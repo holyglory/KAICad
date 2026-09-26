@@ -101,13 +101,18 @@ public static class RecursiveEditorFiles
                 || request.ExpectedSourceToken.Length != 64 || request.Block is not null || request.Connection is not null
                 || request.Field != P.RequirementFieldKind.RfkUnknown || request.Offset != 0 || request.Limit != 0)
                 throw Invalid("invalid_connection_save_request", "Save needs the exact source token, root, block/member paths, connection draft and change origin.");
-            var saved = await RecursiveBlockFiles.SaveConnectionAsync(request.RepositoryRoot, request.SourcePath, document, request.ExpectedSourceToken,
-                RecursiveBlockCodec.DecodeSelection(save.ExpectedRoot), save.BlockPath.Select(RecursiveBlockCodec.DecodeSelection).ToImmutableArray(),
+            // new_members (lane 2B band): members this save creates while it refines the connection's members into groups,
+            // pairs and signals. The result's save summary names every revision the save created.
+            var (saved, outcome, before) = await RecursiveBlockFiles.SaveConnectionWithSummaryAsync(request.RepositoryRoot, request.SourcePath, document,
+                request.ExpectedSourceToken, RecursiveBlockCodec.DecodeSelection(save.ExpectedRoot), save.BlockPath.Select(RecursiveBlockCodec.DecodeSelection).ToImmutableArray(),
                 save.ConnectionPath.Select(RecursiveBlockCodec.DecodeSelection).ToImmutableArray(), RecursiveBlockCodec.Decode(save.Draft, document, schema),
+                RecursiveBlockCodec.DecodeNewMembers(save.NewMembers),
                 Id(save.NewConnectionRevisionId), Id(save.NewRequirementRevisionId), save.ConnectionAncestorRevisionIds.Select(Id).ToImmutableArray(),
                 Id(save.NewBlockRevisionId), Id(save.NewBlockRequirementRevisionId), save.BlockAncestorRevisionIds.Select(Id).ToImmutableArray(),
                 RecursiveBlockCodec.DecodeOrigin(save.Origin), token);
-            return Describe(saved, schema);
+            var connectionResult = Describe(saved, schema);
+            connectionResult.SaveSummary = RecursiveBlockCodec.Summary(before, saved.Graph, outcome);
+            return connectionResult;
         }
         if (request.Action is P.RecursiveFileAction.RfaSaveBlock or P.RecursiveFileAction.RfaSaveImplementation)
         {

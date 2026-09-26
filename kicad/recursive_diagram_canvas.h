@@ -148,6 +148,8 @@ struct BLOCK_CHIPS
     /// When no chip fits below the caption (a small or zoomed-out block), the hidden chips' state marks
     /// beside the caption, so the block still shows that it has choices.
     std::vector<CHOICE_MARK> marks;
+    /// The chosen or candidate facets behind "+N more" (or the marks), in facet order.
+    std::vector<int> hiddenFacets;
     /// The caption text as drawn, clipped to the block's content area.
     wxRect caption;
     /// The names of the block's ports drawn inside its edge; the chips, "+N more", the marks and the link keep clear of them.
@@ -166,7 +168,8 @@ wxRect CaptionRect( wxDC& aDC, const NODE& aNode, const wxRect& aInner, const wx
 wxRect VersionRect( wxDC& aDC, const wxString& aText, const wxRect& aInner, const wxRect& aCaption );
 /// Lays out a block's chips inside aBox, the block's content area in canvas pixels, with aSmall, the chip font.
 /// aCaption is the caption as CaptionRect placed it. aPortNames are the names of the block's ports drawn inside its
-/// edge (see PortNameRect); a row that shares their height stops short of them.
+/// edge (see PortNameRect); a row that shares their height stops short of them. A chip always shows its whole
+/// "Facet: value": one that does not fit its row goes behind "+N more" (design QA round 2, R2-P2-6).
 BLOCK_CHIPS LayoutChips( wxDC& aDC, const NODE& aNode, const wxRect& aBox, const wxFont& aSmall, const wxRect& aCaption,
                          const std::vector<wxRect>& aPortNames = {} );
 /// Where a block port on aSide at aAt names itself just inside the block edge, as KiCad labels sheet pins, with
@@ -176,32 +179,15 @@ wxRect PortNameRect( wxDC& aDC, const wxString& aName, D::DiagramPortSide aSide,
 /// words (only a word wider than the note breaks inside it), the note's own line breaks are kept, and text that
 /// does not fit ends its last shown line with "…".
 std::vector<wxString> NoteLines( wxDC& aDC, const wxString& aText, int aWidth, int aHeight );
+/// What the "+N more" chip shows on hover: each choice behind it with its value and its state, one per line, for example
+/// "Family: TLV755P (candidate)" (design QA round 2, R2-P2-6).
+wxString MoreToolTip( const NODE& aNode, const BLOCK_CHIPS& aChips );
 /// Draws the chips and link LayoutChips placed.
 void DrawChips( wxDC& aDC, const BLOCK_CHIPS& aChips, const wxFont& aSmall, bool aDark,
                 const wxColour& aForeground, const wxColour& aLink );
 /// The state mark shared by chips and the inspector: a check for chosen, a ring for a candidate and a
 /// grey dot for unknown.
 void DrawChoiceMark( wxDC& aDC, const wxRect& aBox, D::DefinitionChoiceStateData aState, bool aDark );
-
-/** One row of the inspector's facet overview: the facet's name and its value with its state mark.
- * Pressing it (click, Enter or Space) opens that facet's detail. */
-class FACET_ROW : public wxWindow
-{
-public:
-    FACET_ROW( wxWindow* aParent, int aFacet, std::function<void( int )> aOpen );
-    void SetChoice( const D::DefinitionTextChoiceData& aChoice, bool aOpen );
-    int FacetIndex() const { return m_facet; }
-    bool AcceptsFocus() const override { return IsShown() && IsEnabled(); }
-
-private:
-    void paint();
-
-    int m_facet;
-    std::function<void( int )> m_open;
-    D::DefinitionChoiceStateData m_state = D::DCSD_UNSPECIFIED;
-    wxString m_value;
-    bool m_isOpen = false, m_hover = false;
-};
 
 /// A root connection as the level draft shows it.
 struct LINK
@@ -212,6 +198,36 @@ struct LINK
     /// Its direction detail (Round A3); the canvas draws arrowheads for it.
     D::DiagramConnectionDirection direction = D::DCDR_UNSPECIFIED;
 };
+
+/// One end of a computed leg (rule F4): where it attaches, which way the leg leaves it, (±1, 0) to the right or left
+/// or (0, ±1) down or up, and the child block it is on (an index into the blocks), or -1 for the level's boundary.
+struct ROUTE_END
+{
+    POINT at;
+    int dx = 0, dy = 0;
+    int block = -1;
+};
+struct ROUTE_LEG { ROUTE_END from, to; };
+/// Lays out computed legs (rule F4 as revised for design QA P2-5) against aStored, the paths already drawn, and aBlocks,
+/// the level's child blocks. Returns each leg's points in order.
+std::vector<std::vector<POINT>> RouteLegs( const std::vector<RECT>& aBlocks, const std::vector<std::vector<POINT>>& aStored,
+                                           const std::vector<ROUTE_LEG>& aLegs );
+/// An orthogonal path in canvas pixels from aStart to aGoal that passes through none of aObstacles and stays inside aArea,
+/// with as few turns as it can and then as short as it can: the Connect preview's way around a block that stands between
+/// the connection's ends (design QA round 2, R2-P2-2). aStartDirection is the way the path must leave aStart and
+/// aGoalDirection the way it must arrive at aGoal, each (±1, 0) or (0, ±1), or (0, 0) for any way. Returns the path's
+/// corners from aStart to aGoal, or nothing when no such path exists (an end inside an obstacle, or no way between).
+std::vector<wxPoint> OrthogonalDetour( const std::vector<wxRect>& aObstacles, const wxPoint& aStart, const wxPoint& aStartDirection,
+                                       const wxPoint& aGoal, const wxPoint& aGoalDirection, const wxRect& aArea );
+/// How often the editor laid out computed paths since it started, and how long the slowest and the latest layout took.
+/// A level is laid out once per change of its geometry: an unchanged level reuses its last layout.
+struct ROUTE_STATS
+{
+    uint64_t layouts = 0;
+    uint64_t slowestMicros = 0;
+    uint64_t latestMicros = 0;
+};
+ROUTE_STATS RouteStats();
 
 /// A port anchor as drawn: stored (PLACED) or from the deterministic fallback (FALLBACK).
 struct PORT
@@ -243,6 +259,11 @@ public:
     bool Placed( const std::string& aBlockId ) const;
     /// Every child port and boundary port as drawn.
     const std::vector<PORT>& Ports() const { return m_ports; }
+    /// Every child block's rectangle, in the order of Nodes().
+    const std::vector<RECT>& Rects() const { return m_rects; }
+    /// Which way a path leaves aEndpoint attached at aAt (see leaving), and the child block it is on (-1 for the boundary).
+    std::pair<int, int> Leaving( const D::DiagramEndpointBindingData& aEndpoint, const POINT& aAt ) const { return leaving( aEndpoint, aAt ); }
+    int OwnBlock( const D::DiagramEndpointBindingData& aEndpoint ) const { return ownBlock( aEndpoint ); }
     const PORT* Port( const std::string& aBlockId, const std::string& aInterfaceId ) const;
     /// Where an endpoint that is not yet part of a connection would attach, looking toward a peer at aPeerX (rules F2,
     /// F2a and F3): a port at its anchor, a block at the middle of its edge facing the peer (the Connect preview).
@@ -253,6 +274,9 @@ public:
     /// The drawn path from endpoint 0 to endpoint aEndpoint (rule F4; computed paths keep their vertical legs apart, F4a).
     std::vector<POINT> Route( const LINK& aLink, int aEndpoint ) const;
     bool HasRoute( const std::string& aConnectionId, int aEndpoint ) const;
+    /// Whether both ends of the leg from endpoint 0 to aEndpoint leave sideways (a left or right edge, or a boundary port
+    /// on the frame's left or right side). Only such a leg's unlocked channel route follows its ends' heights (F4b).
+    bool Sideways( const LINK& aLink, int aEndpoint ) const;
     /// The caption position a stored route names, if it names one.
     std::optional<POINT> RouteLabel( const std::string& aConnectionId, int aEndpoint ) const;
     std::optional<RECT> Frame() const { return m_frame; }
@@ -270,10 +294,11 @@ private:
     int64_t referenceY( const D::DiagramEndpointBindingData& aEndpoint ) const;
     bool isBlockEnd( const D::DiagramEndpointBindingData& aEndpoint ) const;
     D::DiagramPortSide facing( const D::DiagramEndpointBindingData& aEndpoint, const D::DiagramEndpointBindingData& aPeer ) const;
-    /// Which way a path leaves aEndpoint attached at aAt (rule F4c): +1 right, -1 left, 0 for a top or bottom side.
-    int normal( const D::DiagramEndpointBindingData& aEndpoint, const POINT& aAt ) const;
-    /// The child block aEndpoint is on, or an empty id for a boundary end.
-    std::string ownBlock( const D::DiagramEndpointBindingData& aEndpoint ) const;
+    /// Which way a path leaves aEndpoint attached at aAt (rules F4c and F4d): out of a child block's side, into the level
+    /// from a boundary port, as (1, 0) right, (-1, 0) left, (0, 1) down or (0, -1) up.
+    std::pair<int, int> leaving( const D::DiagramEndpointBindingData& aEndpoint, const POINT& aAt ) const;
+    /// The index of the child block aEndpoint is on, or -1 for a boundary end.
+    int ownBlock( const D::DiagramEndpointBindingData& aEndpoint ) const;
     void placeBlockEnds();
     void placePaths();
 
@@ -330,6 +355,10 @@ public:
 /// its role, its label as its name, its pressed state, its focus and its keys for assistive technology (wxGTK has no
 /// wxAccessible). A press leaves the keyboard focus where it was. Elsewhere the platform draws the button.
 void PaintNatively( wxWindow* aButton, BUTTON_PAINTER* aPainter );
+/// The colour the toolkit draws behind aControl. On GTK that is the background of the first widget above it whose theme
+/// gives it one (on Adwaita the window's own), which can differ from the colour wxWidgets reports for its parent; elsewhere,
+/// the parent's background colour.
+wxColour DrawnSurface( wxWindow* aControl );
 /// Gives aWindow the accessible role aRole (an ATK role name such as "link" or "push button") and, when not empty, the
 /// accessible name aName (GTK; elsewhere nothing changes).
 void SetAccessibleRole( wxWindow* aWindow, const char* aRole, const wxString& aName );
@@ -380,6 +409,49 @@ public:
     void PaintButton( wxDC& aDC, bool aHover, bool aDown ) override;
     /// The link colour of the current theme (#20518D on a light surface, #B8CBE1 on a dark one, or the theme's own).
     static wxColour LinkColour( const wxColour& aSurface );
+
+protected:
+    wxSize DoGetBestSize() const override;
+};
+
+/** One row of the inspector's facet overview: the facet's name and its value with its state mark. It is the platform's own
+ * toggle button, pressed while its facet's detail is open, and on GTK the editor paints it. Pressing it (the pointer, or
+ * Space or Enter when focused) opens that facet's detail; assistive technology reads it as a toggle button named by its
+ * facet and value, pressed for the open facet (design QA P2-11 and its review). */
+class FACET_ROW : public wxToggleButton, public BUTTON_PAINTER
+{
+public:
+    FACET_ROW( wxWindow* aParent, int aFacet, std::function<void( int )> aOpen );
+    void SetChoice( const D::DefinitionTextChoiceData& aChoice, bool aOpen );
+    int FacetIndex() const { return m_facet; }
+    void PaintButton( wxDC& aDC, bool aHover, bool aDown ) override;
+
+protected:
+    wxSize DoGetBestSize() const override;
+
+private:
+    int m_facet;
+    std::function<void( int )> m_open;
+    D::DefinitionChoiceStateData m_state = D::DCSD_UNSPECIFIED;
+    /// The value as the row shows it ("SOT-23-5 (candidate)") and without its state suffix ("SOT-23-5").
+    wxString m_value, m_bareValue;
+    bool m_isOpen = false;
+};
+
+/** One one-click choice of a small fixed set: a connection's direction, domain or type (Round A3). It is the platform's own
+ * toggle button, pressed while its value is the chosen one, so assistive technology reads it as a toggle button named by its
+ * label and checked while chosen. On GTK the editor paints it: chosen, with the accent checked style of the drawing tools'
+ * strip (a pale accent tile, an accent border at 3:1 or more and an accent label at 4.5:1 or more); idle, as a quiet framed
+ * button; under the pointer, with a neutral grey fill, so hover never looks chosen (design QA round 2, R2-P2-4). */
+class CHOICE_BUTTON : public wxToggleButton, public BUTTON_PAINTER
+{
+public:
+    CHOICE_BUTTON( wxWindow* aParent, const wxString& aLabel, const wxString& aName );
+    void SetLabel( const wxString& aLabel ) override;
+    void PaintButton( wxDC& aDC, bool aHover, bool aDown ) override;
+    /// The colours a choice is drawn in on aSurface.
+    struct LOOK { wxColour fill, border, text; };
+    static LOOK Look( const wxColour& aSurface, bool aChosen, bool aHover, bool aEnabled );
 
 protected:
     wxSize DoGetBestSize() const override;

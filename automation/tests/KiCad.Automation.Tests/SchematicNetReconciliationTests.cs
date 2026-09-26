@@ -257,6 +257,42 @@ public sealed class SchematicNetReconciliationTests
         Assert.AreEqual(input, SchematicDesignXml.Write(state.Baseline, state.KnowledgeLibraries));
     }
 
+    // Isolated rule of keep-and-replan (kicad_design_recovery_resolve_pending, ledger p0aa59a1dfc8701ea): for a result KiCad
+    // committed and the person keeps, KiCad's connections win. The native journey behind
+    // NativeSessionTests.DeletedNativeSheetsRebuildFromXmlWithoutLoss keeps results whose connections are the XML's; a genuine
+    // difference cannot be drawn there without changing the frozen PSU/CPU partition, so the rules are checked here.
+    [TestMethod]
+    public void KeptResultTakesKiCadsConnectionsAndReportsTheNetsItChanged()
+    {
+        var state = Fixture(); var circuit = state.Baseline.Engineering.Circuit; var old = circuit.Nets.Single();
+        var a = circuit.Components[0].Id; var b = circuit.Components[1].Id;
+        string Write(EngineeringDesign design) => EngineeringDesignXml.Write(design, state.KnowledgeLibraries);
+        // Connections as the design says: the design is kept exactly.
+        var same = SchematicNetReconciliation.PlanKept(state.Baseline, state.ObservedElectrical!, state.OriginId, state.KnowledgeLibraries);
+        Assert.IsNotNull(same.Candidate, same.ErrorMessage);
+        Assert.AreEqual(Write(state.Baseline.Engineering), Write(same.Candidate));
+        Assert.IsEmpty(same.NetChanges);
+
+        // KiCad splits the design's net and joins two pins no net names.
+        var kicad = NativeGroups(state, [old.Pins[0]], [old.Pins[1]], [new(a, "7"), new(b, "7")]);
+        var design = state.Baseline with { Schematic = kicad.Observed };
+        var kept = SchematicNetReconciliation.PlanKept(design, kicad.ObservedElectrical!, state.OriginId, state.KnowledgeLibraries);
+        Assert.IsNotNull(kept.Candidate, kept.ErrorMessage);
+        var change = kept.NetChanges.Single();
+        Assert.AreEqual(old.Id, change.FormerNetId);
+        Assert.AreEqual(NetBindingChangeKind.Split, change.Change);
+        Assert.IsFalse(kept.Candidate.Circuit.Nets.Any(n => n.Id == old.Id), "The split net is no longer the design's net.");
+        Assert.AreEqual(3, kept.Candidate.Circuit.Nets.Count);
+        var joined = kept.Candidate.Circuit.Nets.Single(n => n.Pins.Contains(new(a, "7")));
+        CollectionAssert.AreEquivalent(new PinEndpoint[] { new(a, "7"), new(b, "7") }, joined.Pins.ToArray());
+        Assert.AreEqual("Observed 2", joined.Name, "A net KiCad made is named as KiCad names it.");
+        Assert.IsTrue(kept.Candidate.Structure.HasUnresolvedNetBindings, "Requirements on the split net wait for explicit resolution.");
+        Assert.IsTrue(SchematicElectricalComparison.Compare(design with { Engineering = kept.Candidate }, kicad.ObservedElectrical!,
+            state.KnowledgeLibraries).ConnectivityEquivalent, "The kept design describes KiCad's connections.");
+        Assert.AreEqual(Write(kept.Candidate), Write(SchematicNetReconciliation.PlanKept(design, kicad.ObservedElectrical!, state.OriginId,
+            state.KnowledgeLibraries).Candidate!), "Generated identities are stable.");
+    }
+
     [TestMethod]
     public void NativeJoinAndIndependentXmlJoinBothSurvive()
     {

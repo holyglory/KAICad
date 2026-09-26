@@ -4707,7 +4707,8 @@ BOOST_FIXTURE_TEST_CASE( ApiGlobalLabelsKeepTheirReferenceFieldThroughSetup, TRA
 /**
  * Rebuilding deleted schematic files from saved XML (lane 2C, rebuild_screen_identity): only the root KiCad
  * creates for a project whose schematic files are gone may adopt the identity its saved root file had.  Each
- * refusal is checked on its own, with every other condition met, against the precision case it must not catch.
+ * refusal is checked on its own, with every other condition met, against the precision case it must not catch,
+ * and with the exact message KiCad reports for it (the checked batch passes it on to the person as the reason).
  * The ordering rules of the operation (first in its batch, canonical UUID, retry identity) and the rollback of a
  * rejected batch need a live editor; the PSU/CPU rebuild journey (NativeXmlRebuildJourney) proves those.
  */
@@ -4717,6 +4718,10 @@ BOOST_FIXTURE_TEST_CASE( OnlyANewEmptyRootMayAdoptASavedScreenIdentity, TRACKED_
     {
         return API_HANDLER_SCH::ScreenIdentityRefusal( aSchematic, aPath ? *aPath : aSchematic.Hierarchy().at( 0 ) );
     };
+    const std::string notSingleRoot = "Only the root sheet of a single-root schematic can adopt a screen identity";
+    const std::string notNew = "Only a root that was never loaded from or saved to a file can adopt a screen identity";
+    const std::string notEmpty = "Only an empty root can adopt a screen identity";
+    const std::string notAlone = "Only a schematic with nothing but its root can adopt a screen identity";
     SCHEMATIC&  doc = *schematic;
     SCH_SCREEN* screen = doc.RootScreen();
     BOOST_REQUIRE( doc.Hierarchy().at( 0 ).LastScreen() == screen );
@@ -4728,26 +4733,26 @@ BOOST_FIXTURE_TEST_CASE( OnlyANewEmptyRootMayAdoptASavedScreenIdentity, TRACKED_
 
     // A root KiCad loaded from its file.
     screen->SetFileFormatVersionAtLoad( 20250318 );
-    BOOST_CHECK( refusal( doc ) );
+    BOOST_CHECK_EQUAL( refusal( doc ).value_or( "" ), notNew );
     screen->SetFileFormatVersionAtLoad( 0 );
 
     // A root KiCad knows it saved.
     screen->SetFileExists( true );
-    BOOST_CHECK( refusal( doc ) );
+    BOOST_CHECK_EQUAL( refusal( doc ).value_or( "" ), notNew );
     screen->SetFileExists( false );
 
     // A file at the root's path that KiCad never read: it is kept, never replaced by a rebuild.
     {
         std::ofstream( file ) << "(kicad_sch)";
     }
-    BOOST_CHECK( refusal( doc ) );
+    BOOST_CHECK_EQUAL( refusal( doc ).value_or( "" ), notNew );
     fs::remove( file );
     BOOST_CHECK( !refusal( doc ) );
 
     // A root holding an object.
     auto* note = new SCH_TEXT( VECTOR2I( 0, 0 ), wxS( "note" ) );
     screen->Append( note );
-    BOOST_CHECK( refusal( doc ) );
+    BOOST_CHECK_EQUAL( refusal( doc ).value_or( "" ), notEmpty );
     screen->Remove( note );
     delete note;
     BOOST_CHECK( !refusal( doc ) );
@@ -4755,17 +4760,27 @@ BOOST_FIXTURE_TEST_CASE( OnlyANewEmptyRootMayAdoptASavedScreenIdentity, TRACKED_
     // A child sheet cannot adopt the root's identity, and a root showing one holds its sheet symbol.
     {
         TRACKED_SCHEMATIC nested;
-        addChildSheet( *nested.schematic, wxS( "child.kicad_sch" ) );
+        SCH_SCREEN*       childScreen = addChildSheet( *nested.schematic, wxS( "child.kicad_sch" ) );
         BOOST_REQUIRE_EQUAL( nested.schematic->Hierarchy().size(), 2u );
-        BOOST_CHECK( refusal( *nested.schematic ) );
-        BOOST_CHECK( refusal( *nested.schematic, nested.schematic->Hierarchy().at( 1 ) ) );
+        BOOST_CHECK_EQUAL( refusal( *nested.schematic ).value_or( "" ), notEmpty );
+        BOOST_CHECK_EQUAL( refusal( *nested.schematic, nested.schematic->Hierarchy().at( 1 ) ).value_or( "" ), notSingleRoot );
+
+        // A hierarchy that still shows a sheet the root no longer holds: the root is empty, but the schematic is not.
+        SCH_SCREEN* nestedRoot = nested.schematic->RootScreen();
+        SCH_SHEET*  childSheet = nested.schematic->Hierarchy().at( 1 ).Last();
+        BOOST_REQUIRE( childSheet && childSheet->GetScreen() == childScreen );
+        nestedRoot->Remove( childSheet );
+        BOOST_REQUIRE( nestedRoot->Items().empty() );
+        BOOST_REQUIRE_EQUAL( nested.schematic->Hierarchy().size(), 2u );
+        BOOST_CHECK_EQUAL( refusal( *nested.schematic ).value_or( "" ), notAlone );
+        nestedRoot->Append( childSheet );
     }
 
     // A root holding a library cache but no object.
     {
         TRACKED_SCHEMATIC cached;
         cached.schematic->RootScreen()->AddLibSymbol( new LIB_SYMBOL( wxS( "R" ) ) );
-        BOOST_CHECK( refusal( *cached.schematic ) );
+        BOOST_CHECK_EQUAL( refusal( *cached.schematic ).value_or( "" ), notEmpty );
     }
 
     // A schematic with a second top-level sheet: neither root is the project's only root.
@@ -4779,10 +4794,10 @@ BOOST_FIXTURE_TEST_CASE( OnlyANewEmptyRootMayAdoptASavedScreenIdentity, TRACKED_
         second->GetScreen()->SetFileName( wxS( "second.kicad_sch" ) );
         multi.AddTopLevelSheet( second );
         BOOST_REQUIRE_EQUAL( multi.GetTopLevelSheets().size(), 2u );
-        BOOST_CHECK( refusal( multi, first ) );
+        BOOST_CHECK_EQUAL( refusal( multi, first ).value_or( "" ), notSingleRoot );
         SCH_SHEET_PATH secondPath;
         secondPath.push_back( second );
-        BOOST_CHECK( refusal( multi, secondPath ) );
+        BOOST_CHECK_EQUAL( refusal( multi, secondPath ).value_or( "" ), notSingleRoot );
     }
 }
 

@@ -8,12 +8,18 @@ internal sealed record SchematicOwnershipHistory(DesignSynchronizationReceipt Re
 
 internal static class SchematicOwnershipHistoryReader
 {
+    /// <summary>The design was never synchronized, so no retained XML can know an earlier owner of anything KiCad shows.</summary>
+    internal const string NeverSynchronized = "missing_native_ownership_history";
+    /// <summary>Synchronizations happened, but no retained XML is content-verified for this circuit and document: an
+    /// earlier owner may exist that cannot be read, so nothing may be treated as new.</summary>
+    internal const string Unverified = "unverified_native_ownership_history";
+
     internal static async Task<IReadOnlyList<SchematicOwnershipHistory>> ReadAsync(DesignRecoveryStore store,
         DesignRecoveryState state, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
         var latest = state.LastSynchronization
-            ?? throw new AutomationException("missing_native_ownership_history", "No completed synchronization identifies this design's retained history.");
+            ?? throw new AutomationException(NeverSynchronized, "No completed synchronization identifies this design's retained history.");
         var receipts = new DesignSynchronizationReceipts(store.StatePath).ReadAll().ToDictionary(r => r.OperationId);
         if (receipts.TryGetValue(latest.OperationId, out var copy)
             && JsonSerializer.Serialize(copy) != JsonSerializer.Serialize(latest))
@@ -33,7 +39,7 @@ internal static class SchematicOwnershipHistoryReader
                 result.Add(new(receipt, design, receipt.OperationId == latest.OperationId));
         }
         if (result.Count == 0)
-            throw new AutomationException("missing_native_ownership_history", "No content-verified retained XML belongs to this circuit; legacy paths alone cannot restore identities.");
+            throw new AutomationException(Unverified, "No content-verified retained XML belongs to this circuit; legacy paths alone cannot restore identities.");
         return result;
     }
 }

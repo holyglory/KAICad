@@ -31,7 +31,7 @@ public static class SchematicOwnershipResolutionService
                 return new SchematicHistoricalOwner(id, component.Id, component.Reference, symbol.Unit,
                     symbol.EffectiveSheetInstanceId(component), bindings[id].NativeObjectId);
             }).ToArray();
-            return new SchematicOwnershipChoice(candidate.History.Receipt.OperationId, candidate.History.Receipt.PreviousXmlSha256!,
+            return new SchematicOwnershipChoice(candidate.Source.Receipt.OperationId, candidate.Source.Receipt.PreviousXmlSha256!,
                 owners, candidate.RestoredComponents);
         }).ToArray();
         token.ThrowIfCancellationRequested(); RequireCurrent(store, saved);

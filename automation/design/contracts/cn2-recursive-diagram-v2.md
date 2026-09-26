@@ -1053,3 +1053,42 @@ Integration-owner decision `n03892aa8cecf933f` (2026-09-25): every connection is
 - **Routes the editor stores.** The editor stores no route for a connection it draws (Round A1 stored one, as a native presentation edit of section 4.6, when a computed path ran along another). A stored route, from an agent or an earlier save, follows its ends when they move (unlocked) or stays exactly as stored (locked), as before.
 - **Files written before this erratum.** Opening a file writes nothing and changes no draft. Ends on a block itself and computed paths are resolved by these rules, so `resolved_layout` reports the new points. An unlocked channel route stored against an end's old height (for example Rail feed's (500, 230)–(500, 275) when its end on the CPU moves from 275 to 283) is drawn level at once (F4b) and stored so with the next layout edit. A locked route, or a stored route of another shape, whose end moved is drawn as stored, with a slanted last leg, as a locked route already is when its ends move.
 - **Superseded text.** In section 9.2, F2's "or n when the id is absent" for an end on a block itself, and F4 as a whole.
+
+## Errata 2026-09-26 (integration owner)
+
+### Connection layout amendment (decision nb44e7980df701f1b)
+
+**Amendment 2026-09-25 (lane 2B routing and review follow-ups).** Decision `n03892aa8cecf933f` noted two follow-ups: level runs closer than the design QA's 8 pixels were not scored, and wires from top or bottom ports could run along the block outline. The erratum above is amended as follows; its other rules are unchanged.
+
+- **F4, legs with a stored route.** The channel route rule (F4b) applies only when both ends of the leg leave sideways: an end on a block's left or right edge, or a boundary port that is unplaced or placed on the frame's left or right side. A stored route with an end on a top or bottom side is drawn exactly as stored, and the editor does not move its heights with the next layout edit.
+- **F4, computed legs, leaving an end (F4c and F4d).** An end on a block's top or bottom edge, or a boundary port placed on the frame's top or bottom side, is left along its normal: the leg runs from it straight up (a block's top edge, the frame's bottom side) or down (a block's bottom edge, the frame's top side) for a lead of 20, 30 or 40 units, then level to its channel. Such an end sets no limit on the channel. A leg is thus from, [its lead's end], (x, first level height), (x, second level height), [the other lead's end], to, where a point in the middle of a straight run is left out; a leg whose ends both leave sideways keeps its four points.
+- **F4, computed legs, candidates.** The preferred channel is as before. The candidates are the preferred channel and every channel a multiple of 10 units from it within the limits, at most 20 either side; then each limit itself (the channel exactly 20 units out from an end); then, for an end on a top or bottom side, that end's own x; each with every combination of leads. A leg whose ends are level and both leave sideways has only the preferred channel.
+- **F4a, score.** A candidate is scored, compared in this order: (a) its runs beside other legs: two level segments less than 10 units apart in height whose runs overlap (on one height, also runs that end less than 10 units apart), or two upright segments less than 10 units apart that share or meet at a height, unless both segments start at an end the two legs share (two connections of one port); (b) the total length it runs beside them; (c) its contacts, as before; (d) the other legs' segments it crosses; (e) its distance from the preferred channel plus the length of its leads beyond 20 units. On an equal score the lower channel is taken, then the earlier candidate.
+- **Order.** As before, except that when two legs are laid out again together, the pairs considered are those of each leg's 16 best candidates, scored against all the other legs (in candidate order among equals).
+
+### Agent connection edits and field lineage (decision nb44e7980df701f1b)
+
+- **Connection ends must exist.** Any connection save, from the editor or an agent, that names a block or port the
+  level lacks fails with `connection_edit_target_missing` (section 4.5 rule U named `boundary_interface_in_use` or the
+  generic graph error). Agents bind or unbind a connection end with `kicad_diagram_connection_endpoint_set` and group
+  signals into members with `kicad_diagram_connection_members_refine`; lane 2B band fields
+  `SaveConnectionDraftData.new_members = 200` and `NewConnectionData.members = 201` carry the members a save creates.
+  Other refusals: `ambiguous_connection_edit`, `invalid_connection_refinement`, `invalid_connection_edit_operation`,
+  `stale_connection_parent`. A `members` list in a level draft is refused. Section 13's "MCP tools for level edits" is
+  delivered for connection ends and members.
+- **Field history across implementations.** A requirement history's first revision may name the revision it was derived
+  from (`parent`), so a block, connection or member keeps one continuous history across implementation switches and
+  chosen proposals. A build without this rule refuses such a file without changing it.
+
+### Rebase of drawn signals (decision nb1ed8aa40cd779be, superseding ne0261047035e58c6)
+
+When another writer saved the level first, a rebase keeps the draft's drawn signals and succeeds, unless that writer
+changed or removed the same root connection, which is refused as a connection conflict. Nothing drawn is dropped.
+
+### Finished connections around blocks (decision n7fb0ee3089916669; implementation pending in lane 2B)
+
+A computed leg whose three-segment path would run through a block or across a port's name leaves its first end outward
+for 20 units, goes around the blocks 10 units clear of them with as few turns as it can, and enters its other end from
+the side that end's edge faces. `resolved_layout` reports every point of it. Legs whose three-segment path crosses no
+block keep it. A finished connection takes the path its Connect preview showed.
+

@@ -45,14 +45,29 @@ public static class RecursiveBlockFiles
         Guid requirementRevisionId, ImmutableArray<Guid> connectionAncestorIds, Guid blockRevisionId, Guid blockRequirementRevisionId,
         ImmutableArray<Guid> blockAncestorIds, RequirementRevisionOrigin origin, CancellationToken token = default)
     {
+        return (await SaveConnectionWithSummaryAsync(repositoryRoot, path, documentId, expectedContentSha256, expectedRoot, blockPath, connectionPath,
+            draft, [], connectionRevisionId, requirementRevisionId, connectionAncestorIds, blockRevisionId, blockRequirementRevisionId, blockAncestorIds,
+            origin, token)).Snapshot;
+    }
+
+    /// <summary>As <see cref="SaveConnectionAsync"/>, also creating the members that refine the connection's members into
+    /// groups, pairs and signals, and returning what the save created and the exact graph it started from. One guarded
+    /// write, or none when nothing changed.</summary>
+    public static async Task<(RecursiveBlockFileSnapshot Snapshot, RecursiveBlockSelectionResult Result, RecursiveBlockGraph Before)> SaveConnectionWithSummaryAsync(
+        string repositoryRoot, string path, Guid documentId, string expectedContentSha256, BlockSelection expectedRoot,
+        ImmutableArray<BlockSelection> blockPath, ImmutableArray<ConnectionSelection> connectionPath, DiagramConnectionDraft draft,
+        ImmutableArray<NewConnectionMember> newMembers, Guid connectionRevisionId, Guid requirementRevisionId, ImmutableArray<Guid> connectionAncestorIds,
+        Guid blockRevisionId, Guid blockRequirementRevisionId, ImmutableArray<Guid> blockAncestorIds, RequirementRevisionOrigin origin,
+        CancellationToken token = default)
+    {
         var loaded = await Load(repositoryRoot, path, documentId, token);
         if (loaded.Snapshot.ContentSha256 != expectedContentSha256)
             throw new AutomationException("recursive_block_file_changed", "The saved design changed; retain the connection draft and compare the latest version.");
         token.ThrowIfCancellationRequested();
-        var saved = loaded.Snapshot.Graph.SaveConnectionDraft(expectedRoot, blockPath, connectionPath, draft,
+        var saved = loaded.Snapshot.Graph.SaveConnectionDraft(expectedRoot, blockPath, connectionPath, draft, newMembers,
             connectionRevisionId, requirementRevisionId, connectionAncestorIds, blockRevisionId, blockRequirementRevisionId, blockAncestorIds, origin);
-        if (!saved.Changed) return loaded.Snapshot;
-        return await PublishAsync(loaded, saved.Graph, token);
+        if (!saved.Changed) return (loaded.Snapshot, saved, loaded.Snapshot.Graph);
+        return (await PublishAsync(loaded, saved.Graph, token), saved, loaded.Snapshot.Graph);
     }
     public static async Task<RecursiveBlockFileSnapshot> ReadAsync(string repositoryRoot, string path,
         Guid expectedDocumentId, CancellationToken token = default)

@@ -1,9 +1,11 @@
 /* Copyright The KiCad Developers. SPDX-License-Identifier: GPL-3.0-or-later */
 #include "dialog_diagram_conflict.h"
+#include "dialog_diagram_field_history.h"
 #include <algorithm>
 #include <wx/button.h>
 #include <wx/choice.h>
 #include <wx/radiobut.h>
+#include <wx/settings.h>
 #include <wx/sizer.h>
 #include <wx/stattext.h>
 #include <wx/textctrl.h>
@@ -52,6 +54,8 @@ DIALOG_DIAGRAM_CONFLICT::DIALOG_DIAGRAM_CONFLICT( wxWindow* parent, const wxStri
         auto* value = new wxTextCtrl( this, wxID_ANY, wxEmptyString, wxDefaultPosition,
                 FromDIP( wxSize( 220, 90 ) ), wxTE_MULTILINE | ( editable ? 0 : wxTE_READONLY ) );
         value->SetName( name ); OptOut( value ); value->SetMinSize( FromDIP( wxSize( 180, 65 ) ) );
+        // The texts keep clear of their boxes' borders, as in the approved mockup (mockup audit M1-5).
+        DIAGRAM_LOOK::PadTextBox( value, FromDIP( 8 ), FromDIP( 6 ) );
         sizer->Add( value, 1, wxEXPAND ); return value;
     };
     auto* base = new wxBoxSizer( wxVERTICAL );
@@ -100,14 +104,46 @@ void DIALOG_DIAGRAM_CONFLICT::displayField()
     {
         const auto& conflict = m_merge.conflicts( m_index );
         m_base->ChangeValue( text( conflict.baseline() ) ); m_draft->ChangeValue( text( conflict.draft() ) ); m_saved->ChangeValue( text( conflict.saved() ) );
+        markDifferences();
         int selected = m_choiceKinds.count( m_index ) ? m_choiceKinds.at( m_index ) : 0;
         m_mine->SetValue( selected == 1 ); m_latest->SetValue( selected == 2 ); m_custom->SetValue( selected == 3 );
         m_resolved->ChangeValue( m_choices.count( m_index ) ? text( m_choices.at( m_index ) ) : wxString() );
         m_resolved->Enable( selected != 0 ); m_resolved->SetEditable( selected == 3 );
     }
     for( auto* control : { m_mine, m_latest, m_custom } ) control->Enable( valid );
-    m_save->Enable( valid && m_choices.size() == static_cast<size_t>( m_merge.conflicts_size() ) );
+    // Saving the resolution is the dialog's primary action, filled with the accent once it is available (mockup audit M1-4).
+    DIAGRAM_LOOK::StylePrimary( m_save, valid && m_choices.size() == static_cast<size_t>( m_merge.conflicts_size() ) );
     m_updating = false; Layout();
+}
+void DIALOG_DIAGRAM_CONFLICT::markDifferences()
+{
+    // The words in which your draft and the latest saved text differ are tinted and underlined in both, as the approved
+    // conflict mockup marks "top edge" and "bottom edge" (mockup audit M1-6). The underline keeps the difference visible
+    // without colour.
+    const wxColour ink = wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOWTEXT );
+    const wxColour fill = DIAGRAM_LOOK::DifferenceFill( ink, wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOW ) );
+    m_draftMarks = DIAGRAM_LOOK::DifferingWords( m_draft->GetValue(), m_saved->GetValue() );
+    m_savedMarks = DIAGRAM_LOOK::DifferingWords( m_saved->GetValue(), m_draft->GetValue() );
+    // Each box was just given its text with ChangeValue, which drops earlier marks.
+    for( auto [box, marks] : { std::pair{ m_draft, &m_draftMarks }, std::pair{ m_saved, &m_savedMarks } } )
+    {
+        for( const auto& [start, end] : *marks )
+        {
+            wxTextAttr mark; mark.SetBackgroundColour( fill ); mark.SetTextColour( ink ); mark.SetFontUnderlined( true );
+            box->SetStyle( start, end, mark );
+        }
+    }
+}
+std::vector<wxString> DIALOG_DIAGRAM_CONFLICT::MarkedWords( bool aDraft ) const
+{
+    std::vector<wxString> words;
+    const wxString value = aDraft ? m_draft->GetValue() : m_saved->GetValue();
+    for( const auto& [start, end] : aDraft ? m_draftMarks : m_savedMarks ) words.push_back( value.Mid( start, end - start ) );
+    return words;
+}
+wxColour DIALOG_DIAGRAM_CONFLICT::MarkFill() const
+{
+    return DIAGRAM_LOOK::DifferenceFill( wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOWTEXT ), wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOW ) );
 }
 void DIALOG_DIAGRAM_CONFLICT::choose( int kind )
 {

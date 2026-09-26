@@ -151,12 +151,30 @@ public sealed partial class NativeSessionTests
             CollectionAssert.AreEqual(published, idle.State.DesiredFileBytes);
             var idleDisk = Disk(first);
             var idleExit = await Kill(kicad, "idle");
+            var sinceIdleKill = System.Diagnostics.Stopwatch.StartNew();
             CollectionAssert.AreEqual(published, await File.ReadAllBytesAsync(first.Design, token),
                 "After KiCad died idle the XML is byte-identical to the version last published.");
             Assert.AreEqual(idle.RevisionToken, first.Store.Read()!.RevisionToken, "The recovery record survives unchanged.");
             RequireDisk(first, idleDisk, "idle kill");
-            // Nothing was applying: the worker learns of the exit only when it next needs KiCad or its events fall silent.
+            // Nothing was applying: the worker watches its KiCad's process, so it pauses at once with instance_exited and
+            // needs KiCad started again and the record reattached.
             var idleBeforeStop = await SynchronizationStatus(kicad, first.Session);
+            using (var pauseLimit = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                pauseLimit.CancelAfter(TimeSpan.FromSeconds(10));
+                while (idleBeforeStop.GetProperty("phase").GetString() != "Paused")
+                {
+                    pauseLimit.Token.ThrowIfCancellationRequested();
+                    var next = await mcp.Tool("kicad_design_automatic_sync_wait", new { instanceId = kicad.Id, sessionId = first.Session,
+                        afterSequence = idleBeforeStop.GetProperty("sequence").GetUInt64() });
+                    RequireToolSuccess(next);
+                    idleBeforeStop = next.GetProperty("structuredContent").GetProperty("status").Clone();
+                }
+            }
+            Assert.AreEqual("instance_exited", idleBeforeStop.GetProperty("errorCode").GetString(), idleBeforeStop.GetRawText());
+            Assert.IsTrue(idleBeforeStop.GetProperty("reattachRequired").GetBoolean(), idleBeforeStop.GetRawText());
+            Assert.IsTrue(sinceIdleKill.Elapsed < TimeSpan.FromSeconds(3),
+                $"Automatic synchronization must pause as soon as its KiCad is proven dead; it took {sinceIdleKill.Elapsed.TotalSeconds:F2}s.");
             var idleStop = await StopSynchronization(kicad, first.Session);
             kicad = await Start(first, "after the idle kill", kicad);
             RequirePlaced(await Capture(kicad), 2, "fresh KiCad after the idle kill");

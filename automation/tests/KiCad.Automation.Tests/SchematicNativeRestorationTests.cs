@@ -135,6 +135,20 @@ public sealed class SchematicNativeRestorationTests
             { NativeRevisionSequence = future.Saved.State.NativeRevision.Sequence + 1 } }, future.Saved.RevisionToken);
         plan = await SchematicSynchronizationPlanner.PlanWithHistoryAsync(future.Store, saved);
         Assert.AreEqual("native_ownership_history_ahead", plan.ErrorCode);
+        // Two causes of missing history keep two codes, and both fail closed. A design never synchronized has no earlier
+        // owner to find; a design synchronized without content-verified retained XML may have one that cannot be read,
+        // so the restored symbol is never taken for a new one.
+        using var never = new Fixture();
+        saved = never.Store.Save(never.Saved.State with { LastSynchronization = null }, never.Saved.RevisionToken);
+        plan = await SchematicSynchronizationPlanner.PlanWithHistoryAsync(never.Store, saved);
+        Assert.AreEqual("missing_native_ownership_history", plan.ErrorCode);
+        Assert.IsNull(plan.Candidate); Assert.IsEmpty(plan.NativeOperations);
+        using var unverified = new Fixture();
+        saved = unverified.Store.Save(unverified.Saved.State with { LastSynchronization = unverified.Receipt with
+            { PreviousXmlPath = null, PreviousXmlSha256 = null } }, unverified.Saved.RevisionToken);
+        plan = await SchematicSynchronizationPlanner.PlanWithHistoryAsync(unverified.Store, saved);
+        Assert.AreEqual("unverified_native_ownership_history", plan.ErrorCode);
+        Assert.IsNull(plan.Candidate); Assert.IsEmpty(plan.NativeOperations);
     }
 
     [TestMethod]

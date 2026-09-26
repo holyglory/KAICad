@@ -219,4 +219,88 @@ public sealed class RecursiveBlockLocalDiagramTests
         }
         finally { Directory.Delete(root, true); }
     }
+    /// <summary>Isolated rules of an agent's connection edits (ledger pf92d0ecdec8805b4) on the shared PSU/CPU design: each edit names
+    /// exactly one current target, or is refused before any draft exists. A unit test because the whole refusal matrix needs no
+    /// file, process or window; the helper-process test and the native MCP journey prove the saves and a representative refusal of
+    /// each kind end to end.</summary>
+    [TestMethod]
+    public void AgentConnectionEditsNameExactlyOneCurrentTarget()
+    {
+        static Guid K(int kind, long n) => PsuCpuIds.Id(kind, n);
+        static string Code(Action action) => Assert.ThrowsExactly<AutomationException>(action).Code;
+        var graph = PsuCpuFixture.Graph(); var system = graph.SelectedRoot;
+        var cpu = graph.Inspect(system).Children[1]; ImmutableArray<BlockSelection> cpuPath = [system, cpu];
+        var links = graph.Connections(cpu.BlockId);
+        var memoryLink = graph.Inspect(cpu).LocalDiagram.Connections.Single(c => c.ConnectionId == K(0x16, 0x1d));
+        var sda = links.Inspect(memoryLink).Members.Single(m => m.ConnectionId == K(0x16, 0x1f));
+        Guid processor = K(0x11, 8), memory = K(0x11, 9), scl = K(0x16, 0x1e);
+
+        // The target: the CPU level's Memory interface and its I2C SDA member, by exact identity and current revision.
+        var member = RecursiveConnectionEdits.Locate(graph, system, cpuPath, [memoryLink, sda]);
+        Assert.AreEqual("I2C SDA", member.Connection.Name);
+        Assert.AreEqual("stale_root_revision", Code(() => RecursiveConnectionEdits.Locate(graph, system with { RevisionId = Guid.NewGuid() }, cpuPath, [memoryLink])));
+        Assert.AreEqual("ambiguous_connection_edit", Code(() => RecursiveConnectionEdits.Locate(graph, system, [cpu], [memoryLink])), "The path starts at the root.");
+        Assert.AreEqual("ambiguous_connection_edit", Code(() => RecursiveConnectionEdits.Locate(graph, system, cpuPath, [])));
+        Assert.AreEqual("connection_edit_target_missing", Code(() => RecursiveConnectionEdits.Locate(graph, system,
+            [system, graph.Inspect(cpu).Children[0]], [memoryLink])), "The Processor is not a block of the System level.");
+        Assert.AreEqual("connection_edit_target_missing", Code(() => RecursiveConnectionEdits.Locate(graph, system, [system], [memoryLink])),
+            "Memory interface belongs to the CPU level.");
+        Assert.AreEqual("connection_edit_target_missing", Code(() => RecursiveConnectionEdits.Locate(graph, system, cpuPath, [sda])),
+            "A member is reached through its connection.");
+        var draft = links.StartDraft(memoryLink);
+        var newer = graph.SaveConnectionDraft(system, cpuPath, [memoryLink], draft with { Requirements = draft.Requirements.Edit(DiagramRequirementField.Routing,
+            "Keep the bus short.") }, Guid.NewGuid(), Guid.NewGuid(), [], Guid.NewGuid(), Guid.NewGuid(), [Guid.NewGuid()], RecursiveBlockFixture.Origin()).Graph;
+        var (newerPath, _) = RecursiveConnectionEdits.Follow(newer, cpuPath, [memoryLink]);
+        Assert.AreEqual("stale_block_revision", Code(() => RecursiveConnectionEdits.Locate(newer, newer.SelectedRoot, [newer.SelectedRoot, cpu], [memoryLink])));
+        Assert.AreEqual("stale_connection_revision", Code(() => RecursiveConnectionEdits.Locate(newer, newer.SelectedRoot, newerPath, [memoryLink, sda])));
+
+        // Binding an end names both a block of the level (or the level itself) and one of its ports; unbinding names no port.
+        Assert.AreEqual("connection_edit_target_missing", Code(() => RecursiveConnectionEdits.SetEndpoint(graph, member, 2, ConnectionEndpointAction.Bind,
+            processor, K(0x15, 0x15), null)), "SDA has ends 0 and 1.");
+        Assert.AreEqual("ambiguous_connection_edit", Code(() => RecursiveConnectionEdits.SetEndpoint(graph, member, 0, ConnectionEndpointAction.Bind, processor, null, null)));
+        Assert.AreEqual("connection_edit_target_missing", Code(() => RecursiveConnectionEdits.SetEndpoint(graph, member, 0, ConnectionEndpointAction.Bind,
+            K(0x11, 2), K(0x15, 3), null)), "The PSU is not a block of the CPU level.");
+        Assert.AreEqual("connection_edit_target_missing", Code(() => RecursiveConnectionEdits.SetEndpoint(graph, member, 0, ConnectionEndpointAction.Bind,
+            processor, K(0x15, 0x17), null)), "The Memory's Data port is not the Processor's.");
+        Assert.AreEqual("ambiguous_connection_edit", Code(() => RecursiveConnectionEdits.SetEndpoint(graph, member, 0, ConnectionEndpointAction.Unbind,
+            null, K(0x15, 0x15), null)));
+        Assert.AreEqual("connection_edit_target_missing", Code(() => RecursiveConnectionEdits.SetEndpoint(graph, member, 0, ConnectionEndpointAction.Unbind,
+            K(0x11, 2), null, null)));
+        Assert.AreEqual("ambiguous_connection_edit", Code(() => RecursiveConnectionEdits.SetEndpoint(graph, member, 0, ConnectionEndpointAction.Bind,
+            memory, K(0x15, 0x17), null)), "A selector for a Processor pin cannot move to the Memory.");
+        var kept = RecursiveConnectionEdits.SetEndpoint(graph, member, 0, ConnectionEndpointAction.Bind, processor, K(0x15, 0x15),
+            "Any processor pin that can drive I2C data.").Endpoints[0];
+        Assert.AreEqual((DiagramEndpointKind.Compatible, processor, (Guid?)K(0x15, 0x15), "Any processor pin that can drive I2C data."),
+            (kept.Kind, kept.BlockId, kept.InterfaceId, kept.Intent), "On its own block the end keeps its compatibility selector.");
+        CollectionAssert.AreEqual(new[] { "I2C_SDA" }, kept.Selector!.RequiredFunctions.ToArray());
+        var unbound = RecursiveConnectionEdits.SetEndpoint(graph, member, 1, ConnectionEndpointAction.Unbind, null, null, "Memory data pin to be confirmed.").Endpoints[1];
+        Assert.IsTrue(unbound.SameDefinition(DiagramEndpointBinding.Unknown(memory, "Memory data pin to be confirmed.")),
+            "Unbinding leaves the end Unresolved on its block, without a port or pin.");
+        var bus = RecursiveConnectionEdits.Locate(graph, system, cpuPath, [memoryLink]);
+        var boundary = RecursiveConnectionEdits.SetEndpoint(graph, bus, 1, ConnectionEndpointAction.Bind, cpu.BlockId, K(0x15, 6), null).Endpoints[1];
+        Assert.AreEqual((DiagramEndpointKind.Interface, cpu.BlockId, (Guid?)K(0x15, 6)), (boundary.Kind, boundary.BlockId, boundary.InterfaceId),
+            "A port on the level's own boundary is named by the level's own block.");
+
+        // Refining members places every current and new member exactly once.
+        Guid group = Guid.NewGuid();
+        Assert.AreEqual("ambiguous_connection_edit", Code(() => RecursiveConnectionEdits.RefineMembers(bus, [scl], [], Guid.NewGuid, "Initial")), "SDA would be left out.");
+        Assert.AreEqual("ambiguous_connection_edit", Code(() => RecursiveConnectionEdits.RefineMembers(bus, [scl, sda.ConnectionId, scl], [], Guid.NewGuid, "Initial")));
+        Assert.AreEqual("connection_edit_target_missing", Code(() => RecursiveConnectionEdits.RefineMembers(bus, [scl, sda.ConnectionId, Guid.NewGuid()], [],
+            Guid.NewGuid, "Initial")));
+        Assert.AreEqual("identity_reused", Code(() => RecursiveConnectionEdits.RefineMembers(bus, [scl, sda.ConnectionId], [new(scl, "Again", [])], Guid.NewGuid, "Initial")));
+        Assert.AreEqual("ambiguous_connection_edit", Code(() => RecursiveConnectionEdits.RefineMembers(bus, [group],
+            [new(group, "I2C", [scl, sda.ConnectionId], DiagramConnectionKind.SignalGroup), new(group, "Twice", [])], Guid.NewGuid, "Initial")));
+        Assert.AreEqual("ambiguous_connection_edit", Code(() => RecursiveConnectionEdits.RefineMembers(bus, [group],
+            [new(group, "I2C", [scl], DiagramConnectionKind.SignalGroup)], Guid.NewGuid, "Initial")), "SDA would be left out.");
+        Assert.AreEqual("ambiguous_connection_edit", Code(() => RecursiveConnectionEdits.RefineMembers(bus, default, [], Guid.NewGuid, "Initial")));
+        var (grouped, created) = RecursiveConnectionEdits.RefineMembers(bus, [group],
+            [new(group, "I2C", [scl, sda.ConnectionId], DiagramConnectionKind.SignalGroup, "Keep the bus together.")], Guid.NewGuid, "Initial");
+        var made = created.Single();
+        CollectionAssert.AreEqual(new[] { made.Selection }, grouped.Members.ToArray());
+        CollectionAssert.AreEqual(new[] { scl, sda.ConnectionId }, made.MemberList.ToArray());
+        Assert.AreEqual(new DiagramRequirements("Keep the bus together.", "", ""), made.Requirements);
+        Assert.IsTrue(made.Endpoints.Zip(links.Inspect(memoryLink).Endpoints).All(e => e.First.SameDefinition(e.Second)),
+            "A new member runs between its connection's drawn ends.");
+        Assert.HasCount(4, new[] { made.Selection.ConnectionId, made.Selection.StateId, made.Selection.RevisionId, made.RequirementRevisionId }.Distinct());
+    }
 }

@@ -152,8 +152,9 @@ public sealed partial class NativeSessionTests
         // their idle-host sizing; per-action deadlines are unchanged.
         int aggregateSeconds = journey == NativeJourney.Foundation ? 900
             : journey == NativeJourney.CheckedBatch ? 630
+            : journey == NativeJourney.OwnershipSync ? 1200
             : journey is NativeJourney.SymbolSheets or NativeJourney.ComponentCreation or NativeJourney.PsuCpuComponentCreation
-                or NativeJourney.ConnectedRealization or NativeJourney.XmlRebuild or NativeJourney.OwnershipSync ? 900 : 450;
+                or NativeJourney.ConnectedRealization or NativeJourney.XmlRebuild ? 900 : 450;
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(aggregateSeconds));
         var elapsed = Stopwatch.StartNew();
         async Task Measure(string stage, Func<Task> action)

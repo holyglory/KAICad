@@ -12,7 +12,7 @@ namespace KiCad.Automation.Mcp;
 public sealed class RecoveryObservationTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_design_electrical_baseline_initialize"),
-     Description("Initialize only a missing electrical recovery baseline for one explicitly attached native instance and absolute recovery path. Requires the exact recovery revision token, no pending native operation, unchanged baseline hierarchy, and matching exact model/native pin connectivity. Preserves desired XML and requirements; never writes native design files, edits KiCad or replaces an established baseline. Old recovery files without electrical checkpoints remain readable. Full revision admission and automatic synchronization are still separate.")]
+     Description("Initialize only a missing electrical recovery baseline for one explicitly attached native instance and absolute recovery path. Requires the exact recovery revision token, no pending native operation, unchanged baseline hierarchy, and matching exact model/native pin connectivity. A record an earlier preview saved, whose snapshots still list the library cache as state they could not hold (this build holds it exactly and no longer lists it), initializes against the upgraded KiCad; any other difference is refused. Preserves desired XML and requirements; never writes native design files, edits KiCad or replaces an established baseline. Old recovery files without electrical checkpoints remain readable. Full revision admission and automatic synchronization are still separate.")]
     public Task<CallToolResult> InitializeElectricalBaseline(string instanceId, string recoveryPath,
         string expectedRevisionToken, CancellationToken cancellationToken) => Execute(async () =>
     {

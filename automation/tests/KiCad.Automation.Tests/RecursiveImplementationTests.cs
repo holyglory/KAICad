@@ -30,6 +30,37 @@ public sealed class RecursiveImplementationTests
         Assert.AreEqual(RecursiveBlockGraphXml.Write(loaded), RecursiveBlockGraphXml.Write(fromMessage));
         Assert.HasCount(2, loaded.History(stateId));
         Assert.HasCount(1, loaded.History(source.StateId));
+        // Its field history continues the source's from the exact source revision: the source's text keeps its author and
+        // its own version, and this implementation's rewrite follows it (ledger p390b40bed99e0ab2).
+        var sourceText = graph.Requirements(source);
+        var forkHistory = edited.RequirementHistories.Single(h => h.Scope.DesignStateId == stateId);
+        Assert.AreEqual(sourceText.RevisionId, forkHistory.DerivedFrom);
+        Assert.AreEqual(sourceText.RevisionId, loaded.RequirementHistories.Single(h => h.Scope.DesignStateId == stateId).Revisions[0].ParentId);
+        var chosen = edited.Inspect(edited.SelectedRoot).Children[1];
+        Assert.AreEqual(stateId, chosen.StateId);
+        var page = DiagramFieldHistoryQuery.Block(edited, chosen, DiagramRequirementField.General);
+        Assert.AreEqual(2, page.ContextVersion); Assert.AreEqual(stateId, page.Scope.DesignStateId);
+        CollectionAssert.AreEqual(new[] { forkHistory.Current.Id, sourceText.RevisionId }, page.Entries.Select(e => e.RequirementRevisionId).ToArray());
+        CollectionAssert.AreEqual(new[] { chosen.RevisionId, source.RevisionId }, page.Entries.Select(e => e.ContextRevisionId).ToArray());
+        CollectionAssert.AreEqual(new[] { 2, 1 }, page.Entries.Select(e => e.ContextVersion).ToArray());
+        Assert.AreEqual(sourceText.Requirements.General, page.Entries[1].Text); Assert.IsTrue(page.Entries[0].IsSavedText);
+        // Restoring the source's earlier text is a new revision of this implementation that names where the text came from.
+        var restoring = edited.StartDraft(chosen);
+        restoring = restoring with { Requirements = forkHistory.RestoreField(restoring.Requirements, sourceText.RevisionId, DiagramRequirementField.General) };
+        var restored = edited.SaveDraft(edited.SelectedRoot, [edited.SelectedRoot, chosen], restoring, Guid.NewGuid(), Guid.NewGuid(),
+            [Guid.NewGuid()], RecursiveBlockFixture.Origin()).Graph;
+        var restoredHistory = restored.RequirementHistories.Single(h => h.Scope.DesignStateId == stateId);
+        Assert.HasCount(3, restoredHistory.Revisions); Assert.AreEqual(forkHistory.Current.Id, restoredHistory.Current.ParentId);
+        Assert.AreEqual(new RequirementFieldRestoration(DiagramRequirementField.General, sourceText.RevisionId), restoredHistory.Current.Restorations.Single());
+        Assert.AreEqual(sourceText.Requirements.General, restoredHistory.Current.Requirements.General);
+        var restoredPage = DiagramFieldHistoryQuery.Block(restored, restored.Inspect(restored.SelectedRoot).Children[1], DiagramRequirementField.General);
+        CollectionAssert.AreEqual(new[] { restoredHistory.Current.Id, forkHistory.Current.Id, sourceText.RevisionId },
+            restoredPage.Entries.Select(e => e.RequirementRevisionId).ToArray());
+        string restoredXml = RecursiveBlockGraphXml.Write(restored);
+        var reread = RecursiveBlockGraphXml.Read(restoredXml);
+        Assert.AreEqual(restoredXml, RecursiveBlockGraphXml.Write(reread));
+        Assert.AreEqual(restoredXml, RecursiveBlockGraphXml.Write(KiCad.Automation.Native.RecursiveBlockCodec.Decode(KiCad.Automation.Native.RecursiveBlockCodec.Encode(restored))));
+        Assert.AreEqual(sourceText.RevisionId, reread.RequirementHistories.Single(h => h.Scope.DesignStateId == stateId).Current.Restorations.Single().SourceRevisionId);
     }
 
     [TestMethod]
@@ -50,6 +81,29 @@ public sealed class RecursiveImplementationTests
         Assert.ThrowsExactly<AutomationException>(() => new RecursiveBlockGraph(graph.DocumentId, graph.SelectedRoot, cyclic, graph.Revisions, graph.RequirementHistories));
         var wrongOwner = graph.States.Select(s => s.Id == source.StateId ? s with { ForkedFrom = f.Selected["PSU"] } : s);
         Assert.ThrowsExactly<AutomationException>(() => new RecursiveBlockGraph(graph.DocumentId, graph.SelectedRoot, wrongOwner, graph.Revisions, graph.RequirementHistories));
+        // A new implementation's field history can only continue the exact revision it was made from.
+        Guid forkState = Guid.NewGuid();
+        var forked = graph.ForkImplementation(source, forkState, Guid.NewGuid(), Guid.NewGuid(), "Lineage check", RecursiveBlockFixture.Origin());
+        RecursiveBlockGraph ContinuingWith(Func<DiagramRequirementRevision, DiagramRequirementRevision> first, IEnumerable<BlockDesignState>? states = null) =>
+            new(forked.DocumentId, forked.SelectedRoot, states ?? forked.States, forked.Revisions, forked.RequirementHistories.Select(h =>
+                h.Scope.DesignStateId != forkState ? h : new DiagramRequirementHistory(h.Scope, [first(h.Revisions[0])])));
+        RecursiveBlockGraph Continuing(Guid? parentId, IEnumerable<BlockDesignState>? states = null) => ContinuingWith(r => r with { ParentId = parentId }, states);
+        Assert.AreEqual(graph.Requirements(source).RevisionId, Continuing(graph.Requirements(source).RevisionId)
+            .RequirementHistories.Single(h => h.Scope.DesignStateId == forkState).DerivedFrom);
+        Assert.ThrowsExactly<AutomationException>(() => Continuing(graph.Requirements(f.Alternatives["CPU"]).RevisionId));
+        Assert.ThrowsExactly<AutomationException>(() => Continuing(graph.Requirements(f.Selected["PSU"]).RevisionId));
+        Assert.ThrowsExactly<AutomationException>(() => Continuing(Guid.NewGuid()));
+        Assert.ThrowsExactly<AutomationException>(() => Continuing(graph.Requirements(source).RevisionId,
+            forked.States.Select(s => s.Id == forkState ? s with { ForkedFrom = null } : s)));
+        // Its first revision is an unchanged copy of the text it continues: a different text, or a restoration (even of the
+        // same value), would show up as the new implementation's first change, credited to whoever made it.
+        var madeFrom = graph.Requirements(source);
+        Assert.ThrowsExactly<AutomationException>(() => ContinuingWith(r => r with { ParentId = madeFrom.RevisionId,
+            Requirements = r.Requirements with { General = "Not the text it was made from." } }));
+        Assert.ThrowsExactly<AutomationException>(() => ContinuingWith(r => r with { ParentId = madeFrom.RevisionId,
+            Restorations = [new(DiagramRequirementField.General, madeFrom.RevisionId)] }));
+        // An implementation saved before field histories were continued keeps the separate history it was saved with.
+        Assert.IsNull(Continuing(null).RequirementHistories.Single(h => h.Scope.DesignStateId == forkState).DerivedFrom);
     }
 
     [TestMethod]

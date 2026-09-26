@@ -115,8 +115,13 @@ public sealed partial class NativeSessionTests
         static (string X, string Y, string W, string H) Rect(P.RecursiveDiagramEditorState at, string block) =>
             View(at)?.Blocks.SingleOrDefault(b => b.BlockId == block)?.Rect is { } r ? (r.X, r.Y, r.Width, r.Height) : ("", "", "", "");
         Task Capture(string name) => CaptureRecursive(display, Path.Combine(evidence, instanceId + "-canvas-" + name + ".png"), token);
-        Task Retain(string name, P.RecursiveDiagramEditorState at) =>
-            File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-canvas-" + name + "-state.json"), SchematicJson.Formatter.Format(at), token);
+        async Task Retain(string name, P.RecursiveDiagramEditorState at)
+        {
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-canvas-" + name + "-state.json"), SchematicJson.Formatter.Format(at), token);
+            // Mockup audit M1-2 in every retained canvas state, edited and reopened ones too: each boundary port's name is clear of
+            // the blocks and of every other port (review of e62ac6dce7: "Telemetry" sat 3 pixels from the Processor's Power port).
+            VerifyBoundaryNamesClear(at, name);
+        }
         async Task Closed()
         {
             using var closing = CancellationTokenSource.CreateLinkedTokenSource(token); closing.CancelAfter(TimeSpan.FromSeconds(15));
@@ -149,6 +154,20 @@ public sealed partial class NativeSessionTests
                 Assert.IsTrue(drawn.Rect.Shown, step + ": the note \"" + note.Text + "\" is drawn inside the canvas.");
                 Assert.AreEqual(note.Text, string.Join(" ", drawn.Lines), step + ": the note's lines break between words.");
             }
+            // Mockup audit M1-1: Comments opens on the selected element's own comment, or on a new one, never on a note in the
+            // level's free space (typing there used to rewrite the note, and the note was drawn as the selected comment).
+            OwnComment(at, step, revision);
+            // Mockup audit M1-2: every boundary port's name is drawn clear of the blocks and ports.
+            VerifyBoundaryNamesClear(at, step);
+        }
+        // The comment Comments opens on for the selected block: its own first comment on this level, or none (a new comment).
+        void OwnComment(P.RecursiveDiagramEditorState at, string step, RecursiveBlockRevision revision)
+        {
+            var own = revision.LocalDiagram.Notes.FirstOrDefault(n => n.Target.Kind == DiagramAnnotationTargetKind.Block
+                && n.Target.TargetId?.ToString("D") == at.Draft.Baseline.BlockId);
+            Assert.AreEqual(own is null ? "" : S(own.Id), at.SelectedAnnotationId,
+                step + ": Comments opens on the selected block's own comment" + (own is null ? " (a new one: it has none here)" : " \"" + own.Text + "\"")
+                + ", not on a note in the level's free space.");
         }
 
         string configuration = new DirectoryInfo(AppContext.BaseDirectory).Parent!.Name;
@@ -185,6 +204,8 @@ public sealed partial class NativeSessionTests
                 Assert.IsFalse(observed.IsError == true, "The " + label + " level can be observed; the response is retained.");
                 var view = JsonSerializer.SerializeToElement(observed).GetProperty("structuredContent").GetProperty("observation").GetProperty("views")[0];
                 await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-canvas-" + label + "-observation.json"), view.GetRawText(), token);
+                // Mockup audit M1-11: no connection runs through or against a boundary port's name, in every observed level.
+                VerifyBoundaryNamesOffWires(at, view.GetProperty("resolvedLayout"), label);
                 return view.GetProperty("resolvedLayout");
             }
             static string Point(JsonElement point) => point.GetProperty("x").GetString() + "," + point.GetProperty("y").GetString();
@@ -222,41 +243,56 @@ public sealed partial class NativeSessionTests
 
             // System -> PSU: the four PSU blocks on the two-column grid, every connection on its computed path.
             Key("Escape"); Key("Right");
-            await Wait("psu-selected", s => s.Draft.Baseline.BlockId == S(psu.BlockId));
+            var psuSelected = await Wait("psu-selected", s => s.Draft.Baseline.BlockId == S(psu.BlockId) && s.Rendered);
+            // The approved System walkthrough's state: the PSU selected, its own comment "Explore a quieter supply." in Comments
+            // (fixture note 2) and the level's free-space note "Keep PSU replaceable as a unit." drawn as an ordinary note.
+            Assert.AreEqual("Explore a quieter supply.", systemRevision.LocalDiagram.Notes.Single(n => n.Target.Kind == DiagramAnnotationTargetKind.Block
+                && n.Target.TargetId == psu.BlockId).Text, "The fixture comments on the PSU at the System level.");
+            OwnComment(psuSelected, "psu-selected", systemRevision);
+            await Retain("system-psu-selected", psuSelected); await Capture("system-psu-selected");
             Key("Return");
             var psuLevel = await Wait("psu-level", s => s.Rendered && s.DiagramPath.Count == 2 && s.DiagramPath[^1].BlockId == S(psu.BlockId));
             Level(psuLevel, "psu", psu, psuRevision);
-            // Design QA P2-7 at the default window size: every connection caption between two blocks of the crowded PSU level is
-            // drawn (the four that end at a boundary port are named by the port), each clear of blocks, handles, ports, wires and
-            // the other captions, beside its own connection or moved along it. A caption whose whole text has no clear place is
-            // shortened with "…", as a block caption is; none is left out.
-            VerifyCanvasText(psuLevel, "psu");
-            foreach (string name in new[] { "LDO supply", "Rail A sense", "Rail B sense", "Measurements", "Fault" })
-            {
-                Assert.IsTrue(psuLevel.ConnectionCaptions.Any(c => c.Shown && (c.Label == name
-                    || (c.Label.EndsWith('…') && c.Label.Length >= 5 && name.StartsWith(c.Label[..^1].TrimEnd(), StringComparison.Ordinal)))),
-                    "psu: the caption of " + name + " is drawn at the default size, whole or shortened with an ellipsis.");
-            }
+            // Design QA P2-7 and round 2 (R2-P2-1) at the default window size: every connection caption of the crowded PSU level is
+            // drawn, the four that end at a boundary port as well (the approved sketch A3 captions such a connection beside the
+            // port's own name), each clear of blocks, handles, ports, wires and the other captions, beside its own connection or in
+            // the free space around it. A caption whose whole text has no clear place is shortened with "…", as a block caption is,
+            // and shows its whole text on hover; none is left out. Each caption is matched to its own connection by identity, not
+            // by its text ("Rail…" could otherwise stand for either rail's sense connection).
+            var psuConnections = psuRevision.LocalDiagram.Connections.ToDictionary(c => S(c.ConnectionId),
+                c => fixture.Connections(psu.BlockId).Inspect(c).Name, StringComparer.Ordinal);
+            await Capture("psu-captions");
+            var psuShot = await CapturedWindow.LoadAsync(Path.Combine(evidence, instanceId + "-canvas-psu-captions.png"), WindowOrigin(display, processId, title), token);
+            VerifyCaptions(psuShot, psuLevel, "psu", psuConnections);
+            Assert.IsTrue(psuLevel.ConnectionCaptions.All(c => psuConnections.ContainsKey(c.ObjectId)), "psu: every caption belongs to a connection of the level.");
             var psuLayout = await Observe("psu");
             var psuChildren = psuRevision.Children;
             Drawn(psuLayout, "psu", (psuChildren[0].BlockId, "140,110,240,145", "RPS_FALLBACK"), (psuChildren[1].BlockId, "510,110,240,145", "RPS_FALLBACK"),
                 (psuChildren[2].BlockId, "140,360,240,145", "RPS_FALLBACK"), (psuChildren[3].BlockId, "510,360,240,145", "RPS_FALLBACK"));
             FallbackBoundary(psuLayout, "psu", psu, psuRevision);
             CollectionAssert.AreEqual(psuRevision.LocalDiagram.Connections.Select(c => S(c.ConnectionId) + " RPS_FALLBACK").ToArray(), Routes(psuLayout));
-            // Design QA P2-5 on the shared design (rules F2, F4a and F4c as revised; see the design QA record's contract request).
-            // Each computed leg leaves its blocks along their edges before turning: Rail A sense and Fault, whose ends face the
-            // same way on two blocks of one column, run out 20 units and back instead of along the blocks' edges. Connections
-            // keep apart: LDO supply and Rail B sense no longer meet end to end at (445, 182.5), and Telemetry no longer runs
-            // along Measurements' leg at 468.75 (they turn up 10 units apart, at x 445 and 455). Only connections from one port
-            // (Rail B and Rail B sense from the LDO's output, Rail A and Rail B into the Power port) share the leg at that port.
+            // Design QA P2-5 on the shared design (rules F2, F4a and F4c as revised; cn2 erratum "connection layout", decision
+            // n03892aa8cecf933f, and its review). Each computed leg leaves its blocks along their edges before turning: Rail A sense
+            // and Fault, whose ends face the same way on two blocks of one column, run out 20 units and back instead of along the
+            // blocks' edges. Connections keep apart: LDO supply and Rail B sense no longer meet end to end at (445, 182.5), and
+            // Telemetry no longer runs along Measurements' leg at 468.75 (they turn up 10 units apart, at x 445 and 455). Only
+            // connections from one port (Rail B and Rail B sense from the LDO's output, Rail A and Rail B into the Power port) share
+            // the leg at that port. Level runs 7.5 units apart count as running beside each other too (the formal QA asks for 8
+            // pixels): Rail A's and LDO supply's runs at 182.5 lie beside Rail B's run into the Power port at 175, so both turn
+            // at their 20-unit limit (Rail A at x 120, LDO supply at x 400) and Rail B turns at x 415, which keeps each of those
+            // runs beside it to the 20 units the end itself needs.
             CollectionAssert.AreEqual(new[] {
-                    "40,90 90,90 90,146.25 140,146.25", "140,182.5 90,182.5 90,175 40,175", "380,182.5 445,182.5 445,146.25 510,146.25",
-                    "510,182.5 455,182.5 455,175 40,175", "140,218.75 120,218.75 120,396.25 140,396.25", "510,182.5 465,182.5 465,432.5 380,432.5",
+                    "40,90 90,90 90,146.25 140,146.25", "140,182.5 120,182.5 120,175 40,175", "380,182.5 400,182.5 400,146.25 510,146.25",
+                    "510,182.5 415,182.5 415,175 40,175", "140,218.75 120,218.75 120,396.25 140,396.25", "510,182.5 465,182.5 465,432.5 380,432.5",
                     "380,468.75 445,468.75 445,396.25 510,396.25", "510,218.75 490,218.75 490,432.5 510,432.5", "510,468.75 455,468.75 455,260 40,260" },
                 psuLayout.GetProperty("routes").EnumerateArray().Select(r => string.Join(" ", r.GetProperty("points").EnumerateArray().Select(Point))).ToArray(),
                 "psu: every connection runs on its computed path.");
-            VerifyRoutesClear(psuLayout, "psu");
-            await Capture("psu");
+            // Those two are the only runs beside another, and neither can be avoided with three-segment paths: Rail B's run into the
+            // Power port at 175 must reach the port, and Rail A's and LDO supply's runs at 182.5 must first leave their ends by 20
+            // units. Each is held to exactly those 20 units.
+            string Link(string name) => psuConnections.Single(c => c.Value == name).Key;
+            VerifyRoutesClear(psuLayout, "psu", (Link("Rail A"), Link("Rail B")), (Link("LDO supply"), Link("Rail B")));
+            await Retain("psu", psuLevel); await Capture("psu");
 
             // PSU -> System (Backspace keeps the PSU selected, as the level was left) -> CPU.
             Key("BackSpace");
@@ -512,8 +548,282 @@ public sealed partial class NativeSessionTests
             CollectionAssert.AreEqual(new[] { "Type: EEPROM" }, reopenedChips.Chips.Select(c => c.Text).ToArray(), "The Memory's chip is back.");
             Assert.IsNull(reopenedCpu.BlockChips.SingleOrDefault(b => b.BlockId == clockId));
             await Retain("reopened", reopenedCpu); await Capture("reopened");
+
+            // Ports on a top and a bottom edge (review of design QA P2-5, rule F4d): Place port puts "Status" on the Memory's top
+            // edge and "Reset" on the Processor's bottom edge, and Connect joins them. The wire leaves each of those ports straight
+            // up or down for 20 units or more, never along the block's outline, and every other rule of the level still holds.
+            // Decline then discards all of it.
+            await Press("DiagramPalettePlacePort");
+            await Wait("palette-place-port", s => Tool(s, "add-port", "RecursiveToolPlacePort", "DiagramPalettePlacePort"));
+            await At(700, 150); await Wait("status-caption", s => s.CaptionEditor == "port");
+            Type("Status"); Key("Return");
+            var statusPlaced = await Wait("status-placed", s => s.CaptionEditor == "" && (View(s)?.Ports.Any(p => p.BlockId == memoryId && p.Side == P.DiagramPortSide.DpsTop) ?? false));
+            static decimal Offset(P.DiagramPortPlacementData port) => decimal.Parse(port.Offset, System.Globalization.CultureInfo.InvariantCulture);
+            var statusPort = View(statusPlaced)!.Ports.Single(p => p.BlockId == memoryId && p.Side == P.DiagramPortSide.DpsTop);
+            Assert.IsTrue(Math.Abs(Offset(statusPort) - 110) <= 2, $"Status sits on the Memory's top edge where it was placed ({statusPort.Offset} along it).");
+            await Press("DiagramPalettePlacePort");
+            await Wait("palette-place-port-again", s => Tool(s, "add-port", "RecursiveToolPlacePort", "DiagramPalettePlacePort"));
+            await At(280, 285); await Wait("reset-caption", s => s.CaptionEditor == "port");
+            Type("Reset"); Key("Return");
+            var resetPlaced = await Wait("reset-placed", s => s.CaptionEditor == "" && (View(s)?.Ports.Any(p => p.BlockId == processorId && p.Side == P.DiagramPortSide.DpsBottom) ?? false));
+            var resetPort = View(resetPlaced)!.Ports.Single(p => p.BlockId == processorId && p.Side == P.DiagramPortSide.DpsBottom);
+            Assert.IsTrue(Math.Abs(Offset(resetPort) - 140) <= 2, $"Reset sits on the Processor's bottom edge where it was placed ({resetPort.Offset} along it).");
+            decimal statusX = 590 + Offset(statusPort), resetX = 140 + Offset(resetPort);
+            await Press("DiagramPaletteConnect");
+            await Wait("palette-connect-ports", s => Tool(s, "connect", "RecursiveToolConnect", "DiagramPaletteConnect"));
+            await At(700, 150); await Wait("reset-line-started", s => s.CanvasHint == "Click a port to finish connection");
+            await At(280, 285); await Wait("reset-line-caption", s => s.CaptionEditor == "connection");
+            Type("Reset line"); Key("Return");
+            var resetLine = await Wait("reset-line-added", s => s.LevelDraft.NewConnections.Count == 1 && s.CaptionEditor == "");
+            var resetLink = resetLine.LevelDraft.NewConnections[0];
+            CollectionAssert.AreEqual(new[] { (memoryId, statusPort.InterfaceId), (processorId, resetPort.InterfaceId) },
+                resetLink.Endpoints.Select(e => (e.BlockId, e.InterfaceId)).ToArray(), "Reset line joins the two new ports.");
+            var portsLayout = await Observe("top-bottom-ports");
+            var resetRoute = portsLayout.GetProperty("routes").EnumerateArray().Single(r => r.GetProperty("connectionId").GetString() == resetLink.Selection.ConnectionId)
+                .GetProperty("points").EnumerateArray().Select(p => (X: decimal.Parse(p.GetProperty("x").GetString()!, System.Globalization.CultureInfo.InvariantCulture),
+                    Y: decimal.Parse(p.GetProperty("y").GetString()!, System.Globalization.CultureInfo.InvariantCulture))).ToArray();
+            Assert.AreEqual((statusX, 150m), resetRoute[0], "Reset line starts at the Status port on the Memory's top edge.");
+            Assert.IsTrue(resetRoute[1].X == statusX && resetRoute[1].Y <= 130m, $"Reset line leaves the top edge straight up for 20 units or more, to ({resetRoute[1].X}, {resetRoute[1].Y}).");
+            Assert.AreEqual((resetX, 285m), resetRoute[^1], "Reset line ends at the Reset port on the Processor's bottom edge.");
+            Assert.IsTrue(resetRoute[^2].X == resetX && resetRoute[^2].Y >= 305m, $"Reset line reaches the bottom edge straight from below, from ({resetRoute[^2].X}, {resetRoute[^2].Y}).");
+            VerifyRoutesClear(portsLayout, "top-bottom-ports");
+            await Retain("top-bottom-ports", await Read()); await Capture("top-bottom-ports");
+            // A port on the level's own boundary, on the frame's top side (rule F4d for boundary ports; review of the routing
+            // follow-ups, finding 5): Place port just inside the top of the level frame, between the Processor and the Memory,
+            // stores the frame and puts "Wake" on its top side, and Connect joins it to the Processor. The wire enters the level
+            // from the port straight down for 20 units or more, and every other rule of the level still holds.
+            static decimal Number(string value) => decimal.Parse(value, System.Globalization.CultureInfo.InvariantCulture);
+            decimal frameTop = Number(portsLayout.GetProperty("frame").GetProperty("y").GetString()!);
+            string cpuScope = S(cpu.BlockId);
+            await Press("DiagramPalettePlacePort");
+            await Wait("palette-place-boundary-port", s => Tool(s, "add-port", "RecursiveToolPlacePort", "DiagramPalettePlacePort"));
+            await At(445, (double)frameTop + 8); await Wait("wake-caption", s => s.CaptionEditor == "port");
+            Type("Wake"); Key("Return");
+            var wakePlaced = await Wait("wake-placed", s => s.CaptionEditor == "" && (View(s)?.Ports.Any(p => p.BlockId == cpuScope && p.Side == P.DiagramPortSide.DpsTop) ?? false));
+            var wakePort = View(wakePlaced)!.Ports.Single(p => p.BlockId == cpuScope && p.Side == P.DiagramPortSide.DpsTop);
+            var storedFrame = View(wakePlaced)!.Frame;
+            Assert.AreEqual(frameTop, Number(storedFrame.Y), "The first placed boundary port stores the frame drawn around the level.");
+            decimal wakeX = Number(storedFrame.X) + Offset(wakePort), wakeY = Number(storedFrame.Y);
+            Assert.IsTrue(Math.Abs(wakeX - 445) <= 2, $"Wake sits on the frame's top side where it was placed (x {wakeX}).");
+            await Press("DiagramPaletteConnect");
+            await Wait("palette-connect-wake", s => Tool(s, "connect", "RecursiveToolConnect", "DiagramPaletteConnect"));
+            await At((double)wakeX, (double)wakeY); await Wait("wake-line-started", s => s.CanvasHint == "Click a port to finish connection");
+            await At(260, 180); await Wait("wake-line-caption", s => s.CaptionEditor == "connection");
+            Type("Wake line"); Key("Return");
+            var wakeLine = await Wait("wake-line-added", s => s.LevelDraft.NewConnections.Count == 2 && s.CaptionEditor == "");
+            var wakeLink = wakeLine.LevelDraft.NewConnections.Single(c => c.Name == "Wake line");
+            Assert.AreEqual((cpuScope, wakePort.InterfaceId, processorId), (wakeLink.Endpoints[0].BlockId, wakeLink.Endpoints[0].InterfaceId, wakeLink.Endpoints[1].BlockId),
+                "Wake line runs from the Wake port on the level's boundary to the Processor.");
+            var boundaryLayout = await Observe("top-boundary-port");
+            var wakeRoute = boundaryLayout.GetProperty("routes").EnumerateArray().Single(r => r.GetProperty("connectionId").GetString() == wakeLink.Selection.ConnectionId)
+                .GetProperty("points").EnumerateArray().Select(p => (X: Number(p.GetProperty("x").GetString()!), Y: Number(p.GetProperty("y").GetString()!))).ToArray();
+            Assert.AreEqual((wakeX, wakeY), wakeRoute[0], "Wake line starts at the Wake port on the frame's top side.");
+            Assert.IsTrue(wakeRoute[1].X == wakeX && wakeRoute[1].Y >= wakeY + 20,
+                $"Wake line enters the level from the top side straight down for 20 units or more, to ({wakeRoute[1].X}, {wakeRoute[1].Y}).");
+            VerifyRoutesClear(boundaryLayout, "top-boundary-port");
+            await Retain("top-boundary-port", await Read()); await Capture("top-boundary-port");
+            Key("d", alt: true);
+            await Wait("top-bottom-declined", s => !s.Dirty && s.LevelDraft.NewConnections.Count == 0
+                && !(View(s)?.Ports.Any(p => p.Side is P.DiagramPortSide.DpsTop or P.DiagramPortSide.DpsBottom) ?? false));
             Key("w", control: true); await Closed();
-            Assert.AreEqual(savedXml, await File.ReadAllTextAsync(context.BlocksPath, token), "Reopening and closing write nothing.");
+            Assert.AreEqual(savedXml, await File.ReadAllTextAsync(context.BlocksPath, token), "Reopening, drawing, declining and closing write nothing.");
+
+            // An agent refines the shared design's connections with the agent tools (ledger pf92d0ecdec8805b4) while no editor is
+            // open. On the PSU level, Rail B's end on the PSU's own Power port is left explicitly unresolved and then bound to that
+            // port again; the tool reports how the port maps through the levels, to the System's Power connection and its three rails.
+            // On the System level, Power's Rail A and Rail B become one group beside Return, each keeping its exact revision.
+            static Guid K(int kind, long n) => PsuCpuIds.Id(kind, n);
+            var agentBase = RecursiveBlockGraphXml.Read(savedXml); var agentPsu = agentBase.Inspect(agentBase.SelectedRoot).Children[0];
+            var railB = agentBase.Inspect(agentPsu).LocalDiagram.Connections.Single(c => c.ConnectionId == K(0x16, 0x0c));
+            var agentCall = new Dictionary<string, object?> { ["instanceId"] = instanceId, ["expectedInstanceEpoch"] = native.Epoch,
+                ["repositoryRoot"] = context.ProjectDirectory, ["sourcePath"] = context.BlocksPath, ["documentId"] = documentId,
+                ["expectedSourceToken"] = saved.SourceToken, ["expectedRoot"] = agentBase.SelectedRoot, ["blockPath"] = new[] { agentBase.SelectedRoot, agentPsu },
+                ["connectionPath"] = new[] { railB }, ["endpointIndex"] = 1, ["operationId"] = Guid.NewGuid(), ["actor"] = "PSU/CPU agent" };
+            async Task<JsonElement> Edited(string tool, Dictionary<string, object?> call, params (string Key, object? Value)[] values)
+            {
+                var next = new Dictionary<string, object?>(call);
+                foreach (var (key, value) in values) next[key] = value;
+                var result = await mcp.CallToolAsync(tool, next, cancellationToken: token);
+                var data = JsonSerializer.SerializeToElement(result).GetProperty("structuredContent");
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-canvas-agent-" + tool + "-" + Guid.NewGuid().ToString("N")[..8] + ".json"),
+                    data.GetRawText(), token);
+                Assert.IsFalse(result.IsError == true, tool + ": " + data.GetRawText());
+                Assert.IsTrue(data.GetProperty("changed").GetBoolean(), tool + " saves a change.");
+                return data;
+            }
+            var railBUnbound = await Edited("kicad_diagram_connection_endpoint_set", agentCall, ("action", "unbind"), ("intent", "Which output carries Rail B is open."));
+            Assert.AreEqual(("Unresolved", S(agentPsu.BlockId)), (railBUnbound.GetProperty("endpoint").GetProperty("kind").GetString(),
+                railBUnbound.GetProperty("endpoint").GetProperty("blockId").GetString()));
+            var railBBound = await Edited("kicad_diagram_connection_endpoint_set", agentCall, ("expectedSourceToken", railBUnbound.GetProperty("sourceToken").GetString()),
+                ("expectedRoot", railBUnbound.GetProperty("selectedRoot")), ("blockPath", railBUnbound.GetProperty("blockPath")),
+                ("connectionPath", railBUnbound.GetProperty("connectionPath")), ("operationId", Guid.NewGuid()), ("action", "bind"), ("blockId", agentPsu.BlockId),
+                ("interfaceId", K(0x15, 3)), ("intent", "Rail B leaves the PSU through its Power port."));
+            var railBMapping = railBBound.GetProperty("boundaryMapping");
+            Assert.AreEqual(("Power", railBBound.GetProperty("blockPath")[0].GetProperty("revisionId").GetString()),
+                (railBMapping.GetProperty("interfaceName").GetString(), railBMapping.GetProperty("parentLevel").GetProperty("revisionId").GetString()));
+            CollectionAssert.AreEquivalent(new[] { K(0x16, 2), K(0x16, 3), K(0x16, 4), K(0x16, 5) }.Select(S).ToArray(),
+                railBMapping.GetProperty("parentConnections").EnumerateArray().Select(c => c.GetProperty("connectionId").GetString()).ToArray(),
+                "Through the PSU's Power port Rail B reaches the System's Power connection and its three rails.");
+            var boundGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(context.BlocksPath, token));
+            var agentPower = boundGraph.Inspect(boundGraph.SelectedRoot).LocalDiagram.Connections.Single(c => c.ConnectionId == K(0x16, 2));
+            Guid supplyRails = Guid.NewGuid();
+            var railsGrouped = await Edited("kicad_diagram_connection_members_refine", new Dictionary<string, object?> { ["instanceId"] = instanceId,
+                ["expectedInstanceEpoch"] = native.Epoch, ["repositoryRoot"] = context.ProjectDirectory, ["sourcePath"] = context.BlocksPath, ["documentId"] = documentId,
+                ["expectedSourceToken"] = railBBound.GetProperty("sourceToken").GetString(), ["expectedRoot"] = boundGraph.SelectedRoot,
+                ["blockPath"] = new[] { boundGraph.SelectedRoot }, ["connectionPath"] = new[] { agentPower }, ["memberIds"] = new[] { supplyRails, K(0x16, 5) },
+                ["newMembers"] = JsonSerializer.SerializeToElement(new[] { new ConnectionMemberDefinition(supplyRails, "Supply rails", [K(0x16, 3), K(0x16, 4)],
+                    DiagramConnectionKind.SignalGroup, "Deliver both regulated rails to the CPU.") },
+                    new JsonSerializerOptions(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } }),
+                ["operationId"] = Guid.NewGuid(), ["actor"] = "PSU/CPU agent" });
+            CollectionAssert.AreEqual(new[] { "Supply rails", "Rail A", "Rail B", "Return" }, railsGrouped.GetProperty("members").EnumerateArray()
+                .Select(m => m.GetProperty("revision").GetProperty("name").GetString()).ToArray());
+            var agentStored = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(context.BlocksPath, token));
+            var agentSystem = agentStored.Inspect(agentStored.SelectedRoot); var systemLinks = agentStored.Connections(system.BlockId);
+            var powerGrouped = systemLinks.Inspect(agentSystem.LocalDiagram.Connections.Single(c => c.ConnectionId == K(0x16, 2)));
+            CollectionAssert.AreEqual(fixture.Connections(system.BlockId).Inspect(systemRevision.LocalDiagram.Connections.Single(c => c.ConnectionId == K(0x16, 2)))
+                .Members.Take(2).ToArray(), systemLinks.Inspect(powerGrouped.Members[0]).Members.ToArray(), "Rail A and Rail B keep their fixture revisions.");
+            var railBStored = agentStored.Connections(psu.BlockId).Inspect(agentStored.Inspect(agentSystem.Children[0]).LocalDiagram.Connections
+                .Single(c => c.ConnectionId == K(0x16, 0x0c)));
+            Assert.AreEqual((DiagramEndpointKind.Interface, psu.BlockId, (Guid?)K(0x15, 3)), (railBStored.Endpoints[1].Kind, railBStored.Endpoints[1].BlockId,
+                railBStored.Endpoints[1].InterfaceId), "Rail B ends on the PSU's Power port, which the System's Power connection uses from outside.");
+            savedXml = await File.ReadAllTextAsync(context.BlocksPath, token);
+
+            // A dense level stays responsive (review of design QA P2-5): another agent draws twelve blocks with eight ports each and
+            // fifty connections between them on the System level. The editor lays a level's connection paths out once for each
+            // change of its geometry and reuses that layout for every repaint and every state read; a drag of one block lays the
+            // level out at most once for each position the block reaches (GTK may merge the fixture's eight pointer motions into fewer
+            // positions, which the editor reports as drag_positions), and no single layout takes a second even in this
+            // unoptimized build.
+            var denseBase = RecursiveBlockGraphXml.Read(savedXml);
+            var denseLevel = denseBase.StartLevelDraft(denseBase.SelectedRoot);
+            var denseBlocks = new List<NewBlockOccurrence>(); var densePorts = new List<Guid[]>();
+            for (int b = 0; b < 12; ++b)
+            {
+                var ports = Enumerable.Range(0, 8).Select(_ => Guid.NewGuid()).ToArray(); densePorts.Add(ports);
+                denseBlocks.Add(new NewBlockOccurrence(new BlockSelection(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid()), Guid.NewGuid(), "Initial",
+                    "Dense " + (b + 1), DiagramRequirements.Empty, [.. ports.Select((id, k) => new DiagramBoundaryInterface(id, "P" + (k + 1), ""))], null));
+            }
+            var denseLinks = new List<NewConnectionOccurrence>();
+            for (int i = 0; i < 50; ++i)
+            {
+                int first = i % 12, second = (first + 1 + i * 7 % 11) % 12;
+                denseLinks.Add(new NewConnectionOccurrence(new ConnectionSelection(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid()), Guid.NewGuid(), "Initial",
+                    "Link " + (i + 1), DiagramConnectionKind.Abstract, DiagramDomain.Unspecified, DiagramConnectionDirection.Unspecified,
+                    [new(DiagramEndpointKind.Interface, denseBlocks[first].Selection.BlockId, densePorts[first][i / 12 % 8], "", null, [], null),
+                     new(DiagramEndpointKind.Interface, denseBlocks[second].Selection.BlockId, densePorts[second][(i / 12 + 4) % 8], "", null, [], null)],
+                    DiagramRequirements.Empty, null));
+            }
+            denseLevel = denseLevel with
+            {
+                Scope = denseLevel.Scope with { Children = denseLevel.Scope.Children.AddRange(denseBlocks.Select(n => n.Selection)),
+                    Diagram = denseLevel.Scope.LocalDiagram with { Connections = denseLevel.Scope.LocalDiagram.Connections.AddRange(denseLinks.Select(l => l.Selection)) } },
+                NewChildren = [.. denseBlocks], NewConnections = [.. denseLinks]
+            };
+            var noRevisions = System.Collections.Immutable.ImmutableDictionary<Guid, LevelRevisionId>.Empty;
+            var denseGraph = denseBase.SaveLevelDraft(denseBase.SelectedRoot, [denseBase.SelectedRoot], denseLevel,
+                new LevelRevisionIds(Guid.NewGuid(), Guid.NewGuid(), [], noRevisions, noRevisions), RecursiveBlockFixture.Origin("Another agent")).Graph;
+            await File.WriteAllTextAsync(context.BlocksPath, RecursiveBlockGraphXml.Write(denseGraph), token);
+            var denseOpen = await Open("dense");
+            Assert.HasCount(14, denseOpen.LevelDraft.Scope.Children, "The System level shows the PSU, the CPU and the twelve drawn blocks.");
+            var denseLayout = await Observe("dense");
+            Assert.AreEqual(systemRevision.LocalDiagram.Connections.Length + 50, denseLayout.GetProperty("routes").GetArrayLength(),
+                "Every connection of the dense level is drawn: the System level's own and the fifty drawn ones.");
+            var settled = await Read(); var readAgain = await Read();
+            Assert.IsTrue(settled.RouteLayouts > 0, "The editor reports how often it laid connection paths out.");
+            Assert.AreEqual(settled.RouteLayouts, readAgain.RouteLayouts, "Reading the state again lays nothing out again: an unchanged level reuses its layout.");
+            string denseId = S(denseBlocks[0].Selection.BlockId);
+            var denseRect = denseLayout.GetProperty("blocks").EnumerateArray().Single(b => b.GetProperty("blockId").GetString() == denseId).GetProperty("rect");
+            double Units(JsonElement value) => double.Parse(value.GetString()!, System.Globalization.CultureInfo.InvariantCulture);
+            double denseX = Units(denseRect.GetProperty("x")) + Units(denseRect.GetProperty("width")) / 2, denseY = Units(denseRect.GetProperty("y")) + 30;
+            var watch = Stopwatch.StartNew();
+            await Drag(denseX, denseY, denseX + 40, denseY + 40);
+            var denseDragged = await Wait("dense-dragged", s => s.Dirty && Placed(s).Contains(denseId));
+            watch.Stop();
+            ulong layoutsDuringDrag = denseDragged.RouteLayouts - readAgain.RouteLayouts;
+            ulong dragPositions = denseDragged.DragPositions - readAgain.DragPositions;
+            Console.WriteLine($"Dense level: {layoutsDuringDrag} layouts for {dragPositions} drag positions, slowest {denseDragged.SlowestRouteLayoutMicros} µs, "
+                + $"latest {denseDragged.LatestRouteLayoutMicros} µs, drag settled after {watch.ElapsedMilliseconds} ms.");
+            await Retain("dense-dragged", denseDragged); await Capture("dense-dragged");
+            Assert.IsTrue(dragPositions >= 1, "The drag moved the block to at least one new position.");
+            // Once per position, and at most once more for the stored placements the drag's first motion writes: laying each
+            // position out again for the repaint and the state read (three layouts per position before the fix) fails.
+            Assert.IsTrue(layoutsDuringDrag >= 1 && layoutsDuringDrag <= dragPositions + 1,
+                $"A drag that reached {dragPositions} positions lays the dense level out at most once per position and once more, not {layoutsDuringDrag} times.");
+            Assert.IsTrue(denseDragged.SlowestRouteLayoutMicros <= 1_000_000,
+                $"The slowest layout of the dense level took {denseDragged.SlowestRouteLayoutMicros} µs, at most a second.");
+            Key("d", alt: true); var denseDeclined = await Wait("dense-declined", s => !s.Dirty && Placed(s).Length == 0);
+            // Design QA round 2, R2-P2-1: on the dense level every connection still shows its caption (none is left out, as the
+            // earlier editor left out the ones without a clear place); a caption shortened for want of room shows its whole text on
+            // hover, and the tooltip goes when the pointer leaves it. Where not even a shortened caption has a clear place, it is
+            // drawn shortened where it covers least, never over a block.
+            await Retain("dense-declined", denseDeclined);
+            Assert.AreEqual(systemRevision.LocalDiagram.Connections.Length + 50, denseDeclined.ConnectionCaptions.Count(c => c.Shown),
+                "dense: every connection of the dense level shows its caption.");
+            // Where it covers least means over wires only here: a crowded caption covers no block, no port, no boundary port's name
+            // and no other caption (review of design QA round 2).
+            var denseShown = denseDeclined.ConnectionCaptions.Where(c => c.Shown).ToArray();
+            foreach (var crowded in denseDeclined.ConnectionCaptions.Where(c => !c.Enabled))
+            {
+                Assert.IsTrue(denseDeclined.BlockTexts.All(b => RectsApart(crowded, b.Block)),
+                    $"dense: the crowded caption '{crowded.Label}' covers no block.");
+                Assert.IsTrue(denseDeclined.PortMarks.All(p => RectsApart(crowded, p)), $"dense: the crowded caption '{crowded.Label}' covers no port.");
+                Assert.IsTrue(denseDeclined.BoundaryPortNames.All(n => RectsApart(crowded, n)), $"dense: the crowded caption '{crowded.Label}' covers no port's name.");
+                Assert.IsTrue(denseShown.Where(o => !ReferenceEquals(o, crowded)).All(o => RectsApart(crowded, o)),
+                    $"dense: the crowded caption '{crowded.Label}' covers no other caption.");
+            }
+            var shortenedCaption = denseDeclined.ConnectionCaptions.FirstOrDefault(c => c.Shown && c.Tooltip != "" && c.X > denseDeclined.CanvasWindowX + 120);
+            Assert.IsNotNull(shortenedCaption, "dense: the crowded level shortens a caption for want of room.");
+            Assert.IsTrue(shortenedCaption.Label.EndsWith('…') && shortenedCaption.Tooltip.StartsWith(shortenedCaption.Label[..^1].TrimEnd(), StringComparison.Ordinal),
+                $"dense: the shortened caption '{shortenedCaption.Label}' names '{shortenedCaption.Tooltip}' in full.");
+            NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: denseDeclined.CanvasWindowX + (int)denseDeclined.CanvasPixelWidth - 4,
+                clickFromTop: denseDeclined.CanvasWindowY + (int)denseDeclined.CanvasPixelHeight - 4);
+            ulong denseMotions = (await Read()).CanvasMotions;
+            foreach (int dx in new[] { -3, 0, 2 })
+                NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: shortenedCaption.X + shortenedCaption.Width / 2 + dx,
+                    clickFromTop: shortenedCaption.Y + shortenedCaption.Height / 2);
+            await Wait("dense-caption-hover", s => s.CanvasMotions > denseMotions && s.CanvasTooltip == shortenedCaption.Tooltip);
+            // GTK shows a tooltip after the pointer rests for its delay; the capture waits past it. Only the reported tooltip, which
+            // is read back from the canvas window, is asserted: the capture is not measured for the tooltip's popup.
+            await Task.Delay(1500, token);
+            await Capture("dense-caption-hover");
+            // Every motion has arrived by now: the pointer rests here from this reading on.
+            var hovered = await Wait("dense-caption-rested", s => s.CanvasTooltip == shortenedCaption.Tooltip);
+            // The tooltip follows the canvas while the pointer stays still (review of design QA round 2): it is what lies under the
+            // pointer on the level shown, found again after the canvas is drawn anew, not the text of the last hover.
+            static bool Under(P.DiagramControlRect r, P.DiagramCanvasPoint p) => p.X >= r.X && p.X < r.X + r.Width && p.Y >= r.Y && p.Y < r.Y + r.Height;
+            static string TipUnderPointer(P.RecursiveDiagramEditorState s) =>
+                s.ConnectionCaptions.FirstOrDefault(c => c.Tooltip != "" && Under(c, s.CanvasPointer))?.Tooltip
+                ?? s.BlockChips.Select(b => b.More).FirstOrDefault(m => m is not null && Under(m, s.CanvasPointer))?.Tooltip ?? "";
+            Assert.AreEqual(shortenedCaption.Tooltip, TipUnderPointer(hovered), "dense: the pointer rests on the shortened caption.");
+            // The keyboard selects the PSU (the arrows step through the level's blocks) and Enter opens its level.
+            Key("Escape");
+            for (int i = 0; i <= denseOpen.LevelDraft.Scope.Children.Count; ++i)
+            {
+                string selectedNow = (await Read()).Draft.Baseline.BlockId;
+                if (selectedNow == S(psu.BlockId)) break;
+                Key("Right"); await Wait($"dense-select-{i}", s => s.Draft.Baseline.BlockId != selectedNow);
+            }
+            await Wait("dense-psu-selected", s => s.Draft.Baseline.BlockId == S(psu.BlockId));
+            Key("Return");
+            var psuUnderPointer = await Wait("dense-tip-psu-level", s => s.Rendered && s.DiagramPath.Count == 2 && s.DiagramPath[^1].BlockId == S(psu.BlockId)
+                && s.CanvasTooltip == TipUnderPointer(s));
+            Assert.AreEqual(hovered.CanvasMotions, psuUnderPointer.CanvasMotions, "dense: the pointer did not move while the level changed.");
+            Assert.AreNotEqual(shortenedCaption.Tooltip, psuUnderPointer.CanvasTooltip, "dense: on the PSU level the canvas no longer shows the System level's caption on hover.");
+            Key("BackSpace");
+            var backUnderPointer = await Wait("dense-tip-system-again", s => s.Rendered && s.DiagramPath.Count == 1 && s.CanvasTooltip == TipUnderPointer(s)
+                && s.CanvasTooltip == shortenedCaption.Tooltip);
+            Assert.AreEqual(hovered.CanvasMotions, backUnderPointer.CanvasMotions, "dense: back on the System level, the pointer still had not moved.");
+            // The tooltip goes when the pointer leaves the canvas, although the last place the canvas saw the pointer is still on the
+            // shortened caption.
+            var inspector = Find(backUnderPointer, "RecursiveInspector");
+            NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: inspector.X + inspector.Width / 2,
+                clickFromTop: inspector.Y + 40);
+            var left = await Wait("dense-caption-hover-left-canvas", s => s.CanvasTooltip == "");
+            Assert.AreEqual(shortenedCaption.Tooltip, TipUnderPointer(left), "dense: the canvas last saw the pointer on the shortened caption.");
+            NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: denseDeclined.CanvasWindowX + (int)denseDeclined.CanvasPixelWidth - 4,
+                clickFromTop: denseDeclined.CanvasWindowY + (int)denseDeclined.CanvasPixelHeight - 4);
+            await Wait("dense-caption-hover-left", s => s.CanvasTooltip == "" && s.CanvasMotions > left.CanvasMotions);
+            Key("w", control: true); await Closed();
         }
         finally { Directory.Delete(stateRoot, true); }
     }
@@ -601,6 +911,12 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(originalInput.SameContents(graph.RefinementInput(originalInput.Id)));
             savedRead = await client.CallToolAsync("kicad_diagram_read", arguments, cancellationToken: token);
             Assert.IsFalse(savedRead.IsError == true); savedReadData = JsonSerializer.SerializeToElement(savedRead).GetProperty("structuredContent");
+            // Ledger pa48933d0fe0a5c2f: the agent's revision-bound context of the recorded input, its level by exact revision with the
+            // three fields of every element, and the original prompt and attachment. Its fingerprint is compared after many later edits.
+            var inputContext = await AgentContextOverMcp(client, arguments, savedReadData.GetProperty("sourceToken").GetString()!, token, inputId: originalInput.Id);
+            AssertAgentContext(inputContext, graph, originalInput.BlockPath, originalInput, current: true, "recorded input");
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-agent-context-input.json"), inputContext.GetRawText(), token);
+            string inputContextSha = inputContext.GetProperty("contextSha256").GetString()!;
             await File.WriteAllTextAsync(Path.Combine(project, "original-requirements.txt"), "Later replacement, not the original.", token);
             var readInputArguments = new Dictionary<string, object?>(arguments)
             { ["expectedSourceToken"] = savedReadData.GetProperty("sourceToken").GetString(), ["inputId"] = originalInput.Id };
@@ -787,7 +1103,8 @@ public sealed partial class NativeSessionTests
                 Assert.AreEqual(dirty, currentView.GetProperty("containsUnsavedDraft").GetBoolean());
                 Assert.AreEqual((history ?? psuView).RevisionId.ToString("D"), state.GetProperty("views")[1].GetProperty("diagram").GetProperty("selection").GetProperty("revisionId").GetString());
                 await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-" + label + "-observation.json"), state.GetRawText(), token);
-                Assert.AreEqual(before, await Read(), "Offscreen views must not alter draft, selection, source, view revision or viewport.");
+                Assert.AreEqual(WithoutLayoutStatistics(before), WithoutLayoutStatistics(await Read()),
+                    "Offscreen views must not alter draft, selection, source, view revision or viewport.");
                 viewArguments["expectedViewRevision"] = before.ViewRevision + 1;
                 Assert.IsTrue((await client.CallToolAsync("kicad_diagram_observe", viewArguments, cancellationToken: token)).IsError == true);
                 viewArguments["expectedViewRevision"] = before.ViewRevision; viewArguments["documentId"] = Guid.NewGuid().ToString("D");
@@ -807,11 +1124,11 @@ public sealed partial class NativeSessionTests
                         new() { DocumentId = graph.DocumentId.ToString("D"), ExpectedSourceToken = before.SourceToken, ExpectedViewRevision = before.ViewRevision,
                             Views = { new P.RecursiveDiagramViewRequest { ViewId = "cancelled", PixelWidth = 640, PixelHeight = 480 } } }, cancelledView.Token));
                 }
-                Assert.AreEqual(before, await Read());
+                Assert.AreEqual(WithoutLayoutStatistics(before), WithoutLayoutStatistics(await Read()));
                 viewArguments["views"] = new[] { new { viewId = "recovered", pixelWidth = 640, pixelHeight = 480 } };
                 var recoveredObservation = await client.CallToolAsync("kicad_diagram_observe", viewArguments, cancellationToken: token);
                 Assert.IsFalse(recoveredObservation.IsError == true, "A valid native observation must work after rejected and cancelled requests.");
-                Assert.AreEqual(before, await Read());
+                Assert.AreEqual(WithoutLayoutStatistics(before), WithoutLayoutStatistics(await Read()));
             }
             await ObserveViews("saved-root", false);
             Key("Escape"); Key("Right");
@@ -820,6 +1137,7 @@ public sealed partial class NativeSessionTests
             NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true, clickFromRight: 300, clickFromTop: 185);
             await Wait(s => s.DiagramPath.Count == 2 && s.DiagramPath[^1].BlockId == fixture.Blocks["PSU"].BlockId.ToString("D"));
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-psu.png"), token);
+            VerifyBoundaryNamesClear(await Read(), "recursive-psu");
             NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true, clickFromLeft: 118, clickFromTop: 45);
             var afterUp = await Wait(s => s.DiagramPath.Count == 1 && s.FocusedControl == "RecursiveDiagramCanvas"
                 && s.Draft.Baseline.BlockId == fixture.Blocks["PSU"].BlockId.ToString("D"));
@@ -850,6 +1168,7 @@ public sealed partial class NativeSessionTests
             NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true, clickFromLeft: 377, clickFromTop: 45);
             await Wait(s => s.ViewRevision > beforeFit && s.Rendered);
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-cpu.png"), token);
+            VerifyBoundaryNamesClear(await Read(), "recursive-cpu");
             Key("Escape"); Key("l"); Key("l"); Key("l");
             await Wait(s => s.ConnectionDraft?.Baseline.ConnectionId == fixture.Links["CPU/Memory"].ConnectionId.ToString("D"));
             Key("3", control: true); Key("a", control: true); Type("Keep memory away from noisy power.");
@@ -968,6 +1287,25 @@ public sealed partial class NativeSessionTests
             Key("1", control: true); Key("a", control: true); Type("Reload the saved sketch without losing requirements."); await Wait(s => s.Dirty);
             Key("d", alt: true); await Wait(s => !s.Busy && !s.Dirty && s.Draft.LocalDiagram.Annotations.Any(n => n.Id == sketch.Id.ToString("D")));
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-canvas-note.png"), token);
+            // The same level as an agent's context (ledger pa48933d0fe0a5c2f): the comments on its elements and in its free space, the
+            // original sketch strokes included, each with the exact revisions they were saved in.
+            var sketchedFile = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            BlockSelection[] sketchPath = [sketchedFile.SelectedRoot, sketchedFile.Inspect(sketchedFile.SelectedRoot).Children.Single(c => c.BlockId == fixture.Blocks["CPU"].BlockId)];
+            var sketchContext = await AgentContextOverMcp(client, arguments, await FileToken(source, token), token, blockPath: sketchPath);
+            AssertAgentContext(sketchContext, sketchedFile, sketchPath, null, current: true, "commented level");
+            var sketchComments = sketchContext.GetProperty("context").GetProperty("comments").EnumerateArray().ToArray();
+            Assert.IsTrue(sketchComments.Any(c => c.GetProperty("placement").GetString() == "Element" && c.GetProperty("comment").GetProperty("text").GetString() == "Leave pin choices open until placement."
+                && c.GetProperty("comment").GetProperty("target").GetProperty("kind").GetString() == "Connection"), "A comment on a connection is an element comment.");
+            Assert.IsTrue(sketchComments.Any(c => c.GetProperty("placement").GetString() == "Element" && c.GetProperty("comment").GetProperty("text").GetString() == "Prefer the cooler enclosure side."
+                && c.GetProperty("comment").GetProperty("target").GetProperty("kind").GetString() == "Block"), "A comment on a block is an element comment.");
+            Assert.IsTrue(sketchComments.Any(c => c.GetProperty("placement").GetString() == "FreeSpace" && c.GetProperty("comment").GetProperty("text").GetString() == "Keep this region accessible."),
+                "A comment placed on the canvas is a free-space comment.");
+            var sketchStrokes = sketchComments.Single(c => c.GetProperty("comment").GetProperty("id").GetGuid() == sketch.Id);
+            Assert.AreEqual("FreeSpace", sketchStrokes.GetProperty("placement").GetString());
+            CollectionAssert.AreEqual(sketch.Strokes[0].Points.Select(p => (p.X, p.Y)).ToArray(), sketchStrokes.GetProperty("comment").GetProperty("strokes")[0].GetProperty("points")
+                .EnumerateArray().Select(p => (p.GetProperty("x").GetDecimal(), p.GetProperty("y").GetDecimal())).ToArray(), "The original sketch points reach the agent exactly.");
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-agent-context-comments.json"), sketchContext.GetRawText(), token);
+            string sketchContextSha = sketchContext.GetProperty("contextSha256").GetString()!;
             string original = graph.Requirements(fixture.Blocks["CPU"]).Requirements.General;
             Key("1", control: true); Key("a", control: true); Type("Cool near the enclosure edge.");
             await Wait(s => s.Dirty && s.Draft.Fields.General == "Cool near the enclosure edge.");
@@ -1098,6 +1436,11 @@ public sealed partial class NativeSessionTests
             NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true, clickFromLeft: 377, clickFromTop: 45);
             await Wait(s => s.Rendered && s.ViewRevision > compactView);
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-compact.png"), token);
+            // Mockup audit M1-2: in the 1100 x 760 window the fallback column's names ("Telemetry" among them) used to run into the
+            // Processor's edge, its port and its caption; a name with no room right of its port now goes left of it.
+            var compactNames = await Read();
+            VerifyBoundaryNamesClear(compactNames, "recursive-compact");
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-recursive-compact-state.json"), SchematicJson.Formatter.Format(compactNames), token);
             Key("3", control: true); Key("a", control: true); Type("A compact-window routing edit."); await Wait(s => s.Dirty);
             await Save();
             Key("4", control: true);
@@ -1124,6 +1467,9 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(sourceCpu, copiedGraph.States.Single(s => s.Id == copyState).ForkedFrom);
             Assert.AreEqual(beforeManagementGraph.Requirements(sourceCpu).Requirements,
                 copiedGraph.Requirements(new(sourceCpu.BlockId, copyState, Guid.Parse(duplicated.Draft.Baseline.RevisionId))).Requirements);
+            // The duplicate continues the source's field history from the exact source revision (ledger p390b40bed99e0ab2).
+            Assert.AreEqual(beforeManagementGraph.Requirements(sourceCpu).RevisionId,
+                copiedGraph.RequirementHistories.Single(h => h.Scope.DesignStateId == copyState).DerivedFrom);
             await ImplementationMenu(); Key("r"); await Window("Rename implementation");
             Name("Initial approach", "Rename implementation"); await Window("Invalid implementation name");
             Assert.AreEqual(copiedGraphXml, await File.ReadAllTextAsync(source, token));
@@ -1201,6 +1547,12 @@ public sealed partial class NativeSessionTests
             var agentGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
             Assert.AreEqual(newGraph.SelectedRoot, agentGraph.SelectedRoot);
             Assert.AreEqual(sourceCpu, agentGraph.States.Single(s => s.Id == agentStateId).ForkedFrom);
+            // Switching to another implementation keeps the field history: the agent's duplicate lists every General text of
+            // the CPU implementation it was made from, each with its revision, version and provenance (ledger p390b40bed99e0ab2).
+            var agentAlternative = new BlockSelection(sourceCpu.BlockId, agentStateId, agentGraph.States.Single(s => s.Id == agentStateId).HeadRevisionId);
+            var sourceGeneral = AllFieldEntries((offset, limit) => DiagramFieldHistoryQuery.Block(beforeManagementGraph, sourceCpu, DiagramRequirementField.General, offset, limit));
+            AssertFieldHistory(await FieldHistoryOverMcp(client, arguments, agentAlternative, "General", null, token), sourceGeneral,
+                "agent duplicate of the CPU implementation", Contexts(agentGraph));
             Assert.IsTrue((await client.CallToolAsync("kicad_diagram_manage_implementation", agentArguments, cancellationToken: token)).IsError == true);
             var agentState = agentGraph.States.Single(s => s.Id == agentStateId);
             agentArguments["source"] = new { blockId = agentState.BlockId, stateId = agentState.Id, revisionId = agentState.HeadRevisionId };
@@ -1564,6 +1916,10 @@ public sealed partial class NativeSessionTests
             var proposalData = JsonSerializer.SerializeToElement(proposalResult).GetProperty("structuredContent");
             Assert.IsTrue(proposalData.GetProperty("added").GetBoolean());
             Assert.IsFalse(proposalData.GetProperty("contextStillSelected").GetBoolean(), "The proposal was based on the original input while later edits had advanced the active root.");
+            // Publishing a proposal built on an older revision keeps it for comparison and says so (ledger pa48933d0fe0a5c2f).
+            Assert.IsTrue(proposalData.GetProperty("comparison").GetProperty("stale").GetBoolean(), "The published proposal is compared with the advanced root.");
+            Assert.AreNotEqual(0, proposalData.GetProperty("comparison").GetProperty("currentChanges").GetArrayLength());
+            Assert.AreEqual("Published", proposalData.GetProperty("publication").GetProperty("stage").GetString());
             var proposalPublication = await client.CallToolAsync("kicad_diagram_proposal_publication", new Dictionary<string, object?>
             {
                 ["instanceId"] = instanceId, ["expectedInstanceEpoch"] = native.Epoch, ["operationId"] = proposalArguments["operationId"]
@@ -1574,6 +1930,13 @@ public sealed partial class NativeSessionTests
                 .GetProperty("receipt").GetProperty("stage").GetString());
             string proposalGraphXml = await File.ReadAllTextAsync(source, token); var proposalGraph = RecursiveBlockGraphXml.Read(proposalGraphXml);
             Assert.IsTrue(proposalGraph.Proposal(proposal.Id).Issues.Any());
+            // The proposed root implementation, still unselected, continues the root's field history from the revision the
+            // original input captured: the agent's rewrite first, then every earlier text with its own provenance.
+            AssertFieldHistory(await FieldHistoryOverMcp(client, arguments, proposal.Candidate, "General", null, token),
+                [ProposedFieldEntry(proposal, DiagramRequirementField.General),
+                 .. AllFieldEntries((offset, limit) => DiagramFieldHistoryQuery.Block(mappedGraph, originalInput.BlockPath[^1], DiagramRequirementField.General, offset, limit))
+                    .Select(e => e with { IsSavedText = false })],
+                "unselected root proposal", Contexts(proposalGraph));
             var proposalReadArguments = new Dictionary<string, object?>(arguments)
             {
                 ["expectedSourceToken"] = proposalData.GetProperty("sourceToken").GetString(), ["proposalId"] = proposal.Id
@@ -1612,6 +1975,53 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual("Keep mapped components reachable.", nativeSavedComponents.Requirements(nativeSavedComponents.SelectedRoot).Requirements.Routing);
             Assert.AreEqual(mappedGraph.Requirements(mappedGraph.SelectedRoot).Requirements.General,
                 nativeSavedComponents.Requirements(nativeSavedComponents.SelectedRoot).Requirements.General);
+            // Ledger p390b40bed99e0ab2 for members (review finding 2): a supply agent groups the PSU level's Supply connection's
+            // signals into a member with kicad_diagram_connection_members_refine: a "Converted rails" group of the new signals VOUT
+            // and RTN, whose own General text cites the regulator datasheet by page, table and part variant. The PSU proposal below
+            // refines that member too, and its field history is read back over MCP across the choice.
+            var groupBase = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            var groupPsu = groupBase.Inspect(groupBase.SelectedRoot).Children.Single(c => c.BlockId == fixture.Blocks["PSU"].BlockId);
+            var groupSupply = groupBase.Inspect(groupPsu).LocalDiagram.Connections.Single(c => c.ConnectionId == fixture.Links["PSU/Supply"].ConnectionId);
+            Guid convertedRails = Guid.NewGuid(), vout = Guid.NewGuid(), rtn = Guid.NewGuid(), groupOperation = Guid.NewGuid();
+            var datasheet = new SourceReference("regulator-datasheet", "rev-c", 7, "Table 3", "TPS62A0-Q1");
+            var memberEnums = new JsonSerializerOptions(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } };
+            var groupCall = new Dictionary<string, object?>(arguments)
+            {
+                ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = await FileToken(source, token), ["expectedRoot"] = groupBase.SelectedRoot,
+                ["blockPath"] = new[] { groupBase.SelectedRoot, groupPsu }, ["connectionPath"] = new[] { groupSupply }, ["memberIds"] = new[] { convertedRails },
+                ["newMembers"] = JsonSerializer.SerializeToElement(new[]
+                {
+                    new ConnectionMemberDefinition(convertedRails, "Converted rails", [vout, rtn], DiagramConnectionKind.SignalGroup,
+                        "Carry the converted rail and its return to the boundary."),
+                    new ConnectionMemberDefinition(vout, "VOUT", []), new ConnectionMemberDefinition(rtn, "RTN", [])
+                }, memberEnums),
+                ["operationId"] = groupOperation, ["actor"] = "Supply agent", ["sources"] = new[] { datasheet }
+            };
+            var grouped = await client.CallToolAsync("kicad_diagram_connection_members_refine", groupCall, cancellationToken: token);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-supply-members-grouped.json"), JsonSerializer.Serialize(grouped), token);
+            Assert.IsFalse(grouped.IsError == true, JsonSerializer.Serialize(grouped));
+            Assert.IsTrue(JsonSerializer.SerializeToElement(grouped).GetProperty("structuredContent").GetProperty("changed").GetBoolean());
+            var groupedGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            var groupedPsu = groupedGraph.Inspect(groupedGraph.SelectedRoot).Children.Single(c => c.BlockId == groupPsu.BlockId);
+            var groupedSupply = groupedGraph.Inspect(groupedPsu).LocalDiagram.Connections.Single(c => c.ConnectionId == groupSupply.ConnectionId);
+            // The connection edit's new revision is the operation's identity, so an agent whose call was cut off can see it landed.
+            Assert.AreEqual(groupOperation, groupedSupply.RevisionId, "The grouped Supply revision is the operation's identity.");
+            CollectionAssert.AreEqual(new[] { convertedRails }, groupedGraph.Connections(groupPsu.BlockId).Inspect(groupedSupply).Members.Select(m => m.ConnectionId).ToArray());
+            // Repeating the landed grouping on the file it produced (its token and paths) cannot save it twice: the new members it
+            // declares now exist, so it is refused as identity_reused and writes nothing. (A repeated end binding instead finds
+            // nothing to change; the connection-details journey proves that.)
+            var groupedData = JsonSerializer.SerializeToElement(grouped).GetProperty("structuredContent");
+            string groupedXml = await File.ReadAllTextAsync(source, token);
+            var regrouped = await client.CallToolAsync("kicad_diagram_connection_members_refine", new Dictionary<string, object?>(groupCall)
+            {
+                ["expectedSourceToken"] = groupedData.GetProperty("sourceToken").GetString(), ["expectedRoot"] = groupedData.GetProperty("selectedRoot"),
+                ["blockPath"] = groupedData.GetProperty("blockPath"), ["connectionPath"] = groupedData.GetProperty("connectionPath")
+            }, cancellationToken: token);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-supply-members-regrouped.json"), JsonSerializer.Serialize(regrouped), token);
+            Assert.IsTrue(regrouped.IsError == true, "Repeating the landed grouping is refused: " + JsonSerializer.Serialize(regrouped));
+            Assert.AreEqual("identity_reused", JsonSerializer.SerializeToElement(regrouped).GetProperty("structuredContent").GetProperty("code").GetString());
+            Assert.AreEqual(groupedXml, await File.ReadAllTextAsync(source, token), "The refused repeat writes nothing.");
+            nativeSavedComponents = groupedGraph;
             var beforePhysical = await client.CallToolAsync("kicad_diagram_read", arguments, cancellationToken: token);
             Assert.IsFalse(beforePhysical.IsError == true);
             var beforePhysicalData = JsonSerializer.SerializeToElement(beforePhysical).GetProperty("structuredContent");
@@ -1661,14 +2071,15 @@ public sealed partial class NativeSessionTests
                 ["expectedRoot"] = selectionBase.SelectedRoot, ["currentPath"] = new[] { selectionBase.SelectedRoot },
                 ["ancestorRevisionIds"] = Array.Empty<Guid>(), ["actor"] = "Compatible agent fixture"
             };
-            async Task RejectedSelection(string label, string code)
+            async Task<JsonElement> RejectedSelection(string label, string code)
             {
-                string unchanged = await File.ReadAllTextAsync(source, token); var nativeBefore = await Read();
+                string unchanged = await File.ReadAllTextAsync(source, token); string unchangedToken = await FileToken(source, token); var nativeBefore = await Read();
                 Guid rejectedOperation = Guid.NewGuid(); selectArguments["operationId"] = rejectedOperation;
                 var rejected = await client.CallToolAsync("kicad_diagram_proposal_select", selectArguments, cancellationToken: token);
                 await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-proposal-select-" + label + ".json"), JsonSerializer.Serialize(rejected), token);
                 Assert.IsTrue(rejected.IsError == true, "A " + label + " proposal selection must be rejected, not applied over newer work.");
-                Assert.AreEqual(code, JsonSerializer.SerializeToElement(rejected).GetProperty("structuredContent").GetProperty("code").GetString());
+                var refusal = JsonSerializer.SerializeToElement(rejected).GetProperty("structuredContent");
+                Assert.AreEqual(code, refusal.GetProperty("code").GetString());
                 Assert.AreEqual(unchanged, await File.ReadAllTextAsync(source, token), "A rejected " + label + " selection must leave the saved design unchanged.");
                 var nativeAfter = await Read();
                 Assert.AreEqual(nativeBefore.SourceToken, nativeAfter.SourceToken); Assert.AreEqual(nativeBefore.DiagramPath, nativeAfter.DiagramPath);
@@ -1677,10 +2088,123 @@ public sealed partial class NativeSessionTests
                     { ["instanceId"] = instanceId, ["expectedInstanceEpoch"] = native.Epoch, ["operationId"] = rejectedOperation }, cancellationToken: token);
                 Assert.AreEqual("missing_block_proposal_receipt", JsonSerializer.SerializeToElement(noReceipt).GetProperty("structuredContent").GetProperty("code").GetString(),
                     "A rejected selection must not leave a prepared write behind.");
+                // The refusal names every element changed on each side, from today's file (ledger pa48933d0fe0a5c2f).
+                AssertRefusalComparison(refusal, label, unchangedToken);
+                return refusal;
             }
-            // The first proposal refined the original root revision; the native
-            // and agent edits above have since advanced that exact target.
-            await RejectedSelection("changed-target", "proposal_target_changed");
+            // Ledger pa48933d0fe0a5c2f: the input's context is bound to its revisions, so many edits later it is the same context with
+            // the same fingerprint, now marked as no longer on today's design; the commented level's context likewise.
+            var laterInputContext = await AgentContextOverMcp(client, arguments, selectionToken, token, inputId: originalInput.Id);
+            AssertAgentContext(laterInputContext, selectionBase, originalInput.BlockPath, originalInput, current: false, "recorded input after later edits");
+            Assert.AreEqual(inputContextSha, laterInputContext.GetProperty("contextSha256").GetString(), "Later edits do not change a revision-bound context.");
+            Assert.AreEqual(inputContext.GetProperty("context").GetRawText(), laterInputContext.GetProperty("context").GetRawText());
+            var laterSketchContext = await AgentContextOverMcp(client, arguments, selectionToken, token, blockPath: sketchPath);
+            AssertAgentContext(laterSketchContext, selectionBase, sketchPath, null, current: false, "commented level after later edits");
+            Assert.AreEqual(sketchContextSha, laterSketchContext.GetProperty("contextSha256").GetString());
+            var todayContext = await AgentContextOverMcp(client, arguments, selectionToken, token, blockPath: [selectionBase.SelectedRoot]);
+            AssertAgentContext(todayContext, selectionBase, [selectionBase.SelectedRoot], null, current: true, "today's root");
+            Assert.AreNotEqual(inputContextSha, todayContext.GetProperty("contextSha256").GetString());
+            // A context that names no level, an outdated file, a path that does not start at the root or is not pinned revision by revision,
+            // or a level outside the input's revisions is refused.
+            await AgentContextOverMcp(client, arguments, selectionToken, token, expectError: "ambiguous_agent_context");
+            await AgentContextOverMcp(client, arguments, componentToken, token, blockPath: [selectionBase.SelectedRoot], expectError: "recursive_block_file_changed");
+            var todayPsu = selectionBase.Inspect(selectionBase.SelectedRoot).Children.Single(c => c.BlockId == fixture.Blocks["PSU"].BlockId);
+            await AgentContextOverMcp(client, arguments, selectionToken, token, blockPath: [todayPsu], expectError: "invalid_agent_context_scope");
+            await AgentContextOverMcp(client, arguments, selectionToken, token, blockPath: [originalInput.BlockPath[0], sketchPath[1]], expectError: "invalid_agent_context_scope");
+            await AgentContextOverMcp(client, arguments, selectionToken, token, inputId: originalInput.Id, blockPath: [selectionBase.SelectedRoot],
+                expectError: "invalid_agent_context_scope");
+            // A revision the diagram does not have is a wrong scope too, and an input it does not have is unknown.
+            await AgentContextOverMcp(client, arguments, selectionToken, token,
+                blockPath: [originalInput.BlockPath[0] with { RevisionId = Guid.NewGuid() }], expectError: "invalid_agent_context_scope");
+            await AgentContextOverMcp(client, arguments, selectionToken, token, inputId: Guid.NewGuid(), expectError: "unknown_refinement_input");
+            // A level below the input's own, inside the input's revisions: the supply the input's root pinned. The input's prompt and
+            // attachments come with it, its focus does not, and that supply revision is no longer on today's design.
+            BlockSelection[] belowInput = [.. originalInput.BlockPath,
+                selectionBase.Inspect(originalInput.BlockPath[^1]).Children.Single(c => c.BlockId == fixture.Blocks["PSU"].BlockId)];
+            var belowInputContext = await AgentContextOverMcp(client, arguments, selectionToken, token, inputId: originalInput.Id, blockPath: belowInput);
+            AssertAgentContext(belowInputContext, selectionBase, belowInput, originalInput, current: false, "a level below the input");
+            Assert.AreEqual(0, belowInputContext.GetProperty("context").GetProperty("focus").GetArrayLength(), "Only the input's own level has its focus.");
+            Assert.AreEqual(originalInput.Id, belowInputContext.GetProperty("context").GetProperty("input").GetProperty("id").GetGuid());
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-agent-context-below-input.json"), belowInputContext.GetRawText(), token);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-agent-context-later.json"), laterInputContext.GetRawText(), token);
+            // The first proposal refined the original root revision; the native and agent edits above have since advanced that exact
+            // target. Comparing it with today's design names what changed on each side by exact identity.
+            var compared = await client.CallToolAsync("kicad_diagram_proposal_compare", new Dictionary<string, object?>(arguments)
+                { ["expectedSourceToken"] = selectionToken, ["proposalId"] = proposal.Id }, cancellationToken: token);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-proposal-compare.json"), JsonSerializer.Serialize(compared), token);
+            Assert.IsFalse(compared.IsError == true, JsonSerializer.Serialize(compared));
+            var staleComparison = JsonSerializer.SerializeToElement(compared).GetProperty("structuredContent").GetProperty("comparison");
+            await AssertStaleRootComparison(client, arguments, selectionToken, staleComparison, selectionBase, originalInput, proposal, published: true, token);
+            // A second proposal on the same original input, sent with a token read before those edits, is refused with the same
+            // comparison against today's file; it writes nothing, and the retained request compares the same way afterwards.
+            var staleRequest = RecursiveBlockProposalTests.CreateFor(selectionBase, originalInput);
+            staleRequest = staleRequest with { Blocks = staleRequest.Blocks.SetItem(0, staleRequest.Blocks[0] with { ImplementationName = "Second agent proposal" }) };
+            string beforeStaleRequest = await File.ReadAllTextAsync(source, token);
+            var refusedPublish = await client.CallToolAsync("kicad_diagram_proposal_publish", new Dictionary<string, object?>(arguments)
+            {
+                ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = componentToken, ["operationId"] = Guid.NewGuid(),
+                ["proposalJson"] = JsonSerializer.SerializeToElement(staleRequest, new JsonSerializerOptions(JsonSerializerDefaults.Web))
+            }, cancellationToken: token);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-proposal-publish-stale.json"), JsonSerializer.Serialize(refusedPublish), token);
+            Assert.IsTrue(refusedPublish.IsError == true, "A proposal sent with an outdated token must not be published silently.");
+            var publishRefusal = JsonSerializer.SerializeToElement(refusedPublish).GetProperty("structuredContent");
+            Assert.AreEqual("block_proposal_source_changed", publishRefusal.GetProperty("code").GetString());
+            Assert.AreEqual(beforeStaleRequest, await File.ReadAllTextAsync(source, token), "A refused publication writes nothing.");
+            AssertRefusalComparison(publishRefusal, "publish-outdated-token", selectionToken);
+            await AssertStaleRootComparison(client, arguments, selectionToken, publishRefusal.GetProperty("comparison"), selectionBase, originalInput, staleRequest,
+                published: false, token);
+            Assert.AreEqual(staleComparison.GetProperty("currentChanges").GetRawText(), publishRefusal.GetProperty("comparison").GetProperty("currentChanges").GetRawText(),
+                "Both proposals share the base revision, so today's side is the same.");
+            var retainedCompare = await client.CallToolAsync("kicad_diagram_proposal_compare", new Dictionary<string, object?>(arguments)
+                { ["expectedSourceToken"] = selectionToken, ["proposalId"] = staleRequest.Id }, cancellationToken: token);
+            Assert.IsFalse(retainedCompare.IsError == true, JsonSerializer.Serialize(retainedCompare));
+            Assert.AreEqual(publishRefusal.GetProperty("comparison").GetRawText(),
+                JsonSerializer.SerializeToElement(retainedCompare).GetProperty("structuredContent").GetProperty("comparison").GetRawText());
+            // A third agent sends, with the same outdated token, a proposal that no longer prepares against today's file: its
+            // implementation name is now taken by the first proposal, published since. The refusal keeps its own code and, having
+            // no comparison, says why (comparisonUnavailable: invalid_block_proposal, as its publication would be refused); nothing
+            // is written, and comparing the retained request directly is refused with that code.
+            var invalidRequest = RecursiveBlockProposalTests.CreateFor(selectionBase, originalInput);
+            Assert.AreEqual(selectionBase.States.Single(st => st.Id == proposal.Candidate.StateId).Name, invalidRequest.Blocks[0].ImplementationName,
+                "The request reuses the implementation name the first proposal took.");
+            var refusedInvalid = await client.CallToolAsync("kicad_diagram_proposal_publish", new Dictionary<string, object?>(arguments)
+            {
+                ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = componentToken, ["operationId"] = Guid.NewGuid(),
+                ["proposalJson"] = JsonSerializer.SerializeToElement(invalidRequest, new JsonSerializerOptions(JsonSerializerDefaults.Web))
+            }, cancellationToken: token);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-proposal-publish-stale-invalid.json"), JsonSerializer.Serialize(refusedInvalid), token);
+            Assert.IsTrue(refusedInvalid.IsError == true, "An outdated proposal that no longer prepares is refused.");
+            var invalidRefusal = JsonSerializer.SerializeToElement(refusedInvalid).GetProperty("structuredContent");
+            Assert.AreEqual("block_proposal_source_changed", invalidRefusal.GetProperty("code").GetString(), "The refusal keeps its own code.");
+            Assert.AreEqual(JsonValueKind.Null, invalidRefusal.GetProperty("comparison").ValueKind, "No comparison can be made.");
+            Assert.AreEqual("invalid_block_proposal", invalidRefusal.GetProperty("comparisonUnavailable").GetProperty("code").GetString(),
+                invalidRefusal.GetRawText());
+            Assert.AreEqual(beforeStaleRequest, await File.ReadAllTextAsync(source, token), "A refused publication writes nothing.");
+            var invalidCompare = await client.CallToolAsync("kicad_diagram_proposal_compare", new Dictionary<string, object?>(arguments)
+                { ["expectedSourceToken"] = selectionToken, ["proposalId"] = invalidRequest.Id }, cancellationToken: token);
+            Assert.IsTrue(invalidCompare.IsError == true, JsonSerializer.Serialize(invalidCompare));
+            Assert.AreEqual("invalid_block_proposal", JsonSerializer.SerializeToElement(invalidCompare).GetProperty("structuredContent").GetProperty("code").GetString());
+            // A proposal whose block list holds an empty entry is refused as malformed before anything is read, retained or written.
+            var nullBlock = System.Text.Json.Nodes.JsonNode.Parse(JsonSerializer.Serialize(staleRequest with { Id = Guid.NewGuid() },
+                new JsonSerializerOptions(JsonSerializerDefaults.Web)))!.AsObject();
+            nullBlock["blocks"] = new System.Text.Json.Nodes.JsonArray((System.Text.Json.Nodes.JsonNode?)null);
+            var refusedNull = await client.CallToolAsync("kicad_diagram_proposal_publish", new Dictionary<string, object?>(arguments)
+            {
+                ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = selectionToken, ["operationId"] = Guid.NewGuid(),
+                ["proposalJson"] = JsonSerializer.SerializeToElement(nullBlock)
+            }, cancellationToken: token);
+            Assert.IsTrue(refusedNull.IsError == true, JsonSerializer.Serialize(refusedNull));
+            Assert.AreEqual("invalid_block_proposal", JsonSerializer.SerializeToElement(refusedNull).GetProperty("structuredContent").GetProperty("code").GetString());
+            Assert.AreEqual(beforeStaleRequest, await File.ReadAllTextAsync(source, token), "A malformed proposal writes nothing.");
+            var unknownCompare = await client.CallToolAsync("kicad_diagram_proposal_compare", new Dictionary<string, object?>(arguments)
+                { ["expectedSourceToken"] = selectionToken, ["proposalId"] = Guid.NewGuid() }, cancellationToken: token);
+            Assert.AreEqual("unknown_block_proposal", JsonSerializer.SerializeToElement(unknownCompare).GetProperty("structuredContent").GetProperty("code").GetString());
+            var staleCompareToken = await client.CallToolAsync("kicad_diagram_proposal_compare", new Dictionary<string, object?>(arguments)
+                { ["expectedSourceToken"] = componentToken, ["proposalId"] = proposal.Id }, cancellationToken: token);
+            Assert.AreEqual("recursive_block_file_changed", JsonSerializer.SerializeToElement(staleCompareToken).GetProperty("structuredContent").GetProperty("code").GetString());
+            // Choosing the stale proposal is refused with that comparison instead of being applied over the newer root.
+            var changedTarget = await RejectedSelection("changed-target", "proposal_target_changed");
+            Assert.AreEqual(staleComparison.GetRawText(), changedTarget.GetProperty("comparison").GetRawText(), "The refusal carries the same comparison.");
             var psu = selectionBase.Inspect(selectionBase.SelectedRoot).Children.Single(c => c.BlockId == fixture.Blocks["PSU"].BlockId);
             var psuInput = RecursiveBlockRefinementInputTests.Input(selectionBase) with
                 { SourceSha256 = selectionToken, BlockPath = [selectionBase.SelectedRoot, psu], Attachments = [] };
@@ -1692,7 +2216,10 @@ public sealed partial class NativeSessionTests
             if (psuInputResult.IsError == true) await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-psu-input-error.json"), JsonSerializer.Serialize(psuInputResult), token);
             Assert.IsFalse(psuInputResult.IsError == true);
             string inputToken = JsonSerializer.SerializeToElement(psuInputResult).GetProperty("structuredContent").GetProperty("sourceToken").GetString()!;
-            var psuProposal = RecursiveBlockProposalTests.CreateFor(selectionBase, psuInput);
+            var psuSupply = selectionBase.Inspect(psu).LocalDiagram.Connections.Single(c => c.ConnectionId == fixture.Links["PSU/Supply"].ConnectionId);
+            var groupedMember = selectionBase.Connections(psu.BlockId).Inspect(psuSupply).Members.Single(m => m.ConnectionId == convertedRails);
+            var psuProposal = RecursiveBlockProposalTests.CreateFor(selectionBase, psuInput, psuSupply, groupedMember);
+            psuProposal = psuProposal with { Origin = psuProposal.Origin with { Sources = [new("original-requirements.txt", "captured-2026-09", 1, null, null)] } };
             var psuPublished = await client.CallToolAsync("kicad_diagram_proposal_publish", new Dictionary<string, object?>(arguments)
             {
                 ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = inputToken, ["operationId"] = Guid.NewGuid(),
@@ -1715,7 +2242,22 @@ public sealed partial class NativeSessionTests
             selectArguments["ancestorRevisionIds"] = new[] { Guid.NewGuid() }; selectArguments["expectedSourceToken"] = inputToken;
             // A token observed before the proposal was saved is outdated, even
             // though the refined block itself has not changed.
-            await RejectedSelection("outdated-token", "block_proposal_source_changed");
+            var outdatedToken = (await RejectedSelection("outdated-token", "block_proposal_source_changed")).GetProperty("comparison");
+            // The supply block itself has not changed since the proposal's input: nothing on today's side, only the proposal's changes.
+            Assert.IsFalse(outdatedToken.GetProperty("stale").GetBoolean());
+            Assert.AreEqual(0, outdatedToken.GetProperty("currentChanges").GetArrayLength());
+            Assert.AreNotEqual(0, outdatedToken.GetProperty("proposalChanges").GetArrayLength());
+            // A path through an older root revision is outdated even though that revision pins the same unchanged supply: the choice is
+            // refused as stale, not as a damaged file, and the comparison gives today's path to the supply.
+            var olderRoot = selectionBase.History(selectionBase.SelectedRoot.StateId).Select(r => r.Selection)
+                .First(r => r != selectionBase.SelectedRoot && selectionBase.Inspect(r).Children.Contains(psu));
+            selectArguments["expectedSourceToken"] = proposalToken; selectArguments["currentPath"] = new[] { olderRoot, psu };
+            var outdatedPath = (await RejectedSelection("outdated-path", "stale_root_revision")).GetProperty("comparison");
+            Assert.IsFalse(outdatedPath.GetProperty("stale").GetBoolean());
+            Assert.AreEqual(0, outdatedPath.GetProperty("currentChanges").GetArrayLength());
+            CollectionAssert.AreEqual(new[] { selectionBase.SelectedRoot, psu }, outdatedPath.GetProperty("currentPath").Deserialize<BlockSelection[]>(AgentJson),
+                "The refusal names today's path to the target.");
+            selectArguments["currentPath"] = new[] { selectionBase.SelectedRoot, psu };
             Guid appliedRootRevision = Guid.NewGuid(), applyOperation = Guid.NewGuid();
             selectArguments["expectedSourceToken"] = proposalToken; selectArguments["ancestorRevisionIds"] = new[] { appliedRootRevision };
             selectArguments["operationId"] = applyOperation;
@@ -1749,6 +2291,33 @@ public sealed partial class NativeSessionTests
             var appliedOrigin = applied.Inspect(appliedRoot).Origin;
             Assert.AreEqual(RequirementRevisionActor.Agent, appliedOrigin.ActorKind);
             CollectionAssert.IsSubsetOf(new[] { psuInput.Id, psuProposal.Id }, appliedOrigin.InputIds.ToArray());
+            // Choosing the proposal keeps every field history (ledger p390b40bed99e0ab2), read back over MCP. The chosen supply
+            // lists the agent's rewrite (with its source and the input and proposal it came from) and then every General text
+            // the replaced implementation had; its refined supply connection does the same; the root keeps its own history.
+            var psuGeneral = AllFieldEntries((offset, limit) => DiagramFieldHistoryQuery.Block(selectionBase, psu, DiagramRequirementField.General, offset, limit));
+            var supplyGeneral = AllFieldEntries((offset, limit) => DiagramFieldHistoryQuery.Connection(selectionBase.Connections(psu.BlockId), psuSupply,
+                DiagramRequirementField.General, offset, limit));
+            var refinedSupply = psuProposal.Connections.Single(c => c.BasedOn == psuSupply);
+            AssertFieldHistory(await FieldHistoryOverMcp(client, arguments, psuProposal.Candidate, "General", null, token),
+                [ProposedFieldEntry(psuProposal, DiagramRequirementField.General), .. psuGeneral.Select(e => e with { IsSavedText = false })],
+                "chosen supply proposal", Contexts(applied));
+            AssertFieldHistory(await FieldHistoryOverMcp(client, arguments, psuProposal.Candidate, "General", refinedSupply.Selection, token),
+                [ProposedFieldEntry(psuProposal, DiagramRequirementField.General, refinedSupply), .. supplyGeneral.Select(e => e with { IsSavedText = false })],
+                "refined supply connection", Contexts(applied.Connections(psu.BlockId)));
+            // The member the proposal refined inside that connection does the same: its rewrite, then the supply agent's text with its
+            // datasheet source (page, table and part variant), saved in the member's earlier implementation.
+            var refinedMember = psuProposal.Connections.Single(c => c.BasedOn == groupedMember);
+            var memberGeneral = AllFieldEntries((offset, limit) => DiagramFieldHistoryQuery.Connection(selectionBase.Connections(psu.BlockId), groupedMember,
+                DiagramRequirementField.General, offset, limit));
+            Assert.AreEqual(("Supply agent", "Carry the converted rail and its return to the boundary."), (memberGeneral.Single().Origin.Actor, memberGeneral.Single().Text));
+            Assert.AreEqual(datasheet, memberGeneral.Single().Origin.Sources.Single(), "The member's first text cites the datasheet the agent named.");
+            AssertFieldHistory(await FieldHistoryOverMcp(client, arguments, psuProposal.Candidate, "General", refinedMember.Selection, token),
+                [ProposedFieldEntry(psuProposal, DiagramRequirementField.General, refinedMember), .. memberGeneral.Select(e => e with { IsSavedText = false })],
+                "refined supply member", Contexts(applied.Connections(psu.BlockId)));
+            AssertFieldHistory(await FieldHistoryOverMcp(client, arguments, appliedRoot, "General", null, token),
+                AllFieldEntries((offset, limit) => DiagramFieldHistoryQuery.Block(beforeChoiceGraph, beforeChoiceGraph.SelectedRoot,
+                    DiagramRequirementField.General, offset, limit)), "root after the choice", Contexts(applied));
+            Assert.AreEqual(selectionBase.Requirements(psu).RevisionId, applied.RequirementHistories.Single(h => h.Scope.DesignStateId == psuProposal.Candidate.StateId).DerivedFrom);
             var selectionReceipt = await client.CallToolAsync("kicad_diagram_proposal_publication", new Dictionary<string, object?>
                 { ["instanceId"] = instanceId, ["expectedInstanceEpoch"] = native.Epoch, ["operationId"] = applyOperation }, cancellationToken: token);
             Assert.IsFalse(selectionReceipt.IsError == true);
@@ -1778,7 +2347,193 @@ public sealed partial class NativeSessionTests
             // proposal again must not re-apply it over the now-current target.
             selectArguments["expectedSourceToken"] = appliedToken; selectArguments["expectedRoot"] = appliedRoot;
             selectArguments["currentPath"] = new[] { appliedRoot, psuProposal.Candidate }; selectArguments["ancestorRevisionIds"] = new[] { Guid.NewGuid() };
-            await RejectedSelection("reselected-target", "proposal_target_changed");
+            var reselected = (await RejectedSelection("reselected-target", "proposal_target_changed")).GetProperty("comparison");
+            Assert.IsTrue(reselected.GetProperty("candidateSelected").GetBoolean(), "The refusal says the candidate already is today's supply.");
+            // The chosen proposal is adopted: its own changes are not reported again as today's changes or as conflicts.
+            Assert.IsTrue(reselected.GetProperty("candidateAdopted").GetBoolean());
+            Assert.IsFalse(reselected.GetProperty("stale").GetBoolean(), "An adopted proposal is not outdated.");
+            Assert.AreEqual(0, reselected.GetProperty("currentChanges").GetArrayLength(), "Nothing changed after the choice.");
+            Assert.AreEqual(0, reselected.GetProperty("changedOnBothSides").GetArrayLength(), "An adopted proposal conflicts with nothing.");
+            Assert.AreNotEqual(0, reselected.GetProperty("proposalChanges").GetArrayLength(), "What the proposal changed stays listed.");
+            // In the editor the chosen supply's General history continues across the switch: the row below the saved text is
+            // the replaced implementation's text (labelled with that implementation's name and version). Using it and saving
+            // makes a new revision of the chosen implementation that names the earlier revision the text came from.
+            var earlierGeneral = psuGeneral[0];
+            Assert.AreNotEqual(ProposedFieldEntry(psuProposal, DiagramRequirementField.General).Text, earlierGeneral.Text);
+            await Wait(s => !s.Busy && s.ConnectionDraft is null && s.Draft.Baseline.RevisionId == psuProposal.Candidate.RevisionId.ToString("D"));
+            Key("1", control: true); Key("h", alt: true);
+            using (var modal = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                modal.CancelAfter(TimeSpan.FromSeconds(20));
+                while (!NativeKeyboard.HasWindow(display, processId, "Requirement history")) await Task.Delay(50, modal.Token);
+            }
+            Key("Down", title: "Requirement history");
+            // The list shows the rewrite as this implementation's saved version and every earlier text with the name of the
+            // implementation it was saved in, in the implementation selector's "name · version" form, and its author.
+            var psuHistoryDialog = await Wait(s => s.FieldHistory is { Loading: false }
+                && s.FieldHistory.InspectedRevisionId == earlierGeneral.RequirementRevisionId.ToString("D"));
+            Assert.AreEqual(psu.BlockId.ToString("D"), psuHistoryDialog.FieldHistory.OwnerId);
+            CollectionAssert.AreEqual(new[] { $"v2 · Saved · {psuProposal.Origin.Actor}" }
+                    .Concat(psuGeneral.Select(e => HistoryRowLabel(Contexts(selectionBase), e, psuProposal.Candidate.StateId))).ToArray(),
+                psuHistoryDialog.FieldHistory.RowLabels.ToArray(), "The chosen supply's General history as the editor lists it.");
+            var earlierPsuImplementation = Contexts(selectionBase)(earlierGeneral.ContextRevisionId);
+            Assert.AreNotEqual(psuProposal.Candidate.StateId, earlierPsuImplementation.State);
+            StringAssert.StartsWith(psuHistoryDialog.FieldHistory.RowLabels[1], earlierPsuImplementation.Name + " · v");
+            VerifyShownHistoryRows(psuHistoryDialog.FieldHistory,
+                ["", .. psuGeneral.Select(e => HistoryRowName(Contexts(selectionBase), e, psuProposal.Candidate.StateId))], "continued-field-history");
+            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-continued-field-history.png"), token);
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "Requirement history", false, true, clickFromRight: 70, clickFromBottom: 30);
+            await Wait(s => s.Dirty && s.Draft.Fields.General == earlierGeneral.Text
+                && s.Draft.RestoredFields.Any(r => r.SourceRevisionId == earlierGeneral.RequirementRevisionId.ToString("D")));
+            await Save();
+            var continuedFile = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            var continuedPsu = continuedFile.Inspect(continuedFile.SelectedRoot).Children.Single(c => c.BlockId == psu.BlockId);
+            Assert.AreEqual(psuProposal.Candidate.StateId, continuedPsu.StateId, "The restore is saved in the chosen implementation.");
+            var continuedHistory = continuedFile.RequirementHistories.Single(h => h.Scope.DesignStateId == continuedPsu.StateId);
+            Assert.AreEqual(psuProposal.Blocks[0].RequirementRevisionId, continuedHistory.Current.ParentId);
+            Assert.AreEqual(new RequirementFieldRestoration(DiagramRequirementField.General, earlierGeneral.RequirementRevisionId),
+                continuedHistory.Current.Restorations.Single());
+            Assert.AreEqual(psuProposal.Blocks[0].Requirements with { General = earlierGeneral.Text }, continuedHistory.Current.Requirements);
+            // Edited after the choice, the proposal is still adopted: today's side is exactly what this save changed after the candidate
+            // (its saved history comparison), and nothing is changed on both sides.
+            var afterEdit = await client.CallToolAsync("kicad_diagram_proposal_compare", new Dictionary<string, object?>(arguments)
+                { ["expectedSourceToken"] = await FileToken(source, token), ["proposalId"] = psuProposal.Id }, cancellationToken: token);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-proposal-compare-after-edit.json"), JsonSerializer.Serialize(afterEdit), token);
+            Assert.IsFalse(afterEdit.IsError == true, JsonSerializer.Serialize(afterEdit));
+            var editedComparison = JsonSerializer.SerializeToElement(afterEdit).GetProperty("structuredContent").GetProperty("comparison");
+            Assert.IsTrue(editedComparison.GetProperty("candidateAdopted").GetBoolean());
+            Assert.IsFalse(editedComparison.GetProperty("candidateSelected").GetBoolean(), "Today's supply is a later revision of the candidate.");
+            Assert.IsFalse(editedComparison.GetProperty("stale").GetBoolean());
+            string[] editedKeys = [.. editedComparison.GetProperty("currentChanges").EnumerateArray().Select(c => ChangeKey(c) + "=" + c.GetProperty("kind").GetString())];
+            CollectionAssert.AreEquivalent(DiagramHistoryQuery.Changes(continuedFile, psuProposal.Candidate, continuedPsu).Select(c => LevelChange([psu.BlockId], c))
+                .Select(c => c.Key + "=" + c.Kind).ToArray(), editedKeys, "Only what changed after the choice.");
+            CollectionAssert.Contains(editedKeys, ChangeKey([psu.BlockId], [], DiagramHistoryChangeCategory.Requirement, psu.BlockId, DiagramRequirementField.General, null) + "=Changed");
+            Assert.AreEqual(0, editedComparison.GetProperty("changedOnBothSides").GetArrayLength());
+            AssertFieldHistory(await FieldHistoryOverMcp(client, arguments, continuedPsu, "General", null, token),
+                [new(continuedHistory.Current.Id, continuedPsu.RevisionId, 3, "PSU", earlierGeneral.Text, continuedHistory.Current.Origin, true),
+                 ProposedFieldEntry(psuProposal, DiagramRequirementField.General) with { IsSavedText = false },
+                 .. psuGeneral.Select(e => e with { IsSavedText = false })], "chosen supply after restoring the earlier text", Contexts(continuedFile));
+            // The refined supply connection keeps its field history across the switch in the editor too. Selecting it in the
+            // chosen supply's level and opening its General history lists the agent's rewrite and then every text the replaced
+            // connection implementation had, each named after that implementation. Using the earlier text and saving makes a
+            // new revision of the chosen connection implementation that names the revision the text came from.
+            var earlierSupply = supplyGeneral[0];
+            Assert.AreNotEqual(refinedSupply.Requirements.General, earlierSupply.Text);
+            // Escape returns the keyboard to the canvas, where L selects the level's next connection.
+            Key("Escape");
+            await Wait(s => !s.Busy && s.ConnectionDraft is null && s.Draft.Baseline.BlockId == psu.BlockId.ToString("D")
+                && s.FocusedControl == "RecursiveDiagramCanvas");
+            var levelLinks = applied.Inspect(psuProposal.Candidate).LocalDiagram.Connections;
+            Assert.IsTrue(levelLinks.Any(c => c.ConnectionId == psuSupply.ConnectionId));
+            for (string? selectedLink = null; selectedLink != psuSupply.ConnectionId.ToString("D");)
+            {
+                string? previous = selectedLink; Key("l");
+                selectedLink = (await Wait(s => s.ConnectionDraft is not null && s.ConnectionDraft.Baseline.ConnectionId != previous)).ConnectionDraft.Baseline.ConnectionId;
+                Assert.IsTrue(levelLinks.Any(c => c.ConnectionId.ToString("D") == selectedLink), "L selects a connection of the viewed level.");
+            }
+            var supplySelected = await Wait(s => s.ConnectionDraft?.Baseline.ConnectionId == psuSupply.ConnectionId.ToString("D"));
+            Assert.AreEqual(refinedSupply.Selection.RevisionId.ToString("D"), supplySelected.ConnectionDraft.Baseline.RevisionId,
+                "The editor shows the chosen connection implementation.");
+            Key("1", control: true); Key("h", alt: true);
+            using (var modal = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                modal.CancelAfter(TimeSpan.FromSeconds(20));
+                while (!NativeKeyboard.HasWindow(display, processId, "Requirement history")) await Task.Delay(50, modal.Token);
+            }
+            Key("Down", title: "Requirement history");
+            var supplyHistoryDialog = await Wait(s => s.FieldHistory is { Loading: false }
+                && s.FieldHistory.InspectedRevisionId == earlierSupply.RequirementRevisionId.ToString("D"));
+            Assert.AreEqual(psuSupply.ConnectionId.ToString("D"), supplyHistoryDialog.FieldHistory.OwnerId);
+            var replacedSupply = selectionBase.Connections(psu.BlockId);
+            CollectionAssert.AreEqual(new[] { $"v2 · Saved · {psuProposal.Origin.Actor}" }
+                    .Concat(supplyGeneral.Select(e => HistoryRowLabel(Contexts(replacedSupply), e, refinedSupply.Selection.StateId))).ToArray(),
+                supplyHistoryDialog.FieldHistory.RowLabels.ToArray(), "The refined supply connection's General history as the editor lists it.");
+            var earlierSupplyImplementation = Contexts(replacedSupply)(earlierSupply.ContextRevisionId);
+            Assert.AreNotEqual(refinedSupply.Selection.StateId, earlierSupplyImplementation.State);
+            StringAssert.StartsWith(supplyHistoryDialog.FieldHistory.RowLabels[1], earlierSupplyImplementation.Name + " · v");
+            VerifyShownHistoryRows(supplyHistoryDialog.FieldHistory,
+                ["", .. supplyGeneral.Select(e => HistoryRowName(Contexts(replacedSupply), e, refinedSupply.Selection.StateId))],
+                "continued-connection-field-history");
+            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-continued-connection-field-history.png"), token);
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "Requirement history", false, true, clickFromRight: 70, clickFromBottom: 30);
+            await Wait(s => s.Dirty && s.ConnectionDraft?.Fields.General == earlierSupply.Text
+                && s.ConnectionDraft.RestoredFields.Any(r => r.SourceRevisionId == earlierSupply.RequirementRevisionId.ToString("D")));
+            await Save();
+            var connectionRestoreFile = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            var connectionRestorePsu = connectionRestoreFile.Inspect(connectionRestoreFile.SelectedRoot).Children.Single(c => c.BlockId == psu.BlockId);
+            Assert.AreEqual(psuProposal.Candidate.StateId, connectionRestorePsu.StateId);
+            var restoredSupply = connectionRestoreFile.Inspect(connectionRestorePsu).LocalDiagram.Connections.Single(c => c.ConnectionId == psuSupply.ConnectionId);
+            Assert.AreEqual(refinedSupply.Selection.StateId, restoredSupply.StateId, "The restore is saved in the chosen connection implementation.");
+            var supplyArchive = connectionRestoreFile.Connections(psu.BlockId);
+            var restoredSupplyHistory = supplyArchive.RequirementHistories.Single(h => h.Scope.DesignStateId == restoredSupply.StateId);
+            Assert.AreEqual(supplyArchive.Inspect(restoredSupply).RequirementRevisionId, restoredSupplyHistory.Current.Id);
+            Assert.AreEqual(refinedSupply.RequirementRevisionId, restoredSupplyHistory.Current.ParentId);
+            Assert.AreEqual(new RequirementFieldRestoration(DiagramRequirementField.General, earlierSupply.RequirementRevisionId),
+                restoredSupplyHistory.Current.Restorations.Single());
+            Assert.AreEqual(refinedSupply.Requirements with { General = earlierSupply.Text }, restoredSupplyHistory.Current.Requirements);
+            Assert.AreEqual(replacedSupply.Requirements(psuSupply).RevisionId, restoredSupplyHistory.DerivedFrom,
+                "The chosen connection implementation still continues the exact revision it was refined from.");
+            AssertFieldHistory(await FieldHistoryOverMcp(client, arguments, connectionRestorePsu, "General", restoredSupply, token),
+                [new(restoredSupplyHistory.Current.Id, restoredSupply.RevisionId, 3, refinedSupply.Name, earlierSupply.Text, restoredSupplyHistory.Current.Origin, true),
+                 ProposedFieldEntry(psuProposal, DiagramRequirementField.General, refinedSupply) with { IsSavedText = false },
+                 .. supplyGeneral.Select(e => e with { IsSavedText = false })], "refined supply connection after restoring the earlier text",
+                Contexts(supplyArchive));
+            // The refined member's text from before the switch is restored once. The editor lists a connection's members only in its
+            // Signals row, so the restore is saved through the diagram companion (the process the editor saves through), as a
+            // member draft: a new revision of the chosen member implementation naming the revision the text came from, read back
+            // over MCP first in the member's history, followed by everything it continues.
+            var memberFile = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            var memberLevel = memberFile.Inspect(memberFile.SelectedRoot).Children.Single(c => c.BlockId == psu.BlockId);
+            var memberLinks = memberFile.Connections(psu.BlockId);
+            var supplyOfMember = memberFile.Inspect(memberLevel).LocalDiagram.Connections.Single(c => c.ConnectionId == psuSupply.ConnectionId);
+            var memberToday = memberLinks.Inspect(supplyOfMember).Members.Single(m => m.ConnectionId == convertedRails);
+            Assert.AreEqual(refinedMember.Selection, memberToday, "The chosen supply connection pins the proposal's member implementation.");
+            var earlierMember = memberGeneral.Single();
+            var memberDraft = memberLinks.StartDraft(memberToday);
+            memberDraft = memberDraft with { Requirements = memberLinks.RequirementHistories.Single(h => h.Scope.DesignStateId == memberToday.StateId)
+                .RestoreField(memberDraft.Requirements, earlierMember.RequirementRevisionId, DiagramRequirementField.General) };
+            var memberSave = new P.SaveConnectionDraftData { ExpectedRoot = RecursiveBlockCodec.EncodeSelection(memberFile.SelectedRoot),
+                Draft = RecursiveBlockCodec.Encode(memberDraft), NewConnectionRevisionId = Guid.NewGuid().ToString("D"),
+                NewRequirementRevisionId = Guid.NewGuid().ToString("D"), NewBlockRevisionId = Guid.NewGuid().ToString("D"),
+                NewBlockRequirementRevisionId = Guid.NewGuid().ToString("D"), Origin = RecursiveBlockCodec.EncodeOrigin(RecursiveBlockFixture.Origin("Fixture user")) };
+            memberSave.BlockPath.Add(new[] { memberFile.SelectedRoot, memberLevel }.Select(RecursiveBlockCodec.EncodeSelection));
+            memberSave.ConnectionPath.Add(new[] { supplyOfMember, memberToday }.Select(RecursiveBlockCodec.EncodeSelection));
+            memberSave.BlockAncestorRevisionIds.Add(Guid.NewGuid().ToString("D")); memberSave.ConnectionAncestorRevisionIds.Add(Guid.NewGuid().ToString("D"));
+            var memberRestored = await RecursiveEditorFileCommandTests.Invoke(new P.RecursiveFileRequest { SchemaVersion = RecursiveBlockCodec.SchemaVersion,
+                Action = P.RecursiveFileAction.RfaSaveConnection, RepositoryRoot = project, SourcePath = source, DocumentId = graph.DocumentId.ToString("D"),
+                ExpectedSourceToken = await FileToken(source, token), SaveConnection = memberSave });
+            Assert.IsTrue(memberRestored.Success, memberRestored.ErrorCode + ": " + memberRestored.ErrorMessage);
+            var memberRestoreFile = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            var memberRestoreLevel = memberRestoreFile.Inspect(memberRestoreFile.SelectedRoot).Children.Single(c => c.BlockId == psu.BlockId);
+            var memberRestoreLinks = memberRestoreFile.Connections(psu.BlockId);
+            var restoredMember = memberRestoreLinks.Inspect(memberRestoreFile.Inspect(memberRestoreLevel).LocalDiagram.Connections
+                .Single(c => c.ConnectionId == psuSupply.ConnectionId)).Members.Single(m => m.ConnectionId == convertedRails);
+            Assert.AreEqual(refinedMember.Selection.StateId, restoredMember.StateId, "The restore is saved in the chosen member implementation.");
+            var restoredMemberHistory = memberRestoreLinks.RequirementHistories.Single(h => h.Scope.DesignStateId == restoredMember.StateId);
+            Assert.AreEqual(refinedMember.RequirementRevisionId, restoredMemberHistory.Current.ParentId);
+            Assert.AreEqual(new RequirementFieldRestoration(DiagramRequirementField.General, earlierMember.RequirementRevisionId),
+                restoredMemberHistory.Current.Restorations.Single());
+            Assert.AreEqual(refinedMember.Requirements with { General = earlierMember.Text }, restoredMemberHistory.Current.Requirements);
+            AssertFieldHistory(await FieldHistoryOverMcp(client, arguments, memberRestoreLevel, "General", restoredMember, token),
+                [new(restoredMemberHistory.Current.Id, restoredMember.RevisionId, 3, refinedMember.Name, earlierMember.Text, restoredMemberHistory.Current.Origin, true),
+                 ProposedFieldEntry(psuProposal, DiagramRequirementField.General, refinedMember) with { IsSavedText = false },
+                 earlierMember with { IsSavedText = false }], "refined supply member after restoring the earlier text", Contexts(memberRestoreLinks));
+            // Ledger pa48933d0fe0a5c2f: the user keeps an unsaved edit open while an agent's calls are cancelled and the agent comes back
+            // through a reattached server. Each operation keeps one record, and the open draft is neither saved, replaced nor lost.
+            // It runs once per themed session; the second project only proves instance isolation.
+            if (sessionWide)
+            {
+                const string unsavedText = "Unsaved text kept while an agent reconnects.";
+                Key("1", control: true); Key("a", control: true); Type(unsavedText);
+                var dirtyBefore = await Wait(s => s.Dirty && s.ConnectionDraft?.Fields.General == unsavedText);
+                await VerifyAgentReattachment(native, stateRoot, source, project, graph.DocumentId, fixture.Blocks["CPU"].BlockId, instanceId, evidence, token);
+                var dirtyAfter = await Read();
+                Assert.IsTrue(dirtyAfter.Dirty, "The user's unsaved edit is still open.");
+                Assert.AreEqual(dirtyBefore.SourceToken, dirtyAfter.SourceToken, "The editor was not reloaded under the unsaved edit.");
+                Assert.AreEqual(dirtyBefore.Draft, dirtyAfter.Draft); Assert.AreEqual(dirtyBefore.ConnectionDraft, dirtyAfter.ConnectionDraft);
+                Assert.AreEqual(dirtyBefore.DiagramPath, dirtyAfter.DiagramPath);
+                Key("d", alt: true); await Wait(s => !s.Busy && !s.Dirty);
+            }
             Key("w", control: true);
             if (createdDiagram is not null)
                 await VerifyCreatedDiagramOpensInTheEditor(client, native, processId, display, createdDiagram, instanceId, evidence, token);
@@ -2216,7 +2971,13 @@ public sealed partial class NativeSessionTests
             return (double.Parse(rect.X, System.Globalization.CultureInfo.InvariantCulture) + double.Parse(rect.Width, System.Globalization.CultureInfo.InvariantCulture) / 2,
                 double.Parse(rect.Y, System.Globalization.CultureInfo.InvariantCulture) + double.Parse(rect.Height, System.Globalization.CultureInfo.InvariantCulture) / 2);
         }
-        Task Capture(string name) => CaptureRecursive(display, Path.Combine(evidence, instanceId + "-drawing-" + name + ".png"), token);
+        // Design QA round 2: a capture waits until GTK's short fade of a button that just became available has finished (the
+        // round's refuted "washed-out Save" was one frame of it).
+        async Task Capture(string name)
+        {
+            await Task.Delay(FadeSettleMilliseconds, token);
+            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-drawing-" + name + ".png"), token);
+        }
         // The captures double as measured design evidence (design QA of the drawing tools): pixels are read back from them.
         async Task<CapturedWindow> Shot(string name)
         {
@@ -2321,7 +3082,12 @@ public sealed partial class NativeSessionTests
         await Wait("palette-connect", s => Tool(s, "connect", "RecursiveToolConnect", "DiagramPaletteConnect"));
         var (psuX, psuY) = Centre(cpuAdded, psu); var (cpuX, cpuY) = Centre(cpuAdded, cpu);
         await At(psuX, psuY);
-        await Wait("connect-started", s => s.CanvasHint == "Click a port to finish connection");
+        // Design QA round 2, R2-P2-3: the connection's first end becomes the selection and fills the inspector; the CPU, selected
+        // before, is no longer selected.
+        var connectStarted = await Wait("connect-started", s => s.CanvasHint == "Click a port to finish connection");
+        Assert.AreEqual(psu, connectStarted.Draft.Baseline.BlockId, "connect-started: the connection's first end, the PSU, is the selection.");
+        Assert.IsNull(connectStarted.ConnectionDraft, "connect-started: no connection is selected.");
+        Assert.AreEqual("PSU", Find(connectStarted, "RecursiveOwnerCaption").Label, "connect-started: the inspector shows the PSU.");
         await At(psuX + 60, psuY + 30);
         await Wait("connect-same-block", s => s.Notice == "Connect two different blocks or ports." && s.CanvasHint == "Click a port to finish connection"
             && s.CaptionEditor == "");
@@ -2349,6 +3115,23 @@ public sealed partial class NativeSessionTests
                 $"connect-hint: Save {CapturedWindow.Describe(saveFill)} stands apart from Decline {CapturedWindow.Describe(declineFill)}.");
             Assert.IsTrue(Math.Abs(save.Width - decline.Width) <= 2 && save.Width >= 120 && save.X > decline.X,
                 "connect-hint: Decline and Save share the inspector's width, Save on the right.");
+            // Design QA round 2, R2-P2-3, measured: the PSU, where the connection starts, has the selection's accent outline and
+            // tinted fill; the CPU, selected before Connect, is drawn plain again (its outline is not the accent and its fill is
+            // not the selection's tint).
+            var psuBox = connectEmpty.BlockTexts.Single(b => b.BlockId == psu).Block; var cpuBox = connectEmpty.BlockTexts.Single(b => b.BlockId == cpu).Block;
+            var psuFill = shot.At(psuBox.X + psuBox.Width - 18, psuBox.Y + psuBox.Height - 14); var cpuFill = shot.At(cpuBox.X + cpuBox.Width - 18, cpuBox.Y + cpuBox.Height - 14);
+            var psuBorder = shot.MostContrasting(psuBox.X + psuBox.Width / 4 - 2, psuBox.Y - 1, 5, 4, psuFill);
+            var cpuBorder = shot.MostContrasting(cpuBox.X + cpuBox.Width / 4 - 2, cpuBox.Y - 1, 5, 4, cpuFill);
+            Assert.IsTrue(shot.Contrast("R2-P2-3 connection source's outline on the canvas", psuBorder, canvasColour) >= 3.0,
+                $"connect-hint: the PSU, where the connection starts, is outlined in the accent {CapturedWindow.Describe(psuBorder)}.");
+            Assert.IsTrue(CapturedWindow.Distance(psuBorder, cpuBorder) >= 60,
+                $"connect-hint: the CPU's outline {CapturedWindow.Describe(cpuBorder)} is not the selection's accent {CapturedWindow.Describe(psuBorder)}.");
+            Assert.IsTrue(CapturedWindow.Distance(psuFill, cpuFill) >= 12,
+                $"connect-hint: the CPU's fill {CapturedWindow.Describe(cpuFill)} is not the selection's tint {CapturedWindow.Describe(psuFill)}.");
+            Assert.AreEqual("PSU", Find(connectEmpty, "RecursiveOwnerCaption").Label, "connect-hint: the inspector shows the connection's source, not the CPU.");
+            // The hint is placed clear of every block (design QA round 2, P3 1).
+            Assert.IsNotNull(connectEmpty.ConnectHint, "connect-hint: the hint is drawn.");
+            Assert.IsTrue(connectEmpty.BlockTexts.All(b => RectsApart(connectEmpty.ConnectHint, b.Block)), "connect-hint: the hint covers no block.");
         }
         await At(cpuX, cpuY); await Wait("connection-caption", s => s.CaptionEditor == "connection");
         Type("Power"); Key("Return");
@@ -2383,6 +3166,8 @@ public sealed partial class NativeSessionTests
         await Press("RecursiveToolConnect");
         await Wait("strip-connect", s => Tool(s, "connect", "RecursiveToolConnect", "DiagramPaletteConnect"));
         await At(380, 180); var portStarted = await Wait("port-connect-started", s => s.CanvasHint == "Click a port to finish connection");
+        Assert.AreEqual((psu, rail), (portStarted.SelectedInterfaceOwnerId, portStarted.SelectedInterfaceId),
+            "port-connect-started: the Rail port, where the connection starts, is the selection (design QA round 2, R2-P2-3).");
         {
             // Design QA P2-6: ports are 12-pixel squares at every zoom, and while Connect is active the port under the pointer gets
             // a ring in the accent (the sketch's snap circle), 3:1 or more on the canvas; a block under the pointer gets an outline.
@@ -2390,8 +3175,10 @@ public sealed partial class NativeSessionTests
                 "port-connect-started: every port is drawn as a square of at least 12 pixels.");
             var dcMark = portStarted.PortMarks.Single(p => p.Label == "DC input");
             NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: dcMark.X + dcMark.Width / 2, clickFromTop: dcMark.Y + dcMark.Height / 2);
-            var aimed = await Wait("connect-target-port", s => s.ConnectTarget?.Label == "DC input" && s.PortMarks.Any(p => p.Label == "DC input" && p.Active));
+            var aimed = await Wait("connect-target-port", s => s.ConnectTarget?.Label == "DC input" && s.PortMarks.Any(p => p.Label == "DC input" && p.Active)
+                && s.ConnectPreview.Count >= 2);
             var shot = await Shot("connect-port-target");
+            VerifyConnectPreview(shot, aimed, "connect-port-target", psu, "Rail", "DC input");
             var canvasColour = shot.At(aimed.CanvasWindowX + (int)aimed.CanvasPixelWidth - 12, aimed.CanvasWindowY + (int)aimed.CanvasPixelHeight - 12);
             var ring = aimed.ConnectTarget;
             int cx = ring.X + ring.Width / 2, cy = ring.Y + ring.Height / 2;
@@ -2407,6 +3194,7 @@ public sealed partial class NativeSessionTests
         var feedAdded = await Wait("feed-added", s => s.LevelDraft.NewConnections.Count == 2 && s.CaptionEditor == "");
         var feed = feedAdded.LevelDraft.NewConnections[1];
         Assert.AreEqual((P.DiagramEndpointKind.DekInterface, psu, rail), (feed.Endpoints[0].Kind, feed.Endpoints[0].BlockId, feed.Endpoints[0].InterfaceId));
+        Assert.AreEqual("Rail feed", feedAdded.ConnectionDraft?.Name, "The finished connection is selected.");
 
         // Palette Select, then move and resize the CPU; Escape also returns to Select.
         await Press("DiagramPaletteSelect"); await Wait("palette-select", s => Tool(s, "select", "RecursiveToolSelect", "DiagramPaletteSelect"));
@@ -2614,6 +3402,8 @@ public sealed partial class NativeSessionTests
                 $"saved: the selected wire {CapturedWindow.Describe(selectedWire)} stands 3:1 from the canvas and out from the unselected one {CapturedWindow.Describe(otherWire)}.");
             CollectionAssert.AreEquivalent(new[] { "Power", "Rail feed" }, saved.ConnectionCaptions.Where(c => c.Shown).Select(c => c.Label).ToArray(),
                 "saved: both connection captions are drawn.");
+            VerifyCaptions(shot, saved, "saved", new Dictionary<string, string> { [power.Selection.ConnectionId] = "Power", [feed.Selection.ConnectionId] = "Rail feed" },
+                "Power", "Rail feed");
             VerifyCanvasText(saved, "saved");
             var save = Find(saved, "RecursiveSave"); var decline = Find(saved, "RecursiveDecline");
             Assert.IsFalse(save.Enabled || decline.Enabled, "saved: nothing is left to save or decline.");
@@ -2804,6 +3594,10 @@ public sealed partial class NativeSessionTests
             VerifyToolStyling(shot, compact, "compact", "Select");
             VerifySelectionContrast(shot, compact, "compact", compact.Draft.Baseline.BlockId);
             VerifyCanvasText(compact, "compact");
+            // Design QA round 2, R2-P2-8: a caption with room is drawn whole in the compact window too ("Rail feed" was cut to
+            // "Rail f…" beside its short first leg although the canvas around it was empty).
+            VerifyCaptions(shot, compact, "compact", new Dictionary<string, string> { [power.Selection.ConnectionId] = "Power", [feed.Selection.ConnectionId] = "Rail feed" },
+                "Power", "Rail feed");
         }
         await Press("RecursiveToolConnect"); await Wait("compact-connect", s => Tool(s, "connect", "RecursiveToolConnect", "DiagramPaletteConnect"));
         await Press("RecursiveToolSelect"); await Wait("compact-select", s => Tool(s, "select", "RecursiveToolSelect", "DiagramPaletteSelect"));
@@ -3001,7 +3795,10 @@ public sealed partial class NativeSessionTests
         }
         // The Add detail menu lists the block's facets without a value, in facet order (requirement boxes are under Add requirement).
         async Task AddDetail(params string[] keys) { await Press("RecursiveAddDetail"); await Popup(); foreach (string key in keys) Key(key); Key("Return"); }
-        // The strength choices stay in one row, unclipped and without overlap, at every inspector width; brief tells which labels show.
+        // The strength choices stay in one row, unclipped and without overlap, at every inspector width; brief tells which labels
+        // show. Whenever the full labels show, the row fits the detail's column with the rule's 4 DIP to spare (the fixture display
+        // is at 96 DPI, so 4 pixels): the build that failed in clear-facet-overlap-11e548 showed its 369-pixel row of full labels
+        // in a 365-pixel column, and a build that kept only 2 pixels spare would show them in a 371-pixel column.
         string[] StrengthLabels(P.RecursiveDiagramEditorState at) =>
             new[] { "Information", "Preference", "Requirement" }.Select(n => Find(at, "RecursiveFacetStrength" + n).Label).ToArray();
         void StrengthRow(P.RecursiveDiagramEditorState at, string step, bool? brief)
@@ -3016,6 +3813,13 @@ public sealed partial class NativeSessionTests
             var labels = StrengthLabels(at);
             if (brief is bool collapsed) CollectionAssert.AreEqual(collapsed ? shortLabels : full, labels, step + ": the strength labels.");
             else Assert.IsTrue(labels.SequenceEqual(full) || labels.SequenceEqual(shortLabels), step + ": the strength labels are all full or all short.");
+            if (labels.SequenceEqual(full) && at.Controls.Where(c => c.Shown && c.Name is "RecursiveFacetValue" or "RecursiveFacetCandidates" or "RecursiveFacetReason")
+                .ToArray() is [var column])
+            {
+                int rowWidth = row[2].X + row[2].Width - row[0].X;
+                Assert.IsTrue(rowWidth + 4 <= column.Width,
+                    $"{step}: the full strength labels ({rowWidth} pixels) show only with 4 pixels to spare in the detail's {column.Width}-pixel column.");
+            }
         }
         // The interactive controls of a facet's detail, where the editor drew them.
         string[] detailNames = ["RecursiveFacetBack", "RecursiveFacetStateChosen", "RecursiveFacetStateCandidate", "RecursiveFacetStateUnknown",
@@ -3064,7 +3868,11 @@ public sealed partial class NativeSessionTests
             var back = Find(at, "RecursiveFacetBack"); var clear = Find(at, "RecursiveFacetClear");
             Assert.IsTrue(back.Shown, step + ": Back to facet overview is shown while the overview lists facets.");
             Assert.IsTrue(clear.Shown, step + ": Clear facet is shown for a facet with a value.");
-            Assert.AreEqual(back.Height, clear.Height, $"{step}: {Box(clear)} is as tall as {Box(back)}; both are link-look actions.");
+            // Clear facet keeps at least a whole line of text: it is as tall as the inspector's one-line text (the saved version line),
+            // whichever font draws the glyph of Back to facet overview.
+            var textLine = Find(at, "RecursiveSavedVersion");
+            Assert.IsTrue(textLine.Height > 0 && clear.Height >= textLine.Height,
+                $"{step}: {Box(clear)} is at least as tall as a line of the inspector's text ({textLine.Height} pixels).");
             int closest = int.MaxValue;
             for (int i = 0; i < shown.Length; ++i)
                 for (int j = i + 1; j < shown.Length; ++j)
@@ -3101,14 +3909,17 @@ public sealed partial class NativeSessionTests
             shot.Record("Clear facet below the lowest strength choice (px)", below);
             var inspector = Find(at, "RecursiveInspector");
             // Each choice is drawn where the editor reports it: its label's ink lies in the right two thirds of its rectangle (the
-            // indicator takes the left), measured against the inspector beside it.
+            // indicator takes the left), measured against the inspector beside it. The label's letters are separate runs of ink over
+            // 12 pixels or more, which the indicator alone, a ring at most a few pixels into that part, cannot make.
             foreach (var choice in DetailControls(at).Where(c => c.Name.StartsWith("RecursiveFacetState", StringComparison.Ordinal)
                 || c.Name.StartsWith("RecursiveFacetStrength", StringComparison.Ordinal)))
             {
                 var page = shot.At(inspector.X + 3, choice.Y + choice.Height / 2);
                 int textFrom = choice.X + choice.Width / 3;
-                Assert.IsNotEmpty(shot.InkRuns(textFrom, choice.Y, choice.X + choice.Width - textFrom, choice.Height, page, rows: false, minimum: 2.0),
-                    $"{step}: {choice.Name} ({choice.X}, {choice.Y}, {choice.Width} x {choice.Height}) shows its label where it is reported.");
+                var ink = shot.InkRuns(textFrom, choice.Y, choice.X + choice.Width - textFrom, choice.Height, page, rows: false, minimum: 2.0);
+                Assert.IsTrue(ink.Count >= 2 && ink[^1].Last - ink[0].First + 1 >= 12,
+                    $"{step}: {choice.Name} ({choice.X}, {choice.Y}, {choice.Width} x {choice.Height}) shows its label where it is reported "
+                    + $"({ink.Count} runs of ink over {(ink.Count == 0 ? 0 : ink[^1].Last - ink[0].First + 1)} pixels).");
             }
             VerifyLink(shot, Find(at, "RecursiveFacetClear"), Find(at, "RecursiveSavedVersion"), step, "Clear facet");
         }
@@ -3129,7 +3940,11 @@ public sealed partial class NativeSessionTests
                 return DateTime.UtcNow - since >= TimeSpan.FromMilliseconds(400) && reached(s);
             });
         }
-        Task Capture(string name) => CaptureRecursive(display, Path.Combine(evidence, instanceId + "-choices-" + name + ".png"), token);
+        async Task Capture(string name)
+        {
+            await Task.Delay(FadeSettleMilliseconds, token);
+            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-choices-" + name + ".png"), token);
+        }
         async Task<CapturedWindow> Shot(string name)
         {
             await Capture(name);
@@ -3282,9 +4097,19 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(0U, Chips(unknown, psu)!.HiddenChips);
         Assert.IsEmpty(Chips(unknown, psu)!.Marks, "Marks stand in for chips only when no chip fits.");
         Assert.IsNull(Chips(unknown, psu)!.More, "No \"+N more\" chip while every chip is drawn.");
-        StrengthRow(unknown, "default-width", null);
+        // Design QA round 2, R2-P2-7: at the default window size a facet's detail shows the strength choices' full labels; the
+        // inspector's default width counts its scroll bar, so they show whether or not the inspector scrolls.
+        StrengthRow(unknown, "default-width", false);
         {
+            var settled = await DetailSettled("detail-settled");
             var shot = await Shot("detail");
+            VerifyDetailLayout(shot, unknown, "choices-detail");
+            var informationChoice = Find(unknown, "RecursiveFacetStrengthInformation");
+            var informationInk = shot.InkRuns(informationChoice.X, informationChoice.Y, informationChoice.Width, informationChoice.Height,
+                shot.At(Find(unknown, "RecursiveInspector").X + 3, informationChoice.Y + informationChoice.Height / 2), rows: false, minimum: 2.0);
+            int informationWidth = informationInk.Count == 0 ? 0 : informationInk[^1].Last - informationInk[0].First + 1;
+            Assert.IsTrue(shot.Record("R2-P2-7 Information choice drawn width at the default size (px)", informationWidth) >= 70,
+                $"choices-detail: the Information choice is drawn {informationWidth} pixels wide, its whole word, not \"Info\".");
             VerifySelectionContrast(shot, unknown, "choices-detail", psu);
             // Design QA P2-10: Back to facet overview and Clear facet look like the canvas's link: underlined, in the link colour,
             // 4.5:1 on the inspector, and coloured apart from the inspector's static text ("Selected design: v1").
@@ -3296,7 +4121,22 @@ public sealed partial class NativeSessionTests
             // P2-9: the reason sits inside its box, not against the border.
             VerifyTextInset(shot, Find(unknown, "RecursiveFacetReason"), "choices-detail", "the Reason box");
             // P2-13: Comments is whole in the inspector's view, or a visible scroll bar shows that the inspector holds more.
-            VerifyInspectorScroll(shot, unknown, "choices-detail");
+            VerifyInspectorScroll(shot, settled, "choices-detail");
+            // Design QA round 2, P3 10: while a facet's detail is open the requirement box and Comments are two lines high, as
+            // sketch A4 draws them, so at the default window size Comments lies whole in the inspector's view with its 12-pixel
+            // margin below it (it was cut off at the view's lower edge), and its bottom border is drawn.
+            var inspector = Find(settled, "RecursiveInspector"); var comments = Find(settled, "RecursiveComments");
+            Assert.IsTrue(comments.Shown && comments.Y >= inspector.Y, "choices-detail: Comments is in the inspector's view.");
+            int commentsMargin = inspector.Y + inspector.Height - (comments.Y + comments.Height);
+            Assert.IsTrue(shot.Record("P3 10 Comments bottom to the inspector's lower edge (px)", commentsMargin) >= 12,
+                $"choices-detail: Comments ends {commentsMargin} pixels above the inspector's lower edge, at least 12.");
+            var belowComments = shot.At(inspector.X + 3, comments.Y + comments.Height + 6);
+            var commentsBorder = shot.MostContrasting(comments.X + 12, comments.Y + comments.Height - 3, comments.Width - 24, 3, belowComments);
+            Assert.IsTrue(shot.Contrast("P3 10 Comments bottom border on the inspector", commentsBorder, belowComments) >= 1.3,
+                $"choices-detail: Comments' bottom border {CapturedWindow.Describe(commentsBorder)} is drawn on {CapturedWindow.Describe(belowComments)}.");
+            var general = Find(settled, "RecursiveRequirements0");
+            Assert.IsTrue(general.Height < 90 && comments.Height < 72,
+                $"choices-detail: the requirement box ({general.Height} pixels) and Comments ({comments.Height} pixels) are two lines high beside the detail.");
         }
 
         // The strength labels collapse before the row would wrap and return when the inspector is wide enough, and the chosen
@@ -3388,18 +4228,23 @@ public sealed partial class NativeSessionTests
         (string, P.DefinitionChoiceStateData) typeChosen = ("type", P.DefinitionChoiceStateData.DcsdSelected);
         string[] fullStrengths = ["Information", "Preference", "Requirement"], briefStrengths = ["Info", "Pref.", "Req."];
         var clearSash = Find(await Read(), "RecursiveInspectorSash");
-        var cleared = await ClearPackage("default-width", null, ["type", "manufacturer"], typeChosen);
+        var cleared = await ClearPackage("default-width", false, ["type", "manufacturer"], typeChosen);
         CollectionAssert.AreEqual(new[] { "Type: linear regulator" }, ChipTexts(cleared, psu));
         // The labels switch at one width, and the integration run clear-facet-overlap-11e548 failed near such a width: the full
         // labels fitted the facet overview, which has no scroll bar, but not the Package detail once its scroll bar showed, and
-        // Clear facet was squeezed to nothing below the wrapped row. So the inspector is widened from the default width in 3-pixel
-        // steps until the full labels show with the Package detail open. At each width the detail is measured as the sash left it,
-        // and again, with a capture, after it is reopened from the facet overview: the order in which the integration run met it.
+        // Clear facet was squeezed to nothing below the wrapped row. Since design QA round 2 (R2-P2-7) the default inspector shows
+        // the full labels, so the inspector is first narrowed by 30 pixels, below the switch, and then widened in 3-pixel steps
+        // until the full labels show with the Package detail open. At each width the detail is measured as the sash left it, and
+        // again, with a capture, after it is reopened from the facet overview: the order in which the integration run met it.
+        var sweepFrom = Find(await Read(), "RecursiveInspectorSash");
+        await MoveSash("sweep-narrowed", sweepFrom.X + sweepFrom.Width / 2 + 30, s => Find(s, "RecursiveInspectorSash").X >= sweepFrom.X + 20);
+        // The facet overview's column where the sweep starts, as drawn: each overview row fills the width inside the 12 DIP margins.
+        int overviewColumn = Find(await Read(), "RecursiveFacetRowPackage").Width;
         var sweepStart = (await OpenPackage("sweep-00", true)).Detail;
         P.RecursiveDiagramEditorState lastShort = sweepStart, firstFull;
         for (int i = 1; ; ++i)
         {
-            Assert.IsTrue(i <= 20, "The full strength labels show within 60 pixels of the default width.");
+            Assert.IsTrue(i <= 20, "The full strength labels show within 60 pixels of where the sweep started.");
             string step = $"sweep-{i:00}";
             var sash = Find(await Read(), "RecursiveInspectorSash");
             await MoveSash(step, sash.X + sash.Width / 2 - 3, s => Find(s, "RecursiveInspectorSash").X < sash.X);
@@ -3410,13 +4255,17 @@ public sealed partial class NativeSessionTests
             var reopenedDetail = (await OpenPackage(step + "-reopened", null)).Detail;
             CollectionAssert.AreEqual(StrengthLabels(dragged), StrengthLabels(reopenedDetail),
                 step + ": the strength labels follow the inspector's width, however the detail was reached.");
+            // Every width is visited: each step widens the detail's column by 1 to 3 pixels, so no width where the labels could
+            // switch is skipped.
+            int widened = Find(reopenedDetail, "RecursiveFacetCandidates").Width - Find(lastShort, "RecursiveFacetCandidates").Width;
+            Assert.IsTrue(widened >= 1 && widened <= 3, $"{step}: the detail's column widened by {widened} pixels, 1 to 3.");
             if (StrengthLabels(reopenedDetail).SequenceEqual(fullStrengths)) { firstFull = reopenedDetail; break; }
             lastShort = reopenedDetail;
         }
-        // They switch where the rule says: the full labels show once they fit the detail's column with 4 DIP to spare (the fixture
-        // display is at 96 DPI, where the detail's 12 DIP margin is 12 pixels), and one step narrower they did not. The editor
-        // measures a label with wxWidgets and GTK draws it, and each may round a label's width by a pixel, so the rule is held to
-        // within 3 pixels; that the full labels fit their column is asserted exactly in the measurement.
+        // They switch exactly where the rule says: the full labels show once they fit the detail's column with 4 DIP to spare (the
+        // fixture display is at 96 DPI, where the detail's 12 DIP margin is 12 pixels), and one step narrower they did not. The
+        // editor adds up the same label widths the journey measures here, so the wide side is exact; on the narrow side the editor
+        // estimates the full labels from the short ones it shows, which each may round by a pixel, so that side allows 3 pixels.
         var (fullDetail, fullShot) = await MeasurePackage("first-full-width", false);
         var information = Find(fullDetail, "RecursiveFacetStrengthInformation"); var requirement = Find(fullDetail, "RecursiveFacetStrengthRequirement");
         Assert.AreEqual(12, Find(fullDetail, "RecursiveFacetCandidates").X - Find(fullDetail, "RecursiveInspector").X, "The detail's margin is 12 pixels.");
@@ -3424,11 +4273,11 @@ public sealed partial class NativeSessionTests
         int wideColumn = fullShot.Record("Detail column where the full labels first show (px)", Find(fullDetail, "RecursiveFacetCandidates").Width);
         int narrowColumn = fullShot.Record("Detail column one step narrower, short labels (px)", Find(lastShort, "RecursiveFacetCandidates").Width);
         Assert.AreEqual(Find(firstFull, "RecursiveFacetCandidates").Width, wideColumn, "The detail keeps its width while it is measured again.");
-        Assert.IsTrue(fullRow + 4 <= wideColumn + 3 && fullRow + 4 > narrowColumn - 3,
-            $"The full strength labels ({fullRow} pixels) show from a {wideColumn}-pixel column and not from {narrowColumn} pixels, where they need {fullRow + 4}.");
+        Assert.IsTrue(fullRow + 4 <= wideColumn, $"The full strength labels ({fullRow} pixels) show from a {wideColumn}-pixel column, where they have 4 pixels to spare.");
+        Assert.IsTrue(fullRow + 4 > narrowColumn - 3,
+            $"The full strength labels ({fullRow} pixels) did not show from {narrowColumn} pixels, where they would need {fullRow + 4}.");
         // The sweep covered every width where opening the detail switches the labels: where it started, even the facet overview's
-        // column (the inspector's width less its 12 DIP margins, as the overview has no scroll bar) was too narrow for them.
-        int overviewColumn = Find(sweepStart, "RecursiveInspector").Width - 24;
+        // column (measured from its rows, as the overview has no scroll bar) was too narrow for them.
         fullShot.Record("Facet overview column where the sweep started (px)", overviewColumn);
         Assert.IsTrue(overviewColumn < fullRow + 4,
             $"The sweep starts below the widths where opening the detail switches the labels: the overview's {overviewColumn}-pixel column there is under {fullRow + 4} pixels.");
@@ -3452,22 +4301,39 @@ public sealed partial class NativeSessionTests
         var familyAdded = await Wait("family-back", s => s.FacetEditor == "" && s.FocusedControl == "RecursiveFacetRowFamily");
         (string, P.DefinitionChoiceStateData)[] three = [("type", P.DefinitionChoiceStateData.DcsdSelected), ("family", P.DefinitionChoiceStateData.DcsdCandidates),
             ("package", P.DefinitionChoiceStateData.DcsdCandidates)];
+        const string moreTip = "Family: TLV755P (candidate)\nPackage: SOT-23-5 (candidate)";
         void VerifyMore(P.RecursiveDiagramEditorState at, string step)
         {
             var chips = Chips(at, psu) ?? throw new AssertFailedException(step + ": the PSU reports its chips.");
-            CollectionAssert.AreEqual(new[] { "type", "family" }, chips.Chips.Select(c => c.Facet).ToArray(), step + ": two chips fit the block, in facet order.");
-            Assert.AreEqual("Type: linear regulator", chips.Chips[0].Text, step + ": the first chip keeps its whole text.");
-            StringAssert.StartsWith(chips.Chips[1].Text, "Family: ", step + ": the second chip names its facet.");
+            // Design QA round 2, R2-P2-6: a chip always shows its whole "Facet: value". Family's "TLV755P" does not fit the PSU's
+            // second chip row beside "+1 more" (the Rail port's name ends that row), so Family goes behind "+N more" with Package
+            // instead of being cut to "Family: T…"; the chip's tooltip names both with their values and states.
+            CollectionAssert.AreEqual(new[] { "type" }, chips.Chips.Select(c => c.Facet).ToArray(), step + ": the chips that fit whole, in facet order.");
+            Assert.AreEqual("Type: linear regulator", chips.Chips[0].Text, step + ": the chip keeps its whole text.");
+            Assert.IsFalse(chips.Chips.Any(c => c.Text.Contains('…')), step + ": no chip is shortened.");
             Assert.IsTrue(chips.More is { Shown: true }, step + ": the rest is shown as one \"+N more\" chip.");
-            Assert.AreEqual(1U, chips.HiddenChips, step + ": Package is the one choice behind \"+1 more\".");
+            Assert.AreEqual(2U, chips.HiddenChips, step + ": Family and Package are the choices behind \"+2 more\".");
+            Assert.AreEqual("+2 more", chips.More.Label, step + ": the chip counts the choices behind it.");
+            Assert.AreEqual(moreTip, chips.More.Tooltip, step + ": \"+2 more\" names the choices behind it with their values and states.");
             Assert.IsEmpty(chips.Marks, step + ": no state marks while chips fit.");
             Assert.HasCount(1, chips.PortNames, step + ": the PSU names its Rail port inside its edge, and the chips keep clear of it.");
             VerifyChoicesVisible(at, step, psu, three);
         }
         CollectionAssert.AreEqual(new[] { "type", "manufacturer", "family", "package" }, familyAdded.ShownFacets.ToArray(),
-            "The overview lists every facet with a value, including Package behind \"+1 more\".");
+            "The overview lists every facet with a value, including Family and Package behind \"+2 more\".");
         VerifyMore(familyAdded, "more");
         await Capture("more");
+        // On hover, "+2 more" shows the choices behind it (design QA round 2, R2-P2-6), and the tooltip goes when the pointer leaves.
+        var moreChip = Chips(familyAdded, psu)!.More;
+        ulong motionsBefore = (await Read()).CanvasMotions;
+        // The pointer first enters the canvas away from the chip, then moves onto it.
+        NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: moreChip.X + moreChip.Width / 2, clickFromTop: moreChip.Y + moreChip.Height + 40);
+        foreach (int dx in new[] { -3, 0, 2 })
+            NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: moreChip.X + moreChip.Width / 2 + dx, clickFromTop: moreChip.Y + moreChip.Height / 2);
+        await Wait("more-hover", s => s.CanvasMotions > motionsBefore && s.CanvasTooltip == moreTip);
+        NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: familyAdded.CanvasWindowX + (int)familyAdded.CanvasPixelWidth - 30,
+            clickFromTop: familyAdded.CanvasWindowY + (int)familyAdded.CanvasPixelHeight - 30);
+        await Wait("more-hover-left", s => s.CanvasTooltip == "");
 
         // Save stores the choices in exactly one new revision of the PSU and nothing else about it; the CPU keeps its revision.
         var beforeChoices = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(created.Path, token));
@@ -3517,14 +4383,14 @@ public sealed partial class NativeSessionTests
         var historyOpen = await Wait("history-open", s => s.DiagramHistory is { Busy: false } h && h.Inspected?.RevisionId == graph.SelectedRoot.RevisionId.ToString("D")
             && s.Rendered);
         var historyOpenChips = Chips(historyOpen, psu) ?? throw new AssertFailedException("history-open: the PSU still shows its chips.");
-        CollectionAssert.AreEqual(new[] { "type", "family" }, historyOpenChips.Chips.Select(c => c.Facet).ToArray(), "history-open: the same chips.");
+        CollectionAssert.AreEqual(new[] { "type" }, historyOpenChips.Chips.Select(c => c.Facet).ToArray(), "history-open: the same chips.");
         Assert.IsNull(historyOpenChips.ReviewFacets, "history-open: no Review facets link while the history is open.");
         Key("Down"); await Wait("history-older", s => s.DiagramHistory is { Busy: false } h && h.Inspected?.RevisionId != graph.SelectedRoot.RevisionId.ToString("D"));
         Key("Up"); await Wait("history-saved", s => s.DiagramHistory is { Busy: false } h && h.Inspected?.RevisionId == graph.SelectedRoot.RevisionId.ToString("D"));
         Key("p", alt: true);
         var preview = await Wait("history-preview", s => s.DiagramHistory?.Preview?.RevisionId == graph.SelectedRoot.RevisionId.ToString("D") && s.Rendered);
         var previewChips = Chips(preview, psu) ?? throw new AssertFailedException("history-preview: the previewed PSU still shows its chips.");
-        CollectionAssert.AreEqual(new[] { "type", "family" }, previewChips.Chips.Select(c => c.Facet).ToArray(), "history-preview: the same chips.");
+        CollectionAssert.AreEqual(new[] { "type" }, previewChips.Chips.Select(c => c.Facet).ToArray(), "history-preview: the same chips.");
         Assert.IsNull(previewChips.ReviewFacets, "history-preview: no Review facets link in a read-only preview.");
         await Capture("history-preview");
         Key("c", alt: true); await Wait("history-preview-closed", s => s.DiagramHistory is { Preview: null });
@@ -3574,10 +4440,31 @@ public sealed partial class NativeSessionTests
             VerifyCanvasText(compact, "choices-compact");
             ChoicesClear(compact, "choices-compact");
             VerifyInspectorScroll(shot, compact, "choices-compact");
+            // Design QA round 2, R2-P2-6 in the compact window: a chip is drawn whole or not at all; the choices that do not fit
+            // whole are behind "+N more", which counts them and names each with its value and state on hover.
+            var wholeChips = new Dictionary<string, (string Chip, string Tip)>
+            {
+                ["type"] = ("Type: linear regulator", "Type: linear regulator (chosen)"),
+                ["family"] = ("Family: TLV755P", "Family: TLV755P (candidate)"),
+                ["package"] = ("Package: SOT-23-5", "Package: SOT-23-5 (candidate)")
+            };
+            var compactChips = Chips(compact, psu)!;
+            foreach (var chip in compactChips.Chips)
+                Assert.AreEqual(wholeChips[chip.Facet].Chip, chip.Text, "choices-compact: the " + chip.Facet + " chip shows its whole facet and value.");
+            string[] behind = [.. wholeChips.Keys.Where(f => compactChips.Chips.All(c => c.Facet != f))];
+            Assert.AreEqual((uint)behind.Length, compactChips.HiddenChips, "choices-compact: every choice not drawn as a chip is counted behind \"+N more\".");
+            if (behind.Length > 0 && compactChips.More is { Shown: true } more)
+            {
+                Assert.AreEqual($"+{behind.Length} more", more.Label, "choices-compact: \"+N more\" counts the choices behind it.");
+                Assert.AreEqual(string.Join("\n", behind.Select(f => wholeChips[f].Tip)), more.Tooltip,
+                    "choices-compact: \"+N more\" names the choices behind it with their values and states.");
+            }
         }
         // The compact window keeps the Package detail's measured layout, and Clear facet still clears Package; undo leaves the
         // declined draft clean again.
-        await ClearPackage("compact", null, ["type", "manufacturer", "family"], ("type", P.DefinitionChoiceStateData.DcsdSelected),
+        // The compact window keeps the default inspector's width, so the Package detail shows the full strength labels there too;
+        // the short labels are the narrow inspector's fallback only (design QA round 2, R2-P2-7).
+        await ClearPackage("compact", false, ["type", "manufacturer", "family"], ("type", P.DefinitionChoiceStateData.DcsdSelected),
             ("family", P.DefinitionChoiceStateData.DcsdCandidates));
         // Between the compact and the full window the PSU is re-fitted at a third scale, where the Rail port's name narrows the chip
         // rows differently: the same rules hold there (no chip narrower than its minimum, the rest behind "+N more" or as marks).
@@ -3602,9 +4489,22 @@ public sealed partial class NativeSessionTests
         CollectionAssert.AreEqual(new[] { "type", "manufacturer", "family", "package" }, (await Read()).ShownFacets.ToArray());
         await Press("RecursiveFacetRowManufacturer");
         var manufacturer = await Wait("manufacturer-reopened", s => s.FacetEditor == "manufacturer");
-        Assert.AreEqual("No preference recorded.", manufacturer.Draft.Definition.Manufacturer.UnknownReason);
         Assert.IsFalse(manufacturer.Dirty, "Opening a facet's detail changes nothing.");
+        Assert.AreEqual("No preference recorded.", manufacturer.Draft.Definition.Manufacturer.UnknownReason);
         await Capture("reopened");
+        // A value with an "&" (a manufacturer such as C&K) is shown and read out as written: the facet row, a platform toggle
+        // button whose label GTK would otherwise take as a keyboard mnemonic, is named "Manufacturer: C&K" by its visible label
+        // and by assistive technology (review of the routing follow-ups, finding 3). Decline then discards the value.
+        await Press("RecursiveFacetStateChosen");
+        await Wait("ampersand-needs-value", s => s.FacetEditor == "manufacturer" && s.FocusedControl == "RecursiveFacetValue");
+        Type("C&K");
+        var ampersand = await Wait("ampersand-value", s => Facet(s, d => d.Manufacturer) is { State: P.DefinitionChoiceStateData.DcsdSelected } c
+            && c.Values.SequenceEqual(["C&K"]) && Find(s, "RecursiveFacetRowManufacturer").Label == "Manufacturer: C&K");
+        VerifyAccessible(Find(ampersand, "RecursiveFacetRowManufacturer"), "toggle button", "ampersand-value");
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-choices-ampersand.json"), SchematicJson.Formatter.Format(ampersand), token);
+        await Capture("ampersand");
+        Key("d", alt: true);
+        await Wait("ampersand-declined", s => !s.Dirty && Facet(s, d => d.Manufacturer) is { State: P.DefinitionChoiceStateData.DcsdUnknown });
         Key("w", control: true); await Closed();
         Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token));
 
@@ -3754,7 +4654,39 @@ public sealed partial class NativeSessionTests
         }
         // + Add detail lists only the details the connection does not have yet, in the order signals, direction, domain, type.
         async Task AddDetail(params string[] keys) { await Press("RecursiveAddDetail"); await Popup(); foreach (string key in keys) Key(key); Key("Return"); }
-        Task Capture(string name) => CaptureRecursive(display, Path.Combine(evidence, instanceId + "-details-" + name + ".png"), token);
+        async Task Capture(string name)
+        {
+            await Task.Delay(FadeSettleMilliseconds, token);
+            await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-details-" + name + ".png"), token);
+        }
+        async Task<CapturedWindow> Shot(string name)
+        {
+            await Capture(name);
+            return await CapturedWindow.LoadAsync(Path.Combine(evidence, instanceId + "-details-" + name + ".png"), WindowOrigin(display, processId, title), token);
+        }
+        // Parks the pointer on an empty corner of the canvas, so a capture measures the controls rather than the pointer drawn
+        // over the one pressed last.
+        async Task ParkPointer()
+        {
+            var at = await Read();
+            NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: at.CanvasWindowX + (int)at.CanvasPixelWidth - 6,
+                clickFromTop: at.CanvasWindowY + (int)at.CanvasPixelHeight - 6);
+        }
+        // The route the editor reports it drew for a connection, in window pixels.
+        async Task<(int X, int Y)[]> RoutePixels(P.RecursiveDiagramEditorState at, string connection)
+        {
+            var observed = await client.CallToolAsync("kicad_diagram_observe", new Dictionary<string, object?>
+            {
+                ["instanceId"] = instanceId, ["documentId"] = created.DocumentId, ["expectedSourceToken"] = at.SourceToken,
+                ["expectedViewRevision"] = at.ViewRevision, ["views"] = new[] { new { viewId = "canvas", pixelWidth = 800, pixelHeight = 600 } }
+            }, cancellationToken: token);
+            Assert.IsFalse(observed.IsError == true, "The level can be observed.");
+            var route = JsonSerializer.SerializeToElement(observed).GetProperty("structuredContent").GetProperty("observation").GetProperty("views")[0]
+                .GetProperty("resolvedLayout").GetProperty("routes").EnumerateArray().First(r => r.GetProperty("connectionId").GetString() == connection);
+            return [.. route.GetProperty("points").EnumerateArray().Select(p => Screen(at,
+                double.Parse(p.GetProperty("x").GetString()!, System.Globalization.CultureInfo.InvariantCulture),
+                double.Parse(p.GetProperty("y").GetString()!, System.Globalization.CultureInfo.InvariantCulture)))];
+        }
         async Task Closed()
         {
             using var closing = CancellationTokenSource.CreateLinkedTokenSource(token); closing.CancelAfter(TimeSpan.FromSeconds(15));
@@ -3874,7 +4806,25 @@ public sealed partial class NativeSessionTests
         string supply = drawn.LevelDraft.NewConnections[0].Selection.ConnectionId;
         CaptionOnly(drawn, "new-connection");
         Assert.IsFalse(Find(drawn, "RecursiveSavedVersion").Shown, "A connection drawn in this draft has no saved version yet.");
-        await Capture("new-connection");
+        {
+            // Design QA round 2, R2-P2-1: the new connection's caption is drawn on the canvas, whole, in a clear place near its short
+            // route to the port on the level's boundary (whose own name stays beside the port), as every other caption is.
+            var shot = await Shot("new-connection");
+            VerifyCaptions(shot, drawn, "new-connection", new Dictionary<string, string> { [supply] = "Supply input", [power] = "Power", [feed] = "Rail feed" },
+                "Supply input");
+            var caption = drawn.ConnectionCaptions.Single(c => c.ObjectId == supply);
+            var route = await RoutePixels(drawn, supply);
+            double Distance((int X, int Y) a, (int X, int Y) b)
+            {
+                // From the caption's box to the segment a-b (both axis-aligned boxes): the gap between them, 0 when they touch.
+                int dx = Math.Max(0, Math.Max(Math.Min(a.X, b.X) - (caption.X + caption.Width), caption.X - Math.Max(a.X, b.X)));
+                int dy = Math.Max(0, Math.Max(Math.Min(a.Y, b.Y) - (caption.Y + caption.Height), caption.Y - Math.Max(a.Y, b.Y)));
+                return Math.Sqrt(dx * dx + dy * dy);
+            }
+            double nearest = route.Zip(route.Skip(1)).Min(pair => Distance(pair.First, pair.Second));
+            Assert.IsTrue(shot.Record("R2-P2-1 Supply input caption from its connection (px)", (int)Math.Round(nearest)) <= 64,
+                $"new-connection: the caption 'Supply input' lies {nearest:F0} pixels from its connection, beside it.");
+        }
         // Escape closes + Add detail without adding anything.
         await Press("RecursiveAddDetail"); await Popup(); Key("Escape"); await PopupClosed();
         var menuCancelled = await Wait("add-detail-cancelled", s => Details(s).Length == 0);
@@ -3982,6 +4932,8 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(psuName + " → " + cpuName, Find(direction, "RecursiveDirectionFromFirst").Label, "The direction names the connection's own ends.");
         Assert.AreEqual(cpuName + " → " + psuName, Find(direction, "RecursiveDirectionToFirst").Label);
         Assert.AreEqual("Both ways", Find(direction, "RecursiveDirectionBoth").Label);
+        Assert.IsTrue(new[] { "FromFirst", "ToFirst", "Both" }.All(n => Find(direction, "RecursiveDirection" + n).Tooltip == ""),
+            "No direction choice has a tooltip that only repeats its label (design QA round 2, P3 19).");
         await Capture("direction-row");
         await Press("RecursiveDetailRemoveDirection");
         var directionGone = await Wait("direction-row-removed", s => Details(s).Length == 0 && s.FocusedControl == "RecursiveAddDetail");
@@ -4034,12 +4986,21 @@ public sealed partial class NativeSessionTests
         Key("z", control: true);
         var bothBack = await Wait("drawn-signals-restored", s => Signals(s).SequenceEqual(["VBUS", "GND"]) && Details(s).SequenceEqual(["signals", "direction"]));
         Assert.AreEqual(twoSignals.LevelDraft, bothBack.LevelDraft, "Undo brings both drawn signals back exactly.");
-        await Capture("signals");
+        {
+            // Design QA round 2, R2-P2-5: the action that removes the whole Signals detail is a link that says so ("Remove signals"),
+            // visibly unlike each signal's own "×", which is named after the signal it removes on hover and for assistive technology.
+            await ParkPointer();
+            VerifySignalRemoves(await Shot("signals"), bothBack, "details-signals", "VBUS", "GND");
+            VerifyCanvasText(bothBack, "details-signals");
+        }
 
         // + Add detail > Type: a connection with signals cannot be a single signal; with exactly two signals it may be a pair.
         await AddDetail("Home", "Down");
         var type = await Wait("type-row", s => Details(s).SequenceEqual(["signals", "direction", "type"]));
         Assert.IsFalse(Find(type, "RecursiveTypeSignal").Enabled, "A connection with signals cannot be a single signal.");
+        Assert.AreEqual("A single signal has no signals of its own; remove its signals first.", Find(type, "RecursiveTypeSignal").Tooltip,
+            "The unavailable Signal says why on hover (design QA round 2, P3 20).");
+        Assert.AreEqual("", Find(type, "RecursiveTypeInterface").Tooltip, "An available type has no tooltip that repeats its label.");
         Assert.IsTrue(Find(type, "RecursiveTypeDifferentialPair").Enabled, "Two signals may form a differential pair.");
         await Press("RecursiveTypeInterface");
         await Wait("type-interface", s => s.ConnectionDraft.Kind == P.DiagramConnectionKind.DckInterface && Active(s, "RecursiveType").SequenceEqual(["Interface"]));
@@ -4060,7 +5021,28 @@ public sealed partial class NativeSessionTests
         await Press("RecursiveDomainPower");
         var all = await Wait("domain-power", s => s.ConnectionDraft.Domain == P.DiagramDomain.DdPower && !Find(s, "RecursiveAddDetail").Shown);
         Assert.IsTrue(Find(all, "RecursiveAddRequirement").Shown, "+ Add requirement stays for the two requirement boxes not shown yet.");
-        await Capture("all-details");
+        {
+            // Design QA round 2, R2-P2-4: a chosen option has the drawing tools' accent style, told apart from the others by more
+            // than its fill; and under the pointer an option that is not chosen turns a neutral grey, never the accent.
+            await ParkPointer();
+            var shot = await Shot("all-details");
+            VerifyChoiceStyling(shot, all, "details-all-details", ["DirectionBoth", "DomainPower", "TypeSignalGroup"],
+                ["DirectionFromFirst", "DirectionToFirst", "DomainData", "DomainControl", "TypeInterface"]);
+            var hovered = Find(all, "RecursiveDomainData");
+            NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: hovered.X + 6, clickFromTop: hovered.Y + hovered.Height / 2);
+            await Task.Delay(300, token);
+            var hoverShot = await Shot("all-details-hover");
+            var hoverFill = hoverShot.At(hovered.X + 4, hovered.Y + hovered.Height / 2);
+            var restingFill = hoverShot.At(Find(all, "RecursiveDomainControl").X + 4, hovered.Y + hovered.Height / 2);
+            var chosenFill = hoverShot.At(Find(all, "RecursiveDomainPower").X + 4, hovered.Y + hovered.Height / 2);
+            int spread = Math.Max(hoverFill.R, Math.Max(hoverFill.G, hoverFill.B)) - Math.Min(hoverFill.R, Math.Min(hoverFill.G, hoverFill.B));
+            Assert.IsTrue(CapturedWindow.Distance(hoverFill, restingFill) >= 6 && spread <= 12,
+                $"details-all-details: under the pointer Data turns a neutral grey {CapturedWindow.Describe(hoverFill)} (at rest {CapturedWindow.Describe(restingFill)}).");
+            Assert.IsTrue(CapturedWindow.Distance(hoverFill, chosenFill) >= 12,
+                $"details-all-details: hover {CapturedWindow.Describe(hoverFill)} does not look like the chosen Power {CapturedWindow.Describe(chosenFill)}.");
+            var caption = Find(all, "RecursiveConnectionCaption");
+            NativeKeyboard.SchematicShortcut(display, processId, "motion", title, false, true, clickFromLeft: caption.X + caption.Width / 2, clickFromTop: caption.Y + caption.Height / 2);
+        }
         // Removing a row takes exactly that detail away; Undo brings it back.
         await Press("RecursiveDetailRemoveDomain");
         await Wait("domain-removed", s => s.ConnectionDraft.Domain == P.DiagramDomain.DdUnspecified && Details(s).SequenceEqual(["signals", "direction", "type"])
@@ -4101,15 +5083,15 @@ public sealed partial class NativeSessionTests
         Key("d", alt: true);
         var declined = await Wait("declined", s => !s.Dirty && s.ConnectionDraft?.Direction == P.DiagramConnectionDirection.DcdrBidirectional);
         Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token));
-        // On a clean draft, a signal drawn for the saved Power and removed again leaves nothing to save. The only trace is Power's
-        // connection draft, which the addition opened and which is again exactly the saved Power.
+        // On a clean draft, a signal drawn for the saved Power and removed again leaves nothing to save and no trace: Power's
+        // connection draft, which the addition opened, goes with it, so the level draft is exactly the declined one.
         await Press("RecursiveSignalEntry"); Type("VREF"); Key("Return");
-        await Wait("clean-signal-added", s => Signals(s).SequenceEqual(["VBUS", "GND", "VREF"]) && s.Dirty);
+        var vrefAdded = await Wait("clean-signal-added", s => Signals(s).SequenceEqual(["VBUS", "GND", "VREF"]) && s.Dirty);
+        Assert.IsTrue(vrefAdded.LevelDraft.ConnectionDrafts.Any(d => d.Baseline.ConnectionId == power), "Adding the signal opened Power's connection draft.");
         await Press("RecursiveSignalRemove2");
         var vrefGone = await Wait("clean-signal-removed", s => Signals(s).SequenceEqual(["VBUS", "GND"]) && !s.Dirty);
-        var cleanAgain = declined.LevelDraft.Clone(); cleanAgain.ConnectionDrafts.Add(declined.ConnectionDraft);
-        await DrawnRemoval(vrefGone, cleanAgain, savedXml, "clean-signal-removed");
-        Assert.AreEqual(declined.ConnectionDraft, vrefGone.ConnectionDraft, "Power's draft is again its saved revision.");
+        await DrawnRemoval(vrefGone, declined.LevelDraft, savedXml, "clean-signal-removed");
+        Assert.AreEqual(declined.ConnectionDraft, vrefGone.ConnectionDraft, "The inspector shows Power as saved.");
         Assert.IsFalse(Find(vrefGone, "RecursiveSave").Enabled, "Save is unavailable: nothing is left to save.");
         // A saved signal leaves through the companion's removal cascade and the status bar names it; Undo restores it.
         await Press("RecursiveSignalRemove0");
@@ -4249,8 +5231,24 @@ public sealed partial class NativeSessionTests
                     && choices[i].Y < choices[j].Y + choices[j].Height && choices[j].Y < choices[i].Y + choices[i].Height, choices[i].Name + " overlaps " + choices[j].Name);
         Assert.IsTrue(Inside(Find(compact, "RecursiveConnectionCaption"), compactInspector), "The caption is in view.");
         await Press("RecursiveDirectionFromFirst");
-        await Wait("compact-direction", s => s.Dirty && s.ConnectionDraft.Direction == P.DiagramConnectionDirection.DcdrFromFirst);
-        await Capture("compact");
+        var compactChosen = await Wait("compact-direction", s => s.Dirty && s.ConnectionDraft.Direction == P.DiagramConnectionDirection.DcdrFromFirst);
+        {
+            // Design QA round 2 in the compact window, measured: the chosen direction, domain and type have the drawing tools'
+            // accent style and the others do not (R2-P2-4); "Remove signals" is a link unlike each signal's own "×" (R2-P2-5); and
+            // every connection shows its whole caption on the canvas, the new "Supply input" beside its short route as well
+            // (R2-P2-1 and R2-P2-8).
+            await ParkPointer();
+            var shot = await Shot("compact");
+            string[] OneClick(bool chosen) => [.. compactChosen.Controls.Where(c => c.Shown && c.Enabled && c.Active == chosen
+                && (c.Name.StartsWith("RecursiveDirection", StringComparison.Ordinal) || c.Name.StartsWith("RecursiveDomain", StringComparison.Ordinal)
+                    || c.Name.StartsWith("RecursiveType", StringComparison.Ordinal))).Select(c => c.Name["Recursive".Length..])];
+            CollectionAssert.IsSubsetOf(new[] { "DirectionFromFirst", "DomainPower" }, OneClick(true), "details-compact: PSU → CPU and Power are chosen.");
+            VerifyChoiceStyling(shot, compactChosen, "details-compact", OneClick(true), OneClick(false));
+            VerifySignalRemoves(shot, compactChosen, "details-compact", "VBUS", "GND");
+            var compactNames = new[] { supply, power, feed }.ToDictionary(id => id,
+                id => links.Inspect(savedTop.LocalDiagram.Connections.Single(c => c.ConnectionId.ToString("D") == id)).Name);
+            VerifyCaptions(shot, compactChosen, "details-compact", compactNames, [.. compactNames.Values]);
+        }
         Key("z", control: true); await Wait("compact-undone", s => !s.Dirty && s.ConnectionDraft.Direction == P.DiagramConnectionDirection.DcdrBidirectional);
         NativeKeyboard.SchematicShortcut(display, processId, "", title, false, false, resizeWidth: 1536, resizeHeight: 1024);
         await Wait("expanded", s => s.Rendered && s.CanvasPixelWidth > 900);
@@ -4274,8 +5272,744 @@ public sealed partial class NativeSessionTests
         Assert.IsFalse(Find(supplyReopened, "RecursiveSignalRemove0").Enabled || Find(supplyReopened, "RecursiveSignalEntry").Enabled,
             "The saved pair keeps its two signals.");
         Assert.IsFalse(feedReopened.Dirty || supplyReopened.Dirty, "Selecting connections changes nothing.");
+
+        // An agent binds and unbinds connection ends and refines a connection's members with the agent tools (ledger
+        // pf92d0ecdec8805b4), through the production MCP server while the clean editor stays open. Each call names the exact file,
+        // root, level and connection it edits; a stale, ambiguous or missing target is refused and writes nothing. Once the editor
+        // reloads the file, an end the agent left unresolved or bound, with what it says about that end, shows in the connection's
+        // existing Endpoints row, and the refined members in its Signals row.
+        var agentGraph = RecursiveBlockGraphXml.Read(savedXml); var agentTop = agentGraph.Inspect(agentGraph.SelectedRoot);
+        var agentLinks = agentGraph.Connections(agentGraph.SelectedRoot.BlockId);
+        ConnectionSelection AgentLink(RecursiveBlockGraph at, string id) =>
+            at.Inspect(at.SelectedRoot).LocalDiagram.Connections.Single(c => c.ConnectionId.ToString("D") == id);
+        var railFeed = agentLinks.Inspect(AgentLink(agentGraph, feed));
+        Guid psuBlock = railFeed.Endpoints[0].BlockId, railPort = railFeed.Endpoints[0].InterfaceId!.Value, cpuBlock = railFeed.Endpoints[1].BlockId;
+        Assert.AreEqual((psuName, "Rail"), (agentGraph.Inspect(agentTop.Children.Single(c => c.BlockId == psuBlock)).Name,
+            agentGraph.Inspect(agentTop.Children.Single(c => c.BlockId == psuBlock)).LocalDiagram.Interfaces.Single(i => i.Id == railPort).Name),
+            "Rail feed starts on the PSU's Rail port.");
+        var agentEdit = new Dictionary<string, object?>(arguments) { ["expectedSourceToken"] = supplyReopened.SourceToken,
+            ["expectedRoot"] = agentGraph.SelectedRoot, ["blockPath"] = new[] { agentGraph.SelectedRoot }, ["connectionPath"] = new[] { AgentLink(agentGraph, feed) },
+            ["endpointIndex"] = 0, ["operationId"] = Guid.NewGuid(), ["actor"] = "Agent console" };
+        static Dictionary<string, object?> With(Dictionary<string, object?> call, params (string Key, object? Value)[] values)
+        {
+            var next = new Dictionary<string, object?>(call);
+            foreach (var (key, value) in values) next[key] = value;
+            return next;
+        }
+        async Task<JsonElement> AgentTool(string tool, Dictionary<string, object?> call, string step, string? refusedWith = null)
+        {
+            var result = await client.CallToolAsync(tool, call, cancellationToken: token);
+            var data = JsonSerializer.SerializeToElement(result).GetProperty("structuredContent");
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-details-" + step + ".json"), data.GetRawText(), token);
+            if (refusedWith is null) Assert.IsFalse(result.IsError == true, step + ": " + data.GetRawText());
+            else
+            {
+                Assert.IsTrue(result.IsError == true, step + " is refused: " + data.GetRawText());
+                Assert.AreEqual(refusedWith, data.GetProperty("code").GetString(), step + ": " + data.GetRawText());
+                Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token), step + ": a refused edit writes nothing.");
+            }
+            return data;
+        }
+        // The tool's next call names the revisions this one saved.
+        static Dictionary<string, object?> After(Dictionary<string, object?> call, JsonElement saved) => With(call,
+            ("expectedSourceToken", saved.GetProperty("sourceToken").GetString()), ("expectedRoot", saved.GetProperty("selectedRoot")),
+            ("blockPath", saved.GetProperty("blockPath")), ("operationId", Guid.NewGuid()));
+        async Task<P.RecursiveDiagramEditorState> Reloaded(string step, JsonElement saved, string connection, Func<P.RecursiveDiagramEditorState, bool> shown)
+        {
+            string written = saved.GetProperty("sourceToken").GetString()!;
+            Key("r", control: true);
+            await Wait(step + "-reloaded", s => s.Ready && !s.Dirty && s.SourceToken == written);
+            await SelectConnection(step + "-selected", connection);
+            var at = await Wait(step, shown);
+            await Capture(step);
+            return at;
+        }
+        // The row wraps a long line between words to the inspector's width; read back, each line break is the space it replaced.
+        string EndpointsRow(P.RecursiveDiagramEditorState at) => Find(at, "RecursiveConnectionEndpoints").Label.Replace('\n', ' ');
+        const string feedIntent = "Choose which PSU output feeds the CPU.";
+        await AgentTool("kicad_diagram_connection_endpoint_set", With(agentEdit, ("action", "unbind"), ("expectedSourceToken", savedToken)),
+            "agent-edit-stale-file", "recursive_block_file_changed");
+        await AgentTool("kicad_diagram_connection_endpoint_set", With(agentEdit, ("action", "unbind"), ("expectedRoot", created.Root)),
+            "agent-edit-stale-root", "stale_root_revision");
+        await AgentTool("kicad_diagram_connection_endpoint_set", With(agentEdit, ("action", "bind"), ("blockId", psuBlock)),
+            "agent-edit-bind-without-port", "ambiguous_connection_edit");
+        await AgentTool("kicad_diagram_connection_endpoint_set", With(agentEdit, ("action", "bind"), ("blockId", cpuBlock), ("interfaceId", railPort)),
+            "agent-edit-port-of-another-block", "connection_edit_target_missing");
+        await AgentTool("kicad_diagram_connection_endpoint_set", With(agentEdit, ("action", "unbind"), ("endpointIndex", 2)),
+            "agent-edit-missing-end", "connection_edit_target_missing");
+
+        // Rail feed's first end is left explicitly unresolved on the PSU. The earlier binding stays in history.
+        var unbound = await AgentTool("kicad_diagram_connection_endpoint_set", With(agentEdit, ("action", "unbind"), ("intent", feedIntent)), "agent-unbind");
+        Assert.IsTrue(unbound.GetProperty("changed").GetBoolean());
+        Assert.AreEqual(("Interface", railPort.ToString("D")), (unbound.GetProperty("previousEndpoint").GetProperty("kind").GetString(),
+            unbound.GetProperty("previousEndpoint").GetProperty("interfaceId").GetString()));
+        var unboundEnd = unbound.GetProperty("endpoint");
+        Assert.AreEqual(("Unresolved", psuBlock.ToString("D"), JsonValueKind.Null, feedIntent), (unboundEnd.GetProperty("kind").GetString(),
+            unboundEnd.GetProperty("blockId").GetString(), unboundEnd.GetProperty("interfaceId").ValueKind, unboundEnd.GetProperty("intent").GetString()));
+        Assert.AreEqual(JsonValueKind.Null, unbound.GetProperty("boundaryMapping").ValueKind, "An end on a block of the level maps through no boundary port.");
+        savedXml = await File.ReadAllTextAsync(created.Path, token);
+        var unboundGraph = RecursiveBlockGraphXml.Read(savedXml); var unboundLinks = unboundGraph.Connections(unboundGraph.SelectedRoot.BlockId);
+        var feedUnbound = unboundLinks.Inspect(AgentLink(unboundGraph, feed));
+        Assert.IsTrue(feedUnbound.Endpoints[0].SameDefinition(DiagramEndpointBinding.Unknown(psuBlock, feedIntent))
+            && feedUnbound.Endpoints[1].SameDefinition(railFeed.Endpoints[1]), "Only Rail feed's first end changed, and it is Unresolved on the PSU.");
+        Assert.AreEqual((railFeed.Selection.RevisionId, "Agent console"), (feedUnbound.ParentRevisionId!.Value, feedUnbound.Origin.Actor));
+        // The new revision is the operation's identity (review of pf92d, finding 4): after a cut-off call the agent reads the
+        // connection and sees whether its operation landed. Repeating the landed operation on the file it produced writes nothing.
+        Assert.AreEqual((Guid)agentEdit["operationId"]!, feedUnbound.Selection.RevisionId, "Rail feed's new revision is the unbind operation's identity.");
+        var repeatedUnbind = await AgentTool("kicad_diagram_connection_endpoint_set", With(agentEdit, ("action", "unbind"), ("intent", feedIntent),
+            ("expectedSourceToken", unbound.GetProperty("sourceToken").GetString()), ("expectedRoot", unbound.GetProperty("selectedRoot")),
+            ("blockPath", unbound.GetProperty("blockPath")), ("connectionPath", unbound.GetProperty("connectionPath"))), "agent-unbind-repeated");
+        Assert.IsFalse(repeatedUnbind.GetProperty("changed").GetBoolean(), "The repeated operation finds its end already unbound and saves nothing.");
+        Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token), "Repeating a landed operation writes nothing.");
+        Assert.AreEqual(agentLinks.Requirements(railFeed.Selection).Requirements, unboundLinks.Requirements(feedUnbound.Selection).Requirements,
+            "Rail feed's requirement fields are unchanged.");
+        Assert.AreEqual(unbound.GetProperty("connectionPath")[0].GetProperty("revisionId").GetString(), feedUnbound.Selection.RevisionId.ToString("D"));
+        await Reloaded("agent-unbound", unbound, feed, s => Details(s).SequenceEqual(["direction", "endpoints"])
+            && EndpointsRow(s) == psuName + " \u2014 " + feedIntent);
+
+        // Bound to the PSU's Rail port again, with what it carries: the Endpoints row names the block and the port.
+        const string railIntent = "Regulated supply from the Rail output.";
+        var bound = await AgentTool("kicad_diagram_connection_endpoint_set", With(After(agentEdit, unbound), ("connectionPath", unbound.GetProperty("connectionPath")),
+            ("action", "bind"), ("blockId", psuBlock), ("interfaceId", railPort), ("intent", railIntent)), "agent-bind");
+        var boundEnd = bound.GetProperty("endpoint");
+        Assert.AreEqual(("Interface", railPort.ToString("D"), railIntent), (boundEnd.GetProperty("kind").GetString(),
+            boundEnd.GetProperty("interfaceId").GetString(), boundEnd.GetProperty("intent").GetString()));
+        savedXml = await File.ReadAllTextAsync(created.Path, token);
+        await Reloaded("agent-bound", bound, feed, s => Details(s).SequenceEqual(["direction", "endpoints"])
+            && EndpointsRow(s) == psuName + " \u00b7 Rail \u2014 " + railIntent);
+        var sameAgain = await AgentTool("kicad_diagram_connection_endpoint_set", With(After(agentEdit, bound), ("connectionPath", bound.GetProperty("connectionPath")),
+            ("action", "bind"), ("blockId", psuBlock), ("interfaceId", railPort)), "agent-bind-again");
+        Assert.IsFalse(sameAgain.GetProperty("changed").GetBoolean(), "Binding the end the way it already is writes nothing.");
+        Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token));
+
+        // Supply input's end on the level's own boundary port is bound with what enters there; the tool reports the port and, on
+        // this root level, no level above it that uses the port.
+        const string entryIntent = "The system's supply enters here.";
+        var boundGraph = RecursiveBlockGraphXml.Read(savedXml);
+        var entry = await AgentTool("kicad_diagram_connection_endpoint_set", With(After(agentEdit, bound), ("connectionPath", new[] { AgentLink(boundGraph, supply) }),
+            ("endpointIndex", 1), ("action", "bind"), ("blockId", boundGraph.SelectedRoot.BlockId), ("interfaceId", boundary.Id), ("intent", entryIntent)),
+            "agent-bind-boundary-port");
+        var entryMapping = entry.GetProperty("boundaryMapping");
+        Assert.AreEqual((boundary.Id.ToString("D"), boundary.Name, JsonValueKind.Null, 0), (entryMapping.GetProperty("interfaceId").GetString(),
+            entryMapping.GetProperty("interfaceName").GetString(), entryMapping.GetProperty("parentLevel").ValueKind,
+            entryMapping.GetProperty("parentConnections").GetArrayLength()));
+        savedXml = await File.ReadAllTextAsync(created.Path, token);
+        await Reloaded("agent-boundary-port", entry, supply, s => Details(s).SequenceEqual(["signals", "type", "endpoints"])
+            && EndpointsRow(s) == boundary.Name + " \u2014 " + entryIntent);
+
+        // Power's two signals become a USB power group, beside a new USB data differential pair of two new signals. A refinement that
+        // would leave GND out is refused first.
+        var enums = new JsonSerializerOptions(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } };
+        var entryGraph = RecursiveBlockGraphXml.Read(savedXml); var entryLinks = entryGraph.Connections(entryGraph.SelectedRoot.BlockId);
+        var powerBefore = entryLinks.Inspect(AgentLink(entryGraph, power));
+        Guid vbus = powerBefore.Members[0].ConnectionId, gnd = powerBefore.Members[1].ConnectionId;
+        Guid usbPower = Guid.NewGuid(), usbData = Guid.NewGuid(), dPlus = Guid.NewGuid(), dMinus = Guid.NewGuid();
+        var refine = With(After(agentEdit, entry), ("connectionPath", new[] { AgentLink(entryGraph, power) }),
+            ("sources", new[] { new SourceReference("usb-interface-notes", "draft-1", 1, null, null) }));
+        refine.Remove("endpointIndex");
+        await AgentTool("kicad_diagram_connection_members_refine", With(refine, ("memberIds", new[] { usbPower }),
+            ("newMembers", JsonSerializer.SerializeToElement(new[] { new ConnectionMemberDefinition(usbPower, "USB power", [vbus], DiagramConnectionKind.SignalGroup) }, enums))),
+            "agent-refine-leaving-a-signal-out", "ambiguous_connection_edit");
+        var refinedMembers = await AgentTool("kicad_diagram_connection_members_refine", With(refine, ("memberIds", new[] { usbPower, usbData }),
+            ("newMembers", JsonSerializer.SerializeToElement(new[]
+            {
+                new ConnectionMemberDefinition(usbPower, "USB power", [vbus, gnd], DiagramConnectionKind.SignalGroup, "Carry the USB supply and its return."),
+                new ConnectionMemberDefinition(usbData, "USB data", [dPlus, dMinus], DiagramConnectionKind.DifferentialPair, "", "", "Route D+ and D- as one matched pair."),
+                new ConnectionMemberDefinition(dPlus, "D+", []), new ConnectionMemberDefinition(dMinus, "D-", [])
+            }, enums))), "agent-refine");
+        Assert.IsTrue(refinedMembers.GetProperty("changed").GetBoolean());
+        CollectionAssert.AreEqual(new[] { ("USB power", true), ("VBUS", false), ("GND", false), ("USB data", true), ("D+", true), ("D-", true) },
+            refinedMembers.GetProperty("members").EnumerateArray().Select(m => (m.GetProperty("revision").GetProperty("name").GetString(),
+                m.GetProperty("created").GetBoolean())).ToArray(), "The tool returns Power's members below it, marking the new ones.");
+        savedXml = await File.ReadAllTextAsync(created.Path, token);
+        var refinedGraph = RecursiveBlockGraphXml.Read(savedXml); var refinedLinks = refinedGraph.Connections(refinedGraph.SelectedRoot.BlockId);
+        var powerRefined = refinedLinks.Inspect(AgentLink(refinedGraph, power));
+        CollectionAssert.AreEqual(new[] { usbPower, usbData }, powerRefined.Members.Select(m => m.ConnectionId).ToArray());
+        CollectionAssert.AreEqual(powerBefore.Members.ToArray(), refinedLinks.Inspect(powerRefined.Members[0]).Members.ToArray(),
+            "VBUS and GND keep their exact saved revisions inside the USB power group.");
+        foreach (var kept in powerBefore.Members)
+            Assert.AreEqual(entryLinks.Requirements(kept), refinedLinks.Requirements(kept), "A kept signal keeps its requirement history.");
+        Assert.AreEqual(new DiagramRequirements("", "", "Route D+ and D- as one matched pair."), refinedLinks.Requirements(powerRefined.Members[1]).Requirements);
+        Assert.AreEqual("usb-interface-notes", refinedLinks.Inspect(powerRefined.Members[1]).Origin.Sources.Single().DocumentId,
+            "The new member records the agent's source.");
+        Assert.AreEqual(entryLinks.Requirements(powerBefore.Selection).Requirements, refinedLinks.Requirements(powerRefined.Selection).Requirements,
+            "Power's own requirement fields are unchanged.");
+        await Reloaded("agent-refined-members", refinedMembers, power, s => Signals(s).SequenceEqual(["USB power", "USB data"])
+            && Details(s).SequenceEqual(["signals", "direction", "domain", "type"]));
         Key("w", control: true); await Closed();
         Assert.AreEqual(savedXml, await File.ReadAllTextAsync(created.Path, token));
+    }
+
+    /// <summary>The row the editor's field-history list shows for an entry saved before the viewed implementation's saved
+    /// text (never the saved row): the name of the implementation it was saved in when that is not the viewed one, in the
+    /// implementation selector's "name · version" form, then its author.</summary>
+    private static string HistoryRowLabel(Func<Guid, (Guid State, string Name)> implementationOf, DiagramFieldHistoryEntry entry, Guid viewedState)
+    {
+        string name = HistoryRowName(implementationOf, entry, viewedState);
+        return (name.Length == 0 ? "" : name + " · ") + "v" + entry.ContextVersion.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            + " · " + entry.Origin.Actor;
+    }
+
+    /// <summary>The name a field-history row leads with: the implementation the entry was saved in when that is not the
+    /// viewed one; empty otherwise.</summary>
+    private static string HistoryRowName(Func<Guid, (Guid State, string Name)> implementationOf, DiagramFieldHistoryEntry entry, Guid viewedState)
+    {
+        var (state, implementation) = implementationOf(entry.ContextRevisionId);
+        return state == viewedState ? "" : implementation;
+    }
+
+    /// <summary>Mockup audit M1-3 in the editor's own history dialog: the list shows every row with its version and author
+    /// whole, as the approved rows read "v2 · User"; a row too wide for the list shortens only the leading name of the earlier
+    /// implementation it was saved in (<paramref name="names"/>, one per row).</summary>
+    private static void VerifyShownHistoryRows(P.FieldHistoryViewState history, IReadOnlyList<string> names, string step)
+    {
+        Assert.HasCount(history.RowLabels.Count, history.ShownRowLabels, step + ": the list shows every loaded row.");
+        Assert.HasCount(history.RowLabels.Count, names, step + ": one name per row.");
+        for (int row = 0; row < history.RowLabels.Count; ++row)
+            Assert.IsTrue(NativeFieldHistoryTests.IsShownHistoryRow(history.RowLabels[row], names[row], history.ShownRowLabels[row]),
+                $"{step}: row {row} reads '{history.ShownRowLabels[row]}': '{history.RowLabels[row]}' whole, or with only '{names[row]}' shortened.");
+    }
+
+    /// <summary>The implementation (its identity and name) a block revision was saved in.</summary>
+    private static Func<Guid, (Guid State, string Name)> Contexts(RecursiveBlockGraph graph) => revision =>
+    {
+        Guid state = graph.Revisions.Single(r => r.Selection.RevisionId == revision).Selection.StateId;
+        return (state, graph.States.Single(s => s.Id == state).Name);
+    };
+
+    /// <summary>The implementation (its identity and name) a connection or member revision was saved in.</summary>
+    private static Func<Guid, (Guid State, string Name)> Contexts(DiagramConnectionArchive archive) => revision =>
+    {
+        Guid state = archive.Revisions.Single(r => r.Selection.RevisionId == revision).Selection.StateId;
+        return (state, archive.States.Single(s => s.Id == state).Name);
+    };
+
+    /// <summary>Ledger pa48933d0fe0a5c2f through production MCP servers sharing one state directory and the live instance: an agent
+    /// records a prompt with a preserved attachment for the CPU level, reads its context and publishes a proposal, but that call
+    /// is cancelled in flight and its server ends. A new server reattaches the saved instance; the context is unchanged, the
+    /// operation's receipt is inspected (and resumed if it was interrupted), and repeating the same operation returns the one
+    /// recorded candidate. Choosing it is cancelled the same way, and after another reattachment the repeated choice returns its
+    /// recorded outcome. Exactly one input, one candidate and one new root revision exist at the end.</summary>
+    private static async Task VerifyAgentReattachment(NativeClient native, string stateRoot, string source, string project, Guid documentId,
+        Guid cpuBlockId, string instanceId, string evidence, CancellationToken token)
+    {
+        var arguments = new Dictionary<string, object?> { ["instanceId"] = instanceId, ["repositoryRoot"] = project,
+            ["sourcePath"] = source, ["documentId"] = documentId.ToString("D") };
+        var record = new List<object>();
+        static JsonElement Data(ModelContextProtocol.Protocol.CallToolResult result) => JsonSerializer.SerializeToElement(result).GetProperty("structuredContent");
+        async Task<JsonElement> Call(McpClient agent, string tool, Dictionary<string, object?> request, string label)
+        {
+            var result = await agent.CallToolAsync(tool, request, cancellationToken: token);
+            record.Add(new { label, tool, result = Data(result) });
+            Assert.IsFalse(result.IsError == true, label + ": " + Data(result).GetRawText());
+            return Data(result);
+        }
+        // A call the agent abandons while the server is carrying it out: the agent cancels as soon as the operation's first
+        // recorded phase appears in the server's state directory (the server has started it and has not answered yet), not after
+        // a fixed delay that a fast server could beat. The server is told to cancel it, and the answer, if any, is never used.
+        async Task<string> Cancelled(McpClient agent, string tool, Dictionary<string, object?> request, Guid operation, string label)
+        {
+            string started = Path.Combine(stateRoot, "block-proposal-operations", operation.ToString("N") + ".json");
+            using var abandon = CancellationTokenSource.CreateLinkedTokenSource(token);
+            var call = agent.CallToolAsync(tool, request, cancellationToken: abandon.Token).AsTask();
+            using (var waiting = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                waiting.CancelAfter(TimeSpan.FromSeconds(30));
+                while (!File.Exists(started) && !call.IsCompleted) await Task.Delay(1, waiting.Token);
+            }
+            abandon.Cancel();
+            string outcome;
+            try { var result = await call; outcome = result.IsError == true ? "refused: " + Data(result).GetRawText() : "answered"; }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested) { outcome = "cancelled"; }
+            record.Add(new { label, tool, outcome });
+            Assert.AreEqual("cancelled", outcome, label + ": the agent must abandon the call before its answer arrives, or this step proves no cancellation.");
+            return outcome;
+        }
+        // Which of the three server-side outcomes of a cancelled call ran is recorded as evidence (serverBranch): the operation had not
+        // started (no receipt), was interrupted between its recorded phases (resumed from its receipt) or completed before the cancel
+        // arrived (published receipt). Process death at each phase is proved by BlockProposalInterruptionTests and
+        // BlockProposalSelectionInterruptionTests; this journey proves the repeat over the production server for the branch that ran.
+        async Task<JsonElement> Receipt(McpClient agent, Guid operation, string label, bool afterCancel)
+        {
+            var inspected = await agent.CallToolAsync("kicad_diagram_proposal_publication", new Dictionary<string, object?>
+                { ["instanceId"] = instanceId, ["expectedInstanceEpoch"] = native.Epoch, ["operationId"] = operation }, cancellationToken: token);
+            record.Add(new { label, tool = "kicad_diagram_proposal_publication", result = Data(inspected) });
+            if (inspected.IsError == true)
+            {
+                Assert.AreEqual("missing_block_proposal_receipt", Data(inspected).GetProperty("code").GetString(), label);
+                if (afterCancel) record.Add(new { label, serverBranch = "not started: no receipt" });
+                return default;
+            }
+            var receipt = Data(inspected).GetProperty("receipt");
+            string stage = receipt.GetProperty("stage").GetString()!;
+            if (stage == "Published")
+            {
+                // Which branch ran is recorded only for a receipt read after a cancelled call.
+                if (afterCancel) record.Add(new { label, serverBranch = "completed before the cancel arrived: published receipt" });
+                return receipt;
+            }
+            // An operation interrupted between its recorded phases is completed from its receipt, never repeated as a new write.
+            var resumed = await Call(agent, "kicad_diagram_proposal_publication_resume", new Dictionary<string, object?>(arguments)
+                { ["expectedInstanceEpoch"] = native.Epoch, ["operationId"] = operation }, label + " resume");
+            Assert.AreNotEqual("NeedsReview", resumed.GetProperty("recovery").GetProperty("disposition").GetString(), label);
+            if (afterCancel) record.Add(new { label, serverBranch = "interrupted at " + stage + ": resumed from its receipt" });
+            return Data(await agent.CallToolAsync("kicad_diagram_proposal_publication", new Dictionary<string, object?>
+                { ["instanceId"] = instanceId, ["expectedInstanceEpoch"] = native.Epoch, ["operationId"] = operation }, cancellationToken: token)).GetProperty("receipt");
+        }
+        async Task<McpClient> Server()
+        {
+            string configuration = new DirectoryInfo(AppContext.BaseDirectory).Parent!.Name;
+            return await McpClient.CreateAsync(new StdioClientTransport(new StdioClientTransportOptions
+            {
+                Command = "dotnet", Arguments = [Path.Combine(FindRoot(), "automation", "src", "KiCad.Automation.Mcp", "bin", configuration, "net10.0", "kicad-mcp.dll")],
+                EnvironmentVariables = new Dictionary<string, string?> { ["KICAD_AUTOMATION_STATE_DIRECTORY"] = stateRoot }
+            }), cancellationToken: token);
+        }
+        async Task Reattach(McpClient agent, string label)
+        {
+            var reattached = await Call(agent, "kicad_instance_reattach", new Dictionary<string, object?> { ["instanceId"] = instanceId }, label);
+            Assert.AreEqual(instanceId, reattached.GetProperty("instanceId").GetString(), label + ": the saved instance.");
+        }
+        var before = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token)); string beforeToken = await FileToken(source, token);
+        var cpu = before.Inspect(before.SelectedRoot).Children.Single(c => c.BlockId == cpuBlockId);
+        byte[] notes = System.Text.Encoding.UTF8.GetBytes("Hand notes: keep the CPU power entry on the left edge.\n");
+        await File.WriteAllBytesAsync(Path.Combine(project, "cpu-hand-notes.md"), notes, token);
+        Guid publishOperation = Guid.NewGuid(), selectOperation = Guid.NewGuid(), chosenRootRevision = Guid.NewGuid();
+        DiagramRefinementInput input; BlockProposal proposal; string contextSha, inputToken; Dictionary<string, object?> publish, select; int publishedRevisions;
+        await using (var agent = await Server())
+        {
+            var attached = await Call(agent, "kicad_instance_attach", new Dictionary<string, object?> { ["endpoint"] = native.Endpoint, ["expectedInstanceId"] = instanceId }, "agent attach");
+            Assert.AreEqual(instanceId, attached.GetProperty("instanceId").GetString());
+            var asset = await Call(agent, "kicad_diagram_refinement_asset_capture", new Dictionary<string, object?>(arguments)
+            {
+                ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = beforeToken, ["attachmentPath"] = "cpu-hand-notes.md",
+                ["archiveDirectory"] = "assets/refinement", ["attachmentId"] = Guid.NewGuid(),
+                ["expectedSha256"] = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(notes)), ["expectedByteCount"] = notes.LongLength,
+                ["mediaType"] = "text/markdown"
+            }, "attachment");
+            input = new DiagramRefinementInput(Guid.NewGuid(), documentId, beforeToken, [before.SelectedRoot, cpu], [],
+                "Split the CPU supply into core and I/O rails; values are still unknown.", RecursiveBlockFixture.Origin(),
+                [asset.GetProperty("attachment").Deserialize<DiagramRefinementAttachment>(AgentJson)!]);
+            var recorded = await Call(agent, "kicad_diagram_refinement_input_record", new Dictionary<string, object?>(arguments)
+            {
+                ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = beforeToken,
+                ["input"] = JsonSerializer.SerializeToElement(input, new JsonSerializerOptions(JsonSerializerDefaults.Web))
+            }, "record input");
+            Assert.IsTrue(recorded.GetProperty("added").GetBoolean());
+            inputToken = recorded.GetProperty("sourceToken").GetString()!;
+            var withInput = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            var context = await AgentContextOverMcp(agent, arguments, inputToken, token, inputId: input.Id);
+            AssertAgentContext(context, withInput, input.BlockPath, input, current: true, "reattachment input");
+            contextSha = context.GetProperty("contextSha256").GetString()!;
+            proposal = RecursiveBlockProposalTests.CreateFor(withInput, input);
+            proposal = proposal with { Blocks = proposal.Blocks.SetItem(0, proposal.Blocks[0] with { ImplementationName = "Reattached agent proposal" }) };
+            publish = new Dictionary<string, object?>(arguments)
+            {
+                ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = inputToken, ["operationId"] = publishOperation,
+                ["proposalJson"] = JsonSerializer.SerializeToElement(proposal, new JsonSerializerOptions(JsonSerializerDefaults.Web))
+            };
+            await Cancelled(agent, "kicad_diagram_proposal_publish", publish, publishOperation, "cancelled publication");
+        }
+        string afterPublishToken;
+        await using (var agent = await Server())
+        {
+            await Reattach(agent, "reattach after cancelled publication");
+            var context = await AgentContextOverMcp(agent, arguments, await FileToken(source, token), token, inputId: input.Id);
+            Assert.AreEqual(contextSha, context.GetProperty("contextSha256").GetString(), "The reattached agent reads the same context.");
+            Assert.AreEqual(native.Epoch, context.GetProperty("instanceEpoch").GetString(), "The reattached server speaks to the same live process.");
+            var receipt = await Receipt(agent, publishOperation, "publication receipt after reattachment", afterCancel: true);
+            bool completed = receipt.ValueKind == JsonValueKind.Object;
+            var repeated = await Call(agent, "kicad_diagram_proposal_publish", publish, "repeated publication");
+            Assert.AreEqual(!completed, repeated.GetProperty("added").GetBoolean(), "A publication the receipt records is returned, not repeated.");
+            Assert.AreEqual(proposal.Id, repeated.GetProperty("proposal").GetProperty("id").GetGuid());
+            Assert.AreEqual("Published", repeated.GetProperty("publication").GetProperty("stage").GetString());
+            afterPublishToken = await FileToken(source, token);
+            if (completed) Assert.AreEqual(receipt.GetProperty("afterSha256").GetString(), afterPublishToken);
+            var again = await Call(agent, "kicad_diagram_proposal_publish", publish, "publication repeated again");
+            Assert.IsFalse(again.GetProperty("added").GetBoolean());
+            Assert.AreEqual(afterPublishToken, await FileToken(source, token), "Repeating the operation writes nothing.");
+            var reRecorded = await Call(agent, "kicad_diagram_refinement_input_record", new Dictionary<string, object?>(arguments)
+            {
+                ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = afterPublishToken,
+                ["input"] = JsonSerializer.SerializeToElement(input, new JsonSerializerOptions(JsonSerializerDefaults.Web))
+            }, "input recorded again");
+            Assert.IsFalse(reRecorded.GetProperty("added").GetBoolean(), "Repeating the input records nothing new.");
+            var published = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            Assert.AreEqual(1, published.RefinementInputs.Count(i => i.Id == input.Id));
+            Assert.AreEqual(1, published.Proposals.Count(p => p.Id == proposal.Id));
+            Assert.AreEqual(1, published.States.Count(s => s.Id == proposal.Candidate.StateId));
+            Assert.HasCount(before.States.Length + proposal.Blocks.Length, published.States, "One implementation per proposed block, once.");
+            Assert.HasCount(before.Revisions.Length + proposal.Blocks.Length + proposal.Blocks.Count(b => b.BasedOn is not null), published.Revisions,
+                "One revision per proposed block and one copy of the refined block's base, once.");
+            Assert.AreEqual(before.SelectedRoot, published.SelectedRoot, "Publishing does not choose.");
+            publishedRevisions = published.Revisions.Length;
+            select = new Dictionary<string, object?>(arguments)
+            {
+                ["expectedInstanceEpoch"] = native.Epoch, ["expectedSourceToken"] = afterPublishToken, ["proposalId"] = proposal.Id,
+                ["expectedRoot"] = published.SelectedRoot, ["currentPath"] = new[] { published.SelectedRoot, cpu },
+                ["ancestorRevisionIds"] = new[] { chosenRootRevision }, ["operationId"] = selectOperation, ["actor"] = "Reattaching agent fixture"
+            };
+            await Cancelled(agent, "kicad_diagram_proposal_select", select, selectOperation, "cancelled choice");
+        }
+        await using (var agent = await Server())
+        {
+            await Reattach(agent, "reattach after cancelled choice");
+            var receipt = await Receipt(agent, selectOperation, "choice receipt after reattachment", afterCancel: true);
+            bool completed = receipt.ValueKind == JsonValueKind.Object;
+            var repeated = await Call(agent, "kicad_diagram_proposal_select", select, "repeated choice");
+            Assert.AreEqual(completed, repeated.GetProperty("recorded").GetBoolean(), "A choice the receipt records is returned, not made again.");
+            string chosenToken = await FileToken(source, token);
+            Assert.AreEqual(chosenToken, repeated.GetProperty("sourceToken").GetString());
+            var again = await Call(agent, "kicad_diagram_proposal_select", select, "choice repeated again");
+            Assert.IsTrue(again.GetProperty("recorded").GetBoolean(), "The repeated choice returns its recorded outcome.");
+            Assert.IsTrue(again.GetProperty("stillCurrent").GetBoolean());
+            Assert.AreEqual(chosenToken, again.GetProperty("sourceToken").GetString());
+            Assert.AreEqual(chosenToken, await FileToken(source, token), "Repeating the choice writes nothing.");
+            var chosen = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(source, token));
+            var root = new BlockSelection(before.SelectedRoot.BlockId, before.SelectedRoot.StateId, chosenRootRevision);
+            Assert.AreEqual(root, chosen.SelectedRoot);
+            Assert.AreEqual(root, again.GetProperty("selectedRoot").Deserialize<BlockSelection>(AgentJson));
+            Assert.AreEqual(proposal.Candidate, chosen.Inspect(root).Children.Single(c => c.BlockId == cpuBlockId));
+            Assert.HasCount(publishedRevisions + 1, chosen.Revisions, "Choosing adds exactly one root revision, once.");
+            Assert.AreEqual(before.SelectedRoot.RevisionId, chosen.Inspect(root).ParentRevisionId);
+            Assert.AreEqual(1, chosen.Proposals.Count(p => p.Id == proposal.Id)); Assert.AreEqual(1, chosen.RefinementInputs.Count(i => i.Id == input.Id));
+            var receiptAfter = await Receipt(agent, selectOperation, "choice receipt at the end", afterCancel: false);
+            Assert.AreEqual(chosenToken, receiptAfter.GetProperty("afterSha256").GetString());
+            // The input's context is still the same after the choice; its level is now the replaced implementation.
+            var context = await AgentContextOverMcp(agent, arguments, chosenToken, token, inputId: input.Id);
+            Assert.AreEqual(contextSha, context.GetProperty("contextSha256").GetString());
+            Assert.IsFalse(context.GetProperty("current").GetBoolean());
+            var compared = await Call(agent, "kicad_diagram_proposal_compare", new Dictionary<string, object?>(arguments)
+                { ["expectedSourceToken"] = chosenToken, ["proposalId"] = proposal.Id }, "comparison after the choice");
+            var afterChoice = compared.GetProperty("comparison");
+            Assert.IsTrue(afterChoice.GetProperty("candidateSelected").GetBoolean()); Assert.IsTrue(afterChoice.GetProperty("candidateAdopted").GetBoolean());
+            Assert.IsFalse(afterChoice.GetProperty("stale").GetBoolean());
+            Assert.AreEqual(0, afterChoice.GetProperty("currentChanges").GetArrayLength(), "The chosen proposal's changes are not today's changes.");
+            Assert.AreEqual(0, afterChoice.GetProperty("changedOnBothSides").GetArrayLength());
+            Assert.AreNotEqual(0, afterChoice.GetProperty("proposalChanges").GetArrayLength());
+        }
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-agent-reattachment.json"), JsonSerializer.Serialize(record, AgentJson), token);
+    }
+
+    private static readonly JsonSerializerOptions AgentJson = new(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } };
+
+    private static async Task<string> FileToken(string path, CancellationToken token) =>
+        Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(path, token)));
+
+    /// <summary>An agent's context read through the production MCP server (<c>kicad_diagram_agent_context</c>, ledger
+    /// pa48933d0fe0a5c2f), by original input, by root-to-level path, or both; with <paramref name="expectError"/> the refusal code.</summary>
+    private static async Task<JsonElement> AgentContextOverMcp(McpClient client, IReadOnlyDictionary<string, object?> arguments, string sourceToken,
+        CancellationToken token, Guid? inputId = null, BlockSelection[]? blockPath = null, string? expectError = null)
+    {
+        var request = new Dictionary<string, object?>(arguments) { ["expectedSourceToken"] = sourceToken };
+        if (inputId is { } id) request["inputId"] = id;
+        if (blockPath is not null) request["blockPath"] = blockPath;
+        var result = await client.CallToolAsync("kicad_diagram_agent_context", request, cancellationToken: token);
+        var data = JsonSerializer.SerializeToElement(result).GetProperty("structuredContent");
+        if (expectError is null) Assert.IsFalse(result.IsError == true, data.GetRawText());
+        else
+        {
+            Assert.IsTrue(result.IsError == true, "The context request must be refused with " + expectError + ": " + data.GetRawText());
+            Assert.AreEqual(expectError, data.GetProperty("code").GetString(), data.GetRawText());
+        }
+        return data;
+    }
+
+    /// <summary>The context names exactly the saved level: the path by exact revision, the level's block and direct children with
+    /// their three fields and ports, every connection and member with its fields, every comment of the level as element or
+    /// free-space comment, the input's prompt and attachments, and today's position of the level. Expectations are read from the
+    /// saved file through the model.</summary>
+    private static void AssertAgentContext(JsonElement data, RecursiveBlockGraph graph, IReadOnlyList<BlockSelection> path,
+        DiagramRefinementInput? input, bool current, string step)
+    {
+        var context = data.GetProperty("context");
+        Assert.AreEqual(1, context.GetProperty("version").GetInt32(), step);
+        Assert.AreEqual(graph.DocumentId, context.GetProperty("documentId").GetGuid(), step);
+        Assert.AreEqual(current, data.GetProperty("current").GetBoolean(), step + ": whether the level is on today's design.");
+        Assert.AreEqual(graph.SelectedRoot, data.GetProperty("selectedRoot").Deserialize<BlockSelection>(AgentJson), step);
+        CollectionAssert.AreEqual(BlockProposalCompiler.FindPath(graph, path[^1].BlockId).ToArray(),
+            data.GetProperty("currentPath").Deserialize<BlockSelection[]>(AgentJson), step + ": today's path to the level.");
+        StringAssert.Matches(data.GetProperty("contextSha256").GetString(), new System.Text.RegularExpressions.Regex("^[0-9a-f]{64}$"), step);
+        var levels = context.GetProperty("path").EnumerateArray().ToArray();
+        CollectionAssert.AreEqual(path.ToArray(), levels.Select(l => l.GetProperty("selection").Deserialize<BlockSelection>(AgentJson)).ToArray(), step + ": the exact path.");
+        foreach (var (level, selection) in levels.Zip(path)) Assert.AreEqual(graph.Inspect(selection).Name, level.GetProperty("name").GetString(), step);
+        // Today's implementation names are beside the context, where a rename can change them without changing the context.
+        var implementations = data.GetProperty("implementations").EnumerateArray().ToDictionary(i => i.GetProperty("stateId").GetGuid(),
+            i => (Owner: i.GetProperty("ownerId").GetGuid(), Name: i.GetProperty("name").GetString()!, Archived: i.GetProperty("archived").GetBoolean()));
+        foreach (var selection in path.Concat(graph.Inspect(path[^1]).Children))
+        {
+            var state = graph.States.Single(s => s.Id == selection.StateId);
+            Assert.AreEqual((state.BlockId, state.Name, state.Archived), implementations[selection.StateId], step + ": today's implementation name.");
+        }
+        void Block(JsonElement block, BlockSelection selection)
+        {
+            var revision = graph.Inspect(selection); var fields = graph.Requirements(selection);
+            Assert.AreEqual(selection, block.GetProperty("selection").Deserialize<BlockSelection>(AgentJson), step);
+            Assert.IsFalse(block.TryGetProperty("implementation", out _), step + ": a renameable name is not part of the context.");
+            Assert.AreEqual(revision.Name, block.GetProperty("name").GetString(), step);
+            Assert.AreEqual(fields.RevisionId, block.GetProperty("requirementRevisionId").GetGuid(), step + ": the fields' exact requirement revision.");
+            Assert.AreEqual(fields.Requirements, block.GetProperty("requirements").Deserialize<DiagramRequirements>(AgentJson), step + ": General, Schematic and Routing.");
+            CollectionAssert.AreEqual(revision.LocalDiagram.Interfaces.Select(i => (i.Id, i.Name)).ToArray(),
+                block.GetProperty("interfaces").EnumerateArray().Select(i => (i.GetProperty("id").GetGuid(), i.GetProperty("name").GetString()!)).ToArray(), step + ": boundary ports.");
+            Assert.AreEqual(revision.Children.Length, block.GetProperty("childCount").GetInt32(), step);
+            Assert.AreEqual(revision.LocalDiagram.Connections.Length, block.GetProperty("connectionCount").GetInt32(), step);
+            Assert.IsTrue(revision.EffectiveComponentBindings.SameContents(block.GetProperty("componentBindings").Deserialize<BlockComponentBindings>(AgentJson)!), step);
+        }
+        var scope = graph.Inspect(path[^1]);
+        Block(context.GetProperty("block"), path[^1]);
+        var children = context.GetProperty("children").EnumerateArray().ToArray();
+        Assert.HasCount(scope.Children.Length, children, step + ": the direct children.");
+        foreach (var (child, selection) in children.Zip(scope.Children)) Block(child, selection);
+        var links = context.GetProperty("connections").EnumerateArray().ToArray();
+        if (scope.LocalDiagram.Connections.IsEmpty) Assert.IsEmpty(links, step);
+        else
+        {
+            var archive = graph.Connections(path[^1].BlockId);
+            var walked = archive.Walk(scope.LocalDiagram.Connections);
+            CollectionAssert.AreEqual(walked.ToArray(), links.Select(l => l.GetProperty("selection").Deserialize<ConnectionSelection>(AgentJson)).ToArray(),
+                step + ": every connection and member by exact revision.");
+            var parents = walked.SelectMany(w => archive.Inspect(w).Members.Select(m => (m.ConnectionId, Parent: w.ConnectionId))).ToDictionary(p => p.ConnectionId, p => p.Parent);
+            foreach (var (link, selection) in links.Zip(walked))
+            {
+                var fields = archive.Requirements(selection);
+                Assert.AreEqual(fields.RevisionId, link.GetProperty("requirementRevisionId").GetGuid(), step);
+                Assert.AreEqual(fields.Requirements, link.GetProperty("requirements").Deserialize<DiagramRequirements>(AgentJson), step + ": a connection's three fields.");
+                Assert.AreEqual(archive.Inspect(selection).Name, link.GetProperty("name").GetString(), step);
+                var linkState = archive.States.Single(s => s.Id == selection.StateId);
+                Assert.AreEqual((linkState.ConnectionId, linkState.Name, false), implementations[selection.StateId], step);
+                Assert.AreEqual(parents.TryGetValue(selection.ConnectionId, out var parent) ? parent : null,
+                    link.TryGetProperty("parentConnectionId", out var named) ? named.GetGuid() : (Guid?)null, step + ": the grouping connection.");
+            }
+        }
+        var comments = context.GetProperty("comments").EnumerateArray().ToArray();
+        CollectionAssert.AreEqual(scope.LocalDiagram.Notes.Select(n => (n.Id, n.Text, n.Target.Kind == DiagramAnnotationTargetKind.Canvas ? "FreeSpace" : "Element")).ToArray(),
+            comments.Select(c => (c.GetProperty("comment").GetProperty("id").GetGuid(), c.GetProperty("comment").GetProperty("text").GetString()!,
+                c.GetProperty("placement").GetString()!)).ToArray(), step + ": every comment of the level, on an element or in free space.");
+        if (input is null) Assert.IsFalse(context.TryGetProperty("input", out _), step + ": no input was named.");
+        else
+        {
+            var original = context.GetProperty("input");
+            Assert.AreEqual(input.Id, original.GetProperty("id").GetGuid(), step);
+            Assert.AreEqual(input.Prompt, original.GetProperty("prompt").GetString(), step + ": the prompt exactly as given.");
+            Assert.AreEqual(input.SourceSha256, original.GetProperty("sourceSha256").GetString(), step);
+            CollectionAssert.AreEqual(input.BlockPath.ToArray(), original.GetProperty("blockPath").Deserialize<BlockSelection[]>(AgentJson), step);
+            var attachments = original.GetProperty("attachments").EnumerateArray().ToArray();
+            CollectionAssert.AreEqual(input.Attachments.Select(a => (a.Id, a.AssetPath, a.ContentSha256, a.ByteCount, a.MediaType, a.OriginalName)).ToArray(),
+                attachments.Select(a => (a.GetProperty("id").GetGuid(), a.GetProperty("assetPath").GetString()!, a.GetProperty("contentSha256").GetString()!,
+                    a.GetProperty("byteCount").GetInt64(), a.GetProperty("mediaType").GetString()!, a.GetProperty("originalName").GetString()!)).ToArray(),
+                step + ": attachment references.");
+            var assets = data.GetProperty("assets").EnumerateArray().ToArray();
+            Assert.HasCount(input.Attachments.Length, assets, step);
+            Assert.IsTrue(assets.All(a => a.GetProperty("status").GetString() == "Available"), step + ": every preserved attachment is intact: " + data.GetProperty("assets").GetRawText());
+            CollectionAssert.AreEqual(path.Count == input.BlockPath.Length ? input.ConnectionPath.ToArray() : [],
+                context.GetProperty("focus").Deserialize<ConnectionSelection[]>(AgentJson), step + ": the input's focus.");
+        }
+    }
+
+    private static string ChangeKey(IEnumerable<Guid> level, IEnumerable<Guid> links, DiagramHistoryChangeCategory category, Guid objectId,
+        DiagramRequirementField? field, string? aspect) => string.Join("/", level.Select(g => g.ToString("D"))) + "|"
+        + string.Join("/", links.Select(g => g.ToString("D"))) + "|" + category + "|" + objectId.ToString("D") + "|" + field + "|" + aspect;
+
+    private static string ChangeKey(JsonElement change) => string.Join("/", change.GetProperty("levelPath").EnumerateArray().Select(e => e.GetString())) + "|"
+        + string.Join("/", change.GetProperty("connectionPath").EnumerateArray().Select(e => e.GetString())) + "|" + change.GetProperty("category").GetString() + "|"
+        + change.GetProperty("objectId").GetString() + "|" + (change.TryGetProperty("field", out var field) ? field.GetString() : "") + "|"
+        + (change.TryGetProperty("aspect", out var aspect) ? aspect.GetString() : "");
+
+    /// <summary>One level's history changes as the comparison names them: a definition facet and a list's order are aspects.</summary>
+    private static (string Key, string Kind) LevelChange(IEnumerable<Guid> level, DiagramHistoryChange change) => (ChangeKey(level, [], change.Category, change.ObjectId,
+        change.Field, change.Kind == DiagramHistoryChangeKind.Reordered ? (change.Category == DiagramHistoryChangeCategory.Block ? "Children" : change.Category + "s")
+            : change.Category == DiagramHistoryChangeCategory.Definition ? change.Name : null), change.Kind.ToString());
+
+    /// <summary>A refusal from today's file: its token, the comparison, and one detail per change on each side and per element changed
+    /// on both, in the comparison's order.</summary>
+    private static void AssertRefusalComparison(JsonElement refusal, string label, string todayToken)
+    {
+        Assert.AreEqual(todayToken, refusal.GetProperty("sourceToken").GetString(), label + ": the comparison is made against today's file.");
+        Assert.AreEqual(JsonValueKind.Null, refusal.GetProperty("comparisonUnavailable").ValueKind, label + ": " + refusal.GetRawText());
+        var comparison = refusal.GetProperty("comparison");
+        var current = comparison.GetProperty("currentChanges").EnumerateArray().ToArray();
+        var proposed = comparison.GetProperty("proposalChanges").EnumerateArray().ToArray();
+        var both = comparison.GetProperty("changedOnBothSides").EnumerateArray().ToArray();
+        var details = refusal.GetProperty("details").EnumerateArray().ToArray();
+        CollectionAssert.AreEqual(current.Select(c => ("current_change", c.GetProperty("objectId").GetString(), c.GetProperty("levelPath").EnumerateArray().Last().GetString()))
+                .Concat(proposed.Select(c => ("proposal_change", c.GetProperty("objectId").GetString(), c.GetProperty("levelPath").EnumerateArray().Last().GetString())))
+                .Concat(both.Select(c => ("changed_on_both_sides", c.GetProperty("objectId").GetString(), c.GetProperty("levelPath").EnumerateArray().Last().GetString()))).ToArray(),
+            details.Select(d => (d.GetProperty("kind").GetString(), d.GetProperty("objectId").GetString(), d.GetProperty("scopeBlockId").GetString())).ToArray(),
+            label + ": one detail per changed element.");
+        var todayKeys = current.Select(ChangeKey).ToHashSet();
+        CollectionAssert.AreEqual(proposed.Where(p => todayKeys.Contains(ChangeKey(p))).Select(ChangeKey).ToArray(),
+            both.Select(ChangeKey).ToArray(), label + ": the elements changed on both sides.");
+    }
+
+    /// <summary>The comparison of a proposal made from <see cref="RecursiveBlockProposalTests.CreateFor"/> on the original input's root
+    /// with today's root. The proposal's side is exactly what that proposal changes; today's side matches, level by level, the saved
+    /// history comparison (the root's through the production kicad_diagram_history_compare, each changed child's through the model),
+    /// and names the root's native Routing save, its component choice and its physical allocation, which both sides changed where the
+    /// proposal did too.</summary>
+    private static async Task AssertStaleRootComparison(McpClient client, IReadOnlyDictionary<string, object?> arguments, string sourceToken,
+        JsonElement comparison, RecursiveBlockGraph graph, DiagramRefinementInput input, BlockProposal proposal, bool published, CancellationToken token)
+    {
+        var baseRoot = input.BlockPath[^1]; Guid root = baseRoot.BlockId; Guid[] level = [root];
+        Assert.AreEqual(published, comparison.GetProperty("published").GetBoolean());
+        Assert.IsTrue(comparison.GetProperty("stale").GetBoolean(), "Today's root is no longer the revision the proposal was built on.");
+        Assert.IsFalse(comparison.GetProperty("candidateSelected").GetBoolean());
+        Assert.AreEqual(proposal.Id, comparison.GetProperty("proposalId").GetGuid()); Assert.AreEqual(input.Id, comparison.GetProperty("inputId").GetGuid());
+        Assert.AreEqual(baseRoot, comparison.GetProperty("baseRevision").Deserialize<BlockSelection>(AgentJson));
+        Assert.AreEqual(proposal.Candidate, comparison.GetProperty("candidate").Deserialize<BlockSelection>(AgentJson));
+        CollectionAssert.AreEqual(new[] { graph.SelectedRoot }, comparison.GetProperty("currentPath").Deserialize<BlockSelection[]>(AgentJson));
+        // The proposal's side: its rewritten fields, the component choice it leaves out, its two new blocks and its new connection.
+        Assert.IsFalse(graph.Inspect(baseRoot).EffectiveComponentBindings.SameContents(BlockComponentBindings.Empty), "The base states components.");
+        var expected = new List<(string Key, string Kind)>();
+        var baseFields = graph.Requirements(baseRoot).Requirements;
+        foreach (var field in Enum.GetValues<DiagramRequirementField>())
+            if (baseFields.Get(field) != proposal.Blocks[0].Requirements.Get(field))
+                expected.Add((ChangeKey(level, [], DiagramHistoryChangeCategory.Requirement, root, field, null), "Changed"));
+        expected.Add((ChangeKey(level, [], DiagramHistoryChangeCategory.Definition, root, null, "Components"), "Changed"));
+        foreach (var block in proposal.Blocks.Where(b => b.BasedOn is null))
+            expected.Add((ChangeKey(level, [], DiagramHistoryChangeCategory.Block, block.Selection.BlockId, null, null), "Added"));
+        foreach (var link in proposal.Connections.Where(c => c.BasedOn is null))
+            expected.Add((ChangeKey(level, [], DiagramHistoryChangeCategory.Connection, link.Selection.ConnectionId, null, null), "Added"));
+        var proposed = comparison.GetProperty("proposalChanges").EnumerateArray().ToArray();
+        CollectionAssert.AreEquivalent(expected.Select(e => e.Key + "=" + e.Kind).ToArray(),
+            proposed.Select(c => ChangeKey(c) + "=" + c.GetProperty("kind").GetString()).ToArray(), "Exactly what the proposal changes.");
+        foreach (var block in proposal.Blocks.Where(b => b.BasedOn is null))
+            Assert.AreEqual(block.Selection.RevisionId, proposed.Single(c => c.GetProperty("objectId").GetGuid() == block.Selection.BlockId).GetProperty("afterRevisionId").GetGuid());
+        // Today's side, level by level.
+        var current = comparison.GetProperty("currentChanges").EnumerateArray().ToArray();
+        var today = graph.SelectedRoot;
+        Assert.AreEqual(baseRoot.StateId, today.StateId, "The root kept its implementation, so its saved history compares the two revisions.");
+        var history = await client.CallToolAsync("kicad_diagram_history_compare", new Dictionary<string, object?>(arguments)
+            { ["context"] = today, ["inspected"] = baseRoot, ["expectedSourceToken"] = sourceToken }, cancellationToken: token);
+        Assert.IsFalse(history.IsError == true, JsonSerializer.Serialize(history));
+        var saved = P.DiagramHistoryComparisonData.Parser.ParseJson(JsonSerializer.SerializeToElement(history).GetProperty("structuredContent").GetProperty("comparison").GetRawText());
+        var rootChanges = saved.Changes.Select(c => LevelChange(level, new((DiagramHistoryChangeCategory)((int)c.Category - 1), (DiagramHistoryChangeKind)((int)c.Kind - 1),
+            Guid.Parse(c.ObjectId), c.Name, c.Field == P.RequirementFieldKind.RfkUnknown ? null : (DiagramRequirementField)((int)c.Field - 1)))).ToArray();
+        CollectionAssert.AreEquivalent(rootChanges.Select(c => c.Key + "=" + c.Kind).ToArray(),
+            current.Where(c => c.GetProperty("levelPath").GetArrayLength() == 1 && c.GetProperty("connectionPath").GetArrayLength() == 0)
+                .Select(c => ChangeKey(c) + "=" + c.GetProperty("kind").GetString()).ToArray(), "Today's root level is its saved history comparison.");
+        var baseChildren = graph.Inspect(baseRoot).Children.ToDictionary(c => c.BlockId);
+        foreach (var child in graph.Inspect(today).Children.Where(c => baseChildren.TryGetValue(c.BlockId, out var was) && was != c))
+        {
+            Guid[] childLevel = [root, child.BlockId];
+            var changed = current.Single(c => c.GetProperty("levelPath").GetArrayLength() == 1 && c.GetProperty("category").GetString() == "Block"
+                && c.GetProperty("objectId").GetGuid() == child.BlockId);
+            Assert.AreEqual("Changed", changed.GetProperty("kind").GetString());
+            Assert.AreEqual(baseChildren[child.BlockId].RevisionId, changed.GetProperty("beforeRevisionId").GetGuid());
+            Assert.AreEqual(child.RevisionId, changed.GetProperty("afterRevisionId").GetGuid());
+            CollectionAssert.AreEquivalent(DiagramHistoryQuery.Changes(graph, baseChildren[child.BlockId], child).Select(c => LevelChange(childLevel, c)).Select(c => c.Key + "=" + c.Kind).ToArray(),
+                current.Where(c => c.GetProperty("levelPath").GetArrayLength() == 2 && c.GetProperty("levelPath")[1].GetGuid() == child.BlockId
+                    && c.GetProperty("connectionPath").GetArrayLength() == 0).Select(c => ChangeKey(c) + "=" + c.GetProperty("kind").GetString()).ToArray(),
+                "A changed child's own level: " + child.BlockId);
+        }
+        // Every changed connection names what changed in it.
+        foreach (var link in current.Where(c => c.GetProperty("category").GetString() == "Connection" && c.GetProperty("kind").GetString() == "Changed"
+            && c.GetProperty("connectionPath").GetArrayLength() == 0))
+            Assert.IsTrue(current.Any(c => ChangeKey(c).StartsWith(string.Join("/", link.GetProperty("levelPath").EnumerateArray().Select(e => e.GetString())) + "|"
+                + link.GetProperty("objectId").GetString(), StringComparison.Ordinal)), "The parts of changed connection " + link.GetProperty("objectId").GetString());
+        string[] todayKeys = [.. current.Select(c => ChangeKey(c) + "=" + c.GetProperty("kind").GetString())];
+        CollectionAssert.Contains(todayKeys, ChangeKey(level, [], DiagramHistoryChangeCategory.Requirement, root, DiagramRequirementField.Routing, null) + "=Changed",
+            "The native Routing save.");
+        CollectionAssert.Contains(todayKeys, ChangeKey(level, [], DiagramHistoryChangeCategory.Definition, root, null, "Components") + "=Changed", "The agent's component choice.");
+        CollectionAssert.Contains(todayKeys, ChangeKey(level, [], DiagramHistoryChangeCategory.PhysicalAllocation, root, null, null) + "=Changed", "The physical allocation.");
+        var both = comparison.GetProperty("changedOnBothSides").EnumerateArray().Select(ChangeKey).ToArray();
+        CollectionAssert.Contains(both, ChangeKey(level, [], DiagramHistoryChangeCategory.Definition, root, null, "Components"));
+        if (baseFields.Routing != proposal.Blocks[0].Requirements.Routing)
+            CollectionAssert.Contains(both, ChangeKey(level, [], DiagramHistoryChangeCategory.Requirement, root, DiagramRequirementField.Routing, null));
+        var todayKeySet = current.Select(ChangeKey).ToHashSet();
+        CollectionAssert.AreEqual(proposed.Where(p => todayKeySet.Contains(ChangeKey(p))).Select(ChangeKey).ToArray(), both, "Changed on both sides.");
+    }
+
+    /// <summary>A complete field history read through the production MCP server (<c>kicad_diagram_field_history</c>) for an
+    /// exact block revision, or for an exact connection or member of its level, page by page (at most 200 entries each)
+    /// until every entry is loaded. Every page must name the same saved context and total.</summary>
+    private static async Task<IReadOnlyList<JsonElement>> FieldHistoryOverMcp(McpClient client, Dictionary<string, object?> arguments,
+        BlockSelection block, string field, ConnectionSelection? connection, CancellationToken token)
+    {
+        var entries = new List<JsonElement>(); uint? total = null; string? context = null;
+        do
+        {
+            var request = new Dictionary<string, object?>(arguments)
+            {
+                ["blockId"] = block.BlockId.ToString("D"), ["stateId"] = block.StateId.ToString("D"), ["revisionId"] = block.RevisionId.ToString("D"),
+                ["field"] = field, ["offset"] = entries.Count, ["limit"] = 200
+            };
+            if (connection is not null)
+            {
+                request["connectionId"] = connection.ConnectionId.ToString("D"); request["connectionStateId"] = connection.StateId.ToString("D");
+                request["connectionRevisionId"] = connection.RevisionId.ToString("D");
+            }
+            var result = await client.CallToolAsync("kicad_diagram_field_history", request, cancellationToken: token);
+            var data = JsonSerializer.SerializeToElement(result);
+            Assert.IsFalse(result.IsError == true, "The field history read failed: " + data.GetRawText());
+            var page = data.GetProperty("structuredContent").GetProperty("history");
+            uint pageTotal = page.GetProperty("total").GetUInt32(); string pageContext = page.GetProperty("contextRevisionId").GetString()!;
+            Assert.AreEqual(total ?? pageTotal, pageTotal, "Every page reports the same total."); total = pageTotal;
+            Assert.AreEqual(context ?? pageContext, pageContext, "Every page belongs to the same saved context."); context = pageContext;
+            var rows = page.TryGetProperty("entries", out var list) ? list.EnumerateArray().ToArray() : Array.Empty<JsonElement>();
+            Assert.IsTrue(rows.Length > 0 || entries.Count == total, "A page before the end returns entries.");
+            entries.AddRange(rows);
+        }
+        while (entries.Count < total);
+        return entries;
+    }
+
+    /// <summary>Every entry of a field history read from the model, page by page (the query returns at most 200 per page).</summary>
+    private static List<DiagramFieldHistoryEntry> AllFieldEntries(Func<int, int, DiagramFieldHistoryPage> read)
+    {
+        var entries = new List<DiagramFieldHistoryEntry>(); DiagramFieldHistoryPage page;
+        do { page = read(entries.Count, 200); entries.AddRange(page.Entries); } while (page.HasMore);
+        return entries;
+    }
+
+    /// <summary>The newest field-history entry a published proposal adds for its target block (or for one connection it
+    /// refines): the agent's rewrite at version 2 of the proposed implementation (version 1 is its copy of the baseline),
+    /// with the proposal's origin, sources and the input and proposal it came from.</summary>
+    private static DiagramFieldHistoryEntry ProposedFieldEntry(BlockProposal proposal, DiagramRequirementField field, ProposedConnection? connection = null)
+    {
+        var origin = proposal.Origin with { InputIds = [.. proposal.Origin.InputIds.Append(proposal.InputId).Append(proposal.Id).Distinct()] };
+        if (connection is not null)
+            return new(connection.RequirementRevisionId, connection.Selection.RevisionId, 2, connection.Name, connection.Requirements.Get(field), origin, true);
+        var target = proposal.Blocks.Single(b => b.Selection == proposal.Candidate);
+        return new(target.RequirementRevisionId, proposal.Candidate.RevisionId, 2, target.Name, target.Requirements.Get(field), origin, true);
+    }
+
+    /// <summary>Asserts that an MCP field-history page lists exactly the expected entries, newest first: each entry's requirement
+    /// revision, saved context, the implementation it was saved in and its version there, the owner's name in that revision,
+    /// text, saved marker, author (kind, name and time), summary, every source statement and the linked inputs.</summary>
+    private static void AssertFieldHistory(IReadOnlyList<JsonElement> rows, IReadOnlyList<DiagramFieldHistoryEntry> expected, string what,
+        Func<Guid, (Guid State, string Name)> implementationOf)
+    {
+        Assert.HasCount(expected.Count, rows, what + ": " + string.Join(", ", rows.Take(3).Select(r => r.GetRawText())));
+        static string Optional(JsonElement row, string name) => row.TryGetProperty(name, out var value) ? value.ToString() : "";
+        for (int i = 0; i < expected.Count; ++i)
+        {
+            var row = rows[i]; var want = expected[i]; string at = $"{what}, entry {i}: {row.GetRawText()}";
+            Assert.AreEqual(want.RequirementRevisionId.ToString("D"), row.GetProperty("requirementRevisionId").GetString(), at);
+            Assert.AreEqual(want.ContextRevisionId.ToString("D"), row.GetProperty("contextRevisionId").GetString(), at);
+            Assert.AreEqual(want.ContextVersion.ToString(System.Globalization.CultureInfo.InvariantCulture), Optional(row, "contextVersion"), at);
+            // The name the block, connection or member had in that revision.
+            Assert.AreEqual(want.OwnerName, Optional(row, "ownerName"), at);
+            Assert.AreEqual(want.Text, Optional(row, "text"), at);
+            Assert.AreEqual(want.IsSavedText, row.TryGetProperty("isSavedText", out var saved) && saved.GetBoolean(), at);
+            // The implementation the entry was saved in, which for an earlier implementation's entry is not the requested one.
+            var (state, implementation) = implementationOf(want.ContextRevisionId);
+            Assert.AreEqual(state.ToString("D"), row.GetProperty("contextStateId").GetString(), at);
+            Assert.AreEqual(implementation, row.GetProperty("contextImplementation").GetString(), at);
+            var origin = row.GetProperty("origin");
+            // The complete author identity: whether a person, an agent, an import or the editor wrote it, who, and when.
+            Assert.AreEqual("DAK_" + want.Origin.ActorKind.ToString().ToUpperInvariant(), Optional(origin, "kind"), at);
+            Assert.AreEqual(want.Origin.Actor, origin.GetProperty("actor").GetString(), at);
+            Assert.AreEqual(want.Origin.RecordedAt, Google.Protobuf.JsonParser.Default.Parse<Google.Protobuf.WellKnownTypes.Timestamp>(
+                JsonSerializer.Serialize(origin.GetProperty("recordedAt").GetString())).ToDateTimeOffset(), at);
+            Assert.AreEqual(want.Origin.Summary, Optional(origin, "summary"), at);
+            CollectionAssert.AreEqual(want.Origin.InputIds.Select(id => id.ToString("D")).ToArray(),
+                origin.TryGetProperty("inputIds", out var inputs) ? inputs.EnumerateArray().Select(x => x.GetString()).ToArray() : Array.Empty<string>(), at);
+            // Each source statement exactly: its document, revision, page, table and part variant.
+            CollectionAssert.AreEqual(want.Origin.Sources.Select(s => string.Join("|", s.DocumentId, s.Revision,
+                    s.Page?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "", s.Table ?? "", s.PartVariant ?? "")).ToArray(),
+                origin.TryGetProperty("sources", out var sources) ? sources.EnumerateArray().Select(x => string.Join("|", Optional(x, "documentId"),
+                    Optional(x, "revision"), Optional(x, "page"), Optional(x, "table"), Optional(x, "partVariant"))).ToArray() : Array.Empty<string>(), at);
+        }
     }
 
     private static async Task CaptureRecursive(string display, string path, CancellationToken token)
@@ -4342,6 +6076,18 @@ public sealed partial class NativeSessionTests
         var stripDelete = Find("RecursiveToolDelete");
         var toolbar = shot.At(stripDelete.X + stripDelete.Width + 80, stripDelete.Y + stripDelete.Height / 2);
         string D(ValueTuple<byte, byte, byte> c) => CapturedWindow.Describe(c);
+
+        // Sketch 1 sets Delete apart from the drawing tools (design QA round 2, P3 4): the gap between Place port and Delete holds
+        // one thin line, drawn like the toolbar's own separator before Select.
+        var placePort = Find("RecursiveToolPlacePort"); var select = Find("RecursiveToolSelect");
+        int bandY = stripDelete.Y + stripDelete.Height / 4, bandHeight = stripDelete.Height / 2;
+        var beforeDelete = shot.InkRuns(placePort.X + placePort.Width, bandY, stripDelete.X - placePort.X - placePort.Width, bandHeight, toolbar, rows: false, minimum: 1.05);
+        var beforeSelect = shot.InkRuns(select.X - 12, bandY, 12, bandHeight, toolbar, rows: false, minimum: 1.05);
+        Assert.IsTrue(beforeDelete.Count == 1 && beforeDelete[0].Last - beforeDelete[0].First <= 1 && beforeSelect.Count == 1,
+            $"{step}: one thin separator stands between Place port and Delete ({beforeDelete.Count} runs of ink), as before Select ({beforeSelect.Count}).");
+        var deleteSeparator = shot.At(beforeDelete[0].First, bandY + bandHeight / 2); var selectSeparator = shot.At(beforeSelect[0].First, bandY + bandHeight / 2);
+        Assert.IsTrue(CapturedWindow.Distance(deleteSeparator, selectSeparator) <= 12,
+            $"{step}: the separator before Delete {D(deleteSeparator)} is drawn like the one before Select {D(selectSeparator)}.");
 
         // Strip: the active tool.
         var active = Find("RecursiveTool" + activeTool);
@@ -4426,6 +6172,12 @@ public sealed partial class NativeSessionTests
         var addCell = Find("DiagramPaletteAddBlock");
         Assert.IsEmpty(shot.InkRuns(selectCell.X + selectCell.Width / 2, selectCell.Y + selectCell.Height, 1, addCell.Y - selectCell.Y - selectCell.Height,
             surface, rows: true, minimum: 1.1), step + ": no divider between the tools.");
+        // The card's outline is quiet in both themes (design QA round 2, P3 9: the dark theme's was near-white, 8.4:1 on the canvas,
+        // against the light theme's 1.7:1): measured across the card's left edge beside Select.
+        var canvasColour = shot.At(at.CanvasWindowX + (int)at.CanvasPixelWidth - 12, at.CanvasWindowY + (int)at.CanvasPixelHeight - 12);
+        var outline = shot.MostContrasting(selectCell.X - 9, selectCell.Y + selectCell.Height / 2, 7, 1, canvasColour);
+        Assert.IsTrue(shot.Contrast("P3 9 palette outline on the canvas", outline, canvasColour) <= 3.5,
+            $"{step}: the palette's outline {D(outline)} is quiet on the canvas {D(canvasColour)}.");
     }
 
     /// <summary>Design QA P1-1, measured in one capture: the selected block's border and its handles' outlines stand 3:1 or
@@ -4456,7 +6208,8 @@ public sealed partial class NativeSessionTests
     }
 
     /// <summary>Design QA P2-5, from the paths the editor reports it drew: no two connections share a segment or an end point,
-    /// no end sits on a block's corner, and vertical legs that run beside each other keep at least 10 units apart.</summary>
+    /// no end sits on a block's corner, vertical legs that run beside each other keep at least 10 units apart, and so do level
+    /// runs that overlap (the formal QA asks for 8 pixels; the drawing journey's level is drawn at about a pixel per unit).</summary>
     private static void VerifyPathsApart(string step, (double X, double Y, double W, double H)[] blocks, params (double X, double Y)[][] paths)
     {
         static double Overlap(double a, double b, double c, double d) => Math.Max(0, Math.Min(Math.Max(a, b), Math.Max(c, d)) - Math.Max(Math.Min(a, b), Math.Min(c, d)));
@@ -4473,8 +6226,8 @@ public sealed partial class NativeSessionTests
                     for (int n = 1; n < b.Length; ++n)
                     {
                         var (p, q, r, t) = (a[m - 1], a[m], b[n - 1], b[n]);
-                        if (p.Y == q.Y && r.Y == t.Y && p.Y == r.Y)
-                            Assert.AreEqual(0.0, Overlap(p.X, q.X, r.X, t.X), $"{step}: two connections share part of a horizontal segment at y {p.Y}.");
+                        if (p.Y == q.Y && r.Y == t.Y && p.X != q.X && r.X != t.X && Overlap(p.X, q.X, r.X, t.X) > 0)
+                            Assert.IsTrue(Math.Abs(p.Y - r.Y) >= 10, $"{step}: horizontal legs at y {p.Y} and {r.Y} run beside each other less than 10 units apart.");
                         if (p.X == q.X && r.X == t.X && p.Y != q.Y && r.Y != t.Y && Overlap(p.Y, q.Y, r.Y, t.Y) > 0)
                             Assert.IsTrue(Math.Abs(p.X - r.X) >= 10, $"{step}: vertical legs at x {p.X} and {r.X} run beside each other less than 10 units apart.");
                     }
@@ -4483,48 +6236,82 @@ public sealed partial class NativeSessionTests
     }
 
     /// <summary>Design QA P2-5 on a level as an agent observes it (resolved_layout). Every leg leaves a block's left or right
-    /// edge, and an unplaced boundary port, along the edge for at least 20 units before it turns (rule F4c). No two connections
-    /// share or touch a horizontal run (on one height, overlapping or less than 10 units apart), unless both runs start at the
-    /// same end point (two connections from one port), and no two upright runs lie within 10 units of each other over heights
-    /// they share or meet at (rule F4a).</summary>
-    private static void VerifyRoutesClear(JsonElement layout, string step)
+    /// edge, and a boundary port on the level frame's left or right side (an unplaced one sits on the left), along the edge for
+    /// at least 20 units before it turns (rule F4c), and a block's top or bottom edge straight up or down for at least 20 units
+    /// (rule F4d), never along the block's outline; from a boundary port on the frame's top or bottom side it enters the level
+    /// straight down or up for at least 20 units. No two connections run beside each other (rule F4a): level runs on one height
+    /// that overlap or end less than 10 units apart, level runs less than 10 units apart in height that overlap (the formal QA
+    /// asks for 8 pixels, and the editor draws about a pixel per unit at its default size), or upright runs less than 10 units
+    /// apart over heights they share or meet at, unless both runs start at the same end point (two connections from one port).
+    /// A pair of connections named in <paramref name="unavoidable"/> may run beside each other only along the 20 units one of
+    /// them needs to leave its end: each such run lies within 20 units of an end on its height, and they total 20 units at
+    /// most.</summary>
+    private static void VerifyRoutesClear(JsonElement layout, string step, params (string First, string Second)[] unavoidable)
     {
         static decimal Unit(JsonElement value) => decimal.Parse(value.GetString()!, System.Globalization.CultureInfo.InvariantCulture);
         var blocks = layout.GetProperty("blocks").EnumerateArray().Select(b => b.GetProperty("rect"))
             .Select(r => (X: Unit(r.GetProperty("x")), Y: Unit(r.GetProperty("y")), W: Unit(r.GetProperty("width")), H: Unit(r.GetProperty("height")))).ToArray();
-        var boundary = layout.GetProperty("ports").EnumerateArray()
-            .Where(p => p.GetProperty("source").GetString() == "RPS_FALLBACK" && p.GetProperty("side").GetString() == "DPS_LEFT")
-            .Select(p => (X: Unit(p.GetProperty("anchor").GetProperty("x")), Y: Unit(p.GetProperty("anchor").GetProperty("y")))).ToHashSet();
-        var routes = layout.GetProperty("routes").EnumerateArray()
-            .Select(r => r.GetProperty("points").EnumerateArray().Select(p => (X: Unit(p.GetProperty("x")), Y: Unit(p.GetProperty("y")))).ToArray()).ToArray();
+        // A port of the level's own boundary (its owner is not one of the drawn blocks), with the way a leg enters the level from it.
+        var children = layout.GetProperty("blocks").EnumerateArray().Select(b => b.GetProperty("blockId").GetString()).ToHashSet();
+        var boundary = layout.GetProperty("ports").EnumerateArray().Where(p => !children.Contains(p.GetProperty("blockId").GetString()))
+            .GroupBy(p => (X: Unit(p.GetProperty("anchor").GetProperty("x")), Y: Unit(p.GetProperty("anchor").GetProperty("y"))))
+            .ToDictionary(g => g.Key, g => g.First().GetProperty("side").GetString() switch
+                { "DPS_RIGHT" => (-1, 0), "DPS_TOP" => (0, 1), "DPS_BOTTOM" => (0, -1), _ => (1, 0) });
+        var drawn = layout.GetProperty("routes").EnumerateArray()
+            .Select(r => (Id: r.GetProperty("connectionId").GetString()!, Points: r.GetProperty("points").EnumerateArray()
+                .Select(p => (X: Unit(p.GetProperty("x")), Y: Unit(p.GetProperty("y")))).ToArray())).ToArray();
         string Describe((decimal X, decimal Y)[] route) => string.Join(" ", route.Select(p => p.X + "," + p.Y));
-        foreach (var route in routes)
+        foreach (var (_, route) in drawn)
             foreach (var (end, next) in new[] { (route[0], route[1]), (route[^1], route[^2]) })
             {
-                int direction = boundary.Contains(end) ? 1 : 0;
+                // Which way the leg must leave this end: out of the block edge it is on, or into the level from a boundary port.
+                (int X, int Y) direction = boundary.TryGetValue(end, out var inward) ? inward : (0, 0);
                 foreach (var (x, y, w, h) in blocks)
-                    if (end.Y >= y && end.Y <= y + h) direction = end.X == x ? -1 : end.X == x + w ? 1 : direction;
-                if (direction == 0) continue;
-                Assert.IsTrue(next.Y == end.Y && (next.X - end.X) * direction >= 20,
-                    $"{step}: the leg {Describe(route)} leaves its end ({end.X}, {end.Y}) along the edge for 20 units or more before it turns.");
+                {
+                    if (end.Y >= y && end.Y <= y + h && (end.X == x || end.X == x + w)) direction = (end.X == x ? -1 : 1, 0);
+                    else if (end.X > x && end.X < x + w && (end.Y == y || end.Y == y + h)) direction = (0, end.Y == y ? -1 : 1);
+                }
+                if (direction == (0, 0)) continue;
+                if (direction.Y == 0)
+                    Assert.IsTrue(next.Y == end.Y && (next.X - end.X) * direction.X >= 20,
+                        $"{step}: the leg {Describe(route)} leaves its end ({end.X}, {end.Y}) along the edge for 20 units or more before it turns.");
+                else
+                    Assert.IsTrue(next.X == end.X && (next.Y - end.Y) * direction.Y >= 20,
+                        $"{step}: the leg {Describe(route)} leaves its end ({end.X}, {end.Y}) on a {(direction.Y < 0 ? "top" : "bottom")} edge straight "
+                        + $"{(direction.Y < 0 ? "up" : "down")} for 20 units or more, not along the block's outline.");
             }
-        static decimal Gap(decimal a1, decimal a2, decimal b1, decimal b2) => Math.Max(Math.Min(a1, a2), Math.Min(b1, b2)) - Math.Min(Math.Max(a1, a2), Math.Max(b1, b2));
-        for (int i = 0; i < routes.Length; ++i)
-            for (int j = i + 1; j < routes.Length; ++j)
+        static decimal Overlap(decimal a1, decimal a2, decimal b1, decimal b2) => Math.Min(Math.Max(a1, a2), Math.Max(b1, b2)) - Math.Max(Math.Min(a1, a2), Math.Min(b1, b2));
+        for (int i = 0; i < drawn.Length; ++i)
+            for (int j = i + 1; j < drawn.Length; ++j)
             {
-                var a = routes[i]; var b = routes[j];
+                var a = drawn[i].Points; var b = drawn[j].Points;
+                bool allowed = unavoidable.Any(u => (u.First == drawn[i].Id && u.Second == drawn[j].Id) || (u.First == drawn[j].Id && u.Second == drawn[i].Id));
                 var shared = new[] { a[0], a[^1] }.Intersect(new[] { b[0], b[^1] }).ToArray();
+                decimal beside = 0;
                 for (int m = 1; m < a.Length; ++m)
                     for (int n = 1; n < b.Length; ++n)
                     {
                         var (p, q, r, t) = (a[m - 1], a[m], b[n - 1], b[n]);
                         if (p == q || r == t) continue;
                         bool fromOneEnd = shared.Any(e => (e == p || e == q) && (e == r || e == t));
-                        if (p.Y == q.Y && r.Y == t.Y && p.Y == r.Y && !fromOneEnd)
-                            Assert.IsTrue(Gap(p.X, q.X, r.X, t.X) >= 10, $"{step}: {Describe(a)} and {Describe(b)} run along one height at y {p.Y}.");
-                        if (p.X == q.X && r.X == t.X && Math.Abs(p.X - r.X) < 10 && !fromOneEnd)
-                            Assert.IsTrue(Gap(p.Y, q.Y, r.Y, t.Y) > 0, $"{step}: {Describe(a)} and {Describe(b)} run upright within 10 units at x {p.X} and {r.X}.");
+                        if (fromOneEnd) continue;
+                        if (p.Y == q.Y && r.Y == t.Y && p.Y == r.Y)
+                            Assert.IsTrue(-Overlap(p.X, q.X, r.X, t.X) >= 10, $"{step}: {Describe(a)} and {Describe(b)} run along one height at y {p.Y}.");
+                        if (p.Y == q.Y && r.Y == t.Y && p.Y != r.Y && Math.Abs(p.Y - r.Y) < 10 && Overlap(p.X, q.X, r.X, t.X) > 0)
+                        {
+                            Assert.IsTrue(allowed, $"{step}: {Describe(a)} and {Describe(b)} run beside each other {Math.Abs(p.Y - r.Y)} units apart at y {p.Y} and {r.Y}.");
+                            beside += Overlap(p.X, q.X, r.X, t.X);
+                            // The run lies within the 20 units that an end on one of the two heights needs to leave its port or block.
+                            decimal from = Math.Max(Math.Min(p.X, q.X), Math.Min(r.X, t.X)), to = Math.Min(Math.Max(p.X, q.X), Math.Max(r.X, t.X));
+                            Assert.IsTrue(new[] { a[0], a[^1], b[0], b[^1] }.Any(e => (e.Y == p.Y || e.Y == r.Y) && from >= e.X - 20 && to <= e.X + 20),
+                                $"{step}: {Describe(a)} and {Describe(b)} run beside each other from x {from} to {to}, not within the 20 units at an end.");
+                        }
+                        if (p.X == q.X && r.X == t.X && Math.Abs(p.X - r.X) < 10)
+                            Assert.IsTrue(Overlap(p.Y, q.Y, r.Y, t.Y) < 0, $"{step}: {Describe(a)} and {Describe(b)} run upright within 10 units at x {p.X} and {r.X}.");
                     }
+                if (allowed)
+                    Assert.IsTrue(beside > 0 && beside <= 20,
+                        $"{step}: {Describe(a)} and {Describe(b)} run beside each other for {beside} units; only the 20 units one of them needs to leave its end are allowed.");
             }
     }
 
@@ -4563,6 +6350,11 @@ public sealed partial class NativeSessionTests
         Assert.IsTrue(link.Shown && link.Enabled, $"{step}: {what} is shown and available.");
         VerifyAccessible(link, "link", step);
         var background = shot.At(link.X + 1, link.Y + 1);
+        // Review of design QA round 2: a link has no box of its own. Its background is the inspector's surface just left of it,
+        // where the earlier build drew each link on the colour wxWidgets reported, a faint box on the surface GTK drew.
+        var surface = shot.At(link.X - 3, link.Y + link.Height / 2);
+        Assert.IsTrue(CapturedWindow.Distance(background, surface) <= 3,
+            $"{step}: {what} has no box of its own: its background {CapturedWindow.Describe(background)} is the inspector's {CapturedWindow.Describe(surface)}.");
         var ink = shot.MostContrasting(link.X, link.Y, link.Width, link.Height, background);
         Assert.IsTrue(shot.Contrast("P2-10 " + what + " on the inspector", ink, background) >= 4.5,
             $"{step}: {what} {CapturedWindow.Describe(ink)} reads 4.5:1 on the inspector {CapturedWindow.Describe(background)}.");
@@ -4583,15 +6375,20 @@ public sealed partial class NativeSessionTests
     }
 
     /// <summary>Design QA P2-11, measured in one capture: every shown facet row ends in a chevron at least 9 pixels high and 3:1
-    /// or more on the row (its focus ring and bottom rule left out of the measurement).</summary>
+    /// or more on the row (its focus ring and bottom rule left out of the measurement). Each row is the platform's own toggle
+    /// button: assistive technology reads it as a toggle button named by its facet and value, pressed exactly for the facet
+    /// whose detail is open (review of the design QA fixes).</summary>
     private static void VerifyChevrons(CapturedWindow shot, P.RecursiveDiagramEditorState at, string step)
     {
         var rows = at.Controls.Where(c => c.Name.StartsWith("RecursiveFacetRow", StringComparison.Ordinal) && c.Shown).ToArray();
         Assert.IsNotEmpty(rows, step + ": the facet overview lists facets.");
+        string open = at.FacetEditor == "" ? "" : "RecursiveFacetRow" + string.Concat(at.FacetEditor.Split('-').Select(w => char.ToUpperInvariant(w[0]) + w[1..]));
         foreach (var row in rows)
         {
-            // The editor draws each row, and tells assistive technology it is a button named by its facet and value.
-            VerifyAccessible(row, "button", step);
+            VerifyAccessible(row, "toggle button", step);
+            StringAssert.StartsWith(row.Label, FacetRowLabel(row.Name) + ": ", step + ": " + row.Name + " is named by its facet and value.");
+            Assert.AreEqual(row.Name == open, row.Active, step + ": " + row.Name + " is pressed exactly while its facet's detail is open.");
+            Assert.AreEqual(row.Name == open, row.Accessible.Checked, step + ": assistive technology reads " + row.Name + " as pressed exactly while its detail is open.");
             var background = shot.At(row.X + 3, row.Y + 3);
             var chevron = shot.MostContrasting(row.X + row.Width - 22, row.Y + 3, 18, row.Height - 6, background);
             Assert.IsTrue(shot.Contrast("P2-11 " + row.Name + " chevron on its row", chevron, background) >= 3.0,
@@ -4601,6 +6398,22 @@ public sealed partial class NativeSessionTests
                 $"{step}: {row.Name}'s chevron is text-sized, at least 9 pixels high.");
         }
     }
+
+    /// <summary>The editor state without its layout statistics. They count the work of the whole editor process (an offscreen view
+    /// of another level lays that level out once), so they are left out where a journey compares what a person sees and edits.</summary>
+    private static P.RecursiveDiagramEditorState WithoutLayoutStatistics(P.RecursiveDiagramEditorState state)
+    {
+        var copy = state.Clone();
+        copy.RouteLayouts = 0; copy.SlowestRouteLayoutMicros = 0; copy.LatestRouteLayoutMicros = 0;
+        return copy;
+    }
+
+    /// <summary>The facet a facet row is named for, as its label starts: "Orderable part" for RecursiveFacetRowOrderablePart.</summary>
+    private static string FacetRowLabel(string name) => name["RecursiveFacetRow".Length..] switch
+    {
+        "OrderablePart" => "Orderable part",
+        var facet => facet
+    };
 
     /// <summary>Design QA P2-13, measured in one capture: when Comments does not fit the inspector's view, the inspector shows a
     /// scroll bar that stays visible without the pointer over it.</summary>
@@ -4614,8 +6427,250 @@ public sealed partial class NativeSessionTests
             $"{step}: Comments runs below the inspector's view, and a scroll bar {CapturedWindow.Describe(bar)} shows it on {CapturedWindow.Describe(background)}.");
     }
 
+    /// <summary>Design QA round 2: a capture waits this long for GTK's fade of a button that just became available (the round's
+    /// refuted "washed-out Save" was one frame of it).</summary>
+    private const int FadeSettleMilliseconds = 250;
+
+    private static bool RectsApart(P.DiagramControlRect a, P.DiagramControlRect b) =>
+        a.X + a.Width <= b.X || b.X + b.Width <= a.X || a.Y + a.Height <= b.Y || b.Y + b.Height <= a.Y;
+
+    /// <summary>Mockup audit M1-2: every name of a port on the level's boundary is drawn inside the canvas, clear of every block
+    /// (4 pixels around it), 8 pixels or more from the square of every port but its own, and off its own square, at the size the
+    /// window gives the level. (A name 3 pixels beside the Processor's Power port read as that port's name; review of
+    /// e62ac6dce7.)</summary>
+    private static void VerifyBoundaryNamesClear(P.RecursiveDiagramEditorState at, string step)
+    {
+        Assert.AreEqual(at.LevelDraft.Scope.LocalDiagram.Interfaces.Count, at.BoundaryPortNames.Count, step + ": every boundary port's name is drawn.");
+        foreach (var name in at.BoundaryPortNames)
+        {
+            Assert.IsTrue(name.Shown, $"{step}: the boundary port name '{name.Label}' lies inside the canvas.");
+            foreach (var text in at.BlockTexts)
+            {
+                var b = text.Block;
+                var around = new P.DiagramControlRect { X = b.X - 4, Y = b.Y - 4, Width = b.Width + 8, Height = b.Height + 8 };
+                Assert.IsTrue(RectsApart(name, around), $"{step}: the boundary port name '{name.Label}' ({name.X}, {name.Y}, {name.Width} x {name.Height}) "
+                    + $"is drawn clear of the block at ({b.X}, {b.Y}, {b.Width} x {b.Height}).");
+            }
+            Assert.IsFalse(string.IsNullOrEmpty(name.ObjectId), $"{step}: the boundary port name '{name.Label}' names its port.");
+            Assert.IsTrue(at.PortMarks.Any(m => m.ObjectId == name.ObjectId), $"{step}: the boundary port '{name.Label}' draws its square.");
+            foreach (var mark in at.PortMarks)
+            {
+                if (mark.ObjectId == name.ObjectId)
+                {
+                    Assert.IsTrue(RectsApart(name, mark), $"{step}: the boundary port name '{name.Label}' leaves its own square uncovered.");
+                    continue;
+                }
+                var clear = new P.DiagramControlRect { X = mark.X - 8, Y = mark.Y - 8, Width = mark.Width + 16, Height = mark.Height + 16 };
+                Assert.IsTrue(RectsApart(name, clear), $"{step}: the boundary port name '{name.Label}' ({name.X}, {name.Y}, {name.Width} x {name.Height}) "
+                    + $"is 8 pixels or more from the square of port '{mark.Label}' at ({mark.X}, {mark.Y}), so it cannot read as that port's name.");
+            }
+        }
+    }
+
+    /// <summary>Mockup audit M1-11: no connection runs through or against the name of a port on the level's boundary. Every
+    /// straight run of every computed path in <paramref name="layout"/> (the level the editor drew, in diagram units), placed on
+    /// the canvas as the editor reports its origin and scale, keeps 3 pixels or more from every boundary port's name. (On the
+    /// PSU level the Rail A sense run crossed "Telemetry" and the DC input run touched "Power" while those names sat right of
+    /// their ports.)</summary>
+    private static void VerifyBoundaryNamesOffWires(P.RecursiveDiagramEditorState at, JsonElement layout, string step)
+    {
+        static double Unit(JsonElement value) => double.Parse(value.GetString()!, System.Globalization.CultureInfo.InvariantCulture);
+        int X(double x) => at.CanvasWindowX + (int)Math.Round((x - at.CanvasOriginX) * at.CanvasScale, MidpointRounding.AwayFromZero);
+        int Y(double y) => at.CanvasWindowY + (int)Math.Round((y - at.CanvasOriginY) * at.CanvasScale, MidpointRounding.AwayFromZero);
+        Assert.IsTrue(at.CanvasScale > 0, step + ": the canvas reports its scale.");
+        foreach (var route in layout.GetProperty("routes").EnumerateArray())
+        {
+            var points = route.GetProperty("points").EnumerateArray().Select(p => (X: X(Unit(p.GetProperty("x"))), Y: Y(Unit(p.GetProperty("y"))))).ToArray();
+            for (int i = 1; i < points.Length; ++i)
+            {
+                int left = Math.Min(points[i - 1].X, points[i].X), top = Math.Min(points[i - 1].Y, points[i].Y);
+                int right = Math.Max(points[i - 1].X, points[i].X), bottom = Math.Max(points[i - 1].Y, points[i].Y);
+                var run = new P.DiagramControlRect { X = left - 3, Y = top - 3, Width = right - left + 7, Height = bottom - top + 7 };
+                foreach (var name in at.BoundaryPortNames)
+                    Assert.IsTrue(RectsApart(name, run), $"{step}: the connection {route.GetProperty("connectionId").GetString()} runs from ({points[i - 1].X}, "
+                        + $"{points[i - 1].Y}) to ({points[i].X}, {points[i].Y}), within 3 pixels of the boundary port name '{name.Label}' ({name.X}, {name.Y}, "
+                        + $"{name.Width} x {name.Height}).");
+            }
+        }
+    }
+
+    /// <summary>Design QA round 2, R2-P2-1 and R2-P2-8, measured: every connection named in <paramref name="connections"/>
+    /// (id to caption) shows exactly one caption, drawn inside the canvas in a clear place, and its text's ink lies where the
+    /// editor reports it. Each caption in <paramref name="whole"/> is drawn whole; any other is whole or, only when no clear place
+    /// holds its whole text, shortened with "…" and naming its whole caption on hover. No caption covers a block, a port or
+    /// another caption (<see cref="VerifyCanvasText"/>).</summary>
+    private static void VerifyCaptions(CapturedWindow shot, P.RecursiveDiagramEditorState at, string step, IReadOnlyDictionary<string, string> connections,
+        params string[] whole)
+    {
+        var canvas = shot.At(at.CanvasWindowX + (int)at.CanvasPixelWidth - 12, at.CanvasWindowY + (int)at.CanvasPixelHeight - 12);
+        foreach (var (id, name) in connections)
+        {
+            var drawn = at.ConnectionCaptions.Where(c => c.ObjectId == id).ToArray();
+            Assert.HasCount(1, drawn, $"{step}: the connection {name} shows one caption.");
+            var caption = drawn[0];
+            Assert.IsTrue(caption.Shown, $"{step}: the caption of {name} is drawn inside the canvas.");
+            Assert.IsTrue(caption.Enabled, $"{step}: the caption of {name} has a clear place.");
+            if (caption.Label == name)
+                Assert.AreEqual("", caption.Tooltip, $"{step}: the whole caption {name} needs no tooltip.");
+            else
+            {
+                Assert.IsFalse(whole.Contains(name), $"{step}: the caption {name} is drawn whole, not as '{caption.Label}'.");
+                Assert.IsTrue(caption.Label.EndsWith('…') && caption.Label.Length >= 5 && name.StartsWith(caption.Label[..^1].TrimEnd(), StringComparison.Ordinal),
+                    $"{step}: the caption of {name} is whole or shortened with an ellipsis, not '{caption.Label}'.");
+                Assert.AreEqual(name, caption.Tooltip, $"{step}: the shortened caption '{caption.Label}' shows {name} on hover.");
+            }
+            var ink = shot.InkRuns(caption.X, caption.Y, caption.Width, caption.Height, canvas, rows: false, minimum: 2.0);
+            Assert.IsTrue(ink.Count >= 2 && ink[^1].Last - ink[0].First + 1 >= caption.Width / 2,
+                $"{step}: the caption '{caption.Label}' ({caption.X}, {caption.Y}, {caption.Width} x {caption.Height}) is drawn where it is reported.");
+        }
+        VerifyCanvasText(at, step);
+    }
+
+    /// <summary>Design QA round 2, R2-P2-4, measured in one capture: each chosen one-click option (a connection's direction,
+    /// domain or type) has the drawing tools' accent checked style: an accent border 3:1 or more from the inspector and from its
+    /// own pale accent tile, and an accent label 4.5:1 or more on the tile; each option that is not chosen has a label and a
+    /// border coloured apart from those. Assistive technology reads every option as a toggle button named by its label and
+    /// checked exactly while chosen.</summary>
+    private static void VerifyChoiceStyling(CapturedWindow shot, P.RecursiveDiagramEditorState at, string step, string[] chosen, string[] idle)
+    {
+        P.DiagramControlRect Find(string name) => at.Controls.Single(c => c.Name == "Recursive" + name);
+        string D(ValueTuple<byte, byte, byte> c) => CapturedWindow.Describe(c);
+        var inspector = at.Controls.Single(c => c.Name == "RecursiveInspector");
+        (byte, byte, byte) Surface(P.DiagramControlRect c) => shot.At(inspector.X + 4, c.Y + c.Height / 2);
+        (byte, byte, byte) Label(P.DiagramControlRect c, (byte, byte, byte) behind) => shot.MostContrasting(c.X + 8, c.Y + 5, c.Width - 16, c.Height - 10, behind);
+        // Review of design QA round 2: outside its rounded tile an option shows the inspector's own surface, not a box drawn in
+        // the colour wxWidgets reports for the inspector.
+        void VerifyCorner(P.DiagramControlRect c, string name, (byte, byte, byte) surface) =>
+            Assert.IsTrue(CapturedWindow.Distance(shot.At(c.X, c.Y), surface) <= 3,
+                $"{step}: {name}'s corner {D(shot.At(c.X, c.Y))} shows the inspector's surface {D(surface)}.");
+        var chosenLabels = new List<(byte, byte, byte)>(); var chosenBorders = new List<(byte, byte, byte)>();
+        foreach (string name in chosen)
+        {
+            var choice = Find(name);
+            Assert.IsTrue(choice.Shown && choice.Active, $"{step}: {name} is shown as chosen.");
+            VerifyAccessible(choice, "toggle button", step);
+            Assert.IsTrue(choice.Accessible.Checked, $"{step}: assistive technology reads {name} as checked.");
+            var surface = Surface(choice); var tile = shot.At(choice.X + 4, choice.Y + choice.Height / 2);
+            VerifyCorner(choice, name, surface);
+            var border = shot.MostContrasting(choice.X, choice.Y + choice.Height / 3, 3, choice.Height / 3, tile);
+            Assert.IsTrue(shot.Contrast("R2-P2-4 chosen option border on the inspector", border, surface) >= 3.0,
+                $"{step}: {name}'s border {D(border)} stands 3:1 from the inspector {D(surface)}.");
+            Assert.IsTrue(shot.Contrast("R2-P2-4 chosen option border on its tile", border, tile) >= 3.0,
+                $"{step}: {name}'s border {D(border)} stands 3:1 from its tile {D(tile)}.");
+            var label = Label(choice, tile);
+            Assert.IsTrue(shot.Contrast("R2-P2-4 chosen option label on its tile", label, tile) >= 4.5,
+                $"{step}: {name}'s label {D(label)} reads 4.5:1 on its tile {D(tile)}.");
+            chosenLabels.Add(label); chosenBorders.Add(border);
+        }
+        foreach (string name in idle)
+        {
+            var choice = Find(name);
+            Assert.IsTrue(choice.Shown && !choice.Active, $"{step}: {name} is shown and not chosen.");
+            VerifyAccessible(choice, "toggle button", step);
+            Assert.IsFalse(choice.Accessible.Checked, $"{step}: assistive technology reads {name} as not checked.");
+            var tile = shot.At(choice.X + 4, choice.Y + choice.Height / 2);
+            VerifyCorner(choice, name, Surface(choice));
+            var label = Label(choice, tile);
+            var border = shot.MostContrasting(choice.X, choice.Y + choice.Height / 3, 3, choice.Height / 3, tile);
+            Assert.IsTrue(chosenLabels.All(c => CapturedWindow.Distance(c, label) >= 60),
+                $"{step}: {name}'s label {D(label)} is coloured apart from a chosen option's {D(chosenLabels[0])}.");
+            Assert.IsTrue(chosenBorders.All(c => CapturedWindow.Distance(c, border) >= 60),
+                $"{step}: {name}'s border {D(border)} is coloured apart from a chosen option's {D(chosenBorders[0])}.");
+        }
+    }
+
+    /// <summary>Design QA round 2, R2-P2-5, measured in one capture: the action that removes the whole Signals detail is a link
+    /// that says so ("Remove signals"), drawn as a link and at least 8 pixels above the first signal's own "×"; each signal's
+    /// "×" is named after the signal it removes, on hover and for assistive technology, and its glyph is a quarter of the link's
+    /// width or less, so the two cannot be taken for each other.</summary>
+    private static void VerifySignalRemoves(CapturedWindow shot, P.RecursiveDiagramEditorState at, string step, params string[] signals)
+    {
+        P.DiagramControlRect Find(string name) => at.Controls.Single(c => c.Name == name);
+        var removeAll = Find("RecursiveDetailRemoveSignals");
+        Assert.IsTrue(removeAll.Shown, $"{step}: \"Remove signals\" is shown.");
+        Assert.AreEqual("Remove signals", removeAll.Label, $"{step}: the whole detail's remove action says what it removes.");
+        VerifyLink(shot, removeAll, Find("RecursiveSavedVersion"), step, "Remove signals");
+        var page = shot.At(Find("RecursiveInspector").X + 3, removeAll.Y + removeAll.Height / 2);
+        var linkInk = shot.InkRuns(removeAll.X, removeAll.Y, removeAll.Width, removeAll.Height, page, rows: false, minimum: 2.0);
+        Assert.IsNotEmpty(linkInk, $"{step}: \"Remove signals\" is drawn where it is reported.");
+        int linkWidth = linkInk[^1].Last - linkInk[0].First + 1;
+        for (int index = 0; index < signals.Length; ++index)
+        {
+            string name = signals[index];
+            var one = Find("RecursiveSignalRemove" + index);
+            Assert.AreEqual("×", one.Label, $"{step}: {name}'s own remove button is its \"×\".");
+            Assert.AreEqual("Remove signal " + name, one.Tooltip, $"{step}: {name}'s own remove button names its signal on hover.");
+            Assert.AreEqual("Remove signal " + name, one.Accessible?.Name, $"{step}: assistive technology names {name}'s own remove button after its signal.");
+            var ink = shot.InkRuns(one.X, one.Y, one.Width, one.Height, shot.At(one.X + 1, one.Y + 1), rows: false, minimum: 2.0);
+            int glyphWidth = ink.Count == 0 ? 0 : ink[^1].Last - ink[0].First + 1;
+            Assert.IsTrue(glyphWidth > 0 && glyphWidth * 4 <= linkWidth,
+                $"{step}: {name}'s \"×\" ({glyphWidth} pixels of ink) looks nothing like the {linkWidth}-pixel \"Remove signals\" link.");
+        }
+        var first = Find("RecursiveSignalRemove0");
+        int apart = shot.Record("R2-P2-5 Remove signals above the first signal's remove (px)", first.Y - (removeAll.Y + removeAll.Height));
+        Assert.IsTrue(apart >= 8, $"{step}: \"Remove signals\" is {apart} pixels above the first signal's own \"×\", at least the 8 the design QA asks for.");
+    }
+
+    /// <summary>Design QA round 2, R2-P2-2, measured: the Connect preview leaves the port it starts from outward (to the right, off
+    /// the block's right edge) for 8 pixels or more, runs through no block and across no boundary port's name, and ends on the
+    /// port under the pointer. Inside the source block, where the earlier preview struck through the port's name, no dash is
+    /// drawn; along the preview's longest run, its accent dash is. Only the preview is measured here: a finished connection
+    /// whose target lies behind its source still takes rule F4's three-segment path through the block, a difference that
+    /// awaits a contract decision of the integration owner.</summary>
+    private static void VerifyConnectPreview(CapturedWindow shot, P.RecursiveDiagramEditorState at, string step, string sourceBlock, string sourcePort, string targetPort)
+    {
+        var points = at.ConnectPreview.Select(p => (X: p.X, Y: p.Y)).ToArray();
+        Assert.IsTrue(points.Length >= 2, step + ": the preview is reported as drawn.");
+        string Describe() => string.Join(" ", points.Select(p => p.X + "," + p.Y));
+        (int X, int Y) Centre(P.DiagramControlRect mark) => (mark.X + mark.Width / 2, mark.Y + mark.Height / 2);
+        var source = Centre(at.PortMarks.Single(p => p.Label == sourcePort)); var target = Centre(at.PortMarks.Single(p => p.Label == targetPort));
+        Assert.IsTrue(Math.Abs(points[0].X - source.X) <= 1 && Math.Abs(points[0].Y - source.Y) <= 1, $"{step}: the preview {Describe()} starts on {sourcePort} at {source}.");
+        Assert.IsTrue(Math.Abs(points[^1].X - target.X) <= 1 && Math.Abs(points[^1].Y - target.Y) <= 1, $"{step}: the preview {Describe()} ends on {targetPort} at {target}.");
+        Assert.IsTrue(points[1].Y == points[0].Y && shot.Record("R2-P2-2 preview leaves its port outward (px)", points[1].X - points[0].X) >= 8,
+            $"{step}: the preview {Describe()} leaves {sourcePort} outward, to the right, for 8 pixels or more.");
+        foreach (var text in at.BlockTexts)
+        {
+            var b = text.Block;
+            for (int i = 1; i < points.Length; ++i)
+            {
+                int left = Math.Min(points[i - 1].X, points[i].X), right = Math.Max(points[i - 1].X, points[i].X);
+                int top = Math.Min(points[i - 1].Y, points[i].Y), bottom = Math.Max(points[i - 1].Y, points[i].Y);
+                Assert.IsTrue(right <= b.X || left >= b.X + b.Width - 1 || bottom <= b.Y || top >= b.Y + b.Height - 1,
+                    $"{step}: the preview {Describe()} runs through no block; its run {points[i - 1]} to {points[i]} crosses ({b.X}, {b.Y}, {b.Width} x {b.Height}).");
+            }
+        }
+        foreach (var name in at.BoundaryPortNames)
+            for (int i = 1; i < points.Length; ++i)
+            {
+                int left = Math.Min(points[i - 1].X, points[i].X), right = Math.Max(points[i - 1].X, points[i].X);
+                int top = Math.Min(points[i - 1].Y, points[i].Y), bottom = Math.Max(points[i - 1].Y, points[i].Y);
+                Assert.IsTrue(right < name.X || left > name.X + name.Width || bottom < name.Y || top > name.Y + name.Height,
+                    $"{step}: the preview {Describe()} crosses no port's name ({name.Label}).");
+            }
+        var texts = at.BlockTexts.Single(b => b.BlockId == sourceBlock);
+        var block = texts.Block;
+        var fill = shot.At(block.X + block.Width / 2, block.Y + block.Height - 12);
+        // From just right of the block's caption to well left of the port's own name.
+        int stripFrom = texts.Caption is { } blockCaption ? blockCaption.X + blockCaption.Width + 6 : block.X + 12;
+        var inside = shot.MostContrasting(stripFrom, source.Y - 1, Math.Max(1, source.X - 60 - stripFrom), 3, fill);
+        Assert.IsTrue(shot.Contrast("R2-P2-2 ink inside the source block on its port's height", inside, fill) < 1.5,
+            $"{step}: nothing is drawn through the source block at its port's height ({CapturedWindow.Describe(inside)} on {CapturedWindow.Describe(fill)}).");
+        var canvas = shot.At(at.CanvasWindowX + (int)at.CanvasPixelWidth - 12, at.CanvasWindowY + (int)at.CanvasPixelHeight - 12);
+        int longest = 1;
+        for (int i = 2; i < points.Length; ++i)
+            if (Math.Abs(points[i].X - points[i - 1].X) + Math.Abs(points[i].Y - points[i - 1].Y)
+                > Math.Abs(points[longest].X - points[longest - 1].X) + Math.Abs(points[longest].Y - points[longest - 1].Y)) longest = i;
+        var (mx, my) = ((points[longest].X + points[longest - 1].X) / 2, (points[longest].Y + points[longest - 1].Y) / 2);
+        var dash = points[longest].Y == points[longest - 1].Y ? shot.MostContrasting(mx - 8, my - 1, 16, 3, canvas) : shot.MostContrasting(mx - 1, my - 8, 3, 16, canvas);
+        Assert.IsTrue(shot.Contrast("R2-P2-2 preview on the canvas", dash, canvas) >= 3.0,
+            $"{step}: the preview is drawn along its longest run in the accent {CapturedWindow.Describe(dash)}.");
+        Assert.IsNotNull(at.ConnectHint, step + ": the hint is drawn.");
+        Assert.IsTrue(at.BlockTexts.All(b => RectsApart(at.ConnectHint, b.Block)), step + ": the hint covers no block (design QA round 2, P3 1).");
+    }
+
     /// <summary>Design QA P2-7: text is drawn whole inside its block, and each shown connection caption keeps clear of every
-    /// block (by the handle size plus 4 pixels), every port and every other caption.</summary>
+    /// block (by the handle size plus 4 pixels), every port and every other caption, and does not cross the level's dashed
+    /// boundary.</summary>
     private static void VerifyCanvasText(P.RecursiveDiagramEditorState at, string step)
     {
         static bool Inside(P.DiagramControlRect inner, int x, int y, int right, int bottom) =>
@@ -4640,6 +6695,12 @@ public sealed partial class NativeSessionTests
                 Assert.IsTrue(Apart(caption, port.X, port.Y, port.X + port.Width, port.Y + port.Height), $"{step}: the caption '{caption.Label}' keeps clear of a port.");
             foreach (var other in shown.Where(o => !ReferenceEquals(o, caption)))
                 Assert.IsTrue(Apart(caption, other.X, other.Y, other.X + other.Width, other.Y + other.Height), $"{step}: the captions '{caption.Label}' and '{other.Label}' do not overlap.");
+            // Review of design QA round 2: no caption strikes through the level's dashed boundary. It lies wholly inside the frame
+            // or wholly outside it, as a connection to a boundary port may be captioned beside the port's own name.
+            if (at.LevelFrame is { } frame)
+                Assert.IsTrue(Apart(caption, frame.X, frame.Y, frame.X + frame.Width, frame.Y + frame.Height)
+                    || Inside(caption, frame.X + 1, frame.Y + 1, frame.X + frame.Width - 1, frame.Y + frame.Height - 1),
+                    $"{step}: the caption '{caption.Label}' ({caption.X}, {caption.Y}, {caption.Width} x {caption.Height}) lies wholly inside or outside the level's boundary ({frame.X}, {frame.Y}, {frame.Width} x {frame.Height}).");
         }
     }
 

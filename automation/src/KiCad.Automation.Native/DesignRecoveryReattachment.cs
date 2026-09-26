@@ -18,7 +18,9 @@ public static class DesignRecoveryReattachment
         if (saved.RevisionToken != expectedRecoveryRevision)
             throw Error("design_recovery_changed", "Reload the current recovery record before reattachment.");
         if (saved.State.HasPendingWork)
-            throw Error("pending_recovery_requires_reconciliation", "Resolve the old session's pending operation before adopting another session.");
+            throw Error("pending_recovery_requires_reconciliation", "Resolve the old session's pending operation before adopting another session: "
+                + "complete it with kicad_design_sync_apply, leave it with kicad_design_recovery_resolve_pending (undo, keep-and-replan or discard) "
+                + "while the KiCad that holds it runs, or release it with kicad_design_recovery_release_exited when that KiCad ended.");
         var session = await client.HandshakeAsync(token);
         if (session.InstanceId != saved.State.InstanceId.ToString("D"))
             throw Error("recovery_instance_mismatch", "Reattach only the native instance recorded by this design.");

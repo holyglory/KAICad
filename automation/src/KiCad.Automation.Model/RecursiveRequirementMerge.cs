@@ -79,7 +79,7 @@ public sealed class RecursiveRequirementMerge
         // A resolution may choose saved text instead of a restored field. Do not
         // attach false restoration provenance to the resulting candidate.
         var restored = OriginalDraft.Requirements.RestoredFields.Where(r =>
-            _history.Inspect(r.Value).Requirements.Get(r.Key) == result.Candidate.Get(r.Key)).ToImmutableDictionary();
+            _history.Revision(r.Value).Requirements.Get(r.Key) == result.Candidate.Get(r.Key)).ToImmutableDictionary();
         var candidate = SavedDraft with { Requirements = SavedDraft.Requirements with
             { Requirements = result.Candidate, RestoredFields = restored } };
         return new(ExpectedRoot, BlockPath, candidate, []);

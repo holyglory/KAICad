@@ -16,7 +16,7 @@ namespace KiCad.Automation.Mcp;
 public sealed class RecursiveEditorTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_diagram_proposal_publish"),
-     Description("Publish a complete typed block implementation proposal: nested blocks, connection groups/members and partial endpoints, all three requirement fields, definitions and unresolved issues. Requires an existing original input, current source hash and process epoch. Retains the request in local state before publication. Creates independent alternatives without changing any existing head or selected root. Invalid closures reject as a whole. Stale requests stay retrievable; an identical already-present candidate is an observation, not a receipt resolving an earlier ambiguous file write. This does not generate or activate native electrical designs.")]
+     Description("Publish a complete typed block implementation proposal: nested blocks, connection groups/members and partial endpoints, all three requirement fields, definitions and unresolved issues. Requires an existing original input, current source hash and process epoch. Retains the request in local state before publication. Creates independent alternatives without changing any existing head or selected root. Invalid closures reject as a whole. Stale requests stay retrievable; an identical already-present candidate is an observation, not a receipt resolving an earlier ambiguous file write. Repeating the same proposal and operation identity after an uncertain or cancelled call returns the recorded candidate (added=false) and, when this operation wrote it, its publication receipt; it never creates a second candidate. The result compares the candidate with today's design (comparison: stale, currentChanges since the proposal's base revision, proposalChanges, changedOnBothSides; see kicad_diagram_proposal_compare). A proposal sent with an outdated source token is refused (block_proposal_source_changed) with the same comparison against today's file, and nothing is written. A comparison that cannot be made never replaces the result or refusal: it is reported as comparisonUnavailable with its code (invalid_block_proposal for a request that no longer prepares against today's file; proposal_comparison_failed if comparing the saved candidate fails). This does not generate or activate native electrical designs.")]
     public Task<CallToolResult> PublishProposal(string instanceId, string expectedInstanceEpoch, string repositoryRoot,
         string sourcePath, string documentId, string expectedSourceToken, JsonElement proposalJson, Guid operationId, CancellationToken cancellationToken) => Execute(async () =>
     {
@@ -27,7 +27,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
                 ?? throw new AutomationException("invalid_block_proposal", "The proposal JSON is empty.");
             proposal = BlockProposalFiles.Normalize(proposal);
         }
-        catch (Exception error) when (error is JsonException or InvalidOperationException or ArgumentException)
+        catch (Exception error) when (error is JsonException || Malformed(error))
         { throw new AutomationException("invalid_block_proposal", error.Message); }
         if (operationId == Guid.Empty) throw new AutomationException("invalid_operation_id", "A proposal publication needs an explicit operation identity.");
         var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
@@ -39,10 +39,22 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
             result = await BlockProposalFiles.PublishAsync(repositoryRoot, sourcePath, Identity(documentId), expectedSourceToken, proposal,
                 registry.StateDirectory, cancellationToken, operationId);
         }
-        catch (Exception error) when (error is InvalidOperationException or ArgumentException or KeyNotFoundException or NullReferenceException)
+        catch (AutomationException error) when (error.Code == "block_proposal_source_changed")
+        {
+            // The agent built this proposal on a file that has changed since: nothing is written, and the refusal says exactly
+            // what changed on each side against today's file (ledger pa48933d0fe0a5c2f).
+            return await StaleRefusal(error, instanceId, session.Epoch, repositoryRoot, sourcePath, documentId,
+                graph => BlockProposalComparer.Request(graph, proposal), retainedRequest: true, cancellationToken);
+        }
+        catch (Exception error) when (Malformed(error))
         { throw new AutomationException("invalid_block_proposal", error.Message); }
+        var publication = new BlockProposalReceipts(registry.StateDirectory).Read(operationId);
+        // The candidate is saved at this point; a comparison that cannot be made is reported, never turned into a failed publication.
+        var (comparison, unavailable) = Compare(() => BlockProposalComparer.Published(result.Snapshot.Graph, proposal.Id), retainedRequest: false);
         return Data(new { instanceId, instanceEpoch = session.Epoch, documentId, sourceToken = result.Snapshot.ContentSha256,
-            selectedRoot = result.Snapshot.Graph.SelectedRoot, result.Added, result.ContextStillSelected, proposal = result.Proposal },
+            selectedRoot = result.Snapshot.Graph.SelectedRoot, result.Added, result.ContextStillSelected, proposal = result.Proposal,
+            publication = publication is { ProposalId: var published } && published == proposal.Id ? Receipt(publication) : null,
+            comparison, comparisonUnavailable = unavailable },
             result.Snapshot.UpgradedFromSchemaVersion);
     });
 
@@ -105,7 +117,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_diagram_proposal_select"),
-     Description("Choose a published proposal for the exact current target block, updating its containing root snapshots together while preserving unrelated siblings. Requires the current source hash, process epoch and complete current root-to-block path; a changed target is rejected for comparison. This changes the conceptual diagram selection only, not native schematic/PCB activation. Supply fresh ancestor revision IDs and an operation ID; a completed selection retry must be inspected before another mutation.")]
+     Description("Choose a published proposal for the exact current target block, updating its containing root snapshots together while preserving unrelated siblings. Requires the current source hash, process epoch and complete current root-to-block path. A proposal whose target changed after the revision it was built on, left the design or was already chosen is refused (proposal_target_changed), as is an outdated token (block_proposal_source_changed), an outdated expected root or a path starting at another root revision (stale_root_revision), a path naming a containing block revision the design no longer pins (stale_block_revision) and a containing implementation with a newer saved revision (stale_parent_revision): nothing is written, and the refusal carries the comparison of kicad_diagram_proposal_compare, naming every element changed on today's side and in the proposal and those changed on both, and today's path to the target. A path is outdated only when it runs through saved revisions of exactly the blocks on today's path to the target, each containing the next; any other path (a block skipped or added, a start at another block, a revision the diagram does not have or one that never contained the next block) is refused as invalid (invalid_recursive_block_graph) without a comparison. This changes the conceptual diagram selection only, not native schematic/PCB activation. Supply fresh ancestor revision IDs and an operation ID. Repeating an operation ID whose selection completed (for example after a cancelled or uncertain call, or from a reattached server) returns that recorded outcome (recorded=true, the source token and root it produced, and whether the file still has them) and never chooses again.")]
     public Task<CallToolResult> SelectProposal(string instanceId, string expectedInstanceEpoch, string repositoryRoot,
         string sourcePath, string documentId, string expectedSourceToken, Guid proposalId, BlockSelection expectedRoot,
         BlockSelection[] currentPath, Guid[] ancestorRevisionIds, Guid operationId, string actor, CancellationToken cancellationToken) => Execute(async () =>
@@ -115,12 +127,136 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
             throw new AutomationException("recursive_instance_changed", "The native instance identity or epoch changed; inspect it again.");
         if (operationId == Guid.Empty) throw new AutomationException("invalid_operation_id", "Identify this conceptual selection operation.");
+        // A retried operation returns the outcome it recorded instead of choosing again (ledger pa48933d0fe0a5c2f).
+        if (new BlockProposalReceipts(registry.StateDirectory).Read(operationId) is { Stage: BlockProposalOperationStage.Published,
+                Kind: BlockProposalOperationKind.Select } receipt && receipt.ProposalId == proposalId && receipt.DocumentId is { } recordedDocument
+            && recordedDocument == Identity(documentId))
+        {
+            var now = await RecursiveBlockFiles.ReadAsync(repositoryRoot, sourcePath, recordedDocument, cancellationToken);
+            if (receipt.DesignPath == now.Path)
+                return Data(new { instanceId, instanceEpoch = session.Epoch, documentId, operationId, recorded = true, sourceToken = receipt.AfterSha256,
+                    selectedRoot = receipt.CandidateXml is { } chosen ? RecursiveBlockGraphXml.Read(chosen).SelectedRoot : null, proposalId,
+                    currentSourceToken = now.ContentSha256, stillCurrent = now.ContentSha256 == receipt.AfterSha256, publication = Receipt(receipt) });
+        }
         var origin = new RequirementRevisionOrigin(RequirementRevisionActor.Agent, actor, DateTimeOffset.UtcNow, "Choose proposed implementation", [], [operationId]);
-        var result = await BlockProposalFiles.SelectAsync(repositoryRoot, sourcePath, Identity(documentId), proposalId, expectedSourceToken,
-            expectedRoot, path, ancestors, origin, cancellationToken, registry.StateDirectory, operationId);
-        return Data(new { instanceId, instanceEpoch = session.Epoch, documentId, operationId, sourceToken = result.ContentSha256,
+        RecursiveBlockFileSnapshot result;
+        try
+        {
+            result = await BlockProposalFiles.SelectAsync(repositoryRoot, sourcePath, Identity(documentId), proposalId, expectedSourceToken,
+                expectedRoot, path, ancestors, origin, cancellationToken, registry.StateDirectory, operationId);
+        }
+        catch (AutomationException error) when (error.Code is "proposal_target_changed" or "block_proposal_source_changed"
+            or "stale_root_revision" or "stale_parent_revision" or "stale_block_revision")
+        {
+            return await StaleRefusal(error, instanceId, session.Epoch, repositoryRoot, sourcePath, documentId,
+                graph => BlockProposalComparer.Published(graph, proposalId), retainedRequest: false, cancellationToken);
+        }
+        return Data(new { instanceId, instanceEpoch = session.Epoch, documentId, operationId, recorded = false, sourceToken = result.ContentSha256,
             selectedRoot = result.Graph.SelectedRoot, proposalId }, result.UpgradedFromSchemaVersion);
     });
+
+    [McpServerTool(Name = "kicad_diagram_proposal_compare", ReadOnly = true),
+     KiCadCapability("structural-diagram", "compiled-mcp", "source token, proposal identity"),
+     Description("Compare a proposal with today's saved design before choosing it. The proposal is either published in the diagram or a request this server retained after a refused publication (kicad_diagram_proposal_retained). Its base is the target revision its original input captured. Returns stale (the proposal is not chosen and today's target is no longer that revision, so choosing it would be refused), candidateAdopted (the proposal was chosen: today's target is its candidate or descends from it, as a later revision of the candidate's implementation or an implementation made from one), candidateSelected (today's target is exactly the candidate), the target's current root-to-block path, and three lists by exact identity: proposalChanges (what the proposal changes from the base), currentChanges (what changed from the base to today's revision; for an adopted proposal only what changed after the candidate) and changedOnBothSides (always empty for an adopted proposal, whose changes are part of today's design). Each change names its level (levelPath: block ids from the target down; for a target that left the design, today's root-to-block path of the deepest block of its base path still in the design), the connection and members containing it (connectionPath), its category (Name, Requirement, Block, Connection, Interface, Comment, Definition, PhysicalAllocation, Layout, InterfaceRealization, InterconnectRealization), kind (Added, Removed, Changed, Reordered), the element's id and name, the requirement field or aspect, and for a child block or connection its revision before and after. A retained request that no longer prepares against today's file is refused with the code its publication would get (invalid_block_proposal for a malformed proposal); a published proposal whose comparison fails is refused with proposal_comparison_failed. Nothing is merged, chosen or written.")]
+    public Task<CallToolResult> CompareProposal(string instanceId, string repositoryRoot, string sourcePath, string documentId,
+        string expectedSourceToken, Guid proposalId, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId) throw new AutomationException("recursive_instance_changed", "The native instance identity changed; reattach explicitly.");
+        Guid id = Identity(documentId);
+        var loaded = await RecursiveBlockFiles.ReadAsync(repositoryRoot, sourcePath, id, cancellationToken);
+        if (string.IsNullOrEmpty(expectedSourceToken) || loaded.ContentSha256 != expectedSourceToken)
+            throw new AutomationException("recursive_block_file_changed", "Read the current file token before comparing a proposal with it.");
+        BlockProposalComparison comparison;
+        if (loaded.Graph.Proposals.Any(p => p.Id == proposalId))
+        {
+            // A published proposal was validated when it was saved: a comparison that fails without a code is the comparer's
+            // failure, never blamed on the agent's proposal.
+            try { comparison = BlockProposalComparer.Published(loaded.Graph, proposalId); }
+            catch (Exception error) when (Malformed(error)) { throw new AutomationException("proposal_comparison_failed", error.Message); }
+        }
+        else
+        {
+            var retained = BlockProposalFiles.TryReadRetained(registry.StateDirectory, proposalId)
+                ?? throw new AutomationException("unknown_block_proposal", "No published or retained proposal has this identity.");
+            if (retained.DesignPath != loaded.Path || retained.DocumentId != id)
+                throw new AutomationException("block_proposal_conflict", "The retained request belongs to a different diagram.");
+            // Preparing the request against today's graph refuses an invalid one with a code, as its publication would.
+            try { comparison = BlockProposalComparer.Request(loaded.Graph, retained.Proposal); }
+            catch (Exception error) when (Malformed(error)) { throw new AutomationException("invalid_block_proposal", error.Message); }
+        }
+        return Data(new { instanceId, instanceEpoch = session.Epoch, documentId, sourceToken = loaded.ContentSha256,
+            selectedRoot = loaded.Graph.SelectedRoot, comparison });
+    });
+
+    [McpServerTool(Name = "kicad_diagram_agent_context", ReadOnly = true),
+     KiCadCapability("structural-diagram", "compiled-mcp", "source token, exact root-to-level path or original input"),
+     Description("Give an agent the revision-bound context of one saved diagram level, in a form no agent product or provider owns. Name the level by an original input (inputId, recorded with kicad_diagram_refinement_input_record: the level it captured, or a deeper level given by blockPath inside that input's revisions) or by blockPath alone: the exact root-to-level path, from a revision of the root block, each block pinned by the revision before it; historical revisions are allowed. The context holds the path, the level's block and its direct children (exact block, implementation and revision, name, General/Schematic/Routing text with its requirement revision, boundary ports, definition, component and physical choices, and how many children and connections lie below), every connection and member of the level (exact revision, kind, domain, direction, ends, members, the three fields, realization), the level's comments marked Element (on a block or connection) or FreeSpace (on the canvas, with any original sketch strokes), its interface realizations and saved layout, and, with an input, the original prompt, its author and captured file token, its scope and focus connections, and its attachment references (preserved asset path, SHA-256, byte count, media type, source). contextSha256 fingerprints exactly these contents, so the same revisions give the same context and fingerprint after later edits. Outside the context: today's source token and selected root, whether the level is on today's selected design (current, currentPath), today's name of each implementation the context names (implementations; a rename changes them, not the context) and the present integrity of each attachment (assets). Reads only; it never starts an agent, chooses anything or touches the editor.")]
+    public Task<CallToolResult> AgentContext(string instanceId, string repositoryRoot, string sourcePath, string documentId,
+        string expectedSourceToken, CancellationToken cancellationToken, Guid? inputId = null, BlockSelection[]? blockPath = null) => Execute(async () =>
+    {
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId) throw new AutomationException("recursive_instance_changed", "The native instance identity changed; reattach explicitly.");
+        if (inputId is null && blockPath is null)
+            throw new AutomationException("ambiguous_agent_context", "Name the level by an original input (inputId), a root-to-level block path (blockPath), or both.");
+        Guid id = Identity(documentId);
+        var loaded = await RecursiveBlockFiles.ReadAsync(repositoryRoot, sourcePath, id, cancellationToken);
+        if (string.IsNullOrEmpty(expectedSourceToken) || loaded.ContentSha256 != expectedSourceToken)
+            throw new AutomationException("recursive_block_file_changed", "Read the current file token before asking for a context.");
+        var input = inputId is { } recorded ? loaded.Graph.RefinementInput(recorded) : null;
+        ImmutableArray<BlockSelection> path = blockPath is null ? input!.BlockPath : [.. blockPath];
+        var context = RefinementContexts.Build(loaded.Graph, path, input);
+        var assets = new List<RefinementAssetObservation>();
+        foreach (var attachment in input?.Attachments ?? [])
+            assets.Add(await RefinementAssetFiles.InspectAsync(repositoryRoot, attachment, cancellationToken));
+        var verified = await RecursiveBlockFiles.ReadAsync(repositoryRoot, sourcePath, id, cancellationToken);
+        if (verified.ContentSha256 != loaded.ContentSha256)
+            throw new AutomationException("recursive_block_file_changed", "The diagram changed while its context was read; read a fresh token.");
+        var currentPath = BlockProposalCompiler.FindPath(loaded.Graph, path[^1].BlockId);
+        return Data(new { instanceId, instanceEpoch = session.Epoch, documentId, sourceToken = loaded.ContentSha256,
+            storedSchemaVersion = loaded.StoredSchemaVersion, selectedRoot = loaded.Graph.SelectedRoot,
+            current = currentPath.SequenceEqual(path), currentPath, contextSha256 = context.Fingerprint(), context,
+            implementations = RefinementContexts.Implementations(loaded.Graph, context), assets });
+    });
+
+    private static object Receipt(BlockProposalPublicationReceipt receipt) => new { receipt.OperationId, receipt.Kind, receipt.Stage,
+        receipt.BeforeSha256, receipt.AfterSha256, receipt.ConfirmedAt };
+
+    /// <summary>A refused publication or choice of a proposal built on an older revision: nothing was written, and the refusal
+    /// carries the comparison with today's file, one detail per changed element, besides its code and message.</summary>
+    private static async Task<CallToolResult> StaleRefusal(AutomationException refusal, string instanceId, string epoch, string repositoryRoot,
+        string sourcePath, string documentId, Func<RecursiveBlockGraph, BlockProposalComparison> compare, bool retainedRequest,
+        CancellationToken cancellationToken)
+    {
+        RecursiveBlockFileSnapshot today;
+        try { today = await RecursiveBlockFiles.ReadAsync(repositoryRoot, sourcePath, Identity(documentId), cancellationToken); }
+        catch (Exception error) when (error is AutomationException or IOException or UnauthorizedAccessException) { throw refusal; }
+        var (comparison, unavailable) = Compare(() => compare(today.Graph), retainedRequest);
+        var details = refusal.Details.Concat(comparison?.Details() ?? []).Select(d => new { kind = d.Kind, scopeBlockId = d.ScopeBlockId,
+            objectId = d.ObjectId, message = d.Message });
+        var data = JsonSerializer.SerializeToElement(new { code = refusal.Code, message = refusal.Message, details, instanceId, instanceEpoch = epoch,
+            documentId, sourceToken = today.ContentSha256, selectedRoot = today.Graph.SelectedRoot, comparison, comparisonUnavailable = unavailable }, Web);
+        return new() { IsError = true, Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+    }
+
+    /// <summary>A comparison that cannot be made is reported beside the result or refusal it belongs to, with the code the
+    /// preparation gave it. For a request that was never published (<paramref name="retainedRequest"/>) an uncoded failure
+    /// means a malformed proposal and reads invalid_block_proposal, as its publication would be refused. A published proposal
+    /// was validated when it was saved, so an uncoded failure comparing it is the comparer's own (proposal_comparison_failed),
+    /// never blamed on the agent. It never replaces a refusal's own code or turns a saved publication into a failed call.</summary>
+    internal static (BlockProposalComparison? Comparison, object? Unavailable) Compare(Func<BlockProposalComparison> compare, bool retainedRequest)
+    {
+        try { return (compare(), null); }
+        catch (AutomationException error) { return (null, new { code = error.Code, message = error.Message }); }
+        catch (Exception error) when (Malformed(error))
+        { return (null, new { code = retainedRequest ? "invalid_block_proposal" : "proposal_comparison_failed", message = error.Message }); }
+    }
+
+    /// <summary>The failures a malformed proposal can raise while it is normalized or prepared, besides coded refusals.</summary>
+    private static bool Malformed(Exception error) =>
+        error is InvalidOperationException or ArgumentException or KeyNotFoundException or NullReferenceException;
+
+    private static readonly JsonSerializerOptions Web = new(JsonSerializerDefaults.Web) { Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } };
 
     private static CallToolResult Data(object value, int upgradedFromSchemaVersion = 0)
     {
@@ -383,6 +519,123 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         return new() { Content = [new TextContentBlock { Text = result.GetRawText() }], StructuredContent = result };
     });
 
+    [McpServerTool(Name = "kicad_diagram_connection_endpoint_set"),
+     KiCadCapability("structural-diagram", "compiled-mcp", "instance epoch, source token, exact root and level path, exact connection path, operation ID"),
+     Description("Bind one end of one exact connection or member to a port, or leave it explicitly unresolved, in a saved system diagram. endpointIndex counts the connection's ends from 0. action \"bind\" needs blockId and interfaceId: one of the level's blocks and one of its ports, or the level's own block and a port on the level's boundary, which carries the end through that port to the parent level's connections using it. An end that states pins, candidates or a compatibility selector keeps them while it stays on its block; moving such an end to another block is refused. action \"unbind\" leaves the end Unresolved on its block (or on blockId, one of the level's blocks) with no port, pins or selector. intent, when given, replaces what the end says. The edit is checked against the current file (expectedSourceToken), the selected root (expectedRoot), the root-to-level blockPath and the root-to-member connectionPath, each by exact revision: a changed or no longer current target is refused (recursive_block_file_changed, stale_root_revision, stale_block_revision, stale_parent_revision, stale_connection_revision, and stale_connection_parent for a group containing the member that has a newer saved revision), a block, port, connection or end the level does not have is refused (connection_edit_target_missing), and an edit that does not say exactly one thing is refused (ambiguous_connection_edit); a refusal writes nothing. Otherwise one guarded write saves a new revision of the connection (and of the groups containing it), of the level and of each level above it; the earlier binding and every requirement field stay in history. The connection's new revision takes operationId as its identity (the other new revisions are derived from it), so after an uncertain or cancelled call a read of the connection shows whether the operation landed, and repeating a landed operation never saves it twice. An end that would not change writes nothing (changed=false). Returns the new source token, the block and connection paths now selected, the end before and after, and, for an end on a port of the level's boundary, how that port maps through the levels. An open editor shows the change after it reloads. Never touches schematic or PCB files.")]
+    public Task<CallToolResult> SetConnectionEndpoint(string instanceId, string expectedInstanceEpoch, string repositoryRoot, string sourcePath,
+        string documentId, string expectedSourceToken, BlockSelection expectedRoot, BlockSelection[] blockPath, ConnectionSelection[] connectionPath,
+        int endpointIndex, string action, Guid operationId, string actor, CancellationToken cancellationToken, Guid? blockId = null,
+        Guid? interfaceId = null, string? intent = null, SourceReference[]? sources = null, Guid? refinementInputId = null) => Execute(async () =>
+    {
+        var edit = await PrepareConnectionEdit(instanceId, expectedInstanceEpoch, repositoryRoot, sourcePath, documentId, expectedSourceToken,
+            expectedRoot, blockPath, connectionPath, operationId, actor, sources, refinementInputId,
+            action == "bind" ? "Bind connection end" : "Unbind connection end", cancellationToken);
+        var kind = action switch
+        {
+            "bind" => ConnectionEndpointAction.Bind, "unbind" => ConnectionEndpointAction.Unbind,
+            _ => throw new AutomationException("ambiguous_connection_edit", "Choose the action bind or unbind. Nothing was changed.")
+        };
+        var draft = RecursiveConnectionEdits.SetEndpoint(edit.Graph, edit.Target, endpointIndex, kind, blockId, interfaceId, intent);
+        var (result, graph, levelPath, linkPath) = await SaveConnectionEdit(edit, draft, [], cancellationToken);
+        var endpoint = graph.Connections(levelPath[^1].BlockId).Inspect(linkPath[^1]).Endpoints[endpointIndex];
+        return Data(new { instanceId, instanceEpoch = edit.Epoch, documentId, operationId, sourceToken = result.SourceToken,
+            changed = result.SaveSummary.Changed, selectedRoot = graph.SelectedRoot, blockPath = levelPath, connectionPath = linkPath, endpointIndex,
+            previousEndpoint = edit.Target.Connection.Endpoints[endpointIndex], endpoint,
+            boundaryMapping = RecursiveConnectionEdits.Boundary(graph, levelPath, endpoint),
+            saveSummary = JsonSerializer.Deserialize<JsonElement>(JsonFormatter.Default.Format(result.SaveSummary)) },
+            checked((int)result.UpgradedFromSchemaVersion));
+    });
+
+    [McpServerTool(Name = "kicad_diagram_connection_members_refine"),
+     KiCadCapability("structural-diagram", "compiled-mcp", "instance epoch, source token, exact root and level path, exact connection path, operation ID"),
+     Description("Refine the members of one exact connection or member of a saved system diagram into groups, pairs and signals. memberIds is its direct member list afterwards, in order: ids of its current members and of new members. newMembers declares each new member: a fresh connectionId the agent chooses, its caption (name), its type (kind: Signal by default, SignalGroup, DifferentialPair, Interface or Abstract), the ids it groups in memberIds (current members or other new members; a DifferentialPair groups exactly two single signals, a Signal groups nothing) and its own General, Schematic and Routing requirement text. Every current member and every new member must appear exactly once across memberIds and the new members' lists: a refinement never drops a member (members are removed through the editor's removal cascade). A current member keeps its exact saved revision, requirement history and notes, and interface realizations naming it stay exact. New members run between the connection's ends as they are drawn (block and port; no pins or intent) and start their own requirement history with sources and refinementInputId recorded in its origin. The edit is checked against the current file, selected root, root-to-level blockPath and root-to-member connectionPath by exact revision; a changed or stale target (recursive_block_file_changed, stale_root_revision, stale_block_revision, stale_parent_revision, stale_connection_revision, and stale_connection_parent for a group containing the member that has a newer saved revision), an identity the level does not have (connection_edit_target_missing), a member listed twice or left out (ambiguous_connection_edit), a reused identity (identity_reused) or an invalid group or pair (invalid_connection_refinement) is refused and writes nothing. Otherwise one guarded write saves the new members, a new revision of the connection (and of the groups containing it), of the level and of each level above it. The connection's new revision takes operationId as its identity and every other new identity (the new members' implementations and revisions included) is derived from it, so after an uncertain or cancelled call a read shows whether the operation landed, and repeating a landed operation never saves it twice: on the file it produced, a repeat that declares new members is refused with identity_reused (they now exist) and one that declares none finds nothing to change; both write nothing. An unchanged member list writes nothing (changed=false). Returns the new source token, the paths now selected, and the connection with every member below it and its requirement fields. Never touches schematic or PCB files.")]
+    public Task<CallToolResult> RefineConnectionMembers(string instanceId, string expectedInstanceEpoch, string repositoryRoot, string sourcePath,
+        string documentId, string expectedSourceToken, BlockSelection expectedRoot, BlockSelection[] blockPath, ConnectionSelection[] connectionPath,
+        Guid[] memberIds, ConnectionMemberDefinition[] newMembers, Guid operationId, string actor, CancellationToken cancellationToken,
+        SourceReference[]? sources = null, Guid? refinementInputId = null, string implementationName = "Initial") => Execute(async () =>
+    {
+        var edit = await PrepareConnectionEdit(instanceId, expectedInstanceEpoch, repositoryRoot, sourcePath, documentId, expectedSourceToken,
+            expectedRoot, blockPath, connectionPath, operationId, actor, sources, refinementInputId, "Refine connection members", cancellationToken);
+        if (memberIds is null || newMembers is null)
+            throw new AutomationException("ambiguous_connection_edit", "List the connection's members afterwards (memberIds) and each new member (newMembers), even when a list is empty. Nothing was changed.");
+        int next = 0;
+        var (draft, created) = RecursiveConnectionEdits.RefineMembers(edit.Target, [.. memberIds], [.. newMembers],
+            () => DiagramIdentity.Derive(operationId, "new-member:" + next++.ToString(System.Globalization.CultureInfo.InvariantCulture)), implementationName);
+        var (result, graph, levelPath, linkPath) = await SaveConnectionEdit(edit, draft, created, cancellationToken);
+        var level = result.Document.Graph.ConnectionArchives.Single(a => a.OwnerBlockId == levelPath[^1].BlockId.ToString("D"));
+        var archive = graph.Connections(levelPath[^1].BlockId);
+        var fresh = created.Select(m => m.Selection.ConnectionId).ToHashSet();
+        object Row(ConnectionSelection selection)
+        {
+            var row = level.Revisions.Single(r => r.Selection.RevisionId == selection.RevisionId.ToString("D"));
+            var fields = level.RequirementHistories.Single(h => h.StateId == row.Selection.StateId).Revisions.Single(r => r.Id == row.RequirementRevisionId);
+            return new { created = fresh.Contains(selection.ConnectionId), revision = JsonSerializer.Deserialize<JsonElement>(JsonFormatter.Default.Format(row)),
+                requirements = JsonSerializer.Deserialize<JsonElement>(JsonFormatter.Default.Format(fields)) };
+        }
+        return Data(new { instanceId, instanceEpoch = edit.Epoch, documentId, operationId, sourceToken = result.SourceToken,
+            changed = result.SaveSummary.Changed, selectedRoot = graph.SelectedRoot, blockPath = levelPath, connectionPath = linkPath,
+            connection = Row(linkPath[^1]), members = archive.Walk([linkPath[^1]]).Skip(1).Select(Row).ToArray(),
+            saveSummary = JsonSerializer.Deserialize<JsonElement>(JsonFormatter.Default.Format(result.SaveSummary)) },
+            checked((int)result.UpgradedFromSchemaVersion));
+    });
+
+    private sealed record ConnectionEdit(string Epoch, string RepositoryRoot, string SourcePath, string DocumentId, string SourceToken,
+        RecursiveBlockGraph Graph, ConnectionEditTarget Target, RequirementRevisionOrigin Origin, Guid OperationId);
+
+    /// <summary>The checks every connection edit shares: the attached instance and its epoch, the operation and actor, the exact
+    /// file the agent observed, and the target by exact identity in that file (ledger pf92d0ecdec8805b4). Nothing is written.</summary>
+    private async Task<ConnectionEdit> PrepareConnectionEdit(string instanceId, string expectedInstanceEpoch, string repositoryRoot,
+        string sourcePath, string documentId, string expectedSourceToken, BlockSelection expectedRoot, BlockSelection[] blockPath,
+        ConnectionSelection[] connectionPath, Guid operationId, string actor, SourceReference[]? sources, Guid? refinementInputId,
+        string summary, CancellationToken cancellationToken)
+    {
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
+            throw new AutomationException("recursive_instance_changed", "The native instance identity or epoch changed; inspect it again.");
+        if (operationId == Guid.Empty || string.IsNullOrWhiteSpace(actor) || string.IsNullOrEmpty(expectedSourceToken))
+            throw new AutomationException("invalid_connection_edit_operation", "Provide the observed source token, an operation identity and the agent's name.");
+        if (expectedRoot is null || blockPath is null || connectionPath is null)
+            throw new AutomationException("ambiguous_connection_edit", "Name the saved root, the block path to the level and the connection path by exact identity. Nothing was changed.");
+        if (new[] { expectedRoot }.Concat(blockPath).Any(p => p is null || p.BlockId == Guid.Empty || p.StateId == Guid.Empty || p.RevisionId == Guid.Empty)
+            || connectionPath.Any(p => p is null || p.ConnectionId == Guid.Empty || p.StateId == Guid.Empty || p.RevisionId == Guid.Empty))
+            throw new AutomationException("invalid_diagram_identity", "Provide exact non-empty block and connection identities, implementations and revisions.");
+        var loaded = await RecursiveBlockFiles.ReadAsync(repositoryRoot, sourcePath, Identity(documentId), cancellationToken);
+        if (loaded.ContentSha256 != expectedSourceToken)
+            throw new AutomationException("recursive_block_file_changed", "The saved diagram changed since it was read; read it again before editing a connection. Nothing was changed.");
+        var target = RecursiveConnectionEdits.Locate(loaded.Graph, expectedRoot, [.. blockPath], [.. connectionPath]);
+        var origin = new RequirementRevisionOrigin(RequirementRevisionActor.Agent, actor, DateTimeOffset.UtcNow, summary, [.. sources ?? []], [operationId]);
+        origin.Validate();
+        origin = RefinementInputFiles.AttachOrigin(loaded.Graph, target.BlockPath, refinementInputId, origin);
+        return new(session.Epoch, repositoryRoot, sourcePath, documentId, expectedSourceToken, loaded.Graph, target, origin, operationId);
+    }
+
+    /// <summary>Saves a connection edit through the diagram companion's connection save (the action the helper process runs):
+    /// the draft, the members it creates and new revision identities for the connection, the groups containing it, the
+    /// level and every level above it, guarded by the observed file token. The connection's new revision is the operation's
+    /// identity and the rest are derived from it (ledger pf92d0ecdec8805b4, review finding 4), so a retried operation can see
+    /// that it landed and can never save a second copy.</summary>
+    private static async Task<(RecursiveFileResult Result, RecursiveBlockGraph Graph, ImmutableArray<BlockSelection> BlockPath,
+        ImmutableArray<ConnectionSelection> ConnectionPath)> SaveConnectionEdit(ConnectionEdit edit, DiagramConnectionDraft draft,
+        ImmutableArray<NewConnectionMember> created, CancellationToken cancellationToken)
+    {
+        string Derived(string name) => DiagramIdentity.Derive(edit.OperationId, name).ToString("D");
+        var save = new SaveConnectionDraftData { ExpectedRoot = RecursiveBlockCodec.EncodeSelection(edit.Graph.SelectedRoot),
+            Draft = RecursiveBlockCodec.Encode(draft), NewConnectionRevisionId = edit.OperationId.ToString("D"),
+            NewRequirementRevisionId = Derived("connection-requirements"), NewBlockRevisionId = Derived("level-revision"),
+            NewBlockRequirementRevisionId = Derived("level-requirements"), Origin = RecursiveBlockCodec.EncodeOrigin(edit.Origin) };
+        save.BlockPath.Add(edit.Target.BlockPath.Select(RecursiveBlockCodec.EncodeSelection));
+        save.ConnectionPath.Add(edit.Target.ConnectionPath.Select(RecursiveBlockCodec.EncodeSelection));
+        save.BlockAncestorRevisionIds.Add(edit.Target.BlockPath.Skip(1).Select((_, i) => Derived("block-ancestor:" + i.ToString(System.Globalization.CultureInfo.InvariantCulture))));
+        save.ConnectionAncestorRevisionIds.Add(edit.Target.ConnectionPath.Skip(1).Select((_, i) => Derived("connection-ancestor:" + i.ToString(System.Globalization.CultureInfo.InvariantCulture))));
+        save.NewMembers.Add(created.Select(RecursiveBlockCodec.Encode));
+        var result = await RecursiveEditorFiles.ExecuteAsync(new RecursiveFileRequest { SchemaVersion = RecursiveBlockCodec.SchemaVersion,
+            Action = RecursiveFileAction.RfaSaveConnection, RepositoryRoot = edit.RepositoryRoot, SourcePath = edit.SourcePath,
+            DocumentId = edit.DocumentId, ExpectedSourceToken = edit.SourceToken, SaveConnection = save }, cancellationToken);
+        var graph = RecursiveBlockCodec.Decode(result.Document.Graph);
+        var (blockPath, connectionPath) = RecursiveConnectionEdits.Follow(graph, edit.Target.BlockPath, edit.Target.ConnectionPath);
+        return (result, graph, blockPath, connectionPath);
+    }
+
     [McpServerTool(Name = "kicad_diagram_observe", ReadOnly = true),
      Description("Render one or more native structural-diagram views with matching structured objects at the exact observed source token and editor view revision. Omit a view selection for the current canvas including its draft/preview; specify an exact selection for another saved level or revision. Optional diagram-unit viewport chooses a detail region. Rendering never navigates the user window or saves a draft. Each view returns PNG, actual viewport, coordinate system and object identities; this is not native schematic/PCB realization or electrical verification.")]
     public Task<CallToolResult> Observe(string instanceId, string documentId, string expectedSourceToken,
@@ -569,7 +822,7 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_diagram_field_history", ReadOnly = true),
-     Description("Read a bounded field-history page at an exact saved block revision, optionally for one exact connection/member in that local diagram. Field is General, Schematic or Routing. Returns original text, provenance, revision targets and total count; later unselected candidates do not appear as saved edits. No draft, file or native selection is changed.")]
+     Description("Read a bounded field-history page at an exact saved block revision, optionally for one exact connection/member in that local diagram. Field is General, Schematic or Routing. Returns original text, provenance, revision targets and total count; later unselected candidates do not appear as saved edits. An implementation made from another one (with New or Duplicate, or a proposal that refined the block, connection or member) continues that implementation's history: after its own entries come the earlier implementation's entries, up to the revision it was made from, each with its own author, sources and linked inputs. Every entry names the implementation it was saved in (contextStateId, contextImplementation); its contextRevisionId and contextVersion belong to that implementation, which for such an entry is not the requested one, and ownerName is the name the block, connection or member had in that revision. No draft, file or native selection is changed.")]
     public Task<CallToolResult> FieldHistory(string instanceId, string repositoryRoot, string sourcePath, string documentId,
         string blockId, string stateId, string revisionId, string field, CancellationToken cancellationToken,
         int offset = 0, int limit = 50, string? connectionId = null, string? connectionStateId = null,
@@ -590,8 +843,33 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
             request.Connection = new() { ConnectionId = Identity(connectionId).ToString("D"), StateId = Identity(connectionStateId).ToString("D"), RevisionId = Identity(connectionRevisionId).ToString("D") };
         }
         var result = await RecursiveEditorFiles.ExecuteAsync(request, cancellationToken);
+        // Name the implementation each entry was saved in (an implementation made from another one continues its history),
+        // read from the same saved file: the read is bound to the history's source token.
+        var snapshot = await RecursiveEditorFiles.ExecuteAsync(new RecursiveFileRequest { SchemaVersion = RecursiveBlockCodec.SchemaVersion,
+            RepositoryRoot = repositoryRoot, SourcePath = sourcePath, DocumentId = documentId, ExpectedSourceToken = result.SourceToken }, cancellationToken);
+        var saved = snapshot.Document.Graph;
+        var contexts = new Dictionary<string, (string StateId, string Name)>();
+        if (request.Action == RecursiveFileAction.RfaBlockFieldHistory)
+        {
+            var names = saved.States.ToDictionary(s => s.Id, s => s.Name);
+            foreach (var revision in saved.Revisions.Where(r => r.Selection.BlockId == request.Block.BlockId))
+                contexts[revision.Selection.RevisionId] = (revision.Selection.StateId, names[revision.Selection.StateId]);
+        }
+        else
+        {
+            var archive = saved.ConnectionArchives.Single(a => a.OwnerBlockId == request.Block.BlockId);
+            var names = archive.States.ToDictionary(s => s.Id, s => s.Name);
+            foreach (var revision in archive.Revisions.Where(r => r.Selection.ConnectionId == request.Connection.ConnectionId))
+                contexts[revision.Selection.RevisionId] = (revision.Selection.StateId, names[revision.Selection.StateId]);
+        }
+        var history = JsonNode.Parse(JsonFormatter.Default.Format(result.History))!.AsObject();
+        foreach (var entry in history["entries"]?.AsArray() ?? [])
+        {
+            var (contextState, implementation) = contexts[entry!["contextRevisionId"]!.GetValue<string>()];
+            entry["contextStateId"] = contextState; entry["contextImplementation"] = implementation;
+        }
         var data = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId,
-            sourceToken = result.SourceToken, history = JsonSerializer.Deserialize<JsonElement>(JsonFormatter.Default.Format(result.History)) });
+            sourceToken = result.SourceToken, history });
         return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
     });
 

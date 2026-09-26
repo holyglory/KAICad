@@ -91,6 +91,15 @@ public sealed class DiagramRequirementHistoryFileTests
             await Assert.ThrowsExactlyAsync<AutomationException>(() => DiagramRequirementHistoryFiles.CreateAsync(root,
                 Path.Combine(Path.GetDirectoryName(root)!, "not-in-selected-root.xml"), initial));
             Assert.AreEqual(before, await File.ReadAllTextAsync(path));
+            // A history that continues another implementation's history can only live in the diagram holding both;
+            // a separate file can neither create nor adopt one (it would show the later texts without the earlier ones).
+            var derived = new DiagramRequirementHistory(initial.Scope, [initial.Current with { ParentId = Guid.NewGuid() }]);
+            string derivedPath = Path.Combine(root, "derived.xml");
+            await Assert.ThrowsExactlyAsync<AutomationException>(() => DiagramRequirementHistoryFiles.CreateAsync(root, derivedPath, derived));
+            Assert.IsFalse(File.Exists(derivedPath));
+            await File.WriteAllTextAsync(derivedPath, DiagramRequirementHistoryXml.Write(derived));
+            Assert.AreEqual("invalid_requirement_history", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+                DiagramRequirementHistoryFiles.ReadAsync(root, derivedPath, initial.Scope))).Code);
             if (!OperatingSystem.IsWindows())
             {
                 string linked = Path.Combine(root, "linked.xml"); File.CreateSymbolicLink(linked, path);

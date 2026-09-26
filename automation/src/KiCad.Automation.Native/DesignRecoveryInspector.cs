@@ -1,5 +1,6 @@
 using KiCad.Automation.Model;
 using KiCad.Automation.Protocol;
+using SchematicHierarchyData = Kiapi.Schematic.Types.SchematicHierarchyData;
 
 namespace KiCad.Automation.Native;
 
@@ -118,22 +119,48 @@ public static class DesignRecoveryInspector
         var observed = await ObserveAsync(store, client, token, includeElectrical: true);
         if (observed.Inspection.RevisionToken != expectedRevisionToken)
             throw new AutomationException("design_recovery_changed", "Recovery changed during electrical baseline observation.");
-        if (!saved.State.Baseline.Schematic.Equals(observed.Snapshot.Data))
+        if (!SameSchematicContent(saved.State.Baseline.Schematic, observed.Snapshot.Data))
             throw new AutomationException("electrical_baseline_mismatch", "Reconcile native edits before establishing the missing electrical baseline.");
         var comparison = SchematicElectricalComparison.Compare(saved.State.Baseline, observed.Electrical!, saved.State.KnowledgeLibraries, token);
         if (!comparison.PinBindingsComplete || !comparison.ConnectivityEquivalent)
             throw new AutomationException("electrical_baseline_mismatch", "The saved circuit and exact native pin connections do not agree.");
         token.ThrowIfCancellationRequested();
+        // The baseline checkpoint belongs to the saved baseline hierarchy, which may still carry an earlier build's retired
+        // coverage marker; its pin connections are the ones KiCad shows for that same content.
+        var baselineElectrical = observed.Electrical!.Clone();
+        baselineElectrical.Hierarchy.Data = saved.State.Baseline.Schematic.Clone();
         return store.Save(saved.State with
         {
             Observed = observed.Snapshot.Data, NativeRevision = new(observed.Snapshot.Revision.Epoch, observed.Snapshot.Revision.Sequence),
-            TrackingComplete = observed.Snapshot.TrackingComplete, BaselineElectrical = observed.Electrical,
+            TrackingComplete = observed.Snapshot.TrackingComplete, BaselineElectrical = baselineElectrical,
             ObservedElectrical = observed.Electrical,
             HierarchyResolution = observed.Snapshot.Data.Equals(saved.State.Observed)
                 && observed.Snapshot.Revision.Epoch == saved.State.NativeRevision.Epoch
                 && observed.Snapshot.Revision.Sequence == saved.State.NativeRevision.Sequence
                 && observed.Snapshot.TrackingComplete == saved.State.TrackingComplete ? saved.State.HierarchyResolution : null
         }, expectedRevisionToken);
+    }
+
+    /// <summary>Whether two native hierarchy snapshots hold the same schematic: every screen, object, library cache entry,
+    /// setting and coverage entry exactly, apart from retired coverage markers (SchematicItemDelta.RetiredCoverageMarkers).
+    /// A record an earlier preview saved still lists library_cache as state its snapshot could not hold, although that
+    /// build held the cache exactly; this build no longer lists it, so the two describe the same schematic. Every other
+    /// difference, in the schematic or in what the snapshot says it cannot hold, still counts.</summary>
+    internal static bool SameSchematicContent(SchematicHierarchyData saved, SchematicHierarchyData observed)
+    {
+        ArgumentNullException.ThrowIfNull(saved);
+        ArgumentNullException.ThrowIfNull(observed);
+        static SchematicHierarchyData WithoutRetiredCoverage(SchematicHierarchyData data)
+        {
+            var result = data.Clone();
+            foreach (var screen in result.Instances.Where(s => s.Metadata is not null))
+            {
+                var kept = screen.Metadata.UnrepresentedState.Where(m => !SchematicItemDelta.RetiredCoverageMarkers.Contains(m)).ToArray();
+                screen.Metadata.UnrepresentedState.Clear(); screen.Metadata.UnrepresentedState.Add(kept);
+            }
+            return result;
+        }
+        return WithoutRetiredCoverage(saved).Equals(WithoutRetiredCoverage(observed));
     }
 
     public static async Task<DesignRecoveryInspection> InspectAsync(DesignRecoveryStore store,

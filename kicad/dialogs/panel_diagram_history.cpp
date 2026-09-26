@@ -1,5 +1,6 @@
 /* Copyright The KiCad Developers. SPDX-License-Identifier: GPL-3.0-or-later */
 #include "panel_diagram_history.h"
+#include "dialog_diagram_field_history.h"
 #include <wx/button.h>
 #include <wx/datetime.h>
 #include <wx/dc.h>
@@ -66,6 +67,8 @@ PANEL_DIAGRAM_HISTORY::PANEL_DIAGRAM_HISTORY( wxWindow* parent, ACTIONS actions 
     layout->Add( paging, 0, wxEXPAND | wxALL, gap );
     m_details = new wxTextCtrl( this, wxID_ANY, wxEmptyString, wxDefaultPosition, FromDIP( wxSize( 250, 180 ) ), wxTE_MULTILINE | wxTE_READONLY | wxTE_RICH2 );
     m_details->SetName( "DiagramHistoryComparison" ); m_details->SetMinSize( FromDIP( wxSize( 220, 100 ) ) );
+    // Its text keeps clear of the box's border, as in the editor's boxes (mockup audit M1-5).
+    DIAGRAM_LOOK::PadTextBox( m_details, FromDIP( 8 ), FromDIP( 6 ) );
     layout->Add( m_details, 1, wxEXPAND | wxLEFT | wxRIGHT, gap );
     m_failure = new wxStaticText( this, wxID_ANY, wxEmptyString ); m_failure->SetName( "DiagramHistoryError" );
     layout->Add( m_failure, 0, wxEXPAND | wxALL, gap );
@@ -215,6 +218,8 @@ void PANEL_DIAGRAM_HISTORY::updateActions()
     m_failure->SetLabel( text( m_error ) ); m_failure->Wrap( std::max( FromDIP( 200 ), GetClientSize().x - FromDIP( 24 ) ) );
     m_failure->Show( !m_error.empty() ); m_retry->Show( !m_error.empty() ); m_retry->Enable( !m_busy );
     m_preview->Enable( selected && m_comparisonReady && !m_busy );
-    m_restore->Enable( selected && m_comparisonReady && !m_busy && !same( *Inspected(), m_context ) );
+    // Restoring is the panel's primary action, filled with the accent while it is available, as the approved history
+    // mockup shows it (mockup audit M1-4).
+    DIAGRAM_LOOK::StylePrimary( m_restore, selected && m_comparisonReady && !m_busy && !same( *Inspected(), m_context ) );
     m_return->Show( m_previewing ); m_return->Enable( !m_busy ); Layout();
 }

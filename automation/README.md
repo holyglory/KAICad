@@ -9,6 +9,9 @@ Current downloads are on [kicad.vr.ae](https://kicad.vr.ae/). The
 September 15 Apple Silicon and Intel builds, including managed-update setup.
 The [Windows preview installation guide](distribution/windows-preview-install.md)
 covers the September 16 Windows package and its managed updater.
+To point Codex Desktop or a second MCP client such as Claude Code at a newly installed
+Linux preview's MCP server, and to confirm which server is really running, follow the
+[Codex runtime refresh runbook](docs/codex-runtime-refresh.md).
 
 ## Try provisional Schematic Setup edits in a source build
 
@@ -838,9 +841,17 @@ through `kicad_design_sync_apply` with the returned `continuationOperationId` an
 `requestedRecoveryRevisionToken`, or through automatic synchronization. Until then the
 record cannot be attached to another KiCad session (`kicad_design_recovery_reattach`
 returns `released_operation_requires_continuation`). If the XML was already being
-published when KiCad ended, `resume` refuses (`released_publication_started`), and if the
-restarted KiCad holds other edits neither continuation can proceed yet. The PSU/CPU
-`native-crash` graph proves both continuations on killed KiCad processes.
+published when KiCad ended, `resume` refuses (`released_publication_started`) and says
+whether roll-back still works. Edits the user made after the restart are handled per sheet:
+the continuation changes only the operation's own sheets (`operationSheets`); notes, text,
+drawings, images, tables and page settings on other sheets (`sheetsWithOtherEdits`) are kept
+and published, while components, wires, labels and sheet changes there are refused with
+`released_operation_edits_not_carried`, and any edit on the operation's own sheets with
+`released_operation_sheets_edited`. Each refusal names the edits and the way out (undo them,
+or close without saving and reopen, then call again). A refusal after a release returns
+`releasedNow`, the receipt path and the new `recoveryRevisionToken`; sheet lists are `null`
+when no comparison was made. The PSU/CPU `native-crash` graph proves both continuations on
+killed KiCad processes, including a user edit on another sheet.
 
 Run `devcoordinator2 test start . --test native-xml-component-creation --tier
 development --client codex` for the two-editor Linux journey. It checks XML-driven
@@ -1670,6 +1681,18 @@ zoom-out in both instances: image/scale changes preserve supported design conten
 revision and unsaved state. Zoom follows native preset steps, not an exact inverse
 of an arbitrary starting fit scale. Mid-capture layer-change race injection and
 independent render contexts remain unqualified.
+
+`kicad_schematic_checked_view(instanceId, documentJson, viewDocumentJson?)` returns the
+displayed sheet's PNG and the whole-schematic checked state from one native request, captured
+with no editor event in between, so the image and the state always describe the same revision;
+a change during capture refuses it, and an inconsistent reply is refused as
+`invalid_checked_view`. Plan a batch from `structuredContent.checked` and send it with
+`kicad_schematic_apply_checked_batch`; a batch planned from a changed view is refused as
+`stale_document_state` and changes nothing. The Linux journey
+`AgentAndPersonEditingTogetherNeverGetStaleOrPartialEdits` (graph
+`native-observe-apply-stress`) runs this loop 50 times in each of two editors while real
+keyboard edits land at varying moments, including during the apply, and undoes every step at
+the end.
 Compiled MCP journeys
 compare native image bytes and data on root/repeated sheets and exercise target
 and open-commit rejection with recovery. Tracking and serializer coverage remain
@@ -3063,8 +3086,28 @@ The same run proved that an open native 3D viewer blocks checked PCB close,
 preserves both windows and files, and permits normal close/reopen after explicitly
 closing the viewer. This is close-safety evidence, not qualification of MCP 3D
 rendering. The receipt covers its frozen Linux candidate, not public packages,
-later source changes or Mac/Desktop execution. Cancellable DRC jobs and result
-freshness remain open in completion-ledger outcome `p9966151ec04cd9cf`.
+later source changes or Mac/Desktop execution. A complete input snapshot and result freshness for DRC jobs remain open in
+completion-ledger outcome `p23deb822a36256a6`.
+
+### PCB design-rule check jobs (development branch)
+
+`kicad_pcb_drc_start`, `kicad_pcb_drc_job` and `kicad_pcb_drc_cancel` run KiCad's own checker on a detached copy of an
+explicitly named board at the exact revision the agent observed. Linux run `t20260925T234453Z-24318d` proved them through the compiled MCP
+STDIO server against the rendered PCB editors of two KiCad instances at once. Both checks ran together, and the agent saw
+each one reach KiCad's copper clearance step and its copper sliver step. Each completed check reported exactly six real
+findings, all naming its own board's test copper and bound to the revision it was asked for: two copper clearance
+violations (two parallel tracks, and a track and a via), three dangling tracks and one dangling via. A check cancelled
+once the agent saw it in its copper sliver step ended cancelled, with no findings, only after its worker had stopped;
+the other project's check beside it completed with the same findings as before. A custom rules file with an item KiCad
+does not know ended the check failed with `design_rules_invalid`, naming the file and the item's exact line and offset.
+After the cancellation, and after the rules were corrected (the broken item removed, a rule that matches no net kept),
+new checks reported exactly the first findings. Cancels, reads and starts sent to the wrong instance, with the other
+process's epoch or for a stale revision were refused without changing either board. After every outcome the editor it
+happened in accepted an edit and saved it. In project B only, Ctrl+Z and Ctrl+Y in the rendered PCB editor then undid
+and redid the agent's last edit, and the result saved. A rules file that declares a newer rules version also fails with
+`design_rules_invalid`; the native unit tests prove that case, the journey does not. Ordinary checks never claim a
+complete input snapshot or fresh results (outcome `p23deb822a36256a6`). While a check runs, `phase` names KiCad's
+current check step; `progress` is the furthest fraction any single step has reached, not an overall percentage.
 
 ### Recursive structural diagrams (Linux source increment)
 

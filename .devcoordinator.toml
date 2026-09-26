@@ -2344,6 +2344,16 @@ tier="development"
 requires=["build"]
 command=["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_project_analysis_snapshot$", "--output-on-failure", "--no-tests=error"]
 
+# KiCad's own PCB design-rule suites. They read custom rules files through the same loader the
+# DRC jobs use, so a change to rules parsing (for example the line-number fix accepted in
+# decision nb6844a5bd34d3d5d) is checked against upstream cases too.
+[[test.drc-project-freshness.check]]
+name="upstream-drc-suites"
+tier="development"
+requires=["native-build"]
+timeout_seconds=2400
+command=["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_pcbnew_drc_regression$|^qa_pcbnew_drc_solder_mask$|^qa_pcbnew_constraints$|^qa_pcbnew_creepage$|^qa_pcbnew_multichannel$|^qa_pcbnew_other$", "--output-on-failure", "--no-tests=error"]
+
 [test.mac-baseline-downloads]
 # Admission can wait behind a native build; each HTTP request remains bounded
 # independently to 30 seconds below.
@@ -3341,7 +3351,7 @@ command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--
 retained_artifacts=[{ name = "native-offscreen-move-tests", path = "automation/artifacts/native-offscreen-move-tests", max_bytes = 16777216 }, { name = "native-offscreen-move-evidence", path = "automation/artifacts/native-offscreen-move/native-session-current", max_bytes = 33554432 }]
 
 # Composed Linux acceptance for frozen candidates only: every native schematic,
-# diagram, simulation, PCB-item, crash and PSU/CPU fixture journey, one after another, reusing each
+# diagram, simulation, PCB-item, crash, observe-apply stress and PSU/CPU fixture journey, one after another, reusing each
 # focused graph's exact journey command and evidence retention.
 [test.native-acceptance]
 timeout_seconds=14400
@@ -3351,14 +3361,14 @@ env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
 name="restore"
 tier="development"
 role="preflight"
-invalidates=["managed-build", "native-build", "native-suites", "journey-native-foundation", "journey-native-erc-dialog", "journey-native-setup-dialog", "journey-native-net-chains", "journey-native-net-settings", "journey-native-bom-settings", "journey-native-hierarchy-policy", "journey-native-synchronization-plan", "journey-native-symbol-sheet-ownership", "journey-native-xml-component-creation", "journey-native-transform-sync", "journey-native-checked-batch", "journey-native-offscreen-move", "journey-diagram-requirement-history", "journey-psu-cpu-creation", "journey-psu-cpu-connected", "journey-psu-cpu-rebuild", "journey-native-crash", "journey-diagram-canvas"]
+invalidates=["managed-build", "native-build", "native-suites", "journey-native-foundation", "journey-native-erc-dialog", "journey-native-setup-dialog", "journey-native-net-chains", "journey-native-net-settings", "journey-native-bom-settings", "journey-native-hierarchy-policy", "journey-native-synchronization-plan", "journey-native-symbol-sheet-ownership", "journey-native-xml-component-creation", "journey-native-transform-sync", "journey-native-checked-batch", "journey-native-offscreen-move", "journey-diagram-requirement-history", "journey-psu-cpu-creation", "journey-psu-cpu-connected", "journey-psu-cpu-rebuild", "journey-native-crash", "journey-diagram-canvas", "journey-native-observe-apply-stress"]
 command=["dotnet", "restore", "automation/KiCad.Automation.slnx", "--locked-mode"]
 
 [[test.native-acceptance.check]]
 name="managed-build"
 tier="development"
 role="preflight"
-invalidates=["native-build", "native-suites", "journey-native-foundation", "journey-native-erc-dialog", "journey-native-setup-dialog", "journey-native-net-chains", "journey-native-net-settings", "journey-native-bom-settings", "journey-native-hierarchy-policy", "journey-native-synchronization-plan", "journey-native-symbol-sheet-ownership", "journey-native-xml-component-creation", "journey-native-transform-sync", "journey-native-checked-batch", "journey-native-offscreen-move", "journey-diagram-requirement-history", "journey-psu-cpu-creation", "journey-psu-cpu-connected", "journey-psu-cpu-rebuild", "journey-native-crash", "journey-diagram-canvas"]
+invalidates=["native-build", "native-suites", "journey-native-foundation", "journey-native-erc-dialog", "journey-native-setup-dialog", "journey-native-net-chains", "journey-native-net-settings", "journey-native-bom-settings", "journey-native-hierarchy-policy", "journey-native-synchronization-plan", "journey-native-symbol-sheet-ownership", "journey-native-xml-component-creation", "journey-native-transform-sync", "journey-native-checked-batch", "journey-native-offscreen-move", "journey-diagram-requirement-history", "journey-psu-cpu-creation", "journey-psu-cpu-connected", "journey-psu-cpu-rebuild", "journey-native-crash", "journey-diagram-canvas", "journey-native-observe-apply-stress"]
 command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
 
 [[test.native-acceptance.check]]
@@ -3534,6 +3544,15 @@ after=["journey-native-crash"]
 timeout_seconds=1200
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeDiagramCanvas", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-diagram-canvas-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{ name = "native-diagram-canvas-tests", path = "automation/artifacts/native-diagram-canvas-tests", max_bytes = 16777216 }, { name = "canvas-light", path = "automation/artifacts/native-diagram-canvas/light/native-session-current", max_bytes = 67108864 }, { name = "canvas-dark", path = "automation/artifacts/native-diagram-canvas/dark/native-session-current", max_bytes = 67108864 }]
+
+[[test.native-acceptance.check]]
+name="journey-native-observe-apply-stress"
+tier="development"
+requires=["native-build"]
+after=["journey-diagram-canvas"]
+timeout_seconds=1200
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeObserveApplyStress", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-observe-apply-stress-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
+retained_artifacts=[{ name = "native-observe-apply-stress-tests", path = "automation/artifacts/native-observe-apply-stress-tests", max_bytes = 16777216 }, { name = "native-observe-apply-stress-evidence", path = "automation/artifacts/native-observe-apply-stress/native-session-current", max_bytes = 67108864 }]
 
 # Current Linux publication and latest Mac/Windows public verification recipes
 # (unified from the former delivery control point codex/xml-net-settings).

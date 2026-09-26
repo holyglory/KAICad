@@ -33,10 +33,11 @@ public sealed partial class NativeSessionTests
     //     edit made in KiCad is there, then accepted once KiCad's own undo took that edit back) and discards the stuck
     //     realization after KiCad's own undo, and the ordinary applies then resume; the second keeps both results and
     //     publishes them. The first project also starts a KiCad for a copy of the realized project: there a connection the
-    //     XML adds never reaches KiCad (its test host is killed once the edit is journaled), the person draws that connection
-    //     in KiCad, discard clears the operation while the record keeps observing KiCad as it was, and refresh, plan and apply
-    //     publish the person's drawing; then an automatic worker watches that KiCad and it is killed: the worker pauses with
-    //     instance_exited within a second (pec2f1b53d4024a17). The second starts a KiCad for a copy too, forces a creation
+    //     XML adds never reaches KiCad (its test host is killed once the edit is journaled), a wire making that connection is
+    //     committed in KiCad through its checked-edit API (the journey cannot drive KiCad's wire tool), discard clears the
+    //     operation while the record keeps observing KiCad as it was, and refresh, plan and apply publish that wire; then an
+    //     automatic worker watches that KiCad and it is killed: the worker pauses with instance_exited within a second
+    //     (pec2f1b53d4024a17). The second starts a KiCad for a copy too, forces a creation
     //     stuck there, joins two XML nets with a wire in KiCad, saves and reloads the sheets, and keeps KiCad's result: KiCad's
     //     connections are published, the nets' requirements wait for resolution and the next plan has nothing to do.
     //  2. Records an earlier preview saved (p91fda8ca22a68141). Preview 23's snapshots listed library_cache among the state
@@ -280,12 +281,12 @@ public sealed partial class NativeSessionTests
                 "The realization drew labels, hierarchical labels, wires and sheet pins: " + JsonSerializer.Serialize(drawn));
             Step("complete stage realized", new { drawn, realizationExit });
             // On a KiCad for a copy of the project, an XML connection KiCad never received is discarded and the same connection,
-            // drawn in KiCad, is taken in and published; then an automatic worker whose KiCad is killed pauses at once with
-            // instance_exited (first project). A creation kept after KiCad joined two XML nets and reloaded its saved sheets
+            // committed in KiCad as a wire through its checked-edit API, is taken in and published; then an automatic worker
+            // whose KiCad is killed pauses at once with instance_exited (first project). A creation kept after KiCad joined two XML nets and reloaded its saved sheets
             // publishes KiCad's connections (second project).
             object? exitPause = keeps ? null : await VerifyAutomaticPauseOnExit(host, store.Read()!.State.Baseline, context.ProjectDirectory, display,
                 evidence, instanceId, token);
-            if (exitPause is not null) Step("edit KiCad never received discarded and KiCad's drawing published; automatic worker paused on its KiCad's exit", exitPause);
+            if (exitPause is not null) Step("edit KiCad never received discarded and the wire committed in KiCad published; automatic worker paused on its KiCad's exit", exitPause);
             object? keptConnections = keeps ? await VerifyKeptConnectionsWin(host, store.Read()!.State.Baseline, context.ProjectDirectory, display,
                 evidence, instanceId, token) : null;
             if (keptConnections is not null) Step("KiCad's own connections kept and published", keptConnections);
@@ -309,8 +310,13 @@ public sealed partial class NativeSessionTests
 
             // The original: saved by KiCad, clean, and the XML settled on it.
             var original = await Capture();
-            Assert.AreEqual(realized.Electrical, original.Electrical, "Adopting the earlier records sent no edit to KiCad.");
-            Assert.AreEqual(realized.State.StateSha256, original.State.StateSha256, "Their applies saved KiCad's sheets unchanged.");
+            if (!keeps) Assert.AreEqual(realized, original, "Nothing since the realization reached this KiCad: the other flows ran on a copy's KiCad.");
+            else
+            {
+                // The earlier records' applies saved KiCad's sheets, which moves the save-related state; the design is the same.
+                Assert.AreEqual(realized.Electrical, original.Electrical, "Adopting the earlier records sent no edit to KiCad.");
+                Assert.AreEqual(realized.State.StateSha256, original.State.StateSha256, "Their applies saved KiCad's sheets unchanged.");
+            }
             Assert.IsFalse(original.State.NativeContentDirty);
             var originalDesign = store.Read()!.State.Baseline;
             var originalSheetPins = OriginalSheetPins(original.Electrical.Hierarchy.Data);
@@ -352,7 +358,8 @@ public sealed partial class NativeSessionTests
             var changedFile = await RefusedRebuild("changed-project-file", changedProjectBytes, empty);
             Assert.AreEqual("native_file_conflict", changedFile.Code, changedFile.Message);
             Assert.AreEqual("fixture.kicad_pro changed on disk after KiCad loaded it; restore it, or reopen the project in KiCad and reattach "
-                + "the recovery record (kicad_design_recovery_reattach), then plan again. Nothing was sent to KiCad and no file was written.",
+                + "the recovery record (kicad_design_recovery_reattach; if its schematic files are lost, first create the root with "
+                + "kicad_schematic_create), then plan again. Nothing was sent to KiCad and no file was written.",
                 changedFile.Message, "The refusal names the changed file and what fixes it.");
             await File.WriteAllBytesAsync(projectFile, originalFiles[projectFile], token);
             var fileRestored = await Capture();

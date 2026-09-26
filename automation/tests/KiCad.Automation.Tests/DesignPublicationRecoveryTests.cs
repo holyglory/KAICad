@@ -200,8 +200,11 @@ public sealed class DesignPublicationRecoveryTests
     // against a real KiCad; a journey can neither hand the store the altered next states refused here nor make a record
     // replacement fail after its receipt was written, so they are checked alone (no existing test covers this store rule).
     // The same isolated record also checks how receipts are found (review of 03566919ff, findings 5 and 6): the publication
-    // of a kept result is found from its continuation's index file without reading any other receipt, and a receipt an
-    // unsaved attempt left is not reported once its operation finished another way. Neither state can be made in a journey.
+    // of a kept result is found from its continuation's index file without reading any other receipt, a missing receipt of a
+    // kept operation fails closed instead of turning its publication into an ordinary one, a receipt an unsaved attempt left
+    // is not reported as a resolution once its operation finished another way (and is called unsaved only when the
+    // completion carries the receipt's own native edit), and the publication of a result kept twice names the operation whose
+    // result KiCad kept. None of these states can be made in a journey: the journey keeps a result once per stuck operation.
     [TestMethod]
     public async Task OnlyAResolutionOfExactlyThePendingOperationClearsIt()
     {
@@ -271,26 +274,125 @@ public sealed class DesignPublicationRecoveryTests
         Assert.IsTrue(File.Exists(Path.Combine(folder, continuation.ToString("N") + ".continuation-of." + operation.ToString("N"))));
         string damaged = Path.Combine(folder, Guid.NewGuid().ToString("N") + ".json");
         File.WriteAllText(damaged, "{ \"SchemaVersion\": ");
-        File.WriteAllBytes(Path.Combine(folder, continuation.ToString("N") + ".continuation-of." + Guid.NewGuid().ToString("N")), []);
+        var discardedElsewhere = Guid.NewGuid();
+        DesignPendingResolutions.Write(fixture.RecordPath, Receipt(discardedElsewhere, saved.RevisionToken));
+        File.WriteAllBytes(Path.Combine(folder, continuation.ToString("N") + ".continuation-of." + discardedElsewhere.ToString("N")), []);
         File.WriteAllBytes(Path.Combine(folder, Guid.NewGuid().ToString("N") + ".continuation-of." + operation.ToString("N")), []);
         Assert.AreEqual(operation, DesignPendingResolutions.KeptBy(fixture.RecordPath, continuation, state.InstanceId)!.Value.Receipt.OperationId);
         Assert.IsNull(DesignPendingResolutions.KeptBy(fixture.RecordPath, Guid.NewGuid(), state.InstanceId), "No index names this operation.");
         var unreadable = Assert.ThrowsExactly<AutomationException>(() => DesignPendingResolutions.Read(damaged));
         Assert.AreEqual("invalid_resolution_receipt", unreadable.Code);
         StringAssert.Contains(unreadable.Message, "move it out of " + folder, "A damaged receipt names what works.");
+        StringAssert.Contains(unreadable.Message, "Do not move the receipt of an operation whose kept result is still being published",
+            "The advice never removes the check that guards a kept result's discard.");
 
-        // A receipt an attempt left when its record replacement failed, for an operation that an apply completed instead: a
-        // repeated call naming it is refused, not answered with a resolution that never happened.
-        var finished = Guid.NewGuid();
-        DesignPendingResolutions.Write(fixture.RecordPath, Receipt(finished, resolved.RevisionToken));
-        new DesignSynchronizationReceipts(fixture.RecordPath).Archive(new DesignSynchronizationReceipt(2, finished, state.InstanceId,
-            fixture.Intent.DesignPath, resolved.RevisionToken, new string('a', 64), state.PendingNativeState!.ProcessEpoch,
-            resolved.State.NativeRevision.Epoch, resolved.State.NativeRevision.Sequence, false, false, null, null));
-        var completed = await Assert.ThrowsExactlyAsync<AutomationException>(() => DesignRecoveryPendingResolution.ResolveAsync(fixture.Store, null,
-            state.InstanceId.ToString("D"), resolved.RevisionToken, finished, PendingOperationChoice.Discard));
-        Assert.AreEqual("pending_operation_completed", completed.Code, completed.Message);
-        StringAssert.Contains(completed.Message, "kicad_design_sync_apply");
+        // Must-catch (review of fc3f93f070, finding 3): the kept operation's receipt moved out by hand. Its index still names it,
+        // so the continuation is refused as a publication whose kept result cannot be checked, never treated as an ordinary
+        // publication whose discard needs no check; nothing is read from KiCad and nothing changes. Apply still completes it.
+        string keptReceipt = Path.Combine(folder, operation.ToString("N") + ".json"), movedOut = Path.Combine(fixture.RecordPath + ".moved-receipt.json");
+        File.Move(keptReceipt, movedOut);
+        var missing = Assert.ThrowsExactly<AutomationException>(() => DesignPendingResolutions.KeptBy(fixture.RecordPath, continuation, state.InstanceId));
+        Assert.AreEqual("invalid_resolution_receipt", missing.Code, missing.Message);
+        StringAssert.Contains(missing.Message, keptReceipt + " is missing");
+        StringAssert.Contains(missing.Message, $"kicad_design_sync_apply (operationId {continuation:D})");
+        var guarded = await Assert.ThrowsExactlyAsync<AutomationException>(() => DesignRecoveryPendingResolution.ResolveAsync(fixture.Store, null,
+            state.InstanceId.ToString("D"), resolved.RevisionToken, continuation, PendingOperationChoice.Discard));
+        Assert.AreEqual("invalid_resolution_receipt", guarded.Code, "Refused before KiCad is contacted: " + guarded.Message);
         Assert.AreEqual(resolved.RevisionToken, fixture.Store.Read()!.RevisionToken, "Nothing was changed.");
+        File.Move(movedOut, keptReceipt);
+        Assert.AreEqual(operation, DesignPendingResolutions.KeptBy(fixture.RecordPath, continuation, state.InstanceId)!.Value.Receipt.OperationId);
+
+        // A receipt for an operation that an apply completed: a repeated call naming it is refused, not answered with a
+        // resolution. The receipt is called unsaved only when the apply carries the receipt's own native edit (native edit IDs
+        // are new for every synchronization); otherwise the operation ID may have been used again after a saved resolution
+        // (review of fc3f93f070, finding 4), and the refusal names both rather than saying something false.
+        const string Unsaved = "was left by an attempt that was never saved and describes nothing that happened";
+        const string Either = "was either left by an attempt that was never saved, or saved before the operation ID was used again";
+        async Task<string> Completed(string? receiptEdit, string? appliedEdit)
+        {
+            var finished = Guid.NewGuid();
+            DesignPendingResolutions.Write(fixture.RecordPath, Receipt(finished, resolved.RevisionToken) with { NativeOperationId = receiptEdit });
+            var native = appliedEdit is null ? null : new CheckedSchematicBatchReceipt { ProcessEpoch = state.PendingNativeState!.ProcessEpoch,
+                OperationId = appliedEdit, Status = CheckedSchematicBatchStatus.CsbsCompleted, ExpectedRequestVerified = true,
+                Result = new() { Revision = new Protocol.DocumentRevision { Epoch = resolved.State.NativeRevision.Epoch,
+                    Sequence = resolved.State.NativeRevision.Sequence } } };
+            new DesignSynchronizationReceipts(fixture.RecordPath).Archive(new DesignSynchronizationReceipt(2, finished, state.InstanceId,
+                fixture.Intent.DesignPath, resolved.RevisionToken, new string('a', 64), state.PendingNativeState!.ProcessEpoch,
+                resolved.State.NativeRevision.Epoch, resolved.State.NativeRevision.Sequence, native is not null, false,
+                native is null ? null : Google.Protobuf.MessageExtensions.ToByteArray(native), null));
+            var completed = await Assert.ThrowsExactlyAsync<AutomationException>(() => DesignRecoveryPendingResolution.ResolveAsync(fixture.Store, null,
+                state.InstanceId.ToString("D"), resolved.RevisionToken, finished, PendingOperationChoice.Discard));
+            Assert.AreEqual("pending_operation_completed", completed.Code, completed.Message);
+            StringAssert.Contains(completed.Message, $"Operation {finished:D} is no longer pending: it was completed by kicad_design_sync_apply");
+            Assert.AreEqual(resolved.RevisionToken, fixture.Store.Read()!.RevisionToken, "Nothing was changed.");
+            return completed.Message;
+        }
+        string edit = Guid.NewGuid().ToString("D");
+        string sameEdit = await Completed(edit, edit);
+        StringAssert.Contains(sameEdit, Unsaved, "The apply finished the receipt's own native edit, so the resolution was never saved.");
+        StringAssert.Contains(sameEdit, "with its native edit " + edit);
+        foreach (var (receiptEdit, appliedEdit, what) in new (string?, string?, string)[]
+        {
+            (edit, Guid.NewGuid().ToString("D"), "the apply sent another native edit (the ID was used again)"),
+            (null, null, "neither sent a native edit"), (edit, null, "the apply sent no native edit"), (null, edit, "the receipt names no native edit")
+        })
+        {
+            string message = await Completed(receiptEdit, appliedEdit);
+            StringAssert.Contains(message, Either, what);
+            StringAssert.Contains(message, "('discard', outcome discarded, from recovery revision " + resolved.RevisionToken + ")", what);
+            Assert.IsFalse(message.Contains(Unsaved, StringComparison.Ordinal), what + ": nothing proves the resolution was never saved.");
+        }
+
+        // The same for an operation released with kicad_design_recovery_release_exited. A release older than the receipt
+        // finished nothing after it (the operation was resumed under its ID and then resolved here): a repeated call reports
+        // that resolution.
+        async Task<AutomationException?> Released(string? receiptEdit, string? releasedEdit, TimeSpan releasedAfterReceipt)
+        {
+            var releasedId = Guid.NewGuid();
+            var resolution = Receipt(releasedId, resolved.RevisionToken) with { NativeOperationId = receiptEdit };
+            DesignReleasedOperations.Write(fixture.RecordPath, DesignReleasedOperation.Create(saved, new InstanceExit(state.InstanceId.ToString("D"),
+                state.PendingNativeState!.ProcessEpoch, 4242, null, 9, InstanceExit.ExitStatusEvidence, DateTimeOffset.UtcNow))
+                with { OperationId = releasedId, NativeOperationId = releasedEdit, ReleasedAt = resolution.ResolvedAt + releasedAfterReceipt });
+            DesignPendingResolutions.Write(fixture.RecordPath, resolution);
+            try
+            {
+                var reported = await DesignRecoveryPendingResolution.ResolveAsync(fixture.Store, null, state.InstanceId.ToString("D"),
+                    resolved.RevisionToken, releasedId, PendingOperationChoice.Discard);
+                Assert.IsFalse(reported.ResolvedNow);
+                Assert.AreEqual(resolution.ResolvedAt, reported.Receipt.ResolvedAt, "The saved resolution is reported.");
+                return null;
+            }
+            catch (AutomationException error)
+            {
+                Assert.AreEqual("pending_operation_completed", error.Code, error.Message);
+                StringAssert.Contains(error.Message, "released with kicad_design_recovery_release_exited");
+                return error;
+            }
+            finally { Assert.AreEqual(resolved.RevisionToken, fixture.Store.Read()!.RevisionToken, "Nothing was changed."); }
+        }
+        StringAssert.Contains((await Released(edit, edit, TimeSpan.FromMinutes(1)))!.Message, Unsaved, "released with the receipt's own native edit");
+        StringAssert.Contains((await Released(edit, Guid.NewGuid().ToString("D"), TimeSpan.FromMinutes(1)))!.Message, Either,
+            "released later with another native edit");
+        Assert.IsNull(await Released(null, edit, TimeSpan.FromMinutes(-1)), "Released before the resolution: the resolution is reported.");
+
+        // Must-catch (review of fc3f93f070, finding 2a): keep-and-replan chosen again for the continuation. Its own continuation
+        // publishes the result KiCad kept for the original operation, so undo is refused naming that operation, not the first
+        // continuation, before KiCad is contacted.
+        var second = Guid.NewGuid();
+        var keptAgain = fixture.Store.ResolvePendingOperation(resolved, resolved.State with
+        {
+            PendingPublication = DesignPublicationIntent.Create(fixture.Intent.DesignPath, state.DesiredFileBytes, fixture.Intent.CandidateFileBytes,
+                second, resolved.RevisionToken)
+        }, Receipt(continuation, resolved.RevisionToken, second) with { KeptOperationId = operation });
+        Assert.AreEqual(second, keptAgain.State.PendingPublication!.OperationId);
+        Assert.AreEqual(continuation, DesignPendingResolutions.KeptBy(fixture.RecordPath, second, state.InstanceId)!.Value.Receipt.OperationId);
+        var twice = await Assert.ThrowsExactlyAsync<AutomationException>(() => DesignRecoveryPendingResolution.ResolveAsync(fixture.Store, null,
+            state.InstanceId.ToString("D"), keptAgain.RevisionToken, second, PendingOperationChoice.Undo));
+        Assert.AreEqual("kept_result_pending", twice.Code, twice.Message);
+        StringAssert.Contains(twice.Message, $"Operation {second:D} publishes the result of operation {operation:D} that KiCad kept");
+        Assert.IsFalse(twice.Message.Contains(continuation.ToString("D"), StringComparison.Ordinal), "The first continuation is not the kept operation: "
+            + twice.Message);
+        Assert.AreEqual(keptAgain.RevisionToken, fixture.Store.Read()!.RevisionToken, "Nothing was changed.");
 
         static SchematicElectricalState WithData(SchematicElectricalState electrical, Kiapi.Schematic.Types.SchematicHierarchyData data)
         {

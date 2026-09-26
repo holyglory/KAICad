@@ -154,7 +154,9 @@ public static class CheckedSchematicContract
         if (unknown.Count != 0) parts.Add("KiCad cannot compare " + Names(unknown) + " with what it loaded");
         if (parts.Count == 0) parts.Add("KiCad reports no file it saves this schematic to");
         int restorable = changed.Count + deleted.Count;
-        string reopen = "reopen the project in KiCad and reattach the recovery record (kicad_design_recovery_reattach)";
+        // A reopened KiCad whose schematic files are lost has no root to reattach to until one is created.
+        string reopen = "reopen the project in KiCad and reattach the recovery record (kicad_design_recovery_reattach; if its schematic "
+            + "files are lost, first create the root with kicad_schematic_create)";
         string fix = unknown.Count != 0 || parts.Count == 1 && restorable + created.Count == 0 ? reopen
             : created.Count == 0 ? "restore " + It(restorable) + ", or " + reopen
             : restorable == 0 ? "remove " + It(created.Count) + ", or " + reopen

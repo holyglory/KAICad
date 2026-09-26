@@ -92,7 +92,8 @@ public static class DesignPendingResolutions
     {
         string folder = System.IO.Directory.CreateDirectory(Directory(recoveryPath)).FullName;
         // The index comes first: it only points at the receipt, which stays the authority (KeptBy checks it), so an index
-        // left by an attempt whose receipt or record replacement failed never names a continuation by itself.
+        // left by an attempt whose receipt or record replacement failed never names a continuation by itself. The record
+        // holds a continuation only after the receipt naming it was written, so KeptBy refuses an index whose receipt is gone.
         if (receipt.ContinuationOperationId is { } continuation)
             using (new FileStream(Path.Combine(folder, continuation.ToString("N") + ContinuationOf + receipt.OperationId.ToString("N")),
                 FileMode.OpenOrCreate, FileAccess.Write, FileShare.None)) { }
@@ -128,7 +129,10 @@ public static class DesignPendingResolutions
     /// <summary>The receipt of the keep-and-replan resolution whose continuation is <paramref name="operationId"/>, or null
     /// when that operation does not publish a kept result. Only the receipts the continuation's index files name are read;
     /// an index whose receipt does not name the continuation (left by an attempt that was never saved) is ignored, and an
-    /// unreadable receipt fails the check rather than being skipped.</summary>
+    /// unreadable receipt fails the check rather than being skipped. So does an index whose receipt is missing: Write keeps
+    /// the index, then the receipt, before the record ever holds the continuation, so the receipt of a pending continuation
+    /// can only have been removed by hand, and without it a discard could no longer be checked against the design KiCad
+    /// showed before the kept operation.</summary>
     public static (DesignPendingResolution Receipt, string Path)? KeptBy(string recoveryPath, Guid operationId, Guid instanceId)
     {
         string folder = Directory(recoveryPath);
@@ -137,8 +141,13 @@ public static class DesignPendingResolutions
         foreach (string index in System.IO.Directory.EnumerateFiles(folder, operationId.ToString("N") + ContinuationOf + "*").Order(StringComparer.Ordinal))
         {
             if (!Guid.TryParseExact(Path.GetFileName(index)[(32 + ContinuationOf.Length)..], "N", out var keptOperation)) continue;
-            if (Find(recoveryPath, keptOperation, instanceId) is { } found && found.Receipt.ContinuationOperationId == operationId)
-                kept.Add(found);
+            var found = Find(recoveryPath, keptOperation, instanceId) ?? throw new AutomationException("invalid_resolution_receipt",
+                $"The index file {index} names operation {keptOperation:D} as the operation whose result KiCad kept and operation "
+                + $"{operationId:D} publishes, but its resolution receipt {Path.Combine(folder, keptOperation.ToString("N") + ".json")} is "
+                + "missing, so KiCad cannot be checked against the design it showed before that operation. Put that receipt back as it "
+                + $"was written and call again, or complete the publication with kicad_design_sync_apply (operationId {operationId:D}), "
+                + "which does not read it. Nothing was changed.");
+            if (found.Receipt.ContinuationOperationId == operationId) kept.Add(found);
         }
         if (kept.Count > 1)
             throw new AutomationException("invalid_resolution_receipt", $"Several resolution receipts name operation {operationId:D} as their "
@@ -160,10 +169,15 @@ public static class DesignPendingResolutions
         { throw new AutomationException("invalid_resolution_receipt", $"The resolution receipt {path} cannot be read: {error.Message}. {Remedy(path)}"); }
     }
 
-    // A receipt is a record of what was resolved; nothing reads it but a later resolution. What works when one is damaged.
-    private static string Remedy(string path) => $"Put that file back as it was written, or move it out of {Path.GetDirectoryName(path)} "
-        + "(its operation is then treated as never resolved; a pending publication of a kept result can still be completed with "
-        + "kicad_design_sync_apply), and call again. Nothing was changed.";
+    // A receipt is a record of what was resolved; nothing reads it but a later resolution. What works when one is damaged. The
+    // receipt of an operation whose kept result is still being published guards that publication's discard, so it is never
+    // moved: without it, resolving that publication is refused (KeptBy), and kicad_design_sync_apply, which does not read it,
+    // completes the publication.
+    private static string Remedy(string path) => $"Put that file back as it was written and call again. If it cannot be restored, move it "
+        + $"out of {Path.GetDirectoryName(path)} and call again: its operation is then treated as never resolved. Do not move the "
+        + "receipt of an operation whose kept result is still being published (a file named '<pending operation>.continuation-of.<its "
+        + "operation>' in that folder shows it); complete that publication with kicad_design_sync_apply instead, which does not read the "
+        + "receipt. Nothing was changed.";
 }
 
 /// <summary>What resolving a pending operation did. ResolvedNow is false for a repeated call that found the operation
@@ -224,17 +238,33 @@ public static class DesignRecoveryPendingResolution
         // and the resolution below replaces it.
         if (!Holds(saved.State, operationId) && DesignPendingResolutions.Find(store.StatePath, operationId, instance) is { } done)
         {
-            // An operation finished another way (a completed apply, or kicad_design_recovery_release_exited) was not
-            // resolved here: the receipt was left by an attempt whose record replacement failed, and it describes nothing
-            // that happened.
-            string? finished = saved.State.LastSynchronization?.OperationId == operationId
-                || new DesignSynchronizationReceipts(store.StatePath).Read(operationId) is not null ? "completed by kicad_design_sync_apply"
-                : DesignReleasedOperations.Latest(store.StatePath, operationId, instance) is not null ? "released with kicad_design_recovery_release_exited"
-                : null;
+            // An operation finished another way (a completed apply, or kicad_design_recovery_release_exited) after its receipt
+            // was written. Native edit IDs are new for every synchronization, so a completion that carries the receipt's own
+            // native edit finished exactly the operation the receipt describes: the receipt was left by an attempt whose record
+            // replacement failed, and it describes nothing that happened. Without that evidence the resolution may also have
+            // been saved before the same operation ID was used again for a new synchronization (apply does not refuse that),
+            // so the refusal names both rather than guessing. A release older than the receipt finished nothing after it: the
+            // released operation was resumed under the same ID and then resolved here, and that resolution is reported below.
+            var completedSync = saved.State.LastSynchronization?.OperationId == operationId ? saved.State.LastSynchronization
+                : new DesignSynchronizationReceipts(store.StatePath).Read(operationId);
+            var releasedOperation = completedSync is null ? DesignReleasedOperations.Latest(store.StatePath, operationId, instance)?.Receipt : null;
+            if (releasedOperation is not null && releasedOperation.ReleasedAt < done.Receipt.ResolvedAt) releasedOperation = null;
+            string? finished = completedSync is not null ? "completed by kicad_design_sync_apply"
+                : releasedOperation is not null ? "released with kicad_design_recovery_release_exited" : null;
             if (finished is not null)
-                throw Error("pending_operation_completed", $"Operation {operationId:D} is no longer pending: it was {finished}, not resolved "
-                    + $"here. The resolution receipt {done.Path} was left by an attempt that was never saved and describes nothing that "
-                    + "happened; nothing was changed. Read the record with kicad_design_recovery_plan.");
+            {
+                string? completedEdit = completedSync is { NativeReceipt: { } syncNative } ? CheckedSchematicBatchReceipt.Parser.ParseFrom(syncNative).OperationId
+                    : releasedOperation?.NativeOperationId;
+                throw Error("pending_operation_completed", done.Receipt.NativeOperationId is { } receiptEdit && receiptEdit == completedEdit
+                    ? $"Operation {operationId:D} is no longer pending: it was {finished} with its native edit {receiptEdit}, not resolved here. "
+                        + $"The resolution receipt {done.Path} was left by an attempt that was never saved and describes nothing that "
+                        + "happened; nothing was changed. Read the record with kicad_design_recovery_plan."
+                    : $"Operation {operationId:D} is no longer pending: it was {finished}. The resolution receipt {done.Path} "
+                        + $"('{done.Receipt.Choice}', outcome {done.Receipt.Outcome}, from recovery revision {done.Receipt.ResolvedFromRevisionToken}) "
+                        + "was either left by an attempt that was never saved, or saved before the operation ID was used again for that "
+                        + "synchronization; either way it does not describe the record now, and nothing was changed. Read the record with "
+                        + "kicad_design_recovery_plan.");
+            }
             if (done.Receipt.ResolvedFromRevisionToken != expectedRevisionToken || done.Receipt.Choice != choiceName)
                 throw Error("pending_operation_resolved", $"Operation {operationId:D} was already resolved with '{done.Receipt.Choice}' "
                     + $"(outcome {done.Receipt.Outcome}) at recovery revision {done.Receipt.ResolvedFromRevisionToken}; nothing was changed. "

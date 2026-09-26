@@ -24,7 +24,9 @@
 #include <wx/timer.h>
 #include <wx/uiaction.h>
 #include <gtk/gtk.h>
+#include <algorithm>
 #include <cstdlib>
+#include <tuple>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -73,7 +75,27 @@ void key( int aKey )
     wxTheApp->Yield( true );
 }
 
-void capture( wxWindow* aWindow, const std::filesystem::path& aDirectory, const char* aName )
+/// The pixels of a capture, kept for measuring what was drawn (mockup audit M1-3 to M1-6).
+struct SHOT
+{
+    int width = 0, height = 0;
+    std::vector<unsigned char> rgb;
+    wxColour At( int aX, int aY ) const
+    {
+        aX = std::clamp( aX, 0, width - 1 ); aY = std::clamp( aY, 0, height - 1 );
+        const unsigned char* p = &rgb[( static_cast<size_t>( aY ) * width + aX ) * 3];
+        return wxColour( p[0], p[1], p[2] );
+    }
+};
+
+/// Lets GTK finish a state change's transition (a button that just became available fades in over about 200 ms).
+void settle( int aMilliseconds )
+{
+    wxStopWatch time;
+    waitFor( [&] { return time.Time() >= aMilliseconds; } );
+}
+
+SHOT capture( wxWindow* aWindow, const std::filesystem::path& aDirectory, const char* aName )
 {
     // A changed control value is not a rendering checkpoint. GTK can retain the
     // preceding pixels until the next frame even after wxWindow::Update().
@@ -101,12 +123,98 @@ void capture( wxWindow* aWindow, const std::filesystem::path& aDirectory, const 
     BOOST_REQUIRE( window );
     GdkPixbuf* pixels = gdk_pixbuf_get_from_window( window, 0, 0, gdk_window_get_width( window ), gdk_window_get_height( window ) );
     BOOST_REQUIRE( pixels );
+    SHOT shot; shot.width = gdk_pixbuf_get_width( pixels ); shot.height = gdk_pixbuf_get_height( pixels );
+    const int channels = gdk_pixbuf_get_n_channels( pixels ), stride = gdk_pixbuf_get_rowstride( pixels );
+    const guchar* data = gdk_pixbuf_read_pixels( pixels );
+    shot.rgb.resize( static_cast<size_t>( shot.width ) * shot.height * 3 );
+    for( int y = 0; y < shot.height; ++y )
+        for( int x = 0; x < shot.width; ++x )
+            for( int c = 0; c < 3; ++c ) shot.rgb[( static_cast<size_t>( y ) * shot.width + x ) * 3 + c] = data[y * stride + x * channels + c];
     GError* error = nullptr;
     bool written = gdk_pixbuf_save( pixels, ( aDirectory / aName ).c_str(), "png", &error, nullptr );
     g_object_unref( pixels );
     std::string message = error ? error->message : "Native window capture failed";
     if( error ) g_error_free( error );
     BOOST_REQUIRE_MESSAGE( written, message );
+    return shot;
+}
+
+/// aControl's rectangle in the capture of aWindow (whose client area the capture covers).
+wxRect within( wxWindow* aWindow, wxWindow* aControl )
+{
+    wxRect rect = aControl->GetScreenRect(); wxPoint origin = aWindow->ClientToScreen( wxPoint( 0, 0 ) );
+    rect.Offset( -origin.x, -origin.y ); return rect;
+}
+
+/// The pixel of aBox that contrasts most with aBackground.
+wxColour inkIn( const SHOT& aShot, const wxRect& aBox, const wxColour& aBackground )
+{
+    wxColour ink = aBackground; double best = 1;
+    for( int y = aBox.y; y < aBox.y + aBox.height; ++y )
+        for( int x = aBox.x; x < aBox.x + aBox.width; ++x )
+        {
+            wxColour here = aShot.At( x, y ); double contrast = DIAGRAM_LOOK::Contrast( here, aBackground );
+            if( contrast > best ) { best = contrast; ink = here; }
+        }
+    return ink;
+}
+
+/// A primary action as drawn (mockup audit M1-4): its fill against the surface beside it, and its label on the fill.
+std::pair<double, double> primaryContrast( const SHOT& aShot, wxWindow* aWindow, wxButton* aButton )
+{
+    wxRect rect = within( aWindow, aButton );
+    wxColour fill = aShot.At( rect.x + 6, rect.y + rect.height / 2 ), surface = aShot.At( rect.x - 4, rect.y + rect.height / 2 );
+    wxColour label = inkIn( aShot, wxRect( rect.x + rect.width / 4, rect.y + 4, rect.width / 2, rect.height - 8 ), fill );
+    return { DIAGRAM_LOOK::Contrast( fill, surface ), DIAGRAM_LOOK::Contrast( label, fill ) };
+}
+
+/// How many pixels a box's first line of text starts right of the box's left edge (mockup audit M1-5): the first column past
+/// the border with a pixel of 2:1 or more against the box's fill, in the box's top 30 pixels; -1 when none.
+int textInset( const SHOT& aShot, wxWindow* aWindow, wxTextCtrl* aBox )
+{
+    wxRect rect = within( aWindow, aBox );
+    wxColour fill = aShot.At( rect.x + rect.width - 14, rect.y + rect.height - 8 );
+    for( int x = rect.x + 2; x < rect.x + rect.width / 2; ++x )
+        for( int y = rect.y + 3; y < rect.y + std::min( 30, rect.height - 3 ); ++y )
+            if( DIAGRAM_LOOK::Contrast( aShot.At( x, y ), fill ) >= 2.0 ) return x - rect.x;
+    return -1;
+}
+
+/// Whether the list's rows end in "…" when they are wider than the list (mockup audit M1-3), read back from GTK: its text
+/// renderer ellipsizes at the end, in a fixed column no wider than the list.
+bool rowsEllipsize( wxListBox* aList )
+{
+    GtkWidget* view = gtk_bin_get_child( GTK_BIN( aList->GetHandle() ) );
+    if( !GTK_IS_TREE_VIEW( view ) ) return false;
+    GtkTreeViewColumn* column = gtk_tree_view_get_column( GTK_TREE_VIEW( view ), 0 );
+    if( !column ) return false;
+    bool ellipsized = false;
+    GList* cells = gtk_cell_layout_get_cells( GTK_CELL_LAYOUT( column ) );
+    for( GList* item = cells; item; item = item->next )
+        if( GTK_IS_CELL_RENDERER_TEXT( item->data ) )
+        {
+            PangoEllipsizeMode mode = PANGO_ELLIPSIZE_NONE; g_object_get( item->data, "ellipsize", &mode, nullptr );
+            ellipsized = mode == PANGO_ELLIPSIZE_END;
+        }
+    g_list_free( cells );
+    return ellipsized && gtk_tree_view_column_get_sizing( column ) == GTK_TREE_VIEW_COLUMN_FIXED
+        && gtk_tree_view_column_get_fixed_width( column ) <= aList->GetClientSize().x;
+}
+
+/// The pixels of aBox drawn in aFill (within a colour distance of 12), and the contrast of the text drawn on them with the
+/// fill: the marks of the words that differ (mockup audit M1-6).
+std::pair<int, double> marked( const SHOT& aShot, wxWindow* aWindow, wxTextCtrl* aBox, const wxColour& aFill )
+{
+    wxRect rect = within( aWindow, aBox ); int count = 0; wxRect marks;
+    for( int y = rect.y + 2; y < rect.y + rect.height - 2; ++y )
+        for( int x = rect.x + 2; x < rect.x + rect.width - 2; ++x )
+        {
+            wxColour here = aShot.At( x, y );
+            if( std::abs( here.Red() - aFill.Red() ) + std::abs( here.Green() - aFill.Green() ) + std::abs( here.Blue() - aFill.Blue() ) > 12 ) continue;
+            ++count; marks = marks.IsEmpty() ? wxRect( x, y, 1, 1 ) : marks.Union( wxRect( x, y, 1, 1 ) );
+        }
+    double contrast = count ? DIAGRAM_LOOK::Contrast( inkIn( aShot, marks, aFill ), aFill ) : 1;
+    return { count, contrast };
 }
 
 int show( DIALOG_SHIM* aDialog, const std::function<void()>& aScenario )
@@ -158,7 +266,7 @@ BOOST_AUTO_TEST_CASE( RenderedWholeDiagramPanelKeepsInspectionPreviewAndRestoreS
     panel = new PANEL_DIAGRAM_HISTORY( dialog, std::move( actions ) ); layout->Add( panel, 1, wxEXPAND ); dialog->SetSizer( layout );
     dialog->SetClientSize( 400, 640 ); panel->Begin( first.context(), "System", first.context_version() );
     BOOST_REQUIRE( panel->SetPage( first ) );
-    bool readOnly = false, wrongRejected = false;
+    bool readOnly = false, wrongRejected = false; double restoreFill = 0, restoreLabel = 0; int detailsInset = -1;
     BOOST_CHECK_EQUAL( show( dialog, [&]
     {
         click( control<wxButton>( panel, "DiagramHistoryOlder" ) ); BOOST_CHECK_EQUAL( requested, 1 );
@@ -173,7 +281,11 @@ BOOST_AUTO_TEST_CASE( RenderedWholeDiagramPanelKeepsInspectionPreviewAndRestoreS
         wxRect client( dialog->ClientToScreen( wxPoint( 0, 0 ) ), dialog->GetClientSize() );
         BOOST_CHECK( client.Contains( control<wxButton>( panel, "DiagramHistoryRestore" )->GetScreenRect() ) );
         BOOST_CHECK( client.Contains( control<wxTextCtrl>( panel, "DiagramHistoryComparison" )->GetScreenRect() ) );
-        capture( dialog, outputPath, "09-diagram-history-panel.png" );
+        BOOST_CHECK( control<wxButton>( panel, "DiagramHistoryRestore" )->IsEnabled() );
+        settle( 300 );
+        SHOT shot = capture( dialog, outputPath, "09-diagram-history-panel.png" );
+        std::tie( restoreFill, restoreLabel ) = primaryContrast( shot, dialog, control<wxButton>( panel, "DiagramHistoryRestore" ) );
+        detailsInset = textInset( shot, dialog, control<wxTextCtrl>( panel, "DiagramHistoryComparison" ) );
         click( control<wxButton>( panel, "DiagramHistoryPreview" ) );
         BOOST_CHECK_EQUAL( previewed.revision_id(), comparison.inspected().revision_id() );
         BOOST_CHECK( restored.revision_id().empty() );
@@ -185,7 +297,8 @@ BOOST_AUTO_TEST_CASE( RenderedWholeDiagramPanelKeepsInspectionPreviewAndRestoreS
     std::ofstream receipt( std::filesystem::path( outputPath ) / "diagram-panel-interaction.json" );
     receipt << nlohmann::json( { { "inspection_read_only", readOnly }, { "comparison_target_rejected", wrongRejected },
         { "preview_explicit", previewed.revision_id() == comparison.inspected().revision_id() }, { "return_explicit", returned },
-        { "restore_explicit", restored.revision_id() == comparison.inspected().revision_id() }, { "cancelled", closed } } ).dump( 2 );
+        { "restore_explicit", restored.revision_id() == comparison.inspected().revision_id() }, { "cancelled", closed },
+        { "restore_fill_on_panel", restoreFill }, { "restore_label_on_fill", restoreLabel }, { "details_inset", detailsInset } } ).dump( 2 );
     dialog->Destroy(); wxTheApp->ProcessPendingEvents();
 }
 
@@ -305,6 +418,7 @@ BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
     auto* close = control<wxButton>( dialog, "DiagramFieldHistoryClose" );
     dialog->ConfigurePaging( rows.size(), []( size_t ) { BOOST_FAIL( "A complete short history needs no further request." ); } );
     nlohmann::json renderedRows = nlohmann::json::array(); std::string selectedHeading, restoreLabel;
+    double restoreFill = 0, restoreInk = 0; int selectedInset = -1, savedInset = -1; bool ellipsized = false;
     int cancelled = show( dialog, [&]
     {
         BOOST_CHECK( !control<wxStaticText>( dialog, "DiagramFieldHistoryPageStatus" )->IsShown() );
@@ -317,7 +431,11 @@ BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
         restoreLabel = restore->GetLabelText().utf8_string();
         BOOST_CHECK_EQUAL( saved->GetValue(), text( page.saved_text() ) );
         BOOST_CHECK( !dialog->RestoreRevision().has_value() );
-        capture( dialog, evidence, "02-earlier-text.png" );
+        settle( 300 );
+        SHOT shot = capture( dialog, evidence, "02-earlier-text.png" );
+        std::tie( restoreFill, restoreInk ) = primaryContrast( shot, dialog, restore );
+        selectedInset = textInset( shot, dialog, selected ); savedInset = textInset( shot, dialog, saved );
+        ellipsized = dialog->RowsEllipsize() && rowsEllipsize( list );
         key( WXK_ESCAPE );
     } );
     BOOST_CHECK_EQUAL( cancelled, wxID_CANCEL );
@@ -396,7 +514,8 @@ BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
         { "scope_isolation", scopeIsolation }, { "compact_controls_visible", compactFits },
         { "compact_author_visible", compactAuthorShown }, { "compact_heading", compactHeading },
         { "row_labels", renderedRows }, { "selected_heading", selectedHeading }, { "restore_label", restoreLabel },
-        { "ampersand_restore_label", ampersandLabel } } ).dump( 2 );
+        { "ampersand_restore_label", ampersandLabel }, { "restore_fill_on_dialog", restoreFill }, { "restore_label_on_fill", restoreInk },
+        { "selected_text_inset", selectedInset }, { "saved_text_inset", savedInset }, { "rows_ellipsize", ellipsized } } ).dump( 2 );
     BOOST_REQUIRE( receipt.good() );
 }
 
@@ -426,13 +545,22 @@ BOOST_AUTO_TEST_CASE( RenderedConflictRequiresExplicitChoicesAndPreservesCancel 
     auto* general = merge.add_conflicts(); general->set_field( D::RFK_GENERAL ); general->set_baseline( "" );
     general->set_draft( original->fields().general() ); general->set_saved( latest->fields().general() );
     auto* cancelled = new DIALOG_DIAGRAM_CONFLICT( nullptr, "PSU", merge );
+    nlohmann::json draftMarked = nlohmann::json::array(), savedMarked = nlohmann::json::array();
+    int draftMarks = 0, savedMarks = 0, baseInset = -1, draftInset = -1, savedInset = -1; double draftMarkInk = 1, savedMarkInk = 1;
+    double saveFill = 0, saveInk = 0;
     BOOST_CHECK_EQUAL( show( cancelled, [&]
     {
         BOOST_CHECK( !control<wxButton>( cancelled, "DiagramConflictSave" )->IsEnabled() );
         BOOST_CHECK( !control<wxRadioButton>( cancelled, "DiagramConflictUseMine" )->GetValue() );
         BOOST_CHECK( !control<wxRadioButton>( cancelled, "DiagramConflictUseSaved" )->GetValue() );
         BOOST_CHECK( !control<wxRadioButton>( cancelled, "DiagramConflictWriteMerged" )->GetValue() );
-        capture( cancelled, evidence, "04-conflict-unresolved.png" );
+        SHOT shot = capture( cancelled, evidence, "04-conflict-unresolved.png" );
+        for( bool draft : { true, false } ) for( const auto& word : cancelled->MarkedWords( draft ) ) ( draft ? draftMarked : savedMarked ).push_back( word.utf8_string() );
+        std::tie( draftMarks, draftMarkInk ) = marked( shot, cancelled, control<wxTextCtrl>( cancelled, "DiagramConflictDraft" ), cancelled->MarkFill() );
+        std::tie( savedMarks, savedMarkInk ) = marked( shot, cancelled, control<wxTextCtrl>( cancelled, "DiagramConflictSaved" ), cancelled->MarkFill() );
+        baseInset = textInset( shot, cancelled, control<wxTextCtrl>( cancelled, "DiagramConflictBase" ) );
+        draftInset = textInset( shot, cancelled, control<wxTextCtrl>( cancelled, "DiagramConflictDraft" ) );
+        savedInset = textInset( shot, cancelled, control<wxTextCtrl>( cancelled, "DiagramConflictSaved" ) );
         key( WXK_ESCAPE );
     } ), wxID_CANCEL );
     BOOST_CHECK( cancelled->Resolutions().empty() ); cancelled->Destroy(); wxTheApp->ProcessPendingEvents();
@@ -459,7 +587,10 @@ BOOST_AUTO_TEST_CASE( RenderedConflictRequiresExplicitChoicesAndPreservesCancel 
         waitFor( [&] { return save->IsEnabled() && resolved->GetValue() == "Prefer fixed mounting."; } );
         fields->SetFocus(); key( WXK_UP ); waitFor( [&] { return fields->GetSelection() == 0; } );
         BOOST_CHECK_EQUAL( resolved->GetValue(), "Keep both edges accessible." );
-        capture( dialog, evidence, "05-conflict-resolved.png" ); click( save );
+        settle( 300 );
+        SHOT resolvedShot = capture( dialog, evidence, "05-conflict-resolved.png" );
+        std::tie( saveFill, saveInk ) = primaryContrast( resolvedShot, dialog, save );
+        click( save );
     } ), wxID_OK );
     auto choices = dialog->Resolutions(); BOOST_REQUIRE_EQUAL( choices.size(), 2 );
     BOOST_CHECK_EQUAL( choices[0].text(), "Keep both edges accessible." );
@@ -471,7 +602,11 @@ BOOST_AUTO_TEST_CASE( RenderedConflictRequiresExplicitChoicesAndPreservesCancel 
     std::ofstream receipt( evidence / "conflict-interaction.json" );
     receipt << nlohmann::json( { { "no_default_choice", noDefault }, { "partial_resolution_blocked", partialBlocked },
         { "routing_text", choices[0].text() }, { "general_text", choices[1].text() },
-        { "base_revision", choices[0].baseline_revision_id() }, { "saved_revision", choices[0].saved_revision_id() } } ).dump( 2 );
+        { "base_revision", choices[0].baseline_revision_id() }, { "saved_revision", choices[0].saved_revision_id() },
+        { "draft_marked", draftMarked }, { "saved_marked", savedMarked }, { "draft_mark_pixels", draftMarks }, { "saved_mark_pixels", savedMarks },
+        { "draft_mark_text_on_fill", draftMarkInk }, { "saved_mark_text_on_fill", savedMarkInk },
+        { "base_text_inset", baseInset }, { "draft_text_inset", draftInset }, { "saved_text_inset", savedInset },
+        { "save_fill_on_dialog", saveFill }, { "save_label_on_fill", saveInk } } ).dump( 2 );
     BOOST_REQUIRE( receipt.good() ); dialog->Destroy(); wxTheApp->ProcessPendingEvents();
 }
 

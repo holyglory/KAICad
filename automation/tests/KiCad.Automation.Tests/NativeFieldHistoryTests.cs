@@ -118,6 +118,17 @@ public sealed class NativeFieldHistoryTests
             Assert.AreEqual($"Use {initialName} · v2 text in draft", result.GetProperty("restore_label").GetString());
             // An "&" in an implementation's name shows on the Use button as written, not as a keyboard mnemonic.
             Assert.AreEqual("Use C&K approach · v2 text in draft", result.GetProperty("ampersand_restore_label").GetString());
+            // Mockup audit M1-3 to M1-5, measured in the rendered dialog (02-earlier-text.png): a row wider than the list ends in
+            // "…" instead of being cut off mid-word; "Use … text in draft" is filled with the accent like the editor's Save (3:1
+            // from the dialog, its label 4.5:1 on the fill), as the approved mockup shows it; and both compared texts start 8
+            // pixels or more inside their boxes, as the editor's boxes do (design QA P2-9).
+            Assert.IsTrue(result.GetProperty("rows_ellipsize").GetBoolean(), theme + ": the revision rows end in \"…\" when they are wider than the list.");
+            Assert.IsTrue(result.GetProperty("restore_fill_on_dialog").GetDouble() >= 3.0,
+                $"{theme}: the Use button's fill stands {result.GetProperty("restore_fill_on_dialog").GetDouble():F2}:1 from the dialog, 3:1 or more.");
+            Assert.IsTrue(result.GetProperty("restore_label_on_fill").GetDouble() >= 4.5,
+                $"{theme}: the Use button's label reads {result.GetProperty("restore_label_on_fill").GetDouble():F2}:1 on its fill, 4.5:1 or more.");
+            foreach (string inset in new[] { "selected_text_inset", "saved_text_inset" })
+                Assert.IsTrue(result.GetProperty(inset).GetInt32() >= 8, $"{theme}: {inset} is {result.GetProperty(inset).GetInt32()} pixels, 8 or more.");
             foreach (string capture in new[] { "01-current.png", "02-earlier-text.png", "03-compact.png", "04-conflict-unresolved.png", "05-conflict-resolved.png" })
                 Assert.IsTrue(new FileInfo(Path.Combine(evidence, capture)).Length > 1000, "A rendered capture is required: " + capture);
             byte[] currentCapture = await File.ReadAllBytesAsync(Path.Combine(evidence, "01-current.png"));
@@ -148,6 +159,26 @@ public sealed class NativeFieldHistoryTests
             Assert.IsTrue(conflict.RootElement.GetProperty("partial_resolution_blocked").GetBoolean());
             Assert.AreEqual("Keep both edges accessible.", conflict.RootElement.GetProperty("routing_text").GetString());
             Assert.AreEqual("Prefer fixed mounting.", conflict.RootElement.GetProperty("general_text").GetString());
+            // Mockup audit M1-6: the words in which the draft and the latest saved text differ are marked in both, as the
+            // approved conflict mockup marks "top edge" and "bottom edge": tinted (the tint drawn, its text 7:1 or more on it)
+            // and underlined. Mockup audit M1-4 and M1-5: Save resolved version is filled with the accent once a choice is made
+            // for every field, and the texts start 8 pixels or more inside their boxes.
+            var conflictResult = conflict.RootElement;
+            CollectionAssert.AreEqual(new[] { "top" }, conflictResult.GetProperty("draft_marked").EnumerateArray().Select(w => w.GetString()).ToArray());
+            CollectionAssert.AreEqual(new[] { "bottom" }, conflictResult.GetProperty("saved_marked").EnumerateArray().Select(w => w.GetString()).ToArray());
+            foreach (string side in new[] { "draft", "saved" })
+            {
+                Assert.IsTrue(conflictResult.GetProperty(side + "_mark_pixels").GetInt32() >= 40,
+                    $"{theme}: the {side} text's mark is drawn ({conflictResult.GetProperty(side + "_mark_pixels").GetInt32()} pixels in its tint).");
+                Assert.IsTrue(conflictResult.GetProperty(side + "_mark_text_on_fill").GetDouble() >= 4.5,
+                    $"{theme}: the marked {side} word reads {conflictResult.GetProperty(side + "_mark_text_on_fill").GetDouble():F2}:1 on its tint, 4.5:1 or more.");
+            }
+            foreach (string inset in new[] { "base_text_inset", "draft_text_inset", "saved_text_inset" })
+                Assert.IsTrue(conflictResult.GetProperty(inset).GetInt32() >= 8, $"{theme}: conflict {inset} is {conflictResult.GetProperty(inset).GetInt32()} pixels, 8 or more.");
+            Assert.IsTrue(conflictResult.GetProperty("save_fill_on_dialog").GetDouble() >= 3.0,
+                $"{theme}: Save resolved version's fill stands {conflictResult.GetProperty("save_fill_on_dialog").GetDouble():F2}:1 from the dialog, 3:1 or more.");
+            Assert.IsTrue(conflictResult.GetProperty("save_label_on_fill").GetDouble() >= 4.5,
+                $"{theme}: Save resolved version's label reads {conflictResult.GetProperty("save_label_on_fill").GetDouble():F2}:1 on its fill, 4.5:1 or more.");
             using var paging = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(evidence, "paging-interaction.json")));
             foreach (string check in new[] { "selection_preserved", "failure_preserved_rows", "malformed_page_rejected", "cancelled_load_without_restore" })
                 Assert.IsTrue(paging.RootElement.GetProperty(check).GetBoolean(), check);
@@ -159,6 +190,14 @@ public sealed class NativeFieldHistoryTests
             using var wholePanel = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(evidence, "diagram-panel-interaction.json")));
             foreach (string check in new[] { "inspection_read_only", "comparison_target_rejected", "preview_explicit", "return_explicit", "restore_explicit", "cancelled" })
                 Assert.IsTrue(wholePanel.RootElement.GetProperty(check).GetBoolean(), check);
+            // Mockup audit M1-4 and M1-5 in the whole-diagram history panel (09-diagram-history-panel.png): Restore as draft is
+            // filled with the accent, as the approved history mockup shows it, and the comparison text keeps clear of its border.
+            Assert.IsTrue(wholePanel.RootElement.GetProperty("restore_fill_on_panel").GetDouble() >= 3.0,
+                $"{theme}: Restore as draft's fill stands {wholePanel.RootElement.GetProperty("restore_fill_on_panel").GetDouble():F2}:1 from the panel, 3:1 or more.");
+            Assert.IsTrue(wholePanel.RootElement.GetProperty("restore_label_on_fill").GetDouble() >= 4.5,
+                $"{theme}: Restore as draft's label reads {wholePanel.RootElement.GetProperty("restore_label_on_fill").GetDouble():F2}:1 on its fill, 4.5:1 or more.");
+            Assert.IsTrue(wholePanel.RootElement.GetProperty("details_inset").GetInt32() >= 8,
+                $"{theme}: the comparison text starts {wholePanel.RootElement.GetProperty("details_inset").GetInt32()} pixels inside its box, 8 or more.");
         }
         finally { Directory.Delete(temporary, recursive: true); }
     }

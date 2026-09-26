@@ -267,6 +267,8 @@ private:
     std::vector<wxRect> portNames( wxDC& aDC, const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout, const std::string& aBlock ) const;
     /// Each boundary port's name and where it is drawn beside the level frame, in canvas pixels.
     std::vector<std::pair<std::string, wxRect>> boundaryNames( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
+    /// Each child block of aLayout as drawn, in canvas pixels.
+    std::vector<wxRect> blockBoxes( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
     /// A port's square as drawn at aAt: 12 DIP at every zoom (design QA P2-6).
     wxRect portMark( const wxPoint& aAt ) const;
     /// Every port square as drawn on the canvas (an unplaced child port once per place a connection attaches to it).

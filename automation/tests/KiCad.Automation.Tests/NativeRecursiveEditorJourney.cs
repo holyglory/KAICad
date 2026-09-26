@@ -149,6 +149,20 @@ public sealed partial class NativeSessionTests
                 Assert.IsTrue(drawn.Rect.Shown, step + ": the note \"" + note.Text + "\" is drawn inside the canvas.");
                 Assert.AreEqual(note.Text, string.Join(" ", drawn.Lines), step + ": the note's lines break between words.");
             }
+            // Mockup audit M1-1: Comments opens on the selected element's own comment, or on a new one, never on a note in the
+            // level's free space (typing there used to rewrite the note, and the note was drawn as the selected comment).
+            OwnComment(at, step, revision);
+            // Mockup audit M1-2: every boundary port's name is drawn clear of the blocks and ports.
+            VerifyBoundaryNamesClear(at, step);
+        }
+        // The comment Comments opens on for the selected block: its own first comment on this level, or none (a new comment).
+        void OwnComment(P.RecursiveDiagramEditorState at, string step, RecursiveBlockRevision revision)
+        {
+            var own = revision.LocalDiagram.Notes.FirstOrDefault(n => n.Target.Kind == DiagramAnnotationTargetKind.Block
+                && n.Target.TargetId?.ToString("D") == at.Draft.Baseline.BlockId);
+            Assert.AreEqual(own is null ? "" : S(own.Id), at.SelectedAnnotationId,
+                step + ": Comments opens on the selected block's own comment" + (own is null ? " (a new one: it has none here)" : " \"" + own.Text + "\"")
+                + ", not on a note in the level's free space.");
         }
 
         string configuration = new DirectoryInfo(AppContext.BaseDirectory).Parent!.Name;
@@ -222,7 +236,13 @@ public sealed partial class NativeSessionTests
 
             // System -> PSU: the four PSU blocks on the two-column grid, every connection on its computed path.
             Key("Escape"); Key("Right");
-            await Wait("psu-selected", s => s.Draft.Baseline.BlockId == S(psu.BlockId));
+            var psuSelected = await Wait("psu-selected", s => s.Draft.Baseline.BlockId == S(psu.BlockId) && s.Rendered);
+            // The approved System walkthrough's state: the PSU selected, its own comment "Explore a quieter supply." in Comments
+            // (fixture note 2) and the level's free-space note "Keep PSU replaceable as a unit." drawn as an ordinary note.
+            Assert.AreEqual("Explore a quieter supply.", systemRevision.LocalDiagram.Notes.Single(n => n.Target.Kind == DiagramAnnotationTargetKind.Block
+                && n.Target.TargetId == psu.BlockId).Text, "The fixture comments on the PSU at the System level.");
+            OwnComment(psuSelected, "psu-selected", systemRevision);
+            await Retain("system-psu-selected", psuSelected); await Capture("system-psu-selected");
             Key("Return");
             var psuLevel = await Wait("psu-level", s => s.Rendered && s.DiagramPath.Count == 2 && s.DiagramPath[^1].BlockId == S(psu.BlockId));
             Level(psuLevel, "psu", psu, psuRevision);
@@ -1110,6 +1130,7 @@ public sealed partial class NativeSessionTests
             NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true, clickFromRight: 300, clickFromTop: 185);
             await Wait(s => s.DiagramPath.Count == 2 && s.DiagramPath[^1].BlockId == fixture.Blocks["PSU"].BlockId.ToString("D"));
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-psu.png"), token);
+            VerifyBoundaryNamesClear(await Read(), "recursive-psu");
             NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true, clickFromLeft: 118, clickFromTop: 45);
             var afterUp = await Wait(s => s.DiagramPath.Count == 1 && s.FocusedControl == "RecursiveDiagramCanvas"
                 && s.Draft.Baseline.BlockId == fixture.Blocks["PSU"].BlockId.ToString("D"));
@@ -1140,6 +1161,7 @@ public sealed partial class NativeSessionTests
             NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true, clickFromLeft: 377, clickFromTop: 45);
             await Wait(s => s.ViewRevision > beforeFit && s.Rendered);
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-cpu.png"), token);
+            VerifyBoundaryNamesClear(await Read(), "recursive-cpu");
             Key("Escape"); Key("l"); Key("l"); Key("l");
             await Wait(s => s.ConnectionDraft?.Baseline.ConnectionId == fixture.Links["CPU/Memory"].ConnectionId.ToString("D"));
             Key("3", control: true); Key("a", control: true); Type("Keep memory away from noisy power.");
@@ -1407,6 +1429,11 @@ public sealed partial class NativeSessionTests
             NativeKeyboard.SchematicShortcut(display, processId, "click", "Structural diagram", false, true, clickFromLeft: 377, clickFromTop: 45);
             await Wait(s => s.Rendered && s.ViewRevision > compactView);
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-recursive-compact.png"), token);
+            // Mockup audit M1-2: in the 1100 x 760 window the fallback column's names ("Telemetry" among them) used to run into the
+            // Processor's edge, its port and its caption; a name with no room right of its port now goes left of it.
+            var compactNames = await Read();
+            VerifyBoundaryNamesClear(compactNames, "recursive-compact");
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-recursive-compact-state.json"), SchematicJson.Formatter.Format(compactNames), token);
             Key("3", control: true); Key("a", control: true); Type("A compact-window routing edit."); await Wait(s => s.Dirty);
             await Save();
             Key("4", control: true);
@@ -6374,6 +6401,26 @@ public sealed partial class NativeSessionTests
 
     private static bool RectsApart(P.DiagramControlRect a, P.DiagramControlRect b) =>
         a.X + a.Width <= b.X || b.X + b.Width <= a.X || a.Y + a.Height <= b.Y || b.Y + b.Height <= a.Y;
+
+    /// <summary>Mockup audit M1-2: every name of a port on the level's boundary is drawn inside the canvas, clear of every block
+    /// (with the ports on its edges, 4 pixels around it) and of every port's square, at the size the window gives the level.</summary>
+    private static void VerifyBoundaryNamesClear(P.RecursiveDiagramEditorState at, string step)
+    {
+        Assert.AreEqual(at.LevelDraft.Scope.LocalDiagram.Interfaces.Count, at.BoundaryPortNames.Count, step + ": every boundary port's name is drawn.");
+        foreach (var name in at.BoundaryPortNames)
+        {
+            Assert.IsTrue(name.Shown, $"{step}: the boundary port name '{name.Label}' lies inside the canvas.");
+            foreach (var text in at.BlockTexts)
+            {
+                var b = text.Block;
+                var around = new P.DiagramControlRect { X = b.X - 4, Y = b.Y - 4, Width = b.Width + 8, Height = b.Height + 8 };
+                Assert.IsTrue(RectsApart(name, around), $"{step}: the boundary port name '{name.Label}' ({name.X}, {name.Y}, {name.Width} x {name.Height}) "
+                    + $"is drawn clear of the block at ({b.X}, {b.Y}, {b.Width} x {b.Height}) and the ports on its edges.");
+            }
+            foreach (var mark in at.PortMarks)
+                Assert.IsTrue(RectsApart(name, mark), $"{step}: the boundary port name '{name.Label}' covers no port's square ('{mark.Label}' at ({mark.X}, {mark.Y})).");
+        }
+    }
 
     /// <summary>Design QA round 2, R2-P2-1 and R2-P2-8, measured: every connection named in <paramref name="connections"/>
     /// (id to caption) shows exactly one caption, drawn inside the canvas in a clear place, and its text's ink lies where the

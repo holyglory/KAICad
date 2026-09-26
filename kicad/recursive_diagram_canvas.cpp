@@ -1,6 +1,7 @@
 /* Copyright The KiCad Developers. SPDX-License-Identifier: GPL-3.0-or-later */
 #include "recursive_diagram_canvas.h"
 #include "recursive_diagram_frame.h"
+#include "dialogs/dialog_diagram_field_history.h"
 #include <bitmaps.h>
 #include <kiid.h>
 #include <algorithm>
@@ -34,50 +35,10 @@ std::string FreshId() { return Utf8( KIID().AsString() ); }
 
 namespace
 {
-double channel( unsigned char value )
-{
-    double v = value / 255.0;
-    return v <= 0.03928 ? v / 12.92 : std::pow( ( v + 0.055 ) / 1.055, 2.4 );
-}
-double luminance( const wxColour& colour )
-{
-    return 0.2126 * channel( colour.Red() ) + 0.7152 * channel( colour.Green() ) + 0.0722 * channel( colour.Blue() );
-}
-struct HSL { double h = 0, s = 0, l = 0; };
-HSL toHsl( const wxColour& colour )
-{
-    double r = colour.Red() / 255.0, g = colour.Green() / 255.0, b = colour.Blue() / 255.0;
-    double high = std::max( { r, g, b } ), low = std::min( { r, g, b } );
-    HSL result; result.l = ( high + low ) / 2;
-    if( high == low ) return result;
-    double d = high - low;
-    result.s = result.l > 0.5 ? d / ( 2 - high - low ) : d / ( high + low );
-    if( high == r ) result.h = ( g - b ) / d + ( g < b ? 6 : 0 );
-    else if( high == g ) result.h = ( b - r ) / d + 2;
-    else result.h = ( r - g ) / d + 4;
-    result.h /= 6;
-    return result;
-}
-wxColour fromHsl( const HSL& hsl )
-{
-    auto hue = []( double p, double q, double t )
-    {
-        if( t < 0 ) t += 1;
-        if( t > 1 ) t -= 1;
-        if( t < 1.0 / 6 ) return p + ( q - p ) * 6 * t;
-        if( t < 0.5 ) return q;
-        if( t < 2.0 / 3 ) return p + ( q - p ) * ( 2.0 / 3 - t ) * 6;
-        return p;
-    };
-    double l = std::clamp( hsl.l, 0.0, 1.0 ), r = l, g = l, b = l;
-    if( hsl.s > 0 )
-    {
-        double q = l < 0.5 ? l * ( 1 + hsl.s ) : l + hsl.s - l * hsl.s, p = 2 * l - q;
-        r = hue( p, q, hsl.h + 1.0 / 3 ); g = hue( p, q, hsl.h ); b = hue( p, q, hsl.h - 1.0 / 3 );
-    }
-    auto byte = []( double v ) { return static_cast<unsigned char>( std::lround( std::clamp( v, 0.0, 1.0 ) * 255 ) ); };
-    return wxColour( byte( r ), byte( g ), byte( b ) );
-}
+// The colour arithmetic is shared with the history and conflict dialogs (dialogs/dialog_diagram_field_history.h).
+using HSL = DIAGRAM_LOOK::HSL;
+HSL toHsl( const wxColour& colour ) { return DIAGRAM_LOOK::ToHsl( colour ); }
+wxColour fromHsl( const HSL& hsl ) { return DIAGRAM_LOOK::FromHsl( hsl ); }
 wxColour mix( const wxColour& a, const wxColour& b, double weightOfA )
 {
     auto one = [&]( unsigned char x, unsigned char y ) { return static_cast<unsigned char>( std::lround( x * weightOfA + y * ( 1 - weightOfA ) ) ); };
@@ -85,11 +46,7 @@ wxColour mix( const wxColour& a, const wxColour& b, double weightOfA )
 }
 }
 
-double Contrast( const wxColour& a, const wxColour& b )
-{
-    double x = luminance( a ), y = luminance( b );
-    return ( std::max( x, y ) + 0.05 ) / ( std::min( x, y ) + 0.05 );
-}
+double Contrast( const wxColour& a, const wxColour& b ) { return DIAGRAM_LOOK::Contrast( a, b ); }
 
 bool IsDark( const wxColour& surface ) { return surface.Red() + surface.Green() + surface.Blue() < 384; }
 
@@ -118,23 +75,8 @@ wxColour Readable( const wxColour& colour, std::initializer_list<wxColour> again
 
 ACCENT_FILL AccentFill( const wxColour& accent, const wxColour& surface )
 {
-    const wxColour white( 255, 255, 255 ), ink( 26, 26, 26 );
-    HSL base = toHsl( accent );
-    std::optional<ACCENT_FILL> inked;
-    for( int step = 0; step <= 100; ++step )
-        for( int sign : { 1, -1 } )
-        {
-            if( step == 0 && sign < 0 ) continue;
-            HSL moved = base; moved.l += sign * step * 0.01;
-            if( moved.l < 0.1 || moved.l > 0.9 ) continue;
-            wxColour fill = fromHsl( moved );
-            // 3:1 with a little to spare, so the rendered fill never lands just under it.
-            if( Contrast( fill, surface ) < 3.2 ) continue;
-            if( Contrast( white, fill ) >= 4.5 ) return { fill, white };
-            if( !inked && Contrast( ink, fill ) >= 4.5 ) inked = ACCENT_FILL{ fill, ink };
-        }
-    if( inked ) return *inked;
-    return { accent, Contrast( white, accent ) >= Contrast( ink, accent ) ? white : ink };
+    DIAGRAM_LOOK::ACCENT fill = DIAGRAM_LOOK::AccentFill( accent, surface );
+    return { fill.fill, fill.text };
 }
 
 CANVAS_COLOURS CanvasColours()
@@ -159,30 +101,7 @@ CANVAS_COLOURS CanvasColours()
     return colours;
 }
 
-void PadTextBox( wxTextCtrl* control, int horizontal, int vertical )
-{
-    if( !control->IsMultiLine() ) { control->SetMargins( horizontal, vertical ); return; }
-#if defined( __WXGTK__ )
-    // wxGTK 3.2 applies SetMargins to single-line entries only. A multi-line entry is a GtkTextView inside the GtkScrolledWindow
-    // that GetHandle() returns; its margins are set through the GTK the toolkit already runs on, looked up at run time so no
-    // GTK header is needed here. A missing function leaves the text where GTK puts it.
-    using CHILD = void* ( * )( void* );
-    using MARGIN = void ( * )( void*, int );
-    static const auto child = reinterpret_cast<CHILD>( dlsym( RTLD_DEFAULT, "gtk_bin_get_child" ) );
-    static const auto left = reinterpret_cast<MARGIN>( dlsym( RTLD_DEFAULT, "gtk_text_view_set_left_margin" ) );
-    static const auto right = reinterpret_cast<MARGIN>( dlsym( RTLD_DEFAULT, "gtk_text_view_set_right_margin" ) );
-    static const auto top = reinterpret_cast<MARGIN>( dlsym( RTLD_DEFAULT, "gtk_text_view_set_top_margin" ) );
-    static const auto bottom = reinterpret_cast<MARGIN>( dlsym( RTLD_DEFAULT, "gtk_text_view_set_bottom_margin" ) );
-    void* view = child && control->GetHandle() ? child( control->GetHandle() ) : nullptr;
-    if( !view ) return;
-    if( left ) left( view, horizontal );
-    if( right ) right( view, horizontal );
-    if( top ) top( view, vertical );
-    if( bottom ) bottom( view, vertical );
-#else
-    control->SetMargins( horizontal, vertical );
-#endif
-}
+void PadTextBox( wxTextCtrl* control, int horizontal, int vertical ) { DIAGRAM_LOOK::PadTextBox( control, horizontal, vertical ); }
 
 void DrawGlyph( wxDC& dc, GLYPH glyph, const wxRect& box, const wxColour& colour )
 {
@@ -2392,12 +2311,21 @@ std::vector<DRAWN_PORT> drawnPorts( const R::LEVEL_LAYOUT& drawn, const std::fun
     return result;
 }
 /// Where a boundary port drawn at aAt names itself, in canvas pixels, with aDC's font: outside the level frame beside the
-/// port's side, or above and right of a boundary port that has no stored placement yet.
-wxRect boundaryName( wxDC& dc, const R::PORT& port, const wxPoint& at )
+/// port's side, or above and right of a boundary port that has no stored placement yet. aBlocks are the child blocks as
+/// drawn: where the name above and right of an unplaced port would reach one of them (or the ports on its edge), as the
+/// fallback column's names do in a small window, it goes above and left of the port instead, outside the level, as the name
+/// of a port placed on the level's left side does (mockup audit M1-2).
+wxRect boundaryName( wxDC& dc, const R::PORT& port, const wxPoint& at, const std::vector<wxRect>& blocks )
 {
     wxSize extent = dc.GetTextExtent( Text( port.name ) );
     // Clear of the port's 12-pixel square (design QA P2-6).
-    if( !port.placed ) return wxRect( wxPoint( at.x + 12, at.y - 26 ), extent );
+    if( !port.placed )
+    {
+        wxRect right( wxPoint( at.x + 12, at.y - 26 ), extent );
+        if( std::none_of( blocks.begin(), blocks.end(), [&]( const wxRect& block ) { return wxRect( block ).Inflate( 8 ).Intersects( right ); } ) )
+            return right;
+        return wxRect( wxPoint( at.x - extent.x - 10, at.y - extent.y - 6 ), extent );
+    }
     switch( port.side )
     {
     case D::DPS_RIGHT: return wxRect( wxPoint( at.x + 10, at.y - extent.y - 6 ), extent );
@@ -2408,12 +2336,19 @@ wxRect boundaryName( wxDC& dc, const R::PORT& port, const wxPoint& at )
 }
 }
 
+std::vector<wxRect> RECURSIVE_DIAGRAM_FRAME::blockBoxes( const R::LEVEL_LAYOUT& drawn ) const
+{
+    std::vector<wxRect> boxes;
+    for( const auto& node : drawn.Nodes() ) boxes.push_back( toScreen( drawn.Rect( node.id ) ) );
+    return boxes;
+}
 std::vector<std::pair<std::string, wxRect>> RECURSIVE_DIAGRAM_FRAME::boundaryNames( const R::LEVEL_LAYOUT& drawn ) const
 {
     std::vector<std::pair<std::string, wxRect>> result;
     wxClientDC dc( m_canvas ); dc.SetFont( GetFont() );
+    const auto blocks = blockBoxes( drawn );
     for( const auto& port : drawn.Ports() )
-        if( port.boundary ) result.emplace_back( port.name, boundaryName( dc, port, toScreen( port.anchor ) ) );
+        if( port.boundary ) result.emplace_back( port.name, boundaryName( dc, port, toScreen( port.anchor ), blocks ) );
     return result;
 }
 std::vector<wxRect> RECURSIVE_DIAGRAM_FRAME::portNames( wxDC& dc, const R::LEVEL_LAYOUT& drawn, const std::string& block ) const
@@ -2893,9 +2828,17 @@ int RECURSIVE_DIAGRAM_FRAME::paletteReserve() const
 RECURSIVE_DIAGRAM_FRAME::LABEL_ROOM RECURSIVE_DIAGRAM_FRAME::labelRoom( const R::LEVEL_LAYOUT& drawn ) const
 {
     // A port on the level frame names itself outside the frame at a fixed text size (see paint), so fitting
-    // leaves that many pixels beside the drawing on the port's side.
+    // leaves that many pixels beside the drawing on the port's side. So does a port of the fallback column whose name
+    // goes left of it at the current scale, because the first column's blocks leave it no room on the right (M1-2).
     LABEL_ROOM room;
     wxClientDC dc( m_canvas ); dc.SetFont( GetFont() );
+    const auto blocks = blockBoxes( drawn );
+    for( const auto& port : drawn.Ports() ) if( port.boundary && !port.placed )
+    {
+        wxPoint at = toScreen( port.anchor );
+        wxRect name = boundaryName( dc, port, at, blocks );
+        if( name.x < at.x ) room.left = std::max( room.left, name.width + 14 );
+    }
     for( const auto& port : drawn.Ports() ) if( port.boundary && port.placed )
     {
         wxSize extent = dc.GetTextExtent( Text( port.name ) );
@@ -2925,10 +2868,19 @@ void RECURSIVE_DIAGRAM_FRAME::fit()
     R::RECT bounds = drawn.Bounds(); LABEL_ROOM room = labelRoom( drawn );
     double left = bounds.x / double( Q ), top = bounds.y / double( Q ), width = bounds.w / double( Q ), height = bounds.h / double( Q );
     auto area = m_canvas->GetClientSize();
-    int reserve = paletteReserve() + room.left;
-    double available = std::max( 64, area.x - reserve - room.right ), tall = std::max( 64, area.y - room.top - room.bottom );
-    m_scale = std::max( 0.000000001, std::min( { 1.0, available / width, tall / height } ) );
-    m_origin = { left - reserve / m_scale - ( available / m_scale - width ) / 2, top - room.top / m_scale - ( tall / m_scale - height ) / 2 };
+    // Which side a fallback port's name takes depends on the scale (M1-2), so the room beside the drawing is measured again at
+    // the scale just fitted; on a change the fit is repeated, and a third fit keeps the room every earlier fit needed.
+    for( int pass = 0; ; ++pass )
+    {
+        int reserve = paletteReserve() + room.left;
+        double available = std::max( 64, area.x - reserve - room.right ), tall = std::max( 64, area.y - room.top - room.bottom );
+        m_scale = std::max( 0.000000001, std::min( { 1.0, available / width, tall / height } ) );
+        m_origin = { left - reserve / m_scale - ( available / m_scale - width ) / 2, top - room.top / m_scale - ( tall / m_scale - height ) / 2 };
+        LABEL_ROOM after = labelRoom( drawn );
+        if( pass == 2 || ( after.left == room.left && after.top == room.top && after.right == room.right && after.bottom == room.bottom ) ) break;
+        room = pass == 0 ? after : LABEL_ROOM{ std::max( room.left, after.left ), std::max( room.top, after.top ),
+                                               std::max( room.right, after.right ), std::max( room.bottom, after.bottom ) };
+    }
     m_fitted = true; ++m_viewRevision; m_rendered = false; m_canvas->Refresh();
 }
 void RECURSIVE_DIAGRAM_FRAME::placePaletteAndEditor()
@@ -3190,6 +3142,7 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
         dc.DrawText( place.text, place.rect.GetTopLeft() );
     }
     std::optional<TARGET> target = connectTarget( drawn );
+    const auto blocks = blockBoxes( drawn );
     for( const auto& port : drawnPorts( drawn, screen ) )
     {
         // Ports are 12 DIP squares at every zoom (design QA P2-6).
@@ -3202,7 +3155,7 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
         {
             // A port on the level frame names itself outside the frame, beside its side.
             if( const R::PORT* stored = drawn.Port( port.owner, port.id ) )
-                dc.DrawText( Text( port.name ), boundaryName( dc, *stored, port.at ).GetTopLeft() );
+                dc.DrawText( Text( port.name ), boundaryName( dc, *stored, port.at, blocks ).GetTopLeft() );
         }
         else if( port.placed || selected )
         {

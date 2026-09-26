@@ -2253,10 +2253,14 @@ void RECURSIVE_DIAGRAM_FRAME::fillComments()
     D::DiagramAnnotationTargetKind kind = link ? D::DAT_CONNECTION : D::DAT_BLOCK;
     m_commentIds.clear(); m_commentChoice->Clear();
     const D::DiagramAnnotationData* selectedNote = nullptr;
+    // Comments opens on the selected element's own first comment, or on a new one when it has none (mockup audit M1-1).
+    // The level's free-space notes and unresolved comments stay in the list, but opening a block never picks one of them:
+    // typing would otherwise rewrite the level's note, and the note would be drawn as the selected comment.
+    if( m_commentId.empty() && !m_newComment )
+        for( const auto& note : notes ) if( note.target_kind() == kind && note.target_id() == target ) { m_commentId = note.id(); break; }
     for( const auto& note : notes ) if( ( note.target_kind() == kind && note.target_id() == target )
         || ( !link && ( note.target_kind() == D::DAT_CANVAS || note.has_unresolved_reason() ) ) )
     {
-        if( m_commentId.empty() && !m_newComment ) m_commentId = note.id();
         wxString title = Text( note.text() ).BeforeFirst( '\n' );
         if( title.length() > 36 ) title = title.Left( 36 ) + wxS( "…" );
         if( title.empty() ) title = _( "Sketch comment" );

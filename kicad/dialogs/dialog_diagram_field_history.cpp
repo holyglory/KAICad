@@ -85,10 +85,13 @@ DIALOG_DIAGRAM_FIELD_HISTORY::DIALOG_DIAGRAM_FIELD_HISTORY( wxWindow* aParent,
 
     auto* comparison = new wxBoxSizer( wxHORIZONTAL );
     m_history = new wxListBox( this, wxID_ANY, wxDefaultPosition, FromDIP( wxSize( 200, 300 ) ),
-                              0, nullptr, wxLB_SINGLE | wxLB_HSCROLL );
+                              0, nullptr, wxLB_SINGLE );
     m_history->SetName( "DiagramFieldHistoryRevisions" );
     OptOut( m_history );
     m_history->SetMinSize( FromDIP( wxSize( 200, 200 ) ) );
+    // A row wider than the list, such as "Initial approach · v2 · Fixture user", ends in "…" instead of being cut off
+    // mid-word; the selected row's heading shows it whole (mockup audit M1-3).
+    m_rowsEllipsize = DIAGRAM_LOOK::EllipsizeRows( m_history );
     appendRows( m_entries );
     auto* revisionColumn = new wxBoxSizer( wxVERTICAL );
     revisionColumn->Add( m_history, 1, wxEXPAND );
@@ -121,6 +124,8 @@ DIALOG_DIAGRAM_FIELD_HISTORY::DIALOG_DIAGRAM_FIELD_HISTORY( wxWindow* aParent,
     m_selectedText->SetName( "DiagramFieldHistorySelectedText" );
     OptOut( m_selectedText );
     m_selectedText->SetMinSize( FromDIP( wxSize( 220, 70 ) ) );
+    // The compared texts keep clear of their boxes' borders, as in the approved mockup (mockup audit M1-5).
+    DIAGRAM_LOOK::PadTextBox( m_selectedText, FromDIP( 8 ), FromDIP( 6 ) );
     texts->Add( m_selectedText, 1, wxEXPAND );
     m_source = new wxButton( this, wxID_ANY, _( "View source instruction" ),
                             wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT );
@@ -136,6 +141,7 @@ DIALOG_DIAGRAM_FIELD_HISTORY::DIALOG_DIAGRAM_FIELD_HISTORY( wxWindow* aParent,
     savedText->SetName( "DiagramFieldHistorySavedText" );
     OptOut( savedText );
     savedText->SetMinSize( FromDIP( wxSize( 220, 70 ) ) );
+    DIAGRAM_LOOK::PadTextBox( savedText, FromDIP( 8 ), FromDIP( 6 ) );
     texts->Add( savedText, 1, wxEXPAND );
     comparison->Add( texts, 1, wxEXPAND );
     outer->Add( comparison, 1, wxEXPAND | wxLEFT | wxRIGHT, gap );
@@ -292,7 +298,8 @@ void DIALOG_DIAGRAM_FIELD_HISTORY::updateSelection()
 {
     int selected = m_history->GetSelection();
     const bool available = selected != wxNOT_FOUND;
-    m_restore->Enable( available );
+    // Using the text is the dialog's primary action, filled with the accent as the approved mockup shows it (mockup audit M1-4).
+    DIAGRAM_LOOK::StylePrimary( m_restore, available );
     m_history->Enable( !m_entries.empty() );
     if( available )
     {

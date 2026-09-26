@@ -305,6 +305,203 @@ public sealed class SyncHarnessProcessTests
         finally { Directory.Delete(root, true); }
     }
 
+    // Review finding 4 of the stuck-synchronization work (lane 2C, ledger p0aa59a1dfc8701ea), through the compiled test sync
+    // host over STDIO. A publication without a native edit is left pending when its check refuses it, and the refusal sends
+    // the person to kicad_design_recovery_resolve_pending. Nothing of such an operation can have reached KiCad, so once KiCad
+    // changed (an edit made in KiCad), discard still clears it: the record keeps observing KiCad as it was before that edit
+    // (observationKept), nothing is sent to KiCad, and kicad_design_recovery_refresh then takes the edit in, so the next plan
+    // publishes it. Undo is refused and names discard. Before, discard was refused (native_changed_since_operation) unless the
+    // person took their own edit back. No KiCad build can be made to refuse such a publication on demand, so the scripted
+    // editor on the real NNG transport stands in for it; the native journeys cover the edits KiCad never received
+    // (NativeSynchronizationRecoveryJourney.VerifyNeverReceivedDiscard).
+    [TestMethod]
+    public async Task APublicationWithoutANativeEditIsDiscardedAndKiCadsLaterEditIsTakenIn()
+    {
+        string root = Directory.CreateTempSubdirectory("sync-none-discard-").FullName;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
+        try
+        {
+            string project = Directory.CreateDirectory(Path.Combine(root, "project")).FullName;
+            var state = ConnectionOnlyRevision(project);
+            string instanceId = state.InstanceId.ToString("D");
+            using var editor = new ScriptedNngEditor(root, state, Path.Combine(project, "fixture.kicad_pro"));
+            string recovery = Path.Combine(root, "recovery.json"), design = Path.Combine(root, "design.xml");
+            File.WriteAllBytes(design, state.DesiredFileBytes);
+            var store = new DesignRecoveryStore(recovery);
+            string token = store.Save(state, null).RevisionToken;
+            await using var host = await StdioMcpFixture.StartAsync(StartInfo(), Path.Combine(root, "host-state"),
+                Path.Combine(root, "host.stderr.log"), timeout.Token);
+            var attached = await host.Tool("kicad_instance_attach", new { endpoint = editor.Endpoint, expectedInstanceId = instanceId });
+            Assert.IsFalse(attached.TryGetProperty("isError", out var attachFailed) && attachFailed.GetBoolean(), attached.GetRawText());
+            static string? Code(JsonElement reply) => reply.TryGetProperty("isError", out var failed) && failed.GetBoolean()
+                ? reply.GetProperty("structuredContent").GetProperty("errorCode").GetString() : null;
+            static string Message(JsonElement reply) => reply.GetProperty("structuredContent").GetProperty("errorMessage").GetString()!;
+
+            // The editor does not show the connection the XML adds, so the general path's publication is refused after it was
+            // journaled, with no native edit, and the refusal names the way out.
+            var operation = Guid.NewGuid().ToString("D");
+            var refused = await host.Tool("kicad_design_sync_apply", new { instanceId, recoveryPath = recovery, designPath = design,
+                expectedRevisionToken = token, operationId = operation });
+            Assert.AreEqual("native_sync_connectivity_mismatch", Code(refused), refused.GetRawText());
+            StringAssert.Contains(Message(refused), "kicad_design_recovery_resolve_pending");
+            var held = store.Read()!;
+            Assert.AreEqual(Guid.Parse(operation), held.State.PendingPublication?.OperationId);
+            Assert.IsNull(held.State.PendingMutation, "The operation has no native edit.");
+
+            // A later edit made in KiCad: the editor now shows another title on the root sheet.
+            var edited = state.ObservedElectrical!.Clone();
+            edited.Hierarchy.Revision.Sequence += 2;
+            edited.Hierarchy.Data.Instances[0].Metadata.TitleBlock ??= new();
+            edited.Hierarchy.Data.Instances[0].Metadata.TitleBlock.Title = "Edited in KiCad";
+            editor.Show(edited);
+            int before = editor.Requests.Length;
+
+            object Resolve(string choice) => new { instanceId, recoveryPath = recovery, expectedRevisionToken = held.RevisionToken, operationId = operation, choice };
+            var undo = await host.Tool("kicad_design_recovery_resolve_pending", Resolve("undo"));
+            Assert.AreEqual("native_operation_not_committed", Code(undo), undo.GetRawText());
+            StringAssert.Contains(Message(undo), "choose discard");
+            Assert.AreEqual(held.RevisionToken, store.Read()!.RevisionToken, "A refused undo changes nothing.");
+            var discard = await host.Tool("kicad_design_recovery_resolve_pending", Resolve("discard"));
+            Assert.IsNull(Code(discard), discard.GetRawText());
+            var view = discard.GetProperty("structuredContent");
+            Assert.AreEqual("discarded", view.GetProperty("outcome").GetString(), view.GetRawText());
+            Assert.AreEqual("none", view.GetProperty("nativeStatus").GetString(), view.GetRawText());
+            Assert.IsTrue(view.GetProperty("observationKept").GetBoolean(), view.GetRawText());
+            Assert.IsTrue(view.GetProperty("nativeChangedSinceOperation").GetBoolean(), view.GetRawText());
+            Assert.IsFalse(view.GetProperty("pendingWork").GetBoolean(), view.GetRawText());
+            StringAssert.Contains(view.GetProperty("nextStep").GetString(), "kicad_design_recovery_refresh");
+            var discarded = store.Read()!;
+            Assert.IsFalse(discarded.State.HasPendingWork);
+            Assert.AreEqual(held.State.Observed, discarded.State.Observed, "The record still observes KiCad as it was before the edit.");
+            Assert.AreEqual(held.State.NativeRevision, discarded.State.NativeRevision);
+            CollectionAssert.AreEqual(state.DesiredFileBytes, discarded.State.DesiredFileBytes, "The desired XML is unchanged.");
+            CollectionAssert.AreEqual(state.DesiredFileBytes, File.ReadAllBytes(design), "The XML file is unchanged.");
+            string[] sent = editor.Requests[before..];
+            Assert.IsFalse(sent.Any(r => r == Protocol.CheckedSchematicBatch.Descriptor.FullName || r == Protocol.CheckedSaveDocument.Descriptor.FullName),
+                "Resolving sends nothing to KiCad: " + string.Join(", ", sent));
+
+            // The refresh takes KiCad's edit in, and the next plan publishes it.
+            var refreshed = await host.Tool("kicad_design_recovery_refresh", new { instanceId, recoveryPath = recovery,
+                expectedRevisionToken = discarded.RevisionToken });
+            Assert.IsNull(Code(refreshed), refreshed.GetRawText());
+            Assert.IsTrue(refreshed.GetProperty("structuredContent").GetProperty("changed").GetBoolean(), refreshed.GetRawText());
+            var taken = store.Read()!;
+            Assert.AreEqual(edited.Hierarchy.Data, taken.State.Observed, "The record observes KiCad's edit.");
+            var plan = await host.Tool("kicad_design_sync_plan", new { instanceId, recoveryPath = recovery, expectedRevisionToken = taken.RevisionToken });
+            Assert.IsNull(Code(plan), plan.GetRawText());
+            Assert.IsTrue(plan.GetProperty("structuredContent").GetProperty("canPrepare").GetBoolean(), plan.GetRawText());
+            var candidate = SchematicDesignXml.Read(plan.GetProperty("structuredContent").GetProperty("candidateDesignXml").GetString()!, state.KnowledgeLibraries);
+            Assert.AreEqual("Edited in KiCad", candidate.Schematic.Instances[0].Metadata.TitleBlock.Title, "The plan publishes KiCad's edit.");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    // Review finding 3 of the stuck-synchronization work (lane 2C, ledger p0aa59a1dfc8701ea), through the compiled test sync
+    // host over STDIO. When KiCad refuses the checked edit that undoes a stuck operation, the refusal says to choose undo
+    // again; that works only if the next attempt is a new checked edit, because KiCad keeps the receipt of an edit it refused
+    // and answers the same ID with that refusal again. Here the first undo is refused and the second, with its own ID, is
+    // carried out. A live KiCad cannot be made to refuse a valid undo on demand, so the scripted editor on the real NNG
+    // transport stands in for it, answering exactly as KiCad's checked controller does; the native journeys prove the undo
+    // itself (NativeSynchronizationRecoveryJourney.UndoStuckSynchronization).
+    [TestMethod]
+    public async Task AnUndoKiCadRefusedIsTriedAgainAsANewCheckedEdit()
+    {
+        string root = Directory.CreateTempSubdirectory("sync-undo-retry-").FullName;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
+        try
+        {
+            string project = Directory.CreateDirectory(Path.Combine(root, "project")).FullName;
+            var state = ConnectionOnlyRevision(project);
+            string instanceId = state.InstanceId.ToString("D");
+            using var editor = new ScriptedNngEditor(root, state, Path.Combine(project, "fixture.kicad_pro"));
+            var start = editor.Checkpoint;
+            var screen = state.Baseline.Schematic.Instances[0].Metadata.Document.Clone();
+
+            // The stuck operation: its native edit gave the first sheet another title, KiCad committed it, and it is pending.
+            var synchronized = state.ObservedElectrical!.Clone();
+            synchronized.Hierarchy.Revision.Sequence += 1;
+            synchronized.Hierarchy.Data.Instances[0].Metadata.TitleBlock ??= new();
+            synchronized.Hierarchy.Data.Instances[0].Metadata.TitleBlock.Title = "Synchronized";
+            var edit = new Protocol.ApplySchematicItemBatch { Document = start.State.Document.Clone(), DocumentEpoch = start.State.Revision.Epoch,
+                ExpectedRevision = start.State.Revision.Clone(), OperationId = Guid.NewGuid().ToString("D"), OriginId = state.OriginId.ToString("D"),
+                Description = "Apply XML synchronization candidate" };
+            edit.Operations.Add(new Protocol.SchematicItemOperation { TargetDocument = screen,
+                SetTitleBlock = synchronized.Hierarchy.Data.Instances[0].Metadata.TitleBlock.Clone() });
+            editor.Show(synchronized);
+            var committed = editor.Checkpoint.State;
+            string recovery = Path.Combine(root, "recovery.json"), design = Path.Combine(root, "design.xml");
+            File.WriteAllBytes(design, state.DesiredFileBytes);
+            var operation = Guid.NewGuid();
+            var store = new DesignRecoveryStore(recovery);
+            string token = store.Save(state, null).RevisionToken;
+            token = store.Save(state with { PendingMutation = edit, PendingNativeState = start.State.Clone(),
+                PendingPublication = DesignPublicationIntent.Create(design, state.DesiredFileBytes, state.DesiredFileBytes, operation, token) }, token).RevisionToken;
+
+            // KiCad's checked controller: the operation's edit is retained as completed; the first undo is refused, and a
+            // repeated ID is answered with that same refusal; an undo under a new ID is carried out.
+            var undoIds = new List<string>();
+            var refusals = new Dictionary<string, Protocol.CheckedSchematicBatchReceipt>();
+            editor.Answers = message =>
+            {
+                if (message.Is(Protocol.ReadCheckedSchematicBatchReceipt.Descriptor))
+                {
+                    var query = message.Unpack<Protocol.ReadCheckedSchematicBatchReceipt>();
+                    if (query.OperationId != edit.OperationId) return new Protocol.CheckedSchematicBatchReceipt { Document = query.Document.Clone(),
+                        ProcessEpoch = query.ProcessEpoch, OperationId = query.OperationId, Status = Protocol.CheckedSchematicBatchStatus.CsbsNotFound };
+                    return new Protocol.CheckedSchematicBatchReceipt { Document = edit.Document.Clone(), ProcessEpoch = start.State.ProcessEpoch,
+                        OperationId = edit.OperationId, Status = Protocol.CheckedSchematicBatchStatus.CsbsCompleted, ExpectedRequestVerified = true,
+                        ObservedBefore = start.State.Clone(), ObservedAfter = committed.Clone(), Result = new() { Revision = committed.Revision.Clone() } };
+                }
+                if (!message.Is(Protocol.CheckedSchematicBatch.Descriptor)) return null;
+                var request = message.Unpack<Protocol.CheckedSchematicBatch>();
+                string id = request.Batch.OperationId;
+                undoIds.Add(id);
+                if (refusals.TryGetValue(id, out var kept)) return kept.Clone();
+                if (refusals.Count == 0)
+                {
+                    var refused = new Protocol.CheckedSchematicBatchReceipt { Document = request.Batch.Document.Clone(), ProcessEpoch = request.ExpectedState.ProcessEpoch,
+                        OperationId = id, Status = Protocol.CheckedSchematicBatchStatus.CsbsRejected, ExpectedRequestVerified = true,
+                        ErrorCode = "native_batch_rejected", ErrorMessage = "Scripted refusal of the first undo",
+                        ObservedBefore = request.ExpectedState.Clone(), ObservedAfter = request.ExpectedState.Clone() };
+                    refusals[id] = refused;
+                    return refused.Clone();
+                }
+                var undone = state.ObservedElectrical!.Clone();
+                undone.Hierarchy.Revision.Sequence = committed.Revision.Sequence + 1;
+                editor.Show(undone);
+                var after = editor.Checkpoint.State;
+                return new Protocol.CheckedSchematicBatchReceipt { Document = request.Batch.Document.Clone(), ProcessEpoch = request.ExpectedState.ProcessEpoch,
+                    OperationId = id, Status = Protocol.CheckedSchematicBatchStatus.CsbsCompleted, ExpectedRequestVerified = true,
+                    ObservedBefore = request.ExpectedState.Clone(), ObservedAfter = after, Result = new() { Revision = after.Revision.Clone() } };
+            };
+
+            await using var host = await StdioMcpFixture.StartAsync(StartInfo(), Path.Combine(root, "host-state"),
+                Path.Combine(root, "host.stderr.log"), timeout.Token);
+            var attached = await host.Tool("kicad_instance_attach", new { endpoint = editor.Endpoint, expectedInstanceId = instanceId });
+            Assert.IsFalse(attached.TryGetProperty("isError", out var attachFailed) && attachFailed.GetBoolean(), attached.GetRawText());
+            object Undo() => new { instanceId, recoveryPath = recovery, expectedRevisionToken = token, operationId = operation.ToString("D"), choice = "undo" };
+            var first = await host.Tool("kicad_design_recovery_resolve_pending", Undo());
+            Assert.IsTrue(first.GetProperty("isError").GetBoolean(), first.GetRawText());
+            Assert.AreEqual("undo_not_committed", first.GetProperty("structuredContent").GetProperty("errorCode").GetString(), first.GetRawText());
+            StringAssert.Contains(first.GetProperty("structuredContent").GetProperty("errorMessage").GetString(), "choose undo again");
+            Assert.AreEqual(token, store.Read()!.RevisionToken, "A refused undo changes nothing in the record.");
+            Assert.HasCount(1, undoIds);
+
+            var second = await host.Tool("kicad_design_recovery_resolve_pending", Undo());
+            Assert.IsFalse(second.TryGetProperty("isError", out var failed) && failed.GetBoolean(), second.GetRawText());
+            var view = second.GetProperty("structuredContent");
+            Assert.AreEqual("undone", view.GetProperty("outcome").GetString(), view.GetRawText());
+            Assert.HasCount(2, undoIds);
+            Assert.AreNotEqual(undoIds[0], undoIds[1], "Choosing undo again sends a new checked edit.");
+            Assert.AreEqual(undoIds[1], view.GetProperty("undoOperationId").GetString());
+            var undone = store.Read()!;
+            Assert.IsFalse(undone.State.HasPendingWork);
+            Assert.AreEqual(state.Observed, undone.State.Observed, "The record observes KiCad as the operation found it.");
+            CollectionAssert.AreEqual(state.DesiredFileBytes, File.ReadAllBytes(design), "The XML is unchanged.");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
     // The planning fixture with one saved XML revision that only joins two drawn pins (as in
     // AutomaticDesignSynchronizationTests), moved into a real project folder where an automatic worker keeps its
     // history. The editor checkpoint carries one exact native revision, and every sheet reports the connection
@@ -359,11 +556,15 @@ internal sealed class ScriptedNngEditor : IDisposable
     private readonly object gate = new();
     private readonly List<string> requests = [];
     private readonly string instanceId, projectPath, eventEndpoint, epoch = Guid.NewGuid().ToString("D");
-    private readonly Protocol.CheckedSchematicState checkpoint;
-    private readonly Protocol.SchematicElectricalState electrical;
+    private Protocol.CheckedSchematicState checkpoint;
+    private Protocol.SchematicElectricalState electrical;
     private volatile bool advertises;
     internal string Endpoint { get; }
     internal bool Advertises { get => advertises; set => advertises = value; }
+    /// <summary>Answers to requests the editor otherwise refuses, for scripting a checked controller: null refuses.</summary>
+    internal Func<Any, Google.Protobuf.IMessage?>? Answers { get; set; }
+    /// <summary>The checked checkpoint the editor shows now.</summary>
+    internal Protocol.CheckedSchematicState Checkpoint { get { lock (gate) return checkpoint.Clone(); } }
     internal string[] Requests { get { lock (gate) return [.. requests]; } }
 
     internal ScriptedNngEditor(string directory, DesignRecoveryState state, string projectPath)
@@ -397,6 +598,21 @@ internal sealed class ScriptedNngEditor : IDisposable
         serving = Task.Factory.StartNew(Serve, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
     }
 
+    /// <summary>From now on the editor shows <paramref name="shown"/>, as a KiCad does after an edit made in it: a later
+    /// revision of the same document session with another state digest.</summary>
+    internal void Show(Protocol.SchematicElectricalState shown)
+    {
+        lock (gate)
+        {
+            electrical = shown.Clone();
+            var next = checkpoint.Clone();
+            next.Electrical = shown.Clone();
+            next.State.Revision = shown.Hierarchy.Revision.Clone();
+            next.State.StateSha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Google.Protobuf.MessageExtensions.ToByteArray(shown)));
+            checkpoint = next;
+        }
+    }
+
     internal Protocol.AutomationSession Session(bool advertises)
     {
         var session = new Protocol.AutomationSession { ProtocolVersion = 1, InstanceId = instanceId, ProjectPath = projectPath,
@@ -425,9 +641,11 @@ internal sealed class ScriptedNngEditor : IDisposable
     {
         var message = Kiapi.Common.ApiRequest.Parser.ParseFrom(bytes).Message;
         lock (gate) requests.Add(message.TypeUrl[(message.TypeUrl.LastIndexOf('/') + 1)..]);
-        Google.Protobuf.IMessage? reply = message.Is(Protocol.GetAutomationSession.Descriptor) ? Session(advertises)
-            : message.Is(Protocol.ReadCheckedSchematicState.Descriptor) ? checkpoint.Clone()
-            : message.Is(Protocol.ReadSchematicElectricalState.Descriptor) ? electrical.Clone() : null;
+        Google.Protobuf.IMessage? reply;
+        lock (gate)
+            reply = message.Is(Protocol.GetAutomationSession.Descriptor) ? Session(advertises)
+                : message.Is(Protocol.ReadCheckedSchematicState.Descriptor) ? checkpoint.Clone()
+                : message.Is(Protocol.ReadSchematicElectricalState.Descriptor) ? electrical.Clone() : Answers?.Invoke(message);
         var response = new Kiapi.Common.ApiResponse
         {
             Header = new() { KicadToken = epoch },

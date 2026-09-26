@@ -117,6 +117,51 @@ public static class CheckedSchematicContract
         return files.Count == 0;
     }
 
+    /// <summary>Why <see cref="FileCoverage"/> refuses <paramref name="state"/>, for a person: each file KiCad saves this
+    /// schematic to that no longer holds what KiCad loaded (changed, deleted, created where KiCad has saved nothing yet, or
+    /// not comparable), and what makes synchronization possible again. Names files by their file name, or by their full
+    /// path when two share a name.</summary>
+    internal static string FileConflictMessage(DocumentLifecycleState state)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        List<string> changed = [], deleted = [], created = [], unknown = [];
+        var listed = state.NativeFiles.ToHashSet(StringComparer.Ordinal);
+        foreach (var file in state.FileBaselines)
+        {
+            bool mine = listed.Remove(file.Path);
+            bool clean = file.BaselineExists ? file.BaselineSha256.Length == 64 && file.BaselineSha256.All(char.IsAsciiHexDigitLower)
+                : file.BaselineSha256.Length == 0 && file.BaselineBytes == 0;
+            if (!mine || !Path.IsPathFullyQualified(file.Path) || file.BaselinePath != file.Path || !file.BaselineKnown || !file.CurrentKnown
+                || file.Status is NativeFileBaselineStatus.NfbsWrongPath or NativeFileBaselineStatus.NfbsUnreadable or NativeFileBaselineStatus.NfbsUnknown
+                || !clean)
+                unknown.Add(file.Path);
+            else if (file.BaselineExists && !file.CurrentExists) deleted.Add(file.Path);
+            else if (!file.BaselineExists && file.CurrentExists) created.Add(file.Path);
+            else if (file.Status != NativeFileBaselineStatus.NfbsUnchanged || file.BaselineSha256 != file.CurrentSha256
+                || file.BaselineBytes != file.CurrentBytes) changed.Add(file.Path);
+        }
+        unknown.AddRange(listed.Order(StringComparer.Ordinal));
+        var names = changed.Concat(deleted).Concat(created).Concat(unknown).Select(p => Path.GetFileName(p)).ToArray();
+        string Name(string path) => names.Count(n => n == Path.GetFileName(path)) == 1 && Path.GetFileName(path).Length != 0 ? Path.GetFileName(path) : path;
+        string Names(List<string> paths) => paths.Count == 1 ? Name(paths[0])
+            : string.Join(", ", paths.SkipLast(1).Select(Name)) + " and " + Name(paths[^1]);
+        static string It(int count) => count == 1 ? "it" : "them";
+        var parts = new List<string>();
+        if (changed.Count != 0) parts.Add(Names(changed) + " changed on disk after KiCad loaded " + It(changed.Count));
+        if (deleted.Count != 0) parts.Add(Names(deleted) + (deleted.Count == 1 ? " was" : " were") + " deleted after KiCad loaded " + It(deleted.Count));
+        if (created.Count != 0)
+            parts.Add(Names(created) + (created.Count == 1 ? " was" : " were") + " created on disk where KiCad has not saved " + It(created.Count) + " yet");
+        if (unknown.Count != 0) parts.Add("KiCad cannot compare " + Names(unknown) + " with what it loaded");
+        if (parts.Count == 0) parts.Add("KiCad reports no file it saves this schematic to");
+        int restorable = changed.Count + deleted.Count;
+        string reopen = "reopen the project in KiCad and reattach the recovery record (kicad_design_recovery_reattach)";
+        string fix = unknown.Count != 0 || parts.Count == 1 && restorable + created.Count == 0 ? reopen
+            : created.Count == 0 ? "restore " + It(restorable) + ", or " + reopen
+            : restorable == 0 ? "remove " + It(created.Count) + ", or " + reopen
+            : "restore the changed and deleted files and remove the created ones, or " + reopen;
+        return string.Join("; ", parts) + "; " + fix + ", then plan again. Nothing was sent to KiCad and no file was written.";
+    }
+
     private static bool Uuid(string value) => Guid.TryParseExact(value, "D", out var id) && id != Guid.Empty && id.ToString("D") == value;
     private static AutomationException Invalid(string message) => new("invalid_checked_batch", message);
 }

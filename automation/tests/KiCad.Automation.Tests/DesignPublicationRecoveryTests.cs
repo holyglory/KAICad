@@ -199,8 +199,11 @@ public sealed class DesignPublicationRecoveryTests
     // NativeSessionTests.DeletedNativeSheetsRebuildFromXmlWithoutLoss proves undo, discard and keep through the public tool
     // against a real KiCad; a journey can neither hand the store the altered next states refused here nor make a record
     // replacement fail after its receipt was written, so they are checked alone (no existing test covers this store rule).
+    // The same isolated record also checks how receipts are found (review of 03566919ff, findings 5 and 6): the publication
+    // of a kept result is found from its continuation's index file without reading any other receipt, and a receipt an
+    // unsaved attempt left is not reported once its operation finished another way. Neither state can be made in a journey.
     [TestMethod]
-    public void OnlyAResolutionOfExactlyThePendingOperationClearsIt()
+    public async Task OnlyAResolutionOfExactlyThePendingOperationClearsIt()
     {
         using var fixture = new Fixture();
         var saved = fixture.Saved; var state = saved.State;
@@ -261,6 +264,33 @@ public sealed class DesignPublicationRecoveryTests
         Assert.AreEqual(operation, DesignPendingResolutions.KeptBy(fixture.RecordPath, continuation, state.InstanceId)!.Value.Receipt.OperationId,
             "The continuation is found as the publication of the kept result.");
         Assert.AreEqual("design_recovery_changed", Refused(cleared, Receipt(operation, saved.RevisionToken)), "A resolution happens once.");
+
+        // Only the receipt the continuation's index names is read: a damaged receipt of another operation does not block
+        // finding it, and an index an unsaved attempt left (its receipt names no such continuation) is ignored.
+        string folder = DesignPendingResolutions.Directory(fixture.RecordPath);
+        Assert.IsTrue(File.Exists(Path.Combine(folder, continuation.ToString("N") + ".continuation-of." + operation.ToString("N"))));
+        string damaged = Path.Combine(folder, Guid.NewGuid().ToString("N") + ".json");
+        File.WriteAllText(damaged, "{ \"SchemaVersion\": ");
+        File.WriteAllBytes(Path.Combine(folder, continuation.ToString("N") + ".continuation-of." + Guid.NewGuid().ToString("N")), []);
+        File.WriteAllBytes(Path.Combine(folder, Guid.NewGuid().ToString("N") + ".continuation-of." + operation.ToString("N")), []);
+        Assert.AreEqual(operation, DesignPendingResolutions.KeptBy(fixture.RecordPath, continuation, state.InstanceId)!.Value.Receipt.OperationId);
+        Assert.IsNull(DesignPendingResolutions.KeptBy(fixture.RecordPath, Guid.NewGuid(), state.InstanceId), "No index names this operation.");
+        var unreadable = Assert.ThrowsExactly<AutomationException>(() => DesignPendingResolutions.Read(damaged));
+        Assert.AreEqual("invalid_resolution_receipt", unreadable.Code);
+        StringAssert.Contains(unreadable.Message, "move it out of " + folder, "A damaged receipt names what works.");
+
+        // A receipt an attempt left when its record replacement failed, for an operation that an apply completed instead: a
+        // repeated call naming it is refused, not answered with a resolution that never happened.
+        var finished = Guid.NewGuid();
+        DesignPendingResolutions.Write(fixture.RecordPath, Receipt(finished, resolved.RevisionToken));
+        new DesignSynchronizationReceipts(fixture.RecordPath).Archive(new DesignSynchronizationReceipt(2, finished, state.InstanceId,
+            fixture.Intent.DesignPath, resolved.RevisionToken, new string('a', 64), state.PendingNativeState!.ProcessEpoch,
+            resolved.State.NativeRevision.Epoch, resolved.State.NativeRevision.Sequence, false, false, null, null));
+        var completed = await Assert.ThrowsExactlyAsync<AutomationException>(() => DesignRecoveryPendingResolution.ResolveAsync(fixture.Store, null,
+            state.InstanceId.ToString("D"), resolved.RevisionToken, finished, PendingOperationChoice.Discard));
+        Assert.AreEqual("pending_operation_completed", completed.Code, completed.Message);
+        StringAssert.Contains(completed.Message, "kicad_design_sync_apply");
+        Assert.AreEqual(resolved.RevisionToken, fixture.Store.Read()!.RevisionToken, "Nothing was changed.");
 
         static SchematicElectricalState WithData(SchematicElectricalState electrical, Kiapi.Schematic.Types.SchematicHierarchyData data)
         {

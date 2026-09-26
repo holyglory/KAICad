@@ -27,11 +27,12 @@ public enum PendingOperationChoice
 /// the design as it was before the operation), "discarded" (KiCad already showed it, or nothing of the operation reached
 /// KiCad) or "keep-pending" (KiCad keeps the operation's result and the continuation publishes it).
 /// ObservedBefore and ObservedElectricalBefore hold the design KiCad showed before the operation, carried from the kept
-/// operation's receipt when the operation is itself the continuation that publishes a kept result (KeptOperationId), so
-/// that continuation is discarded only when KiCad shows the design as it was before the kept operation. ObservationKept
-/// marks a discard of an operation nothing of which reached KiCad while KiCad changed since: the record still observes
-/// KiCad as it was before those changes, for intake to take them in. ResultRevisionToken is the record revision the
-/// resolution produced.</summary>
+/// operation's receipt when the operation is itself the continuation that publishes a kept result (KeptOperationId, the
+/// operation whose result KiCad kept, also when keep-and-replan was chosen again for its continuation), so that
+/// continuation is discarded only when KiCad shows the design as it was before the kept operation. ObservationKept marks a
+/// discard of an operation nothing of which reached KiCad (KiCad refused or never received its native edit, or it had
+/// none) while KiCad changed since: the record still observes KiCad as it was before those changes, for intake to take
+/// them in. ResultRevisionToken is the record revision the resolution produced.</summary>
 public sealed record DesignPendingResolution(
     [property: JsonRequired] int SchemaVersion,
     [property: JsonRequired] Guid OperationId,
@@ -75,7 +76,8 @@ public sealed record DesignPendingResolution(
 }
 
 /// <summary>Resolution receipts kept next to a design recovery record, in "&lt;record&gt;.resolved": one file per resolved
-/// operation.</summary>
+/// operation, and for a keep-and-replan resolution an empty index file "&lt;continuation&gt;.continuation-of.&lt;operation&gt;"
+/// that finds the receipt from its continuation without reading any other receipt.</summary>
 public static class DesignPendingResolutions
 {
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
@@ -89,6 +91,11 @@ public static class DesignPendingResolutions
     internal static string Write(string recoveryPath, DesignPendingResolution receipt)
     {
         string folder = System.IO.Directory.CreateDirectory(Directory(recoveryPath)).FullName;
+        // The index comes first: it only points at the receipt, which stays the authority (KeptBy checks it), so an index
+        // left by an attempt whose receipt or record replacement failed never names a continuation by itself.
+        if (receipt.ContinuationOperationId is { } continuation)
+            using (new FileStream(Path.Combine(folder, continuation.ToString("N") + ContinuationOf + receipt.OperationId.ToString("N")),
+                FileMode.OpenOrCreate, FileAccess.Write, FileShare.None)) { }
         string destination = Path.Combine(folder, receipt.OperationId.ToString("N") + ".json");
         string temporary = destination + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
@@ -104,6 +111,8 @@ public static class DesignPendingResolutions
         return destination;
     }
 
+    private const string ContinuationOf = ".continuation-of.";
+
     /// <summary>The receipt of the operation's resolution, or null when it was never resolved.</summary>
     public static (DesignPendingResolution Receipt, string Path)? Find(string recoveryPath, Guid operationId, Guid instanceId)
     {
@@ -111,22 +120,30 @@ public static class DesignPendingResolutions
         if (!File.Exists(file)) return null;
         var receipt = Read(file);
         if (receipt.OperationId != operationId || receipt.InstanceId != instanceId)
-            throw new AutomationException("invalid_resolution_receipt", $"The resolution receipt {file} does not belong to this operation and instance.");
+            throw new AutomationException("invalid_resolution_receipt", $"The resolution receipt {file} does not belong to operation "
+                + $"{operationId:D} of this instance. {Remedy(file)}");
         return (receipt, file);
     }
 
     /// <summary>The receipt of the keep-and-replan resolution whose continuation is <paramref name="operationId"/>, or null
-    /// when that operation does not publish a kept result. An unreadable receipt fails the check rather than being skipped.</summary>
+    /// when that operation does not publish a kept result. Only the receipts the continuation's index files name are read;
+    /// an index whose receipt does not name the continuation (left by an attempt that was never saved) is ignored, and an
+    /// unreadable receipt fails the check rather than being skipped.</summary>
     public static (DesignPendingResolution Receipt, string Path)? KeptBy(string recoveryPath, Guid operationId, Guid instanceId)
     {
         string folder = Directory(recoveryPath);
         if (!System.IO.Directory.Exists(folder)) return null;
-        var kept = System.IO.Directory.EnumerateFiles(folder, "*.json").Order(StringComparer.Ordinal)
-            .Select(file => (Receipt: Read(file), Path: file))
-            .Where(found => found.Receipt.ContinuationOperationId == operationId && found.Receipt.InstanceId == instanceId).ToArray();
-        if (kept.Length > 1)
-            throw new AutomationException("invalid_resolution_receipt", $"Several resolution receipts name operation {operationId:D} as their continuation.");
-        return kept.Length == 0 ? null : kept[0];
+        var kept = new List<(DesignPendingResolution Receipt, string Path)>();
+        foreach (string index in System.IO.Directory.EnumerateFiles(folder, operationId.ToString("N") + ContinuationOf + "*").Order(StringComparer.Ordinal))
+        {
+            if (!Guid.TryParseExact(Path.GetFileName(index)[(32 + ContinuationOf.Length)..], "N", out var keptOperation)) continue;
+            if (Find(recoveryPath, keptOperation, instanceId) is { } found && found.Receipt.ContinuationOperationId == operationId)
+                kept.Add(found);
+        }
+        if (kept.Count > 1)
+            throw new AutomationException("invalid_resolution_receipt", $"Several resolution receipts name operation {operationId:D} as their "
+                + $"continuation ({string.Join(", ", kept.Select(k => k.Path))}). {Remedy(kept[0].Path)}");
+        return kept.Count == 0 ? null : kept[0];
     }
 
     public static DesignPendingResolution Read(string path)
@@ -136,12 +153,17 @@ public static class DesignPendingResolutions
             var receipt = JsonSerializer.Deserialize<DesignPendingResolution>(File.ReadAllBytes(path), Json);
             if (receipt is null || receipt.SchemaVersion != DesignPendingResolution.CurrentSchemaVersion
                 || receipt.Outcome is not (DesignPendingResolution.Undone or DesignPendingResolution.Discarded or DesignPendingResolution.KeepPending))
-                throw new AutomationException("invalid_resolution_receipt", $"The resolution receipt {path} is incomplete.");
+                throw new AutomationException("invalid_resolution_receipt", $"The resolution receipt {path} is incomplete. {Remedy(path)}");
             return receipt;
         }
         catch (JsonException error)
-        { throw new AutomationException("invalid_resolution_receipt", $"The resolution receipt {path} cannot be read: {error.Message}"); }
+        { throw new AutomationException("invalid_resolution_receipt", $"The resolution receipt {path} cannot be read: {error.Message}. {Remedy(path)}"); }
     }
+
+    // A receipt is a record of what was resolved; nothing reads it but a later resolution. What works when one is damaged.
+    private static string Remedy(string path) => $"Put that file back as it was written, or move it out of {Path.GetDirectoryName(path)} "
+        + "(its operation is then treated as never resolved; a pending publication of a kept result can still be completed with "
+        + "kicad_design_sync_apply), and call again. Nothing was changed.";
 }
 
 /// <summary>What resolving a pending operation did. ResolvedNow is false for a repeated call that found the operation
@@ -166,8 +188,8 @@ public sealed record PendingOperationResolution(StoredDesignRecovery Recovery, D
 /// publication of that design is journaled for the running KiCad, completed like any pending synchronization.</item>
 /// <item>discard: KiCad must show the state the operation started from (its edit was undone in KiCad, or KiCad reloaded
 /// the saved sheets), or nothing of the operation reached KiCad (KiCad refused its edit or never received it in this
-/// document session): KiCad's own changes since then stay and the record keeps observing KiCad as it was, so intake takes
-/// them in as edits made in KiCad. Nothing is sent to KiCad.</item>
+/// document session, or it has no native edit): KiCad's own changes since then stay and the record keeps observing KiCad
+/// as it was, so intake takes them in as edits made in KiCad. Nothing is sent to KiCad.</item>
 /// </list>
 /// The publication of a kept result (the continuation of keep-and-replan) sends no native edit of its own: undo is refused
 /// for it, and discard only when KiCad shows the design as it was before the kept operation, as recorded in that
@@ -202,6 +224,17 @@ public static class DesignRecoveryPendingResolution
         // and the resolution below replaces it.
         if (!Holds(saved.State, operationId) && DesignPendingResolutions.Find(store.StatePath, operationId, instance) is { } done)
         {
+            // An operation finished another way (a completed apply, or kicad_design_recovery_release_exited) was not
+            // resolved here: the receipt was left by an attempt whose record replacement failed, and it describes nothing
+            // that happened.
+            string? finished = saved.State.LastSynchronization?.OperationId == operationId
+                || new DesignSynchronizationReceipts(store.StatePath).Read(operationId) is not null ? "completed by kicad_design_sync_apply"
+                : DesignReleasedOperations.Latest(store.StatePath, operationId, instance) is not null ? "released with kicad_design_recovery_release_exited"
+                : null;
+            if (finished is not null)
+                throw Error("pending_operation_completed", $"Operation {operationId:D} is no longer pending: it was {finished}, not resolved "
+                    + $"here. The resolution receipt {done.Path} was left by an attempt that was never saved and describes nothing that "
+                    + "happened; nothing was changed. Read the record with kicad_design_recovery_plan.");
             if (done.Receipt.ResolvedFromRevisionToken != expectedRevisionToken || done.Receipt.Choice != choiceName)
                 throw Error("pending_operation_resolved", $"Operation {operationId:D} was already resolved with '{done.Receipt.Choice}' "
                     + $"(outcome {done.Receipt.Outcome}) at recovery revision {done.Receipt.ResolvedFromRevisionToken}; nothing was changed. "
@@ -225,10 +258,12 @@ public static class DesignRecoveryPendingResolution
                 + "recovery revision token); nothing was changed.");
         var guard = state.PendingNativeState ?? throw Error("operation_process_unknown",
             "The pending operation does not record which KiCad process holds it; inspect it with kicad_design_recovery_plan. Nothing was changed.");
-        // The publication of a result KiCad kept (keep-and-replan) sends no native edit of its own.
+        // The publication of a result KiCad kept (keep-and-replan) sends no native edit of its own. The kept operation is the
+        // one whose result KiCad kept, also when keep-and-replan was chosen again for its continuation.
         var keptBy = DesignPendingResolutions.KeptBy(store.StatePath, operationId, instance)?.Receipt;
+        Guid? keptOperation = keptBy is null ? null : keptBy.KeptOperationId ?? keptBy.OperationId;
         if (keptBy is not null && choice == PendingOperationChoice.Undo)
-            throw KeptResultPending(state, keptBy, "It sends no native edit of its own, so there is nothing of it to undo.");
+            throw KeptResultPending(state, keptOperation!.Value, "It sends no native edit of its own, so there is nothing of it to undo.");
         if (state.PendingNativeSave is not null && choice != PendingOperationChoice.KeepAndReplan)
             throw Error("pending_native_save_started", $"Operation {operationId:D} had already asked KiCad to save its result, so KiCad's files "
                 + "may hold it. Keep it with keep-and-replan, or complete it with kicad_design_sync_apply; nothing was changed." + LastResort);
@@ -262,6 +297,9 @@ public static class DesignRecoveryPendingResolution
             && (after.StateSha256 != live.State.StateSha256 || after.Revision.Epoch != live.State.Revision.Epoch);
         // Nothing of the operation reached KiCad: KiCad refused its edit, or never received it in this document session.
         bool neverRan = keptBy is null && native.Status is "rejected" or "not-found";
+        // Discard also clears an operation with no native edit (other than the publication of a kept result): nothing of it
+        // can have reached KiCad, so every change KiCad shows since it started is an edit made in KiCad.
+        bool nothingReached = neverRan || keptBy is null && native.Status == "none";
         var lane = state.PendingLayout?.Lane ?? (state.PendingLayout is not null ? "connected-move" : "ordinary");
         string kind = state.PendingLayout is not null ? "layout" : "publication";
         string edit = state.PendingMutation?.OperationId is { } nativeEdit ? "native edit " + nativeEdit : "native edit";
@@ -280,15 +318,15 @@ public static class DesignRecoveryPendingResolution
                 if (keptBy is not null)
                 {
                     if (!showsStart)
-                        throw KeptResultPending(state, keptBy, before is null
-                            ? $"The receipt of operation {keptBy.OperationId:D} does not record the design as it was before it, so KiCad cannot be "
+                        throw KeptResultPending(state, keptOperation!.Value, before is null
+                            ? $"The receipt of operation {keptOperation:D} does not record the design as it was before it, so KiCad cannot be "
                                 + "checked against it and discarding could leave its result in KiCad as if it were an edit made in KiCad."
-                            : $"KiCad does not show the design as it was before operation {keptBy.OperationId:D}, so discarding would leave its "
+                            : $"KiCad does not show the design as it was before operation {keptOperation:D}, so discarding would leave its "
                                 + "result in KiCad as if it were an edit made in KiCad.");
                     next = Attached(state, live);
                 }
                 else if (showsStart) next = Attached(state, live);
-                else if (neverRan)
+                else if (nothingReached)
                 {
                     // KiCad's changes are edits made in KiCad: the record keeps observing KiCad as it was, and intake takes them in.
                     next = Cleared(state);
@@ -300,16 +338,13 @@ public static class DesignRecoveryPendingResolution
                         + $"it committed its {edit}. Discarding would leave that result in KiCad as if it were an edit made in KiCad. "
                         + (changedSince ? "Take the later edits back in KiCad (Edit > Undo) and choose undo, or keep KiCad's result with keep-and-replan"
                             : "Remove it with undo, or keep it with keep-and-replan") + "; nothing was changed."),
-                    "session-ended" or "indeterminate" => Error("operation_outcome_unknown", (native.Status == "session-ended"
+                    _ => Error("operation_outcome_unknown", (native.Status == "session-ended"
                             ? $"KiCad reloaded its sheets after operation {operationId:D} started, so its receipt of the {edit} is gone"
                             : $"KiCad reports the {edit} of operation {operationId:D} as indeterminate")
                         + ", and KiCad does not show the design as it was before the operation: it may hold the operation's result. Keep what "
                         + "KiCad shows with keep-and-replan (it first checks that KiCad's objects are the operation's), or make KiCad show the "
                         + "design as it was before the operation (for example reload the sheets saved before it) and choose discard; nothing "
-                        + "was changed." + LastResort),
-                    _ => Error("native_changed_since_operation", $"KiCad changed after operation {operationId:D} started. The operation sends "
-                        + "no native edit, so these are edits made in KiCad: keep them with keep-and-replan, which re-plans the design from "
-                        + "what KiCad shows, or take them back in KiCad and choose discard; nothing was changed.")
+                        + "was changed." + LastResort)
                 };
                 outcome = DesignPendingResolution.Discarded;
                 break;
@@ -328,12 +363,13 @@ public static class DesignRecoveryPendingResolution
                         + (showsStart ? "KiCad shows the design as it was before the operation: choose discard."
                             : neverRan ? "Nothing of the operation reached KiCad: choose discard. KiCad's own changes since then stay and are "
                                 + "taken in as edits made in KiCad."
-                            : native.Status == "session-ended" ? "KiCad reloaded its sheets since the operation started, so whether they hold "
-                                + "its result cannot be told from KiCad's receipt: keep what KiCad shows with keep-and-replan, which first checks "
-                                + "that KiCad's objects are the operation's, or reload the sheets saved before the operation and choose discard."
-                            : "KiCad changed after the operation started; the operation sends no native edit, so these are edits made in "
-                                + "KiCad: keep them with keep-and-replan, or take them back in KiCad and choose discard.")
-                        + " Nothing was changed." + (showsStart || neverRan ? "" : LastResort));
+                            : native.Status == "none" ? "The operation sends no native edit, so every change KiCad shows since it started is "
+                                + "an edit made in KiCad: choose discard, which keeps them and takes them in as edits made in KiCad, or "
+                                + "keep-and-replan, which publishes the XML re-planned from what KiCad shows."
+                            : "KiCad reloaded its sheets since the operation started, so whether they hold its result cannot be told from "
+                                + "KiCad's receipt: keep what KiCad shows with keep-and-replan, which first checks that KiCad's objects are the "
+                                + "operation's, or reload the sheets saved before the operation and choose discard.")
+                        + " Nothing was changed." + (showsStart || nothingReached ? "" : LastResort));
                 // Already undone (for example by an earlier call whose reply was lost): nothing is sent again.
                 if (!showsStart)
                 {
@@ -350,15 +386,19 @@ public static class DesignRecoveryPendingResolution
                             + $"({error.Code}: {error.Message}). Undo it in KiCad (Edit > Undo) and then choose discard, or keep it with "
                             + "keep-and-replan; nothing was changed.");
                     }
-                    var request = new CheckedSchematicBatch { Batch = Batch(live.State, state.OriginId, UndoOperation(operationId, native.Receipt!.OperationId),
-                        $"Undo synchronization {operationId:D} (native edit {native.Receipt.OperationId})", restore), ExpectedState = live.State.Clone() };
+                    // Every attempt is its own checked edit: KiCad keeps the receipt of an edit it refused, so an attempt under an
+                    // earlier attempt's ID could only repeat that refusal. Two attempts can never both commit: each is guarded by
+                    // the state KiCad showed when it was sent, and a committed undo is never sent again (KiCad then shows the start).
+                    var request = new CheckedSchematicBatch { Batch = Batch(live.State, state.OriginId, Guid.NewGuid(),
+                        $"Undo synchronization {operationId:D} (native edit {native.Receipt!.OperationId})", restore), ExpectedState = live.State.Clone() };
                     CheckedSchematicContract.ValidateRequest(request, client.Epoch);
                     var receipt = await client.InvokeAsync<CheckedSchematicBatch, CheckedSchematicBatchReceipt>(request, token);
                     CheckedSchematicContract.ValidateResult(request, receipt, inspect: false);
                     if (receipt.Status != CheckedSchematicBatchStatus.CsbsCompleted)
                         throw Error("undo_not_committed", $"KiCad did not undo operation {operationId:D} ({receipt.Status}: {receipt.ErrorCode} "
                             + $"{receipt.ErrorMessage}). The pending operation is kept and nothing was changed in the recovery record: "
-                            + "choose undo again, keep KiCad's result with keep-and-replan, or undo it in KiCad (Edit > Undo) and choose discard.");
+                            + "choose undo again (a new attempt is a new checked edit), keep KiCad's result with keep-and-replan, or undo it "
+                            + "in KiCad (Edit > Undo) and choose discard.");
                     undoId = request.Batch.OperationId; undoOperations = restore.Count;
                     observed = await Capture(client, state, token);
                     if (!observed.State.Equals(receipt.ObservedAfter)
@@ -378,7 +418,8 @@ public static class DesignRecoveryPendingResolution
                         + "discard; KiCad's own changes since then stay and are taken in as edits made in KiCad. Nothing was changed.");
                 // The way out when KiCad's result cannot be kept.
                 string otherwise = keptBy is not null
-                    ? $"take the kept result of operation {keptBy.OperationId:D} back in KiCad (Edit > Undo) and choose discard"
+                    ? $"take the kept result of operation {keptOperation:D} back in KiCad (Edit > Undo, or reload the sheets saved before it) "
+                        + "and choose discard"
                     : native.Status == "completed" && !changedSince ? "undo the operation instead (choice undo)"
                     : native.Status == "completed" ? "take the later edits back in KiCad (Edit > Undo) until it shows what the operation left and choose undo"
                     : "make KiCad show the design as it was before the operation (for example reload the sheets saved before it) and choose discard";
@@ -431,10 +472,10 @@ public static class DesignRecoveryPendingResolution
 
         var resolution = new DesignPendingResolution(DesignPendingResolution.CurrentSchemaVersion, operationId, state.PendingMutation?.OperationId,
             state.InstanceId, choiceName, outcome, saved.RevisionToken, kind, lane, native.Status, guard.ProcessEpoch, state.NativeRevision,
-            new(observed.State.Revision.Epoch, observed.State.Revision.Sequence), undoId, undoOperations, continuation, changedSince,
+            new(observed.State.Revision.Epoch, observed.State.Revision.Sequence), undoId, undoOperations, continuation, changedSince || observationKept,
             DesignReleasedOperation.BaselineDigest(state), DesignReleasedOperation.Sha(state.DesiredFileBytes), state.PendingMutation?.ToByteArray(),
             guard.ToByteArray(), state.PendingPublication, state.PendingLayout, netChanges, DateTimeOffset.UtcNow,
-            beforeBytes, beforeElectricalBytes, keptBy?.OperationId, observationKept);
+            beforeBytes, beforeElectricalBytes, keptOperation, observationKept);
         var resolved = store.ResolvePendingOperation(saved, next, resolution);
         var stored = DesignPendingResolutions.Find(store.StatePath, operationId, instance) ?? throw Error("invalid_resolution_receipt", "The resolution receipt was not kept.");
         if (stored.Receipt.ResultRevisionToken != resolved.RevisionToken || stored.Receipt.Choice != choiceName || stored.Receipt.ResolvedFromRevisionToken != saved.RevisionToken)
@@ -462,8 +503,9 @@ public static class DesignRecoveryPendingResolution
         string reapply = "The XML still asks for that change, so the next synchronization (kicad_design_sync_plan then "
             + "kicad_design_sync_apply, or automatic synchronization) applies it again; change the XML first if KiCad would refuse it again.";
         if (receipt.ObservationKept)
-            return $"Nothing of operation {receipt.OperationId:D} reached KiCad (KiCad " + (receipt.NativeStatus == "rejected"
-                    ? "refused its native edit" : "never received its native edit") + ") and nothing is pending. KiCad changed after the "
+            return $"Nothing of operation {receipt.OperationId:D} reached KiCad (" + (receipt.NativeStatus switch
+                    { "rejected" => "KiCad refused its native edit", "not-found" => "KiCad never received its native edit", _ => "it has no native edit" })
+                + ") and nothing is pending. KiCad changed after the "
                 + "operation started; those are edits made in KiCad, and the record still observes KiCad as it was before them: take them "
                 + "in with kicad_design_recovery_refresh (automatic synchronization does this itself) before planning. " + reapply;
         return receipt.KeptOperationId is { } keptOperation
@@ -491,13 +533,14 @@ public static class DesignRecoveryPendingResolution
     };
 
     // The publication of a kept result can only be completed, re-planned, or discarded once KiCad no longer shows the result.
-    private static AutomationException KeptResultPending(DesignRecoveryState state, DesignPendingResolution keptBy, string reason)
+    private static AutomationException KeptResultPending(DesignRecoveryState state, Guid keptOperation, string reason)
     {
         var publication = state.PendingPublication!;
-        return Error("kept_result_pending", $"Operation {publication.OperationId:D} publishes the result of operation {keptBy.OperationId:D} "
+        return Error("kept_result_pending", $"Operation {publication.OperationId:D} publishes the result of operation {keptOperation:D} "
             + $"that KiCad kept (keep-and-replan). {reason} Complete it with kicad_design_sync_apply (operationId {publication.OperationId:D}, "
             + $"expectedRevisionToken {publication.RequestedRecoveryRevisionToken}), choose keep-and-replan again to re-plan from what KiCad "
-            + $"shows now, or take that result back in KiCad (Edit > Undo) and choose discard. Nothing was changed.");
+            + $"shows now, or take that result back in KiCad (Edit > Undo, or reload the sheets saved before it) and choose discard. "
+            + "Nothing was changed.");
     }
 
     private sealed record NativeStatus(string Status, CheckedSchematicBatchReceipt? Receipt);
@@ -580,8 +623,7 @@ public static class DesignRecoveryPendingResolution
         return batch;
     }
 
-    // Name-based identities (RFC 9562 version 8, SHA-256), so a repeated resolution names the same undo and continuation.
-    internal static Guid UndoOperation(Guid operationId, string nativeOperationId) => Named("kicad-undo:" + operationId.ToString("D") + ":" + nativeOperationId);
+    // A name-based identity (RFC 9562 version 8, SHA-256), so a repeated keep-and-replan names the same continuation.
     internal static Guid KeepOperation(Guid operationId, string processEpoch) => Named("kicad-keep:" + operationId.ToString("D") + ":" + processEpoch);
 
     private static Guid Named(string name)

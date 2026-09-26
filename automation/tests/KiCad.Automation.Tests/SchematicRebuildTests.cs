@@ -45,11 +45,99 @@ public sealed class SchematicRebuildTests
     {
         var root = design.Schematic.Instances.Single(s => s.Metadata.Document.Equals(design.Schematic.Document)).Clone();
         root.Items.Clear(); root.CachedSymbols.Clear();
+        root.Metadata.NetChains.Clear();
         root.Metadata.ScreenId = new KIID { Value = Guid.NewGuid().ToString("D") };
         root.Metadata.LoadedNativeFormatVersion = 0;
         var data = new SchematicHierarchyData { Document = design.Schematic.Document.Clone() };
         data.Instances.Add(root);
         return data;
+    }
+
+    private static SchematicDesign WithRepeatedSheet(SchematicDesign source)
+    {
+        var result = source with { Schematic = source.Schematic.Clone() };
+        var child = result.Schematic.Instances
+            .Where(s => !s.Metadata.Document.Equals(result.Schematic.Document))
+            .OrderByDescending(s => s.Metadata.Document.SheetPath.Path.Count)
+            .First();
+        var parentPath = new SheetPath();
+        parentPath.Path.Add(child.Metadata.Document.SheetPath.Path.Take(child.Metadata.Document.SheetPath.Path.Count - 1));
+        var parent = result.Schematic.Instances.Single(s => s.Metadata.Document.SheetPath.Equals(parentPath));
+        var original = parent.Items.Where(i => i.Is(SheetSymbol.Descriptor)).Select(i => i.Unpack<SheetSymbol>())
+            .Single(s => s.ChildScreenId.Equals(child.Metadata.ScreenId));
+        var repeatedId = Guid.Parse("0b6f4c33-9a71-4d0e-8f1c-2a5b6c7d8ea1");
+        var repeated = original.Clone();
+        repeated.Id.Value = repeatedId.ToString("D");
+        repeated.NameField.Text.Text_ += " repeat";
+        repeated.PageNumber = "99";
+        repeated.Position ??= new Vector2();
+        repeated.Position.XNm += 25_400_000;
+        repeated.InstanceRecords ??= new SheetPlacementRecords();
+        var placement = repeated.InstanceRecords.Records.SingleOrDefault(r => r.Path.SequenceEqual(parentPath.Path));
+        if (placement is null)
+        {
+            placement = new SheetPlacementRecord { PageNumber = repeated.PageNumber, Variants = repeated.Variants?.Clone() ?? new SheetVariants() };
+            placement.Path.Add(parentPath.Path.Select(id => id.Clone()));
+            repeated.InstanceRecords.Records.Add(placement);
+        }
+        else
+            placement.PageNumber = repeated.PageNumber;
+        parent.Items.Add(Any.Pack(repeated));
+
+        var repeatedPath = child.Metadata.Document.SheetPath.Clone();
+        repeatedPath.Path[^1] = new KIID { Value = repeatedId.ToString("D") };
+        // A shared physical screen carries every placement record on each of its
+        // instances. Add the new occurrence to the source objects before cloning
+        // the repeated screen so physical-operation comparison remains identical.
+        for (int index = 0; index < child.Items.Count; ++index)
+        {
+            var packed = child.Items[index];
+            if (packed.Is(SchematicSymbolInstance.Descriptor))
+            {
+                var symbol = packed.Unpack<SchematicSymbolInstance>();
+                if (symbol.InstanceRecords is { } records && records.Records.SingleOrDefault(r => r.Path.SequenceEqual(child.Metadata.Document.SheetPath.Path)) is { } local
+                    && !records.Records.Any(r => r.Path.SequenceEqual(repeatedPath.Path)))
+                {
+                    var copy = local.Clone();
+                    copy.Path.Clear();
+                    copy.Path.Add(repeatedPath.Path.Select(id => id.Clone()));
+                    records.Records.Add(copy);
+                }
+                child.Items[index] = Any.Pack(symbol);
+            }
+            else if (packed.Is(SheetSymbol.Descriptor))
+            {
+                var sheet = packed.Unpack<SheetSymbol>();
+                if (sheet.InstanceRecords is { } records && records.Records.SingleOrDefault(r => r.Path.SequenceEqual(child.Metadata.Document.SheetPath.Path)) is { } local
+                    && !records.Records.Any(r => r.Path.SequenceEqual(repeatedPath.Path)))
+                {
+                    var copy = local.Clone();
+                    copy.Path.Clear();
+                    copy.Path.Add(repeatedPath.Path.Select(id => id.Clone()));
+                    records.Records.Add(copy);
+                }
+                child.Items[index] = Any.Pack(sheet);
+            }
+        }
+        var repeatedChild = child.Clone();
+        repeatedChild.Metadata.Document.SheetPath = repeatedPath.Clone();
+        for (int i = 0; i < repeatedChild.Items.Count; ++i)
+        {
+            if (repeatedChild.Items[i].Is(SchematicSymbolInstance.Descriptor))
+            {
+                var symbol = repeatedChild.Items[i].Unpack<SchematicSymbolInstance>();
+                symbol.Path = repeatedPath.Clone();
+                repeatedChild.Items[i] = Any.Pack(symbol);
+            }
+            else if (repeatedChild.Items[i].Is(SheetSymbol.Descriptor))
+            {
+                var sheet = repeatedChild.Items[i].Unpack<SheetSymbol>();
+                sheet.Path = repeatedPath.Clone();
+                repeatedChild.Items[i] = Any.Pack(sheet);
+            }
+        }
+        result.Schematic.Instances.Add(repeatedChild);
+        return result;
     }
 
     [TestMethod]
@@ -195,13 +283,15 @@ public sealed class SchematicRebuildTests
         foreach (var screen in covered.Schematic.Instances)
             screen.Metadata.UnrepresentedState.Add(new[] { SchematicRebuild.RetainedProjectSettings, "shared_screen_root_ownership", "net_chains" });
         Assert.AreEqual(SchematicRebuildKind.Admitted, SchematicRebuild.Classify(State(covered, covered, NewEmptyRoot(covered), "loaded", "created"), covered).Kind);
-        // Must-catch: net chains are not rebuilt yet, and a limitation the XML cannot answer is a loss.
+        // Net chains are typed schematic metadata and are rebuilt with the rest of the lost files.
         var chained = covered with { Schematic = covered.Schematic.Clone() };
         foreach (var screen in chained.Schematic.Instances) screen.Metadata.NetChains.Add(new SchematicNetChainDefinition { Name = "DATA_PATH",
             From = new() { Reference = "U1", Pin = "1" }, To = new() { Reference = "U2", Pin = "1" }, MemberNets = { "/DATA" } });
         var withChains = SchematicRebuild.Classify(State(chained, chained, NewEmptyRoot(chained), "loaded", "created"), chained);
-        Assert.AreEqual("rebuild_state_unrepresented", withChains.ErrorCode, withChains.ErrorMessage);
-        StringAssert.Contains(withChains.ErrorMessage, "net_chains");
+        Assert.AreEqual(SchematicRebuildKind.Admitted, withChains.Kind, withChains.ErrorMessage);
+        var chainedPlan = SchematicSynchronizationPlanner.Plan(State(chained, chained, NewEmptyRoot(chained), "loaded", "created"));
+        Assert.IsTrue(chainedPlan.CanPrepare, chainedPlan.ErrorCode + ": " + chainedPlan.ErrorMessage);
+        Assert.IsTrue(chainedPlan.NativeOperations.Any(o => o.ReplaceNetChains is not null), "The rebuild carries the typed net-chain state into the native batch.");
         {
             var marked = covered with { Schematic = covered.Schematic.Clone() };
             foreach (var screen in marked.Schematic.Instances) screen.Metadata.UnrepresentedState.Add("future_state_group");
@@ -231,13 +321,15 @@ public sealed class SchematicRebuildTests
         Assert.AreEqual("rebuild_state_unrepresented", lost.ErrorCode, lost.ErrorMessage);
         StringAssert.Contains(lost.ErrorMessage, "library_cache");
         Assert.IsEmpty(lost.NativeOperations);
-        // Must-catch: shared ownership is lost when a sheet file is shown by two sheets, or when there is a second root.
+        // Repeated sheet instances share one physical screen and are rebuilt with their exact native identities.
         Assert.IsFalse(SchematicRebuild.Lost("shared_screen_root_ownership", covered.Schematic));
         var repeated = covered.Schematic.Clone();
         var child = repeated.Instances.First(s => !s.Metadata.Document.Equals(repeated.Document)).Clone();
         child.Metadata.Document.SheetPath.Path[^1] = new KIID { Value = Guid.NewGuid().ToString("D") };
         repeated.Instances.Add(child);
-        Assert.IsTrue(SchematicRebuild.Lost("shared_screen_root_ownership", repeated));
+        Assert.IsFalse(SchematicRebuild.Lost("shared_screen_root_ownership", repeated));
+        Assert.IsFalse(SchematicRebuild.Lost("net_chains", chained.Schematic));
+        // A second root still cannot be represented by one project rebuild.
         var twoRoots = covered.Schematic.Clone();
         var second = twoRoots.Instances.Single(s => s.Metadata.Document.Equals(twoRoots.Document)).Clone();
         second.Metadata.Document.SheetPath.Path[0] = new KIID { Value = Guid.NewGuid().ToString("D") };
@@ -342,6 +434,44 @@ public sealed class SchematicRebuildTests
             generationState, new SchematicElectricalState { Hierarchy = new() { Data = baseline.Schematic.Clone() } }, generationBatch, receipt)).Code);
     }
 
+    [TestMethod]
+    public void DeletedFilesRebuildSharedScreensAndNetChains()
+    {
+        var placed = Placed();
+        var repeated = WithRepeatedSheet(placed);
+        var chained = repeated with { Schematic = repeated.Schematic.Clone() };
+        foreach (var screen in chained.Schematic.Instances)
+            screen.Metadata.NetChains.Add(new SchematicNetChainDefinition
+            {
+                Name = "REBUILD_CHAIN", From = new() { Reference = "U1", Pin = "1" },
+                To = new() { Reference = "U2", Pin = "1" }, MemberNets = { "/REBUILD" }
+            });
+
+        var state = State(chained, chained, NewEmptyRoot(chained), "loaded", "created");
+        var shape = SchematicRebuild.Classify(state, chained);
+        Assert.AreEqual(SchematicRebuildKind.Admitted, shape.Kind, shape.ErrorMessage);
+        var target = chained.Schematic.Clone();
+        var current = state.Observed.Clone();
+        var currentRoot = current.Instances[0];
+        var targetRoot = target.Instances.Single(s => s.Metadata.Document.Equals(target.Document));
+        currentRoot.Metadata.ScreenId = targetRoot.Metadata.ScreenId.Clone();
+        currentRoot.Metadata.EmbeddedFiles = targetRoot.Metadata.EmbeddedFiles?.Clone();
+        currentRoot.Metadata.EmbeddedFonts = targetRoot.Metadata.EmbeddedFonts;
+        foreach (var screen in target.Instances)
+        {
+            screen.Metadata.LoadedNativeFormatVersion = 0;
+            screen.Metadata.UnrepresentedState.Clear();
+            screen.Metadata.UnrepresentedState.Add(currentRoot.Metadata.UnrepresentedState);
+        }
+        var operations = SchematicHierarchyDelta.Plan(current, target);
+        Assert.IsTrue(operations.Any(o => o.ReplaceNetChains is not null), "Rebuild carries net-chain metadata.");
+        Assert.IsTrue(operations.Any(o => o.Create?.Is(SheetSymbol.Descriptor) == true), "Rebuild carries the shared sheet reference.");
+        var shared = chained.Schematic.Instances.GroupBy(s => s.Metadata.ScreenId.Value, StringComparer.Ordinal)
+            .Where(g => g.Count() > 1).SelectMany(g => g).ToArray();
+        Assert.IsNotEmpty(shared, "The fixture includes a repeated physical sheet.");
+        Assert.AreEqual(SchematicRebuildKind.Admitted, SchematicRebuild.Classify(state, chained).Kind);
+    }
+
     // Review finding (lane 2C, xml-rebuild): the kept project file must not be overwritten. A rebuild whose new root shows
     // project settings other than the XML's is refused before anything reaches KiCad, and no rebuild journal holds a
     // project setting. Every one of the thirteen setting groups the project file holds is checked on its own, with the
@@ -420,11 +550,11 @@ public sealed class SchematicRebuildTests
             new() { SetErcSettings = new() }, new() { SetBomSettings = new() }, new() { SetAnnotation = new() },
             new() { SetFieldTemplates = new() }, new() { SetSymbolComparison = new() }, new() { ReplaceNetChainClasses = new() },
             new() { SetDrawingRatios = new() }, new() { SetReferenceInventory = new() }, new() { ReplaceVariantRegistry = new() },
-            new() { ReplaceBusAliases = new() }, new() { ReplaceNetChains = new() },
+            new() { ReplaceBusAliases = new() },
         })
             Assert.IsFalse(SchematicRebuild.RecreatesFileState(setting, 1), setting.OperationCase.ToString());
         foreach (var file in new SchematicItemOperation[] { new() { SetPageSettings = new() }, new() { SetTitleBlock = new() },
-            new() { SetRootInstance = new() }, new() { ReplaceEmbeddedFiles = new() } })
+            new() { SetRootInstance = new() }, new() { ReplaceEmbeddedFiles = new() }, new() { ReplaceNetChains = new() } })
             Assert.IsTrue(SchematicRebuild.RecreatesFileState(file, 1), file.OperationCase.ToString());
     }
 

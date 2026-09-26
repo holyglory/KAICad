@@ -280,16 +280,34 @@ public sealed partial class NativeSessionTests
                 evidence, instanceId, token) : null;
             if (keptConnections is not null) Step("KiCad's own connections kept and published", keptConnections);
 
+            // Add one typed net-chain declaration while the schematic files still exist. The later lost-file rebuild must
+            // carry this same metadata through its batch and write it back byte-for-byte with the rest of the files.
+            var chainDesign = store.Read()!.State.Baseline with { Schematic = store.Read()!.State.Baseline.Schematic.Clone() };
+            foreach (var screen in chainDesign.Schematic.Instances)
+                screen.Metadata.NetChains.Add(new SchematicNetChainDefinition { Name = "REBUILD_CHAIN",
+                    From = new() { Reference = "U4", Pin = "8" }, To = new() { Reference = "U5", Pin = "74" },
+                    MemberNets = { "/TELEM_MCU_TO_CPU" } });
+            saved = await Desire(store.Read()!, chainDesign);
+            var chainPlan = await Plan(store, "net-chain-plan");
+            Assert.IsFalse(chainPlan.GetProperty("nativeRebuildRequired").GetBoolean(), chainPlan.GetRawText());
+            Assert.IsTrue(Operations(chainPlan).Any(o => o.ReplaceNetChains is not null), "The ordinary metadata update writes the typed chain.");
+            await Apply(store, "net-chain");
+            realized = await Capture();
+            Assert.IsTrue(realized.Electrical.Hierarchy.Data.Instances.All(s => s.Metadata.NetChains.Any(c => c.Name == "REBUILD_CHAIN")));
+            PsuCpuFixture.AssertNative(store.Read()!.State.Baseline, realized.Electrical, Stage);
+            Step("typed net chain saved");
+
             // ---- 2. Records an earlier preview saved (p91fda8ca22a68141) ---------------------------------------
             var settledRecord = store.Read()!;
             byte[] currentXml = await File.ReadAllBytesAsync(path, token);
             string[] coverage = [SchematicRebuild.RetainedProjectSettings, "shared_screen_root_ownership", "net_chains"];
             // KiCad names what no snapshot holds completely; this schematic has no sheet file shown twice and no net chain, so
-            // only the untyped project settings are not in the XML, and they stay in the kept project file.
+            // only the untyped project settings are not in the XML, and they stay in the kept project file. Net chains are
+            // typed schematic state and are retained by this build.
             foreach (var screen in realized.Electrical.Hierarchy.Data.Instances)
             {
                 CollectionAssert.AreEqual(coverage, screen.Metadata.UnrepresentedState.ToArray(), "The snapshot's coverage list is the same for every schematic.");
-                Assert.IsEmpty(screen.Metadata.NetChains);
+                CollectionAssert.Contains(screen.Metadata.NetChains.Select(c => c.Name).ToArray(), "REBUILD_CHAIN");
             }
             Assert.IsFalse(SchematicRebuild.Lost("shared_screen_root_ownership", realized.Electrical.Hierarchy.Data));
             var earlier = await EarlierPreviewRecords(settledRecord, currentXml, realized);
@@ -385,8 +403,8 @@ public sealed partial class NativeSessionTests
                 expectedRevisionToken = store.Read()!.RevisionToken, expectedDocumentEpoch = restored.State.Revision.Epoch }));
             saved = store.Read()!;
 
-            // Must-catch: XML edited after the files were lost is refused with nothing sent to KiCad; so is a design with a net
-            // chain, whose rebuild is not proven yet. Planning alone, directly on the saved record.
+            // Must-catch: XML edited after the files were lost is refused with nothing sent to KiCad. Net chains are typed
+            // schematic state and are admitted into the rebuild batch; planning alone proves the metadata operation here.
             var renamed = originalDesign with { Engineering = originalDesign.Engineering with { Circuit = originalDesign.Engineering.Circuit with
                 { Components = [.. originalDesign.Engineering.Circuit.Components.Select(c => c.Reference == "R1" ? c with { Reference = "R9" } : c)] } } };
             var unsettled = SchematicSynchronizationPlanner.Plan(saved.State with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(renamed, [])) }, token);
@@ -396,7 +414,9 @@ public sealed partial class NativeSessionTests
                 From = new() { Reference = "U4", Pin = "8" }, To = new() { Reference = "U5", Pin = "74" }, MemberNets = { "/TELEM_MCU_TO_CPU" } });
             var withChains = SchematicSynchronizationPlanner.Plan(saved.State with { Baseline = chained,
                 DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(chained, [])) }, token);
-            Assert.AreEqual("rebuild_state_unrepresented", withChains.ErrorCode, withChains.ErrorMessage);
+            Assert.IsTrue(withChains.CanPrepare, withChains.ErrorCode + ": " + withChains.ErrorMessage);
+            Assert.IsTrue(withChains.NativeRebuildRequired);
+            Assert.IsTrue(withChains.NativeOperations.Any(o => o.ReplaceNetChains is not null), "The rebuild batch carries the XML net chain.");
 
             var rebuildPlan = await Plan(store, "rebuild-plan");
             Assert.IsTrue(rebuildPlan.GetProperty("nativeRebuildRequired").GetBoolean(), rebuildPlan.GetRawText());
@@ -452,6 +472,8 @@ public sealed partial class NativeSessionTests
             var comparison = SchematicElectricalComparison.Compare(rebuiltDesign, rebuilt.Electrical, []);
             Assert.IsTrue(comparison.PinBindingsComplete && comparison.ConnectivityEquivalent, "KiCad's rebuilt connections are exactly the XML nets.");
             CollectionAssert.AreEquivalent(originalSheetPins, OriginalSheetPins(rebuilt.Electrical.Hierarchy.Data), "The sheet pins are the original ones.");
+            Assert.IsTrue(rebuilt.Electrical.Hierarchy.Data.Instances.All(s => s.Metadata.NetChains.Any(c => c.Name == "REBUILD_CHAIN")),
+                "The lost-file rebuild restored the typed net chain.");
             Assert.AreEqual(SchematicDesignXml.Write(originalDesign with { Schematic = rebuiltDesign.Schematic }, []), SchematicDesignXml.Write(rebuiltDesign, []),
                 "The published design is the original's engineering, bindings and part symbols.");
 

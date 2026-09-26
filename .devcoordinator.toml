@@ -3721,6 +3721,31 @@ requires=["managed-build"]
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicConnectionRealizerTests.ResolutionAdoptsOnlyTheListedNativeValues|FullyQualifiedName~SchematicLibraryCacheEquivalenceTests", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/connection-resolution-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{name="connection-resolution-tests", path="automation/artifacts/connection-resolution-tests", max_bytes=16777216}]
 
+# Focused rebuild coverage for lost schematic files, shared sheet instances and net-chain metadata.
+[test.rebuild-recovery-contracts]
+timeout_seconds=900
+env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.rebuild-recovery-contracts.check]]
+name="restore"
+tier="development"
+role="preflight"
+invalidates=["rebuild-contracts"]
+command=["dotnet", "restore", "automation/KiCad.Automation.slnx", "--locked-mode"]
+
+[[test.rebuild-recovery-contracts.check]]
+name="managed-build"
+tier="development"
+requires=["restore"]
+command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.rebuild-recovery-contracts.check]]
+name="rebuild-contracts"
+tier="development"
+requires=["managed-build"]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicRebuildTests|FullyQualifiedName~SchematicHierarchyTopologyTests", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/rebuild-recovery-contracts", "--", "MSTest.MapInconclusiveToFailed=true"]
+retained_artifacts=[{name="rebuild-recovery-contracts", path="automation/artifacts/rebuild-recovery-contracts", max_bytes=16777216}]
+
 # Bounded diagnostic for the recursive editor journey; the broader diagram graph
 # also retains its full theme and cross-journey coverage.
 [test.recursive-editor-focus]

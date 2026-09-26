@@ -169,7 +169,7 @@ public static class SchematicRebuild
         || RecreatesFileState(operation, index);
 
     /// <summary>Operations a rebuild journal holds besides creations, updates and library caches: the page, title
-    /// block, root page and embedded files that recreate a deleted schematic file's non-item state, and the new
+    /// block, root page, embedded files and net-chain metadata that recreate a deleted schematic file's non-item state, and the new
     /// root's saved identity, only as the batch's first operation. Never a project setting (the project file is
     /// kept, and a rebuild is refused when its settings differ from the XML), a removal, connected move or
     /// transform, or lock change: a rebuild only adds what the XML holds to sheets KiCad shows empty.</summary>
@@ -180,7 +180,8 @@ public static class SchematicRebuild
         {
             SchematicItemOperation.OperationOneofCase.RebuildScreenIdentity => index == 0,
             SchematicItemOperation.OperationOneofCase.SetPageSettings or SchematicItemOperation.OperationOneofCase.SetTitleBlock
-                or SchematicItemOperation.OperationOneofCase.SetRootInstance or SchematicItemOperation.OperationOneofCase.ReplaceEmbeddedFiles => true,
+                or SchematicItemOperation.OperationOneofCase.SetRootInstance or SchematicItemOperation.OperationOneofCase.ReplaceEmbeddedFiles
+                or SchematicItemOperation.OperationOneofCase.ReplaceNetChains => true,
             _ => false
         };
     }
@@ -358,8 +359,6 @@ public static class SchematicRebuild
                 "The saved XML does not hold every part of the deleted schematic files ("
                 + string.Join(", ", missing.Concat(baseline.Schematic.Instances.Any(s => s.UnrepresentedItems.Count != 0) ? ["unsupported objects"] : []))
                 + "), so they cannot be rebuilt without loss.");
-        if (baseline.Schematic.Instances.GroupBy(s => s.Metadata.ScreenId.Value, StringComparer.Ordinal).Any(g => g.Count() > 1))
-            return Rejected("rebuild_state_unrepresented", "Rebuilding a sheet file shown by several sheets is not supported yet.");
         // The project file was kept, so KiCad's new root shows project settings: the ones KiCad loaded from that file, and any
         // change made in KiCad since. They must be the ones the XML records: a rebuild recreates only the deleted schematic
         // files and never overwrites a project setting. While the files are lost the XML cannot take KiCad's settings instead:
@@ -378,9 +377,9 @@ public static class SchematicRebuild
     }
 
     /// <summary>Whether the snapshot's coverage limitation <paramref name="marker"/> loses part of <paramref name="saved"/>.
-    /// KiCad names shared-screen root ownership and net chains on every snapshot; they lose something only when the
-    /// saved schematic has a sheet file shown by several sheets or roots, or net chains. Untyped project settings stay in
-    /// the kept project file. Builds up to preview 23 also named the library cache on every snapshot, although they held
+    /// KiCad names shared-screen root ownership and net chains on every snapshot; shared sheet files and net chains are
+    /// reconstructed by the typed rebuild operations. Only a second root remains outside the rebuild contract. Untyped
+    /// project settings stay in the kept project file. Builds up to preview 23 also named the library cache on every snapshot, although they held
     /// each screen's cache exactly (a definition they could not read failed the whole read); a record they saved loses
     /// its cache only where a placed symbol's definition is missing from its screen's cache. Any other limitation is a
     /// loss.</summary>
@@ -391,9 +390,13 @@ public static class SchematicRebuild
         return marker switch
         {
             RetainedProjectSettings => false,
-            SharedScreenRootOwnership => saved.Instances.GroupBy(s => s.Metadata.ScreenId.Value, StringComparer.Ordinal).Any(g => g.Count() > 1)
-                || saved.Instances.Count(s => s.Metadata.Document.SheetPath.Path.Count == saved.Document.SheetPath.Path.Count) != 1,
-            NetChains => saved.Instances.Any(s => s.Metadata.NetChains.Count != 0),
+            // Multiple instances of one physical screen are part of the typed hierarchy and are
+            // rebuilt with their exact sheet symbols and placement records. Only a second root
+            // remains outside the rebuild contract.
+            SharedScreenRootOwnership => saved.Instances.Count(s => s.Metadata.Document.SheetPath.Path.Count == saved.Document.SheetPath.Path.Count) != 1,
+            // Net chains have a typed ReplaceNetChains operation and are part of the rebuilt
+            // schematic-wide metadata, so their presence is no longer a coverage loss.
+            NetChains => false,
             LibraryCache => saved.Instances.Any(MissesCachedDefinition),
             _ => true
         };

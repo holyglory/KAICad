@@ -145,13 +145,18 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(at.Dirty, step + ": viewing and navigating change nothing.");
             Assert.IsEmpty(at.LevelDraft.NewChildren); Assert.IsEmpty(at.LevelDraft.NewConnections); Assert.IsEmpty(at.LevelDraft.ChildDrafts);
             // Each canvas note is drawn with its lines broken between words, so its shown lines read back as its text
-            // ("Keep sensing away from sw" / "itching nodes." once split a word that fitted the next line).
-            var canvasNotes = revision.LocalDiagram.Notes.Where(n => n.Target.Kind == DiagramAnnotationTargetKind.Canvas).ToArray();
+            // ("Keep sensing away from sw" / "itching nodes." once split a word that fitted the next line). Mockup audit M1-14: a
+            // comment on a block or connection that has its own place on the canvas (the CPU level's comment on Memory interface)
+            // is drawn there as well, attached to its element; one without a place (the PSU's comment) stays in Comments, as the
+            // approved walkthroughs 01 to 03 show them.
+            var canvasNotes = revision.LocalDiagram.Notes.Where(n => n.Target.Kind == DiagramAnnotationTargetKind.Canvas || n.Position is not null).ToArray();
             CollectionAssert.AreEqual(canvasNotes.Select(n => S(n.Id)).ToArray(), at.CanvasNotes.Select(n => n.AnnotationId).ToArray(),
-                step + ": every canvas note is drawn.");
+                step + ": every canvas note and every placed comment is drawn.");
             foreach (var (note, drawn) in canvasNotes.Zip(at.CanvasNotes))
             {
                 Assert.IsTrue(drawn.Rect.Shown, step + ": the note \"" + note.Text + "\" is drawn inside the canvas.");
+                Assert.AreEqual(note.Target.TargetId is { } element ? S(element) : "", drawn.TargetId,
+                    step + ": the note \"" + note.Text + "\" is drawn for " + (note.Target.TargetId is null ? "the level's free space." : "its own element."));
                 string shown = string.Join(" ", drawn.Lines);
                 if (!compact || shown == note.Text)
                 {
@@ -174,6 +179,11 @@ public sealed partial class NativeSessionTests
                 // it; it shows its whole text on hover, as a shortened connection caption does (hovered in the compact-note-hover step).
                 Assert.AreEqual(note.Text, drawn.Rect.Tooltip, step + ": the shortened note \"" + shown + "\" shows its whole text on hover.");
             }
+            // Mockup audit M1-14: a placed comment's dashed leader runs from the note to its element; a free-space note has none.
+            VerifyNoteLeaders(at, step);
+            // Design QA P2-7 and mockup audit M1-15 on every fixture level, default and compact: captions clear of blocks, ports
+            // and each other, and a word space from any other caption or port name on their line.
+            VerifyCanvasText(at, step);
             // Mockup audit M1-1: Comments opens on the selected element's own comment, or on a new one, never on a note in the
             // level's free space (typing there used to rewrite the note, and the note was drawn as the selected comment).
             OwnComment(at, step, revision);
@@ -240,6 +250,7 @@ public sealed partial class NativeSessionTests
                 await Capture(step);
                 var shot = await CapturedWindow.LoadAsync(Path.Combine(evidence, instanceId + "-canvas-" + step + ".png"), WindowOrigin(display, processId, title), token);
                 VerifyNotesClear(at, layout, step, shot);
+                VerifyNoteLeaders(at, step, shot);
                 VerifyRoutesOffBlocksAndNotes(lastView, step);
             }
             static string Point(JsonElement point) => point.GetProperty("x").GetString() + "," + point.GetProperty("y").GetString();
@@ -342,6 +353,38 @@ public sealed partial class NativeSessionTests
             CollectionAssert.AreEqual(fixtureBytes, await File.ReadAllBytesAsync(context.BlocksPath, token), "Opening and navigating never write.");
             await Retain("cpu", cpuLevel); await FixtureLevel("cpu", cpuLevel, cpuLayout);
 
+            // Mockup audit M1-14, the approved walkthrough 03's own state: the CPU level with Memory interface selected. The comment
+            // on it (fixture annotation 5, "Keep pin choices open for placement.") is drawn in its place below the connection's
+            // caption, attached to the caption by a dashed leader. Pressing the note selects Memory interface: Comments opens on that
+            // comment and the inspector shows the connection's three requirements. Nothing changes, and pressing blank canvas
+            // returns to the CPU level itself.
+            Guid memoryInterface = PsuCpuIds.Id(0x16, 0x1d);
+            var pinComment = cpuRevision.LocalDiagram.Notes.Single(n => n.Target.Kind == DiagramAnnotationTargetKind.Connection);
+            Assert.AreEqual(("Keep pin choices open for placement.", (Guid?)memoryInterface), (pinComment.Text, pinComment.Target.TargetId),
+                "The fixture comments on Memory interface at the CPU level.");
+            var pinNote = cpuLevel.CanvasNotes.Single(n => n.AnnotationId == S(pinComment.Id));
+            Assert.IsNotNull(pinNote.Leader, "cpu: the comment on Memory interface is attached to it by a leader.");
+            Click(pinNote.Rect.X + pinNote.Rect.Width / 2, pinNote.Rect.Y + pinNote.Rect.Height / 2);
+            var memoryInterfaceSelected = await Wait("cpu-memory-interface", s => s.ConnectionDraft?.Baseline?.ConnectionId == S(memoryInterface)
+                && s.SelectedAnnotationId == S(pinComment.Id));
+            Assert.IsFalse(memoryInterfaceSelected.Dirty, "cpu-memory-interface: pressing the comment's note selects its connection and changes nothing.");
+            var memoryInterfaceFields = memoryInterfaceSelected.ConnectionDraft.Fields;
+            Assert.AreEqual(("Provide memory access; choose a compatible interface.", "Keep interface signals grouped and readable.",
+                    "Leave pin assignment open until placement."), (memoryInterfaceFields.General, memoryInterfaceFields.Schematic, memoryInterfaceFields.Routing),
+                "cpu-memory-interface: the inspector shows Memory interface's own three requirements (fixture §1.5.3).");
+            Assert.HasCount(3, memoryInterfaceSelected.ShownRequirementFields, "cpu-memory-interface: all three requirement fields are shown.");
+            // The inspector scrolls just far enough to show Comments, which holds the pressed comment: with two signals, a type and
+            // three requirements it lies below the inspector's fold at the default size.
+            var inspectorShown = memoryInterfaceSelected.Controls.Single(c => c.Name == "RecursiveInspector");
+            var commentsShown = memoryInterfaceSelected.Controls.Single(c => c.Name == "RecursiveComments");
+            Assert.IsTrue(commentsShown.Y >= inspectorShown.Y && commentsShown.Y + commentsShown.Height <= inspectorShown.Y + inspectorShown.Height,
+                $"cpu-memory-interface: Comments ({commentsShown.Y}..{commentsShown.Y + commentsShown.Height}) is scrolled into the inspector's view ({inspectorShown.Y}..{inspectorShown.Y + inspectorShown.Height}).");
+            VerifyNoteLeaders(memoryInterfaceSelected, "cpu-memory-interface");
+            await Retain("cpu-memory-interface", memoryInterfaceSelected); await Capture("cpu-memory-interface");
+            await At(650, 400);
+            await Wait("cpu-level-again", s => s.ConnectionDraft is null && s.Draft.Baseline.BlockId == S(cpu.BlockId) && s.SelectedAnnotationId == "" && !s.Dirty);
+            CollectionAssert.AreEqual(fixtureBytes, await File.ReadAllBytesAsync(context.BlocksPath, token), "Selecting a comment's note writes nothing.");
+
             // The same three levels in the compact window (1100 × 760, mockup audit M1-7 and M1-8): each is fitted to the smaller
             // canvas when it is shown (a level left at the default size is fitted again, not shown at the scale it was left at), its
             // notes stay 24 px or more clear of every block with its handles, every port square and every wire, and no connection
@@ -374,7 +417,7 @@ public sealed partial class NativeSessionTests
             // and it could be read whole only by clicking it. With the pointer resting on it, the canvas shows its whole text as its
             // tooltip, as a shortened connection caption does; the tooltip goes when the pointer leaves the note.
             string cpuNoteText = cpuRevision.LocalDiagram.Notes.Single(n => n.Target.Kind == DiagramAnnotationTargetKind.Canvas).Text;
-            var shortNote = compactCpuAgain.CanvasNotes.Single();
+            var shortNote = compactCpuAgain.CanvasNotes.Single(n => n.TargetId == "");
             Assert.IsTrue(shortNote.Lines.Count > 0 && shortNote.Lines[^1].EndsWith('…') && shortNote.Rect.Tooltip == cpuNoteText,
                 $"compact-cpu-again: the CPU note is drawn shortened (\"{string.Join(" ", shortNote.Lines)}\") and names its whole text on hover.");
             ulong noteMotions = compactCpuAgain.CanvasMotions;
@@ -6769,6 +6812,65 @@ public sealed partial class NativeSessionTests
         }
     }
 
+    /// <summary>Mockup audit M1-14 (approved walkthrough 03): a comment with its own place on the canvas is drawn attached to its
+    /// element. Its dashed leader starts on the note's border and ends on the connection's caption as drawn (or on the block's
+    /// outline), and on its way it enters no block, no other note and no other caption; a note in the level's free space has no
+    /// leader.</summary>
+    private static void VerifyNoteLeaders(P.RecursiveDiagramEditorState at, string step, CapturedWindow? shot = null)
+    {
+        static bool OnBorder(P.DiagramControlRect r, int x, int y) => x >= r.X && x <= r.X + r.Width - 1 && y >= r.Y && y <= r.Y + r.Height - 1
+            && (x == r.X || x == r.X + r.Width - 1 || y == r.Y || y == r.Y + r.Height - 1);
+        static bool Inside(P.DiagramControlRect r, double x, double y) => x > r.X && x < r.X + r.Width - 1 && y > r.Y && y < r.Y + r.Height - 1;
+        foreach (var note in at.CanvasNotes)
+        {
+            string text = string.Join(" ", note.Lines);
+            if (note.TargetId == "") { Assert.IsNull(note.Leader, $"{step}: the free-space note \"{text}\" has no leader."); continue; }
+            var leader = note.Leader;
+            Assert.IsNotNull(leader, $"{step}: the comment \"{text}\" is attached to its element by a leader.");
+            Assert.IsTrue(OnBorder(note.Rect, leader.FromX, leader.FromY),
+                $"{step}: the leader of \"{text}\" starts on the note's border ({leader.FromX}, {leader.FromY}; note {note.Rect.X}, {note.Rect.Y}, {note.Rect.Width} x {note.Rect.Height}).");
+            var caption = at.ConnectionCaptions.SingleOrDefault(c => c.ObjectId == note.TargetId && c.Shown);
+            var element = caption ?? at.BlockTexts.SingleOrDefault(b => b.BlockId == note.TargetId)?.Block;
+            Assert.IsNotNull(element, $"{step}: the element of \"{text}\" is drawn on this level.");
+            Assert.IsTrue(OnBorder(element, leader.ToX, leader.ToY),
+                $"{step}: the leader of \"{text}\" ends on its element ({leader.ToX}, {leader.ToY}; element {element.X}, {element.Y}, {element.Width} x {element.Height}).");
+            int steps = Math.Max(Math.Abs(leader.ToX - leader.FromX), Math.Abs(leader.ToY - leader.FromY));
+            Assert.IsTrue(steps > 0, $"{step}: the leader of \"{text}\" has a length.");
+            var others = at.BlockTexts.Select(b => ("the block " + (b.Caption?.Label ?? b.BlockId), b.Block))
+                .Concat(at.CanvasNotes.Where(n => n.AnnotationId != note.AnnotationId).Select(n => ("the note \"" + string.Join(" ", n.Lines) + "\"", n.Rect)))
+                .Concat(at.ConnectionCaptions.Where(c => c.Shown && c != caption).Select(c => ("the caption " + c.Label, c)));
+            foreach (var (what, rect) in others)
+                for (int i = 0; i <= steps; ++i)
+                {
+                    double x = leader.FromX + (leader.ToX - leader.FromX) * (double)i / steps, y = leader.FromY + (leader.ToY - leader.FromY) * (double)i / steps;
+                    Assert.IsFalse(Inside(rect, x, y), $"{step}: the leader of \"{text}\" runs through {what} at ({x:0}, {y:0}).");
+                }
+            if (shot is null || steps < 12) continue;
+            // Measured in the capture: the leader is drawn where it is reported, as dashes (ink on part of its length), in the note's
+            // amber outline colour rather than the grey of an analog connection's dashes (its red channel well above its blue).
+            var canvas = shot.At(at.CanvasWindowX + (int)at.CanvasPixelWidth - 12, at.CanvasWindowY + (int)at.CanvasPixelHeight - 12);
+            int samples = 0, inked = 0, warmest = int.MinValue;
+            for (int i = 3; i <= steps - 3; ++i)
+            {
+                int x = (int)Math.Round(leader.FromX + (leader.ToX - leader.FromX) * (double)i / steps), y = (int)Math.Round(leader.FromY + (leader.ToY - leader.FromY) * (double)i / steps);
+                ++samples; bool ink = false;
+                for (int dx = -1; dx <= 1; ++dx)
+                    for (int dy = -1; dy <= 1; ++dy)
+                    {
+                        var pixel = shot.At(x + dx, y + dy);
+                        if (CapturedWindow.Distance(pixel, canvas) < 40) continue;
+                        ink = true; warmest = Math.Max(warmest, pixel.R - pixel.B);
+                    }
+                if (ink) ++inked;
+            }
+            shot.Record("M1-14 leader samples with ink (%)", 100 * inked / samples);
+            Assert.IsTrue(inked * 4 >= samples && inked < samples,
+                $"{step}: the leader of \"{text}\" is drawn dashed where it is reported ({inked} of {samples} samples inked).");
+            Assert.IsTrue(shot.Record("M1-14 leader red minus blue", warmest) >= 40,
+                $"{step}: the leader of \"{text}\" is drawn in the note's amber, not a wire's grey (red minus blue {warmest}).");
+        }
+    }
+
     /// <summary>Review of the design QA fixes: a control the editor paints itself keeps what assistive technology reads (on
     /// GTK, the control's ATK object): the expected role, and its visible label as its name. ATK 2.36 renamed the role "push
     /// button" to "button"; either name is the same role.</summary>
@@ -7122,8 +7224,8 @@ public sealed partial class NativeSessionTests
     }
 
     /// <summary>Design QA P2-7: text is drawn whole inside its block, and each shown connection caption keeps clear of every
-    /// block (by the handle size plus 4 pixels), every port and every other caption, and does not cross the level's dashed
-    /// boundary.</summary>
+    /// block (by the handle size plus 4 pixels), every port and every other caption, keeps a word space from any other caption or
+    /// boundary port name on its line (mockup audit M1-15), and does not cross the level's dashed boundary.</summary>
     private static void VerifyCanvasText(P.RecursiveDiagramEditorState at, string step)
     {
         static bool Inside(P.DiagramControlRect inner, int x, int y, int right, int bottom) =>
@@ -7148,6 +7250,15 @@ public sealed partial class NativeSessionTests
                 Assert.IsTrue(Apart(caption, port.X, port.Y, port.X + port.Width, port.Y + port.Height), $"{step}: the caption '{caption.Label}' keeps clear of a port.");
             foreach (var other in shown.Where(o => !ReferenceEquals(o, caption)))
                 Assert.IsTrue(Apart(caption, other.X, other.Y, other.X + other.Width, other.Y + other.Height), $"{step}: the captions '{caption.Label}' and '{other.Label}' do not overlap.");
+            // Mockup audit M1-15: beside another caption or a boundary port's name on the same line, a caption keeps a word space
+            // (12 pixels); 3 pixels apart, "Supply status / control" and "Memory interface" read as one caption.
+            foreach (var (other, kind) in shown.Where(o => !ReferenceEquals(o, caption)).Select(o => (o, "caption"))
+                         .Concat(at.BoundaryPortNames.Select(n => (n, "port name"))))
+            {
+                if (caption.Y + caption.Height <= other.Y || other.Y + other.Height <= caption.Y) continue;
+                int gap = Math.Max(other.X - (caption.X + caption.Width), caption.X - (other.X + other.Width));
+                Assert.IsTrue(gap >= 12, $"{step}: the caption '{caption.Label}' is {gap} pixels from the {kind} '{other.Label}' on its line, less than a word space (12).");
+            }
             // Review of design QA round 2: no caption strikes through the level's dashed boundary. It lies wholly inside the frame
             // or wholly outside it, as the caption of a connection to a boundary port may lie outside the frame.
             if (at.LevelFrame is { } frame)

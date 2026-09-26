@@ -2421,6 +2421,51 @@ wxRect RECURSIVE_DIAGRAM_FRAME::noteRect( const D::DiagramAnnotationData& note, 
     return { static_cast<int>( ( x - m_origin.m_x ) * m_scale ), static_cast<int>( ( y - m_origin.m_y ) * m_scale ),
              static_cast<int>( 240 * m_scale ), static_cast<int>( 100 * m_scale ) };
 }
+std::optional<std::pair<wxPoint, wxPoint>> RECURSIVE_DIAGRAM_FRAME::noteLeader( const R::LEVEL_LAYOUT& drawn,
+        const std::vector<CAPTION_PLACE>& captions, const D::DiagramAnnotationData& note, int index ) const
+{
+    // Mockup audit M1-14: the approved walkthrough 03 draws the comment on Memory interface as a note beside the connection
+    // with a dashed leader to its caption, while walkthroughs 01 and 02 keep the PSU's comment in Comments only. A comment
+    // with its own place on the canvas is drawn there, attached to its element by this leader, so it reads neither as a note
+    // in the level's free space nor as a comment on whatever it lies next to; a comment without a place stays in Comments.
+    if( !note.has_position() || !note.has_target_id() || note.has_unresolved_reason() ) return std::nullopt;
+    std::optional<wxRect> target;
+    if( note.target_kind() == D::DAT_CONNECTION )
+    {
+        for( const auto& place : captions )
+            if( place.shown && place.connection == note.target_id() ) { target = place.rect; break; }
+        const R::LINK* link = target ? nullptr : drawn.Link( note.target_id() );
+        if( link && link->endpoints.size() > 1 && drawn.HasRoute( link->id, 1 ) )
+        {
+            // No caption drawn: the point half-way along the connection's path.
+            std::vector<wxPoint> path;
+            for( const R::POINT& point : drawn.Route( *link, 1 ) ) path.push_back( toScreen( point ) );
+            double length = 0;
+            for( size_t k = 1; k < path.size(); ++k ) length += std::hypot( path[k].x - path[k - 1].x, path[k].y - path[k - 1].y );
+            double rest = length / 2;
+            for( size_t k = 1; k < path.size() && !target; ++k )
+            {
+                double leg = std::hypot( path[k].x - path[k - 1].x, path[k].y - path[k - 1].y );
+                if( leg < rest ) { rest -= leg; continue; }
+                double t = leg > 0 ? rest / leg : 0;
+                target = wxRect( wxPoint( KiROUND( path[k - 1].x + t * ( path[k].x - path[k - 1].x ) ),
+                                          KiROUND( path[k - 1].y + t * ( path[k].y - path[k - 1].y ) ) ), wxSize( 1, 1 ) );
+            }
+        }
+    }
+    else if( note.target_kind() == D::DAT_BLOCK && drawn.Node( note.target_id() ) )
+    {
+        target = toScreen( drawn.Rect( note.target_id() ) );
+    }
+    if( !target ) return std::nullopt;
+    const wxRect box = noteRect( note, index );
+    if( box.Intersects( *target ) ) return std::nullopt;
+    auto nearest = []( const wxRect& rect, const wxPoint& point )
+    { return wxPoint( std::clamp( point.x, rect.x, rect.GetRight() ), std::clamp( point.y, rect.y, rect.GetBottom() ) ); };
+    // From the note's border to the nearest point of the element, as seen from the note's middle.
+    const wxPoint to = nearest( *target, wxPoint( box.x + box.width / 2, box.y + box.height / 2 ) );
+    return std::make_pair( nearest( box, to ), to );
+}
 
 namespace
 {
@@ -2680,7 +2725,8 @@ std::vector<RECURSIVE_DIAGRAM_FRAME::CAPTION_PLACE> RECURSIVE_DIAGRAM_FRAME::con
     //  3. the free space around the connection: the same places up to six steps further out from each leg.
     // Clear means inside the canvas, off the palette, and apart from every block by the handle size plus 4 pixels (so a resize
     // handle never covers a caption), from every port and its name, from every note, from every wire, from the level's dashed
-    // boundary and from the captions already placed. Only a caption whose whole text has no clear place is shortened with "…"
+    // boundary and from the captions already placed; beside a boundary port's name or another caption on the same line, by a
+    // word space (mockup audit M1-15). Only a caption whose whole text has no clear place is shortened with "…"
     // (at least four characters kept) into the first clear place of 1 and 2, and shows its whole text on hover; one that has no
     // clear place even so is drawn shortened to four characters where it covers least, on its knocked-out background, never
     // left out.
@@ -2693,7 +2739,10 @@ std::vector<RECURSIVE_DIAGRAM_FRAME::CAPTION_PLACE> RECURSIVE_DIAGRAM_FRAME::con
     for( const auto& node : drawn.Nodes() ) obstacles.push_back( toScreen( drawn.Rect( node.id ) ).Inflate( clearance ) );
     auto screen = [this]( const R::POINT& p ) { return toScreen( p ); };
     for( const auto& port : drawnPorts( drawn, screen ) ) obstacles.push_back( portMark( port.at ).Inflate( FromDIP( 2 ) ) );
-    for( const auto& name : boundaryNames( drawn ) ) obstacles.push_back( wxRect( name.rect ).Inflate( FromDIP( 2 ) ) );
+    // Mockup audit M1-15: a caption beside another caption or a port's name on the same line keeps a word space (12 DIP) from
+    // it; 3 pixels apart, "Supply status / control" and "Memory interface" read as one caption in the compact window.
+    const int wordSpace = FromDIP( 12 );
+    for( const auto& name : boundaryNames( drawn ) ) obstacles.push_back( wxRect( name.rect ).Inflate( wordSpace, FromDIP( 2 ) ) );
     const auto& notes = visibleNotes();
     for( int i = 0; i < notes.size(); ++i )
         if( notes.Get( i ).target_kind() == D::DAT_CANVAS || notes.Get( i ).has_position() ) obstacles.push_back( noteRect( notes.Get( i ), i ) );
@@ -2840,7 +2889,7 @@ std::vector<RECURSIVE_DIAGRAM_FRAME::CAPTION_PLACE> RECURSIVE_DIAGRAM_FRAME::con
                     if( int count = collisions( candidate, false ); count < fewest ) { fewest = count; place.rect = candidate; }
                 place.shown = true; place.clear = false;
             }
-            placed.push_back( wxRect( place.rect ).Inflate( FromDIP( 2 ) ) );
+            placed.push_back( wxRect( place.rect ).Inflate( wordSpace, FromDIP( 2 ) ) );
             result.push_back( std::move( place ) );
         }
     m_captionKey = std::move( key ); m_captionCache = result;
@@ -3337,7 +3386,8 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
     // Connection captions are drawn after the blocks and their resize handles, each in a clear place beside its connection
     // on a knocked-out background (design QA P2-7).
     dc.SetFont( GetFont() ); dc.SetTextForeground( foreground );
-    for( const auto& place : connectionCaptions( drawn, dc.GetSize() ) )
+    const std::vector<CAPTION_PLACE> captions = connectionCaptions( drawn, dc.GetSize() );
+    for( const auto& place : captions )
     {
         if( !place.shown ) continue;
         dc.SetPen( *wxTRANSPARENT_PEN ); dc.SetBrush( wxBrush( background ) ); dc.DrawRectangle( wxRect( place.rect ).Inflate( 1 ) );
@@ -3389,8 +3439,19 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
             }
         }
         if( note.target_kind() != D::DAT_CANVAS && !note.has_position() ) continue;
+        // A comment with its own place on the canvas is attached to its block or connection by a dashed leader, as walkthrough
+        // 03 draws the comment on Memory interface (mockup audit M1-14); in the accent, with the note, while it is the comment
+        // being edited.
+        // The leader takes the note's own outline colour rather than walkthrough 03's dark ink: analog connections are drawn as
+        // dark grey dashes (owner default n7fb0ee3089916669), and a dark dashed leader could read as one of them.
+        const wxColour outline = note.id() == m_commentId ? accent : wxColour( 176, 142, 52 );
+        if( auto leader = noteLeader( drawn, captions, note, i ) )
+        {
+            dc.SetPen( wxPen( outline, 1, wxPENSTYLE_SHORT_DASH ) );
+            dc.DrawLine( leader->first, leader->second );
+        }
         wxRect box = noteRect( note, i );
-        dc.SetPen( wxPen( note.id() == m_commentId ? accent : wxColour( 176, 142, 52 ), 1 ) );
+        dc.SetPen( wxPen( outline, 1 ) );
         dc.SetBrush( wxBrush( dark ? wxColour( 76, 66, 34 ) : wxColour( 255, 247, 213 ) ) ); dc.DrawRectangle( box );
         box.Deflate( 8 ); dc.SetClippingRegion( box );
         int y = box.y;
@@ -3525,8 +3586,20 @@ void RECURSIVE_DIAGRAM_FRAME::click( wxMouseEvent& event )
     for( int i = notes.size() - 1; i >= 0; --i )
     {
         const auto& note = notes.Get( i );
-        if( note.target_kind() != D::DAT_CANVAS || !noteRect( note, i ).Contains( point ) ) continue;
-        select( scope ); m_commentId = note.id(); m_newComment = false; refresh();
+        if( ( note.target_kind() != D::DAT_CANVAS && !note.has_position() ) || !noteRect( note, i ).Contains( point ) ) continue;
+        // A comment drawn beside its block or connection (M1-14) selects that element, with Comments on this comment; a note
+        // in the level's free space, or a comment whose element is gone, belongs to the level.
+        bool level = note.target_kind() == D::DAT_CANVAS || note.has_unresolved_reason();
+        if( level ) select( scope );
+        else if( note.target_kind() == D::DAT_CONNECTION ) selectConnection( note.target_id() );
+        else select( note.target_id() );
+        // Comments lists this comment only while its element is the selection; otherwise the press selects the level.
+        if( !level && ( note.target_kind() == D::DAT_CONNECTION ? m_connectionId != note.target_id()
+                                                                : m_selected != note.target_id() || !m_connectionId.empty() ) )
+        { select( scope ); refresh(); return; }
+        // Comments, with this note's comment, is scrolled into view (M1-14): a connection with several details and three
+        // requirements puts it below the inspector's fold.
+        m_commentId = note.id(); m_newComment = false; m_revealComments = true; refresh();
         if( event.LeftDClick() ) { m_comments->SetFocus(); return; }
         wxRect box = noteRect( note, i ); m_noteStartX = box.x / m_scale + m_origin.m_x; m_noteStartY = box.y / m_scale + m_origin.m_y;
         m_dragStart = point; m_dragBefore = m_level; m_drag = DRAG::NOTE; m_dragMoved = false;

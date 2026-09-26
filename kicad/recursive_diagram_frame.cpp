@@ -1180,6 +1180,21 @@ void RECURSIVE_DIAGRAM_FRAME::refresh()
     showStatus();
     fillComments(); m_owner->GetParent()->Layout(); m_owner->GetParent()->GetParent()->Layout();
     m_inspectorScroll->Layout(); m_inspectorScroll->FitInside();
+    if( m_revealComments )
+    {
+        // A note pressed on the canvas opens its comment in Comments (mockup audit M1-14): the inspector scrolls just far enough
+        // to show the Comments heading and box whole, keeping everything above them where it fits.
+        m_revealComments = false;
+        int unitX = 0, unitY = 0, startX = 0, startY = 0;
+        m_inspectorScroll->GetScrollPixelsPerUnit( &unitX, &unitY ); m_inspectorScroll->GetViewStart( &startX, &startY );
+        const wxRect box( m_inspectorScroll->CalcUnscrolledPosition( m_comments->GetPosition() ), m_comments->GetSize() );
+        const int shown = m_inspectorScroll->GetClientSize().y, top = startY * unitY, heading = FromDIP( 40 ), margin = FromDIP( 12 );
+        if( unitY > 0 && ( box.y - heading < top || box.GetBottom() + margin > top + shown ) )
+        {
+            const int wanted = std::max( 0, std::min( box.y - heading, box.GetBottom() + margin - shown ) );
+            m_inspectorScroll->Scroll( -1, ( wanted + unitY - 1 ) / unitY );
+        }
+    }
     m_updating = false; m_rendered = false; m_canvas->Refresh();
 }
 void RECURSIVE_DIAGRAM_FRAME::enableSave( bool save, bool decline )
@@ -2785,15 +2800,24 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
                 auto* row = result.add_boundary_port_names(); place( row, "DiagramBoundaryPortName", name.rect, false ); row->set_label( name.name );
                 row->set_object_id( name.owner + "/" + name.id );
             }
-            // Each canvas note with the lines it shows, measured as the canvas paints them.
+            // Each canvas note with the lines it shows, measured as the canvas paints them, and a placed comment's element and
+            // leader (mockup audit M1-14).
             wxClientDC dc( m_canvas ); dc.SetFont( GetFont() );
             const auto& notes = visibleNotes();
+            const auto captions = connectionCaptions( drawn, m_canvas->GetClientSize() );
             for( int i = 0; i < notes.size(); ++i )
             {
                 const auto& note = notes.Get( i );
                 if( note.target_kind() != D::DAT_CANVAS && !note.has_position() ) continue;
                 wxRect box = noteRect( note, i );
                 auto* row = result.add_canvas_notes(); row->set_annotation_id( note.id() ); place( row->mutable_rect(), "DiagramCanvasNote", box, false );
+                if( note.target_kind() != D::DAT_CANVAS && note.has_target_id() ) row->set_target_id( note.target_id() );
+                if( auto leader = noteLeader( drawn, captions, note, i ) )
+                {
+                    auto* line = row->mutable_leader();
+                    line->set_from_x( origin.x + leader->first.x ); line->set_from_y( origin.y + leader->first.y );
+                    line->set_to_x( origin.x + leader->second.x ); line->set_to_y( origin.y + leader->second.y );
+                }
                 box.Deflate( 8 ); bool shortened = false;
                 for( const wxString& line : R::NoteLines( dc, R::Text( note.text() ), box.width, box.GetBottom() - box.y, &shortened ) )
                     row->add_lines( R::Utf8( line ) );
@@ -2810,7 +2834,7 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
                 row->set_active( target && target->port && target->owner == port.owner && target->id == port.id );
             }
             if( target ) { place( result.mutable_connect_target(), "DiagramConnectTarget", target->rect, false ); result.mutable_connect_target()->set_label( R::Utf8( target->name ) ); }
-            for( const auto& caption : connectionCaptions( drawn, m_canvas->GetClientSize() ) )
+            for( const auto& caption : captions )
             {
                 auto* row = result.add_connection_captions(); place( row, "DiagramConnectionCaption", caption.rect, false );
                 row->set_shown( caption.shown && visible.Contains( caption.rect ) ); row->set_label( R::Utf8( caption.text ) );

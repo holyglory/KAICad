@@ -222,14 +222,17 @@ internal static partial class PsuCpuFixtureBuilder
             new(Id(0x1a, n), DiagramAnnotationRole.Comment, text, target, position, [], Origin);
         var canvas = new DiagramAnnotationTarget(DiagramAnnotationTargetKind.Canvas, null);
         // Each canvas note lies in free space below its level's blocks, 24 pixels or more clear of them at the default size and in
-        // the compact window (§1.5.3 as amended by decision n7fb0ee3089916669; mockup audit M1-7).
+        // the compact window (§1.5.3 as amended by decision n7fb0ee3089916669; mockup audit M1-7). The comment on Memory interface
+        // has its own place on the canvas below the connection's caption, where the editor draws it with a leader to the caption,
+        // as the approved walkthrough 03 draws it (§1.5.3 content amendment, mockup audit M1-14); the PSU's comment has none and
+        // stays in Comments, as walkthroughs 01 and 02 show it.
         var notes = new Dictionary<int, ImmutableArray<DiagramAnnotation>>
         {
             [1] = [Note(1, "Keep PSU replaceable as a unit.", canvas, new(40, 320)),
                    Note(2, "Explore a quieter supply.", new(DiagramAnnotationTargetKind.Block, Id(0x11, 2)), null)],
             [2] = [Note(3, "Keep sensing away from switching nodes.", canvas, new(40, 580))],
             [3] = [Note(4, "Compare memory-interface implementations.", canvas, new(40, 320)),
-                   Note(5, "Keep pin choices open for placement.", new(DiagramAnnotationTargetKind.Connection, Id(0x16, 0x1d)), null)],
+                   Note(5, "Keep pin choices open for placement.", new(DiagramAnnotationTargetKind.Connection, Id(0x16, 0x1d)), new(300, 560))],
         };
         var revisions = Blocks.Select((b, i) => new RecursiveBlockRevision(Block(i + 1), null, b.Name, Id(0x14, i + 1),
             b.Children.Select(Block).ToImmutableArray(), Origin,

@@ -140,6 +140,7 @@
             </origin>
             <text>Keep pin choices open for placement.</text>
             <target kind="Connection" ref="7e57f1c5-0000-4000-8000-00160000001d" />
+            <position x="300" y="560" />
             <strokes />
           </annotation>
         </annotations>

@@ -283,7 +283,7 @@ public sealed class PsuCpuFixtureTests
         string Notes(string block) => string.Join("|", revisions[block].LocalDiagram.Notes.Select(n => $"{n.Target.Kind}:{n.Position?.X},{n.Position?.Y}:{n.Text}"));
         Assert.AreEqual("Canvas:40,320:Keep PSU replaceable as a unit.|Block:,:Explore a quieter supply.", Notes("System"));
         Assert.AreEqual("Canvas:40,580:Keep sensing away from switching nodes.", Notes("PSU"));
-        Assert.AreEqual("Canvas:40,320:Compare memory-interface implementations.|Connection:,:Keep pin choices open for placement.", Notes("CPU"));
+        Assert.AreEqual("Canvas:40,320:Compare memory-interface implementations.|Connection:300,560:Keep pin choices open for placement.", Notes("CPU"));
         Assert.IsTrue(revisions.Values.SelectMany(r => r.LocalDiagram.Interfaces).All(i => i.Intent.Length == 0));
         Assert.AreEqual(new DiagramRequirements("Supply CPU power and report rail status.", "Separate power conversion and telemetry.",
             "Keep high-current paths away from sensing."), graph.Requirements(revisions["PSU"].Selection).Requirements);

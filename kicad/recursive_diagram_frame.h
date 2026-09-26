@@ -296,6 +296,14 @@ private:
     /// name or another caption, and those before a block). clear is false only in that last case.
     struct CAPTION_PLACE { std::string connection; wxString text, full; wxRect rect; bool shown = false, clear = true; };
     std::vector<CAPTION_PLACE> connectionCaptions( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout, const wxSize& aArea ) const;
+    /// The dashed leader drawn from aNote (the aIndex-th note of the level) to the block or connection it comments on, in canvas
+    /// pixels, as (a point on the note's border, a point on the element): mockup audit M1-14, approved walkthrough 03. Only a
+    /// comment with its own place on the canvas (a position) is drawn there; its leader ends on its connection's caption as
+    /// aCaptions places it (the middle of the connection's path when the caption is not drawn) or on its block's outline.
+    /// Nothing for a free-space note, an unresolved comment, an element not drawn on this level, or a note touching it.
+    std::optional<std::pair<wxPoint, wxPoint>> noteLeader( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout,
+            const std::vector<CAPTION_PLACE>& aCaptions, const kiapi::automation::diagrams::v1::DiagramAnnotationData& aNote,
+            int aIndex ) const;
     /// The Connect tool's preview of the connection in progress, in canvas pixels, from its first end to the pointer or to the
     /// port or block the pointer is on: the path the finished connection takes (rule F4 and the CN-2 erratum 2026-09-26: its
     /// three-segment path, or its way around the blocks where that would run through a block or leave the level), laid out with
@@ -453,6 +461,8 @@ private:
     wxString m_facetProblem;
     std::vector<std::string> m_commentIds;
     std::string m_commentId;
+    /// Set when a note is pressed on the canvas: the next inspector refresh scrolls Comments into view (mockup audit M1-14).
+    bool m_revealComments = false;
     bool m_newComment = false;
     TOOL m_tool = TOOL::SELECT;
     enum class DRAG { NONE, NOTE, MOVE, RESIZE, PORT, CONNECT };

@@ -284,7 +284,7 @@ Annotations (`DiagramAnnotation`, role Comment, no strokes, fixed origin, `units
 | 2 | System | block PSU | — | "Explore a quieter supply." |
 | 3 | PSU | canvas | (40, 580) | "Keep sensing away from switching nodes." |
 | 4 | CPU | canvas | (40, 320) | "Compare memory-interface implementations." |
-| 5 | CPU | connection 1d | — | "Keep pin choices open for placement." |
+| 5 | CPU | connection 1d | (300, 560) | "Keep pin choices open for placement." |
 
 Content amendment 2026-09-26 (decision `n7fb0ee3089916669`, mockup audit M1-7; no format change): the canvas notes lie in
 free space below their level's blocks, 24 pixels or more clear of every block with its handles, every port square and every
@@ -294,6 +294,11 @@ note sat 5 units under the PSU and read as its comment, and the PSU note covered
 first row, which the compact window draws about 23 pixels (System) and 18 pixels (CPU) from the blocks' handles. The CPU
 note, at (40, 300) the same distance under the Processor, moved to (40, 320) with the System note. `fixture.json` pins the
 new `system.blocks.xml`.
+
+Content amendment 2026-09-26 (mockup audit M1-14; no format change): annotation 5, the comment on connection 1d, has its
+own place on the canvas at (300, 560), below the connection's caption and clear of the Clock block and Clock feed that the
+canvas journey draws later, so the editor draws it as the approved walkthrough 03 does: a note attached to Memory interface
+by a dashed leader. Annotation 2 keeps no position; the PSU's comment stays in Comments, as walkthroughs 01 and 02 show it.
 
 Invariants checked by `PsuCpuFixtureTests`:
 - **G-1 Ownership totality.** In the selected-root closure, each circuit component is bound by exactly one block.

@@ -33,7 +33,9 @@ public sealed partial class NativeSessionTests
     //    fits, which the realization records per connection (kept as evidence, islands.json); every other generated stub, label
     //    and sheet pin follows CN-1 §6. KiCad's own measurement shows no generated wire over a symbol body or any text, and
     //    every routed wire and junction inside the drawing sheet's inner border and clear of its title block as KiCad draws
-    //    them. Replaying the apply returns its receipt, a repeated plan has nothing to do and a repeated apply is a no-op.
+    //    them; so does every other generated stub and label (the frame preference, ledger ped4439a665d260ef: RAIL_B and PSU_SCL
+    //    on PSU and RAIL_A on CPU_POWER no longer cross the border). Replaying the apply returns its receipt, a repeated plan
+    //    has nothing to do and a repeated apply is a no-op.
     // 5. One native undo removes the whole realization and redo restores it; save and reload keep it, and the recovery record
     //    adopts the reloaded editor with nothing left to do.
     // 6. I2C pull-ups added to connected nets (two coordinate-free, one placed and locked) are placed by the connection-aware
@@ -661,14 +663,20 @@ public sealed partial class NativeSessionTests
     // `before`) apart from the items of routed connections (`routed`, checked by RequireRoutedInKiCad) is a wire or a local or
     // hierarchical label, or a sheet pin on an existing sheet symbol: no global label, junction, symbol or other item. Every such
     // wire is a straight stub of 2, 3, 4, 6 or 8 connection-grid steps that leaves a pin away from its body, or a new sheet pin
-    // away from its sheet, and ends in exactly one new label turned the same way. A pin stub's label text is the name KiCad gives
-    // that pin's net (its last path part); a sheet pin's label and the sheet pin carry the same text. Hierarchical labels appear
-    // only on child sheets; every new sheet pin sits on the left or right edge of its sheet symbol and faces into it. Returns the
-    // counts per sheet and kind.
+    // away from its sheet, and ends in exactly one new label turned the same way; every other new label sits on a pin itself
+    // (the §6.4 anchor-label variant, which the frame preference draws inside the border in place of a stub that only the page
+    // inset admits) and faces away from that pin's body. A pin's label text is the name KiCad gives that pin's net (its last path part); a
+    // sheet pin's label and the sheet pin carry the same text. Hierarchical labels appear only on child sheets; every new sheet
+    // pin sits on the left or right edge of its sheet symbol and faces into it. The frame preference (ledger ped4439a665d260ef,
+    // the CN-1 erratum lane 2A reported): every such stub and the box KiCad measures for every such label lie inside the
+    // drawing sheet's inner border as KiCad draws it (touching it is inside) and overlap none of its title block
+    // (LabelStubDrawingSheetProblems). Returns the counts per sheet and kind, and what was measured against each drawing sheet.
     private static async Task<object> RequireLabelStubs(NativeClient client, CheckedSchematicState before, CheckedSchematicState after,
         SchematicConnectionPolicy policy, CancellationToken token, IReadOnlySet<Guid>? routed = null)
     {
         routed ??= new HashSet<Guid>();
+        var frameProblems = new List<string>();
+        var frames = new List<object>();
         var lengths = SchematicConnectionPolicy.StubMultiples.Select(m => m * policy.GridNm).ToHashSet();
         var netOf = new Dictionary<(string Path, string Item), string>();
         foreach (var net in after.Electrical.Nets)
@@ -742,7 +750,30 @@ public sealed partial class NativeSessionTests
                     Count(label.Item is HierarchicalLabel ? "hierarchical-stub" : "local-stub");
                 }
             }
-            Assert.AreEqual(labels.Length, labelled.Count, path + ": every new label ends a new stub.");
+            // A new label that ends no new stub is a label on a pin itself: it faces away from that pin's body and names the pin's net.
+            foreach (var (id, item) in labels.Where(l => !labelled.Contains(l.Id)))
+            {
+                var anchors = pins[Position(item)].ToArray();
+                Assert.IsNotEmpty(anchors, $"{path}: new label {id:D} at {Position(item)} ends a new stub or sits on a pin.");
+                Assert.IsTrue(anchors.Any(p => SchematicConnectionGeometry.Spin(SchematicConnectionGeometry.Outward(p)) == Spin(item)),
+                    $"{path}: the label on the pin at {Position(item)} faces away from its body.");
+                var named = anchors.Select(p => netOf.GetValueOrDefault((path, p.Id.Value))).OfType<string>().Distinct().ToArray();
+                Assert.HasCount(1, named, $"{path}: the pin at {Position(item)} is in one KiCad net.");
+                Assert.AreEqual(Leaf(named[0]), Text(item), $"{path}: the label on the pin at {Position(item)} names the net KiCad reports for it.");
+                Assert.IsFalse(wires.Any(w => (w.Start.XNm, w.Start.YNm) == Position(item) || (w.End.XNm, w.End.YNm) == Position(item)),
+                    $"{path}: a label on a pin at {Position(item)} has no stub of its own.");
+                labelled.Add(id);
+                Count(item is HierarchicalLabel ? "hierarchical-on-pin" : "local-on-pin");
+            }
+            Assert.AreEqual(labels.Length, labelled.Count, path + ": every new label ends a new stub or sits on a pin.");
+            // The frame preference on KiCad's own drawing: each label by the box KiCad measures for it at this revision.
+            var measuredLabels = labels.Select(l => (What: l.Item.Descriptor.Name + " '" + Text(l.Item) + "' " + l.Id.ToString("D"),
+                Bounds: measured.Obstacles.SingleOrDefault(o => o.Id.Value == l.Id.ToString("D"))?.Bounds)).ToArray();
+            foreach (var (what, _) in measuredLabels.Where(l => l.Bounds is null)) frameProblems.Add(path + ": KiCad did not measure " + what);
+            var (sheetFrameProblems, frame) = LabelStubDrawingSheetProblems(path, measured, wires,
+                [.. measuredLabels.Where(l => l.Bounds is not null).Select(l => (l.What, l.Bounds!))]);
+            frameProblems.AddRange(sheetFrameProblems);
+            frames.Add(frame);
             foreach (var (sheet, pin) in sheetPins)
             {
                 Assert.IsTrue(stubbedSheetPins.Contains(pin.Id.Value), $"{path}: new sheet pin {pin.Text.Text_} has its stub.");
@@ -755,7 +786,8 @@ public sealed partial class NativeSessionTests
             }
             counts[path + " wires"] = wires.Length;
         }
-        return counts;
+        Assert.IsEmpty(frameProblems, "Label stubs and labels against the drawing sheet: " + string.Join("; ", frameProblems.Take(12)));
+        return new { counts, drawingSheets = frames };
 
         static (long, long) Position(IMessage item) => item switch
         {
@@ -896,25 +928,10 @@ public sealed partial class NativeSessionTests
         long clearance, long pageInsetNm)
     {
         var problems = new List<string>();
-        if (geometry.DrawingSheet?.MarginFrame is not { } margin)
-        {
-            problems.Add(sheet + ": KiCad did not measure its drawing sheet: " + string.Join("; ", geometry.Limitations));
-            return (problems, new { sheet });
-        }
-        static (long L, long T, long R, long B) Box(Kiapi.Common.Types.Box2 b) => (b.Position.XNm, b.Position.YNm, b.Position.XNm + b.Size.XNm, b.Position.YNm + b.Size.YNm);
-        var page = Box(geometry.PageBounds);
-        var m = Box(margin);
-        var items = geometry.DrawingSheet.Items.Select(i => (i.Kind, Box: Box(i.Bounds))).ToArray();
-        bool IsFrame((SchematicWiringDrawingSheetItemKind Kind, (long L, long T, long R, long B) Box) i) =>
-            i.Kind == SchematicWiringDrawingSheetItemKind.SwrDrawingSheetItemRectangle
-            && 2 * i.Box.L < m.L + m.R && 2 * i.Box.R > m.L + m.R && 2 * i.Box.T < m.T + m.B && 2 * i.Box.B > m.T + m.B
-            && 2 * (i.Box.R - i.Box.L) > m.R - m.L && 2 * (i.Box.B - i.Box.T) > m.B - m.T;
-        var frames = items.Where(IsFrame).Select(i => i.Box).ToArray();
-        if (frames.Length == 0) { problems.Add(sheet + ": KiCad draws no border frame on it"); return (problems, new { sheet }); }
-        var inner = (L: frames.Max(f => f.L), T: frames.Max(f => f.T), R: frames.Min(f => f.R), B: frames.Min(f => f.B));
+        if (DrawingSheetFrame(sheet, geometry, problems) is not { } read) return (problems, new { sheet });
+        var (page, inner, art) = read;
         if (inner.L < page.L + pageInsetNm || inner.T < page.T + pageInsetNm || inner.R > page.R - pageInsetNm || inner.B > page.B - pageInsetNm)
             problems.Add(sheet + ": the drawing sheet's inner frame " + inner + " is not the page inset in from the page " + page);
-        var art = items.Where(i => !IsFrame(i) && i.Box.L < inner.R && i.Box.R > inner.L && i.Box.T < inner.B && i.Box.B > inner.T).Select(i => i.Box).ToArray();
         if (art.Length == 0) problems.Add(sheet + ": KiCad draws no title block inside the frame");
         void Check(string what, long x0, long y0, long x1, long y1)
         {
@@ -932,7 +949,7 @@ public sealed partial class NativeSessionTests
             Check("junction " + junction.Id.Value, junction.Position.XNm, junction.Position.YNm, junction.Position.XNm, junction.Position.YNm);
         foreach (var (what, bounds) in labels)
         {
-            var b = Box(bounds);
+            var b = SheetBox(bounds);
             Check(what + " (" + b.L + ", " + b.T + ")-(" + b.R + ", " + b.B + ")", b.L, b.T, b.R, b.B);
         }
         return (problems, new
@@ -940,7 +957,74 @@ public sealed partial class NativeSessionTests
             sheet, innerFrameMm = new[] { inner.L, inner.T, inner.R, inner.B }.Select(v => v / 1_000_000m).ToArray(),
             artMm = art.Select(a => new[] { a.L, a.T, a.R, a.B }.Select(v => v / 1_000_000m).ToArray()).ToArray(),
             routedWires = wires.Count, junctions = junctions.Count,
-            nameLabelsMm = labels.Select(l => Box(l.Bounds)).Select(b => new[] { b.L, b.T, b.R, b.B }.Select(v => v / 1_000_000m).ToArray()).ToArray()
+            nameLabelsMm = labels.Select(l => SheetBox(l.Bounds)).Select(b => new[] { b.L, b.T, b.R, b.B }.Select(v => v / 1_000_000m).ToArray()).ToArray()
+        });
+    }
+
+    private static (long L, long T, long R, long B) SheetBox(Kiapi.Common.Types.Box2 b) =>
+        (b.Position.XNm, b.Position.YNm, b.Position.XNm + b.Size.XNm, b.Position.YNm + b.Size.YNm);
+
+    // The drawing sheet KiCad draws on a sheet as its placement measurement reports it, read independently of the realizer: its
+    // page, the inside of its innermost border frame (the drawn rectangles around the middle of its margin frame spanning more than
+    // half of it both ways), and everything else it draws meeting that inside (the title block and any other art). Null, with the
+    // reason added to `problems`, when KiCad did not measure it or draws no border.
+    private static ((long L, long T, long R, long B) Page, (long L, long T, long R, long B) Inner, (long L, long T, long R, long B)[] Art)? DrawingSheetFrame(
+        string sheet, SchematicPlacementGeometry geometry, List<string> problems)
+    {
+        if (geometry.DrawingSheet?.MarginFrame is not { } margin)
+        {
+            problems.Add(sheet + ": KiCad did not measure its drawing sheet: " + string.Join("; ", geometry.Limitations));
+            return null;
+        }
+        var m = SheetBox(margin);
+        var items = geometry.DrawingSheet.Items.Select(i => (i.Kind, Box: SheetBox(i.Bounds))).ToArray();
+        bool IsFrame((SchematicWiringDrawingSheetItemKind Kind, (long L, long T, long R, long B) Box) i) =>
+            i.Kind == SchematicWiringDrawingSheetItemKind.SwrDrawingSheetItemRectangle
+            && 2 * i.Box.L < m.L + m.R && 2 * i.Box.R > m.L + m.R && 2 * i.Box.T < m.T + m.B && 2 * i.Box.B > m.T + m.B
+            && 2 * (i.Box.R - i.Box.L) > m.R - m.L && 2 * (i.Box.B - i.Box.T) > m.B - m.T;
+        var frames = items.Where(IsFrame).Select(i => i.Box).ToArray();
+        if (frames.Length == 0) { problems.Add(sheet + ": KiCad draws no border frame on it"); return null; }
+        var inner = (L: frames.Max(f => f.L), T: frames.Max(f => f.T), R: frames.Min(f => f.R), B: frames.Min(f => f.B));
+        var art = items.Where(i => !IsFrame(i) && i.Box.L < inner.R && i.Box.R > inner.L && i.Box.T < inner.B && i.Box.B > inner.T).Select(i => i.Box).ToArray();
+        return (SheetBox(geometry.PageBounds), inner, art);
+    }
+
+    // The frame preference for label stubs (ledger ped4439a665d260ef, the CN-1 erratum lane 2A reported) on KiCad's own drawing,
+    // independently of the realizer's reading of it: every stub wire lies inside the inner border of the drawing sheet KiCad draws
+    // on the sheet (DrawingSheetFrame; touching the border is inside) and meets none of the art inside it, such as the title block;
+    // and the box KiCad measures for every label lies inside that border and overlaps none of that art (touching it is not
+    // overlapping, as §6.4 rule 6 lets a label touch an obstacle). Returns the problems and what was measured.
+    internal static (List<string> Problems, object Evidence) LabelStubDrawingSheetProblems(string sheet, SchematicPlacementGeometry geometry,
+        IReadOnlyList<SchematicLine> stubs, IReadOnlyList<(string What, Kiapi.Common.Types.Box2 Bounds)> labels)
+    {
+        var problems = new List<string>();
+        if (DrawingSheetFrame(sheet, geometry, problems) is not { } read) return (problems, new { sheet });
+        var (_, inner, art) = read;
+        bool Inside((long L, long T, long R, long B) b) => b.L >= inner.L && b.R <= inner.R && b.T >= inner.T && b.B <= inner.B;
+        foreach (var stub in stubs)
+        {
+            var b = (L: Math.Min(stub.Start.XNm, stub.End.XNm), T: Math.Min(stub.Start.YNm, stub.End.YNm), R: Math.Max(stub.Start.XNm, stub.End.XNm),
+                B: Math.Max(stub.Start.YNm, stub.End.YNm));
+            string what = "stub " + stub.Id.Value + " (" + stub.Start.XNm + ", " + stub.Start.YNm + ")-(" + stub.End.XNm + ", " + stub.End.YNm + ")";
+            if (!Inside(b)) problems.Add(sheet + ": " + what + " is not inside the drawing sheet's inner border " + inner);
+            foreach (var a in art.Where(a => b.L <= a.R && a.L <= b.R && b.T <= a.B && a.T <= b.B))
+                problems.Add(sheet + ": " + what + " meets the drawing sheet's title block or art " + a);
+        }
+        foreach (var (what, bounds) in labels)
+        {
+            var b = SheetBox(bounds);
+            string named = what + " (" + b.L + ", " + b.T + ")-(" + b.R + ", " + b.B + ")";
+            if (!Inside(b)) problems.Add(sheet + ": " + named + " is not inside the drawing sheet's inner border " + inner);
+            foreach (var a in art.Where(a => b.L < a.R && a.L < b.R && b.T < a.B && a.T < b.B))
+                problems.Add(sheet + ": " + named + " overlaps the drawing sheet's title block or art " + a);
+        }
+        return (problems, new
+        {
+            sheet, innerFrameMm = new[] { inner.L, inner.T, inner.R, inner.B }.Select(v => v / 1_000_000m).ToArray(),
+            artMm = art.Select(a => new[] { a.L, a.T, a.R, a.B }.Select(v => v / 1_000_000m).ToArray()).ToArray(),
+            stubs = stubs.Count, labels = labels.Count,
+            nearestLabelToBorderMm = labels.Count == 0 ? (decimal?)null : labels.Select(l => SheetBox(l.Bounds))
+                .Min(b => Math.Min(Math.Min(b.L - inner.L, inner.R - b.R), Math.Min(b.T - inner.T, inner.B - b.B))) / 1_000_000m
         });
     }
 

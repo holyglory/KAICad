@@ -477,6 +477,29 @@ public sealed class DesignRecoveryStore(string statePath)
             throw Failure("invalid_design_recovery", "Pending mutation targets must belong to the recorded native design.");
     }
 
+    /// <summary>Whether two candidate XML versions differ only in KiCad's computed
+    /// net-chain membership bit. All declaration fields and design content remain strict.</summary>
+    internal static bool ComputedNetChainOnlyChange(byte[] beforeBytes, byte[] afterBytes,
+        IReadOnlyCollection<ComponentKnowledgeLibrary> libraries)
+    {
+        try
+        {
+            var before = Normalize(SchematicDesignXml.Read(new System.Text.UTF8Encoding(false, true).GetString(beforeBytes), libraries));
+            var after = Normalize(SchematicDesignXml.Read(new System.Text.UTF8Encoding(false, true).GetString(afterBytes), libraries));
+            return SchematicDesignXml.Write(before, libraries) == SchematicDesignXml.Write(after, libraries);
+        }
+        catch (Exception error) when (error is AutomationException or System.Text.DecoderFallbackException or ArgumentException)
+        { return false; }
+
+        static SchematicDesign Normalize(SchematicDesign design)
+        {
+            var result = design with { Schematic = design.Schematic.Clone() };
+            foreach (var screen in result.Schematic.Instances)
+                foreach (var chain in screen.Metadata.NetChains) chain.Committed = false;
+            return result;
+        }
+    }
+
     private static void ValidatePublication(DesignRecoveryState state, DesignPublicationIntent publication)
     {
         if (publication.OperationId == Guid.Empty || !Enum.IsDefined(publication.Phase)
@@ -619,7 +642,9 @@ public sealed class DesignRecoveryStore(string statePath)
         {
             byte[] a = JsonSerializer.SerializeToUtf8Bytes(before with { Phase = DesignPublicationPhase.Prepared }, Json);
             byte[] b = JsonSerializer.SerializeToUtf8Bytes(after with { Phase = DesignPublicationPhase.Prepared }, Json);
-            if (!a.AsSpan().SequenceEqual(b) || !Equals(current.PendingMutation, next.PendingMutation)
+            bool computedNetChainUpdate = current.PendingNativeSave is not null
+                && ComputedNetChainOnlyChange(before.CandidateFileBytes, after.CandidateFileBytes, current.KnowledgeLibraries);
+            if ((!a.AsSpan().SequenceEqual(b) && !computedNetChainUpdate) || !Equals(current.PendingMutation, next.PendingMutation)
                 || !Equals(current.PendingNativeState, next.PendingNativeState)
                 || (current.PendingNativeSave is not null && !Equals(current.PendingNativeSave, next.PendingNativeSave)))
                 throw Failure("sync_intent_changed", "The exact request and pending native identities cannot change during synchronization.");

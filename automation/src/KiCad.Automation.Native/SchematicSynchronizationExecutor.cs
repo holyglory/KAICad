@@ -193,6 +193,7 @@ internal static class SchematicSynchronizationExecutor
             {
                 if (!observed.State.Equals(receipt?.ObservedAfter ?? initialState))
                     throw Error("native_changed_during_sync", "Native state changed after this operation; reconcile it before saving.");
+                candidate = AdoptComputedNetChainMembership(candidate, observed.Electrical);
                 RequireCandidate(candidate, observed.Electrical, saved.State, token);
             }
             catch (AutomationException error) { throw Stuck(error, intent.OperationId, committed: receipt is not null); }
@@ -214,7 +215,14 @@ internal static class SchematicSynchronizationExecutor
         var afterSave = await Capture(client, saved.State, token);
         if (!afterSave.State.Equals(save.ObservedState))
             throw Error("native_changed_during_sync", "The native document changed after saving; preserve the pending candidate for reconciliation.");
+        candidate = AdoptComputedNetChainMembership(candidate, afterSave.Electrical);
         RequireCandidate(candidate, afterSave.Electrical, saved.State, token);
+        byte[] computedCandidateBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(candidate, saved.State.KnowledgeLibraries));
+        if (!computedCandidateBytes.AsSpan().SequenceEqual(intent.CandidateFileBytes))
+        {
+            saved = store.Save(saved.State with { PendingPublication = intent with { CandidateFileBytes = computedCandidateBytes } }, saved.RevisionToken);
+            intent = saved.State.PendingPublication!;
+        }
         var publication = await DesignPublicationCommitter.CommitAsync(store, saved.RevisionToken, save, token, checkpoint: checkpoint);
         saved = publication.Recovery;
 
@@ -330,6 +338,7 @@ internal static class SchematicSynchronizationExecutor
                 LayoutLane.Rebuild => SchematicRebuild.Resolve(planned, saved.State, observed.Electrical, request.Batch, receipt, token),
                 _ => SchematicLayoutResolution.Resolve(planned, observed.Electrical, request.Batch, saved.State.KnowledgeLibraries, token)
             };
+            resolved = AdoptComputedNetChainMembership(resolved, observed.Electrical);
         }
         catch (AutomationException error) { throw Stuck(error, intent.OperationId, committed: true); }
         byte[] candidate = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(resolved, saved.State.KnowledgeLibraries));
@@ -425,6 +434,28 @@ internal static class SchematicSynchronizationExecutor
         var comparison = SchematicElectricalComparison.Compare(candidate, native, state.KnowledgeLibraries, token);
         if (!comparison.PinBindingsComplete || !comparison.ConnectivityEquivalent)
             throw Error("native_sync_connectivity_mismatch", "The native pin connections do not match the candidate; no XML is published.");
+    }
+
+    private static SchematicDesign AdoptComputedNetChainMembership(SchematicDesign candidate,
+        SchematicElectricalState native)
+    {
+        var nativeChains = native.Hierarchy?.Data?.Instances.FirstOrDefault()?.Metadata?.NetChains;
+        if (nativeChains is null || nativeChains.Count == 0) return candidate;
+        var result = candidate with { Schematic = candidate.Schematic.Clone() };
+        foreach (var screen in result.Schematic.Instances)
+            foreach (var chain in screen.Metadata.NetChains)
+                if (nativeChains.SingleOrDefault(n => n.Name == chain.Name) is { } computed)
+                {
+                    chain.Committed = computed.Committed;
+                    // KiCad materializes an empty exclusions message when it
+                    // saves a declaration that omitted the optional message.
+                    // Preserve non-empty XML restrictions, but adopt this
+                    // representation-only native default at the boundary.
+                    if ((chain.Exclusions is null || (chain.Exclusions.NetNames.Count == 0 && chain.Exclusions.Pins.Count == 0))
+                        && computed.Exclusions is { NetNames.Count: 0, Pins.Count: 0 })
+                        chain.Exclusions = computed.Exclusions.Clone();
+                }
+        return result;
     }
 
     internal static bool Equivalent(SchematicDesign a, SchematicDesign b, DesignRecoveryState state, CancellationToken token)

@@ -3697,6 +3697,44 @@ retained_artifacts=[{ name = "delivery-observation-scope", path = "automation/ar
 
 
 # Fast regression for connection result validation; the full native graph also runs these cases.
+[test.native-xml-rebuild-focus]
+timeout_seconds=3600
+env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.native-xml-rebuild-focus.check]]
+name="restore"
+tier="development"
+role="preflight"
+invalidates=["xml-rebuild"]
+command=["dotnet","restore","automation/KiCad.Automation.slnx","--locked-mode"]
+
+[[test.native-xml-rebuild-focus.check]]
+name="managed-build"
+tier="development"
+requires=["restore"]
+command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--configuration","Debug"]
+
+[[test.native-xml-rebuild-focus.check]]
+name="configure"
+tier="development"
+role="preflight"
+requires=["managed-build"]
+invalidates=["xml-rebuild"]
+command=["cmake","-S",".","-B","automation/artifacts/native","-G","Ninja","-DCMAKE_BUILD_TYPE=Debug","-DKICAD_USE_CMAKE_FINDPROTOBUF=ON","-DKICAD_BUILD_QA_TESTS=ON","-DUSE_CCACHE=ON","-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
+
+[[test.native-xml-rebuild-focus.check]]
+name="native-build"
+tier="development"
+requires=["configure"]
+command=["cmake","--build","automation/artifacts/native","--target","api_schema_build_copy","bitmap_archive_build","cvpcb_kiface","eeschema","eeschema_kiface","kiapi","kicad","kicad-cli","pcbnew","pcbnew_kiface","qa_automation_caption","qa_automation_update_client","qa_common","qa_diagram_field_history","qa_document_change_journal","qa_eeschema","qa_pcbnew","qa_symbol_graphic_identity","schema_build_copy"]
+
+[[test.native-xml-rebuild-focus.check]]
+name="xml-rebuild"
+tier="development"
+requires=["native-build"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeXmlRebuild","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-xml-rebuild-focus","--","MSTest.MapInconclusiveToFailed=true"]
+retained_artifacts=[{name="xml-rebuild-focus-tests",path="automation/artifacts/native-xml-rebuild-focus",max_bytes=16777216},{name="xml-rebuild-focus-evidence",path="automation/artifacts/native-xml-rebuild/native-session-current",max_bytes=67108864}]
+
 [test.connection-resolution]
 timeout_seconds=600
 env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }

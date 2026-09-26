@@ -179,11 +179,12 @@ private:
     std::map<KIID, KIID> m_generated;
     // The time-of-day text variables the board's text can show; no captured value.
     std::vector<std::string> m_timeOfDayText;
-    // The functions of @{...} expressions in the board's text whose value the check
-    // cannot capture (now(), random(), vcs...() or an unknown function).
+    // The functions the @{...} expressions of the board's text call, as KiCad resolves the
+    // text, whose value the check cannot capture (now(), random(), vcs...() or an unknown
+    // function).
     std::vector<std::string> m_volatileExpressions;
-    // What @{...} expressions of the drawing sheet's text read from the clock, the
-    // version-control repository or chance; no captured value.
+    // What the @{...} expressions the drawing sheet's text evaluates read from outside the
+    // design: a function other than a pure one, or a live text variable; no captured value.
     std::vector<std::string> m_drawingSheetExpressions;
     // Font files the board's text uses that the check could not read.
     std::vector<wxString> m_unreadableFonts;

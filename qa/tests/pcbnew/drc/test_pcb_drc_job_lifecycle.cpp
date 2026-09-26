@@ -26,6 +26,8 @@
 #include <drc/drc_library_inputs.h>
 #include <drc/drc_rule_parser.h>
 #include <pcb_marker.h>
+#include <pcb_table.h>
+#include <pcb_tablecell.h>
 #include <pcb_text.h>
 #include <title_block.h>
 #include <pgm_base.h>
@@ -2179,10 +2181,13 @@ BOOST_AUTO_TEST_CASE( TextShowingTheDateIsCapturedAndTheTimeOfDayLeavesTheSnapsh
 // random() give another value each time they are evaluated, the vcs...() functions read the
 // project's version-control repository while the check runs, and a function KiCad does not know
 // as one of the design alone may do either: each leaves the snapshot incomplete with the stable
-// reason volatile_text_expression, never fresh. A text reaches an expression directly, through a
-// project variable, a board property or a title-block field, or through a variable substituted
-// into an expression; the drawing sheet's expressions count too. Expressions of the design alone,
-// plain text that only looks like a call, and escaped expressions leave the check complete.
+// reason volatile_text_expression, never fresh. The check resolves each text as KiCad lays it out,
+// with the item's own variables first, and looks for calls before each evaluation: a text reaches
+// an expression directly, through a project variable, a board property or a title-block field,
+// through a variable substituted into an expression or into its name, or through an expression
+// that builds another; whitespace KiCad skips hides no call. The drawing sheet's expressions
+// count too. Expressions of the design alone, parentheses in quoted strings, plain text that only
+// looks like a call, and escaped expressions leave the check complete.
 BOOST_AUTO_TEST_CASE( TextExpressionsAreCapturedOrLeaveTheSnapshotIncomplete )
 {
     GIT_BACKEND_SCOPE git;
@@ -2346,6 +2351,110 @@ BOOST_AUTO_TEST_CASE( TextExpressionsAreCapturedOrLeaveTheSnapshotIncomplete )
     project->GetTextVars().erase( wxS( "EXPR" ) );
     project->GetTextVars().erase( wxS( "STAMP" ) );
 
+    // KiCad's reader skips any whitespace between a function's name and its '(': a line break,
+    // a vertical tab or a no-break space too.
+    text->SetText( wxS( "At @{now\n()}" ) );
+    incomplete( "now() across a line break", "now()", board_text );
+    text->SetText( wxString::FromUTF8( "Lot @{random\v\xC2\xA0()}" ) );
+    incomplete( "random() across a vertical tab and a no-break space", "random()", board_text );
+
+    // A call split between the text and a variable is resolved as KiCad expands it before it
+    // evaluates: the function's name in a variable, the call's close in a variable, or the
+    // expression's opening in a variable.
+    project->GetTextVars()[wxS( "PART" )] = wxS( "now" );
+    text->SetText( wxS( "At @{${PART}()}" ) );
+    incomplete( "a function's name from a variable", "now()", board_text );
+    project->GetTextVars()[wxS( "PART" )] = wxS( "()}" );
+    text->SetText( wxS( "At @{now${PART}" ) );
+    incomplete( "a call closed by a variable", "now()", board_text );
+    project->GetTextVars()[wxS( "PART" )] = wxS( "@{" );
+    text->SetText( wxS( "At ${PART}now()}" ) );
+    incomplete( "an expression opened by a variable", "now()", board_text );
+    project->GetTextVars().erase( wxS( "PART" ) );
+
+    // An expression that builds another: KiCad evaluates a text again while it still holds an
+    // expression, so the expression built is evaluated too.
+    text->SetText( wxS( "At @{concat(\"@{n\", \"ow\", \"()}\")}" ) );
+    incomplete( "an expression built with concat()", "now()", board_text );
+    text->SetText( wxS( "Lot @{\"@\" + \"{rand\" + \"om()}\"}" ) );
+    incomplete( "an expression built by adding strings", "random()", board_text );
+    text->SetText( wxS( "Revision @{concat(\"@{\", lower(\"VCSBRANCH\"), \"()}\")}" ) );
+    incomplete( "an expression built with a function's name in capitals", "vcsbranch()", board_text );
+    // An empty result joins "$" and "{LATER}" into a variable, whose value KiCad resolves and then
+    // evaluates in the next rounds.
+    project->GetTextVars()[wxS( "LATER" )] = wxS( "@{now()}" );
+    text->SetText( wxS( "$@{\"\"}{LATER}" ) );
+    incomplete( "a variable an expression's result completes", "now()", board_text );
+    project->GetTextVars().erase( wxS( "LATER" ) );
+
+    // Parentheses in a quoted string are no call.
+    text->SetText( wxS( "@{upper(\"Rev (A)\")}" ) );
+    complete( "parentheses in a quoted string" );
+    project->GetTextVars()[wxS( "QTY" )] = wxS( "2" );
+    text->SetText( wxS( "@{if(${QTY} > 1, \"Pads (x2)\", \"Pad\")}" ) );
+    complete( "parentheses in the quoted strings of if()" );
+    project->GetTextVars().erase( wxS( "QTY" ) );
+
+    // A variable whose name an expression builds: KiCad evaluates the name's expression before it
+    // looks the variable up, and then reads the variable like any other.
+    board.GetTitleBlock().SetRevision( wxS( "B" ) );
+    text->SetText( wxS( "Rev ${@{upper(\"revision\")}}" ) );
+    BOOST_CHECK( live().is_null() );
+    complete( "a variable's name built by a pure expression" );
+    text->SetText( wxS( "Made ${@{concat(\"CURRENT_\", \"DATE\")}}" ) );
+    BOOST_CHECK( live().contains( "CURRENT_DATE" ) );
+    complete( "the date through a variable's name an expression builds" );
+    text->SetText( wxS( "At ${STAMP@{now()}}" ) );
+    incomplete( "now() in a variable's name", "now()", board_text );
+    board.GetTitleBlock().SetRevision( wxEmptyString );
+
+    // Each text's variables resolve as KiCad resolves them for that item, before the board's and
+    // the project's: the text's layer, its footprint's fields, another footprint's field and a
+    // table cell's position. A project variable of the same name is not read.
+    BOOST_REQUIRE( board.SetLayerName( F_SilkS, wxS( "now" ) ) );
+    text->SetText( wxS( "At @{${LAYER}()}" ) );
+    incomplete( "the name of the text's layer called", "now()", board_text );
+    board.SetLayerName( F_SilkS, wxEmptyString );
+    project->GetTextVars()[wxS( "LAYER" )] = wxS( "now()" );
+    text->SetText( wxS( "On @{upper(\"${LAYER}\")}" ) );
+    complete( "the text's layer, not the project variable of that name" );
+    project->GetTextVars().erase( wxS( "LAYER" ) );
+    auto* part = new FOOTPRINT( &board );
+    part->SetReference( wxS( "U7" ) );
+    part->SetValue( wxS( "random" ) );
+    part->SetPosition( { 30000000, 10000000 } );
+    board.Add( part );
+    auto* partText = new PCB_TEXT( part );
+    partText->SetLayer( F_SilkS );
+    partText->SetPosition( part->GetPosition() );
+    partText->SetText( wxS( "@{${VALUE}()}" ) );
+    part->Add( partText );
+    text->SetText( wxS( "Plain" ) );
+    incomplete( "a footprint's value called in its own text", "random()", board_text );
+    partText->SetText( wxS( "Part" ) );
+    text->SetText( wxS( "Lot @{${U7:VALUE}()}" ) );
+    incomplete( "another footprint's value called", "random()", board_text );
+    board.Remove( part );
+    delete part;
+    auto* table = new PCB_TABLE( &board, pcbIUScale.mmToIU( 0.1 ) );
+    table->SetLayer( F_SilkS );
+    table->SetColCount( 1 );
+    table->SetColWidth( 0, pcbIUScale.mmToIU( 40 ) );
+    table->SetRowHeight( 0, pcbIUScale.mmToIU( 5 ) );
+    auto* cell = new PCB_TABLECELL( &board );
+    cell->SetStart( { 0, 0 } );
+    cell->SetEnd( { pcbIUScale.mmToIU( 40 ), pcbIUScale.mmToIU( 5 ) } );
+    cell->SetText( wxS( "Row @{${ROW} + 1}" ) );
+    table->AddCell( cell );
+    table->Normalize();
+    board.Add( table );
+    project->GetTextVars()[wxS( "ROW" )] = wxS( "random()" );
+    text->SetText( wxS( "Plain" ) );
+    complete( "a table cell's row, not the project variable of that name" );
+    project->GetTextVars().erase( wxS( "ROW" ) );
+    board.Remove( table );
+    delete table;
+
     // The drawing sheet: the check resolves its texts to report unresolved variables, and an
     // expression there can decide that from the clock. Plain variables always resolve there.
     text->SetText( wxS( "Plain" ) );
@@ -2360,6 +2469,15 @@ BOOST_AUTO_TEST_CASE( TextExpressionsAreCapturedOrLeaveTheSnapshotIncomplete )
     board.GetTitleBlock().SetComment( 2, wxS( "@{dateformat(today())}" ) );
     incomplete( "today() through the drawing sheet's title block", "today()", sheet_text );
     board.GetTitleBlock().SetComment( 2, wxEmptyString );
+    // The check lays the sheet out under its own sheet name: a project variable of that name is
+    // not read. And the sheet evaluates its text once, so an expression that its expression
+    // builds stays text.
+    project->GetTextVars()[wxS( "SHEETNAME" )] = wxS( "now()" );
+    sheet->m_TextBase = wxS( "@{upper(\"${SHEETNAME}\")}" );
+    complete( "the drawing sheet's own sheet name, not the project variable of that name" );
+    project->GetTextVars().erase( wxS( "SHEETNAME" ) );
+    sheet->m_TextBase = wxS( "@{concat(\"@{n\", \"ow()}\")}" );
+    complete( "an expression built in the drawing sheet, which it does not evaluate" );
     sheet->m_TextBase = wxS( "Sheet" );
 
     // Nothing reads outside the design any more: a new check is complete and fresh.

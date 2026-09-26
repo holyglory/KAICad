@@ -7,7 +7,10 @@
 #include <board.h>
 #include <board_connected_item.h>
 #include <api/native_state_digest.h>
+#include <advanced_config.h>
 #include <board_design_settings.h>
+#include <build_version.h>
+#include <common.h>
 #include <drc/drc_engine.h>
 #include <drc/drc_library_inputs.h>
 #include <drawing_sheet/ds_data_item.h>
@@ -28,12 +31,19 @@
 #include <eda_group.h>
 #include <eda_text.h>
 #include <pcb_barcode.h>
+#include <pcb_field.h>
+#include <pcb_tablecell.h>
+#include <pgm_base.h>
+#include <string_utils.h>
 #include <title_block.h>
+#include <wx/filename.h>
 #include <pcb_marker.h>
 #include <zone.h>
 #include <fmt/format.h>
 #include <algorithm>
+#include <functional>
 #include <map>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string_view>
@@ -98,250 +108,488 @@ const std::set<std::string, std::less<>> PURE_EXPRESSION_FUNCTIONS = {
 // today() gives the current day, which a check captures and compares like ${CURRENT_DATE}.
 constexpr std::string_view TODAY = "today";
 
-// The functions known to read outside the design: the day, the time (now()), chance
-// (random()) and the project's version-control repository (vcs...()). Written inside an
-// @{...} expression, any function that is not pure counts as such too (ScanTexts): a
-// function this list does not know may be one whose value the check cannot capture.
-bool ReadsOutsideTheDesign( std::string_view aName )
+// The functions of KiCad's evaluator that read outside the design: the day, the time and
+// chance, and every function whose name starts with "vcs", which reads the project's
+// version-control repository.
+constexpr std::wstring_view OUTSIDE_FUNCTIONS[] = { L"today", L"now", L"random" };
+constexpr std::wstring_view VCS_FUNCTIONS = L"vcs";
+
+// What ExpandTextVars leaves for an escaped reference or expression (\${...}, \@{...}).
+constexpr std::wstring_view ESCAPE_MARKERS[] = { L"<<<ESC_DOLLAR:", L"<<<ESC_AT:" };
+
+using RESOLVER = std::function<bool( wxString* )>;
+
+// What KiCad reads from outside the design when it resolves a text.
+struct TEXT_READS
 {
-    return aName == TODAY || aName == "now" || aName == "random" || aName.starts_with( "vcs" );
+    std::set<std::string> variables; // Live text variables it resolves.
+    std::set<std::string> calls;     // Functions its expressions call, other than the pure ones.
+    bool evaluates = false;          // It evaluates an expression.
+    std::set<wxString> titleFields;  // Title-block fields already followed (Reading).
+
+    // A function whose value the check cannot capture: all but the pure ones and today().
+    bool Volatile() const
+    {
+        return std::any_of( calls.begin(), calls.end(), []( const std::string& aName ) { return aName != TODAY; } );
+    }
+
+    void Add( const TEXT_READS& aText )
+    {
+        variables.insert( aText.variables.begin(), aText.variables.end() );
+        calls.insert( aText.calls.begin(), aText.calls.end() );
+        evaluates |= aText.evaluates;
+    }
+};
+
+// The whitespace of KiCad's expression reader (CHARACTER_CLASSIFIER::is_whitespace), which it
+// skips between a function's name and its '('.
+bool ExpressionWhitespace( wchar_t aChar )
+{
+    switch( aChar )
+    {
+    case L' ': case L'\t': case L'\r': case L'\n': case L'\f': case L'\v':
+    case 0x00A0: case 0x2028: case 0x2029: case 0x202F: case 0x205F: case 0x3000:
+        return true;
+    default:
+        return aChar >= 0x2000 && aChar <= 0x200A;
+    }
 }
 
+// A character of a name, as KiCad's expression reader reads one: a letter, a digit or '_',
+// where any character beyond ASCII counts as a letter (a no-break space too, once a name has
+// started).
+bool IdentifierPart( wchar_t aChar )
+{
+    return aChar == L'_' || ( aChar >= L'a' && aChar <= L'z' ) || ( aChar >= L'A' && aChar <= L'Z' )
+           || ( aChar >= L'0' && aChar <= L'9' ) || ( aChar >= 0x80 && aChar != 0xFFFD );
+}
+
+// The first character of a name: the reader skips whitespace before a name and reads a digit
+// as the start of a number.
 bool IdentifierStart( wchar_t aChar )
 {
-    // As the expression lexer: any character beyond ASCII counts as a letter.
-    return aChar == L'_' || ( aChar >= L'a' && aChar <= L'z' ) || ( aChar >= L'A' && aChar <= L'Z' )
-           || ( aChar >= 0x80 && aChar != 0xFFFD );
+    return IdentifierPart( aChar ) && !ExpressionWhitespace( aChar ) && !( aChar >= L'0' && aChar <= L'9' );
 }
 
-bool IdentifierPart( wchar_t aChar ) { return IdentifierStart( aChar ) || ( aChar >= L'0' && aChar <= L'9' ); }
+// Whether the name that ends at aFrom is called: a '(' follows, after any whitespace.
+bool CallFollows( const std::wstring& aText, size_t aFrom )
+{
+    while( aFrom < aText.size() && ExpressionWhitespace( aText[aFrom] ) )
+        ++aFrom;
+    return aFrom < aText.size() && aText[aFrom] == L'(';
+}
 
-// The position after the brace that closes the one at aOpen, or the end of an unclosed text.
-size_t AfterClosingBrace( const std::wstring& aText, size_t aOpen )
+std::string Utf8( const std::wstring& aText, size_t aBegin, size_t aEnd )
+{
+    return wxString( aText.substr( aBegin, aEnd - aBegin ) ).utf8_string();
+}
+
+// The position of the brace that closes the one at aOpen, counting every brace; npos when
+// none does.
+size_t ClosingBrace( const std::wstring& aText, size_t aOpen )
 {
     int depth = 0;
     for( size_t i = aOpen; i < aText.size(); ++i )
     {
         if( aText[i] == L'{' ) ++depth;
-        else if( aText[i] == L'}' && --depth == 0 ) return i + 1;
+        else if( aText[i] == L'}' && --depth == 0 ) return i;
+    }
+    return std::wstring::npos;
+}
+
+// The position after the brace that closes the one at aOpen, or the end of an unclosed text.
+size_t AfterClosingBrace( const std::wstring& aText, size_t aOpen )
+{
+    const size_t close = ClosingBrace( aText, aOpen );
+    return close == std::wstring::npos ? aText.size() : close + 1;
+}
+
+// The position after the quoted string that starts at aQuote, where a backslash escapes the
+// character after it, as KiCad's expression reader reads it; the end of an unclosed string.
+size_t AfterString( const std::wstring& aText, size_t aQuote )
+{
+    size_t i = aQuote + 1;
+    while( i < aText.size() && aText[i] != aText[aQuote] )
+        i += aText[i] == L'\\' && i + 1 < aText.size() ? 2 : 1;
+    return std::min( aText.size(), i + 1 );
+}
+
+// Where the expression that opens at aOpen ("@{") ends as far as KiCad's evaluator reads it:
+// at the brace that closes it counting every brace (it evaluates each expression on its own),
+// or where its tokens close it, skipping quoted strings (it reads the whole text),
+// whichever is further.
+size_t ExpressionEnd( const std::wstring& aText, size_t aOpen )
+{
+    int level = 1;
+    size_t i = aOpen + 2;
+    while( i < aText.size() && level > 0 )
+    {
+        if( ( aText[i] == L'@' || aText[i] == L'$' ) && i + 1 < aText.size() && aText[i + 1] == L'{' )
+        {
+            ++level;
+            i += 2;
+        }
+        else if( aText[i] == L'}' )
+        {
+            --level;
+            ++i;
+        }
+        else if( aText[i] == L'"' || aText[i] == L'\'' )
+        {
+            i = AfterString( aText, i );
+        }
+        else
+        {
+            ++i;
+        }
+    }
+    return std::max( i, AfterClosingBrace( aText, aOpen + 1 ) );
+}
+
+// The functions KiCad's evaluator can call when it evaluates aText, other than the pure ones,
+// added to aCalls. A function that reads outside the design counts wherever a '(' follows its
+// name in a text that evaluates an expression, also in a quoted string or beside the
+// expression: after a number KiCad's reader takes letters and quote marks as a unit, so
+// neither the extent of a quoted string nor that of an expression can hide one. Any other
+// name that a '(' follows in an expression counts outside quoted strings and variable
+// references KiCad left unresolved: a function KiCad does not know as one of the design alone
+// may read outside it too. This can find more calls than KiCad makes, never fewer.
+void AddCalls( const wxString& aText, std::set<std::string>& aCalls )
+{
+    const std::wstring text = aText.ToStdWstring();
+    if( text.find( L"@{" ) == std::wstring::npos )
+        return;
+    for( size_t i = 0; i < text.size(); ++i )
+    {
+        size_t end = i;
+        if( text.compare( i, VCS_FUNCTIONS.size(), VCS_FUNCTIONS ) == 0 )
+        {
+            end = i + VCS_FUNCTIONS.size();
+            while( end < text.size() && IdentifierPart( text[end] ) ) ++end;
+        }
+        else
+        {
+            for( std::wstring_view name : OUTSIDE_FUNCTIONS )
+                if( text.compare( i, name.size(), name ) == 0
+                    && ( i + name.size() == text.size() || !IdentifierPart( text[i + name.size()] ) ) )
+                    end = i + name.size();
+        }
+        if( end > i && CallFollows( text, end ) )
+            aCalls.insert( Utf8( text, i, end ) );
+    }
+    // Each expression as KiCad's evaluator takes them in turn: after one whose braces close, the
+    // next that opens after its closing brace.
+    for( size_t open = text.find( L"@{" ); open != std::wstring::npos; )
+    {
+        const size_t end = ExpressionEnd( text, open );
+        const size_t close = ClosingBrace( text, open + 1 );
+        const size_t next = close == std::wstring::npos ? open + 2 : close + 1;
+        for( size_t i = open + 2; i < end; )
+        {
+            if( text[i] == L'"' || text[i] == L'\'' )
+            {
+                i = AfterString( text, i );
+            }
+            else if( text[i] == L'$' && i + 1 < text.size() && text[i + 1] == L'{' )
+            {
+                i = AfterClosingBrace( text, i + 1 );
+            }
+            else if( IdentifierStart( text[i] ) && !IdentifierPart( text[i - 1] ) )
+            {
+                size_t after = i;
+                while( after < text.size() && IdentifierPart( text[after] ) ) ++after;
+                std::string name = Utf8( text, i, after );
+                if( CallFollows( text, after ) && !PURE_EXPRESSION_FUNCTIONS.contains( name ) )
+                    aCalls.insert( std::move( name ) );
+                i = after;
+            }
+            else
+            {
+                ++i;
+            }
+        }
+        open = text.find( L"@{", next );
+    }
+}
+
+// The end of the name of the variable reference whose name starts at aBegin (after "${"), as
+// ExpandTextVars reads it: at the brace that closes it, where the marker of an escaped
+// reference or expression keeps its own closing brace.
+size_t ReferenceEnd( const std::wstring& aText, size_t aBegin )
+{
+    int depth = 1;
+    size_t i = aBegin;
+    while( i < aText.size() )
+    {
+        bool escaped = false;
+        for( std::wstring_view prefix : ESCAPE_MARKERS )
+        {
+            if( aText.compare( i, prefix.size(), prefix ) != 0 ) continue;
+            i += prefix.size();
+            for( int inner = 1; i < aText.size() && inner > 0; ++i )
+            {
+                if( aText[i] == L'{' ) ++inner;
+                else if( aText[i] == L'}' ) --inner;
+            }
+            escaped = true;
+            break;
+        }
+        if( escaped ) continue;
+        if( aText[i] == L'{' ) ++depth;
+        else if( aText[i] == L'}' && --depth == 0 ) return i;
+        ++i;
     }
     return aText.size();
 }
 
-// The names of the functions called in aText[aBegin, aEnd): an identifier followed by '('.
-// Inside an expression, a variable reference ${...} is replaced before evaluation, so its
-// own name is no call (aSkipReferences). The search is lexical: a quoted string counts
-// too, so it can find more than KiCad evaluates, never less.
-std::vector<std::string> CallNames( const std::wstring& aText, size_t aBegin, size_t aEnd, bool aSkipReferences )
+// A variable whose name holds a variable or an expression (${REF:UNIT(@{${ROW}-1})}) is looked
+// up after KiCad expands the name's variables with the same resolver and evaluates the name's
+// expressions (ExpandTextVars), so those expressions are evaluated too. Every reference counts,
+// also one nested in another or escaped, and its name to the further of the ends KiCad's
+// readers give it: this can find more than KiCad evaluates, never less.
+void ReadNameExpressions( const wxString& aText, const RESOLVER& aResolver, int aFlags, TEXT_READS& aReads )
 {
-    std::vector<std::string> names;
-    size_t i = aBegin;
-    while( i < aEnd )
+    const std::wstring text = aText.ToStdWstring();
+    for( size_t open = text.find( L"${" ); open != std::wstring::npos; open = text.find( L"${", open + 2 ) )
     {
-        if( aSkipReferences && aText[i] == L'$' && i + 1 < aEnd && aText[i + 1] == L'{' )
-        {
-            i = std::min( aEnd, AfterClosingBrace( aText, i + 1 ) );
+        const size_t after = AfterClosingBrace( text, open + 1 );
+        const size_t end = std::max( after > open + 2 && text[after - 1] == L'}' ? after - 1 : after,
+                                     ReferenceEnd( text, open + 2 ) );
+        const wxString name( text.substr( open + 2, end - ( open + 2 ) ) );
+        if( !name.Contains( wxS( "${" ) ) && !name.Contains( wxS( "@{" ) ) )
             continue;
-        }
-        if( IdentifierStart( aText[i] ) && ( i == aBegin || !IdentifierPart( aText[i - 1] ) ) )
+        const wxString expanded = ExpandTextVars( name, &aResolver, aFlags );
+        if( expanded.Contains( wxS( "@{" ) ) )
         {
-            size_t end = i;
-            while( end < aEnd && IdentifierPart( aText[end] ) ) ++end;
-            size_t next = end;
-            while( next < aEnd && ( aText[next] == L' ' || aText[next] == L'\t' ) ) ++next;
-            if( next < aEnd && aText[next] == L'(' )
-                names.push_back( wxString( aText.substr( i, end - i ) ).utf8_string() );
-            i = end;
-            continue;
+            aReads.evaluates = true;
+            AddCalls( expanded, aReads.calls );
         }
-        ++i;
-    }
-    return names;
-}
-
-// The @{...} expressions of one text: the contents of each, and whether a value substituted
-// into the text can become part of an expression: an expression that refers to a variable
-// or field (${...}), text "@${...}" whose substituted value starts an expression, or a value
-// ending in '@' that starts one in the text it is substituted into. An escaped \@{ is text.
-struct EXPRESSION_SPANS
-{
-    std::vector<std::pair<size_t, size_t>> spans;
-    bool substitutes = false;
-};
-
-EXPRESSION_SPANS ExpressionSpans( const std::wstring& aText )
-{
-    EXPRESSION_SPANS result;
-    for( size_t i = 0; i + 1 < aText.size(); ++i )
-    {
-        if( aText[i] != L'@' || ( i > 0 && aText[i - 1] == L'\\' ) ) continue;
-        if( aText[i + 1] == L'{' )
-        {
-            const size_t after = AfterClosingBrace( aText, i + 1 );
-            const size_t end = after > i + 2 && aText[after - 1] == L'}' ? after - 1 : after;
-            result.spans.emplace_back( i + 2, end );
-            if( std::wstring_view( aText ).substr( i + 2, end - ( i + 2 ) ).find( L"${" ) != std::wstring_view::npos )
-                result.substitutes = true;
-            i = after - 1;
-        }
-        else if( aText[i + 1] == L'$' && i + 2 < aText.size() && aText[i + 2] == L'{' )
-        {
-            result.substitutes = true;
-        }
-    }
-    if( !aText.empty() && aText.back() == L'@' ) result.substitutes = true;
-    return result;
-}
-
-// What the texts a check reads take from outside the design.
-struct TEXT_SCAN
-{
-    std::set<std::string> variables;           // Live text variables a text can show.
-    std::set<std::string> expressionVariables; // Live text variables an expression can read.
-    std::set<std::string> calls;               // Functions an expression calls, other than the pure ones.
-    bool expressions = false;                  // A text evaluates an expression.
-};
-
-// The names a text refers to with ${NAME}. A reference whose name is built from another
-// reference or an expression (${${NAME}}, ${REF:UNIT(${ROW})}) can name any definition
-// (aAnyName). An escaped \${ is text.
-void ReferencedNames( const std::wstring& aText, std::vector<wxString>& aNames, bool& aAnyName )
-{
-    for( size_t i = 0; i + 1 < aText.size(); ++i )
-    {
-        if( aText[i] != L'$' || aText[i + 1] != L'{' || ( i > 0 && aText[i - 1] == L'\\' ) ) continue;
-        const size_t after = AfterClosingBrace( aText, i + 1 );
-        const size_t end = after > i + 2 && aText[after - 1] == L'}' ? after - 1 : after;
-        const std::wstring name = aText.substr( i + 2, end - ( i + 2 ) );
-        if( name.find( L"${" ) != std::wstring::npos || name.find( L"@{" ) != std::wstring::npos ) aAnyName = true;
-        else aNames.emplace_back( name );
-        i = after - 1;
     }
 }
 
-// Scans the texts a check lays out or resolves (aSources) and the definitions their variable
-// references reach, by name and transitively: project text variables, board properties,
-// title-block fields and variant descriptions (object fields are sources themselves). A
-// reference whose name is built at resolution time, or an expression that builds text (it
-// quotes a string, which can form a reference), can reach every definition. A value
-// substituted into an expression becomes part of it, so then every reachable text counts for
-// the functions that read outside the design. The search is by name and lexical: it can find
-// more than the texts show, never less.
-TEXT_SCAN ScanTexts( const std::vector<wxString>& aSources,
-                     const std::multimap<wxString, wxString>& aDefinitions )
+void NoteLiveVariable( const wxString& aToken, TEXT_READS& aReads )
 {
-    TEXT_SCAN scan;
-    std::vector<std::wstring> reachable;
-    for( const wxString& text : aSources ) reachable.push_back( text.ToStdWstring() );
-    std::set<wxString> followed;
-    bool everyDefinition = false;
-    for( size_t index = 0; index < reachable.size() && !everyDefinition; ++index )
+    for( const char* name : CAPTURED_LIVE_TEXT )
+        if( aToken == name ) aReads.variables.insert( name );
+    for( const char* name : TIME_OF_DAY_TEXT )
+        if( aToken == name ) aReads.variables.insert( name );
+}
+
+// The title-block field a text variable names, as TITLE_BLOCK::TextVarResolver reads it.
+std::optional<wxString> TitleBlockField( const TITLE_BLOCK& aTitles, const wxString& aToken )
+{
+    if( aToken.IsSameAs( wxS( "ISSUE_DATE" ) ) ) return aTitles.GetDate();
+    if( aToken.IsSameAs( wxS( "REVISION" ) ) ) return aTitles.GetRevision();
+    if( aToken.IsSameAs( wxS( "TITLE" ) ) ) return aTitles.GetTitle();
+    if( aToken.IsSameAs( wxS( "COMPANY" ) ) ) return aTitles.GetCompany();
+    if( aToken.Len() == 8 && aToken.StartsWith( wxS( "COMMENT" ) ) )
     {
-        std::vector<wxString> names;
-        ReferencedNames( reachable[index], names, everyDefinition );
-        for( const auto& [begin, end] : ExpressionSpans( reachable[index] ).spans )
-            if( std::wstring_view( reachable[index] ).substr( begin, end - begin ).find_first_of( L"\"'" )
-                != std::wstring_view::npos )
-                everyDefinition = true;
-        for( const wxString& name : names )
+        const wxChar last = aToken.Last();
+        if( last >= '1' && last <= '9' )
+            return aTitles.GetComment( last - '1' );
+    }
+    return std::nullopt;
+}
+
+// aResolver, recording the live variables a resolution reads, and following a title-block
+// field as TITLE_BLOCK::TextVarResolver gives it: with the field's own variables expanded by
+// the project's resolver, which evaluates the expressions in those variables' names.
+RESOLVER Reading( const BOARD& aBoard, RESOLVER aResolver, int aFlags, TEXT_READS& aReads )
+{
+    return [&aBoard, resolver = std::move( aResolver ), aFlags, &aReads]( wxString* aToken ) -> bool
+    {
+        NoteLiveVariable( *aToken, aReads );
+        const PROJECT* project = aBoard.GetProject();
+        const std::optional<wxString> field = TitleBlockField( aBoard.GetTitleBlock(), *aToken );
+        if( field && project && aReads.titleFields.insert( *aToken ).second )
         {
-            if( !followed.insert( name ).second ) continue;
-            const auto [first, last] = aDefinitions.equal_range( name );
-            for( auto definition = first; definition != last; ++definition )
-                reachable.push_back( definition->second.ToStdWstring() );
+            const RESOLVER projectResolver = [project, &aReads]( wxString* aName ) -> bool
+            {
+                NoteLiveVariable( *aName, aReads );
+                return project->TextVarResolver( aName );
+            };
+            ReadNameExpressions( *field, projectResolver, aFlags, aReads );
+            ExpandTextVars( *field, &projectResolver, aFlags );
         }
-    }
-    if( everyDefinition )
-    {
-        reachable.resize( aSources.size() );
-        for( const auto& [name, value] : aDefinitions ) reachable.push_back( value.ToStdWstring() );
-    }
-    auto liveNames = [&]( std::wstring_view aText, std::set<std::string>& aFound )
-    {
-        auto find = [&]( const char* aName )
-        {
-            if( aText.find( wxString( aName ).ToStdWstring() ) != std::wstring_view::npos ) aFound.insert( aName );
-        };
-        for( const char* name : CAPTURED_LIVE_TEXT ) find( name );
-        for( const char* name : TIME_OF_DAY_TEXT ) find( name );
+        return resolver( aToken );
     };
-    bool substitutes = false;
-    for( const std::wstring& text : reachable )
-    {
-        liveNames( text, scan.variables );
-        const EXPRESSION_SPANS found = ExpressionSpans( text );
-        substitutes |= found.substitutes;
-        for( const auto& [begin, end] : found.spans )
-        {
-            scan.expressions = true;
-            liveNames( std::wstring_view( text ).substr( begin, end - begin ), scan.expressionVariables );
-            for( std::string& name : CallNames( text, begin, end, true ) )
-                if( !PURE_EXPRESSION_FUNCTIONS.contains( name ) ) scan.calls.insert( std::move( name ) );
-        }
-    }
-    if( substitutes )
-    {
-        scan.expressions = true;
-        for( const std::wstring& text : reachable )
-        {
-            liveNames( text, scan.expressionVariables );
-            for( std::string& name : CallNames( text, 0, text.size(), false ) )
-                if( ReadsOutsideTheDesign( name ) ) scan.calls.insert( std::move( name ) );
-        }
-    }
-    return scan;
 }
 
-// Every text of the board a check lays out: the texts, fields, dimensions, table cells and
-// barcodes of the board and its footprints, and the field values of every footprint variant.
-std::vector<wxString> BoardTexts( const BOARD& aBoard )
+// Resolves aText as KiCad resolves a board text (ResolveTextVars): expand its variables, then
+// evaluate its expressions, again while the result holds either, and records what that reads
+// from outside the design. It evaluates only when every call is to a pure function or today(),
+// whose day the check captures, so each further round reads the text KiCad reads: an
+// expression that a variable or another expression builds is found as KiCad evaluates it.
+void ReadResolution( wxString aText, const RESOLVER& aResolver, TEXT_READS& aReads )
 {
-    std::vector<wxString> texts;
-    auto add = [&]( const BOARD_ITEM* aItem )
+    const int maxDepth = ADVANCED_CFG::GetCfg().m_ResolveTextRecursionDepth;
+    EXPRESSION_EVALUATOR evaluator;
+    for( int depth = 1; depth <= maxDepth && ( aText.Contains( wxS( "${" ) ) || aText.Contains( wxS( "@{" ) ) );
+         ++depth )
     {
-        if( const auto* text = dynamic_cast<const EDA_TEXT*>( aItem ) ) texts.push_back( text->GetText() );
-        else if( aItem->Type() == PCB_BARCODE_T ) texts.push_back( static_cast<const PCB_BARCODE*>( aItem )->GetText() );
-        if( aItem->Type() == PCB_FOOTPRINT_T )
-            for( const auto& [name, variant] : static_cast<const FOOTPRINT*>( aItem )->GetVariants() )
-                for( const auto& [field, value] : variant.GetFields() ) texts.push_back( value );
+        ReadNameExpressions( aText, aResolver, 0, aReads );
+        if( aReads.Volatile() )
+            return;
+        aText = ExpandTextVars( aText, &aResolver );
+        if( !aText.Contains( wxS( "@{" ) ) )
+            continue;
+        aReads.evaluates = true;
+        AddCalls( aText, aReads.calls );
+        if( aReads.Volatile() )
+            return;
+        aText = evaluator.Evaluate( aText );
+    }
+}
+
+// The resolver KiCad gives a board text's variables (PCB_TEXT, PCB_FIELD, PCB_TEXTBOX and
+// PCB_TABLECELL::GetShownText; a barcode's text is a PCB_TEXT on the barcode's layer): a table
+// cell's position, the item's layer, then its footprint's variables, then the board's.
+RESOLVER ItemResolver( const BOARD_ITEM& aItem )
+{
+    const FOOTPRINT* footprint = aItem.GetParentFootprint();
+    const BOARD* board = aItem.GetBoard();
+    const PCB_TABLECELL* cell =
+            aItem.Type() == PCB_TABLECELL_T ? static_cast<const PCB_TABLECELL*>( &aItem ) : nullptr;
+    return [&aItem, footprint, board, cell]( wxString* aToken ) -> bool
+    {
+        if( cell && aToken->IsSameAs( wxT( "ROW" ) ) )
+        {
+            *aToken = wxString::Format( wxT( "%d" ), cell->GetRow() + 1 );
+            return true;
+        }
+        if( cell && aToken->IsSameAs( wxT( "COL" ) ) )
+        {
+            *aToken = wxString::Format( wxT( "%d" ), cell->GetColumn() + 1 );
+            return true;
+        }
+        if( cell && aToken->IsSameAs( wxT( "ADDR" ) ) )
+        {
+            *aToken = cell->GetAddr();
+            return true;
+        }
+        if( aToken->IsSameAs( wxT( "LAYER" ) ) )
+        {
+            *aToken = aItem.GetLayerName();
+            return true;
+        }
+        if( footprint && footprint->ResolveTextVar( aToken, 1 ) )
+            return true;
+        return board && board->ResolveTextVar( aToken, 1 );
+    };
+}
+
+// Every text of the board a check lays out, with the item whose resolver KiCad gives it: the
+// texts, fields, dimensions, table cells and barcodes of the board and its footprints, and a
+// field's value in every footprint variant.
+void ForEachBoardText( const BOARD& aBoard, const std::function<void( const BOARD_ITEM&, const wxString& )>& aVisit )
+{
+    auto visit = [&]( const BOARD_ITEM* aItem )
+    {
+        if( const auto* text = dynamic_cast<const EDA_TEXT*>( aItem ) )
+            aVisit( *aItem, text->EDA_TEXT::GetShownText( true, 0 ) );
+        else if( aItem->Type() == PCB_BARCODE_T )
+            aVisit( *aItem, UnescapeString( static_cast<const PCB_BARCODE*>( aItem )->GetText() ) );
+        if( aItem->Type() != PCB_FOOTPRINT_T )
+            return;
+        const auto* footprint = static_cast<const FOOTPRINT*>( aItem );
+        for( const auto& [name, variant] : footprint->GetVariants() )
+        {
+            for( const auto& [field, value] : variant.GetFields() )
+            {
+                const PCB_FIELD* owner = footprint->GetField( field );
+                aVisit( owner ? static_cast<const BOARD_ITEM&>( *owner ) : *aItem, UnescapeString( value ) );
+            }
+        }
     };
     for( BOARD_ITEM* item : aBoard.GetItemSet() )
     {
-        add( item );
-        item->RunOnChildren( add, RECURSE_MODE::RECURSE );
+        visit( item );
+        item->RunOnChildren( visit, RECURSE_MODE::RECURSE );
     }
-    return texts;
 }
 
-// The definitions a text reaches through a variable reference, by the name it refers to.
-std::multimap<wxString, wxString> TextDefinitions( const BOARD& aBoard )
+// What the board's texts read from outside the design as KiCad resolves them.
+TEXT_READS ReadBoardTexts( const BOARD& aBoard )
 {
-    std::multimap<wxString, wxString> definitions;
-    if( const PROJECT* project = aBoard.GetProject() )
-        for( const auto& [name, value] : project->GetTextVars() ) definitions.emplace( name, value );
-    for( const auto& [name, value] : aBoard.GetProperties() ) definitions.emplace( name, value );
-    const TITLE_BLOCK& titles = aBoard.GetTitleBlock();
-    definitions.emplace( wxS( "TITLE" ), titles.GetTitle() );
-    definitions.emplace( wxS( "ISSUE_DATE" ), titles.GetDate() );
-    definitions.emplace( wxS( "REVISION" ), titles.GetRevision() );
-    definitions.emplace( wxS( "COMPANY" ), titles.GetCompany() );
-    for( int comment = 0; comment < 9; ++comment )
-        definitions.emplace( wxString::Format( wxS( "COMMENT%d" ), comment + 1 ), titles.GetComment( comment ) );
-    // Every variant's description, not only the current variant's.
-    for( const wxString& variant : aBoard.GetVariantNames() )
-        definitions.emplace( wxS( "VARIANT_DESC" ), aBoard.GetVariantDescription( variant ) );
-    return definitions;
+    TEXT_READS reads;
+    ForEachBoardText( aBoard, [&]( const BOARD_ITEM& aItem, const wxString& aText )
+    {
+        if( !aText.Contains( wxS( "${" ) ) && !aText.Contains( wxS( "@{" ) ) )
+            return;
+        TEXT_READS text;
+        ReadResolution( aText, Reading( aBoard, ItemResolver( aItem ), 0, text ), text );
+        reads.Add( text );
+    } );
+    return reads;
 }
 
-TEXT_SCAN ScanBoardTexts( const BOARD& aBoard )
+// The resolver the check's drawing-sheet test gives the sheet's texts: that of
+// DS_DRAW_ITEM_LIST::BuildFullText with what DRC_TEST_PROVIDER_MISC sets (page 1 of 1 of
+// "dummyFilename", sheet "dummySheet" on layer "dummyLayer", no sheet path, variant or board
+// properties), the board's paper, title block and project. aTitleBlock is false while it
+// expands a title-block field's value again, as KiCad does.
+RESOLVER SheetResolver( const BOARD& aBoard, bool aTitleBlock, TEXT_READS& aReads )
 {
-    return ScanTexts( BoardTexts( aBoard ), TextDefinitions( aBoard ) );
+    return [&aBoard, aTitleBlock, &aReads]( wxString* aToken ) -> bool
+    {
+        const PROJECT* project = aBoard.GetProject();
+        bool updated = true;
+        if( aToken->IsSameAs( wxT( "KICAD_VERSION" ) ) && PgmOrNull() )
+            *aToken = wxString::Format( wxT( "%s %s" ), wxT( "KiCad E.D.A." ), GetBaseVersion() );
+        else if( aToken->IsSameAs( wxT( "#" ) ) || aToken->IsSameAs( wxT( "##" ) ) )
+            *aToken = wxT( "1" );
+        else if( aToken->IsSameAs( wxT( "SHEETNAME" ) ) )
+            *aToken = wxT( "dummySheet" );
+        else if( aToken->IsSameAs( wxT( "SHEETPATH" ) ) || aToken->IsSameAs( wxT( "VARIANT" ) )
+                 || aToken->IsSameAs( wxT( "VARIANT_DESC" ) ) )
+            *aToken = wxEmptyString;
+        else if( aToken->IsSameAs( wxT( "FILENAME" ) ) )
+            *aToken = wxFileName( wxT( "dummyFilename" ) ).GetFullName();
+        else if( aToken->IsSameAs( wxT( "FILEPATH" ) ) )
+        {
+            *aToken = wxFileName( wxT( "dummyFilename" ) ).GetFullPath();
+            return true;
+        }
+        else if( aToken->IsSameAs( wxT( "PAPER" ) ) )
+            *aToken = aBoard.GetPageSettings().GetTypeAsString();
+        else if( aToken->IsSameAs( wxT( "LAYER" ) ) )
+            *aToken = wxT( "dummyLayer" );
+        else
+            updated = false;
+
+        if( updated )
+        {
+            if( project )
+            {
+                const RESOLVER projectResolver = Reading( aBoard,
+                        [project]( wxString* aName ) { return project->TextVarResolver( aName ); }, FOR_ERC_DRC,
+                        aReads );
+                *aToken = ExpandTextVars( *aToken, &projectResolver, FOR_ERC_DRC );
+            }
+            return true;
+        }
+        if( aTitleBlock && aBoard.GetTitleBlock().TextVarResolver( aToken, project, FOR_ERC_DRC ) )
+        {
+            const RESOLVER again = Reading( aBoard, SheetResolver( aBoard, false, aReads ), FOR_ERC_DRC, aReads );
+            ReadNameExpressions( *aToken, again, FOR_ERC_DRC, aReads );
+            *aToken = ExpandTextVars( *aToken, &again, FOR_ERC_DRC );
+            return true;
+        }
+        return project && project->TextVarResolver( aToken );
+    };
 }
 
-// The drawing sheet's texts. The check resolves them to report variables they leave
-// unresolved; nothing else of the sheet reaches a finding.
-std::vector<wxString> DrawingSheetTexts( const DS_DATA_MODEL& aDrawing )
+// The drawing sheet's texts, which the check lays out to report the variables they leave
+// unresolved; nothing else of the sheet reaches a finding. An empty sheet that may not be
+// empty is laid out as KiCad's default sheet (DS_DRAW_ITEM_LIST::BuildDrawItemsList).
+std::vector<wxString> DrawingSheetTexts( DS_DATA_MODEL& aDrawing )
 {
+    if( aDrawing.GetCount() == 0 && !aDrawing.VoidListAllowed() )
+    {
+        DS_DATA_MODEL defaults;
+        defaults.LoadDrawingSheet( wxEmptyString, nullptr );
+        return defaults.GetCount() == 0 ? std::vector<wxString>() : DrawingSheetTexts( defaults );
+    }
     std::vector<wxString> texts;
     for( unsigned index = 0; index < aDrawing.GetCount(); ++index )
     {
@@ -350,6 +598,33 @@ std::vector<wxString> DrawingSheetTexts( const DS_DATA_MODEL& aDrawing )
             texts.push_back( static_cast<const DS_DATA_ITEM_TEXT*>( item )->m_TextBase );
     }
     return texts;
+}
+
+// What the drawing sheet's texts read from outside the design, as the check resolves them:
+// BuildFullText expands a text's variables and then evaluates its expressions once. Plain
+// variables always resolve there, whatever their value; the live variables a text reads count
+// only when the text evaluates an expression, whose result they can decide.
+TEXT_READS ReadDrawingSheetTexts( DS_DATA_MODEL& aDrawing, const BOARD& aBoard )
+{
+    TEXT_READS reads;
+    for( const wxString& base : DrawingSheetTexts( aDrawing ) )
+    {
+        if( !base.Contains( wxS( "${" ) ) && !base.Contains( wxS( "@{" ) ) )
+            continue;
+        TEXT_READS text;
+        const RESOLVER resolver = Reading( aBoard, SheetResolver( aBoard, true, text ), FOR_ERC_DRC, text );
+        ReadNameExpressions( base, resolver, FOR_ERC_DRC, text );
+        const wxString expanded = ExpandTextVars( base, &resolver, FOR_ERC_DRC );
+        if( expanded.Contains( wxS( "@{" ) ) )
+        {
+            text.evaluates = true;
+            AddCalls( expanded, text.calls );
+        }
+        if( !text.evaluates )
+            text.variables.clear();
+        reads.Add( text );
+    }
+    return reads;
 }
 
 // "a(), b() and c()" style list of names.
@@ -433,12 +708,12 @@ nlohmann::json ProjectInputs( const BOARD& aBoard )
     result["effective_exclusions"] = nlohmann::json::array();
     for( const auto& exclusion : PCB_PROJECT_EDITOR_STATE::Exclusions( aBoard ) )
         result["effective_exclusions"].push_back( exclusion );
-    // The date or revision the board's texts show, only when they can show one, so that
-    // a board without them does not go stale at midnight: a date or revision variable, or
-    // the day an expression reads through today(). Every read compares them again. The time
-    // of day and expressions that read the clock, chance or the repository are no captured
-    // value (PCB_DRC_RUN_INPUTS::Gaps).
-    const TEXT_SCAN texts = ScanBoardTexts( aBoard );
+    // The date or revision the board's texts show, only when KiCad reads one resolving
+    // them, so that a board without them does not go stale at midnight: a date or revision
+    // variable, or the day an expression reads through today(). Every read compares them
+    // again. The time of day and expressions that read the clock, chance or the repository
+    // are no captured value (PCB_DRC_RUN_INPUTS::Gaps).
+    const TEXT_READS texts = ReadBoardTexts( aBoard );
     for( const char* name : CAPTURED_LIVE_TEXT )
         if( texts.variables.contains( name ) ) result["live_text"][name] = LiveTextValue( aBoard, name );
     if( texts.calls.contains( std::string( TODAY ) ) ) result["live_text"]["today()"] = TodayValue();
@@ -536,22 +811,17 @@ std::unique_ptr<PCB_DRC_RUN_INPUTS> PCB_DRC_RUN_INPUTS::Capture(
     const KIID identity = aBoard.m_Uuid;
     auto result = std::unique_ptr<PCB_DRC_RUN_INPUTS>( new PCB_DRC_RUN_INPUTS );
     result->m_projectBaseline.m_settings = ProjectInputs( aBoard );
-    const TEXT_SCAN texts = ScanBoardTexts( aBoard );
+    const TEXT_READS texts = ReadBoardTexts( aBoard );
     for( const char* name : TIME_OF_DAY_TEXT )
         if( texts.variables.contains( name ) ) result->m_timeOfDayText.emplace_back( name );
     for( const std::string& name : texts.calls )
         if( name != TODAY ) result->m_volatileExpressions.push_back( name + "()" );
     // The drawing sheet's expressions: the check reports the variables a sheet text leaves
     // unresolved, and an expression that reads the day, the time, chance or the repository
-    // can change that while the check's copy of the sheet stays the same. Plain variables
-    // always resolve there, whatever their value.
-    const TEXT_SCAN sheet = ScanTexts( DrawingSheetTexts( aContext.drawing ), TextDefinitions( aBoard ) );
-    if( sheet.expressions )
-    {
-        for( const std::string& name : sheet.calls ) result->m_drawingSheetExpressions.push_back( name + "()" );
-        for( const std::string& name : sheet.expressionVariables )
-            result->m_drawingSheetExpressions.push_back( "${" + name + "}" );
-    }
+    // can change that while the check's copy of the sheet stays the same.
+    const TEXT_READS sheet = ReadDrawingSheetTexts( aContext.drawing, aBoard );
+    for( const std::string& name : sheet.calls ) result->m_drawingSheetExpressions.push_back( name + "()" );
+    for( const std::string& name : sheet.variables ) result->m_drawingSheetExpressions.push_back( "${" + name + "}" );
     result->m_auxiliaryBaseline = PCB_DRC_AUXILIARY_BASELINE::Capture( aContext );
     if( aContext.routingSettings )
     {

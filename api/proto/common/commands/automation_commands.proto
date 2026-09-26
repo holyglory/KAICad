@@ -1095,6 +1095,10 @@ enum SchematicWiringDrawingSheetItemKind {
 message SchematicWiringDrawingSheetItem {
   SchematicWiringDrawingSheetItemKind kind = 1;
   kiapi.common.types.Box2 bounds = 2;
+  // For a line or a rectangle, the width of the pen the canvas strokes it with, centred on the
+  // bounds above, so that the stroke reaches half of it past them; zero for a text, polygon or
+  // bitmap, whose bounds already hold everything it draws.
+  int64 stroke_width_nm = 3;
 }
 
 // The drawing sheet KiCad draws on one sheet instance, built from its own drawing-sheet model at

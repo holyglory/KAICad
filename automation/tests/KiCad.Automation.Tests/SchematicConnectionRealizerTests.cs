@@ -170,6 +170,21 @@ public sealed class SchematicConnectionRealizerTests
             framed.Generated.Where(g => g.PlacedPinId == r2.PlacedPinId).Select(g => g.Role).ToArray(), "R2.1, inside the border, takes the join stub.");
         Assert.IsFalse(framed.Generated.Any(g => g.PlacedPinId == r1.PlacedPinId), "Nothing is drawn at R1.1.");
         Assert.AreEqual(island.NetId, framed.Diagnostics.Single(d => d.Code == SchematicConnectionErrors.ExistingNetNamedByRealization).NetId);
+        StringAssert.EndsWith(framed.Diagnostics.Single(d => d.Code == SchematicConnectionErrors.RealizationPageReservationsUnspecified).Message,
+            "so does every label stub and label.");
+        // Must-catch: drawing-sheet art (a text) over the room in front of R2.1 (34.92 mm from the page edge) leaves neither candidate
+        // a join stub or a label on its pin inside the border and clear of the title block, so the join is tried at the page inset
+        // alone, as without the preference: the first candidate takes its two-grid join stub, the batch is exactly the one an editor
+        // without a measured drawing sheet gets, and the sheet's diagnostic names that label as having no room inside the border.
+        var covered = WithDrawingSheet(scene, WithArt(Geometry.DefaultDrawingSheet(), new(20_000_000, 17_500_000, 34_800_000, 20_000_000)));
+        var inset = await covered.Realize();
+        CollectionAssert.AreEquivalent(new[] { GeneratedConnectionRole.StubWire, GeneratedConnectionRole.StubLabel },
+            inset.Generated.Where(g => g.PlacedPinId == island.JoinCandidates[0].PlacedPinId).Select(g => g.Role).ToArray(), "The first join candidate takes a join stub.");
+        CollectionAssert.AreEqual((await WithDrawingSheet(covered, null).Realize()).Operations.Select(o => o.ToByteString()).ToArray(),
+            inset.Operations.Select(o => o.ToByteString()).ToArray());
+        StringAssert.EndsWith(inset.Diagnostics.Single(d => d.Code == SchematicConnectionErrors.RealizationPageReservationsUnspecified).Message,
+            "so does every label stub and label that fits there; the label naming pin " + PinName(scene.Plan.Candidate!, island.JoinCandidates[0].Endpoint)
+            + "'s existing connection has no room inside the border clear of the title block and keeps only inside the page inset.");
     }
 
     [TestMethod]
@@ -451,6 +466,14 @@ public sealed class SchematicConnectionRealizerTests
         CollectionAssert.AreEqual(new[] { new SchematicConnectionRealizer.Box(20_000_000, 20_000_000, 35_000_000, 30_000_000),
             new SchematicConnectionRealizer.Box(100_000_000, 60_000_000, 200_000_000, 140_000_000),
             new SchematicConnectionRealizer.Box(177_000_000, 166_000_000, 285_000_000, 198_000_000) }, more.ToArray());
+        // The frame preference of label stubs reads the drawing sheet as KiCad paints it: the inside of the border up to the inner edge
+        // of its stroke, and the title block out to the outer edge of its lines (merged into one keep-out); a zone mark reaching the
+        // border's line from outside only touches that inside.
+        long half = Geometry.DefaultStrokeNm / 2;
+        var (painted, paintedArt) = SchematicConnectionRealizer.RouteArea(page, Geometry.DefaultDrawingSheet(), 0, strokes: true);
+        Assert.AreEqual(new SchematicConnectionRealizer.Box(12_000_000 + half, 12_000_000 + half, 285_000_000 - half, 198_000_000 - half), painted);
+        CollectionAssert.AreEqual(new[] { new SchematicConnectionRealizer.Box(177_000_000 - half, 166_000_000 - half, 285_000_000 + half, 198_000_000 + half) },
+            paintedArt.ToArray());
         // An editor that does not measure its drawing sheet: KiCad's default inner border and the bottom 50 mm kept for the title block.
         var (fallback, none) = SchematicConnectionRealizer.RouteArea(page, null, c);
         Assert.AreEqual(new SchematicConnectionRealizer.Box(12_000_000 + c, 12_000_000 + c, 285_000_000 - c, 160_000_000 - c), fallback);
@@ -523,12 +546,23 @@ public sealed class SchematicConnectionRealizerTests
         StringAssert.Contains(intoFrame[0], "is not inside the drawing sheet's frame");
         Assert.IsEmpty(SheetProblems(Moved(285_000_000 - c1 - clearLabel.R, up)), "A label may touch the frame shrunk by the clearance.");
         // Must-catch: two pins near the top border, leaving upwards: the label naming the connection would reach past the inner
-        // border at every stub length, so they are drawn with label stubs (which the page inset still admits) and say why.
+        // border at every stub length, so they fall back to label stubs and say why. The frame preference (ledger ped4439a665d260ef)
+        // puts each label on its pin, inside the border: a two-grid stub's label would end 0.065 mm inside the middle of the border's
+        // line, on the part of its 0.1524 mm stroke that reaches in, and every longer stub's further out (the page inset alone admits
+        // the two-grid stub). Guard: on a drawing sheet whose lines KiCad reported without their stroke, that label only touches the
+        // border and each pin keeps its two-grid stub.
         // Guard: one grid lower the label fits inside the border and the pins are routed.
         var (atTop, topRealization, _) = await Drawn(scene, new(80 * Grid, 13 * Grid), new(100 * Grid, 13 * Grid), (0, -1));
         Assert.AreEqual(ConnectionRealizationStrategy.LabelStub, atTop.Strategy);
         StringAssert.Contains(atTop.FallbackReason, "outside the drawing sheet's frame");
-        Assert.HasCount(2, Generated<SchematicLine>(topRealization));
+        Assert.IsEmpty(Generated<SchematicLine>(topRealization));
+        CollectionAssert.AreEqual(new[] { GeneratedConnectionRole.AnchorLabel, GeneratedConnectionRole.AnchorLabel }, topRealization.Generated.Select(g => g.Role).ToArray());
+        Assert.IsTrue(Generated<LocalLabel>(topRealization).All(l => l.Position.YNm == 13 * Grid && scene.Geometry.LabelBox(l).T >= 12_000_000 + Geometry.DefaultStrokeNm / 2));
+        var unstroked = Geometry.DefaultDrawingSheet();
+        foreach (var item in unstroked.Items) item.StrokeWidthNm = 0;
+        var (_, centreline, _) = await Drawn(WithDrawingSheet(scene, unstroked), new(80 * Grid, 13 * Grid), new(100 * Grid, 13 * Grid), (0, -1));
+        Assert.HasCount(2, Generated<SchematicLine>(centreline));
+        Assert.IsTrue(Generated<LocalLabel>(centreline).All(l => l.Position.YNm == 11 * Grid && scene.Geometry.LabelBox(l).T is > 12_000_000 and < 12_000_000 + Geometry.DefaultStrokeNm / 2));
         var (belowTop, belowRealization, belowMeasured) = await Drawn(scene, new(80 * Grid, 14 * Grid), new(100 * Grid, 14 * Grid), (0, -1));
         Assert.AreEqual(ConnectionRealizationStrategy.OrthogonalWire, belowTop.Strategy, belowTop.FallbackReason);
         Assert.IsEmpty(RoutedProblems(belowRealization, scene.Intent, belowMeasured, Policy));
@@ -639,6 +673,15 @@ public sealed class SchematicConnectionRealizerTests
         var outside = NativeSessionTests.LabelStubDrawingSheetProblems(sheetPath, sheetGeometry, [], [("A1 on a stub", Box(framed.Geometry.LabelBox(crossing)))]).Problems;
         Assert.HasCount(1, outside, string.Join("; ", outside));
         StringAssert.Contains(outside[0], "is not inside the drawing sheet's inner border");
+        // Must-catch for that check: KiCad strokes the border's line 0.1524 mm wide about the border it reports, so a label touching
+        // the middle of that line lies on the line, and so does one touching the middle of the title block's; half a stroke further
+        // off, each is clear.
+        long half = Geometry.DefaultStrokeNm / 2;
+        List<string> Against(Rect label) => NativeSessionTests.LabelStubDrawingSheetProblems(sheetPath, sheetGeometry, [], [("a label", Box(label))]).Problems;
+        StringAssert.Contains(Against(new(12_000_000, 60_000_000, 16_000_000, 61_000_000)).Single(), "is not inside the drawing sheet's inner border");
+        Assert.IsEmpty(Against(new(12_000_000 + half, 60_000_000, 16_000_000, 61_000_000)));
+        StringAssert.Contains(Against(new(120_000_000, 164_000_000, 180_000_000, 166_000_000)).Single(), "overlaps the drawing sheet's title block");
+        Assert.IsEmpty(Against(new(120_000_000, 164_000_000, 180_000_000, 166_000_000 - half)));
         // Guard: an editor that does not measure its drawing sheet gives nothing to prefer: every pin keeps its two-grid stub at the
         // page inset, exactly as the frozen §6.3 draws it, and the diagnostic says why.
         var (plain, _) = await WithDrawingSheet(scene, null).RealizeMeasured(new(0, 4));
@@ -693,6 +736,67 @@ public sealed class SchematicConnectionRealizerTests
         Assert.AreEqual(bAt.Y + Grid - 2 * Grid, StubOf(roomy, b.PlacedPinId).End.YNm);
         StringAssert.Contains(roomy.Diagnostics.Single(x => x.Code == SchematicConnectionErrors.RealizationPageReservationsUnspecified).Message,
             "so does every label stub and label.");
+    }
+
+    [TestMethod]
+    public async Task TheFramePreferenceNeverCostsARouteThePageInsetDraws()
+    {
+        // The frame preference must not cost a routed connection either (review of ledger ped4439a665d260ef): when a connection §7
+        // applies to falls back to label stubs on a sheet drawn with the preference, the sheet is also drawn at the page inset alone,
+        // and that drawing is kept when it routes a connection the other does not. Net S (drawn first) joins new TP3.1, pointing down,
+        // to R1.1's labelled connection, so TP3.1 gets a label stub. Net A joins new TP1.1 and TP2.1, pointing up ten grids apart
+        // below TP3.1, by one straight wire along the row of their escapes, exactly as long as the minimum spanning tree of their
+        // pins. Drawing-sheet art (a text) beside TP3.1's stub line, 3 to 9.5 mm in front of it, overlaps the labels of its 2, 3, 4
+        // and 6 grid stubs, so inside the border only the 8-grid stub fits, and its label lies across A's row.
+        var bench = new Bench();
+        Guid tp = bench.Part("TP", Passive("1")), r = bench.Part("R", Passive("1"), Passive("2"));
+        Guid tp1 = bench.Component(tp, "TP1"), tp2 = bench.Component(tp, "TP2"), tp3 = bench.Component(tp, "TP3"), r1 = bench.Component(r, "R1");
+        string wire = bench.Wire(BenchSheet.Root), label = bench.LocalLabel(BenchSheet.Root, "S");
+        var s = new CircuitNet(Guid.Parse("00000000-0000-4000-8000-0000000000a1"), "S", [new(r1, "1")]);
+        var a = new CircuitNet(Guid.Parse("00000000-0000-4000-8000-0000000000b2"), "A", [new(tp1, "1"), new(tp2, "1")]);
+        var state = WithFormatting(bench.State([s], new() { [s.Id] = [(BenchSheet.Root, wire), (BenchSheet.Root, label)] }));
+        var scene = Scene.Of(bench, state, design => WithNets(design, s with { Pins = [.. s.Pins, new(tp3, "1")] }, a));
+        var islands = scene.Intent.Screens.Single().Islands.OrderBy(i => i.NetId).ToArray();
+        CollectionAssert.AreEqual(new[] { "S", "A" }, islands.Select(i => i.LabelText).ToArray(), "S is drawn first.");
+        ConnectionPlacedPin PinOf(Guid component) => islands.SelectMany(i => i.Members).Single(m => m.Pin.Endpoint.ComponentId == component).Pin;
+        var q = PinOf(tp3);
+        var qAt = new Point(85 * Grid, 50 * Grid);
+        Lay(scene, q, qAt, (0, 1));
+        Lay(scene, PinOf(tp1), new(80 * Grid, 60 * Grid), (0, -1));
+        Lay(scene, PinOf(tp2), new(90 * Grid, 60 * Grid), (0, -1));
+        var framed = WithDrawingSheet(scene, WithArt(Geometry.DefaultDrawingSheet(), new(qAt.X + 200_000, qAt.Y + 3_000_000, qAt.X + 2_000_000, qAt.Y + 9_500_000)));
+        long StubLength(SchematicConnectionRealization realization)
+        {
+            var stub = StubOf(realization, q.PlacedPinId);
+            return Math.Abs(stub.End.YNm - stub.Start.YNm) / Grid;
+        }
+        string Reservations(SchematicConnectionRealization realization) =>
+            realization.Diagnostics.Single(d => d.Code == SchematicConnectionErrors.RealizationPageReservationsUnspecified).Message;
+        // Guard: with the contract's budgets A's wire goes round the label of TP3.1's 8-grid stub, so the drawing with the preference
+        // is kept: TP3.1's stub and label lie inside the border, clear of the art, and A is routed.
+        var (roomy, roomyMeasured) = await framed.RealizeMeasured();
+        Assert.AreEqual(ConnectionRealizationStrategy.OrthogonalWire, roomy.Outcomes.Single(o => o.NetId == a.Id).Strategy, roomy.Outcomes.Single(o => o.NetId == a.Id).FallbackReason);
+        Assert.AreEqual(8, StubLength(roomy));
+        StringAssert.EndsWith(Reservations(roomy), "so does every label stub and label.");
+        Assert.IsEmpty(RoutedProblems(roomy, framed.Intent, roomyMeasured, Policy));
+        // Must-catch: with a length budget of one spanning tree A's wire cannot go round that label, so with the preference A would
+        // fall back to label stubs, as the drawing before this review kept it. The sheet is drawn at the page inset alone instead:
+        // TP3.1 keeps its two-grid stub, A is routed straight along its row, the batch is exactly the one an editor without a
+        // measured drawing sheet gets, and the diagnostic names the connection the preference would have cost.
+        SchematicRoutingLimits tight = new(200_000, 1);
+        var (drawn, drawnMeasured) = await framed.RealizeMeasured(tight);
+        var outcome = drawn.Outcomes.Single(o => o.NetId == a.Id);
+        Assert.AreEqual(ConnectionRealizationStrategy.OrthogonalWire, outcome.Strategy, outcome.FallbackReason);
+        Assert.AreEqual(2, StubLength(drawn));
+        Assert.IsEmpty(RoutedProblems(drawn, framed.Intent, drawnMeasured, Policy));
+        StringAssert.EndsWith(Reservations(drawn), "label stubs only inside the page inset, because trying them inside the border first would have drawn net 'A' "
+            + "with label stubs instead of wires.");
+        var (unmeasured, _) = await WithDrawingSheet(framed, null).RealizeMeasured(tight);
+        CollectionAssert.AreEqual(unmeasured.Operations.Select(o => o.ToByteString()).ToArray(), drawn.Operations.Select(o => o.ToByteString()).ToArray(),
+            "The page inset alone draws exactly what an editor without a measured drawing sheet gets.");
+        // Determinism (I9): the choice between the two drawings is made the same way every time.
+        var (again, _) = await framed.RealizeMeasured(tight);
+        CollectionAssert.AreEqual(drawn.Operations.Select(o => o.ToByteString()).ToArray(), again.Operations.Select(o => o.ToByteString()).ToArray());
     }
 
     [TestMethod]
@@ -823,6 +927,10 @@ public sealed class SchematicConnectionRealizerTests
         Assert.IsTrue(Crossings(drawn).All(x => x < 86 * Grid || x > 100 * Grid), "A keeps clear of every stub length and label of TP3.1: "
             + string.Join(", ", Crossings(drawn)));
         Assert.IsEmpty(RoutedProblems(drawn, crowded.Intent, drawnMeasured, Policy));
+        // Those redraws run with the frame preference (ledger ped4439a665d260ef), whose drawing is kept because A is routed in it:
+        // TP3.1's stub and label lie inside the drawing sheet's inner border.
+        StringAssert.EndsWith(drawn.Diagnostics.Single(d => d.Code == SchematicConnectionErrors.RealizationPageReservationsUnspecified).Message,
+            "so does every label stub and label.");
         // Must-catch: when label stubs cannot draw TP3.1 either (junctions beside every stub end), the refusal is milestone 1's
         // own, from a drawing with no routes, after the redraw with TP3.1's room protected is refused again.
         var hopeless = scene;
@@ -1317,6 +1425,27 @@ public sealed class SchematicConnectionRealizerTests
         var occupied = scene.Edited(data => EditSheet(data, sheet, s => s.Pins.Add(existing.Clone())));
         var moved = SheetUpdates(await occupied.Realize()).Single().Pins.Single(p => p.Text.Text_ == "DATA");
         Assert.AreEqual(50_000_000 + 2 * Policy.SheetPinPitchNm, moved.Position.YNm);
+        // The frame preference (ledger ped4439a665d260ef): every slot is tried inside the drawing sheet's inner border and clear of
+        // its title block first, each slot at every stub length. Drawing-sheet art (a text) along the top of the edge, down to 55 mm
+        // and 30 mm out from it, overlaps the label of every slot whose label reaches above 55 mm at every length, so the new pin takes
+        // the first slot below it.
+        string RootReservations(SchematicConnectionRealization realization) => realization.Diagnostics.Single(d => d.Code == SchematicConnectionErrors.RealizationPageReservationsUnspecified
+            && d.Message.Contains(scene.Bench!.ScreenId(BenchSheet.Root).ToString("D"), StringComparison.Ordinal)).Message;
+        string sheetPinStub = "the stub of sheet pin 'DATA' on sheet symbol " + sheet.ToString("D");
+        var topArt = await WithDrawingSheet(scene, WithArt(Geometry.DefaultDrawingSheet(), new(120_000_000, 50_000_000, 149_800_000, 55_000_000))).Realize();
+        long below = Enumerable.Range(0, 40).Select(k => 50_000_000 + Policy.SheetPinPitchNm + k * Grid).First(y => y - Grid / 2 >= 55_000_000);
+        Assert.AreEqual(below, SheetUpdates(topArt).Single().Pins.Single(p => p.Text.Text_ == "DATA").Position.YNm);
+        Assert.IsFalse(RootReservations(topArt).Contains(sheetPinStub, StringComparison.Ordinal), RootReservations(topArt));
+        // Must-catch: art beside the whole edge leaves no slot inside the border, so the slots are tried at the page inset alone, as
+        // without the preference: the first slot, exactly the batch an editor without a measured drawing sheet gets, and the sheet's
+        // diagnostic names the sheet pin's stub.
+        var sideArt = WithDrawingSheet(scene, WithArt(Geometry.DefaultDrawingSheet(), new(140_000_000, 45_000_000, 149_800_000, 95_000_000)));
+        var besideArt = await sideArt.Realize();
+        Assert.AreEqual(50_000_000 + Policy.SheetPinPitchNm, SheetUpdates(besideArt).Single().Pins.Single(p => p.Text.Text_ == "DATA").Position.YNm);
+        CollectionAssert.AreEqual((await WithDrawingSheet(sideArt, null).Realize()).Operations.Select(o => o.ToByteString()).ToArray(),
+            besideArt.Operations.Select(o => o.ToByteString()).ToArray());
+        StringAssert.Contains(RootReservations(besideArt), sheetPinStub);
+        StringAssert.Contains(RootReservations(besideArt), "have no room inside the border clear of the title block and keep only inside the page inset.");
         // Must-catch: an obstacle along the whole left edge leaves no slot.
         await RequireRefusal(scene.Obstacle(new(140_000_000, 40_000_000, 149_999_900, 100_000_000)), SchematicConnectionErrors.RealizationNoFreeSheetPinSlot, "no free slot");
         // Must-catch: a sheet symbol too short for any slot.
@@ -1736,6 +1865,43 @@ public sealed class SchematicConnectionRealizerTests
         Assert.AreEqual((at.X, at.Y, at.X - 2 * Grid), (acrossWire.Start.XNm, acrossWire.Start.YNm, acrossWire.End.XNm));
         await RequireRefusal(Reaching(SchematicConnectionRealizer.PinTargetReachNm + 100), SchematicConnectionErrors.RealizationNoFreeStub,
             "new pin " + PinName(alone.Plan.Candidate!, stacked.Endpoint) + " sits on an existing connection");
+
+        // The frame preference (ledger ped4439a665d260ef) on that optional stub, with #LP0 and R5 moved to 15 grids from the page
+        // edge: every stub from R5.1 would carry the hierarchical label across the drawing sheet's inner border, while a label on the
+        // pin itself would lie inside it. §6.4 rule 5 refuses that label, because #LP0's bounds hold the pin R5.1 shares with it (a
+        // new pin is stacked only on another symbol's pin, so a label on the pin never replaces this stub). The two-grid stub the page
+        // inset admits carries the label, and the child sheet's diagnostic names it. Guard: two grids further in, the two-grid stub
+        // and its label lie inside the border, and nothing is named.
+        var carrierPin = alone.Intent.Screens.SelectMany(s => s.Islands).Single(i => i.ScreenId == alone.Bench!.ScreenId(BenchSheet.Child))
+            .Members.Single(m => m.Role == ConnectionMemberRole.PowerCarrier).Pin;
+        var stackedSymbol = alone.Plan.Candidate!.Schematic.Instances.First(x => Key(x) == stacked.SheetPathKey).Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor))
+            .Select(i => i.Unpack<SchematicSymbolInstance>()).Single(x => Guid.Parse(x.Id.Value) == stacked.SymbolId);
+        var stackedPin2 = Guid.Parse(stackedSymbol.Definition.Items.Select(c => c.Item.Unpack<SchematicPin>()).Single(pin => pin.Number == "2").Id.Value);
+        Scene Inward(long x)
+        {
+            var inward = alone with { Geometry = alone.Geometry.Copy() };
+            var shared = new Point(x, at.Y);
+            inward.Geometry.Place[carrierPin.PlacedPinId] = shared;
+            inward.Geometry.Body[lp0] = new(shared.X - SchematicConnectionRealizer.PinTargetReachNm, shared.Y - 2 * Grid, shared.X + 8 * Grid, shared.Y + 2 * Grid);
+            inward.Geometry.Place[stacked.PlacedPinId] = shared;
+            inward.Geometry.Place[stackedPin2] = new(shared.X, shared.Y + 2 * Grid);
+            inward.Geometry.Body[stacked.SymbolId] = new(shared.X, shared.Y - Grid, shared.X + 4 * Grid, shared.Y + 3 * Grid);
+            return inward;
+        }
+        string childScreen = alone.Bench!.ScreenId(BenchSheet.Child).ToString("D");
+        string ChildReservations(SchematicConnectionRealization realization) => realization.Diagnostics.Single(d => d.Code == SchematicConnectionErrors.RealizationPageReservationsUnspecified
+            && d.Message.Contains(childScreen, StringComparison.Ordinal)).Message;
+        var besideBorder = await Inward(15 * Grid).Realize();
+        var besideLabel = Hierarchical(alone, besideBorder);
+        Assert.AreEqual((stacked.PlacedPinId, GeneratedConnectionRole.StubLabel), (besideLabel.PlacedPinId!.Value, besideLabel.Role));
+        var besideWire = StubOf(besideBorder, stacked.PlacedPinId);
+        Assert.AreEqual((15 * Grid, at.Y, 13 * Grid), (besideWire.Start.XNm, besideWire.Start.YNm, besideWire.End.XNm));
+        StringAssert.EndsWith(ChildReservations(besideBorder), "the label stub of pin " + PinName(alone.Plan.Candidate!, stacked.Endpoint)
+            + " has no room inside the border clear of the title block and keeps only inside the page inset.");
+        var insideBorder = await Inward(17 * Grid).Realize();
+        Assert.AreEqual((stacked.PlacedPinId, GeneratedConnectionRole.StubLabel), (Hierarchical(alone, insideBorder).PlacedPinId!.Value, Hierarchical(alone, insideBorder).Role));
+        Assert.AreEqual(15 * Grid, StubOf(insideBorder, stacked.PlacedPinId).End.XNm);
+        StringAssert.EndsWith(ChildReservations(insideBorder), "so does every label stub and label.");
 
         // Must-catch: without room there, and with nothing else on the child sheet to carry it, the label cannot be drawn.
         // The refusal names the stacked pin (it used to surface as an internal inconsistency once the stub became optional).
@@ -2310,7 +2476,8 @@ public sealed class SchematicConnectionRealizerTests
         /// <summary>KiCad's default drawing sheet on the 297 mm by 210 mm page, as its drawing-sheet measurement reports it: the
         /// 10 mm margin frame, the outer border on it and the inner border 2 mm further in with a zone mark and number between
         /// them, and the title block (its box 110 mm by 32 mm in the bottom right corner of the inner border, one of its rows
-        /// and one of its texts).</summary>
+        /// and one of its texts). Every line and rectangle is stroked with the schematic's default 6 mil pen
+        /// (<see cref="DefaultStrokeNm"/>), which is wider than the drawing sheet's own 0.15 mm.</summary>
         public static SchematicWiringDrawingSheet DefaultDrawingSheet()
         {
             static Box2 Mm(double l, double t, double r, double b) => Box(new((long)(l * 1_000_000), (long)(t * 1_000_000), (long)(r * 1_000_000), (long)(b * 1_000_000)));
@@ -2325,9 +2492,15 @@ public sealed class SchematicConnectionRealizerTests
                 (SchematicWiringDrawingSheetItemKind.SwrDrawingSheetItemLine, Mm(177, 190, 285, 190)),
                 (SchematicWiringDrawingSheetItemKind.SwrDrawingSheetItemText, Mm(178, 191, 200, 194))
             })
-                sheet.Items.Add(new SchematicWiringDrawingSheetItem { Kind = kind, Bounds = bounds });
+                sheet.Items.Add(new SchematicWiringDrawingSheetItem { Kind = kind, Bounds = bounds,
+                    StrokeWidthNm = kind is SchematicWiringDrawingSheetItemKind.SwrDrawingSheetItemLine or SchematicWiringDrawingSheetItemKind.SwrDrawingSheetItemRectangle
+                        ? DefaultStrokeNm : 0 });
             return sheet;
         }
+
+        /// <summary>The width KiCad strokes the lines and rectangles of its default drawing sheet with on a schematic: the
+        /// schematic's default 6 mil pen.</summary>
+        public const long DefaultStrokeNm = 152_400;
 
         public Task<SchematicPlacementGeometry> Measure(Scene scene, MeasureSchematicPlacement request, CancellationToken token)
         {
@@ -2837,7 +3010,10 @@ public sealed class SchematicConnectionRealizerTests
         // overlaps none of its title block, each label by the box KiCad measured for its prototype (§6.2 round 2) at its position,
         // as the creation journey's own check reads them (NativeSessionTests.LabelStubDrawingSheetProblems). Before the preference
         // RAIL_B and PSU_SCL on PSU (at U3.8 and U3.6) and RAIL_A on CPU_POWER crossed the left border and RAIL_B on CPU the top one;
-        // their labels now sit on their pins.
+        // their labels now sit on their pins. The border and the title block are taken as KiCad paints them: the recording carries
+        // the width KiCad strokes every line and rectangle of each drawing sheet with (the schematic's default 6 mil pen).
+        Assert.IsTrue(measured.Values.All(g => g.DrawingSheet.Items.Where(i => i.Kind is SchematicWiringDrawingSheetItemKind.SwrDrawingSheetItemLine
+            or SchematicWiringDrawingSheetItemKind.SwrDrawingSheetItemRectangle).All(i => i.StrokeWidthNm == Geometry.DefaultStrokeNm)), "KiCad reports every stroke.");
         var framing = FrameProblems(realization, recording.Measurements, measured);
         Assert.IsEmpty(framing.Problems, string.Join("\n", framing.Problems));
         foreach (var (sheet, net) in new[] { ("PSU", "RAIL_B"), ("PSU", "PSU_SCL"), ("CPU", "RAIL_B"), ("CPU_POWER", "RAIL_A") })

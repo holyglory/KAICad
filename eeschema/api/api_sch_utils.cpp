@@ -340,6 +340,16 @@ bool PackSchematicDrawingSheet( const SCH_SHEET_PATH& aPath, const SCH_RENDER_SE
         SchematicWiringDrawingSheetItem* drawn = aOutput.add_items();
         drawn->set_kind( kind );
         PackBox2( *drawn->mutable_bounds(), bounds, schIUScale );
+        // A line's or rectangle's bounds run through the middle of its stroke (DS_DRAW_ITEM_LINE and
+        // DS_DRAW_ITEM_RECT leave the pen out of GetBoundingBox). The canvas strokes it with its own
+        // pen (DS_PAINTER) and printing with the wider of that and the schematic's default pen
+        // (PrintWsItem), so the wider of the two is reported: the stroke reaches half of it past the
+        // bounds. A text's box already holds its strokes, and polygons and bitmaps draw no outline.
+        if( kind == SWR_DRAWING_SHEET_ITEM_LINE || kind == SWR_DRAWING_SHEET_ITEM_RECTANGLE )
+        {
+            drawn->set_stroke_width_nm( schIUScale.IUToNm( std::max( item->GetPenWidth(),
+                                                                     aSettings.GetDefaultPenWidth() ) ) );
+        }
     }
     return true;
 }

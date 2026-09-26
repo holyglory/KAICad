@@ -107,7 +107,8 @@ std::vector<BOX2I> MeasureSchematicSymbolFieldBounds( const SCH_SYMBOL& aSymbol,
 /// any other drawing-sheet art), built the way its canvas builds it but from a private copy of the
 /// drawing-sheet model, at that instance's page size, first-page option, page number, file name
 /// and title block: the page shrunk by the model's margins, and every drawn item's kind and
-/// bounding box. Returns false with @a aOutput cleared and the reason in @a aError when the
+/// bounding box, with the stroke width of each line and rectangle (whose bounding box runs
+/// through the middle of its stroke). Returns false with @a aOutput cleared and the reason in @a aError when the
 /// drawing-sheet model cannot be copied. Never changes the design or the human view.
 bool PackSchematicDrawingSheet( const SCH_SHEET_PATH& aPath, const SCH_RENDER_SETTINGS& aSettings,
                                 kiapi::automation::v1::SchematicWiringDrawingSheet& aOutput,

@@ -253,8 +253,11 @@ public static class SchematicConnectionRealizer
     /// rectangle around the middle of the drawing sheet's margin frame that spans more than half of it both ways. The region
     /// is shrunk by <paramref name="clearance"/>; keep-outs are returned as drawn and are inflated by the clearance where they
     /// are used. Without a measured drawing sheet the region is the inside of KiCad's default frame with the bottom
-    /// <see cref="DefaultTitleBlockReserveNm"/> kept for the title block.</summary>
-    internal static (Box Region, IReadOnlyList<Box> KeepOuts) RouteArea(Box page, SchematicWiringDrawingSheet? sheet, long clearance)
+    /// <see cref="DefaultTitleBlockReserveNm"/> kept for the title block. With <paramref name="strokes"/> (the frame preference of
+    /// label stubs, which has no clearance) the region and the keep-outs are what KiCad paints rather than the boxes it reports: a
+    /// border frame ends at the inner edge of its stroke and a line or rectangle of art reaches the outer edge of its own, half the
+    /// stroke width KiCad reports for it past its box (a line's or rectangle's box runs through the middle of its stroke).</summary>
+    internal static (Box Region, IReadOnlyList<Box> KeepOuts) RouteArea(Box page, SchematicWiringDrawingSheet? sheet, long clearance, bool strokes = false)
     {
         Box interior;
         var keepOuts = new List<Box>();
@@ -267,15 +270,19 @@ public static class SchematicConnectionRealizer
             interior = Intersect(page, margin);
             // Compared at twice their size, so that the middle of the margin frame needs no rounding.
             Int128 middleX = (Int128)margin.L + margin.R, middleY = (Int128)margin.T + margin.B;
-            var items = sheet.Items.Select(i => (i.Kind, Bounds: Box.Of(i.Bounds))).ToArray();
-            bool Frame((SchematicWiringDrawingSheetItemKind Kind, Box Bounds) item) => item.Kind == SchematicWiringDrawingSheetItemKind.SwrDrawingSheetItemRectangle
+            // Half of a stroke, rounded up so that what is kept clear covers all of it.
+            var items = sheet.Items.Select(i => (i.Kind, Bounds: Box.Of(i.Bounds), Half: strokes ? checked(Math.Max(0, i.StrokeWidthNm) + 1) / 2 : 0)).ToArray();
+            bool Frame((SchematicWiringDrawingSheetItemKind Kind, Box Bounds, long Half) item) => item.Kind == SchematicWiringDrawingSheetItemKind.SwrDrawingSheetItemRectangle
                 && 2 * (Int128)item.Bounds.L < middleX && 2 * (Int128)item.Bounds.R > middleX && 2 * (Int128)item.Bounds.T < middleY && 2 * (Int128)item.Bounds.B > middleY
                 && 2 * ((Int128)item.Bounds.R - item.Bounds.L) > (Int128)margin.R - margin.L && 2 * ((Int128)item.Bounds.B - item.Bounds.T) > (Int128)margin.B - margin.T;
-            foreach (var frame in items.Where(Frame)) interior = Intersect(interior, frame.Bounds);
+            foreach (var frame in items.Where(Frame)) interior = Intersect(interior, frame.Bounds.Inflate(-frame.Half));
             // Art inside the frame; a mark that only touches the frame's edge from outside stays outside it.
             foreach (var item in items.Where(i => !Frame(i)))
-                if (item.Bounds.L < interior.R && item.Bounds.R > interior.L && item.Bounds.T < interior.B && item.Bounds.B > interior.T)
-                    keepOuts.Add(item.Bounds);
+            {
+                var drawn = item.Bounds.Inflate(item.Half);
+                if (drawn.L < interior.R && drawn.R > interior.L && drawn.T < interior.B && drawn.B > interior.T)
+                    keepOuts.Add(drawn);
+            }
             // Overlapping or touching pieces (the lines, texts and box of a title block) become one keep-out.
             for (bool merged = true; merged;)
             {
@@ -311,11 +318,12 @@ public static class SchematicConnectionRealizer
         screen.RouteKeepOuts.AddRange(areas.SelectMany(a => a.KeepOuts).Distinct().OrderBy(k => k.L).ThenBy(k => k.T).ThenBy(k => k.R).ThenBy(k => k.B));
         // Label stubs prefer the inside of the drawing sheet's inner border (the CN-1 §6.4 frame preference lane 2A reported as an
         // erratum), but only a border KiCad measured on every instance of the sheet: without it there is nothing to prefer, and
-        // label stubs keep the page inset alone.
+        // label stubs keep the page inset alone. The border and the art are taken as KiCad paints them, strokes included, so that
+        // a label kept inside the one and off the other touches neither's line.
         screen.FrameMeasured = screen.Views.All(v => v.DrawingSheet?.MarginFrame is not null);
         if (screen.FrameMeasured)
         {
-            var frames = screen.Views.Select(v => RouteArea(screen.Page, v.DrawingSheet, 0)).ToArray();
+            var frames = screen.Views.Select(v => RouteArea(screen.Page, v.DrawingSheet, 0, strokes: true)).ToArray();
             screen.Frame = frames.Skip(1).Aggregate(frames[0].Region, (a, b) => new(Math.Max(a.L, b.Region.L), Math.Max(a.T, b.Region.T),
                 Math.Min(a.R, b.Region.R), Math.Min(a.B, b.Region.B)));
             screen.FrameArt.AddRange(frames.SelectMany(f => f.KeepOuts).Distinct().OrderBy(k => k.L).ThenBy(k => k.T).ThenBy(k => k.R).ThenBy(k => k.B));
@@ -621,11 +629,11 @@ public static class SchematicConnectionRealizer
         /// <summary>Whether KiCad measured the drawing sheet of every instance of the sheet, so that label stubs can prefer the
         /// inside of its inner border (<see cref="Frame"/>).</summary>
         public bool FrameMeasured { get; set; }
-        /// <summary>The inside of the drawing sheet's innermost border on every instance (<see cref="RouteArea"/> with no
-        /// clearance): where label stubs and their labels are tried first.</summary>
+        /// <summary>The inside of the drawing sheet's innermost border on every instance, up to the inner edge of its stroke
+        /// (<see cref="RouteArea"/> with no clearance, strokes included): where label stubs and their labels are tried first.</summary>
         public Box Frame { get; set; }
-        /// <summary>The drawing-sheet art inside that border (the title block) on every instance, as drawn: label stubs tried
-        /// inside the border keep off it as off an obstacle.</summary>
+        /// <summary>The drawing-sheet art meeting the inside of each instance's own border (the title block, zone marks, any logo
+        /// or text), strokes included, on every instance: label stubs tried inside the border keep off it as off an obstacle.</summary>
         public List<Box> FrameArt { get; } = [];
         /// <summary>Label stubs, labels and sheet pins with nothing inside the border that fits, drawn at the page inset instead
         /// (named for the diagnostic a person reads).</summary>
@@ -751,25 +759,85 @@ public static class SchematicConnectionRealizer
             // on this sheet is routed instead; one that no route fits falls back to its stubs at once, with the reason recorded.
             // Then §6.3 (c) and §6.5 sheet pins, and the check that every island crossing into its parent carries its
             // hierarchical label.
-            // Routing never refuses what label stubs alone would draw (a CN-1 §7 clarification reported to the integration owner).
-            // A route keeps clear the one-grid escape of every new pin still to be routed, and the shortest stub and its label of
-            // every island still to be drawn with stubs (Reserved). When anything is still refused for want of room (no stub, no
-            // join anchor, no sheet-pin slot) after a route was drawn on this sheet, the sheet is drawn again from the start with
-            // all the milestone-1 room of the refused island kept clear of every route: each stub length with each label it may
-            // carry, its join and anchor-label options, and its sheet-pin slots with their stubs and labels. Each redraw protects
-            // one more island; when a protected island is refused again, the sheet is drawn once more with no route at all, every
-            // island that would have been routed recording why, and only a refusal of that drawing stands.
-            // The frame preference (Passes) never refuses what the page inset alone would draw either: when anything is refused
-            // for want of room while label stubs are tried inside the drawing sheet's inner border first, and no route explains it
-            // (every redraw for routes has been made), the whole sheet is drawn again from the start at the page inset alone, routes
-            // and their redraws included, exactly as without the preference; only a refusal of that drawing stands.
+            // Routing never refuses what label stubs alone would draw (a CN-1 §7 clarification reported to the integration owner):
+            // a route keeps clear the one-grid escape of every new pin still to be routed, and the shortest stub and its label of
+            // every island still to be drawn with stubs (Reserved), and Draw redraws the sheet with more room kept clear, and at last
+            // with no route, before a refusal stands.
+            // The frame preference (Passes; ledger ped4439a665d260ef, the CN-1 erratum lane 2A reported) costs nothing the page inset
+            // alone would draw either, no refusal and no route. A sheet whose drawing sheet KiCad measured on every instance is drawn
+            // first with the preference, routes and their redraws included. When that drawing is refused for want of room, the whole
+            // sheet is drawn again from the start at the page inset alone, exactly as without the preference, and only a refusal of
+            // that drawing stands. When it draws, but some connection §7 applies to fell back to label stubs in it, the sheet is also
+            // drawn from the start at the page inset alone; the drawing with the preference is kept only if that one is refused or
+            // routes no connection the drawing with the preference does not, and otherwise the drawing at the page inset alone is
+            // kept. Both drawings are deterministic, so the choice is too (I9).
             var start = Snapshot(screen);
+            string? inset = null;
+            (islands, var refused) = Draw(screen, record, start, screen.FrameMeasured);
+            if (screen.FrameMeasured && refused is not null)
+            {
+                Restore(screen, start);
+                (islands, refused) = Draw(screen, record, start, frame: false);
+                inset = "trying them inside the border first left something on the sheet without room";
+            }
+            else if (screen.FrameMeasured && islands.Any(i => i.FallbackReason is not null))
+            {
+                var framed = islands;
+                var kept = Keep(screen);
+                var wired = framed.Where(i => i.Strategy == ConnectionRealizationStrategy.OrthogonalWire).Select(i => i.Island.NetId).ToHashSet();
+                Restore(screen, start);
+                var (plain, plainRefused) = Draw(screen, record, start, frame: false);
+                var lost = plainRefused is null ? plain.Where(i => i.Strategy == ConnectionRealizationStrategy.OrthogonalWire && !wired.Contains(i.Island.NetId)).ToArray() : [];
+                if (lost.Length != 0)
+                {
+                    islands = plain;
+                    inset = "trying them inside the border first would have drawn " + (lost.Length == 1 ? "net " : "nets ")
+                        + string.Join(", ", lost.Select(i => "'" + NetName(i) + "'")) + " with label stubs instead of wires";
+                }
+                else
+                {
+                    Resume(screen, kept);
+                    islands = framed;
+                }
+            }
+            if (refused is not null) throw refused;
+            foreach (var island in islands)
+            {
+                outcomes.Add(new(island.Island.NetId, record.ScreenId, views[0].Path, island.Strategy,
+                    island.Generated.ToArray(), island.Attached, island.FallbackReason));
+                if (island.Joined)
+                    diagnostics.Add(new(SchematicConnectionErrors.ExistingNetNamedByRealization, "info", island.Island.NetId, null,
+                        "An existing unlabelled connection of net '" + NetName(island) + "' is named by a generated label on sheet "
+                        + island.Island.SheetPathKey + "."));
+            }
+            if (islands.Count != 0)
+                diagnostics.Add(new(SchematicConnectionErrors.RealizationPageReservationsUnspecified, "info", null, null,
+                    "The drawing-sheet title block on screen " + record.ScreenId.ToString("D")
+                    + " is not a schematic item; routed wires keep inside the drawing sheet's frame and clear of its title block as KiCad measures"
+                    + " them, and " + (!screen.FrameMeasured ? "label stubs only inside the page inset, because KiCad did not measure the drawing sheet of every instance of the sheet."
+                        : inset is not null ? "label stubs only inside the page inset, because " + inset + "."
+                        : screen.OutsideFrame.Count == 0 ? "so does every label stub and label."
+                        : "so does every label stub and label that fits there; " + string.Join("; ", screen.OutsideFrame)
+                            + (screen.OutsideFrame.Count == 1 ? " has" : " have") + " no room inside the border clear of the title block and keep"
+                            + (screen.OutsideFrame.Count == 1 ? "s" : "") + " only inside the page inset.")));
+        }
+
+        // One drawing of a screen's islands from `start` (the screen must be there): with label stubs tried inside the drawing sheet's
+        // inner border first when `frame` (Passes), otherwise at the page inset alone. §7 routes are drawn where they fit; when
+        // anything is refused for want of room (no stub, no join anchor, no sheet-pin slot) after a route was drawn, the sheet is
+        // drawn again from the start with all the milestone-1 room of the refused island kept clear of every route: each stub length
+        // with each label it may carry, its join and anchor-label options (and, with `frame`, the label on each of its new pins), and
+        // its sheet-pin slots with their stubs and labels. Each redraw protects one more island; when a protected island is refused
+        // again, the sheet is drawn once more with no route at all, every island that would have been routed recording why. Returns
+        // the islands as drawn, or, with the screen left part-drawn, the refusal of a drawing that no route explains.
+        private (List<IslandState> Islands, AutomationException? Refusal) Draw(Screen screen, ConnectionScreen record, ScreenStart start, bool frame)
+        {
+            framing = frame;
             var protectedRoom = new HashSet<Guid>();
             string? abandoned = null;
-            framing = screen.FrameMeasured;
             while (true)
             {
-                islands = [.. record.Islands.OrderBy(i => i.NetId).ThenBy(i => i.SheetPathKey, StringComparer.Ordinal).Select(i => new IslandState(i))];
+                List<IslandState> islands = [.. record.Islands.OrderBy(i => i.NetId).ThenBy(i => i.SheetPathKey, StringComparer.Ordinal).Select(i => new IslandState(i))];
                 IslandState? current = null;
                 bool routed = false;
                 try
@@ -807,45 +875,18 @@ public static class SchematicConnectionRealizer
                         current = island;
                         RequireUplinkLabel(island);
                     }
-                    break;
+                    return (islands, null);
                 }
-                catch (AutomationException refusal) when ((routed && current is not null || framing) && refusal.Code is SchematicConnectionErrors.RealizationNoFreeStub
+                catch (AutomationException refusal) when (refusal.Code is SchematicConnectionErrors.RealizationNoFreeStub
                     or SchematicConnectionErrors.RealizationNoJoinAnchor or SchematicConnectionErrors.RealizationNoFreeSheetPinSlot)
                 {
-                    if (routed && current is not null)
-                    {
-                        if (!protectedRoom.Add(current.Island.NetId))
-                            abandoned = "wires are not drawn on sheet " + record.InstancePathKeys[0] + " because routes left net '" + NetName(current)
-                                + "' no room even with its label-stub room kept clear (" + refusal.Message + ")";
-                    }
-                    else
-                    {
-                        framing = false;
-                        protectedRoom.Clear();
-                        abandoned = null;
-                    }
+                    if (!routed || current is null) return (islands, refusal);
+                    if (!protectedRoom.Add(current.Island.NetId))
+                        abandoned = "wires are not drawn on sheet " + record.InstancePathKeys[0] + " because routes left net '" + NetName(current)
+                            + "' no room even with its label-stub room kept clear (" + refusal.Message + ")";
                     Restore(screen, start);
                 }
             }
-            foreach (var island in islands)
-            {
-                outcomes.Add(new(island.Island.NetId, record.ScreenId, views[0].Path, island.Strategy,
-                    island.Generated.ToArray(), island.Attached, island.FallbackReason));
-                if (island.Joined)
-                    diagnostics.Add(new(SchematicConnectionErrors.ExistingNetNamedByRealization, "info", island.Island.NetId, null,
-                        "An existing unlabelled connection of net '" + NetName(island) + "' is named by a generated label on sheet "
-                        + island.Island.SheetPathKey + "."));
-            }
-            if (islands.Count != 0)
-                diagnostics.Add(new(SchematicConnectionErrors.RealizationPageReservationsUnspecified, "info", null, null,
-                    "The drawing-sheet title block on screen " + record.ScreenId.ToString("D")
-                    + " is not a schematic item; routed wires keep inside the drawing sheet's frame and clear of its title block as KiCad measures"
-                    + " them, and " + (!screen.FrameMeasured ? "label stubs only inside the page inset, because KiCad did not measure the drawing sheet of every instance of the sheet."
-                        : !framing ? "label stubs only inside the page inset, because trying them inside the border first left something on the sheet without room."
-                        : screen.OutsideFrame.Count == 0 ? "so does every label stub and label."
-                        : "so does every label stub and label that fits there; " + string.Join("; ", screen.OutsideFrame)
-                            + (screen.OutsideFrame.Count == 1 ? " has" : " have") + " no room inside the border and keep" + (screen.OutsideFrame.Count == 1 ? "s" : "")
-                            + " only inside the page inset.")));
         }
 
         // §6.3 (d) with (e): the island's first stub carries its hierarchical label unless that stub attaches to a same-net power
@@ -898,6 +939,28 @@ public static class SchematicConnectionRealizer
                 if (kept == 0) sheetPins.Remove(sheet);
                 else sheetPins[sheet].RemoveRange(kept, sheetPins[sheet].Count - kept);
             }
+        }
+
+        // Everything a finished drawing of a screen holds (what Snapshot counts, in full), so that the drawing can be put back
+        // (Resume) after another drawing of the screen was tried from the same start and set aside.
+        private sealed record ScreenDrawing(IMessage[] Items, ForeignPoint[] Points, ForeignSegment[] Segments, Box[] Envelopes,
+            GeneratedConnectionItem[] Generated, Guid[] Used, Dictionary<Guid, SheetPin[]> SheetPins, string[] OutsideFrame);
+
+        private ScreenDrawing Keep(Screen screen) =>
+            new([.. screen.Items], [.. screen.Points], [.. screen.Segments], [.. screen.Envelopes], [.. generated], [.. used],
+                sheetPins.ToDictionary(p => p.Key, p => p.Value.ToArray()), [.. screen.OutsideFrame]);
+
+        private void Resume(Screen screen, ScreenDrawing drawing)
+        {
+            screen.Items.Clear(); screen.Items.AddRange(drawing.Items);
+            screen.Points.Clear(); screen.Points.AddRange(drawing.Points);
+            screen.Segments.Clear(); screen.Segments.AddRange(drawing.Segments);
+            screen.Envelopes.Clear(); screen.Envelopes.AddRange(drawing.Envelopes);
+            screen.OutsideFrame.Clear(); screen.OutsideFrame.AddRange(drawing.OutsideFrame);
+            generated.Clear(); generated.AddRange(drawing.Generated);
+            used.Clear(); used.UnionWith(drawing.Used);
+            sheetPins.Clear();
+            foreach (var (sheet, pins) in drawing.SheetPins) sheetPins.Add(sheet, [.. pins]);
         }
 
         private MeasureSchematicPlacement Request(PathView view) => new()

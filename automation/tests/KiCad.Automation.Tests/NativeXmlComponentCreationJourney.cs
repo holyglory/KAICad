@@ -669,8 +669,9 @@ public sealed partial class NativeSessionTests
     // sheet pin's label and the sheet pin carry the same text. Hierarchical labels appear only on child sheets; every new sheet
     // pin sits on the left or right edge of its sheet symbol and faces into it. The frame preference (ledger ped4439a665d260ef,
     // the CN-1 erratum lane 2A reported): every such stub and the box KiCad measures for every such label lie inside the
-    // drawing sheet's inner border as KiCad draws it (touching it is inside) and overlap none of its title block
-    // (LabelStubDrawingSheetProblems). Returns the counts per sheet and kind, and what was measured against each drawing sheet.
+    // drawing sheet's inner border and overlap none of its title block, both as KiCad paints them, strokes included (touching
+    // is allowed; LabelStubDrawingSheetProblems), and KiCad reports the stroke of every line and rectangle of the drawing sheet.
+    // Returns the counts per sheet and kind, and what was measured against each drawing sheet.
     private static async Task<object> RequireLabelStubs(NativeClient client, CheckedSchematicState before, CheckedSchematicState after,
         SchematicConnectionPolicy policy, CancellationToken token, IReadOnlySet<Guid>? routed = null)
     {
@@ -766,7 +767,11 @@ public sealed partial class NativeSessionTests
                 Count(item is HierarchicalLabel ? "hierarchical-on-pin" : "local-on-pin");
             }
             Assert.AreEqual(labels.Length, labelled.Count, path + ": every new label ends a new stub or sits on a pin.");
-            // The frame preference on KiCad's own drawing: each label by the box KiCad measures for it at this revision.
+            // The frame preference on KiCad's own drawing: each label by the box KiCad measures for it at this revision, against the
+            // border and art as KiCad paints them, which needs the stroke of every line and rectangle of the drawing sheet.
+            foreach (var item in measured.DrawingSheet?.Items.Where(i => (i.Kind is SchematicWiringDrawingSheetItemKind.SwrDrawingSheetItemLine
+                         or SchematicWiringDrawingSheetItemKind.SwrDrawingSheetItemRectangle) && i.StrokeWidthNm <= 0) ?? [])
+                frameProblems.Add(path + ": KiCad reported no stroke width for the drawing sheet's " + item.Kind + " " + SheetBox(item.Bounds));
             var measuredLabels = labels.Select(l => (What: l.Item.Descriptor.Name + " '" + Text(l.Item) + "' " + l.Id.ToString("D"),
                 Bounds: measured.Obstacles.SingleOrDefault(o => o.Id.Value == l.Id.ToString("D"))?.Bounds)).ToArray();
             foreach (var (what, _) in measuredLabels.Where(l => l.Bounds is null)) frameProblems.Add(path + ": KiCad did not measure " + what);
@@ -966,10 +971,12 @@ public sealed partial class NativeSessionTests
 
     // The drawing sheet KiCad draws on a sheet as its placement measurement reports it, read independently of the realizer: its
     // page, the inside of its innermost border frame (the drawn rectangles around the middle of its margin frame spanning more than
-    // half of it both ways), and everything else it draws meeting that inside (the title block and any other art). Null, with the
-    // reason added to `problems`, when KiCad did not measure it or draws no border.
+    // half of it both ways), and everything else it draws meeting that inside (the title block and any other art). With `strokes`,
+    // as KiCad paints them: KiCad reports a line's or rectangle's box through the middle of its stroke and the stroke's width, so
+    // each border ends half its stroke further in and each line or rectangle of art reaches half its stroke further out. Null, with
+    // the reason added to `problems`, when KiCad did not measure it or draws no border.
     private static ((long L, long T, long R, long B) Page, (long L, long T, long R, long B) Inner, (long L, long T, long R, long B)[] Art)? DrawingSheetFrame(
-        string sheet, SchematicPlacementGeometry geometry, List<string> problems)
+        string sheet, SchematicPlacementGeometry geometry, List<string> problems, bool strokes = false)
     {
         if (geometry.DrawingSheet?.MarginFrame is not { } margin)
         {
@@ -977,28 +984,30 @@ public sealed partial class NativeSessionTests
             return null;
         }
         var m = SheetBox(margin);
-        var items = geometry.DrawingSheet.Items.Select(i => (i.Kind, Box: SheetBox(i.Bounds))).ToArray();
-        bool IsFrame((SchematicWiringDrawingSheetItemKind Kind, (long L, long T, long R, long B) Box) i) =>
+        var items = geometry.DrawingSheet.Items.Select(i => (i.Kind, Box: SheetBox(i.Bounds), Half: strokes ? (Math.Max(0, i.StrokeWidthNm) + 1) / 2 : 0)).ToArray();
+        bool IsFrame((SchematicWiringDrawingSheetItemKind Kind, (long L, long T, long R, long B) Box, long Half) i) =>
             i.Kind == SchematicWiringDrawingSheetItemKind.SwrDrawingSheetItemRectangle
             && 2 * i.Box.L < m.L + m.R && 2 * i.Box.R > m.L + m.R && 2 * i.Box.T < m.T + m.B && 2 * i.Box.B > m.T + m.B
             && 2 * (i.Box.R - i.Box.L) > m.R - m.L && 2 * (i.Box.B - i.Box.T) > m.B - m.T;
-        var frames = items.Where(IsFrame).Select(i => i.Box).ToArray();
+        var frames = items.Where(IsFrame).Select(i => (L: i.Box.L + i.Half, T: i.Box.T + i.Half, R: i.Box.R - i.Half, B: i.Box.B - i.Half)).ToArray();
         if (frames.Length == 0) { problems.Add(sheet + ": KiCad draws no border frame on it"); return null; }
         var inner = (L: frames.Max(f => f.L), T: frames.Max(f => f.T), R: frames.Min(f => f.R), B: frames.Min(f => f.B));
-        var art = items.Where(i => !IsFrame(i) && i.Box.L < inner.R && i.Box.R > inner.L && i.Box.T < inner.B && i.Box.B > inner.T).Select(i => i.Box).ToArray();
+        var art = items.Where(i => !IsFrame(i)).Select(i => (L: i.Box.L - i.Half, T: i.Box.T - i.Half, R: i.Box.R + i.Half, B: i.Box.B + i.Half))
+            .Where(b => b.L < inner.R && b.R > inner.L && b.T < inner.B && b.B > inner.T).ToArray();
         return (SheetBox(geometry.PageBounds), inner, art);
     }
 
     // The frame preference for label stubs (ledger ped4439a665d260ef, the CN-1 erratum lane 2A reported) on KiCad's own drawing,
     // independently of the realizer's reading of it: every stub wire lies inside the inner border of the drawing sheet KiCad draws
-    // on the sheet (DrawingSheetFrame; touching the border is inside) and meets none of the art inside it, such as the title block;
-    // and the box KiCad measures for every label lies inside that border and overlaps none of that art (touching it is not
-    // overlapping, as §6.4 rule 6 lets a label touch an obstacle). Returns the problems and what was measured.
+    // on the sheet, up to the inner edge of the border's stroke (DrawingSheetFrame with strokes; touching that edge is inside), and
+    // meets none of the art inside it, such as the title block, strokes included; and the box KiCad measures for every label lies
+    // inside that border and overlaps none of that art (touching it is not overlapping, as §6.4 rule 6 lets a label touch an
+    // obstacle), so no label is painted over a line of the drawing sheet. Returns the problems and what was measured.
     internal static (List<string> Problems, object Evidence) LabelStubDrawingSheetProblems(string sheet, SchematicPlacementGeometry geometry,
         IReadOnlyList<SchematicLine> stubs, IReadOnlyList<(string What, Kiapi.Common.Types.Box2 Bounds)> labels)
     {
         var problems = new List<string>();
-        if (DrawingSheetFrame(sheet, geometry, problems) is not { } read) return (problems, new { sheet });
+        if (DrawingSheetFrame(sheet, geometry, problems, strokes: true) is not { } read) return (problems, new { sheet });
         var (_, inner, art) = read;
         bool Inside((long L, long T, long R, long B) b) => b.L >= inner.L && b.R <= inner.R && b.T >= inner.T && b.B <= inner.B;
         foreach (var stub in stubs)
@@ -1023,8 +1032,13 @@ public sealed partial class NativeSessionTests
             sheet, innerFrameMm = new[] { inner.L, inner.T, inner.R, inner.B }.Select(v => v / 1_000_000m).ToArray(),
             artMm = art.Select(a => new[] { a.L, a.T, a.R, a.B }.Select(v => v / 1_000_000m).ToArray()).ToArray(),
             stubs = stubs.Count, labels = labels.Count,
+            strokeWidthsMm = geometry.DrawingSheet!.Items.Where(i => i.StrokeWidthNm > 0).Select(i => i.StrokeWidthNm / 1_000_000m).Distinct().Order().ToArray(),
             nearestLabelToBorderMm = labels.Count == 0 ? (decimal?)null : labels.Select(l => SheetBox(l.Bounds))
-                .Min(b => Math.Min(Math.Min(b.L - inner.L, inner.R - b.R), Math.Min(b.T - inner.T, inner.B - b.B))) / 1_000_000m
+                .Min(b => Math.Min(Math.Min(b.L - inner.L, inner.R - b.R), Math.Min(b.T - inner.T, inner.B - b.B))) / 1_000_000m,
+            // The largest gap, along either axis, between a label and the nearest piece of art: how far clear of the title block
+            // the closest label keeps.
+            nearestLabelToArtMm = labels.Count == 0 || art.Length == 0 ? (decimal?)null : labels.Select(l => SheetBox(l.Bounds))
+                .Min(b => art.Min(a => Math.Max(Math.Max(a.L - b.R, b.L - a.R), Math.Max(a.T - b.B, b.T - a.B)))) / 1_000_000m
         });
     }
 

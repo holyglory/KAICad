@@ -181,6 +181,11 @@ private:
     /// labels otherwise, so the row collapses its labels before it wraps; and gives the state and strength rows the
     /// width they wrap within. Returns whether a label or that width changed, so the caller lays out the inspector again.
     bool fitFacetLabels();
+    /// The width the strength choices take in one row with their full labels, in pixels.
+    int fullStrengthRow() const;
+    /// The inspector's default width: 400 DIP, or wider where a facet's detail needs it to show the strength choices' full
+    /// labels beside the inspector's scroll bar (design QA round 2, R2-P2-7).
+    int inspectorWidth() const;
     wxFont chipFont() const;
     wxColour linkColour() const;
     /// The chips of each drawn block of the viewed level, in canvas pixels.
@@ -260,17 +265,45 @@ private:
     LABEL_ROOM labelRoom( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
     /// Where the placed ports of aBlock name themselves inside its edge, in canvas pixels (sets aDC's font to the chip font).
     std::vector<wxRect> portNames( wxDC& aDC, const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout, const std::string& aBlock ) const;
-    /// Each boundary port's name and where it is drawn beside the level frame, in canvas pixels.
-    std::vector<std::pair<std::string, wxRect>> boundaryNames( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
+    /// Each boundary port (its owning block and interface), its name and where the name is drawn beside the level frame, in
+    /// canvas pixels.
+    struct BOUNDARY_NAME { std::string owner, id, name; wxRect rect; };
+    std::vector<BOUNDARY_NAME> boundaryNames( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
+    /// Each child block of aLayout as drawn, in canvas pixels.
+    std::vector<wxRect> blockBoxes( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
+    /// Every port square of aLayout as drawn, in canvas pixels (see portMarks).
+    std::vector<wxRect> portSquares( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
+    /// Every straight run of every connection of aLayout as drawn, as its bounding box in canvas pixels.
+    std::vector<wxRect> wireBoxes( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
     /// A port's square as drawn at aAt: 12 DIP at every zoom (design QA P2-6).
     wxRect portMark( const wxPoint& aAt ) const;
     /// Every port square as drawn on the canvas (an unplaced child port once per place a connection attaches to it).
     struct PORT_MARK { std::string owner, id; wxString name; wxRect rect; };
     std::vector<PORT_MARK> portMarks( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
-    /// Each connection caption and where it is drawn, in canvas pixels; shown is false for one left out because no place
-    /// beside its connection is clear of blocks, handles, ports, wires and other captions (design QA P2-7).
-    struct CAPTION_PLACE { std::string connection; wxString text; wxRect rect; bool shown = false; };
+    /// Each connection caption and where it is drawn, in canvas pixels: text as drawn and full, the whole caption (they differ
+    /// only for a caption shortened with "…"). Every caption is drawn (design QA round 2, R2-P2-1): whole in the nearest place
+    /// beside its connection, or in the free space around it, that is clear of blocks, handles, ports and their names, wires,
+    /// notes, the palette and the other captions; shortened only when no clear place holds the whole text; and, where not even
+    /// a shortened text has one, shortened to four characters and "…" in the place that covers least (a wire before a port, a
+    /// name or another caption, and those before a block). clear is false only in that last case.
+    struct CAPTION_PLACE { std::string connection; wxString text, full; wxRect rect; bool shown = false, clear = true; };
     std::vector<CAPTION_PLACE> connectionCaptions( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout, const wxSize& aArea ) const;
+    /// The Connect tool's preview of the connection in progress, in canvas pixels, from its first end to the pointer or to the
+    /// port or block the pointer is on: the path the committed connection's router would draw, or, where that path would run
+    /// through a block or across a port's name, the way around (design QA round 2, R2-P2-2); empty when none is in progress.
+    /// The finished connection does not go around: it keeps rule F4's three-segment path until that contract changes.
+    std::vector<wxPoint> connectPreview( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
+    /// What the canvas shows on hover at aPoint: the whole caption of a shortened connection caption, or the choices behind a
+    /// "+N more" chip; empty elsewhere.
+    wxString canvasTipAt( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout, const wxPoint& aPoint ) const;
+    /// Sets the canvas's tooltip to what lies under the pointer now (canvasTipAt), or none while the pointer is off the canvas,
+    /// a drag is under way or no level is shown. Called on every pointer motion, when the pointer leaves, and after every
+    /// repaint, so the tooltip follows a canvas that changes under a pointer that stays still (review of design QA round 2).
+    void updateCanvasTip();
+    /// Where the Connect hint ("Click a port to finish connection") is drawn beside the end of aPreview, in canvas pixels: the
+    /// first of the four places around the pointer that covers no block, port name or part of the preview (design QA round 2,
+    /// P3 1); nothing while no connection is in progress or its caption is being typed.
+    std::optional<wxRect> connectHint( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout, const std::vector<wxPoint>& aPreview ) const;
     /// The selected block's eight resize handles as drawn, in canvas pixels; empty when none are drawn.
     std::vector<wxRect> selectionHandles( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
     /// What the Connect tool highlights under the pointer as a valid place to start or finish (design QA P2-6): a port's
@@ -313,6 +346,8 @@ private:
     uint64_t m_navigationInputRevision = 0;
     /// Presses the canvas received, reported so rendered input can tell a press that changed nothing from one not yet delivered.
     uint64_t m_canvasPresses = 0;
+    /// Pointer motions and entries the canvas handled, reported so a journey can tell a hover that has not arrived yet.
+    uint64_t m_canvasMotions = 0;
     unsigned m_rebaseAttempts = 0;
     bool m_rebasing = false;
     LEVEL m_sentLevel, m_removalBefore;
@@ -329,6 +364,13 @@ private:
     std::string m_pendingOwner;
     std::optional<kiapi::automation::diagrams::v1::DiagramEndpointBindingData> m_connectFrom, m_connectTo;
     wxPoint m_pointer;
+    /// The canvas's tooltip as set now (see canvasTipAt), and whether a repaint has asked for it to be found again.
+    wxString m_canvasTip;
+    bool m_canvasTipQueued = false;
+    /// The connection captions last placed, and what they were placed for, so a repaint or a state read of an unchanged
+    /// canvas does not search for their places again.
+    mutable std::string m_captionKey;
+    mutable std::vector<CAPTION_PLACE> m_captionCache;
     /// Whether the pointer is over the canvas (the Connect tool highlights what is under it only then).
     bool m_pointerInside = false;
     wxStaticText* m_breadcrumb;
@@ -364,6 +406,8 @@ private:
     std::array<wxToggleButton*, 3> m_directionChoices;
     std::array<wxToggleButton*, 5> m_domainChoices;
     std::array<wxToggleButton*, 4> m_typeChoices;
+    /// The direction, domain and type rows; they wrap within the width fitFacetLabels gives them.
+    std::array<RECURSIVE_DIAGRAM::CHOICE_FLOW*, 3> m_linkChoiceRows{};
     /// Why the caption or the new signal cannot be kept, as shown beside it.
     wxString m_captionProblem, m_signalProblem;
     /// Detail rows a person added on a connection that has no value for them yet (like m_revealed for requirements).
@@ -404,6 +448,9 @@ private:
     RECURSIVE_DIAGRAM::RECT m_dragRect;
     int m_dragHandle = -1;
     bool m_dragMoved = false;
+    // How many distinct level geometries drags reached in this window (reported as drag_positions), and the latest one.
+    uint64_t m_dragPositions = 0;
+    std::string m_dragGeometry;
     double m_noteStartX = 0, m_noteStartY = 0;
     /// Requirement fields the user asked to add on an element whose fields are still empty.
     std::map<std::string, std::array<bool, 3>> m_revealed;

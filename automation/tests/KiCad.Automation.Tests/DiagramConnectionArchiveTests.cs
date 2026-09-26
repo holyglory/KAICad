@@ -107,6 +107,26 @@ public sealed class DiagramConnectionArchiveTests
         Assert.ThrowsExactly<AutomationException>(() => Replace(f.Selected["Clock"], r => r with { Endpoints = [r.Endpoints[0]] }));
         Assert.ThrowsExactly<AutomationException>(() => Replace(f.Selected["Clock"], r => r with { RequirementRevisionId = archive.Inspect(f.Selected["Data+"]).RequirementRevisionId }));
         Assert.ThrowsExactly<AutomationException>(() => archive.Walk([f.Selected["Data pair"], f.Selected["Data+"]]));
+        // A connection or member implementation continues the field history of a saved revision of another implementation
+        // of the same connection only, and implementations cannot continue each other in a circle.
+        DiagramConnectionArchive ContinueWith(Guid stateId, Func<DiagramRequirementRevision, DiagramRequirementRevision> first) => new(archive.DocumentId,
+            archive.OwnerBlockId, archive.States, archive.Revisions, archive.RequirementHistories.Select(h => h.Scope.DesignStateId == stateId
+                ? new DiagramRequirementHistory(h.Scope, [first(h.Revisions[0])]) : h));
+        DiagramConnectionArchive Continue(Dictionary<Guid, Guid> links) => new(archive.DocumentId, archive.OwnerBlockId, archive.States,
+            archive.Revisions, archive.RequirementHistories.Select(h => links.TryGetValue(h.Scope.DesignStateId, out var parentId)
+                ? new DiagramRequirementHistory(h.Scope, [h.Revisions[0] with { ParentId = parentId }]) : h));
+        Guid Text(ConnectionSelection selection) => archive.Inspect(selection).RequirementRevisionId;
+        var plus = f.Selected["Data+"]; var plusAlternative = f.Alternatives["Data+"];
+        Assert.AreEqual(Text(plus), Continue(new() { [plusAlternative.StateId] = Text(plus) }).RequirementHistories
+            .Single(h => h.Scope.DesignStateId == plusAlternative.StateId).Lineage.Single().Id);
+        Assert.ThrowsExactly<AutomationException>(() => Continue(new() { [plusAlternative.StateId] = Text(f.Selected["Data-"]) }));
+        Assert.ThrowsExactly<AutomationException>(() => Continue(new() { [plusAlternative.StateId] = Guid.NewGuid() }));
+        Assert.ThrowsExactly<AutomationException>(() => Continue(new() { [plusAlternative.StateId] = Text(plus), [plus.StateId] = Text(plusAlternative) }));
+        // The continuing member's first revision is an unchanged copy of the text it continues and restores nothing.
+        Assert.ThrowsExactly<AutomationException>(() => ContinueWith(plusAlternative.StateId, r => r with { ParentId = Text(plus),
+            Requirements = r.Requirements with { Routing = "Not the continued text." } }));
+        Assert.ThrowsExactly<AutomationException>(() => ContinueWith(plusAlternative.StateId, r => r with { ParentId = Text(plus),
+            Restorations = [new(DiagramRequirementField.General, Text(plus))] }));
     }
 
     [TestMethod]

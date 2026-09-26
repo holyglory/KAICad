@@ -249,7 +249,7 @@ public sealed class RecursiveLevelMerge
         var history = Latest.RequirementHistories.SingleOrDefault(h => h.Scope == saved.Scope)
             ?? Latest.ConnectionArchives.SelectMany(a => a.RequirementHistories).Single(h => h.Scope == saved.Scope);
         // A resolution may choose saved text instead of a restored field; keep only true restorations.
-        var restored = draft.RestoredFields.Where(r => history.Inspect(r.Value).Requirements.Get(r.Key) == result.Candidate.Get(r.Key)).ToImmutableDictionary();
+        var restored = draft.RestoredFields.Where(r => history.Revision(r.Value).Requirements.Get(r.Key) == result.Candidate.Get(r.Key)).ToImmutableDictionary();
         return new(saved, result.Candidate, restored);
     }
 

@@ -359,6 +359,12 @@ message SaveConnectionDraftData {
   repeated string block_ancestor_revision_ids = 10;
   DiagramRevisionOriginData origin = 11;
   // -- lane 2B (200-299) --
+  // Members created while this save refines the connection's members into groups, pairs and signals (ledger
+  // pf92d0ecdec8805b4). Each is a new connection occurrence with one implementation, one revision and its own three
+  // requirement fields; its members name, by connection id, direct members of the refined connection (kept at their
+  // exact saved revision) or other members created by this save. The draft's member list names each new member by its
+  // exact selection. member_of is never set here.
+  repeated NewConnectionData new_members = 200;
   // -- end lane 2B --
   // -- lane 2C (300-399) --
   // -- end lane 2C --
@@ -747,6 +753,9 @@ message NewConnectionData {
   // that root connection (a connection drawn in this draft, or one this draft edits and lists it among its
   // members); it is a member of that connection and never a root of its own. Unset for a root connection.
   optional string member_of = 200;
+  // Only for SaveConnectionDraftData.new_members: the connection ids this new member groups, in order. A level draft's
+  // drawn connections and signals never carry it (refused as invalid_recursive_diagram_data).
+  repeated string members = 201;
   // -- end lane 2B --
 }
 message LevelDraftData {

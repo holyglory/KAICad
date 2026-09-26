@@ -39,7 +39,6 @@
 #include <wx/tglbtn.h>
 #include <wx/toolbar.h>
 #include <wx/weakref.h>
-#include <wx/wrapsizer.h>
 
 namespace D = kiapi::automation::diagrams::v1;
 namespace R = RECURSIVE_DIAGRAM;
@@ -115,6 +114,8 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     strip( TOOL::ADD_BLOCK, _( "Add block" ), R::GLYPH::ADD_BLOCK, "RecursiveToolAddBlock", _( "Add a block where you click (B)" ) );
     strip( TOOL::CONNECT, _( "Connect" ), R::GLYPH::CONNECT, "RecursiveToolConnect", _( "Connect two blocks or ports (C)" ) );
     strip( TOOL::ADD_PORT, _( "Place port" ), R::GLYPH::PORT, "RecursiveToolPlacePort", _( "Place a port on a block edge or the level boundary (P)" ) );
+    // Sketch 1 sets Delete apart from the drawing tools with a separator (design QA round 2, P3 4).
+    m_toolbar->AddSeparator();
     m_stripDelete = new R::TOOL_ACTION( m_toolbar, _( "Delete" ), R::GLYPH::REMOVE, R::TOOL_STYLE::STRIP, "RecursiveToolDelete",
                                         _( "Delete the selection (Delete)" ) );
     m_stripDelete->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { removeSelection(); } );
@@ -243,6 +244,8 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     // component choices in the scrolled inspector and its tab order.
     auto* captionColumn = new wxBoxSizer( wxVERTICAL );
     m_captionLabel = new wxStaticText( scroll, wxID_ANY, _( "Caption" ) );
+    // One bold heading style for every section of the inspector, the connection's as well (design QA round 2, P3 17).
+    m_captionLabel->SetFont( GetFont().Bold() );
     captionColumn->Add( m_captionLabel, 0, wxBOTTOM, FromDIP( 4 ) );
     m_connectionCaption = new wxTextCtrl( scroll, wxID_ANY, wxEmptyString );
     m_connectionCaption->SetName( "RecursiveConnectionCaption" ); captionColumn->Add( m_connectionCaption, 0, wxEXPAND );
@@ -250,14 +253,16 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     captionColumn->Add( m_captionNotice, 0, wxEXPAND | wxTOP, FromDIP( 4 ) );
     fields->Add( captionColumn, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP( 12 ) );
     m_connectionCaption->Bind( wxEVT_TEXT, [this]( wxCommandEvent& ) { if( !m_updating ) captionEdited(); } );
-    // One row per detail: its name with a quiet remove button, then its value.
+    // One row per detail: its bold name with the action that removes the whole detail, then its value. That action is a link
+    // that says what it removes ("Remove signals"), so it cannot be taken for the "×" that removes one signal (design QA round
+    // 2, R2-P2-5), and it reads like Clear facet, which removes a block's facet the same way.
     auto detailRow = [&]( DETAIL detail, const char* name )
     {
         auto* row = new wxBoxSizer( wxVERTICAL ); auto* title = new wxBoxSizer( wxHORIZONTAL );
-        title->Add( new wxStaticText( scroll, wxID_ANY, detailLabel( static_cast<int>( detail ) ) ), 1, wxALIGN_CENTER_VERTICAL );
-        auto* remove = new wxButton( scroll, wxID_ANY, wxS( "\u00d7" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT | wxBORDER_NONE );
-        remove->SetName( wxString( "RecursiveDetailRemove" ) + name );
-        remove->SetToolTip( wxString::Format( _( "Remove %s" ), detailLabel( static_cast<int>( detail ) ).Lower() ) );
+        auto* detailName = new wxStaticText( scroll, wxID_ANY, detailLabel( static_cast<int>( detail ) ) ); detailName->SetFont( GetFont().Bold() );
+        title->Add( detailName, 1, wxALIGN_CENTER_VERTICAL );
+        auto* remove = new R::LINK_BUTTON( scroll, wxString::Format( _( "Remove %s" ), detailLabel( static_cast<int>( detail ) ).Lower() ),
+                                           ( std::string( "RecursiveDetailRemove" ) + name ).c_str() );
         remove->Bind( wxEVT_BUTTON, [this, detail]( wxCommandEvent& ) { removeDetail( detail ); } );
         title->Add( remove, 0, wxALIGN_CENTER_VERTICAL ); row->Add( title, 0, wxEXPAND );
         m_detailRows[static_cast<int>( detail )] = row; m_detailRemove[static_cast<int>( detail )] = remove;
@@ -265,22 +270,27 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         return row;
     };
     // Small fixed sets are one-click choices; none is chosen until the person chooses one.
+    // Chosen options use the accent checked style of the drawing tools (design QA round 2, R2-P2-4). The rows wrap within the
+    // width fitFacetLabels gives them before the inspector is laid out, like the facet detail's rows, so what follows a row
+    // that wraps moves down with it.
     auto oneClick = [&]( wxSizer* row, wxToggleButton** buttons, int count, const char* prefix, const char* const* names,
                          const wxString* labels, DETAIL detail, const int* values )
     {
-        auto* wrap = new wxWrapSizer( wxHORIZONTAL );
+        auto* flow = new R::CHOICE_FLOW( FromDIP( 4 ) );
         for( int i = 0; i < count; ++i )
         {
-            buttons[i] = new wxToggleButton( scroll, wxID_ANY, labels[i], wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT );
-            buttons[i]->SetName( wxString( prefix ) + names[i] );
+            buttons[i] = new R::CHOICE_BUTTON( scroll, labels[i], wxString( prefix ) + names[i] );
             int value = values[i];
             buttons[i]->Bind( wxEVT_TOGGLEBUTTON, [this, detail, value]( wxCommandEvent& ) { if( !m_updating ) setLinkValue( detail, value ); } );
-            wrap->Add( buttons[i], 0, wxTOP | wxRIGHT, FromDIP( 4 ) );
+            flow->Add( buttons[i], 0, wxTOP, FromDIP( 4 ) );
         }
-        row->Add( wrap, 0, wxEXPAND );
+        row->Add( flow, 0, wxEXPAND );
+        m_linkChoiceRows[static_cast<int>( detail ) - 1] = flow;
     };
     auto* signalRow = detailRow( DETAIL::SIGNALS, "Signals" );
-    m_signalList = new wxBoxSizer( wxVERTICAL ); signalRow->Add( m_signalList, 0, wxEXPAND );
+    // The signals start 8 DIP below the row's "Remove signals", so it never sits against the first signal's own "×" (design QA
+    // round 2, R2-P2-5: at least 8 pixels between the two removes).
+    m_signalList = new wxBoxSizer( wxVERTICAL ); signalRow->Add( m_signalList, 0, wxEXPAND | wxTOP, FromDIP( 8 ) );
     m_signalEntry = new wxTextCtrl( scroll, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER );
     m_signalEntry->SetName( "RecursiveSignalEntry" ); m_signalEntry->SetHint( _( "Add a signal" ) );
     signalRow->Add( m_signalEntry, 0, wxEXPAND | wxTOP, FromDIP( 4 ) );
@@ -309,10 +319,9 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     // What an agent or a later realization states about an end beyond its block or port (pins, candidates, a selector or
     // intent) is shown as read-only text; a drawn end is already on the canvas.
     auto* endpointRow = new wxBoxSizer( wxVERTICAL ); auto* endpointTitle = new wxBoxSizer( wxHORIZONTAL );
-    m_endpointHeading = new wxStaticText( scroll, wxID_ANY, _( "Endpoints" ) );
+    m_endpointHeading = new wxStaticText( scroll, wxID_ANY, _( "Endpoints" ) ); m_endpointHeading->SetFont( GetFont().Bold() );
     endpointTitle->Add( m_endpointHeading, 1, wxALIGN_CENTER_VERTICAL );
-    m_endpointRemove = new wxButton( scroll, wxID_ANY, wxS( "\u00d7" ), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT | wxBORDER_NONE );
-    m_endpointRemove->SetName( "RecursiveDetailRemoveEndpoints" ); m_endpointRemove->SetToolTip( _( "Remove endpoint details" ) );
+    m_endpointRemove = new R::LINK_BUTTON( scroll, _( "Remove endpoint details" ), "RecursiveDetailRemoveEndpoints" );
     m_endpointRemove->Bind( wxEVT_BUTTON, [this]( wxCommandEvent& ) { removeEndpointDetails(); } );
     endpointTitle->Add( m_endpointRemove, 0, wxALIGN_CENTER_VERTICAL ); endpointRow->Add( endpointTitle, 0, wxEXPAND );
     m_endpoints = new wxStaticText( scroll, wxID_ANY, wxEmptyString ); m_endpoints->SetName( "RecursiveConnectionEndpoints" );
@@ -417,11 +426,16 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     m_canvas->Bind( wxEVT_LEAVE_WINDOW, [this]( wxMouseEvent& event )
     {
         m_pointerInside = false;
+        // The canvas's tooltip goes with the pointer (review of design QA round 2).
+        updateCanvasTip();
         if( m_tool == TOOL::CONNECT ) { m_rendered = false; m_canvas->Refresh(); }
         event.Skip();
     } );
     m_canvas->Bind( wxEVT_LEFT_DCLICK, &RECURSIVE_DIAGRAM_FRAME::click, this );
     m_canvas->Bind( wxEVT_MOTION, &RECURSIVE_DIAGRAM_FRAME::motion, this );
+    // A pointer that jumps onto the canvas from elsewhere may bring only its entry, no motion: the tooltip, cursor and Connect
+    // highlight follow it all the same.
+    m_canvas->Bind( wxEVT_ENTER_WINDOW, [this]( wxMouseEvent& event ) { motion( event ); event.Skip(); } );
     // The release point ends a drag, even when the pointer's last motion before it arrived late or was merged away.
     m_canvas->Bind( wxEVT_LEFT_UP, [this]( wxMouseEvent& event ) { dragTo( event.GetPosition() ); release(); } );
     m_canvas->Bind( wxEVT_MOUSE_CAPTURE_LOST, [this]( wxMouseCaptureLostEvent& ) { release(); } );
@@ -493,7 +507,7 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
     } );
     placePaletteAndEditor();
     refresh(); CallAfter( [this, splitter]
-    { splitter->SetSashPosition( splitter->GetClientSize().x - FromDIP( 400 ) ); load( m_request.expected_source_token() ); } );
+    { splitter->SetSashPosition( splitter->GetClientSize().x - inspectorWidth() ); load( m_request.expected_source_token() ); } );
 }
 
 RECURSIVE_DIAGRAM_FRAME::~RECURSIVE_DIAGRAM_FRAME()
@@ -849,10 +863,7 @@ void RECURSIVE_DIAGRAM_FRAME::completed( wxProcessEvent& event )
             if( m_historyDialog ) m_historyDialog->PageFailed( _( "Older changes did not match this history. Try again." ) );
             refresh(); return;
         }
-        std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> rows;
-        for( const auto& row : result.history().entries() )
-            rows.push_back( { row.requirement_revision_id(), wxString::Format( "v%u", row.context_version() ),
-                Text( row.origin().actor() ), Text( row.text() ), wxEmptyString, row.is_saved_text() } );
+        std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> rows = DiagramFieldHistoryRows( m_document.graph(), result.history(), link );
         if( olderHistory )
         {
             if( !m_historyDialog->AppendPage( result.history().offset(), result.history().total(), std::move( rows ) ) )
@@ -1644,6 +1655,16 @@ void RECURSIVE_DIAGRAM_FRAME::removeSignals( const std::vector<std::string>& ids
                 added->DeleteSubrange( n, 1 );
         if( auto* draft = editConnection( false ) )
             for( int n = draft->members_size() - 1; n >= 0; --n ) if( listed( draft->members( n ).connection_id() ) ) draft->mutable_members()->DeleteSubrange( n, 1 );
+        // The exact inverse of adding them: a connection draft that adding a signal opened, and that is now again the saved
+        // connection, goes with them.
+        if( const auto* savedLink = savedConnection( m_connectionId ) )
+        {
+            const std::string savedDraft = connectionDraftFor( *savedLink ).SerializeAsString();
+            auto* drafts = m_level.mutable_connection_drafts();
+            for( int n = drafts->size() - 1; n >= 0; --n )
+                if( drafts->Get( n ).baseline().connection_id() == m_connectionId && drafts->Get( n ).SerializeAsString() == savedDraft )
+                    drafts->DeleteSubrange( n, 1 );
+        }
         m_notice.clear(); m_lastEffects.Clear(); changed(); return;
     }
     // A saved signal leaves through the companion's one removal cascade (contract rbg-v2 section 4.7): notes and
@@ -1755,7 +1776,11 @@ void RECURSIVE_DIAGRAM_FRAME::fillConnection( bool available )
         wxString value = Text( details.signals[i].name );
         if( m_signalLines[i].name->GetLabelText() != value ) m_signalLines[i].name->SetLabelText( value );
         m_signalLines[i].name->SetToolTip( value );
-        m_signalLines[i].remove->SetToolTip( pair ? pairTip : wxString::Format( _( "Remove signal %s" ), value ) );
+        // Each signal's own "×" is named for the signal it removes, on hover and for assistive technology (design QA round 2,
+        // R2-P2-5), apart from the row's "Remove signals".
+        const wxString removeName = wxString::Format( _( "Remove signal %s" ), value );
+        m_signalLines[i].remove->SetToolTip( pair ? pairTip : removeName );
+        R::SetAccessibleRole( m_signalLines[i].remove, nullptr, removeName );
         m_signalLines[i].remove->Enable( editable && !pair );
     }
     m_signalEntry->Show( signalsShown ); m_signalEntry->Enable( editable && !pair );
@@ -1763,15 +1788,17 @@ void RECURSIVE_DIAGRAM_FRAME::fillConnection( bool available )
     m_signalNotice->SetForegroundColour( problem ); m_signalNotice->SetLabel( m_signalProblem );
     m_signalNotice->Show( signalsShown && !m_signalProblem.empty() ); m_signalNotice->Wrap( wrap );
     m_detailRemove[static_cast<int>( DETAIL::SIGNALS )]->Enable( editable && !( pair && !details.signals.empty() ) );
-    m_detailRemove[static_cast<int>( DETAIL::SIGNALS )]->SetToolTip( pair && !details.signals.empty() ? pairTip : _( "Remove signals" ) );
+    // The link says what it removes; only a reason why it is unavailable needs a tooltip (design QA P3 9).
+    if( pair && !details.signals.empty() ) m_detailRemove[static_cast<int>( DETAIL::SIGNALS )]->SetToolTip( pairTip );
+    else m_detailRemove[static_cast<int>( DETAIL::SIGNALS )]->UnsetToolTip();
     // Direction is stated between the connection's own ends: from its first end to the others, the reverse, or both ways.
     if( details.endpoints.size() >= 2 )
     {
         wxString first = endpointName( details.endpoints[0] );
         wxString others = details.endpoints.size() == 2 ? endpointName( details.endpoints[1] ) : _( "the others" );
         wxString labels[] = { first + wxS( " \u2192 " ) + others, others + wxS( " \u2192 " ) + first, _( "Both ways" ) };
-        for( int i = 0; i < 3; ++i ) if( m_directionChoices[i]->GetLabel() != labels[i] )
-        { m_directionChoices[i]->SetLabel( labels[i] ); m_directionChoices[i]->SetToolTip( labels[i] ); m_directionChoices[i]->InvalidateBestSize(); }
+        // No tooltip that only repeats the label and covers the next choice (design QA round 2, P3 19).
+        for( int i = 0; i < 3; ++i ) if( m_directionChoices[i]->GetLabel() != labels[i] ) m_directionChoices[i]->SetLabel( labels[i] );
     }
     for( int i = 0; i < 3; ++i ) { m_directionChoices[i]->SetValue( details.direction == DIRECTIONS[i] ); m_directionChoices[i]->Enable( editable ); }
     for( int i = 0; i < 5; ++i ) { m_domainChoices[i]->SetValue( details.domain == DOMAINS[i] ); m_domainChoices[i]->Enable( editable ); }
@@ -1782,9 +1809,10 @@ void RECURSIVE_DIAGRAM_FRAME::fillConnection( bool available )
                      : KINDS[i] == D::DCK_DIFFERENTIAL_PAIR ? details.signals.size() == 2 && signalMembers : true;
         m_typeChoices[i]->SetValue( details.kind == KINDS[i] );
         m_typeChoices[i]->Enable( editable && ( allowed || details.kind == KINDS[i] ) );
-        m_typeChoices[i]->SetToolTip( KINDS[i] == D::DCK_SIGNAL && !allowed ? _( "A single signal has no signals of its own; remove its signals first." )
-                                    : KINDS[i] == D::DCK_DIFFERENTIAL_PAIR && !allowed ? _( "A differential pair has exactly two signals." )
-                                    : m_typeChoices[i]->GetLabel() );
+        // An unavailable type says why (design QA round 2, P3 20); an available one needs no tooltip that repeats its label.
+        wxString reason = KINDS[i] == D::DCK_SIGNAL && !allowed ? _( "A single signal has no signals of its own; remove its signals first." )
+                        : KINDS[i] == D::DCK_DIFFERENTIAL_PAIR && !allowed ? _( "A differential pair has exactly two signals." ) : wxString();
+        if( reason.empty() ) m_typeChoices[i]->UnsetToolTip(); else m_typeChoices[i]->SetToolTip( reason );
     }
     // What an end says beyond its block or port, one line per end that says more.
     wxString endpoints;
@@ -1950,8 +1978,13 @@ void RECURSIVE_DIAGRAM_FRAME::fillFacets( bool available )
     m_facetGap->Show( any && !open );
     // "Back to facet overview" only once there is an overview to go back to (design QA P3 21); Escape always returns.
     m_facetBack->Show( open && any );
-    // While a facet's detail is open, Comments is three lines high so more of the detail fits (design QA P2-13).
-    m_comments->SetMinSize( wxSize( -1, FromDIP( open ? 72 : 110 ) ) );
+    // While a facet's detail is open, the requirement boxes and Comments are two lines high, as sketch A4 draws them beside a
+    // facet's detail, so at the default window size the whole detail and Comments, with its 12 DIP margin below it, fit the
+    // inspector's view (design QA P2-13 and round 2, P3 10: Comments was cut off at the view's lower edge). Each box keeps its
+    // text 6 DIP from its top and bottom (P2-9).
+    const int twoLines = 2 * m_comments->GetCharHeight() + 2 * FromDIP( 6 ) + FromDIP( 4 );
+    m_comments->SetMinSize( wxSize( -1, open ? twoLines : FromDIP( 110 ) ) );
+    for( wxTextCtrl* field : m_fields ) field->SetMinSize( wxSize( field->GetMinSize().x, open ? twoLines : FromDIP( 90 ) ) );
     if( open )
     {
         if( !m_facetTouched ) fillFacetForm();
@@ -2034,16 +2067,33 @@ void RECURSIVE_DIAGRAM_FRAME::setFacetStrength( int strength )
 {
     if( strength >= 0 && strength < 3 && !m_facetStrengths[strength]->GetValue() ) m_facetStrengths[strength]->SetValue( true );
 }
-bool RECURSIVE_DIAGRAM_FRAME::fitFacetLabels()
+int RECURSIVE_DIAGRAM_FRAME::fullStrengthRow() const
 {
-    // Measure the full labels in one row: each choice's indicator and padding plus its full label's text.
-    const auto full = strengthLabels( false ), brief = strengthLabels( true );
-    int available = m_inspectorScroll->GetClientSize().x - 2 * FromDIP( 12 ), needed = 2 * FromDIP( FACET_CHOICE_GAP );
+    // The full labels in one row: each choice's indicator and padding plus its full label's text, and the gaps between them.
+    const auto full = strengthLabels( false );
+    int needed = 2 * FromDIP( FACET_CHOICE_GAP );
     for( int i = 0; i < 3; ++i )
     {
         wxRadioButton* button = m_facetStrengths[i]; button->InvalidateBestSize();
         needed += button->GetBestSize().x - button->GetTextExtent( button->GetLabel() ).x + button->GetTextExtent( full[i] ).x;
     }
+    return needed;
+}
+int RECURSIVE_DIAGRAM_FRAME::inspectorWidth() const
+{
+    // Design QA round 2, R2-P2-7: the inspector's default width counts its scroll bar's gutter. A facet's detail makes the
+    // inspector scroll at the default window size, and the scroll bar, which stays visible since P2-13, took the room the full
+    // strength labels need, so they collapsed to Info, Pref. and Req. there. The default width now holds the full row with the
+    // rule's 4 DIP to spare, the detail's 12 DIP margins, the scroll bar and the splitter's sash, and 4 DIP more so a scroll bar
+    // a pixel wider than the toolkit reports cannot tip it; the short labels stay the fallback of a narrower inspector.
+    const int scrollBar = std::max( 0, wxSystemSettings::GetMetric( wxSYS_VSCROLL_X, m_inspectorScroll ) );
+    const int needed = fullStrengthRow() + FromDIP( 4 ) + 2 * FromDIP( 12 ) + scrollBar + m_splitter->GetSashSize() + FromDIP( 4 );
+    return std::max( FromDIP( 400 ), needed );
+}
+bool RECURSIVE_DIAGRAM_FRAME::fitFacetLabels()
+{
+    const auto full = strengthLabels( false ), brief = strengthLabels( true );
+    int available = m_inspectorScroll->GetClientSize().x - 2 * FromDIP( 12 ), needed = fullStrengthRow();
     // A few pixels to spare, so the full labels show only where they fit with room left over.
     bool collapse = needed + FromDIP( 4 ) > available, changed = false;
     for( int i = 0; i < 3; ++i )
@@ -2056,6 +2106,8 @@ bool RECURSIVE_DIAGRAM_FRAME::fitFacetLabels()
     // as tall as the lines it places, so the controls below a row that wraps move down and none lies over a choice.
     changed |= m_facetStateRow->SetWrapWidth( available );
     changed |= m_facetStrengthRow->SetWrapWidth( available );
+    // A connection's direction, domain and type rows wrap within the same width.
+    for( auto* row : m_linkChoiceRows ) if( row ) changed |= row->SetWrapWidth( available );
     return changed;
 }
 void RECURSIVE_DIAGRAM_FRAME::facetStateChanged()
@@ -2201,10 +2253,14 @@ void RECURSIVE_DIAGRAM_FRAME::fillComments()
     D::DiagramAnnotationTargetKind kind = link ? D::DAT_CONNECTION : D::DAT_BLOCK;
     m_commentIds.clear(); m_commentChoice->Clear();
     const D::DiagramAnnotationData* selectedNote = nullptr;
+    // Comments opens on the selected element's own first comment, or on a new one when it has none (mockup audit M1-1).
+    // The level's free-space notes and unresolved comments stay in the list, but opening a block never picks one of them:
+    // typing would otherwise rewrite the level's note, and the note would be drawn as the selected comment.
+    if( m_commentId.empty() && !m_newComment )
+        for( const auto& note : notes ) if( note.target_kind() == kind && note.target_id() == target ) { m_commentId = note.id(); break; }
     for( const auto& note : notes ) if( ( note.target_kind() == kind && note.target_id() == target )
         || ( !link && ( note.target_kind() == D::DAT_CANVAS || note.has_unresolved_reason() ) ) )
     {
-        if( m_commentId.empty() && !m_newComment ) m_commentId = note.id();
         wxString title = Text( note.text() ).BeforeFirst( '\n' );
         if( title.length() > 36 ) title = title.Left( 36 ) + wxS( "…" );
         if( title.empty() ) title = _( "Sketch comment" );
@@ -2413,10 +2469,7 @@ void RECURSIVE_DIAGRAM_FRAME::showHistory( const D::RecursiveFileResult& result,
     int which = static_cast<int>( page.field() ) - 1;
     bool stillSelected = link ? m_connectionId == owner : m_connectionId.empty() && m_selected == owner;
     if( result.source_token() != m_document.source_token() || page.owner_id() != owner || !stillSelected || which < 0 || which > 2 ) return;
-    std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> rows;
-    for( const auto& row : page.entries() )
-        rows.push_back( { row.requirement_revision_id(), wxString::Format( "v%u", row.context_version() ),
-            Text( row.origin().actor() ), Text( row.text() ), wxEmptyString, row.is_saved_text() } );
+    std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> rows = DiagramFieldHistoryRows( m_document.graph(), page, link );
     DIALOG_DIAGRAM_FIELD_HISTORY dialog( this, FIELD_LABELS[which], m_owner->GetLabel(),
             wxString::Format( "v%u", page.context_version() ), Text( page.saved_text() ), std::move( rows ) );
     m_historyContext = page;
@@ -2667,6 +2720,9 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
             out->set_width( rect.width ); out->set_height( rect.height ); out->set_shown( visible.Contains( rect ) ); out->set_enabled( enabled );
         };
         const auto drawnChipsCache = drawnChips();
+        // The level as drawn, kept for the whole report: a "+N more" chip's tooltip reads its block's definition from it.
+        std::optional<R::LEVEL_LAYOUT> chipLevel;
+        if( m_ready && current() ) chipLevel.emplace( layout( current(), !m_historyPreview ) );
         for( const auto& [block, chips] : drawnChipsCache )
         {
             auto* row = result.add_block_chips(); row->set_block_id( block ); row->set_hidden_chips( chips.hidden );
@@ -2681,7 +2737,13 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
                 auto* item = row->add_marks(); item->set_facet( R::FacetName( mark.facet ) ); item->set_state( mark.state );
                 place( item->mutable_rect(), "DiagramChoiceMark", mark.rect, false );
             }
-            if( chips.more ) place( row->mutable_more(), "DiagramMoreChips", *chips.more, false );
+            if( chips.more )
+            {
+                place( row->mutable_more(), "DiagramMoreChips", *chips.more, false );
+                row->mutable_more()->set_label( Utf8( wxString::Format( _( "+%u more" ), chips.hidden ) ) );
+                if( const R::NODE* node = chipLevel ? chipLevel->Node( block ) : nullptr )
+                    row->mutable_more()->set_tooltip( Utf8( R::MoreToolTip( *node, chips ) ) );
+            }
             place( row->mutable_caption(), "DiagramBlockCaption", chips.caption, false );
             for( const auto& name : chips.portNames ) place( row->add_port_names(), "DiagramBlockPortName", name, false );
         }
@@ -2712,8 +2774,11 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
         {
             auto drawn = layout( current(), !m_historyPreview );
             if( auto frame = drawn.Frame() ) place( result.mutable_level_frame(), "DiagramLevelFrame", toScreen( *frame ), false );
-            for( const auto& [name, rect] : boundaryNames( drawn ) )
-            { auto* row = result.add_boundary_port_names(); place( row, "DiagramBoundaryPortName", rect, false ); row->set_label( name ); }
+            for( const auto& name : boundaryNames( drawn ) )
+            {
+                auto* row = result.add_boundary_port_names(); place( row, "DiagramBoundaryPortName", name.rect, false ); row->set_label( name.name );
+                row->set_object_id( name.owner + "/" + name.id );
+            }
             // Each canvas note with the lines it shows, measured as the canvas paints them.
             wxClientDC dc( m_canvas ); dc.SetFont( GetFont() );
             const auto& notes = visibleNotes();
@@ -2732,7 +2797,7 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
             for( const auto& port : portMarks( drawn ) )
             {
                 auto* row = result.add_port_marks(); place( row, "DiagramPortMark", port.rect, false );
-                row->set_label( R::Utf8( port.name ) );
+                row->set_label( R::Utf8( port.name ) ); row->set_object_id( port.owner + "/" + port.id );
                 row->set_active( target && target->port && target->owner == port.owner && target->id == port.id );
             }
             if( target ) { place( result.mutable_connect_target(), "DiagramConnectTarget", target->rect, false ); result.mutable_connect_target()->set_label( R::Utf8( target->name ) ); }
@@ -2740,6 +2805,11 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
             {
                 auto* row = result.add_connection_captions(); place( row, "DiagramConnectionCaption", caption.rect, false );
                 row->set_shown( caption.shown && visible.Contains( caption.rect ) ); row->set_label( R::Utf8( caption.text ) );
+                row->set_object_id( caption.connection );
+                // A shortened caption shows its whole text on hover (design QA round 2, R2-P2-1).
+                if( caption.text != caption.full ) row->set_tooltip( R::Utf8( caption.full ) );
+                // A caption drawn where it covers something, because no clear place was found, is reported as not enabled.
+                row->set_enabled( caption.clear );
             }
             wxFont captionFont = GetFont().Bold().Larger();
             for( const auto& node : drawn.Nodes() )
@@ -2759,6 +2829,11 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
                 }
             }
             for( const auto& handle : selectionHandles( drawn ) ) place( result.add_selection_handles(), "DiagramSelectionHandle", handle, false );
+            // The Connect tool's preview and hint as drawn (design QA round 2, R2-P2-2 and P3 1).
+            const auto preview = connectPreview( drawn );
+            for( const wxPoint& point : preview ) { auto* row = result.add_connect_preview(); row->set_x( origin.x + point.x ); row->set_y( origin.y + point.y ); }
+            if( auto hint = connectHint( drawn, preview ) )
+            { place( result.mutable_connect_hint(), "DiagramConnectHint", *hint, false ); result.mutable_connect_hint()->set_label( "Click a port to finish connection" ); }
         }
     }
     result.set_canvas_presses( m_canvasPresses );
@@ -2794,6 +2869,8 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
         history->set_total_count( static_cast<unsigned>( m_historyDialog->TotalCount() ) );
         history->set_inspected_revision_id( m_historyDialog->InspectedRevision() );
         history->set_loading( m_historyDialog->IsLoading() ); history->set_error_message( Utf8( m_historyDialog->PageError() ) );
+        for( const wxString& row : m_historyDialog->RowLabels() ) history->add_row_labels( Utf8( row ) );
+        for( const wxString& row : m_historyDialog->ShownRowLabels() ) history->add_shown_row_labels( Utf8( row ) );
     }
     if( m_preview ) *result.mutable_preview_selection() = *m_preview;
     // Rendered controls, so journeys drive the real toolbar strip, palette and inspector.
@@ -2804,6 +2881,7 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
         auto* row = result.add_controls(); row->set_name( name ); row->set_x( rect.x - window.x ); row->set_y( rect.y - window.y );
         row->set_width( rect.width ); row->set_height( rect.height ); row->set_shown( shown ); row->set_enabled( enabled ); row->set_active( active );
         row->set_label( Utf8( label ) );
+        if( item ) row->set_tooltip( Utf8( item->GetToolTipText() ) );
         // What assistive technology reads from a button, a one-click choice or a facet row, from the toolkit itself.
         if( item && ( dynamic_cast<wxAnyButton*>( item ) || dynamic_cast<wxRadioButton*>( item ) || dynamic_cast<R::FACET_ROW*>( item ) ) )
             if( auto accessible = R::AccessibleOf( item ) )
@@ -2834,8 +2912,10 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
                         || dynamic_cast<wxStaticText*>( item );
         // The connection's caption field and new-signal entry report the text they show (Round A3).
         auto* text = dynamic_cast<wxStaticText*>( item );
+        // A facet row reports its label as shown and read out, without the escaping of an "&" in its value.
+        auto* facetRow = dynamic_cast<R::FACET_ROW*>( item );
         wxString label = item == m_connectionCaption ? m_connectionCaption->GetValue() : item == m_signalEntry ? m_signalEntry->GetValue()
-                       : text ? text->GetLabelText() : labelled ? item->GetLabel() : wxString();
+                       : text ? text->GetLabelText() : facetRow ? facetRow->GetLabelText() : labelled ? item->GetLabel() : wxString();
         control( Utf8( item->GetName() ), wxRect( item->GetScreenPosition(), item->GetSize() ), item->IsShownOnScreen(), item->IsEnabled(),
                  ( toggle && toggle->GetValue() ) || ( radio && radio->GetValue() ), label, item );
     }
@@ -2848,6 +2928,18 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
     }
     if( auto* focused = wxWindow::FindFocus(); focused && wxGetTopLevelParent( focused ) == this )
         result.set_focused_control( Utf8( focused->GetName() ) );
+    // How often the computed connection paths were laid out and how long that took, read after everything above has drawn.
+    const R::ROUTE_STATS routes = R::RouteStats();
+    result.set_route_layouts( routes.layouts ); result.set_slowest_route_layout_micros( routes.slowestMicros );
+    result.set_latest_route_layout_micros( routes.latestMicros );
+    result.set_drag_positions( m_dragPositions );
+    // The tooltip as it is set on the canvas window itself, not the editor's own note of it.
+    result.set_canvas_tooltip( Utf8( m_canvas->GetToolTipText() ) );
+    result.set_canvas_motions( m_canvasMotions );
+    {
+        wxPoint corner = m_canvas->GetScreenPosition() - GetScreenPosition();
+        result.mutable_canvas_pointer()->set_x( corner.x + m_pointer.x ); result.mutable_canvas_pointer()->set_y( corner.y + m_pointer.y );
+    }
     return result;
 }
 

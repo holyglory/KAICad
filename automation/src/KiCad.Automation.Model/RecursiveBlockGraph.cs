@@ -67,7 +67,8 @@ public sealed partial class RecursiveBlockGraph
             || requirementHistories is null) throw Invalid("Supply a document, selected root and immutable block histories.");
         DocumentId = documentId; SelectedRoot = selectedRoot;
         States = states.ToImmutableArray(); Revisions = revisions.ToImmutableArray();
-        RequirementHistories = requirementHistories.ToImmutableArray();
+        // A derived implementation's history continues the one it was made from (checked below).
+        RequirementHistories = DiagramRequirementHistory.Link(requirementHistories.ToImmutableArray());
         ConnectionArchives = connectionArchives?.ToImmutableArray() ?? [];
         ImplementationChanges = implementationChanges?.ToImmutableArray() ?? [];
         RefinementInputs = refinementInputs?.ToImmutableArray() ?? [];
@@ -193,6 +194,11 @@ public sealed partial class RecursiveBlockGraph
                     throw Invalid("An implementation source must be an exact revision of the same block without circular derivation.");
                 current = _states[source.StateId];
             }
+            // Field history continues from the exact revision the implementation was made from. An implementation saved
+            // before histories were continued keeps the separate history it was saved with.
+            if (_requirements[state.Id].DerivedFrom is { } derived
+                && (state.ForkedFrom is not { } madeFrom || _revisions[madeFrom.RevisionId].RequirementRevisionId != derived))
+                throw Invalid("An implementation's field history can only continue the exact revision it was made from.");
         }
         foreach (var revision in Revisions)
         {
@@ -410,8 +416,9 @@ public sealed partial class RecursiveBlockGraph
         var originalRequirements = Requirements(source);
         var state = new BlockDesignState(stateId, source.BlockId, name, revisionId, source);
         var selection = new BlockSelection(source.BlockId, stateId, revisionId);
+        // The new implementation continues the source's field history from its exact revision.
         var history = new DiagramRequirementHistory(new(DocumentId, source.BlockId, stateId),
-            [new(requirementRevisionId, null, originalRequirements.Requirements, origin, [])]);
+            [new(requirementRevisionId, originalRequirements.RevisionId, originalRequirements.Requirements, origin, [])]);
         BlockLocalDiagram? diagram = original.Diagram;
         if (emptyInterior)
         {
@@ -549,13 +556,31 @@ public sealed partial class RecursiveBlockGraph
     public RecursiveBlockSelectionResult SaveConnectionDraft(BlockSelection expectedRoot, ImmutableArray<BlockSelection> blockPath,
         ImmutableArray<ConnectionSelection> connectionPath, DiagramConnectionDraft draft, Guid connectionRevisionId,
         Guid requirementRevisionId, ImmutableArray<Guid> connectionAncestorRevisionIds, Guid blockRevisionId,
+        Guid blockRequirementRevisionId, ImmutableArray<Guid> blockAncestorRevisionIds, RequirementRevisionOrigin origin) =>
+        SaveConnectionDraft(expectedRoot, blockPath, connectionPath, draft, [], connectionRevisionId, requirementRevisionId,
+            connectionAncestorRevisionIds, blockRevisionId, blockRequirementRevisionId, blockAncestorRevisionIds, origin);
+
+    /// <summary>As the save above, also creating the members that refine the connection's members into groups, pairs and
+    /// signals (<see cref="NewConnectionMember"/>). Every end of the draft and of each new member must name this level or one
+    /// of its blocks, and a port that block has in the pinned revision (<c>connection_edit_target_missing</c> otherwise).
+    /// Nothing is published unless the whole save is valid.</summary>
+    public RecursiveBlockSelectionResult SaveConnectionDraft(BlockSelection expectedRoot, ImmutableArray<BlockSelection> blockPath,
+        ImmutableArray<ConnectionSelection> connectionPath, DiagramConnectionDraft draft, ImmutableArray<NewConnectionMember> newMembers,
+        Guid connectionRevisionId, Guid requirementRevisionId, ImmutableArray<Guid> connectionAncestorRevisionIds, Guid blockRevisionId,
         Guid blockRequirementRevisionId, ImmutableArray<Guid> blockAncestorRevisionIds, RequirementRevisionOrigin origin)
     {
-        if (blockPath.IsDefaultOrEmpty || connectionPath.IsDefaultOrEmpty || draft is null || connectionPath[^1] != draft.Baseline)
+        if (blockPath.IsDefaultOrEmpty || connectionPath.IsDefaultOrEmpty || draft is null || connectionPath[^1] != draft.Baseline
+            || newMembers.IsDefault || draft.Endpoints.IsDefault || draft.Members.IsDefault)
             throw Invalid("Connection edits need their exact containing block and member paths.");
         _ = Select(expectedRoot, blockPath, blockPath[^1], blockAncestorRevisionIds, origin);
         var block = Inspect(blockPath[^1]); var archive = Connections(block.Selection.BlockId);
         _ = archive.Select(block.LocalDiagram.Connections, connectionPath, draft.Baseline, connectionAncestorRevisionIds, origin);
+        CheckEndpointTargets(block, draft.Endpoints.Concat(newMembers.Where(m => m is not null && !m.Endpoints.IsDefault).SelectMany(m => m.Endpoints)));
+        // Both ancestor lists were checked above: the block path by Select and the member path by the archive's Select.
+        if (!newMembers.IsEmpty)
+            archive = WithNewMembers(archive, draft, newMembers, origin,
+                [connectionRevisionId, requirementRevisionId, blockRevisionId, blockRequirementRevisionId,
+                 .. connectionAncestorRevisionIds, .. blockAncestorRevisionIds]);
         var committed = archive.SaveDraft(draft, connectionRevisionId, requirementRevisionId, origin);
         if (!committed.Changed && draft.DiagramAnnotations.IsDefault) return new(this, [], false);
         var selected = committed.Archive.Select(block.LocalDiagram.Connections, connectionPath, committed.Revision.Selection,

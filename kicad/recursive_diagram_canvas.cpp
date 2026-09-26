@@ -1,6 +1,7 @@
 /* Copyright The KiCad Developers. SPDX-License-Identifier: GPL-3.0-or-later */
 #include "recursive_diagram_canvas.h"
 #include "recursive_diagram_frame.h"
+#include "dialogs/dialog_diagram_field_history.h"
 #include <bitmaps.h>
 #include <kiid.h>
 #include <algorithm>
@@ -21,6 +22,7 @@
 #include <wx/settings.h>
 #include <wx/tglbtn.h>
 #include <memory>
+#include <queue>
 #include <set>
 #include <tuple>
 #if defined( __WXGTK__ )
@@ -33,50 +35,10 @@ std::string FreshId() { return Utf8( KIID().AsString() ); }
 
 namespace
 {
-double channel( unsigned char value )
-{
-    double v = value / 255.0;
-    return v <= 0.03928 ? v / 12.92 : std::pow( ( v + 0.055 ) / 1.055, 2.4 );
-}
-double luminance( const wxColour& colour )
-{
-    return 0.2126 * channel( colour.Red() ) + 0.7152 * channel( colour.Green() ) + 0.0722 * channel( colour.Blue() );
-}
-struct HSL { double h = 0, s = 0, l = 0; };
-HSL toHsl( const wxColour& colour )
-{
-    double r = colour.Red() / 255.0, g = colour.Green() / 255.0, b = colour.Blue() / 255.0;
-    double high = std::max( { r, g, b } ), low = std::min( { r, g, b } );
-    HSL result; result.l = ( high + low ) / 2;
-    if( high == low ) return result;
-    double d = high - low;
-    result.s = result.l > 0.5 ? d / ( 2 - high - low ) : d / ( high + low );
-    if( high == r ) result.h = ( g - b ) / d + ( g < b ? 6 : 0 );
-    else if( high == g ) result.h = ( b - r ) / d + 2;
-    else result.h = ( r - g ) / d + 4;
-    result.h /= 6;
-    return result;
-}
-wxColour fromHsl( const HSL& hsl )
-{
-    auto hue = []( double p, double q, double t )
-    {
-        if( t < 0 ) t += 1;
-        if( t > 1 ) t -= 1;
-        if( t < 1.0 / 6 ) return p + ( q - p ) * 6 * t;
-        if( t < 0.5 ) return q;
-        if( t < 2.0 / 3 ) return p + ( q - p ) * ( 2.0 / 3 - t ) * 6;
-        return p;
-    };
-    double l = std::clamp( hsl.l, 0.0, 1.0 ), r = l, g = l, b = l;
-    if( hsl.s > 0 )
-    {
-        double q = l < 0.5 ? l * ( 1 + hsl.s ) : l + hsl.s - l * hsl.s, p = 2 * l - q;
-        r = hue( p, q, hsl.h + 1.0 / 3 ); g = hue( p, q, hsl.h ); b = hue( p, q, hsl.h - 1.0 / 3 );
-    }
-    auto byte = []( double v ) { return static_cast<unsigned char>( std::lround( std::clamp( v, 0.0, 1.0 ) * 255 ) ); };
-    return wxColour( byte( r ), byte( g ), byte( b ) );
-}
+// The colour arithmetic is shared with the history and conflict dialogs (dialogs/dialog_diagram_field_history.h).
+using HSL = DIAGRAM_LOOK::HSL;
+HSL toHsl( const wxColour& colour ) { return DIAGRAM_LOOK::ToHsl( colour ); }
+wxColour fromHsl( const HSL& hsl ) { return DIAGRAM_LOOK::FromHsl( hsl ); }
 wxColour mix( const wxColour& a, const wxColour& b, double weightOfA )
 {
     auto one = [&]( unsigned char x, unsigned char y ) { return static_cast<unsigned char>( std::lround( x * weightOfA + y * ( 1 - weightOfA ) ) ); };
@@ -84,11 +46,7 @@ wxColour mix( const wxColour& a, const wxColour& b, double weightOfA )
 }
 }
 
-double Contrast( const wxColour& a, const wxColour& b )
-{
-    double x = luminance( a ), y = luminance( b );
-    return ( std::max( x, y ) + 0.05 ) / ( std::min( x, y ) + 0.05 );
-}
+double Contrast( const wxColour& a, const wxColour& b ) { return DIAGRAM_LOOK::Contrast( a, b ); }
 
 bool IsDark( const wxColour& surface ) { return surface.Red() + surface.Green() + surface.Blue() < 384; }
 
@@ -117,23 +75,8 @@ wxColour Readable( const wxColour& colour, std::initializer_list<wxColour> again
 
 ACCENT_FILL AccentFill( const wxColour& accent, const wxColour& surface )
 {
-    const wxColour white( 255, 255, 255 ), ink( 26, 26, 26 );
-    HSL base = toHsl( accent );
-    std::optional<ACCENT_FILL> inked;
-    for( int step = 0; step <= 100; ++step )
-        for( int sign : { 1, -1 } )
-        {
-            if( step == 0 && sign < 0 ) continue;
-            HSL moved = base; moved.l += sign * step * 0.01;
-            if( moved.l < 0.1 || moved.l > 0.9 ) continue;
-            wxColour fill = fromHsl( moved );
-            // 3:1 with a little to spare, so the rendered fill never lands just under it.
-            if( Contrast( fill, surface ) < 3.2 ) continue;
-            if( Contrast( white, fill ) >= 4.5 ) return { fill, white };
-            if( !inked && Contrast( ink, fill ) >= 4.5 ) inked = ACCENT_FILL{ fill, ink };
-        }
-    if( inked ) return *inked;
-    return { accent, Contrast( white, accent ) >= Contrast( ink, accent ) ? white : ink };
+    DIAGRAM_LOOK::ACCENT fill = DIAGRAM_LOOK::AccentFill( accent, surface );
+    return { fill.fill, fill.text };
 }
 
 CANVAS_COLOURS CanvasColours()
@@ -158,30 +101,7 @@ CANVAS_COLOURS CanvasColours()
     return colours;
 }
 
-void PadTextBox( wxTextCtrl* control, int horizontal, int vertical )
-{
-    if( !control->IsMultiLine() ) { control->SetMargins( horizontal, vertical ); return; }
-#if defined( __WXGTK__ )
-    // wxGTK 3.2 applies SetMargins to single-line entries only. A multi-line entry is a GtkTextView inside the GtkScrolledWindow
-    // that GetHandle() returns; its margins are set through the GTK the toolkit already runs on, looked up at run time so no
-    // GTK header is needed here. A missing function leaves the text where GTK puts it.
-    using CHILD = void* ( * )( void* );
-    using MARGIN = void ( * )( void*, int );
-    static const auto child = reinterpret_cast<CHILD>( dlsym( RTLD_DEFAULT, "gtk_bin_get_child" ) );
-    static const auto left = reinterpret_cast<MARGIN>( dlsym( RTLD_DEFAULT, "gtk_text_view_set_left_margin" ) );
-    static const auto right = reinterpret_cast<MARGIN>( dlsym( RTLD_DEFAULT, "gtk_text_view_set_right_margin" ) );
-    static const auto top = reinterpret_cast<MARGIN>( dlsym( RTLD_DEFAULT, "gtk_text_view_set_top_margin" ) );
-    static const auto bottom = reinterpret_cast<MARGIN>( dlsym( RTLD_DEFAULT, "gtk_text_view_set_bottom_margin" ) );
-    void* view = child && control->GetHandle() ? child( control->GetHandle() ) : nullptr;
-    if( !view ) return;
-    if( left ) left( view, horizontal );
-    if( right ) right( view, horizontal );
-    if( top ) top( view, vertical );
-    if( bottom ) bottom( view, vertical );
-#else
-    control->SetMargins( horizontal, vertical );
-#endif
-}
+void PadTextBox( wxTextCtrl* control, int horizontal, int vertical ) { DIAGRAM_LOOK::PadTextBox( control, horizontal, vertical ); }
 
 void DrawGlyph( wxDC& dc, GLYPH glyph, const wxRect& box, const wxColour& colour )
 {
@@ -535,79 +455,539 @@ POINT LEVEL_LAYOUT::EndAnchor( const LINK& link, int endpoint, int leg ) const
             return found->second;
     return Anchor( end, centreX( peer ) );
 }
-int LEVEL_LAYOUT::normal( const D::DiagramEndpointBindingData& endpoint, const POINT& at ) const
+std::pair<int, int> LEVEL_LAYOUT::leaving( const D::DiagramEndpointBindingData& endpoint, const POINT& at ) const
 {
-    // Which way a path leaves an end (rule F4c): +1 to the right, -1 to the left, 0 for an end on a top or bottom side. A
-    // child block's end points out of the block; a boundary port points into the level.
-    auto side = []( D::DiagramPortSide portSide, bool boundary ) -> int
+    // Which way a path leaves an end (rules F4c and F4d): a child block's end points out of the block, a boundary port
+    // into the level.
+    auto out = []( D::DiagramPortSide side, bool boundary ) -> std::pair<int, int>
     {
-        if( portSide == D::DPS_LEFT ) return boundary ? 1 : -1;
-        if( portSide == D::DPS_RIGHT ) return boundary ? -1 : 1;
-        return 0;
+        const int sign = boundary ? -1 : 1;
+        switch( side )
+        {
+        case D::DPS_LEFT: return { -sign, 0 };
+        case D::DPS_TOP: return { 0, -sign };
+        case D::DPS_BOTTOM: return { 0, sign };
+        default: return { sign, 0 };
+        }
     };
     if( endpoint.block_id() == m_scope )
     {
         if( endpoint.has_interface_id() )
-            if( const PORT* port = Port( m_scope, endpoint.interface_id() ); port && port->placed ) return side( port->side, true );
-        return 1;
+            if( const PORT* port = Port( m_scope, endpoint.interface_id() ); port && port->placed ) return out( port->side, true );
+        return { 1, 0 };
     }
     if( endpoint.has_interface_id() )
-        if( const PORT* port = Port( endpoint.block_id(), endpoint.interface_id() ); port && port->placed ) return side( port->side, false );
-    return at.x == Rect( endpoint.block_id() ).Right() ? 1 : -1;
+        if( const PORT* port = Port( endpoint.block_id(), endpoint.interface_id() ); port && port->placed ) return out( port->side, false );
+    return { at.x == Rect( endpoint.block_id() ).Right() ? 1 : -1, 0 };
 }
-std::string LEVEL_LAYOUT::ownBlock( const D::DiagramEndpointBindingData& endpoint ) const
+int LEVEL_LAYOUT::ownBlock( const D::DiagramEndpointBindingData& endpoint ) const
 {
-    return endpoint.block_id() != m_scope && Node( endpoint.block_id() ) ? endpoint.block_id() : std::string();
+    if( endpoint.block_id() == m_scope ) return -1;
+    for( size_t i = 0; i < m_nodes.size(); ++i ) if( m_nodes[i].id == endpoint.block_id() ) return static_cast<int>( i );
+    return -1;
 }
-void LEVEL_LAYOUT::placePaths()
+bool LEVEL_LAYOUT::Sideways( const LINK& link, int index ) const
 {
-    // Rule F4 (revised for design QA P2-5). A leg with a stored route runs through its waypoints; an unlocked channel route
-    // (two waypoints on one vertical line) runs level from each of its ends to its channel, so a route stored against ends
-    // that have since moved never draws a slanted leg (F4b). A computed leg is the three-segment path from, (x, from.y),
-    // (x, to.y), to, whose channel x is chosen so that the leg leaves each block along its edge before turning (F4c) and
-    // keeps apart from the other legs (F4a):
-    //  - An end on a block's left or right edge, or on a boundary port, needs the channel at least 20 units out along its
-    //    edge. The preferred channel is the middle between the ends moved into those limits; the candidates are it and every
-    //    channel 10k units from it inside the limits (up to 200 units past the ends on an open side). When the limits of the
-    //    two ends cannot both hold, the preferred channel is the middle and the candidates stay 10 units inside the ends.
-    //  - A candidate scores, in this order: the runs beside another leg (its vertical leg within 10 units of another vertical
-    //    leg over heights they share or meet at; its horizontal leg on the height of another leg's horizontal segment that
-    //    overlaps it or ends within 10 units of it, unless that other leg starts or ends at the same point), the blocks its
-    //    segments come within 10 units of (a segment leaving an end does not count that end's own block), the other legs it
-    //    crosses, and its distance from the preferred channel; then the lower channel.
-    //  - Stored routes are laid out first, then the computed legs in level order, each taking its best candidate against the
-    //    legs laid out before it. Then, up to four times over, each computed leg still running beside another is laid out
-    //    again together with each computed leg it runs beside, over every pair of their candidates, against all the other
-    //    legs; a pair is taken when its summed score is lower than the pair's current one (the first such lowest pair, in
-    //    candidate order).
+    if( index < 1 || index >= static_cast<int>( link.endpoints.size() ) ) return false;
+    return leaving( link.endpoints[0], EndAnchor( link, 0, index ) ).second == 0
+           && leaving( link.endpoints[index], EndAnchor( link, index, index ) ).second == 0;
+}
+
+namespace
+{
+ROUTE_STATS g_routeStats;
+
+/// The computed legs of one level geometry, laid out once: an unchanged level (a repaint, a state report, the geometry
+/// before and after a drag step) reuses its layout instead of laying it out again.
+std::vector<std::vector<POINT>> cachedRoutes( const std::vector<RECT>& blocks, const std::vector<std::vector<POINT>>& stored,
+                                              const std::vector<ROUTE_LEG>& legs )
+{
+    std::string key;
+    auto put = [&key]( int64_t value ) { key.append( reinterpret_cast<const char*>( &value ), sizeof value ); };
+    put( static_cast<int64_t>( blocks.size() ) );
+    for( const RECT& rect : blocks ) { put( rect.x ); put( rect.y ); put( rect.w ); put( rect.h ); }
+    put( static_cast<int64_t>( stored.size() ) );
+    for( const auto& path : stored ) { put( static_cast<int64_t>( path.size() ) ); for( const POINT& point : path ) { put( point.x ); put( point.y ); } }
+    put( static_cast<int64_t>( legs.size() ) );
+    for( const ROUTE_LEG& leg : legs )
+        for( const ROUTE_END* end : { &leg.from, &leg.to } ) { put( end->at.x ); put( end->at.y ); put( end->dx ); put( end->dy ); put( end->block ); }
+    struct ENTRY { std::string key; std::vector<std::vector<POINT>> paths; };
+    static std::vector<ENTRY> recent;
+    for( size_t i = 0; i < recent.size(); ++i )
+        if( recent[i].key == key )
+        {
+            std::rotate( recent.begin(), recent.begin() + static_cast<std::ptrdiff_t>( i ), recent.begin() + static_cast<std::ptrdiff_t>( i ) + 1 );
+            return recent.front().paths;
+        }
+    const auto started = std::chrono::steady_clock::now();
+    auto paths = RouteLegs( blocks, stored, legs );
+    const auto micros = static_cast<uint64_t>( std::chrono::duration_cast<std::chrono::microseconds>( std::chrono::steady_clock::now() - started ).count() );
+    ++g_routeStats.layouts; g_routeStats.latestMicros = micros; g_routeStats.slowestMicros = std::max( g_routeStats.slowestMicros, micros );
+    recent.insert( recent.begin(), ENTRY{ std::move( key ), paths } );
+    if( recent.size() > 16 ) recent.pop_back();
+    return paths;
+}
+}
+
+ROUTE_STATS RouteStats() { return g_routeStats; }
+
+std::vector<std::vector<POINT>> RouteLegs( const std::vector<RECT>& blocks, const std::vector<std::vector<POINT>>& stored,
+                                           const std::vector<ROUTE_LEG>& legs )
+{
+    // Rule F4 for computed legs, as revised for design QA P2-5 and its review. A leg runs from its first end to a channel (a
+    // vertical line at x) and on to its other end:
+    //  - An end on a block's left or right edge, or a boundary port on the frame's left or right side (or unplaced), is left
+    //    level: the leg runs from, (x, from.y), (x, to.y), to, with the channel at least 20 units out along the edge (F4c).
+    //  - An end on a top or bottom side is left along its normal (F4d): the leg first runs straight up or down from it for a
+    //    lead of 20, 30 or 40 units, and only then level to the channel. The channel may also be the end's own x, where the
+    //    lead runs on to the other end's level run.
+    // Candidates: the preferred channel, the middle between the ends moved into their limits, and every channel 10k units
+    // from it within the limits, at most 20 either side (and up to 200 units beyond the ends on a side without a limit); then
+    // each limit itself (exactly 20 units out from its end) and, for an end on a top or bottom side, its own x; each with
+    // every lead. When the limits of the two ends cannot both hold,
+    // the preferred channel is the middle and the candidates stay 10 units inside the ends. A leg whose ends are level and
+    // leave sideways has only the preferred channel. A candidate scores, in this order (F4a):
+    //  (a) its runs beside other legs: two level segments less than 10 units apart in height whose runs overlap (on one
+    //      height, also runs that end less than 10 units apart), or two upright segments less than 10 units apart that share
+    //      or meet at a height, unless both segments start at an end the two legs share (two connections of one port);
+    //  (b) how far, in total, it runs beside them;
+    //  (c) its contacts: each segment that comes within 10 units of a child block, not counting a block for the segment that
+    //      leaves or reaches that block's end;
+    //  (d) the other legs' segments it crosses;
+    //  (e) its distance from the preferred channel plus the length of its leads beyond 20 units;
+    // then the lower channel, then the earlier candidate. The legs are laid out in level order, each against the paths
+    // already drawn; then, up to four times over, a leg still running beside another is laid out again together with each
+    // leg it runs beside, over every pair of each one's 16 best candidates (scored against all the other legs), and the first
+    // pair (in candidate order) whose summed score is the lowest and lower than their current one is taken. Each candidate's
+    // score against the other legs is kept up to date as legs change, and paths or segments whose boxes lie 10 units or
+    // more apart are not compared, so a level of fifty connections is laid out in bounded time.
     const int64_t apart = 10 * QUANTUM, stub = 20 * QUANTUM, reach = 200 * QUANTUM;
-    struct PATH { std::vector<POINT> points; };
-    struct LEG
-    {
-        std::pair<std::string, int> key;
-        POINT from, to;
-        std::string fromBlock, toBlock;
-        int64_t preferred = 0;
-        std::vector<int64_t> candidates;
-    };
+    const int steps = 20;
+    const size_t shortlist = 16;
+    const std::vector<int64_t> leads{ 20 * QUANTUM, 30 * QUANTUM, 40 * QUANTUM }, level{ 0 };
+    using PATH = std::vector<POINT>;
     struct SCORE
     {
-        int64_t conflicts = 0, contacts = 0, crossings = 0, distance = 0;
+        int64_t conflicts = 0, alongside = 0, contacts = 0, crossings = 0, distance = 0;
         SCORE operator+( const SCORE& other ) const
         {
-            return { conflicts + other.conflicts, contacts + other.contacts, crossings + other.crossings, distance + other.distance };
+            return { conflicts + other.conflicts, alongside + other.alongside, contacts + other.contacts, crossings + other.crossings,
+                     distance + other.distance };
+        }
+        SCORE operator-( const SCORE& other ) const
+        {
+            return { conflicts - other.conflicts, alongside - other.alongside, contacts - other.contacts, crossings - other.crossings,
+                     distance - other.distance };
         }
         bool operator<( const SCORE& other ) const
         {
-            return std::tie( conflicts, contacts, crossings, distance ) < std::tie( other.conflicts, other.contacts, other.crossings, other.distance );
+            return std::tie( conflicts, alongside, contacts, crossings, distance )
+                   < std::tie( other.conflicts, other.alongside, other.contacts, other.crossings, other.distance );
         }
     };
-    std::vector<PATH> stored;
-    std::vector<LEG> legs;
+    // A path as its segments (zero-length ones left out), each with its box, and the box of the whole path: two paths or
+    // segments whose boxes are 10 units apart or more can neither cross nor run beside each other.
+    struct SEGMENT
+    {
+        POINT a, b;
+        int64_t left, top, right, bottom;
+        bool level, upright, first, last;
+    };
+    struct DRAWN
+    {
+        PATH path;
+        std::vector<SEGMENT> segments;
+        int64_t left = 0, top = 0, right = 0, bottom = 0;
+        explicit DRAWN( PATH points = {} ) : path( std::move( points ) )
+        {
+            if( path.empty() ) return;
+            left = right = path.front().x; top = bottom = path.front().y;
+            for( size_t i = 1; i < path.size(); ++i )
+            {
+                const POINT &a = path[i - 1], &b = path[i];
+                if( a.x == b.x && a.y == b.y ) continue;
+                SEGMENT segment{ a, b, a.x < b.x ? a.x : b.x, a.y < b.y ? a.y : b.y, a.x < b.x ? b.x : a.x, a.y < b.y ? b.y : a.y,
+                                 a.y == b.y, a.x == b.x, i == 1, i + 1 == path.size() };
+                left = left < segment.left ? left : segment.left; right = right > segment.right ? right : segment.right;
+                top = top < segment.top ? top : segment.top; bottom = bottom > segment.bottom ? bottom : segment.bottom;
+                segments.push_back( segment );
+            }
+        }
+    };
+    struct CANDIDATE { DRAWN drawn; int64_t x = 0; SCORE own; };
+    auto same = []( const POINT& a, const POINT& b ) { return a.x == b.x && a.y == b.y; };
+    auto simplify = [&]( const PATH& points )
+    {
+        PATH out;
+        for( const POINT& point : points ) if( out.empty() || !same( out.back(), point ) ) out.push_back( point );
+        // A point in the middle of a straight run goes; a point where the path turns, or turns back, stays.
+        for( size_t i = 1; i + 1 < out.size(); )
+        {
+            const POINT &a = out[i - 1], &b = out[i], &c = out[i + 1];
+            bool straight = ( a.x == b.x && b.x == c.x && ( b.y - a.y ) * ( c.y - b.y ) > 0 )
+                            || ( a.y == b.y && b.y == c.y && ( b.x - a.x ) * ( c.x - b.x ) > 0 );
+            if( straight ) out.erase( out.begin() + static_cast<std::ptrdiff_t>( i ) );
+            else ++i;
+        }
+        return out;
+    };
+    auto pathOf = [&]( const ROUTE_LEG& leg, int64_t x, int64_t leadFrom, int64_t leadTo ) -> PATH
+    {
+        const POINT f = leg.from.at, t = leg.to.at;
+        const bool upFrom = leg.from.dy != 0, upTo = leg.to.dy != 0;
+        if( !upFrom && !upTo ) return { f, { x, f.y }, { x, t.y }, t };
+        const POINT f2{ f.x, f.y + leg.from.dy * leadFrom }, t2{ t.x, t.y + leg.to.dy * leadTo };
+        PATH points{ f };
+        if( upFrom ) points.push_back( f2 );
+        points.push_back( { x, upFrom ? f2.y : f.y } );
+        points.push_back( { x, upTo ? t2.y : t.y } );
+        if( upTo ) points.push_back( t2 );
+        points.push_back( t );
+        return simplify( points );
+    };
+    // How one path runs beside and crosses another (the same both ways round).
+    auto against = [&]( const DRAWN& mine, const DRAWN& other ) -> SCORE
+    {
+        SCORE score;
+        if( mine.left >= other.right + apart || other.left >= mine.right + apart || mine.top >= other.bottom + apart
+            || other.top >= mine.bottom + apart )
+            return score;
+        const POINT &mineFrom = mine.path.front(), &mineTo = mine.path.back();
+        const POINT &otherFrom = other.path.front(), &otherTo = other.path.back();
+        for( const SEGMENT& s : mine.segments )
+            for( const SEGMENT& t : other.segments )
+            {
+                // A slanted segment (a stored route drawn as stored) neither runs beside nor crosses anything.
+                if( !( s.level || s.upright ) || !( t.level || t.upright ) ) continue;
+                if( s.left >= t.right + apart || t.left >= s.right + apart || s.top >= t.bottom + apart || t.top >= s.bottom + apart )
+                    continue;
+                if( s.level != t.level )
+                {
+                    // A crossing: the upright one passes strictly through the level one.
+                    const SEGMENT &h = s.level ? s : t, &v = s.level ? t : s;
+                    if( v.left > h.left && v.left < h.right && h.top > v.top && h.top < v.bottom ) ++score.crossings;
+                    continue;
+                }
+                const int64_t apartAcross = s.level ? ( s.top > t.top ? s.top - t.top : t.top - s.top ) : ( s.left > t.left ? s.left - t.left : t.left - s.left );
+                const int64_t overlap = s.level ? ( s.right < t.right ? s.right : t.right ) - ( s.left > t.left ? s.left : t.left )
+                                                : ( s.bottom < t.bottom ? s.bottom : t.bottom ) - ( s.top > t.top ? s.top : t.top );
+                // Level runs on one height beside each other when they overlap or end less than 10 units apart, at nearby
+                // heights when they overlap; upright runs when they share or meet at a height.
+                const bool beside = apartAcross < apart
+                                    && ( s.level ? ( apartAcross == 0 ? overlap > -apart : overlap > 0 ) : overlap >= 0 );
+                if( !beside ) continue;
+                // Two connections of one port share the run at that port: both segments start at an end of both legs.
+                const bool onePort = ( s.first && ( ( t.first && same( mineFrom, otherFrom ) ) || ( t.last && same( mineFrom, otherTo ) ) ) )
+                                     || ( s.last && ( ( t.first && same( mineTo, otherFrom ) ) || ( t.last && same( mineTo, otherTo ) ) ) );
+                if( onePort ) continue;
+                ++score.conflicts; score.alongside += overlap > 0 ? overlap : 0;
+            }
+        return score;
+    };
+    // Its own part of the score: the blocks it comes near.
+    auto contacts = [&]( const ROUTE_LEG& leg, const PATH& path ) -> int64_t
+    {
+        int64_t count = 0;
+        for( size_t j = 1; j < path.size(); ++j )
+        {
+            const POINT &a = path[j - 1], &b = path[j];
+            if( same( a, b ) ) continue;
+            for( size_t n = 0; n < blocks.size(); ++n )
+            {
+                const int block = static_cast<int>( n );
+                if( ( j == 1 && block == leg.from.block ) || ( j + 1 == path.size() && block == leg.to.block ) ) continue;
+                const RECT& r = blocks[n];
+                if( std::max( a.x, b.x ) > r.x - apart && std::min( a.x, b.x ) < r.Right() + apart && std::max( a.y, b.y ) > r.y - apart
+                    && std::min( a.y, b.y ) < r.Bottom() + apart )
+                    ++count;
+            }
+        }
+        return count;
+    };
+    std::vector<std::vector<CANDIDATE>> candidates( legs.size() );
+    for( size_t i = 0; i < legs.size(); ++i )
+    {
+        const ROUTE_LEG& leg = legs[i];
+        const POINT f = leg.from.at, t = leg.to.at;
+        const bool upFrom = leg.from.dy != 0, upTo = leg.to.dy != 0;
+        std::optional<int64_t> low, high;
+        for( const ROUTE_END* end : { &leg.from, &leg.to } )
+        {
+            if( end->dx > 0 ) low = low ? std::max( *low, end->at.x + stub ) : end->at.x + stub;
+            else if( end->dx < 0 ) high = high ? std::min( *high, end->at.x - stub ) : end->at.x - stub;
+        }
+        int64_t left, right, preferred = ( f.x + t.x ) / 2;
+        if( !low || !high || *low <= *high )
+        {
+            if( low ) preferred = std::max( preferred, *low );
+            if( high ) preferred = std::min( preferred, *high );
+            left = low ? *low : std::min( f.x, t.x ) - reach;
+            right = high ? *high : std::max( f.x, t.x ) + reach;
+        }
+        else
+        {
+            left = std::min( f.x, t.x ) + apart; right = std::max( f.x, t.x ) - apart;
+        }
+        std::vector<int64_t> channels{ preferred };
+        if( upFrom || upTo || f.y != t.y )
+            for( int k = 1; k <= steps; ++k )
+                for( int64_t x : { preferred - k * apart, preferred + k * apart } )
+                    if( x >= left && x <= right ) channels.push_back( x );
+        // The channels exactly 20 units out from an end, so a run beside another can be kept to that end's own stub, and
+        // an upright end's own x.
+        std::vector<int64_t> extra;
+        if( upFrom || upTo || f.y != t.y )
+        {
+            if( low ) extra.push_back( *low );
+            if( high ) extra.push_back( *high );
+        }
+        for( const ROUTE_END* end : { &leg.from, &leg.to } ) if( end->dy != 0 ) extra.push_back( end->at.x );
+        for( int64_t x : extra )
+            if( x >= left && x <= right && std::find( channels.begin(), channels.end(), x ) == channels.end() ) channels.push_back( x );
+        for( int64_t x : channels )
+            for( int64_t leadFrom : upFrom ? leads : level )
+                for( int64_t leadTo : upTo ? leads : level )
+                {
+                    CANDIDATE candidate;
+                    candidate.x = x; candidate.drawn = DRAWN( pathOf( leg, x, leadFrom, leadTo ) );
+                    candidate.own.contacts = contacts( leg, candidate.drawn.path );
+                    candidate.own.distance = std::llabs( x - preferred ) + ( upFrom ? leadFrom - stub : 0 ) + ( upTo ? leadTo - stub : 0 );
+                    candidates[i].push_back( std::move( candidate ) );
+                }
+    }
+    std::vector<DRAWN> fixed;
+    for( const auto& path : stored ) fixed.emplace_back( path );
+    std::vector<size_t> chosen( legs.size(), 0 );
+    // The paths drawn so far: every stored route and the first aCount computed legs, leaving out aSkipA and aSkipB.
+    auto others = [&]( size_t count, size_t skipA, size_t skipB )
+    {
+        std::vector<const DRAWN*> result;
+        for( const auto& path : fixed ) result.push_back( &path );
+        for( size_t i = 0; i < count; ++i ) if( i != skipA && i != skipB ) result.push_back( &candidates[i][chosen[i]].drawn );
+        return result;
+    };
+    auto cost = [&]( size_t leg, size_t index, const std::vector<const DRAWN*>& drawn )
+    {
+        SCORE score = candidates[leg][index].own;
+        for( const DRAWN* other : drawn ) score = score + against( candidates[leg][index].drawn, *other );
+        return score;
+    };
+    for( size_t i = 0; i < legs.size(); ++i )
+    {
+        const auto before = others( i, SIZE_MAX, SIZE_MAX );
+        std::optional<SCORE> best; size_t bestIndex = 0;
+        for( size_t c = 0; c < candidates[i].size(); ++c )
+        {
+            SCORE score = cost( i, c, before );
+            if( !best || score < *best || ( !( *best < score ) && candidates[i][c].x < candidates[i][bestIndex].x ) ) { best = score; bestIndex = c; }
+        }
+        chosen[i] = bestIndex;
+    }
+    // Every candidate's score against all the other legs as they are drawn now (and the stored routes), kept up to date as
+    // legs take another channel.
+    std::vector<std::vector<SCORE>> all( legs.size() );
+    for( size_t x = 0; x < legs.size(); ++x )
+    {
+        const auto drawn = others( legs.size(), x, SIZE_MAX );
+        for( size_t i = 0; i < candidates[x].size(); ++i ) all[x].push_back( cost( x, i, drawn ) );
+    }
+    // The box around all of a leg's candidates: a leg whose box is 10 units or more from a path cannot score against it.
+    struct BOX { int64_t left, top, right, bottom; };
+    std::vector<BOX> reachOf;
+    for( const auto& list : candidates )
+    {
+        BOX box{ LLONG_MAX, LLONG_MAX, LLONG_MIN, LLONG_MIN };
+        for( const CANDIDATE& candidate : list )
+        {
+            box.left = std::min( box.left, candidate.drawn.left ); box.top = std::min( box.top, candidate.drawn.top );
+            box.right = std::max( box.right, candidate.drawn.right ); box.bottom = std::max( box.bottom, candidate.drawn.bottom );
+        }
+        reachOf.push_back( box );
+    }
+    auto near = [&]( const BOX& box, const DRAWN& path )
+    {
+        return !( box.left >= path.right + apart || path.left >= box.right + apart || box.top >= path.bottom + apart || path.top >= box.bottom + apart );
+    };
+    auto take = [&]( size_t leg, size_t index )
+    {
+        const DRAWN &was = candidates[leg][chosen[leg]].drawn, &now = candidates[leg][index].drawn;
+        for( size_t x = 0; x < legs.size(); ++x )
+            if( x != leg && ( near( reachOf[x], was ) || near( reachOf[x], now ) ) )
+                for( size_t i = 0; i < candidates[x].size(); ++i )
+                    all[x][i] = all[x][i] - against( candidates[x][i].drawn, was ) + against( candidates[x][i].drawn, now );
+        chosen[leg] = index;
+    };
+    for( int round = 0; round < 4; ++round )
+    {
+        bool improved = false;
+        for( size_t a = 0; a < legs.size(); ++a )
+        {
+            if( all[a][chosen[a]].conflicts == 0 ) continue;
+            for( size_t b = 0; b < legs.size(); ++b )
+            {
+                // Only a leg this one runs beside is laid out again with it.
+                const DRAWN &nowA = candidates[a][chosen[a]].drawn, &nowB = candidates[b][chosen[b]].drawn;
+                if( b == a || against( nowA, nowB ).conflicts == 0 ) continue;
+                // Each leg's score against all the other legs but these two.
+                std::vector<SCORE> baseA, baseB;
+                for( size_t i = 0; i < candidates[a].size(); ++i ) baseA.push_back( all[a][i] - against( candidates[a][i].drawn, nowB ) );
+                for( size_t j = 0; j < candidates[b].size(); ++j ) baseB.push_back( all[b][j] - against( candidates[b][j].drawn, nowA ) );
+                auto total = [&]( size_t i, size_t j )
+                {
+                    const SCORE between = against( candidates[a][i].drawn, candidates[b][j].drawn );
+                    return baseA[i] + between + baseB[j] + between;
+                };
+                const SCORE current = total( chosen[a], chosen[b] );
+                // Each leg's best candidates against all the other legs (at most `shortlist`, in candidate order among equals),
+                // so a dense level is laid out in bounded time.
+                auto best = [&]( const std::vector<SCORE>& base )
+                {
+                    std::vector<size_t> order( base.size() );
+                    for( size_t i = 0; i < order.size(); ++i ) order[i] = i;
+                    std::stable_sort( order.begin(), order.end(), [&]( size_t x, size_t y ) { return base[x] < base[y]; } );
+                    if( order.size() > shortlist ) order.resize( shortlist );
+                    std::sort( order.begin(), order.end() );
+                    return order;
+                };
+                const auto listA = best( baseA ), listB = best( baseB );
+                std::optional<std::tuple<SCORE, size_t, size_t>> found;
+                for( size_t i : listA )
+                    for( size_t j : listB )
+                    {
+                        SCORE score = total( i, j );
+                        if( score < current && ( !found || score < std::get<0>( *found ) ) ) found = { score, i, j };
+                    }
+                if( !found ) continue;
+                take( a, std::get<1>( *found ) ); take( b, std::get<2>( *found ) );
+                improved = true;
+                if( std::get<0>( *found ).conflicts == 0 ) break;
+            }
+        }
+        if( !improved ) break;
+    }
+    std::vector<PATH> result;
+    for( size_t i = 0; i < legs.size(); ++i ) result.push_back( candidates[i][chosen[i]].drawn.path );
+    return result;
+}
+
+std::vector<wxPoint> OrthogonalDetour( const std::vector<wxRect>& obstacles, const wxPoint& start, const wxPoint& startDirection,
+                                       const wxPoint& goal, const wxPoint& goalDirection, const wxRect& area )
+{
+    // A route on the lines through the two ends and one pixel outside each obstacle's sides (every turn a shortest orthogonal
+    // way around rectangles needs lies on them), searched for the fewest turns and then the shortest length. A run between
+    // two neighbouring lines is open unless it passes through an obstacle.
+    auto inside = [&]( const wxPoint& p )
+    { return std::any_of( obstacles.begin(), obstacles.end(), [&]( const wxRect& r ) { return r.Contains( p ); } ); };
+    if( inside( start ) || inside( goal ) || !area.Contains( start ) || !area.Contains( goal ) ) return {};
+    std::vector<int> xs{ start.x, goal.x }, ys{ start.y, goal.y };
+    for( const wxRect& r : obstacles )
+    { xs.push_back( r.x - 1 ); xs.push_back( r.GetRight() + 1 ); ys.push_back( r.y - 1 ); ys.push_back( r.GetBottom() + 1 ); }
+    auto tidy = []( std::vector<int>& lines, int low, int high )
+    {
+        lines.erase( std::remove_if( lines.begin(), lines.end(), [&]( int v ) { return v < low || v > high; } ), lines.end() );
+        std::sort( lines.begin(), lines.end() ); lines.erase( std::unique( lines.begin(), lines.end() ), lines.end() );
+    };
+    tidy( xs, area.x, area.GetRight() ); tidy( ys, area.y, area.GetBottom() );
+    const int columns = static_cast<int>( xs.size() ), rows = static_cast<int>( ys.size() );
+    // Whether the run from (a, at) to (b, at) along x (or, with aAlongY, along y) passes through an obstacle between its ends.
+    auto blocked = [&]( int a, int b, int at, bool alongY )
+    {
+        const int low = std::min( a, b ) + 1, high = std::max( a, b ) - 1;
+        for( const wxRect& r : obstacles )
+        {
+            const int from = alongY ? r.y : r.x, to = alongY ? r.GetBottom() : r.GetRight();
+            const int acrossFrom = alongY ? r.x : r.y, acrossTo = alongY ? r.GetRight() : r.GetBottom();
+            if( at >= acrossFrom && at <= acrossTo && std::max( low, from ) <= std::min( high, to ) ) return true;
+        }
+        return false;
+    };
+    const int column0 = static_cast<int>( std::find( xs.begin(), xs.end(), start.x ) - xs.begin() );
+    const int row0 = static_cast<int>( std::find( ys.begin(), ys.end(), start.y ) - ys.begin() );
+    const int column1 = static_cast<int>( std::find( xs.begin(), xs.end(), goal.x ) - xs.begin() );
+    const int row1 = static_cast<int>( std::find( ys.begin(), ys.end(), goal.y ) - ys.begin() );
+    // Directions: 0 right, 1 left, 2 down, 3 up.
+    const int dx[] = { 1, -1, 0, 0 }, dy[] = { 0, 0, 1, -1 };
+    auto directionOf = []( const wxPoint& d ) { return d.x > 0 ? 0 : d.x < 0 ? 1 : d.y > 0 ? 2 : d.y < 0 ? 3 : -1; };
+    const int first = directionOf( startDirection ), last = directionOf( goalDirection );
+    constexpr int64_t TURN = 1000000;
+    const int states = columns * rows * 4;
+    std::vector<int64_t> cost( states, INT64_MAX );
+    std::vector<int> previous( states, -1 );
+    using ENTRY = std::pair<int64_t, int>;
+    std::priority_queue<ENTRY, std::vector<ENTRY>, std::greater<ENTRY>> open;
+    auto state = [&]( int column, int row, int direction ) { return ( row * columns + column ) * 4 + direction; };
+    for( int direction = 0; direction < 4; ++direction )
+    {
+        // Leaving the start another way than it must costs a turn; with no way given, any way is free.
+        const int64_t initial = first < 0 || direction == first ? 0 : TURN;
+        const int at = state( column0, row0, direction );
+        cost[at] = initial; open.push( { initial, at } );
+    }
+    int reached = -1; int64_t best = INT64_MAX;
+    while( !open.empty() )
+    {
+        auto [here, at] = open.top(); open.pop();
+        if( here != cost[at] ) continue;
+        const int direction = at % 4, node = at / 4, column = node % columns, row = node / columns;
+        if( column == column1 && row == row1 )
+        {
+            const int64_t total = here + ( last < 0 || direction == last ? 0 : TURN );
+            if( total < best ) { best = total; reached = at; }
+            continue;
+        }
+        if( here >= best ) continue;
+        for( int next = 0; next < 4; ++next )
+        {
+            if( ( next ^ 1 ) == direction && ( next >> 1 ) == ( direction >> 1 ) ) continue;
+            const int c = column + dx[next], r = row + dy[next];
+            if( c < 0 || c >= columns || r < 0 || r >= rows ) continue;
+            const wxPoint to( xs[c], ys[r] );
+            if( inside( to ) ) continue;
+            if( next < 2 ? blocked( xs[column], to.x, ys[row], false ) : blocked( ys[row], to.y, xs[column], true ) ) continue;
+            const int64_t step = std::abs( to.x - xs[column] ) + std::abs( to.y - ys[row] ) + ( next == direction ? 0 : TURN );
+            const int target = state( c, r, next );
+            if( here + step < cost[target] ) { cost[target] = here + step; previous[target] = at; open.push( { cost[target], target } ); }
+        }
+    }
+    if( reached < 0 ) return {};
+    std::vector<wxPoint> points;
+    for( int at = reached; at >= 0; at = previous[at] )
+    {
+        const int node = at / 4;
+        const wxPoint point( xs[node % columns], ys[node / columns] );
+        if( points.empty() || points.back() != point ) points.push_back( point );
+    }
+    std::reverse( points.begin(), points.end() );
+    // Only the corners stay.
+    std::vector<wxPoint> corners;
+    for( const wxPoint& point : points )
+    {
+        if( corners.size() >= 2 )
+        {
+            const wxPoint &a = corners[corners.size() - 2], &b = corners.back();
+            if( ( a.x == b.x && b.x == point.x ) || ( a.y == b.y && b.y == point.y ) ) corners.pop_back();
+        }
+        corners.push_back( point );
+    }
+    return corners;
+}
+
+void LEVEL_LAYOUT::placePaths()
+{
+    // Rule F4 (revised for design QA P2-5). A leg with a stored route runs through its waypoints; an unlocked channel route
+    // (two waypoints on one vertical line) whose ends both leave sideways runs level from each of its ends to its channel, so
+    // a route stored against ends that have since moved never draws a slanted leg (F4b). Every other leg is computed
+    // (RouteLegs): stored routes are laid out first, then the computed legs in level order (connections in the level's order,
+    // each connection's legs in endpoint order).
+    std::vector<std::vector<POINT>> stored;
+    std::vector<ROUTE_LEG> legs;
+    std::vector<std::pair<std::string, int>> keys;
     for( const auto& link : m_links )
         for( int leg = 1; leg < static_cast<int>( link.endpoints.size() ); ++leg )
         {
             const POINT from = EndAnchor( link, 0, leg ), to = EndAnchor( link, leg, leg );
+            const auto [fromDx, fromDy] = leaving( link.endpoints[0], from );
+            const auto [toDx, toDy] = leaving( link.endpoints[leg], to );
             const D::DiagramConnectionRouteData* route = nullptr;
             for( const auto& row : m_routes )
                 if( row.connection_id() == link.id && row.endpoint_index() == static_cast<unsigned>( leg ) ) { route = &row; break; }
@@ -616,166 +996,19 @@ void LEVEL_LAYOUT::placePaths()
                 std::vector<POINT> waypoints;
                 for( const auto& waypoint : route->waypoints() )
                 { POINT point; if( ParseUnits( waypoint.x(), point.x ) && ParseUnits( waypoint.y(), point.y ) ) waypoints.push_back( point ); }
-                if( !route->locked() && waypoints.size() == 2 && waypoints[0].x == waypoints[1].x ) { waypoints[0].y = from.y; waypoints[1].y = to.y; }
+                if( !route->locked() && waypoints.size() == 2 && waypoints[0].x == waypoints[1].x && fromDy == 0 && toDy == 0 )
+                { waypoints[0].y = from.y; waypoints[1].y = to.y; }
                 std::vector<POINT> points{ from };
                 points.insert( points.end(), waypoints.begin(), waypoints.end() );
                 points.push_back( to );
-                m_paths[{ link.id, leg }] = points; stored.push_back( { std::move( points ) } );
+                m_paths[{ link.id, leg }] = points; stored.push_back( std::move( points ) );
                 continue;
             }
-            LEG item{ { link.id, leg }, from, to, ownBlock( link.endpoints[0] ), ownBlock( link.endpoints[leg] ), 0, {} };
-            std::optional<int64_t> low, high;
-            for( const auto& [endpoint, at] : { std::pair{ &link.endpoints[0], from }, std::pair{ &link.endpoints[leg], to } } )
-            {
-                int direction = normal( *endpoint, at );
-                if( direction > 0 ) low = low ? std::max( *low, at.x + stub ) : at.x + stub;
-                else if( direction < 0 ) high = high ? std::min( *high, at.x - stub ) : at.x - stub;
-            }
-            int64_t left, right, preferred = ( from.x + to.x ) / 2;
-            if( !low || !high || *low <= *high )
-            {
-                if( low ) preferred = std::max( preferred, *low );
-                if( high ) preferred = std::min( preferred, *high );
-                left = low ? *low : std::min( from.x, to.x ) - reach;
-                right = high ? *high : std::max( from.x, to.x ) + reach;
-            }
-            else
-            {
-                left = std::min( from.x, to.x ) + apart; right = std::max( from.x, to.x ) - apart;
-            }
-            item.preferred = preferred; item.candidates = { preferred };
-            if( from.y != to.y )
-                for( int64_t k = 1; preferred - k * apart >= left || preferred + k * apart <= right; ++k )
-                    for( int64_t x : { preferred - k * apart, preferred + k * apart } )
-                        if( x >= left && x <= right ) item.candidates.push_back( x );
-            legs.push_back( std::move( item ) );
+            legs.push_back( { { from, fromDx, fromDy, ownBlock( link.endpoints[0] ) }, { to, toDx, toDy, ownBlock( link.endpoints[leg] ) } } );
+            keys.emplace_back( link.id, leg );
         }
-    auto pathOf = []( const LEG& leg, int64_t x ) { return PATH{ { leg.from, { x, leg.from.y }, { x, leg.to.y }, leg.to } }; };
-    auto crosses = []( const POINT& a, const POINT& b, const POINT& c, const POINT& d )
-    {
-        auto one = []( const POINT& h1, const POINT& h2, const POINT& v1, const POINT& v2 )
-        {
-            return h1.y == h2.y && v1.x == v2.x && v1.x > std::min( h1.x, h2.x ) && v1.x < std::max( h1.x, h2.x )
-                   && h1.y > std::min( v1.y, v2.y ) && h1.y < std::max( v1.y, v2.y );
-        };
-        return one( a, b, c, d ) || one( c, d, a, b );
-    };
-    auto same = []( const POINT& a, const POINT& b ) { return a.x == b.x && a.y == b.y; };
-    // How leg aLeg on channel aX runs beside and crosses one other drawn leg.
-    auto against = [&]( const LEG& leg, int64_t x, const PATH& other ) -> SCORE
-    {
-        SCORE score;
-        const PATH mine = pathOf( leg, x );
-        const int64_t top = std::min( leg.from.y, leg.to.y ), bottom = std::max( leg.from.y, leg.to.y );
-        const auto& points = other.points;
-        const POINT &otherFrom = points.front(), &otherTo = points.back();
-        for( size_t i = 1; i < points.size(); ++i )
-        {
-            const POINT &a = points[i - 1], &b = points[i];
-            if( same( a, b ) ) continue;
-            if( a.x == b.x && top != bottom )
-            {
-                if( std::llabs( a.x - x ) < apart && std::min( std::max( a.y, b.y ), bottom ) >= std::max( std::min( a.y, b.y ), top ) ) ++score.conflicts;
-            }
-            else if( a.y == b.y )
-            {
-                for( const auto& [y, x1, x2, anchor] : { std::tuple{ leg.from.y, std::min( leg.from.x, x ), std::max( leg.from.x, x ), leg.from },
-                                                         std::tuple{ leg.to.y, std::min( leg.to.x, x ), std::max( leg.to.x, x ), leg.to } } )
-                {
-                    if( x1 == x2 || a.y != y || same( anchor, otherFrom ) || same( anchor, otherTo ) ) continue;
-                    if( std::max( std::min( a.x, b.x ), x1 ) - std::min( std::max( a.x, b.x ), x2 ) < apart ) ++score.conflicts;
-                }
-            }
-            for( size_t j = 1; j < mine.points.size(); ++j ) if( crosses( mine.points[j - 1], mine.points[j], a, b ) ) ++score.crossings;
-        }
-        return score;
-    };
-    // Its own part of the score: the blocks it comes near and its distance from the preferred channel.
-    auto alone = [&]( const LEG& leg, int64_t x ) -> SCORE
-    {
-        SCORE score;
-        const PATH mine = pathOf( leg, x );
-        for( size_t j = 1; j < mine.points.size(); ++j )
-        {
-            const POINT &a = mine.points[j - 1], &b = mine.points[j];
-            if( same( a, b ) ) continue;
-            for( size_t n = 0; n < m_nodes.size(); ++n )
-            {
-                if( ( j == 1 && m_nodes[n].id == leg.fromBlock ) || ( j == 3 && m_nodes[n].id == leg.toBlock ) ) continue;
-                const RECT& r = m_rects[n];
-                if( std::max( a.x, b.x ) > r.x - apart && std::min( a.x, b.x ) < r.Right() + apart && std::max( a.y, b.y ) > r.y - apart
-                    && std::min( a.y, b.y ) < r.Bottom() + apart )
-                    ++score.contacts;
-            }
-        }
-        score.distance = std::llabs( x - leg.preferred );
-        return score;
-    };
-    auto cost = [&]( const LEG& leg, int64_t x, const std::vector<const PATH*>& others )
-    {
-        SCORE score = alone( leg, x );
-        for( const PATH* other : others ) score = score + against( leg, x, *other );
-        return score;
-    };
-    std::vector<int64_t> chosen( legs.size() );
-    std::vector<PATH> placed;
-    auto others = [&]( size_t skipA, size_t skipB )
-    {
-        std::vector<const PATH*> result;
-        for( const auto& path : stored ) result.push_back( &path );
-        for( size_t i = 0; i < placed.size(); ++i ) if( i != skipA && i != skipB ) result.push_back( &placed[i] );
-        return result;
-    };
-    for( size_t i = 0; i < legs.size(); ++i )
-    {
-        auto before = others( SIZE_MAX, SIZE_MAX );
-        std::optional<SCORE> best; int64_t bestX = legs[i].preferred;
-        for( int64_t x : legs[i].candidates )
-        {
-            SCORE score = cost( legs[i], x, before );
-            if( !best || score < *best || ( !( *best < score ) && x < bestX ) ) { best = score; bestX = x; }
-        }
-        chosen[i] = bestX; placed.push_back( pathOf( legs[i], bestX ) );
-    }
-    for( int round = 0; round < 4; ++round )
-    {
-        bool improved = false;
-        for( size_t a = 0; a < legs.size(); ++a )
-        {
-            if( cost( legs[a], chosen[a], others( a, SIZE_MAX ) ).conflicts == 0 ) continue;
-            for( size_t b = 0; b < legs.size(); ++b )
-            {
-                // Only a leg this one runs beside is laid out again with it.
-                if( b == a || ( against( legs[a], chosen[a], placed[b] ).conflicts == 0 && against( legs[b], chosen[b], placed[a] ).conflicts == 0 ) )
-                    continue;
-                const auto rest = others( a, b );
-                std::vector<SCORE> baseA, baseB;
-                for( int64_t x : legs[a].candidates ) baseA.push_back( cost( legs[a], x, rest ) );
-                for( int64_t x : legs[b].candidates ) baseB.push_back( cost( legs[b], x, rest ) );
-                auto total = [&]( size_t i, size_t j )
-                {
-                    int64_t xa = legs[a].candidates[i], xb = legs[b].candidates[j];
-                    return baseA[i] + against( legs[a], xa, pathOf( legs[b], xb ) ) + baseB[j] + against( legs[b], xb, pathOf( legs[a], xa ) );
-                };
-                const SCORE current = cost( legs[a], chosen[a], rest ) + against( legs[a], chosen[a], placed[b] )
-                                      + cost( legs[b], chosen[b], rest ) + against( legs[b], chosen[b], placed[a] );
-                std::optional<std::tuple<SCORE, size_t, size_t>> found;
-                for( size_t i = 0; i < legs[a].candidates.size(); ++i )
-                    for( size_t j = 0; j < legs[b].candidates.size(); ++j )
-                    {
-                        SCORE score = total( i, j );
-                        if( score < current && ( !found || score < std::get<0>( *found ) ) ) found = { score, i, j };
-                    }
-                if( !found ) continue;
-                chosen[a] = legs[a].candidates[std::get<1>( *found )]; chosen[b] = legs[b].candidates[std::get<2>( *found )];
-                placed[a] = pathOf( legs[a], chosen[a] ); placed[b] = pathOf( legs[b], chosen[b] );
-                improved = true;
-                if( std::get<0>( *found ).conflicts == 0 ) break;
-            }
-        }
-        if( !improved ) break;
-    }
-    for( size_t i = 0; i < legs.size(); ++i ) m_paths[legs[i].key] = placed[i].points;
+    const auto paths = cachedRoutes( m_rects, stored, legs );
+    for( size_t i = 0; i < keys.size(); ++i ) m_paths[keys[i]] = paths[i];
 }
 bool LEVEL_LAYOUT::HasRoute( const std::string& id, int endpoint ) const
 {
@@ -1103,45 +1336,45 @@ BLOCK_CHIPS LayoutChips( wxDC& dc, const NODE& node, const wxRect& box, const wx
     int rows = bottom - top >= height ? ( bottom - top + gap ) / ( height + gap ) : 0;
     auto moreText = []( size_t count ) { return wxString::Format( _( "+%u more" ), static_cast<unsigned>( count ) ); };
     auto rowWidth = [&]( size_t row ) { auto [from, to] = rowSpan( row ); return to - from; };
-    // Every chip is at least minimumChip wide: its state mark and 40 pixels of text (or all of its text when shorter)
-    // with their margins. A row the port names narrow below that holds no chip: the chips stop at the first such row and
-    // the rest go behind "+N more". A row that holds a chip can also hold the widest "+N more" chip, so "+N more"
-    // always has a row when a chip does.
-    const int minimumText = 40, minimumChip = textLeft + minimumText + 8;
-    const int rowNeeded = std::max( minimumChip, dc.GetTextExtent( moreText( chosen.size() ) ).x + 16 );
-    size_t fit = 0;
-    while( fit < static_cast<size_t>( std::max( 0, rows ) ) && rowWidth( fit ) >= rowNeeded ) ++fit;
-    size_t shown = std::min<size_t>( chosen.size(), fit );
-    int moreWidth = 0; bool ownRow = false;
-    if( shown < chosen.size() )
+    // Every chip shows its whole "Facet: value" and is at least its state mark and 40 pixels of text wide (padded when its
+    // text is shorter). A chip is never cut short: "Family: T…" no longer showed the value the chip exists for (design QA round
+    // 2, R2-P2-6). The chips take the rows in facet order, one per row; a chip wider than the row it would take goes behind
+    // "+N more", and the next chip tries that row. "+N more"
+    // shares the last chip's row when both fit whole beside each other, and otherwise takes the next row; when no row is left
+    // for it, the last chip goes behind it as well.
+    const int minimumText = 40;
+    auto chipText = [&]( int facet ) { return FacetLabel( facet ) + wxS( ": " ) + ChoiceValue( *Facet( node.definition, facet ), wxS( " / " ) ); };
+    auto chipWidth = [&]( int facet ) { return textLeft + std::max( minimumText, dc.GetTextExtent( chipText( facet ) ).x ) + 8; };
+    auto moreWidthFor = [&]( size_t count ) { return dc.GetTextExtent( moreText( count ) ).x + 16; };
+    const size_t rowCount = static_cast<size_t>( std::max( 0, rows ) );
+    std::vector<int> placed, behind;
+    for( int facet : chosen )
     {
-        moreWidth = dc.GetTextExtent( moreText( chosen.size() - shown ) ).x + 16;
-        // "+N more" shares the last row when that chip keeps its minimum width beside it; otherwise it takes that row.
-        if( shown > 0 && moreWidth + gap + minimumChip > rowWidth( shown - 1 ) )
-        { --shown; ownRow = true; moreWidth = dc.GetTextExtent( moreText( chosen.size() - shown ) ).x + 16; }
+        if( placed.size() < rowCount && chipWidth( facet ) <= rowWidth( placed.size() ) ) placed.push_back( facet );
+        else behind.push_back( facet );
     }
-    for( size_t i = 0; i < shown; ++i )
+    while( !behind.empty() )
     {
-        const auto& choice = *Facet( node.definition, chosen[i] );
-        auto [from, to] = rowSpan( i );
-        bool shareRow = i + 1 == shown && shown < chosen.size() && !ownRow;
-        int available = shareRow ? to - from - moreWidth - gap : to - from;
-        wxString text = FacetLabel( chosen[i] ) + wxS( ": " ) + ChoiceValue( choice, wxS( " / " ) );
-        text = wxControl::Ellipsize( text, dc, wxELLIPSIZE_END, available - textLeft - 8 );
-        int chipWidth = std::min( available, textLeft + std::max( minimumText, dc.GetTextExtent( text ).x ) + 8 );
-        result.chips.push_back( { chosen[i], choice.state(), text, wxRect( from, rowTop( i ), chipWidth, height ) } );
-    }
-    result.hidden = static_cast<unsigned>( chosen.size() - result.chips.size() );
-    if( result.hidden )
-    {
-        if( !result.chips.empty() && !ownRow )
+        const int moreWidth = moreWidthFor( behind.size() );
+        if( !placed.empty() )
         {
-            wxRect more( result.chips.back().rect.GetRight() + 1 + gap, result.chips.back().rect.y, moreWidth, height );
-            if( more.GetRight() < rowSpan( result.chips.size() - 1 ).second + 1 ) result.more = more;
+            auto [from, to] = rowSpan( placed.size() - 1 );
+            const int x = from + chipWidth( placed.back() ) + gap;
+            if( x + moreWidth <= to ) { result.more = wxRect( x, rowTop( placed.size() - 1 ), moreWidth, height ); break; }
         }
-        else if( rows > 0 && static_cast<size_t>( rows ) > result.chips.size() && moreWidth <= rowWidth( result.chips.size() ) )
-            result.more = wxRect( rowSpan( result.chips.size() ).first, rowTop( result.chips.size() ), moreWidth, height );
+        if( placed.size() < rowCount && moreWidth <= rowWidth( placed.size() ) )
+        { result.more = wxRect( rowSpan( placed.size() ).first, rowTop( placed.size() ), moreWidth, height ); break; }
+        if( placed.empty() ) break;
+        behind.push_back( placed.back() ); placed.pop_back();
+        std::sort( behind.begin(), behind.end() );
     }
+    for( size_t i = 0; i < placed.size(); ++i )
+    {
+        const auto& choice = *Facet( node.definition, placed[i] );
+        result.chips.push_back( { placed[i], choice.state(), chipText( placed[i] ), wxRect( rowSpan( i ).first, rowTop( i ), chipWidth( placed[i] ), height ) } );
+    }
+    result.hidden = static_cast<unsigned>( behind.size() );
+    result.hiddenFacets = behind;
     if( result.chips.empty() && !result.more && !chosen.empty() && !caption.IsEmpty() )
     {
         // Too small for a chip: the choices' state marks follow the caption, level with it, where they fit. They keep 6 pixels
@@ -1161,6 +1394,22 @@ BLOCK_CHIPS LayoutChips( wxDC& dc, const NODE& node, const wxRect& box, const wx
                 result.marks.push_back( { chosen[i], Facet( node.definition, chosen[i] )->state(), wxRect( x + static_cast<int>( i ) * step, y, size, size ) } );
     }
     return result;
+}
+
+wxString MoreToolTip( const NODE& node, const BLOCK_CHIPS& chips )
+{
+    // The facet overview's words for a choice: its value, and "(candidate)" for a candidate; a chosen value says so as well.
+    wxString tip;
+    for( int facet : chips.hiddenFacets )
+        if( const auto* choice = Facet( node.definition, facet ) )
+        {
+            wxString line = FacetLabel( facet ) + wxS( ": " ) + ChoiceValue( *choice, wxS( ", " ) );
+            line += choice->state() == D::DCSD_CANDIDATES ? ( choice->values_size() == 1 ? _( " (candidate)" ) : _( " (candidates)" ) )
+                                                          : _( " (chosen)" );
+            if( !tip.empty() ) tip += wxS( "\n" );
+            tip += line;
+        }
+    return tip;
 }
 
 void DrawChips( wxDC& dc, const BLOCK_CHIPS& chips, const wxFont& small, bool dark, const wxColour& foreground, const wxColour& link )
@@ -1193,56 +1442,59 @@ void DrawChips( wxDC& dc, const BLOCK_CHIPS& chips, const wxFont& small, bool da
 }
 
 FACET_ROW::FACET_ROW( wxWindow* parent, int facet, std::function<void( int )> open ) :
-        wxWindow( parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE | wxWANTS_CHARS | wxFULL_REPAINT_ON_RESIZE ),
+        wxToggleButton( parent, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE ),
         m_facet( facet ), m_open( std::move( open ) )
 {
     static const char* NAMES[FACETS] = { "Purpose", "Type", "Manufacturer", "Family", "Model", "OrderablePart", "Package" };
     SetName( wxString( "RecursiveFacetRow" ) + NAMES[std::clamp( facet, 0, FACETS - 1 )] );
-    SetBackgroundStyle( wxBG_STYLE_PAINT );
-    SetMinSize( FromDIP( wxSize( 200, 28 ) ) );
-    Bind( wxEVT_PAINT, [this]( wxPaintEvent& ) { paint(); } );
-    Bind( wxEVT_LEFT_DOWN, [this]( wxMouseEvent& ) { SetFocus(); if( m_open ) m_open( m_facet ); } );
-    Bind( wxEVT_ENTER_WINDOW, [this]( wxMouseEvent& ) { m_hover = true; Refresh(); } );
-    Bind( wxEVT_LEAVE_WINDOW, [this]( wxMouseEvent& ) { m_hover = false; Refresh(); } );
-    Bind( wxEVT_SET_FOCUS, [this]( wxFocusEvent& event ) { Refresh(); event.Skip(); } );
-    Bind( wxEVT_KILL_FOCUS, [this]( wxFocusEvent& event ) { Refresh(); event.Skip(); } );
-    Bind( wxEVT_KEY_DOWN, [this]( wxKeyEvent& event )
+    // Pressing the row opens its facet; the row stays pressed exactly while that facet's detail is open (SetChoice).
+    Bind( wxEVT_TOGGLEBUTTON, [this]( wxCommandEvent& )
           {
-              int key = event.GetKeyCode();
-              if( !event.HasAnyModifiers() && ( key == WXK_RETURN || key == WXK_NUMPAD_ENTER || key == WXK_SPACE ) )
-              { if( m_open ) m_open( m_facet ); return; }
-              if( key == WXK_TAB ) { Navigate( event.ShiftDown() ? wxNavigationKeyEvent::IsBackward : wxNavigationKeyEvent::IsForward ); return; }
-              event.Skip();
+              SetValue( m_isOpen );
+              if( m_open ) m_open( m_facet );
           } );
+#if defined( __WXGTK__ )
+    PaintNatively( this, this );
+#endif
+    SetMinSize( DoGetBestSize() );
+}
+
+wxSize FACET_ROW::DoGetBestSize() const
+{
+#if defined( __WXGTK__ )
+    return FromDIP( wxSize( 200, 28 ) );
+#else
+    return wxToggleButton::DoGetBestSize();
+#endif
 }
 
 void FACET_ROW::SetChoice( const D::DefinitionTextChoiceData& choice, bool open )
 {
     wxString value = ChoiceValue( choice, wxS( ", " ) );
+    m_bareValue = value;
     if( choice.state() == D::DCSD_CANDIDATES )
         value += choice.values_size() == 1 ? _( " (candidate)" ) : _( " (candidates)" );
+    if( GetValue() != open ) SetValue( open );
     if( value == m_value && choice.state() == m_state && open == m_isOpen ) return;
     m_value = value; m_state = choice.state(); m_isOpen = open;
-    SetLabel( FacetLabel( m_facet ) + wxS( ": " ) + value ); SetToolTip( value );
-    // The editor draws the row itself, so it tells assistive technology what the row is: a button named by its facet and
-    // value, which opens the facet's detail.
-    SetAccessibleRole( this, "button", GetLabel() );
+    // The label is the row's accessible name: its facet and value. GTK makes a toggle button's label a mnemonic label, so an
+    // "&" in a value (a manufacturer such as "C&K") is escaped: it is read as written and opens nothing.
+    SetLabel( wxControl::EscapeMnemonics( FacetLabel( m_facet ) + wxS( ": " ) + value ) ); SetToolTip( value );
+    SetMinSize( DoGetBestSize() );
     Refresh();
 }
 
-void FACET_ROW::paint()
+void FACET_ROW::PaintButton( wxDC& dc, bool hover, bool )
 {
-    wxAutoBufferedPaintDC dc( this );
     wxColour background = GetParent()->GetBackgroundColour();
     wxColour foreground = wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOWTEXT );
     wxColour muted = wxSystemSettings::GetColour( wxSYS_COLOUR_GRAYTEXT );
     wxColour accent = wxSystemSettings::GetColour( wxSYS_COLOUR_HIGHLIGHT );
     bool dark = darkBackground( background );
     wxRect area( GetClientSize() );
-    dc.SetBackground( wxBrush( background ) ); dc.Clear();
-    if( m_isOpen || m_hover )
+    dc.SetPen( *wxTRANSPARENT_PEN ); dc.SetBrush( wxBrush( background ) ); dc.DrawRectangle( area );
+    if( m_isOpen || hover )
     {
-        dc.SetPen( *wxTRANSPARENT_PEN );
         dc.SetBrush( wxBrush( m_isOpen ? accent.ChangeLightness( dark ? 60 : 180 ) : background.ChangeLightness( dark ? 115 : 95 ) ) );
         dc.DrawRectangle( area );
     }
@@ -1263,9 +1515,12 @@ void FACET_ROW::paint()
     const int chevronWidth = FromDIP( 6 ), chevronHeight = FromDIP( 11 );
     int valueLeft = labelWidth + mark + FromDIP( 6 ), valueWidth = area.width - valueLeft - chevronWidth - FromDIP( 18 );
     dc.SetTextForeground( foreground );
-    dc.DrawText( wxControl::Ellipsize( m_value, dc, wxELLIPSIZE_END, std::max( 0, valueWidth ) ), valueLeft, text );
-    wxColour open = accent.ChangeLightness( dark ? 60 : 180 ), hover = background.ChangeLightness( dark ? 115 : 95 );
-    wxColour chevron = Readable( muted, { background, open, hover }, 3.5 );
+    // A value too long for its column first drops its "(candidate)" suffix, which the ring already shows, so the value itself
+    // is not cut mid-word (design QA round 2, P3 11); only a value that still does not fit is shortened.
+    wxString shown = dc.GetTextExtent( m_value ).x <= valueWidth ? m_value : m_bareValue;
+    dc.DrawText( wxControl::Ellipsize( shown, dc, wxELLIPSIZE_END, std::max( 0, valueWidth ) ), valueLeft, text );
+    wxColour open = accent.ChangeLightness( dark ? 60 : 180 ), hovered = background.ChangeLightness( dark ? 115 : 95 );
+    wxColour chevron = Readable( muted, { background, open, hovered }, 3.5 );
     {
         const int right = area.width - FromDIP( 9 ), middle = area.height / 2;
         const wxPoint points[] = { { right - chevronWidth, middle - chevronHeight / 2 }, { right, middle }, { right - chevronWidth, middle + chevronHeight / 2 } };
@@ -1361,6 +1616,33 @@ void PaintNatively( wxWindow* aButton, BUTTON_PAINTER* aPainter )
 #else
     wxUnusedVar( aButton ); wxUnusedVar( aPainter );
 #endif
+}
+
+wxColour DrawnSurface( wxWindow* aControl )
+{
+#if defined( __WXGTK__ )
+    // GTK draws a plain window with the background of the first widget above it whose theme gives it one, not with the colour
+    // wxWidgets reports for it: the inspector reports (241, 240, 238) in the light theme while GTK draws the window's
+    // (246, 245, 244) (review of design QA round 2).
+    struct RGBA { double red, green, blue, alpha; };
+    static const auto parentOf = toolkit<void* ( * )( void* )>( "gtk_widget_get_parent" );
+    static const auto styleOf = toolkit<void* ( * )( void* )>( "gtk_widget_get_style_context" );
+    static const auto stateOf = toolkit<unsigned ( * )( void* )>( "gtk_style_context_get_state" );
+    static const auto backgroundOf = toolkit<void ( * )( void*, unsigned, RGBA* )>( "gtk_style_context_get_background_color" );
+    if( aControl && aControl->GetHandle() && parentOf && styleOf && stateOf && backgroundOf )
+        for( void* widget = parentOf( aControl->GetHandle() ); widget; widget = parentOf( widget ) )
+        {
+            void* style = styleOf( widget );
+            RGBA colour{ 0, 0, 0, 0 };
+            if( style ) backgroundOf( style, stateOf( style ), &colour );
+            if( colour.alpha >= 0.99 )
+            {
+                auto channel = []( double value ) { return static_cast<unsigned char>( std::lround( std::clamp( value, 0.0, 1.0 ) * 255 ) ); };
+                return wxColour( channel( colour.red ), channel( colour.green ), channel( colour.blue ) );
+            }
+        }
+#endif
+    return aControl && aControl->GetParent() ? aControl->GetParent()->GetBackgroundColour() : wxSystemSettings::GetColour( wxSYS_COLOUR_BTNFACE );
 }
 
 void SetAccessibleRole( wxWindow* aWindow, const char* aRole, const wxString& aName )
@@ -1591,8 +1873,9 @@ void LINK_BUTTON::SetLabel( const wxString& label )
 
 void LINK_BUTTON::PaintButton( wxDC& dc, bool aHover, bool )
 {
-    const wxColour background = GetParent()->GetBackgroundColour();
-    dc.SetPen( *wxTRANSPARENT_PEN ); dc.SetBrush( wxBrush( background ) ); dc.DrawRectangle( wxRect( GetClientSize() ) );
+    // A link has no box of its own: GTK has already drawn the inspector's surface behind it, and its colours are chosen
+    // against that surface (review of design QA round 2: filling with the parent's reported colour drew a faint box).
+    const wxColour background = DrawnSurface( this );
     wxFont font = GetFont(); font.SetUnderlined( true ); dc.SetFont( font );
     wxColour colour = IsEnabled() ? LinkColour( background ) : wxSystemSettings::GetColour( wxSYS_COLOUR_GRAYTEXT );
     if( IsEnabled() && aHover ) colour = Readable( colour, { background }, 7.0 );
@@ -1601,6 +1884,72 @@ void LINK_BUTTON::PaintButton( wxDC& dc, bool aHover, bool )
     {
         dc.SetPen( wxPen( colour, 1, wxPENSTYLE_DOT ) ); dc.SetBrush( *wxTRANSPARENT_BRUSH );
         dc.DrawRectangle( wxRect( GetClientSize() ) );
+    }
+}
+
+CHOICE_BUTTON::CHOICE_BUTTON( wxWindow* parent, const wxString& label, const wxString& name ) :
+        wxToggleButton( parent, wxID_ANY, label, wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT, wxDefaultValidator, name )
+{
+#if defined( __WXGTK__ )
+    PaintNatively( this, this );
+#endif
+    SetInitialSize( DoGetBestSize() );
+}
+
+void CHOICE_BUTTON::SetLabel( const wxString& label )
+{
+    wxToggleButton::SetLabel( label ); InvalidateBestSize(); SetInitialSize( DoGetBestSize() ); Refresh();
+}
+
+wxSize CHOICE_BUTTON::DoGetBestSize() const
+{
+#if defined( __WXGTK__ )
+    // As the toolkit's own exact-fit button was: the label with 10 DIP either side and 8 DIP above and below.
+    return GetTextExtent( GetLabelText() ) + wxSize( 2 * FromDIP( 10 ), 2 * FromDIP( 8 ) );
+#else
+    return wxToggleButton::DoGetBestSize();
+#endif
+}
+
+CHOICE_BUTTON::LOOK CHOICE_BUTTON::Look( const wxColour& surface, bool chosen, bool hover, bool enabled )
+{
+    const bool dark = IsDark( surface );
+    const wxColour highlight = wxSystemSettings::GetColour( wxSYS_COLOUR_HIGHLIGHT );
+    const wxColour grey = wxSystemSettings::GetColour( wxSYS_COLOUR_GRAYTEXT );
+    LOOK look;
+    if( chosen )
+    {
+        // The strip's active tool (design QA P2-1): a pale accent tile, an accent border 3:1 or more from the inspector and
+        // the tile, and an accent label 4.5:1 or more on the tile.
+        look.fill = mix( highlight, surface, dark ? 0.30 : 0.14 );
+        look.border = Readable( highlight, { surface, look.fill }, 3.0 );
+        look.text = enabled ? Readable( highlight, { look.fill }, 4.5 ) : grey;
+        return look;
+    }
+    // Idle, a quiet framed button; under the pointer, a neutral grey fill, never the accent, so hover and chosen look different.
+    look.fill = enabled && hover ? surface.ChangeLightness( dark ? 125 : 91 ) : surface.ChangeLightness( dark ? 112 : 102 );
+    look.border = enabled ? surface.ChangeLightness( dark ? 150 : 80 ) : surface.ChangeLightness( dark ? 130 : 88 );
+    look.text = enabled ? Readable( wxSystemSettings::GetColour( wxSYS_COLOUR_BTNTEXT ), { look.fill }, 4.5 ) : grey;
+    return look;
+}
+
+void CHOICE_BUTTON::PaintButton( wxDC& dc, bool aHover, bool aDown )
+{
+    // The tile's corners show the inspector's surface, which GTK has already drawn behind the choice; its colours are chosen
+    // against that surface (review of design QA round 2).
+    const wxColour surface = DrawnSurface( this );
+    const wxRect area( GetClientSize() );
+    const LOOK look = Look( surface, GetValue(), aHover || aDown, IsEnabled() );
+    const wxRect tile = wxRect( area ).Deflate( FromDIP( 1 ) );
+    const int radius = FromDIP( 4 );
+    dc.SetPen( wxPen( look.border, FromDIP( 1 ) ) ); dc.SetBrush( wxBrush( look.fill ) ); dc.DrawRoundedRectangle( tile, radius );
+    dc.SetFont( GetFont() ); dc.SetTextForeground( look.text );
+    const wxString label = GetLabelText(); const wxSize extent = dc.GetTextExtent( label );
+    dc.DrawText( label, ( area.width - extent.x ) / 2, ( area.height - extent.y ) / 2 );
+    if( HasFocus() )
+    {
+        dc.SetPen( wxPen( Readable( wxSystemSettings::GetColour( wxSYS_COLOUR_HIGHLIGHT ), { look.fill }, 3.0 ), 1, wxPENSTYLE_DOT ) );
+        dc.SetBrush( *wxTRANSPARENT_BRUSH ); dc.DrawRoundedRectangle( wxRect( tile ).Deflate( FromDIP( 2 ) ), radius );
     }
 }
 
@@ -1685,7 +2034,9 @@ void TOOL_PALETTE::paint()
     const bool dark = IsDark( window );
     const wxRect area( GetClientSize() );
     dc.SetBackground( wxBrush( window ) ); dc.Clear();
-    dc.SetPen( wxPen( window.ChangeLightness( dark ? 175 : 78 ), 1 ) ); dc.SetBrush( wxBrush( Surface() ) );
+    // A quiet outline in both themes: the dark theme's was near-white, 8.4:1 on the canvas against the light theme's 1.7:1
+    // (design QA round 2, P3 9).
+    dc.SetPen( wxPen( window.ChangeLightness( dark ? 130 : 78 ), 1 ) ); dc.SetBrush( wxBrush( Surface() ) );
     dc.DrawRoundedRectangle( area, FromDIP( 8 ) );
     const int y = ( m_delete->GetRect().GetBottom() + m_undo->GetRect().y ) / 2;
     dc.SetPen( wxPen( window.ChangeLightness( dark ? 160 : 82 ), 1 ) );
@@ -1751,7 +2102,9 @@ void RECURSIVE_DIAGRAM_FRAME::followRoutes( const R::LEVEL_LAYOUT& before )
     // line, so every leg stays horizontal or vertical. When an end moved since aBefore and the route is still the one
     // aBefore drew, the channel keeps its offset from the middle between the ends. A route that changed since aBefore
     // (a merge took another writer's route, whose channel that writer already placed against the ends it moved) keeps
-    // its channel; only its heights follow the ends. A locked route, and any other stored route, is kept exactly as drawn.
+    // its channel; only its heights follow the ends. A locked route, a route with an end on a top or bottom side (its leg
+    // leaves that end upright, so a level run from it would lie along the block's outline), and any other stored route are
+    // kept exactly as drawn.
     if( !m_level.scope().local_diagram().has_presentation() ) return;
     auto after = layout( current(), true );
     for( auto& row : *m_level.mutable_scope()->mutable_local_diagram()->mutable_presentation()->mutable_routes() )
@@ -1759,7 +2112,7 @@ void RECURSIVE_DIAGRAM_FRAME::followRoutes( const R::LEVEL_LAYOUT& before )
         if( row.locked() || row.waypoints_size() != 2 ) continue;
         const R::LINK* now = after.Link( row.connection_id() );
         int index = static_cast<int>( row.endpoint_index() );
-        if( !now ) continue;
+        if( !now || !after.Sideways( *now, index ) ) continue;
         R::POINT first, second;
         if( !R::ParseUnits( row.waypoints( 0 ).x(), first.x ) || !R::ParseUnits( row.waypoints( 0 ).y(), first.y )
             || !R::ParseUnits( row.waypoints( 1 ).x(), second.x ) || !R::ParseUnits( row.waypoints( 1 ).y(), second.y ) ) continue;
@@ -1957,13 +2310,32 @@ std::vector<DRAWN_PORT> drawnPorts( const R::LEVEL_LAYOUT& drawn, const std::fun
     }
     return result;
 }
+/// The place above and right of a boundary port drawn at aAt that has no stored placement yet, where its name goes when the
+/// fallback column has room, in canvas pixels with aDC's font (clear of the port's 12-pixel square, design QA P2-6).
+wxRect rightName( wxDC& dc, const R::PORT& port, const wxPoint& at )
+{
+    return wxRect( wxPoint( at.x + 12, at.y - 26 ), dc.GetTextExtent( Text( port.name ) ) );
+}
+/// Whether that place is clear: 8 pixels or more from every block (aBlocks) and from every port's square but its own
+/// (aSquares), and 3 pixels or more from every straight run of every connection (aWires), all as drawn. A name 3 pixels beside
+/// a block's port read as that port's name, and a run through a name cut it (mockup audit M1-2 and M1-11).
+bool rightNameClear( wxDC& dc, const R::PORT& port, const wxPoint& at, const std::vector<wxRect>& blocks,
+                     const std::vector<wxRect>& squares, const std::vector<wxRect>& wires )
+{
+    const wxRect right = rightName( dc, port, at );
+    auto crowds = [&]( const wxRect& item, int by ) { return wxRect( item ).Inflate( by ).Intersects( right ); };
+    return std::none_of( blocks.begin(), blocks.end(), [&]( const wxRect& block ) { return crowds( block, 8 ); } )
+           && std::none_of( squares.begin(), squares.end(), [&]( const wxRect& square ) { return !square.Contains( at ) && crowds( square, 8 ); } )
+           && std::none_of( wires.begin(), wires.end(), [&]( const wxRect& run ) { return crowds( run, 3 ); } );
+}
 /// Where a boundary port drawn at aAt names itself, in canvas pixels, with aDC's font: outside the level frame beside the
-/// port's side, or above and right of a boundary port that has no stored placement yet.
-wxRect boundaryName( wxDC& dc, const R::PORT& port, const wxPoint& at )
+/// port's side; for a boundary port that has no stored placement yet, above and right of it, or, when aLeft, above and left of
+/// it, outside the level, as the name of a port placed on the level's left side is drawn (mockup audit M1-2).
+wxRect boundaryName( wxDC& dc, const R::PORT& port, const wxPoint& at, bool left )
 {
     wxSize extent = dc.GetTextExtent( Text( port.name ) );
-    // Clear of the port's 12-pixel square (design QA P2-6).
-    if( !port.placed ) return wxRect( wxPoint( at.x + 12, at.y - 26 ), extent );
+    if( !port.placed )
+        return left ? wxRect( wxPoint( at.x - extent.x - 10, at.y - extent.y - 6 ), extent ) : rightName( dc, port, at );
     switch( port.side )
     {
     case D::DPS_RIGHT: return wxRect( wxPoint( at.x + 10, at.y - extent.y - 6 ), extent );
@@ -1974,12 +2346,47 @@ wxRect boundaryName( wxDC& dc, const R::PORT& port, const wxPoint& at )
 }
 }
 
-std::vector<std::pair<std::string, wxRect>> RECURSIVE_DIAGRAM_FRAME::boundaryNames( const R::LEVEL_LAYOUT& drawn ) const
+std::vector<wxRect> RECURSIVE_DIAGRAM_FRAME::blockBoxes( const R::LEVEL_LAYOUT& drawn ) const
 {
-    std::vector<std::pair<std::string, wxRect>> result;
+    std::vector<wxRect> boxes;
+    for( const auto& node : drawn.Nodes() ) boxes.push_back( toScreen( drawn.Rect( node.id ) ) );
+    return boxes;
+}
+std::vector<wxRect> RECURSIVE_DIAGRAM_FRAME::portSquares( const R::LEVEL_LAYOUT& drawn ) const
+{
+    std::vector<wxRect> squares;
+    for( const auto& mark : portMarks( drawn ) ) squares.push_back( mark.rect );
+    return squares;
+}
+std::vector<wxRect> RECURSIVE_DIAGRAM_FRAME::wireBoxes( const R::LEVEL_LAYOUT& drawn ) const
+{
+    std::vector<wxRect> runs;
+    for( const auto& link : drawn.Links() )
+        for( int i = 1; i < static_cast<int>( link.endpoints.size() ); ++i )
+        {
+            auto route = drawn.Route( link, i );
+            for( size_t j = 1; j < route.size(); ++j )
+            {
+                wxPoint a = toScreen( route[j - 1] ), b = toScreen( route[j] );
+                runs.emplace_back( wxPoint( std::min( a.x, b.x ), std::min( a.y, b.y ) ), wxPoint( std::max( a.x, b.x ), std::max( a.y, b.y ) ) );
+            }
+        }
+    return runs;
+}
+std::vector<RECURSIVE_DIAGRAM_FRAME::BOUNDARY_NAME> RECURSIVE_DIAGRAM_FRAME::boundaryNames( const R::LEVEL_LAYOUT& drawn ) const
+{
+    std::vector<BOUNDARY_NAME> result;
     wxClientDC dc( m_canvas ); dc.SetFont( GetFont() );
+    const auto blocks = blockBoxes( drawn );
+    const auto squares = portSquares( drawn );
+    const auto wires = wireBoxes( drawn );
+    // The fallback column names all its ports on one side, as the approved CPU walkthrough does: right of the ports while each
+    // name has a clear place there, otherwise all left of them, outside the level (mockup audit M1-2 and M1-11).
+    const bool left = std::any_of( drawn.Ports().begin(), drawn.Ports().end(), [&]( const R::PORT& port )
+            { return port.boundary && !port.placed && !rightNameClear( dc, port, toScreen( port.anchor ), blocks, squares, wires ); } );
     for( const auto& port : drawn.Ports() )
-        if( port.boundary ) result.emplace_back( port.name, boundaryName( dc, port, toScreen( port.anchor ) ) );
+        if( port.boundary )
+            result.push_back( { port.blockId, port.interfaceId, port.name, boundaryName( dc, port, toScreen( port.anchor ), left ) } );
     return result;
 }
 std::vector<wxRect> RECURSIVE_DIAGRAM_FRAME::portNames( wxDC& dc, const R::LEVEL_LAYOUT& drawn, const std::string& block ) const
@@ -2124,12 +2531,20 @@ std::optional<RECURSIVE_DIAGRAM_FRAME::TARGET> RECURSIVE_DIAGRAM_FRAME::connectT
 }
 std::vector<RECURSIVE_DIAGRAM_FRAME::CAPTION_PLACE> RECURSIVE_DIAGRAM_FRAME::connectionCaptions( const R::LEVEL_LAYOUT& drawn, const wxSize& area ) const
 {
-    // Design QA P2-7: text keeps its size while the drawing zooms out, so each caption looks for a clear place beside its own
-    // connection: above and below the middle of each horizontal leg, right and left of the middle of each vertical leg,
-    // longest leg first (a stored route's caption position comes first), and then the same places moved along each leg
-    // (the fix the design QA gives: "move labels along their segment when they would collide"). Clear means inside the canvas and apart from every
-    // block by the handle size plus 4 pixels (so a resize handle never covers a caption), from every port and its name, from
-    // every wire and from the captions already placed. A caption with no clear place is left out; the inspector names it.
+    // Every connection shows its caption (owner rule 1, design QA round 2, R2-P2-1 and R2-P2-8; the approved sketch A3 captions
+    // a connection to a boundary port as well, beside the port's own name). Text keeps its size while the drawing zooms out
+    // (design QA P2-7), so each caption looks for a clear place beside its own connection, in this order:
+    //  1. a stored route's caption position, then beside the middle of each leg, longest leg first: above or below a level leg,
+    //     right or left of an upright one;
+    //  2. the same places moved along each leg in 6-pixel steps, nearest the middle first, where the caption may reach past the
+    //     leg's end (past a bend, or beside a short leg) as long as it stays beside at least 8 pixels of the leg;
+    //  3. the free space around the connection: the same places up to six steps further out from each leg.
+    // Clear means inside the canvas, off the palette, and apart from every block by the handle size plus 4 pixels (so a resize
+    // handle never covers a caption), from every port and its name, from every note, from every wire, from the level's dashed
+    // boundary and from the captions already placed. Only a caption whose whole text has no clear place is shortened with "…"
+    // (at least four characters kept) into the first clear place of 1 and 2, and shows its whole text on hover; one that has no
+    // clear place even so is drawn shortened to four characters where it covers least, on its knocked-out background, never
+    // left out.
     std::vector<CAPTION_PLACE> result;
     if( !m_ready || !current() ) return result;
     wxClientDC dc( m_canvas ); dc.SetFont( GetFont() );
@@ -2139,97 +2554,308 @@ std::vector<RECURSIVE_DIAGRAM_FRAME::CAPTION_PLACE> RECURSIVE_DIAGRAM_FRAME::con
     for( const auto& node : drawn.Nodes() ) obstacles.push_back( toScreen( drawn.Rect( node.id ) ).Inflate( clearance ) );
     auto screen = [this]( const R::POINT& p ) { return toScreen( p ); };
     for( const auto& port : drawnPorts( drawn, screen ) ) obstacles.push_back( portMark( port.at ).Inflate( FromDIP( 2 ) ) );
-    for( const auto& [name, rect] : boundaryNames( drawn ) ) obstacles.push_back( wxRect( rect ).Inflate( FromDIP( 2 ) ) );
+    for( const auto& name : boundaryNames( drawn ) ) obstacles.push_back( wxRect( name.rect ).Inflate( FromDIP( 2 ) ) );
     const auto& notes = visibleNotes();
     for( int i = 0; i < notes.size(); ++i )
         if( notes.Get( i ).target_kind() == D::DAT_CANVAS || notes.Get( i ).has_position() ) obstacles.push_back( noteRect( notes.Get( i ), i ) );
+    // The palette covers the canvas's left edge; a caption under it could not be read.
+    if( m_paletteShown && m_palette->IsShown() ) obstacles.push_back( wxRect( m_palette->GetRect() ).Inflate( FromDIP( 4 ) ) );
     std::vector<std::pair<wxPoint, wxPoint>> wires;
+    std::string key;
+    auto put = [&key]( int64_t value ) { key.append( reinterpret_cast<const char*>( &value ), sizeof value ); };
     for( const auto& link : drawn.Links() )
         for( int i = 1; i < static_cast<int>( link.endpoints.size() ); ++i )
         {
             auto route = drawn.Route( link, i );
+            key += link.id; key += '\0'; key += link.name; key += '\0'; put( i );
+            if( auto label = drawn.RouteLabel( link.id, i ) ) { wxPoint at = toScreen( *label ); put( at.x ); put( at.y ); }
+            for( const auto& point : route ) { wxPoint at = toScreen( point ); put( at.x ); put( at.y ); }
             for( size_t j = 1; j < route.size(); ++j ) wires.emplace_back( toScreen( route[j - 1] ), toScreen( route[j] ) );
         }
-    auto touchesWire = [&]( const wxRect& rect )
+    // The level's dashed boundary is kept clear as a wire is, so a caption lies wholly inside the frame or wholly outside it,
+    // as a connection to a boundary port may be captioned beside the port's own name (review of design QA round 2).
+    if( auto frame = drawn.Frame() )
     {
-        wxRect zone = wxRect( rect ).Inflate( FromDIP( 2 ) );
-        for( const auto& [a, b] : wires )
-        {
-            wxRect segment( wxPoint( std::min( a.x, b.x ), std::min( a.y, b.y ) ), wxPoint( std::max( a.x, b.x ), std::max( a.y, b.y ) ) );
-            if( segment.Intersects( zone ) ) return true;
-        }
-        return false;
-    };
+        const wxRect outline = toScreen( *frame );
+        const wxPoint corners[] = { outline.GetTopLeft(), outline.GetTopRight(), outline.GetBottomRight(), outline.GetBottomLeft() };
+        for( int k = 0; k < 4; ++k ) wires.emplace_back( corners[k], corners[( k + 1 ) % 4] );
+        put( outline.x ); put( outline.y ); put( outline.width ); put( outline.height );
+    }
+    put( area.x ); put( area.y ); put( GetFont().GetPointSize() );
+    for( const wxRect& rect : obstacles ) { put( rect.x ); put( rect.y ); put( rect.width ); put( rect.height ); }
+    // An unchanged canvas (a repaint, a state read, a pointer move) keeps the places already found.
+    if( key == m_captionKey ) return m_captionCache;
+    std::vector<wxRect> placed;
     for( const auto& link : drawn.Links() )
         for( int i = 1; i < static_cast<int>( link.endpoints.size() ); ++i )
         {
-            // A boundary already names its interface. Avoid duplicating the title on it.
-            if( link.endpoints[0].block_id() == drawn.ScopeId() || link.endpoints[i].block_id() == drawn.ScopeId() ) continue;
             auto route = drawn.Route( link, i );
             if( route.size() < 2 ) continue;
             std::vector<wxPoint> points; for( const auto& point : route ) points.push_back( toScreen( point ) );
             std::vector<size_t> legs;
             for( size_t j = 1; j < points.size(); ++j ) if( points[j] != points[j - 1] ) legs.push_back( j );
+            if( legs.empty() ) continue;
             auto length = [&]( size_t j ) { return std::abs( points[j].x - points[j - 1].x ) + std::abs( points[j].y - points[j - 1].y ); };
             std::stable_sort( legs.begin(), legs.end(), [&]( size_t a, size_t b ) { return length( a ) > length( b ); } );
-            // The places for a text of aExtent: a stored route's caption position first, then the middle of every leg, then,
-            // when none is clear, places moved along the legs in 6-pixel steps, the nearest to a middle first.
-            auto places = [&]( const wxSize& extent )
+            wxString full = Text( link.name );
+            const wxSize fullExtent = dc.GetTextExtent( full );
+            // Only what lies near this connection can touch its caption.
+            wxRect reach( points.front(), points.front() );
+            for( const auto& point : points ) reach.Union( wxRect( point, point ) );
+            reach.Inflate( fullExtent.x + FromDIP( 90 ), fullExtent.y + FromDIP( 90 ) );
+            // The blocks (the first obstacles) apart from everything else: where no place is clear, a caption covers a wire
+            // rather than a port, a name or another caption, and any of those rather than a block.
+            std::vector<wxRect> nearBlocks, nearby;
+            for( size_t k = 0; k < obstacles.size(); ++k )
+                if( obstacles[k].Intersects( reach ) ) ( k < drawn.Nodes().size() ? nearBlocks : nearby ).push_back( obstacles[k] );
+            for( const wxRect& rect : placed ) if( rect.Intersects( reach ) ) nearby.push_back( rect );
+            std::vector<wxRect> nearWires;
+            for( const auto& [a, b] : wires )
+            {
+                wxRect segment( wxPoint( std::min( a.x, b.x ), std::min( a.y, b.y ) ), wxPoint( std::max( a.x, b.x ), std::max( a.y, b.y ) ) );
+                if( segment.Intersects( reach ) ) nearWires.push_back( segment );
+            }
+            auto collisions = [&]( const wxRect& candidate, bool stopAtFirst )
+            {
+                // A place outside the canvas could not be seen at all: in the last resort it counts as worse than any overlap.
+                int count = canvas.Contains( candidate ) ? 0 : 1000;
+                if( count && stopAtFirst ) return count;
+                const wxRect zone = wxRect( candidate ).Inflate( FromDIP( 2 ) );
+                for( const wxRect& rect : nearBlocks ) if( rect.Intersects( candidate ) && ( count += 100 ) && stopAtFirst ) return count;
+                for( const wxRect& rect : nearby ) if( rect.Intersects( candidate ) && ( count += 10 ) && stopAtFirst ) return count;
+                for( const wxRect& segment : nearWires ) if( segment.Intersects( zone ) && ++count && stopAtFirst ) return count;
+                return count;
+            };
+            // The places for a text of aExtent (see above), up to aLevel.
+            auto places = [&]( const wxSize& extent, int level )
             {
                 std::vector<wxRect> candidates;
                 if( auto label = drawn.RouteLabel( link.id, i ) ) candidates.emplace_back( toScreen( *label ) - wxPoint( extent.x / 2, extent.y / 2 ), extent );
-                // Beside the point `shift` pixels from the middle of leg j, while that point is still on the leg.
-                auto beside = [&]( size_t j, int shift )
+                // Beside the point `shift` pixels from the middle of leg j, `out` steps away from it; false once the caption would
+                // no longer lie beside at least 8 pixels (or the whole) of the leg.
+                auto beside = [&]( size_t j, int shift, int out ) -> bool
                 {
                     const wxPoint &a = points[j - 1], &b = points[j];
-                    wxPoint middle( ( a.x + b.x ) / 2, ( a.y + b.y ) / 2 );
+                    const int along = a.y == b.y ? extent.x : extent.y, span = std::abs( a.y == b.y ? b.x - a.x : b.y - a.y );
+                    const int keep = std::min( FromDIP( 8 ), span );
+                    if( shift != 0 && std::abs( shift ) > span / 2 + along / 2 - keep ) return false;
+                    const wxPoint middle( ( a.x + b.x ) / 2, ( a.y + b.y ) / 2 );
                     if( a.y == b.y )
                     {
-                        int x = middle.x + shift;
-                        if( x < std::min( a.x, b.x ) || x > std::max( a.x, b.x ) ) return;
-                        candidates.emplace_back( wxPoint( x - extent.x / 2, a.y - extent.y - FromDIP( 4 ) ), extent );
-                        candidates.emplace_back( wxPoint( x - extent.x / 2, a.y + FromDIP( 4 ) ), extent );
+                        const int x = middle.x + shift - extent.x / 2, gap = FromDIP( 4 ) + out * ( extent.y / 2 + FromDIP( 2 ) );
+                        candidates.emplace_back( wxPoint( x, a.y - extent.y - gap ), extent );
+                        candidates.emplace_back( wxPoint( x, a.y + gap ), extent );
                     }
                     else if( a.x == b.x )
                     {
-                        int y = middle.y + shift;
-                        if( y < std::min( a.y, b.y ) || y > std::max( a.y, b.y ) ) return;
-                        candidates.emplace_back( wxPoint( a.x + FromDIP( 6 ), y - extent.y / 2 ), extent );
-                        candidates.emplace_back( wxPoint( a.x - FromDIP( 6 ) - extent.x, y - extent.y / 2 ), extent );
+                        const int y = middle.y + shift - extent.y / 2, gap = FromDIP( 6 ) + out * FromDIP( 12 );
+                        candidates.emplace_back( wxPoint( a.x + gap, y ), extent );
+                        candidates.emplace_back( wxPoint( a.x - gap - extent.x, y ), extent );
                     }
+                    return true;
                 };
-                int longest = 0;
-                for( size_t j : legs ) { beside( j, 0 ); longest = std::max( longest, length( j ) ); }
-                const int step = FromDIP( 6 );
-                for( int shift = step; shift <= longest / 2; shift += step )
-                    for( size_t j : legs ) { beside( j, shift ); beside( j, -shift ); }
+                for( size_t j : legs ) beside( j, 0, 0 );
+                if( level >= 1 )
+                {
+                    const int step = FromDIP( 6 );
+                    for( int shift = step; ; shift += step )
+                    {
+                        bool any = false;
+                        for( size_t j : legs ) { any |= beside( j, shift, 0 ); any |= beside( j, -shift, 0 ); }
+                        if( !any ) break;
+                    }
+                }
+                if( level >= 2 )
+                    for( int out = 1; out <= 6; ++out )
+                    {
+                        for( size_t j : legs ) beside( j, 0, out );
+                        const int step = FromDIP( 12 );
+                        for( int shift = step; ; shift += step )
+                        {
+                            bool any = false;
+                            for( size_t j : legs ) { any |= beside( j, shift, out ); any |= beside( j, -shift, out ); }
+                            if( !any ) break;
+                        }
+                    }
                 return candidates;
             };
-            auto clear = [&]( const wxRect& candidate )
+            CAPTION_PLACE place{ link.id, full, full, wxRect(), false, true };
+            for( const wxRect& candidate : places( fullExtent, 2 ) )
+                if( !collisions( candidate, true ) ) { place.rect = candidate; place.shown = true; break; }
+            // Shortened only when the whole caption has no clear place (as a block caption is shortened to its block's width).
+            for( size_t keep = full.length() - 1; !place.shown && keep >= 4 && keep < full.length(); --keep )
             {
-                return canvas.Contains( candidate ) && !touchesWire( candidate )
-                       && std::none_of( obstacles.begin(), obstacles.end(), [&]( const wxRect& other ) { return other.Intersects( candidate ); } );
-            };
-            // The whole caption where it has a clear place. Otherwise the longest shortening of it, ending in "…" and keeping at
-            // least four characters, that has one, as a block caption is shortened to its block's width; only a caption that
-            // has no clear place even so is left out (the inspector names it).
-            wxString full = Text( link.name );
-            CAPTION_PLACE place{ link.id, full, wxRect(), false };
-            for( size_t keep = full.length(); !place.shown && ( keep == full.length() || keep >= 4 ); --keep )
-            {
-                wxString text = keep == full.length() ? full : wxString( full.Left( keep ) ).Trim() + wxS( "…" );
-                if( keep < full.length() && text.length() >= full.length() ) continue;
-                auto candidates = places( dc.GetTextExtent( text ) );
-                if( keep == full.length() && !candidates.empty() ) place.rect = candidates.front();
-                for( const auto& candidate : candidates )
-                    if( clear( candidate ) ) { place.text = text; place.rect = candidate; place.shown = true; break; }
-                if( keep == 0 ) break;
+                wxString text = wxString( full.Left( keep ) ).Trim() + wxS( "…" );
+                if( text.length() >= full.length() ) continue;
+                for( const wxRect& candidate : places( dc.GetTextExtent( text ), 1 ) )
+                    if( !collisions( candidate, true ) ) { place.text = text; place.rect = candidate; place.shown = true; break; }
             }
-            if( legs.empty() && !place.shown ) continue;
-            if( place.shown ) obstacles.push_back( wxRect( place.rect ).Inflate( FromDIP( 2 ) ) );
+            if( !place.shown )
+            {
+                // Never left out: the shortest shortening (four characters and "…", the whole caption when it is not longer), where
+                // it covers least (a wire rather than a port, a name or another caption, and any of those rather than a block), on
+                // its knocked-out background, naming the whole caption on hover.
+                if( full.length() > 5 ) place.text = wxString( full.Left( 4 ) ).Trim() + wxS( "…" );
+                int fewest = INT_MAX;
+                for( const wxRect& candidate : places( dc.GetTextExtent( place.text ), 2 ) )
+                    if( int count = collisions( candidate, false ); count < fewest ) { fewest = count; place.rect = candidate; }
+                place.shown = true; place.clear = false;
+            }
+            placed.push_back( wxRect( place.rect ).Inflate( FromDIP( 2 ) ) );
             result.push_back( std::move( place ) );
         }
+    m_captionKey = std::move( key ); m_captionCache = result;
     return result;
+}
+
+std::vector<wxPoint> RECURSIVE_DIAGRAM_FRAME::connectPreview( const R::LEVEL_LAYOUT& drawn ) const
+{
+    // Design QA round 2, R2-P2-2: the preview is the path the connection's router would draw for it (rule F4 as revised), from
+    // where its first end attaches and leaving it outward. Where that path would run through a block (the router's legs have
+    // three segments) or across a port's name, the preview leaves its first end outward for at least 12 pixels and goes around
+    // the blocks, 8 pixels clear of them, with as few turns as it can, into its target the way the target's edge faces.
+    // Only the preview goes around: the finished connection still takes rule F4's three-segment path, through the block when
+    // its target lies behind its source (Rail to DC input). Letting computed paths go around blocks too is a contract change
+    // of CN-2 F4 that awaits the integration owner (per-level-editor-design-qa.md, "Design QA round 2 fixes").
+    if( m_tool != TOOL::CONNECT || m_historyPreview || !m_connectFrom || !m_ready || !current() ) return {};
+    std::optional<D::DiagramEndpointBindingData> toEndpoint = m_connectTo;
+    if( !toEndpoint )
+        if( auto target = connectTarget( drawn ) )
+        {
+            toEndpoint.emplace(); toEndpoint->set_block_id( target->owner );
+            if( target->port ) { toEndpoint->set_kind( D::DEK_INTERFACE ); toEndpoint->set_interface_id( target->id ); }
+            else toEndpoint->set_kind( D::DEK_UNRESOLVED );
+        }
+    auto centreOf = [&]( const D::DiagramEndpointBindingData& endpoint ) -> int64_t
+    {
+        if( endpoint.has_interface_id() ) if( const R::PORT* port = drawn.Port( endpoint.block_id(), endpoint.interface_id() ) ) return port->anchor.x;
+        if( endpoint.block_id() == drawn.ScopeId() ) return drawn.Anchor( endpoint, 0 ).x;
+        R::RECT rect = drawn.Rect( endpoint.block_id() ); return rect.x + rect.w / 2;
+    };
+    const R::POINT pointer = toDiagram( m_pointer );
+    R::ROUTE_END from, to;
+    from.at = drawn.Anchor( *m_connectFrom, toEndpoint ? centreOf( *toEndpoint ) : pointer.x );
+    std::tie( from.dx, from.dy ) = drawn.Leaving( *m_connectFrom, from.at ); from.block = drawn.OwnBlock( *m_connectFrom );
+    if( toEndpoint )
+    {
+        to.at = drawn.Anchor( *toEndpoint, from.at.x );
+        std::tie( to.dx, to.dy ) = drawn.Leaving( *toEndpoint, to.at ); to.block = drawn.OwnBlock( *toEndpoint );
+    }
+    else to.at = pointer;
+    std::vector<std::vector<R::POINT>> others;
+    for( const auto& link : drawn.Links() )
+        for( int i = 1; i < static_cast<int>( link.endpoints.size() ); ++i ) others.push_back( drawn.Route( link, i ) );
+    // The router's result is kept in a local: a range-for over a member of a temporary would outlive the temporary (C++20).
+    const auto routed = R::RouteLegs( drawn.Rects(), others, { R::ROUTE_LEG{ from, to } } );
+    std::vector<wxPoint> path;
+    if( !routed.empty() ) for( const auto& point : routed.front() ) path.push_back( toScreen( point ) );
+    if( path.size() < 2 ) return path;
+    std::vector<wxRect> blocks, names;
+    for( const auto& node : drawn.Nodes() ) blocks.push_back( toScreen( drawn.Rect( node.id ) ) );
+    {
+        wxClientDC dc( m_canvas );
+        for( const auto& node : drawn.Nodes() ) for( const wxRect& name : portNames( dc, drawn, node.id ) ) names.push_back( name );
+    }
+    for( const auto& name : boundaryNames( drawn ) ) names.push_back( name.rect );
+    auto crosses = [&]( const std::vector<wxPoint>& points )
+    {
+        for( size_t i = 1; i < points.size(); ++i )
+        {
+            const wxRect run( wxPoint( std::min( points[i - 1].x, points[i].x ), std::min( points[i - 1].y, points[i].y ) ),
+                              wxPoint( std::max( points[i - 1].x, points[i].x ), std::max( points[i - 1].y, points[i].y ) ) );
+            for( const wxRect& block : blocks ) if( run.Intersects( wxRect( block ).Deflate( 1 ) ) ) return true;
+            for( const wxRect& name : names ) if( run.Intersects( name ) ) return true;
+        }
+        return false;
+    };
+    if( !crosses( path ) ) return path;
+    std::vector<wxRect> obstacles;
+    for( const wxRect& block : blocks ) obstacles.push_back( wxRect( block ).Inflate( FromDIP( 8 ) ) );
+    for( const wxRect& name : names ) obstacles.push_back( wxRect( name ).Inflate( FromDIP( 2 ) ) );
+    const int stub = FromDIP( 12 );
+    const wxPoint start = path.front(), goal = path.back();
+    const wxPoint startOut = start + wxPoint( from.dx * stub, from.dy * stub );
+    const bool fixedEnd = toEndpoint.has_value();
+    const wxPoint goalOut = fixedEnd ? goal + wxPoint( to.dx * stub, to.dy * stub ) : goal;
+    const wxRect around = wxRect( wxPoint( 0, 0 ), m_canvas->GetClientSize() ).Inflate( FromDIP( 200 ) );
+    auto middle = R::OrthogonalDetour( obstacles, startOut, wxPoint( from.dx, from.dy ), goalOut,
+                                       fixedEnd ? wxPoint( -to.dx, -to.dy ) : wxPoint(), around );
+    if( middle.empty() ) return path;
+    std::vector<wxPoint> detour{ start };
+    for( const wxPoint& point : middle ) if( detour.back() != point ) detour.push_back( point );
+    if( detour.back() != goal ) detour.push_back( goal );
+    // Only the corners stay.
+    std::vector<wxPoint> corners;
+    for( const wxPoint& point : detour )
+    {
+        if( corners.size() >= 2 )
+        {
+            const wxPoint &a = corners[corners.size() - 2], &b = corners.back();
+            if( ( a.x == b.x && b.x == point.x ) || ( a.y == b.y && b.y == point.y ) ) corners.pop_back();
+        }
+        corners.push_back( point );
+    }
+    return corners;
+}
+
+void RECURSIVE_DIAGRAM_FRAME::updateCanvasTip()
+{
+    m_canvasTipQueued = false;
+    wxString tip;
+    if( m_pointerInside && m_drag == DRAG::NONE && m_ready && !m_process && current() )
+        tip = canvasTipAt( layout( current(), !m_historyPreview ), m_pointer );
+    if( tip == m_canvasTip ) return;
+    m_canvasTip = tip;
+    if( tip.empty() ) m_canvas->UnsetToolTip(); else m_canvas->SetToolTip( tip );
+}
+
+wxString RECURSIVE_DIAGRAM_FRAME::canvasTipAt( const R::LEVEL_LAYOUT& drawn, const wxPoint& point ) const
+{
+    // A shortened connection caption shows its whole text, and "+N more" the choices behind it (design QA round 2, R2-P2-1
+    // and R2-P2-6).
+    for( const auto& place : connectionCaptions( drawn, m_canvas->GetClientSize() ) )
+        if( place.shown && place.text != place.full && place.rect.Contains( point ) ) return place.full;
+    for( const auto& [block, chips] : drawnChips() )
+        if( chips.more && chips.more->Contains( point ) )
+            if( const R::NODE* node = drawn.Node( block ) ) return R::MoreToolTip( *node, chips );
+    return wxString();
+}
+
+std::optional<wxRect> RECURSIVE_DIAGRAM_FRAME::connectHint( const R::LEVEL_LAYOUT& drawn, const std::vector<wxPoint>& preview ) const
+{
+    if( m_tool != TOOL::CONNECT || m_historyPreview || !m_connectFrom || m_captionKind || preview.empty() ) return std::nullopt;
+    wxClientDC dc( m_canvas ); dc.SetFont( GetFont() );
+    const wxSize extent = dc.GetTextExtent( _( "Click a port to finish connection" ) ), size( extent.x + 16, extent.y + 10 );
+    const wxPoint at = preview.back();
+    // Below right of the pointer as before, then above right, below left and above left, then the same places moved down and
+    // up in half-steps of the hint's height, nearest first: the first that covers no block, no port name, no part of the preview
+    // and not the palette, inside the canvas.
+    std::vector<wxRect> spots;
+    const int step = size.y / 2 + FromDIP( 4 );
+    for( int k = 0; k <= 12; ++k )
+        for( int sign : { 1, -1 } )
+        {
+            if( k == 0 && sign < 0 ) continue;
+            const int dy = sign * k * step;
+            spots.emplace_back( wxPoint( at.x + 14, at.y + 10 + dy ), size );
+            spots.emplace_back( wxPoint( at.x + 14, at.y - 10 - size.y + dy ), size );
+            spots.emplace_back( wxPoint( at.x - 14 - size.x, at.y + 10 + dy ), size );
+            spots.emplace_back( wxPoint( at.x - 14 - size.x, at.y - 10 - size.y + dy ), size );
+        }
+    std::vector<wxRect> avoid;
+    if( m_paletteShown && m_palette->IsShown() ) avoid.push_back( m_palette->GetRect() );
+    for( const auto& node : drawn.Nodes() ) avoid.push_back( toScreen( drawn.Rect( node.id ) ).Inflate( FromDIP( 4 ) ) );
+    for( const auto& node : drawn.Nodes() ) for( const wxRect& name : portNames( dc, drawn, node.id ) ) avoid.push_back( name );
+    for( const auto& name : boundaryNames( drawn ) ) avoid.push_back( name.rect );
+    for( size_t i = 1; i < preview.size(); ++i )
+        avoid.emplace_back( wxPoint( std::min( preview[i - 1].x, preview[i].x ) - 2, std::min( preview[i - 1].y, preview[i].y ) - 2 ),
+                            wxPoint( std::max( preview[i - 1].x, preview[i].x ) + 2, std::max( preview[i - 1].y, preview[i].y ) + 2 ) );
+    const wxRect canvas( wxPoint( 0, 0 ), m_canvas->GetClientSize() );
+    for( const wxRect& spot : spots )
+        if( canvas.Contains( spot ) && std::none_of( avoid.begin(), avoid.end(), [&]( const wxRect& other ) { return other.Intersects( spot ); } ) )
+            return spot;
+    for( const wxRect& spot : spots ) if( canvas.Contains( spot ) ) return spot;
+    return spots[0];
 }
 
 int RECURSIVE_DIAGRAM_FRAME::paletteReserve() const
@@ -2240,9 +2866,14 @@ int RECURSIVE_DIAGRAM_FRAME::paletteReserve() const
 RECURSIVE_DIAGRAM_FRAME::LABEL_ROOM RECURSIVE_DIAGRAM_FRAME::labelRoom( const R::LEVEL_LAYOUT& drawn ) const
 {
     // A port on the level frame names itself outside the frame at a fixed text size (see paint), so fitting
-    // leaves that many pixels beside the drawing on the port's side.
+    // leaves that many pixels beside the drawing on the port's side. So does the fallback column when its names go left of
+    // their ports at the current scale, because the blocks, their ports or the connections leave one of them no clear place
+    // on the right (M1-2, M1-11).
     LABEL_ROOM room;
     wxClientDC dc( m_canvas ); dc.SetFont( GetFont() );
+    for( const auto& name : boundaryNames( drawn ) )
+        if( const R::PORT* port = drawn.Port( name.owner, name.id ); port && !port->placed && name.rect.x < toScreen( port->anchor ).x )
+            room.left = std::max( room.left, name.rect.width + 14 );
     for( const auto& port : drawn.Ports() ) if( port.boundary && port.placed )
     {
         wxSize extent = dc.GetTextExtent( Text( port.name ) );
@@ -2272,10 +2903,19 @@ void RECURSIVE_DIAGRAM_FRAME::fit()
     R::RECT bounds = drawn.Bounds(); LABEL_ROOM room = labelRoom( drawn );
     double left = bounds.x / double( Q ), top = bounds.y / double( Q ), width = bounds.w / double( Q ), height = bounds.h / double( Q );
     auto area = m_canvas->GetClientSize();
-    int reserve = paletteReserve() + room.left;
-    double available = std::max( 64, area.x - reserve - room.right ), tall = std::max( 64, area.y - room.top - room.bottom );
-    m_scale = std::max( 0.000000001, std::min( { 1.0, available / width, tall / height } ) );
-    m_origin = { left - reserve / m_scale - ( available / m_scale - width ) / 2, top - room.top / m_scale - ( tall / m_scale - height ) / 2 };
+    // Which side a fallback port's name takes depends on the scale (M1-2), so the room beside the drawing is measured again at
+    // the scale just fitted; on a change the fit is repeated, and a third fit keeps the room every earlier fit needed.
+    for( int pass = 0; ; ++pass )
+    {
+        int reserve = paletteReserve() + room.left;
+        double available = std::max( 64, area.x - reserve - room.right ), tall = std::max( 64, area.y - room.top - room.bottom );
+        m_scale = std::max( 0.000000001, std::min( { 1.0, available / width, tall / height } ) );
+        m_origin = { left - reserve / m_scale - ( available / m_scale - width ) / 2, top - room.top / m_scale - ( tall / m_scale - height ) / 2 };
+        LABEL_ROOM after = labelRoom( drawn );
+        if( pass == 2 || ( after.left == room.left && after.top == room.top && after.right == room.right && after.bottom == room.bottom ) ) break;
+        room = pass == 0 ? after : LABEL_ROOM{ std::max( room.left, after.left ), std::max( room.top, after.top ),
+                                               std::max( room.right, after.right ), std::max( room.bottom, after.bottom ) };
+    }
     m_fitted = true; ++m_viewRevision; m_rendered = false; m_canvas->Refresh();
 }
 void RECURSIVE_DIAGRAM_FRAME::placePaletteAndEditor()
@@ -2448,6 +3088,13 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
     // canvas and against the selected block's fill), and handles that stand out from both.
     const R::CANVAS_COLOURS colours = R::CanvasColours();
     const wxColour &background = colours.background, &foreground = colours.foreground, &muted = colours.muted, &accent = colours.accent;
+    // What is drawn may have changed under a pointer that stays still (another level, a rename, a new fit, a history preview),
+    // so the canvas's tooltip is found again once this repaint is done (review of design QA round 2).
+    if( ( m_pointerInside || !m_canvasTip.empty() ) && !m_canvasTipQueued )
+    {
+        m_canvasTipQueued = true;
+        CallAfter( [this] { if( !m_closing ) updateCanvasTip(); } );
+    }
     dc.SetBackground( wxBrush( background ) ); dc.Clear(); dc.SetTextForeground( foreground );
     auto* scope = current(); if( !m_ready || !scope ) { dc.DrawText( m_error.empty() ? _( "Loading diagram…" ) : Text( m_error ), 24, 24 ); return; }
     const bool dark = colours.dark;
@@ -2530,6 +3177,7 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
         dc.DrawText( place.text, place.rect.GetTopLeft() );
     }
     std::optional<TARGET> target = connectTarget( drawn );
+    const auto boundaryLabels = boundaryNames( drawn );
     for( const auto& port : drawnPorts( drawn, screen ) )
     {
         // Ports are 12 DIP squares at every zoom (design QA P2-6).
@@ -2541,8 +3189,8 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
         if( port.boundary )
         {
             // A port on the level frame names itself outside the frame, beside its side.
-            if( const R::PORT* stored = drawn.Port( port.owner, port.id ) )
-                dc.DrawText( Text( port.name ), boundaryName( dc, *stored, port.at ).GetTopLeft() );
+            for( const auto& name : boundaryLabels )
+                if( name.owner == port.owner && name.id == port.id ) { dc.DrawText( Text( port.name ), name.rect.GetTopLeft() ); break; }
         }
         else if( port.placed || selected )
         {
@@ -2604,18 +3252,19 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
         }
         if( m_connectFrom )
         {
-            // The connection in progress, at right angles like a drawn connection, ending in a circle at the pointer (design QA
-            // P1-1 and P3 4), and the hint shared by the toolbar strip and the palette.
-            wxPoint from = toScreen( drawn.Anchor( *m_connectFrom, toDiagram( m_pointer ).x ) );
-            wxPoint to = m_connectTo ? toScreen( drawn.Anchor( *m_connectTo, drawn.Anchor( *m_connectFrom, 0 ).x ) ) : m_pointer;
-            int middle = ( from.x + to.x ) / 2;
-            wxPoint path[] = { from, { middle, from.y }, { middle, to.y }, to };
-            dc.SetPen( wxPen( accent, 2, wxPENSTYLE_SHORT_DASH ) ); dc.DrawLines( 4, path );
-            dc.SetPen( wxPen( accent, 2 ) ); dc.SetBrush( *wxTRANSPARENT_BRUSH ); dc.DrawCircle( to, FromDIP( 5 ) );
-            if( !m_captionKind )
+            // The connection in progress on the path its router would draw, or around the blocks in its way (design QA round 2,
+            // R2-P2-2), ending in an open ring at the pointer that the crosshair does not hide (P3 8), and the hint shared by the
+            // toolbar strip and the palette, placed clear of the blocks (P3 1).
+            std::vector<wxPoint> path = connectPreview( drawn );
+            if( path.size() >= 2 )
             {
-                wxString hint = _( "Click a port to finish connection" ); wxSize extent = dc.GetTextExtent( hint );
-                wxRect callout( to.x + 14, to.y + 10, extent.x + 16, extent.y + 10 );
+                dc.SetPen( wxPen( accent, 2, wxPENSTYLE_SHORT_DASH ) ); dc.DrawLines( static_cast<int>( path.size() ), path.data() );
+                dc.SetPen( wxPen( accent, 2 ) ); dc.SetBrush( *wxTRANSPARENT_BRUSH ); dc.DrawCircle( path.back(), FromDIP( 6 ) );
+            }
+            if( auto spot = connectHint( drawn, path ) )
+            {
+                wxString hint = _( "Click a port to finish connection" );
+                wxRect callout = *spot;
                 wxColour fill = accent.ChangeLightness( dark ? 45 : 185 );
                 dc.SetPen( wxPen( accent, 1 ) ); dc.SetBrush( wxBrush( fill ) );
                 dc.SetTextForeground( R::Readable( foreground, { fill }, 4.5 ) );
@@ -2685,7 +3334,16 @@ void RECURSIVE_DIAGRAM_FRAME::click( wxMouseEvent& event )
                                            : _( "Start the connection on a block or port." ) );
             refresh(); return;
         }
-        if( !m_connectFrom ) { m_connectFrom = endpoint; m_notice.clear(); refresh(); return; }
+        if( !m_connectFrom )
+        {
+            // The connection's first end becomes the selection and fills the inspector, from the palette or the strip alike, so
+            // what is selected is what the person is connecting (design QA round 2, R2-P2-3); the finished connection is
+            // selected in its turn (commitNewConnection).
+            m_connectFrom = endpoint; m_notice.clear();
+            if( endpoint->has_interface_id() ) selectPort( endpoint->block_id(), endpoint->interface_id() );
+            else select( endpoint->block_id() );
+            refresh(); return;
+        }
         if( endpoint->block_id() == m_connectFrom->block_id() && endpoint->interface_id() == m_connectFrom->interface_id() )
         { m_notice = Utf8( _( "Connect two different blocks or ports." ) ); refresh(); return; }
         m_connectTo = endpoint;
@@ -2738,7 +3396,9 @@ void RECURSIVE_DIAGRAM_FRAME::click( wxMouseEvent& event )
 
 void RECURSIVE_DIAGRAM_FRAME::motion( wxMouseEvent& event )
 {
-    m_pointer = event.GetPosition(); m_pointerInside = true;
+    m_pointer = event.GetPosition(); m_pointerInside = true; ++m_canvasMotions;
+    // A shortened connection caption shows its whole text on hover, and "+N more" the choices behind it (design QA round 2).
+    updateCanvasTip();
     // The Connect tool follows the pointer: its preview, and the port or block it would start or finish on.
     if( m_tool == TOOL::CONNECT && !m_connectTo ) { m_rendered = false; m_canvas->Refresh(); }
     if( m_tool == TOOL::SELECT && m_drag == DRAG::NONE && m_ready && !m_process && facetLinkOffered() )
@@ -2757,6 +3417,7 @@ void RECURSIVE_DIAGRAM_FRAME::dragTo( const wxPoint& point )
     m_pointer = point;
     wxPoint delta = m_pointer - m_dragStart;
     if( !m_dragMoved && std::abs( delta.x ) + std::abs( delta.y ) < FromDIP( 4 ) ) return;
+    if( !m_dragMoved ) m_dragGeometry = m_dragBefore.scope().local_diagram().presentation().SerializeAsString();
     m_dragMoved = true;
     if( m_drag == DRAG::NOTE )
     {
@@ -2813,6 +3474,10 @@ void RECURSIVE_DIAGRAM_FRAME::dragTo( const wxPoint& point )
         }
     }
     followRoutes( before );
+    // Each distinct geometry the drag reaches is one position the level must be laid out for; a journey compares the
+    // layouts a drag made with these positions (the dense-level check).
+    if( std::string geometry = m_level.scope().local_diagram().presentation().SerializeAsString(); geometry != m_dragGeometry )
+    { m_dragGeometry = std::move( geometry ); ++m_dragPositions; }
     m_rendered = false; m_canvas->Refresh();
 }
 

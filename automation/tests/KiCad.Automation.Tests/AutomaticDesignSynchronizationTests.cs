@@ -121,6 +121,35 @@ public sealed class AutomaticDesignSynchronizationTests
         Assert.AreEqual(2, driver.Applies);
     }
 
+    // Isolated worker rule (ledger pec2f1b53d4024a17): whether the worker learns of the ended KiCad from its apply or from its
+    // process watcher, it pauses with instance_exited and cannot be resumed on that KiCad. The native journeys prove both
+    // arrivals with killed KiCad processes (NativeSynchronizationRecoveryJourney idle, NativeCrashJourney mid-apply); this
+    // keeps the worker's reattachment rule for each arrival checked without an editor.
+    [TestMethod]
+    public async Task AnEndedKiCadPausesTheWorkerForReattachment()
+    {
+        using (var driver = new Driver { ApplyError = new AutomationException("instance_exited", "KiCad instance ended (fixture).") })
+        {
+            await using var session = new AutomaticDesignSynchronization(driver);
+            var paused = await Until(session, s => s.Phase == AutomaticDesignPhase.Paused);
+            Assert.AreEqual("instance_exited", paused.ErrorCode);
+            Assert.IsTrue(paused.ReattachRequired, "An apply that finds its KiCad ended needs a KiCad started again and a reattached record.");
+            Assert.AreEqual("automatic_sync_reattach_required", Assert.ThrowsExactly<AutomationException>(() => session.Resume(paused.Sequence)).Code);
+        }
+        using (var driver = new Driver())
+        {
+            await using var session = new AutomaticDesignSynchronization(driver);
+            var watching = await Until(session, s => s.Phase == AutomaticDesignPhase.Watching);
+            driver.Inputs.Writer.TryWrite(new(AutomaticDesignSignal.Recovery, ReattachRequired: true, ErrorCode: "instance_exited",
+                ErrorMessage: "KiCad instance ended (fixture)."));
+            var paused = await Until(session, s => s.Phase == AutomaticDesignPhase.Paused);
+            Assert.AreEqual("instance_exited", paused.ErrorCode);
+            Assert.IsTrue(paused.ReattachRequired);
+            Assert.AreEqual(watching.RecoveryRevisionToken, paused.RecoveryRevisionToken, "Pausing changes nothing in the record.");
+            Assert.AreEqual(1, driver.Applies, "A paused worker applies nothing.");
+        }
+    }
+
     [TestMethod]
     public async Task PendingRecoveryUsesItsOriginalOperationAndRequestIdentity()
     {

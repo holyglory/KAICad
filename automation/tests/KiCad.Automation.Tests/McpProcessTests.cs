@@ -481,6 +481,34 @@ public sealed class McpProcessTests
                     "Once continued, the record can be attached like any other.");
                 File.Delete(Path.Combine(state, heldInstance + ".json"));
             }
+            CollectionAssert.Contains(names, "kicad_design_recovery_resolve_pending");
+            // A synchronization that KiCad applied but whose follow-up check refused it is left only through
+            // kicad_design_recovery_resolve_pending, bound to exactly the pending operation and recovery revision. Every choice
+            // checks KiCad first, so with no KiCad attached nothing is resolved and nothing changes. The native journey
+            // NativeSessionTests.DeletedNativeSheetsRebuildFromXmlWithoutLoss proves undo, discard and keep against a real KiCad.
+            using (var stuck = new DesignPublicationRecoveryTests.Fixture())
+            {
+                var held = stuck.Saved;
+                string heldInstance = held.State.InstanceId.ToString("D"), heldOperation = held.State.PendingPublication!.OperationId.ToString("D");
+                async Task<JsonElement> Resolve(int id, string revision, string operation, string choice) =>
+                    (await Request(id, "tools/call", new { name = "kicad_design_recovery_resolve_pending", arguments = new
+                        { instanceId = heldInstance, recoveryPath = stuck.RecordPath, expectedRevisionToken = revision, operationId = operation, choice } }))
+                    .GetProperty("result");
+                string Code(JsonElement result) => result.GetProperty("structuredContent").GetProperty("errorCode").GetString()!;
+                byte[] heldBytes = await File.ReadAllBytesAsync(stuck.RecordPath, timeout.Token);
+                Assert.AreEqual("invalid_resolution_choice", Code(await Resolve(4100, held.RevisionToken, heldOperation, "roll-back")));
+                Assert.AreEqual("design_recovery_changed", Code(await Resolve(4101, new string('0', 64), heldOperation, "undo")));
+                Assert.AreEqual("pending_operation_mismatch", Code(await Resolve(4102, held.RevisionToken, Guid.NewGuid().ToString("D"), "undo")));
+                // This operation had already asked KiCad to save its result: only keeping that result, or completing it, is left.
+                var saving = await Resolve(4103, held.RevisionToken, heldOperation, "discard");
+                Assert.AreEqual("pending_native_save_started", Code(saving), saving.GetRawText());
+                StringAssert.Contains(saving.GetProperty("structuredContent").GetProperty("errorMessage").GetString(), "keep-and-replan");
+                var unattached = await Resolve(4104, held.RevisionToken, heldOperation, "keep-and-replan");
+                Assert.AreEqual("instance_not_attached", Code(unattached), unattached.GetRawText());
+                StringAssert.Contains(unattached.GetProperty("structuredContent").GetProperty("errorMessage").GetString(), "kicad_instance_attach");
+                CollectionAssert.AreEqual(heldBytes, await File.ReadAllBytesAsync(stuck.RecordPath, timeout.Token), "Every refusal changes nothing.");
+                Assert.IsFalse(Directory.Exists(DesignPendingResolutions.Directory(stuck.RecordPath)), "A refused resolution keeps no receipt.");
+            }
             string syncRecoveryPath = Path.Combine(state, "designs", "sync-recovery.json");
             var syncFixture = SchematicSynchronizationPlanTests.Fixture();
             var syncStore = new DesignRecoveryStore(syncRecoveryPath);

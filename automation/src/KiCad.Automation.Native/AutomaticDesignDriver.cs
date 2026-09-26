@@ -18,6 +18,7 @@ internal sealed class AutomaticDesignDriver : IAutomaticDesignDriver
     private readonly BlockOwnershipTarget? blocks;
     private readonly Task nativeReader;
     private readonly Task fileReader;
+    private readonly Task exitWatcher;
     private int disposed;
     public DesignRecoveryStore Store { get; }
     public AutomationSession? Session { get; }
@@ -28,7 +29,7 @@ internal sealed class AutomaticDesignDriver : IAutomaticDesignDriver
     {
         Store = store; this.client = client; this.designPath = designPath; this.instanceId = instanceId; Session = session;
         this.native = native; this.file = file; this.leases = leases; this.blocks = blocks;
-        nativeReader = Task.Run(ReadNativeAsync); fileReader = Task.Run(ReadFileAsync);
+        nativeReader = Task.Run(ReadNativeAsync); fileReader = Task.Run(ReadFileAsync); exitWatcher = Task.Run(WatchExitAsync);
     }
 
     internal static Task<AutomaticDesignDriver> CreateAsync(DesignRecoveryStore store, NativeClient client,
@@ -171,6 +172,21 @@ internal sealed class AutomaticDesignDriver : IAutomaticDesignDriver
         catch (Exception error) { await Failure("automatic_file_observation_failed", error.Message); }
     }
 
+    // The worker learns at once that its KiCad ended (ledger pec2f1b53d4024a17), instead of when it next needs KiCad or its
+    // events fall silent: a KiCad this server started reports its exit status as it ends, and the exit of one it attached
+    // is found by its process observer's bounded backoff (at most every half second). Only a proven exit pauses the worker,
+    // with instance_exited and the observer's description of that exit; a client without an observer is not watched.
+    private async Task WatchExitAsync()
+    {
+        if (client.Process is not { } process) return;
+        try
+        {
+            var exit = await process.WaitForExitAsync(stopping.Token);
+            await Failure("instance_exited", process.ExitedError(exit, requestMayHaveReached: false).Message);
+        }
+        catch (OperationCanceledException) when (stopping.IsCancellationRequested) { }
+    }
+
     private async Task Failure(string code, string message)
     {
         try { await inputs.Writer.WriteAsync(new(AutomaticDesignSignal.Recovery, ReattachRequired: true,
@@ -189,7 +205,7 @@ internal sealed class AutomaticDesignDriver : IAutomaticDesignDriver
     {
         if (Interlocked.Exchange(ref disposed, 1) != 0) return;
         stopping.Cancel(); native.Dispose(); file.Dispose();
-        await Task.WhenAll(nativeReader, fileReader); inputs.Writer.TryComplete();
+        await Task.WhenAll(nativeReader, fileReader, exitWatcher); inputs.Writer.TryComplete();
         foreach (var lease in leases) lease.Dispose(); stopping.Dispose();
     }
 

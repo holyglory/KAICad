@@ -117,6 +117,61 @@ public sealed class RecoveryTools
         }
     }
 
+    [McpServerTool(Name = "kicad_design_recovery_resolve_pending", ReadOnly = false, Destructive = true),
+     KiCadCapability("schematic-design", "compiled-mcp plus native-api", "recovery revision token, pending operation UUID, KiCad's retained receipt of the operation's native edit"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.DeletedNativeSheetsRebuildFromXmlWithoutLoss",
+         "McpProcessTests.InitializeDiscoverAndCallOverStdio"),
+     Description("Leave a synchronization that KiCad applied but whose follow-up check refused it, which retrying only repeats: for example native_sync_connectivity_mismatch after XML components were created (KiCad connects them otherwise than the XML says) or realization_resolution_mismatch after XML connections were drawn (KiCad's drawing differs from the plan). Requires the attached KiCad instance that holds the operation, the absolute recoveryPath, its exact expectedRevisionToken, the pending operation's operationId (pendingPublication or pendingLayout operationId in kicad_design_recovery_plan; a paused automatic synchronization reports it too) and choice 'undo', 'keep-and-replan' or 'discard'. It reads KiCad's retained receipt of the operation's native edit without ever running it, and changes nothing unless its check of KiCad passes. 'undo' requires KiCad to show exactly what the operation's edit left (native_changed_since_operation otherwise), removes that change in one checked native edit attributed to the design, and verifies KiCad shows the design as it was before the operation; the pending operation is cleared and the XML is unchanged, so the next synchronization applies it again. 'keep-and-replan' keeps KiCad's result: the operation's planned design is re-planned from KiCad's objects and connections (KiCad's connections win; each XML net that changes is returned in netChanges and its bound requirements become unresolved net bindings) and journaled as one prepared publication for the running KiCad (outcome keep-pending with continuationOperationId and requestedRecoveryRevisionToken); it completes like any pending synchronization, with kicad_design_sync_apply or automatic synchronization, and writes the XML only if KiCad still shows that result. It refuses a result whose objects no longer resolve to the design (kept_result_unbound), whose symbol properties differ from the plan (kept_result_differs) or an XML file changed since the operation started (design_file_changed). 'discard' clears the pending operation only when KiCad already shows the design as it was before the operation (its edit never ran, was refused, was undone in KiCad, or KiCad reloaded the saved sheets; operation_result_in_kicad otherwise); nothing is sent to KiCad. The baseline never moves and, except for a keep continuation, the XML is never written. A receipt of the whole operation and the resolution is kept in the folder <recoveryPath>.resolved; a repeated call with the same revision token reports it instead of repeating it. Other refusals: automatic_sync_ownership_conflict (stop the automatic worker first), synchronization_busy, publication_started (complete it with kicad_design_sync_apply), pending_native_save_started (undo and discard only), operation_process_ended (the KiCad that holds it ended: kicad_design_recovery_release_exited), instance_not_attached, pending_operation_mismatch, no_pending_operation, native_operation_not_committed, native_operation_indeterminate, undo_unsupported and undo_incomplete; every refusal message says what to do next.")]
+    public async Task<CallToolResult> ResolvePendingTool(string instanceId, string recoveryPath, string expectedRevisionToken,
+        string operationId, string choice, CancellationToken cancellationToken)
+    {
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!Path.IsPathFullyQualified(recoveryPath))
+                throw new AutomationException("invalid_recovery_path", "Specify the absolute recovery-record path.");
+            if (!Guid.TryParseExact(operationId, "D", out var operation) || operation == Guid.Empty || operation.ToString("D") != operationId)
+                throw new AutomationException("invalid_operation_id", "Specify the pending operation's canonical UUID.");
+            var chosen = choice switch
+            {
+                "undo" => PendingOperationChoice.Undo, "keep-and-replan" => PendingOperationChoice.KeepAndReplan,
+                "discard" => PendingOperationChoice.Discard,
+                _ => throw new AutomationException("invalid_resolution_choice", "Choose 'undo', 'keep-and-replan' or 'discard'.")
+            };
+            var result = await DesignRecoveryPendingResolution.ResolveAsync(new DesignRecoveryStore(recoveryPath), registry, instanceId,
+                expectedRevisionToken, operation, chosen, cancellationToken);
+            var receipt = result.Receipt;
+            var state = result.Recovery.State;
+            var continuation = receipt.ContinuationOperationId is { } id && state.PendingPublication?.OperationId == id ? state.PendingPublication : null;
+            var data = JsonSerializer.SerializeToElement(new
+            {
+                instanceId, operationId, choice = receipt.Choice, outcome = receipt.Outcome, resolvedNow = result.ResolvedNow,
+                pendingKind = receipt.PendingKind, lane = receipt.Lane, nativeOperationId = receipt.NativeOperationId,
+                nativeStatus = receipt.NativeStatus, nativeChangedSinceOperation = receipt.NativeChangedSinceOperation,
+                undoOperationId = receipt.UndoOperationId, undoOperations = receipt.UndoOperations,
+                nativeRevisionBefore = receipt.RevisionBefore, nativeRevisionAfter = receipt.RevisionAfter,
+                continuationOperationId = receipt.ContinuationOperationId, continuationPending = continuation is not null,
+                requestedRecoveryRevisionToken = continuation?.RequestedRecoveryRevisionToken,
+                netChanges = receipt.NetChanges?.Select(change => new { formerNetId = change.FormerNetId, change = change.Change.ToString(),
+                    reason = change.Reason, candidateNetIds = change.CandidateNetIds }),
+                pendingWork = state.HasPendingWork, recoveryRevisionToken = result.Recovery.RevisionToken, receiptPath = result.ReceiptPath,
+                baselineAdvanced = false, designFileWritten = false, nextStep = result.NextStep
+            });
+            return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+        }
+        catch (Exception error) when (error is AutomationException or NativeApiException or NngException or IOException
+            or UnauthorizedAccessException or ArgumentException)
+        {
+            string code = error switch
+            {
+                AutomationException known => known.Code, NativeApiException native => "native_status_" + native.Status,
+                NngException transport => "transport_status_" + transport.ErrorCode, _ => "design_recovery_io"
+            };
+            var data = JsonSerializer.SerializeToElement(new { instanceId, operationId, choice, errorCode = code, errorMessage = error.Message });
+            return new() { IsError = true, Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+        }
+    }
+
     [McpServerTool(Name = "kicad_design_sync_plan", ReadOnly = true),
      Description("Prepare one full typed design candidate by reconciling saved XML intent, hierarchy, native properties and captured pin connectivity. Requires an explicit saved instance/recovery path and current recovery revision token. Content-verified retained XML can recover exact deleted owners restored by native undo; newer instructions remain current. Conflicts or unresolved property projection return no partial candidate. Returns candidate XML, restored identities and proposed native operations, with coverage gaps and a flag requiring native connectivity validation. When the saved XML only adds connections, between pins already drawn or to parts it also adds, and leaves every existing part, symbol, sheet, binding and connection unchanged, and the instance's handshake recorded at attach advertises connection realization, a plan that can be prepared returns connectionRealizationRequired true, candidateDesignXml null (the drawing is measured and made in KiCad during apply) and connectionIntent summarizing the planned connections: each net with its scope and global name, each sheet's island with its label text, members, roles, stub and join needs, the sheet ports, the number of native pin groups apply must prove and the symbols it creates. Any other revision, a revision KiCad already shows, or a plan that cannot be prepared returns connectionRealizationRequired false and connectionIntent null. nativeRebuildRequired is true when apply generates native sheets the saved XML adds (as empty sheets, below sheets KiCad shows) or rebuilds deleted schematic files from the XML last synchronized with KiCad after KiCad created a new empty root for the project; rebuildSheetInstances lists the model sheets involved, candidateDesignXml is the planned design and nativeOperationsJson the planned native batch. Symbols placed in KiCad since the last synchronization become new design components with stable identities derived from the circuit, their sheet and the symbol's own UUID (addedSymbolOccurrences, addedComponents, and addedParts for a library symbol no existing part is drawn with); when their part or component cannot be decided from exact identities (several parts drawn with the same library symbol and pins, or a new unit of a multi-unit part) the plan cannot be prepared (native_ownership_resolution_required) and ownershipResolutionRequests names each symbol, its sheet and the exact candidates. A saved XML revision that only removes units or whole components with their bindings, while KiCad still shows the last synchronized design, removes their symbols in KiCad (removedSymbolOccurrences, nativeOperationsJson); when KiCad changed too, both versions are kept and the plan is refused with ownership_change_with_xml_edits. This is preparation only: it does not contact KiCad, prove live freshness, write design files, apply edits or advance synchronization.")]
     public Task<CallToolResult> PlanSynchronization(string instanceId, string recoveryPath, string expectedRevisionToken,

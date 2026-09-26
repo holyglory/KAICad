@@ -26,6 +26,13 @@ public sealed partial class NativeSessionTests
     //     Complete stage's eleven nets are drawn by lane 2A's connection realization (this KiCad advertises
     //     schematic.connection-realization.v1): labelled wire stubs on every pin, hierarchical labels, and sheet pins with
     //     their own stubs and labels on the parent sheets. KiCad's pin partition is exactly the Complete stage's.
+    //     Before the creation and before the realization, the same apply is first made through the test host with a scripted
+    //     refusal, so KiCad commits it and the follow-up check refuses it (ledgers p0aa59a1dfc8701ea, p6728215278183167; see
+    //     NativeSynchronizationRecoveryJourney). Retrying, planning and reattaching cannot leave that state; the public tool
+    //     kicad_design_recovery_resolve_pending can. The first project undoes the stuck creation and discards the stuck
+    //     realization after KiCad's own undo, and the ordinary applies then resume; the second keeps both results and
+    //     publishes them. The first project also kills a KiCad started for a copy of the realized project while an automatic
+    //     worker watches it: the worker pauses with instance_exited within a second (pec2f1b53d4024a17).
     //  2. Records an earlier preview saved (p91fda8ca22a68141). Preview 23's snapshots listed library_cache among the state
     //     they could not hold; this build holds the library cache exactly and no longer lists it, so a preview 23 record sees
     //     a changed snapshot after upgrading. The same design's record, written as preview 23 wrote it (the only difference
@@ -74,6 +81,9 @@ public sealed partial class NativeSessionTests
         var store = new DesignRecoveryStore(Evidence("recovery.json"));
         var document = context.Root;
         Assert.AreEqual(PsuCpuSeed.RootOnly, context.Seed);
+        // The harness runs this journey for two projects, in folders 0 and 1. Operations KiCad applied but whose check refused
+        // them are undone or discarded in the first and kept in the second (NativeSynchronizationRecoveryJourney).
+        bool keeps = Path.GetFileName(Path.TrimEndingDirectorySeparator(context.ProjectDirectory)) == "1";
         var clock = Stopwatch.StartNew();
         var steps = new List<object>();
         void Step(string name, object? detail = null)
@@ -210,9 +220,20 @@ public sealed partial class NativeSessionTests
             var creationPlan = await Plan(store, "creation-plan");
             Assert.IsFalse(creationPlan.GetProperty("nativeRebuildRequired").GetBoolean(), "Component creation is lane 2A's creation path.");
             Assert.AreEqual(expected.Symbols.Count, Operations(creationPlan).Count(o => o.Create?.Is(SchematicSymbolInstance.Descriptor) == true));
-            await Apply(store, "creation");
+            // A creation that KiCad applied but whose connection check refused it (NativeSynchronizationRecoveryJourney): the
+            // first project undoes it and the ordinary apply creates the components again, the second keeps KiCad's result.
+            var stuckCreation = await ForceStuckSynchronization(client, document, store, path, instanceId, "creation-check",
+                "native_sync_connectivity_mismatch", evidence, token);
+            Step("creation stuck after KiCad applied it", stuckCreation.Evidence);
+            object creationExit;
+            if (keeps) creationExit = await KeepStuckSynchronization(host, client, document, store, stuckCreation, instanceId, evidence, token);
+            else
+            {
+                creationExit = await UndoStuckSynchronization(host, client, document, store, stuckCreation, instanceId, evidence, token);
+                await Apply(store, "creation");
+            }
             PsuCpuFixture.AssertNative(store.Read()!.State.Baseline, (await Capture()).Electrical, PsuCpuStage.Components);
-            Step("components created");
+            Step(keeps ? "stuck creation kept and published" : "stuck creation undone, components created", creationExit);
 
             // 1e. The Complete stage: the created design with the fixture's eleven nets, drawn by the connection realization.
             var created = store.Read()!.State.Baseline;
@@ -224,16 +245,34 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(realizationPlan.GetProperty("nativeRebuildRequired").GetBoolean(), "Drawing XML nets is the connection realization, not a rebuild.");
             Assert.AreEqual(11, realizationPlan.GetProperty("connectionIntent").GetProperty("nets").GetArrayLength(), "The preview names every fixture net.");
             Assert.AreEqual(beforeRealization, await Capture(), "Planning must not change KiCad.");
-            var realization = await Apply(store, "realization");
-            Assert.IsTrue(realization.GetProperty("nativeReceipt").GetProperty("result").GetProperty("connectivityAssertionVerified").GetBoolean(),
-                "KiCad verified the connectivity assertion of the realization: " + realization.GetRawText());
+            // A realization that KiCad committed but whose resolution refused it: the first project takes it back in KiCad and
+            // discards it, and the ordinary apply realizes the nets again; the second keeps KiCad's drawing.
+            var stuckRealization = await ForceStuckSynchronization(client, document, store, path, instanceId, "realization-resolution",
+                SchematicConnectionErrors.RealizationResolutionMismatch, evidence, token);
+            Assert.IsTrue(stuckRealization.NativeReceipt.Result.ConnectivityAssertionVerified,
+                "KiCad verified the connectivity assertion of the stuck realization; only the scripted check refused it.");
+            Step("realization stuck after KiCad committed it", stuckRealization.Evidence);
+            object realizationExit;
+            if (keeps)
+                realizationExit = await KeepStuckSynchronization(host, client, document, store, stuckRealization, instanceId, evidence, token);
+            else
+            {
+                realizationExit = await DiscardStuckSynchronization(host, client, document, store, stuckRealization, processId, display, instanceId, evidence, token);
+                var realization = await Apply(store, "realization");
+                Assert.IsTrue(realization.GetProperty("nativeReceipt").GetProperty("result").GetProperty("connectivityAssertionVerified").GetBoolean(),
+                    "KiCad verified the connectivity assertion of the realization: " + realization.GetRawText());
+            }
             var realized = await Capture();
             Assert.IsFalse(realized.State.NativeContentDirty, "Apply saved the realized sheets.");
             PsuCpuFixture.AssertNative(store.Read()!.State.Baseline, realized.Electrical, Stage);
             var drawn = DrawnObjects(realized.Electrical.Hierarchy.Data);
             Assert.IsTrue(drawn["LocalLabel"] > 0 && drawn["HierarchicalLabel"] > 0 && drawn["SchematicLine"] > 0 && drawn["SheetPin"] > 0,
                 "The realization drew labels, hierarchical labels, wires and sheet pins: " + JsonSerializer.Serialize(drawn));
-            Step("complete stage realized", drawn);
+            Step("complete stage realized", new { drawn, realizationExit });
+            // An automatic worker whose KiCad is killed pauses at once with instance_exited (first project).
+            object? exitPause = keeps ? null : await VerifyAutomaticPauseOnExit(host, store.Read()!.State.Baseline, context.ProjectDirectory, display,
+                evidence, instanceId, token);
+            if (exitPause is not null) Step("automatic worker paused on its KiCad's exit", exitPause);
 
             // ---- 2. Records an earlier preview saved (p91fda8ca22a68141) ---------------------------------------
             var settledRecord = store.Read()!;
@@ -440,7 +479,9 @@ public sealed partial class NativeSessionTests
             await File.WriteAllTextAsync(Evidence("proof.json"), JsonSerializer.Serialize(new
             {
                 instanceId, fixture = "psu-cpu", PsuCpuFixture.Version, stage = Stage.ToString(), seed = context.Seed.ToString(), realStdioProductionServer = true,
-                steps, layoutClearanceNm = LayoutClearanceNm, generatedSheets = generated.Select(g => new { g.SheetInstanceId, g.SheetSymbolId, g.ScreenId }),
+                steps, layoutClearanceNm = LayoutClearanceNm,
+                stuckOperations = new { project = keeps ? "keep-and-replan" : "undo, discard and exit pause", creation = creationExit,
+                    realization = realizationExit, exitPause }, generatedSheets = generated.Select(g => new { g.SheetInstanceId, g.SheetSymbolId, g.ScreenId }),
                 original = new { original.State.StateSha256, original.State.SaveStableStateSha256, screens = original.Electrical.Hierarchy.Data.Instances.Count,
                     drawn, sheetPins = originalSheetPins.Length, nets = original.Electrical.Nets.Count,
                     files = originalFiles.ToDictionary(f => Path.GetFileName(f.Key), f => Convert.ToHexStringLower(SHA256.HashData(f.Value))) },

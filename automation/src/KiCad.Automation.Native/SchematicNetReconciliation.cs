@@ -4,6 +4,7 @@ using System.Text.Json;
 using Google.Protobuf.WellKnownTypes;
 using Kiapi.Schematic.Types;
 using KiCad.Automation.Model;
+using KiCad.Automation.Protocol;
 
 namespace KiCad.Automation.Native;
 
@@ -187,6 +188,75 @@ public static class SchematicNetReconciliation
             };
         }
         catch (DecoderFallbackException error) { return new(null, [], [], [], [], "invalid_desired_design", error.Message); }
+        catch (AutomationException error) { return new(null, [], [], [], [], error.Code, error.Message); }
+    }
+
+    /// <summary>KiCad's connections for a design whose objects KiCad already shows: the result of a synchronization that
+    /// KiCad committed and the person chose to keep (kicad_design_recovery_resolve_pending, keep-and-replan). The design's
+    /// own nets stand for both the earlier and the requested partition, and KiCad's pin partition is the native side, so
+    /// KiCad's connections win with the rules of <see cref="Plan(DesignRecoveryState, CancellationToken)"/>: a group of
+    /// pins exactly as one net of the design keeps that net (its identity, name and requirements); a pin alone that no net
+    /// names, and pins KiCad joins only because one symbol stacks them, stay unconnected; every other group becomes a net
+    /// with an identity derived from <paramref name="originId"/>, the circuit and its pins, named as KiCad names it. Each
+    /// net of the design that KiCad does not show as it is is reported, like a native edit, for explicit resolution of
+    /// the requirements bound to it. Exact pin bindings are required; nothing else is merged.</summary>
+    internal static SchematicNetReconciliationResult PlanKept(SchematicDesign design, SchematicElectricalState native, Guid originId,
+        IReadOnlyCollection<ComponentKnowledgeLibrary> libraries, CancellationToken token = default)
+    {
+        ArgumentNullException.ThrowIfNull(design);
+        ArgumentNullException.ThrowIfNull(native);
+        token.ThrowIfCancellationRequested();
+        try
+        {
+            var current = SchematicElectricalComparison.Compare(design, native, libraries, token);
+            if (!current.PinBindingsComplete)
+                return new(null, [], [], current.Issues, current.CoverageGaps, "unresolved_electrical_bindings",
+                    "KiCad's pins no longer resolve to the design's components and pins.");
+            if (current.ConnectivityEquivalent) return new(design.Engineering, [], [], [], current.CoverageGaps);
+            var circuit = design.Engineering.Circuit;
+            var universe = current.PinPartitions!.SelectMany(g => g.Pins).ToArray();
+            IReadOnlyList<IReadOnlyList<PinEndpoint>> stacked = current.StackedPins ?? [];
+            var requested = Partition(circuit, universe, stacked);
+            var stackedNodes = stacked.Select(Key).ToHashSet(StringComparer.Ordinal);
+            var netIds = circuit.Nets.Select(n => n.Id).ToHashSet();
+            var namedPins = circuit.Nets.SelectMany(n => n.Pins).ToHashSet();
+            var result = new Dictionary<Guid, CircuitNet>();
+            foreach (var empty in circuit.Nets.Where(n => n.Pins.Count == 0)) result.Add(empty.Id, empty);
+            foreach (var group in current.PinPartitions!)
+            {
+                token.ThrowIfCancellationRequested();
+                string key = Key(group.Pins);
+                if (requested.Nets.TryGetValue(key, out var kept))
+                {
+                    if (!result.TryAdd(kept.Id, kept))
+                        throw Failure("generated_net_identity_conflict", $"KiCad shows net '{kept.Name}' as two separate groups of pins.");
+                    continue;
+                }
+                if (group.Pins.Count == 1 && !namedPins.Contains(group.Pins[0])) continue;
+                if (stackedNodes.Contains(key) && !group.Pins.Any(namedPins.Contains)) continue;
+                Guid id = GeneratedIdentity(originId, circuit.Id, group.Pins);
+                string name = !string.IsNullOrWhiteSpace(group.NativeName) ? group.NativeName : "NET-" + id.ToString("N")[..12];
+                if (netIds.Contains(id) || !result.TryAdd(id, new(id, name, group.Pins.ToArray())))
+                    throw Failure("generated_net_identity_conflict", "A generated net identity conflicts with an explicit design entity.");
+            }
+            var ordered = circuit.Nets.Where(n => result.ContainsKey(n.Id)).Select(n => result[n.Id])
+                .Concat(result.Values.Where(n => !netIds.Contains(n.Id)).OrderBy(n => n.Id)).ToArray();
+            var connected = circuit with { Nets = ordered }; connected.Validate();
+            var finalByPin = ordered.SelectMany(net => net.Pins.Select(pin => (pin, net))).ToDictionary(x => x.pin, x => x.net);
+            var changes = new List<NetIdentityChange>();
+            foreach (var retired in circuit.Nets.Where(n => !result.ContainsKey(n.Id)))
+            {
+                var candidates = retired.Pins.Where(finalByPin.ContainsKey).Select(p => finalByPin[p]).DistinctBy(n => n.Id).ToArray();
+                var kind = candidates.Length > 1 ? NetBindingChangeKind.Split
+                    : candidates.Length == 0 ? NetBindingChangeKind.Removed
+                    : candidates[0].Pins.Count > retired.Pins.Count ? NetBindingChangeKind.Merged : NetBindingChangeKind.Reidentified;
+                changes.Add(new(retired.Id, kind, $"KiCad's kept connections changed net '{retired.Name}'; its requirement binding needs explicit resolution.",
+                    candidates.Select(n => n.Id).Order().ToArray()));
+            }
+            var candidate = ComponentReferenceRetention.Retain(design.Engineering, connected, [], libraries, changes);
+            candidate.Validate(libraries);
+            return new(candidate, [], changes, [], current.CoverageGaps);
+        }
         catch (AutomationException error) { return new(null, [], [], [], [], error.Code, error.Message); }
     }
 

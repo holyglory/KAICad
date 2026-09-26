@@ -20,6 +20,8 @@ if (!Path.IsPathFullyQualified(state)) throw new InvalidOperationException("The 
 var pause = new PauseGate(Environment.GetEnvironmentVariable("KICAD_SYNC_HARNESS_PAUSE_STAGE") ?? "none",
     Environment.GetEnvironmentVariable("KICAD_SYNC_HARNESS_PAUSE_MARKER"),
     Environment.GetEnvironmentVariable("KICAD_SYNC_HARNESS_PAUSE_RELEASE"));
+var refusal = new ScriptedRefusal(Environment.GetEnvironmentVariable("KICAD_SYNC_HARNESS_REFUSE_STAGE") ?? "none",
+    Environment.GetEnvironmentVariable("KICAD_SYNC_HARNESS_REFUSE_MARKER"));
 if (args is ["--refinement-input-file", var inputFile])
 {
     using var inputJson = JsonDocument.Parse(await File.ReadAllBytesAsync(inputFile)); var request = inputJson.RootElement;
@@ -59,7 +61,7 @@ builder.Logging.ClearProviders();
 builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = LogLevel.Trace);
 builder.Services.AddSingleton(pause);
 builder.Services.AddSingleton<IExecutionCheckpoint>(pause);
-builder.Services.AddSingleton<INativeTransport>(new PausingTransport(pause));
+builder.Services.AddSingleton<INativeTransport>(new PausingTransport(pause, refusal));
 builder.Services.AddSingleton(provider => new InstanceRegistry(provider.GetRequiredService<INativeTransport>(), state));
 // As in the production server: the synchronization preview classifies with the handshake each instance gave when it
 // was attached, without contacting KiCad, so it classifies a saved revision exactly as apply does (decision
@@ -125,15 +127,81 @@ public sealed class PauseGate : IExecutionCheckpoint
     }
 }
 
-internal sealed class PausingTransport(PauseGate pause) : INativeTransport
+internal sealed class PausingTransport(PauseGate pause, ScriptedRefusal refusal) : INativeTransport
 {
     private readonly NngTransport native = new();
     public async Task<byte[]> ExchangeAsync(string endpoint, byte[] request, TimeSpan timeout, CancellationToken cancellationToken = default)
     {
         byte[] response = await native.ExchangeAsync(endpoint, request, timeout, cancellationToken);
         var message = ApiRequest.Parser.ParseFrom(request).Message;
+        response = await refusal.ObserveAsync(message, response, cancellationToken);
         if (message.Is(CheckedSchematicBatch.Descriptor)) await pause.WaitAsync("native-edit", cancellationToken);
         if (message.Is(CheckedSaveDocument.Descriptor)) await pause.WaitAsync("native-save", cancellationToken);
         return response;
+    }
+}
+
+/// <summary>Test-only scripted refusal: forces the condition in which a check refuses a synchronization after KiCad
+/// committed its native edit, never the outcome of leaving it. KiCad really commits the edit. From then on, every checked
+/// capture this host reads is changed by joining KiCad's two largest nets, so the synchronization's own follow-up check
+/// refuses the operation, leaves it pending exactly as a real mismatch would, and refuses it again on every retry through
+/// this host, as a real mismatch does. KiCad itself, and every other client (such as the production server the person
+/// leaves the operation with), sees KiCad's own state. Stage "creation-check" arms on a completed batch that creates
+/// symbols without a connectivity assertion (the connection check then refuses with native_sync_connectivity_mismatch);
+/// "realization-resolution" arms on a completed batch that ends with a connectivity assertion (the resolution then
+/// refuses with realization_resolution_mismatch). The marker file records the armed native edit and the first join.</summary>
+public sealed class ScriptedRefusal
+{
+    private readonly string stage;
+    private readonly string? marker;
+    private string? armed;
+    private int recorded;
+
+    public ScriptedRefusal(string stage, string? marker)
+    {
+        if (stage is not ("none" or "creation-check" or "realization-resolution"))
+            throw new ArgumentException("Unknown scripted refusal stage.", nameof(stage));
+        if (stage != "none" && (marker is null || !Path.IsPathFullyQualified(marker)))
+            throw new ArgumentException("An absolute test-owned marker path is required.", nameof(marker));
+        this.stage = stage; this.marker = marker;
+    }
+
+    public async Task<byte[]> ObserveAsync(Google.Protobuf.WellKnownTypes.Any message, byte[] response, CancellationToken token)
+    {
+        if (stage == "none") return response;
+        if (message.Is(CheckedSchematicBatch.Descriptor))
+        {
+            if (Volatile.Read(ref armed) is not null) return response;
+            var batch = message.Unpack<CheckedSchematicBatch>().Batch;
+            bool asserts = batch.Operations.Any(o => o.OperationCase == SchematicItemOperation.OperationOneofCase.AssertConnectivity);
+            bool creates = batch.Operations.Any(o => o.Create?.Is(Kiapi.Schematic.Types.SchematicSymbolInstance.Descriptor) == true);
+            if (stage == "creation-check" ? creates && !asserts : asserts)
+            {
+                var reply = ApiResponse.Parser.ParseFrom(response);
+                if (reply.Message?.Is(CheckedSchematicBatchReceipt.Descriptor) == true
+                    && reply.Message.Unpack<CheckedSchematicBatchReceipt>().Status == CheckedSchematicBatchStatus.CsbsCompleted)
+                    Volatile.Write(ref armed, batch.OperationId);
+            }
+            return response;
+        }
+        if (Volatile.Read(ref armed) is not { } operation || !message.Is(ReadCheckedSchematicState.Descriptor)) return response;
+        var answer = ApiResponse.Parser.ParseFrom(response);
+        if (answer.Message?.Is(CheckedSchematicState.Descriptor) != true) return response;
+        var captured = answer.Message.Unpack<CheckedSchematicState>();
+        var nets = captured.Electrical.Nets.Select((net, index) => (net, index, items: net.Sheets.Sum(sheet => sheet.Items.Count)))
+            .OrderByDescending(n => n.items).ThenBy(n => n.net.Name, StringComparer.Ordinal).Take(2).ToArray();
+        if (nets.Length < 2) return response;
+        var (kept, removed) = (nets[0], nets[1]);
+        kept.net.Sheets.Add(removed.net.Sheets.Select(sheet => sheet.Clone()));
+        captured.Electrical.Nets.RemoveAt(removed.index);
+        answer.Message = Google.Protobuf.WellKnownTypes.Any.Pack(captured);
+        if (Interlocked.CompareExchange(ref recorded, 1, 0) == 0)
+        {
+            string temporary = marker! + ".tmp";
+            await File.WriteAllBytesAsync(temporary, JsonSerializer.SerializeToUtf8Bytes(new
+                { stage, nativeOperationId = operation, joinedNets = new[] { kept.net.Name, removed.net.Name } }), token);
+            File.Move(temporary, marker!, overwrite: false);
+        }
+        return Google.Protobuf.MessageExtensions.ToByteArray(answer);
     }
 }

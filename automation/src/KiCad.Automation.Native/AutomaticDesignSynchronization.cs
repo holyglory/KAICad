@@ -216,7 +216,9 @@ public sealed class AutomaticDesignSynchronization : IAsyncDisposable
                 {
                     string code = error is AutomationException known ? known.Code : error is NativeApiException native
                         ? "native_status_" + native.Status : error is NngException ? "native_transport_failure" : "automatic_sync_failed";
-                    Pause(code, error.Message, code is "instance_changed" or "native_document_changed" or "native_transport_failure", operation);
+                    // A KiCad that ended (instance_exited) never answers this worker again: it is stopped, KiCad is started
+                    // again and the record reattached, like a changed instance.
+                    Pause(code, error.Message, code is "instance_changed" or "instance_exited" or "native_document_changed" or "native_transport_failure", operation);
                 }
             }
         }

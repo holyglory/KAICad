@@ -14,6 +14,16 @@ internal static class SchematicOwnershipHistoryReader
     /// earlier owner may exist that cannot be read, so nothing may be treated as new.</summary>
     internal const string Unverified = "unverified_native_ownership_history";
 
+    /// <summary>The history that decides whether a symbol KiCad shows is new, as planning reads it: none for a design never
+    /// synchronized (ledger p95b6c94e732b880a), otherwise the verified history, which keeps failing closed when it cannot be
+    /// verified.</summary>
+    internal static async Task<IReadOnlyList<SchematicOwnershipHistory>> ReadForAdditionsAsync(DesignRecoveryStore store,
+        DesignRecoveryState state, CancellationToken token)
+    {
+        try { return await ReadAsync(store, state, token); }
+        catch (AutomationException error) when (error.Code == NeverSynchronized) { return []; }
+    }
+
     internal static async Task<IReadOnlyList<SchematicOwnershipHistory>> ReadAsync(DesignRecoveryStore store,
         DesignRecoveryState state, CancellationToken token)
     {

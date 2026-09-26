@@ -44,12 +44,15 @@ public static class SchematicNetReconciliation
             var (baseline, observed) = SchematicElectricalCheckpoints.Require(state);
             var desiredDocument = SchematicDesignXml.Read(new UTF8Encoding(false, true).GetString(state.DesiredFileBytes), state.KnowledgeLibraries);
             var desired = desiredDocument.Engineering;
-            if (Topology(state.Baseline.Engineering.Circuit) != Topology(desired.Circuit)
-                || Bindings(state.Baseline) != Bindings(desiredDocument))
+            bool nativeOwnersChanged = NativeOwners(state.Baseline.Schematic) != NativeOwners(state.Observed);
+            // XML that binds new occurrences to symbols placed in KiCad answers their resolution requests (ledger
+            // p35cfdc0345e056a5); the addition projection checks that the answer is all the XML changes.
+            if ((Topology(state.Baseline.Engineering.Circuit) != Topology(desired.Circuit) || Bindings(state.Baseline) != Bindings(desiredDocument))
+                && !(nativeOwnersChanged && SchematicNativeAdditionProjection.DeclaresAddedSymbols(state, desiredDocument)))
                 throw Failure("electrical_ownership_changed", "Reconcile changed component, sheet, unit or pin ownership before merging nets.");
             SchematicNativeRemovalResult? removal = null;
             SchematicNativeRestorationResult? restoration = null;
-            if (NativeOwners(state.Baseline.Schematic) != NativeOwners(state.Observed))
+            if (nativeOwnersChanged)
             {
                 removal = SchematicNativeRemovalProjection.Project(state.Baseline, state.Observed, state.KnowledgeLibraries, token);
                 if (removal.BindingCandidate is null)
@@ -60,7 +63,7 @@ public static class SchematicNetReconciliation
                     catch (AutomationException error) when (error.Code == "native_ownership_history_not_matched")
                     {
                         // No verified history knows these owners: they are symbols placed in KiCad since.
-                        var addition = SchematicNativeAdditionProjection.Project(state, history, token);
+                        var addition = SchematicNativeAdditionProjection.Project(state, history, desiredDocument, null, token);
                         if (addition.Adoption is null)
                             return new(null, [], [], addition.Issues.Select(i => new ElectricalBindingIssue(i.Code, i.NativePath,
                                 i.NativeObjectId?.ToString("D"), i.ModelId)).ToArray(), addition.CoverageGaps, addition.ErrorCode, addition.ErrorMessage)
@@ -70,8 +73,10 @@ public static class SchematicNetReconciliation
                     removal = null;
                 }
                 // Circuit/layout edits need their own three-way owner resolution.
-                // Independent instruction changes are retained in the candidate.
-                if (CircuitXml.Write(desired.Circuit) != CircuitXml.Write(state.Baseline.Engineering.Circuit))
+                // Independent instruction changes are retained in the candidate. An XML answer to a resolution request
+                // is the one circuit edit allowed here; the addition projection already refused any other.
+                if (restoration is not { History: null, AnsweredOccurrences.Count: > 0 }
+                    && CircuitXml.Write(desired.Circuit) != CircuitXml.Write(state.Baseline.Engineering.Circuit))
                     throw Failure("ownership_change_with_xml_edits", "Resolve concurrent circuit or layout XML edits and native ownership changes before applying either version.");
             }
             var before = SchematicElectricalComparison.Compare(state.Baseline, baseline, state.KnowledgeLibraries, token);
@@ -111,15 +116,19 @@ public static class SchematicNetReconciliation
                 : Partition(source.Design.Engineering.Circuit, universe, stackedNow).Nets;
             var restoredNets = new HashSet<Guid>();
             var historicalImplicit = new HashSet<PinEndpoint>();
-            if (restoration is { AddedComponents.Count: > 0 })
+            if (restoration is { History: null, AddedOccurrences.Count: > 0 })
             {
-                // A symbol placed in KiCad starts with every pin unconnected: a lone new pin is no new net.
+                // A symbol placed in KiCad starts with every pin unconnected: a lone new pin is no new net. That holds for
+                // every pin a new component draws, and for the pins a new unit of an existing component adds.
                 var adoptedCircuit = restoration.BindingCandidate.Engineering.Circuit;
                 var adoptedParts = adoptedCircuit.Parts.ToDictionary(p => p.Id);
                 var adoptedDefinitions = adoptedCircuit.Sheets.SelectMany(s => s.Components).ToDictionary(c => c.Id);
-                foreach (var component in adoptedCircuit.Components.Where(c => restoration.AddedComponents.Contains(c.Id)))
+                var adoptedComponents = adoptedCircuit.Components.ToDictionary(c => c.Id);
+                var shown = universe.ToHashSet();
+                foreach (var component in adoptedCircuit.Symbols.Where(s => restoration.AddedOccurrences.Contains(s.Id))
+                             .Select(s => adoptedComponents[s.ComponentId]).DistinctBy(c => c.Id))
                     foreach (var pin in adoptedParts[adoptedDefinitions[component.DefinitionId].PartId].Pins)
-                        historicalImplicit.Add(new(component.Id, pin.Number));
+                        if (!shown.Contains(new(component.Id, pin.Number))) historicalImplicit.Add(new(component.Id, pin.Number));
             }
             if (restoration?.History is not null)
             {

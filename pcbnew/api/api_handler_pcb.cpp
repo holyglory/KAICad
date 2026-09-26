@@ -314,9 +314,11 @@ HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> API_HANDLER_PCB::h
     }
     catch( const std::exception& error )
     {
+        // The exception's own problem text (for an IO_ERROR, its Problem()), not the pointer
+        // IO_ERROR::what() returns into the conversion cache of that string (p10897cd52e677d15).
         ApiResponseStatus failure;
         failure.set_status( ApiStatusCode::AS_BAD_REQUEST );
-        failure.set_error_message( std::string( "Native state could not be observed: " ) + error.what() );
+        failure.set_error_message( "Native state could not be observed: " + PcbDrcExceptionMessage( error ) );
         return tl::unexpected( failure );
     }
 }

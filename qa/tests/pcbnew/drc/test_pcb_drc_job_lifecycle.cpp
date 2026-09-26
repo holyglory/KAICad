@@ -1,6 +1,9 @@
 /* Internal worker lifecycle, not qualification of complete design verification. GPL-3.0-or-later. */
 #include <boost/test/unit_test.hpp>
 #include <advanced_config.h>
+#include <api/api_handler_pcb.h>
+#include <api/api_server.h>
+#include <api/headless_pcb_context.h>
 #include <api/pcb_drc_job_manager.h>
 #include <api/pcb_drc_run_inputs.h>
 #include <api/native_state_digest.h>
@@ -23,6 +26,7 @@
 #include <drc/drc_library_inputs.h>
 #include <drc/drc_rule_parser.h>
 #include <pcb_marker.h>
+#include <pgm_base.h>
 #include <pcbnew_utils/board_test_utils.h>
 #include <project.h>
 #include <project/project_file.h>
@@ -155,6 +159,28 @@ struct DRC_CAPTURE_FIXTURE
             wxTheApp->ProcessPendingEvents();
         }
     }
+};
+
+// PGM_BASE keeps its API server protected; a derived class may name that member for any
+// program. The scope gives this test process the API server identity that every native request
+// handler reads, and takes it away again however the test ends.
+struct TEST_API_SERVER_SCOPE
+{
+    struct ACCESS : PGM_BASE
+    {
+        static std::unique_ptr<KICAD_API_SERVER>& Of( PGM_BASE& aProgram )
+        {
+            return aProgram.*( &ACCESS::m_api_server );
+        }
+    };
+
+    TEST_API_SERVER_SCOPE()
+    {
+        BOOST_REQUIRE( !ACCESS::Of( Pgm() ) );
+        ACCESS::Of( Pgm() ) = std::make_unique<KICAD_API_SERVER>( false );
+    }
+
+    ~TEST_API_SERVER_SCOPE() { ACCESS::Of( Pgm() ).reset(); }
 };
 
 BOOST_FIXTURE_TEST_SUITE( PcbDrcJobLifecycle, DRC_CAPTURE_FIXTURE )
@@ -1475,8 +1501,10 @@ BOOST_AUTO_TEST_CASE( UncompilableCustomRulesFailTheCheckAndCorrectedRulesComple
 }
 
 // Isolated rule: every failure message a check reports or compares is copied from the exception
-// itself. IO_ERROR::what() points into a temporary that is freed before it can be read, so no
-// test through a worker could tell a correct message from a lucky read of freed memory.
+// itself, an IO_ERROR's Problem() text rather than the pointer IO_ERROR::what() returns into the
+// conversion cache of that string. With the wxWidgets 3.2 this build uses, both give the same
+// text, so these checks prove the copied text is the exception's real problem text; they cannot
+// tell a return to what() apart, and no sanitizer would either, because nothing is freed.
 BOOST_AUTO_TEST_CASE( NativeExceptionMessagesAreCopiedFromTheExceptionItself )
 {
     BOOST_CHECK_EQUAL( PcbDrcExceptionMessage( IO_ERROR( wxString::FromUTF8( "Library 電源 is unreadable" ),
@@ -1487,6 +1515,54 @@ BOOST_AUTO_TEST_CASE( NativeExceptionMessagesAreCopiedFromTheExceptionItself )
     BOOST_CHECK_EQUAL( PcbDrcExceptionMessage( parse ), parse.Problem().ToStdString( wxConvUTF8 ) );
     BOOST_CHECK_EQUAL( PcbDrcExceptionMessage( std::runtime_error( "Native DRC inputs changed during capture" ) ),
                        "Native DRC inputs changed during capture" );
+
+    // The PCB editor's document state read (kicad_document_state) follows the same rule
+    // (p10897cd52e677d15). A via of no defined type is a board KiCad's own writer refuses with an
+    // IO_ERROR, so reading that board's state must fail with the writer's own problem text, as the
+    // rule above describes.
+    KI_TEST::TEMPORARY_DIRECTORY scratch( "pcb_state_error_" + KIID().AsStdString(), "" );
+    const auto projectPath = scratch.GetPath() / "fixture.kicad_pro";
+    { std::ofstream file( projectPath ); file << R"({"meta":{"version":3}})"; }
+    SETTINGS_MANAGER manager;
+    const wxString projectName = wxString::FromUTF8( projectPath.string() );
+    BOOST_REQUIRE( manager.LoadProject( projectName, false ) );
+    PROJECT* project = manager.GetProject( projectName );
+    BOOST_REQUIRE( project );
+    auto owned = std::make_unique<BOARD>();
+    BOARD& board = *owned;
+    board.SetProject( project );
+    board.SetFileName( wxString::FromUTF8( ( scratch.GetPath() / "fixture.kicad_pcb" ).string() ) );
+    auto* via = new PCB_VIA( &board );
+    via->SetViaType( VIATYPE::NOT_DEFINED );
+    board.Add( via );
+    std::string problem;
+    try
+    {
+        NATIVE_STATE_DIGEST discarded;
+        PCB_IO_KICAD_SEXPR().FormatBoardToFormatter( &discarded, &board, nullptr, false );
+    }
+    catch( const IO_ERROR& error )
+    {
+        problem = error.Problem().ToStdString( wxConvUTF8 );
+    }
+    BOOST_REQUIRE_MESSAGE( problem.find( "unknown via type" ) != std::string::npos,
+                           "KiCad's board writer must refuse the undefined via: " << problem );
+    auto headless = std::make_shared<HEADLESS_PCB_CONTEXT>( std::move( owned ), project, nullptr );
+    API_HANDLER_PCB handler( headless );
+    ReadDocumentLifecycleState read;
+    read.mutable_document()->set_type( kiapi::common::types::DOCTYPE_PCB );
+    read.mutable_document()->set_board_filename( "fixture.kicad_pcb" );
+    kiapi::common::ApiRequest request;
+    request.mutable_header()->set_client_name( "kicad.qa" );
+    BOOST_REQUIRE( request.mutable_message()->PackFrom( read ) );
+    API_RESULT result = [&]
+    {
+        TEST_API_SERVER_SCOPE server;
+        return handler.Handle( request );
+    }();
+    BOOST_REQUIRE_MESSAGE( !result.has_value(), "A board KiCad cannot write must not report a document state." );
+    BOOST_CHECK_EQUAL( result.error().status(), kiapi::common::ApiStatusCode::AS_BAD_REQUEST );
+    BOOST_CHECK_EQUAL( result.error().error_message(), "Native state could not be observed: " + problem );
 }
 
 BOOST_AUTO_TEST_CASE( RefillRunsOnThePrivateBoardAndRequiresCapturedRoutingSettings )

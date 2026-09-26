@@ -26,9 +26,11 @@ class PCB_DRC_SCHEMATIC_INPUT;
 class PROGRESS_REPORTER;
 
 /**
- * The UTF-8 message of a native exception caught while capturing or checking. IO_ERROR's
- * what() returns a pointer into a temporary that is freed before the caller can read it,
- * so its Problem() text is used instead.
+ * The UTF-8 message of a native exception caught while capturing or checking. For an IO_ERROR
+ * it is a copy of the exception's own Problem() text. IO_ERROR::what() gives the same text with
+ * the wxWidgets 3.2 this build uses, but only as a pointer into the conversion cache of the
+ * exception's string (wxString::AsCharBuf), which is valid only until that string is converted
+ * again, so the message does not depend on it.
  */
 std::string PcbDrcExceptionMessage( const std::exception& aError );
 

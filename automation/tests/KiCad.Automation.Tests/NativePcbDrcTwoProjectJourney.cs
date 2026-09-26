@@ -84,7 +84,8 @@ public sealed partial class NativeSessionTests
     // that do not compile and recovers, and is refused for wrong-instance and stale targets without either board
     // changing. After each terminal outcome (completed, cancelled, failed, recovered) the editor it happened in accepts
     // a normal edit and saves it, and a person's undo and redo in project B's rendered editor still work. Ordinary jobs
-    // never claim a complete snapshot or fresh results (n87c71e6665971bd2).
+    // never claim a complete snapshot or fresh results: KiCad does not yet capture every project and rules input a check
+    // depends on (decision n39a51a3a2ff84c55, ledger p23deb822a36256a6).
     private static async Task VerifyPcbDrcTwoProjects(NativeClient client, DocumentSpecifier board, int processId,
         string display, string evidence, CancellationToken token)
     {
@@ -270,8 +271,10 @@ public sealed partial class NativeSessionTests
                 Assert.AreEqual(1.0, job.Progress);
                 Assert.IsTrue(job.WorkerFinished);
                 Assert.IsFalse(job.CancellationRequested, because + " Nothing asked this check to stop.");
-                Assert.IsFalse(job.SnapshotComplete, "An ordinary check never claims a complete input snapshot (n87c71e6665971bd2).");
-                Assert.IsFalse(job.ResultsFresh, "An ordinary check never claims fresh results (n87c71e6665971bd2).");
+                Assert.IsFalse(job.SnapshotComplete,
+                    "An ordinary check never claims a complete input snapshot (n39a51a3a2ff84c55, ledger p23deb822a36256a6).");
+                Assert.IsFalse(job.ResultsFresh,
+                    "An ordinary check never claims fresh results (n39a51a3a2ff84c55, ledger p23deb822a36256a6).");
                 Assert.AreEqual(at, job.CheckedRevision, because);
                 var fixture = target.Fixture;
                 CollectionAssert.AreEqual(new[]
@@ -354,6 +357,11 @@ public sealed partial class NativeSessionTests
                 if (containing is not null) StringAssert.Contains(error.GetProperty("message").GetString()!, containing, because);
             }
 
+            // The project instance B reports as open, as an agent sees it.
+            var listedB = await mcp.Tool("kicad_documents_list", new { instanceId = b.InstanceId, kind = "pcb" });
+            RequireToolSuccess(listedB);
+            var openInB = SchematicJson.Parser.Parse<GetOpenDocumentsResponse>(Text(listedB)).Documents.Single().Project;
+
             // 1. Both projects are checked at once. The agent watches both, and a cancel or read sent to the wrong instance
             //    or with the other process's epoch is refused and does not stop the running check.
             var stateA1 = await State(a); var stateB1 = await State(b);
@@ -364,10 +372,14 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(runningA.Status == PcbDrcJobStatus.PdrcjsRunning && runningB.Status == PcbDrcJobStatus.PdrcjsRunning
                     && !runningA.WorkerFinished && !runningB.WorkerFinished,
                 $"Both projects' checks must be running at the same time: A {runningA.Status}, then B {runningB.Status}.");
-            // KiCad's document check finds project A's board is not project B's (same file name, other project folder)
-            // and reports that the requested board is not open in this instance.
-            string WrongProject = $"the requested document {a.Board.BoardFilename} is not open";
+            // KiCad's document check finds project A's board is not project B's (same file name, other project folder).
+            // The refusal names both projects, so the agent knows it reached the wrong instance, not a closed board
+            // (ledger p98cb405e55270a80).
+            string WrongProject = $"the requested document {a.Board.BoardFilename} of project '{a.Board.Project.Name}' at " +
+                $"'{a.Board.Project.Path}' is not open in this KiCad instance, which has project '{openInB.Name}' at " +
+                $"'{openInB.Path}' open; send the request to the KiCad instance that has that project open";
             Assert.AreEqual(a.Board.BoardFilename, b.Board.BoardFilename, "Only the project folder tells the two boards apart.");
+            Assert.AreNotEqual(a.Board.Project.Path, openInB.Path, "The refusal must be able to tell the two projects apart.");
             Refused(await mcp.Tool("kicad_pcb_drc_cancel", new { instanceId = b.InstanceId, documentJson = Json(a.Board), jobId = a1.JobId, processEpoch = b.Epoch }),
                 "Instance B does not hold project A's board.", code: "native_status_3", containing: WrongProject);
             Refused(await mcp.Tool("kicad_pcb_drc_cancel", new { instanceId = b.InstanceId, documentJson = Json(b.Board), jobId = a1.JobId, processEpoch = b.Epoch }),
@@ -434,6 +446,10 @@ public sealed partial class NativeSessionTests
             var cancelReply = await mcp.Tool("kicad_pcb_drc_cancel", new { instanceId = b.InstanceId, documentJson = Json(b.Board), jobId = b2.JobId, processEpoch = b.Epoch });
             var acknowledged = Parse(cancelReply); Record("cancel-request", b, acknowledged);
             Assert.IsTrue(acknowledged.CancellationRequested, "The cancel must reach the running check.");
+            // Asking a check to stop is not the check stopping: until its worker has finished, the check still reads as
+            // running (n39a51a3a2ff84c55).
+            Assert.IsTrue(acknowledged.Status == PcbDrcJobStatus.PdrcjsRunning && !acknowledged.WorkerFinished,
+                $"The cancel request must find project B's check still running: {acknowledged.Status}, workerFinished={acknowledged.WorkerFinished}.");
             Assert.AreNotEqual(PcbDrcJobStatus.PdrcjsCompleted, acknowledged.Status);
             Assert.IsEmpty(acknowledged.Findings);
             await Picture("cancelling");
@@ -476,9 +492,11 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(failedA.CancellationRequested || failedA.ResultsFresh || failedA.SnapshotComplete);
             Assert.IsLessThan(1.0, failedA.Progress);
             Assert.AreEqual(failedA, await Read(a, a3), "A failed check stays failed.");
+            // A check cancelled after its findings started leaves nothing behind: the next complete check of the same
+            // board reports exactly the first run's real copper findings (n87c71e6665971bd2).
             CheckedCopper(b, failure[1], savedB.Revision, "Project B's first check after its cancellation");
             CollectionAssert.AreEqual(baselineB, Findings(failure[1]),
-                "After the cancellation, a complete check of project B must report exactly its first findings.");
+                "After the cancellation, a complete check of project B must report exactly its first findings (n87c71e6665971bd2).");
             savedA = await EditAndSave(a, "a failed check");
 
             // 5. The person corrects the rules by removing the broken item and keeps the rule that matches nothing, and

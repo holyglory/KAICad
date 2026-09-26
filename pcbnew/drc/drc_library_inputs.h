@@ -33,8 +33,9 @@ public:
             const std::set<wxString>* aLibraries = nullptr );
     const ENTRY* Find( const LIB_ID& aId ) const;
     size_t Size() const { return m_entries.size(); }
-    // Stable across fresh native loads: library serialization omits generated
-    // object UUIDs, but preserves every persisted library-definition property.
+    // Stable across fresh native loads: the digest numbers the objects of each footprint
+    // instead of recording the identities a load gave them, and preserves every persisted
+    // library-definition property.
     std::string ContentFingerprint() const;
     // The same content digest, one per library nickname the board depends on.
     std::map<wxString, std::string> LibraryFingerprints() const;

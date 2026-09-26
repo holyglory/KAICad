@@ -243,6 +243,9 @@ public sealed partial class NativeSessionTests
                         variants = new[] { new { name = "Assembly", description = "original" } }
                     }
                 }), deadline.Token);
+                // KiCad reads a project's footprint library table only when it loads the project.
+                if (journey == NativeJourney.NetSettings)
+                    await WritePcbDrcJourneyLibrary(projectDirectory, deadline.Token);
                 string socket = Path.Combine(projectDirectory, "api.sock");
                 var start = new ProcessStartInfo(executable)
                 {

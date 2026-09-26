@@ -9,7 +9,10 @@
 #include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
 #include <json_common.h>
 #include <richio.h>
+#include <fmt/format.h>
+#include <map>
 #include <set>
+#include <vector>
 #include <stdexcept>
 
 const DRC_LIBRARY_INPUTS::ENTRY* DRC_LIBRARY_INPUTS::Find( const LIB_ID& aId ) const
@@ -20,17 +23,37 @@ const DRC_LIBRARY_INPUTS::ENTRY* DRC_LIBRARY_INPUTS::Find( const LIB_ID& aId ) c
 
 namespace
 {
+// The footprint's definition as the library writes it, with its objects numbered in their
+// order instead of carrying their identities. A library file need not give every object an
+// identity, and KiCad gives such an object a new one on each load (a footprint always has
+// Datasheet and Description fields, for example, even when its file lists neither). The check
+// compares definitions, never these identities (FOOTPRINT::FootprintNeedsUpdate), so two
+// loads of the same file must give the same digest; the numbering keeps references between
+// objects (group members, constraint members) consistent.
+std::string Definition( const FOOTPRINT& aFootprint )
+{
+    std::unique_ptr<FOOTPRINT> copy( static_cast<FOOTPRINT*>( aFootprint.Clone() ) );
+    std::vector<BOARD_ITEM*> objects;
+    copy->RunOnChildren( [&]( BOARD_ITEM* aItem ) { objects.push_back( aItem ); }, RECURSE_MODE::RECURSE );
+    std::map<KIID, KIID> numbered;
+    for( size_t index = 0; index < objects.size(); ++index )
+        numbered.emplace( objects[index]->m_Uuid, KIID( fmt::format( "00000000-0000-4000-8000-{:012x}", index + 1 ) ) );
+    for( BOARD_ITEM* object : objects )
+    {
+        object->RemapKIIDs( numbered );
+        if( auto found = numbered.find( object->m_Uuid ); found != numbered.end() ) object->SetUuidDirect( found->second );
+    }
+    PCB_IO_KICAD_SEXPR writer( CTL_FOR_LIBRARY );
+    STRING_FORMATTER output;
+    writer.SetOutputFormatter( &output );
+    writer.Format( copy.get() );
+    return output.GetString();
+}
+
 std::string EntryRecord( const LIB_ID& aId, const DRC_LIBRARY_INPUTS::ENTRY& aEntry )
 {
     std::string definition;
-    if( aEntry.footprint )
-    {
-        PCB_IO_KICAD_SEXPR writer( CTL_FOR_LIBRARY );
-        STRING_FORMATTER output;
-        writer.SetOutputFormatter( &output );
-        writer.Format( aEntry.footprint.get() );
-        definition = output.GetString();
-    }
+    if( aEntry.footprint ) definition = Definition( *aEntry.footprint );
     // JSON provides unambiguous boundaries even for arbitrary library names,
     // source URIs and definition strings.
     return nlohmann::json( { std::string( aId.Format().c_str() ), static_cast<int>( aEntry.status ),

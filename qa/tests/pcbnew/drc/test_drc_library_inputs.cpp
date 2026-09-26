@@ -18,6 +18,8 @@
 #include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
 #include <pcbnew_utils/board_test_utils.h>
 #include <chrono>
+#include <fstream>
+#include <set>
 #include <thread>
 
 namespace
@@ -213,6 +215,75 @@ BOOST_FIXTURE_TEST_CASE( LibraryFingerprintTracksDefinitionsAndAvailabilityNotPl
     BOOST_CHECK( one->Find( disabled ) == nullptr );
     BOOST_REQUIRE_EQUAL( one->LibraryFingerprints().size(), 1 );
     BOOST_CHECK_EQUAL( one->LibraryFingerprints().at( nickname ), perLibrary.at( nickname ) );
+}
+
+// A library file need not give each object an identity; KiCad then gives each load new ones (and a
+// footprint always has Datasheet and Description fields, absent from this file). A check compares
+// definitions, never those identities, so two loads of the same file must give the same fingerprint,
+// or every check of a board that uses such a library would be stale at once. A changed definition
+// still changes it. The rendered journey found this with a hand-written library
+// (VerifyPcbDrcJobLibraryEdit); this isolates the digest across reloads, which the journey cannot force.
+BOOST_FIXTURE_TEST_CASE( LibraryFingerprintDoesNotDependOnIdentitiesALoadGenerates, LIBRARY_FIXTURE )
+{
+    const auto file = scratch.GetPath() / "local.pretty" / "Part.kicad_mod";
+    auto write = [&]( const std::string& aDescription, const std::string& aSecondPad )
+    {
+        std::ofstream stream( file, std::ios::binary | std::ios::trunc );
+        stream << "(footprint \"Part\" (version 20241229) (generator \"pcbnew\") (layer \"F.Cu\")\n"
+                  "  (descr \"" << aDescription << "\")\n"
+                  "  (property \"Reference\" \"REF**\" (at 0 -2 0) (layer \"F.SilkS\") "
+                  "(effects (font (size 1 1) (thickness 0.15))))\n"
+                  "  (property \"Value\" \"Part\" (at 0 2 0) (layer \"F.Fab\") (effects (font (size 1 1) (thickness 0.15))))\n"
+                  "  (fp_line (start -1 -1) (end 1 -1) (stroke (width 0.12) (type solid)) (layer \"F.SilkS\"))\n"
+                  "  (pad \"1\" smd rect (at 0 0) (size 0.8 0.8) (layers \"F.Cu\"))\n"
+                  "  (pad \"2\" smd rect (at " << aSecondPad << " 0) (size 0.8 0.8) (layers \"F.Cu\")))\n";
+    };
+    write( "no identities", "1.5" );
+    BOARD board;
+    Place( board, original.GetFPID() );
+    LIBRARY_MANAGER manager; Load( manager );
+    FOOTPRINT_LIBRARY_ADAPTER adapter( manager );
+    auto loaded = adapter.LoadOne( nickname );
+    BOOST_REQUIRE( loaded && loaded->load_status == LOAD_STATUS::LOADED );
+    // Each capture reloads the library file, as every check and every read of one does.
+    auto capture = [&]
+    {
+        auto inputs = DRC_LIBRARY_INPUTS::Capture( board, adapter );
+        BOOST_REQUIRE( inputs );
+        BOOST_REQUIRE( inputs->Find( original.GetFPID() )->status == DRC_LIBRARY_INPUTS::STATUS::LOADED );
+        return inputs;
+    };
+    auto identities = []( const DRC_LIBRARY_INPUTS& aInputs, const LIB_ID& aId )
+    {
+        std::set<KIID> result;
+        aInputs.Find( aId )->footprint->RunOnChildren( [&]( BOARD_ITEM* aItem ) { result.insert( aItem->m_Uuid ); },
+                                                       RECURSE_MODE::RECURSE );
+        return result;
+    };
+    const auto first = capture();
+    const auto second = capture();
+    // The two loads really gave the objects without an identity different ones.
+    BOOST_REQUIRE_GE( identities( *first, original.GetFPID() ).size(), 5 );
+    BOOST_CHECK( identities( *first, original.GetFPID() ) != identities( *second, original.GetFPID() ) );
+    BOOST_CHECK_EQUAL( first->ContentFingerprint(), second->ContentFingerprint() );
+    BOOST_CHECK( first->LibraryFingerprints() == second->LibraryFingerprints() );
+    // A new library owner, as a reopened project has, reads the same definition.
+    {
+        LIBRARY_MANAGER reopened; Load( reopened );
+        FOOTPRINT_LIBRARY_ADAPTER other( reopened );
+        auto again = other.LoadOne( nickname );
+        BOOST_REQUIRE( again && again->load_status == LOAD_STATUS::LOADED );
+        auto fresh = DRC_LIBRARY_INPUTS::Capture( board, other );
+        BOOST_REQUIRE( fresh );
+        BOOST_CHECK_EQUAL( fresh->ContentFingerprint(), first->ContentFingerprint() );
+    }
+    // A changed definition changes the fingerprint: the description, or where a pad is.
+    write( "no identities, edited", "1.5" );
+    BOOST_CHECK_NE( capture()->ContentFingerprint(), first->ContentFingerprint() );
+    write( "no identities", "1.6" );
+    BOOST_CHECK_NE( capture()->ContentFingerprint(), first->ContentFingerprint() );
+    write( "no identities", "1.5" );
+    BOOST_CHECK_EQUAL( capture()->ContentFingerprint(), first->ContentFingerprint() );
 }
 
 BOOST_FIXTURE_TEST_CASE( CompletedJobsRejectChangedMissingAndUnobservableLibraryInputs, LIBRARY_FIXTURE )

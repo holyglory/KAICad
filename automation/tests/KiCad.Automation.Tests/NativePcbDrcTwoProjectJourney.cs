@@ -445,10 +445,12 @@ public sealed partial class NativeSessionTests
             var cancelReply = await mcp.Tool("kicad_pcb_drc_cancel", new { instanceId = b.InstanceId, documentJson = Json(b.Board), jobId = b2.JobId, processEpoch = b.Epoch });
             var acknowledged = Parse(cancelReply); Record("cancel-request", b, acknowledged);
             Assert.IsTrue(acknowledged.CancellationRequested, "The cancel must reach the running check.");
-            // Asking a check to stop is not the check stopping: until its worker has finished, the check still reads as
-            // running (n39a51a3a2ff84c55).
-            Assert.IsTrue(acknowledged.Status == PcbDrcJobStatus.PdrcjsRunning && !acknowledged.WorkerFinished,
-                $"The cancel request must find project B's check still running: {acknowledged.Status}, workerFinished={acknowledged.WorkerFinished}.");
+            // Asking a check to stop is not the check stopping (n39a51a3a2ff84c55): until its worker has finished, the check
+            // still reads as running, and it reads as cancelled only once its worker has stopped. The worker can stop between
+            // the cancel and its reply, so the reply shows either; the timeline records which. It is never completed.
+            Assert.IsTrue((acknowledged.Status == PcbDrcJobStatus.PdrcjsRunning && !acknowledged.WorkerFinished)
+                    || (acknowledged.Status == PcbDrcJobStatus.PdrcjsCancelled && acknowledged.WorkerFinished),
+                $"The cancel request must find project B's check still running, or cancelled once its worker stopped: {acknowledged.Status}, workerFinished={acknowledged.WorkerFinished}.");
             Assert.AreNotEqual(PcbDrcJobStatus.PdrcjsCompleted, acknowledged.Status);
             Assert.IsEmpty(acknowledged.Findings);
             await Picture("cancelling");

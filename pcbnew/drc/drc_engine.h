@@ -22,6 +22,7 @@
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <stdexcept>
 #include <vector>
 #include <unordered_map>
 
@@ -63,6 +64,17 @@ namespace std
         }
     };
 }
+
+
+/**
+ * Captured custom design rules declare a rules format newer than this KiCad reads. The rules
+ * cannot be used as written; the check that captured them cannot run.
+ */
+class DRC_RULES_TOO_RECENT : public std::runtime_error
+{
+public:
+    using std::runtime_error::runtime_error;
+};
 
 
 class BOARD_COMMIT;
@@ -204,7 +216,12 @@ public:
      */
     void InitEngine( const wxFileName& aRulePath );
 
-    // Parse already captured UTF-8 rule content; no file access occurs here.
+    /**
+     * Parse already captured UTF-8 rule content; no file access occurs here.
+     *
+     * @throws PARSE_ERROR if the rules contain errors
+     * @throws DRC_RULES_TOO_RECENT if the rules declare a newer rules format
+     */
     void InitEngineFromText( const std::string& aRuleText, const wxString& aSourceName );
 
     void InitEngine( const std::shared_ptr<DRC_RULE>& rule );

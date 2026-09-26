@@ -1,4 +1,34 @@
-/* KiCad native capability commands, owned by Phase 2 lane 2D. GPL-3.0-or-later. */
+/* KiCad native capability and observation commands, owned by Phase 2 lane 2D. GPL-3.0-or-later. */
 syntax = "proto3";
 package kiapi.automation.v1;
 option csharp_namespace = "KiCad.Automation.Protocol";
+
+import "common/types/base_types.proto";
+import "common/commands/automation_commands.proto";
+
+// What an agent needs before it edits a live schematic: the rendered sheet it looks at and the
+// exact state a CheckedSchematicBatch must name, taken together at one native checkpoint.  KiCad
+// captures the whole-schematic checked state (ReadCheckedSchematicState), renders the displayed
+// sheet (CaptureSchematicObservation) and reads the document state again, all within this one
+// request.  API requests run synchronously on KiCad's GUI thread, so no editor event (a keystroke,
+// a pointer edit, an undo) runs between those reads.  A state that differs afterwards, or an image
+// or object list of another revision or sheet, refuses the request (AS_NOT_READY) instead of
+// pairing an image with another revision.  A read KiCad refuses (for example with AS_BUSY while an
+// edit is pending) ends the request with exactly that refusal; a read that returns a reply with a
+// non-OK status, or one that is not that read's result, ends it as AS_BAD_REQUEST.
+message NativeCapabilityReadCheckedView {
+  // The explicit schematic root, as for ReadCheckedSchematicState.
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string process_epoch = 2;
+  // The sheet instance the editor displays: the root itself or a sheet below it, in the same
+  // project.  A sheet of another root or project is refused (AS_BAD_REQUEST) before anything is
+  // read, and a sheet the editor does not display is refused by the capture (AS_BAD_REQUEST).
+  kiapi.common.types.DocumentSpecifier view = 3;
+}
+
+message NativeCapabilityCheckedView {
+  // checked.state is the expected_state of a batch planned from this view.
+  CheckedSchematicState checked = 1;
+  // The displayed sheet's image and objects; its snapshot and preview carry checked.state's revision.
+  SchematicObservation view = 2;
+}

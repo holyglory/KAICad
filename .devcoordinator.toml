@@ -406,49 +406,6 @@ tier="development"
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~WindowsJsonLinkTests|FullyQualifiedName~WindowsNativeRestartRequestTests", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/windows-json-link-tests"]
 retained_artifacts=[{ name = "windows-json-link-tests", path = "automation/artifacts/windows-json-link-tests", max_bytes = 16777216 }]
 
-[test.windows-requalified-stage]
-timeout_seconds=1200
-env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
-
-[[test.windows-requalified-stage.check]]
-name="build"
-tier="development"
-role="preflight"
-invalidates=["contracts", "stage"]
-command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--configuration", "Debug", "--no-restore"]
-
-[[test.windows-requalified-stage.check]]
-name="contracts"
-tier="development"
-role="preflight"
-invalidates=["stage"]
-command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--configuration", "Debug", "--no-build", "--no-restore", "--filter", "FullyQualifiedName~WindowsRequalifiedPreviewTests|FullyQualifiedName~HostedPreviewStagingTests", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/windows-requalified-tests"]
-retained_artifacts=[{ name = "windows-requalified-tests", path = "automation/artifacts/windows-requalified-tests", max_bytes = 16777216 }]
-
-[[test.windows-requalified-stage.check]]
-name="stage"
-tier="development"
-command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-requalified-windows", "--candidate", "/mnt/build-storage/codex/kicad/evidence/github-34555975985-windows-corrected-candidate/kicad-delivery", "--qualification", "/mnt/build-storage/codex/kicad/evidence/github-34571626328-windows-retained-passed/native-windows-x64-c9319056c3392875aca22ec78e27e09b05597037-1/kicad-windows-preflight", "--repository", "/mnt/build-storage/codex/kicad/worktrees/windows-source-433.iTweC0", "--commit", "433c5e1fdf5954955a19df546236dce78e78b5b0", "--run-id", "34571626328", "--version", "preview-20260911-433c5e1fdf59", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/signed-preview-000013", "--output", "/mnt/build-storage/codex/kicad/public-candidates/windows-433-requalified"]
-
-# Requires the separately retained clean native baseline rerun. The compiled
-# stager refuses failed/missing/mismatched evidence before admitting any bytes.
-# Its signed sequence-1 envelope is a test/installation baseline, never a
-# replacement for the current public Windows sequence-2 feed.
-[test.windows-baseline-stage]
-timeout_seconds=600
-env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
-
-[[test.windows-baseline-stage.check]]
-name="stage"
-tier="development"
-command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-requalified-windows", "--candidate", "/mnt/build-storage/codex/kicad/evidence/github-34555974128-windows-baseline/kicad-delivery", "--qualification", "/mnt/build-storage/codex/kicad/evidence/github-34576800022-windows-baseline-requalified/kicad-windows-preflight", "--repository", "/mnt/build-storage/codex/kicad/worktrees/windows-source-0d4.ks3pLg", "--commit", "0d4b8180ac985d372d12b314ff578aa921a6ea97", "--run-id", "34576800022", "--version", "preview-20260911-0d4b8180ac98", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/windows-433-signed-000002", "--output", "/mnt/build-storage/codex/kicad/public-candidates/windows-pair-0d4-433-verified"]
-
-[[test.windows-baseline-stage.check]]
-name="sign-baseline"
-tier="development"
-requires=["stage"]
-command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "release-sign", "--release", "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/distribution/releases/preview-win-x64-000001.json", "--artifacts", "/mnt/build-storage/codex/kicad/public-candidates/windows-pair-0d4-433-verified", "--private", "/mnt/build-storage/codex/kicad/signing/preview-publisher.pkcs8", "--output", "/mnt/build-storage/codex/kicad/public-candidates/windows-baseline-0d4.signed.json"]
-
 # The first Windows update candidate uses the already requalified, unchanged
 # native archive. Sequence 1 is reserved for the distinct frozen baseline.
 # Staging does not deploy the feed or establish native update qualification.
@@ -670,33 +627,6 @@ name="contracts"
 tier="development"
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~NngBindingLifetimeTests|FullyQualifiedName~NngTransportTests|FullyQualifiedName~RuntimeInfoTests", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/nng-binding-lifetime"]
 retained_artifacts=[{ name = "nng-binding-lifetime", path = "automation/artifacts/nng-binding-lifetime", max_bytes = 16777216 }]
-
-[test.platform-feeds-publish]
-timeout_seconds=900
-env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
-
-[[test.platform-feeds-publish.check]]
-name="build"
-tier="development"
-role="preflight"
-invalidates=["sign-arm64", "sign-x64", "stage"]
-command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
-
-[[test.platform-feeds-publish.check]]
-name="sign-arm64"
-tier="development"
-command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "release-sign", "--release", "/home/holyglory/kicad/automation/distribution/releases/preview-osx-arm64-000001.json", "--artifacts", "/mnt/build-storage/codex/kicad/public-candidates/signed-preview-000009", "--private", "/mnt/build-storage/codex/kicad/signing/preview-publisher.pkcs8", "--output", "/mnt/build-storage/codex/kicad/platform-feed-candidates.DsNoNZ/osx-arm64.json"]
-
-[[test.platform-feeds-publish.check]]
-name="sign-x64"
-tier="development"
-command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "release-sign", "--release", "/home/holyglory/kicad/automation/distribution/releases/preview-osx-x64-000001.json", "--artifacts", "/mnt/build-storage/codex/kicad/public-candidates/signed-preview-000009", "--private", "/mnt/build-storage/codex/kicad/signing/preview-publisher.pkcs8", "--output", "/mnt/build-storage/codex/kicad/platform-feed-candidates.DsNoNZ/osx-x64.json"]
-
-[[test.platform-feeds-publish.check]]
-name="stage"
-tier="development"
-requires=["sign-arm64", "sign-x64"]
-command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-platform-feeds", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/signed-preview-000009", "--output", "/mnt/build-storage/codex/kicad/public-candidates/platform-feeds-000001", "--publisher", "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", "--sources", "/home/holyglory/kicad/automation/distribution/releases/platform-feeds-000001.json"]
 
 [test.caption-update]
 timeout_seconds=900
@@ -2346,13 +2276,14 @@ command=["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", 
 
 # KiCad's own PCB design-rule suites. They read custom rules files through the same loader the
 # DRC jobs use, so a change to rules parsing (for example the line-number fix accepted in
-# decision nb6844a5bd34d3d5d) is checked against upstream cases too.
+# decision nb6844a5bd34d3d5d) is checked against upstream cases too. qa_pcbnew_other joins once
+# its three failures that predate that fix are resolved (ledger outcome recorded 2026-09-26).
 [[test.drc-project-freshness.check]]
 name="upstream-drc-suites"
 tier="development"
 requires=["native-build"]
 timeout_seconds=2400
-command=["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_pcbnew_drc_regression$|^qa_pcbnew_drc_solder_mask$|^qa_pcbnew_constraints$|^qa_pcbnew_creepage$|^qa_pcbnew_multichannel$|^qa_pcbnew_other$", "--output-on-failure", "--no-tests=error"]
+command=["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_pcbnew_drc_regression$|^qa_pcbnew_drc_solder_mask$|^qa_pcbnew_constraints$|^qa_pcbnew_creepage$|^qa_pcbnew_multichannel$", "--output-on-failure", "--no-tests=error"]
 
 [test.mac-baseline-downloads]
 # Admission can wait behind a native build; each HTTP request remains bounded

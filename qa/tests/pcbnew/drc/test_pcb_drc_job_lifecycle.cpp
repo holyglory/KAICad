@@ -43,6 +43,12 @@
 #include <fstream>
 #include <functional>
 #include <git2.h>
+#include <git/git_backend.h>
+#include <git/libgit_backend.h>
+#include <font/font.h>
+#include <font/outline_font.h>
+#include <qa_utils/wx_utils/unit_test_utils.h>
+#include <text_eval/text_eval_wrapper.h>
 #include <google/protobuf/util/message_differencer.h>
 #include <chrono>
 #include <thread>
@@ -139,8 +145,7 @@ struct DRC_CAPTURE_FIXTURE
 
     // Every unfinished check reports this gap: its findings are matched to objects of the
     // open board only once it has finished.
-    static constexpr const char* PENDING_IDENTITY =
-            "snapshot_incomplete: generated_item_identity: pending until the check completes";
+    static constexpr const char* PENDING_IDENTITY = "snapshot_incomplete: finding_identity_pending: ";
 
     // The input warnings of a job state other than that pending gap, after checking that the
     // state carries the gap exactly while its worker runs, and that an unfinished check then
@@ -1976,21 +1981,82 @@ BOOST_AUTO_TEST_CASE( CandidateChecksFollowTheSameCompletenessAndFreshnessRule )
     BOOST_CHECK( stale->snapshot_complete() && !stale->results_fresh() );
 }
 
+// KiCad's version-control text (${VCSHASH}, vcs...()) reads the project's repository through the
+// git backend KiCad installs at startup. This test process installs the same backend.
+struct GIT_BACKEND_SCOPE
+{
+    LIBGIT_BACKEND backend;
+    GIT_BACKEND_SCOPE() { backend.Init(); SetGitBackend( &backend ); }
+    ~GIT_BACKEND_SCOPE() { SetGitBackend( nullptr ); backend.Shutdown(); }
+};
+
+// A git repository in a scratch directory; each Commit() writes a file and commits it on top of
+// HEAD, and returns the new commit's identifier.
+struct SCRATCH_REPOSITORY
+{
+    std::filesystem::path directory;
+    git_repository* repository = nullptr;
+
+    explicit SCRATCH_REPOSITORY( const std::filesystem::path& aDirectory ) : directory( aDirectory )
+    {
+        BOOST_REQUIRE_EQUAL( git_repository_init( &repository, aDirectory.string().c_str(), 0 ), 0 );
+    }
+
+    ~SCRATCH_REPOSITORY() { git_repository_free( repository ); }
+
+    std::string Commit( const std::string& aFile, const std::string& aContent )
+    {
+        { std::ofstream stream( directory / aFile, std::ios::binary ); stream << aContent; }
+        git_index* index = nullptr;
+        BOOST_REQUIRE_EQUAL( git_repository_index( &index, repository ), 0 );
+        BOOST_REQUIRE_EQUAL( git_index_add_bypath( index, aFile.c_str() ), 0 );
+        BOOST_REQUIRE_EQUAL( git_index_write( index ), 0 );
+        git_oid treeId;
+        const int treeError = git_index_write_tree( &treeId, index );
+        git_index_free( index );
+        BOOST_REQUIRE_EQUAL( treeError, 0 );
+        git_tree* tree = nullptr;
+        BOOST_REQUIRE_EQUAL( git_tree_lookup( &tree, repository, &treeId ), 0 );
+        git_signature* signature = nullptr;
+        BOOST_REQUIRE_EQUAL( git_signature_now( &signature, "DRC test", "drc-test@kicad.example" ), 0 );
+        git_oid head;
+        git_commit* parent = nullptr;
+        const bool hasParent = git_reference_name_to_id( &head, repository, "HEAD" ) == 0
+                               && git_commit_lookup( &parent, repository, &head ) == 0;
+        const git_commit* parents[] = { parent };
+        git_oid commit;
+        const int error = git_commit_create( &commit, repository, "HEAD", signature, signature, nullptr,
+                                             ( "DRC test: " + aFile ).c_str(), tree, hasParent ? 1 : 0, parents );
+        git_commit_free( parent );
+        git_signature_free( signature );
+        git_tree_free( tree );
+        BOOST_REQUIRE_EQUAL( error, 0 );
+        char text[GIT_OID_HEXSZ + 1];
+        git_oid_tostr( text, sizeof text, &commit );
+        return text;
+    }
+};
+
+// The reasons an incomplete snapshot gives, each "snapshot_incomplete: <code>: <explanation>".
+static std::vector<std::string> IncompleteReasons( const PcbDrcJobState& aState )
+{
+    std::vector<std::string> reasons;
+    for( const auto& warning : aState.input_warnings() )
+        if( warning.rfind( "snapshot_incomplete: ", 0 ) == 0 ) reasons.push_back( warning );
+    return reasons;
+}
+
 // A text can show values that come from outside the design. A check lays out the board's texts,
 // so it reads them. The date and the project's version-control revision are captured with the
 // check and every read compares them again: a completed check goes stale when the date it read
-// is no longer the date, and a new check is fresh. The time of day changes while the check runs,
-// so a board whose text can show it leaves the snapshot incomplete with its reason. A text
-// reaches them directly or through a variable's definition. A board whose texts show none of
-// them does not depend on the clock at all, so its checks do not go stale at midnight.
+// is no longer the date, or when a new commit changes the revision, and a new check is fresh. The
+// time of day changes while the check runs, so a board whose text can show it leaves the snapshot
+// incomplete with its reason. A text reaches them directly or through a variable's definition. A
+// board whose texts show none of them does not depend on the clock at all, so its checks do not
+// go stale at midnight.
 BOOST_AUTO_TEST_CASE( TextShowingTheDateIsCapturedAndTheTimeOfDayLeavesTheSnapshotIncomplete )
 {
-    // KiCad initializes libgit2 at startup, which resolves the revision; this test process does not.
-    struct LIBGIT2_SCOPE
-    {
-        LIBGIT2_SCOPE() { git_libgit2_init(); }
-        ~LIBGIT2_SCOPE() { git_libgit2_shutdown(); }
-    } libgit2;
+    GIT_BACKEND_SCOPE git;
     KI_TEST::TEMPORARY_DIRECTORY scratch( "drc_live_text_" + KIID().AsStdString(), "" );
     const auto projectPath = scratch.GetPath() / "fixture.kicad_pro";
     { std::ofstream stream( projectPath ); stream << R"({"meta":{"filename":"fixture.kicad_pro","version":3}})"; }
@@ -2053,12 +2119,38 @@ BOOST_AUTO_TEST_CASE( TextShowingTheDateIsCapturedAndTheTimeOfDayLeavesTheSnapsh
     BOOST_CHECK( redated.snapshot_complete() && redated.results_fresh() );
 
     // The project's version-control revision is captured the same way, as the text resolves it.
+    // The scratch project is a git repository: its revision is a real commit, and a new commit
+    // makes a completed check stale.
+    SCRATCH_REPOSITORY repository( scratch.GetPath() );
+    const std::string first = repository.Commit( "notes.txt", "first\n" );
     project->GetTextVars()[wxS( "STAMP" )] = wxS( "${VCSSHORTHASH}" );
-    wxString revision = wxS( "VCSSHORTHASH" );
-    BOOST_REQUIRE( project->TextVarResolver( &revision ) );
+    auto revision = [&]
+    {
+        wxString token = wxS( "VCSSHORTHASH" );
+        BOOST_REQUIRE( project->TextVarResolver( &token ) );
+        return token.utf8_string();
+    };
+    BOOST_REQUIRE_EQUAL( revision(), first.substr( 0, 8 ) );
     const nlohmann::json versioned = live();
     BOOST_CHECK( versioned.is_object() && versioned.size() == 1 && versioned.contains( "VCSSHORTHASH" )
-                 && versioned.at( "VCSSHORTHASH" ) == revision.utf8_string() );
+                 && versioned.at( "VCSSHORTHASH" ) == first.substr( 0, 8 ) );
+    BOOST_CHECK( jobs.Read( Query( redated ), board, epoch )->status() == PDRCJS_STALE );
+    const PcbDrcJobState committed = check();
+    BOOST_CHECK( committed.snapshot_complete() && committed.results_fresh() );
+    BOOST_CHECK_EQUAL( committed.input_warnings_size(), 0 );
+    BOOST_CHECK( jobs.Read( Query( committed ), board, epoch )->results_fresh() );
+    const std::string second = repository.Commit( "notes.txt", "second\n" );
+    BOOST_REQUIRE_NE( first, second );
+    BOOST_REQUIRE_EQUAL( revision(), second.substr( 0, 8 ) );
+    auto recommitted = jobs.Read( Query( committed ), board, epoch );
+    BOOST_REQUIRE_MESSAGE( recommitted.has_value(), ( recommitted ? "" : recommitted.error() ) );
+    BOOST_CHECK( recommitted->status() == PDRCJS_STALE );
+    BOOST_CHECK_EQUAL( recommitted->error_code(), "project_inputs_changed" );
+    BOOST_CHECK_EQUAL( recommitted->findings_size(), 0 );
+    BOOST_CHECK( recommitted->snapshot_complete() && !recommitted->results_fresh() );
+    const PcbDrcJobState atSecond = check();
+    BOOST_CHECK( atSecond.snapshot_complete() && atSecond.results_fresh() );
+    BOOST_CHECK( live().at( "VCSSHORTHASH" ) == second.substr( 0, 8 ) );
 
     // The time of day, shown directly: no captured value can hold it.
     project->GetTextVars().erase( wxS( "STAMP" ) );
@@ -2067,9 +2159,7 @@ BOOST_AUTO_TEST_CASE( TextShowingTheDateIsCapturedAndTheTimeOfDayLeavesTheSnapsh
     BOOST_CHECK( live().is_null() );
     const PcbDrcJobState timed = check();
     BOOST_CHECK( !timed.snapshot_complete() && !timed.results_fresh() );
-    std::vector<std::string> reasons;
-    for( const auto& warning : timed.input_warnings() )
-        if( warning.rfind( "snapshot_incomplete: ", 0 ) == 0 ) reasons.push_back( warning );
+    const std::vector<std::string> reasons = IncompleteReasons( timed );
     BOOST_REQUIRE_EQUAL( reasons.size(), 1 );
     BOOST_CHECK_MESSAGE( reasons.front().rfind( "snapshot_incomplete: current_time_text: ", 0 ) == 0
                          && reasons.front().find( "${CURRENT_TIME_HH_MM_SS}" ) != std::string::npos, reasons.front() );
@@ -2081,6 +2171,300 @@ BOOST_AUTO_TEST_CASE( TextShowingTheDateIsCapturedAndTheTimeOfDayLeavesTheSnapsh
     const PcbDrcJobState plain = check();
     BOOST_CHECK( plain.snapshot_complete() && plain.results_fresh() );
     BOOST_CHECK_EQUAL( plain.input_warnings_size(), 0 );
+}
+
+// Board text also evaluates @{...} expressions. A check lays the result out, so what an expression
+// reads from outside the design is an input of the check. today() gives the day, which the check
+// captures and compares like ${CURRENT_DATE}, including through formatting functions. now() and
+// random() give another value each time they are evaluated, the vcs...() functions read the
+// project's version-control repository while the check runs, and a function KiCad does not know
+// as one of the design alone may do either: each leaves the snapshot incomplete with the stable
+// reason volatile_text_expression, never fresh. A text reaches an expression directly, through a
+// project variable, a board property or a title-block field, or through a variable substituted
+// into an expression; the drawing sheet's expressions count too. Expressions of the design alone,
+// plain text that only looks like a call, and escaped expressions leave the check complete.
+BOOST_AUTO_TEST_CASE( TextExpressionsAreCapturedOrLeaveTheSnapshotIncomplete )
+{
+    GIT_BACKEND_SCOPE git;
+    KI_TEST::TEMPORARY_DIRECTORY scratch( "drc_text_expressions_" + KIID().AsStdString(), "" );
+    const auto projectPath = scratch.GetPath() / "fixture.kicad_pro";
+    { std::ofstream stream( projectPath ); stream << R"({"meta":{"filename":"fixture.kicad_pro","version":3}})"; }
+    SCRATCH_REPOSITORY repository( scratch.GetPath() );
+    repository.Commit( "fixture.kicad_pro", R"({"meta":{"filename":"fixture.kicad_pro","version":3}})" );
+    const wxString projectName = wxString::FromUTF8( projectPath.string() );
+    SETTINGS_MANAGER manager;
+    BOOST_REQUIRE( manager.LoadProject( projectName, false ) );
+    PROJECT* project = manager.GetProject( projectName );
+    BOARD board;
+    board.SetProject( project );
+    board.SetFileName( wxString::FromUTF8( ( scratch.GetPath() / "fixture.kicad_pcb" ).string() ) );
+    auto* text = new PCB_TEXT( &board );
+    text->SetLayer( F_SilkS );
+    text->SetPosition( { 10000000, 10000000 } );
+    board.Add( text );
+    auto live = [&]
+    {
+        const nlohmann::json settings = PCB_DRC_PROJECT_BASELINE::Observe( board ).settings;
+        return settings.contains( "live_text" ) ? settings.at( "live_text" ) : nlohmann::json();
+    };
+    PCB_DRC_JOB_MANAGER jobs( auxiliaryObserver() );
+    const std::string epoch = KIID().AsStdString();
+    auto check = [&]( const std::string& aCase )
+    {
+        board.IncrementTimeStamp();
+        auto started = jobs.Start( Request( board, epoch ), board, epoch, context );
+        BOOST_REQUIRE_MESSAGE( started.has_value(), aCase << ": " << ( started ? "" : started.error() ) );
+        const PcbDrcJobState done = Wait( jobs, board, *started );
+        BOOST_REQUIRE_MESSAGE( done.status() == PDRCJS_COMPLETED,
+                               aCase << ": " << done.error_code() << ": " << done.error_message() );
+        return done;
+    };
+    auto complete = [&]( const std::string& aCase )
+    {
+        const PcbDrcJobState done = check( aCase );
+        BOOST_CHECK_MESSAGE( done.snapshot_complete() && done.results_fresh(), aCase );
+        BOOST_CHECK_MESSAGE( done.input_warnings_size() == 0,
+                             aCase << ": " << ( done.input_warnings_size() ? done.input_warnings( 0 ) : "" ) );
+        return done;
+    };
+    // The check is incomplete with exactly one reason, volatile_text_expression, naming aCall.
+    auto incomplete = [&]( const std::string& aCase, const std::string& aCall, const std::string& aWhere )
+    {
+        const PcbDrcJobState done = check( aCase );
+        BOOST_CHECK_MESSAGE( !done.snapshot_complete() && !done.results_fresh(), aCase );
+        const std::vector<std::string> reasons = IncompleteReasons( done );
+        BOOST_REQUIRE_MESSAGE( reasons.size() == 1, aCase << ": " << reasons.size() << " reasons" );
+        BOOST_CHECK_MESSAGE( reasons.front().rfind( "snapshot_incomplete: volatile_text_expression: " + aWhere, 0 ) == 0
+                             && reasons.front().find( aCall ) != std::string::npos,
+                             aCase << ": " << reasons.front() );
+        // A read gives the same incomplete state: the reason is part of the snapshot.
+        const auto again = jobs.Read( Query( done ), board, epoch );
+        BOOST_REQUIRE( again );
+        BOOST_CHECK_MESSAGE( again->status() == PDRCJS_COMPLETED && !again->snapshot_complete()
+                             && !again->results_fresh() && IncompleteReasons( *again ) == reasons, aCase );
+        return done;
+    };
+    const std::string board_text = "The board's text";
+    const std::string sheet_text = "The drawing sheet's text";
+
+    // Expressions of the design alone, text that only looks like a call, and an escaped expression.
+    text->SetText( wxS( "@{upper(\"checked\")} @{format(2.5, 1)} @{dateformat(datestring(\"2026-01-02\"))} "
+                        "@{weekdayname(datestring(\"2026-01-02\"))} @{timeformat(0)}" ) );
+    BOOST_CHECK( live().is_null() );
+    complete( "pure expressions" );
+    text->SetText( wxS( "Order now() at random() from vcsbranch()" ) );
+    BOOST_CHECK( live().is_null() );
+    complete( "plain text" );
+    text->SetText( wxS( "\\@{now()} \\@{random()}" ) );
+    complete( "escaped expressions" );
+
+    // today() and date formatting over it, written in the text: the day is captured. A read on
+    // a later day sees another day, and the completed check goes stale; a new check is fresh.
+    text->SetText( wxS( "Made @{dateformat(today(), \"ISO\")}" ) );
+    const nlohmann::json today = live();
+    BOOST_REQUIRE( today.is_object() && today.size() == 1 && today.contains( "today()" ) );
+    const std::string day = EXPRESSION_EVALUATOR().Evaluate( wxS( "@{today()}" ) ).utf8_string();
+    BOOST_CHECK_MESSAGE( today.at( "today()" ) == day, today.dump() << " " << day );
+    const PcbDrcJobState dated = complete( "today() in the text" );
+    ObserveProjectAs( jobs, []( const BOARD& aBoard )
+    {
+        PCB_DRC_PROJECT_OBSERVATION later = PCB_DRC_PROJECT_BASELINE::Observe( aBoard );
+        later.settings["live_text"]["today()"] = "0";
+        return later;
+    } );
+    auto nextDay = jobs.Read( Query( dated ), board, epoch );
+    BOOST_REQUIRE( nextDay );
+    BOOST_CHECK( nextDay->status() == PDRCJS_STALE );
+    BOOST_CHECK_EQUAL( nextDay->error_code(), "project_inputs_changed" );
+    BOOST_CHECK_EQUAL( nextDay->findings_size(), 0 );
+    BOOST_CHECK( nextDay->snapshot_complete() && !nextDay->results_fresh() );
+    ObserveProjectAs( jobs, []( const BOARD& aBoard ) { return PCB_DRC_PROJECT_BASELINE::Observe( aBoard ); } );
+    BOOST_CHECK( jobs.Read( Query( dated ), board, epoch )->status() == PDRCJS_STALE );
+    // The same day through a project variable, a board property and a title-block field.
+    text->SetText( wxS( "Made ${STAMP}" ) );
+    project->GetTextVars()[wxS( "STAMP" )] = wxS( "@{weekdayname(today())}" );
+    BOOST_CHECK( live().contains( "today()" ) );
+    complete( "today() through a project variable" );
+    project->GetTextVars().erase( wxS( "STAMP" ) );
+    board.SetProperties( { { wxS( "BUILT" ), wxS( "@{dateformat(today())}" ) } } );
+    text->SetText( wxS( "Made ${BUILT}" ) );
+    BOOST_CHECK( live().contains( "today()" ) );
+    complete( "today() through a board property" );
+    board.SetProperties( {} );
+    board.GetTitleBlock().SetComment( 1, wxS( "@{today()}" ) );
+    text->SetText( wxS( "Made ${COMMENT2}" ) );
+    BOOST_CHECK( live().contains( "today()" ) );
+    complete( "today() through a title-block field" );
+    board.GetTitleBlock().SetComment( 1, wxEmptyString );
+    // A definition no text refers to is no input.
+    project->GetTextVars()[wxS( "UNUSED" )] = wxS( "@{now()} ${CURRENT_TIME_HH_MM_SS}" );
+    text->SetText( wxS( "Made ${ANOTHER}" ) );
+    BOOST_CHECK( live().is_null() );
+    complete( "an unreferenced definition" );
+    project->GetTextVars().erase( wxS( "UNUSED" ) );
+
+    // The clock: now(), directly and through a project variable, also under formatting.
+    text->SetText( wxS( "At @{now()}" ) );
+    BOOST_CHECK( live().is_null() );
+    incomplete( "now() in the text", "now()", board_text );
+    text->SetText( wxS( "At ${STAMP}" ) );
+    project->GetTextVars()[wxS( "STAMP" )] = wxS( "@{timeformat(now(), \"HH:mm\")}" );
+    incomplete( "now() through a project variable", "now()", board_text );
+
+    // Chance: random(), directly and through a project variable.
+    text->SetText( wxS( "Lot @{random()}" ) );
+    incomplete( "random() in the text", "random()", board_text );
+    text->SetText( wxS( "Lot ${STAMP}" ) );
+    project->GetTextVars()[wxS( "STAMP" )] = wxS( "@{round(random() * 100)}" );
+    incomplete( "random() through a project variable", "random()", board_text );
+
+    // The version-control repository: every vcs...() function, directly and through a variable.
+    for( const char* call : { "vcsbranch()", "vcsidentifier(8)", "vcsdirty()", "vcsdirtysuffix()", "vcscommitdate()",
+                              "vcsnearestlabel()", "vcslabeldistance()", "vcsauthor()", "vcscommitter()",
+                              "vcsfileidentifier(\"fixture.kicad_pro\")", "vcsfileauthor(\"fixture.kicad_pro\")",
+                              "vcsfilecommitdate(\"fixture.kicad_pro\")" } )
+    {
+        const std::string expression = call;
+        const std::string name = expression.substr( 0, expression.find( '(' ) ) + "()";
+        text->SetText( wxString::FromUTF8( "Revision @{" + expression + "}" ) );
+        incomplete( name + " in the text", name, board_text );
+    }
+    text->SetText( wxS( "Revision ${STAMP}" ) );
+    project->GetTextVars()[wxS( "STAMP" )] = wxS( "@{concat(vcsbranch(), vcsdirtysuffix())}" );
+    incomplete( "vcs...() through a project variable", "vcsbranch()", board_text );
+
+    // A function the check does not know as one of the design alone.
+    text->SetText( wxS( "@{nosuchfunction(1)}" ) );
+    incomplete( "an unknown function", "nosuchfunction()", board_text );
+
+    // A variable substituted into an expression becomes part of it.
+    text->SetText( wxS( "@{${EXPR} + 1}" ) );
+    project->GetTextVars()[wxS( "EXPR" )] = wxS( "now()" );
+    incomplete( "now() substituted into an expression", "now()", board_text );
+    project->GetTextVars()[wxS( "EXPR" )] = wxS( "2" );
+    complete( "a number substituted into an expression" );
+    project->GetTextVars().erase( wxS( "EXPR" ) );
+    project->GetTextVars().erase( wxS( "STAMP" ) );
+
+    // The drawing sheet: the check resolves its texts to report unresolved variables, and an
+    // expression there can decide that from the clock. Plain variables always resolve there.
+    text->SetText( wxS( "Plain" ) );
+    auto* sheet = new DS_DATA_ITEM_TEXT( wxS( "Printed ${CURRENT_DATE} ${CURRENT_TIME_HH_MM_SS}" ) );
+    drawing.Append( sheet );
+    complete( "plain date and time in the drawing sheet" );
+    sheet->m_TextBase = wxS( "@{upper(\"sheet\")}" );
+    complete( "a pure expression in the drawing sheet" );
+    sheet->m_TextBase = wxS( "@{if(now() > 0, \"${MISSING}\", \"\")}" );
+    incomplete( "now() in the drawing sheet", "now()", sheet_text );
+    sheet->m_TextBase = wxS( "Day ${COMMENT3}" );
+    board.GetTitleBlock().SetComment( 2, wxS( "@{dateformat(today())}" ) );
+    incomplete( "today() through the drawing sheet's title block", "today()", sheet_text );
+    board.GetTitleBlock().SetComment( 2, wxEmptyString );
+    sheet->m_TextBase = wxS( "Sheet" );
+
+    // Nothing reads outside the design any more: a new check is complete and fresh.
+    BOOST_CHECK( live().is_null() );
+    complete( "no expression" );
+}
+
+// A text laid out with an outline font reads its glyphs from the font file, which KiCad opens once
+// and reads lazily. A check captures the content of each font file its texts use (a font embedded
+// in the board is part of the board) and every read compares it again: rewriting the file in place
+// with the same size and modification time makes a completed check stale, and putting it back does
+// not revive it. A font file the check cannot read leaves the snapshot incomplete with its reason.
+BOOST_AUTO_TEST_CASE( FontFilesOfTheBoardTextAreCapturedAndCompared )
+{
+    KI_TEST::TEMPORARY_DIRECTORY scratch( "drc_fonts_" + KIID().AsStdString(), "" );
+    wxFileName source( wxString::FromUTF8( KI_TEST::GetTestDataRootDir() ) );
+    source.RemoveLastDir();
+    source.AppendDir( wxS( "resources" ) );
+    source.AppendDir( wxS( "fonts" ) );
+    source.SetFullName( wxS( "NotoSans-Regular.ttf" ) );
+    BOOST_REQUIRE( source.FileExists() );
+    const auto fontPath = scratch.GetPath() / "NotoSans-Regular.ttf";
+    std::filesystem::copy_file( std::filesystem::path( source.GetFullPath().utf8_string() ), fontPath );
+    std::vector<wxString> fontFiles{ wxString::FromUTF8( fontPath.string() ) };
+    KIFONT::FONT* font = KIFONT::FONT::GetFont( wxS( "Noto Sans" ), false, false, &fontFiles );
+    BOOST_REQUIRE( font && font->IsOutline() );
+    const wxString loaded = static_cast<KIFONT::OUTLINE_FONT*>( font )->GetFileName();
+    BOOST_REQUIRE_MESSAGE( std::filesystem::equivalent( std::filesystem::path( loaded.utf8_string() ), fontPath ),
+                           loaded.utf8_string() );
+
+    BOARD board;
+    board.SetFileName( wxString::FromUTF8( ( scratch.GetPath() / "fonts.kicad_pcb" ).string() ) );
+    auto* text = new PCB_TEXT( &board );
+    text->SetText( wxS( "Outline" ) );
+    text->SetLayer( F_SilkS );
+    text->SetPosition( { 10000000, 10000000 } );
+    text->SetFont( font );
+    board.Add( text );
+    PCB_DRC_JOB_MANAGER jobs( auxiliaryObserver() );
+    const std::string epoch = KIID().AsStdString();
+    auto check = [&]
+    {
+        board.IncrementTimeStamp();
+        auto started = jobs.Start( Request( board, epoch ), board, epoch, context );
+        BOOST_REQUIRE_MESSAGE( started.has_value(), ( started ? "" : started.error() ) );
+        const PcbDrcJobState done = Wait( jobs, board, *started );
+        BOOST_REQUIRE_MESSAGE( done.status() == PDRCJS_COMPLETED, done.error_code() + ": " + done.error_message() );
+        return done;
+    };
+    const PcbDrcJobState captured = check();
+    BOOST_CHECK( captured.snapshot_complete() && captured.results_fresh() );
+    BOOST_CHECK_EQUAL( captured.input_warnings_size(), 0 );
+    BOOST_CHECK( jobs.Read( Query( captured ), board, epoch )->results_fresh() );
+
+    // Rewrite one byte of the font file in place, keeping its size and modification time.
+    const auto modified = std::filesystem::last_write_time( fontPath );
+    const auto size = std::filesystem::file_size( fontPath );
+    auto rewriteLastByte = [&]( char aXor )
+    {
+        std::fstream stream( fontPath, std::ios::in | std::ios::out | std::ios::binary );
+        stream.seekg( static_cast<std::streamoff>( size - 1 ) );
+        char last = 0;
+        stream.get( last );
+        stream.seekp( static_cast<std::streamoff>( size - 1 ) );
+        stream.put( static_cast<char>( last ^ aXor ) );
+        stream.close();
+        std::filesystem::last_write_time( fontPath, modified );
+        BOOST_REQUIRE_EQUAL( std::filesystem::file_size( fontPath ), size );
+        BOOST_REQUIRE( std::filesystem::last_write_time( fontPath ) == modified );
+    };
+    rewriteLastByte( 0x01 );
+    auto rewritten = jobs.Read( Query( captured ), board, epoch );
+    BOOST_REQUIRE_MESSAGE( rewritten.has_value(), ( rewritten ? "" : rewritten.error() ) );
+    BOOST_CHECK( rewritten->status() == PDRCJS_STALE );
+    BOOST_CHECK_EQUAL( rewritten->error_code(), "project_inputs_changed" );
+    BOOST_CHECK_EQUAL( rewritten->findings_size(), 0 );
+    BOOST_CHECK( rewritten->snapshot_complete() && !rewritten->results_fresh() );
+    rewriteLastByte( 0x01 ); // The original bytes again.
+    BOOST_CHECK( jobs.Read( Query( captured ), board, epoch )->status() == PDRCJS_STALE );
+    const PcbDrcJobState restored = check();
+    BOOST_CHECK( restored.snapshot_complete() && restored.results_fresh() );
+
+    // The stroke font reads no file: another font file changing is no input then.
+    text->SetFont( nullptr );
+    const PcbDrcJobState stroked = check();
+    BOOST_CHECK( stroked.snapshot_complete() && stroked.results_fresh() );
+    rewriteLastByte( 0x01 );
+    BOOST_CHECK( jobs.Read( Query( stroked ), board, epoch )->results_fresh() );
+    rewriteLastByte( 0x01 );
+
+    // A font file the check cannot read: KiCad still holds the font it opened, but the check
+    // cannot compare the file with what it laid out.
+    text->SetFont( font );
+    std::vector<char> bytes( size );
+    { std::ifstream stream( fontPath, std::ios::binary ); stream.read( bytes.data(), static_cast<std::streamsize>( size ) ); }
+    std::filesystem::remove( fontPath );
+    const PcbDrcJobState unreadable = check();
+    BOOST_CHECK( !unreadable.snapshot_complete() && !unreadable.results_fresh() );
+    const std::vector<std::string> reasons = IncompleteReasons( unreadable );
+    BOOST_REQUIRE_EQUAL( reasons.size(), 1 );
+    BOOST_CHECK_MESSAGE( reasons.front().rfind( "snapshot_incomplete: font_file: ", 0 ) == 0
+                         && reasons.front().find( "NotoSans-Regular.ttf" ) != std::string::npos, reasons.front() );
+    { std::ofstream stream( fontPath, std::ios::binary ); stream.write( bytes.data(), static_cast<std::streamsize>( size ) ); }
+    const PcbDrcJobState readable = check();
+    BOOST_CHECK( readable.snapshot_complete() && readable.results_fresh() );
 }
 
 // Refilling zones rebuilds teardrops inside the check. A finding about a rebuilt teardrop names the

@@ -178,14 +178,17 @@ bool Within( const wxString& aPath, const wxString& aDirectory )
 }
 
 const char* const PROJECT_CHANGE_MESSAGE =
-        "Project settings, the board's current variant, exclusions, custom rules, or the current date or "
-        "version-control revision the board's text shows, changed or could not be observed";
+        "Project settings, the board's current variant, exclusions, custom rules, a font file the board's text "
+        "uses, or the current date or version-control revision the board's text shows, changed or could not be "
+        "observed";
 
 // The gap every unfinished check reports (code, then explanation): its findings are
-// matched to objects of the open board only once it has finished.
+// matched to objects of the open board only once it has finished. Its own code tells a
+// check still running apart from a finished one that could not name an object
+// (generated_item_identity).
 const char* const PENDING_IDENTITY_GAP =
-        "generated_item_identity: pending until the check completes; only a finished check has matched each "
-        "finding to an object of the open board.";
+        "finding_identity_pending: the check has not finished; only a finished check has matched each finding "
+        "to an object of the open board.";
 
 std::string ChangeMessage( const std::string& aCode )
 {

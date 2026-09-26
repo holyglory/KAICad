@@ -117,7 +117,7 @@ public sealed class PcbDrcToolTests
             transport.State.WorkerFinished = false; transport.State.Progress = 0.2;
             transport.State.ResultsFresh = false; transport.State.CancellationRequested = true;
             transport.State.SnapshotComplete = false;
-            transport.State.InputWarnings.Add("snapshot_incomplete: generated_item_identity: pending until the check completes; only a finished check has matched each finding to an object of the open board.");
+            transport.State.InputWarnings.Add("snapshot_incomplete: finding_identity_pending: the check has not finished; only a finished check has matched each finding to an object of the open board.");
             Assert.IsFalse((await tool.Cancel(transport.Session.InstanceId, json, valid.JobId,
                 transport.Session.Epoch, default)).IsError ?? false, "Cancellation acknowledgement may still be running.");
             // The cancelled check ends without findings: nothing is left to match, and its captured snapshot is complete.

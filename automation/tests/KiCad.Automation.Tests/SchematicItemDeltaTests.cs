@@ -143,6 +143,10 @@ public sealed class SchematicItemDeltaTests
         Assert.AreEqual(0, SchematicItemDelta.Plan(current, desired).Single().ReplaceNetChains.Definitions.Count);
         desired.Metadata.NetChains.Add(new SchematicNetChainDefinition { Name = "PENDING" });
         Assert.AreEqual("PENDING", SchematicItemDelta.Plan(current, desired).Single().ReplaceNetChains.Definitions[0].Name);
+        var newlyObserved = Fixture();
+        newlyObserved.Metadata.NetChains.Add(new SchematicNetChainDefinition { Name = "SAVED", Committed = true });
+        var savedDeclaration = SchematicItemDelta.Plan(Fixture(), newlyObserved).Single().ReplaceNetChains.Definitions.Single();
+        Assert.IsFalse(savedDeclaration.Committed, "A newly observed saved declaration is sent back as a pending native declaration.");
     }
 
     [TestMethod]

@@ -374,7 +374,7 @@ public static class SchematicItemDelta
                     || !names.Add(chain.Name))
                     throw Invalid("Net chain names must be valid and unique.");
                 var prior = current.NetChains.SingleOrDefault(c => c.Name == chain.Name);
-                if (chain.Committed != (prior?.Committed ?? false))
+                if (prior is not null && chain.Committed != prior.Committed)
                     throw Invalid("Net chain committed membership is computed, not writable.");
                 if (!NoNul(chain.From?.Reference ?? "") || !NoNul(chain.From?.Pin ?? "")
                     || !NoNul(chain.To?.Reference ?? "") || !NoNul(chain.To?.Pin ?? "") || !NoNul(chain.NetClass))

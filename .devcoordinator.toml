@@ -3720,3 +3720,38 @@ tier="development"
 requires=["managed-build"]
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicConnectionRealizerTests.ResolutionAdoptsOnlyTheListedNativeValues|FullyQualifiedName~SchematicLibraryCacheEquivalenceTests", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/connection-resolution-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{name="connection-resolution-tests", path="automation/artifacts/connection-resolution-tests", max_bytes=16777216}]
+
+# Bounded diagnostic for the recursive editor journey; the broader diagram graph
+# also retains its full theme and cross-journey coverage.
+[test.recursive-editor-focus]
+timeout_seconds=1800
+env={TMPDIR="/mnt/build-storage/codex/kicad/t"}
+
+[[test.recursive-editor-focus.check]]
+name="build"
+tier="development"
+command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--configuration","Debug"]
+
+[[test.recursive-editor-focus.check]]
+name="journey"
+tier="development"
+requires=["build"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~NativeSessionTests.RecursiveEditorNavigatesLevelsAndSavesRequirementHistory","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/recursive-editor-focus","--","MSTest.MapInconclusiveToFailed=true"]
+retained_artifacts=[{name="recursive-editor-focus",path="automation/artifacts/recursive-editor-focus",max_bytes=67108864}]
+
+# Bounded diagnostic for the dense canvas hover journey after synthetic-motion settling.
+[test.diagram-canvas-focus]
+timeout_seconds=1800
+env={TMPDIR="/mnt/build-storage/codex/kicad/t"}
+
+[[test.diagram-canvas-focus.check]]
+name="build"
+tier="development"
+command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--configuration","Debug"]
+
+[[test.diagram-canvas-focus.check]]
+name="journey"
+tier="development"
+requires=["build"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~NativeSessionTests.PerLevelCanvasEditsPersistLayout","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/diagram-canvas-focus","--","MSTest.MapInconclusiveToFailed=true"]
+retained_artifacts=[{name="diagram-canvas-focus",path="automation/artifacts/diagram-canvas-focus",max_bytes=67108864}]

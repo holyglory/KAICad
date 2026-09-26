@@ -181,6 +181,10 @@ internal static class NativeKeyboard
                 }
             }
             XSync(display, 0);
+            // GTK may coalesce a synthetic pointer event until its main loop runs. Keep
+            // rapid hover probes deterministic: the following state read must observe
+            // the motion that was just sent, rather than the preceding pointer position.
+            if (key == "motion") Thread.Sleep(25);
             if (key is "click" or "right-click" or "motion") return;
             byte control = XKeysymToKeycode(display, XStringToKeysym(altKey ? "Alt_L" : "Control_L"));
             nuint requested = LiteralKeysym(key) ?? XStringToKeysym(key);

@@ -1073,3 +1073,37 @@ The adversarial review of this item's two commits confirmed the runs, the file o
 4. **The compact check did not confirm which connection was selected.** It now asserts that the finished connection is the selection and that both handles are its own, as at the default size.
 5. **The accent check could not tell the accent from the data blue.** The selected wire is now compared with its handles' outline on the same capture, with the unselected data blue and by its weight; the dark theme's closeness in colour is recorded (P3 item 17).
 6. **The CN-2 erratum claimed more than its tests do.** It now says the tests stand for crossing a port's name in diagram units, and names the two kinds of name they do not reach: a block port's name reaching past the block's edge (not avoided; P3 item 18) and an unplaced boundary port's name inside the level (kept off wires by its placement, M1-11).
+
+## Final mockup audit (item mockup-audit-final)
+
+### What was asked
+
+Run the post-implementation mockup audit again, exactly as before, from fresh governed captures of the final commit, until only the owner's open question (M1-10) remains; fix any new P0 to P2 in lane 2B's files and audit again. No new visible element beyond restoring the approved sketches; M1-10 unchanged.
+
+### What the audit found
+
+Pass 7 (run `t20260926T055159Z-03ee99` on `7f8e4ec037`) found every earlier finding still fixed, and two P2 findings every earlier pass had missed. **M1-14:** no pass had captured the approved walkthrough 03's own state, the CPU level with Memory interface selected, which draws the connection's comment "Keep pin choices open for placement." as a note beside the connection with a dashed leader to its name; the editor drew no comment on a block or connection on the canvas, so that comment could be found only by selecting the connection (walkthroughs 01 and 02 show the PSU's comment in Comments only). **M1-15:** in the compact window the CPU level's captions "Supply status / control" and "Memory interface" stood on one line 4 pixels apart, less than the spaces between their own words, and read as one caption. Pass 8 (run `t20260926T063659Z-a5ee65` on `3fc04da22e`) confirmed both fixed and found no new P0 to P2. The audit report is `design-qa.md`; its final result stays blocked on M1-10 alone.
+
+### What a person sees now
+
+- **Comments attached to their element (M1-14).** A comment on a block or connection that has its own place on the canvas is drawn there as a note, with a dashed leader from the note to its connection's caption (or, when the caption is not drawn, the middle of the connection's path) or to its block's outline. The leader takes the note's amber outline, and the accent with the note while that comment is the one in Comments; walkthrough 03 draws it dark, but analog connections are dark grey dashes (owner default `n7fb0ee3089916669`), and a first repair's dark leader, lengthened by later edits, could be read as one. Pressing the note selects its element, opens the comment in Comments and scrolls the inspector just far enough to show Comments whole; dragging it moves it, as a free-space note moves. A comment without a place stays in Comments, as walkthroughs 01 and 02 show the PSU's comment; a comment whose element is gone keeps no leader and belongs to the level, as an unresolved comment does. Before, a comment with a place was drawn like a free-space note, with nothing showing what it was about.
+- **The shared example.** The fixture's comment on Memory interface (annotation 5) has its own place at (300, 560), below the connection's name, clear of the Clock block and Clock feed that the canvas journey draws later (contract §1.5.3, content amendment, within the fixture note positions granted with decision `n7fb0ee3089916669`). The PSU's comment keeps no place.
+- **Captions a word apart (M1-15).** A connection caption keeps a word space, 12 pixels, from any other caption or boundary port name on its line (and 2 pixels above and below, as before). On the compact CPU level the two captions now stand 39 blank pixels apart; on the System and PSU levels and in the drawing, choices and details journeys nothing moved; on the dense stress level some crowded captions are placed or shortened differently.
+
+### Measured and asserted
+
+Values from run `t20260926T063659Z-a5ee65` (evidence `EV10` in `design-qa.md`), the same in both themes and both projects of each theme.
+
+| Finding | Measured | Asserted by |
+|---|---|---|
+| M1-14 | the leader drawn where the editor reports it (80 % of the samples along it inked) in the note's amber (its most coloured pixel red minus blue 124; the amber (176, 142, 52) reads 3.10:1 on the light canvas and 4.44:1 on the dark); the comment 300 px from every block, port and wire at the default size and 159 in the compact window | the canvas journey's `Level` on System, PSU and CPU, default and compact: every free-space note and every placed comment drawn and reporting its element; `VerifyNoteLeaders`: the leader starts on its note's border, ends on its connection's caption or its block's outline, runs through no block, other note or other caption, and is inked in amber; `VerifyNotesClear`; the new step `cpu-memory-interface`: pressing the note selects Memory interface with Comments on the comment and whole in the inspector's view, its three requirements shown, nothing changed, and blank canvas returns to the level with the file untouched |
+| M1-15 | on the compact CPU level's text row 39 blank pixels between "control" and "Memory" (4 before) | `VerifyCanvasText`, now on every fixture level at both sizes as well as the drawing journeys' levels: captions on one line 12 px or more from each other and from every boundary port name |
+
+The editor reports each note's element and leader (`DiagramCanvasNote.target_id` and `leader`, lane 2B's own proto).
+
+### Limits
+
+- A placed comment's leader is a straight line, not an obstacle for captions or wires and not routed around them. On the fixture's levels it crosses nothing (asserted); after the canvas journey's later edits move Memory interface's caption up, it runs long beside the Clock feed and the Clock block's edge (audit report P3 item 20).
+- With Memory interface selected by its wire, Comments lies below the inspector's fold at the default size (P3 item 19); pressing the comment's note brings it into view.
+- The editor has no tool to give a comment a place on the canvas: a comment typed in Comments has none, and a note made with Note belongs to the level. Placed comments come from files and agents (the annotation model's `position`); attaching a new note to an element on the canvas belongs to the comment and markup outcome `p47c5ac4e8184b9a4`. Whether every comment on an element should show a cue is an open question for the owner in the audit report.
+- M1-10 waits for the owner (unchanged).

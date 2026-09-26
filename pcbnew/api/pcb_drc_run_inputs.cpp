@@ -18,9 +18,17 @@
 #include <project/net_settings.h>
 #include <pcb_project_editor_state.h>
 #include <json_common.h>
+#include <ki_exception.h>
 #include <router/pns_routing_settings.h>
 #include <algorithm>
 #include <stdexcept>
+
+std::string PcbDrcExceptionMessage( const std::exception& aError )
+{
+    if( const auto* io = dynamic_cast<const IO_ERROR*>( &aError ) )
+        return io->Problem().ToStdString( wxConvUTF8 );
+    return aError.what();
+}
 
 namespace
 {
@@ -74,14 +82,42 @@ nlohmann::json ProjectInputs( const BOARD& aBoard )
 }
 }
 
+PCB_DRC_PROJECT_OBSERVATION PCB_DRC_PROJECT_BASELINE::Observe( const BOARD& aBoard )
+{
+    PCB_DRC_PROJECT_OBSERVATION result;
+    result.settings = ProjectInputs( aBoard );
+    result.rulesPath = aBoard.GetDesignRulesPath();
+    if( !result.rulesPath.empty() ) result.rules = FILE_CONTENT_BASELINE::Read( result.rulesPath );
+    return result;
+}
+
 bool PCB_DRC_PROJECT_BASELINE::Unchanged( const BOARD& aBoard ) const
 {
     try
     {
-        const wxString rulesPath = aBoard.GetDesignRulesPath();
-        const bool rulesUnchanged = m_rules.Path().empty() ? rulesPath.empty()
-                : m_rules.Check( rulesPath ) == FILE_BASELINE_CHECK::UNCHANGED;
-        return rulesUnchanged && m_settings == ProjectInputs( aBoard );
+        return Unchanged( Observe( aBoard ) );
+    }
+    catch( const std::exception& )
+    {
+        // Unreadable or unrepresentable inputs are not evidence of freshness.
+        return false;
+    }
+}
+
+bool PCB_DRC_PROJECT_BASELINE::Unchanged( const PCB_DRC_PROJECT_OBSERVATION& aObserved ) const
+{
+    try
+    {
+        // The same comparison as FILE_CONTENT_BASELINE::Check, against the rules file
+        // content the observation already read: an unreadable file, another path or
+        // other bytes are never unchanged.
+        const FILE_CONTENT_BASELINE& now = aObserved.rules;
+        const bool rulesUnchanged = m_rules.Path().empty() ? aObserved.rulesPath.empty()
+                : m_rules.Known() && now.Known()
+                  && FILE_CONTENT_BASELINE::SamePath( m_rules.Path(), aObserved.rulesPath )
+                  && now.Exists() == m_rules.Exists() && now.Bytes() == m_rules.Bytes()
+                  && now.Sha256() == m_rules.Sha256();
+        return rulesUnchanged && m_settings == aObserved.settings;
     }
     catch( const std::exception& )
     {
@@ -184,6 +220,11 @@ const KIID& PCB_DRC_RUN_INPUTS::CapturedDrawingIdentity() const { return m_proxy
 std::string PCB_DRC_RUN_INPUTS::LibraryFingerprint() const
 {
     return m_libraries->ContentFingerprint();
+}
+
+std::map<wxString, std::string> PCB_DRC_RUN_INPUTS::LibraryFingerprints() const
+{
+    return m_libraries->LibraryFingerprints();
 }
 
 tl::expected<std::vector<KIID>, std::string> PCB_DRC_RUN_INPUTS::AddCandidateItems(

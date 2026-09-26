@@ -25,6 +25,7 @@ public static class DiagramRequirementHistoryFiles
         DiagramRequirementHistory initial, CancellationToken token = default)
     {
         ArgumentNullException.ThrowIfNull(initial); token.ThrowIfCancellationRequested();
+        Standalone(initial);
         path = Contained(repositoryRoot, path, requireFile: false);
         string xml = DiagramRequirementHistoryXml.Write(initial);
         if (File.Exists(path))
@@ -101,7 +102,16 @@ public static class DiagramRequirementHistoryFiles
         catch (DecoderFallbackException) { throw Invalid("invalid_requirement_history_xml", "History must contain valid UTF-8 text."); }
         if (history.Scope != expectedScope)
             throw Invalid("wrong_requirement_history", "The selected file belongs to another document, owner or design state.");
+        Standalone(history);
         return new(path, bytes, history);
+    }
+
+    // A history that continues another implementation's history is resolved by the diagram that holds both;
+    // a file holding one history alone cannot show or check the earlier texts, so it is refused, not truncated.
+    private static void Standalone(DiagramRequirementHistory history)
+    {
+        if (history.DerivedFrom is not null)
+            throw Invalid("invalid_requirement_history", "A history that continues another implementation's history belongs to its diagram file, not a separate history file.");
     }
 
     internal static string Contained(string root, string path, bool requireFile)

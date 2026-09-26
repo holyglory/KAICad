@@ -133,6 +133,42 @@ public sealed class McpProcessTests
             StringAssert.Contains(listed.GetProperty("result").GetProperty("tools").EnumerateArray()
                 .Single(t => t.GetProperty("name").GetString() == "kicad_schematic_apply_checked_batch").GetProperty("description").GetString(),
                 "\"@type\":\"type.googleapis.com/kiapi.schematic.types.LocalLabel\"", "The tool shows an agent how to write a typed object.");
+            // The checked view takes the rendered sheet and the checked state together for an explicit schematic root and a
+            // displayed sheet of that same schematic. An unreadable or non-root document, a view of another schematic, or an
+            // instance this server never attached is refused before KiCad is asked. The capture itself, and the observe-then-
+            // apply loop it serves, need a real editor: NativeSessionTests.AgentAndPersonEditingTogetherNeverGetStaleOrPartialEdits.
+            CollectionAssert.Contains(names, "kicad_schematic_checked_view");
+            string viewRoot = Guid.NewGuid().ToString("D");
+            string ViewDocument(params string[] path)
+            {
+                var sheetPath = new Kiapi.Common.Types.SheetPath();
+                sheetPath.Path.Add(path.Select(id => new Kiapi.Common.Types.KIID { Value = id }));
+                return SchematicJson.Formatter.Format(new Kiapi.Common.Types.DocumentSpecifier
+                {
+                    Type = (Kiapi.Common.Types.DocumentType)1, SheetPath = sheetPath,
+                    Project = new Kiapi.Common.Types.ProjectSpecifier { Name = "fixture", Path = state }
+                });
+            }
+            foreach (var (requestId, documentJson, viewDocumentJson, code) in new (int, string, string?, string)[]
+            {
+                (9094, "{\"type\":", null, "invalid_checked_document"),
+                (9095, ViewDocument(viewRoot, Guid.NewGuid().ToString("D")), null, "invalid_checked_document"),
+                (9096, ViewDocument(viewRoot), ViewDocument(Guid.NewGuid().ToString("D")), "invalid_checked_document"),
+                (9097, ViewDocument(viewRoot), ViewDocument(viewRoot, Guid.NewGuid().ToString("D")), "unknown_instance"),
+                (9098, ViewDocument(viewRoot), null, "unknown_instance")
+            })
+            {
+                string instanceId = Guid.NewGuid().ToString("D");
+                object arguments = viewDocumentJson is null ? new { instanceId, documentJson } : new { instanceId, documentJson, viewDocumentJson };
+                var refused = (await Request(requestId, "tools/call", new { name = "kicad_schematic_checked_view", arguments })).GetProperty("result");
+                Assert.IsTrue(refused.GetProperty("isError").GetBoolean(), refused.GetRawText());
+                Assert.AreEqual(code, refused.GetProperty("structuredContent").GetProperty("code").GetString(), refused.GetRawText());
+                Assert.IsFalse(refused.GetProperty("content").EnumerateArray().Any(block => block.GetProperty("type").GetString() == "image"),
+                    "A refused view carries no image.");
+            }
+            Assert.IsTrue(listed.GetProperty("result").GetProperty("tools").EnumerateArray()
+                .Single(t => t.GetProperty("name").GetString() == "kicad_schematic_checked_view").GetProperty("annotations")
+                .GetProperty("readOnlyHint").GetBoolean(), "Taking a view never edits the design.");
             CollectionAssert.Contains(names, "kicad_document_operation");
             CollectionAssert.Contains(names, "kicad_pcb_drc_state");
             CollectionAssert.Contains(names, "kicad_pcb_drc_start");
@@ -149,6 +185,10 @@ public sealed class McpProcessTests
             CollectionAssert.DoesNotContain(names, "kicad_diagram_migrate");
             Assert.IsFalse(names.Any(name => name.StartsWith("kicad_structure_", StringComparison.Ordinal)), string.Join(", ", names));
             CollectionAssert.Contains(names, "kicad_diagram_open");
+            CollectionAssert.Contains(names, "kicad_diagram_connection_endpoint_set");
+            CollectionAssert.Contains(names, "kicad_diagram_connection_members_refine");
+            CollectionAssert.Contains(names, "kicad_diagram_agent_context");
+            CollectionAssert.Contains(names, "kicad_diagram_proposal_compare");
             var invalidGeometry = await Request(9088, "tools/call", new { name = "kicad_schematic_measure_placement",
                 arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}" } });
             Assert.IsTrue(invalidGeometry.GetProperty("result").GetProperty("isError").GetBoolean());
@@ -477,11 +517,25 @@ public sealed class McpProcessTests
                 Assert.AreEqual(moved.NativeRevision, continued.State.NativeRevision);
                 Assert.AreEqual("released_operation_not_open", Assert.ThrowsExactly<AutomationException>(() =>
                     store.ContinueReleasedOperation(Session(continued.State), continued.RevisionToken, receipt)).Code, "An operation is continued once.");
-                Assert.AreNotEqual(continued.RevisionToken, store.Save(Session(continued.State), continued.RevisionToken).RevisionToken,
-                    "Once continued, the record can be attached like any other.");
+                var reattached = store.Save(Session(continued.State), continued.RevisionToken);
+                Assert.AreNotEqual(continued.RevisionToken, reattached.RevisionToken, "Once continued, the record can be attached like any other.");
+                // A refusal once the operation is released keeps the release and says so: the error reply names the receipt and
+                // the record's current revision token, and whether this call released the operation.
+                var superseded = await Release(4096, reattached.RevisionToken, heldOperation, "resume");
+                Assert.IsTrue(superseded.GetProperty("isError").GetBoolean(), superseded.GetRawText());
+                Assert.AreEqual("released_operation_superseded", Code(superseded), superseded.GetRawText());
+                var refusal = superseded.GetProperty("structuredContent");
+                Assert.IsFalse(refusal.GetProperty("releasedNow").GetBoolean(), refusal.GetRawText());
+                Assert.AreEqual(heldEpoch, refusal.GetProperty("releasedEpoch").GetString());
+                Assert.AreEqual(view.GetProperty("receiptPath").GetString(), refusal.GetProperty("receiptPath").GetString());
+                Assert.AreEqual(reattached.RevisionToken, refusal.GetProperty("recoveryRevisionToken").GetString());
+                StringAssert.Contains(refusal.GetProperty("errorMessage").GetString(), "stays released (receipt " + view.GetProperty("receiptPath").GetString());
+                Assert.AreEqual(reattached.RevisionToken, store.Read()!.RevisionToken, "A refused continuation changes nothing.");
                 File.Delete(Path.Combine(state, heldInstance + ".json"));
             }
             CollectionAssert.Contains(names, "kicad_design_recovery_resolve_pending");
+            CollectionAssert.Contains(names, "kicad_design_block_owners_plan");
+            CollectionAssert.Contains(names, "kicad_design_block_owners_apply");
             // A synchronization that KiCad applied but whose follow-up check refused it is left only through
             // kicad_design_recovery_resolve_pending, bound to exactly the pending operation and recovery revision. Every choice
             // checks KiCad first, so with no KiCad attached nothing is resolved and nothing changes. The native journey

@@ -93,7 +93,9 @@ public static class SchematicSynchronizationPlanner
         try
         {
             if (state.HasPendingWork)
-                return Failure("pending_recovery_requires_reconciliation", "Inspect the saved native operation before preparing another synchronization.");
+                return Failure("pending_recovery_requires_reconciliation", "A synchronization is still pending. Finish it with kicad_design_sync_apply, "
+                    + "clear a change KiCad applied but its check refused with kicad_design_recovery_resolve_pending, or, if KiCad ended, "
+                    + "continue it with kicad_design_recovery_release_exited before preparing another synchronization.");
             var desired = DesignRecoveryStore.ReadDesired(state);
             hierarchy = state.HierarchyResolution is { } choices
                 ? SchematicHierarchyMerge.Resolve(state.Baseline.Schematic, desired.Schematic, state.Observed,

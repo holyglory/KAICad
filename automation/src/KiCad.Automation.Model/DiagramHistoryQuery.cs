@@ -56,7 +56,22 @@ public static class DiagramHistoryQuery
     /// context. Stable identities, not similar names or positions, match objects.</summary>
     public static DiagramHistoryComparison Compare(RecursiveBlockGraph graph, BlockSelection context, BlockSelection inspected)
     {
-        var before = Inspect(graph, context, inspected); var after = graph.Inspect(context);
+        var before = Inspect(graph, context, inspected);
+        var changes = Changes(graph, inspected, context);
+        int version = Read(graph, context, 0, 1).ContextVersion;
+        int inspectedVersion = Read(graph, inspected, 0, 1).ContextVersion;
+        return new(graph.DocumentId, context, inspected, version, inspectedVersion, before.Origin, changes);
+    }
+
+    /// <summary>Content changes from one saved revision of a block to another saved revision of the same block, in the
+    /// same or another of its implementations (a proposal's candidate, or today's head against an older revision). The
+    /// changes are those of this one level: its name, fields, definition, children, connections, ports, comments,
+    /// realizations and layout. Stable identities, not similar names or positions, match objects.</summary>
+    public static ImmutableArray<DiagramHistoryChange> Changes(RecursiveBlockGraph graph, BlockSelection inspected, BlockSelection context)
+    {
+        var before = graph.Inspect(inspected); var after = graph.Inspect(context);
+        if (inspected.BlockId != context.BlockId)
+            throw new AutomationException("wrong_diagram_history_scope", "Compare two revisions of the same block.");
         var changes = ImmutableArray.CreateBuilder<DiagramHistoryChange>();
         if (before.Name != after.Name)
             changes.Add(new(DiagramHistoryChangeCategory.Name, DiagramHistoryChangeKind.Changed, context.BlockId, after.Name));
@@ -114,9 +129,7 @@ public static class DiagramHistoryQuery
         foreach (var id in oldRealizations.Keys.Where(id => !newRealizations.ContainsKey(id)))
             changes.Add(new(DiagramHistoryChangeCategory.InterfaceRealization, DiagramHistoryChangeKind.Removed, id, InterfaceName(id)));
         CompareLayout(graph.ActivePresentation(inspected), graph.ActivePresentation(context));
-        int version = Read(graph, context, 0, 1).ContextVersion;
-        int inspectedVersion = Read(graph, inspected, 0, 1).ContextVersion;
-        return new(graph.DocumentId, context, inspected, version, inspectedVersion, before.Origin, changes.ToImmutable());
+        return changes.ToImmutable();
 
         void CompareLayout(DiagramPresentationView oldView, DiagramPresentationView newView)
         {

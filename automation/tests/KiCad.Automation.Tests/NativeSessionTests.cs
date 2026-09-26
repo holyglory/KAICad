@@ -96,8 +96,14 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeCrash")]
     public Task NativeCrashReleasesTheExitedOperation() => RunNativeSessions(NativeJourney.NativeCrashRelease);
 
+    // An agent observes and edits the live schematic over MCP STDIO 50 times in each editor while the harness, as a person
+    // at the keyboard of the same window, edits it at varying moments (item observe-apply-stress, ledger p60776bb2239d1087).
+    [TestMethod, TestCategory("NativeObserveApplyStress")]
+    public Task AgentAndPersonEditingTogetherNeverGetStaleOrPartialEdits() => RunNativeSessions(NativeJourney.ObserveApplyStress);
+
     private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, RecursiveEditor, Simulation, PcbItems,
-        PsuCpuSeed, PsuCpuComponentCreation, ConnectedRealization, DiagramCanvas, XmlRebuild, OwnershipSync, NativeCrash, NativeCrashRelease }
+        PsuCpuSeed, PsuCpuComponentCreation, ConnectedRealization, DiagramCanvas, XmlRebuild, OwnershipSync, NativeCrash, NativeCrashRelease,
+        ObserveApplyStress }
 
     private async Task RunNativeSessions(NativeJourney journey, string theme = "light")
     {
@@ -128,6 +134,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.OwnershipSync => "native-ownership-sync",
                 NativeJourney.NativeCrash => "native-crash",
                 NativeJourney.NativeCrashRelease => "native-crash-release",
+                NativeJourney.ObserveApplyStress => "native-observe-apply-stress",
                 _ => "native-net-chains" }));
         string temporary = Directory.CreateTempSubdirectory("kicad-native-").FullName;
         // The earlier composed journey took 433s before expanded Setup and
@@ -145,8 +152,9 @@ public sealed partial class NativeSessionTests
         // their idle-host sizing; per-action deadlines are unchanged.
         int aggregateSeconds = journey == NativeJourney.Foundation ? 900
             : journey == NativeJourney.CheckedBatch ? 630
+            : journey == NativeJourney.OwnershipSync ? 1200
             : journey is NativeJourney.SymbolSheets or NativeJourney.ComponentCreation or NativeJourney.PsuCpuComponentCreation
-                or NativeJourney.ConnectedRealization or NativeJourney.XmlRebuild or NativeJourney.OwnershipSync ? 900 : 450;
+                or NativeJourney.ConnectedRealization or NativeJourney.XmlRebuild ? 900 : 450;
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(aggregateSeconds));
         var elapsed = Stopwatch.StartNew();
         async Task Measure(string stage, Func<Task> action)
@@ -507,6 +515,20 @@ public sealed partial class NativeSessionTests
                             synchronizationFailures.Add(error);
                             await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-sync-execution-failure.txt"), error.ToString(), deadline.Token);
                             Console.WriteLine($"Synchronization failed for {target.Id}; preserve it and continue the independent project.");
+                        }
+                    }
+                    else if (journey == NativeJourney.ObserveApplyStress)
+                    {
+                        try
+                        {
+                            await VerifyObserveApplyStress(client, opened.Document, focusProcessId, ":" + displayNumber,
+                                evidence, target.Id, deadline.Token);
+                        }
+                        catch (Exception error) when (!deadline.IsCancellationRequested)
+                        {
+                            synchronizationFailures.Add(error);
+                            await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-stress-failure.txt"), error.ToString(), deadline.Token);
+                            Console.WriteLine($"Observe-apply stress failed for {target.Id}; preserve it and continue the independent project.");
                         }
                     }
                     else if (journey == NativeJourney.SynchronizationPlan)

@@ -105,6 +105,21 @@ public sealed class DiagramRequirementHistoryTests
         Assert.ThrowsExactly<AutomationException>(() => new DiagramRequirementHistory(first.Scope, []));
         Assert.ThrowsExactly<AutomationException>(() => new DiagramRequirementHistory(first.Scope, [root, root]));
         Assert.ThrowsExactly<AutomationException>(() => new DiagramRequirementHistory(first.Scope, [root with { ParentId = root.Id }]));
+        // A history may continue another implementation's revision (its owner links and checks it), but not an empty
+        // identity, and no later revision may reuse the identity it continues.
+        Guid earlier = Guid.NewGuid();
+        var continued = new DiagramRequirementHistory(first.Scope, [root with { ParentId = earlier }]);
+        Assert.AreEqual(earlier, continued.DerivedFrom); Assert.IsEmpty(continued.Lineage);
+        Assert.IsNull(first.DerivedFrom);
+        Assert.ThrowsExactly<AutomationException>(() => new DiagramRequirementHistory(first.Scope, [root with { ParentId = Guid.Empty }]));
+        Assert.ThrowsExactly<AutomationException>(() => new DiagramRequirementHistory(first.Scope,
+            [root with { ParentId = earlier }, root with { Id = earlier, ParentId = root.Id }]));
+        // Its first revision copies the text it continues, so it restores nothing, even before its owner links it.
+        Assert.ThrowsExactly<AutomationException>(() => new DiagramRequirementHistory(first.Scope,
+            [root with { ParentId = earlier, Restorations = [new(DiagramRequirementField.Routing, earlier)] }]));
+        // A history that started on its own cannot claim a restoration from outside itself.
+        Assert.ThrowsExactly<AutomationException>(() => new DiagramRequirementHistory(first.Scope,
+            [root, root with { Id = Guid.NewGuid(), ParentId = root.Id, Restorations = [new(DiagramRequirementField.Routing, earlier)] }]));
         Assert.ThrowsExactly<AutomationException>(() => new DiagramRequirementHistory(first.Scope,
             [root, root with { Id = Guid.NewGuid(), ParentId = root.Id,
                 Requirements = root.Requirements with { Routing = "Not the restored value" },

@@ -40,20 +40,32 @@ internal static class NativeSetupUi
         await StableGeometry(display, processId, token);
     }
 
+    // failureCapture, when given, receives a screenshot of the display if the popup never reaches the wanted state,
+    // so an intermittent failure can be diagnosed from the retained evidence.
     internal static async Task WaitForPopup(string display, int processId, bool visible, CancellationToken token,
-        string window = "Schematic Setup")
+        string window = "Schematic Setup", string? failureCapture = null)
     {
         using var wait = CancellationTokenSource.CreateLinkedTokenSource(token);
         wait.CancelAfter(TimeSpan.FromSeconds(5));
         int delay = 25;
-        while (true)
+        try
         {
-            wait.Token.ThrowIfCancellationRequested();
-            int count = 0;
-            NativeKeyboard.SchematicShortcut(display, processId, "", window,
-                observePopupCount: value => count = value);
-            if ((count != 0) == visible) return;
-            await Task.Delay(delay, wait.Token); delay = Math.Min(delay * 2, 200);
+            while (true)
+            {
+                wait.Token.ThrowIfCancellationRequested();
+                int count = 0;
+                NativeKeyboard.SchematicShortcut(display, processId, "", window,
+                    observePopupCount: value => count = value);
+                if ((count != 0) == visible) return;
+                await Task.Delay(delay, wait.Token); delay = Math.Min(delay * 2, 200);
+            }
+        }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested)
+        {
+            if (failureCapture is not null)
+                await NativeKeyboard.CaptureAsync(display, failureCapture, CancellationToken.None);
+            throw new AssertFailedException($"A popup of '{window}' did not {(visible ? "open" : "close")} within 5 s"
+                + (failureCapture is null ? "." : $"; the display is saved as {Path.GetFileName(failureCapture)}."));
         }
     }
 

@@ -1339,6 +1339,19 @@ public sealed class RecursiveEditorFileCommandTests
                 Assert.IsFalse(refused.Success, name); Assert.AreEqual("connection_member_edit_requires_member_path", refused.ErrorCode, name);
             }
             Assert.AreEqual(savedXml, await File.ReadAllTextAsync(path), "A refused member list writes nothing.");
+            // The positive control for the refusals above: the one member list the rule accepts (the saved signals in their saved
+            // order, then the signal drawn for I2C) saves through the same EditI2c draft. It is saved to a copy of the file, so the
+            // steps below still start from the saved design.
+            string copy = Path.Combine(root, "accepted-members.xml"); await File.WriteAllTextAsync(copy, savedXml);
+            var copyRead = ReadRequest(root, copy, stored, 2); var copyLoaded = await Invoke(copyRead); Assert.IsTrue(copyLoaded.Success, copyLoaded.ErrorMessage);
+            var accepted = await Invoke(SaveLevelRequest(copyRead, copyLoaded.SourceToken, stored.SelectedRoot, [stored.SelectedRoot],
+                EditI2c([sda.Selection, scl.Selection, alert.Selection], alert)));
+            Assert.IsTrue(accepted.Success, accepted.ErrorMessage);
+            var acceptedGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(copy)); var acceptedLinks = acceptedGraph.Connections(system.BlockId);
+            var acceptedI2c = acceptedLinks.Inspect(acceptedGraph.Inspect(acceptedGraph.SelectedRoot).LocalDiagram.Connections.Single(c => c.ConnectionId == i2c.ConnectionId));
+            CollectionAssert.AreEqual(new[] { "SDA", "SCL", "ALERT" }, acceptedI2c.Members.Select(m => acceptedLinks.Inspect(m).Name).ToArray(),
+                "The saved signals keep their order and the drawn one follows them.");
+            Assert.AreEqual(savedXml, await File.ReadAllTextAsync(path), "Saving the copy leaves the design itself unchanged.");
 
             // A saved signal leaves through the helper's removal cascade: a note on it becomes unresolved, and nothing is written.
             var note = new DiagramAnnotation(Guid.NewGuid(), DiagramAnnotationRole.Comment, "Return current flows here.",
@@ -1555,6 +1568,225 @@ public sealed class RecursiveEditorFileCommandTests
             Assert.AreEqual(renamedXml, await File.ReadAllTextAsync(path), "A rebase never writes.");
         }
         finally { Directory.Delete(root, true); }
+    }
+
+    /// <summary>Ledger pf92d0ecdec8805b4 through the compiled helper process (the connection save an agent tool sends) on the shared
+    /// PSU/CPU design (psu-cpu-fixture-and-ownership.md section 1.5). On the PSU level, Rail B's end on the PSU's own Power port is
+    /// left explicitly unresolved and then bound to that port again, which carries it through the levels to the System's Power
+    /// connection and its rails. The PSU's Telemetry signals are refined into a UART group and a new SYNC differential pair, and the
+    /// System's Power rails into a group; every current member keeps its exact revision and requirement history, new members start
+    /// their own three requirement fields with the agent's sources, and the PSU's stated realization of its Telemetry port stays
+    /// exact. Every refused save writes nothing.</summary>
+    [TestMethod]
+    public async Task AgentConnectionEditsBindEndsThroughTheLevelsAndRefineMembersInOneGuardedSave()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-connection-refinement-").FullName;
+        try
+        {
+            static Guid K(int kind, long n) => PsuCpuIds.Id(kind, n);
+            var fixture = PsuCpuFixture.Graph(); var psu = fixture.Inspect(fixture.SelectedRoot).Children[0];
+            Guid powerPort = K(0x15, 3), telemetryPort = K(0x15, 4);
+            // The PSU level states how its Telemetry port is realized inside: by the two signals of its Telemetry connection.
+            var stated = new InterfaceRealization(telemetryPort, DiagramRealizationState.Resolved,
+                [InterfaceRealizationTarget.LocalConnection(K(0x16, 0x16)), InterfaceRealizationTarget.LocalConnection(K(0x16, 0x17))], null, []);
+            var realized = fixture.StartDraft(psu);
+            realized = realized with { Diagram = realized.LocalDiagram with { InterfaceRealizations = [stated] } };
+            var start = fixture.SaveDraft(fixture.SelectedRoot, [fixture.SelectedRoot, psu], realized, Guid.NewGuid(), Guid.NewGuid(), [Guid.NewGuid()],
+                RecursiveBlockFixture.Origin()).Graph;
+            string path = Path.Combine(root, "system.blocks.xml"); await File.WriteAllTextAsync(path, RecursiveBlockGraphXml.Write(start));
+            var read = ReadRequest(root, path, start, 2); var loaded = await Invoke(read); Assert.IsTrue(loaded.Success, loaded.ErrorMessage);
+            ImmutableArray<SourceReference> sources = [new("psu-cpu-interface-notes", "rev-1", 2, null, null)];
+            RequirementRevisionOrigin Agent(string summary) => new(RequirementRevisionActor.Agent, "Refinement agent", DateTimeOffset.UtcNow, summary, sources, [Guid.NewGuid()]);
+            var graph = start; string token = loaded.SourceToken;
+            async Task<P.RecursiveFileResult> Saved(P.RecursiveFileRequest request, string step)
+            {
+                var result = await Invoke(request);
+                Assert.IsTrue(result.Success, step + ": " + result.ErrorCode + " " + result.ErrorMessage);
+                string xml = await File.ReadAllTextAsync(path);
+                graph = RecursiveBlockGraphXml.Read(xml); token = result.SourceToken;
+                Assert.AreEqual(xml, RecursiveBlockGraphXml.Write(RecursiveBlockCodec.Decode(result.Document.Graph)), step + ": the result describes the file.");
+                return result;
+            }
+            async Task Refused(P.RecursiveFileRequest request, string code, string step)
+            {
+                string before = await File.ReadAllTextAsync(path);
+                var result = await Invoke(request);
+                Assert.IsFalse(result.Success, step); Assert.AreEqual(code, result.ErrorCode, step + ": " + result.ErrorMessage);
+                Assert.AreEqual(before, await File.ReadAllTextAsync(path), step + ": a refused save writes nothing.");
+            }
+            string[] Ids(IEnumerable<P.ConnectionSelectionData> rows) => [.. rows.Select(r => r.ConnectionId)];
+
+            // Rail B's end on the PSU's Power port becomes explicitly unresolved on the PSU level's own boundary. Only Rail B, the PSU
+            // and the System gain a revision; Rail B's other end keeps its exact pin and its requirement text is unchanged.
+            ImmutableArray<BlockSelection> psuPath = [graph.SelectedRoot, graph.Inspect(graph.SelectedRoot).Children[0]];
+            var railB = graph.Inspect(psuPath[1]).LocalDiagram.Connections.Single(c => c.ConnectionId == K(0x16, 0x0c));
+            var target = RecursiveConnectionEdits.Locate(graph, graph.SelectedRoot, psuPath, [railB]);
+            var unbound = RecursiveConnectionEdits.SetEndpoint(graph, target, 1, ConnectionEndpointAction.Unbind, null, null, "Which PSU output carries Rail B is open.");
+            var before = graph;
+            var saved = await Saved(SaveConnectionRequest(read, token, graph.SelectedRoot, psuPath, [railB], unbound, Agent("Unbind connection end")), "unbind");
+            var (levelPath, linkPath) = RecursiveConnectionEdits.Follow(graph, psuPath, [railB]);
+            var links = graph.Connections(psu.BlockId); var railBNow = links.Inspect(linkPath[0]); var railBBefore = links.Inspect(railB);
+            Assert.IsTrue(railBNow.Endpoints[1].SameDefinition(DiagramEndpointBinding.Unknown(psu.BlockId, "Which PSU output carries Rail B is open.")),
+                "The end is Unresolved on the PSU level's own boundary, without a port, and says what is open.");
+            Assert.IsTrue(railBNow.Endpoints[0].SameDefinition(railBBefore.Endpoints[0]), "The other end keeps its exact pin.");
+            Assert.AreEqual((DiagramEndpointKind.Interface, psu.BlockId, (Guid?)powerPort), (railBBefore.Endpoints[1].Kind, railBBefore.Endpoints[1].BlockId,
+                railBBefore.Endpoints[1].InterfaceId), "The earlier revision keeps the binding in history.");
+            Assert.AreEqual(railB.RevisionId, railBNow.ParentRevisionId);
+            Assert.AreEqual(links.Requirements(railB).Requirements, links.Requirements(linkPath[0]).Requirements, "Rail B's requirement fields are unchanged.");
+            CollectionAssert.AreEqual(new[] { linkPath[0].ConnectionId.ToString("D") }, Ids(saved.SaveSummary.CreatedConnectionRevisions));
+            CollectionAssert.AreEqual(new[] { levelPath[1].RevisionId.ToString("D") }, saved.SaveSummary.CreatedBlockRevisions.Select(r => r.RevisionId).ToArray());
+            CollectionAssert.AreEqual(new[] { levelPath[0].RevisionId.ToString("D") }, saved.SaveSummary.CreatedAncestors.Select(r => r.RevisionId).ToArray());
+            Assert.AreEqual(sources.Single(), railBNow.Origin.Sources.Single(), "The agent's source is recorded on the new revision.");
+            CollectionAssert.AreEqual(before.Inspect(before.SelectedRoot).LocalDiagram.Connections.ToArray(),
+                graph.Inspect(graph.SelectedRoot).LocalDiagram.Connections.ToArray(), "The System's connections keep their exact revisions.");
+
+            // Bound to the port on the PSU level's boundary again: through that port the end reaches the System's Power connection and its
+            // three rails, which use the PSU's Power port from outside. Binding it the same way once more changes nothing and writes nothing.
+            target = RecursiveConnectionEdits.Locate(graph, graph.SelectedRoot, levelPath, linkPath);
+            var bound = RecursiveConnectionEdits.SetEndpoint(graph, target, 1, ConnectionEndpointAction.Bind, psu.BlockId, powerPort,
+                "Rail B leaves the PSU through its Power port.");
+            await Saved(SaveConnectionRequest(read, token, graph.SelectedRoot, levelPath, linkPath, bound, Agent("Bind connection end")), "bind");
+            (levelPath, linkPath) = RecursiveConnectionEdits.Follow(graph, levelPath, linkPath);
+            var endpoint = graph.Connections(psu.BlockId).Inspect(linkPath[0]).Endpoints[1];
+            Assert.AreEqual((DiagramEndpointKind.Interface, psu.BlockId, (Guid?)powerPort, "Rail B leaves the PSU through its Power port."),
+                (endpoint.Kind, endpoint.BlockId, endpoint.InterfaceId, endpoint.Intent));
+            var mapping = RecursiveConnectionEdits.Boundary(graph, levelPath, endpoint)!;
+            Assert.AreEqual(("Power", levelPath[0]), (mapping.InterfaceName, mapping.ParentLevel));
+            CollectionAssert.AreEquivalent(new[] { K(0x16, 2), K(0x16, 3), K(0x16, 4), K(0x16, 5) }, mapping.ParentConnections.Select(c => c.ConnectionId).ToArray(),
+                "The System's Power connection and its rails use the PSU's Power port from outside.");
+            Assert.IsNull(mapping.Realization, "No realization of the Power port is stated, and none is derived.");
+            target = RecursiveConnectionEdits.Locate(graph, graph.SelectedRoot, levelPath, linkPath);
+            string boundXml = await File.ReadAllTextAsync(path);
+            var same = await Invoke(SaveConnectionRequest(read, token, graph.SelectedRoot, levelPath, linkPath,
+                RecursiveConnectionEdits.SetEndpoint(graph, target, 1, ConnectionEndpointAction.Bind, psu.BlockId, powerPort, null), Agent("Bind connection end")));
+            Assert.IsTrue(same.Success, same.ErrorMessage); Assert.IsFalse(same.SaveSummary.Changed, "An end that would not change is not saved.");
+            Assert.AreEqual(boundXml, await File.ReadAllTextAsync(path));
+
+            // Ends the level does not have are refused, and so is a save against an earlier file.
+            var railBDraft = graph.Connections(psu.BlockId).StartDraft(linkPath[0]);
+            var cpuPort = new DiagramEndpointBinding(DiagramEndpointKind.Interface, K(0x11, 3), K(0x15, 5), "", null, [], null);
+            await Refused(SaveConnectionRequest(read, token, graph.SelectedRoot, levelPath, linkPath, railBDraft with { Endpoints = railBDraft.Endpoints.SetItem(1, cpuPort) },
+                Agent("Bind connection end")), "connection_edit_target_missing", "an end on a block of another level");
+            var otherPort = new DiagramEndpointBinding(DiagramEndpointKind.Interface, psu.BlockId, K(0x15, 0x0f), "", null, [], null);
+            await Refused(SaveConnectionRequest(read, token, graph.SelectedRoot, levelPath, linkPath, railBDraft with { Endpoints = railBDraft.Endpoints.SetItem(1, otherPort) },
+                Agent("Bind connection end")), "connection_edit_target_missing", "an end on a port its block does not have");
+            await Refused(SaveConnectionRequest(read, loaded.SourceToken, start.SelectedRoot, psuPath, [railB], unbound, Agent("Unbind connection end")),
+                "recursive_block_file_changed", "a save against the file before the agent's edits");
+
+            // The PSU's Telemetry signals become a UART group, and a new SYNC differential pair of two new signals joins them.
+            var telemetry = graph.Inspect(levelPath[1]).LocalDiagram.Connections.Single(c => c.ConnectionId == K(0x16, 0x15));
+            target = RecursiveConnectionEdits.Locate(graph, graph.SelectedRoot, levelPath, [telemetry]);
+            Guid uart = Guid.NewGuid(), sync = Guid.NewGuid(), plus = Guid.NewGuid(), minus = Guid.NewGuid();
+            var (refined, created) = RecursiveConnectionEdits.RefineMembers(target, [uart, sync],
+                [new(uart, "UART", [K(0x16, 0x16), K(0x16, 0x17)], DiagramConnectionKind.SignalGroup, "Keep both directions of the link together.", "",
+                    "Route the two lines side by side."),
+                 new(sync, "SYNC", [plus, minus], DiagramConnectionKind.DifferentialPair, "", "Draw the pair as one bus.", "Match the pair's lengths."),
+                 new(plus, "SYNC+", []), new(minus, "SYNC-", [])], Guid.NewGuid, "Initial");
+            var refine = SaveConnectionRequest(read, token, graph.SelectedRoot, levelPath, [telemetry], refined, Agent("Refine connection members"), created);
+            // Refused member lists write nothing.
+            ImmutableArray<NewConnectionMember> Replace(Guid id, Func<NewConnectionMember, NewConnectionMember> change) =>
+                [.. created.Select(m => m.Selection.ConnectionId == id ? change(m) : m)];
+            var extra = created.Single(m => m.Selection.ConnectionId == plus) with { Selection = new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid()),
+                RequirementRevisionId = Guid.NewGuid(), Name = "SYNC spare" };
+            var refusals = new (string Step, P.RecursiveFileRequest Request, string Code)[]
+            {
+                ("a new member reusing a connection identity", SaveConnectionRequest(read, token, graph.SelectedRoot, levelPath, [telemetry], refined,
+                    Agent("Refine connection members"), Replace(plus, m => m with { Selection = m.Selection with { ConnectionId = K(0x16, 0x0e) } }))
+                    , "identity_reused"),
+                ("a member placed twice", SaveConnectionRequest(read, token, graph.SelectedRoot, levelPath, [telemetry],
+                    refined with { Members = refined.Members.Add(target.Connection.Members[0]) }, Agent("Refine connection members"), created), "invalid_connection_refinement"),
+                ("a pair of three signals", SaveConnectionRequest(read, token, graph.SelectedRoot, levelPath, [telemetry], refined, Agent("Refine connection members"),
+                    [.. Replace(sync, m => m with { Members = [plus, minus, extra.Selection.ConnectionId] }), extra]), "invalid_connection_refinement"),
+                ("a new member nothing contains", SaveConnectionRequest(read, token, graph.SelectedRoot, levelPath, [telemetry], refined, Agent("Refine connection members"),
+                    [.. created, extra]), "invalid_connection_refinement"),
+                ("a group of a member of another connection", SaveConnectionRequest(read, token, graph.SelectedRoot, levelPath, [telemetry], refined,
+                    Agent("Refine connection members"), Replace(uart, m => m with { Members = [K(0x16, 0x16), K(0x16, 0x0e)] })), "invalid_connection_refinement"),
+            };
+            foreach (var (step, request, code) in refusals) await Refused(request, code, step);
+            var signal = refine.Clone(); signal.SaveConnection.NewMembers[2].MemberOf = K(0x16, 0x15).ToString("D");
+            await Refused(signal, "invalid_recursive_diagram_data", "a new member that names a level draft's connection");
+            saved = await Saved(refine, "refine telemetry");
+            (levelPath, linkPath) = RecursiveConnectionEdits.Follow(graph, levelPath, [telemetry]);
+            links = graph.Connections(psu.BlockId);
+            var telemetryNow = links.Inspect(linkPath[0]);
+            CollectionAssert.AreEqual(new[] { "UART", "SYNC" }, telemetryNow.Members.Select(m => links.Inspect(m).Name).ToArray());
+            var uartNow = links.Inspect(telemetryNow.Members[0]); var syncNow = links.Inspect(telemetryNow.Members[1]);
+            CollectionAssert.AreEqual(links.Inspect(telemetry).Members.ToArray(), uartNow.Members.ToArray(),
+                "MCU to CPU and CPU to MCU keep their exact saved revisions inside UART.");
+            foreach (var kept in uartNow.Members)
+                Assert.AreEqual(before.Connections(psu.BlockId).Requirements(kept), links.Requirements(kept), "A kept member keeps its requirement history.");
+            Assert.AreEqual((DiagramConnectionKind.SignalGroup, DiagramConnectionKind.DifferentialPair), (uartNow.Kind, syncNow.Kind));
+            CollectionAssert.AreEqual(new[] { ("SYNC+", DiagramConnectionKind.Signal), ("SYNC-", DiagramConnectionKind.Signal) },
+                syncNow.Members.Select(m => (links.Inspect(m).Name, links.Inspect(m).Kind)).ToArray());
+            Assert.AreEqual(new DiagramRequirements("Keep both directions of the link together.", "", "Route the two lines side by side."),
+                links.Requirements(telemetryNow.Members[0]).Requirements, "UART starts with its own three requirement fields.");
+            Assert.AreEqual(new DiagramRequirements("", "Draw the pair as one bus.", "Match the pair's lengths."), links.Requirements(telemetryNow.Members[1]).Requirements);
+            Assert.AreEqual(links.Requirements(telemetry).Requirements, links.Requirements(linkPath[0]).Requirements, "Telemetry's own fields are unchanged.");
+            Assert.IsTrue(new[] { uartNow, syncNow }.Concat(syncNow.Members.Select(links.Inspect)).All(m => m.Origin.Sources.SequenceEqual(sources)
+                && m.ParentRevisionId is null && m.Endpoints.Length == 2
+                && m.Endpoints.Zip(telemetryNow.Endpoints).All(e => e.First.SameDefinition(e.Second))),
+                "Each new member records the agent's source, starts its own history and runs between Telemetry's drawn ends.");
+            CollectionAssert.AreEqual(links.Inspect(telemetry).Members.ToArray(), before.Connections(psu.BlockId).Inspect(telemetry).Members.ToArray(),
+                "The earlier Telemetry revision keeps its two signals.");
+            Assert.HasCount(5, saved.SaveSummary.CreatedConnectionRevisions, "UART, SYNC, SYNC+, SYNC- and Telemetry's successor.");
+            // The PSU's Telemetry port is still realized by exactly the same two signals, now inside UART; from outside, the System's
+            // Telemetry connection and its signals still use that port.
+            var psuNow = graph.Inspect(levelPath[1]);
+            Assert.IsTrue(stated.SameContents(psuNow.LocalDiagram.Realizations.Single()), "The realization of the Telemetry port stays exact.");
+            var telemetryMapping = RecursiveConnectionEdits.Boundary(graph, levelPath, telemetryNow.Endpoints[1])!;
+            CollectionAssert.AreEquivalent(new[] { K(0x16, 6), K(0x16, 7), K(0x16, 8) }, telemetryMapping.ParentConnections.Select(c => c.ConnectionId).ToArray());
+            Assert.IsTrue(stated.SameContents(telemetryMapping.Realization));
+
+            // The System's Power rails become one group beside Return. The PSU keeps its revision; through its Power port Rail B still
+            // reaches Power and each rail, now also the new group.
+            var power = graph.Inspect(graph.SelectedRoot).LocalDiagram.Connections.Single(c => c.ConnectionId == K(0x16, 2));
+            target = RecursiveConnectionEdits.Locate(graph, graph.SelectedRoot, [graph.SelectedRoot], [power]);
+            Guid rails = Guid.NewGuid();
+            (refined, created) = RecursiveConnectionEdits.RefineMembers(target, [rails, K(0x16, 5)],
+                [new(rails, "Supply rails", [K(0x16, 3), K(0x16, 4)], DiagramConnectionKind.SignalGroup, "Deliver both regulated rails to the CPU.")],
+                Guid.NewGuid, "Initial");
+            var psuBefore = levelPath[1];
+            await Saved(SaveConnectionRequest(read, token, graph.SelectedRoot, [graph.SelectedRoot], [power], refined, Agent("Refine connection members"), created),
+                "refine power");
+            var system = graph.Connections(graph.SelectedRoot.BlockId); var powerNow = system.Inspect(graph.Inspect(graph.SelectedRoot).LocalDiagram.Connections
+                .Single(c => c.ConnectionId == K(0x16, 2)));
+            CollectionAssert.AreEqual(new[] { "Supply rails", "Return" }, powerNow.Members.Select(m => system.Inspect(m).Name).ToArray());
+            CollectionAssert.AreEqual(system.Inspect(power).Members.Take(2).ToArray(), system.Inspect(powerNow.Members[0]).Members.ToArray());
+            Assert.AreEqual(psuBefore, graph.Inspect(graph.SelectedRoot).Children[0], "The PSU keeps its revision.");
+            (levelPath, linkPath) = RecursiveConnectionEdits.Follow(graph, levelPath, linkPath);
+            CollectionAssert.AreEquivalent(new[] { K(0x16, 2), rails, K(0x16, 3), K(0x16, 4), K(0x16, 5) },
+                RecursiveConnectionEdits.Boundary(graph, levelPath, endpoint)!.ParentConnections.Select(c => c.ConnectionId).ToArray(),
+                "Rail B reaches Power, the new group and each rail through the PSU's Power port.");
+
+            // A level draft's drawn connection lists no members of its own: the member list belongs to a connection save only.
+            var drawn = new NewConnectionOccurrence(new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid()), Guid.NewGuid(), "Initial", "Status",
+                DiagramConnectionKind.Abstract, DiagramDomain.Unspecified, DiagramConnectionDirection.Unspecified,
+                [DiagramEndpointBinding.Unknown(K(0x11, 2)), DiagramEndpointBinding.Unknown(K(0x11, 3))], DiagramRequirements.Empty, null);
+            var level = graph.StartLevelDraft(graph.SelectedRoot);
+            level = level with { Scope = level.Scope with { Diagram = level.Scope.LocalDiagram with { Connections = level.Scope.LocalDiagram.Connections.Add(drawn.Selection) } },
+                NewConnections = [drawn] };
+            var withMembers = SaveLevelRequest(read, token, graph.SelectedRoot, [graph.SelectedRoot], level);
+            withMembers.SaveLevel.Draft.NewConnections[0].Members.Add(K(0x16, 5).ToString("D"));
+            await Refused(withMembers, "invalid_recursive_diagram_data", "a level draft's drawn connection with members");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    private static P.RecursiveFileRequest SaveConnectionRequest(P.RecursiveFileRequest read, string token, BlockSelection expectedRoot,
+        ImmutableArray<BlockSelection> blockPath, ImmutableArray<ConnectionSelection> connectionPath, DiagramConnectionDraft draft,
+        RequirementRevisionOrigin origin, IEnumerable<NewConnectionMember>? members = null)
+    {
+        var request = read.Clone(); request.Action = P.RecursiveFileAction.RfaSaveConnection; request.ExpectedSourceToken = token;
+        request.SaveConnection = new() { ExpectedRoot = Data(expectedRoot), Draft = RecursiveBlockCodec.Encode(draft),
+            NewConnectionRevisionId = Guid.NewGuid().ToString("D"), NewRequirementRevisionId = Guid.NewGuid().ToString("D"),
+            NewBlockRevisionId = Guid.NewGuid().ToString("D"), NewBlockRequirementRevisionId = Guid.NewGuid().ToString("D"),
+            Origin = RecursiveBlockCodec.EncodeOrigin(origin) };
+        request.SaveConnection.BlockPath.Add(blockPath.Select(Data));
+        request.SaveConnection.ConnectionPath.Add(connectionPath.Select(RecursiveBlockCodec.EncodeSelection));
+        request.SaveConnection.BlockAncestorRevisionIds.Add(blockPath.Skip(1).Select(_ => Guid.NewGuid().ToString("D")));
+        request.SaveConnection.ConnectionAncestorRevisionIds.Add(connectionPath.Skip(1).Select(_ => Guid.NewGuid().ToString("D")));
+        request.SaveConnection.NewMembers.Add((members ?? []).Select(RecursiveBlockCodec.Encode));
+        return request;
     }
 
     private static P.RecursiveFileRequest SaveLevelRequest(P.RecursiveFileRequest read, string token, BlockSelection expectedRoot,

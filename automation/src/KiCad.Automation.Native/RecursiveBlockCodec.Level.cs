@@ -15,10 +15,41 @@ public static partial class RecursiveBlockCodec
             [.. data.NewChildren.Select(c => new M.NewBlockOccurrence(Selection(Need(c.Selection)), GuidValue(c.RequirementRevisionId),
                 c.ImplementationName, c.Name, Fields(Need(c.Fields)), [.. c.Interfaces.Select(Interface)],
                 c.Definition is { } definition ? Decode(definition) : null))],
-            [.. data.NewConnections.Select(c => new M.NewConnectionOccurrence(Selection(Need(c.Selection)), GuidValue(c.RequirementRevisionId),
+            [.. data.NewConnections.Select(c => c.Members.Count != 0
+                // A drawn connection or signal gets its members from the signals drawn for it (member_of); the member list is
+                // only for members a connection save creates (SaveConnectionDraftData.new_members).
+                ? throw Invalid("A connection or signal drawn in a level draft lists no members of its own; nothing was saved.")
+                : new M.NewConnectionOccurrence(Selection(Need(c.Selection)), GuidValue(c.RequirementRevisionId),
                 c.ImplementationName, c.Name, Defined((M.DiagramConnectionKind)((int)c.Kind - 1)), Domain(c.Domain), Direction(c.Direction),
                 [.. c.Endpoints.Select(Decode)], Fields(Need(c.Fields)), c.Realization is { } realization ? Realization(realization) : null,
                 c.HasMemberOf ? GuidValue(c.MemberOf) : null))]);
+    }
+
+    /// <summary>The members a connection save creates while it refines the connection's members into groups, pairs and
+    /// signals (SaveConnectionDraftData.new_members, lane 2B band). Each names what it groups by connection id. A new member
+    /// is never a level draft's signal (member_of) and states no interconnect realization at creation; either is refused.</summary>
+    public static ImmutableArray<M.NewConnectionMember> DecodeNewMembers(IEnumerable<P.NewConnectionData> rows) => [.. rows.Select(c =>
+    {
+        Known(c, P.NewConnectionData.Parser);
+        if (c.HasMemberOf || c.Realization is not null)
+            throw Invalid("A member created by a connection save belongs to that connection and states no realization yet; member_of and realization are not part of it.");
+        return new M.NewConnectionMember(Selection(Need(c.Selection)), GuidValue(c.RequirementRevisionId), c.ImplementationName, c.Name,
+            Defined((M.DiagramConnectionKind)((int)c.Kind - 1)), [.. c.Endpoints.Select(Decode)], Fields(Need(c.Fields)),
+            [.. c.Members.Select(GuidValue)], Domain(c.Domain), Direction(c.Direction));
+    })];
+
+    public static P.BlockSelectionData EncodeSelection(M.BlockSelection selection) => Selection(selection);
+    public static P.ConnectionSelectionData EncodeSelection(M.ConnectionSelection selection) => Selection(selection);
+    public static P.DiagramRevisionOriginData EncodeOrigin(M.RequirementRevisionOrigin origin) => Origin(origin);
+
+    public static P.NewConnectionData Encode(M.NewConnectionMember member)
+    {
+        var row = new P.NewConnectionData { Selection = Selection(member.Selection), RequirementRevisionId = Id(member.RequirementRevisionId),
+            ImplementationName = member.ImplementationName, Name = member.Name, Kind = (P.DiagramConnectionKind)((int)member.Kind + 1),
+            Domain = (P.DiagramDomain)member.Domain, Direction = (P.DiagramConnectionDirection)member.Direction, Fields = Fields(member.Requirements) };
+        row.Endpoints.Add(member.Endpoints.Select(Encode));
+        row.Members.Add(member.MemberList.Select(Id));
+        return row;
     }
 
     public static P.LevelDraftData Encode(M.RecursiveLevelDraft draft)

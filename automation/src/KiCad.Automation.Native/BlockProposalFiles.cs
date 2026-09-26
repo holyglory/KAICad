@@ -151,6 +151,10 @@ public static class BlockProposalFiles
         return RecursiveBlockFiles.Published(loaded.Snapshot, loaded.Snapshot.Path, hash, selected.Graph, version);
     }
 
+    /// <summary>The retained request for this proposal identity, or null when this state directory retains none.</summary>
+    public static RetainedBlockProposal? TryReadRetained(string stateDirectory, Guid proposalId) =>
+        File.Exists(RetainedPath(stateDirectory, proposalId)) ? ReadRetained(stateDirectory, proposalId) : null;
+
     public static RetainedBlockProposal ReadRetained(string stateDirectory, Guid proposalId)
     {
         string path = RetainedPath(stateDirectory, proposalId);

@@ -853,6 +853,41 @@ or close without saving and reopen, then call again). A refusal after a release 
 when no comparison was made. The PSU/CPU `native-crash` graph proves both continuations on
 killed KiCad processes, including a user edit on another sheet.
 
+When KiCad applied a synchronization but the check that follows refused it (for example
+`native_sync_connectivity_mismatch` or `realization_resolution_mismatch`), retrying repeats the
+refusal. While that KiCad runs, stop any automatic session and call
+`kicad_design_recovery_resolve_pending(instanceId, recoveryPath, expectedRevisionToken,
+operationId, choice)` with `undo` (removes exactly that change from KiCad in one checked edit),
+`keep-and-replan` (keeps KiCad's result, re-plans the XML from it with KiCad's connections
+winning, and publishes through `kicad_design_sync_apply` with the returned
+`continuationOperationId`) or `discard` (once KiCad already shows the design as it was before,
+or never received the edit). The XML and the baseline stay unchanged until a consistent result
+is published, every refusal names a choice that works, and a receipt is kept in
+`<recoveryPath>.resolved`. An automatic session whose KiCad ends pauses at once with
+`instance_exited` and needs KiCad started again and the record reattached.
+
+Symbols placed in KiCad join the XML design with identities derived from the circuit, the
+native sheet path and the symbol's own UUID, so a repeated plan, a replay or a redo gives the
+same identities. Their part is the one existing part drawn or declared with the same library
+symbol and exactly the same pins; otherwise a new part is made from that symbol's pins.
+`kicad_design_sync_plan` reports `addedSymbolOccurrences`, `addedComponents`, `addedParts` and
+`ownershipResolutionRequests`. When a part or unit cannot be decided exactly, automatic
+synchronization pauses with `native_ownership_resolution_required` and publishes nothing.
+
+`kicad_design_automatic_sync_start` accepts an optional `blockGraphPath` and `designId`; after
+each synchronization a placed component joins the block of its sheet only when exactly one
+block owns everything else on that sheet. Otherwise it pauses with
+`block_owner_resolution_required` and the plan lists `candidateBlockIds`; answer with
+`kicad_diagram_components_set` and resume. `kicad_design_block_owners_plan` and
+`kicad_design_block_owners_apply` do the same on request (apply is guarded by the block graph
+file's SHA-256). Units or components the XML removes are removed in KiCad; the pins only a
+removed unit draws must leave their nets first (`xml_removal_unit_pins_connected`). If KiCad
+also changed, both versions are kept and synchronization pauses
+(`ownership_change_with_xml_edits`). Placing a symbol before the design was ever synchronized
+fails with `missing_native_ownership_history`; history that exists but cannot be verified fails
+with `unverified_native_ownership_history`. Sheets added, removed or moved in KiCad, and XML
+sheet removals and moves, are not synchronized yet.
+
 Run `devcoordinator2 test start . --test native-xml-component-creation --tier
 development --client codex` for the two-editor Linux journey. It checks XML-driven
 root/repeated-sheet creation, unchanged connectivity, exact retry, cancellation,
@@ -1212,12 +1247,19 @@ creates native sheets from XML:
 
 The rebuild refuses, before KiCad is touched: XML edited after the files were lost
 (`rebuild_requires_settled_xml`); net chains, and sheet files shared by several sheets,
-which it cannot rebuild yet (`rebuild_state_unrepresented`); a kept project file whose
-settings differ from the XML's (`rebuild_project_settings_changed`); and any planned
-change other than the root identity, page, title block, root page and embedded files
-(`rebuild_operation_unsupported`). The snapshot's list of state it does not hold no
-longer names the library cache, which it now holds exactly; recovery records captured
-by earlier previews report a changed snapshot on their first capture after upgrading.
+which it cannot rebuild yet (`rebuild_state_unrepresented`); project settings shown in
+KiCad that differ from the XML's (`rebuild_project_settings_changed`: change them back in
+KiCad, or restore the project file saved with the XML and reopen the project, then refresh
+the recovery record before rebuilding); and any planned change other than the root
+identity, page, title block, root page and embedded files (`rebuild_operation_unsupported`).
+A project file changed on disk after KiCad loaded it is refused at apply
+(`native_file_conflict`). A fully wired design is rebuilt too: the PSU/CPU Complete stage,
+drawn through XML, comes back byte for byte after its schematic files are deleted. The
+snapshot's list of state it does not hold no longer names the library cache, which it now
+holds exactly. A recovery record saved by an earlier preview reattaches and plans normally
+after upgrading (its design file keeps the old list until the next synchronization publishes
+the design); one saved before electrical checkpoints asks for
+`kicad_design_electrical_baseline_initialize` first.
 Linux native run `t20260916T032035Z-c12d41` verifies real keyboard undo/redo of
 unit and component deletions in two editors, including history older than the
 latest receipt, exact restored identities, preserved newer instructions, actual

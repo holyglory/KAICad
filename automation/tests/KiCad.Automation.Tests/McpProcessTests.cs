@@ -534,6 +534,8 @@ public sealed class McpProcessTests
                 File.Delete(Path.Combine(state, heldInstance + ".json"));
             }
             CollectionAssert.Contains(names, "kicad_design_recovery_resolve_pending");
+            CollectionAssert.Contains(names, "kicad_design_block_owners_plan");
+            CollectionAssert.Contains(names, "kicad_design_block_owners_apply");
             // A synchronization that KiCad applied but whose follow-up check refused it is left only through
             // kicad_design_recovery_resolve_pending, bound to exactly the pending operation and recovery revision. Every choice
             // checks KiCad first, so with no KiCad attached nothing is resolved and nothing changes. The native journey

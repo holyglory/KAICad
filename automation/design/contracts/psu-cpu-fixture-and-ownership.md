@@ -815,3 +815,8 @@ the matching erratum of `cn2-recursive-diagram-v2.md`.
 `pcbnew/api/pcb_drc_run_inputs.*`, the DRC input capture code under `pcbnew/drc` (including the captured-rules
 loader in `drc_engine.cpp`), the DRC event hooks in `pcbnew/pcb_edit_frame.cpp`, the `qa/tests/pcbnew/drc` job
 tests and the `PcbDrc*`/`NativePcbDrc*` sources and tests (decision nb6844a5bd34d3d5d).
+
+**Amendment 2026-09-26 (section 2.5, lane 2C).** Lane 2C also owns `automation/tests/fixtures/preview-23-recovery/**`,
+`DesignRecoveryPendingResolution.cs`, `NativeSynchronizationRecoveryJourney.cs` and
+`SchematicSynchronizationPlanTests.Rebuild.cs` (decision n4b500adb68997799).
+

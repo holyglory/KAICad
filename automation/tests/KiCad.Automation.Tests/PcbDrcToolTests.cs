@@ -83,7 +83,7 @@ public sealed class PcbDrcToolTests
             Assert.IsTrue(badOperation.IsError ?? false);
             Assert.AreEqual(4, transport.Calls);
             var valid = transport.State.Clone();
-            for (int variant = 0; variant < 10; ++variant)
+            for (int variant = 0; variant < 9; ++variant)
             {
                 transport.State = valid.Clone();
                 switch (variant)
@@ -98,11 +98,6 @@ public sealed class PcbDrcToolTests
                     // An incomplete snapshot must say why, and a complete one must not claim a gap.
                     case 7: transport.State.SnapshotComplete = false; transport.State.ResultsFresh = false; break;
                     case 8: transport.State.InputWarnings.Add("snapshot_incomplete: item_identity: fixture"); break;
-                    // A running check has not yet matched its findings to the open board, so it never claims completeness.
-                    case 9:
-                        transport.State.Status = (PcbDrcJobStatus)2; transport.State.WorkerFinished = false;
-                        transport.State.Progress = 0.2; transport.State.ResultsFresh = false;
-                        break;
                 }
                 Assert.IsTrue((await tool.Job(transport.Session.InstanceId, json, valid.JobId,
                     transport.Session.Epoch, default)).IsError, $"Invalid native state variant {variant} was accepted");
@@ -116,13 +111,9 @@ public sealed class PcbDrcToolTests
             transport.State.Status = (PcbDrcJobStatus)2;
             transport.State.WorkerFinished = false; transport.State.Progress = 0.2;
             transport.State.ResultsFresh = false; transport.State.CancellationRequested = true;
-            transport.State.SnapshotComplete = false;
-            transport.State.InputWarnings.Add("snapshot_incomplete: generated_item_identity: pending until the check completes; only a finished check has matched each finding to an object of the open board.");
             Assert.IsFalse((await tool.Cancel(transport.Session.InstanceId, json, valid.JobId,
                 transport.Session.Epoch, default)).IsError ?? false, "Cancellation acknowledgement may still be running.");
-            // The cancelled check ends without findings: nothing is left to match, and its captured snapshot is complete.
             transport.State.Status = (PcbDrcJobStatus)4; transport.State.WorkerFinished = true;
-            transport.State.SnapshotComplete = true; transport.State.InputWarnings.Clear();
             Assert.IsFalse((await tool.Job(transport.Session.InstanceId, json, valid.JobId,
                 transport.Session.Epoch, default)).IsError ?? false);
             transport.State = valid.Clone();

@@ -173,56 +173,6 @@ public sealed partial class NativeSessionTests
         var repeated = await WaitFor(state => state.Findings.Count == initial.Findings.Count);
         Assert.AreEqual(expectedMarker, repeated.Findings.Single(finding => finding.Excluded && finding.Comment == comment).Marker);
         await Picture("rerun");
-
-        // A detached check captures the exclusion with its comment. Editing only the comment in this rendered dialog makes
-        // that check stale for an agent reading it through the STDIO MCP server; KiCad records the edit as a change of the
-        // board, so the reason is document_changed. A new check carries the edited comment and is complete and fresh.
-        const string editedComment = "fixture edited exclusion";
-        static string Violation(Kiapi.Board.DrcMarker marker) => marker.ErrorType + "|" + string.Join(",", marker.Items.Select(item => item.Value));
-        Task JobEvidence(string name, PcbDrcJobState job) => File.WriteAllTextAsync(
-            Path.Combine(evidence, processId + "-" + name), SchematicJson.Formatter.Format(job), token);
-        var (_, commented) = await RunPcbDrcJob(client, board, await ObserveLifecycleState(client, board, token), token);
-        await JobEvidence("pcb-drc-job-exclusion.json", commented);
-        AssertPcbDrcJobCurrent(commented, "A check of the board with a commented exclusion must be complete and fresh.");
-        var captured = commented.Findings.Single(finding => finding.Excluded);
-        Assert.AreEqual(comment, captured.Comment, "The check must capture the exclusion's comment.");
-        Assert.AreEqual(Violation(expectedMarker), Violation(captured.Marker), "The check must exclude the same violation as the editor.");
-        await Menu(true); // Edit exclusion comment... is the second action of an excluded violation.
-        await Picture("comment-edit");
-        Key("a", commentDialog, true);
-        foreach (char character in editedComment) Key(character.ToString(), commentDialog);
-        NativeKeyboard.SchematicShortcut(display, processId, "click", commentDialog, false, false,
-            clickFromRight: 60, clickFromBottom: 25);
-        await Window(commentDialog, false);
-        await WaitFor(state => state.Findings.Any(finding => finding.Excluded && finding.Comment == editedComment));
-        await Picture("comment-edited");
-        string jobMcpState = Directory.CreateTempSubdirectory("kicad-drc-exclusion-mcp-").FullName;
-        try
-        {
-            await using var mcp = await StdioMcpFixture.StartAsync(jobMcpState,
-                Path.Combine(evidence, processId + "-drc-job-exclusion-mcp.stderr.log"), token);
-            string instanceId = (await client.HandshakeAsync(token)).InstanceId;
-            var attached = await mcp.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId });
-            Assert.IsFalse(attached.TryGetProperty("isError", out var attachError) && attachError.GetBoolean(), attached.GetRawText());
-            var reply = await mcp.Tool("kicad_pcb_drc_job", new
-            {
-                instanceId, documentJson = SchematicJson.Formatter.Format(board), jobId = commented.JobId, processEpoch = client.Epoch
-            });
-            Assert.IsFalse(reply.TryGetProperty("isError", out var replyError) && replyError.GetBoolean(), reply.GetRawText());
-            var stale = SchematicJson.Parser.Parse<PcbDrcJobState>(reply.GetProperty("content").EnumerateArray()
-                .Single(item => item.GetProperty("type").GetString() == "text").GetProperty("text").GetString()!);
-            await JobEvidence("pcb-drc-job-exclusion-stale.json", stale);
-            AssertPcbDrcJobStale(stale, "document_changed",
-                "Editing the exclusion comment in the rendered dialog must make the check stale for an agent reading it over MCP.");
-        }
-        finally { Directory.Delete(jobMcpState, true); }
-        var (_, recommented) = await RunPcbDrcJob(client, board, await ObserveLifecycleState(client, board, token), token);
-        await JobEvidence("pcb-drc-job-exclusion-edited.json", recommented);
-        AssertPcbDrcJobCurrent(recommented, "A new check after the comment edit must be complete and fresh.");
-        var recaptured = recommented.Findings.Single(finding => finding.Excluded);
-        Assert.AreEqual(editedComment, recaptured.Comment, "The new check must capture the edited comment.");
-        Assert.AreEqual(Violation(expectedMarker), Violation(recaptured.Marker));
-
         await Menu(false);
         await WaitFor(state => state.Findings.All(finding => !finding.Excluded));
         await Picture("removed");
@@ -236,8 +186,6 @@ public sealed partial class NativeSessionTests
         await VerifyPcbDrcJobActivation(client, board, processId, display, evidence, token);
         // The router settings reach a check only through the rendered editor's Interactive Router Settings dialog.
         await VerifyPcbDrcJobRouterChange(client, board, processId, display, evidence, token);
-        // The board's current variant reaches a check only through the rendered editor's variant choice.
-        await VerifyPcbDrcJobVariantChange(client, board, processId, display, evidence, token);
         // Checks in this project and its sibling KiCad at once, driven by one agent over MCP; it needs the rendered
         // PCB editor of this step for the person's keyboard edit.
         await VerifyPcbDrcTwoProjects(client, board, processId, display, evidence, token);

@@ -119,6 +119,30 @@ BOOST_AUTO_TEST_CASE( RegeneratesDirtyNativeTuningWithoutChangingTheSource )
     BOOST_CHECK_EQUAL( source->GetTimeStamp(), revision );
     BOOST_CHECK( pattern->IsDirty() );
     BOOST_CHECK( !inputs->GetBoard().Tracks().empty() );
+
+    // The copy of this real board keeps every object identity of the open board, and every track the
+    // pattern rebuilt inside the check stands for the pattern itself: the object of the open board a
+    // person selects and edits. No rebuilt track is presented under an identity the open board lacks.
+    BOOST_CHECK( inputs->Gaps().empty() );
+    inputs->MapGeneratedItems();
+    auto* rebuilt = dynamic_cast<PCB_GENERATOR*>( inputs->GetBoard().ResolveItem( identity, true ) );
+    BOOST_REQUIRE( rebuilt );
+    int regenerated = 0;
+    for( BOARD_ITEM* member : rebuilt->GetBoardItems() )
+    {
+        KIID named = member->m_Uuid;
+        BOOST_CHECK( inputs->ResolveFindingItem( named ) );
+        if( source->ResolveItem( member->m_Uuid, true ) )
+        {
+            BOOST_CHECK( named == member->m_Uuid );
+            continue;
+        }
+        ++regenerated;
+        BOOST_CHECK( named == identity );
+    }
+    BOOST_CHECK_GT( regenerated, 0 );
+    KIID unknown;
+    BOOST_CHECK( !inputs->ResolveFindingItem( unknown ) );
 }
 
 BOOST_AUTO_TEST_CASE( MissingInputsCancellationFailureAndFreshCaptureRecovery )
@@ -269,6 +293,15 @@ BOOST_AUTO_TEST_CASE( CopperFillDrivesViaStitchingAndTheGeneratedViasStayPrivate
     BOOST_CHECK( stitch->GetBoardItems().empty() );
     BOOST_CHECK( source.Tracks().empty() );
     BOOST_CHECK_EQUAL( structure( source ), before );
+
+    // Each via the stitching generated inside the check stands for the stitching itself.
+    inputs->MapGeneratedItems();
+    for( BOARD_ITEM* via : generated->GetBoardItems() )
+    {
+        KIID named = via->m_Uuid;
+        BOOST_CHECK( inputs->ResolveFindingItem( named ) );
+        BOOST_CHECK( named == stitch->m_Uuid );
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

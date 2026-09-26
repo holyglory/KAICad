@@ -21,14 +21,10 @@
 #include <ki_exception.h>
 #include <router/pns_routing_settings.h>
 #include <eda_group.h>
-#include <eda_text.h>
-#include <pcb_barcode.h>
-#include <title_block.h>
 #include <pcb_marker.h>
 #include <zone.h>
 #include <fmt/format.h>
 #include <algorithm>
-#include <set>
 #include <stdexcept>
 
 std::string PcbDrcExceptionMessage( const std::exception& aError )
@@ -71,62 +67,6 @@ BOARD& PCB_DRC_RUN_INPUTS::GetBoard() const { return m_document->GetBoard(); }
 
 namespace
 {
-// Text variables whose value comes from outside the design, which KiCad resolves again
-// each time it lays out a text: the date and the project's version-control revision,
-// which a check can capture and compare, and the time of day, which changes while the
-// check runs.
-constexpr const char* CAPTURED_LIVE_TEXT[] = { "CURRENT_DATE", "VCSHASH", "VCSSHORTHASH" };
-constexpr const char* TIME_OF_DAY_TEXT[] = { "CURRENT_TIME_HH_MM_SS", "CURRENT_TIME_LOCALE" };
-
-// The live text variables the board's texts can show. A check lays out the board's texts
-// (its text clearance and silkscreen tests read their shapes), resolving their variables.
-// A text reaches a variable directly or through the definition of another variable: a
-// project text variable, a board property, a title-block field or another object's field.
-// So once any text refers to a variable, every definition counts too. The search is by
-// name: it can find more than the board shows, never less.
-std::set<std::string> LiveTextVariables( const BOARD& aBoard )
-{
-    std::set<std::string> found;
-    bool refersToVariables = false;
-    auto search = [&]( const wxString& aText )
-    {
-        if( aText.Contains( wxS( "${" ) ) ) refersToVariables = true;
-        for( const char* name : CAPTURED_LIVE_TEXT )
-            if( aText.Contains( name ) ) found.insert( name );
-        for( const char* name : TIME_OF_DAY_TEXT )
-            if( aText.Contains( name ) ) found.insert( name );
-    };
-    auto searchItem = [&]( const BOARD_ITEM* aItem )
-    {
-        if( const auto* text = dynamic_cast<const EDA_TEXT*>( aItem ) ) search( text->GetText() );
-        else if( aItem->Type() == PCB_BARCODE_T ) search( static_cast<const PCB_BARCODE*>( aItem )->GetText() );
-    };
-    for( BOARD_ITEM* item : aBoard.GetItemSet() )
-    {
-        searchItem( item );
-        item->RunOnChildren( searchItem, RECURSE_MODE::RECURSE );
-    }
-    if( !refersToVariables ) return {};
-    if( const PROJECT* project = aBoard.GetProject() )
-        for( const auto& [name, value] : project->GetTextVars() ) search( value );
-    for( const auto& [name, value] : aBoard.GetProperties() ) search( value );
-    const TITLE_BLOCK& titles = aBoard.GetTitleBlock();
-    for( const wxString* field : { &titles.GetTitle(), &titles.GetDate(), &titles.GetRevision(), &titles.GetCompany() } )
-        search( *field );
-    for( int comment = 0; comment < 9; ++comment ) search( titles.GetComment( comment ) );
-    return found;
-}
-
-// The value of a captured live text variable now, as the board's texts resolve it.
-std::string LiveTextValue( const BOARD& aBoard, const std::string& aName )
-{
-    if( aName == "CURRENT_DATE" ) return TITLE_BLOCK::GetCurrentDate().utf8_string();
-    wxString token = wxString::FromUTF8( aName );
-    if( const PROJECT* project = aBoard.GetProject(); project && project->TextVarResolver( &token ) )
-        return token.utf8_string();
-    return "${" + aName + "}"; // Unresolved: shown as written.
-}
-
 nlohmann::json ProjectInputs( const BOARD& aBoard )
 {
     const PROJECT* project = aBoard.GetProject();
@@ -145,12 +85,6 @@ nlohmann::json ProjectInputs( const BOARD& aBoard )
     result["effective_exclusions"] = nlohmann::json::array();
     for( const auto& exclusion : PCB_PROJECT_EDITOR_STATE::Exclusions( aBoard ) )
         result["effective_exclusions"].push_back( exclusion );
-    // The date or revision the board's texts show, only when they can show one, so that
-    // a board without them does not go stale at midnight. Every read compares them again.
-    // The time of day is no captured value (PCB_DRC_RUN_INPUTS::Gaps).
-    const std::set<std::string> live = LiveTextVariables( aBoard );
-    for( const char* name : CAPTURED_LIVE_TEXT )
-        if( live.contains( name ) ) result["live_text"][name] = LiveTextValue( aBoard, name );
     return result;
 }
 }
@@ -235,9 +169,6 @@ std::unique_ptr<PCB_DRC_RUN_INPUTS> PCB_DRC_RUN_INPUTS::Capture(
     const KIID identity = aBoard.m_Uuid;
     auto result = std::unique_ptr<PCB_DRC_RUN_INPUTS>( new PCB_DRC_RUN_INPUTS );
     result->m_projectBaseline.m_settings = ProjectInputs( aBoard );
-    const std::set<std::string> live = LiveTextVariables( aBoard );
-    for( const char* name : TIME_OF_DAY_TEXT )
-        if( live.contains( name ) ) result->m_timeOfDayText.emplace_back( name );
     result->m_auxiliaryBaseline = PCB_DRC_AUXILIARY_BASELINE::Capture( aContext );
     if( aContext.routingSettings )
     {
@@ -348,14 +279,6 @@ std::vector<PCB_DRC_INPUT_GAP> PCB_DRC_RUN_INPUTS::Gaps() const
                              "held by more than one object), so a finding could name an object that does not exist "
                              "in the open board.",
                              gap.missing, gap.unexpected, gap.shared ) } );
-    }
-    if( !m_timeOfDayText.empty() )
-    {
-        std::string names;
-        for( const std::string& name : m_timeOfDayText ) names += ( names.empty() ? "${" : ", ${" ) + name + "}";
-        gaps.push_back( { "current_time_text",
-                fmt::format( "The board's text can show the time of day ({}), which changes while the check runs, "
-                             "so the check cannot read one captured value of it.", names ) } );
     }
     return gaps;
 }

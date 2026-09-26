@@ -178,14 +178,7 @@ bool Within( const wxString& aPath, const wxString& aDirectory )
 }
 
 const char* const PROJECT_CHANGE_MESSAGE =
-        "Project settings, the board's current variant, exclusions, custom rules, or the current date or "
-        "version-control revision the board's text shows, changed or could not be observed";
-
-// The gap every unfinished check reports (code, then explanation): its findings are
-// matched to objects of the open board only once it has finished.
-const char* const PENDING_IDENTITY_GAP =
-        "generated_item_identity: pending until the check completes; only a finished check has matched each "
-        "finding to an object of the open board.";
+        "Project settings, the board's current variant, exclusions or custom rules changed or could not be observed";
 
 std::string ChangeMessage( const std::string& aCode )
 {
@@ -963,14 +956,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
     // and a completed check's results are fresh only while no captured input changed.
     // This read compared every live input above (n456d6b796cd7a9a3); a change, or an
     // input it could not observe, has made the job stale before this point.
-    // Until the worker has finished, no finding has yet been matched to an object of the
-    // open board (copper rebuilt while refilling zones is mapped only after the refill),
-    // so an unfinished check never claims a complete snapshot: the flag cannot turn from
-    // complete to incomplete when a finding names an object the open board lacks. A
-    // check that ends without findings (cancelled, failed, incomplete or stale) has
-    // nothing left to match.
-    const bool identitiesPending = !aJob->workerFinished;
-    const bool complete = aJob->incomplete.empty() && !identitiesPending;
+    const bool complete = aJob->incomplete.empty();
     result.set_snapshot_complete( complete );
     result.set_results_fresh( complete && !aJob->invalidated && aJob->workerFinished
                               && aJob->status == PDRCJS_COMPLETED );
@@ -984,8 +970,6 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
     // An incomplete snapshot always says why, in a warning with a stable prefix.
     for( const auto& gap : aJob->incomplete )
         result.add_input_warnings( "snapshot_incomplete: " + gap.code + ": " + gap.message );
-    if( identitiesPending )
-        result.add_input_warnings( std::string( "snapshot_incomplete: " ) + PENDING_IDENTITY_GAP );
     if( aJob->workerFinished && aJob->status == PDRCJS_COMPLETED )
         result.mutable_findings()->Assign( aJob->findings.begin(), aJob->findings.end() );
     return result;

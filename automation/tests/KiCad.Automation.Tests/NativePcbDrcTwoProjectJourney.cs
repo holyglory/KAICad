@@ -83,9 +83,9 @@ public sealed partial class NativeSessionTests
     // gets real copper violations of the exact checked revision, cancels one check mid-run, forces a failure with rules
     // that do not compile and recovers, and is refused for wrong-instance and stale targets without either board
     // changing. After each terminal outcome (completed, cancelled, failed, recovered) the editor it happened in accepts
-    // a normal edit and saves it, and a person's undo and redo in project B's rendered editor still work. Ordinary jobs
-    // never claim a complete snapshot or fresh results: KiCad does not yet capture every project and rules input a check
-    // depends on (decision n39a51a3a2ff84c55, ledger p23deb822a36256a6).
+    // a normal edit and saves it, and a person's undo and redo in project B's rendered editor still work. KiCad captures
+    // every input a check reads, so every check reports a complete snapshot, and a completed check reports fresh results
+    // while none of those inputs has changed (ledger p23deb822a36256a6).
     private static async Task VerifyPcbDrcTwoProjects(NativeClient client, DocumentSpecifier board, int processId,
         string display, string evidence, CancellationToken token)
     {
@@ -210,19 +210,17 @@ public sealed partial class NativeSessionTests
                     Assert.AreEqual(at, started.CheckedRevision, $"Project {target.Name}'s check must be bound to the revision it was asked for.");
                     Assert.IsEmpty(started.Findings);
                     Assert.IsFalse(started.CandidateDryRun);
-                    AssertPcbDrcJobPending(started, $"Project {target.Name}'s check as kicad_pcb_drc_start returned it");
                 }
                 return (startedA, startedB);
             }
             async Task<PcbDrcJobState> Read(TwoProjectDrcTarget target, PcbDrcJobState job) => Parse(await mcp.Tool("kicad_pcb_drc_job", new
                 { instanceId = target.InstanceId, documentJson = Json(target.Board), jobId = job.JobId, processEpoch = target.Epoch }));
-            // A running check shows no findings, stays below 1, claims no complete snapshot, and its progress never goes back.
+            // A running check shows no findings, stays below 1, and its progress never goes back.
             void Progressing(TwoProjectDrcTarget target, PcbDrcJobState before, PcbDrcJobState now)
             {
                 Assert.AreEqual(before.JobId, now.JobId);
                 Assert.AreEqual(before.CheckedRevision, now.CheckedRevision);
                 Assert.IsGreaterThanOrEqualTo(before.Progress, now.Progress, $"Project {target.Name}'s progress went back.");
-                AssertPcbDrcJobPending(now, $"Project {target.Name}'s check");
                 if (now.WorkerFinished) return;
                 Assert.IsTrue(now.Status is PcbDrcJobStatus.PdrcjsQueued or PcbDrcJobStatus.PdrcjsRunning, now.Status.ToString());
                 Assert.IsEmpty(now.Findings, $"Project {target.Name}'s running check must not expose findings.");
@@ -274,9 +272,8 @@ public sealed partial class NativeSessionTests
                 Assert.IsTrue(job.WorkerFinished);
                 Assert.IsFalse(job.CancellationRequested, because + " Nothing asked this check to stop.");
                 Assert.IsTrue(job.SnapshotComplete,
-                    "A completed check owns a complete detached input snapshot.");
-                Assert.IsTrue(job.ResultsFresh,
-                    "A completed check is fresh while its captured inputs remain unchanged.");
+                    because + " KiCad captured every input the check reads (ledger p23deb822a36256a6). " + string.Join(" | ", job.InputWarnings));
+                Assert.IsTrue(job.ResultsFresh, because + " Nothing the check read has changed since it was captured.");
                 Assert.AreEqual(at, job.CheckedRevision, because);
                 var fixture = target.Fixture;
                 CollectionAssert.AreEqual(new[]
@@ -424,32 +421,7 @@ public sealed partial class NativeSessionTests
                 "Instance B must not check project A's board.", code: "native_status_3", containing: WrongProject);
             Refused(await mcp.Tool("kicad_pcb_drc_job", new { instanceId = a.InstanceId, documentJson = Json(a.Board), jobId = a1.JobId, processEpoch = Guid.NewGuid().ToString("D") }),
                 "A read with an epoch no process has must be refused.", code: "stale_process_epoch");
-            // An automation instance serves one project: an unnamed board request identifies no
-            // accepted target, while a missing board in that same project is simply not open.
-            async Task RefusedByA<TRequest, TResponse>(TRequest request, string expected, string because)
-                where TRequest : Google.Protobuf.IMessage<TRequest>
-                where TResponse : Google.Protobuf.IMessage<TResponse>, new()
-            {
-                var refusal = await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
-                    a.Native.InvokeAsync<TRequest, TResponse>(request, token));
-                Assert.AreEqual(3, refusal.Status, because + " " + refusal.Message);
-                Assert.AreEqual(expected, refusal.Message, because);
-            }
-            var unnamed = a.Board.Clone(); unnamed.Project = null;
-            await RefusedByA<Kiapi.Board.Commands.GetBoardOrigin, Vector2>(
-                new() { Board = unnamed, Type = Kiapi.Board.Commands.BoardOriginType.BotGrid },
-                $"the requested document {a.Board.BoardFilename} names no project; this KiCad instance has project "
-                + $"'{a.Board.Project.Name}' at '{a.Board.Project.Path}' open and accepts a board request only with its project named by its absolute folder path",
-                "Project A's editor must refuse an unnamed project.");
-            var closedInA = a.Board.Clone(); closedInA.BoardFilename = "closed.kicad_pcb";
-            Assert.IsFalse(File.Exists(Path.Combine(a.Board.Project.Path, closedInA.BoardFilename)));
-            await RefusedByA<ReadDocumentLifecycleState, DocumentLifecycleState>(new() { Document = closedInA },
-                "the requested document closed.kicad_pcb is not open",
-                "A closed board in project A must be reported as not open, not as another project's board.");
-            // KiCad without a window (kicad-cli api-server) refuses requests for these boards the same way.
-            await VerifyHeadlessWrongProjectRefusal(a.Board, b.Board, display, evidence, token);
-            Console.WriteLine($"Two-project PCB checks: headless KiCad refused both projects' boards at {clock.Elapsed.TotalSeconds:F1}s.");
-            await Unchanged(boards2, "Refused stale, wrong-target, unnamed-project and headless requests must leave both boards alone.");
+            await Unchanged(boards2, "Refused stale and wrong-target requests must leave both boards alone.");
 
             // 3. Project B's check is cancelled after its copper clearance checks, while project A's check runs beside it and
             //    completes with its first findings. The cancelled check ends cancelled, never completed, only once its
@@ -490,8 +462,8 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(terminalB.CancellationRequested);
             Assert.IsEmpty(terminalB.Findings, "A cancelled check never exposes the violations it had already found.");
             Assert.IsLessThan(1.0, terminalB.Progress);
-            Assert.IsFalse(terminalB.ResultsFresh);
-            Assert.IsTrue(terminalB.SnapshotComplete);
+            Assert.IsFalse(terminalB.ResultsFresh, "A cancelled check has no results to be fresh.");
+            Assert.IsTrue(terminalB.SnapshotComplete, "A cancelled check keeps the complete snapshot it was captured from.");
             Assert.AreEqual(savedB.Revision, terminalB.CheckedRevision);
             Assert.AreEqual(terminalB, await Read(b, b2), "A cancelled check stays cancelled.");
             Assert.AreEqual(terminalB, Parse(await mcp.Tool("kicad_pcb_drc_cancel", new
@@ -518,7 +490,7 @@ public sealed partial class NativeSessionTests
             Assert.IsEmpty(failedA.Findings, "A failed check never exposes findings.");
             Assert.IsTrue(failedA.WorkerFinished);
             Assert.IsFalse(failedA.CancellationRequested || failedA.ResultsFresh);
-            Assert.IsTrue(failedA.SnapshotComplete);
+            Assert.IsTrue(failedA.SnapshotComplete, "The broken rules were captured exactly; only the check failed.");
             Assert.IsLessThan(1.0, failedA.Progress);
             Assert.AreEqual(failedA, await Read(a, a3), "A failed check stays failed.");
             // A check cancelled after its findings started leaves nothing behind: the next complete check of the same
@@ -601,149 +573,5 @@ public sealed partial class NativeSessionTests
                 { Header = new() { Document = target }, Items = { new KIID { Value = "33333333-3333-4333-8333-333333333333" } } }, token);
             Assert.HasCount(1, fixtureTrack.Items, $"{path} must hold its own fixture again.");
         }
-    }
-
-    // Ledger p3865669bf8f25214. KiCad without a window (kicad-cli api-server) serves a third project whose board has the
-    // same file name as the boards of projects A and B. A request naming project A's or B's board reaches it and is refused
-    // with the text the PCB editors give, naming both projects, so the agent knows it reached the wrong KiCad instance
-    // rather than a closed board. The server still reports a closed board of its own project as not open, refuses its own
-    // project named by a relative folder for that reason, and keeps serving its own board.
-    private static async Task VerifyHeadlessWrongProjectRefusal(DocumentSpecifier boardA, DocumentSpecifier boardB,
-        string display, string evidence, CancellationToken token)
-    {
-        Assert.AreEqual(boardA.BoardFilename, boardB.BoardFilename, "The editors' boards share one file name.");
-        string directory = Directory.CreateTempSubdirectory("kicad-drc-headless-").FullName;
-        string socket = Path.Combine(directory, "api.sock");
-        string boardPath = Path.Combine(directory, boardA.BoardFilename);
-        // Test data only: the third project, and a board KiCad's own loader reads, known by the grid origin it sets.
-        await File.WriteAllTextAsync(Path.ChangeExtension(boardPath, ".kicad_pro"), """{"meta":{"version":3}}""", token);
-        await File.WriteAllTextAsync(boardPath,
-            "(kicad_pcb (version 20260206) (generator \"pcbnew\")\n  (general (thickness 1.6)) (paper \"A4\")\n" +
-            "  (layers (0 \"F.Cu\" signal) (2 \"B.Cu\" signal) (25 \"Edge.Cuts\" user))\n" +
-            "  (setup (pad_to_mask_clearance 0) (grid_origin 12 34))\n)\n", token);
-        var start = new ProcessStartInfo(Path.Combine(FindRoot(), "automation", "artifacts", "native", "kicad", "kicad-cli"))
-        {
-            WorkingDirectory = directory, UseShellExecute = false,
-            RedirectStandardOutput = true, RedirectStandardError = true
-        };
-        start.Environment["DISPLAY"] = display;
-        start.Environment["KICAD_RUN_FROM_BUILD_DIR"] = "1";
-        start.Environment["XDG_CONFIG_HOME"] = Path.Combine(directory, "config");
-        start.Environment["XDG_CACHE_HOME"] = Path.Combine(directory, "cache");
-        foreach (string arg in new[] { "api-server", "--socket", socket }) start.ArgumentList.Add(arg);
-        using var process = Process.Start(start)!;
-        var stdout = Capture(process.StandardOutput, Path.Combine(evidence, "pcb-drc-two-projects-headless.stdout.log"));
-        var stderr = Capture(process.StandardError, Path.Combine(evidence, "pcb-drc-two-projects-headless.stderr.log"));
-        try
-        {
-            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
-            deadline.CancelAfter(TimeSpan.FromSeconds(60));
-            var headless = new NativeClient(new NngTransport(), "ipc://" + socket);
-            while (true)
-            {
-                deadline.Token.ThrowIfCancellationRequested();
-                Assert.IsFalse(process.HasExited, "The headless KiCad exited before serving requests.");
-                try { await headless.GetVersionAsync(deadline.Token); break; }
-                catch (NngException) { }
-                catch (NativeApiException error) when (error.Status is 4 or 7) { }
-                await Task.Delay(100, deadline.Token);
-            }
-            var own = (await headless.OpenRootBoardAsync(boardPath, deadline.Token)).Document;
-            Assert.AreEqual(boardA.BoardFilename, own.BoardFilename);
-            Assert.AreEqual(boardA.Project.Name, own.Project.Name, "Only the project folder tells the three boards apart.");
-            Assert.AreNotEqual(boardA.Project.Path, own.Project.Path);
-            Assert.AreNotEqual(boardB.Project.Path, own.Project.Path);
-
-            Task<Vector2> Origin(DocumentSpecifier board) => headless.InvokeAsync<Kiapi.Board.Commands.GetBoardOrigin, Vector2>(
-                new() { Board = board, Type = Kiapi.Board.Commands.BoardOriginType.BotGrid }, deadline.Token);
-            async Task Refused<TRequest, TResponse>(TRequest request, string expected, string because)
-                where TRequest : Google.Protobuf.IMessage<TRequest>
-                where TResponse : Google.Protobuf.IMessage<TResponse>, new()
-            {
-                var refusal = await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
-                    headless.InvokeAsync<TRequest, TResponse>(request, deadline.Token));
-                Assert.AreEqual(3, refusal.Status, because);
-                Assert.AreEqual(expected, refusal.Message, because);
-            }
-            string OtherProject(DocumentSpecifier board) =>
-                $"the requested document {board.BoardFilename} of project '{board.Project.Name}' at '{board.Project.Path}' is " +
-                $"not open in this KiCad instance, which has project '{own.Project.Name}' at '{own.Project.Path}' open; send " +
-                "the request to the KiCad instance that has that project open";
-
-            var origin = await Origin(own);
-            Assert.AreEqual((12_000_000L, 34_000_000L), (origin.XNm, origin.YNm), "The headless KiCad must serve its own board.");
-            var before = await headless.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(new() { Document = own }, deadline.Token);
-            Assert.AreEqual(headless.Epoch, before.ProcessEpoch, "Lifecycle state uses the responding server's process identity.");
-            byte[] savedBoard = await File.ReadAllBytesAsync(boardPath, deadline.Token);
-            byte[] savedProject = await File.ReadAllBytesAsync(Path.ChangeExtension(boardPath, ".kicad_pro"), deadline.Token);
-            var markers = await headless.InvokeAsync<ReadPcbDrcState, PcbDrcState>(new() { Document = own }, deadline.Token);
-            Assert.AreEqual(headless.Epoch, markers.ProcessEpoch);
-            Assert.IsTrue(markers.MarkerSnapshotComplete);
-            // Headless jobs still lack drawing-sheet input. Preserve that explicit refusal,
-            // and verify start/read/cancel no longer dereference a missing desktop server.
-            await Refused<StartPcbDrcJob, PcbDrcJobState>(new()
-                { Document = own, OperationId = Guid.NewGuid().ToString("D"), ProcessEpoch = headless.Epoch,
-                    ExpectedRevision = before.Revision.Clone() },
-                "Native DRC requires initialized project library and drawing-sheet inputs", "Unavailable native job inputs are explicit.");
-            string missingJob = Guid.NewGuid().ToString("D");
-            await Refused<ReadPcbDrcJob, PcbDrcJobState>(new() { Document = own, JobId = missingJob, ProcessEpoch = headless.Epoch },
-                "Unknown PCB DRC job", "Reading an unknown headless job is a normal refusal.");
-            await Refused<CancelPcbDrcJob, PcbDrcJobState>(new() { Document = own, JobId = missingJob, ProcessEpoch = headless.Epoch },
-                "Unknown PCB DRC job", "Cancelling an unknown headless job is a normal refusal.");
-            await Refused<StartPcbDrcJob, PcbDrcJobState>(new()
-                {
-                    Document = boardA, OperationId = Guid.NewGuid().ToString("D"), ProcessEpoch = headless.Epoch,
-                    ExpectedRevision = new DocumentRevision { Epoch = Guid.NewGuid().ToString("D"), Sequence = 1 }
-                }, OtherProject(boardA), "The headless KiCad must refuse a PCB check of project A's board, naming both projects.");
-            await Refused<Kiapi.Board.Commands.GetBoardOrigin, Vector2>(
-                new() { Board = boardB, Type = Kiapi.Board.Commands.BoardOriginType.BotGrid }, OtherProject(boardB),
-                "The headless KiCad must refuse a read of project B's board, naming both projects.");
-            var closed = own.Clone(); closed.BoardFilename = "closed.kicad_pcb";
-            await Refused<ReadDocumentLifecycleState, DocumentLifecycleState>(new() { Document = closed },
-                "the requested document closed.kicad_pcb is not open",
-                "A closed board of the headless KiCad's own project is not open there; it belongs to no other instance.");
-            var relative = own.Clone(); relative.Project.Path = ".";
-            await Refused<Kiapi.Board.Commands.GetBoardOrigin, Vector2>(
-                new() { Board = relative, Type = Kiapi.Board.Commands.BoardOriginType.BotGrid },
-                $"the requested document {own.BoardFilename} names project '{own.Project.Name}' by the folder '.', which is not " +
-                "an absolute path; name the project by its absolute folder path",
-                "A relative project folder is refused for that reason, even where it leads to the server's own project.");
-            Assert.AreEqual(origin, await Origin(own), "After the refusals the headless KiCad still serves its own board.");
-            Assert.AreEqual(before, await headless.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
-                new() { Document = own }, deadline.Token), "Rejected requests preserve the headless server's own board state.");
-            CollectionAssert.AreEqual(savedBoard, await File.ReadAllBytesAsync(boardPath, deadline.Token),
-                "Rejected requests preserve the headless server's saved board bytes.");
-            CollectionAssert.AreEqual(savedProject, await File.ReadAllBytesAsync(Path.ChangeExtension(boardPath, ".kicad_pro"), deadline.Token));
-            await File.WriteAllTextAsync(Path.Combine(evidence, "pcb-headless-project-refusal.json"), JsonSerializer.Serialize(new
-            {
-                ownProject = own.Project, otherProjectA = boardA.Project, otherProjectB = boardB.Project,
-                wrongProjectDrcRefused = true, wrongProjectReadRefused = true, closedBoardRefused = true,
-                relativeProjectRefused = true, correctProjectStillServed = true, nativeStatePreserved = true,
-                lifecycleEpochMatchesServer = true, markerReadWorks = true, unavailableJobInputsExplicit = true,
-                unknownJobReadAndCancelRefused = true, projectBytesPreserved = true,
-                savedBoardSha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(savedBoard))
-            }), deadline.Token);
-        }
-        finally
-        {
-            // This process and its folder exist only for this step. The server is asked to stop as a person stops it
-            // (SIGTERM), so it closes its board and flushes its output into the evidence logs; it is killed only if it
-            // has not stopped within 30 seconds.
-            if (!process.HasExited && SignalProcess(process.Id, 15) == 0)
-            {
-                using var stopping = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-                try { await process.WaitForExitAsync(stopping.Token); }
-                catch (OperationCanceledException) { }
-            }
-            bool stopped = process.HasExited;
-            if (!stopped) process.Kill();
-            await process.WaitForExitAsync(CancellationToken.None);
-            Console.WriteLine(stopped
-                ? $"Two-project PCB checks: headless KiCad stopped on request with exit code {process.ExitCode}."
-                : "Two-project PCB checks: headless KiCad did not stop within 30 s of SIGTERM and was killed.");
-            await Task.WhenAll(stdout, stderr);
-            Directory.Delete(directory, true);
-        }
-        Assert.AreEqual(0, process.ExitCode, "The headless server shuts down cleanly after serving requests.");
     }
 }

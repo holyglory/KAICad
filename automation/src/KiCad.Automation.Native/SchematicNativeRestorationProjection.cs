@@ -5,6 +5,8 @@ using Google.Protobuf;
 using Kiapi.Schematic.Types;
 using KiCad.Automation.Model;
 
+using ModelSheetInstance = KiCad.Automation.Model.SheetInstance;
+
 namespace KiCad.Automation.Native;
 
 /// <summary>Native owners that appeared in KiCad since the last synchronization, projected onto the design: owners a
@@ -23,6 +25,14 @@ internal sealed record SchematicNativeRestorationResult(SchematicDesign BindingC
     /// <summary>Added occurrences exactly as the saved XML declares them: the person's answers to resolution requests
     /// (ledger p35cfdc0345e056a5). The XML differs from the last synchronized design only by them.</summary>
     public IReadOnlyList<Guid> AnsweredOccurrences { get; init; } = [];
+    /// <summary>Sheets inserted in KiCad that become design sheets (ledger p5f6d5d0ca242d628).</summary>
+    public IReadOnlyList<Guid> AddedSheetInstances { get; init; } = [];
+    /// <summary>Design sheets KiCad no longer shows, removed with everything on them.</summary>
+    public IReadOnlyList<Guid> RemovedSheetInstances { get; init; } = [];
+    /// <summary>Design sheets KiCad shows at another place.</summary>
+    public IReadOnlyList<Guid> MovedSheetInstances { get; init; } = [];
+    /// <summary>Design sheets a verified history restores with their exact identities.</summary>
+    public IReadOnlyList<Guid> RestoredSheetInstances { get; init; } = [];
 
     /// <summary>The verified history a restoration used; only restorations have one.</summary>
     public SchematicOwnershipHistory Source => History
@@ -66,7 +76,8 @@ internal static class SchematicNativeRestorationProjection
             var report = SchematicDesignBindings.Inspect(entry.Design, state.KnowledgeLibraries, token);
             if (!report.IdentitiesResolved || report.Differences.Any(d => d.Field == "unit")) continue;
             var reduced = SchematicNativeRemovalProjection.Project(entry.Design, state.Baseline.Schematic, state.KnowledgeLibraries, token);
-            if (reduced.BindingCandidate is null || reduced.RemovedOccurrences.Count == 0
+            if (reduced.BindingCandidate is null || reduced.RemovedOccurrences.Count == 0 && reduced.RemovedSheetInstances.Count == 0
+                || reduced.MovedSheetInstances.Count != 0
                 || SchematicNetReconciliation.Topology(reduced.BindingCandidate.Engineering.Circuit) != currentTopology
                 || SchematicNetReconciliation.Bindings(reduced.BindingCandidate) != currentBindings) continue;
             candidates.Add(Build(state, entry, token));
@@ -113,15 +124,23 @@ internal static class SchematicNativeRestorationProjection
         var definitions = current.Sheets.SelectMany(s => s.Components).Select(c => c.Id).ToHashSet();
         var restoredComponents = old.Components.Where(c => !componentIds.Contains(c.Id)).OrderBy(c => c.Id).ToArray();
         var restoredSymbols = old.Symbols.Where(s => !symbolIds.Contains(s.Id)).OrderBy(s => s.Id).ToArray();
+        // Sheets a KiCad undo shows again come back with their exact identities, in the history's order (ledger p5f6d5d0ca242d628).
+        var sheetIds = current.SheetInstances.Select(s => s.Id).ToHashSet();
+        var sheetDefinitions = current.Sheets.Select(s => s.Id).ToHashSet();
+        var restoredSheets = old.SheetInstances.Where(s => !sheetIds.Contains(s.Id)).ToArray();
+        var restoredSheetIds = restoredSheets.Select(s => s.Id).ToHashSet();
         var next = current with
         {
             Components = [.. current.Components, .. restoredComponents],
             Symbols = [.. current.Symbols, .. restoredSymbols],
-            Sheets = current.Sheets.Select(s => s with { Components = [.. s.Components,
-                .. old.Sheets.Single(o => o.Id == s.Id).Components.Where(c => !definitions.Contains(c.Id)).OrderBy(c => c.Id)] }).ToArray()
+            Sheets = [.. current.Sheets.Select(s => s with { Components = [.. s.Components,
+                .. old.Sheets.Single(o => o.Id == s.Id).Components.Where(c => !definitions.Contains(c.Id)).OrderBy(c => c.Id)] }),
+                .. old.Sheets.Where(s => !sheetDefinitions.Contains(s.Id))],
+            SheetInstances = [.. current.SheetInstances, .. restoredSheets]
         };
         var addedSymbols = restoredSymbols.Select(s => s.Id).ToHashSet();
         var design = baseline with { Engineering = baseline.Engineering with { Circuit = next }, Schematic = state.Observed.Clone(),
+            SheetBindings = [.. baseline.SheetBindings, .. history.Design.SheetBindings.Where(b => restoredSheetIds.Contains(b.SheetInstanceId))],
             SymbolBindings = [.. baseline.SymbolBindings, .. history.Design.SymbolBindings.Where(b => addedSymbols.Contains(b.SymbolOccurrenceId))
                 .OrderBy(b => b.SymbolOccurrenceId)] };
         var native = SchematicModelProjection.NativeSymbols(design, state.Observed);
@@ -154,7 +173,8 @@ internal static class SchematicNativeRestorationProjection
         var report = SchematicDesignBindings.Inspect(design, state.KnowledgeLibraries, token);
         if (!report.IdentitiesResolved)
             throw Error("unresolved_restored_bindings", "The restored declarations do not resolve every exact native object.");
-        return new(design, history, addedSymbols.Order().ToArray(), restoredIds.Order().ToArray());
+        return new(design, history, addedSymbols.Order().ToArray(), restoredIds.Order().ToArray())
+            { RestoredSheetInstances = [.. restoredSheets.Select(s => s.Id)] };
     }
 
     internal static EngineeringDesign ResolveRetained(EngineeringDesign design, SchematicNativeRestorationResult restoration,
@@ -212,7 +232,11 @@ public sealed record SchematicOwnershipAnswer(Guid NativeObjectId, Guid? PartId 
 
 internal sealed record SchematicNativeAdditionResult(SchematicNativeRestorationResult? Adoption,
     IReadOnlyList<SchematicOwnershipResolutionRequest> Requests, IReadOnlyList<SchematicBindingIssue> Issues,
-    IReadOnlyList<HierarchyCoverageGap> CoverageGaps, string? ErrorCode = null, string? ErrorMessage = null);
+    IReadOnlyList<HierarchyCoverageGap> CoverageGaps, string? ErrorCode = null, string? ErrorMessage = null)
+{
+    /// <summary>Sheet moves exact identities cannot decide (<see cref="SchematicNativeSheetChanges.MoveAmbiguous"/>).</summary>
+    public IReadOnlyList<SchematicSheetResolutionRequest> SheetRequests { get; init; } = [];
+}
 
 /// <summary>The saved XML with a person's answers declared (<see cref="SchematicNativeAdditionProjection.Answer"/>), and the
 /// native symbols it declares.</summary>
@@ -230,11 +254,16 @@ internal sealed record SchematicOwnershipAnswerResult(SchematicDesign? Answered,
 /// multi-unit part. The person answers a request in the saved XML, by declaring the occurrence bound to that symbol (its
 /// component, part, unit and reference as KiCad shows them), or with kicad_design_ownership_answer, which writes that
 /// declaration (ledger p35cfdc0345e056a5); a declared answer is taken exactly as declared. Symbols removed in the same
-/// KiCad change are removed as the removal projection removes them, with their instructions retained. Sheets that
-/// appear, disappear or move are not adopted here (sheet_ownership_changed).</summary>
+/// KiCad change are removed as the removal projection removes them, with their instructions retained. Sheets KiCad
+/// removed or shows at another place follow KiCad as the removal projection projects them, and each sheet inserted in KiCad
+/// becomes a design sheet named as KiCad names it, with identities derived from the circuit, its parent sheet's path and its
+/// sheet symbol's UUID; symbols on it are adopted like any other (ledger p5f6d5d0ca242d628). A sheet an earlier synchronized
+/// design had is restored from that history instead, and a sheet shown several times is not adopted yet.</summary>
 public static class SchematicNativeAdditionProjection
 {
     public const string ResolutionRequired = "native_ownership_resolution_required";
+    /// <summary>An existing sheet moved into a sheet inserted in the same KiCad change: synchronize the new sheet first.</summary>
+    public const string MoveIntoNewSheet = "native_sheet_move_into_new_sheet";
     public const string PartAmbiguous = "native_part_ambiguous";
     public const string UnitOwnerAmbiguous = "native_unit_owner_ambiguous";
     public const string UnitGroupingAmbiguous = "native_unit_grouping_ambiguous";
@@ -303,14 +332,21 @@ public static class SchematicNativeAdditionProjection
             if (!topology.IsValid) return Failure("invalid_native_hierarchy", "Resolve the reported native hierarchy before adopting new symbols.");
             static string Key(SchematicScreenData screen) => string.Join('/', screen.Metadata.Document.SheetPath.Path.Select(p => p.Value));
             var screens = observed.Instances.ToDictionary(Key, StringComparer.Ordinal);
-            var before = baseline.Schematic.Instances.ToDictionary(Key, StringComparer.Ordinal);
-            if (!screens.Keys.ToHashSet(StringComparer.Ordinal).SetEquals(before.Keys)
-                || screens.Any(pair => pair.Value.Metadata.ScreenId.Value != before[pair.Key].Metadata.ScreenId.Value))
-                return Failure("sheet_ownership_changed", "Sheet insertion, removal or reparenting requires explicit ownership reconciliation.");
+            // Sheets inserted, removed or moved in KiCad (ledger p5f6d5d0ca242d628), by exact identity only.
+            var sheetChanges = SchematicNativeSheetChanges.Compare(baseline.Schematic, observed);
+            if (sheetChanges.ErrorCode is not null)
+                return Failure(sheetChanges.ErrorCode, sheetChanges.ErrorMessage!) with
+                    { SheetRequests = SchematicNativeRemovalProjection.Requests(sheetChanges, baseline) };
+            var inserted = sheetChanges.Inserted.ToHashSet(StringComparer.Ordinal);
+            bool Within(string path, string sheet) => path == sheet || path.StartsWith(sheet + "/", StringComparison.Ordinal);
+            if (sheetChanges.Moved.Values.FirstOrDefault(to => inserted.Any(sheet => Within(to, sheet))) is { } into)
+                return Failure(MoveIntoNewSheet, "KiCad shows an existing sheet moved into a sheet inserted in the same change. Nothing was "
+                    + "published. Undo the move in KiCad, let the new sheet synchronize, then move the sheet into it.");
 
             var circuit = baseline.Engineering.Circuit;
             var components = circuit.Components.ToDictionary(c => c.Id);
-            var sheetPaths = baseline.SheetBindings.ToDictionary(b => b.SheetInstanceId, b => SchematicDesignBindings.PathKey(b.NativePath));
+            // Where KiCad shows each design sheet now: moved sheets at their new place, removed sheets nowhere.
+            var sheetPaths = sheetChanges.Rebind(baseline.SheetBindings);
             var bound = baseline.SymbolBindings.Select(b =>
             {
                 var occurrence = circuit.Symbols.Single(s => s.Id == b.SymbolOccurrenceId);
@@ -320,7 +356,7 @@ public static class SchematicNativeAdditionProjection
                     .Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => (Path: pair.Key, Symbol: i.Unpack<SchematicSymbolInstance>())))
                 .Where(x => !bound.Contains(x.Path + "#" + x.Symbol.Id.Value))
                 .OrderBy(x => x.Path, StringComparer.Ordinal).ThenBy(x => x.Symbol.Id.Value, StringComparer.Ordinal).ToArray();
-            if (added.Length == 0)
+            if (added.Length == 0 && inserted.Count == 0)
                 return Failure("electrical_ownership_changed", "Unit changes or changed library pin identities require explicit ownership reconciliation.");
 
             // A symbol KiCad shows again after an undo belongs to the verified history that knew it, not to a new
@@ -330,15 +366,26 @@ public static class SchematicNativeAdditionProjection
                 return Failure("native_restoration_with_additions",
                     "KiCad shows symbols an earlier synchronized design had together with newly placed ones. Synchronize them separately: "
                     + "undo the new placement in KiCad, synchronize the restored symbols, then redo it.");
+            // Likewise a sheet an earlier synchronized design had is restored from that history with its identities, never adopted anew.
+            var historicalSheets = (history ?? []).SelectMany(h => h.Design.SheetBindings.Select(b => SchematicDesignBindings.PathKey(b.NativePath)))
+                .ToHashSet(StringComparer.Ordinal);
+            if (inserted.Any(historicalSheets.Contains))
+                return Failure("native_restoration_with_additions",
+                    "KiCad shows a sheet an earlier synchronized design had together with other changes. Synchronize them separately: "
+                    + "undo the other changes in KiCad, synchronize the restored sheet, then redo them.");
 
-            // Removals first, exactly as a removal-only change is projected.
+            // Removals and moves first, exactly as a change without new owners is projected: KiCad's drawing without the
+            // inserted sheets and the new symbols.
             var withoutAdded = observed.Clone();
-            foreach (var screen in withoutAdded.Instances)
+            for (int index = withoutAdded.Instances.Count - 1; index >= 0; --index)
             {
+                var screen = withoutAdded.Instances[index];
                 string path = Key(screen);
+                if (inserted.Contains(path)) { withoutAdded.Instances.RemoveAt(index); continue; }
                 for (int i = screen.Items.Count - 1; i >= 0; --i)
                     if (screen.Items[i].Is(SchematicSymbolInstance.Descriptor)
-                        && !bound.Contains(path + "#" + screen.Items[i].Unpack<SchematicSymbolInstance>().Id.Value))
+                            && !bound.Contains(path + "#" + screen.Items[i].Unpack<SchematicSymbolInstance>().Id.Value)
+                        || screen.Items[i].Is(SheetSymbol.Descriptor) && inserted.Contains(path + "/" + screen.Items[i].Unpack<SheetSymbol>().Id?.Value))
                         screen.Items.RemoveAt(i);
             }
             var removal = SchematicNativeRemovalProjection.Project(baseline, withoutAdded, libraries, token);
@@ -347,6 +394,39 @@ public static class SchematicNativeAdditionProjection
                 return Failure(removal.ErrorCode ?? "electrical_ownership_changed", removal.ErrorMessage
                     ?? "Unit changes or changed library pin identities require explicit ownership reconciliation.", removal.Issues);
             var kept = removal.BindingCandidate;
+            // Each sheet inserted in KiCad becomes a design sheet: a sheet definition and its one instance below the design sheet
+            // KiCad shows it in, with identities derived from the circuit, the parent sheet's path and the sheet symbol's UUID,
+            // so a repeated plan, a replay and a redo give the same identities. It is named as KiCad names it.
+            var addedSheets = new List<(SheetDefinition Definition, ModelSheetInstance Instance, SchematicSheetBinding Binding)>();
+            var keptSheets = kept.SheetBindings.ToDictionary(b => SchematicDesignBindings.PathKey(b.NativePath), b => b.SheetInstanceId, StringComparer.Ordinal);
+            foreach (string path in sheetChanges.Inserted)
+            {
+                token.ThrowIfCancellationRequested();
+                var sheetSymbol = SchematicNativeSheetChanges.SheetSymbolOf(observed, path);
+                string parent = SchematicNativeSheetChanges.Parent(path);
+                if (sheetSymbol?.NameField?.Text?.Text_ is not { } name || string.IsNullOrWhiteSpace(name) || !keptSheets.TryGetValue(parent, out var parentSheet))
+                    return Failure("native_sheet_incomplete", "A sheet inserted in KiCad needs its sheet symbol, a name and a parent sheet to join the design.");
+                var parentPath = PathOf(parent); Guid symbolId = Guid.Parse(SchematicNativeSheetChanges.Last(path));
+                Guid instanceId = AdoptedIdentity("sheet-instance", kept.Engineering.Circuit.Id, parentPath, symbolId);
+                Guid definitionId = AdoptedIdentity("sheet-definition", kept.Engineering.Circuit.Id, parentPath, symbolId);
+                addedSheets.Add((new(definitionId, name, []), new(instanceId, definitionId, parentSheet), new(instanceId, PathOf(path))));
+                keptSheets.Add(path, instanceId);
+            }
+            if (addedSheets.Count != 0)
+            {
+                var withSheets = kept.Engineering.Circuit with
+                {
+                    Sheets = [.. kept.Engineering.Circuit.Sheets, .. addedSheets.Select(s => s.Definition)],
+                    SheetInstances = [.. kept.Engineering.Circuit.SheetInstances, .. addedSheets.Select(s => s.Instance)]
+                };
+                try { withSheets.Validate(); }
+                catch (AutomationException error)
+                {
+                    return Failure("native_addition_conflict", "The sheets inserted in KiCad cannot join the design as they are: " + error.Message);
+                }
+                kept = kept with { Engineering = kept.Engineering with { Circuit = withSheets },
+                    SheetBindings = [.. kept.SheetBindings, .. addedSheets.Select(s => s.Binding)] };
+            }
             var keptCircuit = kept.Engineering.Circuit;
             var keptComponents = keptCircuit.Components.ToDictionary(c => c.Id);
             var definitions = keptCircuit.Sheets.SelectMany(s => s.Components).ToDictionary(c => c.Id);
@@ -643,7 +723,9 @@ public static class SchematicNativeAdditionProjection
                 AddedComponents = [.. addedComponents.Select(c => c.Id).Order()],
                 AddedParts = [.. newParts.Keys.Concat(declaredParts.Select(p => p.Id)).Order()],
                 AnsweredOccurrences = [.. declarations.Values.Select(d => d.Occurrence.Id).Order()],
-                RemovedOccurrences = removal.RemovedOccurrences, ComponentChanges = removal.ComponentChanges
+                RemovedOccurrences = removal.RemovedOccurrences, ComponentChanges = removal.ComponentChanges,
+                AddedSheetInstances = [.. addedSheets.Select(s => s.Instance.Id)],
+                RemovedSheetInstances = removal.RemovedSheetInstances, MovedSheetInstances = removal.MovedSheetInstances
             }, [], [], gaps.Distinct().ToArray());
 
         }

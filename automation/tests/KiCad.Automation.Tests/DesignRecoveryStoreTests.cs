@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json.Nodes;
 using Google.Protobuf;
+using Kiapi.Schematic.Types;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
@@ -11,6 +12,31 @@ namespace KiCad.Automation.Tests;
 [TestClass]
 public sealed class DesignRecoveryStoreTests
 {
+    [TestMethod]
+    public void ComputedNetChainMembershipIsTheOnlyDerivedPublicationDifference()
+    {
+        var source = Fixture();
+        var before = source.Baseline with { Schematic = source.Baseline.Schematic.Clone() };
+        foreach (var screen in before.Schematic.Instances)
+            screen.Metadata.NetChains.Add(new SchematicNetChainDefinition
+            {
+                Name = "PATH", From = new() { Reference = "U1", Pin = "1" },
+                To = new() { Reference = "U2", Pin = "1" }, MemberNets = { "/A" }
+            });
+        var after = before with { Schematic = before.Schematic.Clone() };
+        foreach (var screen in after.Schematic.Instances)
+        {
+            screen.Metadata.NetChains[0].Committed = true;
+            screen.Metadata.NetChains[0].Exclusions = new();
+        }
+        byte[] beforeBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(before, source.KnowledgeLibraries));
+        byte[] afterBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(after, source.KnowledgeLibraries));
+        Assert.IsTrue(DesignRecoveryStore.ComputedNetChainOnlyChange(beforeBytes, afterBytes, source.KnowledgeLibraries));
+        after.Schematic.Instances[0].Metadata.NetChains[0].NetClass = "changed";
+        afterBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(after, source.KnowledgeLibraries));
+        Assert.IsFalse(DesignRecoveryStore.ComputedNetChainOnlyChange(beforeBytes, afterBytes, source.KnowledgeLibraries));
+    }
+
     internal static DesignRecoveryState Fixture()
     {
         var (design, library) = SchematicModelProjectionTests.Fixture();

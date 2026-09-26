@@ -495,7 +495,11 @@ public sealed class DesignRecoveryStore(string statePath)
         {
             var result = design with { Schematic = design.Schematic.Clone() };
             foreach (var screen in result.Schematic.Instances)
-                foreach (var chain in screen.Metadata.NetChains) chain.Committed = false;
+                foreach (var chain in screen.Metadata.NetChains)
+                {
+                    chain.Committed = false;
+                    if (chain.Exclusions is { NetNames.Count: 0, Pins.Count: 0 }) chain.Exclusions = null;
+                }
             return result;
         }
     }

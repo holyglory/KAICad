@@ -451,8 +451,7 @@ internal static class SchematicSynchronizationExecutor
                     // saves a declaration that omitted the optional message.
                     // Preserve non-empty XML restrictions, but adopt this
                     // representation-only native default at the boundary.
-                    if ((chain.Exclusions is null || (chain.Exclusions.NetNames.Count == 0 && chain.Exclusions.Pins.Count == 0))
-                        && computed.Exclusions is { NetNames.Count: 0, Pins.Count: 0 })
+                    if (chain.Exclusions is null && computed.Exclusions is not null)
                         chain.Exclusions = computed.Exclusions.Clone();
                 }
         return result;

@@ -25,7 +25,9 @@
 #include <api/api_request_target.h>
 #include <eda_base_frame.h>
 #include <eda_item.h>
+#include <project.h>
 #include <title_block.h>
+#include <wx/filename.h>
 #include <wx/wx.h>
 
 using namespace kiapi::common::commands;
@@ -38,6 +40,57 @@ ApiResponseStatus StagedTransactionBusy()
     error.set_status( ApiStatusCode::AS_BUSY );
     error.set_error_message( "A staged transaction owns this document; finish or cancel it first" );
     return error;
+}
+
+
+// Two KiCad instances can each have a board of the same name open in their own project. A PCB
+// request naming the other project's board is refused with both projects named, so the agent
+// knows it reached the wrong instance rather than a closed board (ledger p98cb405e55270a80).
+// Schematic and footprint refusals keep their existing text. Returns nothing when the request
+// names this editor's project, names no project, or comes to an editor without a frame (a
+// headless API server), whose refusal also keeps its existing text.
+std::optional<std::string> OtherProjectRefusal( const DocumentSpecifier& aDocument,
+                                                const EDA_BASE_FRAME* aFrame )
+{
+    if( !aFrame || !aDocument.has_project() || aDocument.type() != types::DOCTYPE_PCB )
+        return std::nullopt;
+
+    const PROJECT&     open = aFrame->Prj();
+    const std::string& name = aDocument.project().name();
+    const std::string& path = aDocument.project().path();
+    const std::string  openName = open.GetProjectName().ToStdString( wxConvUTF8 );
+    wxFileName         requested = wxFileName::DirName( wxString::FromUTF8( path ) );
+    wxFileName         current = wxFileName::DirName( open.GetProjectPath() );
+    const bool         absolute = requested.IsAbsolute();
+
+    const std::string document = aDocument.board_filename().empty()
+            ? std::string( "the requested document" )
+            : fmt::format( "the requested document {}", aDocument.board_filename() );
+
+    // The PCB editor accepts a project only by its absolute folder, so a relative folder is
+    // refused for that reason, even when it would lead to this instance's own project.
+    if( !absolute )
+        return fmt::format( "{} names project '{}' by the folder '{}', which is not an absolute "
+                            "path; name the project by its absolute folder path",
+                            document, name, path );
+
+    requested.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+    current.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+
+    if( requested == current && path.find( '\0' ) == std::string::npos && name == openName )
+        return std::nullopt;
+
+    if( open.IsNullProject() )
+        return fmt::format( "{} of project '{}' at '{}' is not open in this KiCad instance, which has "
+                            "no project open; send the request to the KiCad instance that has that "
+                            "project open",
+                            document, name, path );
+
+    return fmt::format( "{} of project '{}' at '{}' is not open in this KiCad instance, which has "
+                        "project '{}' at '{}' open; send the request to the KiCad instance that has "
+                        "that project open",
+                        document, name, path, openName,
+                        open.GetProjectPath().ToStdString( wxConvUTF8 ) );
 }
 }
 
@@ -207,8 +260,18 @@ HANDLER_RESULT<bool> API_HANDLER_EDITOR::validateDocument( const DocumentSpecifi
     {
         ApiResponseStatus e;
         e.set_status( ApiStatusCode::AS_BAD_REQUEST );
-        e.set_error_message( fmt::format( "the requested document {} is not open",
-                                          aDocument.board_filename() ) );
+
+        std::optional<std::string> refusal;
+
+        if( thisDocumentType() == types::DOCTYPE_PCB )
+            refusal = OtherProjectRefusal( aDocument, m_frame );
+
+        if( refusal )
+            e.set_error_message( *refusal );
+        else
+            e.set_error_message( fmt::format( "the requested document {} is not open",
+                                              aDocument.board_filename() ) );
+
         return tl::unexpected( e );
     }
 

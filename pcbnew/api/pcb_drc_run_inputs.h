@@ -62,7 +62,8 @@ struct PCB_DRC_COPPER_PREPARATION
 };
 
 // The live project inputs a project baseline is compared with: the project and
-// board settings, and the content of the board's custom rules file as it is now.
+// board settings, the date or version-control revision the board's text shows, and
+// the content of the board's custom rules file as it is now.
 struct PCB_DRC_PROJECT_OBSERVATION
 {
     nlohmann::json settings;
@@ -164,5 +165,7 @@ private:
     std::set<KIID> m_candidates;
     // Generated object of the private board -> the open board's object it stands for.
     std::map<KIID, KIID> m_generated;
+    // The time-of-day text variables the board's text can show; no captured value.
+    std::vector<std::string> m_timeOfDayText;
 };
 #endif

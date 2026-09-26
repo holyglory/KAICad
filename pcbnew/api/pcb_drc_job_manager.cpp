@@ -121,13 +121,16 @@ struct PCB_DRC_JOB_MANAGER::JOB
     bool candidateDryRun = false;
     std::vector<KIID> candidateItemIds;
     std::vector<std::string> inputWarnings;
+    // Inputs the check did not capture exactly (PCB_DRC_RUN_INPUTS::Gaps), and findings
+    // naming objects that exist only inside the check. While this is empty every input
+    // the enabled tests read was captured exactly: the snapshot is complete, and a
+    // completed check's results are fresh until a captured input changes.
+    std::vector<PCB_DRC_INPUT_GAP> incomplete;
     PcbDrcJobStatus status = PDRCJS_QUEUED;
     double progress = 0.0;
     std::string phase;
     std::string errorCode;
     std::string errorMessage;
-    bool resultsFresh = false;
-    bool snapshotComplete = false;
     bool workerFinished = false;
     bool invalidated = false;
     std::vector<PcbDrcFinding> findings;
@@ -174,10 +177,20 @@ bool Within( const wxString& aPath, const wxString& aDirectory )
     return aPath.StartsWith( aDirectory + wxFileName::GetPathSeparator() );
 }
 
+const char* const PROJECT_CHANGE_MESSAGE =
+        "Project settings, the board's current variant, exclusions, custom rules, or the current date or "
+        "version-control revision the board's text shows, changed or could not be observed";
+
+// The gap every unfinished check reports (code, then explanation): its findings are
+// matched to objects of the open board only once it has finished.
+const char* const PENDING_IDENTITY_GAP =
+        "generated_item_identity: pending until the check completes; only a finished check has matched each "
+        "finding to an object of the open board.";
+
 std::string ChangeMessage( const std::string& aCode )
 {
     if( aCode == "project_inputs_changed" )
-        return "Project settings, exclusions or custom rules changed or could not be observed";
+        return PROJECT_CHANGE_MESSAGE;
     if( aCode == "library_inputs_changed" )
         return "Footprint library inputs changed or could not be observed";
     if( aCode == "auxiliary_inputs_changed" )
@@ -502,7 +515,6 @@ void PCB_DRC_JOB_MANAGER::invalidate( const std::shared_ptr<JOB>& job,
                              && job->status != PDRCJS_COMPLETED ) ) return;
     job->invalidated = true;
     job->findings.clear();
-    job->resultsFresh = false;
     job->errorCode = code;
     job->errorMessage = message;
     job->reporter->Cancel();
@@ -922,7 +934,6 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
     {
         aJob->invalidated = true;
         if( aJob->workerFinished ) aJob->status = PDRCJS_STALE;
-        aJob->resultsFresh = false;
         aJob->findings.clear();
         aJob->errorCode = schematicChanged ? "schematic_changed"
                 : ( liveChanged ? "document_changed"
@@ -930,7 +941,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
                         : ( librariesChanged ? "library_inputs_changed" : "auxiliary_inputs_changed" ) ) );
         aJob->errorMessage = schematicChanged ? "The source schematic changed or could not be observed"
                 : ( liveChanged ? "The live PCB changed while DRC was running"
-                    : ( projectChanged ? "Project settings, exclusions or custom rules changed or could not be observed"
+                    : ( projectChanged ? PROJECT_CHANGE_MESSAGE
                         : ( librariesChanged ? "Footprint library inputs changed or could not be observed"
                                              : "Drawing-sheet or router inputs changed or could not be observed" ) ) );
         if( aJob->reporter ) aJob->reporter->Cancel();
@@ -947,15 +958,34 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
     result.set_phase( aJob->phase );
     result.set_error_code( aJob->errorCode );
     result.set_error_message( aJob->errorMessage );
-    result.set_results_fresh( aJob->resultsFresh );
+    // One rule for every job, ordinary or candidate (p23deb822a36256a6): the snapshot
+    // is complete only when every input the enabled tests read was captured exactly,
+    // and a completed check's results are fresh only while no captured input changed.
+    // This read compared every live input above (n456d6b796cd7a9a3); a change, or an
+    // input it could not observe, has made the job stale before this point.
+    // Until the worker has finished, no finding has yet been matched to an object of the
+    // open board (copper rebuilt while refilling zones is mapped only after the refill),
+    // so an unfinished check never claims a complete snapshot: the flag cannot turn from
+    // complete to incomplete when a finding names an object the open board lacks. A
+    // check that ends without findings (cancelled, failed, incomplete or stale) has
+    // nothing left to match.
+    const bool identitiesPending = !aJob->workerFinished;
+    const bool complete = aJob->incomplete.empty() && !identitiesPending;
+    result.set_snapshot_complete( complete );
+    result.set_results_fresh( complete && !aJob->invalidated && aJob->workerFinished
+                              && aJob->status == PDRCJS_COMPLETED );
     result.set_cancellation_requested( aJob->reporter->IsCancelled() );
     result.set_worker_finished( aJob->workerFinished );
-    result.set_snapshot_complete( aJob->snapshotComplete );
     result.set_candidate_dry_run( aJob->candidateDryRun );
     for( const KIID& identity : aJob->candidateItemIds )
         result.add_candidate_item_ids( identity.AsStdString() );
     if( aJob->testFootprints ) result.mutable_checked_schematic_state()->CopyFrom( aJob->schematicState );
     for( const auto& warning : aJob->inputWarnings ) result.add_input_warnings( warning );
+    // An incomplete snapshot always says why, in a warning with a stable prefix.
+    for( const auto& gap : aJob->incomplete )
+        result.add_input_warnings( "snapshot_incomplete: " + gap.code + ": " + gap.message );
+    if( identitiesPending )
+        result.add_input_warnings( std::string( "snapshot_incomplete: " ) + PENDING_IDENTITY_GAP );
     if( aJob->workerFinished && aJob->status == PDRCJS_COMPLETED )
         result.mutable_findings()->Assign( aJob->findings.begin(), aJob->findings.end() );
     return result;
@@ -1086,7 +1116,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
     job->libraryFingerprints = inputs->LibraryFingerprints();
     job->auxiliaryFingerprint = inputs->AuxiliaryBaseline().Fingerprint();
     job->hasLibraryDependencies = inputs->HasLibraryDependencies();
-    job->snapshotComplete = inputs->SnapshotComplete();
+    job->incomplete = inputs->Gaps();
     job->candidateDryRun = !candidateItemIds.empty();
     job->candidateItemIds = std::move( candidateItemIds );
     if( job->testFootprints )
@@ -1114,6 +1144,8 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
         PcbDrcJobStatus terminal = PDRCJS_FAILED;
         std::string errorCode, errorMessage;
         std::vector<PcbDrcFinding> findings;
+        // Findings naming an object that exists only inside this check.
+        size_t unresolved = 0;
         {
             std::lock_guard lock( job->mutex );
             job->status = PDRCJS_RUNNING;
@@ -1148,12 +1180,16 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
             DRC_RUN_SCOPE invocation( engine, running );
             inputs->BindInvocation( engine );
             engine.SetProgressReporter( job->reporter.get() );
-            engine.SetViolationHandler( [&findings, &inputs, &settings, &board]( const std::shared_ptr<DRC_ITEM>& item, const VECTOR2I& position,
-                                               int layer, const std::function<void( PCB_MARKER* )>& pathGenerator )
+            engine.SetViolationHandler( [&findings, &unresolved, &inputs, &settings, &board](
+                    const std::shared_ptr<DRC_ITEM>& item, const VECTOR2I& position, int layer,
+                    const std::function<void( PCB_MARKER* )>& pathGenerator )
             {
+                // Every finding names the objects a person or agent finds in the open board
+                // (or in the candidate request), never an identity private to this check.
                 auto ids = item->GetIDs();
-                for( auto& id : ids )
-                    if( id == inputs->CapturedDrawingIdentity() ) id = inputs->SourceDrawingIdentity();
+                bool named = true;
+                for( auto& id : ids ) named &= inputs->ResolveFindingItem( id );
+                if( !named ) ++unresolved;
                 item->SetItems( ids );
                 auto marker = std::make_unique<PCB_MARKER>( item, position, layer );
                 marker->SetParent( &board );
@@ -1178,6 +1214,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
                 const auto& preparation = inputs->PrepareCopper( job->reporter.get() );
                 using STATUS = PCB_DRC_COPPER_PREPARATION::STATUS;
                 copperReady = preparation.status == STATUS::COMPLETED;
+                if( copperReady ) inputs->MapGeneratedItems();
                 if( preparation.status == STATUS::CANCELLED ) terminal = PDRCJS_CANCELLED;
                 else if( !copperReady )
                 {
@@ -1226,8 +1263,17 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
         // A stopped check keeps the furthest progress it reported; it never goes back.
         job->progress = terminal == PDRCJS_COMPLETED ? 1.0 : std::max( job->progress, job->reporter->Progress() );
         job->phase = job->reporter->Phase();
-        if( terminal == PDRCJS_COMPLETED ) job->findings = std::move( findings );
-        job->resultsFresh = terminal == PDRCJS_COMPLETED && job->snapshotComplete;
+        if( terminal == PDRCJS_COMPLETED )
+        {
+            job->findings = std::move( findings );
+            if( unresolved )
+            {
+                job->incomplete.push_back( { "generated_item_identity",
+                        std::to_string( unresolved ) + ( unresolved == 1 ? " finding names" : " findings name" )
+                        + " an object that exists only inside this check (such as copper KiCad rebuilt while "
+                          "refilling zones), not in the open board, so it cannot be selected or edited there." } );
+            }
+        }
     } );
     }
     catch( const std::exception& error )

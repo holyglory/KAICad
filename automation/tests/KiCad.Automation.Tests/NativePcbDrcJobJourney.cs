@@ -10,96 +10,191 @@ namespace KiCad.Automation.Tests;
 
 public sealed partial class NativeSessionTests
 {
+    // Item drc-complete-inputs (ledger p23deb822a36256a6). An ordinary check captures every input its tests read at the
+    // revision it was asked for, so a completed check reports a complete snapshot and fresh results. Each kind of input
+    // change makes it stale, with no findings and with the reason KiCad observed; a new check is complete and fresh
+    // again. The kinds exercised here: the custom rules file edited in place with the same size and modification time,
+    // the project's text variables (with a schematic-parity check, whose schematic state includes them), the drawing
+    // sheet edited in place with the same size and modification time, a committed board edit, a reloaded board whose
+    // notifications a check can no longer rely on, and teardrops, which KiCad keeps without an identity in the board file:
+    // a check's finding must name the open board's teardrop, also after a reload gives it a new identity. Also the
+    // project's net classes, read through the STDIO MCP server, and board text that shows the clock: the date is
+    // captured, and the time of day leaves the snapshot incomplete with its reason. A candidate check follows the same
+    // rule. A check never claims a complete snapshot before it has finished (RunPcbDrcJob). The router settings, the
+    // board's current variant, the activation checkpoint and an exclusion comment are exercised in the rendered editor
+    // (VerifyPcbDrcJobActivation, VerifyPcbDrcJobRouterChange, VerifyPcbDrcJobVariantChange, VerifyPcbDrcExclusions).
     private static async Task VerifyPcbDrcJobs(NativeClient client, DocumentSpecifier board,
         string evidence, CancellationToken token)
     {
-        // The native job owner is registered (7717fc32a4), but complete project/rule
-        // input capture is still open (p23deb822a36256a6). An ordinary job must run on
-        // its detached snapshot, leave the live board untouched and never claim a
-        // complete snapshot or fresh results.
-        Task<(StartPcbDrcJob Request, PcbDrcJobState State)> Run(DocumentLifecycleState at) => RunPcbDrcJob(client, board, at, token);
+        Task<(StartPcbDrcJob Request, PcbDrcJobState State)> Run(DocumentLifecycleState at, Action<StartPcbDrcJob>? configure = null) =>
+            RunPcbDrcJob(client, board, at, token, configure);
         Task<PcbDrcJobState> Read(PcbDrcJobState job, CancellationToken cancellation) => ReadPcbDrcJobState(client, board, job, cancellation);
         static void AssertStale(PcbDrcJobState job, string code, string because) => AssertPcbDrcJobStale(job, code, because);
+        static void AssertCurrent(PcbDrcJobState job, string because) => AssertPcbDrcJobCurrent(job, because);
         Task Evidence(string name, PcbDrcJobState state) => File.WriteAllTextAsync(
             Path.Combine(evidence, name), SchematicJson.Formatter.Format(state), token);
+        Task<DocumentLifecycleState> Observe() => ObserveLifecycleState(client, board, token);
+        // KiCad handles file notifications and API requests on its UI thread and runs ready file notifications before
+        // queued requests. The pause only gives a busy UI thread its turn; the assertions after it prove the result.
+        async Task Settle()
+        {
+            await Observe();
+            await Task.Delay(TimeSpan.FromMilliseconds(250), token);
+            await Observe();
+        }
+        // Rewrites a file in place with text of the same length and puts its modification time back, so only its
+        // content says that it changed.
+        async Task EditInPlace(string path, string from, string to)
+        {
+            Assert.AreEqual(from.Length, to.Length);
+            var info = new FileInfo(path);
+            long length = info.Length;
+            DateTime modified = info.LastWriteTimeUtc;
+            string text = await File.ReadAllTextAsync(path, token);
+            Assert.AreEqual(1, text.Split(from).Length - 1, $"{path} must hold '{from}' once.");
+            await File.WriteAllTextAsync(path, text.Replace(from, to), token);
+            File.SetLastWriteTimeUtc(path, modified);
+            info.Refresh();
+            Assert.AreEqual(length, info.Length, "The edit must keep the file size.");
+            Assert.AreEqual(modified, info.LastWriteTimeUtc, "The edit must keep the modification time.");
+        }
 
-        var before = await ObserveLifecycleState(client, board, token);
+        // 1. A check of the saved board: complete, fresh, and still fresh when read again. The live board is untouched.
+        var before = await Observe();
         var (_, state) = await Run(before);
         await Evidence("pcb-drc-job.json", state);
+        AssertCurrent(state, "A completed check of an unchanged board must be complete and fresh.");
+        Assert.AreEqual(state, await Read(state, token), "Reading an unchanged check again must not change it.");
+        Assert.AreEqual(before, await Observe(), "A detached DRC job must not change the live board or its files.");
 
-        Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, state.Status, state.ErrorCode + ": " + state.ErrorMessage);
-        Assert.AreEqual(1.0, state.Progress);
-        Assert.IsTrue(state.SnapshotComplete, "The detached DRC bundle captures every owned native input before execution.");
-        Assert.IsTrue(state.ResultsFresh, "Completed results remain fresh while all captured inputs are unchanged.");
-        Assert.IsFalse(state.CancellationRequested);
-        Assert.AreEqual(state.Findings.Count, state.Findings.Select(finding => finding.NativeId).Distinct().Count());
-        Assert.AreEqual(before, await ObserveLifecycleState(client, board, token),
-            "A detached DRC job must not change the live board or its files.");
+        // 2. A candidate check follows the same rule. Its candidate never reaches the board.
+        var header = new ItemHeader { Document = board };
+        var track = (await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = header, Items = { new KIID { Value = "33333333-3333-4333-8333-333333333333" } } }, token))
+            .Items.Single().Unpack<Track>();
+        string candidateId = Guid.NewGuid().ToString("D");
+        var candidate = track.Clone();
+        candidate.Id = new KIID { Value = candidateId };
+        candidate.Start.YNm += 5_000_000; candidate.End.YNm += 5_000_000;
+        var (_, dryRun) = await Run(before, request => request.CandidateItems.Add(Any.Pack(candidate)));
+        await Evidence("pcb-drc-job-candidate.json", dryRun);
+        AssertCurrent(dryRun, "A completed candidate check follows the ordinary rule.");
+        Assert.IsTrue(dryRun.CandidateDryRun);
+        CollectionAssert.AreEqual(new[] { candidateId }, dryRun.CandidateItemIds.ToArray());
+        Assert.AreEqual(before, await Observe(), "A candidate check must not add its candidate to the live board.");
 
-        // The check goes stale the moment its custom rules change on disk, even when
-        // the file is put back before anyone reads the check again: KiCad's own file
-        // notification made it stale, not a later comparison of the file contents.
+        // 3. The custom rules file: created, then edited in place with the same size and modification time.
         string rules = Path.Combine(board.Project.Path, Path.ChangeExtension(board.BoardFilename, ".kicad_dru"));
         byte[]? savedRules = File.Exists(rules) ? await File.ReadAllBytesAsync(rules, token) : null;
         try
         {
             await File.WriteAllTextAsync(rules,
                 "(version 1)\n(rule \"fixture_event\" (constraint clearance (min 0.3mm)))\n", token);
-            // KiCad handles file notifications and API requests on its UI thread and
-            // runs ready file notifications before queued requests. The pause only
-            // gives a busy UI thread its turn; the assertions below prove the result.
-            await ObserveLifecycleState(client, board, token);
-            await Task.Delay(TimeSpan.FromMilliseconds(250), token);
-            await ObserveLifecycleState(client, board, token);
+            await Settle();
+            var created = await Read(state, token);
+            await Evidence("pcb-drc-job-rules-stale.json", created);
+            AssertStale(created, "project_inputs_changed", "Creating a custom rules file must make the finished check stale.");
+            var (_, ruled) = await Run(await Observe());
+            await Evidence("pcb-drc-job-rules.json", ruled);
+            AssertCurrent(ruled, "A check with the new rules file must be complete and fresh.");
+            await EditInPlace(rules, "(min 0.3mm)", "(min 0.4mm)");
+            await Settle();
+            var edited = await Read(ruled, token);
+            await Evidence("pcb-drc-job-rules-in-place-stale.json", edited);
+            AssertStale(edited, "project_inputs_changed",
+                "Editing the rules in place, with the same size and modification time, must make the check stale.");
         }
         finally
         {
             if (savedRules is null) File.Delete(rules); // Only the rules file this journey created.
             else await File.WriteAllBytesAsync(rules, savedRules, CancellationToken.None);
         }
-        var rulesChanged = await Read(state, token);
-        await Evidence("pcb-drc-job-rules-stale.json", rulesChanged);
-        AssertStale(rulesChanged, "project_inputs_changed",
-            "Changing the custom rules file must make the finished check stale, and restoring it must not revive it.");
-
-        var (secondRequest, second) = await Run(await ObserveLifecycleState(client, board, token));
-        Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, second.Status, second.ErrorCode + ": " + second.ErrorMessage);
+        await Settle();
+        AssertStale(await Read(state, token), "project_inputs_changed", "Putting the rules back must not revive the first check.");
+        var (secondRequest, second) = await Run(await Observe());
+        AssertCurrent(second, "A check after the rules were put back must be complete and fresh.");
         Assert.AreEqual(state.Findings.Count, second.Findings.Count,
             "A new check of the same board and restored rules must report the same findings.");
 
-        // A committed edit through KiCad's own board transaction makes the check stale.
-        var header = new ItemHeader { Document = board };
-        var track = (await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
-            { Header = header, Items = { new KIID { Value = "33333333-3333-4333-8333-333333333333" } } }, token))
-            .Items.Single().Unpack<Track>();
-        var moved = track.Clone(); moved.End.XNm += 1_000_000;
-        var begin = await client.InvokeAsync<BeginCommit, BeginCommitResponse>(new() { Header = header }, token);
-        bool committed = false;
+        // 4. The project's text variables, which KiCad keeps in memory and every read compares. A schematic-parity check
+        //    reads the schematic state, which includes the project settings.
+        var schematic = (await client.InvokeAsync<GetOpenDocuments, GetOpenDocumentsResponse>(
+            new() { Type = DocumentType.DoctypeSchematic }, token)).Documents.Single();
+        var schematicState = await ObserveLifecycleState(client, schematic, token);
+        var (_, parity) = await Run(await Observe(), request =>
+        {
+            request.TestFootprints = true;
+            request.ExpectedSchematicState = schematicState.Clone();
+        });
+        await Evidence("pcb-drc-job-parity.json", parity);
+        AssertCurrent(parity, "A completed schematic-parity check must be complete and fresh.");
+        Assert.AreEqual(schematicState, parity.CheckedSchematicState);
+        AssertCurrent(await Read(second, token), "The parity check must not change the ordinary check's inputs.");
+        var projectDocument = new DocumentSpecifier { Type = DocumentType.DoctypeProject, Project = board.Project.Clone() };
+        var variables = await client.InvokeAsync<GetTextVariables, Kiapi.Common.Project.TextVariables>(
+            new() { Document = projectDocument }, token);
+        bool variablesChanged = false;
         try
         {
-            var update = new UpdateItems { Header = header };
-            update.Items.Add(Any.Pack(moved));
-            var updated = await client.InvokeAsync<UpdateItems, UpdateItemsResponse>(update, token);
-            Assert.IsTrue(updated.UpdatedItems.Count == 1
-                && updated.UpdatedItems.All(item => item.Status.Code == ItemStatusCode.IscOk), updated.ToString());
-            await client.InvokeAsync<EndCommit, EndCommitResponse>(new()
-            {
-                Id = begin.Id, Action = CommitAction.CmaCommit, Header = header,
-                Message = "DRC freshness journey edit"
-            }, token);
-            committed = true;
+            var change = new SetTextVariables { Document = projectDocument, MergeMode = MapMergeMode.MmmMerge, Variables = new() };
+            change.Variables.Variables["DRC_JOURNEY_CHECK"] = "changed";
+            variablesChanged = true;
+            await client.InvokeAsync<SetTextVariables, Empty>(change, token);
+            var projectStale = await Read(second, token);
+            await Evidence("pcb-drc-job-project-stale.json", projectStale);
+            AssertStale(projectStale, "project_inputs_changed", "A changed project text variable must make the check stale.");
+            var parityStale = await ReadPcbDrcJobState(client, board, parity, token);
+            await Evidence("pcb-drc-job-parity-stale.json", parityStale);
+            AssertStale(parityStale, "schematic_changed",
+                "A changed project text variable changes the schematic the parity check compared, so it must be stale.");
         }
         finally
         {
-            if (!committed)
-                await client.InvokeAsync<EndCommit, EndCommitResponse>(new()
-                    { Id = begin.Id, Action = CommitAction.CmaDrop, Header = header }, CancellationToken.None);
+            if (variablesChanged)
+                await client.InvokeAsync<SetTextVariables, Empty>(new()
+                    { Document = projectDocument, MergeMode = MapMergeMode.MmmReplace, Variables = variables.Clone() }, CancellationToken.None);
         }
-        var edited = await Read(second, token);
-        await Evidence("pcb-drc-job-edit-stale.json", edited);
-        AssertStale(edited, "document_changed", "A committed board edit must make the finished check stale.");
+        Assert.AreEqual(variables, await client.InvokeAsync<GetTextVariables, Kiapi.Common.Project.TextVariables>(
+            new() { Document = projectDocument }, token));
+        AssertStale(await Read(second, token), "project_inputs_changed", "Putting the variables back must not revive the check.");
 
-        // An agent reading the same check through the STDIO MCP server sees it stale too.
+        // 5. The drawing sheet: a sheet file of the project, then edited in place with the same size and modification time.
+        var originalPage = await client.InvokeAsync<GetPageSettings, PageSettings>(new() { Document = board }, token);
+        string sheet = Path.Combine(board.Project.Path, "drc-journey.kicad_wks");
+        Assert.IsFalse(File.Exists(sheet), "Only this journey writes its drawing sheet.");
+        await File.WriteAllTextAsync(sheet,
+            "(kicad_wks (version 20220228) (generator pl_editor) " +
+            "(setup (textsize 1.5 1.5) (linewidth 0.15) (textlinewidth 0.15) " +
+            "(left_margin 10) (right_margin 10) (top_margin 10) (bottom_margin 10)) " +
+            "(rect (name \"Frame\") (start 0 0 ltcorner) (end 0 0)) " +
+            "(tbtext \"DRC JOURNEY SHEET A\" (name \"Label\") (pos 10 10 ltcorner)))", token);
+        try
+        {
+            var custom = originalPage.Clone();
+            custom.DrawingSheet = sheet;
+            await client.InvokeAsync<SetPageSettings, PageSettings>(new() { Document = board, PageSettings = custom }, token);
+            var (_, sheetCheck) = await Run(await Observe());
+            await Evidence("pcb-drc-job-drawing.json", sheetCheck);
+            AssertCurrent(sheetCheck, "A check with the project's drawing sheet must be complete and fresh.");
+            await EditInPlace(sheet, "SHEET A", "SHEET B");
+            await Settle();
+            var sheetStale = await Read(sheetCheck, token);
+            await Evidence("pcb-drc-job-drawing-stale.json", sheetStale);
+            AssertStale(sheetStale, "auxiliary_inputs_changed",
+                "Editing the drawing sheet in place, with the same size and modification time, must make the check stale.");
+        }
+        finally
+        {
+            await client.InvokeAsync<SetPageSettings, PageSettings>(
+                new() { Document = board, PageSettings = originalPage }, CancellationToken.None);
+            File.Delete(sheet);
+        }
+        Assert.AreEqual(originalPage, await client.InvokeAsync<GetPageSettings, PageSettings>(new() { Document = board }, token));
+
+        // 6. A committed edit through KiCad's own board transaction. An agent reading the check through the STDIO MCP
+        //    server sees it fresh before the edit and stale after it.
+        var (_, fourth) = await Run(await Observe());
+        AssertCurrent(fourth, "A check after the drawing sheet was put back must be complete and fresh.");
         string statePath = Directory.CreateTempSubdirectory("kicad-drc-job-mcp-").FullName;
         try
         {
@@ -108,45 +203,235 @@ public sealed partial class NativeSessionTests
             string instanceId = (await client.HandshakeAsync(token)).InstanceId;
             var attached = await mcp.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId });
             Assert.IsFalse(attached.TryGetProperty("isError", out var attachError) && attachError.GetBoolean(), attached.GetRawText());
-            var reply = await mcp.Tool("kicad_pcb_drc_job", new
+            async Task<PcbDrcJobState> McpRead(PcbDrcJobState job)
             {
-                instanceId, documentJson = SchematicJson.Formatter.Format(board),
-                jobId = second.JobId, processEpoch = client.Epoch
-            });
-            Assert.IsFalse(reply.TryGetProperty("isError", out var replyError) && replyError.GetBoolean(), reply.GetRawText());
-            var observed = SchematicJson.Parser.Parse<PcbDrcJobState>(reply.GetProperty("content").EnumerateArray()
-                .Single(item => item.GetProperty("type").GetString() == "text").GetProperty("text").GetString()!);
+                var reply = await mcp.Tool("kicad_pcb_drc_job", new
+                {
+                    instanceId, documentJson = SchematicJson.Formatter.Format(board),
+                    jobId = job.JobId, processEpoch = client.Epoch
+                });
+                Assert.IsFalse(reply.TryGetProperty("isError", out var replyError) && replyError.GetBoolean(), reply.GetRawText());
+                return SchematicJson.Parser.Parse<PcbDrcJobState>(reply.GetProperty("content").EnumerateArray()
+                    .Single(item => item.GetProperty("type").GetString() == "text").GetProperty("text").GetString()!);
+            }
+            var current = await McpRead(fourth);
+            await Evidence("pcb-drc-job-mcp-fresh.json", current);
+            AssertCurrent(current, "An agent reading the unchanged check over MCP must see it complete and fresh.");
+            Assert.AreEqual(fourth, current);
+
+            var moved = track.Clone(); moved.End.XNm += 1_000_000;
+            var begin = await client.InvokeAsync<BeginCommit, BeginCommitResponse>(new() { Header = header }, token);
+            bool committed = false;
+            try
+            {
+                var update = new UpdateItems { Header = header };
+                update.Items.Add(Any.Pack(moved));
+                var updated = await client.InvokeAsync<UpdateItems, UpdateItemsResponse>(update, token);
+                Assert.IsTrue(updated.UpdatedItems.Count == 1
+                    && updated.UpdatedItems.All(item => item.Status.Code == ItemStatusCode.IscOk), updated.ToString());
+                await client.InvokeAsync<EndCommit, EndCommitResponse>(new()
+                {
+                    Id = begin.Id, Action = CommitAction.CmaCommit, Header = header,
+                    Message = "DRC freshness journey edit"
+                }, token);
+                committed = true;
+            }
+            finally
+            {
+                if (!committed)
+                    await client.InvokeAsync<EndCommit, EndCommitResponse>(new()
+                        { Id = begin.Id, Action = CommitAction.CmaDrop, Header = header }, CancellationToken.None);
+            }
+            var edited = await Read(fourth, token);
+            await Evidence("pcb-drc-job-edit-stale.json", edited);
+            AssertStale(edited, "document_changed", "A committed board edit must make the finished check stale.");
+            var observed = await McpRead(fourth);
             AssertStale(observed, "document_changed", "An agent reading the check over MCP must see it stale.");
             Assert.AreEqual(edited, observed);
+
+            // The project's net classes, which KiCad keeps in memory and every read compares: a wider clearance for the
+            // Default class makes the check stale for the agent, and a new check is complete and fresh again.
+            var (_, classed) = await Run(await Observe());
+            await Evidence("pcb-drc-job-netclass.json", classed);
+            AssertCurrent(classed, "A check before the net class changes must be complete and fresh.");
+            AssertCurrent(await McpRead(classed), "An agent must see the check before the net class change complete and fresh.");
+            var classes = await client.InvokeAsync<GetNetClasses, NetClassesResponse>(new(), token);
+            var defaultClass = classes.NetClasses.Single(netClass => netClass.Name == "Default");
+            Assert.IsNotNull(defaultClass.Board?.Clearance, "The Default net class declares its clearance.");
+            bool classesChanged = false;
+            try
+            {
+                var widened = defaultClass.Clone();
+                widened.Board.Clearance.ValueNm += 50_000;
+                var change = new SetNetClasses { MergeMode = MapMergeMode.MmmMerge };
+                change.NetClasses.Add(widened);
+                classesChanged = true;
+                await client.InvokeAsync<SetNetClasses, Empty>(change, token);
+                var classStale = await McpRead(classed);
+                await Evidence("pcb-drc-job-netclass-stale.json", classStale);
+                AssertStale(classStale, "project_inputs_changed",
+                    "An agent reading the check over MCP after the Default net class changed must see it stale.");
+                var (_, reclassed) = await Run(await Observe());
+                await Evidence("pcb-drc-job-netclass-new.json", reclassed);
+                AssertCurrent(reclassed, "A new check with the changed net class must be complete and fresh.");
+                AssertCurrent(await McpRead(reclassed), "An agent must see the new check complete and fresh.");
+            }
+            finally
+            {
+                if (classesChanged)
+                {
+                    var restore = new SetNetClasses { MergeMode = MapMergeMode.MmmMerge };
+                    restore.NetClasses.Add(defaultClass.Clone());
+                    await client.InvokeAsync<SetNetClasses, Empty>(restore, CancellationToken.None);
+                }
+            }
+            Assert.AreEqual(classes, await client.InvokeAsync<GetNetClasses, NetClassesResponse>(new(), token),
+                "The net classes are put back exactly.");
+            AssertStale(await McpRead(classed), "project_inputs_changed", "Putting the net class back must not revive the check.");
         }
         finally { Directory.Delete(statePath, true); }
 
-        // A check of the edited board that is still current when the board is reloaded.
-        // The editor detaches it before it frees the edited board, so the check becomes
-        // stale for good instead of listening to a board that no longer exists.
-        var (_, edit) = await Run(await ObserveLifecycleState(client, board, token));
+        // 7. A check of the edited board that is still current when the board is reloaded. The editor detaches it before
+        //    it frees the edited board: its notifications are gone, so it becomes stale for good instead of listening to
+        //    a board that no longer exists, and only a new check, captured afresh, is current.
+        var (_, edit) = await Run(await Observe());
         await Evidence("pcb-drc-job-edited-board.json", edit);
-        Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, edit.Status, edit.ErrorCode + ": " + edit.ErrorMessage);
+        AssertCurrent(edit, "A check of the edited board must be complete and fresh.");
         Assert.AreEqual(edit, await Read(edit, token), "Nothing changed the edited board before it was reloaded.");
-
-        // Reverting replaces the edited board with the saved one. The stale check
-        // stays stale, and replaying its start request returns it instead of a new check.
         await client.InvokeAsync<RevertDocument, Empty>(new() { Document = board }, token);
         var detached = await Read(edit, token);
         await Evidence("pcb-drc-job-reload-detached.json", detached);
         AssertStale(detached, "input_events_lost",
             "Reloading the board must detach the check that was still current, not compare it with the new board.");
-        AssertStale(await Read(second, token), "document_changed", "Reloading the board must not revive an older check.");
+        AssertStale(await Read(fourth, token), "document_changed", "Reloading the board must not revive an older check.");
         var replay = await client.InvokeAsync<StartPcbDrcJob, PcbDrcJobState>(secondRequest, token);
         Assert.AreEqual(second.JobId, replay.JobId);
-        AssertStale(replay, "document_changed", "Replaying a start request must return its stale check.");
-        var (_, third) = await Run(await ObserveLifecycleState(client, board, token));
+        AssertStale(replay, "project_inputs_changed", "Replaying a start request must return its stale check.");
+        var (_, third) = await Run(await Observe());
         await Evidence("pcb-drc-job-reverted.json", third);
-        Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, third.Status, third.ErrorCode + ": " + third.ErrorMessage);
+        AssertCurrent(third, "A new check of the reloaded board must be complete and fresh.");
         Assert.AreEqual(state.Findings.Count, third.Findings.Count,
             "A new check of the reloaded board must report the findings of the saved board.");
-        Assert.IsTrue(third.SnapshotComplete);
-        Assert.IsTrue(third.ResultsFresh);
+
+        // 8. Teardrops: KiCad writes them without an identity and gives each a new one when it loads the board. A check's
+        //    copy of the board must still name the open board's teardrop, so a rule that fails for every track (rules
+        //    match a teardrop as a track) yields a finding about exactly that teardrop, before and after another reload
+        //    changes its identity.
+        string boardPath = Path.Combine(board.Project.Path, board.BoardFilename);
+        Assert.IsFalse((await Observe()).NativeContentDirty, "The board must be saved before this step replaces its file.");
+        byte[] savedBoard = await File.ReadAllBytesAsync(boardPath, token);
+        Assert.IsFalse(File.Exists(rules), "Only this journey writes custom rules.");
+        try
+        {
+            // Test data only: the teardrop reaches the open editor through KiCad's own board loader.
+            string text = System.Text.Encoding.UTF8.GetString(savedBoard);
+            int end = text.LastIndexOf(')');
+            Assert.IsGreaterThan(0, end);
+            await File.WriteAllTextAsync(boardPath, text[..end] +
+                "  (zone (net \"DRC_JOURNEY_TEARDROP\") (layer \"F.Cu\") (hatch edge 0.5) (priority 30000) " +
+                "(attr (teardrop (type padvia))) (connect_pads yes (clearance 0)) (min_thickness 0.0254) " +
+                "(fill yes (thermal_gap 0.5) (thermal_bridge_width 0.5) (island_removal_mode 1) (island_area_min 10)) " +
+                "(polygon (pts (xy 180 180) (xy 181 180.4) (xy 181 180.6) (xy 180 181))))\n" + text[end..], token);
+            // Rules match a teardrop as a track, so every track and the teardrop fail this assertion.
+            await File.WriteAllTextAsync(rules,
+                "(version 1)\n(rule \"every_track\" (condition \"A.Type == 'Track'\") (constraint assertion \"A.Type != 'Track'\"))\n", token);
+            // Reloads the board and returns its teardrop's identity.
+            async Task<string> Load()
+            {
+                await client.InvokeAsync<RevertDocument, Empty>(new() { Document = board }, token);
+                return (await client.InvokeAsync<GetItems, GetItemsResponse>(
+                    new() { Header = header, Types_ = { KiCadObjectType.KotPcbZone } }, token))
+                    .Items.Select(item => item.Unpack<Zone>()).Single(zone => zone.Type == ZoneType.ZtTeardrop).Id.Value;
+            }
+            async Task<PcbDrcJobState> CheckTeardrop(string teardrop, string name)
+            {
+                var (_, zoneCheck) = await Run(await Observe());
+                await Evidence(name, zoneCheck);
+                AssertCurrent(zoneCheck, "A check of a board with a teardrop must be complete and fresh.");
+                var named = zoneCheck.Findings.Where(finding => finding.Marker.ErrorType == Kiapi.Board.DrcErrorType.DrcetAssertionFailure)
+                    .SelectMany(finding => finding.Marker.Items.Select(item => item.Value)).ToList();
+                CollectionAssert.Contains(named, teardrop, "The rule's finding must name the open board's teardrop.");
+                CollectionAssert.IsSubsetOf(named, new[] { teardrop, "11111111-1111-4111-8111-111111111111", "33333333-3333-4333-8333-333333333333" },
+                    "Every finding of the rule must name the teardrop or a track of the open board, never an identity private to the check.");
+                return zoneCheck;
+            }
+            string loaded = await Load();
+            var firstLoad = await CheckTeardrop(loaded, "pcb-drc-job-teardrop.json");
+            string reloaded = await Load();
+            Assert.AreNotEqual(loaded, reloaded, "KiCad gives a loaded teardrop a new identity.");
+            AssertStale(await Read(firstLoad, token), "input_events_lost", "Reloading must make the teardrop check stale.");
+            await CheckTeardrop(reloaded, "pcb-drc-job-teardrop-reloaded.json");
+        }
+        finally
+        {
+            await File.WriteAllBytesAsync(boardPath, savedBoard, CancellationToken.None);
+            File.Delete(rules); // Only the rules file this step created.
+            await client.InvokeAsync<RevertDocument, Empty>(new() { Document = board }, CancellationToken.None);
+        }
+        var (_, restored) = await Run(await Observe());
+        await Evidence("pcb-drc-job-restored.json", restored);
+        AssertCurrent(restored, "A check of the restored board must be complete and fresh.");
+        Assert.AreEqual(state.Findings.Count, restored.Findings.Count,
+            "A check of the restored board must report the findings of the saved board.");
+
+        // 9. Text that shows the clock. A check lays out the board's texts, so it reads what they show. A silkscreen text
+        //    shows a project text variable. When the variable gives the date, KiCad captures the date with the check, which
+        //    is complete and fresh. When it gives the time of day, which changes while the check runs, the check's snapshot
+        //    is incomplete with its reason and its results are never fresh. Without that text a new check is complete and
+        //    fresh again.
+        Assert.IsFalse((await Observe()).NativeContentDirty, "The board must be saved before this step replaces its file.");
+        byte[] savedClockBoard = await File.ReadAllBytesAsync(boardPath, token);
+        const string stamp = "DRC_JOURNEY_STAMP";
+        bool stamped = false;
+        async Task Stamp(string value)
+        {
+            var set = new SetTextVariables { Document = projectDocument, MergeMode = MapMergeMode.MmmMerge, Variables = new() };
+            set.Variables.Variables[stamp] = value;
+            stamped = true;
+            await client.InvokeAsync<SetTextVariables, Empty>(set, token);
+        }
+        try
+        {
+            // Test data only: the text reaches the open editor through KiCad's own board loader.
+            string text = System.Text.Encoding.UTF8.GetString(savedClockBoard);
+            int end = text.LastIndexOf(')');
+            Assert.IsGreaterThan(0, end);
+            await File.WriteAllTextAsync(boardPath, text[..end] +
+                "  (gr_text \"Checked ${" + stamp + "}\" (at 60 60) (layer \"F.SilkS\") " +
+                "(uuid \"44444444-4444-4444-8444-444444444444\") (effects (font (size 1 1) (thickness 0.15))))\n" +
+                text[end..], token);
+            await client.InvokeAsync<RevertDocument, Empty>(new() { Document = board }, token);
+            await Stamp("${CURRENT_DATE}");
+            var (_, dated) = await Run(await Observe());
+            await Evidence("pcb-drc-job-date.json", dated);
+            AssertCurrent(dated, "A check whose board text shows the date, which KiCad captures with the check, must be complete and fresh.");
+            await Stamp("${CURRENT_TIME_HH_MM_SS}");
+            AssertStale(await Read(dated, token), "project_inputs_changed", "Changing what the text shows must make the check stale.");
+            var (_, timed) = await Run(await Observe());
+            await Evidence("pcb-drc-job-time-of-day.json", timed);
+            Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, timed.Status, timed.ErrorCode + ": " + timed.ErrorMessage);
+            Assert.IsTrue(timed.WorkerFinished);
+            Assert.IsFalse(timed.SnapshotComplete, "A board text that shows the time of day is no input a check can capture.");
+            Assert.IsFalse(timed.ResultsFresh, "An incomplete snapshot never has fresh results.");
+            var reason = timed.InputWarnings.Single(warning => warning.StartsWith("snapshot_incomplete: ", StringComparison.Ordinal));
+            StringAssert.StartsWith(reason, "snapshot_incomplete: current_time_text: ");
+            StringAssert.Contains(reason, "${CURRENT_TIME_HH_MM_SS}");
+        }
+        finally
+        {
+            if (stamped)
+                await client.InvokeAsync<SetTextVariables, Empty>(new()
+                    { Document = projectDocument, MergeMode = MapMergeMode.MmmReplace, Variables = variables.Clone() }, CancellationToken.None);
+            await File.WriteAllBytesAsync(boardPath, savedClockBoard, CancellationToken.None);
+            await client.InvokeAsync<RevertDocument, Empty>(new() { Document = board }, CancellationToken.None);
+        }
+        Assert.AreEqual(variables, await client.InvokeAsync<GetTextVariables, Kiapi.Common.Project.TextVariables>(
+            new() { Document = projectDocument }, token));
+        var (_, unstamped) = await Run(await Observe());
+        await Evidence("pcb-drc-job-clock-restored.json", unstamped);
+        AssertCurrent(unstamped, "Without the clock text, a new check must be complete and fresh again.");
+        Assert.AreEqual(state.Findings.Count, unstamped.Findings.Count,
+            "A check of the restored board must report the findings of the saved board.");
     }
 
     // Window activation is the PCB editor's checkpoint for changes that reach it without any notification. Here the
@@ -216,21 +501,21 @@ public sealed partial class NativeSessionTests
             // seen: the check's inputs are again exactly what it checked.
             var (_, control) = await RunPcbDrcJob(client, board, await ObserveLifecycleState(client, board, token), token);
             await Evidence("pcb-drc-job-activation-control.json", control);
-            Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, control.Status, control.ErrorCode + ": " + control.ErrorMessage);
+            AssertPcbDrcJobCurrent(control, "A check whose rules file is a link still captures the rules it reads exactly.");
             CollectionAssert.Contains(control.InputWarnings.ToArray(), uncovered,
                 "A check whose rules file is a link must say that notifications do not cover all of its inputs.");
             await File.WriteAllTextAsync(target, changed, token);
             await Settle();
             await File.WriteAllTextAsync(target, original, token);
             var unobserved = await ReadPcbDrcJobState(client, board, control, token);
-            Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, unobserved.Status,
-                "Nothing but a read observed the linked rules, and they were put back first. " + unobserved.ErrorCode + ": " + unobserved.ErrorMessage);
+            AssertPcbDrcJobCurrent(unobserved,
+                "Nothing but a read observed the linked rules, and they were put back first: the check's inputs are again exactly what it checked.");
             Assert.AreEqual(control.Findings.Count, unobserved.Findings.Count);
 
             // The same change, now with the PCB editor activated while the linked rules are changed: the person moves
             // to the schematic editor and back.
             var (_, check) = await RunPcbDrcJob(client, board, await ObserveLifecycleState(client, board, token), token);
-            Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, check.Status, check.ErrorCode + ": " + check.ErrorMessage);
+            AssertPcbDrcJobCurrent(check, "A new check with the linked rules must be complete and fresh.");
             CollectionAssert.Contains(check.InputWarnings.ToArray(), uncovered);
             await File.WriteAllTextAsync(target, changed, token);
             NativeKeyboard.SchematicShortcut(display, processId, "click", controlKey: false); // The schematic canvas background.
@@ -253,23 +538,172 @@ public sealed partial class NativeSessionTests
         }
     }
 
-    // Starts an ordinary PCB DRC job at the given revision and reads it until its worker finished.
+    // The interactive router's settings live only in the PCB editor's memory and reach no notification. A check reads
+    // them (a refill regenerates tuning patterns with them), so changing them in the rendered Interactive Router Settings
+    // dialog makes a completed check stale at the next read, and a new check is complete and fresh again. The step puts
+    // the original routing mode back the same way before the next step.
+    private static async Task VerifyPcbDrcJobRouterChange(NativeClient client, DocumentSpecifier board, int processId,
+        string display, string evidence, CancellationToken token)
+    {
+        const string dialog = "Interactive Router Settings";
+        Task Evidence(string name, PcbDrcJobState state) => File.WriteAllTextAsync(
+            Path.Combine(evidence, name), SchematicJson.Formatter.Format(state), token);
+        Task Picture(string phase) => NativeKeyboard.CaptureAsync(display,
+            Path.Combine(evidence, processId + "-drc-job-router-" + phase + ".png"), token);
+        void Key(string key, string window) => NativeKeyboard.SchematicShortcut(display, processId, key, window, false, false);
+        async Task Window(bool visible)
+        {
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
+            limit.CancelAfter(TimeSpan.FromSeconds(8));
+            int delay = 25;
+            try
+            {
+                while (NativeKeyboard.HasWindow(display, processId, dialog) != visible)
+                { await Task.Delay(delay, limit.Token); delay = Math.Min(delay * 2, 200); }
+            }
+            catch (OperationCanceledException) when (limit.IsCancellationRequested && !token.IsCancellationRequested)
+            {
+                await Picture(visible ? "dialog-missing" : "dialog-open");
+                throw new AssertFailedException($"The {dialog} dialog did not {(visible ? "open" : "close")}.");
+            }
+            if (visible) await NativeSetupUi.StableGeometry(display, processId, limit.Token, dialog);
+        }
+
+        // Route > Interactive Router Settings... is the last item of the Route menu (Alt+U). The dialog opens on its routing
+        // mode buttons; an arrow key selects the neighbouring mode, and Return confirms it.
+        async Task SelectMode(string arrow, string phase)
+        {
+            NativeKeyboard.SchematicShortcut(display, processId, "u", "PCB Editor", false, false, altKey: true);
+            await NativeSetupUi.WaitForPopup(display, processId, true, token, "PCB Editor");
+            Key("End", "PCB Editor");
+            Key("Return", "PCB Editor");
+            await Window(true);
+            await Picture(phase + "-dialog");
+            Key(arrow, dialog);
+            await Picture(phase);
+            Key("Return", dialog);
+            await Window(false);
+        }
+
+        var (_, check) = await RunPcbDrcJob(client, board, await ObserveLifecycleState(client, board, token), token);
+        await Evidence("pcb-drc-job-router.json", check);
+        AssertPcbDrcJobCurrent(check, "A check before the router settings change must be complete and fresh.");
+        await SelectMode("Down", "mode-changed");
+        var changed = await ReadPcbDrcJobState(client, board, check, token);
+        await Evidence("pcb-drc-job-router-stale.json", changed);
+        AssertPcbDrcJobStale(changed, "auxiliary_inputs_changed",
+            "Changing the interactive router settings in the rendered dialog must make the finished check stale.");
+        var (_, again) = await RunPcbDrcJob(client, board, await ObserveLifecycleState(client, board, token), token);
+        await Evidence("pcb-drc-job-router-new.json", again);
+        AssertPcbDrcJobCurrent(again, "A new check with the changed router settings must be complete and fresh.");
+        Assert.AreEqual(check.Findings.Count, again.Findings.Count, "Router settings do not change what a check without refill finds.");
+
+        // Put the original mode back for the steps after this one: the opposite arrow key selects it again. That too is a
+        // router change, and a new check is complete and fresh.
+        await SelectMode("Up", "mode-restored");
+        var reverted = await ReadPcbDrcJobState(client, board, again, token);
+        await Evidence("pcb-drc-job-router-restored-stale.json", reverted);
+        AssertPcbDrcJobStale(reverted, "auxiliary_inputs_changed",
+            "Putting the router mode back in the rendered dialog must make the check of the changed mode stale.");
+        var (_, restored) = await RunPcbDrcJob(client, board, await ObserveLifecycleState(client, board, token), token);
+        await Evidence("pcb-drc-job-router-restored.json", restored);
+        AssertPcbDrcJobCurrent(restored, "A new check with the original router mode must be complete and fresh.");
+        Assert.AreEqual(check.Findings.Count, restored.Findings.Count, "Router settings do not change what a check without refill finds.");
+        AssertPcbDrcJobStale(await ReadPcbDrcJobState(client, board, check, token), "auxiliary_inputs_changed",
+            "The check before the change never becomes current again, even with the original mode back.");
+    }
+
+    // The board's current variant selects variant field values and ${VARIANT}. KiCad keeps it only in memory, and choosing
+    // another variant in the PCB editor's toolbar is no board edit. A check reads it, so choosing a variant in the rendered
+    // toolbar makes a completed check stale at the next read, and a new check is complete and fresh again. The step
+    // chooses the default variant again the same way, and puts the board back, before the next step.
+    private static async Task VerifyPcbDrcJobVariantChange(NativeClient client, DocumentSpecifier board, int processId,
+        string display, string evidence, CancellationToken token)
+    {
+        const string variant = "DrcJourney";
+        Task Evidence(string name, PcbDrcJobState state) => File.WriteAllTextAsync(
+            Path.Combine(evidence, name), SchematicJson.Formatter.Format(state), token);
+        Task Picture(string phase) => NativeKeyboard.CaptureAsync(display,
+            Path.Combine(evidence, processId + "-drc-job-variant-" + phase + ".png"), token);
+        // The variant choice is the last control of the PCB editor's top toolbar ("< Default >" with the default variant).
+        // Its list opens under the pointer; Home picks the default variant, the first entry, and End the board's own
+        // variant, the last one.
+        async Task Choose(string key, string phase)
+        {
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "PCB Editor", false, false,
+                clickFromLeft: 1073, clickFromTop: 43);
+            await NativeSetupUi.WaitForPopup(display, processId, true, token, "PCB Editor",
+                Path.Combine(evidence, processId + "-drc-job-variant-" + phase + "-missing.png"));
+            await Picture(phase + "-list");
+            NativeKeyboard.SchematicShortcut(display, processId, key, "PCB Editor", false, false);
+            NativeKeyboard.SchematicShortcut(display, processId, "Return", "PCB Editor", false, false);
+            await NativeSetupUi.WaitForPopup(display, processId, false, token, "PCB Editor",
+                Path.Combine(evidence, processId + "-drc-job-variant-" + phase + "-open.png"));
+            await Picture(phase);
+        }
+
+        string boardPath = Path.Combine(board.Project.Path, board.BoardFilename);
+        Assert.IsFalse((await ObserveLifecycleState(client, board, token)).NativeContentDirty,
+            "The board must be saved before this step replaces its file.");
+        byte[] saved = await File.ReadAllBytesAsync(boardPath, token);
+        try
+        {
+            // Test data only: the board's variant reaches the open editor through KiCad's own board loader.
+            string text = System.Text.Encoding.UTF8.GetString(saved);
+            int end = text.LastIndexOf(')');
+            Assert.IsGreaterThan(0, end);
+            await File.WriteAllTextAsync(boardPath, text[..end] +
+                "  (variants (variant (name \"" + variant + "\") (description \"DRC journey variant\")))\n" + text[end..], token);
+            await client.InvokeAsync<RevertDocument, Empty>(new() { Document = board }, token);
+            var (_, check) = await RunPcbDrcJob(client, board, await ObserveLifecycleState(client, board, token), token);
+            await Evidence("pcb-drc-job-variant.json", check);
+            AssertPcbDrcJobCurrent(check, "A check of the default variant must be complete and fresh.");
+            await Choose("End", "chosen");
+            var chosen = await ReadPcbDrcJobState(client, board, check, token);
+            await Evidence("pcb-drc-job-variant-stale.json", chosen);
+            AssertPcbDrcJobStale(chosen, "project_inputs_changed",
+                "Choosing the board's variant in the rendered toolbar must make the check of the default variant stale.");
+            var (_, again) = await RunPcbDrcJob(client, board, await ObserveLifecycleState(client, board, token), token);
+            await Evidence("pcb-drc-job-variant-new.json", again);
+            AssertPcbDrcJobCurrent(again, "A new check of the chosen variant must be complete and fresh.");
+            await Choose("Home", "default");
+            var restored = await ReadPcbDrcJobState(client, board, again, token);
+            await Evidence("pcb-drc-job-variant-default-stale.json", restored);
+            AssertPcbDrcJobStale(restored, "project_inputs_changed",
+                "Choosing the default variant again must make the check of the board's variant stale.");
+            var (_, defaulted) = await RunPcbDrcJob(client, board, await ObserveLifecycleState(client, board, token), token);
+            await Evidence("pcb-drc-job-variant-default.json", defaulted);
+            AssertPcbDrcJobCurrent(defaulted, "A new check of the default variant must be complete and fresh.");
+            AssertPcbDrcJobStale(await ReadPcbDrcJobState(client, board, check, token), "project_inputs_changed",
+                "The first check never becomes current again, even with the default variant chosen again.");
+        }
+        finally
+        {
+            await File.WriteAllBytesAsync(boardPath, saved, CancellationToken.None);
+            await client.InvokeAsync<RevertDocument, Empty>(new() { Document = board }, CancellationToken.None);
+        }
+    }
+
+    // Starts a PCB DRC job at the given revision and reads it until its worker finished. configure adds options to the
+    // ordinary request, such as candidate items or a schematic-parity source.
     private static async Task<(StartPcbDrcJob Request, PcbDrcJobState State)> RunPcbDrcJob(NativeClient client,
-        DocumentSpecifier board, DocumentLifecycleState at, CancellationToken token)
+        DocumentSpecifier board, DocumentLifecycleState at, CancellationToken token, Action<StartPcbDrcJob>? configure = null)
     {
         var request = new StartPcbDrcJob
         {
             Document = board, ProcessEpoch = client.Epoch,
             ExpectedRevision = at.Revision.Clone(), OperationId = Guid.NewGuid().ToString("D")
         };
+        configure?.Invoke(request);
         var started = await client.InvokeAsync<StartPcbDrcJob, PcbDrcJobState>(request, token);
         Assert.AreEqual(board, started.Document);
         Assert.AreEqual(request.OperationId, started.OperationId);
         Assert.AreEqual(client.Epoch, started.ProcessEpoch);
         Assert.AreEqual(at.Revision, started.CheckedRevision);
         Assert.IsTrue(Guid.TryParseExact(started.JobId, "D", out _));
-        Assert.IsFalse(started.CandidateDryRun);
-        Assert.IsEmpty(started.CandidateItemIds);
+        Assert.AreEqual(request.CandidateItems.Count != 0, started.CandidateDryRun);
+        Assert.HasCount(request.CandidateItems.Count, started.CandidateItemIds);
+        AssertPcbDrcJobPending(started, "A check that has just started");
         using var wait = CancellationTokenSource.CreateLinkedTokenSource(token);
         wait.CancelAfter(TimeSpan.FromMinutes(2));
         int delay = 25;
@@ -280,14 +714,34 @@ public sealed partial class NativeSessionTests
             delay = Math.Min(delay * 2, 500);
             state = await ReadPcbDrcJobState(client, board, started, wait.Token);
             Assert.AreEqual(started.JobId, state.JobId);
+            AssertPcbDrcJobPending(state, "A running check");
         }
         return (request, state);
+    }
+
+    internal const string PcbDrcPendingIdentity = "snapshot_incomplete: generated_item_identity: pending until the check completes";
+
+    // Until its worker has finished, a check has not matched its findings to objects of the open board: it claims neither
+    // a complete snapshot nor fresh results, and says so. A finished check no longer carries that reason.
+    internal static void AssertPcbDrcJobPending(PcbDrcJobState job, string because)
+    {
+        int pending = job.InputWarnings.Count(warning => warning.StartsWith(PcbDrcPendingIdentity, StringComparison.Ordinal));
+        if (job.WorkerFinished)
+        {
+            Assert.AreEqual(0, pending, because + " has finished and must no longer wait for its finding identities.");
+            return;
+        }
+        Assert.AreEqual(1, pending, because + " must say that its findings are not yet matched to the open board. "
+            + string.Join(" | ", job.InputWarnings));
+        Assert.IsFalse(job.SnapshotComplete, because + " must not claim a complete snapshot before it has finished.");
+        Assert.IsFalse(job.ResultsFresh, because + " must not claim fresh results.");
     }
 
     private static Task<PcbDrcJobState> ReadPcbDrcJobState(NativeClient client, DocumentSpecifier board, PcbDrcJobState job,
         CancellationToken token) => client.InvokeAsync<ReadPcbDrcJob, PcbDrcJobState>(new()
             { Document = board, JobId = job.JobId, ProcessEpoch = client.Epoch }, token);
 
+    // A stale check keeps the complete snapshot it was captured from; only its results are no longer current.
     private static void AssertPcbDrcJobStale(PcbDrcJobState job, string code, string because)
     {
         Assert.AreEqual(PcbDrcJobStatus.PdrcjsStale, job.Status, because + " " + job.ErrorCode + ": " + job.ErrorMessage);
@@ -295,6 +749,20 @@ public sealed partial class NativeSessionTests
         Assert.IsEmpty(job.Findings, because + " A stale check must not expose its old findings.");
         Assert.IsTrue(job.WorkerFinished, because);
         Assert.IsFalse(job.ResultsFresh, because);
-        Assert.IsTrue(job.SnapshotComplete, because);
+        Assert.IsTrue(job.SnapshotComplete, because + " " + string.Join(" | ", job.InputWarnings));
+    }
+
+    // A completed check whose every input KiCad captured exactly, and none of which has changed since: the only case in
+    // which a check may claim a complete snapshot and fresh results (decision n39a51a3a2ff84c55, ledger p23deb822a36256a6).
+    private static void AssertPcbDrcJobCurrent(PcbDrcJobState job, string because)
+    {
+        Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, job.Status, because + " " + job.ErrorCode + ": " + job.ErrorMessage);
+        Assert.AreEqual(1.0, job.Progress, because);
+        Assert.IsTrue(job.WorkerFinished, because);
+        Assert.IsFalse(job.CancellationRequested, because);
+        Assert.IsTrue(job.SnapshotComplete, because + " " + string.Join(" | ", job.InputWarnings));
+        Assert.IsTrue(job.ResultsFresh, because);
+        Assert.IsFalse(job.InputWarnings.Any(warning => warning.StartsWith("snapshot_incomplete: ", StringComparison.Ordinal)), because);
+        Assert.AreEqual(job.Findings.Count, job.Findings.Select(finding => finding.NativeId).Distinct().Count(), because);
     }
 }

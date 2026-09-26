@@ -210,17 +210,19 @@ public sealed partial class NativeSessionTests
                     Assert.AreEqual(at, started.CheckedRevision, $"Project {target.Name}'s check must be bound to the revision it was asked for.");
                     Assert.IsEmpty(started.Findings);
                     Assert.IsFalse(started.CandidateDryRun);
+                    AssertPcbDrcJobPending(started, $"Project {target.Name}'s check as kicad_pcb_drc_start returned it");
                 }
                 return (startedA, startedB);
             }
             async Task<PcbDrcJobState> Read(TwoProjectDrcTarget target, PcbDrcJobState job) => Parse(await mcp.Tool("kicad_pcb_drc_job", new
                 { instanceId = target.InstanceId, documentJson = Json(target.Board), jobId = job.JobId, processEpoch = target.Epoch }));
-            // A running check shows no findings, stays below 1, and its progress never goes back.
+            // A running check shows no findings, stays below 1, claims no complete snapshot, and its progress never goes back.
             void Progressing(TwoProjectDrcTarget target, PcbDrcJobState before, PcbDrcJobState now)
             {
                 Assert.AreEqual(before.JobId, now.JobId);
                 Assert.AreEqual(before.CheckedRevision, now.CheckedRevision);
                 Assert.IsGreaterThanOrEqualTo(before.Progress, now.Progress, $"Project {target.Name}'s progress went back.");
+                AssertPcbDrcJobPending(now, $"Project {target.Name}'s check");
                 if (now.WorkerFinished) return;
                 Assert.IsTrue(now.Status is PcbDrcJobStatus.PdrcjsQueued or PcbDrcJobStatus.PdrcjsRunning, now.Status.ToString());
                 Assert.IsEmpty(now.Findings, $"Project {target.Name}'s running check must not expose findings.");

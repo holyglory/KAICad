@@ -10,6 +10,7 @@
 #include <exception>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <tl/expected.hpp>
 #include <vector>
@@ -44,6 +45,14 @@ struct PCB_DRC_CAPTURE_CONTEXT
     const kiapi::automation::v1::SchematicParityNetlistSnapshot* schematic = nullptr;
 };
 
+// An input the check could not capture exactly. A check with any such gap never
+// reports a complete snapshot or fresh results; the code and explanation say why.
+struct PCB_DRC_INPUT_GAP
+{
+    std::string code;
+    std::string message;
+};
+
 struct PCB_DRC_COPPER_PREPARATION
 {
     enum class STATUS { NOT_RUN, COMPLETED, CANCELLED, NOT_CONVERGED, FAILED };
@@ -53,7 +62,8 @@ struct PCB_DRC_COPPER_PREPARATION
 };
 
 // The live project inputs a project baseline is compared with: the project and
-// board settings, and the content of the board's custom rules file as it is now.
+// board settings, the date or version-control revision the board's text shows, and
+// the content of the board's custom rules file as it is now.
 struct PCB_DRC_PROJECT_OBSERVATION
 {
     nlohmann::json settings;
@@ -107,9 +117,6 @@ public:
     const KIID& CapturedDrawingIdentity() const;
     const KIID& SourceDrawingIdentity() const { return m_sourceDrawingIdentity; }
     bool RulesUnchanged() const;
-    // True only after the detached board, project/rule baseline, library
-    // definitions, drawing-sheet model and routing settings were all captured.
-    bool SnapshotComplete() const;
     const PCB_DRC_PROJECT_BASELINE& ProjectBaseline() const { return m_projectBaseline; }
     const PCB_DRC_AUXILIARY_BASELINE& AuxiliaryBaseline() const { return m_auxiliaryBaseline; }
     std::string LibraryFingerprint() const;
@@ -127,6 +134,20 @@ public:
     // Call after installing and initializing the board's owned DRC engine.
     const PCB_DRC_COPPER_PREPARATION& PrepareCopper( PROGRESS_REPORTER* aReporter = nullptr );
 
+    // Inputs this bundle did not capture exactly, known at capture.
+    std::vector<PCB_DRC_INPUT_GAP> Gaps() const;
+    // After a completed PrepareCopper: record, for each object the preparation generated
+    // in the private board, the object of the open board it stands for: the tuning
+    // pattern (generator) that regenerated it, or the teardrop of the open board with
+    // the same layer, net, kind and outline.
+    void MapGeneratedItems();
+    // Replace an identity a finding names in the private board by the identity of the
+    // object it stands for: an object of the open board, the open drawing sheet, a
+    // candidate item of the request or, for a generated object, its generating source.
+    // False when it names nothing a person or agent can find in the open board or in
+    // the request.
+    bool ResolveFindingItem( KIID& aIdentity ) const;
+
 private:
     PCB_DRC_RUN_INPUTS() = default;
     std::unique_ptr<PCB_DRC_DOCUMENT_SNAPSHOT> m_document;
@@ -141,5 +162,10 @@ private:
     KIID m_sourceDrawingIdentity;
     std::unique_ptr<PNS::ROUTING_SETTINGS> m_routingSettings;
     PCB_DRC_COPPER_PREPARATION m_copperPreparation;
+    std::set<KIID> m_candidates;
+    // Generated object of the private board -> the open board's object it stands for.
+    std::map<KIID, KIID> m_generated;
+    // The time-of-day text variables the board's text can show; no captured value.
+    std::vector<std::string> m_timeOfDayText;
 };
 #endif

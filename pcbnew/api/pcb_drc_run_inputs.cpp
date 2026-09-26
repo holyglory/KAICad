@@ -20,7 +20,15 @@
 #include <json_common.h>
 #include <ki_exception.h>
 #include <router/pns_routing_settings.h>
+#include <eda_group.h>
+#include <eda_text.h>
+#include <pcb_barcode.h>
+#include <title_block.h>
+#include <pcb_marker.h>
+#include <zone.h>
+#include <fmt/format.h>
 #include <algorithm>
+#include <set>
 #include <stdexcept>
 
 std::string PcbDrcExceptionMessage( const std::exception& aError )
@@ -63,12 +71,71 @@ BOARD& PCB_DRC_RUN_INPUTS::GetBoard() const { return m_document->GetBoard(); }
 
 namespace
 {
+// Text variables whose value comes from outside the design, which KiCad resolves again
+// each time it lays out a text: the date and the project's version-control revision,
+// which a check can capture and compare, and the time of day, which changes while the
+// check runs.
+constexpr const char* CAPTURED_LIVE_TEXT[] = { "CURRENT_DATE", "VCSHASH", "VCSSHORTHASH" };
+constexpr const char* TIME_OF_DAY_TEXT[] = { "CURRENT_TIME_HH_MM_SS", "CURRENT_TIME_LOCALE" };
+
+// The live text variables the board's texts can show. A check lays out the board's texts
+// (its text clearance and silkscreen tests read their shapes), resolving their variables.
+// A text reaches a variable directly or through the definition of another variable: a
+// project text variable, a board property, a title-block field or another object's field.
+// So once any text refers to a variable, every definition counts too. The search is by
+// name: it can find more than the board shows, never less.
+std::set<std::string> LiveTextVariables( const BOARD& aBoard )
+{
+    std::set<std::string> found;
+    bool refersToVariables = false;
+    auto search = [&]( const wxString& aText )
+    {
+        if( aText.Contains( wxS( "${" ) ) ) refersToVariables = true;
+        for( const char* name : CAPTURED_LIVE_TEXT )
+            if( aText.Contains( name ) ) found.insert( name );
+        for( const char* name : TIME_OF_DAY_TEXT )
+            if( aText.Contains( name ) ) found.insert( name );
+    };
+    auto searchItem = [&]( const BOARD_ITEM* aItem )
+    {
+        if( const auto* text = dynamic_cast<const EDA_TEXT*>( aItem ) ) search( text->GetText() );
+        else if( aItem->Type() == PCB_BARCODE_T ) search( static_cast<const PCB_BARCODE*>( aItem )->GetText() );
+    };
+    for( BOARD_ITEM* item : aBoard.GetItemSet() )
+    {
+        searchItem( item );
+        item->RunOnChildren( searchItem, RECURSE_MODE::RECURSE );
+    }
+    if( !refersToVariables ) return {};
+    if( const PROJECT* project = aBoard.GetProject() )
+        for( const auto& [name, value] : project->GetTextVars() ) search( value );
+    for( const auto& [name, value] : aBoard.GetProperties() ) search( value );
+    const TITLE_BLOCK& titles = aBoard.GetTitleBlock();
+    for( const wxString* field : { &titles.GetTitle(), &titles.GetDate(), &titles.GetRevision(), &titles.GetCompany() } )
+        search( *field );
+    for( int comment = 0; comment < 9; ++comment ) search( titles.GetComment( comment ) );
+    return found;
+}
+
+// The value of a captured live text variable now, as the board's texts resolve it.
+std::string LiveTextValue( const BOARD& aBoard, const std::string& aName )
+{
+    if( aName == "CURRENT_DATE" ) return TITLE_BLOCK::GetCurrentDate().utf8_string();
+    wxString token = wxString::FromUTF8( aName );
+    if( const PROJECT* project = aBoard.GetProject(); project && project->TextVarResolver( &token ) )
+        return token.utf8_string();
+    return "${" + aName + "}"; // Unresolved: shown as written.
+}
+
 nlohmann::json ProjectInputs( const BOARD& aBoard )
 {
     const PROJECT* project = aBoard.GetProject();
     const auto& settings = aBoard.GetDesignSettings();
     nlohmann::json result = {
         { "project_path", project ? project->GetProjectFullName().ToStdString() : "" },
+        // The editor's current variant resolves variant field values and ${VARIANT}; it
+        // lives only in memory and switching it is no board edit.
+        { "current_variant", aBoard.GetCurrentVariant().utf8_string() },
         { "project", project ? project->GetProjectFile().CaptureCurrentState() : nlohmann::json() },
         { "board_settings", settings.CaptureCurrentState() },
         { "net_settings", settings.m_NetSettings
@@ -78,6 +145,12 @@ nlohmann::json ProjectInputs( const BOARD& aBoard )
     result["effective_exclusions"] = nlohmann::json::array();
     for( const auto& exclusion : PCB_PROJECT_EDITOR_STATE::Exclusions( aBoard ) )
         result["effective_exclusions"].push_back( exclusion );
+    // The date or revision the board's texts show, only when they can show one, so that
+    // a board without them does not go stale at midnight. Every read compares them again.
+    // The time of day is no captured value (PCB_DRC_RUN_INPUTS::Gaps).
+    const std::set<std::string> live = LiveTextVariables( aBoard );
+    for( const char* name : CAPTURED_LIVE_TEXT )
+        if( live.contains( name ) ) result["live_text"][name] = LiveTextValue( aBoard, name );
     return result;
 }
 }
@@ -162,6 +235,9 @@ std::unique_ptr<PCB_DRC_RUN_INPUTS> PCB_DRC_RUN_INPUTS::Capture(
     const KIID identity = aBoard.m_Uuid;
     auto result = std::unique_ptr<PCB_DRC_RUN_INPUTS>( new PCB_DRC_RUN_INPUTS );
     result->m_projectBaseline.m_settings = ProjectInputs( aBoard );
+    const std::set<std::string> live = LiveTextVariables( aBoard );
+    for( const char* name : TIME_OF_DAY_TEXT )
+        if( live.contains( name ) ) result->m_timeOfDayText.emplace_back( name );
     result->m_auxiliaryBaseline = PCB_DRC_AUXILIARY_BASELINE::Capture( aContext );
     if( aContext.routingSettings )
     {
@@ -256,7 +332,75 @@ tl::expected<std::vector<KIID>, std::string> PCB_DRC_RUN_INPUTS::AddCandidateIte
         identities.push_back( item->m_Uuid );
         source.Add( item.release() );
     }
+    m_candidates.insert( identities.begin(), identities.end() );
     return identities;
+}
+
+std::vector<PCB_DRC_INPUT_GAP> PCB_DRC_RUN_INPUTS::Gaps() const
+{
+    std::vector<PCB_DRC_INPUT_GAP> gaps;
+    const auto& gap = m_document->IdentityGap();
+    if( !gap.Empty() )
+    {
+        gaps.push_back( { "item_identity",
+                fmt::format( "The check's copy of the board does not keep the identity of every object of the open "
+                             "board ({} missing from the copy, {} in the copy but not in the open board, {} identities "
+                             "held by more than one object), so a finding could name an object that does not exist "
+                             "in the open board.",
+                             gap.missing, gap.unexpected, gap.shared ) } );
+    }
+    if( !m_timeOfDayText.empty() )
+    {
+        std::string names;
+        for( const std::string& name : m_timeOfDayText ) names += ( names.empty() ? "${" : ", ${" ) + name + "}";
+        gaps.push_back( { "current_time_text",
+                fmt::format( "The board's text can show the time of day ({}), which changes while the check runs, "
+                             "so the check cannot read one captured value of it.", names ) } );
+    }
+    return gaps;
+}
+
+void PCB_DRC_RUN_INPUTS::MapGeneratedItems()
+{
+    const std::set<KIID>& source = m_document->SourceIdentities();
+    m_generated.clear();
+    for( BOARD_ITEM* item : GetBoard().GetItemSet() )
+    {
+        if( item->Type() == PCB_MARKER_T || source.contains( item->m_Uuid ) || m_candidates.contains( item->m_Uuid ) )
+            continue;
+        // A tuning pattern regenerates its tracks with new identities; the pattern is the
+        // object of the open board a person selects and edits.
+        if( EDA_GROUP* group = item->GetParentGroup() )
+        {
+            const EDA_ITEM* owner = group->AsEdaItem();
+            if( owner->Type() == PCB_GENERATOR_T && source.contains( owner->m_Uuid ) )
+            {
+                m_generated.emplace( item->m_Uuid, owner->m_Uuid );
+                continue;
+            }
+        }
+        // A rebuilt teardrop is the open board's teardrop only when it is the same one.
+        if( item->Type() == PCB_ZONE_T )
+            if( auto teardrop = m_document->SourceTeardrop( *static_cast<const ZONE*>( item ) ) )
+                m_generated.emplace( item->m_Uuid, *teardrop );
+    }
+}
+
+bool PCB_DRC_RUN_INPUTS::ResolveFindingItem( KIID& aIdentity ) const
+{
+    if( aIdentity == niluuid ) return true; // Names no object.
+    if( m_proxy && aIdentity == m_proxy->m_Uuid )
+    {
+        aIdentity = m_sourceDrawingIdentity;
+        return true;
+    }
+    if( m_candidates.contains( aIdentity ) ) return true;
+    if( const auto generated = m_generated.find( aIdentity ); generated != m_generated.end() )
+    {
+        aIdentity = generated->second;
+        return true;
+    }
+    return m_document->SourceIdentities().contains( aIdentity );
 }
 
 bool PCB_DRC_RUN_INPUTS::HasLibraryDependencies() const
@@ -269,14 +413,4 @@ bool PCB_DRC_RUN_INPUTS::RulesUnchanged() const
     // An absent project/rule path is explicitly implicit-only, not a failed read.
     return m_rulesBaseline.Path().empty()
             || m_rulesBaseline.Check( m_rulesBaseline.Path() ) == FILE_BASELINE_CHECK::UNCHANGED;
-}
-
-bool PCB_DRC_RUN_INPUTS::SnapshotComplete() const
-{
-    // A run is complete only when every owned native input needed by the DRC
-    // engine has a detached representation. Schematic parity is optional and is
-    // captured separately when requested by test_footprints.
-    return m_document != nullptr && m_libraries != nullptr && m_drawing != nullptr
-            && m_proxy != nullptr
-            && ( m_rulesBaseline.Path().empty() || m_rulesBaseline.Known() );
 }

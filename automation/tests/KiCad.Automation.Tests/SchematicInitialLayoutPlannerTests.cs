@@ -930,6 +930,15 @@ public sealed class SchematicInitialLayoutPlannerTests
             foreach (var symbol in reply.Obstacles.Where(o => o.SymbolPins?.Pins.Any(p => p.Id.Value == partner.ToString("D")) == true))
                 symbol.SymbolPins.Complete = false;
         }), "incomplete_layout_measurement", "one instance without pin 7's symbol pins");
+        // Must-catch (ledger p20323fd749ff825e): KiCad reports the pins of pin 7's symbol as it does on an instance whose design
+        // variant swaps in another library symbol, with no pins and its reason; the refusal passes that reason on.
+        const string VariantReason = "Alternate variant symbols require an exact persistent pin mapping";
+        await RequireRefused(saved, regions, OnSecond(reply =>
+        {
+            foreach (var symbol in reply.Obstacles.Where(o => o.SymbolPins?.Pins.Any(p => p.Id.Value == partner.ToString("D")) == true))
+                symbol.SymbolPins = new() { Complete = false, IncompleteReason = SchematicPinGeometryIncompleteReason.SpgirVariantPinMappingUnresolved,
+                    Limitations = { VariantReason } };
+        }), "incomplete_layout_measurement", "pin 7's symbol swapped for another library symbol on one instance", VariantReason);
 
         SchematicConnectionRealizerTests.Geometry OnSecond(Action<SchematicPlacementGeometry> corrupt) => new()
         {
@@ -1052,11 +1061,12 @@ public sealed class SchematicInitialLayoutPlannerTests
     }
 
     private static async Task RequireRefused(DesignRecoveryState saved, SchematicLayoutRegion[] regions,
-        SchematicConnectionRealizerTests.Geometry geometry, string code, string problem)
+        SchematicConnectionRealizerTests.Geometry geometry, string code, string problem, string? says = null)
     {
         byte[] before = saved.DesiredFileBytes.ToArray();
         var error = await Assert.ThrowsAsync<AutomationException>(() => ProposeConnected(saved, regions, geometry));
         Assert.AreEqual(code, error.Code, problem + ": " + error.Message);
+        if (says is not null) StringAssert.Contains(error.Message, says, problem);
         CollectionAssert.AreEqual(before, saved.DesiredFileBytes, problem);
     }
 

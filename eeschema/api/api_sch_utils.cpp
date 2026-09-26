@@ -19,6 +19,7 @@
  */
 
 #include <algorithm>
+#include <map>
 #include <set>
 #include <stdexcept>
 #include <trace_helpers.h>
@@ -51,6 +52,10 @@
 #include <api/sch_text_presentation.h>
 #include <sch_connection.h>
 #include <sch_render_settings.h>
+#include <drawing_sheet/ds_data_model.h>
+#include <drawing_sheet/ds_draw_item.h>
+#include <page_info.h>
+#include <project.h>
 #include <trigo.h>
 
 #include <api/api_utils.h>
@@ -214,6 +219,32 @@ BOX2I MeasureSchematicSymbolDrawnBody( const SCH_SYMBOL& symbol, const SCH_SHEET
 }
 
 
+SCHEMATIC_SYMBOL_DRAWN_PARTS MeasureSchematicSymbolDrawnParts( const SCH_SYMBOL& symbol, const SCH_SHEET_PATH& path )
+{
+    const LIB_SYMBOL* definition = symbol.GetEffectiveLibSymbol( &path );
+    if( !definition )
+        definition = LIB_SYMBOL::GetDummy();
+    const int unit = symbol.GetUnitSelection( &path );
+    const int bodyStyle = symbol.GetBodyStyle();
+    const TRANSFORM& transform = symbol.GetTransform();
+    SCHEMATIC_SYMBOL_DRAWN_PARTS parts;
+    // Without its pins the body box takes in each visible pin's root, never its line or the target at its end.
+    parts.body = definition->GetBodyBoundingBox( unit, bodyStyle, false, false );
+    parts.body = transform.TransformCoordinate( parts.body );
+    parts.body.Normalize();
+    parts.body.Offset( symbol.GetPosition() );
+    // The same pins GetBodyBoundingBox merges: this unit and body style, visible, not private.
+    for( const SCH_PIN* pin : definition->GetGraphicalPins( unit, bodyStyle ) )
+    {
+        if( !pin->IsVisible() || pin->IsPrivate() )
+            continue;
+        parts.pins.emplace_back( transform.TransformCoordinate( pin->GetPosition() ) + symbol.GetPosition(),
+                                 transform.TransformCoordinate( pin->GetPinRoot() ) + symbol.GetPosition() );
+    }
+    return parts;
+}
+
+
 BOX2I MeasureSchematicSymbolBounds( const SCH_SYMBOL& symbol, const SCH_SHEET_PATH& path,
                                     const wxString& variant )
 {
@@ -221,6 +252,107 @@ BOX2I MeasureSchematicSymbolBounds( const SCH_SYMBOL& symbol, const SCH_SHEET_PA
     for( const SCH_FIELD& field : symbol.GetFields() )
         if( field.IsVisible() ) bounds.Merge( field.GetBoundingBox( &path, variant ) );
     return bounds;
+}
+
+
+std::vector<BOX2I> MeasureSchematicSymbolFieldBounds( const SCH_SYMBOL& symbol, const SCH_SHEET_PATH& path,
+                                                      const wxString& variant )
+{
+    std::vector<BOX2I> fields;
+    for( const SCH_FIELD& field : symbol.GetFields() )
+    {
+        // Like the painter: a hidden or private field, or one whose text is empty here, draws nothing.
+        if( !field.IsVisible() || field.IsPrivate() || field.GetShownText( &path, true, 0, variant ).IsEmpty() )
+            continue;
+        BOX2I box = field.GetBoundingBox( &path, variant );
+        box.Normalize();
+        fields.push_back( box );
+    }
+    return fields;
+}
+
+
+bool PackSchematicDrawingSheet( const SCH_SHEET_PATH& aPath, const SCH_RENDER_SETTINGS& aSettings,
+                                kiapi::automation::v1::SchematicWiringDrawingSheet& aOutput,
+                                std::string& aError )
+{
+    using namespace kiapi::automation::v1;
+    aOutput.Clear();
+    SCH_SCREEN* screen = aPath.LastScreen();
+    if( !screen || !screen->Schematic() )
+    {
+        aError = "The sheet instance has no loaded screen";
+        return false;
+    }
+    std::unique_ptr<DS_DATA_MODEL> layout;
+    try
+    {
+        // Like the offscreen renderer: a private copy of the persisted drawing sheet, so neither the
+        // global model's coordinate environment nor its cached draw items change.
+        layout = DS_DATA_MODEL::GetTheInstance().CloneForRendering();
+    }
+    catch( const std::exception& error )
+    {
+        aError = std::string( "The drawing sheet cannot be copied: " ) + error.what();
+        return false;
+    }
+    if( !layout )
+    {
+        aError = "The drawing sheet cannot be copied";
+        return false;
+    }
+    SCHEMATIC& schematic = *screen->Schematic();
+    DS_DRAW_ITEM_LIST items( schIUScale );
+    items.SetDefaultPenSize( aSettings.GetDrawingSheetLineWidth() );
+    items.SetIsFirstPage( aPath.GetVirtualPageNumber() == 1 );
+    items.SetPageNumber( aPath.GetPageNumber() );
+    items.SetSheetCount( screen->GetPageCount() );
+    items.SetFileName( screen->GetFileName() );
+    items.SetSheetName( aPath.Last()->GetName() );
+    items.SetSheetPath( aPath.PathHumanReadable() );
+    items.SetSheetLayer( aSettings.GetLayerName() );
+    items.SetVariantName( schematic.GetCurrentVariant() );
+    items.SetVariantDesc( schematic.GetVariantDescription( schematic.GetCurrentVariant() ) );
+    items.SetProject( &schematic.Project() );
+    items.SetProperties( schematic.GetProperties() );
+    const PAGE_INFO& page = screen->GetPageSettings();
+    items.BuildDrawItemsList( page, screen->GetTitleBlock(), layout.get() );
+    const int width = page.GetWidthIU( schIUScale.IU_PER_MILS ), height = page.GetHeightIU( schIUScale.IU_PER_MILS );
+    const VECTOR2I leftTop( schIUScale.mmToIU( layout->GetLeftMargin() ), schIUScale.mmToIU( layout->GetTopMargin() ) );
+    const VECTOR2I rightBottom( width - schIUScale.mmToIU( layout->GetRightMargin() ),
+                                height - schIUScale.mmToIU( layout->GetBottomMargin() ) );
+    BOX2I frame( leftTop, rightBottom - leftTop );
+    frame.Normalize();
+    PackBox2( *aOutput.mutable_margin_frame(), frame, schIUScale );
+    for( DS_DRAW_ITEM_BASE* item = items.GetFirst(); item; item = items.GetNext() )
+    {
+        SchematicWiringDrawingSheetItemKind kind;
+        switch( item->Type() )
+        {
+        case WSG_LINE_T:   kind = SWR_DRAWING_SHEET_ITEM_LINE; break;
+        case WSG_RECT_T:   kind = SWR_DRAWING_SHEET_ITEM_RECTANGLE; break;
+        case WSG_TEXT_T:   kind = SWR_DRAWING_SHEET_ITEM_TEXT; break;
+        case WSG_POLY_T:   kind = SWR_DRAWING_SHEET_ITEM_POLYGON; break;
+        case WSG_BITMAP_T: kind = SWR_DRAWING_SHEET_ITEM_BITMAP; break;
+        default:           continue; // the page limits, drawn only by the drawing-sheet editor
+        }
+        BOX2I bounds = item->GetBoundingBox();
+        bounds.Normalize();
+        SchematicWiringDrawingSheetItem* drawn = aOutput.add_items();
+        drawn->set_kind( kind );
+        PackBox2( *drawn->mutable_bounds(), bounds, schIUScale );
+        // A line's or rectangle's bounds run through the middle of its stroke (DS_DRAW_ITEM_LINE and
+        // DS_DRAW_ITEM_RECT leave the pen out of GetBoundingBox). The canvas strokes it with its own
+        // pen (DS_PAINTER) and printing with the wider of that and the schematic's default pen
+        // (PrintWsItem), so the wider of the two is reported: the stroke reaches half of it past the
+        // bounds. A text's box already holds its strokes, and polygons and bitmaps draw no outline.
+        if( kind == SWR_DRAWING_SHEET_ITEM_LINE || kind == SWR_DRAWING_SHEET_ITEM_RECTANGLE )
+        {
+            drawn->set_stroke_width_nm( schIUScale.IUToNm( std::max( item->GetPenWidth(),
+                                                                     aSettings.GetDefaultPenWidth() ) ) );
+        }
+    }
+    return true;
 }
 
 
@@ -258,6 +390,39 @@ void PackSchematicPinGeometry( const SCH_SYMBOL& symbol, const SCH_SHEET_PATH& p
         return pin->GetBodyStyle() && pin->GetBodyStyle() != symbol.GetBodyStyle();
     } );
     std::sort( pins.begin(), pins.end(), []( const auto* a, const auto* b ) { return a->m_Uuid < b->m_Uuid; } );
+    // KiCad saves a placed pin under its number alone and, when it loads or relinks the symbol, pairs it with a
+    // library pin of that number (SCH_SYMBOL::UpdatePins, over every unit of the selected body style and the common
+    // pins). Where two such library pins share a number, which placed pin belongs to which of them is not saved and
+    // can change on the next load, so neither pair is an exact identity (ledger p20323fd749ff825e). The symbol is then
+    // reported incomplete rather than with a guess. Pins of another body style are never paired and do not count.
+    // Making such pins exact needs the file to record each placed pin's library pin.
+    std::map<wxString, int> pairedByNumber;
+    for( const SCH_PIN* libraryPin : symbol.GetLibSymbolRef()->GetPins() )
+    {
+        if( !libraryPin->GetBodyStyle() || !symbol.GetBodyStyle()
+                || libraryPin->GetBodyStyle() == symbol.GetBodyStyle() )
+        {
+            ++pairedByNumber[libraryPin->GetNumber()];
+        }
+    }
+    std::set<wxString> sharedNumbers;
+    for( const SCH_PIN* pin : pins )
+    {
+        if( pairedByNumber[pin->GetNumber()] > 1 )
+            sharedNumbers.insert( pin->GetNumber() );
+    }
+    if( !sharedNumbers.empty() )
+    {
+        wxString numbers;
+        for( const wxString& number : sharedNumbers )
+            numbers << ( numbers.IsEmpty() ? wxS( "'" ) : wxS( ", '" ) ) << number << wxS( "'" );
+        output.add_limitations( std::string( wxString::Format(
+                wxS( "Pin numbers %s are shared by more than one pin of this symbol; KiCad saves a placed pin "
+                     "by its number alone, so which library pin each of them is cannot be told exactly" ),
+                numbers ).ToUTF8() ) );
+        output.set_incomplete_reason( SPGIR_PLACED_IDENTITY_MISSING );
+        return;
+    }
     std::set<KIID> identities;
     std::set<KIID> ownedIdentities;
     for( const SCH_PIN* pin : pins )
@@ -1072,7 +1237,19 @@ void PackSchematicPresentationFacts( const SCH_SHEET_PATH& aPath, const SCH_REND
 
         if( auto* symbol = dynamic_cast<SCH_SYMBOL*>( copy.get() ) )
         {
-            object( *symbol, nullptr, "symbol", Fact::GRAPHIC, MeasureSchematicSymbolDrawnBody( *symbol, aPath ), true );
+            Fact* drawn = object( *symbol, nullptr, "symbol", Fact::GRAPHIC,
+                                  MeasureSchematicSymbolDrawnBody( *symbol, aPath ), true );
+            const SCHEMATIC_SYMBOL_DRAWN_PARTS parts = MeasureSchematicSymbolDrawnParts( *symbol, aPath );
+            BOX2I body = parts.body;
+            body.Normalize();
+            PackBox2( *drawn->mutable_body_bounds(), body, schIUScale );
+            for( const auto& [connection, root] : parts.pins )
+            {
+                kiapi::common::types::PolyLine* line = drawn->add_pin_lines();
+                PackVector2( *line->add_nodes()->mutable_point(), connection, schIUScale );
+                PackVector2( *line->add_nodes()->mutable_point(), root, schIUScale );
+                line->set_closed( false );
+            }
             // Power and virtual ('#') symbols hide their references by design.
             const bool required = !symbol->IsPower() && !symbol->GetRef( &aPath ).StartsWith( wxT( "#" ) );
             for( const SCH_FIELD& symbolField : symbol->GetFields() )

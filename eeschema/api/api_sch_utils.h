@@ -30,6 +30,9 @@
 #include <pin_map.h>
 
 #include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 
 class EDA_ITEM;
 class SCH_FIELD;
@@ -43,6 +46,7 @@ namespace kiapi::automation::v1
 {
 class SchematicPresentationFacts;
 class SchematicSymbolPinGeometry;
+class SchematicWiringDrawingSheet;
 }
 
 /// Sheet-space body of a placed symbol at an explicit sheet instance: the drawn body and its
@@ -53,6 +57,20 @@ BOX2I MeasureSchematicSymbolBody( const SCH_SYMBOL& aSymbol, const SCH_SHEET_PAT
 /// it: like MeasureSchematicSymbolBody, but without the circle the editor draws at an unconnected pin end, which a
 /// touching wire, label or power symbol removes and which is never printed.
 BOX2I MeasureSchematicSymbolDrawnBody( const SCH_SYMBOL& aSymbol, const SCH_SHEET_PATH& aPath );
+
+/// The drawn body of a placed symbol at an explicit sheet instance split into its parts, from the same definition,
+/// unit and body style as MeasureSchematicSymbolDrawnBody: the box of its graphics and visible pin roots (the body
+/// without its pins), and each visible pin as the straight line the painter draws from its connection point to its
+/// root, all in sheet coordinates. A wire check needs the parts: a symbol whose pins differ in length has a drawn box
+/// that reaches past its shorter pins' ends, where nothing is drawn.
+struct SCHEMATIC_SYMBOL_DRAWN_PARTS
+{
+    BOX2I                                    body;
+    std::vector<std::pair<VECTOR2I, VECTOR2I>> pins; ///< (connection point, root)
+};
+
+SCHEMATIC_SYMBOL_DRAWN_PARTS MeasureSchematicSymbolDrawnParts( const SCH_SYMBOL& aSymbol,
+                                                               const SCH_SHEET_PATH& aPath );
 
 /// Extent of the glyphs SCH_PAINTER::draw( SCH_FIELD ) paints for @a aField at an explicit sheet
 /// instance, from the exact native glyph geometry: the text KiCad shows there, centred on the
@@ -80,9 +98,30 @@ void PackSchematicPresentationFacts( const SCH_SHEET_PATH& aPath, const SCH_REND
 /// incomplete by #PackSchematicPinGeometry instead of refusing the whole sheet.
 BOX2I MeasureSchematicSymbolBounds( const SCH_SYMBOL& aSymbol, const SCH_SHEET_PATH& aPath,
                                     const wxString& aVariant );
+/// Sheet-space bounds of each field a placed symbol shows at an explicit sheet instance (visible, not
+/// private, with text there), in field order: each is one of the field boxes MeasureSchematicSymbolBounds
+/// takes in besides the body.
+std::vector<BOX2I> MeasureSchematicSymbolFieldBounds( const SCH_SYMBOL& aSymbol, const SCH_SHEET_PATH& aPath,
+                                                      const wxString& aVariant );
+/// The drawing sheet KiCad draws on the loaded sheet instance @a aPath (page frame, title block and
+/// any other drawing-sheet art), built the way its canvas builds it but from a private copy of the
+/// drawing-sheet model, at that instance's page size, first-page option, page number, file name
+/// and title block: the page shrunk by the model's margins, and every drawn item's kind and
+/// bounding box, with the stroke width of each line and rectangle (whose bounding box runs
+/// through the middle of its stroke). Returns false with @a aOutput cleared and the reason in @a aError when the
+/// drawing-sheet model cannot be copied. Never changes the design or the human view.
+bool PackSchematicDrawingSheet( const SCH_SHEET_PATH& aPath, const SCH_RENDER_SETTINGS& aSettings,
+                                kiapi::automation::v1::SchematicWiringDrawingSheet& aOutput,
+                                std::string& aError );
 
-/// Observe exact active pin identities and sheet-space anchors. Incomplete
-/// mappings return no pins; previous output is cleared before every observation.
+/// Observe exact active pin identities and sheet-space anchors at @a aPath: the pins of the unit
+/// selected there and of the symbol's selected body style (a De Morgan alternate body reports its own
+/// library pins and geometry, never the other body's same-numbered pins) plus the common pins.
+/// Incomplete mappings return no pins and name their reason: an unresolved definition, a design
+/// variant @a aVariant that swaps in another library symbol (its pins have no persistent link to the
+/// placed pins), an active pin whose number another pin of the selected body shares (KiCad saves a
+/// placed pin by its number alone), or a missing or repeated placed or owned identity. Previous
+/// output is cleared before every observation.
 void PackSchematicPinGeometry( const SCH_SYMBOL& aSymbol, const SCH_SHEET_PATH& aPath,
                               const wxString& aVariant,
                               kiapi::automation::v1::SchematicSymbolPinGeometry& aOutput );

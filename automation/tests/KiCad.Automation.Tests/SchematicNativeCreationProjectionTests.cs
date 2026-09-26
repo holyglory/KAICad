@@ -1,3 +1,4 @@
+using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using Kiapi.Common.Types;
 using Kiapi.Schematic.Types;
@@ -123,9 +124,17 @@ public sealed class SchematicNativeCreationProjectionTests
         }
         var near = Created(Dragged(60_960_000, 121_666_000, 90, shown: false, size: 2_540_000));
         var far = Created(Dragged(-20 * Mm, 40 * Mm, 270, shown: true, size: 800_000));
+        // The two refusals governed full acceptance recorded on sources without this rule (runs t20260925T024611Z-78215b and
+        // t20260925T090725Z-c388f6, "no free room for a connection stub" at the new probe's pin). The manual field check drags
+        // one placed probe's reference to the sheet point (81.28 mm, 141.986 mm), and in both runs that probe had the lowest
+        // generated occurrence identity of its part, so creation copied it: TP801 at (20.32 mm, 20.32 mm), its reference
+        // 60.96 mm aside and 121.666 mm ahead (the drag above), and TP899 at (200.66 mm, 130.81 mm), its reference 119.38 mm
+        // to the other side and 11.176 mm ahead (the drag here).
+        var refusedInAcceptance = Created(Dragged(-119_380_000, 11_176_000, 0, shown: true, size: 1_270_000));
         Assert.IsNotEmpty(near);
         CollectionAssert.AreEqual(near, far,
             "The new symbol does not depend on where the copied symbol's fields were dragged or how they were shown, sized or styled.");
+        CollectionAssert.AreEqual(near, refusedInAcceptance, "A copy of the probe dragged as in run t20260925T090725Z-c388f6 is the same new symbol.");
         foreach (var symbol in near)
         {
             long x = symbol.Position.XNm, y = symbol.Position.YNm;
@@ -412,6 +421,434 @@ public sealed class SchematicNativeCreationProjectionTests
                 SchematicNativeCreationProjection.Project(inconsistent.Baseline, inconsistent.Desired, [inconsistent.Library]), problem).Code, problem);
             Assert.AreEqual(before, SchematicDesignXml.Write(inconsistent.Baseline, [inconsistent.Library]), problem);
         }
+    }
+
+    // Ledger pb41c5714361c378a, CN-1 §5.3 on the unconnected creation path: a created pin that KiCad joins to a global net by
+    // name alone may stay out of every XML net only while nothing else in the design has that name. A unit test on purpose:
+    // the rendered NativeXmlComponentCreation journey proves the refused and the declared case end to end on a live KiCad
+    // with one hidden power pin name, and the intent builder's power-net test (the nearest existing test, which covers the
+    // connected path) is extended with the same states on this path. The other sources KiCad joins by name (global labels,
+    // power symbols, pins of the same creation), the unresolved power name and the cases that must stay admitted (stacked
+    // pins, local labels, visible power inputs, a name used nowhere else) need states no single live fixture holds.
+    [TestMethod]
+    public void UnconnectedCreationIsRefusedWhenKiCadWouldJoinACreatedPinByNameAlone()
+    {
+        // The frozen PSU/CPU Components stage created on its empty S1 sheets, with chosen library pins made hidden power inputs.
+        var (sheets, components) = PsuCpuComponents();
+        SchematicDesign Hidden(params (string CacheKey, string Number)[] pins) => components with { PartSymbols =
+        [
+            .. SchematicSynchronizationPlanTests.WithLibraryPinTypes(components.PartSymbols!).Select(declaration =>
+            {
+                var symbol = declaration.Symbol.Clone();
+                foreach (var child in symbol.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)))
+                {
+                    var pin = child.Item.Unpack<SchematicPin>();
+                    if (!pins.Contains((symbol.CacheKey, pin.Number))) continue;
+                    pin.ElectricalType = ElectricalPinType.EptPowerInput; pin.Visible = false;
+                    child.Item = Any.Pack(pin);
+                }
+                return declaration with { Symbol = symbol };
+            })
+        ] };
+        AutomationException Refused(SchematicDesign baseline, SchematicDesign desired, string code, string problem)
+        {
+            string before = SchematicDesignXml.Write(baseline, []);
+            var error = Assert.ThrowsExactly<AutomationException>(() => SchematicNativeCreationProjection.Project(baseline, desired, []), problem);
+            Assert.AreEqual(code, error.Code, problem + ": " + error.Message);
+            StringAssert.Contains(error.Message, "nothing was changed", problem);
+            Assert.AreEqual(before, SchematicDesignXml.Write(baseline, []), problem + ": creation must not change its baseline.");
+            // CN-1 §4.3: a connected addition skips only the refusal of new nets. These revisions declare no net for the
+            // created pins, so the connected mode refuses them the same way.
+            var connected = Assert.ThrowsExactly<AutomationException>(() => SchematicNativeCreationProjection.Project(baseline, desired, [], allowConnected: true), problem);
+            Assert.AreEqual((error.Code, error.Message), (connected.Code, connected.Message), problem + ": both modes apply the same rule.");
+            return error;
+        }
+
+        // Guard: the memory's hidden VCC pin is the only VCC in the design, so KiCad joins it to nothing.
+        var alone = SchematicNativeCreationProjection.Project(sheets, Hidden(("pic_programmer:24C16", "8")), []);
+        Assert.IsTrue(CreatedPins(alone.Candidate, "U6").Any(p => p.Number == "8" && !p.Visible && p.ElectricalType == ElectricalPinType.EptPowerInput));
+        // Must-catch: the ADC's and the memory's hidden GND pins would join each other, which the XML does not declare.
+        var twoGround = Refused(sheets, Hidden(("Battery_Management:LTC2959", "10"), ("pic_programmer:24C16", "4")),
+            SchematicConnectionErrors.ConnectedImplicitPowerConflict, "two new hidden GND pins");
+        StringAssert.Contains(twoGround.Message, "Hidden power pin U3.10 is named 'GND'");
+        StringAssert.Contains(twoGround.Message, "including hidden power pin U6.4");
+        StringAssert.Contains(twoGround.Message, "Declare a net holding U3.10 and U6.4 so the connection is declared");
+        // Guard: the regulator's two OUT pins stacked at one point are one connection in KiCad, so they may share the name.
+        _ = SchematicNativeCreationProjection.Project(sheets, Hidden(("Regulator_Linear:LP3982ILD-3.3", "1"), ("Regulator_Linear:LP3982ILD-3.3", "4")), []);
+        // Must-catch: a global label VCC already on the root sheet; guard: a local label VCC joins only its own sheet.
+        SchematicDesign WithLabel(IMessage label)
+        {
+            var schematic = sheets.Schematic.Clone();
+            schematic.Instances.Single(s => s.Metadata.Document.SheetPath.Path.Count == 1).Items.Add(Any.Pack(label));
+            return sheets with { Schematic = schematic };
+        }
+        var global = Refused(WithLabel(new GlobalLabel { Id = new() { Value = Guid.NewGuid().ToString("D") }, Position = new(), Text = new() { Text_ = "VCC" },
+                SpinStyle = SchematicLabelSpinStyle.SlssRight, Shape = SchematicLabelShape.SlshPassive, Locked = LockedState.LsUnlocked }),
+            Hidden(("pic_programmer:24C16", "8")), SchematicConnectionErrors.ConnectedImplicitPowerConflict, "global label VCC");
+        StringAssert.Contains(global.Message, "including the global label 'VCC'");
+        StringAssert.Contains(global.Message, "Add U6.8 to the XML net whose pins the global label 'VCC' connects so the connection is declared, or rename that label");
+        _ = SchematicNativeCreationProjection.Project(WithLabel(new LocalLabel { Id = new() { Value = Guid.NewGuid().ToString("D") }, Position = new(),
+            Text = new() { Text_ = "VCC" }, SpinStyle = SchematicLabelSpinStyle.SlssRight, Locked = LockedState.LsUnlocked }), Hidden(("pic_programmer:24C16", "8")), []);
+
+        // New global power symbols copied from #PWR1 (VCC) beside a global label V5, a local label V3 and an IC whose VCC
+        // power input is visible, which KiCad joins by wire only.
+        var bench = new SchematicConnectionIntentBuilderTests.Bench();
+        Guid power = bench.Part("PWR", SchematicSymbolType.SstGlobalPower,
+            new SchematicConnectionIntentBuilderTests.BenchPin("1", "~", 1, ElectricalPinType.EptPowerInput, false));
+        Guid ic = bench.Part("IC", new SchematicConnectionIntentBuilderTests.BenchPin("1", "VCC", 1, ElectricalPinType.EptPowerInput),
+            new SchematicConnectionIntentBuilderTests.BenchPin("2", "OUT", 1, ElectricalPinType.EptOutput));
+        bench.Component(power, "#PWR1", value: "VCC"); bench.Component(ic, "U1");
+        bench.GlobalLabel(SchematicConnectionIntentBuilderTests.BenchSheet.Root, "V5");
+        bench.LocalLabel(SchematicConnectionIntentBuilderTests.BenchSheet.Root, "V3");
+        var state = bench.State([]);
+        SchematicDesign NewPower(string value, SchematicDesign? onto = null, string reference = "#PWR2") =>
+            bench.Create(onto ?? state.Baseline, power, reference, SchematicConnectionIntentBuilderTests.BenchSheet.Root, value).Design;
+        StringAssert.Contains(Refused(state.Baseline, NewPower("VCC"), SchematicConnectionErrors.ConnectedGlobalNameConflict, "power symbol VCC").Message,
+            "Power symbol #PWR2 is named 'VCC', and KiCad joins everything with that name into one net, including power symbol #PWR1");
+        StringAssert.Contains(Refused(state.Baseline, NewPower("V5"), SchematicConnectionErrors.ConnectedGlobalNameConflict, "power symbol V5").Message,
+            "including the global label 'V5'");
+        StringAssert.Contains(Refused(state.Baseline, NewPower("V7", NewPower("V7"), "#PWR3"), SchematicConnectionErrors.ConnectedGlobalNameConflict,
+            "two new power symbols V7").Message, "including power symbol #PWR3");
+        Assert.AreEqual(SchematicConnectionErrors.ConnectedPowerNameUnresolved, Assert.ThrowsExactly<AutomationException>(() =>
+            SchematicNativeCreationProjection.Project(state.Baseline, NewPower("${RAIL}"), [])).Code);
+        _ = SchematicNativeCreationProjection.Project(state.Baseline, NewPower("V3"), []);
+        _ = SchematicNativeCreationProjection.Project(state.Baseline, bench.Create(state.Baseline, ic, "U2", SchematicConnectionIntentBuilderTests.BenchSheet.Root).Design, []);
+
+        // Through the synchronization planner the refusal is a plan without a candidate or any native operation, with or
+        // without a handshake that advertises connection realization.
+        var (saved, _) = SchematicConnectionIntentBuilderTests.Revise(state, _ => NewPower("VCC"));
+        Assert.IsTrue(SchematicNativeCreationProjection.IsSupportedAddition(saved.Baseline, DesignRecoveryStore.ReadDesired(saved).Engineering));
+        foreach (var plan in new[] { SchematicSynchronizationPlanner.Plan(saved), SchematicConnectionIntentBuilderTests.Plan(saved) })
+        {
+            Assert.AreEqual(SchematicConnectionErrors.ConnectedGlobalNameConflict, plan.ErrorCode, plan.ErrorMessage);
+            Assert.IsNull(plan.Candidate); Assert.IsNull(plan.CandidateXml); Assert.IsEmpty(plan.NativeOperations); Assert.IsNull(plan.Connections);
+        }
+        var (clean, _) = SchematicConnectionIntentBuilderTests.Revise(state, _ => NewPower("V3"));
+        var admitted = SchematicSynchronizationPlanner.Plan(clean);
+        Assert.IsTrue(admitted.CanPrepare, admitted.ErrorCode + ": " + admitted.ErrorMessage);
+        Assert.IsNotNull(admitted.CandidateXml, "An unconnected creation keeps its publishable preview.");
+
+        static IEnumerable<SchematicPin> CreatedPins(SchematicDesign design, string reference)
+        {
+            var component = design.Engineering.Circuit.Components.Single(c => c.Reference == reference);
+            var natives = design.Engineering.Circuit.Symbols.Where(s => s.ComponentId == component.Id)
+                .Select(s => design.SymbolBindings.Single(b => b.SymbolOccurrenceId == s.Id).NativeObjectId.ToString("D")).ToHashSet();
+            return design.Schematic.Instances.SelectMany(s => s.Items).Where(i => i.Is(SchematicSymbolInstance.Descriptor))
+                .Select(i => i.Unpack<SchematicSymbolInstance>()).Where(s => natives.Contains(s.Id.Value))
+                .SelectMany(s => s.Definition.Items).Where(c => c.Item.Is(SchematicPin.Descriptor)).Select(c => c.Item.Unpack<SchematicPin>());
+        }
+    }
+
+    // Review of ledger pb41c5714361c378a: a pin common to all units is one physical pin however many units show it, as the
+    // electrical comparison treats it, so a new part whose common hidden power input has a name used nowhere else is created,
+    // unconnected or connected, and the partition it asserts joins every unit's placement of that pin (KiCad joins them by
+    // name), together with each unit's pins stacked on it. A second source of the name is still refused, naming each pin once.
+    // A unit test on purpose: which pins count as one source is isolated planning logic, and the rendered creation journey
+    // creates such a part in KiCad and compares KiCad's own pin partition with the assertion.
+    [TestMethod]
+    public void APinCommonToAllUnitsIsOneSourceThatKiCadJoinsAcrossUnits()
+    {
+        var bench = new SchematicConnectionIntentBuilderTests.Bench();
+        Guid r = bench.Part("R", SchematicConnectionIntentBuilderTests.Passive("1"), SchematicConnectionIntentBuilderTests.Passive("2"));
+        Guid r1 = bench.Component(r, "R1");
+        var state = bench.State([]);
+        static ConnectionPinKey[] Keys(SchematicDesign design, params (Guid Component, string Number)[] pins) => SchematicConnectionIntentBuilderTests.Keys(design, pins);
+        foreach (bool stacked in new[] { false, true })
+        {
+            string when = stacked ? "every pin drawn at one point" : "pins apart";
+            var part = CommonPowerPart(stacked);
+            var (design, ids) = WithCommonPowerPart(state.Baseline, part, "U5");
+            Guid u5 = ids[0];
+            // Guard: VCC is U5.1 alone, however many units show it, in both modes.
+            var candidate = SchematicNativeCreationProjection.Project(state.Baseline, design, []).Candidate;
+            _ = SchematicNativeCreationProjection.Project(state.Baseline, design, [], allowConnected: true);
+            var common = Keys(candidate, (u5, "1"));
+            Assert.HasCount(2, common, when + ": both units show the common pin.");
+            ConnectionPinKey[][] expected = stacked ? [[.. common, .. Keys(candidate, (u5, "2"), (u5, "3"))]]
+                : [common, Keys(candidate, (u5, "2")), Keys(candidate, (u5, "3"))];
+            RequireAsserted(SchematicNativeCreationProjection.CreationAssertion(state.Baseline, candidate), expected, when);
+            var (saved, _) = SchematicConnectionIntentBuilderTests.Revise(state, _ => design);
+            var plan = SchematicSynchronizationPlanner.Plan(saved);
+            Assert.IsTrue(plan.CanPrepare && plan.CandidateXml is not null, when + ": " + plan.ErrorCode + ": " + plan.ErrorMessage);
+
+            // Must-catch: a second part of the same kind is a second source of VCC; the message names each pin once.
+            var (twice, _) = WithCommonPowerPart(state.Baseline, part, "U5", "U6");
+            var error = Assert.ThrowsExactly<AutomationException>(() => SchematicNativeCreationProjection.Project(state.Baseline, twice, []), when);
+            Assert.AreEqual(SchematicConnectionErrors.ConnectedImplicitPowerConflict, error.Code, error.Message);
+            StringAssert.Contains(error.Message, "Hidden power pin U5.1 is named 'VCC'", when);
+            StringAssert.Contains(error.Message, "including hidden power pin U6.1", when);
+            StringAssert.Contains(error.Message, "Declare a net holding U5.1 and U6.1", when);
+            // Must-catch: an existing global label VCC.
+            var labelled = state.Baseline with { Schematic = state.Baseline.Schematic.Clone() };
+            labelled.Schematic.Instances.Single(s => s.Metadata.Document.SheetPath.Path.Count == 1).Items.Add(Any.Pack(new GlobalLabel
+            {
+                Id = new() { Value = Guid.NewGuid().ToString("D") }, Position = new(), Text = new() { Text_ = "VCC" },
+                SpinStyle = SchematicLabelSpinStyle.SlssRight, Shape = SchematicLabelShape.SlshPassive, Locked = LockedState.LsUnlocked
+            }));
+            var (onLabel, _) = WithCommonPowerPart(labelled, part, "U5");
+            StringAssert.Contains(Assert.ThrowsExactly<AutomationException>(() => SchematicNativeCreationProjection.Project(labelled, onLabel, []), when).Message,
+                "including the global label 'VCC'", when);
+        }
+
+        // A connected addition of the same part: OUT joins U5.2 and R1.1, and the common hidden VCC pin, in no net, is one
+        // expected group of both units' placements, as KiCad joins them.
+        var apart = CommonPowerPart(stacked: false);
+        var (connected, created) = WithCommonPowerPart(state.Baseline, apart, "U5");
+        var (connectedSaved, _) = SchematicConnectionIntentBuilderTests.Revise(state, _ => SchematicConnectionIntentBuilderTests.WithNets(connected,
+            new CircuitNet(Guid.NewGuid(), "OUT", [new(created[0], "2"), new(r1, "1")])));
+        var realization = SchematicConnectionIntentBuilderTests.Plan(connectedSaved);
+        var intent = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(realization);
+        SchematicConnectionIntentBuilderTests.RequireGroups(intent, [Keys(realization.Candidate!, (created[0], "1")),
+            Keys(realization.Candidate!, (created[0], "2"), (r1, "1")), Keys(realization.Candidate!, (created[0], "3"))]);
+
+        static void RequireAsserted(KiCad.Automation.Protocol.SchematicItemOperation operation, ConnectionPinKey[][] expected, string when)
+        {
+            var actual = operation.AssertConnectivity.ExpectedGroups.Select(g => g.Pins.Select(p =>
+                new ConnectionPinKey(string.Join('/', p.Path.Path.Select(id => id.Value)), Guid.Parse(p.Pin.Value)))).ToArray();
+            CollectionAssert.AreEquivalent(expected.Select(g => Joined(g)).ToArray(), actual.Select(g => Joined(g)).ToArray(), when);
+        }
+
+        static string Joined(IEnumerable<ConnectionPinKey> group) =>
+            string.Join(",", group.Select(k => k.SheetPathKey + "/" + k.PlacedPinId.ToString("D")).Order(StringComparer.Ordinal));
+    }
+
+    // Ledger p2d40d4ec87d01d32: a new part whose one symbol draws two hidden power inputs of one name (VSTK) at one point. KiCad
+    // makes them one connection, so planning treats them as one when the XML also adds connections, as the unconnected path
+    // does: both left out of every net they are one source of VSTK, joined only to each other; and one of them in a net declares
+    // its stacked partner through it (decision n757c07fe60e30e87), so the partner is no second source and joins that net's
+    // expected group. A second such part left out of every net is still a second source and is refused, naming its pin.
+    // A unit test on purpose: which created pins count as one source is isolated planning logic that the existing
+    // common-pin test (APinCommonToAllUnitsIsOneSourceThatKiCadJoinsAcrossUnits) cannot express with its two-unit part; the
+    // rendered creation journey creates such parts in KiCad with a declared connection and compares KiCad's own pin partition.
+    [TestMethod]
+    public void SameNamedHiddenPinsOneSymbolStacksAreOneConnectionWhenTheXmlAlsoAddsConnections()
+    {
+        var bench = new SchematicConnectionIntentBuilderTests.Bench();
+        Guid r = bench.Part("R", SchematicConnectionIntentBuilderTests.Passive("1"), SchematicConnectionIntentBuilderTests.Passive("2"));
+        Guid r1 = bench.Component(r, "R1"), r2 = bench.Component(r, "R2");
+        var state = bench.State([]);
+        static ConnectionPinKey[] Keys(SchematicDesign design, params (Guid Component, string Number)[] pins) => SchematicConnectionIntentBuilderTests.Keys(design, pins);
+        var part = StackedPowerPart();
+        DesignRecoveryState Saved(SchematicDesign design, params CircuitNet[] nets) =>
+            SchematicConnectionIntentBuilderTests.Revise(state, _ => SchematicConnectionIntentBuilderTests.WithNets(design, nets)).Saved;
+
+        // One part, U7. Unconnected, it is created as before, and its assertion joins its two VSTK pins only.
+        var (single, singleIds) = WithCommonPowerPart(state.Baseline, part, "U7");
+        Guid u7 = singleIds[0];
+        var unconnected = SchematicSynchronizationPlanner.Plan(SchematicConnectionIntentBuilderTests.Revise(state, _ => single).Saved);
+        Assert.IsTrue(unconnected.CanPrepare && unconnected.CandidateXml is not null, unconnected.ErrorCode + ": " + unconnected.ErrorMessage);
+        // Guard: the XML adds OUT, joining U7.1 and R1.1, and leaves both VSTK pins in no net. They are one source of VSTK and
+        // one expected group of their own.
+        var alone = SchematicConnectionIntentBuilderTests.Plan(Saved(single, new CircuitNet(Guid.NewGuid(), "OUT", [new(u7, "1"), new(r1, "1")])));
+        var aloneIntent = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(alone);
+        SchematicConnectionIntentBuilderTests.RequireGroups(aloneIntent, [Keys(alone.Candidate!, (u7, "1"), (r1, "1")), Keys(alone.Candidate!, (u7, "2"), (u7, "3"))]);
+
+        // Two parts, U7 and U8.
+        var (both, ids) = WithCommonPowerPart(state.Baseline, part, "U7", "U8");
+        (u7, Guid u8) = (ids[0], ids[1]);
+        var output = new CircuitNet(Guid.NewGuid(), "OUT", [new(u7, "1"), new(r1, "1")]);
+        // Guard: VSTK holds U7.2 and U8.2 and leaves their stacked partners U7.3 and U8.3 out. Each partner is declared through
+        // its listed pin, so nothing is refused, and all four pins are one expected group, the global net VSTK.
+        var declared = SchematicConnectionIntentBuilderTests.Plan(Saved(both, new CircuitNet(Guid.NewGuid(), "VSTK", [new(u7, "2"), new(u8, "2")]), output));
+        var declaredIntent = SchematicConnectionIntentBuilderTests.RequireRealizationPlan(declared);
+        Assert.AreEqual("VSTK", declaredIntent.Nets.Single(n => n.Name == "VSTK").GlobalName);
+        SchematicConnectionIntentBuilderTests.RequireGroups(declaredIntent, [Keys(declared.Candidate!, (u7, "2"), (u7, "3"), (u8, "2"), (u8, "3")),
+            Keys(declared.Candidate!, (u7, "1"), (r1, "1")), Keys(declared.Candidate!, (u8, "1"))]);
+        // Must-catch: VSTK holds U7.2 and R2.1 and leaves both of U8's VSTK pins out. U8's pair is a second source of VSTK, which
+        // KiCad would join silently, so it is refused while planning, naming one of U8's pins (created pins are ordered by their
+        // new identities) and the pin the XML lists in VSTK, never the partner declared only through it.
+        var second = Saved(both, new CircuitNet(Guid.NewGuid(), "VSTK", [new(u7, "2"), new(r2, "1")]), output);
+        SchematicConnectionIntentBuilderTests.RequireRefusal(second, SchematicConnectionErrors.ConnectedImplicitPowerConflict, "is named 'VSTK'");
+        string refusal = SchematicConnectionIntentBuilderTests.Plan(second).ErrorMessage!;
+        StringAssert.Matches(refusal, new System.Text.RegularExpressions.Regex(@"^Hidden power pin U8\.[23] is named 'VSTK'"));
+        StringAssert.Matches(refusal, new System.Text.RegularExpressions.Regex(@"Add U8\.[23] to net 'VSTK', which holds U7\.2, so the connection is declared"));
+    }
+
+    /// <summary>A declared one-unit part: pin 1 OUT, passive and visible, and pins 2 and 3, both hidden power inputs named VSTK,
+    /// drawn at one point 2.54 mm to its right.</summary>
+    private static (PartDefinition Part, SchematicPartSymbol Declaration) StackedPowerPart()
+    {
+        var (declared, _) = SchematicPartSymbolTests.Fixture();
+        var source = declared.PartSymbols!.Single();
+        var part = new PartDefinition(Guid.NewGuid(), "Stacked power pins", 1, [new("1", "OUT", 1), new("2", "VSTK", 1), new("3", "VSTK", 1)]);
+        var symbol = source.Symbol.Clone();
+        symbol.CacheKey = "StackedPowerAlias";
+        symbol.Definition.Id = new() { LibraryNickname = "Owned", EntryName = "StackedPowerDefinition" };
+        symbol.Definition.UnitCount = 1;
+        symbol.Definition.Items.Clear();
+        foreach (var (number, type, x) in new[] { ("1", ElectricalPinType.EptPassive, 0L), ("2", ElectricalPinType.EptPowerInput, 2_540_000L),
+            ("3", ElectricalPinType.EptPowerInput, 2_540_000L) })
+            symbol.Definition.Items.Add(new SchematicSymbolChild { Unit = new() { Unit = 1 }, Item = Any.Pack(new SchematicPin
+            {
+                Id = new() { Value = Guid.NewGuid().ToString("D") }, Number = number, Name = number == "1" ? "OUT" : "VSTK", ElectricalType = type,
+                Visible = number == "1", Position = new() { XNm = x, YNm = 0 }
+            }) });
+        return (part, new SchematicPartSymbol(part.Id, new() { LibraryNickname = "External", EntryName = "StackedPower" }, symbol));
+    }
+
+    // CN-1 §5.5 for created local power symbols, and names KiCad resolves only when it builds the nets (review of ledger
+    // pb41c5714361c378a): a new local power symbol that the XML leaves out of every net joins every label, hierarchical label
+    // and local power symbol of its name on its own sheet, so it is refused while another exists there, and allowed on another
+    // sheet or beside a global label of that name. An existing name with a text variable could be any created name, so a
+    // created pin that could join it is refused. A unit test on purpose: these sources need sheets, labels and power symbols
+    // that no single live fixture holds; the rendered creation journey proves the hidden power input case end to end.
+    [TestMethod]
+    public void UnconnectedLocalPowerNamesAndUnresolvedNamesAreRefusedBeforeKiCadJoinsThem()
+    {
+        var bench = new SchematicConnectionIntentBuilderTests.Bench();
+        var root = SchematicConnectionIntentBuilderTests.BenchSheet.Root;
+        var child = SchematicConnectionIntentBuilderTests.BenchSheet.Child;
+        Guid local = bench.Part("LPWR", SchematicSymbolType.SstLocalPower,
+            new SchematicConnectionIntentBuilderTests.BenchPin("1", "~", 1, ElectricalPinType.EptPowerInput, false));
+        Guid power = bench.Part("PWR", SchematicSymbolType.SstGlobalPower,
+            new SchematicConnectionIntentBuilderTests.BenchPin("1", "~", 1, ElectricalPinType.EptPowerInput, false));
+        bench.Component(local, "#PWR1", value: "VL"); bench.Component(power, "#PWR2", value: "VG");
+        bench.LocalLabel(root, "SIG"); bench.HierarchicalLabel(child, "H"); bench.GlobalLabel(root, "G");
+        var state = bench.State([]);
+        SchematicDesign NewLocal(string value, SchematicConnectionIntentBuilderTests.BenchSheet sheet, SchematicDesign? onto = null, string reference = "#PWR3") =>
+            bench.Create(onto ?? state.Baseline, local, reference, sheet, value).Design;
+        string Refused(SchematicDesign baseline, SchematicDesign desired, string code, string problem)
+        {
+            var error = Assert.ThrowsExactly<AutomationException>(() => SchematicNativeCreationProjection.Project(baseline, desired, []), problem);
+            Assert.AreEqual(code, error.Code, problem + ": " + error.Message);
+            StringAssert.Contains(error.Message, "nothing was changed", problem);
+            var connected = Assert.ThrowsExactly<AutomationException>(() => SchematicNativeCreationProjection.Project(baseline, desired, [], allowConnected: true), problem);
+            Assert.AreEqual((error.Code, error.Message), (connected.Code, connected.Message), problem + ": both modes apply the same rule.");
+            return error.Message;
+        }
+
+        // Must-catch: a local power symbol, a label and a hierarchical label of the name on the same sheet, and two new ones.
+        StringAssert.Contains(Refused(state.Baseline, NewLocal("VL", root), SchematicConnectionErrors.ConnectedNetNameConflict, "local power VL"),
+            "Local power symbol #PWR3 is named 'VL', and KiCad joins it to every label, hierarchical label and local power symbol with that name on its sheet, "
+            + "including local power symbol #PWR1, but the XML leaves the pin of power symbol #PWR3 out of every net. "
+            + "Declare a net holding the pin of power symbol #PWR3 and the pin of power symbol #PWR1");
+        StringAssert.Contains(Refused(state.Baseline, NewLocal("SIG", root), SchematicConnectionErrors.ConnectedNetNameConflict, "label SIG"),
+            "including the label 'SIG'");
+        StringAssert.Contains(Refused(state.Baseline, NewLocal("H", child), SchematicConnectionErrors.ConnectedNetNameConflict, "hierarchical label H"),
+            "Add the pin of power symbol #PWR3 to the XML net whose pins the hierarchical label 'H' connects on that sheet");
+        StringAssert.Contains(Refused(state.Baseline, NewLocal("VN", root, NewLocal("VN", root), "#PWR4"), SchematicConnectionErrors.ConnectedNetNameConflict,
+            "two new local power symbols VN"), "including local power symbol #PWR4");
+        // Guards: another sheet, a global label or global power symbol of the name, and one new symbol per sheet.
+        _ = SchematicNativeCreationProjection.Project(state.Baseline, NewLocal("VL", child), []);
+        _ = SchematicNativeCreationProjection.Project(state.Baseline, NewLocal("SIG", child), []);
+        _ = SchematicNativeCreationProjection.Project(state.Baseline, NewLocal("G", root), []);
+        _ = SchematicNativeCreationProjection.Project(state.Baseline, NewLocal("VG", root), []);
+        _ = SchematicNativeCreationProjection.Project(state.Baseline, NewLocal("VN", root, NewLocal("VN", child), "#PWR4"), []);
+        StringAssert.Contains(Refused(state.Baseline, NewLocal("${RAIL}", root), SchematicConnectionErrors.ConnectedPowerNameUnresolved, "created ${RAIL}"),
+            "Power symbol #PWR3 is named '${RAIL}'");
+
+        // Existing names with a text variable: a global power symbol named ${RAIL} and a label ${X} on the root sheet.
+        var variables = new SchematicConnectionIntentBuilderTests.Bench();
+        Guid localPart = variables.Part("LPWR", SchematicSymbolType.SstLocalPower,
+            new SchematicConnectionIntentBuilderTests.BenchPin("1", "~", 1, ElectricalPinType.EptPowerInput, false));
+        Guid powerPart = variables.Part("PWR", SchematicSymbolType.SstGlobalPower,
+            new SchematicConnectionIntentBuilderTests.BenchPin("1", "~", 1, ElectricalPinType.EptPowerInput, false));
+        variables.Component(powerPart, "#PWR1", value: "${RAIL}"); variables.Component(localPart, "#PWR2", value: "VL");
+        variables.LocalLabel(root, "${X}");
+        var unresolved = variables.State([]);
+        StringAssert.Contains(Refused(unresolved.Baseline, variables.Create(unresolved.Baseline, powerPart, "#PWR3", root, "VCC").Design,
+            SchematicConnectionErrors.ConnectedPowerNameUnresolved, "existing ${RAIL}"),
+            "Power symbol #PWR1 is named '${RAIL}', which is empty or still contains a text variable, so KiCad may join it to power symbol #PWR3 ('VCC')");
+        StringAssert.Contains(Refused(unresolved.Baseline, variables.Create(unresolved.Baseline, localPart, "#PWR3", root, "VN").Design,
+            SchematicConnectionErrors.ConnectedPowerNameUnresolved, "existing ${X}"), "The label '${X}' is named '${X}'");
+        // Guard: a local name elsewhere, which neither item can reach.
+        _ = SchematicNativeCreationProjection.Project(unresolved.Baseline, variables.Create(unresolved.Baseline, localPart, "#PWR3", child, "VN").Design, []);
+    }
+
+    /// <summary>The declared two-unit part of <see cref="SchematicPartSymbolTests.Fixture"/> with its pin 1, VCC, common to both
+    /// units, made a hidden power input, and the unit pins 2 and 3 passive and visible: drawn apart, or all at one point.</summary>
+    private static (PartDefinition Part, SchematicPartSymbol Declaration) CommonPowerPart(bool stacked)
+    {
+        var (declared, _) = SchematicPartSymbolTests.Fixture();
+        var source = declared.PartSymbols!.Single();
+        var part = declared.Engineering.Circuit.Parts.Single(p => p.Id == source.PartId);
+        Assert.AreEqual(0, part.Pins.Single(p => p.Number == "1").Unit, "Pin 1 is common to both units.");
+        var symbol = source.Symbol.Clone();
+        long x = 0;
+        foreach (var child in symbol.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)))
+        {
+            var pin = child.Item.Unpack<SchematicPin>();
+            (pin.ElectricalType, pin.Visible) = pin.Number == "1" ? (ElectricalPinType.EptPowerInput, false) : (ElectricalPinType.EptPassive, true);
+            pin.Position = stacked ? new() : new() { XNm = x += 2_540_000, YNm = 0 };
+            child.Item = Any.Pack(pin);
+        }
+        return (part, source with { Symbol = symbol });
+    }
+
+    /// <summary><paramref name="design"/> with one new component of <paramref name="declared"/> per reference on the root
+    /// sheet, both units placed.</summary>
+    private static (SchematicDesign Design, Guid[] Components) WithCommonPowerPart(SchematicDesign design,
+        (PartDefinition Part, SchematicPartSymbol Declaration) declared, params string[] references)
+    {
+        var circuit = design.Engineering.Circuit;
+        var root = circuit.SheetInstances.Single(s => s.ParentId is null);
+        var definitions = references.Select(_ => new ComponentDefinition(Guid.NewGuid(), declared.Part.Id, "Common power part")).ToArray();
+        var components = references.Select((reference, i) => new ComponentInstance(Guid.NewGuid(), definitions[i].Id, root.Id, reference)).ToArray();
+        var occurrences = components.SelectMany((component, i) => Enumerable.Range(1, declared.Part.Units).Select(unit =>
+            new SymbolOccurrence(Guid.NewGuid(), component.Id, unit, new SymbolPlacement(150 + 30 * i, 20 + 20 * unit, 0, false, false, false)))).ToArray();
+        return (design with
+        {
+            PartSymbols = [.. design.PartSymbols ?? [], declared.Declaration],
+            Engineering = design.Engineering with { Circuit = circuit with
+            {
+                Parts = [.. circuit.Parts, declared.Part],
+                Sheets = [.. circuit.Sheets.Select(s => s.Id == root.DefinitionId ? s with { Components = [.. s.Components, .. definitions] } : s)],
+                Components = [.. circuit.Components, .. components], Symbols = [.. circuit.Symbols, .. occurrences]
+            } }
+        }, [.. components.Select(c => c.Id)]);
+    }
+
+    // The pin partition an unconnected creation asserts (ledger pb41c5714361c378a, CN-1 §8.1): on the frozen PSU/CPU Components
+    // stage it is exactly the fixture's expected native result, every pin alone except U2's stacked pins 1 and 4; on a repeated
+    // sheet each channel instance's copy of a shared symbol's pin is its own group. A unit test of the helper the seam request
+    // asks the executor to append; the rendered creation journey sends it to KiCad with a real creation.
+    [TestMethod]
+    public void CreationAssertionKeepsEveryCreatedPinAloneExceptStackedPins()
+    {
+        var (sheets, components) = PsuCpuComponents();
+        var created = SchematicNativeCreationProjection.Project(sheets, components, []).Candidate;
+        var operation = SchematicNativeCreationProjection.CreationAssertion(sheets, created);
+        var assertion = operation.AssertConnectivity;
+        Assert.AreEqual(1u, assertion.Version);
+        var paths = created.Schematic.Instances.ToDictionary(s => string.Join('/', s.Metadata.Document.SheetPath.Path.Select(p => p.Value)),
+            s => s.Metadata.Document.SheetPath, StringComparer.Ordinal);
+        var actual = assertion.ExpectedGroups.Select(g => g.Pins.Select(p =>
+        {
+            string path = string.Join('/', p.Path.Path.Select(id => id.Value));
+            Assert.AreEqual(paths[path], p.Path, "Each pin names its exact loaded sheet instance.");
+            return new ConnectionPinKey(path, Guid.Parse(p.Pin.Value));
+        }).ToArray()).ToArray();
+        var circuit = created.Engineering.Circuit;
+        Guid Component(string reference) => circuit.Components.Single(c => c.Reference == reference).Id;
+        var expected = PsuCpuFixture.ExpectedNative(PsuCpuStage.Components);
+        var groups = expected.JoinedPins.Select(g => SchematicConnectionIntentBuilderTests.Keys(created, [.. g.Select(p => (Component(p.Reference), p.Number))]))
+            .Concat(expected.IsolatedPins.SelectMany(pair => pair.Value.SelectMany(number => SchematicConnectionIntentBuilderTests.Keys(created, (Component(pair.Key), number))))
+                .Select(key => new[] { key })).ToArray();
+        Assert.HasCount(1, expected.JoinedPins, "The Components stage joins only U2's stacked pins.");
+        CollectionAssert.AreEquivalent(groups.Select(Text).ToArray(), actual.Select(Text).ToArray());
+        // §5.8 order: keys by (sheet path, placed pin), groups by their first key.
+        foreach (var group in actual)
+            CollectionAssert.AreEqual(group.OrderBy(k => k.SheetPathKey, StringComparer.Ordinal).ThenBy(k => k.PlacedPinId).ToArray(), group);
+        CollectionAssert.AreEqual(actual.OrderBy(g => g[0].SheetPathKey, StringComparer.Ordinal).ThenBy(g => g[0].PlacedPinId).Select(Text).ToArray(),
+            actual.Select(Text).ToArray());
+        Assert.AreEqual(operation, SchematicNativeCreationProjection.CreationAssertion(sheets, created), "The same creation asserts the same partition.");
+
+        // A repeated channel sheet: the channel components share one physical symbol, whose pins are asserted once per instance.
+        var repeated = Repeated((_, _, _) => null);
+        var placed = SchematicNativeCreationProjection.Project(repeated.Baseline, repeated.Desired, [repeated.Library]).Candidate;
+        var channel = SchematicNativeCreationProjection.CreationAssertion(repeated.Baseline, placed).AssertConnectivity;
+        var keys = channel.ExpectedGroups.SelectMany(g => g.Pins).Select(p => string.Join('/', p.Path.Path.Select(id => id.Value)) + "|" + p.Pin.Value).ToArray();
+        CollectionAssert.AllItemsAreUnique(keys);
+        var expectedKeys = repeated.Components.SelectMany(c => repeated.Desired.Engineering.Circuit.Parts
+                .Single(p => p.Id == repeated.Desired.Engineering.Circuit.Sheets.SelectMany(s => s.Components).Single(d => d.Id == c.DefinitionId).PartId).Pins
+                .SelectMany(pin => SchematicConnectionIntentBuilderTests.Keys(placed, (c.Id, pin.Number))))
+            .Select(k => k.SheetPathKey + "|" + k.PlacedPinId.ToString("D")).ToArray();
+        CollectionAssert.AreEquivalent(expectedKeys, keys);
+        var shared = placed.Engineering.Circuit.Symbols.Where(s => repeated.Components.Skip(1).Any(c => c.Id == s.ComponentId))
+            .GroupBy(s => placed.SymbolBindings.Single(b => b.SymbolOccurrenceId == s.Id).NativeObjectId).ToArray();
+        Assert.IsTrue(shared.All(g => g.Count() == 2), "Both channel components share each physical symbol.");
+
+        static string Text(IEnumerable<ConnectionPinKey> group) => string.Join(",", group.Select(k => k.SheetPathKey + "/" + k.PlacedPinId.ToString("D")).Order(StringComparer.Ordinal));
     }
 
     // Placeholder target resolved by Repeated: the first channel sheet instance in UUID order.

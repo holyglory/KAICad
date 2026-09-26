@@ -395,6 +395,24 @@ public sealed class SchematicConnectionIntentBuilderTests
         var placed = RequireRealizationPlan(placedInVcc);
         Assert.AreEqual("VCC", placed.Nets.Single(n => n.Name == "VCC").GlobalName);
         Assert.AreEqual(ConnectionScope.Local, placed.Nets.Single(n => n.Name == "OUT").Scope);
+
+        // The unconnected creation path applies the same rule (ledger pb41c5714361c378a): the same new ICs with no new net at
+        // all are refused while planning, with a handshake or without one, because KiCad would join their hidden VCC pins to
+        // U8's anyway. Only the declared form above, U10.2 in VCC, is planned.
+        foreach (var (unconnected, design, pin, remedy) in new[] { (loneState, withU9, "U9.2", "Declare a net holding U9.2 and U8.2 so the connection is declared"),
+            (singleState, withIc, "U10.2", "Add U10.2 to net 'VCC', which holds U8.2, so the connection is declared") })
+        {
+            Assert.IsTrue(SchematicNativeCreationProjection.IsSupportedAddition(unconnected.Baseline, design.Engineering), pin + " is an unconnected creation.");
+            var (unconnectedSaved, _) = Revise(unconnected, _ => design);
+            foreach (var refusal in new[] { Plan(unconnectedSaved), SchematicSynchronizationPlanner.Plan(unconnectedSaved) })
+            {
+                Assert.AreEqual(SchematicConnectionErrors.ConnectedImplicitPowerConflict, refusal.ErrorCode, refusal.ErrorMessage);
+                StringAssert.Contains(refusal.ErrorMessage!, "Hidden power pin " + pin + " is named 'VCC'");
+                StringAssert.Contains(refusal.ErrorMessage!, "including hidden power pin U8.2");
+                StringAssert.Contains(refusal.ErrorMessage!, remedy, "The message names a net the XML can actually declare.");
+                Assert.IsNull(refusal.Candidate); Assert.IsNull(refusal.CandidateXml); Assert.IsEmpty(refusal.NativeOperations); Assert.IsNull(refusal.Connections);
+            }
+        }
     }
 
     [TestMethod]
@@ -432,6 +450,33 @@ public sealed class SchematicConnectionIntentBuilderTests
             shape with { ChangedNetIds = new[] { net.Id, crossing.Id }.Order().ToArray() }, SchematicConnectionErrors.ConnectedHierarchyUnsupported);
         Assert.ThrowsExactly<ArgumentException>(() => SchematicConnectionIntentBuilder.Build(state, candidate,
             shape with { Kind = SchematicConnectedAdditionKind.NotApplicable }));
+
+        // A created hidden power pin left out of every net while its name exists (§5.3). Every planner path refuses this earlier,
+        // in the creation projection (SchematicNativeCreationProjection.RequireUndeclaredPowerPinsAlone, both modes); the builder
+        // keeps its own check for a candidate that did not pass through that projection. The candidate is an admitted plan's,
+        // with the new U10's hidden VCC pin taken out of VCC again, while U8's hidden VCC pin still carries the name.
+        var power = new Bench();
+        Guid ic = power.Part("IC", new BenchPin("1", "OUT", 1, ElectricalPinType.EptOutput), new BenchPin("2", "VCC", 1, ElectricalPinType.EptPowerInput, false));
+        Guid resistor = power.Part("R", Passive("1"), Passive("2"));
+        Guid u8 = power.Component(ic, "U8"), r9 = power.Component(resistor, "R9");
+        var vcc = new CircuitNet(Guid.NewGuid(), "VCC", [new(u8, "2"), new(r9, "2")]);
+        var powered = power.State([vcc]);
+        var (withIc, u10) = power.Create(powered.Baseline, ic, "U10", BenchSheet.Root);
+        var output = new CircuitNet(Guid.NewGuid(), "OUT", [new(u10, "1"), new(r9, "1")]);
+        var admitted = Plan(Revise(powered, _ => WithNets(withIc, vcc with { Pins = [.. vcc.Pins, new(u10, "2")] }, output)).Saved);
+        _ = RequireRealizationPlan(admitted);
+        var (undeclaredSaved, undeclaredDesired) = Revise(powered, _ => WithNets(withIc, vcc, output));
+        var undeclaredShape = SchematicConnectedAddition.Classify(powered, undeclaredDesired, Realizing(powered));
+        Assert.AreEqual(SchematicConnectedAdditionKind.Admitted, undeclaredShape.Kind, undeclaredShape.ErrorMessage);
+        var hidden = Assert.ThrowsExactly<AutomationException>(() => SchematicConnectionIntentBuilder.Build(powered, WithNets(admitted.Candidate!, vcc, output), undeclaredShape));
+        Assert.AreEqual(SchematicConnectionErrors.ConnectedImplicitPowerConflict, hidden.Code, hidden.Message);
+        StringAssert.Contains(hidden.Message, "Hidden power pin U10.2 is named 'VCC', which KiCad connects to every other 'VCC' in the design, but the XML leaves it out of any net.");
+        // Guard: the same candidate with U10.2 in VCC is built. The planner refuses the undeclared revision in the projection.
+        Assert.IsNotNull(SchematicConnectionIntentBuilder.Build(powered, admitted.Candidate!,
+            SchematicConnectedAddition.Classify(powered, Revise(powered, _ => WithNets(withIc, vcc with { Pins = [.. vcc.Pins, new(u10, "2")] }, output)).Desired, Realizing(powered))));
+        var refused = Plan(undeclaredSaved);
+        Assert.AreEqual(SchematicConnectionErrors.ConnectedImplicitPowerConflict, refused.ErrorCode, refused.ErrorMessage);
+        StringAssert.Contains(refused.ErrorMessage!, "Add U10.2 to net 'VCC', which holds U8.2", "The projection refuses it first, with its own message.");
     }
 
     [TestMethod]
@@ -604,8 +649,9 @@ public sealed class SchematicConnectionIntentBuilderTests
         var (withGnd, second) = bench.Create(state.Baseline, power, "#PWR3", BenchSheet.Root, "GND");
         yield return ("a second GND net", Revise(state, _ => WithNets(withGnd, gnd, vcc, new CircuitNet(Guid.NewGuid(), "GND2", [new(second, "1"), new(r2, "1")]))).Saved,
             SchematicConnectionErrors.ConnectedGlobalNameConflict, "already carries it");
+        // Refused by the creation projection, which applies the same rule in both modes (CN-1 §4.3), before the intent is built.
         yield return ("an unconnected GND symbol", Revise(state, _ => WithNets(withGnd, gnd, vcc, new CircuitNet(Guid.NewGuid(), "N", [new(r2, "1"), new(r3, "1")]))).Saved,
-            SchematicConnectionErrors.ConnectedGlobalNameConflict, "#PWR3.1");
+            SchematicConnectionErrors.ConnectedGlobalNameConflict, "Add the pin of power symbol #PWR3 to net 'GND', which holds the pin of power symbol #PWR1");
         var (withA, a) = bench.Create(state.Baseline, power, "#PWR4", BenchSheet.Root, "V5");
         var (withB, b) = bench.Create(withA, power, "#PWR5", BenchSheet.Root, "V5");
         yield return ("two nets with one global name", Revise(state, _ => WithNets(withB, gnd, vcc, new CircuitNet(Guid.NewGuid(), "NA", [new(a, "1"), new(r2, "1")]),

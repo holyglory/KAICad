@@ -67,8 +67,13 @@ public static class SchematicConnectionResolution
             var nativeScreen = nativeScreens[path];
             if (!Equals(plannedScreen.Metadata, nativeScreen.Metadata))
                 throw Mismatch("KiCad's settings of sheet " + path + " differ from the plan.");
-            if (!plannedScreen.CachedSymbols.OrderBy(c => c.CacheKey, StringComparer.Ordinal)
-                    .SequenceEqual(nativeScreen.CachedSymbols.OrderBy(c => c.CacheKey, StringComparer.Ordinal))
+            var plannedCaches = plannedScreen.CachedSymbols.OrderBy(c => c.CacheKey, StringComparer.Ordinal).ToArray();
+            var nativeCaches = nativeScreen.CachedSymbols.OrderBy(c => c.CacheKey, StringComparer.Ordinal).ToArray();
+            bool cachesEquivalent = plannedCaches.Length == nativeCaches.Length
+                && plannedCaches.Zip(nativeCaches, (plannedCache, nativeCache) =>
+                    plannedCache.CacheKey == nativeCache.CacheKey
+                    && SchematicLibraryCacheEquivalence.Equal(plannedCache, nativeCache)).All(equal => equal);
+            if (!cachesEquivalent
                 || !plannedScreen.UnrepresentedItems.SequenceEqual(nativeScreen.UnrepresentedItems))
                 throw Mismatch("KiCad's symbol library cache of sheet " + path + " differs from the plan.");
             var plannedItems = SchematicItemDelta.Index(plannedScreen.Items);
@@ -91,7 +96,9 @@ public static class SchematicConnectionResolution
                 }
                 else if (createdSymbols.Contains(id))
                 {
-                    if (!nativeItem.Equals(plannedItem))
+                    if (nativeItem is not SchematicSymbolInstance nativeSymbol
+                        || plannedItem is not SchematicSymbolInstance plannedSymbol
+                        || !CreatedSymbolEquivalent(plannedSymbol, nativeSymbol))
                         throw Mismatch("KiCad created symbol " + id.ToString("D") + " on sheet " + path + " differently than planned.");
                 }
                 else if (!beforeItems.TryGetValue(id, out var beforeItem))
@@ -198,6 +205,26 @@ public static class SchematicConnectionResolution
     {
         var item = SchematicItemDelta.Index([create]).Single();
         return item.Key;
+    }
+
+    // KiCad's symbol writer orders definition children by native item/pin identity. The
+    // definition remains exact when the child collection is reordered, so compare that
+    // collection as an exact multiset while keeping every instance and definition field
+    // ordered and strict. A changed child, duplicate, deletion or metadata field remains
+    // a resolution mismatch.
+    private static bool CreatedSymbolEquivalent(SchematicSymbolInstance planned, SchematicSymbolInstance native)
+    {
+        if (planned.Equals(native)) return true;
+        if (planned.Definition is null || native.Definition is null) return false;
+        var plannedDefinition = planned.Definition.Clone();
+        var nativeDefinition = native.Definition.Clone();
+        plannedDefinition.Items.Clear(); nativeDefinition.Items.Clear();
+        var plannedOuter = planned.Clone(); plannedOuter.Definition = plannedDefinition;
+        var nativeOuter = native.Clone(); nativeOuter.Definition = nativeDefinition;
+        if (!plannedOuter.Equals(nativeOuter) || planned.Definition.Items.Count != native.Definition.Items.Count)
+            return false;
+        return planned.Definition.Items.Select(child => child.ToByteString().ToBase64()).Order(StringComparer.Ordinal)
+            .SequenceEqual(native.Definition.Items.Select(child => child.ToByteString().ToBase64()).Order(StringComparer.Ordinal));
     }
 
     private static AutomationException Mismatch(string message) =>

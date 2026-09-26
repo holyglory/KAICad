@@ -69,6 +69,44 @@ internal static class SchematicPlacedPins
     }
 }
 
+/// <summary>How KiCad connects a placed pin without any wire (cn1-wiring-intent.md §2, "Carrier" and "Implicit power pin"):
+/// a power-input pin of a global power symbol joins the global net named by the symbol's value; a hidden power-input pin
+/// of an ordinary symbol joins the global net of its own name; a power-input pin of a local power symbol joins the local
+/// net of the symbol's value on its sheet. An active alternate supplies the pin's type and name, as in
+/// <c>SCH_PIN::IsGlobalPower</c>, <c>GetType</c> and <c>GetShownName</c>. Global labels join the same global nets.</summary>
+internal static class SchematicPowerPins
+{
+    internal static bool IsPowerSymbol(SchematicSymbolInstance symbol) =>
+        symbol.Definition?.Type is SchematicSymbolType.SstGlobalPower or SchematicSymbolType.SstLocalPower;
+
+    internal static bool IsGlobalPowerSymbol(SchematicSymbolInstance symbol) => symbol.Definition?.Type == SchematicSymbolType.SstGlobalPower;
+
+    /// <summary>The name a power symbol gives its net: its value.</summary>
+    internal static string CarrierName(SchematicSymbolInstance symbol) => symbol.ValueField?.Text?.Text_ ?? "";
+
+    internal static ElectricalPinType EffectiveType(SchematicPin pin) => pin.HasActiveAlternate && pin.ActiveAlternate.Length != 0
+        ? pin.Alternates.FirstOrDefault(a => a.Name == pin.ActiveAlternate)?.ElectricalType ?? ElectricalPinType.EptUnspecified
+        : pin.ElectricalType;
+
+    internal static string ImplicitName(SchematicPin pin) => pin.HasActiveAlternate && pin.ActiveAlternate.Length != 0 ? pin.ActiveAlternate : pin.Name;
+
+    /// <summary>A hidden power input on an ordinary symbol, which joins the global net of its name (legacy implicit power).</summary>
+    internal static bool IsImplicitPower(SchematicSymbolInstance symbol, SchematicPin pin) =>
+        !IsPowerSymbol(symbol) && !pin.Visible && EffectiveType(pin) == ElectricalPinType.EptPowerInput;
+
+    /// <summary>A pin KiCad joins to a global net by name alone: a power input of a global power symbol, or a hidden power
+    /// input of any symbol that is not a local power symbol.</summary>
+    internal static bool IsGlobalPowerPin(SchematicSymbolInstance symbol, SchematicPin pin) =>
+        EffectiveType(pin) == ElectricalPinType.EptPowerInput
+        && (IsGlobalPowerSymbol(symbol) || (symbol.Definition?.Type != SchematicSymbolType.SstLocalPower && !pin.Visible));
+
+    internal static bool IsLocalPowerPin(SchematicSymbolInstance symbol, SchematicPin pin) =>
+        EffectiveType(pin) == ElectricalPinType.EptPowerInput && symbol.Definition?.Type == SchematicSymbolType.SstLocalPower;
+
+    /// <summary>The net name a power pin joins: the power symbol's value, or the hidden pin's own name.</summary>
+    internal static string PowerName(SchematicSymbolInstance symbol, SchematicPin pin) => IsPowerSymbol(symbol) ? CarrierName(symbol) : ImplicitName(pin);
+}
+
 /// <summary>Builds the frozen <see cref="SchematicConnectionIntent"/> for an admitted connected addition
 /// (cn1-wiring-intent.md §5). Every refusal is an <see cref="AutomationException"/> with a §13 planning code
 /// and a message that names the net, pin or sheet to change; nothing reaches the editor.</summary>
@@ -520,7 +558,13 @@ public static partial class SchematicConnectionIntentBuilder
                         + plan.GlobalName + "', but another connection in the editor already carries it. Add the pins to that net in the XML instead.");
             }
             // Every created power pin must land in the net of its own global name, unless that name exists nowhere else.
+            // Sources are compared by model node: every unit's placement of a pin common to several units is one physical
+            // pin, and pins one symbol stacks at one point are one connection (SchematicElectricalComparison.StackedPinNodes).
             var createdSources = created.Where(p => IsGlobalPowerSymbol(p.Symbol) || IsImplicitPower(p.Symbol, p.NativePin)).ToArray();
+            var nodes = new Dictionary<PinEndpoint, PinEndpoint>();
+            foreach (var group in SchematicElectricalComparison.StackedPinNodes(candidate, token))
+                foreach (var pin in group) nodes[pin] = group[0];
+            PinEndpoint Node(Placement placement) => nodes.GetValueOrDefault(placement.Pin.Endpoint, placement.Pin.Endpoint);
             var memberOf = new Dictionary<ItemKey, NetPlan>();
             foreach (var plan in plans)
                 foreach (var placement in plan.Placements)
@@ -540,8 +584,14 @@ public static partial class SchematicConnectionIntentBuilder
                         throw Error(code, what + " is named '" + name + "' but sits in net '" + plan.Net.Name + "'. Put it in the net of '" + name + "'.");
                     continue;
                 }
+                // A pin its symbol draws at one point with a pin of the same name that a net lists is one connection with that pin
+                // in KiCad (decision n757c07fe60e30e87, ledger p2d40d4ec87d01d32): it is declared through that pin, whose net
+                // carries the name (checked for that pin here), so it is no other source of the name.
+                if (createdSources.Any(other => Node(other) == Node(placement) && memberOf.TryGetValue(other.Key, out var partner)
+                        && partner.GlobalName == name && (IsGlobalPowerSymbol(other.Symbol) ? CarrierName(other.Symbol) : ImplicitName(other.NativePin)) == name))
+                    continue;
                 bool elsewhere = nativeCarriers.ContainsKey(name) || plans.Any(p => p.GlobalName == name)
-                    || createdSources.Any(other => other.Key != placement.Key
+                    || createdSources.Any(other => Node(other) != Node(placement)
                         && (IsGlobalPowerSymbol(other.Symbol) ? CarrierName(other.Symbol) : ImplicitName(other.NativePin)) == name);
                 if (elsewhere)
                     throw Error(code, what + " is named '" + name + "', which KiCad connects to every other '" + name
@@ -836,27 +886,25 @@ public static partial class SchematicConnectionIntentBuilder
                             Claim(key, index, plan.Net.Name);
                 }
             }
-            // Pins a created symbol stacks at one point are one connection in KiCad (decision
-            // kicad-stacked-pins-one-node-20260924): a stacked pin no net lists joins its partner's group, and
-            // partners that no net lists form one group. Nets that split a stack were refused before this point.
-            var createdKeys = created.Select(p => p.Key).ToHashSet();
-            var units = circuit.Symbols.ToDictionary(s => s.Id, s => s.Unit);
-            foreach (var symbol in created.GroupBy(p => (p.Pin.SheetPathKey, p.Pin.SymbolId, p.Pin.SymbolOccurrenceId)))
+            // Created pins that KiCad joins among themselves without any wire are one connection: pins a created symbol
+            // stacks at one point (decision kicad-stacked-pins-one-node-20260924), and created power pins of one name, such
+            // as every unit's placement of a common hidden power input (SchematicNativeCreationProjection.CreatedPinGroups).
+            // A joined pin no net lists joins its partners' group, and partners that no net lists form one group. Nets that
+            // split such a group were refused before this point.
+            var createdKeys = created.ToDictionary(p => p.Key);
+            var added = shape.AddedComponentIds.ToHashSet();
+            foreach (var joined in SchematicNativeCreationProjection.CreatedPinGroups(candidate, circuit.Symbols.Where(s => added.Contains(s.ComponentId)), token))
             {
-                var first = symbol.First();
-                foreach (var stack in SchematicElectricalComparison.StackedDefinitionPins(first.Symbol, units[first.Pin.SymbolOccurrenceId]))
-                {
-                    var keys = new List<ItemKey>();
-                    foreach (var pin in stack)
-                        if (Canonical(pin.Id?.Value, out var id) && createdKeys.Contains(new(first.Pin.SheetPathKey, id))) keys.Add(new(first.Pin.SheetPathKey, id));
-                    if (keys.Count < 2) continue;
-                    var claimed = keys.Where(owner.ContainsKey).Select(k => owner[k]).Distinct().ToArray();
-                    if (claimed.Length > 1)
-                        throw Inconsistent("Pins drawn at one point in the symbol of " + Describe(first.Pin.Endpoint) + " would belong to different connections.");
-                    int group = claimed.Length == 1 ? claimed[0] : groups.Count;
-                    if (claimed.Length == 0) groups.Add(new SortedSet<ItemKey>(order));
-                    foreach (var key in keys.Where(k => !owner.ContainsKey(k))) Claim(key, group, "(stacked pins)");
-                }
+                if (joined.Count < 2) continue;
+                var keys = joined.Select(k => new ItemKey(k.SheetPathKey, k.PlacedPinId)).ToArray();
+                if (keys.Any(k => !createdKeys.ContainsKey(k))) throw Inconsistent("A created pin KiCad joins without a wire is not a placed pin of its symbol.");
+                var claimed = keys.Where(owner.ContainsKey).Select(k => owner[k]).Distinct().ToArray();
+                if (claimed.Length > 1)
+                    throw Inconsistent("Pins " + string.Join(", ", keys.Select(k => Describe(createdKeys[k].Pin.Endpoint)).Distinct(StringComparer.Ordinal))
+                        + ", which KiCad joins without any wire, would belong to different connections.");
+                int group = claimed.Length == 1 ? claimed[0] : groups.Count;
+                if (claimed.Length == 0) groups.Add(new SortedSet<ItemKey>(order));
+                foreach (var key in keys.Where(k => !owner.ContainsKey(k))) Claim(key, group, "(joined created pins)");
             }
             foreach (var placement in created.Where(p => !owner.ContainsKey(p.Key)))
             {
@@ -1017,32 +1065,21 @@ public static partial class SchematicConnectionIntentBuilder
                     + "', which is not a valid label: use 1 to 128 characters without spaces, control characters or any of { } [ ] / \\ $ ~ ^ , \" and not starting with #.");
         }
 
-        private static bool IsPowerSymbol(SchematicSymbolInstance symbol) =>
-            symbol.Definition?.Type is SchematicSymbolType.SstGlobalPower or SchematicSymbolType.SstLocalPower;
+        private static bool IsPowerSymbol(SchematicSymbolInstance symbol) => SchematicPowerPins.IsPowerSymbol(symbol);
 
-        private static bool IsGlobalPowerSymbol(SchematicSymbolInstance symbol) => symbol.Definition?.Type == SchematicSymbolType.SstGlobalPower;
+        private static bool IsGlobalPowerSymbol(SchematicSymbolInstance symbol) => SchematicPowerPins.IsGlobalPowerSymbol(symbol);
 
-        private static string CarrierName(SchematicSymbolInstance symbol) => symbol.ValueField?.Text?.Text_ ?? "";
+        private static string CarrierName(SchematicSymbolInstance symbol) => SchematicPowerPins.CarrierName(symbol);
 
-        // KiCad applies an active alternate's electrical type and name.
-        private static ElectricalPinType EffectiveType(SchematicPin pin) => pin.HasActiveAlternate && pin.ActiveAlternate.Length != 0
-            ? pin.Alternates.FirstOrDefault(a => a.Name == pin.ActiveAlternate)?.ElectricalType ?? ElectricalPinType.EptUnspecified
-            : pin.ElectricalType;
+        private static string ImplicitName(SchematicPin pin) => SchematicPowerPins.ImplicitName(pin);
 
-        private static string ImplicitName(SchematicPin pin) => pin.HasActiveAlternate && pin.ActiveAlternate.Length != 0 ? pin.ActiveAlternate : pin.Name;
+        private static bool IsImplicitPower(SchematicSymbolInstance symbol, SchematicPin pin) => SchematicPowerPins.IsImplicitPower(symbol, pin);
 
-        // A hidden power input on an ordinary symbol joins the global net of its name (legacy implicit power).
-        private static bool IsImplicitPower(SchematicSymbolInstance symbol, SchematicPin pin) =>
-            !IsPowerSymbol(symbol) && !pin.Visible && EffectiveType(pin) == ElectricalPinType.EptPowerInput;
+        private static bool IsGlobalPowerPin(SchematicSymbolInstance symbol, SchematicPin pin) => SchematicPowerPins.IsGlobalPowerPin(symbol, pin);
 
-        private static bool IsGlobalPowerPin(SchematicSymbolInstance symbol, SchematicPin pin) =>
-            EffectiveType(pin) == ElectricalPinType.EptPowerInput
-            && (IsGlobalPowerSymbol(symbol) || (symbol.Definition?.Type != SchematicSymbolType.SstLocalPower && !pin.Visible));
+        private static bool IsLocalPowerPin(SchematicSymbolInstance symbol, SchematicPin pin) => SchematicPowerPins.IsLocalPowerPin(symbol, pin);
 
-        private static bool IsLocalPowerPin(SchematicSymbolInstance symbol, SchematicPin pin) =>
-            EffectiveType(pin) == ElectricalPinType.EptPowerInput && symbol.Definition?.Type == SchematicSymbolType.SstLocalPower;
-
-        private static string PowerName(SchematicSymbolInstance symbol, SchematicPin pin) => IsPowerSymbol(symbol) ? CarrierName(symbol) : ImplicitName(pin);
+        private static string PowerName(SchematicSymbolInstance symbol, SchematicPin pin) => SchematicPowerPins.PowerName(symbol, pin);
 
         [GeneratedRegex("^NET-[0-9a-f]{12}$", RegexOptions.CultureInvariant)]
         private static partial Regex GeneratedName();

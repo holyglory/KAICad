@@ -234,6 +234,36 @@ public static class NativePresentationChecks
         return new(PresentationVerifier.Verify(snapshot, policy), targets, limitations);
     }
 
+    /// <summary>Measure the sheet instance <paramref name="document"/> offscreen at exactly <paramref name="revision"/>, with
+    /// KiCad's own bodies (each symbol's body without its pins, and every visible pin as drawn), painted field glyphs,
+    /// labels, sheet pins and texts, and report every place where one of <paramref name="wires"/> runs over a symbol or
+    /// sheet body or along or across a pin away from its connection point (wire_overlaps_symbol), or over any of that text
+    /// (wire_overlaps_text): <see cref="PresentationVerifier.WireOverlaps"/>. Generated connection wires are checked this way
+    /// (CN-1 §6.4, §7). KiCad refuses the measurement unless it holds that revision; neither the design nor the displayed
+    /// sheet changes. An empty result means no listed wire overlaps anything.</summary>
+    public static async Task<IReadOnlyList<PresentationFinding>> CheckWireOverlapsAsync(NativeClient client, DocumentSpecifier document,
+        Protocol.DocumentRevision revision, IReadOnlyCollection<Guid> wires, decimal toleranceMm = PresentationPolicy.DefaultOverlapToleranceMm,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(client);
+        ArgumentNullException.ThrowIfNull(document);
+        ArgumentNullException.ThrowIfNull(revision);
+        ArgumentNullException.ThrowIfNull(wires);
+        if (document.SheetPath is null || document.SheetPath.Path.Count == 0)
+            throw Invalid("An explicit sheet-instance path is required.");
+        RequireRevision(revision);
+        if (wires.Count == 0) return [];
+        var measured = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(new()
+        {
+            Document = document.Clone(), ExpectedRevision = revision.Clone(), IncludePresentation = true
+        }, cancellationToken);
+        var facts = measured.Presentation;
+        if (facts is null || !facts.Document.Equals(document) || !revision.Equals(measured.Revision) || !revision.Equals(facts.Revision))
+            throw Invalid("Native presentation facts identify another sheet or revision, or this KiCad build cannot measure them.");
+        var sheet = Sheet(facts, []);
+        return PresentationVerifier.WireOverlaps(sheet, wires, toleranceMm, new KiCad.Automation.Model.DocumentRevision(revision.Epoch, revision.Sequence));
+    }
+
     private static void RequireRevision(Protocol.DocumentRevision? expected)
     {
         if (expected is not null && string.IsNullOrWhiteSpace(expected.Epoch))
@@ -281,7 +311,9 @@ public static class NativePresentationChecks
             objects.Add(new(id, kind, fact.GlyphBounds is null ? Bounds(fact.Bounds) : Bounds(fact.GlyphBounds), fact.Visible,
                 fact.HasTextHeightNm ? fact.TextHeightNm / 1_000_000m : null, fact.Text,
                 TextBounds: fact.TextBounds is null ? null : Bounds(fact.TextBounds), Role: role, OwnerId: owner,
-                ReadingAngleDegrees: fact.HasReadingAngleDegrees ? Degrees(fact.ReadingAngleDegrees) : null));
+                ReadingAngleDegrees: fact.HasReadingAngleDegrees ? Degrees(fact.ReadingAngleDegrees) : null,
+                BodyBounds: role == PresentationRole.Symbol && fact.BodyBounds is not null ? Bounds(fact.BodyBounds) : null,
+                PinLines: role == PresentationRole.Symbol && fact.BodyBounds is not null ? [.. fact.PinLines.Select(PinLine)] : null));
             if (kind == PresentationObjectKind.ReferenceDesignator && fact.DesignatorRequired) references.Add(id);
             targets.Add(new(id, owner, string.IsNullOrEmpty(fact.FieldName) ? null : fact.FieldName, key));
         }
@@ -291,6 +323,12 @@ public static class NativePresentationChecks
             facts.Junctions.Select(p => new PresentationPoint(p.XNm, p.YNm)).ToArray(),
             string.IsNullOrEmpty(facts.SheetName) ? null : facts.SheetName);
     }
+
+    // A drawn pin: an open line of two points, from its connection point to its root.
+    private static PresentationSegment PinLine(Kiapi.Common.Types.PolyLine line) =>
+        line.Closed || line.Nodes.Count != 2 || line.Nodes.Any(n => n.GeometryCase != Kiapi.Common.Types.PolyLineNode.GeometryOneofCase.Point)
+            ? throw Invalid("A native pin line is not an open line of two points.")
+            : new(new(line.Nodes[0].Point.XNm, line.Nodes[0].Point.YNm), new(line.Nodes[1].Point.XNm, line.Nodes[1].Point.YNm));
 
     private static decimal Degrees(double value) => double.IsFinite(value) && Math.Abs(value) <= 3600
         ? Math.Round((decimal)value, 3) : throw Invalid("Native reading direction is not a finite angle.");

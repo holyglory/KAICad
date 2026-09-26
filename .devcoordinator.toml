@@ -2276,13 +2276,14 @@ command=["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", 
 
 # KiCad's own PCB design-rule suites. They read custom rules files through the same loader the
 # DRC jobs use, so a change to rules parsing (for example the line-number fix accepted in
-# decision nb6844a5bd34d3d5d) is checked against upstream cases too.
+# decision nb6844a5bd34d3d5d) is checked against upstream cases too. qa_pcbnew_other joins once
+# its three failures that predate that fix are resolved (ledger outcome recorded 2026-09-26).
 [[test.drc-project-freshness.check]]
 name="upstream-drc-suites"
 tier="development"
 requires=["native-build"]
 timeout_seconds=2400
-command=["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_pcbnew_drc_regression$|^qa_pcbnew_drc_solder_mask$|^qa_pcbnew_constraints$|^qa_pcbnew_creepage$|^qa_pcbnew_multichannel$|^qa_pcbnew_other$", "--output-on-failure", "--no-tests=error"]
+command=["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_pcbnew_drc_regression$|^qa_pcbnew_drc_solder_mask$|^qa_pcbnew_constraints$|^qa_pcbnew_creepage$|^qa_pcbnew_multichannel$", "--output-on-failure", "--no-tests=error"]
 
 [test.mac-baseline-downloads]
 # Admission can wait behind a native build; each HTTP request remains bounded

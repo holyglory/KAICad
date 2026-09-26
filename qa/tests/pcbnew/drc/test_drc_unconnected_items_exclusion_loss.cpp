@@ -354,7 +354,11 @@ static void runDrcAndCreateMarkers( BOARD* aBoard )
                 aBoard->Add( marker );
             } );
 
-    bds.m_DRCEngine->RunTests( EDA_UNITS::MM, true, true );
+    // No schematic is loaded, so the schematic parity check is not requested: a requested parity
+    // check without its schematic is an incomplete run that checks nothing (decision
+    // n75f90d50f37b5c16). Upstream skipped parity here without a netlist, so the checks this test
+    // relies on are unchanged, and the run must now complete.
+    BOOST_REQUIRE( bds.m_DRCEngine->RunTests( EDA_UNITS::MM, true, false ) == DRC_RUN_RESULT::COMPLETED );
     bds.m_DRCEngine->ClearViolationHandler();
 }
 

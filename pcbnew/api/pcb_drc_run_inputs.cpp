@@ -18,9 +18,17 @@
 #include <project/net_settings.h>
 #include <pcb_project_editor_state.h>
 #include <json_common.h>
+#include <ki_exception.h>
 #include <router/pns_routing_settings.h>
 #include <algorithm>
 #include <stdexcept>
+
+std::string PcbDrcExceptionMessage( const std::exception& aError )
+{
+    if( const auto* io = dynamic_cast<const IO_ERROR*>( &aError ) )
+        return io->Problem().ToStdString( wxConvUTF8 );
+    return aError.what();
+}
 
 namespace
 {

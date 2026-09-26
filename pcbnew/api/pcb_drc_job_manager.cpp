@@ -597,7 +597,7 @@ void PCB_DRC_JOB_MANAGER::ObserveInputs( BOARD& board, const std::string& epoch,
                 if( SameDocument( observed, document ) ) return result;
             tl::expected<DocumentLifecycleState, std::string> result = tl::unexpected( std::string() );
             try { result = schematic( document ); }
-            catch( const std::exception& error ) { result = tl::unexpected( std::string( error.what() ) ); }
+            catch( const std::exception& error ) { result = tl::unexpected( PcbDrcExceptionMessage( error ) ); }
             schematics.emplace_back( document, result );
             return result;
         };
@@ -609,7 +609,7 @@ void PCB_DRC_JOB_MANAGER::ObserveInputs( BOARD& board, const std::string& epoch,
             if( !catalogue )
             {
                 try { catalogue = libraries( source ); }
-                catch( const std::exception& error ) { catalogue = tl::unexpected( std::string( error.what() ) ); }
+                catch( const std::exception& error ) { catalogue = tl::unexpected( PcbDrcExceptionMessage( error ) ); }
             }
             return *catalogue;
         };
@@ -621,7 +621,7 @@ void PCB_DRC_JOB_MANAGER::ObserveInputs( BOARD& board, const std::string& epoch,
             if( !auxiliary )
             {
                 try { auxiliary = m_observeAuxiliary( source ); }
-                catch( const std::exception& error ) { auxiliary = tl::unexpected( std::string( error.what() ) ); }
+                catch( const std::exception& error ) { auxiliary = tl::unexpected( PcbDrcExceptionMessage( error ) ); }
             }
             return *auxiliary;
         };
@@ -1065,13 +1065,9 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
                     aRequest.expected_schematic_state(), aRequest.document(), aProcessEpoch ) );
         if( aBoard.GetTimeStamp() != sequence ) return tl::unexpected( "PCB changed during DRC capture" );
     }
-    catch( const IO_ERROR& error ) // what() points into a temporary buffer.
-    {
-        return tl::unexpected( "Could not snapshot PCB for DRC: " + error.Problem().ToStdString( wxConvUTF8 ) );
-    }
     catch( const std::exception& error )
     {
-        return tl::unexpected( std::string( "Could not snapshot PCB for DRC: " ) + error.what() );
+        return tl::unexpected( "Could not snapshot PCB for DRC: " + PcbDrcExceptionMessage( error ) );
     }
 
     auto job = std::make_shared<JOB>();
@@ -1129,15 +1125,23 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
             auto& settings = board.GetDesignSettings();
             settings.m_DRCEngine = std::make_shared<DRC_ENGINE>( &board, &settings );
             DRC_ENGINE& engine = *settings.m_DRCEngine;
+            // The captured rules text is the engine's only input here: a parse or read
+            // error (PARSE_ERROR is an IO_ERROR) or a newer rules format is the rules
+            // file's, never an internal error.
             try
             {
                 inputs->InitializeEngine( engine );
             }
-            catch( const PARSE_ERROR& error )
+            catch( const IO_ERROR& error )
             {
                 throw DESIGN_RULES_INVALID( "The custom design rules could not be compiled: "
                         + error.Problem().ToStdString( wxConvUTF8 )
                         + " Correct or remove the rules file, then start a new check." );
+            }
+            catch( const DRC_RULES_TOO_RECENT& error )
+            {
+                throw DESIGN_RULES_INVALID( std::string( "The custom design rules could not be compiled: " )
+                        + error.what() + " Correct or remove the rules file, then start a new check." );
             }
             bool running = false;
             DRC_RUN_SCOPE invocation( engine, running );
@@ -1197,16 +1201,10 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
             errorCode = "design_rules_invalid";
             errorMessage = error.what();
         }
-        // IO_ERROR::what() points into a temporary buffer; Problem() is its message.
-        catch( const IO_ERROR& error )
-        {
-            errorCode = "native_exception";
-            errorMessage = error.Problem().ToStdString( wxConvUTF8 );
-        }
         catch( const std::exception& error )
         {
             errorCode = "native_exception";
-            errorMessage = error.what();
+            errorMessage = PcbDrcExceptionMessage( error );
         }
         catch( ... ) { errorCode = "native_exception"; errorMessage = "Unexpected native DRC exception"; }
         // Board/engine/callbacks and all captured input owners are gone before terminal
@@ -1236,7 +1234,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
         std::lock_guard lock( m_mutex );
         m_jobs.erase( job->id );
         m_watches.erase( job->id );
-        return tl::unexpected( std::string( "Could not launch native DRC worker: " ) + error.what() );
+        return tl::unexpected( "Could not launch native DRC worker: " + PcbDrcExceptionMessage( error ) );
     }
     return state( job, aBoard, aProcessEpoch, capturedState, observeLibraries );
 }

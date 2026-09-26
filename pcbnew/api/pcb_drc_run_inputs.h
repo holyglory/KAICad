@@ -7,6 +7,7 @@
 #include <google/protobuf/repeated_field.h>
 #include <kiid.h>
 #include <json_common.h>
+#include <exception>
 #include <map>
 #include <memory>
 #include <string>
@@ -23,6 +24,13 @@ class FOOTPRINT_LIBRARY_ADAPTER;
 class PCB_DRC_DOCUMENT_SNAPSHOT;
 class PCB_DRC_SCHEMATIC_INPUT;
 class PROGRESS_REPORTER;
+
+/**
+ * The UTF-8 message of a native exception caught while capturing or checking. IO_ERROR's
+ * what() returns a pointer into a temporary that is freed before the caller can read it,
+ * so its Problem() text is used instead.
+ */
+std::string PcbDrcExceptionMessage( const std::exception& aError );
 
 struct PCB_DRC_CAPTURE_CONTEXT
 {

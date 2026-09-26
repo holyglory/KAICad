@@ -21,6 +21,7 @@
 #include <board_design_settings.h>
 #include <drc/drc_item.h>
 #include <drc/drc_library_inputs.h>
+#include <drc/drc_rule_parser.h>
 #include <pcb_marker.h>
 #include <pcbnew_utils/board_test_utils.h>
 #include <project.h>
@@ -28,6 +29,7 @@
 #include <project/net_settings.h>
 #include <settings/settings_manager.h>
 #include <json_common.h>
+#include <ki_exception.h>
 #include <router/pns_routing_settings.h>
 #include <zone.h>
 #include <fstream>
@@ -1388,9 +1390,10 @@ BOOST_AUTO_TEST_CASE( WorkerUsesCapturedUnsavedProjectRulesDrawingAndExclusions 
     BOOST_CHECK( !std::filesystem::exists( scratch.GetPath() / "fixture.kicad_pcb" ) );
 }
 
-// Isolated rule of the worker: custom rules that do not compile end the check failed with
-// design_rules_invalid and a message naming the file, item and line, never with findings. A new
-// check after the rules are corrected completes with the real copper finding.
+// Isolated rule of the worker: custom rules that do not compile, or that declare a newer rules
+// format, end the check failed with design_rules_invalid and a message naming the file and the
+// item, line and offset or the version, never with findings. A new check after the rules are
+// corrected completes with the real copper finding.
 BOOST_AUTO_TEST_CASE( UncompilableCustomRulesFailTheCheckAndCorrectedRulesComplete )
 {
     KI_TEST::TEMPORARY_DIRECTORY scratch( "drc_invalid_rules_" + KIID().AsStdString(), "" );
@@ -1433,15 +1436,31 @@ BOOST_AUTO_TEST_CASE( UncompilableCustomRulesFailTheCheckAndCorrectedRulesComple
     const PcbDrcJobState failed = Wait( jobs, board, *started );
     BOOST_CHECK( failed.status() == PDRCJS_FAILED );
     BOOST_CHECK_EQUAL( failed.error_code(), "design_rules_invalid" );
-    BOOST_CHECK_MESSAGE( failed.error_message().find( "fixture.kicad_dru" ) != std::string::npos
-                         && failed.error_message().find( "'not_a_rule'" ) != std::string::npos
-                         && failed.error_message().find( ", line " ) != std::string::npos, failed.error_message() );
+    // The item is on line 3 of the file, starting at its second character.
+    BOOST_CHECK_MESSAGE( failed.error_message().find( "'not_a_rule'" ) != std::string::npos
+                         && failed.error_message().find( "fixture.kicad_dru', line 3, offset 2." ) != std::string::npos,
+                         failed.error_message() );
     BOOST_CHECK_EQUAL( failed.findings_size(), 0 );
     BOOST_CHECK_LT( failed.progress(), 1.0 );
     BOOST_CHECK( !failed.results_fresh() && !failed.snapshot_complete() && !failed.cancellation_requested() );
     auto reread = jobs.Read( Query( failed ), board, epoch );
     BOOST_REQUIRE( reread );
     BOOST_CHECK( MessageDifferencer::Equals( *reread, failed ) );
+
+    // Rules that parse but declare a newer rules format are the rules file's problem too, not an
+    // internal error.
+    { std::ofstream stream( rulesPath ); stream << "(version " << DRC_RULE_FILE_VERSION + 1
+                                                << ")\n(rule \"kept\" (constraint clearance (min 0.3mm)))\n"; }
+    auto future = jobs.Start( Request( board, epoch ), board, epoch, context );
+    BOOST_REQUIRE_MESSAGE( future.has_value(), ( future ? "" : future.error() ) );
+    const PcbDrcJobState newer = Wait( jobs, board, *future );
+    BOOST_CHECK( newer.status() == PDRCJS_FAILED );
+    BOOST_CHECK_EQUAL( newer.error_code(), "design_rules_invalid" );
+    BOOST_CHECK_MESSAGE( newer.error_message().find( "fixture.kicad_dru' declares a design rules version newer than "
+                                                     + std::to_string( DRC_RULE_FILE_VERSION ) ) != std::string::npos,
+                         newer.error_message() );
+    BOOST_CHECK_EQUAL( newer.findings_size(), 0 );
+    BOOST_CHECK( !newer.results_fresh() && !newer.snapshot_complete() && !newer.cancellation_requested() );
 
     { std::ofstream stream( rulesPath ); stream << "(version 1)\n(rule \"kept\" (constraint clearance (min 0.3mm)))\n"; }
     auto corrected = jobs.Start( Request( board, epoch ), board, epoch, context );
@@ -1453,6 +1472,21 @@ BOOST_AUTO_TEST_CASE( UncompilableCustomRulesFailTheCheckAndCorrectedRulesComple
         clearance += finding.marker().error_type() == kiapi::board::DRCET_CLEARANCE;
     BOOST_CHECK_EQUAL( clearance, 1 );
     BOOST_CHECK( !completed.results_fresh() && !completed.snapshot_complete() );
+}
+
+// Isolated rule: every failure message a check reports or compares is copied from the exception
+// itself. IO_ERROR::what() points into a temporary that is freed before it can be read, so no
+// test through a worker could tell a correct message from a lucky read of freed memory.
+BOOST_AUTO_TEST_CASE( NativeExceptionMessagesAreCopiedFromTheExceptionItself )
+{
+    BOOST_CHECK_EQUAL( PcbDrcExceptionMessage( IO_ERROR( wxString::FromUTF8( "Library 電源 is unreadable" ),
+                                                         __FILE__, __FUNCTION__, __LINE__ ) ),
+                       "Library 電源 is unreadable" );
+    const PARSE_ERROR parse( wxT( "Unrecognized item" ), __FILE__, __FUNCTION__, __LINE__,
+                             wxT( "fixture.kicad_dru" ), "(not_a_rule)", 3, 2 );
+    BOOST_CHECK_EQUAL( PcbDrcExceptionMessage( parse ), parse.Problem().ToStdString( wxConvUTF8 ) );
+    BOOST_CHECK_EQUAL( PcbDrcExceptionMessage( std::runtime_error( "Native DRC inputs changed during capture" ) ),
+                       "Native DRC inputs changed during capture" );
 }
 
 BOOST_AUTO_TEST_CASE( RefillRunsOnThePrivateBoardAndRequiresCapturedRoutingSettings )

@@ -15,16 +15,25 @@ namespace KiCad.Automation.Tests;
 
 public sealed partial class NativeSessionTests
 {
+    // KiCad's copper clearance step, which finds this board's clearance violations.
+    private const string PcbDrcClearancePhase = "Checking track & via clearances...";
+
     // KiCad runs its copper sliver check after the copper clearance checks, and on this board it is the longest step.
     // A check seen in this step has already produced its clearance violations.
     private const string PcbDrcLateCopperPhase = "Running sliver detection on copper layers...";
 
+    // Custom rules for project A: a real rule that matches no net on the board, so every finding stays the same.
+    // The broken copy adds an item KiCad does not know on line 3, from its second character.
+    private const string PcbDrcHarmlessRules =
+        "(version 1)\n(rule \"journey_unmatched\" (condition \"A.NetName == 'NO_SUCH_NET'\") (constraint track_width (min 0.1mm)))\n";
+    private const string PcbDrcBrokenRules = PcbDrcHarmlessRules + "(not_a_rule)\n";
+
     // A generated board: 60 closed copper loops on their own nets (12,120 segments) that break no rule but give KiCad's
     // checker seconds of real work, and two real copper clearance violations between exactly known items: two parallel
-    // B.Cu tracks of different nets 0.05 mm apart, and a via 0.075 mm from a track of another net. Item identities are new
-    // for each project, so each project's findings can only name its own copper.
-    private sealed record TwoProjectDrcBoard(string Text, string PairA, string PairB, string Track, string Via, string Edited,
-        IReadOnlySet<string> Load);
+    // B.Cu tracks of different nets 0.05 mm apart, and a via 0.075 mm from a track of another net. Those three tracks and
+    // the via connect to nothing, so KiCad also reports each of them as dangling. Item identities are new for each
+    // project, so each project's findings can only name its own copper.
+    private sealed record TwoProjectDrcBoard(string Text, string PairA, string PairB, string Track, string Via, string Edited);
 
     // One project as the agent addresses it, and what the journey must put back afterwards.
     private sealed record TwoProjectDrcTarget(string Name, string InstanceId, string Epoch, NativeClient Native,
@@ -35,7 +44,6 @@ public sealed partial class NativeSessionTests
         const int loops = 60, segments = 100;
         const double pitch = 0.65;
         var text = new StringBuilder(3_000_000);
-        var load = new HashSet<string>(StringComparer.Ordinal);
         static string Mm(double value) => value.ToString("0.###", CultureInfo.InvariantCulture);
         string Segment(double x0, double y0, double x1, double y1, string net, string layer, double width)
         {
@@ -55,12 +63,11 @@ public sealed partial class NativeSessionTests
             for (int s = 0; s < segments; s++)
             {
                 string id = Segment(10 + s, y, 11 + s, y, net, "F.Cu", 0.2);
-                load.Add(id);
                 if (loop == 0 && s == 0) edited = id;
             }
-            load.Add(Segment(10 + segments, y, 10 + segments, y + 0.2, net, "F.Cu", 0.2));
-            for (int s = 0; s < segments; s++) load.Add(Segment(10 + segments - s, y + 0.2, 9 + segments - s, y + 0.2, net, "F.Cu", 0.2));
-            load.Add(Segment(10, y + 0.2, 10, y, net, "F.Cu", 0.2));
+            Segment(10 + segments, y, 10 + segments, y + 0.2, net, "F.Cu", 0.2);
+            for (int s = 0; s < segments; s++) Segment(10 + segments - s, y + 0.2, 9 + segments - s, y + 0.2, net, "F.Cu", 0.2);
+            Segment(10, y + 0.2, 10, y, net, "F.Cu", 0.2);
         }
         double pairs = 15 + loops * pitch;
         string pairA = Segment(10, pairs, 20, pairs, "PAIR_A", "B.Cu", 0.25);
@@ -68,7 +75,7 @@ public sealed partial class NativeSessionTests
         string track = Segment(30, pairs, 40, pairs, "TRACK_T", "B.Cu", 0.25);
         string via = Guid.NewGuid().ToString("D");
         text.Append($"  (via (at 35 {Mm(pairs + 0.5)}) (size 0.6) (drill 0.3) (layers \"F.Cu\" \"B.Cu\") (net \"VIA_V\") (uuid \"{via}\"))\n)\n");
-        return new(text.ToString(), pairA, pairB, track, via, edited, load);
+        return new(text.ToString(), pairA, pairB, track, via, edited);
     }
 
     // Item pcb-two-project-drc (ledger p4aa00ee192dd3acd). One agent, through one compiled MCP STDIO server, runs real
@@ -76,9 +83,8 @@ public sealed partial class NativeSessionTests
     // gets real copper violations of the exact checked revision, cancels one check mid-run, forces a failure with rules
     // that do not compile and recovers, and is refused for wrong-instance and stale targets without either board
     // changing. After each terminal outcome (completed, cancelled, failed, recovered) the editor it happened in accepts
-    // a normal edit and saves it, and a person's undo and redo in the rendered editor still work. Ordinary jobs never claim
-    // a complete snapshot or fresh results (n87c71e6665971bd2). The harness runs projects one after the other, so the
-    // journey runs once, in the second project, when its sibling already has its own board open.
+    // a normal edit and saves it, and a person's undo and redo in project B's rendered editor still work. Ordinary jobs
+    // never claim a complete snapshot or fresh results (n87c71e6665971bd2).
     private static async Task VerifyPcbDrcTwoProjects(NativeClient client, DocumentSpecifier board, int processId,
         string display, string evidence, CancellationToken token)
     {
@@ -86,11 +92,26 @@ public sealed partial class NativeSessionTests
         var siblingNative = new NativeClient(new NngTransport(), sibling.Endpoint, sibling.Epoch);
         var siblingSession = await siblingNative.HandshakeAsync(token);
         string siblingBoardPath = Path.ChangeExtension(siblingSession.ProjectPath, ".kicad_pcb");
-        if (!File.Exists(siblingBoardPath))
+        // The harness keeps its two projects in the numbered folders 0 and 1 under one root and runs this step in
+        // project 0, then in project 1. Both boards are open only in project 1's run, so the journey runs there, and
+        // only project 0's run may skip it: in project 1 a missing sibling board fails instead of passing unproven.
+        string? own = Path.TrimEndingDirectorySeparator(Path.GetFullPath(board.Project.Path));
+        string? other = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.GetDirectoryName(siblingSession.ProjectPath)!));
+        while (own is not null && other is not null && Path.GetDirectoryName(own) != Path.GetDirectoryName(other))
         {
-            Console.WriteLine($"PCB checks in two projects at once run from the second project; {sibling.InstanceId} has no board yet.");
+            own = Path.GetDirectoryName(own);
+            other = Path.GetDirectoryName(other);
+        }
+        string slot = Path.GetFileName(own) ?? "", siblingSlot = Path.GetFileName(other) ?? "";
+        Assert.IsTrue((slot, siblingSlot) is ("0", "1") or ("1", "0"),
+            $"The two projects must be the harness's folders 0 and 1 under one root: {board.Project.Path} and {siblingSession.ProjectPath}.");
+        if (slot == "0")
+        {
+            Console.WriteLine("PCB checks in two projects at once run from project 1, once both boards are open.");
             return;
         }
+        Assert.IsTrue(File.Exists(siblingBoardPath),
+            $"Project 1 runs the two-project PCB checks, so project 0's board {siblingBoardPath} must already exist.");
         var clock = Stopwatch.StartNew();
         var timeline = new StringBuilder();
         string statePath = Directory.CreateTempSubdirectory("kicad-drc-two-projects-").FullName;
@@ -205,6 +226,8 @@ public sealed partial class NativeSessionTests
                 Assert.IsLessThan(1.0, now.Progress);
             }
             // Reads every unfinished check until each worker has finished; returns the terminal states and the phases seen.
+            // The projects' checks are read together, as an agent watching both does, so each is read about every 40 ms
+            // and a step as short as KiCad's copper clearance step (100-250 ms here) is seen.
             async Task<(PcbDrcJobState[] States, HashSet<string>[] Phases)> Watch(string step, params (TwoProjectDrcTarget Target, PcbDrcJobState Job)[] jobs)
             {
                 var states = jobs.Select(job => job.Job).ToArray();
@@ -215,11 +238,14 @@ public sealed partial class NativeSessionTests
                 limit.CancelAfter(TimeSpan.FromMinutes(2));
                 while (states.Any(state => !state.WorkerFinished))
                 {
-                    await Task.Delay(50, limit.Token);
-                    for (int index = 0; index < jobs.Length; index++)
+                    await Task.Delay(10, limit.Token);
+                    int[] watched = Enumerable.Range(0, jobs.Length).Where(index => !states[index].WorkerFinished).ToArray();
+                    var reads = watched.Select(index => Read(jobs[index].Target, states[index])).ToArray();
+                    await Task.WhenAll(reads);
+                    for (int read = 0; read < watched.Length; read++)
                     {
-                        if (states[index].WorkerFinished) continue;
-                        var now = await Read(jobs[index].Target, states[index]);
+                        int index = watched[read];
+                        var now = reads[read].Result;
                         Record(step, jobs[index].Target, now);
                         Progressing(jobs[index].Target, states[index], now);
                         if (!now.WorkerFinished && now.Phase.Length != 0) phases[index].Add(now.Phase);
@@ -232,15 +258,13 @@ public sealed partial class NativeSessionTests
                 $"{finding.Marker.ErrorType}|{string.Join(",", finding.Marker.Items.Select(item => item.Value).Order(StringComparer.Ordinal))}" +
                 $"|{finding.Marker.Layer}|{finding.Marker.Position?.XNm},{finding.Marker.Position?.YNm}|{finding.Excluded}|{finding.Comment}";
             static string[] Findings(PcbDrcJobState job) => job.Findings.Select(Finding).Order(StringComparer.Ordinal).ToArray();
-            var copperTypes = new HashSet<Kiapi.Board.DrcErrorType>
-            {
-                Kiapi.Board.DrcErrorType.DrcetClearance, Kiapi.Board.DrcErrorType.DrcetShortingItems,
-                Kiapi.Board.DrcErrorType.DrcetTracksCrossing, Kiapi.Board.DrcErrorType.DrcetHoleClearance,
-                Kiapi.Board.DrcErrorType.DrcetCopperSliver, Kiapi.Board.DrcErrorType.DrcetConnectionWidth
-            };
-            // A completed check of the exact revision it was asked for, with exactly the two real copper clearance
-            // violations of this project's own generated items. No finding names the 12,120 load segments or the other project.
-            void CheckedCopper(TwoProjectDrcTarget target, TwoProjectDrcTarget other, PcbDrcJobState job, DocumentRevision at, string because)
+            static string Named(Kiapi.Board.DrcErrorType type, IEnumerable<string> items) =>
+                $"{type}|" + string.Join(",", items.Order(StringComparer.Ordinal));
+            // A completed check of the exact revision it was asked for, with exactly the six real findings of this
+            // project's own generated copper and nothing else: the two copper clearance violations (the parallel pair,
+            // and the track and via), the three tracks dangling and the via dangling. No finding names the 12,120 load
+            // segments or the other project's copper.
+            void CheckedCopper(TwoProjectDrcTarget target, PcbDrcJobState job, DocumentRevision at, string because)
             {
                 Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, job.Status, because + " " + job.ErrorCode + ": " + job.ErrorMessage);
                 Assert.AreEqual(1.0, job.Progress);
@@ -249,20 +273,19 @@ public sealed partial class NativeSessionTests
                 Assert.IsFalse(job.SnapshotComplete, "An ordinary check never claims a complete input snapshot (n87c71e6665971bd2).");
                 Assert.IsFalse(job.ResultsFresh, "An ordinary check never claims fresh results (n87c71e6665971bd2).");
                 Assert.AreEqual(at, job.CheckedRevision, because);
-                string Pair(string first, string second) => $"{Kiapi.Board.DrcErrorType.DrcetClearance}|" +
-                    string.Join(",", new[] { first, second }.Order(StringComparer.Ordinal));
-                CollectionAssert.AreEqual(
-                    new[] { Pair(target.Fixture.PairA, target.Fixture.PairB), Pair(target.Fixture.Track, target.Fixture.Via) }.Order(StringComparer.Ordinal).ToArray(),
-                    job.Findings.Where(finding => copperTypes.Contains(finding.Marker.ErrorType))
-                        .Select(finding => $"{finding.Marker.ErrorType}|" + string.Join(",", finding.Marker.Items.Select(item => item.Value).Order(StringComparer.Ordinal)))
+                var fixture = target.Fixture;
+                CollectionAssert.AreEqual(new[]
+                    {
+                        Named(Kiapi.Board.DrcErrorType.DrcetClearance, [fixture.PairA, fixture.PairB]),
+                        Named(Kiapi.Board.DrcErrorType.DrcetClearance, [fixture.Track, fixture.Via]),
+                        Named(Kiapi.Board.DrcErrorType.DrcetDanglingTrack, [fixture.PairA]),
+                        Named(Kiapi.Board.DrcErrorType.DrcetDanglingTrack, [fixture.PairB]),
+                        Named(Kiapi.Board.DrcErrorType.DrcetDanglingTrack, [fixture.Track]),
+                        Named(Kiapi.Board.DrcErrorType.DrcetDanglingVia, [fixture.Via])
+                    }.Order(StringComparer.Ordinal).ToArray(),
+                    job.Findings.Select(finding => Named(finding.Marker.ErrorType, finding.Marker.Items.Select(item => item.Value)))
                         .Order(StringComparer.Ordinal).ToArray(),
-                    because + " The copper findings must be exactly this project's two clearance violations.");
-                foreach (var item in job.Findings.SelectMany(finding => finding.Marker.Items))
-                {
-                    Assert.IsFalse(target.Fixture.Load.Contains(item.Value), $"{because} A finding names load copper that breaks no rule.");
-                    Assert.IsFalse(other.Fixture.Load.Contains(item.Value) || new[] { other.Fixture.PairA, other.Fixture.PairB,
-                        other.Fixture.Track, other.Fixture.Via }.Contains(item.Value), $"{because} A finding names the other project's copper.");
-                }
+                    because + " The findings must be exactly this project's two clearance violations and its dangling test copper.");
             }
             async Task<string> Picture(string name)
             {
@@ -338,23 +361,29 @@ public sealed partial class NativeSessionTests
             var (a1, b1) = await StartBoth("both", stateA1.Revision, stateB1.Revision);
             var runningA = await Read(a, a1); Record("both-overlap", a, runningA);
             var runningB = await Read(b, b1); Record("both-overlap", b, runningB);
-            Assert.IsFalse(runningA.WorkerFinished || runningB.WorkerFinished,
-                "Both projects' checks must be running at the same time: B was running when A was read still running.");
+            Assert.IsTrue(runningA.Status == PcbDrcJobStatus.PdrcjsRunning && runningB.Status == PcbDrcJobStatus.PdrcjsRunning
+                    && !runningA.WorkerFinished && !runningB.WorkerFinished,
+                $"Both projects' checks must be running at the same time: A {runningA.Status}, then B {runningB.Status}.");
+            // KiCad's document check finds project A's board is not project B's (same file name, other project folder)
+            // and reports that the requested board is not open in this instance.
+            string WrongProject = $"the requested document {a.Board.BoardFilename} is not open";
+            Assert.AreEqual(a.Board.BoardFilename, b.Board.BoardFilename, "Only the project folder tells the two boards apart.");
             Refused(await mcp.Tool("kicad_pcb_drc_cancel", new { instanceId = b.InstanceId, documentJson = Json(a.Board), jobId = a1.JobId, processEpoch = b.Epoch }),
-                "Instance B does not hold project A's board.");
+                "Instance B does not hold project A's board.", code: "native_status_3", containing: WrongProject);
             Refused(await mcp.Tool("kicad_pcb_drc_cancel", new { instanceId = b.InstanceId, documentJson = Json(b.Board), jobId = a1.JobId, processEpoch = b.Epoch }),
-                "Instance B does not own project A's check.", containing: "Unknown PCB DRC job");
+                "Instance B does not own project A's check.", code: "native_status_3", containing: "Unknown PCB DRC job");
             Refused(await mcp.Tool("kicad_pcb_drc_cancel", new { instanceId = a.InstanceId, documentJson = Json(a.Board), jobId = a1.JobId, processEpoch = b.Epoch }),
                 "A cancel with instance B's process epoch must not reach instance A.", code: "stale_process_epoch");
             Refused(await mcp.Tool("kicad_pcb_drc_job", new { instanceId = b.InstanceId, documentJson = Json(b.Board), jobId = a1.JobId, processEpoch = b.Epoch }),
-                "Instance B cannot read project A's check.", containing: "Unknown PCB DRC job");
+                "Instance B cannot read project A's check.", code: "native_status_3", containing: "Unknown PCB DRC job");
             var (both, bothPhases) = await Watch("both", (a, runningA), (b, runningB));
             await Evidence("A-completed", both[0]); await Evidence("B-completed", both[1]);
-            CheckedCopper(a, b, both[0], stateA1.Revision, "Project A's check, run beside project B's and after refused cancels,");
-            CheckedCopper(b, a, both[1], stateB1.Revision, "Project B's check, run beside project A's,");
+            CheckedCopper(a, both[0], stateA1.Revision, "Project A's check, run beside project B's and after refused cancels,");
+            CheckedCopper(b, both[1], stateB1.Revision, "Project B's check, run beside project A's,");
             for (int index = 0; index < 2; index++)
-                Assert.IsGreaterThanOrEqualTo(2, bothPhases[index].Count,
-                    $"The agent must see project {(index == 0 ? "A" : "B")}'s check advance through KiCad's check steps: {string.Join(" / ", bothPhases[index])}");
+                foreach (string phase in new[] { PcbDrcClearancePhase, PcbDrcLateCopperPhase })
+                    Assert.Contains(phase, bothPhases[index],
+                        $"The agent must see project {(index == 0 ? "A" : "B")}'s check reach KiCad's step \"{phase}\"; it saw: {string.Join(" / ", bothPhases[index])}");
             await Unchanged(boards1, "Running two checks and refusing wrong-instance requests must leave both boards alone.");
             Assert.AreEqual(both[0], await Read(a, a1), "Nothing changed project A's board: its check stays current.");
             Assert.AreEqual(both[1], await Read(b, b1), "Nothing changed project B's board: its check stays current.");
@@ -373,11 +402,12 @@ public sealed partial class NativeSessionTests
             var boards2 = await Untouched();
             string reused = Guid.NewGuid().ToString("D");
             Refused(await mcp.Tool("kicad_pcb_drc_start", StartArguments(a, stateA1.Revision, reused)),
-                "A check of a revision older than the saved edit must not start.", containing: "no job was started");
+                "A check of a revision older than the saved edit must not start.", code: "native_status_3",
+                containing: "PCB changed since the requested DRC revision; no job was started");
             Refused(await mcp.Tool("kicad_pcb_drc_start", StartArguments(a, savedA.Revision, Guid.NewGuid().ToString("D"), epoch: b.Epoch)),
                 "A check with instance B's process epoch must not start in instance A.", code: "stale_process_epoch");
             Refused(await mcp.Tool("kicad_pcb_drc_start", StartArguments(b, savedA.Revision, Guid.NewGuid().ToString("D"), document: a.Board)),
-                "Instance B must not check project A's board.");
+                "Instance B must not check project A's board.", code: "native_status_3", containing: WrongProject);
             Refused(await mcp.Tool("kicad_pcb_drc_job", new { instanceId = a.InstanceId, documentJson = Json(a.Board), jobId = a1.JobId, processEpoch = Guid.NewGuid().ToString("D") }),
                 "A read with an epoch no process has must be refused.", code: "stale_process_epoch");
             await Unchanged(boards2, "Refused stale and wrong-target requests must leave both boards alone.");
@@ -409,7 +439,7 @@ public sealed partial class NativeSessionTests
             await Picture("cancelling");
             var (cancelled, _) = await Watch("cancel", (a, runningA2), (b, acknowledged));
             await Evidence("A-beside-cancel", cancelled[0]); await Evidence("B-cancelled", cancelled[1]);
-            CheckedCopper(a, b, cancelled[0], savedA.Revision, "Project A's check beside project B's cancelled one");
+            CheckedCopper(a, cancelled[0], savedA.Revision, "Project A's check beside project B's cancelled one");
             CollectionAssert.AreEqual(baselineA, Findings(cancelled[0]), "Project A's findings must not depend on project B's cancellation.");
             var terminalB = cancelled[1];
             Assert.AreEqual(PcbDrcJobStatus.PdrcjsCancelled, terminalB.Status, terminalB.ErrorCode + ": " + terminalB.ErrorMessage);
@@ -427,38 +457,38 @@ public sealed partial class NativeSessionTests
             // Project A's check completed again; its editor was already proven after a completed check.
             savedB = await EditAndSave(b, "a cancelled check");
 
-            // 4. Project A's custom rules do not compile: its check fails with a code that says so, while project B's first
-            //    check after its cancellation completes with its first findings. Project A's editor still takes an edit and
-            //    a save with the broken rules in place.
-            await File.WriteAllTextAsync(a.RulesPath, "(version 1)\n(not_a_rule)\n", token);
+            // 4. Project A's custom rules do not compile: its check fails with a code that says so and names the file, the
+            //    item and its exact line, while project B's first check after its cancellation completes with its first
+            //    findings. Project A's editor still takes an edit and a save with the broken rules in place.
             rulesWritten = true;
+            await File.WriteAllTextAsync(a.RulesPath, PcbDrcBrokenRules, token);
             var (a3, b3) = await StartBoth("failure", savedA.Revision, savedB.Revision);
             var (failure, _) = await Watch("failure", (a, a3), (b, b3));
             await Evidence("A-failed", failure[0]); await Evidence("B-after-cancel", failure[1]);
             var failedA = failure[0];
             Assert.AreEqual(PcbDrcJobStatus.PdrcjsFailed, failedA.Status, failedA.ErrorCode + ": " + failedA.ErrorMessage);
             Assert.AreEqual("design_rules_invalid", failedA.ErrorCode, failedA.ErrorMessage);
-            StringAssert.Contains(failedA.ErrorMessage, Path.GetFileName(a.RulesPath), "The failure must name the rules file.");
             StringAssert.Contains(failedA.ErrorMessage, "'not_a_rule'", "The failure must name the item that does not compile.");
-            StringAssert.Contains(failedA.ErrorMessage, ", line ", "The failure must say where in the file it is.");
+            StringAssert.Contains(failedA.ErrorMessage, $"{a.RulesPath}', line 3, offset 2.",
+                "The failure must name the rules file and the item's own line and offset in it.");
             Assert.IsEmpty(failedA.Findings, "A failed check never exposes findings.");
             Assert.IsTrue(failedA.WorkerFinished);
             Assert.IsFalse(failedA.CancellationRequested || failedA.ResultsFresh || failedA.SnapshotComplete);
             Assert.IsLessThan(1.0, failedA.Progress);
             Assert.AreEqual(failedA, await Read(a, a3), "A failed check stays failed.");
-            CheckedCopper(b, a, failure[1], savedB.Revision, "Project B's first check after its cancellation");
+            CheckedCopper(b, failure[1], savedB.Revision, "Project B's first check after its cancellation");
             CollectionAssert.AreEqual(baselineB, Findings(failure[1]),
                 "After the cancellation, a complete check of project B must report exactly its first findings.");
             savedA = await EditAndSave(a, "a failed check");
 
-            // 5. With the rules put back, project A recovers: a new check completes with its first findings.
-            File.Delete(a.RulesPath); // Only the rules file this journey wrote.
-            rulesWritten = false;
+            // 5. The person corrects the rules by removing the broken item and keeps the rule that matches nothing, and
+            //    project A recovers: a new check compiles the corrected rules and completes with its first findings.
+            await File.WriteAllTextAsync(a.RulesPath, PcbDrcHarmlessRules, token);
             var a4 = Parse(await mcp.Tool("kicad_pcb_drc_start", StartArguments(a, savedA.Revision, Guid.NewGuid().ToString("D"))));
             Record("recovery-start", a, a4);
             var (recovered, _) = await Watch("recovery", (a, a4));
             await Evidence("A-recovered", recovered[0]);
-            CheckedCopper(a, b, recovered[0], savedA.Revision, "Project A's check after its failure");
+            CheckedCopper(a, recovered[0], savedA.Revision, "Project A's check after its failure");
             CollectionAssert.AreEqual(baselineA, Findings(recovered[0]), "After recovery, project A's findings must be its first findings.");
             savedA = await EditAndSave(a, "a recovered check");
             Assert.AreEqual(savedB, await State(b), "Project A's failure and recovery must not change project B's board.");

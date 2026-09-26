@@ -699,14 +699,21 @@ void DRC_ENGINE::loadRules( LINE_READER& aReader, const wxString& aSourceName, b
     {
         wxString str( line );
         str = m_board->ConvertCrossReferencesToKIIDs( str );
-        rulesText << ExpandTextVars( str, &resolver ) << '\n';
+        rulesText << ExpandTextVars( str, &resolver );
+        // A read line keeps its own line break; adding another would double every line
+        // number the parser reports.
+        if( !str.EndsWith( wxT( "\n" ) ) ) rulesText << '\n';
     }
     DRC_RULES_PARSER parser( rulesText, aSourceName );
     // Captured verification inputs must fail on malformed rules even when a
     // diagnostic logger is present. UI file parsing retains its existing mode.
     parser.Parse( rules, aStrict ? nullptr : m_logReporter );
     if( aStrict && parser.IsTooRecent() )
-        throw std::runtime_error( "Captured design rules require a newer native format" );
+    {
+        throw DRC_RULES_TOO_RECENT( wxString::Format(
+                wxT( "'%s' declares a design rules version newer than %d, the newest this KiCad reads." ),
+                aSourceName, DRC_RULE_FILE_VERSION ).ToStdString( wxConvUTF8 ) );
+    }
     // Publish only after successful parsing, preserving the existing native contract.
     for( auto& rule : rules ) m_rules.push_back( std::move( rule ) );
 }

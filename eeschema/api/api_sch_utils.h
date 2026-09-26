@@ -114,8 +114,14 @@ bool PackSchematicDrawingSheet( const SCH_SHEET_PATH& aPath, const SCH_RENDER_SE
                                 kiapi::automation::v1::SchematicWiringDrawingSheet& aOutput,
                                 std::string& aError );
 
-/// Observe exact active pin identities and sheet-space anchors. Incomplete
-/// mappings return no pins; previous output is cleared before every observation.
+/// Observe exact active pin identities and sheet-space anchors at @a aPath: the pins of the unit
+/// selected there and of the symbol's selected body style (a De Morgan alternate body reports its own
+/// library pins and geometry, never the other body's same-numbered pins) plus the common pins.
+/// Incomplete mappings return no pins and name their reason: an unresolved definition, a design
+/// variant @a aVariant that swaps in another library symbol (its pins have no persistent link to the
+/// placed pins), an active pin whose number another pin of the selected body shares (KiCad saves a
+/// placed pin by its number alone), or a missing or repeated placed or owned identity. Previous
+/// output is cleared before every observation.
 void PackSchematicPinGeometry( const SCH_SYMBOL& aSymbol, const SCH_SHEET_PATH& aPath,
                               const wxString& aVariant,
                               kiapi::automation::v1::SchematicSymbolPinGeometry& aOutput );

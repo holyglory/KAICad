@@ -3016,7 +3016,7 @@ name="input-contracts"
 tier="development"
 role="preflight"
 invalidates=["configure", "model-build", "codec", "native-build", "rendered"]
-command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicFieldLayoutPlannerTests|FullyQualifiedName~SchematicInitialLayoutPlannerTests|FullyQualifiedName~InitialSchematicLayoutTests|FullyQualifiedName~LayoutRefinementTests|FullyQualifiedName~DesignRecoveryReattachmentTests|FullyQualifiedName~SchematicNativeCreationProjectionTests|FullyQualifiedName~AutomaticDesignSynchronizationTests|FullyQualifiedName~SchematicOwnershipResolutionTests|FullyQualifiedName~SchematicNativeRestorationTests|FullyQualifiedName~SchematicNativeRemovalProjectionTests|FullyQualifiedName~PinPartition|FullyQualifiedName~SymbolSheetOwnershipTests|FullyQualifiedName~SymbolPinCoverageTests|FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~SchematicLayoutResolutionTests|FullyQualifiedName~DesignLayoutRecoveryTests|FullyQualifiedName~SchematicPropertyProjectionTests|FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicOrientationTests|FullyQualifiedName~CheckedSchematicToolTests|FullyQualifiedName~CheckedDesignRecoveryTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignElectricalRecoveryTests|FullyQualifiedName~DesignPublicationRecoveryTests|FullyQualifiedName~DesignSynchronizationReceiptTests|FullyQualifiedName~RetainedXmlHistoryTests|FullyQualifiedName~SyncHarnessProcessTests|FullyQualifiedName~DesignFilePublisherTests|FullyQualifiedName~SchematicSynchronizationAdmissionTests|FullyQualifiedName~DocumentLifecycleToolTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/component-creation-input-contracts"]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicConnectionRealizerTests|FullyQualifiedName~SchematicLibraryCacheEquivalenceTests|FullyQualifiedName~SchematicFieldLayoutPlannerTests|FullyQualifiedName~SchematicInitialLayoutPlannerTests|FullyQualifiedName~InitialSchematicLayoutTests|FullyQualifiedName~LayoutRefinementTests|FullyQualifiedName~DesignRecoveryReattachmentTests|FullyQualifiedName~SchematicNativeCreationProjectionTests|FullyQualifiedName~AutomaticDesignSynchronizationTests|FullyQualifiedName~SchematicOwnershipResolutionTests|FullyQualifiedName~SchematicNativeRestorationTests|FullyQualifiedName~SchematicNativeRemovalProjectionTests|FullyQualifiedName~PinPartition|FullyQualifiedName~SymbolSheetOwnershipTests|FullyQualifiedName~SymbolPinCoverageTests|FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~SchematicLayoutResolutionTests|FullyQualifiedName~DesignLayoutRecoveryTests|FullyQualifiedName~SchematicPropertyProjectionTests|FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicOrientationTests|FullyQualifiedName~CheckedSchematicToolTests|FullyQualifiedName~CheckedDesignRecoveryTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignElectricalRecoveryTests|FullyQualifiedName~DesignPublicationRecoveryTests|FullyQualifiedName~DesignSynchronizationReceiptTests|FullyQualifiedName~RetainedXmlHistoryTests|FullyQualifiedName~SyncHarnessProcessTests|FullyQualifiedName~DesignFilePublisherTests|FullyQualifiedName~SchematicSynchronizationAdmissionTests|FullyQualifiedName~DocumentLifecycleToolTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/component-creation-input-contracts"]
 retained_artifacts=[{ name = "component-creation-input-contracts", path = "automation/artifacts/component-creation-input-contracts", max_bytes = 16777216 }]
 
 [[test.native-xml-component-creation.check]]
@@ -3678,3 +3678,28 @@ requires=["build"]
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~DeliveryObservationScopeTests", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/delivery-observation-scope"]
 retained_artifacts=[{ name = "delivery-observation-scope", path = "automation/artifacts/delivery-observation-scope", max_bytes = 16777216 }]
 
+
+# Fast regression for connection result validation; the full native graph also runs these cases.
+[test.connection-resolution]
+timeout_seconds=600
+env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.connection-resolution.check]]
+name="restore"
+tier="development"
+role="preflight"
+invalidates=["resolution"]
+command=["dotnet", "restore", "automation/KiCad.Automation.slnx", "--locked-mode"]
+
+[[test.connection-resolution.check]]
+name="managed-build"
+tier="development"
+requires=["restore"]
+command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.connection-resolution.check]]
+name="resolution"
+tier="development"
+requires=["managed-build"]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~SchematicConnectionRealizerTests.ResolutionAdoptsOnlyTheListedNativeValues|FullyQualifiedName~SchematicLibraryCacheEquivalenceTests", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/connection-resolution-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
+retained_artifacts=[{name="connection-resolution-tests", path="automation/artifacts/connection-resolution-tests", max_bytes=16777216}]

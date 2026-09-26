@@ -826,9 +826,12 @@ public static class SchematicInitialLayoutPlanner
                 var symbol = Measurements.SelectMany(m => m.Candidates.Concat(m.Obstacles)).FirstOrDefault(s => s.Id?.Value == pin.SymbolId.ToString("D"))
                     ?? throw Error("incomplete_layout_measurement", "KiCad did not measure the symbol of connected pin "
                         + pin.Endpoint.Pin + " on sheet " + Path + ".");
+                // KiCad says why (ledger p20323fd749ff825e): a design variant that swaps in another library symbol, pins that
+                // share a number, or an unresolved definition. Nothing is placed from a guessed pin.
                 if (symbol.SymbolPins is not { Complete: true } pins)
                     throw Error("incomplete_layout_measurement", "KiCad cannot report exact pin positions for the symbol of connected pin "
-                        + pin.Endpoint.Pin + " on sheet " + Path + ", so its connections cannot be placed.");
+                        + pin.Endpoint.Pin + " on sheet " + Path + ", so its connections cannot be placed"
+                        + (symbol.SymbolPins is { Limitations.Count: > 0 } reported ? ": " + string.Join("; ", reported.Limitations) + "." : "."));
                 return pins.Pins.FirstOrDefault(p => p.Id?.Value == pin.PlacedPinId.ToString("D"))
                     ?? throw Error("incomplete_layout_measurement", "KiCad does not report connected pin " + pin.Endpoint.Pin + " on sheet " + Path + ".");
             }

@@ -19,6 +19,7 @@
  */
 
 #include <algorithm>
+#include <map>
 #include <set>
 #include <stdexcept>
 #include <trace_helpers.h>
@@ -389,6 +390,39 @@ void PackSchematicPinGeometry( const SCH_SYMBOL& symbol, const SCH_SHEET_PATH& p
         return pin->GetBodyStyle() && pin->GetBodyStyle() != symbol.GetBodyStyle();
     } );
     std::sort( pins.begin(), pins.end(), []( const auto* a, const auto* b ) { return a->m_Uuid < b->m_Uuid; } );
+    // KiCad saves a placed pin under its number alone and, when it loads or relinks the symbol, pairs it with a
+    // library pin of that number (SCH_SYMBOL::UpdatePins, over every unit of the selected body style and the common
+    // pins). Where two such library pins share a number, which placed pin belongs to which of them is not saved and
+    // can change on the next load, so neither pair is an exact identity (ledger p20323fd749ff825e). The symbol is then
+    // reported incomplete rather than with a guess. Pins of another body style are never paired and do not count.
+    // Making such pins exact needs the file to record each placed pin's library pin.
+    std::map<wxString, int> pairedByNumber;
+    for( const SCH_PIN* libraryPin : symbol.GetLibSymbolRef()->GetPins() )
+    {
+        if( !libraryPin->GetBodyStyle() || !symbol.GetBodyStyle()
+                || libraryPin->GetBodyStyle() == symbol.GetBodyStyle() )
+        {
+            ++pairedByNumber[libraryPin->GetNumber()];
+        }
+    }
+    std::set<wxString> sharedNumbers;
+    for( const SCH_PIN* pin : pins )
+    {
+        if( pairedByNumber[pin->GetNumber()] > 1 )
+            sharedNumbers.insert( pin->GetNumber() );
+    }
+    if( !sharedNumbers.empty() )
+    {
+        wxString numbers;
+        for( const wxString& number : sharedNumbers )
+            numbers << ( numbers.IsEmpty() ? wxS( "'" ) : wxS( ", '" ) ) << number << wxS( "'" );
+        output.add_limitations( std::string( wxString::Format(
+                wxS( "Pin numbers %s are shared by more than one pin of this symbol; KiCad saves a placed pin "
+                     "by its number alone, so which library pin each of them is cannot be told exactly" ),
+                numbers ).ToUTF8() ) );
+        output.set_incomplete_reason( SPGIR_PLACED_IDENTITY_MISSING );
+        return;
+    }
     std::set<KIID> identities;
     std::set<KIID> ownedIdentities;
     for( const SCH_PIN* pin : pins )

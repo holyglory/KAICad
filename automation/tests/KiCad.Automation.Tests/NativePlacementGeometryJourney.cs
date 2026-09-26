@@ -115,6 +115,7 @@ public sealed partial class NativeSessionTests
                 Assert.AreEqual(3, (await Assert.ThrowsAsync<NativeApiException>(() =>
                     client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(unknown, token))).Status);
                 await VerifyPowerProbes(client, request, token);
+                await VerifySharedPinNumbers(client, request, token);
                 mcp.Add(await VerifyLabelPrototypes(client, request, measured, before, evidence, instanceId, token));
             }
             result.Add(measured);
@@ -161,6 +162,51 @@ public sealed partial class NativeSessionTests
                 "Hidden active pins are still electrical connection points.");
             Assert.IsTrue(hidden.Candidates.Single().SymbolPins.Pins.All(p => !p.Visible));
         }
+    }
+
+    // Ledger p20323fd749ff825e at the real measurement boundary: KiCad saves a placed pin under its number alone, so a symbol
+    // whose selected body has two pins with one number cannot say exactly which placed pin is which library pin. A detached
+    // copy of a real candidate with a second active pin numbered like its first, drawn 2.54 mm lower with its own placed and
+    // owned identities, is reported incomplete (placed identity missing) with no pins and a limitation naming the number,
+    // while its bounds are still measured; the untouched candidate beside it in the same request stays exact.
+    private static async Task VerifySharedPinNumbers(NativeClient client, MeasureSchematicPlacement original, CancellationToken token)
+    {
+        var request = original.Clone();
+        var exact = request.Candidates[0].Clone(); request.Candidates.Clear(); request.Candidates.Add(exact);
+        var shared = exact.Clone();
+        shared.Id = new() { Value = Guid.NewGuid().ToString("D") };
+        foreach (var child in shared.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)))
+        {
+            var pin = child.Item.Unpack<SchematicPin>();
+            if (pin.LibraryPinId is null) continue;
+            // Distinct placed identities from the exact candidate's, which the same request also measures.
+            pin.Id = new() { Value = Guid.NewGuid().ToString("D") };
+            child.Item = Any.Pack(pin);
+        }
+        // A pin the candidate draws: of its unit or common, and of its body style or common.
+        int unit = shared.Unit.Unit, style = shared.BodyStyle?.Style ?? 1;
+        var firstChild = shared.Definition.Items.First(c => c.Item.Is(SchematicPin.Descriptor) && c.Item.Unpack<SchematicPin>().LibraryPinId is not null
+            && ((c.Unit?.Unit ?? 0) == 0 || c.Unit!.Unit == unit) && ((c.BodyStyle?.Style ?? 0) == 0 || c.BodyStyle!.Style == style));
+        var twin = firstChild.Clone();
+        var twinPin = twin.Item.Unpack<SchematicPin>();
+        twinPin.Id = new() { Value = Guid.NewGuid().ToString("D") };
+        twinPin.LibraryPinId = new() { Value = Guid.NewGuid().ToString("D") };
+        twinPin.Position = new() { XNm = twinPin.Position.XNm, YNm = twinPin.Position.YNm + 2_540_000 };
+        twin.Item = Any.Pack(twinPin);
+        shared.Definition.Items.Add(twin);
+        request.Candidates.Add(shared);
+        var measured = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(request, token);
+        var sharedPins = measured.Candidates.Single(c => c.Id.Equals(shared.Id));
+        Assert.IsNotNull(sharedPins.SymbolPins, "KiCad reports pin geometry for the candidate whose pins share a number.");
+        Assert.IsFalse(sharedPins.SymbolPins.Complete, "Pins that share a number are never paired by a guess.");
+        Assert.AreEqual(SchematicPinGeometryIncompleteReason.SpgirPlacedIdentityMissing, sharedPins.SymbolPins.IncompleteReason);
+        Assert.AreEqual(0, sharedPins.SymbolPins.Pins.Count, "An incomplete observation reports no pins.");
+        Assert.IsTrue(sharedPins.SymbolPins.Limitations.Any(l => l.Contains("Pin numbers '" + twinPin.Number + "' are shared", StringComparison.Ordinal)),
+            "KiCad names the shared number: " + string.Join("; ", sharedPins.SymbolPins.Limitations));
+        Assert.IsTrue(sharedPins.Bounds.Size.XNm > 0 && sharedPins.Bounds.Size.YNm > 0, "The symbol is still measured as an obstacle.");
+        var exactPins = measured.Candidates.Single(c => c.Id.Equals(exact.Id)).SymbolPins;
+        Assert.IsTrue(exactPins.Complete, "False-positive guard: the untouched candidate stays exact.");
+        Assert.AreEqual(SchematicPinGeometryIncompleteReason.SpgirUnspecified, exactPins.IncompleteReason);
     }
 
     // The implicit power connection native reports for a placed pin must be the one its captured definition implies

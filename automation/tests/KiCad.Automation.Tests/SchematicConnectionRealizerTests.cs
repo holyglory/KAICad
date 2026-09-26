@@ -2044,6 +2044,48 @@ public sealed class SchematicConnectionRealizerTests
         var before = scene.Checkpoint.Electrical.Hierarchy.Data;
         var result = new SchematicItemBatchResult { ConnectivityAssertionVerified = true };
         Assert.AreEqual(realization.Design.Schematic, SchematicConnectionResolution.Resolve(realization.Design, before, committed, batch, result, []).Schematic);
+        // Native cache writers may reorder a definition's children while preserving every identity and property.
+        // Resolution must use the established cache equivalence for that representation detail, otherwise a valid
+        // connected creation with a freshly declared symbol is rejected after KiCad has committed it.
+        var (cacheFixture, _) = SchematicPartSymbolTests.Fixture();
+        var cache = cacheFixture.PartSymbols!.Single().Symbol;
+        var cachedScene = scene.Edited(data => Root(data).CachedSymbols.Add(cache.Clone()));
+        var cachedRealization = await cachedScene.Realize();
+        var cachePlan = cachedRealization.Design;
+        var cacheBefore = cachedScene.Checkpoint.Electrical.Hierarchy.Data;
+        var cacheBatch = Batch(cachedScene, cachedRealization);
+        var cacheNative = Committed(cachedScene, cachedRealization);
+        var nativeCache = Root(cacheNative.Hierarchy.Data).CachedSymbols.Single();
+        var nativeChildren = nativeCache.Definition.Items.Reverse().ToArray();
+        nativeCache.Definition.Items.Clear(); nativeCache.Definition.Items.Add(nativeChildren);
+        Assert.AreNotEqual(cache, nativeCache, "The fixture must exercise a different child order.");
+        var resolvedCache = SchematicConnectionResolution.Resolve(cachePlan, cacheBefore, cacheNative, cacheBatch, result, []);
+        Assert.AreEqual(cacheNative.Hierarchy.Data, resolvedCache.Schematic, "Retain the editor's equivalent enumeration.");
+        foreach (string change in new[] { "id", "name", "position", "unit", "style", "duplicate", "delete", "cache", "spacing", "missing", "extra" })
+        {
+            var different = cacheNative.Clone();
+            var definitions = Root(different.Hierarchy.Data).CachedSymbols;
+            var definition = definitions.Single();
+            var child = definition.Definition.Items.First(c => c.Item.Is(SchematicPin.Descriptor));
+            var pin = child.Item.Unpack<SchematicPin>();
+            switch (change)
+            {
+                case "id": pin.Id.Value = Guid.NewGuid().ToString("D"); break;
+                case "name": pin.Name += "_changed"; break;
+                case "position": pin.Position.XNm += 100; break;
+                case "unit": child.Unit.Unit++; break;
+                case "style": child.BodyStyle.Style++; break;
+                case "duplicate": definition.Definition.Items.Add(child.Clone()); break;
+                case "delete": definition.Definition.Items.Remove(child); break;
+                case "cache": definition.CacheKey += "_other"; break;
+                case "spacing": definition.PinNameOffset.ValueNm += 100; break;
+                case "missing": definitions.Clear(); break;
+                case "extra": definitions.Add(definition.Clone()); break;
+            }
+            child.Item = Any.Pack(pin);
+            Assert.AreEqual(SchematicConnectionErrors.RealizationResolutionMismatch, Assert.ThrowsExactly<AutomationException>(() =>
+                SchematicConnectionResolution.Resolve(cachePlan, cacheBefore, different, cacheBatch, result, []), change).Code);
+        }
         // Guard: KiCad filling in presentation details the plan leaves open is adopted, and the resolved design is KiCad's.
         var adopted = committed.Clone();
         EditItems(adopted.Hierarchy.Data, item => item switch

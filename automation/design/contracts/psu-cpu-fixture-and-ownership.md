@@ -807,3 +807,11 @@ the matching erratum of `cn2-recursive-diagram-v2.md`.
 - **§3.** The retired conversion numbers in `diagram_revision_types.proto` are reserved (including frozen numbers below 100)
   and are never reused. `SharedProtoBandTests` records them and no longer grants lane 2B the `StructuralMigration` type
   prefix or the `SMG_` value prefix.
+
+**Amendment 2026-09-26 (section 2.6, lane 2D).** Lane 2D also owns `DesignOperationRelease.cs`,
+`ExitedOperationTools.cs`, `NativeObserveApplyStressJourney.cs`, `CheckedSchematicToolTests.cs`,
+`qa/tests/common/test_document_lifecycle_controller.cpp` (decision ne093a488e59e7b66),
+`automation/docs/codex-runtime-refresh.md`, and the PCB DRC job files: `pcbnew/api/pcb_drc_job_manager.*`,
+`pcbnew/api/pcb_drc_run_inputs.*`, the DRC input capture code under `pcbnew/drc` (including the captured-rules
+loader in `drc_engine.cpp`), the DRC event hooks in `pcbnew/pcb_edit_frame.cpp`, the `qa/tests/pcbnew/drc` job
+tests and the `PcbDrc*`/`NativePcbDrc*` sources and tests (decision nb6844a5bd34d3d5d).

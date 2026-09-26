@@ -188,7 +188,7 @@ public sealed partial class NativeSessionTests
         await OpenTable(); Filename("DiscardedWithPreset.csv");
         // The filename row follows the format selector in native tab order.
         Key("ISO_Left_Tab"); Key("ISO_Left_Tab");
-        Key("space"); await NativeSetupUi.WaitForPopup(display, processId, true, token, table);
+        Key("space"); await NativeSetupUi.WaitForPopup(display, processId, true, token, table, Prefix("preset-popup-failure.png"));
         Key("End"); Key("Up"); Key("Return");
         await Window("Save BOM Preset", true);
         Type("AutomationBom", "Save BOM Preset"); Key("Return", "Save BOM Preset");

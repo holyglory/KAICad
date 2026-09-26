@@ -9,6 +9,9 @@ Current downloads are on [kicad.vr.ae](https://kicad.vr.ae/). The
 September 15 Apple Silicon and Intel builds, including managed-update setup.
 The [Windows preview installation guide](distribution/windows-preview-install.md)
 covers the September 16 Windows package and its managed updater.
+To point Codex Desktop or a second MCP client such as Claude Code at a newly installed
+Linux preview's MCP server, and to confirm which server is really running, follow the
+[Codex runtime refresh runbook](docs/codex-runtime-refresh.md).
 
 ## Try provisional Schematic Setup edits in a source build
 
@@ -41,7 +44,59 @@ coverage are still being qualified; native Mac Setup evidence and full automatic
 XML synchronization remain open. The authoritative completion state is in
 DevCoordinator, not this usage guide.
 
-## Linux preview — September 24, 2026
+## Linux preview — September 25, 2026
+
+[Linux application and MCP](https://kicad.vr.ae/artifacts/kicad-codex-preview-20260925T142556Z-51abb3af7e05-debian13-x64.tar.gz)
+and [matching source](https://kicad.vr.ae/artifacts/kicad-codex-preview-20260925T142556Z-51abb3af7e05-source.tar.gz)
+identify `51abb3af7e054f42487da42df28fc63e8e11dc68`, signed preview sequence 24.
+Extract and run `./kicad-codex`; use `./kicad-mcp` for the matching STDIO tools.
+Existing Linux installations offer it through the caption Update button.
+
+Compared with sequence 23 it adds, as preliminary features:
+
+- **XML connections become labelled wires.** When saved XML adds connections, apply
+  draws a short wire and a net label from each new pin, with hierarchical labels and
+  sheet pins where a net crosses sheets, in one KiCad edit that KiCad accepts only if the
+  pin connections are exactly the XML's nets; one undo removes the whole drawing. KiCad
+  started for a project advertises `schematic.connection-realization.v1`; the empty update
+  manager does not. `kicad_design_sync_plan` says beforehand which connections apply will
+  draw (`connectionRealizationRequired`, `connectionIntent`).
+- **Lost schematic files are rebuilt from XML.** After the `.kicad_sch` files of a project
+  are deleted, reattaching the recovery record and applying rebuilds every sheet, symbol,
+  label and sheet pin from the last synchronized XML, byte for byte, keeping the project
+  file. New empty sheets added in XML are created in KiCad.
+- **Crash recovery.** If KiCad is killed while applying or saving an XML change,
+  `kicad_design_recovery_release_exited` resumes or rolls back that operation in the KiCad
+  started again, and never takes its partial result for a user edit.
+- **Steadier synchronization.** After a reload, KiCad's own join of a symbol's stacked pins
+  no longer adds a net to the XML, and the first save of a project KiCad never saved no
+  longer leaves the apply unfinished.
+- **Diagram editor polish.** Design review fixes (clearer dark-theme selection, active tools
+  and ports), each drawn connection gets its own path, and Clear facet no longer overlaps
+  the strength choices.
+- **Presentation checks** can cover a whole loaded sheet hierarchy, and new connected parts
+  are placed next to the pins they join, with room for each connection.
+
+The diagram editor stays preliminary: its design audit still finds eight moderate differences
+from the approved sketches, for example a new connection's name not yet shown on the canvas.
+
+Not yet included: wires routed between pins (connections are drawn as labelled stubs),
+opening a diagram from the project manager, rebuilding designs with net chains or with one
+sheet file shown by several sheets, and full two-way ownership synchronization of parts
+added in KiCad. Mac and Windows builds stay on hold until the XML editing workflow is
+complete.
+
+Every gate ran on the exact commit before publication: the composed native acceptance,
+now 24 checks including the PSU/CPU creation, connection, rebuild, crash and diagram
+canvas journeys (`t20260925T110834Z-6b2cf9`: 23 passed; its BOM settings journey missed a
+5-second popup wait on a fully loaded host and passed on the same commit in a clean
+checkout, `t20260925T141858Z-7e9653`), the PSU/CPU fixture with the lost-files rebuild,
+the update manager, a cold checkout's Setup, the unit suites and the installed-package
+journey. Public run `t20260925T143552Z-6876f7` verified the downloads, the signed caption
+update from sequence 23 and the landing page; delivery receipts `t20260925T144525Z-069be7`.
+Existing Mac and Windows downloads stay available.
+
+### Earlier Linux preview — September 24, 2026
 
 [Linux application and MCP](https://kicad.vr.ae/artifacts/kicad-codex-preview-20260924T181444Z-3f023fc2aa35-debian13-x64.tar.gz)
 and [matching source](https://kicad.vr.ae/artifacts/kicad-codex-preview-20260924T181444Z-3f023fc2aa35-source.tar.gz)
@@ -71,14 +126,9 @@ Compared with sequence 22 it adds, as preliminary features:
   MCP server without contacting KiCad.
 - **Save and close failures** return precise codes (`file_not_writable`, `partial_save`,
   `native_save_refused`, `native_save_failed` and others) and keep unsaved work.
-- **XML connections become labelled wires.** When saved XML adds connections, apply
-  draws a short wire and a net label from each new pin, with hierarchical labels and
-  sheet pins where a net crosses sheets, in one KiCad edit that KiCad accepts only if the
-  pin connections are exactly the XML's nets; one undo removes the whole drawing. KiCad
-  started for a project advertises `schematic.connection-realization.v1`; the empty update
-  manager does not. Wires routed between pins are not built yet.
 
-Known limitations: the
+Groundwork for turning XML connections into wires is included but switched off: KiCad
+does not advertise `schematic.connection-realization.v1` yet. Known limitations: the
 diagram editor's dark-theme selection and other design-QA polish are still being fixed,
 Clear facet can overlap the strength choices in a narrow inspector, and opening a diagram
 from the project manager is not built yet.
@@ -791,9 +841,17 @@ through `kicad_design_sync_apply` with the returned `continuationOperationId` an
 `requestedRecoveryRevisionToken`, or through automatic synchronization. Until then the
 record cannot be attached to another KiCad session (`kicad_design_recovery_reattach`
 returns `released_operation_requires_continuation`). If the XML was already being
-published when KiCad ended, `resume` refuses (`released_publication_started`), and if the
-restarted KiCad holds other edits neither continuation can proceed yet. The PSU/CPU
-`native-crash` graph proves both continuations on killed KiCad processes.
+published when KiCad ended, `resume` refuses (`released_publication_started`) and says
+whether roll-back still works. Edits the user made after the restart are handled per sheet:
+the continuation changes only the operation's own sheets (`operationSheets`); notes, text,
+drawings, images, tables and page settings on other sheets (`sheetsWithOtherEdits`) are kept
+and published, while components, wires, labels and sheet changes there are refused with
+`released_operation_edits_not_carried`, and any edit on the operation's own sheets with
+`released_operation_sheets_edited`. Each refusal names the edits and the way out (undo them,
+or close without saving and reopen, then call again). A refusal after a release returns
+`releasedNow`, the receipt path and the new `recoveryRevisionToken`; sheet lists are `null`
+when no comparison was made. The PSU/CPU `native-crash` graph proves both continuations on
+killed KiCad processes, including a user edit on another sheet.
 
 Run `devcoordinator2 test start . --test native-xml-component-creation --tier
 development --client codex` for the two-editor Linux journey. It checks XML-driven
@@ -1623,6 +1681,18 @@ zoom-out in both instances: image/scale changes preserve supported design conten
 revision and unsaved state. Zoom follows native preset steps, not an exact inverse
 of an arbitrary starting fit scale. Mid-capture layer-change race injection and
 independent render contexts remain unqualified.
+
+`kicad_schematic_checked_view(instanceId, documentJson, viewDocumentJson?)` returns the
+displayed sheet's PNG and the whole-schematic checked state from one native request, captured
+with no editor event in between, so the image and the state always describe the same revision;
+a change during capture refuses it, and an inconsistent reply is refused as
+`invalid_checked_view`. Plan a batch from `structuredContent.checked` and send it with
+`kicad_schematic_apply_checked_batch`; a batch planned from a changed view is refused as
+`stale_document_state` and changes nothing. The Linux journey
+`AgentAndPersonEditingTogetherNeverGetStaleOrPartialEdits` (graph
+`native-observe-apply-stress`) runs this loop 50 times in each of two editors while real
+keyboard edits land at varying moments, including during the apply, and undoes every step at
+the end.
 Compiled MCP journeys
 compare native image bytes and data on root/repeated sheets and exercise target
 and open-commit rejection with recovery. Tracking and serializer coverage remain
@@ -3016,8 +3086,28 @@ The same run proved that an open native 3D viewer blocks checked PCB close,
 preserves both windows and files, and permits normal close/reopen after explicitly
 closing the viewer. This is close-safety evidence, not qualification of MCP 3D
 rendering. The receipt covers its frozen Linux candidate, not public packages,
-later source changes or Mac/Desktop execution. Cancellable DRC jobs and result
-freshness remain open in completion-ledger outcome `p9966151ec04cd9cf`.
+later source changes or Mac/Desktop execution. A complete input snapshot and result freshness for DRC jobs remain open in
+completion-ledger outcome `p23deb822a36256a6`.
+
+### PCB design-rule check jobs (development branch)
+
+`kicad_pcb_drc_start`, `kicad_pcb_drc_job` and `kicad_pcb_drc_cancel` run KiCad's own checker on a detached copy of an
+explicitly named board at the exact revision the agent observed. Linux run `t20260925T234453Z-24318d` proved them through the compiled MCP
+STDIO server against the rendered PCB editors of two KiCad instances at once. Both checks ran together, and the agent saw
+each one reach KiCad's copper clearance step and its copper sliver step. Each completed check reported exactly six real
+findings, all naming its own board's test copper and bound to the revision it was asked for: two copper clearance
+violations (two parallel tracks, and a track and a via), three dangling tracks and one dangling via. A check cancelled
+once the agent saw it in its copper sliver step ended cancelled, with no findings, only after its worker had stopped;
+the other project's check beside it completed with the same findings as before. A custom rules file with an item KiCad
+does not know ended the check failed with `design_rules_invalid`, naming the file and the item's exact line and offset.
+After the cancellation, and after the rules were corrected (the broken item removed, a rule that matches no net kept),
+new checks reported exactly the first findings. Cancels, reads and starts sent to the wrong instance, with the other
+process's epoch or for a stale revision were refused without changing either board. After every outcome the editor it
+happened in accepted an edit and saved it. In project B only, Ctrl+Z and Ctrl+Y in the rendered PCB editor then undid
+and redid the agent's last edit, and the result saved. A rules file that declares a newer rules version also fails with
+`design_rules_invalid`; the native unit tests prove that case, the journey does not. Ordinary checks never claim a
+complete input snapshot or fresh results (outcome `p23deb822a36256a6`). While a check runs, `phase` names KiCad's
+current check step; `progress` is the furthest fraction any single step has reached, not an overall percentage.
 
 ### Recursive structural diagrams (Linux source increment)
 

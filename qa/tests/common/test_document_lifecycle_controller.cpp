@@ -1,6 +1,7 @@
 /* Revision/file checked save dispatch and retry semantics. GPL-3.0-or-later. */
 #include <boost/test/unit_test.hpp>
 #include <api/document_lifecycle_controller.h>
+#include <api/common/commands/capability_commands.pb.h>
 #include <api/common/commands/project_commands.pb.h>
 #include <google/protobuf/empty.pb.h>
 #include <google/protobuf/util/message_differencer.h>
@@ -139,6 +140,121 @@ struct LIFECYCLE_FIXTURE
         LifecycleOperationResult result; BOOST_REQUIRE( response->message().UnpackTo( &result ) ); return result;
     }
 };
+
+// A fake editor behind the checked view (NativeCapabilityReadCheckedView): it answers the three
+// reads the controller dispatches for one request, records them in order, and can refuse any of
+// them, answer with a state, image or object list of another revision or sheet, or alter the reply
+// it returns (for example a non-OK status in a returned reply, or a message of another type).
+struct CHECKED_VIEW_FIXTURE
+{
+    std::string epoch = KIID().AsStdString();
+    kiapi::common::types::DocumentSpecifier root, sheet;
+    CheckedSchematicState checkedState;
+    SchematicObservation observation;
+    DocumentLifecycleState after;
+    std::vector<std::string> calls;
+    std::map<std::string, ApiResponseStatus> refusals;
+    std::map<std::string, std::function<void( ApiResponse& )>> alterations;
+    DOCUMENT_LIFECYCLE_CONTROLLER controller;
+
+    CHECKED_VIEW_FIXTURE()
+    {
+        root.set_type( kiapi::common::types::DOCTYPE_SCHEMATIC );
+        root.mutable_project()->set_name( "fixture" );
+        root.mutable_project()->set_path( std::filesystem::temp_directory_path().string() );
+        root.mutable_sheet_path()->add_path()->set_value( KIID().AsStdString() );
+        sheet = root;
+        sheet.mutable_sheet_path()->add_path()->set_value( KIID().AsStdString() );
+        auto* state = checkedState.mutable_state();
+        state->mutable_document()->CopyFrom( root );
+        state->set_process_epoch( epoch );
+        state->set_native_identity( KIID().AsStdString() );
+        state->mutable_revision()->set_epoch( KIID().AsStdString() );
+        state->mutable_revision()->set_sequence( 12 );
+        state->set_state_sha256( std::string( 64, 'c' ) );
+        state->set_scope( DLS_SCHEMATIC_HIERARCHY );
+        checkedState.mutable_electrical()->mutable_hierarchy()->mutable_revision()->CopyFrom( state->revision() );
+        checkedState.mutable_electrical()->mutable_hierarchy()->mutable_data()->mutable_document()->CopyFrom( root );
+        after = *state;
+        observation.mutable_snapshot()->mutable_revision()->CopyFrom( state->revision() );
+        observation.mutable_snapshot()->mutable_data()->mutable_metadata()->mutable_document()->CopyFrom( sheet );
+        observation.mutable_preview()->mutable_revision()->CopyFrom( state->revision() );
+        observation.mutable_preview()->mutable_document()->CopyFrom( sheet );
+        observation.mutable_preview()->set_width_pixels( 2 );
+        observation.mutable_preview()->set_height_pixels( 1 );
+        observation.mutable_preview()->set_png( std::string( "\x89PNG\r\n\x1a\n", 8 ) );
+    }
+
+    NativeCapabilityReadCheckedView Request() const
+    {
+        NativeCapabilityReadCheckedView request;
+        request.mutable_document()->CopyFrom( root );
+        request.set_process_epoch( epoch );
+        request.mutable_view()->CopyFrom( sheet );
+        return request;
+    }
+
+    API_RESULT Dispatch( ApiRequest& aRequest )
+    {
+        std::string type;
+        BOOST_REQUIRE( google::protobuf::Any::ParseAnyTypeUrl( aRequest.message().type_url(), &type ) );
+        calls.push_back( type );
+        // Every read carries the caller's header, so KiCad checks the same instance token.
+        BOOST_CHECK_EQUAL( aRequest.header().kicad_token(), "fixture-token" );
+        if( auto refusal = refusals.find( type ); refusal != refusals.end() )
+            return tl::unexpected( refusal->second );
+        ApiResponse reply;
+        reply.mutable_status()->set_status( ApiStatusCode::AS_OK );
+        if( aRequest.message().Is<ReadCheckedSchematicState>() )
+        {
+            ReadCheckedSchematicState query;
+            BOOST_REQUIRE( aRequest.message().UnpackTo( &query ) );
+            BOOST_CHECK( google::protobuf::util::MessageDifferencer::Equals( query.document(), root ) );
+            BOOST_CHECK_EQUAL( query.process_epoch(), epoch );
+            reply.mutable_message()->PackFrom( checkedState );
+        }
+        else if( aRequest.message().Is<CaptureSchematicObservation>() )
+        {
+            CaptureSchematicObservation capture;
+            BOOST_REQUIRE( aRequest.message().UnpackTo( &capture ) );
+            BOOST_CHECK( google::protobuf::util::MessageDifferencer::Equals( capture.document(), sheet ) );
+            BOOST_CHECK_EQUAL( capture.schema_version(), 9u );
+            reply.mutable_message()->PackFrom( observation );
+        }
+        else if( aRequest.message().Is<ReadDocumentLifecycleState>() )
+        {
+            ReadDocumentLifecycleState read;
+            BOOST_REQUIRE( aRequest.message().UnpackTo( &read ) );
+            BOOST_CHECK( google::protobuf::util::MessageDifferencer::Equals( read.document(), root ) );
+            reply.mutable_message()->PackFrom( after );
+        }
+        else throw std::runtime_error( "Unexpected checked view dispatch " + type );
+        if( auto alteration = alterations.find( type ); alteration != alterations.end() )
+            alteration->second( reply );
+        return reply;
+    }
+
+    API_RESULT Call( const google::protobuf::Message& aRequest )
+    {
+        ApiRequest envelope;
+        envelope.mutable_message()->PackFrom( aRequest );
+        return Call( envelope );
+    }
+
+    API_RESULT Call( ApiRequest& aEnvelope )
+    {
+        aEnvelope.mutable_header()->set_kicad_token( "fixture-token" );
+        return controller.Handle( aEnvelope, epoch, [this]( ApiRequest& value ) { return Dispatch( value ); } );
+    }
+};
+
+// The reads one checked view dispatches, in order.
+std::vector<std::string> CheckedViewReads()
+{
+    return { std::string( ReadCheckedSchematicState::descriptor()->full_name() ),
+             std::string( CaptureSchematicObservation::descriptor()->full_name() ),
+             std::string( ReadDocumentLifecycleState::descriptor()->full_name() ) };
+}
 
 using SAVE_PROBLEM = DOCUMENT_LIFECYCLE_CONTROLLER::SAVE_PROBLEM;
 
@@ -803,6 +919,182 @@ BOOST_AUTO_TEST_CASE( LockedProjectReasonNamesWhatHoldsTheLockNow )
             }
         }
     }
+}
+
+// The checked view is one request: the checked state, the displayed sheet's capture and a closing
+// state read, in that order, with the caller's header, and the reply pairs exactly what KiCad
+// returned.  The request type is advertised and claimed like the controller's other requests.
+BOOST_AUTO_TEST_CASE( CheckedViewPairsTheImageWithTheStateItWasCapturedAt )
+{
+    CHECKED_VIEW_FIXTURE fixture;
+    const auto& types = DOCUMENT_LIFECYCLE_CONTROLLER::RequestTypes();
+    BOOST_CHECK( std::binary_search( types.begin(), types.end(),
+                                     std::string( NativeCapabilityReadCheckedView::descriptor()->full_name() ) ) );
+    ApiRequest envelope;
+    envelope.mutable_message()->PackFrom( fixture.Request() );
+    BOOST_CHECK( DOCUMENT_LIFECYCLE_CONTROLLER::Handles( envelope ) );
+
+    for( bool viewRoot : { false, true } )
+    {
+        CHECKED_VIEW_FIXTURE current;
+        auto request = current.Request();
+        if( viewRoot )
+        {
+            current.sheet = current.root;
+            current.observation.mutable_preview()->mutable_document()->CopyFrom( current.root );
+            current.observation.mutable_snapshot()->mutable_data()->mutable_metadata()->mutable_document()->CopyFrom( current.root );
+            request.mutable_view()->CopyFrom( current.root );
+        }
+        auto reply = current.Call( request );
+        BOOST_REQUIRE( reply );
+        BOOST_CHECK( reply->status().status() == ApiStatusCode::AS_OK );
+        NativeCapabilityCheckedView view;
+        BOOST_REQUIRE( reply->message().UnpackTo( &view ) );
+        BOOST_CHECK( google::protobuf::util::MessageDifferencer::Equals( view.checked(), current.checkedState ) );
+        BOOST_CHECK( google::protobuf::util::MessageDifferencer::Equals( view.view(), current.observation ) );
+        BOOST_CHECK( current.calls == CheckedViewReads() );
+    }
+}
+
+// Anything that differs after the capture refuses the pair with AS_NOT_READY, so the caller
+// observes again instead of receiving an image of one revision with the state of another.
+BOOST_AUTO_TEST_CASE( CheckedViewRefusesAChangeDuringTheCapture )
+{
+    const std::vector<std::pair<std::string, std::function<void( CHECKED_VIEW_FIXTURE& )>>> changes = {
+        { "a later revision after rendering", []( CHECKED_VIEW_FIXTURE& f ) { f.after.mutable_revision()->set_sequence( 13 ); } },
+        { "other content after rendering", []( CHECKED_VIEW_FIXTURE& f ) { f.after.set_state_sha256( std::string( 64, 'd' ) ); } },
+        { "unsaved work after rendering", []( CHECKED_VIEW_FIXTURE& f ) { f.after.set_native_content_dirty( true ); } },
+        { "an image of another revision", []( CHECKED_VIEW_FIXTURE& f )
+          { f.observation.mutable_preview()->mutable_revision()->set_sequence( 11 ); } },
+        { "an image of another journal epoch", []( CHECKED_VIEW_FIXTURE& f )
+          { f.observation.mutable_preview()->mutable_revision()->set_epoch( KIID().AsStdString() ); } },
+        { "objects of another revision", []( CHECKED_VIEW_FIXTURE& f )
+          { f.observation.mutable_snapshot()->mutable_revision()->set_sequence( 13 ); } },
+        { "an image of another sheet", []( CHECKED_VIEW_FIXTURE& f )
+          { f.observation.mutable_preview()->mutable_document()->mutable_sheet_path()->mutable_path( 1 )->set_value( KIID().AsStdString() ); } },
+        { "objects of another sheet", []( CHECKED_VIEW_FIXTURE& f )
+          { f.observation.mutable_snapshot()->mutable_data()->mutable_metadata()->mutable_document()->CopyFrom( f.root ); } }
+    };
+    for( const auto& [name, change] : changes )
+    {
+        BOOST_TEST_CONTEXT( name )
+        {
+            CHECKED_VIEW_FIXTURE fixture;
+            change( fixture );
+            auto reply = fixture.Call( fixture.Request() );
+            BOOST_REQUIRE( !reply );
+            BOOST_CHECK( reply.error().status() == ApiStatusCode::AS_NOT_READY );
+            BOOST_CHECK( Contains( reply.error().error_message(), "observe again" ) );
+            BOOST_CHECK( fixture.calls == CheckedViewReads() );
+        }
+    }
+}
+
+// A read KiCad refuses (a busy editor, a pending edit, a sheet it does not display) ends the view
+// with that exact refusal and dispatches nothing after it.
+BOOST_AUTO_TEST_CASE( CheckedViewPassesARefusedReadThroughUnchanged )
+{
+    const std::vector<std::string> order = CheckedViewReads();
+    for( size_t refused = 0; refused < order.size(); ++refused )
+    {
+        for( ApiStatusCode code : { ApiStatusCode::AS_BUSY, ApiStatusCode::AS_NOT_READY, ApiStatusCode::AS_BAD_REQUEST } )
+        {
+            BOOST_TEST_CONTEXT( order[refused] << " refused with " << static_cast<int>( code ) )
+            {
+                CHECKED_VIEW_FIXTURE fixture;
+                ApiResponseStatus refusal;
+                refusal.set_status( code );
+                refusal.set_error_message( "Fixture refusal of " + order[refused] );
+                fixture.refusals[order[refused]] = refusal;
+                auto reply = fixture.Call( fixture.Request() );
+                BOOST_REQUIRE( !reply );
+                BOOST_CHECK( google::protobuf::util::MessageDifferencer::Equals( reply.error(), refusal ) );
+                BOOST_CHECK( fixture.calls == std::vector<std::string>( order.begin(), order.begin() + refused + 1 ) );
+            }
+        }
+    }
+}
+
+// A read that returns a reply instead of refusing, but whose reply carries a non-OK status or is not
+// that read's result, is not a refusal KiCad made: the view ends as a bad request, and nothing is
+// dispatched after that read.
+BOOST_AUTO_TEST_CASE( CheckedViewRefusesAReadThatAnswersWithoutItsResult )
+{
+    const std::vector<std::string> order = CheckedViewReads();
+    const std::vector<std::pair<std::string, std::function<void( ApiResponse& )>>> answers = {
+        { "a returned reply with a non-OK status", []( ApiResponse& r )
+          {
+              r.mutable_status()->set_status( ApiStatusCode::AS_BUSY );
+              r.mutable_status()->set_error_message( "Fixture busy in a returned reply" );
+          } },
+        { "a returned reply of another message type", []( ApiResponse& r )
+          { r.mutable_message()->PackFrom( google::protobuf::Empty() ); } }
+    };
+    for( size_t failed = 0; failed < order.size(); ++failed )
+    {
+        for( const auto& [name, answer] : answers )
+        {
+            BOOST_TEST_CONTEXT( order[failed] << " answered with " << name )
+            {
+                CHECKED_VIEW_FIXTURE fixture;
+                fixture.alterations[order[failed]] = answer;
+                auto reply = fixture.Call( fixture.Request() );
+                BOOST_REQUIRE( !reply );
+                BOOST_CHECK( reply.error().status() == ApiStatusCode::AS_BAD_REQUEST );
+                BOOST_CHECK( !Contains( reply.error().error_message(), "Fixture busy" ) );
+                BOOST_CHECK( fixture.calls == std::vector<std::string>( order.begin(), order.begin() + failed + 1 ) );
+            }
+        }
+    }
+}
+
+// A view that is not of a sheet of the named schematic root in the same project, of another process,
+// or that cannot be decoded is refused as a bad request before KiCad reads anything.
+BOOST_AUTO_TEST_CASE( CheckedViewRefusesAnotherRootProjectOrAnUndecodableRequest )
+{
+    const std::vector<std::pair<std::string, std::function<void( NativeCapabilityReadCheckedView& )>>> changes = {
+        { "a sheet of another root", []( NativeCapabilityReadCheckedView& r )
+          { r.mutable_view()->mutable_sheet_path()->mutable_path( 0 )->set_value( KIID().AsStdString() ); } },
+        { "a sheet of another project", []( NativeCapabilityReadCheckedView& r )
+          { r.mutable_view()->mutable_project()->set_name( "other" ); } },
+        { "a sheet in another project directory", []( NativeCapabilityReadCheckedView& r )
+          { r.mutable_view()->mutable_project()->set_path( "/other" ); } },
+        { "no sheet to view", []( NativeCapabilityReadCheckedView& r ) { r.clear_view(); } },
+        { "a board to view", []( NativeCapabilityReadCheckedView& r )
+          { r.mutable_view()->set_type( kiapi::common::types::DOCTYPE_PCB ); } },
+        { "a sheet below the root named as the root", []( NativeCapabilityReadCheckedView& r )
+          { r.mutable_document()->CopyFrom( r.view() ); } },
+        { "a root that is no UUID", []( NativeCapabilityReadCheckedView& r )
+          {
+              r.mutable_document()->mutable_sheet_path()->mutable_path( 0 )->set_value( "root" );
+              r.mutable_view()->mutable_sheet_path()->mutable_path( 0 )->set_value( "root" );
+          } },
+        { "another process", []( NativeCapabilityReadCheckedView& r ) { r.set_process_epoch( KIID().AsStdString() ); } }
+    };
+    for( const auto& [name, change] : changes )
+    {
+        BOOST_TEST_CONTEXT( name )
+        {
+            CHECKED_VIEW_FIXTURE fixture;
+            auto request = fixture.Request();
+            change( request );
+            auto reply = fixture.Call( request );
+            BOOST_REQUIRE( !reply );
+            BOOST_CHECK( reply.error().status() == ApiStatusCode::AS_BAD_REQUEST );
+            BOOST_CHECK( fixture.calls.empty() );
+        }
+    }
+
+    CHECKED_VIEW_FIXTURE fixture;
+    ApiRequest undecodable;
+    undecodable.mutable_message()->PackFrom( fixture.Request() );
+    // Field 1 claims five bytes of which only two follow.
+    undecodable.mutable_message()->set_value( std::string( "\x0a\x05" "ab", 4 ) );
+    BOOST_REQUIRE( DOCUMENT_LIFECYCLE_CONTROLLER::Handles( undecodable ) );
+    auto reply = fixture.Call( undecodable );
+    BOOST_REQUIRE( !reply );
+    BOOST_CHECK( reply.error().status() == ApiStatusCode::AS_BAD_REQUEST );
+    BOOST_CHECK( fixture.calls.empty() );
 }
 
 BOOST_AUTO_TEST_SUITE_END()

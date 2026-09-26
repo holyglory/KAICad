@@ -265,10 +265,14 @@ private:
     LABEL_ROOM labelRoom( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
     /// Where the placed ports of aBlock name themselves inside its edge, in canvas pixels (sets aDC's font to the chip font).
     std::vector<wxRect> portNames( wxDC& aDC, const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout, const std::string& aBlock ) const;
-    /// Each boundary port's name and where it is drawn beside the level frame, in canvas pixels.
-    std::vector<std::pair<std::string, wxRect>> boundaryNames( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
+    /// Each boundary port (its owning block and interface), its name and where the name is drawn beside the level frame, in
+    /// canvas pixels.
+    struct BOUNDARY_NAME { std::string owner, id, name; wxRect rect; };
+    std::vector<BOUNDARY_NAME> boundaryNames( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
     /// Each child block of aLayout as drawn, in canvas pixels.
     std::vector<wxRect> blockBoxes( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
+    /// Every port square of aLayout as drawn, in canvas pixels (see portMarks).
+    std::vector<wxRect> portSquares( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
     /// A port's square as drawn at aAt: 12 DIP at every zoom (design QA P2-6).
     wxRect portMark( const wxPoint& aAt ) const;
     /// Every port square as drawn on the canvas (an unplaced child port once per place a connection attaches to it).

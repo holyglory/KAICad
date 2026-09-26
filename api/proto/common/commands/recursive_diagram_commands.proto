@@ -23,9 +23,12 @@ message FieldHistoryViewState {
   string inspected_revision_id = 7;
   bool loading = 8;
   string error_message = 9;
-  // Lane 2B: every loaded row of the history list, in list order, exactly as the list shows it (the revision label,
-  // with the implementation's name for a row saved in an earlier implementation, the saved marker and the author).
+  // Lane 2B: every loaded row of the history list, in list order, as its whole text (the revision label, with the
+  // implementation's name for a row saved in an earlier implementation, the saved marker and the author).
   repeated string row_labels = 200;
+  // Lane 2B: the same rows exactly as the list shows them at its current width: whole, or with only the earlier
+  // implementation's name shortened with "…" so the version and author stay whole (mockup audit M1-3).
+  repeated string shown_row_labels = 201;
 }
 message DiagramHistoryViewState {
   BlockSelectionData context = 1;
@@ -313,7 +316,8 @@ message DiagramControlRect {
   // What assistive technology reads from a button, a one-click choice or a facet row, as the toolkit exposes it (GTK's
   // ATK object); absent for other controls and where the toolkit exposes none.
   DiagramAccessible accessible = 10;
-  // The diagram object the control is drawn for: the connection id of a connection caption; empty otherwise.
+  // The diagram object the control is drawn for: the connection id of a connection caption; the owning block's id and the
+  // port's interface id, joined by "/", of a port's square and of a boundary port's name; empty otherwise.
   string object_id = 11;
   // The text the control shows on hover: a control's tooltip, the full caption of a connection caption drawn shortened, or
   // the choices behind a "+N more" chip, one per line; empty when it shows none. (Lane 2B band, 200-299.)

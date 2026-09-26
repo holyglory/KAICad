@@ -2311,18 +2311,21 @@ std::vector<DRAWN_PORT> drawnPorts( const R::LEVEL_LAYOUT& drawn, const std::fun
     return result;
 }
 /// Where a boundary port drawn at aAt names itself, in canvas pixels, with aDC's font: outside the level frame beside the
-/// port's side, or above and right of a boundary port that has no stored placement yet. aBlocks are the child blocks as
-/// drawn: where the name above and right of an unplaced port would reach one of them (or the ports on its edge), as the
-/// fallback column's names do in a small window, it goes above and left of the port instead, outside the level, as the name
-/// of a port placed on the level's left side does (mockup audit M1-2).
-wxRect boundaryName( wxDC& dc, const R::PORT& port, const wxPoint& at, const std::vector<wxRect>& blocks )
+/// port's side, or above and right of a boundary port that has no stored placement yet. aBlocks are the child blocks and
+/// aSquares every port's square as drawn: where the name above and right of an unplaced port would come within 8 pixels of
+/// a block or of any port's square but its own, as the fallback column's names do in a small window or beside a block's
+/// edge port, it goes above and left of the port instead, outside the level, as the name of a port placed on the level's
+/// left side does (mockup audit M1-2; a name 3 pixels from a block's port read as that port's name).
+wxRect boundaryName( wxDC& dc, const R::PORT& port, const wxPoint& at, const std::vector<wxRect>& blocks, const std::vector<wxRect>& squares )
 {
     wxSize extent = dc.GetTextExtent( Text( port.name ) );
     // Clear of the port's 12-pixel square (design QA P2-6).
     if( !port.placed )
     {
         wxRect right( wxPoint( at.x + 12, at.y - 26 ), extent );
-        if( std::none_of( blocks.begin(), blocks.end(), [&]( const wxRect& block ) { return wxRect( block ).Inflate( 8 ).Intersects( right ); } ) )
+        auto crowds = [&]( const wxRect& item ) { return wxRect( item ).Inflate( 8 ).Intersects( right ); };
+        if( std::none_of( blocks.begin(), blocks.end(), crowds )
+            && std::none_of( squares.begin(), squares.end(), [&]( const wxRect& square ) { return !square.Contains( at ) && crowds( square ); } ) )
             return right;
         return wxRect( wxPoint( at.x - extent.x - 10, at.y - extent.y - 6 ), extent );
     }
@@ -2342,13 +2345,21 @@ std::vector<wxRect> RECURSIVE_DIAGRAM_FRAME::blockBoxes( const R::LEVEL_LAYOUT& 
     for( const auto& node : drawn.Nodes() ) boxes.push_back( toScreen( drawn.Rect( node.id ) ) );
     return boxes;
 }
-std::vector<std::pair<std::string, wxRect>> RECURSIVE_DIAGRAM_FRAME::boundaryNames( const R::LEVEL_LAYOUT& drawn ) const
+std::vector<wxRect> RECURSIVE_DIAGRAM_FRAME::portSquares( const R::LEVEL_LAYOUT& drawn ) const
 {
-    std::vector<std::pair<std::string, wxRect>> result;
+    std::vector<wxRect> squares;
+    for( const auto& mark : portMarks( drawn ) ) squares.push_back( mark.rect );
+    return squares;
+}
+std::vector<RECURSIVE_DIAGRAM_FRAME::BOUNDARY_NAME> RECURSIVE_DIAGRAM_FRAME::boundaryNames( const R::LEVEL_LAYOUT& drawn ) const
+{
+    std::vector<BOUNDARY_NAME> result;
     wxClientDC dc( m_canvas ); dc.SetFont( GetFont() );
     const auto blocks = blockBoxes( drawn );
+    const auto squares = portSquares( drawn );
     for( const auto& port : drawn.Ports() )
-        if( port.boundary ) result.emplace_back( port.name, boundaryName( dc, port, toScreen( port.anchor ), blocks ) );
+        if( port.boundary )
+            result.push_back( { port.blockId, port.interfaceId, port.name, boundaryName( dc, port, toScreen( port.anchor ), blocks, squares ) } );
     return result;
 }
 std::vector<wxRect> RECURSIVE_DIAGRAM_FRAME::portNames( wxDC& dc, const R::LEVEL_LAYOUT& drawn, const std::string& block ) const
@@ -2516,7 +2527,7 @@ std::vector<RECURSIVE_DIAGRAM_FRAME::CAPTION_PLACE> RECURSIVE_DIAGRAM_FRAME::con
     for( const auto& node : drawn.Nodes() ) obstacles.push_back( toScreen( drawn.Rect( node.id ) ).Inflate( clearance ) );
     auto screen = [this]( const R::POINT& p ) { return toScreen( p ); };
     for( const auto& port : drawnPorts( drawn, screen ) ) obstacles.push_back( portMark( port.at ).Inflate( FromDIP( 2 ) ) );
-    for( const auto& [name, rect] : boundaryNames( drawn ) ) obstacles.push_back( wxRect( rect ).Inflate( FromDIP( 2 ) ) );
+    for( const auto& name : boundaryNames( drawn ) ) obstacles.push_back( wxRect( name.rect ).Inflate( FromDIP( 2 ) ) );
     const auto& notes = visibleNotes();
     for( int i = 0; i < notes.size(); ++i )
         if( notes.Get( i ).target_kind() == D::DAT_CANVAS || notes.Get( i ).has_position() ) obstacles.push_back( noteRect( notes.Get( i ), i ) );
@@ -2718,7 +2729,7 @@ std::vector<wxPoint> RECURSIVE_DIAGRAM_FRAME::connectPreview( const R::LEVEL_LAY
         wxClientDC dc( m_canvas );
         for( const auto& node : drawn.Nodes() ) for( const wxRect& name : portNames( dc, drawn, node.id ) ) names.push_back( name );
     }
-    for( const auto& [name, rect] : boundaryNames( drawn ) ) names.push_back( rect );
+    for( const auto& name : boundaryNames( drawn ) ) names.push_back( name.rect );
     auto crosses = [&]( const std::vector<wxPoint>& points )
     {
         for( size_t i = 1; i < points.size(); ++i )
@@ -2808,7 +2819,7 @@ std::optional<wxRect> RECURSIVE_DIAGRAM_FRAME::connectHint( const R::LEVEL_LAYOU
     if( m_paletteShown && m_palette->IsShown() ) avoid.push_back( m_palette->GetRect() );
     for( const auto& node : drawn.Nodes() ) avoid.push_back( toScreen( drawn.Rect( node.id ) ).Inflate( FromDIP( 4 ) ) );
     for( const auto& node : drawn.Nodes() ) for( const wxRect& name : portNames( dc, drawn, node.id ) ) avoid.push_back( name );
-    for( const auto& [name, rect] : boundaryNames( drawn ) ) avoid.push_back( rect );
+    for( const auto& name : boundaryNames( drawn ) ) avoid.push_back( name.rect );
     for( size_t i = 1; i < preview.size(); ++i )
         avoid.emplace_back( wxPoint( std::min( preview[i - 1].x, preview[i].x ) - 2, std::min( preview[i - 1].y, preview[i].y ) - 2 ),
                             wxPoint( std::max( preview[i - 1].x, preview[i].x ) + 2, std::max( preview[i - 1].y, preview[i].y ) + 2 ) );
@@ -2829,14 +2840,16 @@ RECURSIVE_DIAGRAM_FRAME::LABEL_ROOM RECURSIVE_DIAGRAM_FRAME::labelRoom( const R:
 {
     // A port on the level frame names itself outside the frame at a fixed text size (see paint), so fitting
     // leaves that many pixels beside the drawing on the port's side. So does a port of the fallback column whose name
-    // goes left of it at the current scale, because the first column's blocks leave it no room on the right (M1-2).
+    // goes left of it at the current scale, because the first column's blocks or their ports leave it no room on the right
+    // (M1-2).
     LABEL_ROOM room;
     wxClientDC dc( m_canvas ); dc.SetFont( GetFont() );
     const auto blocks = blockBoxes( drawn );
+    const auto squares = portSquares( drawn );
     for( const auto& port : drawn.Ports() ) if( port.boundary && !port.placed )
     {
         wxPoint at = toScreen( port.anchor );
-        wxRect name = boundaryName( dc, port, at, blocks );
+        wxRect name = boundaryName( dc, port, at, blocks, squares );
         if( name.x < at.x ) room.left = std::max( room.left, name.width + 14 );
     }
     for( const auto& port : drawn.Ports() ) if( port.boundary && port.placed )
@@ -3143,6 +3156,7 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
     }
     std::optional<TARGET> target = connectTarget( drawn );
     const auto blocks = blockBoxes( drawn );
+    const auto squares = portSquares( drawn );
     for( const auto& port : drawnPorts( drawn, screen ) )
     {
         // Ports are 12 DIP squares at every zoom (design QA P2-6).
@@ -3155,7 +3169,7 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
         {
             // A port on the level frame names itself outside the frame, beside its side.
             if( const R::PORT* stored = drawn.Port( port.owner, port.id ) )
-                dc.DrawText( Text( port.name ), boundaryName( dc, *stored, port.at, blocks ).GetTopLeft() );
+                dc.DrawText( Text( port.name ), boundaryName( dc, *stored, port.at, blocks, squares ).GetTopLeft() );
         }
         else if( port.placed || selected )
         {

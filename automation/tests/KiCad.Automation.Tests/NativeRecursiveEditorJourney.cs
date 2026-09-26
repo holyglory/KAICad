@@ -115,8 +115,13 @@ public sealed partial class NativeSessionTests
         static (string X, string Y, string W, string H) Rect(P.RecursiveDiagramEditorState at, string block) =>
             View(at)?.Blocks.SingleOrDefault(b => b.BlockId == block)?.Rect is { } r ? (r.X, r.Y, r.Width, r.Height) : ("", "", "", "");
         Task Capture(string name) => CaptureRecursive(display, Path.Combine(evidence, instanceId + "-canvas-" + name + ".png"), token);
-        Task Retain(string name, P.RecursiveDiagramEditorState at) =>
-            File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-canvas-" + name + "-state.json"), SchematicJson.Formatter.Format(at), token);
+        async Task Retain(string name, P.RecursiveDiagramEditorState at)
+        {
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-canvas-" + name + "-state.json"), SchematicJson.Formatter.Format(at), token);
+            // Mockup audit M1-2 in every retained canvas state, edited and reopened ones too: each boundary port's name is clear of
+            // the blocks and of every other port (review of e62ac6dce7: "Telemetry" sat 3 pixels from the Processor's Power port).
+            VerifyBoundaryNamesClear(at, name);
+        }
         async Task Closed()
         {
             using var closing = CancellationTokenSource.CreateLinkedTokenSource(token); closing.CancelAfter(TimeSpan.FromSeconds(15));
@@ -2372,6 +2377,8 @@ public sealed partial class NativeSessionTests
             var earlierPsuImplementation = Contexts(selectionBase)(earlierGeneral.ContextRevisionId);
             Assert.AreNotEqual(psuProposal.Candidate.StateId, earlierPsuImplementation.State);
             StringAssert.StartsWith(psuHistoryDialog.FieldHistory.RowLabels[1], earlierPsuImplementation.Name + " · v");
+            VerifyShownHistoryRows(psuHistoryDialog.FieldHistory,
+                ["", .. psuGeneral.Select(e => HistoryRowName(Contexts(selectionBase), e, psuProposal.Candidate.StateId))], "continued-field-history");
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-continued-field-history.png"), token);
             NativeKeyboard.SchematicShortcut(display, processId, "click", "Requirement history", false, true, clickFromRight: 70, clickFromBottom: 30);
             await Wait(s => s.Dirty && s.Draft.Fields.General == earlierGeneral.Text
@@ -2442,6 +2449,9 @@ public sealed partial class NativeSessionTests
             var earlierSupplyImplementation = Contexts(replacedSupply)(earlierSupply.ContextRevisionId);
             Assert.AreNotEqual(refinedSupply.Selection.StateId, earlierSupplyImplementation.State);
             StringAssert.StartsWith(supplyHistoryDialog.FieldHistory.RowLabels[1], earlierSupplyImplementation.Name + " · v");
+            VerifyShownHistoryRows(supplyHistoryDialog.FieldHistory,
+                ["", .. supplyGeneral.Select(e => HistoryRowName(Contexts(replacedSupply), e, refinedSupply.Selection.StateId))],
+                "continued-connection-field-history");
             await CaptureRecursive(display, Path.Combine(evidence, instanceId + "-continued-connection-field-history.png"), token);
             NativeKeyboard.SchematicShortcut(display, processId, "click", "Requirement history", false, true, clickFromRight: 70, clickFromBottom: 30);
             await Wait(s => s.Dirty && s.ConnectionDraft?.Fields.General == earlierSupply.Text
@@ -5433,9 +5443,29 @@ public sealed partial class NativeSessionTests
     /// implementation selector's "name · version" form, then its author.</summary>
     private static string HistoryRowLabel(Func<Guid, (Guid State, string Name)> implementationOf, DiagramFieldHistoryEntry entry, Guid viewedState)
     {
-        var (state, implementation) = implementationOf(entry.ContextRevisionId);
-        return (state == viewedState ? "" : implementation + " · ") + "v" + entry.ContextVersion.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        string name = HistoryRowName(implementationOf, entry, viewedState);
+        return (name.Length == 0 ? "" : name + " · ") + "v" + entry.ContextVersion.ToString(System.Globalization.CultureInfo.InvariantCulture)
             + " · " + entry.Origin.Actor;
+    }
+
+    /// <summary>The name a field-history row leads with: the implementation the entry was saved in when that is not the
+    /// viewed one; empty otherwise.</summary>
+    private static string HistoryRowName(Func<Guid, (Guid State, string Name)> implementationOf, DiagramFieldHistoryEntry entry, Guid viewedState)
+    {
+        var (state, implementation) = implementationOf(entry.ContextRevisionId);
+        return state == viewedState ? "" : implementation;
+    }
+
+    /// <summary>Mockup audit M1-3 in the editor's own history dialog: the list shows every row with its version and author
+    /// whole, as the approved rows read "v2 · User"; a row too wide for the list shortens only the leading name of the earlier
+    /// implementation it was saved in (<paramref name="names"/>, one per row).</summary>
+    private static void VerifyShownHistoryRows(P.FieldHistoryViewState history, IReadOnlyList<string> names, string step)
+    {
+        Assert.HasCount(history.RowLabels.Count, history.ShownRowLabels, step + ": the list shows every loaded row.");
+        Assert.HasCount(history.RowLabels.Count, names, step + ": one name per row.");
+        for (int row = 0; row < history.RowLabels.Count; ++row)
+            Assert.IsTrue(NativeFieldHistoryTests.IsShownHistoryRow(history.RowLabels[row], names[row], history.ShownRowLabels[row]),
+                $"{step}: row {row} reads '{history.ShownRowLabels[row]}': '{history.RowLabels[row]}' whole, or with only '{names[row]}' shortened.");
     }
 
     /// <summary>The implementation (its identity and name) a block revision was saved in.</summary>
@@ -6403,7 +6433,9 @@ public sealed partial class NativeSessionTests
         a.X + a.Width <= b.X || b.X + b.Width <= a.X || a.Y + a.Height <= b.Y || b.Y + b.Height <= a.Y;
 
     /// <summary>Mockup audit M1-2: every name of a port on the level's boundary is drawn inside the canvas, clear of every block
-    /// (with the ports on its edges, 4 pixels around it) and of every port's square, at the size the window gives the level.</summary>
+    /// (4 pixels around it), 8 pixels or more from the square of every port but its own, and off its own square, at the size the
+    /// window gives the level. (A name 3 pixels beside the Processor's Power port read as that port's name; review of
+    /// e62ac6dce7.)</summary>
     private static void VerifyBoundaryNamesClear(P.RecursiveDiagramEditorState at, string step)
     {
         Assert.AreEqual(at.LevelDraft.Scope.LocalDiagram.Interfaces.Count, at.BoundaryPortNames.Count, step + ": every boundary port's name is drawn.");
@@ -6415,10 +6447,21 @@ public sealed partial class NativeSessionTests
                 var b = text.Block;
                 var around = new P.DiagramControlRect { X = b.X - 4, Y = b.Y - 4, Width = b.Width + 8, Height = b.Height + 8 };
                 Assert.IsTrue(RectsApart(name, around), $"{step}: the boundary port name '{name.Label}' ({name.X}, {name.Y}, {name.Width} x {name.Height}) "
-                    + $"is drawn clear of the block at ({b.X}, {b.Y}, {b.Width} x {b.Height}) and the ports on its edges.");
+                    + $"is drawn clear of the block at ({b.X}, {b.Y}, {b.Width} x {b.Height}).");
             }
+            Assert.IsFalse(string.IsNullOrEmpty(name.ObjectId), $"{step}: the boundary port name '{name.Label}' names its port.");
+            Assert.IsTrue(at.PortMarks.Any(m => m.ObjectId == name.ObjectId), $"{step}: the boundary port '{name.Label}' draws its square.");
             foreach (var mark in at.PortMarks)
-                Assert.IsTrue(RectsApart(name, mark), $"{step}: the boundary port name '{name.Label}' covers no port's square ('{mark.Label}' at ({mark.X}, {mark.Y})).");
+            {
+                if (mark.ObjectId == name.ObjectId)
+                {
+                    Assert.IsTrue(RectsApart(name, mark), $"{step}: the boundary port name '{name.Label}' leaves its own square uncovered.");
+                    continue;
+                }
+                var clear = new P.DiagramControlRect { X = mark.X - 8, Y = mark.Y - 8, Width = mark.Width + 16, Height = mark.Height + 16 };
+                Assert.IsTrue(RectsApart(name, clear), $"{step}: the boundary port name '{name.Label}' ({name.X}, {name.Y}, {name.Width} x {name.Height}) "
+                    + $"is 8 pixels or more from the square of port '{mark.Label}' at ({mark.X}, {mark.Y}), so it cannot read as that port's name.");
+            }
         }
     }
 

@@ -201,6 +201,47 @@ bool rowsEllipsize( wxListBox* aList )
         && gtk_tree_view_column_get_fixed_width( column ) <= aList->GetClientSize().x;
 }
 
+/// Whether GTK draws every row of the list whole, without its own "…" (mockup audit M1-3), read back from GTK: each row is
+/// displayed, and its text as the list shows it, laid out in the font the list's text renderer draws with, fits the row's
+/// cell (the part of it inside the list) less the renderer's padding and focus line on both sides.
+bool rowsFit( wxListBox* aList )
+{
+    GtkWidget* view = gtk_bin_get_child( GTK_BIN( aList->GetHandle() ) );
+    if( !GTK_IS_TREE_VIEW( view ) || aList->GetCount() == 0 ) return false;
+    GtkTreeViewColumn* column = gtk_tree_view_get_column( GTK_TREE_VIEW( view ), 0 );
+    if( !column ) return false;
+    GtkCellRenderer* renderer = nullptr;
+    GList* cells = gtk_cell_layout_get_cells( GTK_CELL_LAYOUT( column ) );
+    for( GList* item = cells; item; item = item->next )
+        if( GTK_IS_CELL_RENDERER_TEXT( item->data ) ) renderer = GTK_CELL_RENDERER( item->data );
+    g_list_free( cells );
+    if( !renderer ) return false;
+    gint xpad = 0, ypad = 0, focus = 0;
+    gtk_cell_renderer_get_padding( renderer, &xpad, &ypad );
+    gtk_widget_style_get( view, "focus-line-width", &focus, nullptr );
+    gboolean fontSet = FALSE; PangoFontDescription* font = nullptr;
+    g_object_get( renderer, "font-set", &fontSet, nullptr );
+    if( fontSet ) g_object_get( renderer, "font-desc", &font, nullptr );
+    const int visible = gtk_widget_get_allocated_width( view );
+    bool fits = true;
+    for( unsigned row = 0; row < aList->GetCount() && fits; ++row )
+    {
+        GtkTreePath* path = gtk_tree_path_new_from_indices( static_cast<gint>( row ), -1 );
+        GdkRectangle cell{}; gtk_tree_view_get_cell_area( GTK_TREE_VIEW( view ), path, column, &cell );
+        gtk_tree_path_free( path );
+        PangoLayout* layout = gtk_widget_create_pango_layout( view, aList->GetString( row ).utf8_string().c_str() );
+        if( font ) pango_layout_set_font_description( layout, font );
+        int width = 0, height = 0; pango_layout_get_pixel_size( layout, &width, &height );
+        g_object_unref( layout );
+        const int room = std::min( cell.x + cell.width, visible ) - cell.x - 2 * xpad - 2 * focus;
+        fits = cell.height > 0 && width <= room;
+        if( !fits )
+            BOOST_TEST_MESSAGE( "Row '" << aList->GetString( row ).utf8_string() << "' is " << width << " pixels wide; its cell leaves " << room );
+    }
+    if( font ) pango_font_description_free( font );
+    return fits;
+}
+
 /// The pixels of aBox drawn in aFill (within a colour distance of 12), and the contrast of the text drawn on them with the
 /// fill: the marks of the words that differ (mockup audit M1-6).
 std::pair<int, double> marked( const SHOT& aShot, wxWindow* aWindow, wxTextCtrl* aBox, const wxColour& aFill )
@@ -417,13 +458,19 @@ BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
     auto* restore = control<wxButton>( dialog, "DiagramFieldHistoryRestore" );
     auto* close = control<wxButton>( dialog, "DiagramFieldHistoryClose" );
     dialog->ConfigurePaging( rows.size(), []( size_t ) { BOOST_FAIL( "A complete short history needs no further request." ); } );
-    nlohmann::json renderedRows = nlohmann::json::array(); std::string selectedHeading, restoreLabel;
-    double restoreFill = 0, restoreInk = 0; int selectedInset = -1, savedInset = -1; bool ellipsized = false;
+    nlohmann::json rowLabels = nlohmann::json::array(), shownRows = nlohmann::json::array(), compactShownRows = nlohmann::json::array();
+    std::string selectedHeading, restoreLabel;
+    double restoreFill = 0, restoreInk = 0; int selectedInset = -1, savedInset = -1; bool ellipsized = false, fit = false, compactFit = false;
+    auto collectShown = [&]( nlohmann::json& aRows )
+    {
+        for( const wxString& row : dialog->ShownRowLabels() ) aRows.push_back( row.utf8_string() );
+        BOOST_CHECK_EQUAL( dialog->ShownRowLabels().size(), list->GetCount() );
+    };
     int cancelled = show( dialog, [&]
     {
         BOOST_CHECK( !control<wxStaticText>( dialog, "DiagramFieldHistoryPageStatus" )->IsShown() );
         BOOST_CHECK( !control<wxButton>( dialog, "DiagramFieldHistoryOlder" )->IsShown() );
-        for( unsigned row = 0; row < list->GetCount(); ++row ) renderedRows.push_back( list->GetString( row ).utf8_string() );
+        for( const wxString& row : dialog->RowLabels() ) rowLabels.push_back( row.utf8_string() );
         capture( dialog, evidence, "01-current.png" );
         list->SetFocus(); key( WXK_DOWN );
         waitFor( [&] { return list->GetSelection() == 1 && selected->GetValue() == text( page.entries( 1 ).text() ); } );
@@ -436,6 +483,9 @@ BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
         std::tie( restoreFill, restoreInk ) = primaryContrast( shot, dialog, restore );
         selectedInset = textInset( shot, dialog, selected ); savedInset = textInset( shot, dialog, saved );
         ellipsized = dialog->RowsEllipsize() && rowsEllipsize( list );
+        // Mockup audit M1-3: every row as drawn, and whether GTK draws each whole (its version and author never cut).
+        collectShown( shownRows ); fit = rowsFit( list );
+        BOOST_CHECK_MESSAGE( fit, "Every history row fits the list as drawn." );
         key( WXK_ESCAPE );
     } );
     BOOST_CHECK_EQUAL( cancelled, wxID_CANCEL );
@@ -466,6 +516,8 @@ BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
             && heading->GetTextExtent( shown ).x <= heading->GetClientSize().x;
         BOOST_CHECK_MESSAGE( compactAuthorShown, "The compact heading '" << compactHeading << "' shows its version and author whole." );
         capture( dialog, evidence, "03-compact.png" );
+        collectShown( compactShownRows ); compactFit = rowsFit( list );
+        BOOST_CHECK_MESSAGE( compactFit, "Every history row fits the list as drawn in the compact dialog." );
         dialog->SetClientSize( dialog->FromDIP( wxSize( 740, 520 ) ) ); dialog->Layout();
         click( restore );
     } ), wxID_OK );
@@ -513,7 +565,8 @@ BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
         { "cancelled_without_restore", cancelledWithoutRestore }, { "reopen_cleared_restore", reopenCleared },
         { "scope_isolation", scopeIsolation }, { "compact_controls_visible", compactFits },
         { "compact_author_visible", compactAuthorShown }, { "compact_heading", compactHeading },
-        { "row_labels", renderedRows }, { "selected_heading", selectedHeading }, { "restore_label", restoreLabel },
+        { "row_labels", rowLabels }, { "shown_rows", shownRows }, { "rows_fit", fit }, { "compact_shown_rows", compactShownRows },
+        { "compact_rows_fit", compactFit }, { "selected_heading", selectedHeading }, { "restore_label", restoreLabel },
         { "ampersand_restore_label", ampersandLabel }, { "restore_fill_on_dialog", restoreFill }, { "restore_label_on_fill", restoreInk },
         { "selected_text_inset", selectedInset }, { "saved_text_inset", savedInset }, { "rows_ellipsize", ellipsized } } ).dump( 2 );
     BOOST_REQUIRE( receipt.good() );

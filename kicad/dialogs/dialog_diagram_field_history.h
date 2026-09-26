@@ -139,9 +139,10 @@ inline void PadTextBox( wxTextCtrl* aControl, int aHorizontal, int aVertical )
 #endif
 }
 /// Makes a list's rows that are wider than the list end in "…" instead of being cut off mid-word (mockup audit M1-3). The
-/// rows keep their whole text, so what assistive technology reads is unchanged. On GTK the list is a GtkTreeView whose one
-/// text column is given the list's width and told to ellipsize. Other platforms are left as they are. Returns whether the
-/// rows now ellipsize.
+/// field-history dialog first shortens only a row's earlier implementation name (DIALOG_DIAGRAM_FIELD_HISTORY::fitRows), so
+/// this is the last resort, for a version and author too wide for the list on their own. On GTK the list is a GtkTreeView
+/// whose one text column is given the list's width and told to ellipsize. Other platforms are left as they are. Returns
+/// whether the rows now ellipsize.
 inline bool EllipsizeRows( wxListBox* aList )
 {
 #if defined( __WXGTK__ )
@@ -185,8 +186,8 @@ inline bool EllipsizeRows( wxListBox* aList )
     return false;
 #endif
 }
-/// The fill that marks the words in which two versions of a text differ (the approved conflict mockup highlights "top edge"
-/// and "bottom edge"; mockup audit M1-6): an amber tint that keeps aText at 7:1 or more on it, pale on a light surface and
+/// The fill that marks the words in which two versions of a text differ (mockup audit M1-6; the approved conflict mockup
+/// highlights the phrases "top edge" and "bottom edge", the editor the words that differ, "top" and "bottom"): an amber tint that keeps aText at 7:1 or more on it, pale on a light surface and
 /// deep on a dark one.
 inline wxColour DifferenceFill( const wxColour& aText, const wxColour& aSurface )
 {
@@ -285,9 +286,13 @@ public:
     bool IsLoading() const { return m_loading; }
     std::string InspectedRevision() const;
     wxString PageError() const;
-    /// Every loaded row as the list shows it: its revision label, the saved marker and the author.
+    /// Every loaded row's whole text: its revision label (with the name of the earlier implementation it was saved in), the
+    /// saved marker and the author.
     std::vector<wxString> RowLabels() const;
-    /// Whether a row wider than the list ends in "…" (mockup audit M1-3).
+    /// Every loaded row as the list shows it at its current width: the whole text, or, where that is wider than the list,
+    /// with only the earlier implementation's name shortened with "…", so "vN · Author" stays whole (mockup audit M1-3).
+    std::vector<wxString> ShownRowLabels() const;
+    /// Whether a row too wide even for "vN · Author" ends in "…" instead of being cut off mid-word (mockup audit M1-3).
     bool RowsEllipsize() const { return m_rowsEllipsize; }
 
     /// Lays the dialog out and then fits the selected row's heading to the width its column got.
@@ -296,6 +301,7 @@ public:
 private:
     void updateSelection();
     void fitHeading();
+    void fitRows();
     void updatePaging();
     void appendRows( const std::vector<DIAGRAM_FIELD_HISTORY_ENTRY>& aEntries );
 
@@ -307,7 +313,7 @@ private:
     bool m_showPageCount = false;
     bool m_rowsEllipsize = false;
     std::optional<std::string> m_restoreRevision;
-    wxListBox* m_history;
+    wxListBox* m_history = nullptr;
     wxStaticText* m_pageStatus;
     wxStaticText* m_pageError;
     wxButton* m_older;

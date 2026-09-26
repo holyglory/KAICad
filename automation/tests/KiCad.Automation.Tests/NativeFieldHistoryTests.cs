@@ -107,8 +107,24 @@ public sealed class NativeFieldHistoryTests
             // also names its author, which the narrow list can cut off.
             string initialName = graph.States.Single(s => s.Id == initialPsu.StateId).Name;
             Assert.AreEqual("Initial approach", initialName);
-            CollectionAssert.AreEqual(new[] { "v2 · Saved · AI agent", $"{initialName} · v2 · Fixture user", $"{initialName} · v1 · Fixture user" },
-                result.GetProperty("row_labels").EnumerateArray().Select(r => r.GetString()).ToArray());
+            string[] wholeRows = [.. result.GetProperty("row_labels").EnumerateArray().Select(r => r.GetString()!)];
+            CollectionAssert.AreEqual(new[] { "v2 · Saved · AI agent", $"{initialName} · v2 · Fixture user", $"{initialName} · v1 · Fixture user" }, wholeRows);
+            // Mockup audit M1-3 (review of e62ac6dce7): in the list every row shows its version and author whole, as the approved
+            // rows read "v2 · User"; a row too wide for the list shortens only the name of the earlier implementation it was
+            // saved in ("Initi… · v2 · Fixture user"). The native case measures each row as drawn against its cell in GTK, at the
+            // default and the compact size, so GTK's own "…" cuts nothing of it.
+            string[] names = ["", initialName, initialName];
+            foreach (string key in new[] { "shown_rows", "compact_shown_rows" })
+            {
+                string[] shown = [.. result.GetProperty(key).EnumerateArray().Select(r => r.GetString()!)];
+                Assert.HasCount(wholeRows.Length, shown, $"{theme}: {key} lists every row.");
+                for (int row = 0; row < shown.Length; ++row)
+                    Assert.IsTrue(IsShownHistoryRow(wholeRows[row], names[row], shown[row]),
+                        $"{theme}: {key} row {row} reads '{shown[row]}': '{wholeRows[row]}' whole, or with only '{names[row]}' shortened.");
+                Assert.AreNotEqual(wholeRows[1], shown[1], $"{theme}: {key}: the earlier implementation's rows are too wide for the list whole.");
+            }
+            Assert.IsTrue(result.GetProperty("rows_fit").GetBoolean(), theme + ": every history row as drawn fits the list, so GTK cuts none of it.");
+            Assert.IsTrue(result.GetProperty("compact_rows_fit").GetBoolean(), theme + ": every history row as drawn fits the list in the compact dialog.");
             Assert.AreEqual($"{initialName} · v2 · Fixture user — Selected text", result.GetProperty("selected_heading").GetString());
             // In the compact dialog the heading is too narrow for the whole text: only the implementation's name is shortened, and
             // the version and author stay whole (the native case also checks that the shown heading fits its column).
@@ -118,11 +134,12 @@ public sealed class NativeFieldHistoryTests
             Assert.AreEqual($"Use {initialName} · v2 text in draft", result.GetProperty("restore_label").GetString());
             // An "&" in an implementation's name shows on the Use button as written, not as a keyboard mnemonic.
             Assert.AreEqual("Use C&K approach · v2 text in draft", result.GetProperty("ampersand_restore_label").GetString());
-            // Mockup audit M1-3 to M1-5, measured in the rendered dialog (02-earlier-text.png): a row wider than the list ends in
-            // "…" instead of being cut off mid-word; "Use … text in draft" is filled with the accent like the editor's Save (3:1
-            // from the dialog, its label 4.5:1 on the fill), as the approved mockup shows it; and both compared texts start 8
-            // pixels or more inside their boxes, as the editor's boxes do (design QA P2-9).
-            Assert.IsTrue(result.GetProperty("rows_ellipsize").GetBoolean(), theme + ": the revision rows end in \"…\" when they are wider than the list.");
+            // Mockup audit M1-3 to M1-5, measured in the rendered dialog (02-earlier-text.png): a row too wide for the list even
+            // with its implementation's name shortened ends in "…" instead of being cut off mid-word; "Use … text in draft" is
+            // filled with the accent like the editor's Save (3:1 from the dialog, its label 4.5:1 on the fill), as the approved
+            // mockup shows it; and both compared texts start 8 pixels or more inside their boxes, as the editor's boxes do
+            // (design QA P2-9).
+            Assert.IsTrue(result.GetProperty("rows_ellipsize").GetBoolean(), theme + ": a row too wide even for its version and author ends in \"…\".");
             Assert.IsTrue(result.GetProperty("restore_fill_on_dialog").GetDouble() >= 3.0,
                 $"{theme}: the Use button's fill stands {result.GetProperty("restore_fill_on_dialog").GetDouble():F2}:1 from the dialog, 3:1 or more.");
             Assert.IsTrue(result.GetProperty("restore_label_on_fill").GetDouble() >= 4.5,
@@ -159,10 +176,11 @@ public sealed class NativeFieldHistoryTests
             Assert.IsTrue(conflict.RootElement.GetProperty("partial_resolution_blocked").GetBoolean());
             Assert.AreEqual("Keep both edges accessible.", conflict.RootElement.GetProperty("routing_text").GetString());
             Assert.AreEqual("Prefer fixed mounting.", conflict.RootElement.GetProperty("general_text").GetString());
-            // Mockup audit M1-6: the words in which the draft and the latest saved text differ are marked in both, as the
-            // approved conflict mockup marks "top edge" and "bottom edge": tinted (the tint drawn, its text 7:1 or more on it)
-            // and underlined. Mockup audit M1-4 and M1-5: Save resolved version is filled with the accent once a choice is made
-            // for every field, and the texts start 8 pixels or more inside their boxes.
+            // Mockup audit M1-6: the words in which the draft and the latest saved text differ are marked in both, tinted (the
+            // tint drawn, its text 7:1 or more on it) and underlined. The approved conflict mockup marks the phrases "top edge"
+            // and "bottom edge"; the editor marks the words that differ, "top" and "bottom" (a P3 difference in design-qa.md).
+            // Mockup audit M1-4 and M1-5: Save resolved version is filled with the accent once a choice is made for every field,
+            // and the texts start 8 pixels or more inside their boxes.
             var conflictResult = conflict.RootElement;
             CollectionAssert.AreEqual(new[] { "top" }, conflictResult.GetProperty("draft_marked").EnumerateArray().Select(w => w.GetString()).ToArray());
             CollectionAssert.AreEqual(new[] { "bottom" }, conflictResult.GetProperty("saved_marked").EnumerateArray().Select(w => w.GetString()).ToArray());
@@ -200,6 +218,21 @@ public sealed class NativeFieldHistoryTests
                 $"{theme}: the comparison text starts {wholePanel.RootElement.GetProperty("details_inset").GetInt32()} pixels inside its box, 8 or more.");
         }
         finally { Directory.Delete(temporary, recursive: true); }
+    }
+
+    /// <summary>Whether <paramref name="shown"/> is how the field-history list may show the row <paramref name="whole"/>
+    /// (mockup audit M1-3): whole, or with only the leading name of the earlier implementation it was saved in,
+    /// <paramref name="name"/>, shortened with "…" or replaced by "…" or left out, so the version and author after it are
+    /// always whole.</summary>
+    internal static bool IsShownHistoryRow(string whole, string name, string shown)
+    {
+        if (shown == whole) return true;
+        if (name.Length == 0 || !whole.StartsWith(name + " · ", StringComparison.Ordinal)) return false;
+        string rest = whole[(name.Length + " · ".Length)..];
+        if (shown == rest || shown == "… · " + rest) return true;
+        if (!shown.EndsWith("… · " + rest, StringComparison.Ordinal)) return false;
+        string kept = shown[..^("… · " + rest).Length];
+        return kept.Length > 0 && kept.Length < name.Length && name.StartsWith(kept, StringComparison.Ordinal);
     }
 
     private static string FindRoot()

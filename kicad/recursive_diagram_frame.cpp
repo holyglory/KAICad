@@ -2774,8 +2774,11 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
         {
             auto drawn = layout( current(), !m_historyPreview );
             if( auto frame = drawn.Frame() ) place( result.mutable_level_frame(), "DiagramLevelFrame", toScreen( *frame ), false );
-            for( const auto& [name, rect] : boundaryNames( drawn ) )
-            { auto* row = result.add_boundary_port_names(); place( row, "DiagramBoundaryPortName", rect, false ); row->set_label( name ); }
+            for( const auto& name : boundaryNames( drawn ) )
+            {
+                auto* row = result.add_boundary_port_names(); place( row, "DiagramBoundaryPortName", name.rect, false ); row->set_label( name.name );
+                row->set_object_id( name.owner + "/" + name.id );
+            }
             // Each canvas note with the lines it shows, measured as the canvas paints them.
             wxClientDC dc( m_canvas ); dc.SetFont( GetFont() );
             const auto& notes = visibleNotes();
@@ -2794,7 +2797,7 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
             for( const auto& port : portMarks( drawn ) )
             {
                 auto* row = result.add_port_marks(); place( row, "DiagramPortMark", port.rect, false );
-                row->set_label( R::Utf8( port.name ) );
+                row->set_label( R::Utf8( port.name ) ); row->set_object_id( port.owner + "/" + port.id );
                 row->set_active( target && target->port && target->owner == port.owner && target->id == port.id );
             }
             if( target ) { place( result.mutable_connect_target(), "DiagramConnectTarget", target->rect, false ); result.mutable_connect_target()->set_label( R::Utf8( target->name ) ); }
@@ -2867,6 +2870,7 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
         history->set_inspected_revision_id( m_historyDialog->InspectedRevision() );
         history->set_loading( m_historyDialog->IsLoading() ); history->set_error_message( Utf8( m_historyDialog->PageError() ) );
         for( const wxString& row : m_historyDialog->RowLabels() ) history->add_row_labels( Utf8( row ) );
+        for( const wxString& row : m_historyDialog->ShownRowLabels() ) history->add_shown_row_labels( Utf8( row ) );
     }
     if( m_preview ) *result.mutable_preview_selection() = *m_preview;
     // Rendered controls, so journeys drive the real toolbar strip, palette and inspector.

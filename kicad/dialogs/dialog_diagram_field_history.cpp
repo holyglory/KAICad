@@ -5,12 +5,61 @@
 #include <set>
 #include <utility>
 #include <wx/button.h>
-#include <wx/dcclient.h>
 #include <wx/listbox.h>
 #include <wx/sizer.h>
 #include <wx/statline.h>
 #include <wx/stattext.h>
 #include <wx/textctrl.h>
+
+
+namespace
+{
+/// An entry's revision label in two parts: the name of the earlier implementation it was saved in, when the label names
+/// one ("Initial approach · v2"), and the version that follows it ("v2").
+std::pair<wxString, wxString> NameAndVersion( const DIAGRAM_FIELD_HISTORY_ENTRY& aEntry )
+{
+    const wxString prefix = aEntry.implementation + wxS( " · " );
+    if( !aEntry.implementation.IsEmpty() && aEntry.revisionLabel.StartsWith( prefix ) )
+        return { aEntry.implementation, aEntry.revisionLabel.Mid( prefix.length() ) };
+    return { wxEmptyString, aEntry.revisionLabel };
+}
+
+
+/// A history row in the same two parts: the earlier implementation's name, and the version, the saved marker and the author
+/// ("v2 · Fixture user", "v3 · Saved · AI agent").
+std::pair<wxString, wxString> RowParts( const DIAGRAM_FIELD_HISTORY_ENTRY& aEntry )
+{
+    auto [name, rest] = NameAndVersion( aEntry );
+    // The saved marker comes before the author, so it stays visible when a long author name is cut.
+    if( aEntry.saved ) rest += wxS( " · " ) + _( "Saved" );
+    return { name, rest + wxS( " · " ) + aEntry.actor };
+}
+
+
+wxString Joined( const std::pair<wxString, wxString>& aParts )
+{
+    return aParts.first.IsEmpty() ? aParts.second : aParts.first + wxS( " · " ) + aParts.second;
+}
+
+
+/// "aName · aRest" no wider than aRoom pixels as aWidth measures it: whole when it fits; otherwise only aName is shortened
+/// with "…" (or left out when not even "…" fits), so the version and author in aRest stay whole and readable (mockup audit
+/// M1-3). Only when aRest alone is wider than aRoom does the control end it in "…". A room of 0 or less (not laid out yet)
+/// keeps the whole text.
+wxString FitName( const std::function<int( const wxString& )>& aWidth, const wxString& aName, const wxString& aRest, int aRoom )
+{
+    const wxString separator = wxS( " · " ), ellipsis = wxS( "…" );
+    if( aName.IsEmpty() ) return aRest;
+    const wxString whole = aName + separator + aRest;
+    if( aRoom <= 0 || aWidth( whole ) <= aRoom ) return whole;
+    wxString name = aName;
+    while( !name.IsEmpty() && aWidth( name + ellipsis + separator + aRest ) > aRoom ) name.RemoveLast();
+    name.Trim();
+    if( !name.IsEmpty() ) return name + ellipsis + separator + aRest;
+    if( aWidth( ellipsis + separator + aRest ) <= aRoom ) return ellipsis + separator + aRest;
+    return aRest;
+}
+}
 
 
 std::vector<DIAGRAM_FIELD_HISTORY_ENTRY> DiagramFieldHistoryRows(
@@ -89,8 +138,9 @@ DIALOG_DIAGRAM_FIELD_HISTORY::DIALOG_DIAGRAM_FIELD_HISTORY( wxWindow* aParent,
     m_history->SetName( "DiagramFieldHistoryRevisions" );
     OptOut( m_history );
     m_history->SetMinSize( FromDIP( wxSize( 200, 200 ) ) );
-    // A row wider than the list, such as "Initial approach · v2 · Fixture user", ends in "…" instead of being cut off
-    // mid-word; the selected row's heading shows it whole (mockup audit M1-3).
+    // A row wider than the list, such as "Initial approach · v2 · Fixture user", shortens only the earlier implementation's
+    // name ("Initi… · v2 · Fixture user", fitRows), so every row's version and author stay readable; a row too wide even for
+    // those ends in "…" instead of being cut off mid-word. The Use button names the implementation whole (mockup audit M1-3).
     m_rowsEllipsize = DIAGRAM_LOOK::EllipsizeRows( m_history );
     appendRows( m_entries );
     auto* revisionColumn = new wxBoxSizer( wxVERTICAL );
@@ -212,14 +262,8 @@ DIALOG_DIAGRAM_FIELD_HISTORY::DIALOG_DIAGRAM_FIELD_HISTORY( wxWindow* aParent,
 
 void DIALOG_DIAGRAM_FIELD_HISTORY::appendRows( const std::vector<DIAGRAM_FIELD_HISTORY_ENTRY>& entries )
 {
-    for( const auto& entry : entries )
-    {
-        // The saved marker must remain visible when a long actor name scrolls.
-        wxString label = entry.revisionLabel;
-        if( entry.saved ) label += wxS( " · " ) + _( "Saved" );
-        label += wxS( " · " ) + entry.actor;
-        m_history->Append( label );
-    }
+    // Whole at first; the next layout fits each row to the list (fitRows).
+    for( const auto& entry : entries ) m_history->Append( Joined( RowParts( entry ) ) );
 }
 
 
@@ -243,6 +287,14 @@ wxString DIALOG_DIAGRAM_FIELD_HISTORY::PageError() const { return m_pageError->G
 
 
 std::vector<wxString> DIALOG_DIAGRAM_FIELD_HISTORY::RowLabels() const
+{
+    std::vector<wxString> labels;
+    for( const auto& entry : m_entries ) labels.push_back( Joined( RowParts( entry ) ) );
+    return labels;
+}
+
+
+std::vector<wxString> DIALOG_DIAGRAM_FIELD_HISTORY::ShownRowLabels() const
 {
     std::vector<wxString> labels;
     for( unsigned row = 0; row < m_history->GetCount(); ++row ) labels.push_back( m_history->GetString( row ) );
@@ -304,14 +356,12 @@ void DIALOG_DIAGRAM_FIELD_HISTORY::updateSelection()
     if( available )
     {
         const auto& entry = m_entries[selected];
-        m_headingImplementation = entry.implementation;
-        wxString version = entry.revisionLabel;
-        if( !entry.implementation.IsEmpty() && version.StartsWith( entry.implementation + wxS( " · " ) ) )
-            version = version.Mid( entry.implementation.length() + 3 );
+        auto [name, version] = NameAndVersion( entry );
+        m_headingImplementation = name;
         m_headingRest = wxString::Format( _( "%s · %s — Selected text" ), version, entry.actor );
         // The whole heading, until fitHeading shortens it to the laid-out column.
         // Set as plain text: an "&" in a name or an author is shown, not taken as a keyboard mnemonic.
-        m_selectedHeading->SetLabelText( wxString::Format( _( "%s · %s — Selected text" ), entry.revisionLabel, entry.actor ) );
+        m_selectedHeading->SetLabelText( Joined( { m_headingImplementation, m_headingRest } ) );
         m_selectedHeading->SetToolTip( m_selectedHeading->GetLabelText() );
         m_selectedText->ChangeValue( entry.text );
         // Escaped like the heading: an "&" in an implementation's name is shown, not taken as a keyboard mnemonic.
@@ -336,6 +386,7 @@ bool DIALOG_DIAGRAM_FIELD_HISTORY::Layout()
     // Fitting after every layout, not only on the heading's own size event, keeps the heading right however the toolkit
     // orders a resize: the sizer has just given the heading the width it will be drawn at.
     bool laidOut = DIALOG_SHIM::Layout();
+    if( m_history ) fitRows();
     if( m_selectedHeading ) fitHeading();
     return laidOut;
 }
@@ -345,20 +396,24 @@ void DIALOG_DIAGRAM_FIELD_HISTORY::fitHeading()
 {
     // The whole heading when it fits its column; otherwise the earlier implementation's name is shortened with "…" (or
     // left out when not even "…" fits) before anything of the version or the author is.
-    const wxString separator = wxS( " · " ), ellipsis = wxS( "…" );
-    wxString shown = m_headingImplementation.IsEmpty() ? m_headingRest : m_headingImplementation + separator + m_headingRest;
-    const int width = m_selectedHeading->GetClientSize().x;
-    if( !m_headingImplementation.IsEmpty() && width > 0 && m_selectedHeading->GetTextExtent( shown ).x > width )
-    {
-        wxClientDC dc( m_selectedHeading );
-        dc.SetFont( m_selectedHeading->GetFont() );
-        const int room = width - dc.GetTextExtent( separator + m_headingRest ).x;
-        wxString name = m_headingImplementation;
-        while( !name.IsEmpty() && dc.GetTextExtent( name + ellipsis ).x > room ) name.RemoveLast();
-        name.Trim();
-        if( !name.IsEmpty() ) name += ellipsis;
-        else if( dc.GetTextExtent( ellipsis ).x <= room ) name = ellipsis;
-        shown = name.IsEmpty() ? m_headingRest : name + separator + m_headingRest;
-    }
+    wxString shown = FitName( [this]( const wxString& text ) { return m_selectedHeading->GetTextExtent( text ).x; },
+                              m_headingImplementation, m_headingRest, m_selectedHeading->GetClientSize().x );
     if( m_selectedHeading->GetLabelText() != shown ) m_selectedHeading->SetLabelText( shown );
+}
+
+
+void DIALOG_DIAGRAM_FIELD_HISTORY::fitRows()
+{
+    // Each row as the heading is fitted: a row wider than the list shortens only the name of the earlier implementation it
+    // was saved in, so its version and author are always shown whole (mockup audit M1-3; the approved rows read "v2 · User").
+    // A row's text gets the list's width less GTK's frame, cell spacing, focus line and text padding (about 10 pixels),
+    // with a few pixels to spare.
+    const int room = m_history->GetClientSize().x - FromDIP( 16 );
+    auto width = [this]( const wxString& text ) { return m_history->GetTextExtent( text ).x; };
+    for( unsigned row = 0; row < m_entries.size() && row < m_history->GetCount(); ++row )
+    {
+        auto [name, rest] = RowParts( m_entries[row] );
+        wxString shown = FitName( width, name, rest, room );
+        if( m_history->GetString( row ) != shown ) m_history->SetString( row, shown );
+    }
 }

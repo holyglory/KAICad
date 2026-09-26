@@ -32,7 +32,9 @@ public sealed partial class NativeSessionTests
     //     kicad_design_recovery_resolve_pending can. The first project undoes the stuck creation and discards the stuck
     //     realization after KiCad's own undo, and the ordinary applies then resume; the second keeps both results and
     //     publishes them. The first project also kills a KiCad started for a copy of the realized project while an automatic
-    //     worker watches it: the worker pauses with instance_exited within a second (pec2f1b53d4024a17).
+    //     worker watches it: the worker pauses with instance_exited within a second (pec2f1b53d4024a17). The second starts a
+    //     KiCad for a copy too, forces a creation stuck there, joins two XML nets with a wire in KiCad, saves and reloads the
+    //     sheets, and keeps KiCad's result: KiCad's connections are published and the nets' requirements wait for resolution.
     //  2. Records an earlier preview saved (p91fda8ca22a68141). Preview 23's snapshots listed library_cache among the state
     //     they could not hold; this build holds the library cache exactly and no longer lists it, so a preview 23 record sees
     //     a changed snapshot after upgrading. The same design's record, written as preview 23 wrote it (the only difference
@@ -269,10 +271,14 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(drawn["LocalLabel"] > 0 && drawn["HierarchicalLabel"] > 0 && drawn["SchematicLine"] > 0 && drawn["SheetPin"] > 0,
                 "The realization drew labels, hierarchical labels, wires and sheet pins: " + JsonSerializer.Serialize(drawn));
             Step("complete stage realized", new { drawn, realizationExit });
-            // An automatic worker whose KiCad is killed pauses at once with instance_exited (first project).
+            // An automatic worker whose KiCad is killed pauses at once with instance_exited (first project). A creation kept after
+            // KiCad joined two XML nets and reloaded its saved sheets publishes KiCad's connections (second project).
             object? exitPause = keeps ? null : await VerifyAutomaticPauseOnExit(host, store.Read()!.State.Baseline, context.ProjectDirectory, display,
                 evidence, instanceId, token);
             if (exitPause is not null) Step("automatic worker paused on its KiCad's exit", exitPause);
+            object? keptConnections = keeps ? await VerifyKeptConnectionsWin(host, store.Read()!.State.Baseline, context.ProjectDirectory, display,
+                evidence, instanceId, token) : null;
+            if (keptConnections is not null) Step("KiCad's own connections kept and published", keptConnections);
 
             // ---- 2. Records an earlier preview saved (p91fda8ca22a68141) ---------------------------------------
             var settledRecord = store.Read()!;
@@ -480,8 +486,8 @@ public sealed partial class NativeSessionTests
             {
                 instanceId, fixture = "psu-cpu", PsuCpuFixture.Version, stage = Stage.ToString(), seed = context.Seed.ToString(), realStdioProductionServer = true,
                 steps, layoutClearanceNm = LayoutClearanceNm,
-                stuckOperations = new { project = keeps ? "keep-and-replan" : "undo, discard and exit pause", creation = creationExit,
-                    realization = realizationExit, exitPause }, generatedSheets = generated.Select(g => new { g.SheetInstanceId, g.SheetSymbolId, g.ScreenId }),
+                stuckOperations = new { project = keeps ? "keep-and-replan, and KiCad's own connections kept" : "undo, discard and exit pause",
+                    creation = creationExit, realization = realizationExit, exitPause, keptConnections }, generatedSheets = generated.Select(g => new { g.SheetInstanceId, g.SheetSymbolId, g.ScreenId }),
                 original = new { original.State.StateSha256, original.State.SaveStableStateSha256, screens = original.Electrical.Hierarchy.Data.Instances.Count,
                     drawn, sheetPins = originalSheetPins.Length, nets = original.Electrical.Nets.Count,
                     files = originalFiles.ToDictionary(f => Path.GetFileName(f.Key), f => Convert.ToHexStringLower(SHA256.HashData(f.Value))) },

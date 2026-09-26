@@ -508,6 +508,27 @@ public sealed class McpProcessTests
                 StringAssert.Contains(unattached.GetProperty("structuredContent").GetProperty("errorMessage").GetString(), "kicad_instance_attach");
                 CollectionAssert.AreEqual(heldBytes, await File.ReadAllBytesAsync(stuck.RecordPath, timeout.Token), "Every refusal changes nothing.");
                 Assert.IsFalse(Directory.Exists(DesignPendingResolutions.Directory(stuck.RecordPath)), "A refused resolution keeps no receipt.");
+                DesignPendingResolution Receipt(Guid operation, string choice, string outcome, string from, Guid? continuation) => new(
+                    DesignPendingResolution.CurrentSchemaVersion, operation, null, held.State.InstanceId, choice, outcome, from, "publication", "ordinary",
+                    "completed", held.State.PendingNativeState!.ProcessEpoch, held.State.NativeRevision, held.State.NativeRevision, null, 0, continuation,
+                    false, new string('0', 64), new string('0', 64), null, null, null, null, null, DateTimeOffset.UtcNow);
+                // A receipt that an attempt left when its record replacement failed is never reported as the operation's
+                // resolution: the record still holds the operation, so a call naming that attempt's revision is refused.
+                string earlier = new string('e', 64);
+                DesignPendingResolutions.Write(stuck.RecordPath, Receipt(Guid.Parse(heldOperation), "undo", DesignPendingResolution.Undone, earlier, null));
+                var stale = await Resolve(4105, earlier, heldOperation, "undo");
+                Assert.AreEqual("design_recovery_changed", Code(stale), stale.GetRawText());
+                // The publication of a result KiCad kept (keep-and-replan) sends no native edit of its own: undo is refused before
+                // KiCad is contacted, and the refusal names the ways out.
+                DesignPendingResolutions.Write(stuck.RecordPath, Receipt(Guid.NewGuid(), "keep-and-replan", DesignPendingResolution.KeepPending,
+                    held.RevisionToken, Guid.Parse(heldOperation)));
+                var keptUndo = await Resolve(4106, held.RevisionToken, heldOperation, "undo");
+                Assert.AreEqual("kept_result_pending", Code(keptUndo), keptUndo.GetRawText());
+                string keptMessage = keptUndo.GetProperty("structuredContent").GetProperty("errorMessage").GetString()!;
+                StringAssert.Contains(keptMessage, "kicad_design_sync_apply");
+                StringAssert.Contains(keptMessage, "keep-and-replan");
+                StringAssert.Contains(keptMessage, "discard");
+                CollectionAssert.AreEqual(heldBytes, await File.ReadAllBytesAsync(stuck.RecordPath, timeout.Token), "Every refusal changes nothing.");
             }
             string syncRecoveryPath = Path.Combine(state, "designs", "sync-recovery.json");
             var syncFixture = SchematicSynchronizationPlanTests.Fixture();

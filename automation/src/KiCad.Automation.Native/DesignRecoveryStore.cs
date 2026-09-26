@@ -150,6 +150,9 @@ public sealed class DesignRecoveryStore(string statePath)
             ValidateTransition(current?.State, state, abandoningRealization, releasingExited, resolving);
             if (current?.RevisionToken == next.RevisionToken) return current;
             beforeReplace?.Invoke();
+            // The receipt of a resolved pending operation names the record revision it produced, so a repeated call can tell
+            // it from one an earlier attempt left when its record replacement failed (DesignPendingResolutions.Write).
+            if (resolving is not null) DesignPendingResolutions.Write(path, resolving with { ResultRevisionToken = next.RevisionToken });
             temporary = path + ".tmp-" + Guid.NewGuid().ToString("N");
             using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
@@ -331,11 +334,13 @@ public sealed class DesignRecoveryStore(string statePath)
     /// <summary>Leave a pending operation whose native change KiCad already committed but whose follow-up check refused it
     /// (DesignRecoveryPendingResolution, kicad_design_recovery_resolve_pending). The caller has verified KiCad first; this
     /// is the one save that clears exactly the pending operation named by <paramref name="receipt"/> and moves the record's
-    /// observation to KiCad's verified state (<paramref name="next"/>), optionally journaling the keep-and-replan
-    /// continuation: one prepared XML publication of KiCad's kept result, with no native edit. Under the record's lock and
-    /// after the revision check, the resolution receipt is written before the record is replaced. The baseline, desired
-    /// XML, electrical baseline, completed receipts and ownership choice stay exactly as they were; whole-sheet choices,
-    /// made against the observation the operation replaced, are cleared.</summary>
+    /// observation to KiCad's verified state (<paramref name="next"/>), or keeps it when nothing of the operation reached
+    /// KiCad, optionally journaling the keep-and-replan continuation: one prepared XML publication of KiCad's kept result,
+    /// with no native edit. Under the record's lock and after the revision check, the resolution receipt, naming the record
+    /// revision this save produces, is written before the record is replaced; it replaces a receipt an earlier attempt left
+    /// when its record replacement failed. The baseline, desired XML, electrical baseline, completed receipts and ownership
+    /// choice stay exactly as they were; whole-sheet choices, made against the observation the operation replaced, are
+    /// cleared.</summary>
     internal StoredDesignRecovery ResolvePendingOperation(StoredDesignRecovery saved, DesignRecoveryState next, DesignPendingResolution receipt)
     {
         ArgumentNullException.ThrowIfNull(saved);
@@ -344,8 +349,7 @@ public sealed class DesignRecoveryStore(string statePath)
         var pending = saved.State.PendingPublication?.OperationId ?? saved.State.PendingLayout?.OperationId;
         if (!saved.State.HasPendingWork || pending != receipt.OperationId || receipt.ResolvedFromRevisionToken != saved.RevisionToken)
             throw Failure("pending_operation_mismatch", "The resolution receipt does not name the record's pending operation at this revision.");
-        return SaveCore(next, saved.RevisionToken, abandoningRealization: false, resolving: receipt,
-            beforeReplace: () => DesignPendingResolutions.Write(path, receipt));
+        return SaveCore(next, saved.RevisionToken, abandoningRealization: false, resolving: receipt);
     }
 
     // A released operation stays open while the record sits on the document session it was released from. Only its
@@ -547,8 +551,9 @@ public sealed class DesignRecoveryStore(string statePath)
         if (resolving is not null)
         {
             // Only ResolvePendingOperation reaches here, after KiCad was verified: the pending operation is cleared, or
-            // replaced by the keep-and-replan continuation, and the observation moves to KiCad's verified state. Nothing
-            // else changes. Ordinary saves cannot clear a pending publication or layout without its completion.
+            // replaced by the keep-and-replan continuation, and the observation moves to KiCad's verified state (or stays,
+            // when nothing of the operation reached KiCad). Nothing else changes. Ordinary saves cannot clear a pending
+            // publication or layout without its completion.
             static byte[] Serialized<T>(T value) => JsonSerializer.SerializeToUtf8Bytes(value, Json);
             Guid? operation = current?.PendingPublication?.OperationId ?? current?.PendingLayout?.OperationId;
             bool unchanged = current is not null && current.HasPendingWork && operation == resolving.OperationId

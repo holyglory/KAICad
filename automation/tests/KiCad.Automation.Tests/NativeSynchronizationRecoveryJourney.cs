@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using Kiapi.Common.Types;
+using Kiapi.Schematic.Types;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
@@ -27,7 +28,11 @@ public sealed partial class NativeSessionTests
     //    Discard is refused while KiCad still shows either result. A KiCad started for a copy of the realized project is watched
     //    by an automatic worker and killed: the worker pauses with instance_exited within a second.
     //  - Second project: both stuck operations are kept (keep-and-replan); each continuation is completed with
-    //    kicad_design_sync_apply, which saves KiCad's result and publishes the XML re-planned from it.
+    //    kicad_design_sync_apply, which saves KiCad's result and publishes the XML re-planned from it. On a KiCad started for a
+    //    copy of the realized project, a stuck creation is kept after the person joined two XML nets with a wire and saved and
+    //    reloaded the sheets (VerifyKeptConnectionsWin): discard and undo are refused and name keep-and-replan, KiCad's joined
+    //    net is published with the requirements on the two nets waiting for resolution, and the kept result's publication is
+    //    refused undo and discard while KiCad shows it.
     // Every path ends with KiCad, the recovery record and the XML consistent, and the next synchronization proceeds.
 
     private sealed record StuckSynchronization(Guid OperationId, string NativeOperationId, StoredDesignRecovery Held, CheckedSchematicState Before,
@@ -268,14 +273,35 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(stuck.NativeOperationId, receipt.NativeOperationId, what + ": the receipt keeps the operation's native edit.");
     }
 
-    // An automatic worker watching a KiCad that ends pauses at once with instance_exited (ledger pec2f1b53d4024a17). A KiCad is
-    // started for a copy of the realized project like a person would start it, attached to the production server, and watched by
-    // an automatic worker; once the worker watches, KiCad is killed. The server finds the exit by its process observer (it did
-    // not start this KiCad) and the worker's status is paused with instance_exited within a second, while nothing needs KiCad.
-    private static async Task<object> VerifyAutomaticPauseOnExit(StdioMcpFixture host, SchematicDesign design, string projectDirectory,
-        string display, string evidence, string instanceId, CancellationToken token)
+    // A KiCad started for a copy of the project in projectDirectory like a person would start it, attached to the given
+    // production server with its schematic open, and a direct client of it. Disposing it kills that KiCad and removes the copy.
+    private sealed class CopiedKiCad(Process process, string scratch, string copy, string id, DocumentSpecifier root, NativeClient client,
+        Task<string> output, Task<string> errors) : IAsyncDisposable
     {
-        string scratch = Directory.CreateTempSubdirectory("kicad-exit-pause-").FullName;
+        public Process Process => process;
+        public string Scratch => scratch;
+        public string Copy => copy;
+        public string Id => id;
+        public DocumentSpecifier Root => root;
+        public NativeClient Client => client;
+
+        public async ValueTask DisposeAsync() => await Stop(process, scratch, output, errors);
+
+        internal static async Task Stop(Process process, string scratch, Task<string> output, Task<string> errors)
+        {
+            if (!process.HasExited) process.Kill();
+            await process.WaitForExitAsync(CancellationToken.None);
+            await Task.WhenAll(output, errors);
+            process.Dispose();
+            try { Directory.Delete(scratch, true); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        }
+    }
+
+    private static async Task<CopiedKiCad> StartKiCadForCopy(StdioMcpFixture host, string projectDirectory, string display, string evidence,
+        string instanceId, string label, CancellationToken token)
+    {
+        string scratch = Directory.CreateTempSubdirectory("kicad-" + label + "-").FullName;
         string copy = Directory.CreateDirectory(Path.Combine(scratch, "project")).FullName;
         foreach (string file in Directory.EnumerateFiles(projectDirectory).Where(f => Path.GetExtension(f) is ".kicad_sch" or ".kicad_pro"))
             File.Copy(file, Path.Combine(copy, Path.GetFileName(file)));
@@ -288,12 +314,11 @@ public sealed partial class NativeSessionTests
         start.Environment["XDG_CONFIG_HOME"] = Path.Combine(scratch, "config");
         start.Environment["XDG_CACHE_HOME"] = Path.Combine(scratch, "cache");
         foreach (string argument in new[] { "--new", "--automation", id, "--api-socket", socket,
-                     "--automation-log", Path.Combine(evidence, instanceId + "-exit-pause-native.log"), "--software-rendering", project })
+                     "--automation-log", Path.Combine(evidence, instanceId + "-" + label + "-native.log"), "--software-rendering", project })
             start.ArgumentList.Add(argument);
-        using var process = Process.Start(start)!;
+        var process = Process.Start(start)!;
         var output = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
         var errors = process.StandardError.ReadToEndAsync(CancellationToken.None);
-        string? session = null;
         try
         {
             string endpoint = NativeIpcEndpoint.FromSocketPath(socket);
@@ -313,21 +338,51 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(process.Id, attached.GetProperty("structuredContent").GetProperty("processId").GetInt32());
             Assert.AreEqual("running", attached.GetProperty("structuredContent").GetProperty("processState").GetString(), attached.GetRawText());
             string epoch = attached.GetProperty("structuredContent").GetProperty("epoch").GetString()!;
-            JsonElement opened;
-            using (var ready = CancellationTokenSource.CreateLinkedTokenSource(token))
-            {
-                ready.CancelAfter(TimeSpan.FromSeconds(30));
-                while (true)
-                {
-                    opened = await host.Tool("kicad_schematic_open", new { instanceId = id, path = Path.Combine(copy, "fixture.kicad_sch") });
-                    if (Error(opened) is not ("native_status_4" or "native_status_7")) break;
-                    await Task.Delay(200, ready.Token);
-                }
-            }
-            RequireToolSuccess(opened);
-            var root = SchematicJson.Parser.Parse<DocumentSpecifier>(Text(opened));
+            var root = await OpenCopiedSchematic(host, id, copy, token);
             var direct = new NativeClient(new NngTransport(), endpoint, epoch);
             Assert.AreEqual(id, (await direct.HandshakeAsync(token)).InstanceId);
+            return new(process, scratch, copy, id, root, direct, output, errors);
+        }
+        catch
+        {
+            await CopiedKiCad.Stop(process, scratch, output, errors);
+            throw;
+        }
+    }
+
+    // Opens the copy's root schematic through the production server, waiting while KiCad is still starting or busy.
+    private static async Task<DocumentSpecifier> OpenCopiedSchematic(StdioMcpFixture host, string id, string copy, CancellationToken token)
+    {
+        JsonElement opened;
+        using (var ready = CancellationTokenSource.CreateLinkedTokenSource(token))
+        {
+            ready.CancelAfter(TimeSpan.FromSeconds(30));
+            while (true)
+            {
+                opened = await host.Tool("kicad_schematic_open", new { instanceId = id, path = Path.Combine(copy, "fixture.kicad_sch") });
+                if (Error(opened) is not ("native_status_4" or "native_status_7")) break;
+                await Task.Delay(200, ready.Token);
+            }
+        }
+        RequireToolSuccess(opened);
+        return SchematicJson.Parser.Parse<DocumentSpecifier>(Text(opened));
+    }
+
+    // An automatic worker watching a KiCad that ends pauses at once with instance_exited (ledger pec2f1b53d4024a17). A KiCad is
+    // started for a copy of the realized project like a person would start it, attached to the production server, and watched by
+    // an automatic worker; once the worker watches, KiCad is killed. The server finds the exit by its process observer (it did
+    // not start this KiCad) and the worker's status is paused with instance_exited within a second, while nothing needs KiCad.
+    private static async Task<object> VerifyAutomaticPauseOnExit(StdioMcpFixture host, SchematicDesign design, string projectDirectory,
+        string display, string evidence, string instanceId, CancellationToken token)
+    {
+        await using var kicad = await StartKiCadForCopy(host, projectDirectory, display, evidence, instanceId, "exit-pause", token);
+        var process = kicad.Process;
+        string id = kicad.Id, copy = kicad.Copy, scratch = kicad.Scratch;
+        var root = kicad.Root;
+        var direct = kicad.Client;
+        string? session = null;
+        try
+        {
             var shown = await direct.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new() { Document = root.Clone(), ProcessEpoch = direct.Epoch }, token);
             // The copy's record: the realized design as KiCad shows it for the copy, synchronized.
             var baseline = design with { Schematic = shown.Electrical.Hierarchy.Data.Clone() };
@@ -431,11 +486,281 @@ public sealed partial class NativeSessionTests
             if (session is not null)
                 try { await host.Tool("kicad_design_automatic_sync_stop", new { instanceId = id, sessionId = session }); }
                 catch (IOException) { }
-            if (!process.HasExited) process.Kill();
-            await process.WaitForExitAsync(CancellationToken.None);
-            await Task.WhenAll(output, errors);
-            try { Directory.Delete(scratch, true); }
-            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
         }
+    }
+
+    // Keep-and-replan when KiCad's connections really differ from the XML (ledger p0aa59a1dfc8701ea), after KiCad saved and
+    // reloaded its sheets, and the publication of a kept result that can be neither undone nor discarded while KiCad shows it.
+    // A KiCad is started for a copy of the realized project, and its record holds that design with a requirement on each of two
+    // nets whose labels one straight wire can join on a sheet below the root. The XML then adds a resistor on the root sheet,
+    // and that creation is forced stuck as in ForceStuckSynchronization: KiCad commits it and the scripted check refuses it.
+    // The person draws the wire in KiCad, so KiCad joins the two nets the XML keeps apart, saves the sheets (Ctrl+S) and
+    // reloads them (File > Revert), so KiCad's receipt of the creation is gone (session-ended). Discard and undo are refused
+    // and name keep-and-replan; keep-and-replan keeps what KiCad shows: both nets are reported merged into one net named as
+    // KiCad names it, and their
+    // requirements become unresolved net bindings. While that result waits for its publication, discard and undo of the
+    // publication are refused (kept_result_pending). Completing it publishes the XML with KiCad's joined net and the resistor;
+    // KiCad, the record and the XML then agree, with nothing pending.
+    private static async Task<object> VerifyKeptConnectionsWin(StdioMcpFixture host, SchematicDesign design, string projectDirectory,
+        string display, string evidence, string instanceId, CancellationToken token)
+    {
+        await using var kicad = await StartKiCadForCopy(host, projectDirectory, display, evidence, instanceId, "kept-connections", token);
+        var client = kicad.Client;
+        var root = kicad.Root;
+        string id = kicad.Id;
+        Task<CheckedSchematicState> Capture() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(new()
+            { Document = root.Clone(), ProcessEpoch = client.Epoch }, token);
+        async Task<CheckedSchematicState> Until(string what, Func<CheckedSchematicState, bool> done)
+        {
+            using var wait = CancellationTokenSource.CreateLinkedTokenSource(token);
+            wait.CancelAfter(TimeSpan.FromSeconds(30));
+            while (true)
+            {
+                try
+                {
+                    var state = await Capture();
+                    if (done(state)) return state;
+                }
+                catch (NativeApiException error) when (error.Status is 4 or 7) { }
+                try { await Task.Delay(250, wait.Token); }
+                catch (OperationCanceledException) when (!token.IsCancellationRequested) { throw new AssertFailedException("KiCad never " + what + "."); }
+            }
+        }
+        var shown = await Capture();
+        var circuit = design.Engineering.Circuit;
+
+        // The wire the person will draw, and the copy's record: the realized design as KiCad shows it for the copy, with a
+        // requirement on each of the two nets it joins.
+        var wire = await ChooseJoiningWire(client, shown, circuit, token);
+        var (first, second) = (circuit.Nets.Single(n => n.Name == wire.First), circuit.Nets.Single(n => n.Name == wire.Second));
+        EngineeringStatement Requirement(CircuitNet net) => new(Guid.NewGuid(), net.Id, EngineeringStatementRole.Intent, GuidanceStrength.Requirement,
+            net.Name + " stays its own net.", null, [], []);
+        var requirements = new[] { Requirement(first), Requirement(second) };
+        var structure = design.Engineering.Structure;
+        var baseline = design with { Schematic = shown.Electrical.Hierarchy.Data.Clone(), Engineering = design.Engineering with
+            { Structure = structure with { Statements = [.. structure.Statements, .. requirements] } } };
+        string designPath = Path.Combine(kicad.Copy, "design.xml");
+        byte[] bytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(baseline, []));
+        await File.WriteAllBytesAsync(designPath, bytes, token);
+        var store = new DesignRecoveryStore(Path.Combine(kicad.Scratch, "recovery.json"));
+        var record = store.Save(new(Guid.NewGuid(), Guid.Parse(id), new(shown.State.Revision.Epoch, shown.State.Revision.Sequence),
+            shown.Electrical.Hierarchy.TrackingComplete, baseline, bytes, baseline.Schematic.Clone(), [],
+            BaselineElectrical: shown.Electrical.Clone(), ObservedElectrical: shown.Electrical.Clone()), null);
+
+        // The XML adds a resistor like R1 on a free spot of the root sheet; its creation is forced stuck.
+        var spot = await FreeSymbolSpot(client, shown, token);
+        var r1 = circuit.Components.Single(c => c.Reference == "R1");
+        var r1Definition = circuit.Sheets.SelectMany(s => s.Components).Single(d => d.Id == r1.DefinitionId);
+        var rootSheet = circuit.SheetInstances.Single(s => s.ParentId is null);
+        Guid definitionId = Guid.NewGuid(), componentId = Guid.NewGuid(), occurrenceId = Guid.NewGuid();
+        var withResistor = baseline with { Engineering = baseline.Engineering with { Circuit = circuit with
+        {
+            Sheets = [.. circuit.Sheets.Select(s => s.Id != rootSheet.DefinitionId ? s
+                : s with { Components = [.. s.Components, new ComponentDefinition(definitionId, r1Definition.PartId, r1Definition.Value)] })],
+            Components = [.. circuit.Components, new ComponentInstance(componentId, definitionId, rootSheet.Id, "R2")],
+            Symbols = [.. circuit.Symbols, new SymbolOccurrence(occurrenceId, componentId, 1,
+                new SymbolPlacement(spot.XNm / 1_000_000m, spot.YNm / 1_000_000m, 0, false, false, false))]
+        } } };
+        byte[] desired = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(withResistor, []));
+        await File.WriteAllBytesAsync(designPath, desired, token);
+        store.Save(record.State with { DesiredFileBytes = desired }, record.RevisionToken);
+        var stuck = await ForceStuckSynchronization(client, root, store, designPath, id, "creation-check", "native_sync_connectivity_mismatch",
+            evidence, token);
+
+        // The person draws the wire: KiCad joins exactly the two nets.
+        var committed = await Capture();
+        Assert.AreEqual(stuck.Committed.State, committed.State);
+        var line = new SchematicLine { Id = new() { Value = Guid.NewGuid().ToString("D") }, Type = SchematicLineType.SltWire,
+            Start = wire.Start.Clone(), End = wire.End.Clone(), Locked = LockedState.LsUnlocked };
+        var edit = new ApplySchematicItemBatch { Document = committed.State.Document.Clone(), DocumentEpoch = committed.State.Revision.Epoch,
+            ExpectedRevision = committed.State.Revision.Clone(), OperationId = Guid.NewGuid().ToString("D"), Description = "Draw wire" };
+        edit.Operations.Add(new SchematicItemOperation { TargetDocument = wire.Sheet.Clone(), Create = Google.Protobuf.WellKnownTypes.Any.Pack(line) });
+        var drawn = await client.InvokeAsync<CheckedSchematicBatch, CheckedSchematicBatchReceipt>(new() { Batch = edit, ExpectedState = committed.State.Clone() }, token);
+        Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, drawn.Status, drawn.ToString());
+        var wired = await Capture();
+        string[] apart = RebuildPartition(committed.Electrical), together = RebuildPartition(wired.Electrical);
+        var joinedGroups = apart.Except(together).ToArray();
+        var joinedGroup = together.Except(apart).ToArray();
+        Assert.HasCount(2, joinedGroups, "The wire joins exactly two nets: " + string.Join(" | ", joinedGroups));
+        Assert.HasCount(1, joinedGroup, "The wire makes exactly one new net.");
+        var joinedItems = joinedGroups.SelectMany(g => g.Split(' ')).ToHashSet(StringComparer.Ordinal);
+        var newItems = joinedGroup[0].Split(' ').ToHashSet(StringComparer.Ordinal);
+        var earlierItems = apart.SelectMany(g => g.Split(' ')).ToHashSet(StringComparer.Ordinal);
+        var added = newItems.Where(item => !joinedItems.Contains(item)).ToArray();
+        Assert.IsTrue(joinedItems.All(item => newItems.Contains(item)), "The new net holds both nets.");
+        Assert.IsFalse(added.Any(item => earlierItems.Contains(item)), "The wire joins nothing else: " + string.Join(", ", added));
+
+        // The person saves KiCad's sheets (Ctrl+S) and reloads them from disk (File > Revert): a new document session, whose
+        // receipts hold nothing of the creation.
+        await FocusedSchematicShortcut(client, root, kicad.Process.Id, display, "s", token);
+        await Until("saved its sheets after Ctrl+S", s => !s.State.NativeContentDirty && s.State.Revision.Epoch == wired.State.Revision.Epoch);
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                await client.InvokeAsync<Kiapi.Common.Commands.RevertDocument, Google.Protobuf.WellKnownTypes.Empty>(new() { Document = root.Clone() }, token);
+                break;
+            }
+            catch (NativeApiException error) when (error.Status is 4 or 7 && attempt < 40) { await Task.Delay(250, token); }
+        }
+        var reloaded = await Until("reloaded its sheets", s => s.State.Revision.Epoch != wired.State.Revision.Epoch);
+        Assert.IsFalse(reloaded.State.NativeContentDirty, "KiCad shows the sheets it saved.");
+        CollectionAssert.AreEqual(together, RebuildPartition(reloaded.Electrical), "KiCad reloaded the sheets it saved, with the wire.");
+        CollectionAssert.AreEqual(stuck.Xml, await File.ReadAllBytesAsync(designPath, token), "The XML still waits.");
+
+        // Discard and undo cannot tell whether KiCad holds the creation's result, and name keep-and-replan.
+        string Message(JsonElement reply) => reply.GetProperty("structuredContent").GetProperty("errorMessage").GetString()!;
+        var discard = await ResolvePending(host, id, store, stuck, "discard", evidence, token, label: "session-ended");
+        Assert.AreEqual("operation_outcome_unknown", Error(discard), discard.GetRawText());
+        StringAssert.Contains(Message(discard), "keep-and-replan");
+        var undo = await ResolvePending(host, id, store, stuck, "undo", evidence, token, label: "session-ended");
+        Assert.AreEqual("native_operation_not_committed", Error(undo), undo.GetRawText());
+        StringAssert.Contains(Message(undo), "keep-and-replan");
+        Assert.AreEqual(stuck.Held.RevisionToken, store.Read()!.RevisionToken, "The refusals change nothing in the record.");
+        Assert.AreEqual(reloaded.State, (await Capture()).State, "The refusals send nothing to KiCad.");
+
+        // Keep-and-replan: KiCad's connections win.
+        var reply = await ResolvePending(host, id, store, stuck, "keep-and-replan", evidence, token);
+        RequireToolSuccess(reply);
+        var view = reply.GetProperty("structuredContent").Clone();
+        Assert.AreEqual("keep-pending", view.GetProperty("outcome").GetString(), view.GetRawText());
+        Assert.AreEqual("session-ended", view.GetProperty("nativeStatus").GetString(), view.GetRawText());
+        Assert.IsTrue(view.GetProperty("continuationPending").GetBoolean(), view.GetRawText());
+        var changes = view.GetProperty("netChanges").EnumerateArray().ToArray();
+        CollectionAssert.AreEquivalent(new[] { first.Id, second.Id }, changes.Select(c => c.GetProperty("formerNetId").GetGuid()).ToArray(),
+            "Both joined nets are reported: " + view.GetRawText());
+        Assert.IsTrue(changes.All(c => c.GetProperty("change").GetString() == "Merged"), view.GetRawText());
+        var joinedNet = changes.SelectMany(c => c.GetProperty("candidateNetIds").EnumerateArray().Select(n => n.GetGuid())).Distinct().Single();
+        string continuation = view.GetProperty("continuationOperationId").GetString()!;
+        string requested = view.GetProperty("requestedRecoveryRevisionToken").GetString()!;
+        Assert.AreEqual(reloaded.State, (await Capture()).State, "Keeping sends nothing to KiCad.");
+        CollectionAssert.AreEqual(stuck.Xml, await File.ReadAllBytesAsync(designPath, token), "The XML waits for the continuation.");
+        var kept = store.Read()!;
+        Assert.AreEqual(Guid.Parse(continuation), kept.State.PendingPublication?.OperationId);
+        Assert.IsNull(kept.State.PendingMutation, "The continuation sends no native edit.");
+        Assert.AreEqual(reloaded.State, kept.State.PendingNativeState, "The continuation is guarded by exactly what KiCad shows.");
+        Assert.AreEqual(view.GetProperty("resultRevisionToken").GetString(), kept.RevisionToken, "The receipt names the record revision it produced.");
+
+        // While the kept result waits for its publication, it can be neither undone nor discarded: KiCad still shows it.
+        var publication = stuck with { OperationId = Guid.Parse(continuation), Held = kept };
+        var undoKept = await ResolvePending(host, id, store, publication, "undo", evidence, token, label: "refused");
+        Assert.AreEqual("kept_result_pending", Error(undoKept), undoKept.GetRawText());
+        var discardKept = await ResolvePending(host, id, store, publication, "discard", evidence, token, label: "refused");
+        Assert.AreEqual("kept_result_pending", Error(discardKept), discardKept.GetRawText());
+        StringAssert.Contains(Message(discardKept), "kicad_design_sync_apply");
+        Assert.AreEqual(kept.RevisionToken, store.Read()!.RevisionToken, "The refusals change nothing in the record.");
+        Assert.AreEqual(reloaded.State, (await Capture()).State, "The refusals send nothing to KiCad.");
+
+        // Completing the publication saves KiCad's sheets and publishes the XML with KiCad's joined net.
+        var completed = await host.Tool("kicad_design_sync_apply", new { instanceId = id, recoveryPath = store.StatePath, designPath,
+            expectedRevisionToken = requested, operationId = continuation });
+        await File.WriteAllTextAsync(Path.Combine(evidence, id + "-kept-connections-continuation.json"), RetainedToolEvidence(completed), token);
+        RequireToolSuccess(completed);
+        var result = completed.GetProperty("structuredContent");
+        Assert.IsFalse(result.GetProperty("nativeMutationCommitted").GetBoolean(), completed.GetRawText());
+        Assert.IsTrue(result.GetProperty("nativeFilesSaved").GetBoolean(), completed.GetRawText());
+        Assert.IsTrue(result.GetProperty("synchronizationCommitted").GetBoolean(), completed.GetRawText());
+        var final = await Capture();
+        Assert.IsFalse(final.State.NativeContentDirty, "KiCad's kept result is saved.");
+        var published = store.Read()!;
+        Assert.IsFalse(published.State.HasPendingWork);
+        Assert.AreEqual(Guid.Parse(continuation), published.State.LastSynchronization?.OperationId);
+        var xml = SchematicDesignXml.Read(await File.ReadAllTextAsync(designPath, token), []);
+        var nets = xml.Engineering.Circuit.Nets;
+        var joined = nets.Single(n => n.Id == joinedNet);
+        CollectionAssert.IsSubsetOf(first.Pins.Concat(second.Pins).ToArray(), joined.Pins.ToArray(), "The XML holds KiCad's joined net.");
+        Assert.IsFalse(nets.Any(n => n.Id == first.Id || n.Id == second.Id), "The two nets KiCad joined are gone from the XML.");
+        foreach (var other in circuit.Nets.Where(n => n.Id != first.Id && n.Id != second.Id))
+            CollectionAssert.AreEquivalent(other.Pins.ToArray(), nets.Single(n => n.Id == other.Id).Pins.ToArray(), other.Name + " is unchanged.");
+        Assert.IsTrue(xml.Engineering.Circuit.Components.Any(c => c.Id == componentId && c.Reference == "R2"), "The XML holds the created resistor.");
+        Assert.IsTrue(xml.Engineering.Structure.HasUnresolvedNetBindings, "The joined nets' requirements wait for resolution.");
+        var bindings = xml.Engineering.Structure.UnresolvedNetBindings!;
+        CollectionAssert.AreEquivalent(requirements.Select(r => (r.Id, r.TargetId)).ToArray(), bindings.Select(b => (b.OwnerId, b.FormerNetId)).ToArray());
+        Assert.IsTrue(bindings.All(b => b.CandidateNetIds.SequenceEqual([joinedNet])), "Each requirement names the joined net as its candidate.");
+        Assert.IsEmpty(SchematicHierarchyDelta.Plan(final.Electrical.Hierarchy.Data, xml.Schematic, token), "The XML describes what KiCad shows.");
+        var comparison = SchematicElectricalComparison.Compare(xml, final.Electrical, []);
+        Assert.IsTrue(comparison.PinBindingsComplete && comparison.ConnectivityEquivalent, "KiCad's connections are the XML's.");
+        Assert.AreEqual(SchematicDesignXml.Write(xml, []), SchematicDesignXml.Write(published.State.Baseline, []), "The baseline is the published XML.");
+
+        var proof = new
+        {
+            instanceId = id, sheet = string.Join('/', wire.Sheet.SheetPath.Path.Select(p => p.Value)), joinedNets = new[] { first.Name, second.Name },
+            wire = new { startNm = new[] { wire.Start.XNm, wire.Start.YNm }, endNm = new[] { wire.End.XNm, wire.End.YNm } },
+            resistorAtNm = new[] { spot.XNm, spot.YNm }, stuck.Evidence, reloadedEpoch = reloaded.State.Revision.Epoch,
+            refusedAfterReload = new { discard = Error(discard), undo = Error(undo) }, keptStatus = "session-ended",
+            netChanges = changes.Select(c => JsonSerializer.Deserialize<JsonElement>(c.GetRawText())).ToArray(), joinedNetId = joinedNet,
+            joinedNetName = joined.Name, refusedWhileKept = new { undo = Error(undoKept), discard = Error(discardKept) },
+            continuationOperationId = continuation, unresolvedNetBindings = bindings.Count, receiptPath = view.GetProperty("receiptPath").GetString()
+        };
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-kept-connections.json"), JsonSerializer.Serialize(proof), token);
+        return proof;
+    }
+
+    private sealed record JoiningWire(DocumentSpecifier Sheet, string First, string Second, Vector2 Start, Vector2 End);
+
+    // The shortest straight wire between labels of two different XML nets on one sheet below the root that touches no other
+    // connection point: no wire end, label, junction, no-connect marker, sheet pin or symbol pin lies on it, so drawing it joins
+    // exactly those two nets.
+    private static async Task<JoiningWire> ChooseJoiningWire(NativeClient client, CheckedSchematicState shown, Circuit circuit, CancellationToken token)
+    {
+        var names = circuit.Nets.Select(n => n.Name).ToHashSet(StringComparer.Ordinal);
+        (JoiningWire Wire, long Length)? best = null;
+        foreach (var screen in shown.Electrical.Hierarchy.Data.Instances.Where(s => s.Metadata.Document.SheetPath.Path.Count > 1))
+        {
+            var labels = new List<(string Text, Vector2 At)>();
+            var points = new List<Vector2>();
+            foreach (var item in screen.Items)
+            {
+                if (item.Is(SchematicLine.Descriptor)) { var wire = item.Unpack<SchematicLine>(); points.Add(wire.Start); points.Add(wire.End); }
+                else if (item.Is(LocalLabel.Descriptor)) { var label = item.Unpack<LocalLabel>(); points.Add(label.Position); labels.Add((label.Text.Text_, label.Position)); }
+                else if (item.Is(HierarchicalLabel.Descriptor)) { var label = item.Unpack<HierarchicalLabel>(); points.Add(label.Position); labels.Add((label.Text.Text_, label.Position)); }
+                else if (item.Is(GlobalLabel.Descriptor)) points.Add(item.Unpack<GlobalLabel>().Position);
+                else if (item.Is(Junction.Descriptor)) points.Add(item.Unpack<Junction>().Position);
+                else if (item.Is(NoConnectMarker.Descriptor)) points.Add(item.Unpack<NoConnectMarker>().Position);
+                else if (item.Is(SheetSymbol.Descriptor)) points.AddRange(item.Unpack<SheetSymbol>().Pins.Select(p => p.Position));
+            }
+            var measured = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(new()
+                { Document = screen.Metadata.Document.Clone(), ExpectedRevision = shown.State.Revision.Clone() }, token);
+            Assert.IsTrue(measured.PinGeometryAvailable, "KiCad measures the symbol pins of every sheet.");
+            points.AddRange(measured.Obstacles.Where(o => o.SymbolPins is not null).SelectMany(o => o.SymbolPins.Pins).Select(p => p.Position));
+            foreach (var a in labels.Where(l => names.Contains(l.Text)))
+                foreach (var b in labels.Where(l => names.Contains(l.Text) && string.CompareOrdinal(l.Text, a.Text) > 0))
+                {
+                    long dx = b.At.XNm - a.At.XNm, dy = b.At.YNm - a.At.YNm, length = dx * dx / 1000 + dy * dy / 1000;
+                    if (length == 0 || best is { } shortest && length >= shortest.Length) continue;
+                    bool At(Vector2 p, Vector2 q) => p.XNm == q.XNm && p.YNm == q.YNm;
+                    bool On(Vector2 p) => (p.XNm - a.At.XNm) * dy == (p.YNm - a.At.YNm) * dx
+                        && p.XNm >= Math.Min(a.At.XNm, b.At.XNm) && p.XNm <= Math.Max(a.At.XNm, b.At.XNm)
+                        && p.YNm >= Math.Min(a.At.YNm, b.At.YNm) && p.YNm <= Math.Max(a.At.YNm, b.At.YNm);
+                    if (points.Any(p => !At(p, a.At) && !At(p, b.At) && On(p))) continue;
+                    best = (new JoiningWire(screen.Metadata.Document.Clone(), a.Text, b.Text, a.At.Clone(), b.At.Clone()), length);
+                }
+        }
+        return best?.Wire ?? throw new AssertFailedException("No two XML nets have labels on one sheet that a straight wire joins without touching anything else.");
+    }
+
+    // A spot on the root sheet with room for a resistor and its fields, clear of everything KiCad measured there, inside the
+    // page (10 mm inset, the bottom 50 mm kept for the title block), on the connection grid.
+    private static async Task<Vector2> FreeSymbolSpot(NativeClient client, CheckedSchematicState shown, CancellationToken token)
+    {
+        var rootScreen = shown.Electrical.Hierarchy.Data.Instances.Single(s => s.Metadata.Document.SheetPath.Path.Count == 1);
+        var measured = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(new()
+            { Document = rootScreen.Metadata.Document.Clone(), ExpectedRevision = shown.State.Revision.Clone() }, token);
+        const long Grid = 2_540_000, Clearance = 2_540_000;
+        long left = measured.PageBounds.Position.XNm, top = measured.PageBounds.Position.YNm;
+        long right = left + measured.PageBounds.Size.XNm - 10_000_000, bottom = top + measured.PageBounds.Size.YNm - 50_000_000;
+        static (long L, long T, long R, long B) Rect(Box2 b) => (b.Position.XNm, b.Position.YNm, b.Position.XNm + b.Size.XNm, b.Position.YNm + b.Size.YNm);
+        for (long y = top + 8 * Grid; y + 5 * Grid <= bottom; y += 2 * Grid)
+            for (long x = left + 8 * Grid; x + 8 * Grid <= right; x += 2 * Grid)
+            {
+                var area = (L: x - 4 * Grid, T: y - 5 * Grid, R: x + 8 * Grid, B: y + 5 * Grid);
+                if (measured.Obstacles.All(o =>
+                    {
+                        var box = Rect(o.Bounds);
+                        return area.R + Clearance < box.L || area.L - Clearance > box.R || area.B + Clearance < box.T || area.T - Clearance > box.B;
+                    }))
+                    return new() { XNm = x, YNm = y };
+            }
+        throw new AssertFailedException("The root sheet has no free room for a resistor.");
     }
 }

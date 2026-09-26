@@ -264,7 +264,7 @@ internal static class SchematicSynchronizationExecutor
                 + "the XML re-planned from it, and discard clears the operation once KiCad no longer shows its result."
             : $" Retrying repeats this check. Leave the operation with {ResolvePendingTool} (operationId {operationId:D}): "
                 + "keep-and-replan publishes the XML re-planned from what KiCad shows, and discard clears the operation once KiCad "
-                + "shows the design as it was before it.";
+                + "shows the design as it was before the change it would publish.";
         return new(error.Code, error.Message + next, error.Details);
     }
 

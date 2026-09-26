@@ -242,10 +242,10 @@ public sealed class DesignElectricalRecoveryTests
             Assert.IsFalse(DesignRecoveryInspector.SameSchematicContent(state.Baseline.Schematic, dropped));
             Assert.AreEqual("unsupported_schematic_delta", Assert.ThrowsExactly<AutomationException>(() =>
                 SchematicItemDelta.Plan(dropped.Instances[0], state.Baseline.Schematic.Instances[0])).Code);
-            // A rebuild would restore its library caches (every placed symbol's definition is cached under KiCad's key), and
-            // still refuses the sheet file shown twice, which no snapshot holds.
+            // A rebuild restores its library caches (every placed symbol's definition is cached under KiCad's key), and
+            // repeated sheet ownership is now typed hierarchy state that the rebuild preserves.
             Assert.IsFalse(SchematicRebuild.Lost("library_cache", state.Baseline.Schematic));
-            Assert.IsTrue(SchematicRebuild.Lost("shared_screen_root_ownership", state.Baseline.Schematic));
+            Assert.IsFalse(SchematicRebuild.Lost("shared_screen_root_ownership", state.Baseline.Schematic));
 
             // Reattached to this build's KiCad, it plans normally: nothing to send, and the design as this build writes it.
             var observedElectrical = state.ObservedElectrical!.Clone();

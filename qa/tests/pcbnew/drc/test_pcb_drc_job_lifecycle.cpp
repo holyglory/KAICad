@@ -42,8 +42,10 @@
 #include <teardrop/teardrop.h>
 #include <api/board/board_types.pb.h>
 #include <zone.h>
+#include <filesystem>
 #include <fstream>
 #include <functional>
+#include <optional>
 #include <git2.h>
 #include <git/git_backend.h>
 #include <git/libgit_backend.h>
@@ -1685,6 +1687,136 @@ BOOST_AUTO_TEST_CASE( NativeExceptionMessagesAreCopiedFromTheExceptionItself )
     BOOST_REQUIRE_MESSAGE( !result.has_value(), "A board KiCad cannot write must not report a document state." );
     BOOST_CHECK_EQUAL( result.error().status(), kiapi::common::ApiStatusCode::AS_BAD_REQUEST );
     BOOST_CHECK_EQUAL( result.error().error_message(), "Native state could not be observed: " + problem );
+}
+
+// Ledger p3865669bf8f25214. A headless API server (kicad-cli api-server) builds its PCB handler without a
+// frame (pcbnew.cpp, HandleApiOpenDocument), as here. That handler compares the project a request names
+// with its own once, refuses a board of another project naming both projects, as the PCB editor does, and
+// reports a closed board of its own project only as not open. NativePcbDrcTwoProjectJourney proves this
+// through the rendered editors and a real kicad-cli api-server; this test adds each reason of the shared
+// comparison, including the unnamed project an automation instance refuses, which no journey can send
+// because MCP always names the project.
+BOOST_AUTO_TEST_CASE( HeadlessServerRefusesAnotherProjectsBoardNamingBothProjects )
+{
+    KI_TEST::TEMPORARY_DIRECTORY scratch( "pcb_headless_refusal_" + KIID().AsStdString(), "" );
+    const std::filesystem::path ownFolder = scratch.GetPath() / "own";
+    const std::filesystem::path otherFolder = scratch.GetPath() / "other";
+    std::filesystem::create_directories( ownFolder );
+    std::filesystem::create_directories( otherFolder );
+    const auto projectPath = ownFolder / "fixture.kicad_pro";
+    { std::ofstream file( projectPath ); file << R"({"meta":{"version":3}})"; }
+    SETTINGS_MANAGER manager;
+    const wxString projectName = wxString::FromUTF8( projectPath.string() );
+    BOOST_REQUIRE( manager.LoadProject( projectName, false ) );
+    PROJECT* project = manager.GetProject( projectName );
+    BOOST_REQUIRE( project );
+    auto owned = std::make_unique<BOARD>();
+    owned->SetProject( project );
+    owned->SetFileName( wxString::FromUTF8( ( ownFolder / "fixture.kicad_pcb" ).string() ) );
+    owned->GetDesignSettings().SetGridOrigin( VECTOR2I( 12000000, 34000000 ) );
+    auto headless = std::make_shared<HEADLESS_PCB_CONTEXT>( std::move( owned ), project, nullptr );
+    API_HANDLER_PCB handler( headless );
+
+    const std::string ownPath = project->GetProjectPath().ToStdString( wxConvUTF8 );
+    const std::string otherPath = otherFolder.string() + "/";
+    BOOST_REQUIRE_EQUAL( project->GetProjectName().ToStdString( wxConvUTF8 ), "fixture" );
+    BOOST_REQUIRE_NE( ownPath, otherPath );
+
+    auto board = []( const std::string& aFile, std::optional<std::pair<std::string, std::string>> aProject )
+    {
+        kiapi::common::types::DocumentSpecifier document;
+        document.set_type( kiapi::common::types::DOCTYPE_PCB );
+        document.set_board_filename( aFile );
+        if( aProject )
+        {
+            document.mutable_project()->set_name( aProject->first );
+            document.mutable_project()->set_path( aProject->second );
+        }
+        return document;
+    };
+    auto send = [&]( const google::protobuf::Message& aMessage )
+    {
+        kiapi::common::ApiRequest request;
+        request.mutable_header()->set_client_name( "kicad.qa" );
+        BOOST_REQUIRE( request.mutable_message()->PackFrom( aMessage ) );
+        return handler.Handle( request );
+    };
+    auto origin = [&]( const kiapi::common::types::DocumentSpecifier& aBoard )
+    {
+        kiapi::board::commands::GetBoardOrigin read;
+        read.mutable_board()->CopyFrom( aBoard );
+        read.set_type( kiapi::board::commands::BOT_GRID );
+        return read;
+    };
+    auto refused = [&]( const google::protobuf::Message& aMessage, const std::string& aExpected )
+    {
+        API_RESULT result = send( aMessage );
+        BOOST_REQUIRE_MESSAGE( !result.has_value(), "The headless server must refuse: " << aExpected );
+        BOOST_CHECK_EQUAL( result.error().status(), kiapi::common::ApiStatusCode::AS_BAD_REQUEST );
+        BOOST_CHECK_EQUAL( result.error().error_message(), aExpected );
+    };
+    auto served = [&]( const kiapi::common::types::DocumentSpecifier& aBoard )
+    {
+        API_RESULT result = send( origin( aBoard ) );
+        BOOST_REQUIRE_MESSAGE( result.has_value(), ( result ? "" : result.error().error_message() ) );
+        kiapi::common::types::Vector2 value;
+        BOOST_REQUIRE( result->message().UnpackTo( &value ) );
+        BOOST_CHECK_EQUAL( value.x_nm(), 12000000 );
+        BOOST_CHECK_EQUAL( value.y_nm(), 34000000 );
+    };
+
+    const auto own = board( "fixture.kicad_pcb", std::pair( std::string( "fixture" ), ownPath ) );
+    const auto other = board( "fixture.kicad_pcb", std::pair( std::string( "fixture" ), otherPath ) );
+    const std::string wrongProject =
+            "the requested document fixture.kicad_pcb of project 'fixture' at '" + otherPath
+            + "' is not open in this KiCad instance, which has project 'fixture' at '" + ownPath
+            + "' open; send the request to the KiCad instance that has that project open";
+
+    // Like kicad-cli api-server, this program has no API server of its own: nothing here names one.
+    BOOST_REQUIRE( !Pgm().ApiServerOrNull() );
+    served( own );
+
+    // The board of the same name in another project's folder: every PCB request names both projects.
+    StartPcbDrcJob start;
+    start.mutable_document()->CopyFrom( other );
+    start.set_operation_id( KIID().AsStdString() );
+    start.set_process_epoch( KIID().AsStdString() );
+    start.mutable_expected_revision()->set_epoch( KIID().AsStdString() );
+    start.mutable_expected_revision()->set_sequence( 1 );
+    refused( start, wrongProject );
+    ReadDocumentLifecycleState read;
+    read.mutable_document()->CopyFrom( other );
+    refused( read, wrongProject );
+    refused( origin( other ), wrongProject );
+
+    // Another project in this project's folder, by its name.
+    refused( origin( board( "fixture.kicad_pcb", std::pair( std::string( "renamed" ), ownPath ) ) ),
+             "the requested document fixture.kicad_pcb of project 'renamed' at '" + ownPath
+             + "' is not open in this KiCad instance, which has project 'fixture' at '" + ownPath
+             + "' open; send the request to the KiCad instance that has that project open" );
+
+    // A closed board of this server's own project is not open here; it belongs to no other instance.
+    read.mutable_document()->CopyFrom( board( "closed.kicad_pcb", std::pair( std::string( "fixture" ), ownPath ) ) );
+    refused( read, "the requested document closed.kicad_pcb is not open" );
+
+    // A project named by a relative folder is refused for that reason.
+    refused( origin( board( "fixture.kicad_pcb", std::pair( std::string( "fixture" ), std::string( "own" ) ) ) ),
+             "the requested document fixture.kicad_pcb names project 'fixture' by the folder 'own', which is "
+             "not an absolute path; name the project by its absolute folder path" );
+
+    // Without an automation instance, a request that names no project keeps being served by its board name.
+    served( board( "fixture.kicad_pcb", std::nullopt ) );
+    refused( origin( board( "closed.kicad_pcb", std::nullopt ) ), "the requested document closed.kicad_pcb is not open" );
+
+    // An automation instance serves one project, and refuses a request that names none for that reason.
+    TEST_API_SERVER_SCOPE server;
+    Pgm().GetApiServer().ConfigureAutomation( KIID().AsStdString(), projectPath.string() );
+    refused( origin( board( "fixture.kicad_pcb", std::nullopt ) ),
+             "the requested document fixture.kicad_pcb names no project; this KiCad instance has project "
+             "'fixture' at '" + ownPath + "' open and accepts a board request only with its project named by "
+             "its absolute folder path" );
+    refused( origin( other ), wrongProject );
+    served( own );
 }
 
 BOOST_AUTO_TEST_CASE( RefillRunsOnThePrivateBoardAndRequiresCapturedRoutingSettings )

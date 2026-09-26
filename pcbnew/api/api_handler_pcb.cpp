@@ -879,24 +879,11 @@ tl::expected<bool, ApiResponseStatus> API_HANDLER_PCB::validateDocumentInternal(
         return tl::unexpected( e );
     }
 
-    const bool automation = Pgm().ApiServerOrNull() && Pgm().GetApiServer().IsAutomation();
-    if( automation || aDocument.has_project() )
-    {
-        wxFileName supplied = wxFileName::DirName( wxString::FromUTF8( aDocument.project().path() ) );
-        wxFileName expected = wxFileName::DirName( project().GetProjectPath() );
-        const bool absolute = supplied.IsAbsolute();
-        supplied.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
-        expected.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
-        if( !absolute || supplied != expected
-                || aDocument.project().path().find( '\0' ) != std::string::npos
-                || aDocument.project().name() != project().GetProjectName().ToStdString( wxConvUTF8 ) )
-        {
-            ApiResponseStatus e;
-            e.set_status( ApiStatusCode::AS_BAD_REQUEST );
-            e.set_error_message( "The requested PCB project identity does not match this instance" );
-            return tl::unexpected( e );
-        }
-    }
+    // The one comparison of the named project with this handler's project, shared with
+    // API_HANDLER_EDITOR::validateDocument; its refusal names both projects, in the editor and in
+    // a headless API server alike.
+    if( std::optional<PROJECT_MISMATCH> mismatch = boardProjectMismatch( aDocument ) )
+        return tl::unexpected( boardProjectRefusal( aDocument, *mismatch ) );
 
     wxFileName fn( pcbContext()->GetCurrentFileName() );
 

@@ -195,6 +195,24 @@ BOOST_FIXTURE_TEST_CASE( LibraryFingerprintTracksDefinitionsAndAvailabilityNotPl
     auto recovered = DRC_LIBRARY_INPUTS::Capture( board, adapter );
     BOOST_REQUIRE( recovered );
     BOOST_CHECK_EQUAL( recovered->ContentFingerprint(), fingerprint );
+
+    // A notification for one library rechecks that library alone, with the same
+    // digest the full capture gives it; other libraries are not read.
+    const LIB_ID disabled( nickname + "_disabled", "Part" );
+    Place( board, disabled );
+    auto both = DRC_LIBRARY_INPUTS::Capture( board, adapter );
+    BOOST_REQUIRE( both );
+    BOOST_REQUIRE_EQUAL( both->Size(), 2 );
+    const auto perLibrary = both->LibraryFingerprints();
+    BOOST_REQUIRE_EQUAL( perLibrary.size(), 2 );
+    BOOST_CHECK_NE( perLibrary.at( nickname ), perLibrary.at( nickname + "_disabled" ) );
+    const std::set<wxString> only{ nickname };
+    auto one = DRC_LIBRARY_INPUTS::Capture( board, adapter, nullptr, &only );
+    BOOST_REQUIRE( one );
+    BOOST_CHECK_EQUAL( one->Size(), 1 );
+    BOOST_CHECK( one->Find( disabled ) == nullptr );
+    BOOST_REQUIRE_EQUAL( one->LibraryFingerprints().size(), 1 );
+    BOOST_CHECK_EQUAL( one->LibraryFingerprints().at( nickname ), perLibrary.at( nickname ) );
 }
 
 BOOST_FIXTURE_TEST_CASE( CompletedJobsRejectChangedMissingAndUnobservableLibraryInputs, LIBRARY_FIXTURE )

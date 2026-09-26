@@ -138,7 +138,7 @@ const PCB_DRC_COPPER_PREPARATION& PCB_DRC_RUN_INPUTS::PrepareCopper( PROGRESS_RE
     catch( const std::exception& error )
     {
         result.status = cancelled() ? STATUS::CANCELLED : STATUS::FAILED;
-        result.error = error.what();
+        result.error = PcbDrcExceptionMessage( error );
         if( !commit.Empty() ) commit.Revert();
     }
     // A failed bundle is never reused as fresh verification input. The caller

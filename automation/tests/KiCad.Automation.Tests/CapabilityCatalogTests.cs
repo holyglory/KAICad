@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Reflection;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Google.Protobuf;
@@ -9,6 +11,7 @@ using KiCad.Automation.Mcp;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using ModelContextProtocol.Client;
 using ModelContextProtocol.Server;
 
 namespace KiCad.Automation.Tests;
@@ -76,6 +79,90 @@ public sealed class CapabilityCatalogTests
             Directory.Delete(root, true);
         }
     }
+
+    // The public runbook automation/docs/codex-runtime-refresh.md tells a person which tools to call after pointing
+    // Codex or Claude Code at a new preview's server, and which handshake identity to expect. A real SDK MCP client, in
+    // the role those clients play, starts the compiled server: every tool the page names must be one the server lists,
+    // the handshake must be the one the page quotes, and the page's smoke check must answer as the page says. This is a
+    // new method, not an extension of the one above, because StdioMcpFixture does not expose the initialize reply.
+    [TestMethod]
+    public async Task RuntimeRefreshRunbookMatchesWhatAClientSees()
+    {
+        string runbook = await File.ReadAllTextAsync(Path.Combine(AutomationRoot(), "docs", "codex-runtime-refresh.md"));
+        // Must-catch and must-not-flag cases for the name reader: a file extension, an environment variable and a path
+        // segment are not tool names, while an unknown tool-shaped name is read so that the check below reports it.
+        CollectionAssert.AreEqual(new[] { "kicad_instances_list", "kicad_no_such_tool" },
+            RunbookToolNames("`.kicad_pro`, KICAD_AUTOMATION_STATE_DIRECTORY, /opt/kicad_x, `kicad_instances_list` and kicad_no_such_tool."));
+        string[] named = RunbookToolNames(runbook);
+        CollectionAssert.IsSubsetOf(new[] { "kicad_instances_list", "kicad_service_capabilities" }, named,
+            "The runbook's smoke check names the two tools a freshly started server answers without KiCad.");
+
+        string state = Directory.CreateTempSubdirectory("kicad-runtime-refresh-").FullName;
+        string handshakeState = Directory.CreateTempSubdirectory("kicad-runtime-refresh-handshake-").FullName;
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        try
+        {
+            // The runbook's handshake one-liner: its own initialize line goes to a plain server process, and the quote must
+            // be what its grep prints from the raw first reply line, so field order or an added field cannot hide.
+            string request = Regex.Match(runbook, @"'(\{""jsonrpc"":""2\.0"",""id"":1,""method"":""initialize""[^']*)'").Groups[1].Value;
+            Assert.AreNotEqual("", request, "The runbook shows the initialize request its handshake check sends.");
+            JsonDocument.Parse(request).Dispose();
+            var raw = UpdateCommandTests.StartInfo();
+            raw.RedirectStandardInput = true;
+            raw.StandardInputEncoding = new UTF8Encoding(false);
+            raw.Environment["KICAD_AUTOMATION_STATE_DIRECTORY"] = handshakeState;
+            using (var server = Process.Start(raw)!)
+            {
+                Task<string> serverErrors = server.StandardError.ReadToEndAsync(deadline.Token);
+                try
+                {
+                    await server.StandardInput.WriteLineAsync(request);
+                    await server.StandardInput.FlushAsync(deadline.Token);
+                    string firstLine = await server.StandardOutput.ReadLineAsync(deadline.Token) ?? "";
+                    server.StandardInput.Close();
+                    string printed = Regex.Match(firstLine, @"""serverInfo"":\{[^}]*\}").Value;
+                    Assert.AreNotEqual("", printed, "The server's first reply line carries serverInfo: " + firstLine);
+                    StringAssert.Contains(runbook, printed, "The runbook must quote the handshake the server really prints.");
+                    await server.WaitForExitAsync(deadline.Token);
+                }
+                finally
+                {
+                    if (!server.HasExited) server.Kill(entireProcessTree: true);
+                    await server.WaitForExitAsync();
+                    try { await serverErrors; } catch (OperationCanceledException) { }
+                }
+            }
+
+            var start = UpdateCommandTests.StartInfo();
+            await using var client = await McpClient.CreateAsync(new StdioClientTransport(new StdioClientTransportOptions
+            {
+                Name = "runtime-refresh-runbook", Command = start.FileName, Arguments = start.ArgumentList.ToArray(),
+                EnvironmentVariables = new Dictionary<string, string?> { ["KICAD_AUTOMATION_STATE_DIRECTORY"] = state }
+            }), cancellationToken: deadline.Token);
+
+            string[] listed = (await client.ListToolsAsync(cancellationToken: deadline.Token)).Select(tool => tool.Name).ToArray();
+            string[] missing = named.Except(listed, StringComparer.Ordinal).ToArray();
+            Assert.IsEmpty(missing, "The runbook names tools this server does not register: " + string.Join(", ", missing));
+
+            // Step 5 of the runbook: a freshly started server has attached no KiCad, and its catalogue is every registered tool.
+            var attached = await client.CallToolAsync("kicad_instances_list", new Dictionary<string, object?>(), cancellationToken: deadline.Token);
+            Assert.IsFalse(attached.IsError == true, "kicad_instances_list answers without KiCad.");
+            string attachedText = attached.Content.OfType<ModelContextProtocol.Protocol.TextContentBlock>().Single().Text;
+            using (var instances = JsonDocument.Parse(attachedText))
+                Assert.AreEqual(0, instances.RootElement.GetArrayLength(), "A freshly started server lists no attached instance: " + attachedText);
+            var catalogue = await client.CallToolAsync("kicad_service_capabilities", new Dictionary<string, object?>(), cancellationToken: deadline.Token);
+            Assert.IsFalse(catalogue.IsError == true, "kicad_service_capabilities answers without KiCad.");
+            string[] catalogued = catalogue.StructuredContent!.Value.GetProperty("serviceCapabilities").EnumerateArray()
+                .Select(entry => entry.GetProperty("name").GetString()!).ToArray();
+            CollectionAssert.AreEquivalent(listed, catalogued, "kicad_service_capabilities lists exactly the tools a client sees.");
+        }
+        finally { Directory.Delete(state, true); Directory.Delete(handshakeState, true); }
+    }
+
+    // Tool-shaped names in running text: lower-case kicad_ words not directly after a letter, digit, '.', '/' or '-'.
+    private static string[] RunbookToolNames(string text) =>
+        Regex.Matches(text, @"(?<![\w./-])kicad_[a-z0-9]+(?:_[a-z0-9]+)*").Select(match => match.Value)
+            .Distinct(StringComparer.Ordinal).ToArray();
 
     // Isolated metadata check: evidence names are test-assembly identifiers, which no end-to-end
     // path can resolve. It keeps the published verification tied to tests that exist and call the

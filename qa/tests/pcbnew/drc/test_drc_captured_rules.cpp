@@ -9,6 +9,8 @@
 #include <richio.h>
 #include <reporter.h>
 #include <fstream>
+#include <functional>
+#include <utility>
 
 namespace
 {
@@ -53,6 +55,23 @@ BOOST_AUTO_TEST_CASE( FileAndCapturedRulesAgreeButOnlyNewFileReadsFollowAnEdit )
     fromText.InitEngineFromText( captured, "captured custom rules" );
     BOOST_CHECK_EQUAL( Clearance( fromFile ), 800000 );
     BOOST_CHECK_EQUAL( Clearance( fromText ), 500000 );
+
+    // A rules error is reported at its own line from the file and from captured text alike;
+    // a read line keeps its line break, so none is added twice.
+    const std::string broken = "(version 1)\n(rule \"kept\" (constraint clearance (min 0.3mm)))\n(not_a_rule)\n";
+    write( broken );
+    auto errorLine = [&]( const std::function<void()>& aInitialize )
+    {
+        try { aInitialize(); }
+        catch( const PARSE_ERROR& error ) { return std::make_pair( error.lineNumber, error.byteIndex ); }
+        BOOST_FAIL( "Rules that do not compile must throw PARSE_ERROR" );
+        return std::make_pair( 0, 0 );
+    };
+    BOOST_CHECK( errorLine( [&] { fromFile.InitEngine( wxFileName( filename ) ); } ) == std::make_pair( 3, 2 ) );
+    BOOST_CHECK( errorLine( [&] { fromText.InitEngineFromText( broken, "captured custom rules" ); } )
+                 == std::make_pair( 3, 2 ) );
+    BOOST_CHECK( errorLine( [&] { fromText.InitEngineFromText( "(version 1)\r\n(not_a_rule)", "captured custom rules" ); } )
+                 == std::make_pair( 2, 2 ) );
 }
 
 BOOST_AUTO_TEST_CASE( FailedInitializationCannotRunAnImplicitOnlyFallbackAsComplete )
@@ -72,7 +91,18 @@ BOOST_AUTO_TEST_CASE( FailedInitializationCannotRunAnImplicitOnlyFallbackAsCompl
     BOOST_CHECK_EQUAL( Clearance( engine ), 800000 );
     const std::string future = "(version " + std::to_string( DRC_RULE_FILE_VERSION + 1 ) + ")\n"
                                "(rule \"future\" (constraint clearance (min 0.8mm)))";
-    BOOST_CHECK_THROW( engine.InitEngineFromText( future, "unsupported captured rules" ), std::runtime_error );
+    try
+    {
+        engine.InitEngineFromText( future, "unsupported captured rules" );
+        BOOST_FAIL( "Rules in a newer format must not initialize the engine" );
+    }
+    catch( const DRC_RULES_TOO_RECENT& error )
+    {
+        // Distinct from an internal error, and names the rules it refused.
+        BOOST_CHECK_EQUAL( std::string( error.what() ),
+                           "'unsupported captured rules' declares a design rules version newer than "
+                                   + std::to_string( DRC_RULE_FILE_VERSION ) + ", the newest this KiCad reads." );
+    }
     BOOST_CHECK( !engine.RulesValid() );
     BOOST_CHECK( engine.RunTests( EDA_UNITS::MM, false, false ) == DRC_RUN_RESULT::INCOMPLETE );
     engine.SetLogReporter( nullptr );

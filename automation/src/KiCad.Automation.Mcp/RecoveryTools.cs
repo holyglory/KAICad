@@ -252,7 +252,7 @@ public sealed class RecoveryTools
      KiCadCapability("schematic-design", "compiled-mcp", "recovery revision token, absolute design XML path, exact native symbol identities"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativeEditsReachTheOwningBlockByExactIdentity",
          "SymbolSheetOwnershipTests.OwnershipAnswersOverStdioDeclareExactlyWhatThePersonChose"),
-     Description("Answer the ownership resolution requests (native_ownership_resolution_required, listed by kicad_design_sync_plan as ownershipResolutionRequests) for symbols placed in KiCad since the last synchronization of one explicit instance's recovery record, at its revision token. answers lists, per symbol by the request's NativeObjectId: partId, one of the request's CandidatePartIds (native_part_ambiguous), and componentId (native_unit_owner_ambiguous, native_unit_grouping_ambiguous): an existing component or another new symbol's component from CandidateComponentIds, or the symbol's own ProposedComponentId for a component of its own. Writes the answers into the saved design XML at the absolute designPath (the occurrence bound to each answered symbol, with the component, definition and part it adds) through a guarded write that refuses a file changed meanwhile (design_file_changed), and records that XML as the recovery record's desired XML. Resume the paused automatic synchronization (kicad_design_automatic_sync_resume), or plan and apply, to adopt the symbols exactly as answered; symbols not answered are still decided by exact identities. An answer that is not one of the request's choices is refused with native_ownership_answer_invalid and nothing is written. Does not contact or change KiCad and advances no synchronization.")]
+     Description("Answer the ownership resolution requests (native_ownership_resolution_required, listed by kicad_design_sync_plan as ownershipResolutionRequests) for symbols placed in KiCad since the last synchronization of one explicit instance's recovery record, at its revision token. answers lists, per symbol by the request's NativeObjectId: partId, one of the request's CandidatePartIds (native_part_ambiguous), and componentId (native_unit_owner_ambiguous, native_unit_grouping_ambiguous): an existing component or another new symbol's component from CandidateComponentIds, or the symbol's own ProposedComponentId for a component of its own. Writes the answers into the saved design XML at the absolute designPath (the occurrence bound to each answered symbol, with the component, definition and part it adds) through a guarded write that refuses a file changed meanwhile (design_file_changed), and records that XML as the recovery record's desired XML. Resume the paused automatic synchronization (kicad_design_automatic_sync_resume), or plan and apply, to adopt the symbols exactly as answered; symbols not answered are still decided by exact identities. An answer that is not one of the request's choices (a part not among CandidatePartIds, such as one drawn with another library symbol or one overriding a part exact identities decide) is refused with native_ownership_answer_invalid and nothing is written. Answer every open request in one call: answers that leave a request open are refused with native_ownership_resolution_required and the requests still open. Before writing, the answered XML is planned as the next synchronization plans it from the record; answers it would not adopt exactly as given are refused with its error code and nothing is written, while a conflict it finds elsewhere in the design (hierarchy, properties, placement or connectivity) is returned as synchronizationConflict with the written answer. If the record changes after that check and cannot take the XML in, the result is an error with designFileWritten true and recoveryDesiredUpdated false: the XML holds the answers and resuming the automatic synchronization reads them. Does not contact or change KiCad and advances no synchronization.")]
     public Task<CallToolResult> AnswerOwnership(string instanceId, string recoveryPath, string expectedRevisionToken, string designPath,
         SchematicOwnershipAnswer[] answers, CancellationToken cancellationToken) => ExecuteAsync(async () =>
     {
@@ -280,46 +280,79 @@ public sealed class RecoveryTools
                 throw new AutomationException(SchematicNativeAdditionProjection.AnswerInvalid, "KiCad shows symbols an earlier synchronized "
                     + "design had; synchronizing restores them with their identities, so there is nothing to answer.");
         }
-        var answered = SchematicNativeAdditionProjection.Answer(state, history, answers ?? [], cancellationToken);
-        if (answered.Answered is null)
+        var web = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        CallToolResult Refused(string? code, string? message, IReadOnlyList<SchematicOwnershipResolutionRequest> requests,
+            IReadOnlyList<SchematicBindingIssue> issues, IReadOnlyList<ElectricalBindingIssue>? electricalIssues = null)
         {
             var refused = JsonSerializer.SerializeToElement(new
             {
-                instanceId = saved.State.InstanceId, recoveryRevisionToken = saved.RevisionToken, errorCode = answered.ErrorCode,
-                errorMessage = answered.ErrorMessage, ownershipResolutionRequests = answered.Requests, bindingIssues = answered.Issues,
+                instanceId = saved.State.InstanceId, recoveryRevisionToken = saved.RevisionToken, errorCode = code, errorMessage = message,
+                ownershipResolutionRequests = requests, bindingIssues = issues, electricalBindingIssues = electricalIssues ?? [],
                 designFileWritten = false, nativeMutationAuthorized = false
-            }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            }, web);
             return new CallToolResult { IsError = true, Content = [new TextContentBlock { Text = refused.GetRawText() }], StructuredContent = refused };
         }
+        var answered = SchematicNativeAdditionProjection.Answer(state, history, answers ?? [], cancellationToken);
+        if (answered.Answered is null) return Refused(answered.ErrorCode, answered.ErrorMessage, answered.Requests, answered.Issues);
         byte[] bytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(answered.Answered, libraries));
-        // The next synchronization adopts exactly these answers; anything it would refuse is refused here, before writing.
-        var check = SchematicNetReconciliation.Plan(state with { DesiredFileBytes = bytes }, history, cancellationToken);
-        if (check.Candidate is null || check.Restoration is not { History: null } adoption
+        // The plan the next synchronization makes from this record once it holds the answered XML, as apply and the automatic
+        // worker make it. The answers must be adopted exactly as declared, or nothing is written. A conflict the plan finds
+        // elsewhere in the design (hierarchy, properties, placement or connectivity) is not the answer's: the answer is written
+        // and that conflict is returned with it (synchronizationConflict), since the next synchronization stops at it either way.
+        // KiCad changes made after the record's observation are checked by that synchronization, not here.
+        var check = await SchematicSynchronizationPlanner.PlanForExecutionWithHistoryAsync(store,
+            saved with { State = state with { DesiredFileBytes = bytes, HierarchyResolution = null } },
+            handshakes?.Handshake(saved.State.InstanceId.ToString("D")), cancellationToken);
+        var electrical = check.Electrical;
+        if (electrical?.Candidate is null || electrical.Restoration is not { History: null } adoption
             || !answered.DeclaredSymbols.All(native => adoption.BindingCandidate.SymbolBindings.Any(b => b.NativeObjectId == native
                 && adoption.AnsweredOccurrences.Contains(b.SymbolOccurrenceId))))
-            throw new AutomationException(check.ErrorCode ?? "design_sync_conflict", check.ErrorMessage
-                ?? "The answered XML would not adopt the answered symbols as declared; nothing was written.");
+            return Refused(check.ErrorCode ?? electrical?.ErrorCode ?? "design_sync_conflict", (check.ErrorMessage ?? electrical?.ErrorMessage
+                ?? "The answered XML would not adopt the answered symbols as declared.") + " Nothing was written.",
+                electrical?.ResolutionRequests ?? [], check.BindingIssues, electrical?.BindingIssues);
         cancellationToken.ThrowIfCancellationRequested();
         if (store.Read()?.RevisionToken != saved.RevisionToken)
             throw new AutomationException("design_recovery_changed", "Recovery changed while answering; reload it and answer again.");
         string sha256 = await DesignFilePublisher.WriteIfUnchangedAsync(designPath, current, bytes, CancellationToken.None);
-        var written = store.Save(saved.State with { DesiredFileBytes = bytes, HierarchyResolution = null }, saved.RevisionToken);
         var circuit = answered.Answered.Engineering.Circuit;
+        var answeredSymbols = answered.DeclaredSymbols.Select(native =>
+        {
+            var binding = answered.Answered.SymbolBindings.Single(b => b.NativeObjectId == native
+                && adoption.AnsweredOccurrences.Contains(b.SymbolOccurrenceId));
+            var occurrence = circuit.Symbols.Single(s => s.Id == binding.SymbolOccurrenceId);
+            var component = circuit.Components.Single(c => c.Id == occurrence.ComponentId);
+            var definition = circuit.Sheets.SelectMany(s => s.Components).Single(d => d.Id == component.DefinitionId);
+            return new { nativeObjectId = native, occurrenceId = occurrence.Id, componentId = component.Id, partId = definition.PartId,
+                occurrence.Unit, component.Reference };
+        }).ToArray();
+        var conflict = check.CanPrepare ? null : new { errorCode = check.ErrorCode, errorMessage = check.ErrorMessage };
+        StoredDesignRecovery written;
+        try { written = store.Save(saved.State with { DesiredFileBytes = bytes, HierarchyResolution = null }, saved.RevisionToken); }
+        catch (Exception error) when (error is AutomationException or IOException or UnauthorizedAccessException)
+        {
+            // The XML already holds the answers. The record changed (or could not be written) after it was checked, so it does
+            // not hold them yet; the XML is what the next synchronization reads.
+            string? currentToken;
+            try { currentToken = store.Read()?.RevisionToken; }
+            catch (AutomationException) { currentToken = null; }
+            var partial = JsonSerializer.SerializeToElement(new
+            {
+                instanceId = saved.State.InstanceId, recoveryRevisionToken = currentToken,
+                errorCode = error is AutomationException known ? known.Code : "design_recovery_io",
+                errorMessage = "The answers were written into the XML at designPath, but the recovery record could not take that XML in ("
+                    + error.Message + "). Resuming the automatic synchronization reads them from the XML; for plan and apply, store the XML "
+                    + "in the record with kicad_design_candidate_commit first. Do not answer again: the XML already answers these symbols.",
+                designSha256 = sha256, answeredSymbols, synchronizationConflict = conflict,
+                designFileWritten = true, recoveryDesiredUpdated = false, nativeMutationAuthorized = false, synchronizationAdvanced = false
+            }, web);
+            return new CallToolResult { IsError = true, Content = [new TextContentBlock { Text = partial.GetRawText() }], StructuredContent = partial };
+        }
         var data = JsonSerializer.SerializeToElement(new
         {
             instanceId = saved.State.InstanceId, recoveryRevisionToken = written.RevisionToken, designSha256 = sha256,
-            answeredSymbols = answered.DeclaredSymbols.Select(native =>
-            {
-                var binding = answered.Answered.SymbolBindings.Single(b => b.NativeObjectId == native
-                    && adoption.AnsweredOccurrences.Contains(b.SymbolOccurrenceId));
-                var occurrence = circuit.Symbols.Single(s => s.Id == binding.SymbolOccurrenceId);
-                var component = circuit.Components.Single(c => c.Id == occurrence.ComponentId);
-                var definition = circuit.Sheets.SelectMany(s => s.Components).Single(d => d.Id == component.DefinitionId);
-                return new { nativeObjectId = native, occurrenceId = occurrence.Id, componentId = component.Id, partId = definition.PartId,
-                    occurrence.Unit, component.Reference };
-            }).ToArray(),
+            answeredSymbols, synchronizationConflict = conflict,
             designFileWritten = true, recoveryDesiredUpdated = true, nativeMutationAuthorized = false, synchronizationAdvanced = false
-        }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        }, web);
         return new CallToolResult { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
     });
 

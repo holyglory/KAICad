@@ -8,10 +8,12 @@ internal sealed record SchematicOwnershipHistory(DesignSynchronizationReceipt Re
 
 internal static class SchematicOwnershipHistoryReader
 {
-    /// <summary>The design was never synchronized, so no retained XML can know an earlier owner of anything KiCad shows.</summary>
+    /// <summary>The design was never synchronized (no synchronization in the record, and none of this instance archived at
+    /// its path), so no retained XML can know an earlier owner of anything KiCad shows.</summary>
     internal const string NeverSynchronized = "missing_native_ownership_history";
-    /// <summary>Synchronizations happened, but no retained XML is content-verified for this circuit and document: an
-    /// earlier owner may exist that cannot be read, so nothing may be treated as new.</summary>
+    /// <summary>Synchronizations happened, but no retained XML is content-verified for this circuit and document, or they
+    /// are archived at the path of a record that has not synchronized itself: an earlier owner may exist that cannot be
+    /// read, so nothing may be treated as new.</summary>
     internal const string Unverified = "unverified_native_ownership_history";
 
     /// <summary>The history that decides whether a symbol KiCad shows is new, as planning reads it: none for a design never
@@ -28,9 +30,16 @@ internal static class SchematicOwnershipHistoryReader
         DesignRecoveryState state, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
+        var archived = new DesignSynchronizationReceipts(store.StatePath).ReadAll();
+        // Never synchronized means no synchronization of this instance at all, not only none in this record: a record created
+        // again at the same path keeps the receipts of the synchronizations before it, and a symbol an undo brings back from
+        // them is not new. Their history cannot be tied to this record, so it fails closed as unverified.
         var latest = state.LastSynchronization
-            ?? throw new AutomationException(NeverSynchronized, "No completed synchronization identifies this design's retained history.");
-        var receipts = new DesignSynchronizationReceipts(store.StatePath).ReadAll().ToDictionary(r => r.OperationId);
+            ?? throw (archived.Any(r => r.InstanceId == state.InstanceId)
+                ? new AutomationException(Unverified, "This recovery record has not synchronized, but earlier synchronizations of this "
+                    + "instance are archived beside it; their retained XML cannot be tied to this record, so no symbol KiCad shows is taken for new.")
+                : new AutomationException(NeverSynchronized, "No completed synchronization identifies this design's retained history."));
+        var receipts = archived.ToDictionary(r => r.OperationId);
         if (receipts.TryGetValue(latest.OperationId, out var copy)
             && JsonSerializer.Serialize(copy) != JsonSerializer.Serialize(latest))
             throw new AutomationException("sync_receipt_conflict", "The current and archived synchronization receipts disagree.");

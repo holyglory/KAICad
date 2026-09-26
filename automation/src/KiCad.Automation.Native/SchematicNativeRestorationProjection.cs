@@ -383,14 +383,28 @@ public static class SchematicNativeAdditionProjection
                     return Failure("native_addition_incomplete", "A symbol placed in KiCad needs its identity, definition, unit and reference to be adopted.");
                 var pins = Pins(symbol);
                 int units = checked((int)symbol.Definition.UnitCount);
-                additions.Add(new(path, symbol, nativeId, sheet.SheetInstanceId, LibraryKey(symbol), pins, units, Signature(units, pins),
-                    AdoptedIdentity("component", keptCircuit.Id, PathOf(path), nativeId)));
+                string library = LibraryKey(symbol);
+                additions.Add(new(path, symbol, nativeId, sheet.SheetInstanceId, library, pins, units, Signature(units, pins),
+                    AdoptedIdentity("component", keptCircuit.Id, PathOf(path), nativeId), AdoptedPartIdentity(keptCircuit.Id, library, units, pins)));
             }
             var byKey = additions.ToDictionary(a => a.Key, StringComparer.Ordinal);
             SchematicOwnershipResolutionRequest Request(Addition addition, string code, IReadOnlyList<Guid> candidateParts,
                 IReadOnlyList<Guid> candidateComponents, string reason) =>
                 new(code, addition.NativeId, addition.Path, addition.Sheet, addition.Reference, addition.Library, addition.Unit,
                     candidateParts, candidateComponents, reason, addition.Proposed);
+
+            // The parts a symbol can be, exactly as its request offers them: the existing parts drawn or declared with the
+            // library symbol KiCad draws and with exactly its units and pins, and the part that library symbol already made
+            // for an earlier adoption. With none, the symbol makes that part (DerivedPart).
+            List<Guid> PartChoices(Addition addition)
+            {
+                var choices = keptCircuit.Parts.Where(p => evidence.TryGetValue(p.Id, out var libraries) && libraries.Contains(addition.Library)
+                    && Signature(p.Units, p.Pins) == addition.Signature).Select(p => p.Id).ToList();
+                if (parts.TryGetValue(addition.DerivedPart, out var earlier) && Signature(earlier.Units, earlier.Pins) == addition.Signature
+                    && !choices.Contains(addition.DerivedPart))
+                    choices.Add(addition.DerivedPart);
+                return choices;
+            }
 
             // Answers the saved XML declares: occurrences it binds to these symbols, taken exactly as declared.
             var declarations = new Dictionary<string, Declaration>(StringComparer.Ordinal);
@@ -403,6 +417,9 @@ public static class SchematicNativeAdditionProjection
                 var dParts = dc.Parts.ToDictionary(p => p.Id);
                 var dSymbols = dc.Symbols.ToDictionary(s => s.Id);
                 var dPaths = declared.SheetBindings.ToDictionary(b => b.SheetInstanceId, b => SchematicDesignBindings.PathKey(b.NativePath));
+                // The library symbol the XML declares for each part it adds.
+                var dLibraries = (declared.PartSymbols ?? []).Where(s => !parts.ContainsKey(s.PartId))
+                    .ToDictionary(s => s.PartId, s => LibraryKey(s.LibraryId));
                 foreach (var binding in declared.SymbolBindings.Where(b => !known.Contains(b.SymbolOccurrenceId)))
                 {
                     token.ThrowIfCancellationRequested();
@@ -416,8 +433,13 @@ public static class SchematicNativeAdditionProjection
                         return Failure(AnswerMismatch, $"The XML binds two occurrences to symbol {addition.Reference} ({addition.NativeId:D}); bind each symbol once.");
                     var (sheetDefinition, definition) = dDefinitions[component.DefinitionId];
                     var part = dParts[definition.PartId];
+                    // The part must be one the request could offer: an existing part drawn or declared with the library symbol
+                    // KiCad draws, the part that library symbol makes, or a part the XML adds and declares with that library symbol.
+                    bool drawnWith = parts.ContainsKey(part.Id) ? PartChoices(addition).Contains(part.Id)
+                        : part.Id == addition.DerivedPart || dLibraries.TryGetValue(part.Id, out var library) && library == addition.Library;
                     string? problem = Signature(part.Units, part.Pins) != addition.Signature
                             ? $"part {part.Name}, whose units and pins are not those of the library symbol {addition.Library} KiCad draws"
+                        : !drawnWith ? $"part {part.Name}, which is not drawn or declared with the library symbol {addition.Library} KiCad draws"
                         : occurrence.Unit != addition.Unit ? $"unit {occurrence.Unit}, but KiCad shows unit {addition.Unit}"
                         : component.Reference != addition.Reference ? $"reference {component.Reference}, but KiCad shows {addition.Reference}"
                         : definition.Value != addition.Value ? $"value {definition.Value}, but KiCad shows {addition.Value}"
@@ -458,20 +480,20 @@ public static class SchematicNativeAdditionProjection
             {
                 token.ThrowIfCancellationRequested();
                 answerBy.TryGetValue(addition.Key, out var answer);
+                var candidates = PartChoices(addition);
+                Guid derived = addition.DerivedPart;
                 if (answer?.PartId is Guid chosen)
                 {
-                    if (!parts.TryGetValue(chosen, out var part) || Signature(part.Units, part.Pins) != addition.Signature)
-                        return Failure(AnswerInvalid, $"Part {chosen:D} is not a part of this design with exactly the units and pins of the library symbol "
-                            + $"{addition.Library} KiCad draws for {addition.Reference}; choose one of the request's candidate parts.");
-                    decided.Add(new(addition, chosen, null, answer));
-                    continue;
+                    // Only a part the request offers, or the part the symbol would be anyway: an answer never overrides a part
+                    // exact identities decide, and never makes the symbol a part drawn with another library symbol.
+                    if (!(candidates.Count == 0 ? chosen == derived : candidates.Contains(chosen)))
+                        return Failure(AnswerInvalid, $"Part {chosen:D} is not one of the parts {addition.Reference} ({addition.NativeId:D}) can be: "
+                            + $"a part drawn or declared with the library symbol {addition.Library} KiCad draws, with exactly its units and pins"
+                            + (candidates.Count == 0 ? $", of which this design has none, so the answer is the new part {derived:D}"
+                                : $" ({string.Join(", ", candidates.Order().Select(c => c.ToString("D")))})")
+                            + "; choose one of the request's candidate parts.");
+                    if (candidates.Count > 1) candidates = [chosen];
                 }
-                var candidates = keptCircuit.Parts.Where(p => evidence.TryGetValue(p.Id, out var libraries) && libraries.Contains(addition.Library)
-                    && Signature(p.Units, p.Pins) == addition.Signature).Select(p => p.Id).ToList();
-                Guid derived = AdoptedPartIdentity(keptCircuit.Id, addition.Library, addition.Units, addition.Pins);
-                if (parts.TryGetValue(derived, out var earlier) && Signature(earlier.Units, earlier.Pins) == addition.Signature
-                    && !candidates.Contains(derived))
-                    candidates.Add(derived);
                 if (candidates.Count > 1)
                 {
                     requests.Add(Request(addition, PartAmbiguous, [.. candidates.Order()], [],
@@ -729,8 +751,9 @@ public static class SchematicNativeAdditionProjection
         catch (AutomationException) { return false; }
     }
 
+    // DerivedPart is the part this library symbol makes when no part of the design is drawn with it.
     private sealed record Addition(string Path, SchematicSymbolInstance Symbol, Guid NativeId, Guid Sheet, string Library,
-        IReadOnlyList<PartPin> Pins, int Units, string Signature, Guid Proposed)
+        IReadOnlyList<PartPin> Pins, int Units, string Signature, Guid Proposed, Guid DerivedPart)
     {
         public string Key => Path + "#" + NativeId.ToString("D");
         public int Unit => Symbol.Unit.Unit;

@@ -14,7 +14,8 @@ public sealed partial class NativeSessionTests
     // Shared PSU/CPU acceptance journey (psu-cpu-fixture-and-ownership.md §1.9), lane 2C, ledger p74ee7c1da24272d9: native
     // edits reach the owning block by exact identity. From the S1 seed the Components stage is created through the public
     // layout, plan and apply tools of the production MCP server over STDIO. Then, as a person works in KiCad and in the XML:
-    //  The XML also declares a second part, R_sense, drawn with the same library resistor as the fixture's R.
+    //  The XML also declares a second part, R_sense, drawn with the same library resistor as the fixture's R, and a part C with
+    //  exactly the resistor's pins but declared with a capacitor's library symbol.
     //  1. The automatic worker starts with the fixture's block graph. Every component is owned, so nothing is written.
     //  2. Connectors placed in KiCad on three sheets become XML components whose identities derive from the circuit, the
     //     sheet path and the symbol's own UUID, of the fixture's connector part (the only part drawn or declared with that
@@ -26,8 +27,9 @@ public sealed partial class NativeSessionTests
     //  3. An instruction the XML adds to J4 is kept as a detached instruction when undo in KiCad removes it, and is attached
     //     again when redo restores it with the same identities; its Processor binding stays throughout.
     //  4. A resistor placed in KiCad beside the processor's power unit could be the fixture's R or R_sense: the worker pauses
-    //     with the resolution request and publishes nothing (ledger p35cfdc0345e056a5). An answer that is not one of the
-    //     request's choices is refused. The person answers R_sense with kicad_design_ownership_answer, which declares R2 in
+    //     with the resolution request and publishes nothing (ledger p35cfdc0345e056a5). Answers that are not among the
+    //     request's choices are refused: a part with other pins, and C, whose pins match but whose library symbol does not
+    //     (KiCad draws a resistor). The person answers R_sense with kicad_design_ownership_answer, which declares R2 in
     //     the saved XML, and resumes: the worker adopts R2 as R_sense with the identities the request proposed and binds it to
     //     Processor. A repeat plan changes nothing; undo in KiCad takes R2 out and redo brings it back as the same R_sense
     //     component.
@@ -77,10 +79,14 @@ public sealed partial class NativeSessionTests
         var components = PsuCpuFixture.Desired(context, PsuCpuStage.Components);
         var fixtureR = components.Engineering.Circuit.Parts.Single(p => p.Id == PsuCpuIds.Id(0x03, 3));
         var sense = fixtureR with { Id = Guid.NewGuid(), Name = "R_sense" };
+        var capacitor = fixtureR with { Id = Guid.NewGuid(), Name = "C" };
+        var resistorSymbol = context.PartSymbols.Single(p => p.PartId == fixtureR.Id);
         saved = await Desire(saved, components with
         {
-            Engineering = components.Engineering with { Circuit = components.Engineering.Circuit with { Parts = [.. components.Engineering.Circuit.Parts, sense] } },
-            PartSymbols = [.. components.PartSymbols!, context.PartSymbols.Single(p => p.PartId == fixtureR.Id) with { PartId = sense.Id }]
+            Engineering = components.Engineering with { Circuit = components.Engineering.Circuit with
+                { Parts = [.. components.Engineering.Circuit.Parts, sense, capacitor] } },
+            PartSymbols = [.. components.PartSymbols!, resistorSymbol with { PartId = sense.Id },
+                resistorSymbol with { PartId = capacitor.Id, LibraryId = new() { LibraryNickname = "Device", EntryName = "C" } }]
         });
         var layout = await host.Tool("kicad_design_propose_initial_layout", new { instanceId, recoveryPath = store.StatePath,
             expectedRevisionToken = saved.RevisionToken, gridNm = 1_270_000L, clearanceNm = 2_540_000L, pageInsetNm = 0L, regions,
@@ -92,12 +98,13 @@ public sealed partial class NativeSessionTests
         var creation = await Plan("creation-plan");
         Assert.AreEqual(expected.Symbols.Count, Operations(creation).Count(o => o.Create?.Is(SchematicSymbolInstance.Descriptor) == true));
         await Apply("creation", mutation: true);
-        // KiCad shows exactly the Components stage; the XML's unused R_sense part draws nothing.
+        // KiCad shows exactly the Components stage; the XML's unused R_sense and C parts draw nothing.
         var created = store.Read()!.State.Baseline;
-        Assert.IsTrue(created.Engineering.Circuit.Parts.Any(p => p.Id == sense.Id));
+        Assert.IsTrue(created.Engineering.Circuit.Parts.Any(p => p.Id == sense.Id) && created.Engineering.Circuit.Parts.Any(p => p.Id == capacitor.Id));
+        bool Unused(Guid part) => part == sense.Id || part == capacitor.Id;
         PsuCpuFixture.AssertNative(created with { Engineering = created.Engineering with { Circuit = created.Engineering.Circuit with
-            { Parts = [.. created.Engineering.Circuit.Parts.Where(p => p.Id != sense.Id)] } },
-            PartSymbols = [.. created.PartSymbols!.Where(p => p.PartId != sense.Id)] }, (await Capture()).Electrical, PsuCpuStage.Components);
+            { Parts = [.. created.Engineering.Circuit.Parts.Where(p => !Unused(p.Id))] } },
+            PartSymbols = [.. created.PartSymbols!.Where(p => !Unused(p.PartId))] }, (await Capture()).Electrical, PsuCpuStage.Components);
         string blocksAtStart = await BlocksSha();
         Step("components created");
 
@@ -267,15 +274,21 @@ public sealed partial class NativeSessionTests
             && i.Unpack<SchematicSymbolInstance>().Id.Value == r2.Id.Value), "KiCad keeps the person's symbol.");
         object Answer(Guid part) => new { instanceId, recoveryPath = store.StatePath, expectedRevisionToken = store.Read()!.RevisionToken,
             designPath = path, answers = new[] { new { nativeObjectId = r2Native, partId = part } } };
-        // A part that is not one of the choices (the regulator's) is refused, and nothing is written.
+        // Parts that are not among the choices are refused, and nothing is written: the regulator's (other pins) and C (the
+        // resistor's pins, but declared with a capacitor's library symbol, while KiCad draws a resistor).
         var refused = await host.Tool("kicad_design_ownership_answer", Answer(PsuCpuIds.Id(0x03, 2)));
         await File.WriteAllTextAsync(Evidence("answer-refused.json"), refused.GetRawText(), token);
         Assert.AreEqual(SchematicNativeAdditionProjection.AnswerInvalid, Error(refused), refused.GetRawText());
+        var refusedCapacitor = await host.Tool("kicad_design_ownership_answer", Answer(capacitor.Id));
+        await File.WriteAllTextAsync(Evidence("answer-refused-library.json"), refusedCapacitor.GetRawText(), token);
+        Assert.AreEqual(SchematicNativeAdditionProjection.AnswerInvalid, Error(refusedCapacitor), refusedCapacitor.GetRawText());
         CollectionAssert.AreEqual(beforeAmbiguous, await File.ReadAllBytesAsync(path, token), "A refused answer writes nothing.");
         // The person answers: R2 is an R_sense.
         var answer = await host.Tool("kicad_design_ownership_answer", Answer(sense.Id));
         await File.WriteAllTextAsync(Evidence("answer.json"), answer.GetRawText(), token);
         RequireToolSuccess(answer);
+        Assert.AreEqual(JsonValueKind.Null, answer.GetProperty("structuredContent").GetProperty("synchronizationConflict").ValueKind,
+            "The plan the worker will make, checked before writing, adopts R2 and finds nothing else to stop at.");
         var answeredSymbol = answer.GetProperty("structuredContent").GetProperty("answeredSymbols").EnumerateArray().Single();
         Assert.AreEqual(r2Native, answeredSymbol.GetProperty("nativeObjectId").GetGuid());
         Assert.AreEqual(r2Component, answeredSymbol.GetProperty("componentId").GetGuid());
@@ -469,6 +482,7 @@ public sealed partial class NativeSessionTests
             undoRedo = new { instructionDetachedOnUndo = true, instructionAttachedOnRedo = true, sameIdentitiesAfterRedo = true, blockBindingKept = true },
             undecidablePart = new { pausedWith = SchematicNativeAdditionProjection.ResolutionRequired, candidates = new[] { fixtureR.Id, sense.Id },
                 publishedWhileUndecided = false, refusedAnswer = SchematicNativeAdditionProjection.AnswerInvalid,
+                refusedParts = new { otherPins = PsuCpuIds.Id(0x03, 2), otherLibrarySymbol = capacitor.Id },
                 answeredWith = SchematicNativeAdditionProjection.AnswerTool, answeredPart = sense.Id, component = r2Component, occurrence = r2Occurrence,
                 owner = "Processor", workerResumedAndPublished = true, repeatNoOp = true, undoRemoves = true, redoRestoresAnsweredPart = true },
             firstSynchronization = new { neverSynchronizedRecord = true, component = j5Component, occurrence = j5Occurrence, part = PsuCpuIds.Id(0x03, 1),

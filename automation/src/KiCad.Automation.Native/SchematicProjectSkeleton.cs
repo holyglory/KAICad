@@ -10,9 +10,18 @@ namespace KiCad.Automation.Native;
 
 public sealed record SchematicProjectSheet(Guid Id, string Name);
 
-public sealed record SchematicProjectSkeleton(string ProjectFile, Guid RootSheetId,
-    string ProjectName, IReadOnlyList<SchematicProjectSheet> Sheets)
+/// <summary>The derived project entries needed to open a missing schematic root.
+/// Captured project settings are restored later by the native rebuild, not inferred here.</summary>
+public sealed class SchematicProjectSkeleton
 {
+    private SchematicProjectSkeleton(string projectFile, Guid rootSheetId, string projectName,
+        IReadOnlyList<SchematicProjectSheet> sheets)
+    { ProjectFile = projectFile; RootSheetId = rootSheetId; ProjectName = projectName; Sheets = sheets; }
+
+    public string ProjectFile { get; }
+    public Guid RootSheetId { get; }
+    public string ProjectName { get; }
+    public IReadOnlyList<SchematicProjectSheet> Sheets { get; }
     public static SchematicProjectSkeleton FromHierarchy(SchematicHierarchyData hierarchy,
         string? expectedProjectFile = null, CancellationToken cancellationToken = default)
     {
@@ -22,7 +31,9 @@ public sealed record SchematicProjectSkeleton(string ProjectFile, Guid RootSheet
             throw new AutomationException("invalid_project_skeleton", "The schematic hierarchy is not valid enough to reconstruct its project file.");
         var declaredDocument = hierarchy.Document ?? throw new AutomationException("invalid_project_skeleton", "The hierarchy must declare a project document.");
         var project = declaredDocument.Project;
-        if (project is null || string.IsNullOrWhiteSpace(project.Name) || project.Name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0
+        if (declaredDocument.Type != DocumentType.DoctypeSchematic
+            || project is null || string.IsNullOrWhiteSpace(project.Name) || project.Name is "." or ".."
+            || project.Name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0
             || project.Name.Contains('/') || project.Name.Contains('\\') || project.Name.Contains('\0')
             || !Path.IsPathFullyQualified(project.Path) || !Directory.Exists(project.Path))
             throw new AutomationException("invalid_project_skeleton", "The XML must identify one absolute existing project directory and a safe project name.");
@@ -51,7 +62,7 @@ public sealed record SchematicProjectSkeleton(string ProjectFile, Guid RootSheet
 
         var ordered = new List<SchematicProjectSheet> { new(rootId, project.Name) };
         ordered.AddRange(sheets.Values.Where(s => s.Id != rootId).OrderBy(s => s.Id));
-        return new(projectFile, rootId, project.Name, ordered);
+        return new(projectFile, rootId, project.Name, ordered.AsReadOnly());
     }
 
     public byte[] JsonBytes()
@@ -72,17 +83,24 @@ public sealed record SchematicProjectSkeleton(string ProjectFile, Guid RootSheet
         return Encoding.UTF8.GetBytes(root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }) + "\n");
     }
 
-    public bool CreateIfMissing(string? authoritativeProjectFile = null)
+    public bool CreateIfMissing(string authoritativeProjectFile)
     {
-        string path = Path.GetFullPath(authoritativeProjectFile ?? ProjectFile);
+        if (!Path.IsPathFullyQualified(authoritativeProjectFile))
+            throw new AutomationException("project_identity_mismatch", "The authoritative project file path must be absolute.");
+        string path = Path.GetFullPath(authoritativeProjectFile);
         if (!PathEquals(path, ProjectFile))
             throw new AutomationException("project_identity_mismatch", "The requested project file does not match the XML project identity.");
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        if (!Directory.Exists(Path.GetDirectoryName(path)))
+            throw new AutomationException("project_directory_missing", "Restore the original project directory before creating its project file.");
         if (File.Exists(path)) return false;
         string temporary = path + ".codex-skeleton-" + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            File.WriteAllBytes(temporary, JsonBytes());
+            using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                output.Write(JsonBytes());
+                output.Flush(flushToDisk: true);
+            }
             File.Move(temporary, path, overwrite: false);
             return true;
         }
@@ -94,5 +112,5 @@ public sealed record SchematicProjectSkeleton(string ProjectFile, Guid RootSheet
 
     private static bool PathEquals(string first, string second) =>
         string.Equals(Path.GetFullPath(first), Path.GetFullPath(second),
-            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+            OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
 }

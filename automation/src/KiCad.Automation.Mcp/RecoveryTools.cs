@@ -223,27 +223,44 @@ public sealed class RecoveryTools
     });
 
     [McpServerTool(Name = "kicad_project_recovery_create", ReadOnly = false),
-     Description("Create the minimal .kicad_pro project skeleton required before starting KiCad when the project file is missing. Reads the settled XML recovery baseline, derives the absolute project identity, root top-level sheet and child sheet list, and creates the file atomically only when absent. Existing project files are never replaced. Requires the exact recovery revision token and optional expectedProjectFile path; after this tool succeeds, start KiCad with kicad_instance_start and create/reattach the missing schematic root before planning the rebuild. This creates only the project container; it does not reconstruct schematic files or board/CVPCB settings."),
-     KiCadCapability("schematic-design", "compiled-mcp", "absolute recovery path and revision token"),
-     KiCadVerification(KiCadVerificationLevel.NativeJourney, "SchematicProjectSkeletonTests.ExtractsDerivedProjectEntriesAndCreatesMissingFileWithoutReplacement")]
+     Description("Restore the missing .kicad_pro container for an instance whose registered KiCad process has ended. Requires the exact recovery revision token and settled XML with no pending synchronization. Derives the root and sheet entries from that XML, validates the destination against the instance registry, and creates the file atomically only when absent. Existing project files are preserved. Returns the hash of the observed project file and whether it was created. Next start KiCad, create its missing schematic root and reattach the recovery record before applying the rebuild. This creates the project container only; schematic reconstruction remains a separate operation and board-only settings are not restored."),
+     KiCadCapability("schematic-design", "compiled-mcp", "registered stopped instance, recovery revision token"),
+     KiCadVerification(KiCadVerificationLevel.InProcess, "SchematicProjectSkeletonTests.ExtractsDerivedProjectEntriesAndCreatesMissingFileWithoutReplacement")]
     public Task<CallToolResult> CreateProjectSkeleton(string instanceId, string recoveryPath, string expectedRevisionToken,
-        string? expectedProjectFile = null, CancellationToken cancellationToken = default) => ExecuteAsync(() =>
+        string? expectedProjectFile = null, CancellationToken cancellationToken = default) => ExecuteAsync(async () =>
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var (store, saved) = Read(instanceId, recoveryPath);
-        if (saved.RevisionToken != expectedRevisionToken)
-            throw new AutomationException("design_recovery_changed", "Recovery changed; inspect the current record before creating the project skeleton.");
-        var skeleton = SchematicProjectSkeleton.FromHierarchy(saved.State.Baseline.Schematic, expectedProjectFile, cancellationToken);
-        bool created = skeleton.CreateIfMissing(expectedProjectFile);
-        var data = JsonSerializer.SerializeToElement(new
+        var (store, _) = ReadAtRevision(instanceId, recoveryPath, expectedRevisionToken);
+        if (registry is null)
+            throw new AutomationException("instance_not_attached", "Use the production server's saved instance registry for project recovery.");
+        return await registry.WithStoppedProjectAsync(instanceId, record =>
         {
-            instanceId = saved.State.InstanceId, recoveryRevisionToken = saved.RevisionToken,
-            projectFile = skeleton.ProjectFile, created, jsonSha256 = skeleton.JsonSha256(),
-            rootSheetId = skeleton.RootSheetId, projectName = skeleton.ProjectName, sheets = skeleton.Sheets
-        });
-        if (store.Read()?.RevisionToken != saved.RevisionToken)
-            throw new AutomationException("design_recovery_changed", "Recovery changed while creating the project skeleton; inspect it before continuing.");
-        return Task.FromResult(new CallToolResult { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data });
+            // The same locks used by synchronization and record writers protect validation through rename.
+            using var synchronization = new DesignSynchronizationReceipts(store.StatePath).Acquire();
+            using var ownership = new FileStream(store.StatePath + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            var saved = store.Read() ?? throw new AutomationException("missing_design_recovery", "No saved recovery record exists.");
+            if (saved.RevisionToken != expectedRevisionToken)
+                throw new AutomationException("design_recovery_changed", "Recovery changed; inspect the current record before creating the project.");
+            if (saved.State.HasPendingWork || DesignReleasedOperations.OpenOn(store.StatePath, saved.State).Count != 0)
+                throw new AutomationException("pending_recovery_requires_reconciliation", "Resolve the pending synchronization before restoring the project container.");
+            var desired = DesignRecoveryStore.ReadDesired(saved.State);
+            if (SchematicDesignXml.Write(desired, saved.State.KnowledgeLibraries)
+                != SchematicDesignXml.Write(saved.State.Baseline, saved.State.KnowledgeLibraries))
+                throw new AutomationException("rebuild_requires_settled_xml", "Restore from the XML last synchronized with KiCad, then apply newer changes.");
+            var skeleton = SchematicProjectSkeleton.FromHierarchy(saved.State.Baseline.Schematic, record.ProjectPath, cancellationToken);
+            if (expectedProjectFile is not null)
+                _ = SchematicProjectSkeleton.FromHierarchy(saved.State.Baseline.Schematic, expectedProjectFile, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            bool created = skeleton.CreateIfMissing(record.ProjectPath);
+            var data = JsonSerializer.SerializeToElement(new
+            {
+                instanceId = saved.State.InstanceId, recoveryRevisionToken = saved.RevisionToken,
+                projectFile = skeleton.ProjectFile, created,
+                observedFileSha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(skeleton.ProjectFile))),
+                rootSheetId = skeleton.RootSheetId, projectName = skeleton.ProjectName, sheets = skeleton.Sheets
+            });
+            return new CallToolResult { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+        }, cancellationToken);
     });
 
     [McpServerTool(Name = "kicad_design_block_owners_plan", ReadOnly = true),

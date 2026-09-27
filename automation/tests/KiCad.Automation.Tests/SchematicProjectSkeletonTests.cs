@@ -31,9 +31,9 @@ public sealed class SchematicProjectSkeletonTests
             Assert.AreEqual(Path.Combine(directory, "fixture.kicad_pro"), skeleton.ProjectFile);
             Assert.AreEqual(root, skeleton.RootSheetId);
             Assert.AreSequenceEqual(new[] { "fixture", "Child" }, skeleton.Sheets.Select(s => s.Name).ToArray());
-            Assert.IsTrue(skeleton.CreateIfMissing());
+            Assert.IsTrue(skeleton.CreateIfMissing(skeleton.ProjectFile));
             byte[] first = File.ReadAllBytes(skeleton.ProjectFile);
-            Assert.IsFalse(skeleton.CreateIfMissing());
+            Assert.IsFalse(skeleton.CreateIfMissing(skeleton.ProjectFile));
             CollectionAssert.AreEqual(first, File.ReadAllBytes(skeleton.ProjectFile));
             var json = JsonNode.Parse(first)!.AsObject();
             Assert.AreEqual("fixture.kicad_pro", json["meta"]!["filename"]!.GetValue<string>());

@@ -661,8 +661,10 @@ public sealed partial class NativeSessionTests
             CollectionAssert.AreEqual(rebuiltXml, await File.ReadAllBytesAsync(path, token), "A second rebuild leaves the XML untouched.");
 
             // One native undo takes the whole rebuild back to the empty root, identity included; redo restores it exactly.
+            await File.WriteAllTextAsync(Evidence("history-expected.json"), SchematicJson.Formatter.Format(rebuilt), token);
             await FocusedSchematicShortcut(client, document, processId, display, "z", token);
             var undone = await Until("native undo", s => s.Electrical.Hierarchy.Data.Instances.Count == 1);
+            await File.WriteAllTextAsync(Evidence("history-undone.json"), SchematicJson.Formatter.Format(undone), token);
             Assert.AreEqual(emptyRoot.Metadata.ScreenId.Value, undone.Electrical.Hierarchy.Data.Instances[0].Metadata.ScreenId.Value,
                 "Undo returns the root to the identity KiCad gave it.");
             Assert.IsEmpty(undone.Electrical.Hierarchy.Data.Instances[0].Items);
@@ -1095,17 +1097,21 @@ public sealed partial class NativeSessionTests
         async Task<CheckedSchematicState> Until(string what, Func<CheckedSchematicState, bool> reached)
         {
             using var wait = CancellationTokenSource.CreateLinkedTokenSource(token); wait.CancelAfter(TimeSpan.FromSeconds(20));
+            CheckedSchematicState? last = null;
             while (true)
             {
                 try
                 {
-                    var state = await Capture();
+                    var state = last = await Capture();
                     if (reached(state)) return state;
                 }
                 catch (NativeApiException error) when (error.Status is 4 or 7) { }
                 try { await Task.Delay(250, wait.Token); }
                 catch (OperationCanceledException) when (!token.IsCancellationRequested)
                 {
+                    if (last is not null)
+                        await File.WriteAllTextAsync(Evidence(what.Replace(' ', '-') + "-actual.json"),
+                            SchematicJson.Formatter.Format(last), token);
                     throw new AssertFailedException(what + " was not reached within 20 s.");
                 }
             }

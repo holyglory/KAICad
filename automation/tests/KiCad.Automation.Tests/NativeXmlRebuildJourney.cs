@@ -552,7 +552,7 @@ public sealed partial class NativeSessionTests
                 new SchematicItemOperation { TargetDocument = document.Clone(), SetTitleBlock = emptyRoot.Metadata.TitleBlock?.Clone() ?? new TitleBlockInfo() },
                 Identity(originalRootScreen)));
             refusals.Add(await RefusedIdentity(restored, "canonical", Identity(originalRootScreen.ToUpperInvariant())));
-            refusals.Add(await RefusedIdentity(restored, "Only an empty root can adopt a screen identity", Identity(originalRootScreen),
+            refusals.Add(await RefusedIdentity(restored, "Atomic operation 1 rejected", Identity(originalRootScreen),
                 new SchematicItemOperation { TargetDocument = document.Clone(), Update = Any.Pack(probeLabel) }));
 
             saved = store.Read()!;

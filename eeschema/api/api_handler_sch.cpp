@@ -273,7 +273,20 @@ std::optional<std::string> API_HANDLER_SCH::ScreenIdentityRefusal( SCHEMATIC& aS
     if( screen->GetFileFormatVersionAtLoad() > 0 || screen->FileExists()
             || ( !screen->GetFileName().IsEmpty() && file.FileExists() ) )
         return std::string( "Only a root that was never loaded from or saved to a file can adopt a screen identity" );
-    if( !screen->Items().empty() || !screen->GetLibSymbols().empty() )
+    // ERC markers are diagnostics, excluded from the screen's saved item snapshot.
+    // Clearing a saved exclusion leaves its marker as a non-excluded diagnostic;
+    // it does not make this newly created root a populated schematic. Keep the
+    // marker untouched here; typed ERC operations own its exclusion state.
+    bool hasNonMarkerItem = false;
+    for( SCH_ITEM* item : screen->Items() )
+    {
+        if( item->Type() != SCH_MARKER_T )
+        {
+            hasNonMarkerItem = true;
+            break;
+        }
+    }
+    if( hasNonMarkerItem || !screen->GetLibSymbols().empty() )
         return std::string( "Only an empty root can adopt a screen identity" );
     for( const SCH_SHEET_PATH& path : aSchematic.Hierarchy() )
     {

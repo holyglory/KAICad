@@ -258,6 +258,7 @@ void SCH_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList )
     SCH_CLEANUP_FLAGS      connectivityCleanUp = NO_CLEANUP;
     SCH_SHEET_LIST         sheets= m_schematic->Hierarchy();
     bool                   clearedRepeatItems = false;
+    std::vector<std::pair<DS_PROXY_UNDO_ITEM*, SCH_SCREEN*>> deferredPageSettings;
 
     std::map<SCH_LIBRARY_CACHE_UNDO_ITEM*, SCH_SYMBOL_CACHE_STATE> cacheBefore;
     std::vector<std::unique_ptr<SCH_SYMBOL_CACHE_EDIT_SCOPE>> cacheScopes;
@@ -375,53 +376,9 @@ void SCH_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList )
         }
         else if( status == UNDO_REDO::PAGESETTINGS )
         {
-            if( GetCurrentSheet() != undoSheet )
-            {
-                SetCurrentSheet( undoSheet );
-                DisplayCurrentSheet();
-            }
-
-            // swap current settings with stored settings
-            DS_PROXY_UNDO_ITEM* item = static_cast<DS_PROXY_UNDO_ITEM*>( eda_item );
-            auto* allPages = dynamic_cast<SCH_PAGE_SETTINGS_UNDO_ITEM*>( item );
-
-            if( allPages && allPages->IncludesOnlyErc() )
-            {
-                // An ERC edit changed no page, title block, drawing sheet or hierarchy: restore
-                // only the ERC settings and markers.  Rebuilding the drawing sheet or the
-                // hierarchy here could overwrite state this entry never recorded.
-                SCH_PAGE_SETTINGS_UNDO_ITEM alternate( this );
-                alternate.CopyProjectSettingsScope( *allPages );
-                allPages->RestoreErc( this, &alternate );
-                *allPages = std::move( alternate );
-            }
-            else if( allPages )
-            {
-                if( !allPages->BusAliasesMatch( Schematic() ) || !allPages->TextVariablesMatch( this )
-                        || allPages->IncludesNetChains() || allPages->IncludesSetup()
-                        || allPages->IncludesNetSettings() )
-                {
-                    dirtyConnectivity = true;
-                    connectivityCleanUp = GLOBAL_CLEANUP;
-                }
-                SCH_PAGE_SETTINGS_UNDO_ITEM alternate( this );
-                netSettingsChanged |= allPages->IncludesNetSettings();
-                alternate.CopyProjectSettingsScope( *allPages );
-                // ERC markers the restoration deletes or rebuilds are recorded in the opposite
-                // entry by identity, so it can reverse them without a marker pointer.
-                allPages->RestoreAll( this, false, &alternate );
-                *allPages = std::move( alternate );
-                refreshHierarchy = true;
-                rebuildHierarchyNavigator = true;
-            }
-            else
-            {
-                DS_PROXY_UNDO_ITEM alternate( this );
-                item->Restore( this );
-                *item = std::move( alternate );
-                refreshHierarchy = true;
-                rebuildHierarchyNavigator = true;
-            }
+            // Restore page/project settings after graphical entries have reattached child sheets.
+            // ERC exclusions with nested paths otherwise cannot resolve during redo.
+            deferredPageSettings.emplace_back( static_cast<DS_PROXY_UNDO_ITEM*>( eda_item ), screen );
         }
         else if( status == UNDO_REDO::REPEAT_ITEM )
         {
@@ -527,6 +484,52 @@ void SCH_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList )
             if( schItem != &Schematic().Root() )
                 AddToScreen( schItem, screen );
         }
+    }
+
+    if( refreshHierarchy )
+        Schematic().RefreshHierarchy();
+
+    for( const auto& [item, screen] : deferredPageSettings )
+    {
+        sheets = m_schematic->Hierarchy();
+        SCH_SHEET_PATH undoSheet = screen ? sheets.FindSheetForScreen( screen ) : GetCurrentSheet();
+        if( GetCurrentSheet() != undoSheet )
+        {
+            SetCurrentSheet( undoSheet );
+            DisplayCurrentSheet();
+        }
+
+        auto* allPages = dynamic_cast<SCH_PAGE_SETTINGS_UNDO_ITEM*>( item );
+        if( allPages && allPages->IncludesOnlyErc() )
+        {
+            SCH_PAGE_SETTINGS_UNDO_ITEM alternate( this );
+            alternate.CopyProjectSettingsScope( *allPages );
+            allPages->RestoreErc( this, &alternate );
+            *allPages = std::move( alternate );
+        }
+        else if( allPages )
+        {
+            if( !allPages->BusAliasesMatch( Schematic() ) || !allPages->TextVariablesMatch( this )
+                    || allPages->IncludesNetChains() || allPages->IncludesSetup()
+                    || allPages->IncludesNetSettings() )
+            {
+                dirtyConnectivity = true;
+                connectivityCleanUp = GLOBAL_CLEANUP;
+            }
+            SCH_PAGE_SETTINGS_UNDO_ITEM alternate( this );
+            netSettingsChanged |= allPages->IncludesNetSettings();
+            alternate.CopyProjectSettingsScope( *allPages );
+            allPages->RestoreAll( this );
+            *allPages = std::move( alternate );
+        }
+        else
+        {
+            DS_PROXY_UNDO_ITEM alternate( this );
+            item->Restore( this );
+            *item = std::move( alternate );
+        }
+        refreshHierarchy = true;
+        rebuildHierarchyNavigator = true;
     }
 
     // We have now swapped all the group parent and group member pointers.  But it is a

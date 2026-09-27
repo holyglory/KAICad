@@ -59,22 +59,22 @@ public sealed record SchematicGeneratedSheetIdentity(Guid SheetInstanceId, Guid 
 /// last synchronized with KiCad, and it holds every part of the deleted files: every screen, object,
 /// library cache entry, page, title block, root page and embedded file. The rebuild gives the new root
 /// the identity its file had and recreates everything else with its exact identities, sheet symbols and
-/// their sheet pins included. The project file is kept, and the rebuild changes none of its settings: it
-/// is refused unless KiCad's project settings are exactly the ones the XML records, so settings the XML
-/// types and settings it does not (<c>complete_project_settings</c>) both stay as the kept file holds
-/// them.</item>
+/// their sheet pins included. The project file is kept; XML-typed text variables are restored as part of
+/// the rebuild, while every other typed project setting must still match the XML and untyped settings
+/// (<c>complete_project_settings</c>) remain as the kept file holds them.</item>
 /// </list></summary>
 public static class SchematicRebuild
 {
     /// <summary>The only unrepresented native state a rebuild accepts: project settings the XML does not
-    /// type. They live in the project file, which deleting the schematic files leaves in place. A rebuild
-    /// changes no project setting (it is refused when the typed ones differ from the XML), so the project
-    /// file KiCad saves afterward still holds them.</summary>
+    /// type. They live in the project file, which deleting the schematic files leaves in place. The
+    /// XML-typed text variables are the bounded exception: the rebuild restores them from XML. All other
+    /// typed settings remain protected by the mismatch refusal.</summary>
     public const string RetainedProjectSettings = "complete_project_settings";
     public const string BatchDescription = "Rebuild native sheets from XML";
     private const string SharedScreenRootOwnership = "shared_screen_root_ownership";
     private const string NetChains = "net_chains";
     private const string LibraryCache = "library_cache";
+    private const string TextVariablesSetting = "text variables";
 
     private const long Grid = 1_270_000L;
     private const long SheetWidth = 38_100_000L;
@@ -169,10 +169,10 @@ public static class SchematicRebuild
         || RecreatesFileState(operation, index);
 
     /// <summary>Operations a rebuild journal holds besides creations, updates and library caches: the page, title
-    /// block, root page, embedded files and net-chain metadata that recreate a deleted schematic file's non-item state, and the new
-    /// root's saved identity, only as the batch's first operation. Never a project setting (the project file is
-    /// kept, and a rebuild is refused when its settings differ from the XML), a removal, connected move or
-    /// transform, or lock change: a rebuild only adds what the XML holds to sheets KiCad shows empty.</summary>
+    /// block, root page, embedded files, net-chain metadata and XML text variables that recreate a deleted
+    /// schematic file's non-item state, and the new root's saved identity, only as the batch's first operation.
+    /// Other project settings remain refused, as do removals, connected moves, transforms and lock changes:
+    /// a rebuild only adds what the XML holds to sheets KiCad shows empty.</summary>
     internal static bool RecreatesFileState(SchematicItemOperation operation, int index)
     {
         ArgumentNullException.ThrowIfNull(operation);
@@ -181,7 +181,7 @@ public static class SchematicRebuild
             SchematicItemOperation.OperationOneofCase.RebuildScreenIdentity => index == 0,
             SchematicItemOperation.OperationOneofCase.SetPageSettings or SchematicItemOperation.OperationOneofCase.SetTitleBlock
                 or SchematicItemOperation.OperationOneofCase.SetRootInstance or SchematicItemOperation.OperationOneofCase.ReplaceEmbeddedFiles
-                or SchematicItemOperation.OperationOneofCase.ReplaceNetChains => true,
+                or SchematicItemOperation.OperationOneofCase.ReplaceNetChains or SchematicItemOperation.OperationOneofCase.ReplaceTextVariables => true,
             _ => false
         };
     }
@@ -360,17 +360,20 @@ public static class SchematicRebuild
                 + string.Join(", ", missing.Concat(baseline.Schematic.Instances.Any(s => s.UnrepresentedItems.Count != 0) ? ["unsupported objects"] : []))
                 + "), so they cannot be rebuilt without loss.");
         // The project file was kept, so KiCad's new root shows project settings: the ones KiCad loaded from that file, and any
-        // change made in KiCad since. They must be the ones the XML records: a rebuild recreates only the deleted schematic
-        // files and never overwrites a project setting. While the files are lost the XML cannot take KiCad's settings instead:
-        // every plan is this rebuild, and an edited XML is refused as rebuild_requires_settled_xml. So the message names only
-        // what does fix it: putting KiCad's settings back, in KiCad or by reopening the project with the project file saved
-        // with this XML. Planning reads the recovery record's saved observation, never KiCad, so the message also names the
-        // step that shows the record KiCad's settings again: a refresh in the same document session, or, after reopening the
-        // project (a new session), the new root created and the record reattached to it.
+        // change made in KiCad since. XML-typed text variables are restored by the rebuild; every other typed setting must
+        // still match the XML. While the files are lost, an edited XML is refused as rebuild_requires_settled_xml, so the
+        // mismatch message names only what fixes the remaining protected settings: putting them back in KiCad or reopening
+        // the project with the project file saved with this XML. Planning reads the recovery record's saved observation, never
+        // KiCad, so the message also names the step that shows the record KiCad's settings again: a refresh in the same
+        // document session, or, after reopening the project (a new session), the new root created and the record reattached.
         var kept = state.Observed.Instances[0].Metadata;
         var recorded = baseline.Schematic.Instances.Single(s => s.Metadata.Document.Equals(baseline.Schematic.Document)).Metadata;
-        var changed = ChangedProjectSettings(kept, recorded);
-        if (changed.Count != 0)
+        // Text variables are typed in XML and are restored by the rebuild batch. Keep the remaining
+        // project-file settings refusal intact until their own XML/rebuild contracts are implemented.
+        var changed = ChangedProjectSettings(kept, recorded)
+            .Where(name => !string.Equals(name, TextVariablesSetting, StringComparison.Ordinal))
+            .ToArray();
+        if (changed.Length != 0)
             return Rejected("rebuild_project_settings_changed", SettingsChangedMessage(changed));
         return new(SchematicRebuildKind.Admitted, [.. baseline.SheetBindings.Select(b => b.SheetInstanceId)]);
     }
@@ -436,7 +439,7 @@ public static class SchematicRebuild
         ArgumentNullException.ThrowIfNull(recorded);
         var changed = new List<string>();
         void Check(string name, bool same) { if (!same) changed.Add(name); }
-        Check("text variables", kept.TextVariables.Equals(recorded.TextVariables));
+        Check(TextVariablesSetting, kept.TextVariables.Equals(recorded.TextVariables));
         Check("bus aliases", kept.BusAliases.Equals(recorded.BusAliases));
         Check("variants", kept.VariantDescriptions.Equals(recorded.VariantDescriptions));
         Check("drawing ratios", Equals(kept.DrawingRatios, recorded.DrawingRatios));

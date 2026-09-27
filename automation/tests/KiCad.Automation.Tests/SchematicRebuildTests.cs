@@ -477,14 +477,12 @@ public sealed class SchematicRebuildTests
     }
 
     // Review finding (lane 2C, xml-rebuild): the kept project file must not be overwritten. A rebuild whose new root shows
-    // project settings other than the XML's is refused before anything reaches KiCad, and no rebuild journal holds a
-    // project setting. Every one of the thirteen setting groups the project file holds is checked on its own, with the
+    // project settings other than XML text variables are refused before anything reaches KiCad. Every one of the thirteen
+    // setting groups the project file holds is checked on its own: text variables are the bounded rebuild exception, and the
     // exact message naming only that group (ledger p001c485926b37099). The message names what is compared (the settings
-    // KiCad shows) and only actions that work while the files are lost; synchronizing the settings into the XML is not one
-    // of them (review of 31cbe4f594). Planning reads the recovery record, not KiCad, so it also names the step that shows the
-    // record KiCad's settings again (review of 9c764b5537). The NativeXmlRebuild journey follows the message literally
-    // through kicad_design_sync_plan and kicad_design_sync_apply on a setting changed in KiCad, and proves apply's refusal of
-    // a project file changed on disk.
+    // KiCad shows) and the recovery step that makes the record observe protected settings again (review of 9c764b5537).
+    // The NativeXmlRebuild journey follows that refusal through the public tools, then proves the XML text-variable exception
+    // is carried by the rebuild batch and a project file changed on disk is still refused.
     private const string SettingsChangedMessage = "differ from the ones the XML records, so rebuilding would overwrite them. "
         + "Put them back as the XML records them (change them back in KiCad, or restore the project file KiCad last saved with "
         + "this XML and reopen the project), then refresh the recovery record (kicad_design_recovery_refresh; after reopening "
@@ -523,7 +521,9 @@ public sealed class SchematicRebuildTests
     {
         var baseline = Placed();
         Assert.HasCount(13, ProjectSettingGroups, "Every typed setting group the project file holds (SchematicRebuild.ChangedProjectSettings).");
-        foreach (var (what, edit) in ProjectSettingGroups)
+        var protectedGroups = ProjectSettingGroups.Where(g => g.What != "text variables").ToArray();
+        Assert.HasCount(12, protectedGroups, "Every typed setting group other than the XML-typed text variables remains protected.");
+        foreach (var (what, edit) in protectedGroups)
         {
             var kept = NewEmptyRoot(baseline);
             edit(kept.Instances[0].Metadata);
@@ -540,8 +540,8 @@ public sealed class SchematicRebuildTests
         }
         // All of them at once are named together, in the order the project file's groups are compared.
         var all = NewEmptyRoot(baseline);
-        foreach (var (_, edit) in ProjectSettingGroups) edit(all.Instances[0].Metadata);
-        Assert.AreEqual("KiCad's project settings (" + string.Join(", ", ProjectSettingGroups.Select(g => g.What)) + ") " + SettingsChangedMessage,
+        foreach (var (_, edit) in protectedGroups) edit(all.Instances[0].Metadata);
+        Assert.AreEqual("KiCad's project settings (" + string.Join(", ", protectedGroups.Select(g => g.What)) + ") " + SettingsChangedMessage,
             SchematicRebuild.Classify(State(baseline, baseline, all, "loaded", "created"), baseline).ErrorMessage);
         // Precision: the schematic file's own state on the new root (here its page) is what a rebuild recreates.
         var fresh = NewEmptyRoot(baseline);
@@ -550,10 +550,10 @@ public sealed class SchematicRebuildTests
         var recreated = SchematicSynchronizationPlanner.Plan(State(baseline, baseline, fresh, "loaded", "created"));
         Assert.IsTrue(recreated.CanPrepare, recreated.ErrorCode + ": " + recreated.ErrorMessage);
         Assert.AreEqual(1, recreated.NativeOperations.Count(o => o.SetPageSettings is not null && o.TargetDocument.Equals(baseline.Schematic.Document)));
-        // No project setting ever enters a rebuild journal.
+        // Only the XML-typed text variables enter a rebuild journal; every other project setting remains excluded.
         foreach (var setting in new SchematicItemOperation[]
         {
-            new() { ReplaceTextVariables = new() }, new() { SetFormatting = new() }, new() { SetNetSettings = new() },
+            new() { SetFormatting = new() }, new() { SetNetSettings = new() },
             new() { SetErcSettings = new() }, new() { SetBomSettings = new() }, new() { SetAnnotation = new() },
             new() { SetFieldTemplates = new() }, new() { SetSymbolComparison = new() }, new() { ReplaceNetChainClasses = new() },
             new() { SetDrawingRatios = new() }, new() { SetReferenceInventory = new() }, new() { ReplaceVariantRegistry = new() },
@@ -561,8 +561,38 @@ public sealed class SchematicRebuildTests
         })
             Assert.IsFalse(SchematicRebuild.RecreatesFileState(setting, 1), setting.OperationCase.ToString());
         foreach (var file in new SchematicItemOperation[] { new() { SetPageSettings = new() }, new() { SetTitleBlock = new() },
-            new() { SetRootInstance = new() }, new() { ReplaceEmbeddedFiles = new() }, new() { ReplaceNetChains = new() } })
+            new() { SetRootInstance = new() }, new() { ReplaceEmbeddedFiles = new() }, new() { ReplaceNetChains = new() },
+            new() { ReplaceTextVariables = new() } })
             Assert.IsTrue(SchematicRebuild.RecreatesFileState(file, 1), file.OperationCase.ToString());
+    }
+
+    [TestMethod]
+    public void RebuildAdmitsTextVariableReplacementAndJournalsIt()
+    {
+        var baseline = Placed();
+        foreach (var screen in baseline.Schematic.Instances) screen.Metadata.TextVariables["REVISION"] = "A";
+        var kept = NewEmptyRoot(baseline);
+        kept.Instances[0].Metadata.TextVariables["REVISION"] = "B";
+        var state = State(baseline, baseline, kept, "loaded", "created");
+
+        var classified = SchematicRebuild.Classify(state, baseline);
+        Assert.AreEqual(SchematicRebuildKind.Admitted, classified.Kind, classified.ErrorMessage);
+
+        var plan = SchematicSynchronizationPlanner.Plan(state);
+        Assert.IsTrue(plan.CanPrepare, plan.ErrorCode + ": " + plan.ErrorMessage);
+        Assert.IsTrue(plan.NativeRebuildRequired);
+        var variables = plan.NativeOperations.Single(o => o.ReplaceTextVariables is not null).ReplaceTextVariables;
+        Assert.AreEqual("REVISION", variables.Variables.Single().Key);
+        Assert.AreEqual("A", variables.Variables.Single().Value);
+        Assert.IsTrue(SchematicRebuild.RecreatesFileState(plan.NativeOperations.Single(o => o.ReplaceTextVariables is not null), 1));
+
+        // A text-variable mismatch combined with any protected setting is still refused.
+        var withFormatting = NewEmptyRoot(baseline);
+        withFormatting.Instances[0].Metadata.TextVariables["REVISION"] = "B";
+        withFormatting.Instances[0].Metadata.Formatting = Formatting(1_524_000);
+        var mixed = SchematicRebuild.Classify(state with { Observed = withFormatting }, baseline);
+        Assert.AreEqual("rebuild_project_settings_changed", mixed.ErrorCode);
+        Assert.AreEqual("KiCad's project settings (formatting) " + SettingsChangedMessage, mixed.ErrorMessage);
     }
 
     // Ledger p001c485926b37099: the second line of defence behind the settings check. Prepare refuses any planned batch that
@@ -595,7 +625,7 @@ public sealed class SchematicRebuildTests
         Assert.IsFalse(plan.CanPrepare);
 
         // Precision: the same prepared rebuild with the kept root's formatting equal to the XML's is planned, and its batch
-        // sets no project setting.
+        // sets no protected project setting.
         var same = NewEmptyRoot(recorded);
         var agreed = SchematicRebuild.Prepare(State(recorded, recorded, same, "loaded", "created"), recorded,
             SchematicHierarchyMerge.Plan(recorded.Schematic, recorded.Schematic, same), admitted, []);

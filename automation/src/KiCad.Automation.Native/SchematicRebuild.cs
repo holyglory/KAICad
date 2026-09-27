@@ -75,6 +75,7 @@ public static class SchematicRebuild
     private const string NetChains = "net_chains";
     private const string LibraryCache = "library_cache";
     private const string TextVariablesSetting = "text variables";
+    private const string BusAliasesSetting = "bus aliases";
 
     private const long Grid = 1_270_000L;
     private const long SheetWidth = 38_100_000L;
@@ -181,7 +182,8 @@ public static class SchematicRebuild
             SchematicItemOperation.OperationOneofCase.RebuildScreenIdentity => index == 0,
             SchematicItemOperation.OperationOneofCase.SetPageSettings or SchematicItemOperation.OperationOneofCase.SetTitleBlock
                 or SchematicItemOperation.OperationOneofCase.SetRootInstance or SchematicItemOperation.OperationOneofCase.ReplaceEmbeddedFiles
-                or SchematicItemOperation.OperationOneofCase.ReplaceNetChains or SchematicItemOperation.OperationOneofCase.ReplaceTextVariables => true,
+                or SchematicItemOperation.OperationOneofCase.ReplaceNetChains or SchematicItemOperation.OperationOneofCase.ReplaceTextVariables
+                or SchematicItemOperation.OperationOneofCase.ReplaceBusAliases => true,
             _ => false
         };
     }
@@ -371,7 +373,8 @@ public static class SchematicRebuild
         // Text variables are typed in XML and are restored by the rebuild batch. Keep the remaining
         // project-file settings refusal intact until their own XML/rebuild contracts are implemented.
         var changed = ChangedProjectSettings(kept, recorded)
-            .Where(name => !string.Equals(name, TextVariablesSetting, StringComparison.Ordinal))
+            .Where(name => !string.Equals(name, TextVariablesSetting, StringComparison.Ordinal)
+                && !string.Equals(name, BusAliasesSetting, StringComparison.Ordinal))
             .ToArray();
         if (changed.Length != 0)
             return Rejected("rebuild_project_settings_changed", SettingsChangedMessage(changed));
@@ -440,7 +443,7 @@ public static class SchematicRebuild
         var changed = new List<string>();
         void Check(string name, bool same) { if (!same) changed.Add(name); }
         Check(TextVariablesSetting, kept.TextVariables.Equals(recorded.TextVariables));
-        Check("bus aliases", kept.BusAliases.Equals(recorded.BusAliases));
+        Check(BusAliasesSetting, kept.BusAliases.Equals(recorded.BusAliases));
         Check("variants", kept.VariantDescriptions.Equals(recorded.VariantDescriptions));
         Check("drawing ratios", Equals(kept.DrawingRatios, recorded.DrawingRatios));
         Check("formatting", Equals(kept.Formatting, recorded.Formatting));

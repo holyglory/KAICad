@@ -521,8 +521,8 @@ public sealed class SchematicRebuildTests
     {
         var baseline = Placed();
         Assert.HasCount(13, ProjectSettingGroups, "Every typed setting group the project file holds (SchematicRebuild.ChangedProjectSettings).");
-        var protectedGroups = ProjectSettingGroups.Where(g => g.What != "text variables").ToArray();
-        Assert.HasCount(12, protectedGroups, "Every typed setting group other than the XML-typed text variables remains protected.");
+        var protectedGroups = ProjectSettingGroups.Where(g => g.What is not "text variables" and not "bus aliases").ToArray();
+        Assert.HasCount(11, protectedGroups, "Every typed setting group other than XML-typed text variables and bus aliases remains protected.");
         foreach (var (what, edit) in protectedGroups)
         {
             var kept = NewEmptyRoot(baseline);
@@ -550,7 +550,7 @@ public sealed class SchematicRebuildTests
         var recreated = SchematicSynchronizationPlanner.Plan(State(baseline, baseline, fresh, "loaded", "created"));
         Assert.IsTrue(recreated.CanPrepare, recreated.ErrorCode + ": " + recreated.ErrorMessage);
         Assert.AreEqual(1, recreated.NativeOperations.Count(o => o.SetPageSettings is not null && o.TargetDocument.Equals(baseline.Schematic.Document)));
-        // Only the XML-typed text variables enter a rebuild journal; every other project setting remains excluded.
+        // Only the XML-typed text variables and bus aliases enter a rebuild journal; every other project setting remains excluded.
         foreach (var setting in new SchematicItemOperation[]
         {
             new() { SetFormatting = new() }, new() { SetNetSettings = new() },
@@ -559,10 +559,10 @@ public sealed class SchematicRebuildTests
             new() { SetDrawingRatios = new() }, new() { SetReferenceInventory = new() }, new() { ReplaceVariantRegistry = new() },
             new() { ReplaceBusAliases = new() },
         })
-            Assert.IsFalse(SchematicRebuild.RecreatesFileState(setting, 1), setting.OperationCase.ToString());
+            if (setting.ReplaceBusAliases is null) Assert.IsFalse(SchematicRebuild.RecreatesFileState(setting, 1), setting.OperationCase.ToString());
         foreach (var file in new SchematicItemOperation[] { new() { SetPageSettings = new() }, new() { SetTitleBlock = new() },
             new() { SetRootInstance = new() }, new() { ReplaceEmbeddedFiles = new() }, new() { ReplaceNetChains = new() },
-            new() { ReplaceTextVariables = new() } })
+            new() { ReplaceTextVariables = new() }, new() { ReplaceBusAliases = new() } })
             Assert.IsTrue(SchematicRebuild.RecreatesFileState(file, 1), file.OperationCase.ToString());
     }
 
@@ -593,6 +593,25 @@ public sealed class SchematicRebuildTests
         var mixed = SchematicRebuild.Classify(state with { Observed = withFormatting }, baseline);
         Assert.AreEqual("rebuild_project_settings_changed", mixed.ErrorCode);
         Assert.AreEqual("KiCad's project settings (formatting) " + SettingsChangedMessage, mixed.ErrorMessage);
+    }
+
+    [TestMethod]
+    public void RebuildAdmitsBusAliasReplacementAndJournalsIt()
+    {
+        var baseline = Placed();
+        foreach (var screen in baseline.Schematic.Instances)
+            screen.Metadata.BusAliases.Add(new SchematicBusAlias { Name = "DATA", Members = { "D0", "D1" } });
+        var kept = NewEmptyRoot(baseline);
+        kept.Instances[0].Metadata.BusAliases.Clear();
+        var state = State(baseline, baseline, kept, "loaded", "created");
+
+        var classified = SchematicRebuild.Classify(state, baseline);
+        Assert.AreEqual(SchematicRebuildKind.Admitted, classified.Kind, classified.ErrorMessage);
+        var plan = SchematicSynchronizationPlanner.Plan(state);
+        Assert.IsTrue(plan.CanPrepare, plan.ErrorCode + ": " + plan.ErrorMessage);
+        var aliases = plan.NativeOperations.Single(o => o.ReplaceBusAliases is not null).ReplaceBusAliases;
+        Assert.AreEqual("DATA", aliases.Aliases.Single().Name);
+        Assert.IsTrue(SchematicRebuild.RecreatesFileState(plan.NativeOperations.Single(o => o.ReplaceBusAliases is not null), 1));
     }
 
     // Ledger p001c485926b37099: the second line of defence behind the settings check. Prepare refuses any planned batch that

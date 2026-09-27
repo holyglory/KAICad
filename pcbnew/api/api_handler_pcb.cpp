@@ -869,6 +869,54 @@ HANDLER_RESULT<Empty> API_HANDLER_PCB::handleRevertDocument(
 }
 
 
+namespace
+{
+std::optional<ApiResponseStatus> BoardProjectRefusal( const DocumentSpecifier& aDocument,
+                                                      const PROJECT& aOpen )
+{
+    const std::string& name = aDocument.project().name();
+    const std::string& path = aDocument.project().path();
+    const std::string document = aDocument.board_filename().empty()
+            ? std::string( "the requested document" )
+            : fmt::format( "the requested document {}", aDocument.board_filename() );
+    const std::string openProject = aOpen.IsNullProject()
+            ? std::string( "no project open" )
+            : fmt::format( "project '{}' at '{}' open", aOpen.GetProjectName().ToStdString( wxConvUTF8 ),
+                           aOpen.GetProjectPath().ToStdString( wxConvUTF8 ) );
+    auto refusal = []( const std::string& message )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( message );
+        return error;
+    };
+
+    if( !aDocument.has_project() )
+    {
+        if( !Pgm().ApiServerOrNull() || !Pgm().GetApiServer().IsAutomation() )
+            return std::nullopt;
+        return refusal( fmt::format( "{} names no project; this KiCad instance has {} and accepts a board request only with its project named by its absolute folder path",
+                                     document, openProject ) );
+    }
+
+    wxFileName requested = wxFileName::DirName( wxString::FromUTF8( path ) );
+    if( !requested.IsAbsolute() )
+        return refusal( fmt::format( "{} names project '{}' by the folder '{}', which is not an absolute path; name the project by its absolute folder path",
+                                     document, name, path ) );
+
+    wxFileName current = wxFileName::DirName( aOpen.GetProjectPath() );
+    requested.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+    current.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+    if( requested == current && path.find( '\0' ) == std::string::npos
+            && name == aOpen.GetProjectName().ToStdString( wxConvUTF8 ) )
+        return std::nullopt;
+
+    return refusal( fmt::format( "{} of project '{}' at '{}' is not open in this KiCad instance, which has {}; send the request to the KiCad instance that has that project open",
+                                 document, name, path, openProject ) );
+}
+}
+
+
 tl::expected<bool, ApiResponseStatus> API_HANDLER_PCB::validateDocumentInternal( const DocumentSpecifier& aDocument ) const
 {
     if( aDocument.type() != DocumentType::DOCTYPE_PCB )
@@ -879,24 +927,8 @@ tl::expected<bool, ApiResponseStatus> API_HANDLER_PCB::validateDocumentInternal(
         return tl::unexpected( e );
     }
 
-    const bool automation = Pgm().ApiServerOrNull() && Pgm().GetApiServer().IsAutomation();
-    if( automation || aDocument.has_project() )
-    {
-        wxFileName supplied = wxFileName::DirName( wxString::FromUTF8( aDocument.project().path() ) );
-        wxFileName expected = wxFileName::DirName( project().GetProjectPath() );
-        const bool absolute = supplied.IsAbsolute();
-        supplied.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
-        expected.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
-        if( !absolute || supplied != expected
-                || aDocument.project().path().find( '\0' ) != std::string::npos
-                || aDocument.project().name() != project().GetProjectName().ToStdString( wxConvUTF8 ) )
-        {
-            ApiResponseStatus e;
-            e.set_status( ApiStatusCode::AS_BAD_REQUEST );
-            e.set_error_message( "The requested PCB project identity does not match this instance" );
-            return tl::unexpected( e );
-        }
-    }
+    if( std::optional<ApiResponseStatus> refusal = BoardProjectRefusal( aDocument, project() ) )
+        return tl::unexpected( *refusal );
 
     wxFileName fn( pcbContext()->GetCurrentFileName() );
 

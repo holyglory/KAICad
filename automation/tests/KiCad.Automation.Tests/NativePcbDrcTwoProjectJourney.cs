@@ -422,6 +422,28 @@ public sealed partial class NativeSessionTests
                 "Instance B must not check project A's board.", code: "native_status_3", containing: WrongProject);
             Refused(await mcp.Tool("kicad_pcb_drc_job", new { instanceId = a.InstanceId, documentJson = Json(a.Board), jobId = a1.JobId, processEpoch = Guid.NewGuid().ToString("D") }),
                 "A read with an epoch no process has must be refused.", code: "stale_process_epoch");
+            // An automation instance serves one project: an unnamed board request identifies no
+            // accepted target, while a missing board in that same project is simply not open.
+            async Task RefusedByA<TRequest, TResponse>(TRequest request, string expected, string because)
+                where TRequest : Google.Protobuf.IMessage<TRequest>
+                where TResponse : Google.Protobuf.IMessage<TResponse>, new()
+            {
+                var refusal = await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
+                    a.Native.InvokeAsync<TRequest, TResponse>(request, token));
+                Assert.AreEqual(3, refusal.Status, because + " " + refusal.Message);
+                Assert.AreEqual(expected, refusal.Message, because);
+            }
+            var unnamed = a.Board.Clone(); unnamed.Project = null;
+            await RefusedByA<Kiapi.Board.Commands.GetBoardOrigin, Vector2>(
+                new() { Board = unnamed, Type = Kiapi.Board.Commands.BoardOriginType.BotGrid },
+                $"the requested document {a.Board.BoardFilename} names no project; this KiCad instance has project "
+                + $"'{a.Board.Project.Name}' at '{a.Board.Project.Path}' open and accepts a board request only with its project named by its absolute folder path",
+                "Project A's editor must refuse an unnamed project.");
+            var closedInA = a.Board.Clone(); closedInA.BoardFilename = "closed.kicad_pcb";
+            Assert.IsFalse(File.Exists(Path.Combine(a.Board.Project.Path, closedInA.BoardFilename)));
+            await RefusedByA<ReadDocumentLifecycleState, DocumentLifecycleState>(new() { Document = closedInA },
+                "the requested document closed.kicad_pcb is not open",
+                "A closed board in project A must be reported as not open, not as another project's board.");
             await Unchanged(boards2, "Refused stale and wrong-target requests must leave both boards alone.");
 
             // 3. Project B's check is cancelled after its copper clearance checks, while project A's check runs beside it and

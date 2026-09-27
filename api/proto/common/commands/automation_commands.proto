@@ -203,6 +203,9 @@ message ReadSchematicMetadata {
   // 5: includes persisted reference-numbering policy.
   // 6: includes the inventory of previously allocated reference designators.
   // 7: includes project field templates and symbol/library comparison policy.
+  // 8: includes project BOM settings.
+  // 9: includes declared project net settings.
+  // 10: includes persisted ngspice project settings.
   // Unknown versions are rejected, never silently simplified.
   uint32 schema_version = 2;
 }
@@ -910,6 +913,7 @@ message SchematicItemOperation {
     // batch needs operation_id and expected_revision. A mismatch rejects the whole
     // batch with the prefix "connectivity_postcondition_failed:" and no state change.
     SchematicConnectivityAssertion assert_connectivity = 27;
+    kiapi.schematic.types.SchematicNgspiceSettings set_ngspice_settings = 28;
     // -- lane 2A (100-199) --
     // -- end lane 2A --
     // -- lane 2C (300-399) --
@@ -1044,6 +1048,7 @@ message SchematicItemBatchResult {
   bool net_settings_changed = 24;
   // True only when an assert_connectivity operation was evaluated and passed.
   bool connectivity_assertion_verified = 25;
+  bool ngspice_settings_changed = 26;
   // -- lane 2A (100-199) --
   // -- end lane 2A --
   // -- lane 2C (300-399) --

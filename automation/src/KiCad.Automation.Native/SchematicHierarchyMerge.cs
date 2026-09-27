@@ -167,6 +167,7 @@ public static class SchematicHierarchyMerge
         metadata.SymbolComparison = project.SymbolComparison?.Clone();
         metadata.BomSettings = project.BomSettings?.Clone();
         metadata.NetSettings = project.NetSettings?.Clone();
+        metadata.NgspiceSettings = project.NgspiceSettings?.Clone();
         metadata.ErcSettings = project.ErcSettings?.Clone();
         metadata.NetChainClasses = project.NetChainClasses?.Clone();
         SchematicVariantProjection.Reproject(result);

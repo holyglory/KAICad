@@ -270,6 +270,7 @@ public static class SchematicItemDelta
         remainder.BomSettings = current.BomSettings?.Clone();
         remainder.NetSettings = current.NetSettings?.Clone();
         remainder.ErcSettings = current.ErcSettings?.Clone();
+        remainder.NgspiceSettings = current.NgspiceSettings?.Clone();
         remainder.NetChainClasses = current.NetChainClasses?.Clone();
         // A record an earlier preview saved lists the retired library_cache marker where this build does not; that is no
         // change to the schematic. Any other difference in the coverage list still stops planning.
@@ -284,6 +285,16 @@ public static class SchematicItemDelta
             var after = desired.NetSettings ?? throw Invalid("Declared net settings cannot be omitted or inferred from defaults.");
             if (!SchematicNetSettingsState.SameDeclared(before, after))
                 operations.Add(new() { SetNetSettings = SchematicNetSettingsState.Declared(after) });
+        }
+        if (current.NgspiceSettings is not null || desired.NgspiceSettings is not null)
+        {
+            var before = current.NgspiceSettings ?? throw Invalid("The native peer did not capture ngspice project settings.");
+            var after = desired.NgspiceSettings ?? throw Invalid("Ngspice project settings cannot be omitted or inferred from defaults.");
+            if (after.WorkbookFilename.Contains('\0'))
+                throw Invalid("Ngspice workbook filename cannot contain NUL.");
+            if (after.ModelMode is < 0 or > 5)
+                throw Invalid("Ngspice model mode must be a supported compatibility value.");
+            if (!before.Equals(after)) operations.Add(new() { SetNgspiceSettings = after.Clone() });
         }
         if (current.BomSettings is not null || desired.BomSettings is not null)
         {

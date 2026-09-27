@@ -20,10 +20,17 @@ public sealed partial class NativeSessionTests
         const string symbolSettingsGap = "symbol_project_settings_require_snapshot_schema_7";
         const string bomGap = "bom_settings_require_snapshot_schema_8";
         const string netSettingsGap = "net_settings_require_snapshot_schema_9";
+        const string ngspiceGap = "ngspice_settings_require_snapshot_schema_10";
+        void ProjectNgspice(SchematicMetadata metadata)
+        {
+            metadata.NgspiceSettings = null;
+            metadata.UnrepresentedState.Add(ngspiceGap);
+        }
         void ProjectNetSettings(SchematicMetadata metadata)
         {
             metadata.NetSettings = null;
             metadata.UnrepresentedState.Add(netSettingsGap);
+            ProjectNgspice(metadata);
         }
         void ProjectBom(SchematicMetadata metadata)
         {
@@ -56,7 +63,9 @@ public sealed partial class NativeSessionTests
             Assert.IsNull(metadata.SymbolComparison);
             Assert.IsNull(metadata.BomSettings);
             Assert.IsNull(metadata.NetSettings);
+            Assert.IsNull(metadata.NgspiceSettings);
             CollectionAssert.Contains(metadata.UnrepresentedState.ToArray(), netSettingsGap);
+            CollectionAssert.Contains(metadata.UnrepresentedState.ToArray(), ngspiceGap);
             CollectionAssert.Contains(metadata.UnrepresentedState.ToArray(), bomGap);
             CollectionAssert.Contains(metadata.UnrepresentedState.ToArray(), symbolSettingsGap);
             CollectionAssert.Contains(metadata.UnrepresentedState.ToArray(), inventoryGap);
@@ -93,6 +102,7 @@ public sealed partial class NativeSessionTests
         Assert.IsNotNull(current.Data.Metadata.SymbolComparison);
         Assert.IsNotNull(current.Data.Metadata.BomSettings);
         Assert.IsNotNull(current.Data.Metadata.NetSettings);
+        Assert.IsNotNull(current.Data.Metadata.NgspiceSettings);
         var legacy = await client.InvokeAsync<ReadSchematicScreenData, SchematicScreenDataSnapshot>(new() { Document = document, SchemaVersion = 1 }, token);
         Legacy(legacy.Data.Metadata);
         var expected = current.Clone(); expected.Data.Metadata.ErcSettings = null; expected.Data.Metadata.UnrepresentedState.Add(gap);
@@ -167,14 +177,17 @@ public sealed partial class NativeSessionTests
         var v8Expected = current.Clone(); ProjectNetSettings(v8Expected.Data.Metadata);
         var v8 = await client.InvokeAsync<ReadSchematicScreenData, SchematicScreenDataSnapshot>(new() { Document = document, SchemaVersion = 8 }, token);
         Assert.AreEqual(v8Expected, v8);
+        var v9Expected = current.Clone(); ProjectNgspice(v9Expected.Data.Metadata);
+        var v9 = await client.InvokeAsync<ReadSchematicScreenData, SchematicScreenDataSnapshot>(new() { Document = document, SchemaVersion = 9 }, token);
+        Assert.AreEqual(v9Expected, v9);
 
         Func<Task>[] unknown = [
-            async () => await client.InvokeAsync<ReadSchematicMetadata, SchematicMetadataSnapshot>(new() { Document = document, SchemaVersion = 10 }, token),
-            async () => await client.InvokeAsync<ReadSchematicScreenData, SchematicScreenDataSnapshot>(new() { Document = document, SchemaVersion = 10 }, token),
-            async () => await client.InvokeAsync<ReadSchematicHierarchyData, SchematicHierarchyDataSnapshot>(new() { Document = document, SchemaVersion = 10 }, token),
-            async () => await client.InvokeAsync<ReadSchematicElectricalState, SchematicElectricalState>(new() { Document = document, SchemaVersion = 10 }, token),
-            async () => await client.InvokeAsync<CaptureSchematicObservation, SchematicObservation>(new() { Document = document, SchemaVersion = 10 }, token),
-            async () => { var request = views.Clone(); request.SchemaVersion = 10; await client.InvokeAsync<RenderSchematicViews, SchematicViewSet>(request, token); }
+            async () => await client.InvokeAsync<ReadSchematicMetadata, SchematicMetadataSnapshot>(new() { Document = document, SchemaVersion = 11 }, token),
+            async () => await client.InvokeAsync<ReadSchematicScreenData, SchematicScreenDataSnapshot>(new() { Document = document, SchemaVersion = 11 }, token),
+            async () => await client.InvokeAsync<ReadSchematicHierarchyData, SchematicHierarchyDataSnapshot>(new() { Document = document, SchemaVersion = 11 }, token),
+            async () => await client.InvokeAsync<ReadSchematicElectricalState, SchematicElectricalState>(new() { Document = document, SchemaVersion = 11 }, token),
+            async () => await client.InvokeAsync<CaptureSchematicObservation, SchematicObservation>(new() { Document = document, SchemaVersion = 11 }, token),
+            async () => { var request = views.Clone(); request.SchemaVersion = 11; await client.InvokeAsync<RenderSchematicViews, SchematicViewSet>(request, token); }
         ];
         foreach (var call in unknown)
             Assert.AreEqual(3, (await Assert.ThrowsExactlyAsync<NativeApiException>(call)).Status);

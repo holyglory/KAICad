@@ -65,6 +65,7 @@
 #include <api/api_sch_bom_settings.h>
 #include <api/api_sch_net_settings.h>
 #include <api/api_sch_erc_settings.h>
+#include <api/api_sch_ngspice_settings.h>
 #include <api/api_sch_field_text_modes.h>
 #include <sim/spice_circuit_model.h>
 #include <sch_symbol_cache_state.h>
@@ -845,6 +846,11 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
     types::ItemHeader header;
     header.mutable_document()->CopyFrom( aCtx.Request.document() );
     kiapi::automation::v1::SchematicItemBatchResult result;
+    // ERC exclusions refer to schematic item identities.  Rebuild batches create
+    // those items in this same atomic commit, so defer ERC decoding until all
+    // staged objects can be exposed through a temporary hierarchy below.
+    const bool rebuilding = aCtx.Request.operations( 0 ).has_rebuild_screen_identity();
+    std::vector<std::pair<const kiapi::automation::v1::SchematicItemOperation*, std::string>> deferredErcSettings;
 
     std::optional<std::vector<std::pair<KIID, int>>> savedSelection;
     std::optional<VECTOR2I> savedReference;
@@ -1306,6 +1312,11 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
             }
             else if( operation.has_set_erc_settings() )
             {
+                if( rebuilding )
+                {
+                    deferredErcSettings.emplace_back( &operation, prefix );
+                    continue;
+                }
                 SCH_ERC_SETTINGS::PREPARED candidate;
                 std::string failure;
                 if( !SCH_ERC_SETTINGS::Prepare( operation.set_erc_settings(), *schematic(), candidate, failure ) )
@@ -1548,6 +1559,36 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                     // Private validation uses exceptions; the transport needs
                     // an explicit reply, with all earlier operations reverted.
                     return reject( prefix + error.what() );
+                }
+            }
+            else if( operation.has_set_ngspice_settings() )
+            {
+                const auto& desired = operation.set_ngspice_settings();
+                std::string failure;
+                if( !SCH_NGSPICE_SETTINGS::Validate( desired, failure ) )
+                    return reject( prefix + failure );
+                auto settings = project().GetProjectFile().m_SchematicSettings
+                        ? project().GetProjectFile().m_SchematicSettings->m_NgspiceSettings : nullptr;
+                if( !settings )
+                    return reject( prefix + "Ngspice project settings are unavailable" );
+                if( SCH_NGSPICE_SETTINGS::Capture( *settings ).SerializeAsString()
+                        != desired.SerializeAsString() )
+                {
+                    auto before = project().GetProjectFile().CaptureCurrentState();
+                    auto after = before;
+                    auto& ngspice = after["schematic"]["ngspice"];
+                    ngspice["workbook_filename"] = desired.workbook_filename();
+                    ngspice["fix_include_paths"] = desired.fix_include_paths();
+                    ngspice["model_mode"] = desired.model_mode();
+                    try
+                    {
+                        static_cast<SCH_COMMIT*>( getCurrentCommit( aCtx.ClientName ) )->SetSetupSettings( before, after );
+                    }
+                    catch( const std::exception& error )
+                    {
+                        return reject( prefix + error.what() );
+                    }
+                    result.set_ngspice_settings_changed( true );
                 }
             }
             else if( operation.has_set_reference_inventory() )
@@ -1806,6 +1847,65 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                 return reject( prefix + "Operation kind is missing" );
         }
 
+        // ERC is applied after all ordinary operations are staged.  This keeps
+        // one commit/undo entry while allowing exclusions to name items and
+        // child sheets created earlier in the same rebuild batch.
+        std::string deferredErcFailure;
+        if( !deferredErcSettings.empty() )
+        {
+            std::vector<std::pair<SCH_SCREEN*, SCH_ITEM*>> shown;
+            shown.reserve( createdItems.size() );
+            struct STAGED_VIEW
+            {
+                SCHEMATIC& schematic;
+                std::vector<std::pair<SCH_SCREEN*, SCH_ITEM*>>& items;
+
+                ~STAGED_VIEW()
+                {
+                    for( auto it = items.rbegin(); it != items.rend(); ++it )
+                        it->first->Remove( it->second, false );
+                    if( !items.empty() )
+                        schematic.RefreshHierarchy();
+                }
+            } stagedView{ *schematic(), shown };
+
+            // Append without library-cache maintenance, matching the checked
+            // connectivity assertion's staged view.  The items remain owned by
+            // createdItems and are removed before the actual commit push.
+            for( const auto& [key, item] : createdItems )
+            {
+                if( item->Type() == SCH_SHEET_PIN_T || item->Type() == SCH_FIELD_T
+                        || key.first->CheckIfOnDrawList( item.get() ) )
+                    continue;
+                key.first->Append( item.get(), false );
+                shown.emplace_back( key.first, item.get() );
+            }
+            schematic()->RefreshHierarchy();
+
+            std::string failure;
+            for( const auto& [deferred, prefix] : deferredErcSettings )
+            {
+                SCH_ERC_SETTINGS::PREPARED candidate;
+                if( !SCH_ERC_SETTINGS::Prepare( deferred->set_erc_settings(), *schematic(), candidate, failure ) )
+                {
+                    deferredErcFailure = prefix + failure;
+                    break;
+                }
+                const bool changed = SCH_ERC_SETTINGS::Capture( *schematic() ).SerializeAsString()
+                                     != candidate.canonical.SerializeAsString();
+                if( changed && !nativeCommit->SetErcSettings( candidate, failure ) )
+                {
+                    deferredErcFailure = prefix + failure;
+                    break;
+                }
+                result.set_erc_settings_changed( result.erc_settings_changed() || changed );
+            }
+        }
+        // The temporary hierarchy must be gone before rollback recalculates
+        // connectivity or releases the staged sheets and their marker owners.
+        if( !deferredErcFailure.empty() )
+            return reject( deferredErcFailure );
+
         wxString cacheFailure;
         if( !nativeCommit->ValidateLibraryCaches( cacheFailure ) )
             return reject( cacheFailure.ToStdString() );
@@ -1936,7 +2036,7 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicOperationReceipt> API_HANDLER_SCH
 
 std::optional<ApiResponseStatus> API_HANDLER_SCH::validateSnapshotSchema( uint32_t aVersion )
 {
-    if( aVersion <= 9 ) return std::nullopt;
+    if( aVersion <= 10 ) return std::nullopt;
     ApiResponseStatus error;
     error.set_status( ApiStatusCode::AS_BAD_REQUEST );
     error.set_error_message( "Unsupported schematic snapshot schema version" );
@@ -1988,6 +2088,11 @@ void API_HANDLER_SCH::projectSnapshotSchema(
         aMetadata.clear_net_settings();
         aMetadata.add_unrepresented_state( "net_settings_require_snapshot_schema_9" );
     }
+    if( aVersion < 10 && aMetadata.has_ngspice_settings() )
+    {
+        aMetadata.clear_ngspice_settings();
+        aMetadata.add_unrepresented_state( "ngspice_settings_require_snapshot_schema_10" );
+    }
 }
 
 
@@ -2000,7 +2105,7 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicObservation> API_HANDLER_SCH::han
     query.ClientName = aCtx.ClientName;
     query.Request.mutable_document()->CopyFrom( aCtx.Request.document() );
     // Compare full current state across rendering, even for legacy clients.
-    query.Request.set_schema_version( 9 );
+    query.Request.set_schema_version( 10 );
     auto before = handleReadScreenData( query );
     if( !before )
         return tl::unexpected( before.error() );
@@ -2289,7 +2394,7 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicElectricalState> API_HANDLER_SCH:
     HANDLER_CONTEXT<ReadSchematicHierarchyData> query;
     query.ClientName = aCtx.ClientName;
     query.Request.mutable_document()->CopyFrom( aCtx.Request.document() );
-    query.Request.set_schema_version( 9 );
+    query.Request.set_schema_version( 10 );
     auto before = handleReadHierarchyData( query );
     if( !before ) return tl::unexpected( before.error() );
     if( aCtx.Request.has_expected_revision()
@@ -2522,6 +2627,12 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicMetadataSnapshot> API_HANDLER_SCH
     *metadata->mutable_bom_settings() = SCH_BOM_SETTINGS::Capture( schematic()->Settings() );
     if( auto settings = project().GetProjectFile().NetSettings() )
         *metadata->mutable_net_settings() = SCH_NET_SETTINGS::Capture( *settings );
+    if( project().GetProjectFile().m_SchematicSettings
+            && project().GetProjectFile().m_SchematicSettings->m_NgspiceSettings )
+    {
+        auto settings = project().GetProjectFile().m_SchematicSettings->m_NgspiceSettings;
+        *metadata->mutable_ngspice_settings() = SCH_NGSPICE_SETTINGS::Capture( *settings );
+    }
     if( auto settings = project().GetProjectFile().NetSettings() )
     {
         auto* classes = metadata->mutable_net_chain_classes();
@@ -3110,6 +3221,11 @@ HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> API_HANDLER_SCH::handl
     {
         std::unique_lock<std::mutex> simulatorLock( m_automationSimulator->GetMutex(), std::try_to_lock );
         if( !simulatorLock.owns_lock() ) return SimulationError( ApiStatusCode::AS_BUSY, "The KiCad simulator is in use by another owner" );
+        // Project settings may have changed after the automation simulator was
+        // first created. Rebind and reinitialize before every new run so the
+        // XML-restored ngspice compatibility mode is applied to this netlist.
+        m_automationSimulator->Settings() = m_context->Prj().GetProjectFile().m_SchematicSettings->m_NgspiceSettings;
+        m_automationSimulator->Init();
         if( !m_automationSimulator->LoadNetlist( m_simulationJob->netlist ) || !m_automationSimulator->Run() )
         {
             m_simulationJob->status = SIMJS_FAILED;

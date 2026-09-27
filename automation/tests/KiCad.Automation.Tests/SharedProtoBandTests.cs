@@ -569,7 +569,7 @@ public sealed partial class SharedProtoBandTests
         SchematicTextVariableState 1 ffac67100c41b7e6
         SchematicNetChainState 1 0501351c6823ff33 2C
         SchematicVariantRegistryState 1 2e2fb88b29ac4835
-        SchematicItemBatchResult 25 eb533bc3d6f40c2d 2A 2C
+        SchematicItemBatchResult 26 5745ec53ea8d8661 2A 2C
         InspectSchematicOperation 4 f4511343b7bd9da1
         SchematicOperationReceipt 8 dd4b229204b3dfe3 2C 2D
         SchematicOperationReceipt.State 4 2da28953fefd8eb4
@@ -584,7 +584,8 @@ public sealed partial class SharedProtoBandTests
         SchematicNetChainDefinition 8 10ac1e622e632600 2C
         SchematicNetChainExclusions 2 7a5c1e147393756a
         SchematicNetChainPinAnchor 2 617f9fe8fbc72667
-        SchematicMetadata 24 1dd9d57620d0ce53 2C
+        SchematicMetadata 25 97f0dff8d3283ad7 2C
+        SchematicNgspiceSettings 3 b0b09233eb99be4a
         SchematicNetClassNames 1 fc9e4a07e4d5a1a4
         SchematicNetClassPattern 2 f345d367f49f5562
         SchematicNetSettings 6 584acac27dce2806 2C

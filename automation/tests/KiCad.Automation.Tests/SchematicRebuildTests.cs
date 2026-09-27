@@ -5,9 +5,6 @@ using Kiapi.Schematic.Types;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
-using ErcErrorType = Kiapi.Schematic.ErcErrorType;
-using ErcSeveritySetting = Kiapi.Schematic.ErcSeveritySetting;
-using NetClass = Kiapi.Common.Project.NetClass;
 
 namespace KiCad.Automation.Tests;
 
@@ -476,36 +473,26 @@ public sealed class SchematicRebuildTests
         Assert.AreEqual(SchematicRebuildKind.Admitted, SchematicRebuild.Classify(state, chained).Kind);
     }
 
-    // Review finding (lane 2C, xml-rebuild): the kept project file must not be overwritten. A rebuild whose new root shows
-    // project settings other than XML-typed groups are refused before anything reaches KiCad. Every one of the thirteen
-    // setting groups the project file holds is checked on its own: text variables, bus aliases, variants, drawing ratios and
-    // formatting are the bounded rebuild exceptions, and the
-    // exact message naming only that group (ledger p001c485926b37099). The message names what is compared (the settings
-    // KiCad shows) and the recovery step that makes the record observe protected settings again (review of 9c764b5537).
-    // The NativeXmlRebuild journey follows that refusal through the public tools, then proves the XML-typed exceptions
-    // is carried by the rebuild batch and a project file changed on disk is still refused.
-    private const string SettingsChangedMessage = "differ from the ones the XML records, so rebuilding would overwrite them. "
-        + "Put them back as the XML records them (change them back in KiCad, or restore the project file KiCad last saved with "
-        + "this XML and reopen the project), then refresh the recovery record (kicad_design_recovery_refresh; after reopening "
-        + "the project, create the root with kicad_schematic_create and use kicad_design_recovery_reattach) and rebuild.";
-
+    // All captured project settings are restored from settled XML. Legacy-omitted message groups cannot
+    // become guessed defaults. NativeXmlRebuildJourney proves application/save/reopen; these cases extend
+    // the existing rebuild suite to cover each group's planner payload, missing coverage and journal boundary.
     private static readonly (string What, Action<SchematicMetadata> Edit)[] ProjectSettingGroups =
     [
         ("text variables", m => m.TextVariables["REVISION"] = "B"),
-        ("bus aliases", m => m.BusAliases.Add(new SchematicBusAlias { Name = "DATA", Members = { "D0", "D1" } })),
-        ("variants", m => m.VariantDescriptions["Lite"] = "Without telemetry"),
-        ("drawing ratios", m => m.DrawingRatios = new SchematicDrawingRatios { DashLengthRatio = 12, GapLengthRatio = 3, TextOffsetRatio = 0.15,
-            LabelSizeRatio = 0.375, OverbarHeightRatio = 1.23 }),
-        ("formatting", m => m.Formatting = Formatting(1_524_000)),
-        ("annotation", m => m.Annotation = new SchematicAnnotationSettings { StartAfter = 100 }),
-        ("field templates", m => m.FieldTemplates = new SchematicFieldTemplates { Fields = { new SchematicFieldTemplate { Name = "Supplier", Visible = true } } }),
-        ("symbol comparison", m => m.SymbolComparison = new SchematicSymbolComparisonSettings { MissingFields = true, FieldTexts = true }),
-        ("BOM settings", m => m.BomSettings = new SchematicBomSettings { ExportFilename = "fixture-bom.csv" }),
-        ("net classes", m => m.NetSettings = new SchematicNetSettings { DefaultClass = new NetClass { Name = "Default" } }),
-        ("used references", m => m.ReferenceInventory = new SchematicReferenceInventory { Allocated = { "R7" } }),
-        ("net chain classes", m => m.NetChainClasses = new SchematicNetChainClassState { Definitions = { "fastbus" } }),
-        ("ERC settings", m => m.ErcSettings = new SchematicErcSettings { RuleSeverities =
-            { new ErcSeveritySetting { RuleType = ErcErrorType.ErcetPinNotConnected, Severity = RuleSeverity.RsError } } }),
+        ("bus aliases", m => m.BusAliases.Add(new SchematicBusAlias { Name = "REBUILD_BUS", Members = { "D0", "D1" } })),
+        ("variants", m => m.VariantDescriptions["Rebuild"] = "rebuild variant"),
+        ("drawing ratios", m => m.DrawingRatios!.DashLengthRatio += 1),
+        ("formatting", m => m.Formatting!.DefaultTextSizeNm += 254_000),
+        ("annotation", m => m.Annotation!.StartAfter++),
+        ("field templates", m => m.FieldTemplates!.Fields.Add(new SchematicFieldTemplate { Name = "RebuildNote", Visible = true })),
+        ("symbol comparison", m => m.SymbolComparison!.MissingFields = !m.SymbolComparison.MissingFields),
+        ("BOM settings", m => m.BomSettings!.ExportFilename = "${PROJECTNAME}-rebuild.csv"),
+        ("net classes", m => m.NetSettings!.DefaultClass.Priority--),
+        ("used references", m => m.ReferenceInventory!.Allocated.Add("R999")),
+        ("net chain classes", m => m.NetChainClasses!.Definitions.Add("rebuild-extra")),
+        ("ERC settings", m => m.ErcSettings!.RuleSeverities[0].Severity = m.ErcSettings.RuleSeverities[0].Severity == RuleSeverity.RsWarning
+            ? RuleSeverity.RsError : RuleSeverity.RsWarning),
+        ("ngspice settings", m => m.NgspiceSettings!.ModelMode = m.NgspiceSettings.ModelMode == 2 ? 3 : 2),
     ];
 
     // A complete, valid formatting replacement (SchematicFormatting.Validate) with the given default text size.
@@ -517,55 +504,116 @@ public sealed class SchematicRebuildTests
         UnitReference = new() { SeparatorAscii = 0, FirstIdAscii = 'A' }
     };
 
+    private static SchematicNgspiceSettings Ngspice() => new()
+    { WorkbookFilename = "fixture.raw", FixIncludePaths = true, ModelMode = 2 };
+
+    private static void PopulateTypedProjectSettings(SchematicDesign design)
+    {
+        foreach (var screen in design.Schematic.Instances)
+        {
+            var metadata = screen.Metadata;
+            metadata.TextVariables.Clear();
+            metadata.TextVariables["REVISION"] = "A";
+            metadata.BusAliases.Clear();
+            metadata.BusAliases.Add(new SchematicBusAlias { Name = "DATA", Members = { "D0", "D1" } });
+            metadata.VariantDescriptions.Clear();
+            metadata.VariantDescriptions["Assembly"] = "original";
+            metadata.DrawingRatios = new SchematicDrawingRatios { DashLengthRatio = 12, GapLengthRatio = 3,
+                TextOffsetRatio = 0.15, LabelSizeRatio = 0.375, OverbarHeightRatio = 1.23 };
+            metadata.Formatting = Formatting(1_270_000);
+            metadata.Annotation = SchematicAnnotationTests.Policy();
+            metadata.FieldTemplates = new SchematicFieldTemplates();
+            metadata.FieldTemplates.Fields.Add(new SchematicFieldTemplate { Name = "Supplier", Visible = true });
+            metadata.SymbolComparison = new SchematicSymbolComparisonSettings { MissingFields = false, FieldTexts = false };
+            metadata.BomSettings = SchematicBomSettingsTests.Settings();
+            metadata.NetSettings = SchematicNetSettingsSnapshotTests.Settings();
+            metadata.ReferenceInventory = new SchematicReferenceInventory { Allocated = { "R7" } };
+            metadata.NetChainClasses = new SchematicNetChainClassState { Definitions = { "fastbus" } };
+            metadata.ErcSettings = SchematicErcSettingsTests.Fixture();
+            metadata.NgspiceSettings = Ngspice();
+        }
+    }
+
+    private static SchematicItemOperation ExpectedProjectOperation(SchematicMetadata metadata, string what) => what switch
+    {
+        "text variables" => new() { ReplaceTextVariables = new() { Variables = { metadata.TextVariables } } },
+        "bus aliases" => new() { ReplaceBusAliases = new() { Aliases = { metadata.BusAliases.Select(a => a.Clone()) } } },
+        "variants" => new() { ReplaceVariantRegistry = new() { Descriptions = { metadata.VariantDescriptions } } },
+        "drawing ratios" => new() { SetDrawingRatios = metadata.DrawingRatios.Clone() },
+        "formatting" => new() { SetFormatting = metadata.Formatting.Clone() },
+        "annotation" => new() { SetAnnotation = metadata.Annotation.Clone() },
+        "field templates" => new() { SetFieldTemplates = metadata.FieldTemplates.Clone() },
+        "symbol comparison" => new() { SetSymbolComparison = metadata.SymbolComparison.Clone() },
+        "BOM settings" => new() { SetBomSettings = metadata.BomSettings.Clone() },
+        "net classes" => new() { SetNetSettings = SchematicNetSettingsState.Declared(metadata.NetSettings) },
+        "used references" => new() { SetReferenceInventory = SchematicReferenceInventoryState.Normalize(metadata.ReferenceInventory) },
+        "net chain classes" => new() { ReplaceNetChainClasses = SchematicNetChainClasses.Normalize(metadata.NetChainClasses) },
+        "ERC settings" => new() { SetErcSettings = SchematicErcSettingsValidation.Normalize(metadata.ErcSettings,
+            metadata.ErcSettings.RuleSeverities.Select(r => r.RuleType).ToHashSet()) },
+        "ngspice settings" => new() { SetNgspiceSettings = metadata.NgspiceSettings.Clone() },
+        _ => throw new AssertFailedException("Unknown typed setting: " + what)
+    };
+
+    private static void AssertRebuildCandidate(SchematicDesign expected, SchematicSynchronizationPlan plan,
+        SchematicHierarchyData observed, string what)
+    {
+        Assert.IsNotNull(plan.Candidate, what);
+        var recreated = expected.Schematic.Clone();
+        foreach (var screen in recreated.Instances)
+        {
+            screen.Metadata.LoadedNativeFormatVersion = 0;
+            screen.Metadata.UnrepresentedState.Clear();
+            screen.Metadata.UnrepresentedState.Add(observed.Instances[0].Metadata.UnrepresentedState);
+        }
+        Assert.AreEqual(recreated, plan.Candidate.Schematic, what + ": every screen retains the XML settings and objects");
+        Assert.AreEqual(SchematicDesignXml.Write(expected with { Schematic = recreated }, []), plan.CandidateXml,
+            what + ": the published candidate is exactly the planned XML");
+    }
+
     [TestMethod]
-    public void RebuildRefusesAKeptProjectFileWhoseSettingsDifferFromTheXml()
+    public void RebuildPlansEveryCapturedTypedProjectSetting()
     {
         var baseline = Placed();
-        Assert.HasCount(13, ProjectSettingGroups, "Every typed setting group the project file holds (SchematicRebuild.ChangedProjectSettings).");
-        var protectedGroups = ProjectSettingGroups.Where(g => g.What is not "text variables" and not "bus aliases" and not "variants" and not "drawing ratios" and not "formatting").ToArray();
-        Assert.HasCount(8, protectedGroups, "Every typed setting group other than XML-typed text variables, bus aliases, variants, drawing ratios and formatting remains protected.");
-        foreach (var (what, edit) in protectedGroups)
+        PopulateTypedProjectSettings(baseline);
+        Assert.HasCount(14, ProjectSettingGroups, "Every typed project-setting group has a rebuild contract.");
+        var recorded = baseline.Schematic.Instances.Single(s => s.Metadata.Document.Equals(baseline.Schematic.Document)).Metadata;
+        var projectOperationKinds = ProjectSettingGroups.Select(g => ExpectedProjectOperation(recorded, g.What).OperationCase).ToHashSet();
+        foreach (var (what, edit) in ProjectSettingGroups)
         {
             var kept = NewEmptyRoot(baseline);
             edit(kept.Instances[0].Metadata);
+            var expectedOperation = ExpectedProjectOperation(recorded, what);
+            Assert.AreNotEqual(expectedOperation, ExpectedProjectOperation(kept.Instances[0].Metadata, what),
+                what + ": the fixture must change this setting");
             var state = State(baseline, baseline, kept, "loaded", "created");
             var shape = SchematicRebuild.Classify(state, baseline);
-            Assert.AreEqual(SchematicRebuildKind.Rejected, shape.Kind, what);
-            Assert.AreEqual("rebuild_project_settings_changed", shape.ErrorCode, what);
-            Assert.AreEqual("KiCad's project settings (" + what + ") " + SettingsChangedMessage, shape.ErrorMessage, what);
+            Assert.AreEqual(SchematicRebuildKind.Admitted, shape.Kind, what + ": " + shape.ErrorMessage);
             var plan = SchematicSynchronizationPlanner.Plan(state);
-            Assert.AreEqual("rebuild_project_settings_changed", plan.ErrorCode, what);
-            Assert.AreEqual(shape.ErrorMessage, plan.ErrorMessage, what);
-            Assert.IsEmpty(plan.NativeOperations, what + ": nothing is sent to KiCad.");
-            Assert.IsNull(plan.Candidate, what + ": nothing is published.");
+            Assert.IsTrue(plan.CanPrepare, what + ": " + plan.ErrorCode + ": " + plan.ErrorMessage);
+            Assert.IsTrue(plan.NativeRebuildRequired, what);
+            var settingOperations = plan.NativeOperations.Where(o => projectOperationKinds.Contains(o.OperationCase)).ToArray();
+            Assert.HasCount(1, settingOperations, what + ": exactly one project setting changes, once across the hierarchy");
+            var operation = settingOperations.Single();
+            Assert.IsNotNull(operation.TargetDocument, what + ": project operation target");
+            expectedOperation.TargetDocument = operation.TargetDocument.Clone();
+            Assert.AreEqual(expectedOperation, operation, what + ": the operation restores the complete recorded payload");
+            Assert.IsTrue(SchematicRebuild.RecreatesFileState(operation, 1), what);
+            AssertRebuildCandidate(baseline, plan, kept, what);
         }
-        // All of them at once are named together, in the order the project file's groups are compared.
-        var all = NewEmptyRoot(baseline);
-        foreach (var (_, edit) in protectedGroups) edit(all.Instances[0].Metadata);
-        Assert.AreEqual("KiCad's project settings (" + string.Join(", ", protectedGroups.Select(g => g.What)) + ") " + SettingsChangedMessage,
-            SchematicRebuild.Classify(State(baseline, baseline, all, "loaded", "created"), baseline).ErrorMessage);
-        // Precision: the schematic file's own state on the new root (here its page) is what a rebuild recreates.
+
+        var unchanged = NewEmptyRoot(baseline);
+        var unchangedPlan = SchematicSynchronizationPlanner.Plan(State(baseline, baseline, unchanged, "loaded", "created"));
+        Assert.IsTrue(unchangedPlan.CanPrepare, unchangedPlan.ErrorCode + ": " + unchangedPlan.ErrorMessage);
+        Assert.IsFalse(unchangedPlan.NativeOperations.Any(o => projectOperationKinds.Contains(o.OperationCase)),
+            "Unchanged captured project settings do not acquire redundant edits while the sheets rebuild.");
+
+        // The schematic file's own page is still recreated independently of project settings.
         var fresh = NewEmptyRoot(baseline);
-        Assert.IsNotNull(fresh.Instances[0].Metadata.Page);
         fresh.Instances[0].Metadata.Page = new PageSettings { PageSize = PageSize.PsA2 };
-        var recreated = SchematicSynchronizationPlanner.Plan(State(baseline, baseline, fresh, "loaded", "created"));
-        Assert.IsTrue(recreated.CanPrepare, recreated.ErrorCode + ": " + recreated.ErrorMessage);
-        Assert.AreEqual(1, recreated.NativeOperations.Count(o => o.SetPageSettings is not null && o.TargetDocument.Equals(baseline.Schematic.Document)));
-        // Only the XML-typed text variables, bus aliases, variants, drawing ratios and formatting enter a rebuild journal; every other project setting remains excluded.
-        foreach (var setting in new SchematicItemOperation[]
-        {
-            new() { SetFormatting = new() }, new() { SetNetSettings = new() },
-            new() { SetErcSettings = new() }, new() { SetBomSettings = new() }, new() { SetAnnotation = new() },
-            new() { SetFieldTemplates = new() }, new() { SetSymbolComparison = new() }, new() { ReplaceNetChainClasses = new() },
-            new() { SetDrawingRatios = new() }, new() { SetReferenceInventory = new() }, new() { ReplaceVariantRegistry = new() },
-            new() { ReplaceBusAliases = new() },
-        })
-            if (setting.ReplaceBusAliases is null && setting.ReplaceVariantRegistry is null && setting.SetDrawingRatios is null && setting.SetFormatting is null)
-                Assert.IsFalse(SchematicRebuild.RecreatesFileState(setting, 1), setting.OperationCase.ToString());
-        foreach (var file in new SchematicItemOperation[] { new() { SetPageSettings = new() }, new() { SetTitleBlock = new() },
-            new() { SetRootInstance = new() }, new() { ReplaceEmbeddedFiles = new() }, new() { ReplaceNetChains = new() },
-            new() { ReplaceTextVariables = new() }, new() { ReplaceBusAliases = new() }, new() { ReplaceVariantRegistry = new() }, new() { SetDrawingRatios = new() }, new() { SetFormatting = new() } })
-            Assert.IsTrue(SchematicRebuild.RecreatesFileState(file, 1), file.OperationCase.ToString());
+        var pagePlan = SchematicSynchronizationPlanner.Plan(State(baseline, baseline, fresh, "loaded", "created"));
+        Assert.IsTrue(pagePlan.CanPrepare, pagePlan.ErrorCode + ": " + pagePlan.ErrorMessage);
+        Assert.AreEqual(1, pagePlan.NativeOperations.Count(o => o.SetPageSettings is not null
+            && o.TargetDocument.Equals(baseline.Schematic.Document)));
     }
 
     [TestMethod]
@@ -588,13 +636,16 @@ public sealed class SchematicRebuildTests
         Assert.AreEqual("A", variables.Variables.Single().Value);
         Assert.IsTrue(SchematicRebuild.RecreatesFileState(plan.NativeOperations.Single(o => o.ReplaceTextVariables is not null), 1));
 
-        // A text-variable mismatch combined with a still-protected setting is still refused.
-        var protectedObserved = NewEmptyRoot(baseline);
+        // A legacy XML record that omitted a typed setting still refuses a native value rather than inventing a default.
+        var omittedRecorded = baseline with { Schematic = baseline.Schematic.Clone() };
+        foreach (var screen in omittedRecorded.Schematic.Instances) screen.Metadata.Annotation = null;
+        var protectedObserved = NewEmptyRoot(omittedRecorded);
+        protectedObserved.Instances[0].Metadata.Annotation = SchematicAnnotationTests.Policy();
         protectedObserved.Instances[0].Metadata.TextVariables["REVISION"] = "B";
-        protectedObserved.Instances[0].Metadata.Annotation = new SchematicAnnotationSettings { StartAfter = 100 };
-        var protectedMixed = SchematicRebuild.Classify(state with { Observed = protectedObserved }, baseline);
+        var protectedState = State(omittedRecorded, omittedRecorded, protectedObserved, "loaded", "created");
+        var protectedMixed = SchematicRebuild.Classify(protectedState, omittedRecorded);
         Assert.AreEqual("rebuild_project_settings_changed", protectedMixed.ErrorCode);
-        Assert.AreEqual("KiCad's project settings (annotation) " + SettingsChangedMessage, protectedMixed.ErrorMessage);
+        StringAssert.Contains(protectedMixed.ErrorMessage, "annotation");
 
     }
 
@@ -686,15 +737,109 @@ public sealed class SchematicRebuildTests
         StringAssert.Contains(omittedResult.ErrorMessage, "formatting");
     }
 
-    // Ledger p001c485926b37099: the second line of defence behind the settings check. Prepare refuses any planned batch that
-    // holds an edit a rebuild never makes, here the symbol-comparison policy the kept root shows differently from the XML. The
-    // planner never reaches it this way (classification refuses the same state first, as asserted), so Prepare is called
-    // directly with an admitted classification; no journey can reach it without bypassing classification. Unit test,
-    // because no existing test prepares an admitted rebuild whose batch the journal would not admit.
     [TestMethod]
-    public void PreparedRebuildRefusesABatchWithAnEditARebuildNeverMakes()
+    public void RebuildRefusesEveryMessageSettingMissingFromLegacyXmlThroughClassifierAndPlanner()
     {
         var baseline = Placed();
+        PopulateTypedProjectSettings(baseline);
+        var missing = new (string What, Action<SchematicMetadata> Remove, Action<SchematicMetadata, SchematicMetadata> Restore)[]
+        {
+            ("drawing ratios", m => m.DrawingRatios = null, (target, source) => target.DrawingRatios = source.DrawingRatios.Clone()),
+            ("formatting", m => m.Formatting = null, (target, source) => target.Formatting = source.Formatting.Clone()),
+            ("annotation", m => m.Annotation = null, (target, source) => target.Annotation = source.Annotation.Clone()),
+            ("field templates", m => m.FieldTemplates = null, (target, source) => target.FieldTemplates = source.FieldTemplates.Clone()),
+            ("symbol comparison", m => m.SymbolComparison = null, (target, source) => target.SymbolComparison = source.SymbolComparison.Clone()),
+            ("BOM settings", m => m.BomSettings = null, (target, source) => target.BomSettings = source.BomSettings.Clone()),
+            ("net classes", m => m.NetSettings = null, (target, source) => target.NetSettings = source.NetSettings.Clone()),
+            ("used references", m => m.ReferenceInventory = null, (target, source) => target.ReferenceInventory = source.ReferenceInventory.Clone()),
+            ("net chain classes", m => m.NetChainClasses = null, (target, source) => target.NetChainClasses = source.NetChainClasses.Clone()),
+            ("ERC settings", m => m.ErcSettings = null, (target, source) => target.ErcSettings = source.ErcSettings.Clone()),
+            ("ngspice settings", m => m.NgspiceSettings = null, (target, source) => target.NgspiceSettings = source.NgspiceSettings.Clone()),
+        };
+        foreach (var (what, remove, restore) in missing)
+        {
+            var recorded = baseline with { Schematic = baseline.Schematic.Clone() };
+            foreach (var screen in recorded.Schematic.Instances) remove(screen.Metadata);
+            var observed = NewEmptyRoot(recorded);
+            restore(observed.Instances[0].Metadata, baseline.Schematic.Instances[0].Metadata);
+            var state = State(recorded, recorded, observed, "loaded", "created");
+            var shape = SchematicRebuild.Classify(state, recorded);
+            Assert.AreEqual(SchematicRebuildKind.Rejected, shape.Kind, what);
+            Assert.AreEqual("rebuild_project_settings_changed", shape.ErrorCode, what);
+            StringAssert.Contains(shape.ErrorMessage, what, what);
+            var plan = SchematicSynchronizationPlanner.Plan(state);
+            Assert.AreEqual("rebuild_project_settings_changed", plan.ErrorCode, what);
+            Assert.IsEmpty(plan.NativeOperations, what + ": no operation may be sent");
+            Assert.IsNull(plan.Candidate, what + ": no candidate may be published");
+
+            // The nine newer message groups require a captured native baseline as well as the XML value.
+            if (what is not "drawing ratios" and not "formatting")
+            {
+                var missingNative = NewEmptyRoot(baseline);
+                remove(missingNative.Instances[0].Metadata);
+                var missingNativeState = State(baseline, baseline, missingNative, "loaded", "created");
+                var nativeShape = SchematicRebuild.Classify(missingNativeState, baseline);
+                Assert.AreEqual(SchematicRebuildKind.Rejected, nativeShape.Kind, what + ": native coverage");
+                Assert.AreEqual("rebuild_project_settings_changed", nativeShape.ErrorCode, what);
+                StringAssert.Contains(nativeShape.ErrorMessage, what, what);
+                StringAssert.Contains(nativeShape.ErrorMessage, "snapshot did not capture", what);
+                var nativePlan = SchematicSynchronizationPlanner.Plan(missingNativeState);
+                Assert.AreEqual("rebuild_project_settings_changed", nativePlan.ErrorCode, what);
+                Assert.IsEmpty(nativePlan.NativeOperations, what + ": no operation without a native baseline");
+                Assert.IsNull(nativePlan.Candidate, what);
+            }
+        }
+    }
+
+    [TestMethod]
+    public void EmptyMapAndRepeatedProjectSettingsRemainCaptured()
+    {
+        var baseline = Placed();
+        PopulateTypedProjectSettings(baseline);
+        foreach (var screen in baseline.Schematic.Instances)
+        {
+            screen.Metadata.TextVariables.Clear();
+            screen.Metadata.BusAliases.Clear();
+            screen.Metadata.VariantDescriptions.Clear();
+        }
+        var observed = NewEmptyRoot(baseline);
+        observed.Instances[0].Metadata.TextVariables["REVISION"] = "B";
+        observed.Instances[0].Metadata.BusAliases.Add(new SchematicBusAlias { Name = "REBUILD_BUS", Members = { "D0" } });
+        observed.Instances[0].Metadata.VariantDescriptions["Rebuild"] = "variant";
+        var state = State(baseline, baseline, observed, "loaded", "created");
+        Assert.AreEqual(SchematicRebuildKind.Admitted, SchematicRebuild.Classify(state, baseline).Kind);
+        var plan = SchematicSynchronizationPlanner.Plan(state);
+        Assert.IsTrue(plan.CanPrepare, plan.ErrorCode + ": " + plan.ErrorMessage);
+        Assert.IsEmpty(plan.NativeOperations.Single(o => o.ReplaceTextVariables is not null).ReplaceTextVariables.Variables);
+        Assert.IsEmpty(plan.NativeOperations.Single(o => o.ReplaceBusAliases is not null).ReplaceBusAliases.Aliases);
+        Assert.IsEmpty(plan.NativeOperations.Single(o => o.ReplaceVariantRegistry is not null).ReplaceVariantRegistry.Descriptions);
+        AssertRebuildCandidate(baseline, plan, observed, "explicit empty project collections");
+    }
+
+    [TestMethod]
+    public void RebuildAdmitsNgspiceReplacementWhenXmlCapturedIt()
+    {
+        var baseline = Placed();
+        foreach (var screen in baseline.Schematic.Instances)
+            screen.Metadata.NgspiceSettings = new SchematicNgspiceSettings { WorkbookFilename = "fixture.raw", FixIncludePaths = true, ModelMode = 2 };
+        var kept = NewEmptyRoot(baseline);
+        kept.Instances[0].Metadata.NgspiceSettings.ModelMode = 3;
+        var state = State(baseline, baseline, kept, "loaded", "created");
+        var classified = SchematicRebuild.Classify(state, baseline);
+        Assert.AreEqual(SchematicRebuildKind.Admitted, classified.Kind, classified.ErrorMessage);
+        var plan = SchematicSynchronizationPlanner.Plan(state);
+        Assert.IsTrue(plan.CanPrepare, plan.ErrorCode + ": " + plan.ErrorMessage);
+        var operation = plan.NativeOperations.Single(o => o.SetNgspiceSettings is not null);
+        Assert.AreEqual(2, operation.SetNgspiceSettings.ModelMode);
+        Assert.IsTrue(SchematicRebuild.RecreatesFileState(operation, 1));
+    }
+
+    // A direct admitted classification still prepares every typed project-setting operation the rebuild journal accepts.
+    [TestMethod]
+    public void PreparedRebuildAcceptsTypedProjectSettings()
+    {
+        var baseline = Placed();
+        PopulateTypedProjectSettings(baseline);
         var recorded = baseline with { Schematic = baseline.Schematic.Clone() };
         foreach (var screen in recorded.Schematic.Instances) screen.Metadata.SymbolComparison = new SchematicSymbolComparisonSettings { MissingFields = false, FieldTexts = false };
         var kept = NewEmptyRoot(recorded);
@@ -703,22 +848,19 @@ public sealed class SchematicRebuildTests
         var state = State(recorded, recorded, kept, "loaded", "created");
         var hierarchy = SchematicHierarchyMerge.Plan(recorded.Schematic, recorded.Schematic, kept);
         var plan = SchematicRebuild.Prepare(state, recorded, hierarchy, admitted, []);
-        Assert.AreEqual("rebuild_operation_unsupported", plan.ErrorCode, plan.ErrorMessage);
-        Assert.AreEqual("Rebuilding these sheets from the XML would need an edit a rebuild never makes; nothing was sent to KiCad.", plan.ErrorMessage);
-        Assert.IsEmpty(plan.NativeOperations, "No native operation is planned.");
-        Assert.IsNull(plan.Candidate);
-        Assert.IsNull(plan.CandidateXml);
-        Assert.IsNull(plan.Rebuild, "No rebuild intent reaches the executor.");
-        Assert.IsFalse(plan.CanPrepare);
+        Assert.IsTrue(plan.CanPrepare, plan.ErrorCode + ": " + plan.ErrorMessage);
+        Assert.AreEqual(recorded.Schematic.Instances[0].Metadata.SymbolComparison,
+            plan.NativeOperations.Single(o => o.SetSymbolComparison is not null).SetSymbolComparison);
+        Assert.IsNotNull(plan.Rebuild);
 
         // Precision: the same prepared rebuild with the kept root's symbol-comparison settings equal to the XML's is planned,
-        // and its batch sets no protected project setting.
+        // and its batch sets no symbol-comparison policy.
         var same = NewEmptyRoot(recorded);
         var agreed = SchematicRebuild.Prepare(State(recorded, recorded, same, "loaded", "created"), recorded,
             SchematicHierarchyMerge.Plan(recorded.Schematic, recorded.Schematic, same), admitted, []);
         Assert.IsTrue(agreed.CanPrepare, agreed.ErrorCode + ": " + agreed.ErrorMessage);
         Assert.IsTrue(agreed.NativeRebuildRequired);
-        Assert.IsFalse(agreed.NativeOperations.Any(o => o.SetFormatting is not null));
+        Assert.IsFalse(agreed.NativeOperations.Any(o => o.SetSymbolComparison is not null));
     }
 
     [TestMethod]
@@ -732,8 +874,21 @@ public sealed class SchematicRebuildTests
         Assert.IsTrue(SchematicRebuild.IsRebuild(state with { PendingMutation = batch, PendingLayout = Layout(DesignLayoutIntent.RebuildLane) }));
         Assert.IsFalse(SchematicRebuild.IsRebuild(state with { PendingMutation = batch, PendingLayout = Layout(DesignLayoutIntent.ConnectionRealizationLane) }));
         Assert.IsFalse(SchematicRebuild.IsRebuild(state with { PendingMutation = batch, PendingLayout = Layout(null) }));
-        var asserted = batch.Clone(); asserted.Operations.Add(new SchematicItemOperation { AssertConnectivity = new() { Version = 1 } });
-        Assert.IsFalse(SchematicRebuild.IsRebuild(state with { PendingMutation = asserted, PendingLayout = Layout(DesignLayoutIntent.RebuildLane) }));
+        foreach (var forbidden in new[]
+        {
+            new SchematicItemOperation { Remove = new KIID { Value = Guid.NewGuid().ToString("D") } },
+            new SchematicItemOperation { MoveConnectedSymbols = new() },
+            new SchematicItemOperation { TransformConnectedSymbols = new() },
+            new SchematicItemOperation { SetSymbolLocks = new() },
+            new SchematicItemOperation { AssertConnectivity = new() { Version = 1 } },
+        })
+        {
+            Assert.IsFalse(SchematicRebuild.RecreatesFileState(forbidden, 0), forbidden.OperationCase.ToString());
+            Assert.IsFalse(SchematicRebuild.RecreatesFileState(forbidden, 1), forbidden.OperationCase.ToString());
+            var candidate = batch.Clone(); candidate.Operations.Add(forbidden);
+            Assert.IsFalse(SchematicRebuild.IsRebuild(state with { PendingMutation = candidate,
+                PendingLayout = Layout(DesignLayoutIntent.RebuildLane) }), forbidden.OperationCase.ToString());
+        }
         var other = batch.Clone(); other.Description = "Apply XML synchronization candidate";
         Assert.IsFalse(SchematicRebuild.IsRebuild(state with { PendingMutation = other, PendingLayout = Layout(DesignLayoutIntent.RebuildLane) }));
         Assert.AreEqual("cpu_power", SchematicRebuild.GeneratedFileStem("CPU_POWER"));

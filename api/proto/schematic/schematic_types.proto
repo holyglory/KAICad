@@ -156,8 +156,19 @@ message SchematicMetadata
   // Schema 9: declared shared project net settings, excluding effective caches
   // and the separately owned net-chain grouping definitions.
   SchematicNetSettings net_settings = 24;
+  // Schema 10. Persisted ngspice project settings. Empty workbook names are
+  // meaningful; absence means an older peer did not capture this group.
+  SchematicNgspiceSettings ngspice_settings = 25;
   // -- lane 2C (300-399) --
   // -- end lane 2C --
+}
+
+message SchematicNgspiceSettings
+{
+  string workbook_filename = 1;
+  bool fix_include_paths = 2;
+  // NGSPICE_COMPATIBILITY_MODE's persisted numeric value (0..5).
+  int32 model_mode = 3;
 }
 
 message SchematicNetClassNames

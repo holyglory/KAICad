@@ -110,6 +110,32 @@ public sealed class SchematicItemDeltaTests
     }
 
     [TestMethod]
+    public void NgspiceSettingsProduceAnExplicitValidatedDelta()
+    {
+        var before = Fixture();
+        before.Metadata.NgspiceSettings = new() { WorkbookFilename = "before.wbk", FixIncludePaths = true, ModelMode = 0 };
+        var desired = before.Clone();
+        desired.Metadata.NgspiceSettings.WorkbookFilename = "after.wbk";
+        desired.Metadata.NgspiceSettings.FixIncludePaths = false;
+        desired.Metadata.NgspiceSettings.ModelMode = 4;
+        var operation = SchematicItemDelta.Plan(before, desired).Single();
+        Assert.AreEqual(desired.Metadata.NgspiceSettings, operation.SetNgspiceSettings);
+        Assert.AreEqual(0, SchematicItemDelta.Plan(desired, desired.Clone()).Count);
+        foreach (Action<SchematicNgspiceSettings> corrupt in new Action<SchematicNgspiceSettings>[]
+        {
+            value => value.WorkbookFilename = "bad\0name",
+            value => value.ModelMode = -1,
+            value => value.ModelMode = 6
+        })
+        {
+            var invalid = desired.Clone(); corrupt(invalid.Metadata.NgspiceSettings);
+            Assert.ThrowsExactly<AutomationException>(() => SchematicItemDelta.Plan(before, invalid));
+        }
+        desired.Metadata.NgspiceSettings = null;
+        Assert.ThrowsExactly<AutomationException>(() => SchematicItemDelta.Plan(before, desired));
+    }
+
+    [TestMethod]
     public void UnsavableGraphicSegmentUsesTheExplicitNativeLineRepresentation()
     {
         var before = Fixture(); var desired = before.Clone();

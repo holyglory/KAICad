@@ -28,6 +28,7 @@ public static class SchematicHierarchyDelta
                 || !Equals(s.Metadata.SymbolComparison, assets.SymbolComparison)
                 || !Equals(s.Metadata.BomSettings, assets.BomSettings)
                 || !SchematicNetSettingsState.SameDeclared(s.Metadata.NetSettings, assets.NetSettings)
+                || !Equals(s.Metadata.NgspiceSettings, assets.NgspiceSettings)
                 || !Equals(s.Metadata.NetSettings?.LabelAssignments, assets.NetSettings?.LabelAssignments)
                 || !SchematicReferenceInventoryState.Same(s.Metadata.ReferenceInventory, assets.ReferenceInventory)
                 || !SchematicNetChainClasses.Same(s.Metadata.NetChainClasses, assets.NetChainClasses)
@@ -84,6 +85,7 @@ public static class SchematicHierarchyDelta
         bool symbolComparisonEmitted = false;
         bool bomSettingsEmitted = false;
         bool netSettingsEmitted = false;
+        bool ngspiceSettingsEmitted = false;
         bool referenceInventoryEmitted = false;
         bool ercEmitted = false;
         foreach (var path in after.Keys.Order(StringComparer.Ordinal))
@@ -155,6 +157,11 @@ public static class SchematicHierarchyDelta
                 {
                     if (netSettingsEmitted) continue;
                     netSettingsEmitted = true;
+                }
+                if (operation.SetNgspiceSettings is not null)
+                {
+                    if (ngspiceSettingsEmitted) continue;
+                    ngspiceSettingsEmitted = true;
                 }
                 if (operation.SetReferenceInventory is not null)
                 {

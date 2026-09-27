@@ -190,7 +190,7 @@ API_RESULT ReadCheckedView( ApiRequest& aEnvelope, const std::string& aProcessEp
     CaptureSchematicObservation viewQuery;
     viewQuery.mutable_document()->CopyFrom( request.view() );
     // The schema the checked electrical state uses, so both describe the same object fields.
-    viewQuery.set_schema_version( 9 );
+    viewQuery.set_schema_version( 10 );
     API_RESULT view = call( viewQuery );
     if( !view ) return view;
     if( view->status().status() != ApiStatusCode::AS_OK || !view->message().UnpackTo( result.mutable_view() ) )

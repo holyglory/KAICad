@@ -63,8 +63,8 @@ public sealed partial class NativeSessionTests
     //     symbol-comparison settings changed with kicad_schematic_apply_checked_batch): planning and applying are refused with
     //     rebuild_project_settings_changed and a message naming the setting KiCad shows, the actions that work while the
     //     files are lost (change it back in KiCad, or restore the saved project file and reopen the project) and the recovery
-    //     step after them. The file is restored, the record is refreshed with kicad_design_recovery_refresh, and a text-variable
-    //     mismatch is then admitted and carried by the rebuild batch.
+    //     step after them. The file is restored, captured typed project settings are admitted, and their XML values are carried
+    //     by the rebuild batch. Legacy records that omitted a typed group remain protected by the planner.
     //     (The harness KiCad cannot be started again inside the journey: NativeSessionTests checks afterwards that it kept its
     //     process epoch and still holds the project. Planning on a KiCad started after the file changed is the same
     //     classification, proven with every setting group in SchematicRebuildTests.)
@@ -294,8 +294,26 @@ public sealed partial class NativeSessionTests
             // Add one typed net-chain declaration while the schematic files still exist. The later lost-file rebuild must
             // carry this same metadata through its batch and write it back byte-for-byte with the rest of the files.
             var chainDesign = store.Read()!.State.Baseline with { Schematic = store.Read()!.State.Baseline.Schematic.Clone() };
+            var chainRootScreen = chainDesign.Schematic.Instances.Single(s => s.Metadata.Document.Equals(document));
+            var nestedScreen = chainDesign.Schematic.Instances.Where(s => !s.Metadata.Document.Equals(document)
+                    && s.Items.Any(i => i.Is(SchematicSymbolInstance.Descriptor)))
+                .OrderByDescending(s => s.Metadata.Document.SheetPath.Path.Count).First();
+            var exclusionPolicy = chainRootScreen.Metadata.ErcSettings.Clone();
+            foreach (var owner in new[] { chainRootScreen, nestedScreen })
+            {
+                var anchor = owner == chainRootScreen
+                    ? owner.Items.First(i => i.Is(SheetSymbol.Descriptor)).Unpack<SheetSymbol>().Id
+                    : owner.Items.First(i => i.Is(SchematicSymbolInstance.Descriptor)).Unpack<SchematicSymbolInstance>().Id;
+                var marker = new Kiapi.Schematic.ErcMarker { ErrorType = Kiapi.Schematic.ErcErrorType.ErcetPinNotConnected,
+                    Position = new Vector2(), MainItemSheetPath = owner.Metadata.Document.SheetPath.Clone(),
+                    SheetSpecificPath = owner.Metadata.Document.SheetPath.Clone() };
+                marker.Items.Add(anchor.Clone());
+                exclusionPolicy.Exclusions.Add(new Kiapi.Schematic.ErcExclusion { Marker = marker,
+                    Comment = owner == chainRootScreen ? "Retain root review decision" : "Retain nested review decision" });
+            }
             foreach (var screen in chainDesign.Schematic.Instances)
             {
+                screen.Metadata.ErcSettings = exclusionPolicy.Clone();
                 screen.Metadata.BusAliases.Add(new SchematicBusAlias { Name = "REBUILD_BUS", Members = { "D0", "D1" } });
                 screen.Metadata.NetChains.Add(new SchematicNetChainDefinition { Name = "REBUILD_CHAIN",
                     From = new() { Reference = "U4", Pin = "8" }, To = new() { Reference = "U5", Pin = "74" },
@@ -309,6 +327,7 @@ public sealed partial class NativeSessionTests
             realized = await Capture();
             Assert.IsTrue(realized.Electrical.Hierarchy.Data.Instances.All(s => s.Metadata.NetChains.Any(c => c.Name == "REBUILD_CHAIN")));
             Assert.IsTrue(realized.Electrical.Hierarchy.Data.Instances.All(s => s.Metadata.BusAliases.Any(a => a.Name == "REBUILD_BUS")));
+            Assert.HasCount(2, realized.Electrical.Hierarchy.Data.Instances[0].Metadata.ErcSettings.Exclusions);
             PsuCpuFixture.AssertNative(store.Read()!.State.Baseline, realized.Electrical, Stage);
             Step("typed net chain saved");
 
@@ -387,43 +406,18 @@ public sealed partial class NativeSessionTests
             var fileRestored = await Capture();
             Assert.IsTrue(CheckedSchematicContract.FileCoverage(fileRestored.State), "The restored project file is the one KiCad loaded.");
             Step("changed project file refused");
-            // (b) KiCad's own protected project settings changed on the new root: planning and applying are refused.
+            var legacySettingsRefusal = await RefuseLegacySettings(fileRestored, originalFiles[projectFile]);
+            // (b) A captured typed project setting changed on the new root: the XML value is restored by the rebuild plan.
             var originalSymbolComparison = fileRestored.Electrical.Hierarchy.Data.Instances[0].Metadata.SymbolComparison.Clone();
             var changedSymbolComparison = originalSymbolComparison.Clone(); changedSymbolComparison.MissingFields = !changedSymbolComparison.MissingFields;
-            var changedSettings = await EditSymbolComparison(fileRestored, changedSymbolComparison, "Change symbol comparison (refusal probe)");
+            var changedSettings = await EditSymbolComparison(fileRestored, changedSymbolComparison, "Change symbol comparison before rebuild");
             RequireToolSuccess(await host.Tool("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
                 expectedRevisionToken = store.Read()!.RevisionToken, expectedDocumentEpoch = changedSettings.State.Revision.Epoch }));
-            const string SettingsRefusal = "KiCad's project settings (symbol comparison) differ from the ones the XML records, so rebuilding would "
-                + "overwrite them. Put them back as the XML records them (change them back in KiCad, or restore the project file KiCad last "
-                + "saved with this XML and reopen the project), then refresh the recovery record (kicad_design_recovery_refresh; after "
-                + "reopening the project, create the root with kicad_schematic_create and use kicad_design_recovery_reattach) and rebuild.";
-            var settingsPlan = await host.Tool("kicad_design_sync_plan", Recovery(store));
-            await File.WriteAllTextAsync(Evidence("changed-settings-plan.json"), RetainedToolEvidence(settingsPlan), token);
-            Assert.AreEqual("rebuild_project_settings_changed", Error(settingsPlan), settingsPlan.GetRawText());
-            var settingsContent = settingsPlan.GetProperty("structuredContent");
-            Assert.AreEqual(SettingsRefusal, settingsContent.GetProperty("errorMessage").GetString());
-            Assert.IsFalse(settingsContent.GetProperty("canPrepare").GetBoolean());
-            Assert.AreEqual(0, settingsContent.GetProperty("nativeOperationsJson").GetArrayLength(), "Nothing would reach KiCad.");
-            Assert.AreEqual(JsonValueKind.Null, settingsContent.GetProperty("candidateDesignXml").ValueKind, "Nothing would be published.");
-            var changedSetting = await RefusedRebuild("changed-settings", originalFiles[projectFile], changedSettings);
-            Assert.AreEqual("rebuild_project_settings_changed", changedSetting.Code, changedSetting.Message);
-            Assert.AreEqual(SettingsRefusal, changedSetting.Message);
-            // The message, followed literally. Its first action: the setting is changed back in KiCad.
-            var restored = await EditSymbolComparison(changedSettings, originalSymbolComparison, "Restore symbol comparison");
-            Assert.IsTrue(originalSymbolComparison.Equals(restored.Electrical.Hierarchy.Data.Instances[0].Metadata.SymbolComparison));
-            Assert.IsEmpty(restored.Electrical.Hierarchy.Data.Instances[0].Items);
-            // Planning reads the recovery record, which still holds the changed settings, so it still refuses: the refresh the
-            // message names next is needed.
-            var unrefreshed = await host.Tool("kicad_design_sync_plan", Recovery(store));
-            await File.WriteAllTextAsync(Evidence("changed-settings-unrefreshed-plan.json"), RetainedToolEvidence(unrefreshed), token);
-            Assert.AreEqual("rebuild_project_settings_changed", Error(unrefreshed), unrefreshed.GetRawText());
-            Assert.AreEqual(SettingsRefusal, unrefreshed.GetProperty("structuredContent").GetProperty("errorMessage").GetString());
-            // Then the recovery record is refreshed (the same document session, so no reattach); the rebuild is planned below.
-            var refreshed = await host.Tool("kicad_design_recovery_refresh", Recovery(store));
-            await File.WriteAllTextAsync(Evidence("changed-settings-refresh.json"), refreshed.GetRawText(), token);
-            RequireToolSuccess(refreshed);
-            Assert.IsTrue(refreshed.GetProperty("structuredContent").GetProperty("changed").GetBoolean(), refreshed.GetRawText());
-            Assert.AreEqual(restored.Electrical.Hierarchy.Data, store.Read()!.State.Observed, "The record observes the settings as KiCad shows them again.");
+            var settingsPlan = await Plan(store, "changed-settings-plan");
+            Assert.IsTrue(settingsPlan.GetProperty("nativeRebuildRequired").GetBoolean(), settingsPlan.GetRawText());
+            var symbolOperation = Operations(settingsPlan).Single(o => o.SetSymbolComparison is not null).SetSymbolComparison;
+            Assert.AreEqual(originalSymbolComparison, symbolOperation);
+            var restored = changedSettings;
             // Bus aliases are XML-typed project settings too. Change one in KiCad, then verify the lost-file rebuild plans
             // the XML value back through ReplaceBusAliases alongside the text-variable operation.
             var withAlias = restored.Electrical.Hierarchy.Data.Instances[0].Metadata.BusAliases
@@ -479,6 +473,57 @@ public sealed partial class NativeSessionTests
             var formattingOperation = Operations(formattingPlan).Single(o => o.SetFormatting is not null).SetFormatting;
             Assert.AreEqual(xmlFormatting, formattingOperation);
             restored = changedFormattingForRebuildState;
+            // The remaining typed project settings are also carried by the XML. Exercise each through KiCad's
+            // checked-batch path so the final lost-file rebuild has to restore every captured group.
+            var changedAnnotation = restored.Electrical.Hierarchy.Data.Instances[0].Metadata.Annotation.Clone();
+            changedAnnotation.StartAfter++;
+            restored = await EditAnnotation(restored, changedAnnotation, "Change annotation policy before rebuild");
+            RequireToolSuccess(await host.Tool("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
+                expectedRevisionToken = store.Read()!.RevisionToken, expectedDocumentEpoch = restored.State.Revision.Epoch }));
+            var changedFieldTemplates = restored.Electrical.Hierarchy.Data.Instances[0].Metadata.FieldTemplates.Clone();
+            changedFieldTemplates.Fields.Add(new SchematicFieldTemplate { Name = "RebuildNote", Visible = true });
+            restored = await EditFieldTemplates(restored, changedFieldTemplates, "Change field templates before rebuild");
+            RequireToolSuccess(await host.Tool("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
+                expectedRevisionToken = store.Read()!.RevisionToken, expectedDocumentEpoch = restored.State.Revision.Epoch }));
+            var changedBom = restored.Electrical.Hierarchy.Data.Instances[0].Metadata.BomSettings.Clone();
+            changedBom.ExportFilename = "${PROJECTNAME}-rebuild.csv";
+            restored = await EditBomSettings(restored, changedBom, "Change BOM settings before rebuild");
+            RequireToolSuccess(await host.Tool("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
+                expectedRevisionToken = store.Read()!.RevisionToken, expectedDocumentEpoch = restored.State.Revision.Epoch }));
+            var changedNetSettings = restored.Electrical.Hierarchy.Data.Instances[0].Metadata.NetSettings.Clone();
+            changedNetSettings.DefaultClass.Schematic.WireWidth.ValueNm += 25_400;
+            changedNetSettings.LabelAssignments.Clear();
+            restored = await EditNetSettings(restored, changedNetSettings, "Change net settings before rebuild");
+            RequireToolSuccess(await host.Tool("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
+                expectedRevisionToken = store.Read()!.RevisionToken, expectedDocumentEpoch = restored.State.Revision.Epoch }));
+            var changedReferences = restored.Electrical.Hierarchy.Data.Instances[0].Metadata.ReferenceInventory.Clone();
+            changedReferences.Allocated.Add("R999");
+            restored = await EditReferenceInventory(restored, changedReferences, "Change reference inventory before rebuild");
+            RequireToolSuccess(await host.Tool("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
+                expectedRevisionToken = store.Read()!.RevisionToken, expectedDocumentEpoch = restored.State.Revision.Epoch }));
+            var changedNetChainClasses = restored.Electrical.Hierarchy.Data.Instances[0].Metadata.NetChainClasses.Clone();
+            changedNetChainClasses.Definitions.Add("rebuild-extra");
+            restored = await EditNetChainClasses(restored, changedNetChainClasses, "Change net-chain classes before rebuild");
+            RequireToolSuccess(await host.Tool("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
+                expectedRevisionToken = store.Read()!.RevisionToken, expectedDocumentEpoch = restored.State.Revision.Epoch }));
+            var changedErc = restored.Electrical.Hierarchy.Data.Instances[0].Metadata.ErcSettings.Clone();
+            changedErc.RuleSeverities[0].Severity = changedErc.RuleSeverities[0].Severity == RuleSeverity.RsWarning ? RuleSeverity.RsError : RuleSeverity.RsWarning;
+            changedErc.Exclusions.Clear();
+            restored = await EditErcSettings(restored, changedErc, "Change ERC settings before rebuild");
+            RequireToolSuccess(await host.Tool("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
+                expectedRevisionToken = store.Read()!.RevisionToken, expectedDocumentEpoch = restored.State.Revision.Epoch }));
+            var xmlNgspice = restored.Electrical.Hierarchy.Data.Instances[0].Metadata.NgspiceSettings.Clone();
+            var changedNgspice = xmlNgspice.Clone();
+            changedNgspice.ModelMode = xmlNgspice.ModelMode == 2 ? 3 : 2;
+            changedNgspice.FixIncludePaths = !xmlNgspice.FixIncludePaths;
+            changedNgspice.WorkbookFilename = "rebuild-probe.wbk";
+            var changedNgspiceState = await EditNgspiceSettings(restored, changedNgspice, "Change ngspice settings before rebuild");
+            RequireToolSuccess(await host.Tool("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
+                expectedRevisionToken = store.Read()!.RevisionToken, expectedDocumentEpoch = changedNgspiceState.State.Revision.Epoch }));
+            var ngspicePlan = await Plan(store, "changed-ngspice-settings-plan");
+            Assert.IsTrue(ngspicePlan.GetProperty("nativeRebuildRequired").GetBoolean(), ngspicePlan.GetRawText());
+            Assert.AreEqual(xmlNgspice, Operations(ngspicePlan).Single(o => o.SetNgspiceSettings is not null).SetNgspiceSettings);
+            restored = changedNgspiceState;
             // Text variables are XML-typed. A mismatch is admitted and the rebuild carries the XML value back to KiCad.
             var withVariable = restored.Electrical.Hierarchy.Data.Instances[0].Metadata.TextVariables.ToDictionary(v => v.Key, v => v.Value);
             Assert.IsNotEmpty(withVariable, "The fixture has an XML text variable to restore.");
@@ -549,6 +594,15 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(rebuildOperations.Any(o => o.ReplaceVariantRegistry is not null), "The rebuild carries the XML variant registry.");
             Assert.IsTrue(rebuildOperations.Any(o => o.SetDrawingRatios is not null), "The rebuild carries the XML drawing ratios.");
             Assert.IsTrue(rebuildOperations.Any(o => o.SetFormatting is not null), "The rebuild carries the XML formatting.");
+            Assert.IsTrue(rebuildOperations.Any(o => o.SetAnnotation is not null), "The rebuild carries the XML annotation policy.");
+            Assert.IsTrue(rebuildOperations.Any(o => o.SetFieldTemplates is not null), "The rebuild carries the XML field templates.");
+            Assert.IsTrue(rebuildOperations.Any(o => o.SetSymbolComparison is not null), "The rebuild carries the XML symbol comparison policy.");
+            Assert.IsTrue(rebuildOperations.Any(o => o.SetBomSettings is not null), "The rebuild carries the XML BOM settings.");
+            Assert.IsTrue(rebuildOperations.Any(o => o.SetNetSettings is not null), "The rebuild carries the XML net settings.");
+            Assert.IsTrue(rebuildOperations.Any(o => o.SetReferenceInventory is not null), "The rebuild carries the XML reference inventory.");
+            Assert.IsTrue(rebuildOperations.Any(o => o.ReplaceNetChainClasses is not null), "The rebuild carries the XML net-chain classes.");
+            Assert.IsTrue(rebuildOperations.Any(o => o.SetErcSettings is not null), "The rebuild carries the XML ERC settings.");
+            Assert.IsTrue(rebuildOperations.Any(o => o.SetNgspiceSettings is not null), "The rebuild carries the XML ngspice settings.");
             Assert.IsTrue(rebuildOperations.Select((o, i) => (o, i)).All(p => p.o.Create is not null || p.o.ReplaceLibraryCache is not null
                 || SchematicRebuild.RecreatesFileState(p.o, p.i)), "The rebuild sends no protected project setting, removal or move.");
             Assert.AreEqual(restored, await Capture(), "Planning must not change KiCad.");
@@ -628,11 +682,11 @@ public sealed partial class NativeSessionTests
                     drawn, sheetPins = originalSheetPins.Length, nets = original.Electrical.Nets.Count,
                     files = originalFiles.ToDictionary(f => Path.GetFileName(f.Key), f => Convert.ToHexStringLower(SHA256.HashData(f.Value))) },
                 earlierPreviewRecords = earlier,
+                legacySettingsRefusal,
                 changedProjectFile = new { planIsRebuild = true, applyRefused = changedFile.Code, message = changedFile.Message,
                     projectFileUnchanged = true, kicadUnchanged = true, xmlUnchanged = true },
-                changedProjectSettings = new { protectedSetting = "symbol comparison", planRefused = "rebuild_project_settings_changed", applyRefused = changedSetting.Code,
-                    message = SettingsRefusal, projectFileUnchanged = true, kicadUnchanged = true, xmlUnchanged = true, changedBackInKiCad = true,
-                    planRefusedUntilRefresh = Error(unrefreshed), refreshed = true, textVariables = new { planAccepted = true,
+                changedProjectSettings = new { restoredSetting = "symbol comparison", planAccepted = true,
+                    operation = "set_symbol_comparison", xmlValueRestored = true, textVariables = new { planAccepted = true,
                         operation = "replace_text_variables", name = textVariableName, xmlValueRestored = xmlTextVariableValue, thenRebuilt = true } },
                 deleted = schematicFiles.Select(Path.GetFileName), newRootScreen = emptyRoot.Metadata.ScreenId.Value,
                 rebuild = new { operations = rebuildOperations.Count, created = rebuiltKinds, firstOperation = "rebuild_screen_identity", result = rebuild },
@@ -640,7 +694,7 @@ public sealed partial class NativeSessionTests
                     samePinPartition = true, completePartition = true },
                 refused = new { unsettled = unsettled.ErrorCode, netChains = withChains.ErrorCode, nativeIdentity = refusals },
                 secondApplyNoOp = true, undoRestoresEmptyRoot = true, redoRestoresRebuild = true, crossPlatformReady = false,
-                remaining = "Project-file reconstruction from XML; rebuild of net chains and shared screens."
+                remaining = "Project-file reconstruction from XML; repeated-sheet and shared-screen recovery coverage."
             }), token);
             Step("done");
         }
@@ -802,6 +856,49 @@ public sealed partial class NativeSessionTests
 
         static int RecordVersion(DesignRecoveryStore on) => JsonNode.Parse(File.ReadAllText(on.StatePath))!["Version"]!.GetValue<int>();
 
+        // Older XML lacks message presence for a setting it never captured. Refuse that exact saved record
+        // through the public plan and apply tools without changing the complete record or either design.
+        async Task<object> RefuseLegacySettings(CheckedSchematicState shown, byte[] projectBytes)
+        {
+            var current = store.Read()!;
+            var baseline = current.State.Baseline with { Schematic = current.State.Baseline.Schematic.Clone() };
+            foreach (var screen in baseline.Schematic.Instances) screen.Metadata.Annotation = null;
+            var electrical = current.State.BaselineElectrical!.Clone();
+            electrical.Hierarchy.Data = baseline.Schematic.Clone();
+            byte[] bytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(baseline, current.State.KnowledgeLibraries));
+            var legacy = new DesignRecoveryStore(Path.Combine(earlierRecords, "omitted-annotation-recovery.json"));
+            string legacyPath = Path.Combine(earlierRecords, "omitted-annotation.xml");
+            await File.WriteAllBytesAsync(legacyPath, bytes, token);
+            legacy.Save(current.State with { Baseline = baseline, BaselineElectrical = electrical, DesiredFileBytes = bytes }, null);
+            RequireToolSuccess(await host.Tool("kicad_design_recovery_reattach", new { instanceId, recoveryPath = legacy.StatePath,
+                expectedRevisionToken = legacy.Read()!.RevisionToken, expectedDocumentEpoch = shown.State.Revision.Epoch }));
+            var before = legacy.Read()!;
+            var plan = await host.Tool("kicad_design_sync_plan", Recovery(legacy));
+            var apply = await host.Tool("kicad_design_sync_apply", new { instanceId, recoveryPath = legacy.StatePath,
+                designPath = legacyPath, expectedRevisionToken = before.RevisionToken, operationId = Guid.NewGuid().ToString("D") });
+            await File.WriteAllTextAsync(Evidence("omitted-annotation-plan.json"), RetainedToolEvidence(plan), token);
+            await File.WriteAllTextAsync(Evidence("omitted-annotation-apply.json"), RetainedToolEvidence(apply), token);
+            foreach (var result in new[] { plan, apply })
+            {
+                Assert.AreEqual("rebuild_project_settings_changed", Error(result), result.GetRawText());
+                StringAssert.Contains(result.GetProperty("structuredContent").GetProperty("errorMessage").GetString(), "annotation");
+                StringAssert.Contains(result.GetProperty("structuredContent").GetProperty("errorMessage").GetString(), "did not capture");
+            }
+            var content = plan.GetProperty("structuredContent");
+            Assert.IsFalse(content.GetProperty("canPrepare").GetBoolean());
+            Assert.AreEqual(0, content.GetProperty("nativeOperationsJson").GetArrayLength());
+            Assert.AreEqual(JsonValueKind.Null, content.GetProperty("candidateDesignXml").ValueKind);
+            Assert.AreEqual(shown, await Capture());
+            CollectionAssert.AreEqual(projectBytes, await File.ReadAllBytesAsync(projectFile, token));
+            CollectionAssert.AreEqual(bytes, await File.ReadAllBytesAsync(legacyPath, token));
+            CollectionAssert.AreEqual(current.State.DesiredFileBytes, await File.ReadAllBytesAsync(path, token));
+            Assert.AreEqual(current.RevisionToken, store.Read()!.RevisionToken);
+            Assert.AreEqual(before.RevisionToken, legacy.Read()!.RevisionToken);
+            Assert.IsFalse(schematicFiles.Any(File.Exists));
+            return new { omittedGroup = "annotation", planRefused = Error(plan), applyRefused = Error(apply),
+                nativeUnchanged = true, filesUnchanged = true, recoveryRecordsUnchanged = true };
+        }
+
         // Apply the rebuild through the public tool and require it to be refused before anything reaches KiCad: the code and
         // reason, KiCad, the project file (whatever it holds now), the XML and the recovery record all unchanged, and no
         // schematic file written.
@@ -821,6 +918,46 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(before.RevisionToken, store.Read()!.RevisionToken, name + ": the recovery record is unchanged.");
             return (code, message);
         }
+
+        async Task<CheckedSchematicState> EditProjectSetting(CheckedSchematicState at, SchematicItemOperation operation,
+            string evidenceName, string description)
+        {
+            var request = new CheckedSchematicBatch { ExpectedState = at.State.Clone(), Batch = new ApplySchematicItemBatch
+            {
+                Document = document.Clone(), DocumentEpoch = at.State.Revision.Epoch, ExpectedRevision = at.State.Revision.Clone(),
+                OperationId = Guid.NewGuid().ToString("D"), Description = description
+            } };
+            operation.TargetDocument = document.Clone();
+            request.Batch.Operations.Add(operation);
+            var edited = await host.Tool("kicad_schematic_apply_checked_batch", new { instanceId, requestJson = SchematicJson.Formatter.Format(request) });
+            await File.WriteAllTextAsync(Evidence(evidenceName + "-" + at.State.Revision.Sequence + ".json"), edited.GetRawText(), token);
+            RequireToolSuccess(edited);
+            return await Capture();
+        }
+
+        async Task<CheckedSchematicState> EditAnnotation(CheckedSchematicState at, SchematicAnnotationSettings value, string description) =>
+            await EditProjectSetting(at, new SchematicItemOperation { SetAnnotation = value.Clone() }, "annotation", description);
+
+        async Task<CheckedSchematicState> EditFieldTemplates(CheckedSchematicState at, SchematicFieldTemplates value, string description) =>
+            await EditProjectSetting(at, new SchematicItemOperation { SetFieldTemplates = value.Clone() }, "field-templates", description);
+
+        async Task<CheckedSchematicState> EditBomSettings(CheckedSchematicState at, SchematicBomSettings value, string description) =>
+            await EditProjectSetting(at, new SchematicItemOperation { SetBomSettings = value.Clone() }, "bom-settings", description);
+
+        async Task<CheckedSchematicState> EditNetSettings(CheckedSchematicState at, SchematicNetSettings value, string description) =>
+            await EditProjectSetting(at, new SchematicItemOperation { SetNetSettings = value.Clone() }, "net-settings", description);
+
+        async Task<CheckedSchematicState> EditReferenceInventory(CheckedSchematicState at, SchematicReferenceInventory value, string description) =>
+            await EditProjectSetting(at, new SchematicItemOperation { SetReferenceInventory = value.Clone() }, "reference-inventory", description);
+
+        async Task<CheckedSchematicState> EditNetChainClasses(CheckedSchematicState at, SchematicNetChainClassState value, string description) =>
+            await EditProjectSetting(at, new SchematicItemOperation { ReplaceNetChainClasses = value.Clone() }, "net-chain-classes", description);
+
+        async Task<CheckedSchematicState> EditErcSettings(CheckedSchematicState at, SchematicErcSettings value, string description) =>
+            await EditProjectSetting(at, new SchematicItemOperation { SetErcSettings = value.Clone() }, "erc-settings", description);
+
+        async Task<CheckedSchematicState> EditNgspiceSettings(CheckedSchematicState at, SchematicNgspiceSettings value, string description) =>
+            await EditProjectSetting(at, new SchematicItemOperation { SetNgspiceSettings = value.Clone() }, "ngspice-settings", description);
 
         // Replace the project's text variables in KiCad through the public checked-batch tool, at exactly this state.
         async Task<CheckedSchematicState> EditTextVariables(CheckedSchematicState at, Dictionary<string, string> textVariables, string description)

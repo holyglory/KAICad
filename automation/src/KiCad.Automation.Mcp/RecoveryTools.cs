@@ -247,20 +247,38 @@ public sealed class RecoveryTools
             if (SchematicDesignXml.Write(desired, saved.State.KnowledgeLibraries)
                 != SchematicDesignXml.Write(saved.State.Baseline, saved.State.KnowledgeLibraries))
                 throw new AutomationException("rebuild_requires_settled_xml", "Restore from the XML last synchronized with KiCad, then apply newer changes.");
-            var skeleton = SchematicProjectSkeleton.FromHierarchy(saved.State.Baseline.Schematic, record.ProjectPath, cancellationToken);
-            if (expectedProjectFile is not null)
-                _ = SchematicProjectSkeleton.FromHierarchy(saved.State.Baseline.Schematic, expectedProjectFile, cancellationToken);
-            cancellationToken.ThrowIfCancellationRequested();
-            bool created = skeleton.CreateIfMissing(record.ProjectPath);
-            var data = JsonSerializer.SerializeToElement(new
-            {
-                instanceId = saved.State.InstanceId, recoveryRevisionToken = saved.RevisionToken,
-                projectFile = skeleton.ProjectFile, created,
-                observedFileSha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(skeleton.ProjectFile))),
-                rootSheetId = skeleton.RootSheetId, projectName = skeleton.ProjectName, sheets = skeleton.Sheets
-            });
+            var data = SkeletonResult(saved, store, record.ProjectPath, expectedProjectFile, cancellationToken);
             return new CallToolResult { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
         }, cancellationToken);
+    });
+
+    [McpServerTool(Name = "kicad_project_recovery_start", ReadOnly = false),
+     Description("Restore a missing .kicad_pro container and start the exact registered KiCad instance for a settled XML recovery record. Requires the saved instance's process to be proven ended, the exact recovery revision token, and the matching native executable. Existing project files are preserved. The returned instance still needs kicad_schematic_create when the root schematic is missing, followed by kicad_design_recovery_reattach and kicad_design_sync_plan/apply; this operation never overwrites a project or reconstructs schematic files."),
+     KiCadCapability("service", "compiled-mcp plus native-process", "registered stopped instance and exact recovery token"),
+     KiCadVerification(KiCadVerificationLevel.InProcess, "SchematicProjectSkeletonTests.ExtractsDerivedProjectEntriesAndCreatesMissingFileWithoutReplacement")]
+    public Task<CallToolResult> StartProjectRecovery(string executable, string instanceId, string recoveryPath,
+        string expectedRevisionToken, bool? softwareRendering = null, CancellationToken cancellationToken = default) => ExecuteAsync(async () =>
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var (store, _) = ReadAtRevision(instanceId, recoveryPath, expectedRevisionToken);
+        if (registry is null)
+            throw new AutomationException("instance_not_attached", "Use the production server's instance registry for project recovery.");
+        string projectPath = await registry.WithStoppedProjectAsync(instanceId, record =>
+        {
+            var saved = store.Read() ?? throw new AutomationException("missing_design_recovery", "No saved recovery record exists.");
+            if (saved.RevisionToken != expectedRevisionToken)
+                throw new AutomationException("design_recovery_changed", "Recovery changed; inspect the current record before starting KiCad.");
+            _ = SkeletonResult(saved, store, record.ProjectPath, record.ProjectPath, cancellationToken);
+            return record.ProjectPath;
+        }, cancellationToken);
+        var started = await registry.StartInstanceAsync(executable, projectPath, cancellationToken, softwareRendering);
+        var data = JsonSerializer.SerializeToElement(new
+        {
+            instanceId = started.Instance.InstanceId, projectPath = started.Instance.ProjectPath,
+            epoch = started.Instance.Epoch, processId = started.Instance.ProcessId,
+            nextStep = "Create the missing root with kicad_schematic_create, reattach the recovery record, then plan and apply the rebuild."
+        });
+        return new CallToolResult { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
     });
 
     [McpServerTool(Name = "kicad_design_block_owners_plan", ReadOnly = true),
@@ -540,6 +558,29 @@ public sealed class RecoveryTools
         if (saved.State.InstanceId != id)
             throw new AutomationException("recovery_instance_mismatch", "The record belongs to a different instance.");
         return (store, saved);
+    }
+
+    private static JsonElement SkeletonResult(StoredDesignRecovery saved, DesignRecoveryStore store,
+        string authoritativeProjectFile, string? expectedProjectFile, CancellationToken cancellationToken)
+    {
+        if (saved.State.HasPendingWork || DesignReleasedOperations.OpenOn(store.StatePath, saved.State).Count != 0)
+            throw new AutomationException("pending_recovery_requires_reconciliation", "Resolve the pending synchronization before restoring the project container.");
+        var desired = DesignRecoveryStore.ReadDesired(saved.State);
+        if (SchematicDesignXml.Write(desired, saved.State.KnowledgeLibraries)
+            != SchematicDesignXml.Write(saved.State.Baseline, saved.State.KnowledgeLibraries))
+            throw new AutomationException("rebuild_requires_settled_xml", "Restore from the XML last synchronized with KiCad, then apply newer changes.");
+        var skeleton = SchematicProjectSkeleton.FromHierarchy(saved.State.Baseline.Schematic, authoritativeProjectFile, cancellationToken);
+        if (expectedProjectFile is not null)
+            _ = SchematicProjectSkeleton.FromHierarchy(saved.State.Baseline.Schematic, expectedProjectFile, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        bool created = skeleton.CreateIfMissing(authoritativeProjectFile);
+        return JsonSerializer.SerializeToElement(new
+        {
+            instanceId = saved.State.InstanceId, recoveryRevisionToken = saved.RevisionToken,
+            projectFile = skeleton.ProjectFile, created,
+            observedFileSha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(skeleton.ProjectFile))),
+            rootSheetId = skeleton.RootSheetId, projectName = skeleton.ProjectName, sheets = skeleton.Sheets
+        });
     }
 
     private static CallToolResult Describe(StoredDesignRecovery saved)

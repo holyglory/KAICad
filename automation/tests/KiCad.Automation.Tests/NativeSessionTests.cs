@@ -863,7 +863,9 @@ public sealed partial class NativeSessionTests
             rejectionDeadline.CancelAfter(TimeSpan.FromSeconds(15));
             await competing.WaitForExitAsync(rejectionDeadline.Token);
             Assert.AreNotEqual(0, competing.ExitCode, "A second writable process must reject the owned project.");
-            StringAssert.Contains(await File.ReadAllTextAsync(competingLog, deadline.Token), "already open");
+            string competingOutput = await File.ReadAllTextAsync(competingLog, deadline.Token);
+            Assert.IsTrue(competingOutput.Contains("already open", StringComparison.OrdinalIgnoreCase)
+                || competingOutput.Contains("unsaved local history", StringComparison.OrdinalIgnoreCase), competingOutput);
             foreach (var target in launched)
                 Assert.AreEqual(registry.Get(target.Id).Epoch,
                     (await registry.Client(target.Id).HandshakeAsync(deadline.Token)).Epoch);

@@ -11,6 +11,47 @@ namespace KiCad.Automation.Tests;
 public sealed class SchematicNativeRestorationTests
 {
     [TestMethod]
+    public void NativeSymbolOwnershipUsesSheetPathWithTheNativeUuid()
+    {
+        var (source, sourceLibrary) = SchematicDesignTests.Fixture();
+        string PathOf(SchematicDesign design, SchematicSymbolBinding binding)
+        {
+            var circuit = design.Engineering.Circuit;
+            var occurrence = circuit.Symbols.Single(s => s.Id == binding.SymbolOccurrenceId);
+            var component = circuit.Components.Single(c => c.Id == occurrence.ComponentId);
+            return SchematicDesignBindings.PathKey(design.SheetBindings.Single(b => b.SheetInstanceId == occurrence.EffectiveSheetInstanceId(component)).NativePath);
+        }
+        var repeatedNative = source.SymbolBindings.GroupBy(b => b.NativeObjectId)
+            .Select(g => (Bindings: g.ToArray(), Paths: g.Select(b => PathOf(source, b)).Distinct(StringComparer.Ordinal).ToArray()))
+            .First(g => g.Paths.Length > 1);
+        var removed = repeatedNative.Bindings[0];
+        var removedOccurrence = source.Engineering.Circuit.Symbols.Single(s => s.Id == removed.SymbolOccurrenceId);
+        var baselineCircuit = source.Engineering.Circuit with
+        {
+            Symbols = source.Engineering.Circuit.Symbols.Where(s => s.Id != removedOccurrence.Id).ToArray()
+        };
+        var baseline = source with
+        {
+            Engineering = source.Engineering with { Circuit = baselineCircuit },
+            SymbolBindings = source.SymbolBindings.Where(b => b.SymbolOccurrenceId != removed.SymbolOccurrenceId).ToArray()
+        };
+        var replacement = removedOccurrence with { Id = Guid.NewGuid() };
+        var desired = baseline with
+        {
+            Engineering = baseline.Engineering with
+            {
+                Circuit = baseline.Engineering.Circuit with { Symbols = [.. baseline.Engineering.Circuit.Symbols, replacement] }
+            },
+            SymbolBindings = [.. baseline.SymbolBindings, new(replacement.Id, removed.NativeObjectId)]
+        };
+        var state = new DesignRecoveryState(Guid.NewGuid(), Guid.NewGuid(), new("e1", 1), false,
+            baseline, [], source.Schematic.Clone(), [sourceLibrary]);
+
+        Assert.IsTrue(SchematicNativeAdditionProjection.DeclaresAddedSymbols(state, desired),
+            "A native UUID already bound on one sheet path is still a new ownership candidate on its sibling path.");
+    }
+
+    [TestMethod]
     public async Task RestoredOwnersKeepExactIdsAndNewerInstructionsWithoutInventingNets()
     {
         using var fixture = new Fixture(newerInstructions: true);

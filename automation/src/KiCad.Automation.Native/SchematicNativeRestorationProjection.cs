@@ -228,7 +228,11 @@ public sealed record SchematicOwnershipResolutionRequest(string Code, Guid Nativ
 /// is the component it draws a unit of: an existing component or another new symbol's proposed component from the
 /// request's candidates, or the symbol's own proposed component for a component of its own. Null leaves that decision to
 /// exact identities.</summary>
-public sealed record SchematicOwnershipAnswer(Guid NativeObjectId, Guid? PartId = null, Guid? ComponentId = null);
+public sealed record SchematicOwnershipAnswer(Guid NativeObjectId, Guid? PartId = null, Guid? ComponentId = null)
+{
+    /// <summary>Optional sheet-instance path that disambiguates equal native UUIDs on repeated sheets.</summary>
+    public IReadOnlyList<Guid>? NativePath { get; init; }
+}
 
 internal sealed record SchematicNativeAdditionResult(SchematicNativeRestorationResult? Adoption,
     IReadOnlyList<SchematicOwnershipResolutionRequest> Requests, IReadOnlyList<SchematicBindingIssue> Issues,
@@ -300,11 +304,17 @@ public static class SchematicNativeAdditionProjection
     internal static bool DeclaresAddedSymbols(DesignRecoveryState state, SchematicDesign desired)
     {
         var occurrences = state.Baseline.Engineering.Circuit.Symbols.Select(s => s.Id).ToHashSet();
-        var bound = state.Baseline.SymbolBindings.Select(b => b.NativeObjectId).ToHashSet();
-        var candidates = desired.SymbolBindings.Where(b => !occurrences.Contains(b.SymbolOccurrenceId) && !bound.Contains(b.NativeObjectId))
-            .Select(b => b.NativeObjectId.ToString("D")).ToHashSet(StringComparer.Ordinal);
-        return candidates.Count != 0 && state.Observed.Instances.Any(screen => screen.Items.Any(i => i.Is(SchematicSymbolInstance.Descriptor)
-            && candidates.Contains(i.Unpack<SchematicSymbolInstance>().Id?.Value ?? "")));
+        var bound = state.Baseline.SymbolBindings.Select(b => BindingKey(state.Baseline, b))
+            .Where(k => k is not null).Select(k => k!).ToHashSet(StringComparer.Ordinal);
+        var candidates = desired.SymbolBindings.Where(b => !occurrences.Contains(b.SymbolOccurrenceId))
+            .Select(b => BindingKey(desired, b)).Where(k => k is not null && !bound.Contains(k))
+            .Select(k => k!).ToHashSet(StringComparer.Ordinal);
+        return candidates.Count != 0 && state.Observed.Instances.Any(screen =>
+        {
+            string path = SchematicDesignBindings.PathKey(screen.Metadata.Document.SheetPath.Path.Select(id => Guid.Parse(id.Value)).ToArray());
+            return screen.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>())
+                .Select(s => path + "#" + s.Id?.Value).Any(candidates.Contains);
+        });
     }
 
     internal static SchematicNativeAdditionResult Project(DesignRecoveryState state, IReadOnlyList<SchematicOwnershipHistory>? history,
@@ -361,8 +371,9 @@ public static class SchematicNativeAdditionProjection
 
             // A symbol KiCad shows again after an undo belongs to the verified history that knew it, not to a new
             // component. Restoring it together with new symbols is two decisions; take them one at a time.
-            var historical = (history ?? []).SelectMany(h => h.Design.SymbolBindings.Select(b => b.NativeObjectId)).ToHashSet();
-            if (added.Any(x => Guid.TryParse(x.Symbol.Id.Value, out var id) && historical.Contains(id)))
+            var historical = (history ?? []).SelectMany(h => h.Design.SymbolBindings.Select(b => BindingKey(h.Design, b)))
+                .Where(k => k is not null).Select(k => k!).ToHashSet(StringComparer.Ordinal);
+            if (added.Any(x => historical.Contains(x.Path + "#" + x.Symbol.Id.Value)))
                 return Failure("native_restoration_with_additions",
                     "KiCad shows symbols an earlier synchronized design had together with newly placed ones. Synchronize them separately: "
                     + "undo the new placement in KiCad, synchronize the restored symbols, then redo it.");
@@ -542,10 +553,16 @@ public static class SchematicNativeAdditionProjection
             var answerBy = new Dictionary<string, SchematicOwnershipAnswer>(StringComparer.Ordinal);
             foreach (var answer in answers ?? [])
             {
-                var matches = additions.Where(a => a.NativeId == answer.NativeObjectId).ToArray();
+                if (answer.NativePath is { Count: 0 })
+                    return Failure(AnswerInvalid, $"Symbol {answer.NativeObjectId:D} has an empty native path; answer the sheet path named by its request.");
+                string? answerPath = answer.NativePath is { Count: > 0 } ? SchematicDesignBindings.PathKey(answer.NativePath) : null;
+                var matches = additions.Where(a => a.NativeId == answer.NativeObjectId
+                    && (answerPath is null || a.Path == answerPath)).ToArray();
                 if (matches.Length != 1)
-                    return Failure(AnswerInvalid, $"Symbol {answer.NativeObjectId:D} is not a symbol KiCad shows since the last synchronization; "
-                        + "answer the symbols the resolution requests name.");
+                    return Failure(AnswerInvalid, matches.Length > 1
+                        ? $"Symbol {answer.NativeObjectId:D} appears on repeated sheets; answer it with the NativePath from its request."
+                        : $"Symbol {answer.NativeObjectId:D} is not a symbol KiCad shows since the last synchronization; "
+                            + "answer the symbols the resolution requests name.");
                 if (declarations.ContainsKey(matches[0].Key))
                     return Failure(AnswerInvalid, $"The XML already answers symbol {matches[0].Reference} ({answer.NativeObjectId:D}).");
                 if (!answerBy.TryAdd(matches[0].Key, answer))
@@ -749,7 +766,6 @@ public static class SchematicNativeAdditionProjection
         var components = circuit.Components.ToDictionary(c => c.Id);
         var paths = design.SheetBindings.ToDictionary(b => b.SheetInstanceId, b => SchematicDesignBindings.PathKey(b.NativePath));
         var occurrences = circuit.Symbols.ToDictionary(s => s.Id);
-        var answered = answers.Select(a => a.NativeObjectId).ToHashSet();
         var joined = answers.Where(a => a.ComponentId is not null).Select(a => a.ComponentId!.Value).ToHashSet();
         var desiredCircuit = desired.Engineering.Circuit;
         var known = desiredCircuit.Symbols.Select(s => s.Id).ToHashSet();
@@ -758,7 +774,10 @@ public static class SchematicNativeAdditionProjection
             .Where(b =>
             {
                 var occurrence = occurrences[b.SymbolOccurrenceId];
-                return answered.Contains(b.NativeObjectId) || joined.Contains(occurrence.ComponentId)
+                string path = paths[occurrence.EffectiveSheetInstanceId(components[occurrence.ComponentId])];
+                bool answered = answers.Any(a => a.NativeObjectId == b.NativeObjectId
+                    && (a.NativePath is null || SchematicDesignBindings.PathKey(a.NativePath) == path));
+                return answered || joined.Contains(occurrence.ComponentId)
                     && AdoptedIdentity("component", circuit.Id, PathOf(paths[occurrence.EffectiveSheetInstanceId(components[occurrence.ComponentId])]),
                         b.NativeObjectId) == occurrence.ComponentId;
             }).ToArray();
@@ -850,6 +869,17 @@ public static class SchematicNativeAdditionProjection
     private sealed record Decision(Addition Addition, Guid Part, PartDefinition? NewPart, SchematicOwnershipAnswer? Answer);
 
     private static IReadOnlyList<Guid> PathOf(string path) => [.. path.Split('/').Select(Guid.Parse)];
+
+    private static string? BindingKey(SchematicDesign design, SchematicSymbolBinding binding)
+    {
+        var circuit = design.Engineering.Circuit;
+        var occurrence = circuit.Symbols.SingleOrDefault(s => s.Id == binding.SymbolOccurrenceId);
+        if (occurrence is null) return null;
+        var component = circuit.Components.SingleOrDefault(c => c.Id == occurrence.ComponentId);
+        if (component is null) return null;
+        var sheet = design.SheetBindings.SingleOrDefault(s => s.SheetInstanceId == occurrence.EffectiveSheetInstanceId(component));
+        return sheet is null ? null : SchematicDesignBindings.PathKey(sheet.NativePath) + "#" + binding.NativeObjectId.ToString("D");
+    }
 
     internal static string LibraryKey(SchematicSymbolInstance symbol) =>
         LibraryKey(symbol.LibraryId ?? symbol.Definition?.Id ?? new Kiapi.Common.Types.LibraryIdentifier());

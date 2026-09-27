@@ -453,6 +453,19 @@ public sealed partial class NativeSessionTests
             var variantOperation = Operations(variantPlan).Single(o => o.ReplaceVariantRegistry is not null).ReplaceVariantRegistry;
             Assert.AreEqual(xmlVariantDescription, variantOperation.Descriptions["Assembly"]);
             restored = changedVariants;
+            // Drawing ratios are XML-typed project settings too. The rebuild must carry the XML ratios back through
+            // SetDrawingRatios after the files are lost.
+            var xmlRatios = restored.Electrical.Hierarchy.Data.Instances[0].Metadata.DrawingRatios?.Clone()
+                ?? throw new AssertFailedException("The fixture exposes drawing ratios.");
+            var changedRatios = xmlRatios.Clone(); changedRatios.DashLengthRatio += 1;
+            var changedDrawingRatios = await EditDrawingRatios(restored, changedRatios, "Change XML drawing ratios before rebuild");
+            RequireToolSuccess(await host.Tool("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
+                expectedRevisionToken = store.Read()!.RevisionToken, expectedDocumentEpoch = changedDrawingRatios.State.Revision.Epoch }));
+            var ratioPlan = await Plan(store, "changed-drawing-ratios-plan");
+            Assert.IsTrue(ratioPlan.GetProperty("nativeRebuildRequired").GetBoolean(), ratioPlan.GetRawText());
+            var ratioOperation = Operations(ratioPlan).Single(o => o.SetDrawingRatios is not null).SetDrawingRatios;
+            Assert.AreEqual(xmlRatios, ratioOperation);
+            restored = changedDrawingRatios;
             // Text variables are XML-typed. A mismatch is admitted and the rebuild carries the XML value back to KiCad.
             var withVariable = restored.Electrical.Hierarchy.Data.Instances[0].Metadata.TextVariables.ToDictionary(v => v.Key, v => v.Value);
             Assert.IsNotEmpty(withVariable, "The fixture has an XML text variable to restore.");
@@ -521,6 +534,7 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(rebuildOperations.Any(o => o.ReplaceTextVariables is not null), "The rebuild carries the XML text variables.");
             Assert.IsTrue(rebuildOperations.Any(o => o.ReplaceBusAliases is not null), "The rebuild carries the XML bus aliases.");
             Assert.IsTrue(rebuildOperations.Any(o => o.ReplaceVariantRegistry is not null), "The rebuild carries the XML variant registry.");
+            Assert.IsTrue(rebuildOperations.Any(o => o.SetDrawingRatios is not null), "The rebuild carries the XML drawing ratios.");
             Assert.IsTrue(rebuildOperations.Select((o, i) => (o, i)).All(p => p.o.Create is not null || p.o.ReplaceLibraryCache is not null
                 || SchematicRebuild.RecreatesFileState(p.o, p.i)), "The rebuild sends no protected project setting, removal or move.");
             Assert.AreEqual(restored, await Capture(), "Planning must not change KiCad.");
@@ -850,6 +864,20 @@ public sealed partial class NativeSessionTests
             request.Batch.Operations.Add(new SchematicItemOperation { TargetDocument = document.Clone(), ReplaceVariantRegistry = state });
             var edited = await host.Tool("kicad_schematic_apply_checked_batch", new { instanceId, requestJson = SchematicJson.Formatter.Format(request) });
             await File.WriteAllTextAsync(Evidence("variants-" + at.State.Revision.Sequence + ".json"), edited.GetRawText(), token);
+            RequireToolSuccess(edited);
+            return await Capture();
+        }
+
+        async Task<CheckedSchematicState> EditDrawingRatios(CheckedSchematicState at, SchematicDrawingRatios ratios, string description)
+        {
+            var request = new CheckedSchematicBatch { ExpectedState = at.State.Clone(), Batch = new ApplySchematicItemBatch
+            {
+                Document = document.Clone(), DocumentEpoch = at.State.Revision.Epoch, ExpectedRevision = at.State.Revision.Clone(),
+                OperationId = Guid.NewGuid().ToString("D"), Description = description
+            } };
+            request.Batch.Operations.Add(new SchematicItemOperation { TargetDocument = document.Clone(), SetDrawingRatios = ratios.Clone() });
+            var edited = await host.Tool("kicad_schematic_apply_checked_batch", new { instanceId, requestJson = SchematicJson.Formatter.Format(request) });
+            await File.WriteAllTextAsync(Evidence("drawing-ratios-" + at.State.Revision.Sequence + ".json"), edited.GetRawText(), token);
             RequireToolSuccess(edited);
             return await Capture();
         }

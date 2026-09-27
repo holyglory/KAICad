@@ -667,8 +667,10 @@ public sealed partial class NativeSessionTests
                 "Undo returns the root to the identity KiCad gave it.");
             Assert.IsEmpty(undone.Electrical.Hierarchy.Data.Instances[0].Items);
             await FocusedSchematicShortcut(client, document, processId, display, "y", token);
-            var redone = await Until("native redo", s => s.Electrical.Hierarchy.Data.Equals(rebuilt.Electrical.Hierarchy.Data)
-                && s.Electrical.Nets.Equals(rebuilt.Electrical.Nets));
+            var redone = await Until("native redo", s =>
+                SchematicHierarchyDelta.Plan(rebuilt.Electrical.Hierarchy.Data, s.Electrical.Hierarchy.Data, token).Count == 0
+                && SchematicHierarchyDelta.Plan(s.Electrical.Hierarchy.Data, rebuilt.Electrical.Hierarchy.Data, token).Count == 0
+                && SchematicElectricalComparison.Compare(rebuiltDesign, s.Electrical, []).ConnectivityEquivalent);
             Assert.AreEqual(originalRootScreen, redone.Electrical.Hierarchy.Data.Instances.Single(s => s.Metadata.Document.Equals(document)).Metadata.ScreenId.Value);
             Step("second apply no-op, undo and redo");
 

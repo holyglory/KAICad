@@ -396,9 +396,7 @@ void SCH_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList )
         }
         else if( status == UNDO_REDO::PAGESETTINGS )
         {
-            // Restore page/project settings after graphical entries have reattached child sheets.
-            // ERC exclusions with nested paths otherwise cannot resolve during redo.
-            deferredPageSettings.emplace_back( static_cast<DS_PROXY_UNDO_ITEM*>( eda_item ), screen );
+            // Already captured once in the prepass; restore after graphical entries.
         }
         else if( status == UNDO_REDO::REPEAT_ITEM )
         {
@@ -509,8 +507,10 @@ void SCH_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList )
     if( refreshHierarchy )
         Schematic().RefreshHierarchy();
 
-    for( auto& deferred : deferredPageSettings )
+    // Preserve the original reverse traversal order without scheduling any picker twice.
+    for( auto it = deferredPageSettings.rbegin(); it != deferredPageSettings.rend(); ++it )
     {
+        auto& deferred = *it;
         auto* item = deferred.item;
         auto* screen = deferred.screen;
         sheets = m_schematic->Hierarchy();

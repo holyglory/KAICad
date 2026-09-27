@@ -838,37 +838,47 @@ public sealed partial class NativeSessionTests
                 Console.WriteLine($"Native editor journey {target.Id} completed at {elapsed.Elapsed.TotalSeconds:F1}s.");
             }
 
-            // A competing process must fail without showing a lock-override
-            // dialog or disturbing the two existing writers.
-            var competingStart = new ProcessStartInfo(executable)
+            try
             {
-                WorkingDirectory = Path.GetDirectoryName(launched[0].Project)!,
-                UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true
-            };
-            competingStart.Environment["DISPLAY"] = ":" + displayNumber;
-            competingStart.Environment["KICAD_RUN_FROM_BUILD_DIR"] = "1";
-            competingStart.Environment["XDG_CONFIG_HOME"] = Path.Combine(temporary, "competing-config");
-            competingStart.Environment["XDG_CACHE_HOME"] = Path.Combine(temporary, "competing-cache");
-            string competingLog = Path.Combine(evidence, "competing-native.log");
-            foreach (string arg in new[] { "--new", "--automation", Guid.NewGuid().ToString("D"),
-                                           "--api-socket", Path.Combine(temporary, "competing.sock"),
-                                           "--automation-log", competingLog,
-                                           "--software-rendering", launched[0].Project })
-                competingStart.ArgumentList.Add(arg);
-            Process competing = Process.Start(competingStart)!;
-            processes.Add(competing);
-            captures.Add(Capture(competing.StandardOutput, Path.Combine(evidence, "competing.stdout.log")));
-            captures.Add(Capture(competing.StandardError, Path.Combine(evidence, "competing.stderr.log")));
-            using var rejectionDeadline = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
-            rejectionDeadline.CancelAfter(TimeSpan.FromSeconds(15));
-            await competing.WaitForExitAsync(rejectionDeadline.Token);
-            Assert.AreNotEqual(0, competing.ExitCode, "A second writable process must reject the owned project.");
-            string competingOutput = await File.ReadAllTextAsync(competingLog, deadline.Token);
-            Assert.IsTrue(competingOutput.Contains("already open", StringComparison.OrdinalIgnoreCase)
-                || competingOutput.Contains("unsaved local history", StringComparison.OrdinalIgnoreCase), competingOutput);
+                // A competing process must fail without showing a lock-override
+                // dialog or disturbing the two existing writers.
+                var competingStart = new ProcessStartInfo(executable)
+                {
+                    WorkingDirectory = Path.GetDirectoryName(launched[0].Project)!,
+                    UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true
+                };
+                competingStart.Environment["DISPLAY"] = ":" + displayNumber;
+                competingStart.Environment["KICAD_RUN_FROM_BUILD_DIR"] = "1";
+                competingStart.Environment["XDG_CONFIG_HOME"] = Path.Combine(temporary, "competing-config");
+                competingStart.Environment["XDG_CACHE_HOME"] = Path.Combine(temporary, "competing-cache");
+                string competingLog = Path.Combine(evidence, "competing-native.log");
+                foreach (string arg in new[] { "--new", "--automation", Guid.NewGuid().ToString("D"),
+                                               "--api-socket", Path.Combine(temporary, "competing.sock"),
+                                               "--automation-log", competingLog,
+                                               "--software-rendering", launched[0].Project })
+                    competingStart.ArgumentList.Add(arg);
+                Process competing = Process.Start(competingStart)!;
+                processes.Add(competing);
+                captures.Add(Capture(competing.StandardOutput, Path.Combine(evidence, "competing.stdout.log")));
+                captures.Add(Capture(competing.StandardError, Path.Combine(evidence, "competing.stderr.log")));
+                using var rejectionDeadline = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
+                rejectionDeadline.CancelAfter(TimeSpan.FromSeconds(15));
+                await competing.WaitForExitAsync(rejectionDeadline.Token);
+                Assert.AreNotEqual(0, competing.ExitCode, "A second writable process must reject the owned project.");
+                StringAssert.Contains(await File.ReadAllTextAsync(competingLog, deadline.Token), "already open");
+            }
+            catch (Exception error) when (!deadline.IsCancellationRequested)
+            { synchronizationFailures.Add(error); }
             foreach (var target in launched)
-                Assert.AreEqual(registry.Get(target.Id).Epoch,
-                    (await registry.Client(target.Id).HandshakeAsync(deadline.Token)).Epoch);
+            {
+                try
+                {
+                    Assert.AreEqual(registry.Get(target.Id).Epoch,
+                        (await registry.Client(target.Id).HandshakeAsync(deadline.Token)).Epoch);
+                }
+                catch (Exception error) when (!deadline.IsCancellationRequested)
+                { synchronizationFailures.Add(error); }
+            }
             if (synchronizationFailures.Count != 0)
                 throw new AggregateException("Native synchronization execution failed; each independent project was exercised.", synchronizationFailures);
         }

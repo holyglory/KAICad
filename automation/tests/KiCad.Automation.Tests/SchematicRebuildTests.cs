@@ -521,8 +521,8 @@ public sealed class SchematicRebuildTests
     {
         var baseline = Placed();
         Assert.HasCount(13, ProjectSettingGroups, "Every typed setting group the project file holds (SchematicRebuild.ChangedProjectSettings).");
-        var protectedGroups = ProjectSettingGroups.Where(g => g.What is not "text variables" and not "bus aliases").ToArray();
-        Assert.HasCount(11, protectedGroups, "Every typed setting group other than XML-typed text variables and bus aliases remains protected.");
+        var protectedGroups = ProjectSettingGroups.Where(g => g.What is not "text variables" and not "bus aliases" and not "variants").ToArray();
+        Assert.HasCount(10, protectedGroups, "Every typed setting group other than XML-typed text variables, bus aliases and variants remains protected.");
         foreach (var (what, edit) in protectedGroups)
         {
             var kept = NewEmptyRoot(baseline);
@@ -550,7 +550,7 @@ public sealed class SchematicRebuildTests
         var recreated = SchematicSynchronizationPlanner.Plan(State(baseline, baseline, fresh, "loaded", "created"));
         Assert.IsTrue(recreated.CanPrepare, recreated.ErrorCode + ": " + recreated.ErrorMessage);
         Assert.AreEqual(1, recreated.NativeOperations.Count(o => o.SetPageSettings is not null && o.TargetDocument.Equals(baseline.Schematic.Document)));
-        // Only the XML-typed text variables and bus aliases enter a rebuild journal; every other project setting remains excluded.
+        // Only the XML-typed text variables, bus aliases and variants enter a rebuild journal; every other project setting remains excluded.
         foreach (var setting in new SchematicItemOperation[]
         {
             new() { SetFormatting = new() }, new() { SetNetSettings = new() },
@@ -559,10 +559,11 @@ public sealed class SchematicRebuildTests
             new() { SetDrawingRatios = new() }, new() { SetReferenceInventory = new() }, new() { ReplaceVariantRegistry = new() },
             new() { ReplaceBusAliases = new() },
         })
-            if (setting.ReplaceBusAliases is null) Assert.IsFalse(SchematicRebuild.RecreatesFileState(setting, 1), setting.OperationCase.ToString());
+            if (setting.ReplaceBusAliases is null && setting.ReplaceVariantRegistry is null)
+                Assert.IsFalse(SchematicRebuild.RecreatesFileState(setting, 1), setting.OperationCase.ToString());
         foreach (var file in new SchematicItemOperation[] { new() { SetPageSettings = new() }, new() { SetTitleBlock = new() },
             new() { SetRootInstance = new() }, new() { ReplaceEmbeddedFiles = new() }, new() { ReplaceNetChains = new() },
-            new() { ReplaceTextVariables = new() }, new() { ReplaceBusAliases = new() } })
+            new() { ReplaceTextVariables = new() }, new() { ReplaceBusAliases = new() }, new() { ReplaceVariantRegistry = new() } })
             Assert.IsTrue(SchematicRebuild.RecreatesFileState(file, 1), file.OperationCase.ToString());
     }
 
@@ -612,6 +613,24 @@ public sealed class SchematicRebuildTests
         var aliases = plan.NativeOperations.Single(o => o.ReplaceBusAliases is not null).ReplaceBusAliases;
         Assert.AreEqual("DATA", aliases.Aliases.Single().Name);
         Assert.IsTrue(SchematicRebuild.RecreatesFileState(plan.NativeOperations.Single(o => o.ReplaceBusAliases is not null), 1));
+    }
+
+    [TestMethod]
+    public void RebuildAdmitsVariantReplacementAndJournalsIt()
+    {
+        var baseline = Placed();
+        foreach (var screen in baseline.Schematic.Instances) screen.Metadata.VariantDescriptions["Assembly"] = "original";
+        var kept = NewEmptyRoot(baseline);
+        kept.Instances[0].Metadata.VariantDescriptions.Clear();
+        var state = State(baseline, baseline, kept, "loaded", "created");
+
+        var classified = SchematicRebuild.Classify(state, baseline);
+        Assert.AreEqual(SchematicRebuildKind.Admitted, classified.Kind, classified.ErrorMessage);
+        var plan = SchematicSynchronizationPlanner.Plan(state);
+        Assert.IsTrue(plan.CanPrepare, plan.ErrorCode + ": " + plan.ErrorMessage);
+        var variants = plan.NativeOperations.Single(o => o.ReplaceVariantRegistry is not null).ReplaceVariantRegistry;
+        Assert.AreEqual("original", variants.Descriptions["Assembly"]);
+        Assert.IsTrue(SchematicRebuild.RecreatesFileState(plan.NativeOperations.Single(o => o.ReplaceVariantRegistry is not null), 1));
     }
 
     // Ledger p001c485926b37099: the second line of defence behind the settings check. Prepare refuses any planned batch that

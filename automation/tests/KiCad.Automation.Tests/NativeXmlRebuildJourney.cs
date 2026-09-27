@@ -438,6 +438,21 @@ public sealed partial class NativeSessionTests
             var aliasOperation = aliasOperations.Single(o => o.ReplaceBusAliases is not null).ReplaceBusAliases;
             Assert.AreEqual("D0", aliasOperation.Aliases.Single(a => a.Name == "REBUILD_BUS").Members[0]);
             restored = changedAliases;
+            // Variant descriptions are XML-typed project settings too. Mutate the fixture's Assembly registry entry,
+            // then verify the lost-file rebuild plans the XML description back through ReplaceVariantRegistry.
+            var withVariant = restored.Electrical.Hierarchy.Data.Instances[0].Metadata.VariantDescriptions
+                .ToDictionary(v => v.Key, v => v.Value);
+            Assert.IsTrue(withVariant.ContainsKey("Assembly"), "The fixture exposes its Assembly variant description.");
+            string xmlVariantDescription = withVariant["Assembly"];
+            withVariant["Assembly"] = xmlVariantDescription == "changed" ? "original" : "changed";
+            var changedVariants = await EditVariants(restored, withVariant, "Change XML variant description before rebuild");
+            RequireToolSuccess(await host.Tool("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
+                expectedRevisionToken = store.Read()!.RevisionToken, expectedDocumentEpoch = changedVariants.State.Revision.Epoch }));
+            var variantPlan = await Plan(store, "changed-variants-plan");
+            Assert.IsTrue(variantPlan.GetProperty("nativeRebuildRequired").GetBoolean(), variantPlan.GetRawText());
+            var variantOperation = Operations(variantPlan).Single(o => o.ReplaceVariantRegistry is not null).ReplaceVariantRegistry;
+            Assert.AreEqual(xmlVariantDescription, variantOperation.Descriptions["Assembly"]);
+            restored = changedVariants;
             // Text variables are XML-typed. A mismatch is admitted and the rebuild carries the XML value back to KiCad.
             var withVariable = restored.Electrical.Hierarchy.Data.Instances[0].Metadata.TextVariables.ToDictionary(v => v.Key, v => v.Value);
             Assert.IsNotEmpty(withVariable, "The fixture has an XML text variable to restore.");
@@ -505,6 +520,7 @@ public sealed partial class NativeSessionTests
                 "Each sheet symbol is rebuilt with its sheet pins and their identities.");
             Assert.IsTrue(rebuildOperations.Any(o => o.ReplaceTextVariables is not null), "The rebuild carries the XML text variables.");
             Assert.IsTrue(rebuildOperations.Any(o => o.ReplaceBusAliases is not null), "The rebuild carries the XML bus aliases.");
+            Assert.IsTrue(rebuildOperations.Any(o => o.ReplaceVariantRegistry is not null), "The rebuild carries the XML variant registry.");
             Assert.IsTrue(rebuildOperations.Select((o, i) => (o, i)).All(p => p.o.Create is not null || p.o.ReplaceLibraryCache is not null
                 || SchematicRebuild.RecreatesFileState(p.o, p.i)), "The rebuild sends no protected project setting, removal or move.");
             Assert.AreEqual(restored, await Capture(), "Planning must not change KiCad.");
@@ -819,6 +835,21 @@ public sealed partial class NativeSessionTests
             request.Batch.Operations.Add(new SchematicItemOperation { TargetDocument = document.Clone(), ReplaceBusAliases = state });
             var edited = await host.Tool("kicad_schematic_apply_checked_batch", new { instanceId, requestJson = SchematicJson.Formatter.Format(request) });
             await File.WriteAllTextAsync(Evidence("bus-aliases-" + at.State.Revision.Sequence + ".json"), edited.GetRawText(), token);
+            RequireToolSuccess(edited);
+            return await Capture();
+        }
+
+        async Task<CheckedSchematicState> EditVariants(CheckedSchematicState at, Dictionary<string, string> variants, string description)
+        {
+            var state = new SchematicVariantRegistryState(); state.Descriptions.Add(variants);
+            var request = new CheckedSchematicBatch { ExpectedState = at.State.Clone(), Batch = new ApplySchematicItemBatch
+            {
+                Document = document.Clone(), DocumentEpoch = at.State.Revision.Epoch, ExpectedRevision = at.State.Revision.Clone(),
+                OperationId = Guid.NewGuid().ToString("D"), Description = description
+            } };
+            request.Batch.Operations.Add(new SchematicItemOperation { TargetDocument = document.Clone(), ReplaceVariantRegistry = state });
+            var edited = await host.Tool("kicad_schematic_apply_checked_batch", new { instanceId, requestJson = SchematicJson.Formatter.Format(request) });
+            await File.WriteAllTextAsync(Evidence("variants-" + at.State.Revision.Sequence + ".json"), edited.GetRawText(), token);
             RequireToolSuccess(edited);
             return await Capture();
         }

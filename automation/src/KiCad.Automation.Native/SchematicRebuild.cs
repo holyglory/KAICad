@@ -59,16 +59,17 @@ public sealed record SchematicGeneratedSheetIdentity(Guid SheetInstanceId, Guid 
 /// last synchronized with KiCad, and it holds every part of the deleted files: every screen, object,
 /// library cache entry, page, title block, root page and embedded file. The rebuild gives the new root
 /// the identity its file had and recreates everything else with its exact identities, sheet symbols and
-/// their sheet pins included. The project file is kept; XML-typed text variables are restored as part of
-/// the rebuild, while every other typed project setting must still match the XML and untyped settings
+/// their sheet pins included. The project file is kept; XML-typed text variables, bus aliases, variant
+/// descriptions, drawing ratios and formatting are restored as part of the rebuild, while every other
+/// typed project setting must still match the XML and untyped settings
 /// (<c>complete_project_settings</c>) remain as the kept file holds them.</item>
 /// </list></summary>
 public static class SchematicRebuild
 {
     /// <summary>The only unrepresented native state a rebuild accepts: project settings the XML does not
     /// type. They live in the project file, which deleting the schematic files leaves in place. The
-    /// XML-typed text variables are the bounded exception: the rebuild restores them from XML. All other
-    /// typed settings remain protected by the mismatch refusal.</summary>
+    /// XML-typed text variables, bus aliases, variant descriptions, drawing ratios and formatting are restored
+    /// from XML; all other typed settings remain protected by the mismatch refusal.</summary>
     public const string RetainedProjectSettings = "complete_project_settings";
     public const string BatchDescription = "Rebuild native sheets from XML";
     private const string SharedScreenRootOwnership = "shared_screen_root_ownership";
@@ -78,6 +79,7 @@ public static class SchematicRebuild
     private const string BusAliasesSetting = "bus aliases";
     private const string VariantsSetting = "variants";
     private const string DrawingRatiosSetting = "drawing ratios";
+    private const string FormattingSetting = "formatting";
 
     private const long Grid = 1_270_000L;
     private const long SheetWidth = 38_100_000L;
@@ -172,9 +174,9 @@ public static class SchematicRebuild
         || RecreatesFileState(operation, index);
 
     /// <summary>Operations a rebuild journal holds besides creations, updates and library caches: the page, title
-    /// block, root page, embedded files, net-chain metadata and XML text variables that recreate a deleted
+    /// block, root page, embedded files, net-chain metadata and XML-typed project settings that recreate a deleted
     /// schematic file's non-item state, and the new root's saved identity, only as the batch's first operation.
-    /// Other project settings remain refused, as do removals, connected moves, transforms and lock changes:
+    /// Remaining protected project settings remain refused, as do removals, connected moves, transforms and lock changes:
     /// a rebuild only adds what the XML holds to sheets KiCad shows empty.</summary>
     internal static bool RecreatesFileState(SchematicItemOperation operation, int index)
     {
@@ -186,7 +188,7 @@ public static class SchematicRebuild
                 or SchematicItemOperation.OperationOneofCase.SetRootInstance or SchematicItemOperation.OperationOneofCase.ReplaceEmbeddedFiles
                 or SchematicItemOperation.OperationOneofCase.ReplaceNetChains or SchematicItemOperation.OperationOneofCase.ReplaceTextVariables
                 or SchematicItemOperation.OperationOneofCase.ReplaceBusAliases or SchematicItemOperation.OperationOneofCase.ReplaceVariantRegistry
-                or SchematicItemOperation.OperationOneofCase.SetDrawingRatios => true,
+                or SchematicItemOperation.OperationOneofCase.SetDrawingRatios or SchematicItemOperation.OperationOneofCase.SetFormatting => true,
             _ => false
         };
     }
@@ -365,8 +367,9 @@ public static class SchematicRebuild
                 + string.Join(", ", missing.Concat(baseline.Schematic.Instances.Any(s => s.UnrepresentedItems.Count != 0) ? ["unsupported objects"] : []))
                 + "), so they cannot be rebuilt without loss.");
         // The project file was kept, so KiCad's new root shows project settings: the ones KiCad loaded from that file, and any
-        // change made in KiCad since. XML-typed text variables are restored by the rebuild; every other typed setting must
-        // still match the XML. While the files are lost, an edited XML is refused as rebuild_requires_settled_xml, so the
+        // change made in KiCad since. XML-typed text variables, bus aliases, variant descriptions, drawing ratios and
+        // formatting are restored by the rebuild; every other typed setting must still match the XML. While the files are
+        // lost, an edited XML is refused as rebuild_requires_settled_xml, so the
         // mismatch message names only what fixes the remaining protected settings: putting them back in KiCad or reopening
         // the project with the project file saved with this XML. Planning reads the recovery record's saved observation, never
         // KiCad, so the message also names the step that shows the record KiCad's settings again: a refresh in the same
@@ -380,7 +383,9 @@ public static class SchematicRebuild
                 && !string.Equals(name, BusAliasesSetting, StringComparison.Ordinal)
                 && !string.Equals(name, VariantsSetting, StringComparison.Ordinal)
                 && (!string.Equals(name, DrawingRatiosSetting, StringComparison.Ordinal)
-                    || recorded.DrawingRatios is null))
+                    || recorded.DrawingRatios is null)
+                && (!string.Equals(name, FormattingSetting, StringComparison.Ordinal)
+                    || recorded.Formatting is null))
             .ToArray();
         if (changed.Length != 0)
             return Rejected("rebuild_project_settings_changed", SettingsChangedMessage(changed));
@@ -452,7 +457,7 @@ public static class SchematicRebuild
         Check(BusAliasesSetting, kept.BusAliases.Equals(recorded.BusAliases));
         Check(VariantsSetting, kept.VariantDescriptions.Equals(recorded.VariantDescriptions));
         Check(DrawingRatiosSetting, Equals(kept.DrawingRatios, recorded.DrawingRatios));
-        Check("formatting", Equals(kept.Formatting, recorded.Formatting));
+        Check(FormattingSetting, Equals(kept.Formatting, recorded.Formatting));
         Check("annotation", Equals(kept.Annotation, recorded.Annotation));
         Check("field templates", Equals(kept.FieldTemplates, recorded.FieldTemplates));
         Check("symbol comparison", Equals(kept.SymbolComparison, recorded.SymbolComparison));

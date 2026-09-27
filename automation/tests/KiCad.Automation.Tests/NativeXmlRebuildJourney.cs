@@ -54,13 +54,13 @@ public sealed partial class NativeSessionTests
     //     automation/tests/fixtures/preview-23-recovery and read, planned, applied and saved again by
     //     DesignElectricalRecoveryTests.ARecordPreview23WroteReadsPlansAndAppliesAgainstThisBuildsSnapshot.
     //  3. Every schematic file is lost, KiCad creates a new empty root for the project and the recovery record adopts it.
-    //     A protected setting mismatch is refused through the public tools, while XML text variables are restored by the
+    //     A protected setting mismatch is refused through the public tools, while XML-typed project settings are restored by
     //     rebuild, each with the
     //     project file, the XML and KiCad unchanged (p001c485926b37099). The kept project file changed on disk (a text
     //     variable added): KiCad reads a project file only when it opens the project, so its new root still shows the
     //     settings it loaded, the plan is the rebuild, and apply refuses it with native_file_conflict before anything reaches
     //     KiCad, naming the changed file and what fixes it, so the changed file is never overwritten. KiCad's own project
-    //     formatting changed with kicad_schematic_apply_checked_batch): planning and applying are refused with
+    //     symbol-comparison settings changed with kicad_schematic_apply_checked_batch): planning and applying are refused with
     //     rebuild_project_settings_changed and a message naming the setting KiCad shows, the actions that work while the
     //     files are lost (change it back in KiCad, or restore the saved project file and reopen the project) and the recovery
     //     step after them. The file is restored, the record is refreshed with kicad_design_recovery_refresh, and a text-variable
@@ -354,7 +354,7 @@ public sealed partial class NativeSessionTests
             await File.WriteAllTextAsync(Evidence("original.xml"), SchematicDataXml.Write(original.Electrical.Hierarchy.Data), token);
             string originalRootScreen = original.Electrical.Hierarchy.Data.Instances.Single(s => s.Metadata.Document.Equals(document)).Metadata.ScreenId.Value;
 
-            // ---- 3. The files are lost; protected settings are refused and text variables are restored ----------------
+            // ---- 3. The files are lost; protected settings are refused and XML-typed settings are restored --------------
             var close = await host.Tool("kicad_document_close", new { instanceId, expectedStateJson = SchematicJson.Formatter.Format(original.State),
                 operationId = Guid.NewGuid().ToString("D") });
             await File.WriteAllTextAsync(Evidence("close.json"), close.GetRawText(), token);
@@ -388,12 +388,12 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(CheckedSchematicContract.FileCoverage(fileRestored.State), "The restored project file is the one KiCad loaded.");
             Step("changed project file refused");
             // (b) KiCad's own protected project settings changed on the new root: planning and applying are refused.
-            var originalFormatting = fileRestored.Electrical.Hierarchy.Data.Instances[0].Metadata.Formatting.Clone();
-            var changedFormatting = originalFormatting.Clone(); changedFormatting.DefaultTextSizeNm = 1_524_000;
-            var changedSettings = await EditFormatting(fileRestored, changedFormatting, "Change project formatting (refusal probe)");
+            var originalSymbolComparison = fileRestored.Electrical.Hierarchy.Data.Instances[0].Metadata.SymbolComparison.Clone();
+            var changedSymbolComparison = originalSymbolComparison.Clone(); changedSymbolComparison.MissingFields = !changedSymbolComparison.MissingFields;
+            var changedSettings = await EditSymbolComparison(fileRestored, changedSymbolComparison, "Change symbol comparison (refusal probe)");
             RequireToolSuccess(await host.Tool("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
                 expectedRevisionToken = store.Read()!.RevisionToken, expectedDocumentEpoch = changedSettings.State.Revision.Epoch }));
-            const string SettingsRefusal = "KiCad's project settings (formatting) differ from the ones the XML records, so rebuilding would "
+            const string SettingsRefusal = "KiCad's project settings (symbol comparison) differ from the ones the XML records, so rebuilding would "
                 + "overwrite them. Put them back as the XML records them (change them back in KiCad, or restore the project file KiCad last "
                 + "saved with this XML and reopen the project), then refresh the recovery record (kicad_design_recovery_refresh; after "
                 + "reopening the project, create the root with kicad_schematic_create and use kicad_design_recovery_reattach) and rebuild.";
@@ -409,8 +409,8 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual("rebuild_project_settings_changed", changedSetting.Code, changedSetting.Message);
             Assert.AreEqual(SettingsRefusal, changedSetting.Message);
             // The message, followed literally. Its first action: the setting is changed back in KiCad.
-            var restored = await EditFormatting(changedSettings, originalFormatting, "Restore the project's formatting");
-            Assert.IsTrue(originalFormatting.Equals(restored.Electrical.Hierarchy.Data.Instances[0].Metadata.Formatting));
+            var restored = await EditSymbolComparison(changedSettings, originalSymbolComparison, "Restore symbol comparison");
+            Assert.IsTrue(originalSymbolComparison.Equals(restored.Electrical.Hierarchy.Data.Instances[0].Metadata.SymbolComparison));
             Assert.IsEmpty(restored.Electrical.Hierarchy.Data.Instances[0].Items);
             // Planning reads the recovery record, which still holds the changed settings, so it still refuses: the refresh the
             // message names next is needed.
@@ -466,6 +466,19 @@ public sealed partial class NativeSessionTests
             var ratioOperation = Operations(ratioPlan).Single(o => o.SetDrawingRatios is not null).SetDrawingRatios;
             Assert.AreEqual(xmlRatios, ratioOperation);
             restored = changedDrawingRatios;
+            // Formatting is also XML-typed. Change one validated formatting field, then verify the XML value is carried
+            // back through SetFormatting during the rebuild.
+            var xmlFormatting = restored.Electrical.Hierarchy.Data.Instances[0].Metadata.Formatting.Clone();
+            var changedFormattingForRebuild = xmlFormatting.Clone(); changedFormattingForRebuild.DefaultTextSizeNm += 254_000;
+            var changedFormattingForRebuildState = await EditFormatting(restored, changedFormattingForRebuild,
+                "Change XML formatting before rebuild");
+            RequireToolSuccess(await host.Tool("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
+                expectedRevisionToken = store.Read()!.RevisionToken, expectedDocumentEpoch = changedFormattingForRebuildState.State.Revision.Epoch }));
+            var formattingPlan = await Plan(store, "changed-formatting-plan");
+            Assert.IsTrue(formattingPlan.GetProperty("nativeRebuildRequired").GetBoolean(), formattingPlan.GetRawText());
+            var formattingOperation = Operations(formattingPlan).Single(o => o.SetFormatting is not null).SetFormatting;
+            Assert.AreEqual(xmlFormatting, formattingOperation);
+            restored = changedFormattingForRebuildState;
             // Text variables are XML-typed. A mismatch is admitted and the rebuild carries the XML value back to KiCad.
             var withVariable = restored.Electrical.Hierarchy.Data.Instances[0].Metadata.TextVariables.ToDictionary(v => v.Key, v => v.Value);
             Assert.IsNotEmpty(withVariable, "The fixture has an XML text variable to restore.");
@@ -484,7 +497,7 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(textVariableName, textSettingsOperations.Single(o => o.ReplaceTextVariables is not null).ReplaceTextVariables.Variables.Single().Key);
             Assert.AreEqual(xmlTextVariableValue, textSettingsOperations.Single(o => o.ReplaceTextVariables is not null).ReplaceTextVariables.Variables.Single().Value);
             restored = changedTextSettings;
-            Step("protected project setting refused and text variables admitted");
+            Step("protected project setting refused and XML-typed settings admitted");
 
             // ---- 4. The schematic is rebuilt from the XML -------------------------------------------------------
             // Must-catch, in the live editor through the checked batch path apply uses: the identity is only ever a batch's
@@ -535,6 +548,7 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(rebuildOperations.Any(o => o.ReplaceBusAliases is not null), "The rebuild carries the XML bus aliases.");
             Assert.IsTrue(rebuildOperations.Any(o => o.ReplaceVariantRegistry is not null), "The rebuild carries the XML variant registry.");
             Assert.IsTrue(rebuildOperations.Any(o => o.SetDrawingRatios is not null), "The rebuild carries the XML drawing ratios.");
+            Assert.IsTrue(rebuildOperations.Any(o => o.SetFormatting is not null), "The rebuild carries the XML formatting.");
             Assert.IsTrue(rebuildOperations.Select((o, i) => (o, i)).All(p => p.o.Create is not null || p.o.ReplaceLibraryCache is not null
                 || SchematicRebuild.RecreatesFileState(p.o, p.i)), "The rebuild sends no protected project setting, removal or move.");
             Assert.AreEqual(restored, await Capture(), "Planning must not change KiCad.");
@@ -616,7 +630,7 @@ public sealed partial class NativeSessionTests
                 earlierPreviewRecords = earlier,
                 changedProjectFile = new { planIsRebuild = true, applyRefused = changedFile.Code, message = changedFile.Message,
                     projectFileUnchanged = true, kicadUnchanged = true, xmlUnchanged = true },
-                changedProjectSettings = new { protectedSetting = "formatting", planRefused = "rebuild_project_settings_changed", applyRefused = changedSetting.Code,
+                changedProjectSettings = new { protectedSetting = "symbol comparison", planRefused = "rebuild_project_settings_changed", applyRefused = changedSetting.Code,
                     message = SettingsRefusal, projectFileUnchanged = true, kicadUnchanged = true, xmlUnchanged = true, changedBackInKiCad = true,
                     planRefusedUntilRefresh = Error(unrefreshed), refreshed = true, textVariables = new { planAccepted = true,
                         operation = "replace_text_variables", name = textVariableName, xmlValueRestored = xmlTextVariableValue, thenRebuilt = true } },
@@ -834,6 +848,20 @@ public sealed partial class NativeSessionTests
             request.Batch.Operations.Add(new SchematicItemOperation { TargetDocument = document.Clone(), SetFormatting = formatting.Clone() });
             var edited = await host.Tool("kicad_schematic_apply_checked_batch", new { instanceId, requestJson = SchematicJson.Formatter.Format(request) });
             await File.WriteAllTextAsync(Evidence("formatting-" + at.State.Revision.Sequence + ".json"), edited.GetRawText(), token);
+            RequireToolSuccess(edited);
+            return await Capture();
+        }
+
+        async Task<CheckedSchematicState> EditSymbolComparison(CheckedSchematicState at, SchematicSymbolComparisonSettings comparison, string description)
+        {
+            var request = new CheckedSchematicBatch { ExpectedState = at.State.Clone(), Batch = new ApplySchematicItemBatch
+            {
+                Document = document.Clone(), DocumentEpoch = at.State.Revision.Epoch, ExpectedRevision = at.State.Revision.Clone(),
+                OperationId = Guid.NewGuid().ToString("D"), Description = description
+            } };
+            request.Batch.Operations.Add(new SchematicItemOperation { TargetDocument = document.Clone(), SetSymbolComparison = comparison.Clone() });
+            var edited = await host.Tool("kicad_schematic_apply_checked_batch", new { instanceId, requestJson = SchematicJson.Formatter.Format(request) });
+            await File.WriteAllTextAsync(Evidence("symbol-comparison-" + at.State.Revision.Sequence + ".json"), edited.GetRawText(), token);
             RequireToolSuccess(edited);
             return await Capture();
         }

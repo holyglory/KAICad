@@ -477,11 +477,12 @@ public sealed class SchematicRebuildTests
     }
 
     // Review finding (lane 2C, xml-rebuild): the kept project file must not be overwritten. A rebuild whose new root shows
-    // project settings other than XML text variables are refused before anything reaches KiCad. Every one of the thirteen
-    // setting groups the project file holds is checked on its own: text variables are the bounded rebuild exception, and the
+    // project settings other than XML-typed groups are refused before anything reaches KiCad. Every one of the thirteen
+    // setting groups the project file holds is checked on its own: text variables, bus aliases, variants, drawing ratios and
+    // formatting are the bounded rebuild exceptions, and the
     // exact message naming only that group (ledger p001c485926b37099). The message names what is compared (the settings
     // KiCad shows) and the recovery step that makes the record observe protected settings again (review of 9c764b5537).
-    // The NativeXmlRebuild journey follows that refusal through the public tools, then proves the XML text-variable exception
+    // The NativeXmlRebuild journey follows that refusal through the public tools, then proves the XML-typed exceptions
     // is carried by the rebuild batch and a project file changed on disk is still refused.
     private const string SettingsChangedMessage = "differ from the ones the XML records, so rebuilding would overwrite them. "
         + "Put them back as the XML records them (change them back in KiCad, or restore the project file KiCad last saved with "
@@ -521,8 +522,8 @@ public sealed class SchematicRebuildTests
     {
         var baseline = Placed();
         Assert.HasCount(13, ProjectSettingGroups, "Every typed setting group the project file holds (SchematicRebuild.ChangedProjectSettings).");
-        var protectedGroups = ProjectSettingGroups.Where(g => g.What is not "text variables" and not "bus aliases" and not "variants" and not "drawing ratios").ToArray();
-        Assert.HasCount(9, protectedGroups, "Every typed setting group other than XML-typed text variables, bus aliases, variants and drawing ratios remains protected.");
+        var protectedGroups = ProjectSettingGroups.Where(g => g.What is not "text variables" and not "bus aliases" and not "variants" and not "drawing ratios" and not "formatting").ToArray();
+        Assert.HasCount(8, protectedGroups, "Every typed setting group other than XML-typed text variables, bus aliases, variants, drawing ratios and formatting remains protected.");
         foreach (var (what, edit) in protectedGroups)
         {
             var kept = NewEmptyRoot(baseline);
@@ -550,7 +551,7 @@ public sealed class SchematicRebuildTests
         var recreated = SchematicSynchronizationPlanner.Plan(State(baseline, baseline, fresh, "loaded", "created"));
         Assert.IsTrue(recreated.CanPrepare, recreated.ErrorCode + ": " + recreated.ErrorMessage);
         Assert.AreEqual(1, recreated.NativeOperations.Count(o => o.SetPageSettings is not null && o.TargetDocument.Equals(baseline.Schematic.Document)));
-        // Only the XML-typed text variables, bus aliases, variants and drawing ratios enter a rebuild journal; every other project setting remains excluded.
+        // Only the XML-typed text variables, bus aliases, variants, drawing ratios and formatting enter a rebuild journal; every other project setting remains excluded.
         foreach (var setting in new SchematicItemOperation[]
         {
             new() { SetFormatting = new() }, new() { SetNetSettings = new() },
@@ -559,11 +560,11 @@ public sealed class SchematicRebuildTests
             new() { SetDrawingRatios = new() }, new() { SetReferenceInventory = new() }, new() { ReplaceVariantRegistry = new() },
             new() { ReplaceBusAliases = new() },
         })
-            if (setting.ReplaceBusAliases is null && setting.ReplaceVariantRegistry is null && setting.SetDrawingRatios is null)
+            if (setting.ReplaceBusAliases is null && setting.ReplaceVariantRegistry is null && setting.SetDrawingRatios is null && setting.SetFormatting is null)
                 Assert.IsFalse(SchematicRebuild.RecreatesFileState(setting, 1), setting.OperationCase.ToString());
         foreach (var file in new SchematicItemOperation[] { new() { SetPageSettings = new() }, new() { SetTitleBlock = new() },
             new() { SetRootInstance = new() }, new() { ReplaceEmbeddedFiles = new() }, new() { ReplaceNetChains = new() },
-            new() { ReplaceTextVariables = new() }, new() { ReplaceBusAliases = new() }, new() { ReplaceVariantRegistry = new() }, new() { SetDrawingRatios = new() } })
+            new() { ReplaceTextVariables = new() }, new() { ReplaceBusAliases = new() }, new() { ReplaceVariantRegistry = new() }, new() { SetDrawingRatios = new() }, new() { SetFormatting = new() } })
             Assert.IsTrue(SchematicRebuild.RecreatesFileState(file, 1), file.OperationCase.ToString());
     }
 
@@ -587,13 +588,14 @@ public sealed class SchematicRebuildTests
         Assert.AreEqual("A", variables.Variables.Single().Value);
         Assert.IsTrue(SchematicRebuild.RecreatesFileState(plan.NativeOperations.Single(o => o.ReplaceTextVariables is not null), 1));
 
-        // A text-variable mismatch combined with any protected setting is still refused.
-        var withFormatting = NewEmptyRoot(baseline);
-        withFormatting.Instances[0].Metadata.TextVariables["REVISION"] = "B";
-        withFormatting.Instances[0].Metadata.Formatting = Formatting(1_524_000);
-        var mixed = SchematicRebuild.Classify(state with { Observed = withFormatting }, baseline);
-        Assert.AreEqual("rebuild_project_settings_changed", mixed.ErrorCode);
-        Assert.AreEqual("KiCad's project settings (formatting) " + SettingsChangedMessage, mixed.ErrorMessage);
+        // A text-variable mismatch combined with a still-protected setting is still refused.
+        var protectedObserved = NewEmptyRoot(baseline);
+        protectedObserved.Instances[0].Metadata.TextVariables["REVISION"] = "B";
+        protectedObserved.Instances[0].Metadata.Annotation = new SchematicAnnotationSettings { StartAfter = 100 };
+        var protectedMixed = SchematicRebuild.Classify(state with { Observed = protectedObserved }, baseline);
+        Assert.AreEqual("rebuild_project_settings_changed", protectedMixed.ErrorCode);
+        Assert.AreEqual("KiCad's project settings (annotation) " + SettingsChangedMessage, protectedMixed.ErrorMessage);
+
     }
 
     [TestMethod]
@@ -650,17 +652,42 @@ public sealed class SchematicRebuildTests
         Assert.IsTrue(plan.CanPrepare, plan.ErrorCode + ": " + plan.ErrorMessage);
         Assert.IsNotNull(plan.NativeOperations.Single(o => o.SetDrawingRatios is not null).SetDrawingRatios);
         Assert.IsTrue(SchematicRebuild.RecreatesFileState(plan.NativeOperations.Single(o => o.SetDrawingRatios is not null), 1));
+        var omittedRecorded = baseline with { Schematic = baseline.Schematic.Clone() };
+        foreach (var screen in omittedRecorded.Schematic.Instances) screen.Metadata.DrawingRatios = null;
+        var omittedObserved = NewEmptyRoot(omittedRecorded);
+        omittedObserved.Instances[0].Metadata.DrawingRatios = baseline.Schematic.Instances[0].Metadata.DrawingRatios.Clone();
+        var omittedResult = SchematicRebuild.Classify(State(omittedRecorded, omittedRecorded, omittedObserved, "loaded", "created"), omittedRecorded);
+        Assert.AreEqual("rebuild_project_settings_changed", omittedResult.ErrorCode);
+        StringAssert.Contains(omittedResult.ErrorMessage, "drawing ratios");
+    }
 
-        // An older XML record that omits the ratios remains explicitly protected instead of reaching
-        // the metadata delta with an unsupported null replacement.
-        var omitted = NewEmptyRoot(baseline); omitted.Instances[0].Metadata.DrawingRatios = null;
-        var refused = SchematicRebuild.Classify(State(baseline, baseline, omitted, "loaded", "created"), baseline);
-        Assert.AreEqual("rebuild_project_settings_changed", refused.ErrorCode);
-        StringAssert.Contains(refused.ErrorMessage, "drawing ratios");
+    [TestMethod]
+    public void RebuildAdmitsFormattingReplacementAndJournalsIt()
+    {
+        var baseline = Placed();
+        foreach (var screen in baseline.Schematic.Instances) screen.Metadata.Formatting = Formatting(1_270_000);
+        var kept = NewEmptyRoot(baseline);
+        var changed = Formatting(1_524_000);
+        kept.Instances[0].Metadata.Formatting = changed;
+        var state = State(baseline, baseline, kept, "loaded", "created");
+        var classified = SchematicRebuild.Classify(state, baseline);
+        Assert.AreEqual(SchematicRebuildKind.Admitted, classified.Kind, classified.ErrorMessage);
+        var plan = SchematicSynchronizationPlanner.Plan(state);
+        Assert.IsTrue(plan.CanPrepare, plan.ErrorCode + ": " + plan.ErrorMessage);
+        var operation = plan.NativeOperations.Single(o => o.SetFormatting is not null);
+        Assert.AreEqual(Formatting(1_270_000), operation.SetFormatting);
+        Assert.IsTrue(SchematicRebuild.RecreatesFileState(operation, 1));
+        var omittedRecorded = baseline with { Schematic = baseline.Schematic.Clone() };
+        foreach (var screen in omittedRecorded.Schematic.Instances) screen.Metadata.Formatting = null;
+        var omittedObserved = NewEmptyRoot(omittedRecorded);
+        omittedObserved.Instances[0].Metadata.Formatting = Formatting(1_270_000);
+        var omittedResult = SchematicRebuild.Classify(State(omittedRecorded, omittedRecorded, omittedObserved, "loaded", "created"), omittedRecorded);
+        Assert.AreEqual("rebuild_project_settings_changed", omittedResult.ErrorCode);
+        StringAssert.Contains(omittedResult.ErrorMessage, "formatting");
     }
 
     // Ledger p001c485926b37099: the second line of defence behind the settings check. Prepare refuses any planned batch that
-    // holds an edit a rebuild never makes, here the project formatting the kept root shows differently from the XML. The
+    // holds an edit a rebuild never makes, here the symbol-comparison policy the kept root shows differently from the XML. The
     // planner never reaches it this way (classification refuses the same state first, as asserted), so Prepare is called
     // directly with an admitted classification; no journey can reach it without bypassing classification. Unit test,
     // because no existing test prepares an admitted rebuild whose batch the journal would not admit.
@@ -669,15 +696,11 @@ public sealed class SchematicRebuildTests
     {
         var baseline = Placed();
         var recorded = baseline with { Schematic = baseline.Schematic.Clone() };
-        foreach (var screen in recorded.Schematic.Instances) screen.Metadata.Formatting = Formatting(1_270_000);
+        foreach (var screen in recorded.Schematic.Instances) screen.Metadata.SymbolComparison = new SchematicSymbolComparisonSettings { MissingFields = false, FieldTexts = false };
         var kept = NewEmptyRoot(recorded);
-        kept.Instances[0].Metadata.Formatting = Formatting(1_524_000);
-        var state = State(recorded, recorded, kept, "loaded", "created");
-        var classified = SchematicRebuild.Classify(state, recorded);
-        Assert.AreEqual("rebuild_project_settings_changed", classified.ErrorCode, "Classification refuses this state first.");
-        Assert.AreEqual("KiCad's project settings (formatting) " + SettingsChangedMessage, classified.ErrorMessage);
-
+        kept.Instances[0].Metadata.SymbolComparison = new SchematicSymbolComparisonSettings { MissingFields = true, FieldTexts = true };
         var admitted = new SchematicRebuildClassification(SchematicRebuildKind.Admitted, [.. recorded.SheetBindings.Select(b => b.SheetInstanceId)]);
+        var state = State(recorded, recorded, kept, "loaded", "created");
         var hierarchy = SchematicHierarchyMerge.Plan(recorded.Schematic, recorded.Schematic, kept);
         var plan = SchematicRebuild.Prepare(state, recorded, hierarchy, admitted, []);
         Assert.AreEqual("rebuild_operation_unsupported", plan.ErrorCode, plan.ErrorMessage);
@@ -688,8 +711,8 @@ public sealed class SchematicRebuildTests
         Assert.IsNull(plan.Rebuild, "No rebuild intent reaches the executor.");
         Assert.IsFalse(plan.CanPrepare);
 
-        // Precision: the same prepared rebuild with the kept root's formatting equal to the XML's is planned, and its batch
-        // sets no protected project setting.
+        // Precision: the same prepared rebuild with the kept root's symbol-comparison settings equal to the XML's is planned,
+        // and its batch sets no protected project setting.
         var same = NewEmptyRoot(recorded);
         var agreed = SchematicRebuild.Prepare(State(recorded, recorded, same, "loaded", "created"), recorded,
             SchematicHierarchyMerge.Plan(recorded.Schematic, recorded.Schematic, same), admitted, []);

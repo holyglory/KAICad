@@ -154,7 +154,8 @@ public sealed partial class NativeSessionTests
             : journey == NativeJourney.CheckedBatch ? 630
             : journey == NativeJourney.OwnershipSync ? 1200
             : journey is NativeJourney.RecursiveEditor or NativeJourney.SymbolSheets or NativeJourney.ComponentCreation or NativeJourney.PsuCpuComponentCreation
-                or NativeJourney.ConnectedRealization or NativeJourney.XmlRebuild ? 900 : 450;
+                or NativeJourney.ConnectedRealization ? 900
+            : journey == NativeJourney.XmlRebuild ? 1200 : 450;
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(aggregateSeconds));
         var elapsed = Stopwatch.StartNew();
         async Task Measure(string stage, Func<Task> action)

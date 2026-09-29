@@ -3968,3 +3968,19 @@ tier="development"
 requires=["https","rendered","browser","landing"]
 command=["python3","automation/qualification/observe-preview-delivery.py"]
 retained_artifacts=[{name="delivery-observations",path="automation/artifacts/preview25-delivery-evidence",max_bytes=536870912},{name="delivery-tests",path="automation/artifacts/preview25-delivery-tests",max_bytes=16777216}]
+
+[test.preview25-receipts]
+timeout_seconds=600
+env={ TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_CAPTION_PACKAGE_CATALOGUE = "/mnt/build-storage/codex/kicad/public-candidates/20260925T142556Z-51abb3af7e05", KICAD_CAPTION_CANDIDATE_CATALOGUE = "/mnt/build-storage/codex/kicad/public-candidates/20260929T213530Z-25fb8da3e8c4", KICAD_PUBLIC_DOWNLOAD_URL = "https://kicad.vr.ae/", KICAD_PACKAGE_CATALOGUE = "/mnt/build-storage/codex/kicad/public-candidates/linux-25fb-signed-000025", KICAD_PUBLIC_DOWNLOAD_EVIDENCE = "/mnt/build-storage/codex/kicad/worktrees/integration.20260923/automation/artifacts/preview25-download-evidence", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", KICAD_CAPTION_INSTALLED_ENVELOPE = "/mnt/build-storage/codex/kicad/public-candidates/linux-51ab-signed-000024/updates/preview.json", KICAD_LANDING_URL = "https://kicad.vr.ae", KICAD_BROWSER_EXECUTABLE = "/home/holyglory/.local/bin/agent-browser", FORMAL_WEB_UI_SKILL_DIR = "/home/holyglory/.codex/skills/formal-web-ui-verification", KICAD_LANDING_PLATFORM = "linux-x64", KICAD_LANDING_CANDIDATE_NAME = "kicad-codex-preview-20260929T213530Z-25fb8da3e8c4-debian13-x64.tar.gz", KICAD_LANDING_CANDIDATE_VERSION = "preview-20260929T213530Z-25fb8da3e8c4", KICAD_COORDINATOR_EXECUTOR = "/home/DevCoordinator2/target/release/devcoordinator2-executor", KICAD_DELIVERY_DEPLOYMENT = "d30d9eeb63ffeccbc", KICAD_DELIVERY_COMMIT = "25fb8da3e8c4d190637cb35cd6162d4717149308", KICAD_DELIVERY_EVIDENCE = "/mnt/build-storage/codex/kicad/worktrees/integration.20260923/automation/artifacts/preview25-delivery-evidence" }
+
+[[test.preview25-receipts.check]]
+name="build"
+tier="development"
+command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--configuration","Debug"]
+
+[[test.preview25-receipts.check]]
+name="observations"
+tier="development"
+requires=["build"]
+command=["python3","automation/qualification/observe-preview-delivery.py"]
+retained_artifacts=[{name="delivery-observations",path="automation/artifacts/preview25-delivery-evidence",max_bytes=536870912},{name="delivery-tests",path="automation/artifacts/preview25-delivery-tests",max_bytes=16777216}]

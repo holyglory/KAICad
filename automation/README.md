@@ -823,6 +823,16 @@ writing XML or advancing the synchronized baseline. Pending old-session actions
 must be resolved first. Inspect `kicad_design_sync_plan` for intervening edits,
 then start automatic synchronization with the returned recovery token.
 
+Repeated sheet-file recovery is also verified in the current source. The native
+journey `RepeatedPhysicalSheetRebuildPreservesEveryInstance` uses a root and two
+sheet instances of one physical child, with separate references and three known
+pin networks. It deletes both schematic files, rebuilds through public sync tools,
+and checks exact project/schematic bytes, shared screen identity, net chains,
+failed-batch rollback, a second-apply no-op, undo/redo and save/reopen. Run
+`t20260929T223705Z-eacde0` passed on two real Linux KiCad projects. This verifies
+recovery of existing XML-bound repeated sheets; adopting newly repeated sheets or
+newly placed symbols on shared sheets remains a separate ownership workflow.
+
 For source builds with `kicad_project_recovery_start`, a stopped instance can also
 recover when its `.kicad_pro` and schematic files are missing. Supply its exact
 `instanceId`, saved `recoveryPath`, current `expectedRevisionToken`, and matching

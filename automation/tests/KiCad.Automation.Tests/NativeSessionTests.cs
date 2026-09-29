@@ -82,6 +82,9 @@ public sealed partial class NativeSessionTests
     [DataRow("dark")]
     public Task PerLevelCanvasEditsPersistLayout(string theme) => RunNativeSessions(NativeJourney.DiagramCanvas, theme);
 
+    [TestMethod, TestCategory("NativeRepeatedSheetRebuild")]
+    public Task RepeatedPhysicalSheetRebuildPreservesEveryInstance() => RunNativeSessions(NativeJourney.RepeatedSheetRebuild);
+
     [TestMethod, TestCategory("NativeXmlRebuild")]
     public Task DeletedNativeSheetsRebuildFromXmlWithoutLoss() => RunNativeSessions(NativeJourney.XmlRebuild);
 
@@ -108,7 +111,7 @@ public sealed partial class NativeSessionTests
     public Task AgentAndPersonEditingTogetherNeverGetStaleOrPartialEdits() => RunNativeSessions(NativeJourney.ObserveApplyStress);
 
     private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, RecursiveEditor, Simulation, PcbItems,
-        PsuCpuSeed, PsuCpuComponentCreation, ConnectedRealization, DiagramCanvas, XmlRebuild, ProjectRecovery, ProjectRecoveryContainer, OwnershipSync, NativeCrash, NativeCrashRelease,
+        PsuCpuSeed, PsuCpuComponentCreation, ConnectedRealization, DiagramCanvas, XmlRebuild, RepeatedSheetRebuild, ProjectRecovery, ProjectRecoveryContainer, OwnershipSync, NativeCrash, NativeCrashRelease,
         ObserveApplyStress }
 
     private async Task RunNativeSessions(NativeJourney journey, string theme = "light")
@@ -137,6 +140,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.ConnectedRealization => "native-connected-realization",
                 NativeJourney.DiagramCanvas => Path.Combine("native-diagram-canvas", theme),
                 NativeJourney.XmlRebuild => "native-xml-rebuild",
+                NativeJourney.RepeatedSheetRebuild => "native-repeated-rebuild",
                 NativeJourney.ProjectRecovery => "native-project-recovery",
                 NativeJourney.ProjectRecoveryContainer => "native-project-recovery-container",
                 NativeJourney.OwnershipSync => "native-ownership-sync",
@@ -163,6 +167,7 @@ public sealed partial class NativeSessionTests
             : journey == NativeJourney.OwnershipSync ? 1200
             : journey is NativeJourney.RecursiveEditor or NativeJourney.SymbolSheets or NativeJourney.ComponentCreation or NativeJourney.PsuCpuComponentCreation
                 or NativeJourney.ConnectedRealization ? 900
+            : journey is NativeJourney.RepeatedSheetRebuild ? 900
             : journey is NativeJourney.XmlRebuild ? 1200
             : journey == NativeJourney.ProjectRecovery ? 2400 : 450;
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(aggregateSeconds));
@@ -452,6 +457,25 @@ public sealed partial class NativeSessionTests
                             ":" + displayNumber, evidence, deadline.Token);
                         await VerifySnapshotSchemaVersions(client, opened.Document, deadline.Token);
                         await VerifyParityNetlistCapture(client, opened.Document, electrical, evidence, deadline.Token);
+                    }
+                    else if (journey == NativeJourney.RepeatedSheetRebuild)
+                    {
+                        try
+                        {
+                            // The shared-screen journey compares keyboard focus too. Establish its
+                            // normal human starting focus before capturing the baseline and history.
+                            await FocusedSchematicShortcut(client, opened.Document, focusProcessId,
+                                ":" + displayNumber, "", deadline.Token);
+                            await VerifySharedScreenConnectedMove(client, opened.Document, hierarchyFixture, focusProcessId,
+                                ":" + displayNumber, evidence, target.Id, target.Id == launched.Last().Id, deadline.Token);
+                            await VerifyRepeatedSheetRebuild(client, opened.Document, hierarchyFixture, focusProcessId,
+                                ":" + displayNumber, evidence, target.Id, deadline.Token);
+                        }
+                        catch (Exception error) when (!deadline.IsCancellationRequested)
+                        {
+                            synchronizationFailures.Add(error);
+                            await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-repeated-rebuild-failure.txt"), error.ToString(), deadline.Token);
+                        }
                     }
                     else if (journey == NativeJourney.OffscreenMove)
                     {

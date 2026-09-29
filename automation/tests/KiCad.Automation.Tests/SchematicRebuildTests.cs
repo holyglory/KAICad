@@ -53,10 +53,21 @@ public sealed class SchematicRebuildTests
     private static SchematicDesign WithRepeatedSheet(SchematicDesign source)
     {
         var result = source with { Schematic = source.Schematic.Clone() };
-        var child = result.Schematic.Instances
-            .Where(s => !s.Metadata.Document.Equals(result.Schematic.Document))
-            .OrderByDescending(s => s.Metadata.Document.SheetPath.Path.Count)
-            .First();
+        // PSU owns all its placed components locally. CPU_POWER contains a unit owned
+        // by another sheet and cannot be duplicated by inventing component ownership.
+        var binding = result.SheetBindings.Single(b => b.SheetInstanceId == PsuCpuIds.Id(0x05, 2));
+        var child = result.Schematic.Instances.Single(s =>
+            s.Metadata.Document.SheetPath.Path.Select(p => Guid.Parse(p.Value)).SequenceEqual(binding.NativePath));
+        var sourceInstance = result.Engineering.Circuit.SheetInstances.Single(s => s.Id == binding.SheetInstanceId);
+        Guid newInstanceId = Guid.NewGuid();
+        var sourceComponents = result.Engineering.Circuit.Components.Where(c => c.SheetInstanceId == sourceInstance.Id).ToArray();
+        var newComponents = sourceComponents.Select((c, i) => c with
+            { Id = Guid.NewGuid(), SheetInstanceId = newInstanceId, Reference = "REPEATED" + (i + 1) }).ToArray();
+        var componentMap = sourceComponents.Zip(newComponents).ToDictionary(p => p.First.Id, p => p.Second);
+        var references = sourceComponents.Zip(newComponents).ToDictionary(p => p.First.Reference, p => p.Second.Reference);
+        var sourceOccurrences = result.Engineering.Circuit.Symbols.Where(s => componentMap.ContainsKey(s.ComponentId)).ToArray();
+        var newOccurrences = sourceOccurrences.Select(s => s with { Id = Guid.NewGuid(), ComponentId = componentMap[s.ComponentId].Id,
+            SheetInstanceId = s.SheetInstanceId is null ? null : newInstanceId }).ToArray();
         var parentPath = new SheetPath();
         parentPath.Path.Add(child.Metadata.Document.SheetPath.Path.Take(child.Metadata.Document.SheetPath.Path.Count - 1));
         var parent = result.Schematic.Instances.Single(s => s.Metadata.Document.SheetPath.Equals(parentPath));
@@ -98,6 +109,7 @@ public sealed class SchematicRebuildTests
                     var copy = local.Clone();
                     copy.Path.Clear();
                     copy.Path.Add(repeatedPath.Path.Select(id => id.Clone()));
+                    copy.Reference = references[local.Reference];
                     records.Records.Add(copy);
                 }
                 child.Items[index] = Any.Pack(symbol);
@@ -124,6 +136,7 @@ public sealed class SchematicRebuildTests
             {
                 var symbol = repeatedChild.Items[i].Unpack<SchematicSymbolInstance>();
                 symbol.Path = repeatedPath.Clone();
+                symbol.ReferenceField.Text.Text_ = references[symbol.ReferenceField.Text.Text_];
                 repeatedChild.Items[i] = Any.Pack(symbol);
             }
             else if (repeatedChild.Items[i].Is(SheetSymbol.Descriptor))
@@ -134,7 +147,18 @@ public sealed class SchematicRebuildTests
             }
         }
         result.Schematic.Instances.Add(repeatedChild);
-        return result;
+        return result with
+        {
+            Engineering = result.Engineering with { Circuit = result.Engineering.Circuit with
+            {
+                SheetInstances = [.. result.Engineering.Circuit.SheetInstances, sourceInstance with { Id = newInstanceId }],
+                Components = [.. result.Engineering.Circuit.Components, .. newComponents],
+                Symbols = [.. result.Engineering.Circuit.Symbols, .. newOccurrences]
+            } },
+            SheetBindings = [.. result.SheetBindings, new(newInstanceId, repeatedPath.Path.Select(p => Guid.Parse(p.Value)).ToArray())],
+            SymbolBindings = [.. result.SymbolBindings, .. sourceOccurrences.Zip(newOccurrences).Select(p =>
+                new SchematicSymbolBinding(p.Second.Id, result.SymbolBindings.Single(b => b.SymbolOccurrenceId == p.First.Id).NativeObjectId))]
+        };
     }
 
     [TestMethod]
@@ -449,28 +473,29 @@ public sealed class SchematicRebuildTests
             });
 
         var state = State(chained, chained, NewEmptyRoot(chained), "loaded", "created");
-        var shape = SchematicRebuild.Classify(state, chained);
-        Assert.AreEqual(SchematicRebuildKind.Admitted, shape.Kind, shape.ErrorMessage);
-        var target = chained.Schematic.Clone();
-        var current = state.Observed.Clone();
-        var currentRoot = current.Instances[0];
-        var targetRoot = target.Instances.Single(s => s.Metadata.Document.Equals(target.Document));
-        currentRoot.Metadata.ScreenId = targetRoot.Metadata.ScreenId.Clone();
-        currentRoot.Metadata.EmbeddedFiles = targetRoot.Metadata.EmbeddedFiles?.Clone();
-        currentRoot.Metadata.EmbeddedFonts = targetRoot.Metadata.EmbeddedFonts;
-        foreach (var screen in target.Instances)
-        {
-            screen.Metadata.LoadedNativeFormatVersion = 0;
-            screen.Metadata.UnrepresentedState.Clear();
-            screen.Metadata.UnrepresentedState.Add(currentRoot.Metadata.UnrepresentedState);
-        }
-        var operations = SchematicHierarchyDelta.Plan(current, target);
-        Assert.IsTrue(operations.Any(o => o.ReplaceNetChains is not null), "Rebuild carries net-chain metadata.");
-        Assert.IsTrue(operations.Any(o => o.Create?.Is(SheetSymbol.Descriptor) == true), "Rebuild carries the shared sheet reference.");
-        var shared = chained.Schematic.Instances.GroupBy(s => s.Metadata.ScreenId.Value, StringComparer.Ordinal)
-            .Where(g => g.Count() > 1).SelectMany(g => g).ToArray();
-        Assert.IsNotEmpty(shared, "The fixture includes a repeated physical sheet.");
-        Assert.AreEqual(SchematicRebuildKind.Admitted, SchematicRebuild.Classify(state, chained).Kind);
+        var bindings = SchematicDesignBindings.Inspect(chained, []);
+        Assert.IsTrue(bindings.IdentitiesResolved, string.Join(", ", bindings.Issues.Select(i => i.Code)));
+        Assert.IsEmpty(bindings.Differences);
+        var plan = SchematicSynchronizationPlanner.Plan(state);
+        Assert.IsTrue(plan.CanPrepare, plan.ErrorCode + ": " + plan.ErrorMessage);
+        Assert.IsTrue(plan.NativeRebuildRequired);
+        Assert.IsEmpty(plan.BindingIssues);
+        var operations = plan.NativeOperations;
+        Assert.HasCount(1, operations.Where(o => o.ReplaceNetChains is not null), "Project-wide net chains are emitted once.");
+        var shared = chained.Schematic.Instances.GroupBy(s => s.Metadata.ScreenId.Value, StringComparer.Ordinal).Single(g => g.Count() == 2);
+        Assert.AreEqual(2, shared.Count());
+        var physicalSymbols = shared.First().Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor))
+            .Select(i => i.Unpack<SchematicSymbolInstance>().Id.Value).ToHashSet();
+        Assert.HasCount(physicalSymbols.Count, operations.Where(o => o.Create?.Is(SchematicSymbolInstance.Descriptor) == true
+            && physicalSymbols.Contains(o.Create.Unpack<SchematicSymbolInstance>().Id.Value)), "Each physical shared symbol is created once.");
+        Assert.IsTrue(SchematicDesignBindings.Inspect(plan.Candidate!, []).IdentitiesResolved);
+        Assert.HasCount(chained.Schematic.Instances.Count, plan.Candidate!.Schematic.Instances);
+        // Missing path-specific bindings must still fail the complete planner, not vanish behind Classify.
+        var missing = chained with { SheetBindings = chained.SheetBindings.SkipLast(1).ToArray() };
+        var refused = SchematicSynchronizationPlanner.Plan(State(missing, missing, NewEmptyRoot(missing), "loaded", "created"));
+        Assert.IsFalse(refused.CanPrepare);
+        Assert.IsEmpty(refused.NativeOperations);
+
     }
 
     // All captured project settings are restored from settled XML. Legacy-omitted message groups cannot

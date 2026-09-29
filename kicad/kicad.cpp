@@ -514,6 +514,16 @@ bool PGM_KICAD::OnPgmInit()
             if( managerFrame )
             {
                 Kiway.SetTop( nullptr );
+
+                // LoadProject() installs the project in SETTINGS_MANAGER before the
+                // automation-only local-history refusal. Unload that in-memory project
+                // without saving or tagging history before destroying the manager frame;
+                // otherwise OnPgmExit() tears down KiCad interfaces while the failed
+                // project and its history savers are still owned by the process.
+                SETTINGS_MANAGER& manager = Pgm().GetSettingsManager();
+                if( manager.IsProjectOpen() )
+                    manager.UnloadProject( &manager.Prj(), false );
+
                 managerFrame->Destroy();
             }
 

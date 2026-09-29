@@ -291,13 +291,51 @@ public sealed class InstanceRegistryTests
         Directory.CreateDirectory(Path.GetDirectoryName(project)!);
         await File.WriteAllTextAsync(project, "{}");
         string executable = Path.Combine(state, "kicad");
-        await File.WriteAllTextAsync(executable, "#!/bin/sh\nexec sleep 60\n");
+        await File.WriteAllTextAsync(executable, "#!/bin/bash\nexec bash -c 'sleep 60; true' kicad \"$@\"\n");
         File.SetUnixFileMode(executable, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-        // KiCad names its own process in the handshake: here the stand-in the registry started.
-        var transport = new EchoTransport(project) { ProcessIdOf = StartedProcess(state) };
+        // KiCad names its own process in the handshake: here the stand-in the registry started. The recovery
+        // handshake can wait while another request checks the same project's reservation.
+        var processIdOf = StartedProcess(state);
+        var observedStarts = new System.Collections.Concurrent.ConcurrentDictionary<int, string>();
+        string? recoveringId = null;
+        var recoveryWaiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var allowRecovery = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        (uint ProcessId, string ProjectPath) Identity(string instanceId)
+        {
+            string launchPath = Path.Combine(state, "launches", instanceId + ".json");
+            if (File.Exists(launchPath))
+            {
+                var launch = JsonSerializer.Deserialize<UnverifiedInstanceLaunch>(File.ReadAllText(launchPath))!;
+                return (checked((uint)(launch.ProcessId ?? 0)), launch.ProjectPath);
+            }
+            var saved = JsonSerializer.Deserialize<InstanceRecord>(File.ReadAllText(Path.Combine(state, instanceId + ".json")))!;
+            return (checked((uint)(saved.ProcessId ?? 0)), saved.ProjectPath);
+        }
+        var transport = new EchoTransport(project)
+        {
+            ProcessIdOf = async (instanceId, token) =>
+            {
+                uint pid = await processIdOf(instanceId, token);
+                if (pid == 0) pid = Identity(instanceId).ProcessId;
+                if (pid != 0) observedStarts.TryAdd(checked((int)pid), instanceId);
+                if (instanceId == recoveringId)
+                {
+                    recoveryWaiting.TrySetResult();
+                    await allowRecovery.Task.WaitAsync(token);
+                }
+                return pid;
+            },
+            ProjectOf = instanceId => Identity(instanceId).ProjectPath,
+            EpochOf = instanceId => "epoch-" + Identity(instanceId).ProcessId
+        };
         var registry = new InstanceRegistry(transport, state);
         string? id = null;
+        string? independentId = null;
         var processes = new List<int>();
+        Task<InstanceRegistration>? recovering = null;
+        Task<InstanceRegistration>? independentStarting = null;
+        using var startupDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        using var cancelledRecovery = CancellationTokenSource.CreateLinkedTokenSource(startupDeadline.Token);
         try
         {
             var started = await registry.StartInstanceAsync(executable, project);
@@ -308,12 +346,17 @@ public sealed class InstanceRegistryTests
             Assert.AreEqual(InstanceProcessStatus.Running, registry.Statuses().Single().State);
             var refused = await Assert.ThrowsExactlyAsync<AutomationException>(() => registry.StartInstanceAsync(executable, project));
             Assert.AreEqual("project_owned", refused.Code, "A project whose KiCad still runs is never started twice.");
+            bool preparedWhileLive = false;
+            var liveRecovery = await Assert.ThrowsExactlyAsync<AutomationException>(() => registry.StartProjectRecoveryAsync(
+                executable, id, _ => preparedWhileLive = true));
+            Assert.AreEqual("project_owned", liveRecovery.Code);
+            Assert.IsFalse(preparedWhileLive, "A live writer is refused before the project preparation callback runs.");
 
             var client = registry.Client(id);
             var waiting = client.GetVersionAsync();
             await transport.Waiting.Task.WaitAsync(TimeSpan.FromSeconds(10));
             var clock = Stopwatch.StartNew();
-            using (var process = Process.GetProcessById(pid)) process.Kill();
+            using (var process = Process.GetProcessById(pid)) process.Kill(entireProcessTree: true);
             var failed = await Assert.ThrowsExactlyAsync<AutomationException>(() => waiting);
             Assert.IsLessThan(10.0, clock.Elapsed.TotalSeconds, "A request in flight fails when the process ends, not after its timeout.");
             Assert.AreEqual("instance_exited", failed.Code);
@@ -325,8 +368,98 @@ public sealed class InstanceRegistryTests
             Assert.AreEqual((137, 9, "SIGKILL", InstanceExit.ExitStatusEvidence), (status.Exit!.ExitCode, status.Exit.Signal, status.Exit.SignalName, status.Exit.Evidence));
             Assert.AreEqual("instance_exited", (await Assert.ThrowsExactlyAsync<AutomationException>(() => client.HandshakeAsync())).Code);
 
-            var again = await registry.StartInstanceAsync(executable, project);
-            processes.Add(again.Instance.ProcessId!.Value);
+            File.Delete(project);
+            int preparations = 0;
+            var rejectedPreparation = await Assert.ThrowsExactlyAsync<AutomationException>(() => registry.StartProjectRecoveryAsync(
+                executable, id, record =>
+                {
+                    preparations++;
+                    Assert.AreEqual(started.Instance, record, "Recovery prepares the exact ended registration.");
+                    throw new AutomationException("fixture_preparation_refused", "The fixture refused to prepare its project.");
+                }));
+            Assert.AreEqual("fixture_preparation_refused", rejectedPreparation.Code);
+            Assert.AreEqual(1, preparations);
+            Assert.IsFalse(File.Exists(project));
+            Assert.IsEmpty(await registry.PendingLaunchesAsync(), "A refused preparation starts no process.");
+            Assert.IsFalse(File.Exists(Path.Combine(state, "launches", id + ".json")), "No replacement launch was written for the ended instance.");
+            Assert.AreEqual(1, observedStarts.Count, "Only the original, now-ended process reached the handshake.");
+
+            recoveringId = id;
+            recovering = registry.StartProjectRecoveryAsync(executable, id, record =>
+            {
+                preparations++;
+                Assert.AreEqual(started.Instance, record);
+                Assert.IsFalse(File.Exists(record.ProjectPath));
+                File.WriteAllText(record.ProjectPath, "{\"recovered\":true}");
+            }, cancelledRecovery.Token);
+            await recoveryWaiting.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.AreEqual(2, preparations, "The failed preparation released its reservation for a later recovery.");
+            Assert.IsFalse(recovering.IsCompleted, "The replacement process has not completed its handshake yet.");
+            var reservedStart = await Assert.ThrowsExactlyAsync<AutomationException>(() => registry.StartInstanceAsync(executable, project, startupDeadline.Token));
+            Assert.AreEqual("project_owned", reservedStart.Code, "Preparation and native startup keep one project reservation.");
+            var reservedRecovery = await Assert.ThrowsExactlyAsync<AutomationException>(() => registry.StartProjectRecoveryAsync(
+                executable, id, _ => preparations++, startupDeadline.Token));
+            Assert.AreEqual("project_owned", reservedRecovery.Code);
+            Assert.AreEqual(2, preparations, "A concurrent recovery never prepares the reserved project twice.");
+
+            string independentProject = Path.Combine(state, "project", "independent.kicad_pro");
+            await File.WriteAllTextAsync(independentProject, "{}");
+            independentStarting = registry.StartInstanceAsync(executable, independentProject, startupDeadline.Token);
+            var independent = await independentStarting.WaitAsync(TimeSpan.FromSeconds(10));
+            independentId = independent.Instance.InstanceId;
+            processes.Add(independent.Instance.ProcessId!.Value);
+            Assert.AreEqual(independentProject, independent.Instance.ProjectPath);
+            Assert.AreNotEqual(id, independentId);
+            Assert.AreEqual(InstanceProcessStatus.Running, registry.Statuses().Single(s => s.Instance.InstanceId == independentId).State);
+            Assert.IsFalse(recovering.IsCompleted, "An unrelated project starts while recovery is still waiting for its native handshake.");
+
+            string launchPath = Path.Combine(state, "launches", id + ".json");
+            byte[] pendingBytes = await File.ReadAllBytesAsync(launchPath);
+            var pendingLaunch = JsonSerializer.Deserialize<UnverifiedInstanceLaunch>(pendingBytes)!;
+            Assert.AreEqual(started.Instance.Epoch, pendingLaunch.ReplacesEpoch);
+            Assert.IsNotNull(pendingLaunch.ProcessId);
+            int recoveringProcessId = pendingLaunch.ProcessId.Value;
+            processes.Add(recoveringProcessId);
+            string runtime = NativeIpcEndpoint.RuntimeDirectory(id);
+            string[] earlierLogs = Directory.GetDirectories(Path.Combine(runtime, "epochs"));
+            var otherServer = new InstanceRegistry(transport, state);
+            Assert.AreEqual("project_owned", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+                otherServer.StartProjectRecoveryAsync(executable, id, _ => preparations++, startupDeadline.Token))).Code,
+                "The durable receipt excludes a second MCP server while the first is waiting.");
+            Assert.AreEqual(2, preparations);
+
+            await cancelledRecovery.CancelAsync();
+            await Assert.ThrowsAsync<OperationCanceledException>(async () => await recovering);
+            using (var recoveringProcess = Process.GetProcessById(recoveringProcessId))
+                Assert.IsFalse(recoveringProcess.HasExited, "Cancelling startup never kills the replacement KiCad.");
+            CollectionAssert.AreEqual(new[] { pendingLaunch }, (await registry.PendingLaunchesAsync()).ToArray(),
+                "The pending replacement remains discoverable beside its old verified registration.");
+            foreach (var owner in new[] { registry, otherServer })
+            {
+                Assert.AreEqual("project_owned", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+                    owner.StartProjectRecoveryAsync(executable, id, _ => preparations++, startupDeadline.Token))).Code);
+                Assert.AreEqual("project_owned", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+                    owner.StartInstanceAsync(executable, project, startupDeadline.Token))).Code);
+                CollectionAssert.AreEqual(pendingBytes, await File.ReadAllBytesAsync(launchPath), "Retry preserves the exact launch receipt.");
+                CollectionAssert.AreEqual(earlierLogs, Directory.GetDirectories(Path.Combine(runtime, "epochs")), "Retry does not rotate the live process's logs.");
+                Assert.AreEqual("{\"recovered\":true}", await File.ReadAllTextAsync(project));
+            }
+            Assert.AreEqual(2, preparations, "Retry does not prepare the project again.");
+            Assert.AreEqual(3, observedStarts.Count, "Only the original, replacement and independent processes were started.");
+
+            allowRecovery.TrySetResult();
+            var continued = await otherServer.ReattachAsync(id, startupDeadline.Token);
+            Assert.AreEqual(recoveringProcessId, continued.ProcessId, "Reattach adopts the preserved process, not another launch.");
+            Assert.IsFalse(File.Exists(launchPath));
+            Assert.IsEmpty(await otherServer.PendingLaunchesAsync());
+            Assert.AreEqual("instance_changed", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+                registry.StartProjectRecoveryAsync(executable, id, _ => preparations++, startupDeadline.Token))).Code,
+                "An old in-memory registration cannot overwrite a newer same-ID record from another MCP server.");
+            Assert.AreEqual(2, preparations);
+            var again = await registry.AttachInstanceAsync(continued.Endpoint, id, startupDeadline.Token);
+            Assert.AreEqual(continued, again.Instance, "Both MCP servers adopt the same replacement registration.");
+            Assert.HasCount(1, Directory.GetFiles(Path.Combine(state, "exit-replacements")), "The same replacement is recorded once.");
+            Assert.AreEqual("{\"recovered\":true}", await File.ReadAllTextAsync(project));
             Assert.AreEqual(id, again.Instance.InstanceId, "The same project continues the ended instance's ID.");
             Assert.AreNotEqual(started.Instance.Epoch, again.Instance.Epoch);
             Assert.AreEqual(started.Instance.Epoch, again.Replaced!.Epoch);
@@ -334,7 +467,6 @@ public sealed class InstanceRegistryTests
             Assert.AreEqual(again.Instance.Epoch, registry.Client(id).Epoch);
             // The same instance ID reuses its runtime folder: the ended process's logs moved under its epoch, and the
             // folder's logs now belong to the new process.
-            string runtime = NativeIpcEndpoint.RuntimeDirectory(id);
             var kept = Directory.GetDirectories(Path.Combine(runtime, "epochs")).Single();
             CollectionAssert.AreEquivalent(new[] { "bootstrap.stderr.log", "bootstrap.stdout.log" },
                 Directory.GetFiles(kept).Select(Path.GetFileName).ToArray());
@@ -342,8 +474,8 @@ public sealed class InstanceRegistryTests
             Assert.IsTrue(File.Exists(Path.Combine(runtime, "bootstrap.stdout.log")), "The new process writes its own bootstrap log.");
 
             // After a server restart, the saved registration's ended process still lets a start continue the ID.
-            using (var process = Process.GetProcessById(again.Instance.ProcessId!.Value)) process.Kill();
-            await WaitForAsync(() => registry.Statuses().Single().State == InstanceProcessStatus.Exited);
+            using (var process = Process.GetProcessById(again.Instance.ProcessId!.Value)) process.Kill(entireProcessTree: true);
+            await WaitForAsync(() => registry.Statuses().Single(s => s.Instance.InstanceId == id).State == InstanceProcessStatus.Exited);
             var restarted = new InstanceRegistry(transport, state);
             var third = await restarted.StartInstanceAsync(executable, project);
             processes.Add(third.Instance.ProcessId!.Value);
@@ -353,20 +485,162 @@ public sealed class InstanceRegistryTests
         }
         finally
         {
+            allowRecovery.TrySetResult();
+            await startupDeadline.CancelAsync();
+            foreach (var pending in new[] { recovering, independentStarting }.OfType<Task<InstanceRegistration>>())
+            {
+                try
+                {
+                    var completed = await pending;
+                    if (completed.Instance.ProcessId is { } pid && !processes.Contains(pid)) processes.Add(pid);
+                }
+                catch (Exception) { } // Preserve the test's original failure; pending-launch processes are still cleaned below.
+            }
+            foreach (int pid in observedStarts.Keys)
+                if (!processes.Contains(pid)) processes.Add(pid);
+            foreach (var launch in await registry.PendingLaunchesAsync())
+                if (launch.ProcessId is { } pid && !processes.Contains(pid)) processes.Add(pid);
             // Only the stand-in processes this test started are stopped.
             foreach (int pid in processes)
+            {
+                try { using var process = Process.GetProcessById(pid); process.Kill(entireProcessTree: true); await process.WaitForExitAsync(); }
+                catch (ArgumentException) { }
+                catch (InvalidOperationException) { }
+            }
+            foreach (string ownedId in observedStarts.Values.Distinct(StringComparer.Ordinal))
+            {
+                string runtime = NativeIpcEndpoint.RuntimeDirectory(ownedId);
+                if (Directory.Exists(runtime)) Directory.Delete(runtime, true);
+            }
+            await DeleteAsync(state);
+        }
+    }
+
+    [TestMethod]
+    public async Task ADefinitiveChildExitRetiresItsLaunchSoTheProjectCanBeRetried()
+    {
+        if (!OperatingSystem.IsLinux()) { Assert.Inconclusive("Process identity reconciliation reads Linux /proc."); return; }
+        string state = Directory.CreateTempSubdirectory("kicad-start-retry-").FullName;
+        string project = Path.Combine(state, "project", "retry.kicad_pro");
+        Directory.CreateDirectory(Path.GetDirectoryName(project)!);
+        await File.WriteAllTextAsync(project, "{}");
+        string executable = Path.Combine(state, "kicad");
+        async Task WriteExecutable(string body)
+        {
+            await File.WriteAllTextAsync(executable, body);
+            File.SetUnixFileMode(executable, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+        var ownedProcesses = new List<int>();
+        var ownedInstances = new List<string>();
+        bool ready = false;
+        var processIdOf = StartedProcess(state);
+        var transport = new EchoTransport(project)
+        {
+            ProcessIdOf = async (id, token) =>
+            {
+                // An executable exiting before native readiness never sends a handshake.
+                if (!ready) await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                return await processIdOf(id, token);
+            }
+        };
+        var registry = new InstanceRegistry(transport, state, start =>
+        {
+            int index = start.ArgumentList.IndexOf("--automation");
+            ownedInstances.Add(start.ArgumentList[index + 1]);
+        });
+        try
+        {
+            await WriteExecutable("#!/bin/sh\nexit 23\n");
+            var failed = await Assert.ThrowsExactlyAsync<AutomationException>(() => registry.StartInstanceAsync(executable, project));
+            Assert.AreEqual("start_failed", failed.Code);
+            Assert.IsEmpty(registry.List(), "A process that never answered a handshake is never a verified instance.");
+            Assert.IsEmpty(await registry.PendingLaunchesAsync(), "A definitively ended child leaves no dead launch receipt.");
+            Assert.IsEmpty(Directory.GetFiles(Path.Combine(state, "launches")));
+
+            await WriteExecutable("#!/bin/sh\nexec sleep 60\n");
+            ready = true;
+            var retry = await registry.StartInstanceAsync(executable, project);
+            ownedProcesses.Add(retry.Instance.ProcessId!.Value);
+            Assert.AreEqual(project, retry.Instance.ProjectPath);
+            Assert.AreEqual(InstanceProcessStatus.Running, registry.Statuses().Single().State);
+            Assert.IsEmpty(await registry.PendingLaunchesAsync());
+        }
+        finally
+        {
+            foreach (string receipt in Directory.Exists(Path.Combine(state, "launches"))
+                         ? Directory.GetFiles(Path.Combine(state, "launches"), "*.json") : [])
+            {
+                var launch = JsonSerializer.Deserialize<UnverifiedInstanceLaunch>(await File.ReadAllTextAsync(receipt));
+                if (launch?.ProcessId is { } pid && !ownedProcesses.Contains(pid)) ownedProcesses.Add(pid);
+            }
+            foreach (int pid in ownedProcesses)
             {
                 try { using var process = Process.GetProcessById(pid); process.Kill(); await process.WaitForExitAsync(); }
                 catch (ArgumentException) { }
                 catch (InvalidOperationException) { }
             }
-            if (id is not null)
+            foreach (string id in ownedInstances)
             {
                 string runtime = NativeIpcEndpoint.RuntimeDirectory(id);
-                if (Directory.Exists(runtime)) Directory.Delete(runtime, true);
+                if (Directory.Exists(runtime)) await DeleteAsync(runtime);
             }
             await DeleteAsync(state);
         }
+    }
+
+    [TestMethod]
+    public async Task FreshRegistryRetiresOnlyAProvenEndedMarkedLaunch()
+    {
+        if (!OperatingSystem.IsLinux()) { Assert.Inconclusive("Process identity reconciliation reads Linux /proc."); return; }
+        string state = Directory.CreateTempSubdirectory("kicad-start-reconcile-").FullName;
+        string project = Path.Combine(state, "project", "reconcile.kicad_pro");
+        Directory.CreateDirectory(Path.GetDirectoryName(project)!);
+        await File.WriteAllTextAsync(project, "{}");
+        string executable = Path.Combine(state, "kicad");
+        await File.WriteAllTextAsync(executable, "#!/bin/sh\nexit 23\n");
+        File.SetUnixFileMode(executable, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        try
+        {
+            string id = Guid.NewGuid().ToString("D"), epoch = Guid.NewGuid().ToString("D"), endpoint = LaunchEndpoint(id);
+            using (var ended = Process.Start(new ProcessStartInfo("bash") { UseShellExecute = false, ArgumentList = { "-c", "sleep .1" } })!)
+            {
+                var identity = ProcessIdentity.Record(ended.Id);
+                Assert.IsNotNull(identity);
+                await ended.WaitForExitAsync();
+                var saved = new InstanceRecord(id, project, endpoint, epoch, ended.Id, DateTimeOffset.UtcNow.AddMinutes(-1), identity);
+                await File.WriteAllTextAsync(Path.Combine(state, id + ".json"), JsonSerializer.Serialize(saved));
+                await WriteLaunch(state, new UnverifiedInstanceLaunch(id, project, endpoint, ended.Id,
+                    DateTimeOffset.UtcNow.AddSeconds(-30), epoch, identity));
+            }
+            var transport = new EchoTransport(project)
+            {
+                ProcessIdOf = async (_, token) => { await Task.Delay(Timeout.InfiniteTimeSpan, token); return 0; }
+            };
+            var registry = new InstanceRegistry(transport, state);
+            var failed = await Assert.ThrowsExactlyAsync<AutomationException>(() => registry.StartInstanceAsync(executable, project));
+            Assert.AreEqual("start_failed", failed.Code);
+            Assert.IsEmpty(await registry.PendingLaunchesAsync(), "A fresh registry retires only the receipt whose exact process identity is proven ended.");
+            Assert.IsEmpty(Directory.GetFiles(Path.Combine(state, "launches")));
+
+            string uncertainState = Directory.CreateTempSubdirectory("kicad-start-uncertain-").FullName;
+            try
+            {
+                string uncertainProject = Path.Combine(uncertainState, "project", "uncertain.kicad_pro");
+                Directory.CreateDirectory(Path.GetDirectoryName(uncertainProject)!);
+                await File.WriteAllTextAsync(uncertainProject, "{}");
+                string uncertainId = Guid.NewGuid().ToString("D"), uncertainEpoch = Guid.NewGuid().ToString("D"), uncertainEndpoint = LaunchEndpoint(uncertainId);
+                var uncertain = new InstanceRecord(uncertainId, uncertainProject, uncertainEndpoint, uncertainEpoch, 999999, DateTimeOffset.UtcNow.AddMinutes(-1));
+                await File.WriteAllTextAsync(Path.Combine(uncertainState, uncertainId + ".json"), JsonSerializer.Serialize(uncertain));
+                string receipt = await WriteLaunch(uncertainState, new UnverifiedInstanceLaunch(uncertainId, uncertainProject, uncertainEndpoint,
+                    999999, DateTimeOffset.UtcNow.AddSeconds(-30), uncertainEpoch));
+                var uncertainRegistry = new InstanceRegistry(transport, uncertainState);
+                var refused = await Assert.ThrowsExactlyAsync<AutomationException>(() => uncertainRegistry.StartInstanceAsync(executable, uncertainProject));
+                Assert.AreEqual("project_owned", refused.Code, "A receipt without process identity remains uncertain and blocks retry.");
+                Assert.IsTrue(File.Exists(receipt));
+            }
+            finally { await DeleteAsync(uncertainState); }
+        }
+        finally { await DeleteAsync(state); }
     }
 
     // Review finding 2: an epoch attached to this server answered a handshake, so only the process this server observes
@@ -682,6 +956,8 @@ public sealed class InstanceRegistryTests
         public TaskCompletionSource Waiting { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         // The process ID each instance's handshake names; without it, 0 (unknown), like a KiCad built before the field.
         public Func<string, CancellationToken, Task<uint>>? ProcessIdOf { get; init; }
+        public Func<string, string>? ProjectOf { get; init; }
+        public Func<string, string>? EpochOf { get; init; }
 
         public async Task<byte[]> ExchangeAsync(string endpoint, byte[] request, TimeSpan timeout, CancellationToken cancellationToken = default)
         {
@@ -692,7 +968,8 @@ public sealed class InstanceRegistryTests
             lock (epochs)
             {
                 // A request without an epoch comes from a new start's readiness probe: a new process.
-                if (header.Length == 0 || !epochs.TryGetValue(id, out epoch!)) epochs[id] = epoch = "epoch-" + Interlocked.Increment(ref starts);
+                if (EpochOf is { } observedEpoch) epochs[id] = epoch = observedEpoch(id);
+                else if (header.Length == 0 || !epochs.TryGetValue(id, out epoch!)) epochs[id] = epoch = "epoch-" + Interlocked.Increment(ref starts);
                 else if (header != epoch) epoch = header;
             }
             if (!message.Message.Is(GetAutomationSession.Descriptor))
@@ -705,7 +982,7 @@ public sealed class InstanceRegistryTests
             {
                 Header = new ApiResponseHeader { KicadToken = epoch },
                 Status = new ApiResponseStatus { Status = ApiStatusCode.AsOk },
-                Message = Any.Pack(new AutomationSession { ProtocolVersion = 1, InstanceId = id, ProjectPath = project, Epoch = epoch,
+                Message = Any.Pack(new AutomationSession { ProtocolVersion = 1, InstanceId = id, ProjectPath = ProjectOf?.Invoke(id) ?? project, Epoch = epoch,
                     ProcessId = processId })
             }.ToByteArray();
         }

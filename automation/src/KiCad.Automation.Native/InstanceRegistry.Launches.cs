@@ -5,7 +5,8 @@ namespace KiCad.Automation.Native;
 
 // An observed launch attempt, never proof of a live or ready native process.
 public sealed record UnverifiedInstanceLaunch(string InstanceId, string ProjectPath,
-    string Endpoint, int? ProcessId, DateTimeOffset RequestedAt);
+    string Endpoint, int? ProcessId, DateTimeOffset RequestedAt, string? ReplacesEpoch = null,
+    ProcessStartIdentity? ProcessStart = null);
 
 public sealed partial class InstanceRegistry
 {
@@ -57,8 +58,16 @@ public sealed partial class InstanceRegistry
         {
             token.ThrowIfCancellationRequested();
             string id = Path.GetFileNameWithoutExtension(file);
-            if (File.Exists(Path.Combine(directory, id + ".json"))) continue;
-            result.Add(await ReadLaunchAsync(id, token));
+            if (File.Exists(Path.Combine(directory, id + ".json")))
+            {
+                var saved = await ReadSavedAsync(id, token);
+                var replacement = await ReadLaunchAsync(id, token);
+                // An old unmarked receipt never overrides a verified session. A marked
+                // replacement stays discoverable until the old epoch has been replaced.
+                if (replacement.ReplacesEpoch == saved.Epoch && replacement.ProjectPath == saved.ProjectPath)
+                    result.Add(replacement);
+            }
+            else result.Add(await ReadLaunchAsync(id, token));
         }
         return result;
     }
@@ -72,7 +81,9 @@ public sealed partial class InstanceRegistry
             var launch = JsonSerializer.Deserialize<UnverifiedInstanceLaunch>(await File.ReadAllTextAsync(LaunchPath(id), token));
             if (launch is null || launch.InstanceId != id || string.IsNullOrWhiteSpace(launch.ProjectPath)
                 || !Path.IsPathFullyQualified(launch.ProjectPath) || launch.RequestedAt == default
-                || launch.ProcessId is <= 0
+                || launch.ProcessId is <= 0 || launch.ReplacesEpoch is { Length: 0 }
+                || (launch.ProcessStart is { } identity && (launch.ProcessId is null || string.IsNullOrWhiteSpace(identity.MachineId)
+                    || string.IsNullOrWhiteSpace(identity.BootId) || identity.PidNamespace == 0))
                 || launch.Endpoint != NativeIpcEndpoint.FromSocketPath(Path.Combine(NativeIpcEndpoint.RuntimeDirectory(id), "api.sock")))
                 throw new AutomationException("invalid_registry", "The unverified launch receipt is invalid.");
             return launch;
@@ -83,6 +94,94 @@ public sealed partial class InstanceRegistry
         { throw new AutomationException("unknown_instance", "No verified session or unverified launch receipt exists for this instance."); }
         catch (JsonException)
         { throw new AutomationException("invalid_registry", "The unverified launch receipt is invalid."); }
+    }
+
+    // Admission and the intent write share the existing cross-process metadata lease.
+    // A receipt is not proof of a live process, but must be reconciled before its project,
+    // socket and logs can be used by another launch (n9d9cb697ed628e53).
+    private async Task RequireNoPendingLaunchAsync(string projectPath, CancellationToken token)
+    {
+        string launches = Path.Combine(directory, "launches");
+        if (!Directory.Exists(launches)) return;
+        foreach (string path in Directory.EnumerateFiles(launches, "*.json"))
+        {
+            var pending = await ReadLaunchAsync(Path.GetFileNameWithoutExtension(path), token);
+            if (pending.ProjectPath != projectPath) continue;
+            if (pending.ProcessStart is { } identity && ProcessIdentity.Ended(pending.ProcessId!.Value, identity))
+            {
+                await RetireExactLaunchAsync(pending);
+                continue;
+            }
+            if (File.Exists(Path.Combine(directory, pending.InstanceId + ".json")))
+            {
+                var saved = await ReadSavedAsync(pending.InstanceId, token);
+                // A successful verification can leave its older receipt when retirement
+                // failed. A newer unmarked receipt remains unresolved even though discovery
+                // cannot use it to bypass the saved epoch.
+                if (saved.ProjectPath == pending.ProjectPath && saved.VerifiedAt >= pending.RequestedAt
+                    && pending.ReplacesEpoch != saved.Epoch) continue;
+            }
+            throw new AutomationException("project_owned", $"KiCad instance {pending.InstanceId} has an unresolved startup for this project. "
+                + $"Use kicad_instance_reattach for that instance at {pending.Endpoint}; its launch, process and logs were preserved.");
+        }
+    }
+
+    private async Task RequireCurrentSavedRecordAsync(InstanceRecord record, CancellationToken token)
+    {
+        if (!File.Exists(Path.Combine(directory, record.InstanceId + ".json"))) return;
+        var saved = await ReadSavedAsync(record.InstanceId, token);
+        if (saved.Epoch != record.Epoch || saved.ProjectPath != record.ProjectPath || saved.Endpoint != record.Endpoint)
+            throw new AutomationException("instance_changed", "The saved instance changed in another server; reattach it before starting recovery.");
+    }
+
+    private async Task<UnverifiedInstanceLaunch> ReserveLaunchAsync(string projectPath, InstanceRecord? replacing,
+        CancellationToken token)
+    {
+        string id = replacing?.InstanceId ?? Guid.NewGuid().ToString("D");
+        string endpoint = NativeIpcEndpoint.FromSocketPath(Path.Combine(NativeIpcEndpoint.RuntimeDirectory(id), "api.sock"));
+        var launch = new UnverifiedInstanceLaunch(id, projectPath, endpoint, null, DateTimeOffset.UtcNow, replacing?.Epoch);
+        await SaveLaunchAsync(launch, token);
+        return launch;
+    }
+
+    // Only an intent this attempt still owns, before Process.Start, can be retired on failure.
+    // Comparing the full receipt preserves a different attempt, even with the same instance ID.
+    private async Task RetireUnstartedLaunchAsync(UnverifiedInstanceLaunch launch)
+    {
+        if (launch.ProcessId is not null || !File.Exists(LaunchPath(launch.InstanceId))) return;
+        if (await ReadLaunchAsync(launch.InstanceId, CancellationToken.None) == launch)
+            File.Delete(LaunchPath(launch.InstanceId));
+    }
+
+    // Called under the existing metadata lease. The launch's request identity is
+    // compared before deletion so an unrelated retry cannot be removed.
+    private async Task RetireExactLaunchAsync(UnverifiedInstanceLaunch launch)
+    {
+        if (!File.Exists(LaunchPath(launch.InstanceId))) return;
+        var current = await ReadLaunchAsync(launch.InstanceId, CancellationToken.None);
+        if (current == launch) File.Delete(LaunchPath(launch.InstanceId));
+    }
+
+    private static bool SameLaunchAttempt(UnverifiedInstanceLaunch first, UnverifiedInstanceLaunch second) =>
+        first.InstanceId == second.InstanceId && first.ProjectPath == second.ProjectPath
+        && first.Endpoint == second.Endpoint && first.RequestedAt == second.RequestedAt
+        && first.ReplacesEpoch == second.ReplacesEpoch;
+
+    // Called under the existing metadata lease after this server observed its exact child exit.
+    internal async Task RetireExitedLaunchAsync(UnverifiedInstanceLaunch attempt, int processId)
+    {
+        try
+        {
+            if (!File.Exists(LaunchPath(attempt.InstanceId))) return;
+            var current = await ReadLaunchAsync(attempt.InstanceId, CancellationToken.None);
+            if (SameLaunchAttempt(current, attempt) && current.ProcessId == processId)
+                File.Delete(LaunchPath(attempt.InstanceId));
+        }
+        catch (AutomationException)
+        {
+            // A malformed or competing receipt is preserved for explicit reconciliation;
+            // it must not mask the definitive native start failure.
+        }
     }
 
     private async Task SaveLaunchAsync(UnverifiedInstanceLaunch launch, CancellationToken token)
@@ -98,12 +197,22 @@ public sealed partial class InstanceRegistry
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
 
-    private void RetireLaunch(string id)
+    private async Task RetireLaunchAsync(InstanceRecord verified, bool metadataLeaseHeld = false)
     {
         // A verified record was committed first. A leftover receipt is harmless
-        // and omitted from discovery; cleanup must not undo a successful attach.
-        try { File.Delete(LaunchPath(id)); }
+        // and omitted from discovery; cleanup must not undo a successful attach or
+        // remove a later attempt already replacing this newly verified epoch.
+        try
+        {
+            using var lease = metadataLeaseHeld ? null : await MetadataLease(CancellationToken.None);
+            if (!File.Exists(LaunchPath(verified.InstanceId))) return;
+            var launch = await ReadLaunchAsync(verified.InstanceId, CancellationToken.None);
+            if (launch.ProjectPath == verified.ProjectPath && launch.RequestedAt <= verified.VerifiedAt
+                && launch.ReplacesEpoch != verified.Epoch)
+                File.Delete(LaunchPath(verified.InstanceId));
+        }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
+        catch (AutomationException) { } // A verified registration must survive stale or malformed cleanup metadata.
     }
 }

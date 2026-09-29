@@ -81,7 +81,7 @@ public sealed partial class NativeSessionTests
     // of the XML last synchronized with KiCad, whatever path brought it there (PlanRebuild reads only that XML), and every
     // kind of object those nets drew is drawn here by the realization and rebuilt: local and hierarchical labels with the
     // same label payload (SchematicConnectionRealizer.LabelPayload), sheet pins and wires.
-    private static async Task VerifyPsuCpuXmlRebuild(NativeClient client, PsuCpuNativeContext context, int processId,
+    private static async Task<DesignRecoveryStore> VerifyPsuCpuXmlRebuild(NativeClient client, PsuCpuNativeContext context, int processId,
         string display, string evidence, string instanceId, CancellationToken token)
     {
         const PsuCpuStage Stage = PsuCpuStage.Complete;
@@ -700,6 +700,7 @@ public sealed partial class NativeSessionTests
                 remaining = "Project-file reconstruction from XML; repeated-sheet and shared-screen recovery coverage."
             }), token);
             Step("done");
+            return store;
         }
         finally
         {

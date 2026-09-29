@@ -92,7 +92,7 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
                 // launcher rather than KiCad: it stays a diagnostic hint, never an identity that proves an exit.
                 var attached = await AttachCoreAsync(launch.Endpoint, instanceId, launch.ProcessId,
                     cancellationToken, launch.ProjectPath);
-                RetireLaunch(instanceId);
+                await RetireLaunchAsync(attached.Instance);
                 return attached.Instance;
             }
             finally { changes.Release(); }
@@ -101,10 +101,28 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
         await changes.WaitAsync(cancellationToken);
         try
         {
+            // A recorded replacement launch can outlive a cancelled start while the old
+            // verified record remains. Only its exact ended epoch authorizes continuation;
+            // ordinary unmarked receipts still cannot bypass a verified epoch.
+            saved = await ReadSavedAsync(instanceId, cancellationToken);
+            if (File.Exists(LaunchPath(instanceId)))
+            {
+                var launch = await ReadLaunchAsync(instanceId, cancellationToken);
+                if (launch.ReplacesEpoch == saved.Epoch && launch.ProjectPath == saved.ProjectPath)
+                {
+                    if (await ProvenExitAsync(instanceId, saved.Epoch, cancellationToken) is null)
+                        throw new AutomationException("instance_changed", "The launch cannot replace an instance whose recorded process may still run.");
+                    var replacement = await AttachCoreAsync(launch.Endpoint, instanceId, launch.ProcessId,
+                        cancellationToken, saved.ProjectPath, replaceExited: true);
+                    await RetireLaunchAsync(replacement.Instance);
+                    RecordLogEpoch(NativeIpcEndpoint.RuntimeDirectory(instanceId), replacement.Instance.Epoch);
+                    return replacement.Instance;
+                }
+            }
             // The same epoch keeps the process recorded when it was verified (AttachCoreAsync copies it).
             var attached = await AttachCoreAsync(saved.Endpoint, saved.InstanceId, null,
-                cancellationToken, saved.ProjectPath, saved.Epoch);
-            RetireLaunch(instanceId);
+                cancellationToken, saved.ProjectPath, saved.Epoch, replaceExited: true);
+            await RetireLaunchAsync(attached.Instance);
             return attached.Instance;
         }
         finally { changes.Release(); }
@@ -136,9 +154,12 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
 
         InstanceRecord? replacing = null;
         InstanceExit? replacedExit = null;
+        UnverifiedInstanceLaunch launch;
         await changes.WaitAsync(cancellationToken);
         try
         {
+            using var lease = await MetadataLease(cancellationToken);
+            await RequireNoPendingLaunchAsync(projectPath, cancellationToken);
             if (startingProjects.Contains(projectPath))
                 throw new AutomationException("project_owned", "This project already has an attached writer; use another worktree for an independent instance.");
             if (connections.Values.FirstOrDefault(r => r.Record.ProjectPath == projectPath) is { } owner)
@@ -146,6 +167,7 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
                 replacedExit = await ProvenExitAsync(owner.Record.InstanceId, owner.Record.Epoch, cancellationToken)
                     ?? throw new AutomationException("project_owned", "This project already has an attached writer; use another worktree for an independent instance.");
                 replacing = owner.Record;
+                await RequireCurrentSavedRecordAsync(replacing, cancellationToken);
             }
             else
             {
@@ -159,18 +181,29 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
                     replacing = saved[0]; replacedExit = exit;
                 }
             }
+            launch = await ReserveLaunchAsync(projectPath, replacing, cancellationToken);
             startingProjects.Add(projectPath);
         }
         finally { changes.Release(); }
+        return await StartReservedInstanceAsync(executable, launch, replacing, cancellationToken, softwareRendering);
+    }
+
+    // Both ordinary startup and recovery enter with this project reserved. The reservation
+    // preserves admission through readiness without holding changes while KiCad starts.
+    private async Task<InstanceRegistration> StartReservedInstanceAsync(string executable, UnverifiedInstanceLaunch launch,
+        InstanceRecord? replacing, CancellationToken cancellationToken, bool? softwareRendering)
+    {
+        string projectPath = launch.ProjectPath;
+        bool processStarted = false;
+        Process? process = null;
+        bool observed = false;
         try
         {
-            string id = replacing?.InstanceId ?? Guid.NewGuid().ToString("D");
+            string id = launch.InstanceId;
             string runtime = NativeIpcEndpoint.RuntimeDirectory(id);
             string socket = Path.Combine(runtime, "api.sock");
             string endpoint = NativeIpcEndpoint.FromSocketPath(socket);
             Directory.CreateDirectory(runtime);
-            // KiCad started again under the same instance ID writes into the same runtime folder.
-            KeepEarlierProcessLogs(runtime);
             var start = new ProcessStartInfo(executable)
             {
                 WorkingDirectory = Path.GetDirectoryName(projectPath)!,
@@ -184,23 +217,26 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
             if (softwareRendering ?? OperatingSystem.IsLinux()) start.ArgumentList.Add("--software-rendering");
             start.ArgumentList.Add(projectPath);
             configureProcess?.Invoke(start);
-            var launch = new UnverifiedInstanceLaunch(id, projectPath, endpoint, null, DateTimeOffset.UtcNow);
-            await SaveLaunchAsync(launch, cancellationToken);
-            cancellationToken.ThrowIfCancellationRequested();
-            Process process = Process.Start(start) ?? throw new AutomationException("start_failed", "KiCad could not be started.");
-            // Once attached, the process belongs to its exit observer, which disposes it when KiCad ends.
-            bool observed = false;
-            // The native --automation-log option redirects its own descriptors, so
-            // editor lifetime does not depend on MCP's diagnostic pipes (SA-04).
-            _ = CaptureAsync(process.StandardOutput, Path.Combine(runtime, "bootstrap.stdout.log"));
-            _ = CaptureAsync(process.StandardError, Path.Combine(runtime, "bootstrap.stderr.log"));
+            using (await MetadataLease(cancellationToken))
+            {
+                if (await ReadLaunchAsync(id, cancellationToken) != launch)
+                    throw new AutomationException("instance_changed", "The reserved launch changed; its process and logs were left untouched.");
+                if (replacing is not null) await RequireCurrentSavedRecordAsync(replacing, cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+                // The launch owns this runtime before its earlier logs or socket are touched.
+                KeepEarlierProcessLogs(runtime);
+                process = Process.Start(start) ?? throw new AutomationException("start_failed", "KiCad could not be started.");
+                processStarted = true;
+                // The native --automation-log option redirects its own descriptors, so
+                // editor lifetime does not depend on MCP's diagnostic pipes (SA-04).
+                _ = CaptureAsync(process.StandardOutput, Path.Combine(runtime, "bootstrap.stdout.log"));
+                _ = CaptureAsync(process.StandardError, Path.Combine(runtime, "bootstrap.stderr.log"));
+                await SaveLaunchAsync(launch with { ProcessId = process.Id, ProcessStart = ProcessIdentity.Record(process.Id) }, CancellationToken.None);
+            }
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             deadline.CancelAfter(TimeSpan.FromSeconds(45));
             try
             {
-                // The launch intent is already durable if MCP disconnects
-                // between process creation and this diagnostic PID update.
-                await SaveLaunchAsync(launch with { ProcessId = process.Id }, CancellationToken.None);
                 while (true)
                 {
                     deadline.Token.ThrowIfCancellationRequested();
@@ -247,7 +283,7 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
                             observed = watcher is not null;
                             var attached = await AttachCoreAsync(endpoint, id, startedKiCad ? process.Id : null, deadline.Token,
                                 projectPath, ready.Epoch, replaceExited: replacing is not null, child: watcher);
-                            RetireLaunch(id);
+                            await RetireLaunchAsync(attached.Instance);
                             RecordLogEpoch(runtime, attached.Instance.Epoch);
                             return attached;
                         }
@@ -262,13 +298,38 @@ public sealed partial class InstanceRegistry(INativeTransport transport, string 
             {
                 throw new AutomationException("startup_timeout", $"KiCad did not become ready; it was not killed. Inspect {runtime} and reattach instance {id} at {endpoint} if it recovers.");
             }
-            finally { if (!observed) process.Dispose(); } // Dispose never kills the native process.
         }
         finally
         {
+            // Once attached, the process belongs to its exit observer. A cancelled or
+            // timed-out launch remains alive and retains its receipt for reattachment.
             await changes.WaitAsync(CancellationToken.None);
-            try { startingProjects.Remove(projectPath); }
-            finally { changes.Release(); }
+            try
+            {
+                using var lease = await MetadataLease(CancellationToken.None);
+                if (!processStarted) await RetireUnstartedLaunchAsync(launch);
+                else
+                {
+                    bool exited = false;
+                    try { exited = process?.HasExited == true; }
+                    catch (ObjectDisposedException) { }
+                    catch (InvalidOperationException) { }
+                    if (exited)
+                    {
+                        try { process!.WaitForExit(); }
+                        catch (ObjectDisposedException) { }
+                        catch (InvalidOperationException) { }
+                        await RetireExitedLaunchAsync(launch, process!.Id);
+                    }
+                }
+            }
+            finally
+            {
+                // Inspect the child before disposing its handle; disposal removes the exit evidence.
+                if (!observed) process?.Dispose();
+                startingProjects.Remove(projectPath);
+                changes.Release();
+            }
         }
     }
 

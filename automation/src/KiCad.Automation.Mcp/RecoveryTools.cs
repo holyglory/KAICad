@@ -225,7 +225,8 @@ public sealed class RecoveryTools
     [McpServerTool(Name = "kicad_project_recovery_create", ReadOnly = false),
      Description("Restore the missing .kicad_pro container for an instance whose registered KiCad process has ended. Requires the exact recovery revision token and settled XML with no pending synchronization. Derives the root and sheet entries from that XML, validates the destination against the instance registry, and creates the file atomically only when absent. Existing project files are preserved. Returns the hash of the observed project file and whether it was created. Next start KiCad, create its missing schematic root and reattach the recovery record before applying the rebuild. This creates the project container only; schematic reconstruction remains a separate operation and board-only settings are not restored."),
      KiCadCapability("schematic-design", "compiled-mcp", "registered stopped instance, recovery revision token"),
-     KiCadVerification(KiCadVerificationLevel.InProcess, "SchematicProjectSkeletonTests.ExtractsDerivedProjectEntriesAndCreatesMissingFileWithoutReplacement")]
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.DeletedProjectFileRecoversThroughNativeStart",
+         "SchematicProjectSkeletonTests.ExtractsDerivedProjectEntriesAndCreatesMissingFileWithoutReplacement")]
     public Task<CallToolResult> CreateProjectSkeleton(string instanceId, string recoveryPath, string expectedRevisionToken,
         string? expectedProjectFile = null, CancellationToken cancellationToken = default) => ExecuteAsync(async () =>
     {
@@ -235,19 +236,8 @@ public sealed class RecoveryTools
             throw new AutomationException("instance_not_attached", "Use the production server's saved instance registry for project recovery.");
         return await registry.WithStoppedProjectAsync(instanceId, record =>
         {
-            // The same locks used by synchronization and record writers protect validation through rename.
-            using var synchronization = new DesignSynchronizationReceipts(store.StatePath).Acquire();
-            using var ownership = new FileStream(store.StatePath + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-            var saved = store.Read() ?? throw new AutomationException("missing_design_recovery", "No saved recovery record exists.");
-            if (saved.RevisionToken != expectedRevisionToken)
-                throw new AutomationException("design_recovery_changed", "Recovery changed; inspect the current record before creating the project.");
-            if (saved.State.HasPendingWork || DesignReleasedOperations.OpenOn(store.StatePath, saved.State).Count != 0)
-                throw new AutomationException("pending_recovery_requires_reconciliation", "Resolve the pending synchronization before restoring the project container.");
-            var desired = DesignRecoveryStore.ReadDesired(saved.State);
-            if (SchematicDesignXml.Write(desired, saved.State.KnowledgeLibraries)
-                != SchematicDesignXml.Write(saved.State.Baseline, saved.State.KnowledgeLibraries))
-                throw new AutomationException("rebuild_requires_settled_xml", "Restore from the XML last synchronized with KiCad, then apply newer changes.");
-            var data = SkeletonResult(saved, store, record.ProjectPath, expectedProjectFile, cancellationToken);
+            var data = PrepareProjectSkeleton(store, instanceId, expectedRevisionToken, record.ProjectPath,
+                expectedProjectFile, cancellationToken);
             return new CallToolResult { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
         }, cancellationToken);
     });
@@ -255,7 +245,8 @@ public sealed class RecoveryTools
     [McpServerTool(Name = "kicad_project_recovery_start", ReadOnly = false),
      Description("Restore a missing .kicad_pro container and start the exact registered KiCad instance for a settled XML recovery record. Requires the saved instance's process to be proven ended, the exact recovery revision token, and the matching native executable. Existing project files are preserved. The returned instance still needs kicad_schematic_create when the root schematic is missing, followed by kicad_design_recovery_reattach and kicad_design_sync_plan/apply; this operation never overwrites a project or reconstructs schematic files."),
      KiCadCapability("service", "compiled-mcp plus native-process", "registered stopped instance and exact recovery token"),
-     KiCadVerification(KiCadVerificationLevel.InProcess, "SchematicProjectSkeletonTests.ExtractsDerivedProjectEntriesAndCreatesMissingFileWithoutReplacement")]
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.DeletedProjectFileRecoversThroughNativeStart",
+         "SchematicProjectSkeletonTests.ExtractsDerivedProjectEntriesAndCreatesMissingFileWithoutReplacement")]
     public Task<CallToolResult> StartProjectRecovery(string executable, string instanceId, string recoveryPath,
         string expectedRevisionToken, bool? softwareRendering = null, CancellationToken cancellationToken = default) => ExecuteAsync(async () =>
     {
@@ -263,15 +254,11 @@ public sealed class RecoveryTools
         var (store, _) = ReadAtRevision(instanceId, recoveryPath, expectedRevisionToken);
         if (registry is null)
             throw new AutomationException("instance_not_attached", "Use the production server's instance registry for project recovery.");
-        string projectPath = await registry.WithStoppedProjectAsync(instanceId, record =>
+        var started = await registry.StartProjectRecoveryAsync(executable, instanceId, record =>
         {
-            var saved = store.Read() ?? throw new AutomationException("missing_design_recovery", "No saved recovery record exists.");
-            if (saved.RevisionToken != expectedRevisionToken)
-                throw new AutomationException("design_recovery_changed", "Recovery changed; inspect the current record before starting KiCad.");
-            _ = SkeletonResult(saved, store, record.ProjectPath, record.ProjectPath, cancellationToken);
-            return record.ProjectPath;
-        }, cancellationToken);
-        var started = await registry.StartInstanceAsync(executable, projectPath, cancellationToken, softwareRendering);
+            _ = PrepareProjectSkeleton(store, instanceId, expectedRevisionToken, record.ProjectPath,
+                record.ProjectPath, cancellationToken);
+        }, cancellationToken, softwareRendering);
         var data = JsonSerializer.SerializeToElement(new
         {
             instanceId = started.Instance.InstanceId, projectPath = started.Instance.ProjectPath,
@@ -558,6 +545,18 @@ public sealed class RecoveryTools
         if (saved.State.InstanceId != id)
             throw new AutomationException("recovery_instance_mismatch", "The record belongs to a different instance.");
         return (store, saved);
+    }
+
+    private static JsonElement PrepareProjectSkeleton(DesignRecoveryStore store, string instanceId,
+        string expectedRevisionToken, string authoritativeProjectFile, string? expectedProjectFile,
+        CancellationToken cancellationToken)
+    {
+        // Synchronization and recovery writers use these locks too. Re-read the exact
+        // instance and revision inside them, then keep the locks through validation and rename.
+        using var synchronization = new DesignSynchronizationReceipts(store.StatePath).Acquire();
+        using var ownership = new FileStream(store.StatePath + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        var (_, saved) = ReadAtRevision(instanceId, store.StatePath, expectedRevisionToken);
+        return SkeletonResult(saved, store, authoritativeProjectFile, expectedProjectFile, cancellationToken);
     }
 
     private static JsonElement SkeletonResult(StoredDesignRecovery saved, DesignRecoveryStore store,

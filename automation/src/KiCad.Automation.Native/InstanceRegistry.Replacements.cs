@@ -95,7 +95,7 @@ public sealed partial class InstanceRegistry
             beforePublish?.Invoke();
             await WriteRecordAsync(intent.Replacement, token);
             connections[previous.InstanceId] = connection;
-            RetireLaunch(previous.InstanceId);
+            await RetireLaunchAsync(intent.Replacement, metadataLeaseHeld: true);
             return new(intent.Replacement, false);
         }
         finally { changes.Release(); }

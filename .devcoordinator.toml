@@ -3467,6 +3467,14 @@ command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--
 retained_artifacts=[{ name = "native-xml-rebuild-tests", path = "automation/artifacts/native-xml-rebuild-tests", max_bytes = 16777216 }, { name = "native-xml-rebuild-evidence", path = "automation/artifacts/native-xml-rebuild/native-session-current", max_bytes = 67108864 }]
 
 [[test.native-acceptance.check]]
+name="journey-project-recovery"
+tier="development"
+requires=["native-build"]
+timeout_seconds=2700
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeProjectRecovery","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-project-recovery-tests","--","MSTest.MapInconclusiveToFailed=true"]
+retained_artifacts=[{name="project-recovery-tests",path="automation/artifacts/native-project-recovery-tests",max_bytes=16777216},{name="project-recovery-evidence",path="automation/artifacts/native-project-recovery/native-session-current",max_bytes=134217728}]
+
+[[test.native-acceptance.check]]
 name="journey-native-crash"
 tier="development"
 requires=["native-build"]
@@ -3735,6 +3743,7 @@ requires=["native-build"]
 command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeXmlRebuild","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-xml-rebuild-focus","--","MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{name="xml-rebuild-focus-tests",path="automation/artifacts/native-xml-rebuild-focus",max_bytes=16777216},{name="xml-rebuild-focus-evidence",path="automation/artifacts/native-xml-rebuild/native-session-current",max_bytes=67108864}]
 
+
 [test.connection-resolution]
 timeout_seconds=600
 env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
@@ -3818,3 +3827,67 @@ tier="development"
 requires=["build"]
 command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~NativeSessionTests.PerLevelCanvasEditsPersistLayout","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/diagram-canvas-focus","--","MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{name="diagram-canvas-focus",path="automation/artifacts/diagram-canvas-focus",max_bytes=67108864}]
+
+
+[test.project-recovery]
+timeout_seconds=3600
+env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.project-recovery.check]]
+name="restore"
+tier="development"
+role="preflight"
+invalidates=["project-recovery","project-recovery-container"]
+command=["dotnet","restore","automation/KiCad.Automation.slnx","--locked-mode"]
+
+[[test.project-recovery.check]]
+name="managed-build"
+tier="development"
+requires=["restore"]
+command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--configuration","Debug"]
+
+[[test.project-recovery.check]]
+name="configure"
+tier="development"
+role="preflight"
+requires=["managed-build"]
+invalidates=["project-recovery","project-recovery-container"]
+command=["cmake","-S",".","-B","automation/artifacts/native","-G","Ninja","-DCMAKE_BUILD_TYPE=Debug","-DKICAD_USE_CMAKE_FINDPROTOBUF=ON","-DKICAD_BUILD_QA_TESTS=ON","-DUSE_CCACHE=ON","-DKICAD_CCACHE_DIR=/mnt/build-storage/codex/kicad/compiler-cache"]
+
+[[test.project-recovery.check]]
+name="native-build"
+tier="development"
+requires=["configure"]
+command=["cmake","--build","automation/artifacts/native","--target","api_schema_build_copy","bitmap_archive_build","cvpcb_kiface","eeschema","eeschema_kiface","kiapi","kicad","kicad-cli","pcbnew","pcbnew_kiface","qa_automation_caption","qa_automation_update_client","qa_common","qa_diagram_field_history","qa_document_change_journal","qa_eeschema","qa_pcbnew","qa_symbol_graphic_identity","schema_build_copy"]
+
+# The two-project proof retains about 98 MB of exact snapshots, replies and screenshots.
+# Startup contracts and the short native container journey must pass before the full design run.
+[[test.project-recovery.check]]
+name="project-recovery"
+tier="development"
+requires=["native-build", "project-recovery-contracts", "project-recovery-container"]
+timeout_seconds=2700
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeProjectRecovery","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-project-recovery-tests","--","MSTest.MapInconclusiveToFailed=true"]
+retained_artifacts=[{name="project-recovery-tests",path="automation/artifacts/native-project-recovery-tests",max_bytes=16777216},{name="project-recovery-evidence",path="automation/artifacts/native-project-recovery/native-session-current",max_bytes=134217728}]
+
+[[test.project-recovery.check]]
+name="project-recovery-container"
+tier="development"
+requires=["native-build"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeProjectRecoveryContainer","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-project-recovery-container-tests","--","MSTest.MapInconclusiveToFailed=true"]
+retained_artifacts=[{name="project-recovery-container-tests",path="automation/artifacts/native-project-recovery-container-tests",max_bytes=16777216},{name="project-recovery-container-evidence",path="automation/artifacts/native-project-recovery-container/native-session-current",max_bytes=67108864}]
+
+[[test.project-recovery.check]]
+name="project-recovery-contracts"
+tier="development"
+requires=["managed-build"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~InstanceRegistryTests|FullyQualifiedName~SchematicProjectSkeletonTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/project-recovery-contracts"]
+retained_artifacts=[{name="project-recovery-contracts",path="automation/artifacts/project-recovery-contracts",max_bytes=16777216}]
+
+# Refusing an invalid display or unsaved native local history must leave recoverable data intact.
+[[test.project-recovery.check]]
+name="native-startup-refusals"
+tier="development"
+requires=["native-build"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeStartupFailure","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-startup-failure-tests","--","MSTest.MapInconclusiveToFailed=true"]
+retained_artifacts=[{name="native-startup-failure-tests",path="automation/artifacts/native-startup-failure-tests",max_bytes=16777216},{name="native-startup-failure-evidence",path="automation/artifacts/native-startup-failure/native-session-current",max_bytes=16777216}]

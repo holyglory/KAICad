@@ -419,27 +419,39 @@ public sealed partial class InstanceRegistry
             identity);
         using (await MetadataLease(token))
         {
+            bool alreadyAdopted = false;
             if (File.Exists(Path.Combine(directory, previous.InstanceId + ".json")))
             {
                 var saved = await ReadSavedAsync(previous.InstanceId, token);
-                if (saved.Epoch != previous.Epoch || saved.ProjectPath != previous.ProjectPath)
+                if (saved.Epoch == replacement.Epoch && saved.ProjectPath == replacement.ProjectPath
+                    && saved.Endpoint == replacement.Endpoint)
+                {
+                    // Another trusted MCP server can finish reattaching the same preserved
+                    // launch first. Keep its verified record and adopt this same epoch locally.
+                    replacement = saved;
+                    alreadyAdopted = true;
+                }
+                else if (saved.Epoch != previous.Epoch || saved.ProjectPath != previous.ProjectPath)
                     throw new AutomationException("instance_changed", "The saved registration changed while the replacement started; inspect it before continuing.");
             }
-            string receipts = Directory.CreateDirectory(Path.Combine(directory, "exit-replacements")).FullName;
-            string receipt = Path.Combine(receipts, Guid.NewGuid().ToString("D") + ".json");
-            string pending = receipt + "." + Guid.NewGuid().ToString("N") + ".tmp";
-            try
+            if (!alreadyAdopted)
             {
-                await File.WriteAllTextAsync(pending, JsonSerializer.Serialize(new ExitReplacement(1,
-                    Guid.Parse(Path.GetFileNameWithoutExtension(receipt)), previous, exit, replacement)), token);
-                File.Move(pending, receipt);
+                string receipts = Directory.CreateDirectory(Path.Combine(directory, "exit-replacements")).FullName;
+                string receipt = Path.Combine(receipts, Guid.NewGuid().ToString("D") + ".json");
+                string pending = receipt + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                try
+                {
+                    await File.WriteAllTextAsync(pending, JsonSerializer.Serialize(new ExitReplacement(1,
+                        Guid.Parse(Path.GetFileNameWithoutExtension(receipt)), previous, exit, replacement)), token);
+                    File.Move(pending, receipt);
+                }
+                finally { if (File.Exists(pending)) File.Delete(pending); }
+                await WriteExitAsync(exit, token);
+                await WriteRecordAsync(replacement, token);
             }
-            finally { if (File.Exists(pending)) File.Delete(pending); }
-            await WriteExitAsync(exit, token);
-            await WriteRecordAsync(replacement, token);
         }
         connections[replacement.InstanceId] = new(replacement, client, session.Clone(), process);
-        RetireLaunch(replacement.InstanceId);
+        await RetireLaunchAsync(replacement);
         return replacement;
     }
 }

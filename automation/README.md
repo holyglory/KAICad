@@ -823,6 +823,26 @@ writing XML or advancing the synchronized baseline. Pending old-session actions
 must be resolved first. Inspect `kicad_design_sync_plan` for intervening edits,
 then start automatic synchronization with the returned recovery token.
 
+For source builds with `kicad_project_recovery_start`, a stopped instance can also
+recover when its `.kicad_pro` and schematic files are missing. Supply its exact
+`instanceId`, saved `recoveryPath`, current `expectedRevisionToken`, and matching
+native `executable`. The tool requires a settled synchronized design and no pending
+or released operation. It creates only the missing project container, preserves an
+existing file, and starts the same registered instance with a new process epoch.
+Then use `kicad_schematic_create` for the original root path, read its checked state,
+call `kicad_design_recovery_reattach`, and plan/apply the rebuild as above. Schematic
+settings captured in XML are restored; unrelated board-only settings are outside
+this reconstruction. Unresolved native local history still requires recovery before
+automation; it is never deleted or silently accepted.
+
+If startup is interrupted while KiCad remains alive, inspect
+`kicad_instance_pending_launches` and call `kicad_instance_reattach` for that exact
+instance. Repeating start is refused while its launch is unresolved, including from
+another MCP service using the registry. A process proven to have exited before
+readiness releases its launch reservation so a corrected startup can be retried;
+an unverified process is preserved. `kicad_project_recovery_create` performs just
+the guarded container creation when a separate explicit startup is preferred.
+
 When KiCad ends while a synchronization is applying or saving its edit, the record
 keeps that operation and it is never replayed on another KiCad process. Start KiCad
 again for the project (`kicad_instance_start`, which continues the instance ID), stop

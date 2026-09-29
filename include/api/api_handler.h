@@ -42,6 +42,8 @@
 using kiapi::common::ApiRequest, kiapi::common::ApiResponse;
 using kiapi::common::ApiResponseStatus, kiapi::common::ApiStatusCode;
 
+class KICAD_API_SERVER;
+
 typedef tl::expected<ApiResponse, ApiResponseStatus> API_RESULT;
 
 template <typename T>
@@ -81,6 +83,11 @@ public:
     std::vector<std::string> HandledMessageTypes() const;
 
 protected:
+
+    // The server that registered this handler owns its process token and nested dispatch.
+    // A headless command may own that server without installing a desktop-global server.
+    KICAD_API_SERVER& apiServer() const;
+    KICAD_API_SERVER* apiServerOrNull() const { return m_apiServer; }
 
     // Called after typed decoding and before command-specific busy or
     // validation checks. Non-editor handlers keep their existing behavior.
@@ -154,6 +161,9 @@ protected:
     static const wxString m_defaultCommitMessage;
 
 private:
+
+    friend class KICAD_API_SERVER;
+    KICAD_API_SERVER* m_apiServer = nullptr;
 
     template<typename MessageType>
     bool tryUnpack( ApiRequest& aRequest, ApiResponse& aReply, MessageType& aDest )

@@ -1247,7 +1247,6 @@ requires=["build"]
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~NativeEventCursorTests|FullyQualifiedName~NativeEventToolContractTests|FullyQualifiedName~McpProcessTests|FullyQualifiedName~DesignFileSubscriptionTests", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/event-contract-results"]
 retained_artifacts=[{ name = "event-contract-results", path = "automation/artifacts/event-contract-results", max_bytes = 16777216 }]
 
-# Focused engineering model persistence and cross-reference contracts.
 [test.engineering-model]
 timeout_seconds=3600
 env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
@@ -2282,10 +2281,8 @@ tier="development"
 requires=["build"]
 command=["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_project_analysis_snapshot$", "--output-on-failure", "--no-tests=error"]
 
-# KiCad's own PCB design-rule suites. They read custom rules files through the same loader the
-# DRC jobs use, so a change to rules parsing (for example the line-number fix accepted in
-# decision nb6844a5bd34d3d5d) is checked against upstream cases too. qa_pcbnew_other joins once
-# its three failures that predate that fix are resolved (ledger outcome recorded 2026-09-26).
+# Upstream PCB rule suites supplement the job checks (nb6844a5bd34d3d5d).
+# qa_pcbnew_other awaits its three recorded pre-existing failures.
 [[test.drc-project-freshness.check]]
 name="upstream-drc-suites"
 tier="development"
@@ -2349,14 +2346,20 @@ command=["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", 
 name="native-build"
 tier="development"
 requires=["codec"]
-command=["cmake", "--build", "automation/artifacts/native", "--target", "kicad", "kicad-cli", "eeschema_kiface", "pcbnew_kiface", "cvpcb_kiface", "schema_build_copy", "api_schema_build_copy", "bitmap_archive_build"]
+command=["cmake", "--build", "automation/artifacts/native", "--target", "kicad", "kicad-cli", "eeschema_kiface", "pcbnew_kiface", "cvpcb_kiface", "schema_build_copy", "api_schema_build_copy", "bitmap_archive_build", "qa_pcbnew"]
 
 [[test.native-net-settings.check]]
 name="rendered"
 tier="development"
 requires=["native-build"]
-command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeNetSettings", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-net-settings-tests"]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeNetSettings", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-net-settings-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{ name = "native-net-settings-tests", path = "automation/artifacts/native-net-settings-tests", max_bytes = 16777216 }, { name = "native-net-settings-evidence", path = "automation/artifacts/native-net-settings/native-session-current", max_bytes = 33554432 }]
+
+[[test.native-net-settings.check]]
+name="pcb-lifecycle"
+tier="development"
+requires=["native-build"]
+command=["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_pcbnew_drc_job_lifecycle$", "--output-on-failure", "--no-tests=error"]
 
 [test.native-bom-settings]
 timeout_seconds=3600
@@ -3364,7 +3367,7 @@ name="journey-native-net-settings"
 tier="development"
 requires=["native-build"]
 after=["journey-native-net-chains"]
-command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeNetSettings", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-net-settings-tests"]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeNetSettings", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-net-settings-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{ name = "native-net-settings-tests", path = "automation/artifacts/native-net-settings-tests", max_bytes = 16777216 }, { name = "native-net-settings-evidence", path = "automation/artifacts/native-net-settings/native-session-current", max_bytes = 33554432 }]
 
 [[test.native-acceptance.check]]

@@ -19,12 +19,22 @@
  */
 
 #include <api/api_handler.h>
+#include <stdexcept>
 #include <wx/wx.h>
 
 using kiapi::common::ApiRequest, kiapi::common::ApiResponse, kiapi::common::ApiResponseStatus;
 
 
 const wxString API_HANDLER::m_defaultCommitMessage = _( "Modification from API" );
+
+
+KICAD_API_SERVER& API_HANDLER::apiServer() const
+{
+    if( !m_apiServer )
+        throw std::logic_error( "API handler is not registered with a server" );
+
+    return *m_apiServer;
+}
 
 
 API_RESULT API_HANDLER::Handle( ApiRequest& aMsg )

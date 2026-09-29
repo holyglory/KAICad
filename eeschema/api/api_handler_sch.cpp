@@ -2167,7 +2167,7 @@ HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> API_HANDLER_SCH::h
         result.mutable_revision()->set_epoch( schematic()->ChangeJournal().Epoch() );
         result.mutable_revision()->set_sequence( schematic()->ChangeJournal().Sequence() );
         result.set_native_identity( schematic()->RootScreen()->GetUuid().AsStdString() );
-        result.set_process_epoch( Pgm().GetApiServer().Token() );
+        result.set_process_epoch( apiServer().Token() );
         result.set_scope( kiapi::automation::v1::DLS_SCHEMATIC_HIERARCHY );
         // The same grouped state that native change tracking compares, so a tracked owner
         // records a revision exactly when this digest changes.
@@ -2241,7 +2241,7 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicParityNetlistSnapshot> API_HANDLE
         request.mutable_message()->PackFrom( query );
         // Go through the common dispatcher just as an external read does. It
         // adds the process-owned clean checkpoint used by checked lifecycle calls.
-        auto reply = Pgm().GetApiServer().DispatchToHandlers( request );
+        auto reply = apiServer().DispatchToHandlers( request );
         if( !reply ) return tl::unexpected( reply.error() );
         if( reply->status().status() != ApiStatusCode::AS_OK ) return tl::unexpected( reply->status() );
         DocumentLifecycleState state;

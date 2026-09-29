@@ -161,28 +161,6 @@ struct DRC_CAPTURE_FIXTURE
     }
 };
 
-// PGM_BASE keeps its API server protected; a derived class may name that member for any
-// program. The scope gives this test process the API server identity that every native request
-// handler reads, and takes it away again however the test ends.
-struct TEST_API_SERVER_SCOPE
-{
-    struct ACCESS : PGM_BASE
-    {
-        static std::unique_ptr<KICAD_API_SERVER>& Of( PGM_BASE& aProgram )
-        {
-            return aProgram.*( &ACCESS::m_api_server );
-        }
-    };
-
-    TEST_API_SERVER_SCOPE()
-    {
-        BOOST_REQUIRE( !ACCESS::Of( Pgm() ) );
-        ACCESS::Of( Pgm() ) = std::make_unique<KICAD_API_SERVER>( false );
-    }
-
-    ~TEST_API_SERVER_SCOPE() { ACCESS::Of( Pgm() ).reset(); }
-};
-
 BOOST_FIXTURE_TEST_SUITE( PcbDrcJobLifecycle, DRC_CAPTURE_FIXTURE )
 
 BOOST_AUTO_TEST_CASE( HeadlessBoardReplacementDoesNotRetainNativeListeners )
@@ -1557,8 +1535,11 @@ BOOST_AUTO_TEST_CASE( NativeExceptionMessagesAreCopiedFromTheExceptionItself )
     BOOST_REQUIRE( request.mutable_message()->PackFrom( read ) );
     API_RESULT result = [&]
     {
-        TEST_API_SERVER_SCOPE server;
-        return handler.Handle( request );
+        KICAD_API_SERVER server( false );
+        server.RegisterHandler( &handler );
+        API_RESULT reply = server.DispatchToHandlers( request );
+        server.DeregisterHandler( &handler );
+        return reply;
     }();
     BOOST_REQUIRE_MESSAGE( !result.has_value(), "A board KiCad cannot write must not report a document state." );
     BOOST_CHECK_EQUAL( result.error().status(), kiapi::common::ApiStatusCode::AS_BAD_REQUEST );

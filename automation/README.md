@@ -3485,3 +3485,17 @@ by `p5848545e243151a7`; scoped Linux evidence is separate from cross-platform
 qualification. Complete
 graph conflict handling, structural/native generation and reverse synchronization,
 schematic/PCB markup, and full platform qualification remain open.
+
+
+Headless server ownership (2026-09-29): native handlers obtain process identity and
+internal dispatch from the API server that registered them. A standalone
+`kicad-cli api-server` no longer dereferences the absent desktop server when
+reading board state, DRC markers or job requests. The existing two-project PCB
+journey now also opens a third headless project, verifies exact wrong-project,
+closed-board and relative-path refusals, rechecks its own board state and saved
+board/project bytes, and requires clean shutdown. Headless DRC starts still
+refuse missing drawing-sheet inputs; this is not qualification of headless DRC
+execution. Complete governed run `t20260929T234156Z-ffaf58` passed all eight
+checks, including the graphical two-project DRC journey and native lifecycle
+contracts, with unchanged source. Its retained `native-net-settings-evidence`
+contains `pcb-headless-project-refusal.json`.

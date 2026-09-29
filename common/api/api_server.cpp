@@ -290,6 +290,8 @@ void KICAD_API_SERVER::PublishSchematicCommit(
 void KICAD_API_SERVER::RegisterHandler( API_HANDLER* aHandler )
 {
     wxCHECK( aHandler, /* void */ );
+    wxCHECK( !aHandler->m_apiServer || aHandler->m_apiServer == this, /* void */ );
+    aHandler->m_apiServer = this;
     m_handlers.insert( aHandler );
 }
 
@@ -297,6 +299,8 @@ void KICAD_API_SERVER::RegisterHandler( API_HANDLER* aHandler )
 void KICAD_API_SERVER::DeregisterHandler( API_HANDLER* aHandler )
 {
     m_handlers.erase( aHandler );
+    if( aHandler && aHandler->m_apiServer == this )
+        aHandler->m_apiServer = nullptr;
 }
 
 

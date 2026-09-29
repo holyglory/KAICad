@@ -165,7 +165,7 @@ public sealed class NativeClientTests
         var query = new ReadSchematicMetadata();
         var result = await client.InvokeAsync<ReadSchematicMetadata, SchematicMetadataSnapshot>(query);
         Assert.AreEqual(payload, result); // Coverage limitations are not discarded or invented.
-        CollectionAssert.AreEqual(Enumerable.Range((int)maximum, 10 - (int)maximum).Reverse().Select(x => (uint)x).ToArray(),
+        CollectionAssert.AreEqual(Enumerable.Range(1, 10).Reverse().Select(x => (uint)x).Where(x => x >= maximum).ToArray(),
             transport.Requests.Select(x => x.Message.Unpack<ReadSchematicMetadata>().SchemaVersion).ToArray());
         Assert.AreEqual(0U, query.SchemaVersion);
         Assert.AreEqual("schema-peer", client.Epoch);
@@ -215,7 +215,8 @@ public sealed class NativeClientTests
         var rejected = new ScriptTransport((_, _) => SnapshotReply(new SchematicMetadataSnapshot(), 3));
         await Assert.ThrowsExactlyAsync<NativeApiException>(() => new NativeClient(rejected, "ipc:///tmp/rejected-schema.sock")
             .InvokeAsync<ReadSchematicMetadata, SchematicMetadataSnapshot>(new()));
-        Assert.HasCount(9, rejected.Requests);
+        CollectionAssert.AreEqual(Enumerable.Range(1, 10).Reverse().Select(x => (uint)x).ToArray(),
+            rejected.Requests.Select(x => x.Message.Unpack<ReadSchematicMetadata>().SchemaVersion).ToArray());
 
         var replaced = new ScriptTransport((_, attempt) =>
         {

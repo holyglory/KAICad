@@ -468,6 +468,15 @@ internal static class SchematicSynchronizationExecutor
     internal static bool Equivalent(SchematicDesign a, SchematicDesign b, DesignRecoveryState state, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
+        // Equality is not a request to recreate a native screen. A sheet added,
+        // removed or moved in KiCad is already present in the candidate; asking
+        // the delta planner to create its loaded contents can legitimately refuse.
+        // Different exact sheet identities therefore establish inequality directly.
+        if (!a.Schematic.Document.Equals(b.Schematic.Document)
+            || a.Schematic.Instances.Count != b.Schematic.Instances.Count
+            || !a.Schematic.Instances.Select(s => (s.Metadata.Document, s.Metadata.ScreenId)).ToHashSet()
+                .SetEquals(b.Schematic.Instances.Select(s => (s.Metadata.Document, s.Metadata.ScreenId))))
+            return false;
         // Reloading a file saved by the pinned writer changes loaded-format
         // provenance. It needs XML publication, not a native metadata mutation.
         // The planner has already validated both formats. Do not swallow other

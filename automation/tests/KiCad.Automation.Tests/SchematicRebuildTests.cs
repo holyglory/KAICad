@@ -162,7 +162,7 @@ public sealed class SchematicRebuildTests
     }
 
     [TestMethod]
-    public void XmlThatAddsSheetsGeneratesThemWithIdentitiesDerivedFromTheModel()
+    public async Task XmlThatAddsSheetsGeneratesThemWithIdentitiesDerivedFromTheModel()
     {
         var baseline = RootOnly();
         var desired = baseline with { Engineering = PsuCpuFixture.Engineering(PsuCpuStage.SheetsOnly) };
@@ -204,6 +204,55 @@ public sealed class SchematicRebuildTests
         var again = SchematicSynchronizationPlanner.Plan(state);
         Assert.AreEqual(plan.CandidateXml, again.CandidateXml);
         CollectionAssert.AreEqual(plan.NativeOperations.Select(o => o.ToString()).ToArray(), again.NativeOperations.Select(o => o.ToString()).ToArray());
+
+        // The same native sheets, when inserted in KiCad first, pass the complete
+        // reconciliation pipeline with their newly adopted sheet bindings.
+        string directory = Directory.CreateTempSubdirectory("kicad-native-sheet-adoption-").FullName;
+        try
+        {
+            var store = new DesignRecoveryStore(Path.Combine(directory, "recovery.json"));
+            string epoch = Guid.NewGuid().ToString("D");
+            var saved = store.Save(State(baseline, baseline, plan.Candidate!.Schematic, epoch, epoch), null);
+            var nativeAdded = await SchematicSynchronizationPlanner.PlanWithHistoryAsync(store, saved);
+            Assert.IsTrue(nativeAdded.CanPrepare, nativeAdded.ErrorCode + ": " + nativeAdded.ErrorMessage);
+            Assert.IsEmpty(nativeAdded.NativeOperations);
+            Assert.HasCount(4, nativeAdded.Candidate!.SheetBindings);
+            Assert.HasCount(3, nativeAdded.Electrical!.AddedSheetInstances!);
+            var loaded = nativeAdded.Candidate with { Schematic = nativeAdded.Candidate.Schematic.Clone() };
+            foreach (var screen in loaded.Schematic.Instances) screen.Metadata.LoadedNativeFormatVersion = screen.Metadata.WriterNativeFormatVersion;
+            Assert.IsFalse(SchematicSynchronizationExecutor.Equivalent(baseline, loaded, saved.State, CancellationToken.None),
+                "A newly loaded native sheet makes designs unequal; equality must not try to recreate it.");
+            Assert.IsFalse(SchematicSynchronizationExecutor.Equivalent(loaded, baseline, saved.State, CancellationToken.None));
+        }
+        finally { Directory.Delete(directory, true); }
+
+        var complete = plan.Candidate!;
+        Guid movedId = sheets[2], parentId = PsuCpuIds.Id(0x05, 1);
+        var movedModel = complete with { Engineering = complete.Engineering with { Circuit = complete.Engineering.Circuit with
+        { SheetInstances = complete.Engineering.Circuit.SheetInstances.Select(s => s.Id == movedId ? s with { ParentId = parentId } : s).ToArray() } } };
+        var movedPlan = SchematicSynchronizationPlanner.Plan(State(complete, movedModel));
+        Assert.IsTrue(movedPlan.CanPrepare, movedPlan.ErrorCode + ": " + movedPlan.ErrorMessage);
+        Assert.AreEqual(parentId, movedPlan.Candidate!.Engineering.Circuit.SheetInstances.Single(s => s.Id == movedId).ParentId);
+        Assert.AreEqual(complete.SheetBindings.Single(b => b.SheetInstanceId == movedId).NativePath[^1],
+            movedPlan.Candidate.SheetBindings.Single(b => b.SheetInstanceId == movedId).NativePath[^1]);
+        Assert.HasCount(1, movedPlan.NativeOperations.Where(o => o.Remove is not null));
+        Assert.HasCount(1, movedPlan.NativeOperations.Where(o => o.Create?.Is(SheetSymbol.Descriptor) == true));
+        var removedIds = new[] { sheets[1], sheets[2] }.ToHashSet();
+        var removedDefinitions = complete.Engineering.Circuit.SheetInstances.Where(s => removedIds.Contains(s.Id)).Select(s => s.DefinitionId).ToHashSet();
+        var removedModel = complete with { Engineering = complete.Engineering with { Circuit = complete.Engineering.Circuit with
+        { SheetInstances = complete.Engineering.Circuit.SheetInstances.Where(s => !removedIds.Contains(s.Id)).ToArray(),
+            Sheets = complete.Engineering.Circuit.Sheets.Where(s => !removedDefinitions.Contains(s.Id)).ToArray() } },
+            SheetBindings = complete.SheetBindings.Where(s => !removedIds.Contains(s.SheetInstanceId)).ToArray() };
+        var removedPlan = SchematicSynchronizationPlanner.Plan(State(complete, removedModel));
+        Assert.IsTrue(removedPlan.CanPrepare, removedPlan.ErrorCode + ": " + removedPlan.ErrorMessage);
+        CollectionAssert.AreEquivalent(removedIds.ToArray(), removedPlan.Electrical!.RemovedSheetInstances!.ToArray());
+        Assert.HasCount(1, removedPlan.NativeOperations.Where(o => o.Remove is not null), "Unlink the parent once; do not delete detached child contents.");
+        var concurrent = complete.Schematic.Clone();
+        concurrent.Instances[0].Metadata.TitleBlock ??= new();
+        concurrent.Instances[0].Metadata.TitleBlock.Title = "Concurrent native change";
+        var conflict = SchematicSynchronizationPlanner.Plan(State(complete, movedModel, concurrent));
+        Assert.IsFalse(conflict.CanPrepare); Assert.IsEmpty(conflict.NativeOperations);
+        Assert.AreEqual("ownership_change_with_xml_edits", conflict.ErrorCode);
     }
 
     [TestMethod]

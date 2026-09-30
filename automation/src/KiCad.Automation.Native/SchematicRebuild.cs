@@ -553,7 +553,7 @@ public static class SchematicRebuild
     }
 
     // KiCad shows exactly the baseline: no native edit waits to be reconciled.
-    private static bool NativeUnchanged(DesignRecoveryState state, CancellationToken token)
+    internal static bool NativeUnchanged(DesignRecoveryState state, CancellationToken token)
     {
         var baseline = state.Baseline.Schematic;
         static string Key(SchematicScreenData screen) => string.Join('/', screen.Metadata.Document.SheetPath.Path.Select(id => id.Value));

@@ -123,6 +123,8 @@ public static class SchematicSynchronizationPlanner
                 return Failure(connected.ErrorCode ?? SchematicConnectionErrors.XmlDisconnectionUnsupported, connected.ErrorMessage);
             if (connected.Kind == SchematicConnectedAdditionKind.Admitted)
                 return SchematicConnectedAdditionPlanner.Prepare(state, desired, hierarchy, connected, gaps, token);
+            if (SchematicXmlSheetChanges.Prepare(state, desired, hierarchy, token) is { } sheetChanges)
+                return sheetChanges;
             // A sheet generation or lost-files rebuild; an unexplained refusal is design_sync_conflict.
             var rebuild = SchematicRebuild.Classify(state, desired, token);
             if (rebuild.Kind == SchematicRebuildKind.Rejected)

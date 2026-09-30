@@ -1032,6 +1032,102 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
             if( auto* screen = path.LastScreen(); screen && cacheCandidates.count( screen->GetUuid().AsStdString() ) )
                 nativeCommit->CaptureLibraryCache( *screen );
         }
+
+        // A paired remove/create of the same sheet symbol reparents its existing
+        // screen. References and variants in that subtree are indexed by full
+        // sheet path; move those records in the same commit, before any result
+        // is observed. Other instances of shared screens keep their records.
+        const SCH_SHEET_LIST originalHierarchy = schematic()->Hierarchy();
+        std::map<KIID_PATH, KIID_PATH> movedPaths;
+        for( const auto& operation : aCtx.Request.operations() )
+        {
+            if( !operation.has_create() || !operation.create().Is<kiapi::schematic::types::SheetSymbol>() )
+                continue;
+            kiapi::schematic::types::SheetSymbol created;
+            operation.create().UnpackTo( &created );
+            const auto& target = operation.has_target_document() ? operation.target_document() : aCtx.Request.document();
+            if( !target.has_sheet_path() || !created.has_child_screen_id() )
+                continue;
+            for( const auto& removed : aCtx.Request.operations() )
+            {
+                if( !removed.has_remove() || removed.remove().value() != created.id().value() )
+                    continue;
+                const auto& source = removed.has_target_document() ? removed.target_document() : aCtx.Request.document();
+                if( !source.has_sheet_path() ) continue;
+                auto parent = originalHierarchy.GetSheetPathByKIIDPath( UnpackSheetPath( source.sheet_path() ) );
+                if( !parent ) continue;
+                SCH_ITEM* item = parent->ResolveItem( KIID( removed.remove().value() ) );
+                if( !item || item->Type() != SCH_SHEET_T ) continue;
+                auto* sheet = static_cast<SCH_SHEET*>( item );
+                if( !sheet->GetScreen() || sheet->GetScreen()->GetUuid().AsStdString() != created.child_screen_id().value() )
+                    continue;
+                KIID_PATH from = parent->Path(), to = UnpackSheetPath( target.sheet_path() );
+                from.push_back( sheet->m_Uuid ); to.push_back( sheet->m_Uuid );
+                if( from == to ) continue;
+                if( std::count_if( originalHierarchy.begin(), originalHierarchy.end(),
+                            [&]( const SCH_SHEET_PATH& path ) { return path.LastScreen() == parent->LastScreen(); } ) != 1 )
+                    return reject( "Reparenting a sheet symbol on a shared parent requires all parent instances to be specified" );
+                auto destination = originalHierarchy.GetSheetPathByKIIDPath( UnpackSheetPath( target.sheet_path() ) );
+                if( destination && std::count_if( originalHierarchy.begin(), originalHierarchy.end(),
+                            [&]( const SCH_SHEET_PATH& path ) { return path.LastScreen() == destination->LastScreen(); } ) != 1 )
+                    return reject( "Reparenting into a shared parent requires explicit ownership for its additional instances" );
+                if( !movedPaths.emplace( from, to ).second )
+                    return reject( "A sheet instance cannot be moved twice in one batch" );
+            }
+        }
+        auto movedPath = [&]( const KIID_PATH& path ) -> std::optional<KIID_PATH>
+        {
+            const KIID_PATH* from = nullptr;
+            const KIID_PATH* to = nullptr;
+            for( const auto& [oldPath, newPath] : movedPaths )
+                if( oldPath.size() <= path.size() && ( !from || oldPath.size() > from->size() )
+                        && std::equal( oldPath.begin(), oldPath.end(), path.begin() ) )
+                { from = &oldPath; to = &newPath; }
+            if( !from ) return std::nullopt;
+            KIID_PATH result = *to;
+            result.insert( result.end(), path.begin() + from->size(), path.end() );
+            return result;
+        };
+        std::set<SCH_SCREEN*> movedScreens;
+        for( const SCH_SHEET_PATH& path : originalHierarchy )
+        {
+            SCH_SCREEN* screen = path.LastScreen();
+            if( movedPaths.empty() || !movedScreens.insert( screen ).second ) continue;
+            for( SCH_ITEM* item : screen->Items() )
+            {
+                if( item->Type() == SCH_SYMBOL_T )
+                {
+                    auto* symbol = static_cast<SCH_SYMBOL*>( item );
+                    const auto instances = symbol->GetInstances();
+                    for( auto instance : instances )
+                    {
+                        if( !instance.m_ProjectName.IsEmpty() && instance.m_ProjectName != project().GetProjectName() ) continue;
+                        auto next = movedPath( instance.m_Path );
+                        if( !next ) continue;
+                        nativeCommit->Modify( symbol, screen );
+                        symbol->RemoveInstance( instance.m_Path );
+                        instance.m_Path = *next;
+                        symbol->AddHierarchicalReference( instance );
+                        symbol->SetConnectivityDirty();
+                    }
+                }
+                else if( item->Type() == SCH_SHEET_T )
+                {
+                    auto* sheet = static_cast<SCH_SHEET*>( item );
+                    const auto instances = sheet->GetInstances();
+                    for( auto instance : instances )
+                    {
+                        if( !instance.m_ProjectName.IsEmpty() && instance.m_ProjectName != project().GetProjectName() ) continue;
+                        auto next = movedPath( instance.m_Path );
+                        if( !next ) continue;
+                        nativeCommit->Modify( sheet, screen );
+                        sheet->RemoveInstance( instance.m_Path );
+                        instance.m_Path = *next;
+                        sheet->AddInstance( instance );
+                    }
+                }
+            }
+        }
         int index = 0;
 
         for( const auto& operation : aCtx.Request.operations() )

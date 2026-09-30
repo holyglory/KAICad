@@ -3521,3 +3521,33 @@ fixtures cover pathless, partial, conflicting and agreed answers; all 150 focuse
 checks passed in `t20260930T002243Z-2b2715`. No product source changed after the native
 pass. The focused ownership build ignores persistent build servers after two
 MSBuild child-node exits in the isolated checkout; it keeps the same tests.
+
+
+Sheet topology synchronization (2026-09-30): native sheet insertion now carries its
+new bindings through property reconciliation and publication. XML can move an
+existing sheet to another parent or unlink a branch through the existing checked
+native batch. Sheet-symbol, screen, component and occurrence identities remain
+stable; relative filenames are adjusted when the parent directory changes, and
+unlinked files are preserved. A native batch that reparents an existing sheet
+moves descendant reference and variant records in the same undoable commit;
+other instances of shared screens keep their records. Publication still requires
+exact native objects and connectivity. Planned placement records use KiCad's
+canonical path order; no comparison accepts changed record values.
+
+Complete native run `t20260930T013235Z-75ddb0` passed all six checks with unchanged
+source. In two projects it verified native add/move/remove, native undo, an XML
+move between directories, populated repeated-instance moves in both directions,
+rollback after an invalid later operation, XML branch removal with detached files
+unchanged, XML undo/redo and saved reload. Each retained `sheet-topology-proof.json`
+is in `native-rebuild/rebuild-evidence`; manifest
+`0ff5e97c8f03d5493787deb7c9694d5f35d2b2a3ab4b42e9babb6054f460a190`.
+The existing planner test also checks insertion through the full ownership
+pipeline, move/removal batches, equality for newly loaded sheets and concurrent
+native-edit refusal. The final ownership regression graph
+`t20260930T014111Z-8c4df7` passed. Only documentation/evidence wording changed afterward.
+
+The parent topology outcome remains open. Creating additional shared-sheet
+instances and reparenting through shared parents are tracked in
+`pc626c6d7d14a0d15`; other variable-backed filenames beyond `KIPRJMOD` are tracked in
+`p2b873890e79c72c2`. These cases are explicitly refused pending their own native
+resolution and ownership proof, rather than guessed or silently converted.

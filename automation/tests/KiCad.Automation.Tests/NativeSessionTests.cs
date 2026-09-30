@@ -225,6 +225,8 @@ public sealed partial class NativeSessionTests
                 if (journey == NativeJourney.NetSettings)
                     projectDirectory = Path.Combine(projectDirectory, "電源");
                 Directory.CreateDirectory(projectDirectory);
+                if (journey == NativeJourney.ComponentRebind)
+                    await PrepareRebindLibrary(projectDirectory, deadline.Token);
                 string project = Path.Combine(projectDirectory, "fixture.kicad_pro");
                 string declaredRootId = (index == 0 ? Guid.NewGuid() : Guid.Empty).ToString("D");
                 // PROJECT_FILE schema 3 requires meta.version; an empty object

@@ -65,6 +65,164 @@ public sealed class SchematicHierarchyDeltaTests
         Assert.ThrowsExactly<AutomationException>(() => SchematicHierarchyDelta.Plan(before, bad));
         bad = after.Clone(); bad.Instances[^1].Metadata.TitleBlock = new() { Title = "Conflicting metadata" };
         Assert.ThrowsExactly<AutomationException>(() => SchematicHierarchyDelta.Plan(before, bad));
+        VerifyExplicitRelocationChoices();
+
+        // Extend this existing repeated-screen fixture for the intentionally
+        // isolated ownership comparison. Native execution is verified separately.
+        static void VerifyExplicitRelocationChoices()
+        {
+            var original = SchematicHierarchyTopologyTests.Fixture();
+            var root = original.Instances[0];
+            var parents = original.Instances.Skip(1).ToArray();
+            var template = root.Items[0].Unpack<SheetSymbol>();
+            static void BindReferences(SchematicHierarchyData data)
+            {
+                foreach (var group in data.Instances.GroupBy(s => s.Metadata.ScreenId.Value))
+                {
+                    var instances = group.ToArray();
+                    foreach (var id in instances[0].Items.Where(i => i.Is(SheetSymbol.Descriptor))
+                        .Select(i => i.Unpack<SheetSymbol>().Id.Value).ToArray())
+                    {
+                        var records = instances.Select(screen =>
+                        {
+                            var sheet = screen.Items.Where(i => i.Is(SheetSymbol.Descriptor))
+                                .Select(i => i.Unpack<SheetSymbol>()).Single(s => s.Id.Value == id);
+                            var record = new SheetPlacementRecord { ProjectName = data.Document.Project?.Name ?? "",
+                                PageNumber = sheet.PageNumber, Variants = sheet.Variants?.Clone() ?? new() };
+                            foreach (var variant in record.Variants.Variants) variant.ClearDescription();
+                            record.Path.Add(screen.Metadata.Document.SheetPath.Path.Select(p => p.Clone())); return record;
+                        }).ToArray();
+                        foreach (var screen in instances)
+                        {
+                            int index = screen.Items.Select((item, i) => (item, i)).Single(x => x.item.Is(SheetSymbol.Descriptor)
+                                && x.item.Unpack<SheetSymbol>().Id.Value == id).i;
+                            var sheet = screen.Items[index].Unpack<SheetSymbol>(); sheet.InstanceRecords = new();
+                            sheet.InstanceRecords.Records.Add(records.Select(r => r.Clone())); screen.Items[index] = Any.Pack(sheet);
+                        }
+                    }
+                }
+            }
+            SchematicScreenData[] AddChildren(SchematicScreenData[] owners)
+            {
+                var id = new Kiapi.Common.Types.KIID { Value = Guid.NewGuid().ToString("D") };
+                var screenId = new Kiapi.Common.Types.KIID { Value = Guid.NewGuid().ToString("D") };
+                return owners.Select(owner =>
+                {
+                    var sheet = template.Clone(); sheet.Id = id.Clone(); sheet.ChildScreenId = screenId.Clone();
+                    sheet.Path = owner.Metadata.Document.SheetPath.Clone(); sheet.FilenameField.Text.Text_ = id.Value + ".kicad_sch";
+                    owner.Items.Add(Any.Pack(sheet));
+                    var child = new SchematicScreenData { Metadata = owner.Metadata.Clone() };
+                    child.Metadata.ScreenId = screenId.Clone(); child.Metadata.Document.SheetPath.Path.Add(id.Clone());
+                    original.Instances.Add(child); return child;
+                }).ToArray();
+            }
+            var children = AddChildren(parents); var descendants = AddChildren(children);
+            BindReferences(original);
+            string first = SchematicNativeSheetChanges.Key(children[0]), second = SchematicNativeSheetChanges.Key(children[1]);
+            var relocated = original.Clone();
+            foreach (var parent in relocated.Instances.Take(3).Skip(1))
+            {
+                var item = parent.Items.Single(i => i.Is(SheetSymbol.Descriptor));
+                parent.Items.Remove(item);
+            }
+            var reference = parents[1].Items.Single(i => i.Is(SheetSymbol.Descriptor)).Unpack<SheetSymbol>();
+            reference.Path = root.Metadata.Document.SheetPath.Clone(); relocated.Instances[0].Items.Add(Any.Pack(reference));
+            string target = SchematicNativeSheetChanges.Key(root) + "/" + reference.Id.Value;
+            for (int i = relocated.Instances.Count - 1; i >= 0; --i)
+            {
+                var screen = relocated.Instances[i]; string path = SchematicNativeSheetChanges.Key(screen);
+                if (path == first || path.StartsWith(first + "/", StringComparison.Ordinal)) { relocated.Instances.RemoveAt(i); continue; }
+                if (path != second && !path.StartsWith(second + "/", StringComparison.Ordinal)) continue;
+                screen.Metadata.Document.SheetPath.Path.Clear();
+                screen.Metadata.Document.SheetPath.Path.Add((target + path[second.Length..]).Split('/')
+                    .Select(value => new Kiapi.Common.Types.KIID { Value = value }));
+                for (int n = 0; n < screen.Items.Count; ++n)
+                    if (screen.Items[n].Is(SheetSymbol.Descriptor))
+                    { var sheet = screen.Items[n].Unpack<SheetSymbol>(); sheet.Path = screen.Metadata.Document.SheetPath.Clone(); screen.Items[n] = Any.Pack(sheet); }
+            }
+            BindReferences(relocated);
+            Assert.IsTrue(SchematicHierarchyTopology.Inspect(original).IsValid);
+            Assert.IsTrue(SchematicHierarchyTopology.Inspect(relocated).IsValid);
+            Assert.AreEqual(SchematicNativeSheetChanges.MoveAmbiguous, SchematicNativeSheetChanges.Compare(original, relocated).ErrorCode);
+            var choice = new SchematicSheetInstanceChoices([new(second, target)], [first], []);
+            var collapse = SchematicNativeSheetChanges.Compare(original, relocated, choice);
+            Assert.IsNull(collapse.ErrorCode); Assert.HasCount(2, collapse.Moved); Assert.HasCount(2, collapse.Removed);
+            Assert.AreEqual(target, collapse.Now(second)); Assert.IsNull(collapse.Now(first));
+            var collapsePlan = SchematicHierarchyDelta.PlanWithSheetChoices(original, relocated, choice);
+            var collapseMapping = collapsePlan.Single(o => o.SetSheetInstancePaths is not null).SetSheetInstancePaths;
+            Assert.AreEqual(reference.Id, collapseMapping.SourceSheetId);
+            Assert.AreEqual(reference.Id, collapseMapping.DestinationSheetId);
+            Assert.AreEqual(root.Metadata.Document, collapseMapping.DestinationDocument);
+            Assert.AreEqual(second, string.Join('/', collapseMapping.Moves.Single().Before.Path.Select(p => p.Value)));
+            Assert.AreEqual(target, string.Join('/', collapseMapping.Moves.Single().After.Path.Select(p => p.Value)));
+            Assert.AreEqual(first, string.Join('/', collapseMapping.Retired.Single().Path.Select(p => p.Value)));
+            Assert.IsEmpty(collapseMapping.Added);
+            Assert.AreEqual(collapseMapping.SourceDocument, collapsePlan.Single(o => o.Remove is not null).TargetDocument,
+                "The mapping names the exact deduplicated physical removal target, independently of which instance survives.");
+            Assert.AreEqual(target + "/" + descendants[1].Metadata.Document.SheetPath.Path[^1].Value,
+                collapse.Now(SchematicNativeSheetChanges.Key(descendants[1])));
+            var expansion = SchematicNativeSheetChanges.Compare(relocated, original,
+                new([new(target, second)], [], [first]));
+            Assert.IsNull(expansion.ErrorCode); Assert.HasCount(2, expansion.Moved); Assert.HasCount(2, expansion.Inserted);
+            var expansionPlan = SchematicHierarchyDelta.PlanWithSheetChoices(relocated, original,
+                new([new(target, second)], [], [first]));
+            var expansionMapping = expansionPlan.Single(o => o.SetSheetInstancePaths is not null).SetSheetInstancePaths;
+            Assert.AreEqual(first, string.Join('/', expansionMapping.Added.Single().Path.Select(p => p.Value)));
+            Assert.IsEmpty(expansionMapping.Retired);
+            var wrapped = relocated.Clone();
+            var wrapperReference = template.Clone(); wrapperReference.Id.Value = Guid.NewGuid().ToString("D");
+            wrapperReference.ChildScreenId.Value = Guid.NewGuid().ToString("D");
+            wrapperReference.NameField.Text.Text_ = "Wrapper";
+            wrapperReference.FilenameField.Text.Text_ = wrapperReference.Id.Value + ".kicad_sch";
+            // The root fixture has a known empty cache; the existing shared child
+            // deliberately carries an unknown-cache marker for coverage tests.
+            var wrapper = new SchematicScreenData { Metadata = root.Metadata.Clone() };
+            wrapper.Metadata.LoadedNativeFormatVersion = 0; wrapper.Metadata.RootInstance = new();
+            wrapper.Metadata.ScreenId = wrapperReference.ChildScreenId.Clone(); wrapper.Metadata.Document = root.Metadata.Document.Clone();
+            wrapper.Metadata.Document.SheetPath.Path.Add(wrapperReference.Id.Clone());
+            string wrapperPath = SchematicNativeSheetChanges.Key(wrapper);
+            var moving = wrapped.Instances[0].Items.Single(i => i.Is(SheetSymbol.Descriptor)
+                && i.Unpack<SheetSymbol>().Id.Equals(reference.Id));
+            wrapped.Instances[0].Items.Remove(moving);
+            var wrappedReference = moving.Unpack<SheetSymbol>(); wrappedReference.Path = wrapper.Metadata.Document.SheetPath.Clone();
+            wrapper.Items.Add(Any.Pack(wrappedReference)); wrapped.Instances[0].Items.Add(Any.Pack(wrapperReference));
+            string wrappedTarget = wrapperPath + "/" + reference.Id.Value;
+            foreach (var screen in wrapped.Instances)
+            {
+                string path = SchematicNativeSheetChanges.Key(screen);
+                if (path != target && !path.StartsWith(target + "/", StringComparison.Ordinal)) continue;
+                screen.Metadata.Document.SheetPath.Path.Clear();
+                screen.Metadata.Document.SheetPath.Path.Add((wrappedTarget + path[target.Length..]).Split('/')
+                    .Select(value => new Kiapi.Common.Types.KIID { Value = value }));
+                for (int n = 0; n < screen.Items.Count; ++n)
+                    if (screen.Items[n].Is(SheetSymbol.Descriptor))
+                    { var sheet = screen.Items[n].Unpack<SheetSymbol>(); sheet.Path = screen.Metadata.Document.SheetPath.Clone(); screen.Items[n] = Any.Pack(sheet); }
+            }
+            wrapped.Instances.Add(wrapper); BindReferences(wrapped);
+            Assert.IsTrue(SchematicHierarchyTopology.Inspect(wrapped).IsValid);
+            var throughNewParent = SchematicNativeSheetChanges.Compare(original, wrapped,
+                new([new(second, wrappedTarget)], [first], [wrapperPath]));
+            Assert.IsNull(throughNewParent.ErrorCode); Assert.HasCount(2, throughNewParent.Moved);
+            CollectionAssert.AreEqual(new[] { wrapperPath }, throughNewParent.Inserted.ToArray(),
+                "An added parent does not turn the moved subtree into newly owned instances.");
+            var wrappedPlan = SchematicHierarchyDelta.PlanWithSheetChoices(original, wrapped,
+                new([new(second, wrappedTarget)], [first], [wrapperPath]));
+            var wrappedMapping = wrappedPlan.Single(o => o.SetSheetInstancePaths is not null).SetSheetInstancePaths;
+            Assert.AreEqual(wrapper.Metadata.Document, wrappedMapping.DestinationDocument);
+            Assert.IsEmpty(wrappedMapping.Added, "The new unique parent is created separately from the existing child reference's instance mapping.");
+            foreach (var invalid in new[]
+            {
+                choice with { Retired = [] },
+                choice with { Moves = [new(second, target), new(first, target)], Retired = [] },
+                choice with { Retired = [first, second] },
+                choice with { Added = [target] },
+                choice with { Moves = [new(second, SchematicNativeSheetChanges.Key(root))] },
+                choice with { Retired = [first, first] }
+            }) Assert.AreEqual(SchematicNativeSheetChanges.MoveAnswerInvalid,
+                SchematicNativeSheetChanges.Compare(original, relocated, invalid).ErrorCode);
+            Assert.AreEqual(SchematicNativeSheetChanges.MoveAmbiguous, SchematicNativeSheetChanges.Compare(original, relocated).ErrorCode,
+                "A prior answer cannot silently change a later comparison.");
+        }
     }
 
     [TestMethod]

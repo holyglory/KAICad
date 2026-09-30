@@ -21,11 +21,13 @@ public sealed record DesignSynchronizationReceipt(
     [property: JsonRequired] bool NativeFilesSaved,
     [property: JsonRequired] byte[]? NativeReceipt,
     [property: JsonRequired] string? PreviousXmlPath,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? PreviousXmlSha256 = null)
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? PreviousXmlSha256 = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? PreviousSynchronizedXml = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? PreviousSynchronizedXmlSha256 = null)
 {
     internal void Validate()
     {
-        if (Version is not (1 or 2) || OperationId == Guid.Empty || InstanceId == Guid.Empty
+        if (Version is not (1 or 2 or 3) || OperationId == Guid.Empty || InstanceId == Guid.Empty
             || !Path.IsPathFullyQualified(DesignPath) || Path.GetFullPath(DesignPath) != DesignPath
             || !Digest(RequestedRecoveryRevisionToken) || !Digest(DesignFileSha256)
             || !Uuid(NativeProcessEpoch) || !Uuid(NativeDocumentEpoch)
@@ -33,9 +35,14 @@ public sealed record DesignSynchronizationReceipt(
             || (PreviousXmlPath is not null && !Path.IsPathFullyQualified(PreviousXmlPath)))
             throw Invalid("Synchronization receipt has incomplete identity or result fields.");
         if ((Version == 1 && PreviousXmlSha256 is not null)
-            || (Version == 2 && ((PreviousXmlPath is null) != (PreviousXmlSha256 is null)
+            || (Version >= 2 && ((PreviousXmlPath is null) != (PreviousXmlSha256 is null)
                 || (PreviousXmlSha256 is not null && !Digest(PreviousXmlSha256)))))
             throw Invalid("Versioned retained XML requires an exact prior-content digest paired with its path.");
+        if (Version < 3 ? PreviousSynchronizedXml is not null || PreviousSynchronizedXmlSha256 is not null
+            : string.IsNullOrEmpty(PreviousSynchronizedXml) || PreviousSynchronizedXmlSha256 is null
+                || Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(
+                    System.Text.Encoding.UTF8.GetBytes(PreviousSynchronizedXml))) != PreviousSynchronizedXmlSha256)
+            throw Invalid("The synchronized predecessor requires its exact content and digest.");
         if (NativeReceipt is not null)
         {
             try

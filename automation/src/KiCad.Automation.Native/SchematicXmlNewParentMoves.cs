@@ -112,7 +112,7 @@ internal static class SchematicXmlNewParentMoves
                 var declarations = desired with { Engineering = desired.Engineering with
                     { Circuit = desired.Engineering.Circuit with { Nets = shell.Engineering.Circuit.Nets } } };
                 var validation = SchematicNativeAdditionProjection.Project(state with
-                    { Baseline = shell, Observed = desired.Schematic, RepeatedSheetResolution = null }, [], declarations, null, token);
+                    { Baseline = shell, Observed = desired.Schematic, RepeatedSheetResolution = null, SheetMoveResolution = null }, [], declarations, null, token);
                 if (validation.Adoption is not { } owners || !owners.AddedOccurrences.ToHashSet().SetEquals(addedOccurrences))
                     return Failure(validation.ErrorCode ?? "xml_new_parent_component_conflict", validation.ErrorMessage ?? "The new parent declarations do not match its exact native symbols.");
                 var deltaTarget = desired.Schematic.Clone();

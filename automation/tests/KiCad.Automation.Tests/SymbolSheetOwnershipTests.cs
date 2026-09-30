@@ -618,6 +618,8 @@ public sealed class SymbolSheetOwnershipTests
                 cursor = page.TryGetProperty("nextCursor", out var next) && next.ValueKind == JsonValueKind.String ? next.GetString() : null;
             } while (cursor is not null);
             CollectionAssert.Contains(names, SchematicNativeAdditionProjection.AnswerTool);
+            CollectionAssert.Contains(names, SchematicSheetMoveChoices.Tool);
+            await VerifySheetMoveAnswers(host, root, timeout.Token);
 
             object Args(object[] answers, string? token = null, string? design = null) => new { instanceId = state.InstanceId.ToString("D"),
                 recoveryPath, expectedRevisionToken = token ?? store.Read()!.RevisionToken, designPath = design ?? designPath, answers };
@@ -870,6 +872,71 @@ public sealed class SymbolSheetOwnershipTests
     // effects without KiCad. The design is the PSU/CPU Components stage; the block graph leaves J1 (on the PSU sheet, whose
     // other parts four blocks own) and U6 (on the CPU sheet, whose other part only Processor owns) unowned. Lane-owned home
     // for these cases, so the parent's McpProcessTests seam is untouched.
+    private static async Task VerifySheetMoveAnswers(StdioMcpFixture host, string directory, CancellationToken token)
+    {
+        var state = DesignRecoveryStoreTests.Fixture(); var observed = state.Observed.Clone();
+        var old = state.Baseline.SheetBindings.Where(b => b.NativePath.Count == 2).ToArray();
+        Assert.HasCount(2, old);
+        var paths = old.ToDictionary(b => SchematicDesignBindings.PathKey(b.NativePath),
+            b => (IReadOnlyList<Guid>)new[] { b.NativePath[0], Guid.NewGuid() }, StringComparer.Ordinal);
+        void Repath(Google.Protobuf.Collections.RepeatedField<Kiapi.Common.Types.KIID> path)
+        {
+            if (!paths.TryGetValue(string.Join('/', path.Select(p => p.Value)), out var next)) return;
+            path.Clear(); path.Add(next.Select(id => new Kiapi.Common.Types.KIID { Value = id.ToString("D") }));
+        }
+        foreach (var screen in observed.Instances)
+        {
+            Repath(screen.Metadata.Document.SheetPath.Path);
+            for (int i = 0; i < screen.Items.Count; ++i)
+            {
+                if (screen.Items[i].Is(SheetSymbol.Descriptor))
+                {
+                    var sheet = screen.Items[i].Unpack<SheetSymbol>();
+                    string previous = SchematicNativeSheetChanges.Key(screen) + "/" + sheet.Id.Value;
+                    if (paths.TryGetValue(previous, out var next)) sheet.Id.Value = next[^1].ToString("D");
+                    screen.Items[i] = Any.Pack(sheet);
+                }
+                else if (screen.Items[i].Is(SchematicSymbolInstance.Descriptor))
+                {
+                    var symbol = screen.Items[i].Unpack<SchematicSymbolInstance>(); Repath(symbol.Path.Path);
+                    if (symbol.InstanceRecords is not null)
+                        foreach (var record in symbol.InstanceRecords.Records) Repath(record.Path);
+                    screen.Items[i] = Any.Pack(symbol);
+                }
+            }
+        }
+        state = state with { Observed = observed, NativeRevision = state.NativeRevision with { Sequence = state.NativeRevision.Sequence + 1 } };
+        var store = new DesignRecoveryStore(Path.Combine(directory, "sheet-move-recovery.json")); var saved = store.Save(state, null);
+        string designPath = Path.Combine(directory, "sheet-move-design.xml"); await File.WriteAllBytesAsync(designPath, state.DesiredFileBytes, token);
+        var answers = old.Select(b => new SchematicSheetMoveAnswer(b.SheetInstanceId, paths[SchematicDesignBindings.PathKey(b.NativePath)])).ToArray();
+        object Args(SchematicSheetMoveAnswer[] selected, string? revision = null) => new
+        { instanceId = state.InstanceId.ToString("D"), recoveryPath = store.StatePath, expectedRevisionToken = revision ?? store.Read()!.RevisionToken,
+            moves = selected, retiredSheetInstanceIds = Array.Empty<Guid>(), addedNativePaths = Array.Empty<Guid[]>() };
+        static string? Code(JsonElement result) => result.GetProperty("structuredContent").GetProperty("errorCode").GetString();
+        foreach (var invalid in new[] { answers.Take(1).ToArray(), new[] { answers[0], answers[0] },
+            new[] { answers[0] with { SheetInstanceId = Guid.NewGuid() }, answers[1] } })
+        {
+            Assert.AreEqual(SchematicNativeSheetChanges.MoveAnswerInvalid, Code(await host.Tool(SchematicSheetMoveChoices.Tool, Args(invalid))));
+            Assert.AreEqual(saved.RevisionToken, store.Read()!.RevisionToken);
+        }
+        var retained = await host.Tool(SchematicSheetMoveChoices.Tool, Args(answers));
+        Assert.IsFalse(retained.TryGetProperty("isError", out var error) && error.GetBoolean(), retained.GetRawText());
+        var result = retained.GetProperty("structuredContent");
+        Assert.IsTrue(result.GetProperty("choicesRetained").GetBoolean()); Assert.IsFalse(result.GetProperty("designFileWritten").GetBoolean());
+        Assert.IsFalse(result.GetProperty("nativeMutationAuthorized").GetBoolean()); Assert.IsFalse(result.GetProperty("synchronizationAdvanced").GetBoolean());
+        var reopened = store.Read()!; Assert.IsNotNull(SchematicSheetMoveChoices.Current(reopened.State));
+        Assert.AreEqual(result.GetProperty("recoveryRevisionToken").GetString(), reopened.RevisionToken);
+        CollectionAssert.AreEqual(state.DesiredFileBytes, await File.ReadAllBytesAsync(designPath, token));
+        Assert.AreEqual(state.Observed, reopened.State.Observed);
+        Assert.AreEqual(SchematicDesignXml.Write(state.Baseline, state.KnowledgeLibraries),
+            SchematicDesignXml.Write(reopened.State.Baseline, reopened.State.KnowledgeLibraries));
+        Assert.AreEqual("design_recovery_changed", Code(await host.Tool(SchematicSheetMoveChoices.Tool, Args(answers, saved.RevisionToken))));
+        var changed = state.Observed.Clone(); changed.Instances[0].Metadata.TitleBlock = new() { Title = "Later native edit" };
+        var refreshed = store.Save(reopened.State with { Observed = changed }, reopened.RevisionToken);
+        Assert.IsNull(SchematicSheetMoveChoices.Current(refreshed.State), "An answer cannot survive a different observation.");
+        Assert.AreEqual("design_recovery_changed", Code(await host.Tool(SchematicSheetMoveChoices.Tool, Args(answers, reopened.RevisionToken))));
+    }
+
     [TestMethod]
     public async Task BlockOwnerToolsOverStdioBindOnlyWhatExactIdentitiesDecide()
     {

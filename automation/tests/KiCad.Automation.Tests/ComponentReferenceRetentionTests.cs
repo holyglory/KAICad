@@ -67,6 +67,20 @@ public sealed class ComponentReferenceRetentionTests
         string xml = EngineeringDesignXml.Write(after, [library]);
         Assert.AreEqual(xml, EngineeringDesignXml.Write(EngineeringDesignXml.Read(xml, [library]), [library]));
         Assert.AreEqual(xml, EngineeringDesignXml.Write(ComponentReferenceRetention.Retain(after, after.Circuit, [], [library]), [library]));
+        var removal = new ComponentReferenceChange(new(before.Circuit.Components[0].Id),
+            ComponentReferenceChangeKind.Removed, "The XML explicitly retired the former owner.", []);
+        var retiredNet = new NetIdentityChange(before.Circuit.Nets[0].Id, NetBindingChangeKind.Removed,
+            "The XML explicitly retired the former connection.", []);
+        var repeated = ComponentReferenceRetention.Retain(after, after.Circuit, [removal], [library], [retiredNet], before.Circuit);
+        Assert.AreEqual(xml, EngineeringDesignXml.Write(repeated, [library]), "Former ownership evidence must not discard retained requirements.");
+        var explicitXml = after with { Structure = new(after.Structure.Id, [], [], [], []),
+            ComponentBindings = [], UnresolvedGuidanceBindings = null };
+        Assert.ThrowsExactly<AutomationException>(() => ComponentReferenceRetention.Retain(explicitXml, explicitXml.Circuit,
+            [removal], [library], [retiredNet]));
+        Assert.AreEqual(EngineeringDesignXml.Write(explicitXml, [library]), EngineeringDesignXml.Write(
+            ComponentReferenceRetention.Retain(explicitXml, explicitXml.Circuit, [removal], [library], [retiredNet], before.Circuit), [library]));
+        Assert.ThrowsExactly<AutomationException>(() => ComponentReferenceRetention.Retain(explicitXml, explicitXml.Circuit,
+            [removal], [library], [retiredNet], before.Circuit with { Id = Guid.NewGuid() }));
         Assert.AreEqual(original, EngineeringDesignXml.Write(before, [library]));
     }
 

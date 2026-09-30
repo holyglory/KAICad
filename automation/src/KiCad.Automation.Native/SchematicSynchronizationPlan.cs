@@ -64,7 +64,8 @@ public static class SchematicSynchronizationPlanner
         if (saved.State.HasPendingWork) return plan;
         bool selected = saved.State.OwnershipResolution is not null;
         bool sameOwners = SchematicNetReconciliation.NativeOwners(saved.State.Baseline.Schematic) == SchematicNetReconciliation.NativeOwners(saved.State.Observed);
-        if (!selected && (plan.CanPrepare || plan.ErrorCode != "electrical_ownership_changed" || sameOwners))
+        if (!selected && (plan.CanPrepare
+            || plan.ErrorCode is not ("electrical_ownership_changed" or SchematicNativeSheetChanges.MoveAmbiguous) || sameOwners))
             return plan;
         try
         {

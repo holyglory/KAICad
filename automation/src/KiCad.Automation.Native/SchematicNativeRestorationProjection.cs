@@ -53,7 +53,7 @@ internal static class SchematicNativeRestorationProjection
         {
             var candidate = inspection.Candidates.SingleOrDefault(c => c.Source.Receipt.OperationId == selected.HistoryOperationId);
             if (selected.SnapshotToken != inspection.SnapshotToken || candidate is null
-                || candidate.Source.Receipt.PreviousXmlSha256 != selected.HistoryXmlSha256)
+                || candidate.Source.XmlSha256 != selected.HistoryXmlSha256)
                 throw Error("native_owner_resolution_stale", "The selected history no longer matches this snapshot; inspect and choose again.");
             return candidate;
         }
@@ -75,7 +75,8 @@ internal static class SchematicNativeRestorationProjection
             if (SchematicNetReconciliation.NativeOwners(entry.Design.Schematic) != observedOwners) continue;
             var report = SchematicDesignBindings.Inspect(entry.Design, state.KnowledgeLibraries, token);
             if (!report.IdentitiesResolved || report.Differences.Any(d => d.Field == "unit")) continue;
-            var reduced = SchematicNativeRemovalProjection.Project(entry.Design, state.Baseline.Schematic, state.KnowledgeLibraries, token);
+            var reduced = SchematicNativeRemovalProjection.Project(entry.Design, state.Baseline.Schematic, state.KnowledgeLibraries, token,
+                SchematicSheetMoveChoices.FromDesigns(entry.Design, state.Baseline));
             if (reduced.BindingCandidate is null || reduced.RemovedOccurrences.Count == 0 && reduced.RemovedSheetInstances.Count == 0
                 || SchematicNetReconciliation.Topology(reduced.BindingCandidate.Engineering.Circuit) != currentTopology
                 || SchematicNetReconciliation.Bindings(reduced.BindingCandidate) != currentBindings) continue;
@@ -358,7 +359,8 @@ public static class SchematicNativeAdditionProjection
             static string Key(SchematicScreenData screen) => string.Join('/', screen.Metadata.Document.SheetPath.Path.Select(p => p.Value));
             var screens = observed.Instances.ToDictionary(Key, StringComparer.Ordinal);
             // Sheets inserted, removed or moved in KiCad (ledger p5f6d5d0ca242d628), by exact identity only.
-            var sheetChanges = SchematicNativeSheetChanges.Compare(baseline.Schematic, observed);
+            var sheetChoices = SchematicSheetMoveChoices.Current(state);
+            var sheetChanges = SchematicNativeSheetChanges.Compare(baseline.Schematic, observed, sheetChoices);
             if (sheetChanges.ErrorCode is not null)
                 return Failure(sheetChanges.ErrorCode, sheetChanges.ErrorMessage!) with
                     { SheetRequests = SchematicNativeRemovalProjection.Requests(sheetChanges, baseline) };
@@ -397,22 +399,21 @@ public static class SchematicNativeAdditionProjection
                     "KiCad shows a sheet an earlier synchronized design had together with other changes. Synchronize them separately: "
                     + "undo the other changes in KiCad, synchronize the restored sheet, then redo them.");
 
-            // Removals and moves first, exactly as a change without new owners is projected: KiCad's drawing without the
-            // inserted sheets and the new symbols.
+            // Keep the full physical topology. Removing just one newly implied
+            // child of a shared parent would fabricate inconsistent parent copies.
+            // Only new symbol owners are omitted from this private owner view.
             var withoutAdded = observed.Clone();
             for (int index = withoutAdded.Instances.Count - 1; index >= 0; --index)
             {
                 var screen = withoutAdded.Instances[index];
                 string path = Key(screen);
-                if (inserted.Contains(path) && !insertedParents.Paths.Contains(path)) { withoutAdded.Instances.RemoveAt(index); continue; }
                 for (int i = screen.Items.Count - 1; i >= 0; --i)
                     if (screen.Items[i].Is(SchematicSymbolInstance.Descriptor)
-                            && !bound.Contains(path + "#" + screen.Items[i].Unpack<SchematicSymbolInstance>().Id.Value)
-                        || screen.Items[i].Is(SheetSymbol.Descriptor) && inserted.Contains(path + "/" + screen.Items[i].Unpack<SheetSymbol>().Id?.Value)
-                            && !insertedParents.Paths.Contains(path + "/" + screen.Items[i].Unpack<SheetSymbol>().Id?.Value))
+                            && !bound.Contains(path + "#" + screen.Items[i].Unpack<SchematicSymbolInstance>().Id.Value))
                         screen.Items.RemoveAt(i);
             }
-            var removal = SchematicNativeRemovalProjection.Project(insertedParents.Baseline, withoutAdded, libraries, token);
+            var removal = SchematicNativeRemovalProjection.ProjectExisting(insertedParents.Baseline, withoutAdded, libraries, token,
+                SchematicSheetMoveChoices.Restrict(sheetChoices, insertedParents.Baseline.Schematic, withoutAdded));
             gaps.AddRange(removal.CoverageGaps);
             if (removal.BindingCandidate is null)
                 return Failure(removal.ErrorCode ?? "electrical_ownership_changed", removal.ErrorMessage

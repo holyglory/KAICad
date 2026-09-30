@@ -166,7 +166,10 @@ internal static class SchematicXmlSheetChanges
             }
             // Reuse native ownership rules: removed components, cross-sheet units and
             // net endpoints must have exactly the same meaning in either direction.
-            var projected = SchematicNativeRemovalProjection.Project(baseline, drawing, state.KnowledgeLibraries, token);
+            var sheetChoices = new SchematicSheetInstanceChoices(
+                newPaths.Where(p => oldPaths[p.Key] != p.Value).Select(p => new SchematicSheetPathMove(oldPaths[p.Key], p.Value)).ToArray(),
+                before.Keys.Where(id => !after.ContainsKey(id)).Select(id => oldPaths[id]).ToArray(), []);
+            var projected = SchematicNativeRemovalProjection.Project(baseline, drawing, state.KnowledgeLibraries, token, sheetChoices);
             gaps.AddRange(projected.CoverageGaps);
             if (projected.BindingCandidate is not { } nativeModel)
                 return Failure(projected.ErrorCode ?? "xml_sheet_projection_failed", projected.ErrorMessage ?? "The requested hierarchy cannot preserve its component ownership.", projected.Issues);
@@ -184,7 +187,7 @@ internal static class SchematicXmlSheetChanges
             if (!SameDrawing(desired.Schematic, baseline.Schematic) && !SameDrawing(desired.Schematic, drawing))
                 return Failure("xml_sheet_native_edits_conflict", "Change sheet ownership separately from other edits to the native XML drawing; both versions are preserved.");
             var engineering = ComponentReferenceRetention.Retain(desired.Engineering, nativeModel.Engineering.Circuit,
-                projected.ComponentChanges, state.KnowledgeLibraries, projected.RetiredNets);
+                projected.ComponentChanges, state.KnowledgeLibraries, projected.RetiredNets, baseline.Engineering.Circuit);
             var candidate = desired with { Engineering = engineering, Schematic = drawing,
                 SheetBindings = nativeModel.SheetBindings, SymbolBindings = nativeModel.SymbolBindings };
             var bindings = SchematicDesignBindings.Inspect(candidate, state.KnowledgeLibraries, token);
@@ -205,7 +208,7 @@ internal static class SchematicXmlSheetChanges
                     addedScreen.Metadata.UnrepresentedState.Clear();
                 }
             }
-            var operations = SchematicHierarchyDelta.Plan(state.Observed, deltaTarget, token);
+            var operations = SchematicHierarchyDelta.PlanWithSheetChoices(state.Observed, deltaTarget, sheetChoices, token);
             if (operations.Count == 0) return Failure("xml_sheet_nothing_to_apply", "The requested sheet change produced no native hierarchy operation.");
             var electrical = new SchematicNetReconciliationResult(engineering, [], projected.RetiredNets, [], projected.CoverageGaps,
                 RemovedSymbolOccurrences: projected.RemovedOccurrences, ComponentChanges: projected.ComponentChanges)

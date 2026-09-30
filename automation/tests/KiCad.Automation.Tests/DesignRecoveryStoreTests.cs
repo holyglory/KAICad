@@ -121,7 +121,20 @@ public sealed class DesignRecoveryStoreTests
         Assert.ThrowsExactly<AutomationException>(() => store.Save(reopenedChoices.State with
             { RepeatedSheetResolution = choices with { ComponentReferences = [reference, reference] } }, withChoices.RevisionToken));
         Assert.AreEqual(withChoices.RevisionToken, store.Read()!.RevisionToken);
-        var pendingChoices = store.Save(reopenedChoices.State with { PendingMutation = Mutation(reopenedChoices.State) }, withChoices.RevisionToken);
+        var former = state.Baseline.SheetBindings.First(b => b.NativePath.Count > 1);
+        var destination = former.NativePath.ToArray(); destination[^1] = Guid.NewGuid();
+        var sheetMoves = new DesignSheetMoveResolution(SchematicRepeatedSheetChoices.SnapshotToken(reopenedChoices.State),
+            [new(former.SheetInstanceId, destination)], [], []);
+        var retainedMoves = store.Save(reopenedChoices.State with { SheetMoveResolution = sheetMoves }, withChoices.RevisionToken);
+        Assert.IsTrue(SchematicSheetMoveChoices.Same(sheetMoves, store.Read()!.State.SheetMoveResolution));
+        using (var document = JsonDocument.Parse(File.ReadAllBytes(path))) Assert.AreEqual(13, document.RootElement.GetProperty("Version").GetInt32());
+        Assert.IsNotNull(SchematicSheetMoveChoices.Current(retainedMoves.State));
+        Assert.IsNull(SchematicSheetMoveChoices.Current(retainedMoves.State with { Observed = changedObserved }));
+        Assert.ThrowsExactly<AutomationException>(() => store.Save(retainedMoves.State with
+            { SheetMoveResolution = sheetMoves with { RetiredSheetInstanceIds = [former.SheetInstanceId] } }, retainedMoves.RevisionToken));
+        var pendingChoices = store.Save(retainedMoves.State with { PendingMutation = Mutation(retainedMoves.State) }, retainedMoves.RevisionToken);
+        Assert.AreEqual("ownership_resolution_pending", Assert.ThrowsExactly<AutomationException>(() => store.Save(pendingChoices.State with
+            { SheetMoveResolution = null }, pendingChoices.RevisionToken)).Code);
         Assert.AreEqual("ownership_resolution_pending", Assert.ThrowsExactly<AutomationException>(() => store.Save(pendingChoices.State with
             { RepeatedSheetResolution = choices with { ComponentReferences = [reference with { Reference = "UNPLACED302" }] } }, pendingChoices.RevisionToken)).Code);
         Assert.AreEqual(pendingChoices.RevisionToken, store.Read()!.RevisionToken);

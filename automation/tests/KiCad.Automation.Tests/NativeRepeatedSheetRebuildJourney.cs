@@ -169,6 +169,10 @@ public sealed partial class NativeSessionTests
             var observation = await client.InvokeAsync<CaptureSchematicObservation, SchematicObservation>(new() { Document = screen.Metadata.Document.Clone() }, token);
             await File.WriteAllBytesAsync(FileName(screen.Metadata.Document.SheetPath.Path[^1].Value + ".png"), observation.Preview.Png.ToByteArray(), token);
         }
+        await VerifyNativeSharedParentMapping(client, document, fixture, processId, display, directory, instanceId, Call, token);
+        var afterSharedParent = await Capture();
+        RequireToolSuccess(await Call("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
+            expectedRevisionToken = store.Read()!.RevisionToken, expectedDocumentEpoch = afterSharedParent.State.Revision.Epoch }));
         await VerifyRepeatedNativeAdoption(client, document, fixture, processId, display, instanceId,
             designPath, store, Call, token);
         await VerifySheetOwnershipRoundTrips(client, document, fixture, processId, display, instanceId,
@@ -201,10 +205,10 @@ public sealed partial class NativeSessionTests
         }
     }
 
-    private static SchematicDesign RepeatedProbeDesign(SchematicElectricalState state)
+    private static SchematicDesign RepeatedProbeDesign(SchematicElectricalState state, bool includeUndrawn = true)
     {
         var data = state.Hierarchy.Data;
-        Assert.HasCount(3, data.Instances);
+        if (includeUndrawn) Assert.HasCount(3, data.Instances);
         var definitions = data.Instances.GroupBy(s => s.Metadata.ScreenId.Value).ToDictionary(g => g.Key, g => Guid.NewGuid());
         var instances = data.Instances.ToDictionary(RebuildPathKey, _ => Guid.NewGuid());
         Guid part = Guid.NewGuid();
@@ -213,9 +217,9 @@ public sealed partial class NativeSessionTests
             componentDefinitions.Add(group.Key, group.First().Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor))
                 .Select(i => i.Unpack<SchematicSymbolInstance>()).OrderBy(s => s.Id.Value, StringComparer.Ordinal)
                 .Select(s => new ComponentDefinition(Guid.NewGuid(), part, s.ValueField.Text.Text_)).ToArray());
-        string repeatedScreenId = data.Instances.GroupBy(s => s.Metadata.ScreenId.Value).Single(g => g.Count() == 2).Key;
+        string? repeatedScreenId = includeUndrawn ? data.Instances.GroupBy(s => s.Metadata.ScreenId.Value).Single(g => g.Count() == 2).Key : null;
         var undrawn = new ComponentDefinition(Guid.NewGuid(), part, "Undrawn fixture probe");
-        componentDefinitions[repeatedScreenId] = [.. componentDefinitions[repeatedScreenId], undrawn];
+        if (repeatedScreenId is not null) componentDefinitions[repeatedScreenId] = [.. componentDefinitions[repeatedScreenId], undrawn];
         var components = new List<ComponentInstance>();
         var occurrences = new List<SymbolOccurrence>();
         var bindings = new List<SchematicSymbolBinding>();

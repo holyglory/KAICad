@@ -249,11 +249,13 @@ internal static class SchematicSynchronizationExecutor
             throw Error("native_changed_during_sync", "Native state changed while completing XML publication; "
                 + "retain the pending versions for reconciliation and do not advance the baseline.");
         }
-        var resultReceipt = new DesignSynchronizationReceipt(2, intent.OperationId, saved.State.InstanceId,
+        string previousSynchronizedXml = SchematicDesignXml.Write(saved.State.Baseline, saved.State.KnowledgeLibraries);
+        var resultReceipt = new DesignSynchronizationReceipt(3, intent.OperationId, saved.State.InstanceId,
             intent.DesignPath, intent.RequestedRecoveryRevisionToken!, publication.FileSha256, client.Epoch,
             final.State.Revision.Epoch, final.State.Revision.Sequence, receipt is not null, true,
             receipt?.ToByteArray(), publication.PreviousPath,
-            publication.PreviousPath is null ? null : Hash(intent.ExpectedFileBytes));
+            publication.PreviousPath is null ? null : Hash(intent.ExpectedFileBytes),
+            previousSynchronizedXml, Hash(Encoding.UTF8.GetBytes(previousSynchronizedXml)));
         var complete = store.Save(saved.State with
         {
             Baseline = baseline, DesiredFileBytes = intent.CandidateFileBytes,
@@ -262,7 +264,7 @@ internal static class SchematicSynchronizationExecutor
             ObservedElectrical = final.Electrical.Clone(), PendingMutation = null, PendingNativeState = null,
             PendingNativeSave = null, PendingCandidateFileBytes = null, PendingPublication = null, HierarchyResolution = null,
             LastSynchronization = resultReceipt, OwnershipResolution = null, NativeFileLocations = fileLocations,
-            RepeatedSheetResolution = null
+            RepeatedSheetResolution = null, SheetMoveResolution = null
         }, saved.RevisionToken);
         if (checkpoint is not null) await checkpoint("baseline-committed", CancellationToken.None);
         // A failure here leaves the complete result in the atomic recovery

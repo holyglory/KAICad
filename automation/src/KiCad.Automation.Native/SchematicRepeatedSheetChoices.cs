@@ -29,7 +29,8 @@ internal static class SchematicRepeatedSheetChoices
             throw new AutomationException(Invalid, "Give at least one reference or symbol-owner choice from the current repeated-sheet questions.");
         string snapshot = SnapshotToken(saved.State);
         Validate(new(snapshot, references, symbolOwners));
-        var changes = SchematicNativeSheetChanges.Compare(saved.State.Baseline.Schematic, saved.State.Observed);
+        var changes = SchematicNativeSheetChanges.Compare(saved.State.Baseline.Schematic, saved.State.Observed,
+            SchematicSheetMoveChoices.Current(saved.State));
         var oldScreens = saved.State.Baseline.Schematic.Instances.Select(s => s.Metadata.ScreenId.Value).ToHashSet(StringComparer.Ordinal);
         var inserted = changes.Inserted.ToHashSet(StringComparer.Ordinal);
         if (changes.ErrorCode is not null || !saved.State.Observed.Instances.Any(s => inserted.Contains(SchematicNativeSheetChanges.Key(s))

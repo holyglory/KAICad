@@ -6,10 +6,14 @@ public static class ComponentReferenceRetention
 {
     public static EngineeringDesign Retain(EngineeringDesign previous, Circuit circuit,
         IReadOnlyList<ComponentReferenceChange> changes, IReadOnlyCollection<ComponentKnowledgeLibrary> libraries,
-        IReadOnlyList<NetIdentityChange>? netChanges = null)
+        IReadOnlyList<NetIdentityChange>? netChanges = null, Circuit? formerCircuit = null)
     {
         previous.Validate(libraries); circuit.Validate();
-        var before = new ComponentReferenceIndex(previous.Circuit);
+        var former = formerCircuit ?? previous.Circuit;
+        former.Validate();
+        if (former.Id != previous.Circuit.Id || former.Id != circuit.Id)
+            throw ComponentReferenceIndex.Invalid("Former ownership evidence must belong to this circuit.");
+        var before = new ComponentReferenceIndex(former);
         var after = new ComponentReferenceIndex(circuit);
         var knownFormer = (previous.Structure.UnresolvedComponentReferences ?? []).Select(r => r.FormerTarget)
             .Concat((previous.Structure.UnresolvedComponentReferences ?? []).Select(r => new ComponentReferenceTarget(r.FormerTarget.ComponentId)))
@@ -71,7 +75,7 @@ public static class ComponentReferenceRetention
         var result = previous with
         {
             Circuit = circuit,
-            Structure = previous.Structure.RetainNetReferences(previous.Circuit, circuit, netChanges ?? []) with
+            Structure = previous.Structure.RetainNetReferences(former, circuit, netChanges ?? []) with
             { Blocks = blocks, UnresolvedComponentReferences = retained.Count == 0 ? null : retained.Values
                 .OrderBy(r => r.OwnerId).ThenBy(r => r.Slot).ThenBy(r => r.FormerTarget.ComponentId)
                 .ThenBy(r => r.FormerTarget.PinNumber, StringComparer.Ordinal).ToArray() },

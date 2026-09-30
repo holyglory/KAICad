@@ -16,6 +16,9 @@ internal sealed record SchematicNativeRemovalResult(SchematicDesign? BindingCand
     public IReadOnlyList<Guid> MovedSheetInstances { get; init; } = [];
     /// <summary>Moves exact identities cannot decide; set with <see cref="SchematicNativeSheetChanges.MoveAmbiguous"/>.</summary>
     public IReadOnlyList<SchematicSheetResolutionRequest> SheetRequests { get; init; } = [];
+    /// <summary>Only the addition compositor may use this partial owner view; all
+    /// listed native instances still require complete binding validation.</summary>
+    public IReadOnlyList<string> UnboundInsertedSheetPaths { get; init; } = [];
     public bool SheetsChanged => RemovedSheetInstances.Count != 0 || MovedSheetInstances.Count != 0;
 }
 
@@ -31,7 +34,16 @@ internal static class SchematicNativeRemovalProjection
     internal const string SplitComponent = "native_sheet_removal_splits_component";
 
     internal static SchematicNativeRemovalResult Project(SchematicDesign baseline, SchematicHierarchyData observed,
-        IReadOnlyCollection<ComponentKnowledgeLibrary> libraries, CancellationToken token = default)
+        IReadOnlyCollection<ComponentKnowledgeLibrary> libraries, CancellationToken token = default,
+        SchematicSheetInstanceChoices? sheetChoices = null) => ProjectCore(baseline, observed, libraries, token, sheetChoices, false);
+
+    internal static SchematicNativeRemovalResult ProjectExisting(SchematicDesign baseline, SchematicHierarchyData observed,
+        IReadOnlyCollection<ComponentKnowledgeLibrary> libraries, CancellationToken token,
+        SchematicSheetInstanceChoices? sheetChoices) => ProjectCore(baseline, observed, libraries, token, sheetChoices, true);
+
+    private static SchematicNativeRemovalResult ProjectCore(SchematicDesign baseline, SchematicHierarchyData observed,
+        IReadOnlyCollection<ComponentKnowledgeLibrary> libraries, CancellationToken token,
+        SchematicSheetInstanceChoices? sheetChoices, bool projectExisting)
     {
         token.ThrowIfCancellationRequested();
         var gaps = new List<HierarchyCoverageGap>();
@@ -46,10 +58,10 @@ internal static class SchematicNativeRemovalProjection
             var topology = SchematicHierarchyTopology.Inspect(observed, token);
             gaps.AddRange(topology.CoverageGaps);
             if (!topology.IsValid) return Failure("invalid_native_hierarchy", "Resolve the reported native hierarchy before projecting deletions.");
-            var sheets = SchematicNativeSheetChanges.Compare(baseline.Schematic, observed);
+            var sheets = SchematicNativeSheetChanges.Compare(baseline.Schematic, observed, sheetChoices);
             if (sheets.ErrorCode is not null)
                 return Failure(sheets.ErrorCode, sheets.ErrorMessage) with { SheetRequests = Requests(sheets, baseline) };
-            if (sheets.Inserted.Count != 0)
+            if (sheets.Inserted.Count != 0 && !projectExisting)
                 return Failure("electrical_ownership_changed", "Sheets inserted in KiCad require explicit ownership reconciliation.");
             var screens = observed.Instances.ToDictionary(SchematicNativeSheetChanges.Key);
 
@@ -58,6 +70,9 @@ internal static class SchematicNativeRemovalProjection
             var now = sheets.Rebind(baseline.SheetBindings);
             var removedSheets = now.Where(p => p.Value is null).Select(p => p.Key).ToHashSet();
             var byPath = now.Where(p => p.Value is not null).ToDictionary(p => p.Value!, p => p.Key, StringComparer.Ordinal);
+            if (now.Values.Where(p => p is not null).Any(p => SchematicNativeSheetChanges.Parent(p!).Length != 0
+                && !byPath.ContainsKey(SchematicNativeSheetChanges.Parent(p!))))
+                return Failure("native_sheet_parent_requires_owner", "Resolve the new parent's ownership before projecting its existing children.");
             var instances = circuit.SheetInstances.Where(s => !removedSheets.Contains(s.Id)).Select(s =>
             {
                 string path = now[s.Id]!, parent = SchematicNativeSheetChanges.Parent(path);
@@ -92,7 +107,17 @@ internal static class SchematicNativeRemovalProjection
                     if (screen.Items[i].Is(SchematicSymbolInstance.Descriptor)
                         && !live.Contains(screen.Items[i].Unpack<SchematicSymbolInstance>().Id.Value)) screen.Items.RemoveAt(i);
             }
-            if (SchematicNetReconciliation.NativeOwners(survivingNative) != SchematicNetReconciliation.NativeOwners(observed))
+            var observedOwners = observed;
+            if (projectExisting && sheets.Inserted.Count != 0)
+            {
+                // This copy is used only to compare old symbol ownership, never
+                // as a hierarchy, native observation or electrical checkpoint.
+                observedOwners = observed.Clone();
+                for (int i = observedOwners.Instances.Count - 1; i >= 0; --i)
+                    if (sheets.Inserted.Contains(SchematicNativeSheetChanges.Key(observedOwners.Instances[i]), StringComparer.Ordinal))
+                        observedOwners.Instances.RemoveAt(i);
+            }
+            if (SchematicNetReconciliation.NativeOwners(survivingNative) != SchematicNetReconciliation.NativeOwners(observedOwners))
                 return Failure("electrical_ownership_changed", "New symbols, unit changes or changed library pin identities require explicit ownership reconciliation.");
 
             var remainingSymbols = circuit.Symbols.Where(s => !removed.Contains(s.Id)).ToArray();
@@ -135,11 +160,15 @@ internal static class SchematicNativeRemovalProjection
                 SymbolBindings = baseline.SymbolBindings.Where(b => !removed.Contains(b.SymbolOccurrenceId)).ToArray() };
             var report = SchematicDesignBindings.Inspect(candidate, libraries, token);
             gaps.AddRange(report.CoverageGaps);
-            if (!report.IdentitiesResolved) return Failure("unresolved_design_bindings", issues: report.Issues);
+            var remainingIssues = projectExisting ? report.Issues.Where(i =>
+                !(i.Code is "unmapped_native_sheet" or "unmapped_native_symbol"
+                    && i.NativePath is not null && sheets.Inserted.Contains(i.NativePath, StringComparer.Ordinal))).ToArray() : report.Issues;
+            if (remainingIssues.Count != 0) return Failure("unresolved_design_bindings", issues: remainingIssues);
             return new(candidate, removed.Order().ToArray(), changes, netChanges, [], gaps.Distinct().ToArray())
             {
                 RemovedSheetInstances = [.. circuit.SheetInstances.Where(s => removedSheets.Contains(s.Id)).Select(s => s.Id)],
-                MovedSheetInstances = moved
+                MovedSheetInstances = moved,
+                UnboundInsertedSheetPaths = projectExisting ? sheets.Inserted : []
             };
         }
         catch (AutomationException error) { return Failure(error.Code, error.Message); }

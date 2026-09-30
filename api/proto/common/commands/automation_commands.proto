@@ -950,8 +950,35 @@ message SchematicItemOperation {
     // definition, and never an identity another loaded screen has. Undo and a rejected batch
     // restore the previous identity.
     kiapi.common.types.KIID rebuild_screen_identity = 300;
+    // Complete instance ownership for physical sheet remove/create pairs in
+    // this batch. One declaration per physical reference, targeting the root. Older peers
+    // reject this operation instead of silently ignoring path ownership.
+    SchematicSheetInstancePaths set_sheet_instance_paths = 301;
     // -- end lane 2C --
   }
+}
+
+message SchematicSheetInstanceMove {
+  kiapi.common.types.SheetPath before = 1;
+  kiapi.common.types.SheetPath after = 2;
+}
+
+// Each path includes the moved sheet symbol itself. Descendant records follow
+// the most specific declared path. Every affected old instance must be moved
+// or explicitly retired, and every resulting instance moved or explicitly
+// added. New component references and units come from the batch's complete
+// symbol placement records, never from names, ordering or guessed copies.
+message SchematicSheetInstancePaths {
+  repeated SchematicSheetInstanceMove moves = 1;
+  repeated kiapi.common.types.SheetPath retired = 2;
+  repeated kiapi.common.types.SheetPath added = 3;
+  // The exact parent targets and reference IDs of one remove/create pair.
+  // This also binds a move where every old instance is retired and all
+  // resulting instances are explicitly new; file-name matching is forbidden.
+  kiapi.common.types.DocumentSpecifier source_document = 4;
+  kiapi.common.types.KIID source_sheet_id = 5;
+  kiapi.common.types.DocumentSpecifier destination_document = 6;
+  kiapi.common.types.KIID destination_sheet_id = 7;
 }
 
 // Finite native drag, not an interactive mouse action. Uses the explicitly

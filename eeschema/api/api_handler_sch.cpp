@@ -1041,6 +1041,130 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
         // is observed. Other instances of shared screens keep their records.
         const SCH_SHEET_LIST originalHierarchy = schematic()->Hierarchy();
         std::map<KIID_PATH, KIID_PATH> movedPaths;
+
+        struct DECLARED_SHEET_MOVE
+        {
+            SCH_SCREEN* sourceParent;
+            KIID sourceId;
+            SCH_SCREEN* child;
+            KIID_PATH destinationParent;
+            KIID destinationId;
+            std::set<KIID_PATH> destinations;
+        };
+        std::vector<DECLARED_SHEET_MOVE> declaredMoves;
+        std::set<KIID_PATH> retiredPaths, addedPaths, claimedDestinations;
+        auto within = []( const KIID_PATH& path, const KIID_PATH& prefix )
+        {
+            return prefix.size() <= path.size() && std::equal( prefix.begin(), prefix.end(), path.begin() );
+        };
+        auto canonicalPath = []( const types::SheetPath& path, size_t minimum )
+        {
+            if( static_cast<size_t>( path.path_size() ) < minimum ) return false;
+            for( const auto& value : path.path() )
+                if( KIID id( value.value() ); id == niluuid || id.AsStdString() != value.value() ) return false;
+            return true;
+        };
+        auto sameOwner = [&]( const types::DocumentSpecifier& document )
+        {
+            auto owner = document, batchOwner = aCtx.Request.document();
+            owner.clear_sheet_path(); batchOwner.clear_sheet_path();
+            return google::protobuf::util::MessageDifferencer::Equals( owner, batchOwner );
+        };
+        for( const auto& operation : aCtx.Request.operations() )
+        {
+            if( !operation.has_set_sheet_instance_paths() ) continue;
+            auto known = operation; known.DiscardUnknownFields();
+            const auto& declaration = operation.set_sheet_instance_paths();
+            const auto& source = declaration.source_document();
+            const auto& destination = declaration.destination_document();
+            const KIID sourceId( declaration.source_sheet_id().value() );
+            const KIID destinationId( declaration.destination_sheet_id().value() );
+            if( !google::protobuf::util::MessageDifferencer::Equals( known, operation )
+                    || sourceId == niluuid || sourceId.AsStdString() != declaration.source_sheet_id().value()
+                    || destinationId == niluuid || destinationId.AsStdString() != declaration.destination_sheet_id().value()
+                    || !sameOwner( source ) || !sameOwner( destination )
+                    || !canonicalPath( source.sheet_path(), 1 ) || !canonicalPath( destination.sheet_path(), 1 )
+                    || aCtx.Request.document().sheet_path().path_size() != 1
+                    || operation.has_target_document() && !google::protobuf::util::MessageDifferencer::Equals(
+                            operation.target_document(), aCtx.Request.document() ) )
+                return reject( "Sheet-instance mapping requires exact parent targets, canonical identities and a root batch" );
+            auto parent = originalHierarchy.GetSheetPathByKIIDPath( UnpackSheetPath( source.sheet_path() ) );
+            SCH_ITEM* item = parent ? parent->ResolveItem( sourceId ) : nullptr;
+            if( !item || item->Type() != SCH_SHEET_T || !static_cast<SCH_SHEET*>( item )->GetScreen() )
+                return reject( "The mapped source sheet reference is not loaded" );
+            auto* child = static_cast<SCH_SHEET*>( item )->GetScreen();
+            if( std::any_of( declaredMoves.begin(), declaredMoves.end(), [&]( const auto& existing )
+                    { return existing.sourceParent == parent->LastScreen() && existing.sourceId == sourceId; } ) )
+                return reject( "A physical sheet reference can have only one instance mapping" );
+            size_t removals = 0, creations = 0;
+            for( const auto& change : aCtx.Request.operations() )
+            {
+                const auto& target = change.has_target_document() ? change.target_document() : aCtx.Request.document();
+                if( change.has_remove() && change.remove().value() == sourceId.AsStdString()
+                        && google::protobuf::util::MessageDifferencer::Equals( target, source ) ) ++removals;
+                if( change.has_create() && change.create().Is<kiapi::schematic::types::SheetSymbol>()
+                        && google::protobuf::util::MessageDifferencer::Equals( target, destination ) )
+                {
+                    kiapi::schematic::types::SheetSymbol created;
+                    change.create().UnpackTo( &created );
+                    if( created.id().value() == destinationId.AsStdString()
+                            && created.child_screen_id().value() == child->GetUuid().AsStdString() )
+                    {
+                        size_t placements = 0;
+                        for( const auto& record : created.instance_records().records() )
+                        {
+                            if( record.path_size() != destination.sheet_path().path_size()
+                                    || !std::equal( record.path().begin(), record.path().end(), destination.sheet_path().path().begin(),
+                                            []( const auto& a, const auto& b ) { return a.value() == b.value(); } )
+                                    || !record.project_name().empty()
+                                        && record.project_name() != project().GetProjectName().ToStdString( wxConvUTF8 ) ) continue;
+                            ++placements;
+                            if( record.page_number() != created.page_number() )
+                                return reject( "A mapped sheet's page must agree with its destination placement record" );
+                        }
+                        if( placements != 1 )
+                            return reject( "A mapped sheet requires one exact destination placement record" );
+                        ++creations;
+                    }
+                }
+            }
+            if( removals != 1 || creations != 1 )
+                return reject( "An instance mapping requires one exact physical remove/create pair" );
+            std::set<KIID_PATH> sources, covered, destinations;
+            for( const auto& instance : originalHierarchy )
+                if( instance.LastScreen() == parent->LastScreen() )
+                { auto path = instance.Path(); path.push_back( sourceId ); sources.insert( path ); }
+            for( const auto& move : declaration.moves() )
+            {
+                if( !canonicalPath( move.before(), 2 ) || !canonicalPath( move.after(), 2 ) )
+                    return reject( "Mapped instance paths must be canonical full child paths" );
+                auto from = UnpackSheetPath( move.before() ), to = UnpackSheetPath( move.after() );
+                if( !sources.count( from ) || to.back() != destinationId || !covered.insert( from ).second
+                        || !destinations.insert( to ).second || !claimedDestinations.insert( to ).second
+                        || retiredPaths.count( from ) || !movedPaths.emplace( from, to ).second )
+                    return reject( "A sheet-instance mapping contains conflicting or foreign paths" );
+            }
+            for( const auto& entry : declaration.retired() )
+            {
+                if( !canonicalPath( entry, 2 ) ) return reject( "Retired instance paths must be canonical full child paths" );
+                auto path = UnpackSheetPath( entry );
+                if( !sources.count( path ) || !covered.insert( path ).second || movedPaths.count( path )
+                        || !retiredPaths.insert( path ).second )
+                    return reject( "A retired instance is missing, duplicated or also mapped" );
+            }
+            for( const auto& entry : declaration.added() )
+            {
+                if( !canonicalPath( entry, 2 ) ) return reject( "New instance paths must be canonical full child paths" );
+                auto path = UnpackSheetPath( entry );
+                if( path.back() != destinationId || !destinations.insert( path ).second
+                        || !claimedDestinations.insert( path ).second || !addedPaths.insert( path ).second )
+                    return reject( "A new instance path is duplicated or also mapped" );
+            }
+            if( covered != sources || destinations.empty() )
+                return reject( "The instance mapping must account for every source and resulting instance" );
+            declaredMoves.push_back( { parent->LastScreen(), sourceId, child,
+                    UnpackSheetPath( destination.sheet_path() ), destinationId, std::move( destinations ) } );
+        }
         for( const auto& operation : aCtx.Request.operations() )
         {
             if( !operation.has_create() || !operation.create().Is<kiapi::schematic::types::SheetSymbol>() )
@@ -1065,6 +1189,9 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                     continue;
                 KIID_PATH from = parent->Path(), to = UnpackSheetPath( target.sheet_path() );
                 from.push_back( sheet->m_Uuid ); to.push_back( sheet->m_Uuid );
+                if( std::any_of( declaredMoves.begin(), declaredMoves.end(), [&]( const auto& declared )
+                            { return declared.sourceParent == parent->LastScreen() && declared.sourceId == sheet->m_Uuid; } ) )
+                    continue; // Exact complete mapping replaces inference for this physical reference.
                 if( from == to ) continue;
                 if( std::count_if( originalHierarchy.begin(), originalHierarchy.end(),
                             [&]( const SCH_SHEET_PATH& path ) { return path.LastScreen() == parent->LastScreen(); } ) != 1 )
@@ -1077,6 +1204,13 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                     return reject( "A sheet instance cannot be moved twice in one batch" );
             }
         }
+        auto retiredPath = [&]( const KIID_PATH& path )
+        {
+            size_t retired = 0, moved = 0;
+            for( const auto& prefix : retiredPaths ) if( within( path, prefix ) ) retired = std::max( retired, prefix.size() );
+            for( const auto& entry : movedPaths ) if( within( path, entry.first ) ) moved = std::max( moved, entry.first.size() );
+            return retired > moved;
+        };
         auto movedPath = [&]( const KIID_PATH& path ) -> std::optional<KIID_PATH>
         {
             const KIID_PATH* from = nullptr;
@@ -1085,7 +1219,7 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                 if( oldPath.size() <= path.size() && ( !from || oldPath.size() > from->size() )
                         && std::equal( oldPath.begin(), oldPath.end(), path.begin() ) )
                 { from = &oldPath; to = &newPath; }
-            if( !from ) return std::nullopt;
+            if( !from || retiredPath( path ) ) return std::nullopt;
             KIID_PATH result = *to;
             result.insert( result.end(), path.begin() + from->size(), path.end() );
             return result;
@@ -1094,39 +1228,41 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
         for( const SCH_SHEET_PATH& path : originalHierarchy )
         {
             SCH_SCREEN* screen = path.LastScreen();
-            if( movedPaths.empty() || !movedScreens.insert( screen ).second ) continue;
+            if( ( movedPaths.empty() && retiredPaths.empty() ) || !movedScreens.insert( screen ).second ) continue;
             for( SCH_ITEM* item : screen->Items() )
             {
                 if( item->Type() == SCH_SYMBOL_T )
                 {
                     auto* symbol = static_cast<SCH_SYMBOL*>( item );
                     const auto instances = symbol->GetInstances();
+                    auto replacements = instances; replacements.clear();
                     for( auto instance : instances )
                     {
                         if( !instance.m_ProjectName.IsEmpty() && instance.m_ProjectName != project().GetProjectName() ) continue;
                         auto next = movedPath( instance.m_Path );
-                        if( !next ) continue;
+                        if( !next && !retiredPath( instance.m_Path ) ) continue;
                         nativeCommit->Modify( symbol, screen );
                         symbol->RemoveInstance( instance.m_Path );
-                        instance.m_Path = *next;
-                        symbol->AddHierarchicalReference( instance );
+                        if( next ) { instance.m_Path = *next; replacements.push_back( instance ); }
                         symbol->SetConnectivityDirty();
                     }
+                    for( const auto& instance : replacements ) symbol->AddHierarchicalReference( instance );
                 }
                 else if( item->Type() == SCH_SHEET_T )
                 {
                     auto* sheet = static_cast<SCH_SHEET*>( item );
                     const auto instances = sheet->GetInstances();
+                    auto replacements = instances; replacements.clear();
                     for( auto instance : instances )
                     {
                         if( !instance.m_ProjectName.IsEmpty() && instance.m_ProjectName != project().GetProjectName() ) continue;
                         auto next = movedPath( instance.m_Path );
-                        if( !next ) continue;
+                        if( !next && !retiredPath( instance.m_Path ) ) continue;
                         nativeCommit->Modify( sheet, screen );
                         sheet->RemoveInstance( instance.m_Path );
-                        instance.m_Path = *next;
-                        sheet->AddInstance( instance );
+                        if( next ) { instance.m_Path = *next; replacements.push_back( instance ); }
                     }
+                    for( const auto& instance : replacements ) sheet->AddInstance( instance );
                 }
             }
         }
@@ -1153,7 +1289,13 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
             header.mutable_document()->CopyFrom( document );
             result.add_operation_targets()->CopyFrom( document );
 
-            if( operation.has_rebuild_screen_identity() )
+            if( operation.has_set_sheet_instance_paths() )
+            {
+                // Parsed and applied before physical edits. Complete destination
+                // coverage is checked against the staged hierarchy before commit.
+                continue;
+            }
+            else if( operation.has_rebuild_screen_identity() )
             {
                 // Rebuilding deleted native files from saved XML: a root KiCad created for the project
                 // adopts the identity its saved root file had.  Refuse anything else, before any edit.
@@ -1962,7 +2104,7 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
         // one commit/undo entry while allowing exclusions to name items and
         // child sheets created earlier in the same rebuild batch.
         std::string deferredErcFailure;
-        if( !deferredErcSettings.empty() )
+        if( !deferredErcSettings.empty() || !declaredMoves.empty() )
         {
             std::vector<std::pair<SCH_SCREEN*, SCH_ITEM*>> shown;
             shown.reserve( createdItems.size() );
@@ -1992,10 +2134,82 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                 shown.emplace_back( key.first, item.get() );
             }
             schematic()->RefreshHierarchy();
+            for( const auto& declared : declaredMoves )
+            {
+                auto parent = schematic()->Hierarchy().GetSheetPathByKIIDPath( declared.destinationParent );
+                auto* target = parent ? parent->ResolveItem( declared.destinationId ) : nullptr;
+                if( !target || target->Type() != SCH_SHEET_T
+                        || static_cast<SCH_SHEET*>( target )->GetScreen() != declared.child )
+                {
+                    deferredErcFailure = "The mapped destination did not retain the original physical sheet";
+                    break;
+                }
+                std::set<KIID_PATH> actual;
+                for( const auto& instance : schematic()->Hierarchy() )
+                    if( instance.LastScreen() == parent->LastScreen() )
+                    { auto path = instance.Path(); path.push_back( declared.destinationId ); actual.insert( path ); }
+                if( actual != declared.destinations )
+                {
+                    deferredErcFailure = "The mapping does not cover the complete resulting sheet-instance set";
+                    break;
+                }
+            }
+            for( const auto& instance : schematic()->Hierarchy() )
+            {
+                if( !deferredErcFailure.empty() ) break;
+                if( std::none_of( addedPaths.begin(), addedPaths.end(), [&]( const auto& path ) { return within( instance.Path(), path ); } ) )
+                    continue;
+                for( SCH_ITEM* item : instance.LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
+                {
+                    const auto* symbol = static_cast<const SCH_SYMBOL*>( item );
+                    const auto& records = symbol->GetInstances();
+                    if( std::none_of( records.begin(), records.end(), [&]( const auto& record )
+                            { return record.m_Path == instance.Path() && record.m_Unit > 0
+                                && record.m_Unit <= symbol->GetUnitCount()
+                                && ( record.m_ProjectName.IsEmpty() || record.m_ProjectName == project().GetProjectName() ); } ) )
+                    {
+                        deferredErcFailure = "A new sheet instance requires explicit component reference and unit records";
+                        break;
+                    }
+                    bool supplied = false;
+                    for( const auto& operation : aCtx.Request.operations() )
+                    {
+                        const auto* packed = operation.has_create() ? &operation.create()
+                                : operation.has_update() ? &operation.update() : nullptr;
+                        if( !packed || !packed->Is<kiapi::schematic::types::SchematicSymbolInstance>() ) continue;
+                        const auto& document = operation.has_target_document() ? operation.target_document() : aCtx.Request.document();
+                        auto owner = resolveBatchSheet( UnpackSheetPath( document.sheet_path() ) );
+                        if( !owner || owner->LastScreen() != instance.LastScreen() ) continue;
+                        kiapi::schematic::types::SchematicSymbolInstance candidate;
+                        packed->UnpackTo( &candidate );
+                        if( candidate.id().value() != symbol->m_Uuid.AsStdString() ) continue;
+                        for( const auto& declared : candidate.instance_records().records() )
+                        {
+                            if( static_cast<size_t>( declared.path_size() ) != instance.Path().size()
+                                    || !std::equal( declared.path().begin(), declared.path().end(), instance.Path().begin(),
+                                            []( const auto& value, const KIID& id ) { return value.value() == id.AsStdString(); } ) ) continue;
+                            supplied = std::any_of( records.begin(), records.end(), [&]( const auto& actual )
+                            {
+                                return actual.m_Path == instance.Path() && actual.m_Unit == declared.unit()
+                                    && actual.m_Reference.ToStdString() == declared.reference()
+                                    && ( declared.project_name().empty() || declared.project_name() == project().GetProjectName().ToStdString() );
+                            } );
+                            if( supplied ) break;
+                        }
+                        if( supplied ) break;
+                    }
+                    if( !supplied )
+                    {
+                        deferredErcFailure = "A new sheet instance requires explicitly supplied component reference and unit records";
+                        break;
+                    }
+                }
+            }
 
             std::string failure;
             for( const auto& [deferred, prefix] : deferredErcSettings )
             {
+                if( !deferredErcFailure.empty() ) break;
                 SCH_ERC_SETTINGS::PREPARED candidate;
                 if( !SCH_ERC_SETTINGS::Prepare( deferred->set_erc_settings(), *schematic(), candidate, failure ) )
                 {

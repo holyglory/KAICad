@@ -9,6 +9,10 @@ namespace KiCad.Automation.Native;
 /// screen contents. Does not execute, admit revisions or establish complete synchronization.</summary>
 public static class SchematicHierarchyDelta
 {
+    internal static IReadOnlyList<SchematicItemOperation> PlanWithSheetChoices(SchematicHierarchyData current,
+        SchematicHierarchyData desired, SchematicSheetInstanceChoices choices, CancellationToken token = default) =>
+        SchematicSheetMappingOperations.Add(current, desired, choices, Plan(current, desired, token));
+
     public static IReadOnlyList<SchematicItemOperation> Plan(SchematicHierarchyData current,
         SchematicHierarchyData desired, CancellationToken cancellationToken = default)
     {

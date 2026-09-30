@@ -298,6 +298,23 @@ public sealed class RecoveryTools
         return BlockOwnersResult(saved, result.Plan, result.BlockGraphSha256, result);
     });
 
+    [McpServerTool(Name = "kicad_design_sheet_move_answer", Destructive = false),
+     KiCadCapability("schematic-design", "compiled-mcp", "recovery revision token, exact sheet identities and full native paths"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.RepeatedPhysicalSheetRebuildPreservesEveryInstance"),
+     Description("Retain one complete answer to the current sheetResolutionRequests from kicad_design_sync_plan. moves maps a former sheetInstanceId to its resulting full nativePath; retiredSheetInstanceIds explicitly removes former instances; addedNativePaths names newly introduced paths. Descendants follow their most specific path choice. Uses the exact recovery revision token and rejects incomplete, duplicate, conflicting or stale choices without writing. Replaces the saved mapping for this observation; later edits make it stale. Writes only the recovery record: does not contact KiCad, change XML, advance synchronization or resolve other conflicts. Refresh and plan/apply, or resume the paused worker, to publish the full design.")]
+    public Task<CallToolResult> AnswerSheetMove(string instanceId, string recoveryPath, string expectedRevisionToken,
+        SchematicSheetMoveAnswer[] moves, Guid[] retiredSheetInstanceIds, Guid[][] addedNativePaths,
+        CancellationToken cancellationToken) => ExecuteAsync(() =>
+    {
+        var (store, saved) = ReadAtRevision(instanceId, recoveryPath, expectedRevisionToken);
+        var retained = SchematicSheetMoveChoices.Retain(store, saved, moves ?? [], retiredSheetInstanceIds ?? [],
+            (addedNativePaths ?? []).Select(p => (IReadOnlyList<Guid>)p).ToArray(), cancellationToken);
+        var data = JsonSerializer.SerializeToElement(new { instanceId, recoveryRevisionToken = retained.RevisionToken,
+            choicesRetained = true, sheetMappingComplete = true, designFileWritten = false,
+            nativeMutationAuthorized = false, synchronizationAdvanced = false });
+        return Task.FromResult(new CallToolResult { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data });
+    });
+
     [McpServerTool(Name = "kicad_design_repeated_sheet_answer", Destructive = false),
      KiCadCapability("schematic-design", "compiled-mcp", "recovery revision token, exact new sheet and component-definition identities"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.RepeatedPhysicalSheetRebuildPreservesEveryInstance",

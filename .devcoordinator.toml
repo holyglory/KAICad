@@ -24,7 +24,7 @@ command=["dotnet", "automation/artifacts/download-host/kicad-downloads.dll"]
 port=true
 route=true
 health={ path = "/healthz", timeout_seconds = 300 }
-env={ ASPNETCORE_ENVIRONMENT = "Production", KICAD_DOWNLOAD_ROOT = "/mnt/build-storage/codex/kicad/public-candidates/linux-25fb-signed-000025", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki" }
+env={ ASPNETCORE_ENVIRONMENT="Production", KICAD_DOWNLOAD_ROOT="/mnt/build-storage/codex/kicad/public-candidates/linux-25fb-signed-000025", KICAD_UPDATE_PUBLISHER_SPKI_FILE="/home/holyglory/kicad/automation/distribution/preview-publisher.spki" }
 [test]
 default="automation"
 [test.diagram-requirement-history]
@@ -65,7 +65,7 @@ command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-r
 retained_artifacts=[{name="canvas-tests",path="automation/artifacts/native-diagram-canvas-tests",max_bytes=16777216},{name="canvas-light",path="automation/artifacts/native-diagram-canvas/light/native-session-current",max_bytes=67108864},{name="canvas-dark",path="automation/artifacts/native-diagram-canvas/dark/native-session-current",max_bytes=67108864}]
 [test.part-symbol-contracts]
 timeout_seconds=600
-env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+env={ TMPDIR="/mnt/build-storage/codex/kicad/t" }
 [[test.part-symbol-contracts.check]]
 name="build"
 tier="development"
@@ -79,7 +79,7 @@ command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--
 retained_artifacts=[{ name = "part-symbol-contracts", path = "automation/artifacts/part-symbol-contracts", max_bytes = 16777216 }]
 [test.archive-pruning-contracts]
 timeout_seconds=600
-env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+env={ TMPDIR="/mnt/build-storage/codex/kicad/t" }
 [[test.archive-pruning-contracts.check]]
 name="build"
 tier="development"
@@ -93,7 +93,7 @@ command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--
 retained_artifacts=[{ name = "archive-pruning-contracts", path = "automation/artifacts/archive-pruning-contracts", max_bytes = 16777216 }]
 [test.retained-part-symbol-diagnosis]
 timeout_seconds=600
-env={ TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_PART_SYMBOL_DIAGNOSTIC_DIRECTORY = "/mnt/build-storage/codex/kicad/evidence/declared-style-1a6bb1/native-xml-component-creation-evidence" }
+env={ TMPDIR="/mnt/build-storage/codex/kicad/t", KICAD_PART_SYMBOL_DIAGNOSTIC_DIRECTORY="/mnt/build-storage/codex/kicad/evidence/declared-style-1a6bb1/native-xml-component-creation-evidence" }
 [[test.retained-part-symbol-diagnosis.check]]
 name="build"
 tier="development"
@@ -107,7 +107,7 @@ command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--
 retained_artifacts=[{ name = "part-symbol-diagnosis", path = "automation/artifacts/retained-part-symbol-diagnosis", max_bytes = 16777216 }]
 [test.compiler-cache]
 timeout_seconds=1200
-env={ TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_TEST_COMPILER_CACHE = "/mnt/build-storage/codex/kicad/compiler-cache" }
+env={ TMPDIR="/mnt/build-storage/codex/kicad/t", KICAD_TEST_COMPILER_CACHE="/mnt/build-storage/codex/kicad/compiler-cache" }
 [[test.compiler-cache.check]]
 name="managed-build"
 tier="development"
@@ -138,7 +138,7 @@ requires=["native-build"]
 command=["ctest", "--test-dir", "automation/artifacts/native", "--tests-regex", "^qa_document_change_journal$", "--output-on-failure", "--no-tests=error"]
 [test.compiler-cache-pch-diagnostic]
 timeout_seconds=600
-env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+env={ TMPDIR="/mnt/build-storage/codex/kicad/t" }
 [[test.compiler-cache-pch-diagnostic.check]]
 name="logs"
 tier="development"
@@ -171,10 +171,10 @@ type="process"
 command=["dotnet", "automation/artifacts/landing-host/kicad-downloads.dll"]
 port=true
 health={ path = "/healthz", timeout_seconds = 60 }
-env={ KICAD_DOWNLOAD_ROOT = "/mnt/build-storage/codex/kicad/public-candidates/windows-pair-0d4-433-verified", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki" }
+env={ KICAD_DOWNLOAD_ROOT="/mnt/build-storage/codex/kicad/public-candidates/windows-pair-0d4-433-verified", KICAD_UPDATE_PUBLISHER_SPKI_FILE="/home/holyglory/kicad/automation/distribution/preview-publisher.spki" }
 [test.download-page]
 timeout_seconds=600
-env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+env={ TMPDIR="/mnt/build-storage/codex/kicad/t" }
 [[test.download-page.check]]
 name="build"
 tier="development"
@@ -188,14 +188,14 @@ command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--
 retained_artifacts=[{ name = "landing-tests", path = "automation/artifacts/landing-tests", max_bytes = 16777216 }]
 [test.landing-verifier-self-test]
 timeout_seconds=360
-env={ TMPDIR = "/tmp", FORMAL_WEB_UI_SKILL_DIR = "/home/holyglory/.codex/skills/formal-web-ui-verification" }
+env={ TMPDIR="/tmp", FORMAL_WEB_UI_SKILL_DIR="/home/holyglory/.codex/skills/formal-web-ui-verification" }
 [[test.landing-verifier-self-test.check]]
 name="verifier"
 tier="development"
 command=["devcoordinator2-tooling", "formal-ui", "self-test", "--phase", "rendering", "--workspace-parent", "/tmp", "--timeout-seconds", "300"]
 [test.landing-rendered]
 timeout_seconds=600
-env={ TMPDIR = "/mnt/build-storage/codex/kicad/t", FORMAL_WEB_UI_SKILL_DIR = "/home/holyglory/.codex/skills/formal-web-ui-verification" }
+env={ TMPDIR="/mnt/build-storage/codex/kicad/t", FORMAL_WEB_UI_SKILL_DIR="/home/holyglory/.codex/skills/formal-web-ui-verification" }
 [[test.landing-rendered.check]]
 name="layout"
 tier="development"
@@ -206,7 +206,7 @@ command=["devcoordinator2-tooling", "formal-ui", "verify", "--config", "automati
 # Private key bytes never appear in command arguments or results.
 [test.publisher-provision]
 timeout_seconds=120
-env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+env={ TMPDIR="/mnt/build-storage/codex/kicad/t" }
 [[test.publisher-provision.check]]
 name="key"
 tier="development"
@@ -214,14 +214,14 @@ command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10
 # Explicit release publication operation; output is immutable, never overwritten.
 [test.preview-sign]
 timeout_seconds=120
-env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+env={ TMPDIR="/mnt/build-storage/codex/kicad/t" }
 [[test.preview-sign.check]]
 name="sign"
 tier="development"
 command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "release-sign", "--release", "/home/holyglory/kicad/automation/distribution/releases/preview-000008.json", "--artifacts", "/mnt/build-storage/codex/kicad/public-candidates/signed-preview-000008", "--private", "/mnt/build-storage/codex/kicad/signing/preview-publisher.pkcs8", "--output", "/mnt/build-storage/codex/kicad/public-candidates/signed-preview-000008/updates/preview.json", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/signed-preview-000007/updates/preview.json"]
 [test.public-caption-update]
 timeout_seconds=900
-env={ TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_CAPTION_PACKAGE_CATALOGUE = "/mnt/build-storage/codex/kicad/public-candidates/20260911T052623Z-7b22b31c2c74", KICAD_CAPTION_CANDIDATE_CATALOGUE = "/mnt/build-storage/codex/kicad/public-candidates/20260914T220222Z-02703fe62087", KICAD_PUBLIC_DOWNLOAD_URL = "https://kicad.vr.ae/", KICAD_PACKAGE_CATALOGUE = "/mnt/build-storage/codex/kicad/public-candidates/linux-02703-signed-000018", KICAD_PUBLIC_DOWNLOAD_EVIDENCE = "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/artifacts/public-download-evidence", KICAD_UPDATE_PUBLISHER_SPKI_FILE = "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", KICAD_CAPTION_INSTALLED_ENVELOPE = "/mnt/build-storage/codex/kicad/public-candidates/windows-pair-0d4-433-verified/updates/preview.json", KICAD_LANDING_URL = "https://kicad.vr.ae", KICAD_BROWSER_EXECUTABLE = "/home/holyglory/.local/bin/agent-browser", FORMAL_WEB_UI_SKILL_DIR = "/home/holyglory/.codex/skills/formal-web-ui-verification" }
+env={ TMPDIR="/mnt/build-storage/codex/kicad/t", KICAD_CAPTION_PACKAGE_CATALOGUE="/mnt/build-storage/codex/kicad/public-candidates/20260911T052623Z-7b22b31c2c74", KICAD_CAPTION_CANDIDATE_CATALOGUE="/mnt/build-storage/codex/kicad/public-candidates/20260914T220222Z-02703fe62087", KICAD_PUBLIC_DOWNLOAD_URL="https://kicad.vr.ae/", KICAD_PACKAGE_CATALOGUE="/mnt/build-storage/codex/kicad/public-candidates/linux-02703-signed-000018", KICAD_PUBLIC_DOWNLOAD_EVIDENCE="/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/artifacts/public-download-evidence", KICAD_UPDATE_PUBLISHER_SPKI_FILE="/home/holyglory/kicad/automation/distribution/preview-publisher.spki", KICAD_CAPTION_INSTALLED_ENVELOPE="/mnt/build-storage/codex/kicad/public-candidates/windows-pair-0d4-433-verified/updates/preview.json", KICAD_LANDING_URL="https://kicad.vr.ae", KICAD_BROWSER_EXECUTABLE="/home/holyglory/.local/bin/agent-browser", FORMAL_WEB_UI_SKILL_DIR="/home/holyglory/.codex/skills/formal-web-ui-verification" }
 [[test.public-caption-update.check]]
 name="build"
 tier="development"
@@ -3961,7 +3961,7 @@ command=["cmake","-S",".","-B","automation/artifacts/native","-G","Ninja","-DCMA
 name="native-build"
 tier="development"
 requires=["configure"]
-command=["cmake","--build","automation/artifacts/native","--target","api_schema_build_copy","bitmap_archive_build","eeschema","eeschema_kiface","kiapi","kicad","schema_build_copy"]
+command=["cmake","--build","automation/artifacts/native","--target","api_schema_build_copy","bitmap_archive_build","eeschema","eeschema_kiface","kiapi","kicad","schema_build_copy","pcbnew_kiface","cvpcb_kiface","kicad-cli"]
 
 
 [[test.repeated-sheet-recovery.check]]
@@ -3976,7 +3976,7 @@ name="native-rebuild"
 tier="development"
 requires=["native-build","rebuild-contracts"]
 command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeRepeatedSheetRebuild","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/repeated-rebuild-tests","--","MSTest.MapInconclusiveToFailed=true"]
-retained_artifacts=[{name="rebuild-tests",path="automation/artifacts/repeated-rebuild-tests",max_bytes=16777216},{name="rebuild-evidence",path="automation/artifacts/native-repeated-rebuild/native-session-current",max_bytes=67108864}]
+retained_artifacts=[{name="rebuild-tests",path="automation/artifacts/repeated-rebuild-tests",max_bytes=16777216},{name="rebuild-evidence",path="automation/artifacts/native-repeated-rebuild/native-session-current",max_bytes=268435456}]
 
 [[test.repeated-sheet-recovery.check]]
 name="native-external"
@@ -3984,4 +3984,4 @@ tier="development"
 requires=["native-build","rebuild-contracts"]
 timeout_seconds=2700
 command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeRepeatedSheetOwnership","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/repeated-ownership-tests","--","MSTest.MapInconclusiveToFailed=true"]
-retained_artifacts=[{name="external-owner-tests",path="automation/artifacts/repeated-ownership-tests",max_bytes=16777216},{name="external-owner-evidence",path="automation/artifacts/native-repeated-ownership/native-session-current",max_bytes=134217728}]
+retained_artifacts=[{name="external-owner-tests",path="automation/artifacts/repeated-ownership-tests",max_bytes=16777216},{name="external-owner-evidence",path="automation/artifacts/native-repeated-ownership/native-session-current",max_bytes=268435456}]

@@ -1104,6 +1104,13 @@ status is separate from the historical native result, and replay itself remains
 read-only. Broader edit qualification remains open; the normal MCP server
 advertises the apply tool and the `kicad_design_automatic_sync_*` lifecycle tools.
 
+Synchronization receipt version 3 additionally retains the previous synchronized
+design and its content digest inside the immutable operation receipt. This is
+distinct from displaced user XML: a requested XML edit can already have replaced
+that file, or publication can converge without replacing it. Recovery verifies
+the retained predecessor against the frozen baseline before advancing. Older
+receipts retain their existing encoding and content-verification rules.
+
 `kicad_design_recovery_refresh` persists a freshly captured native hierarchy into
 an existing recovery record. It requires an attached instance and the exact
 recovery revision token. Baseline, libraries and desired-file bytes (including
@@ -3852,3 +3859,24 @@ Only this evidence description changed after the run. This qualifies
 `pa0569df11b611af2` and the combined unique-parent outcome
 `pfd3b84bd1d59b91c`; shared-parent moves, broader topology work and full product
 acceptance remain open. No new packaged release is claimed.
+
+### Explicit shared-parent instance mapping
+
+Moving one physical sheet reference through a repeated parent can create or retire
+several sheet instances. The atomic native operation carries complete moved,
+retired and added paths alongside one physical remove/create pair. It validates
+the resulting hierarchy, explicit component-instance records and displayed page
+records before committing. Complete XML candidates supply their stable instance
+identities; ambiguous native edits use `kicad_design_sheet_move_answer` with the
+current recovery revision. Recovery envelope version 13 persists that answer,
+invalidates it after input changes and clears it after successful synchronization.
+Retaining an answer alone changes neither KiCad nor the XML file.
+
+Selected native run `t20260930T171728Z-5a3aff` passed in both real projects with
+unchanged source. It verifies XML collapse/expansion, preserved identities and
+connections, conflicting-history refusal, the public answer-and-apply path,
+undo/redo, saved reload and repeat publication. Its retained source digest is
+`143d5e252fdc033715514351176afc8218b0587f88dc3c6a4a7f0c7d170b1da4`;
+the evidence manifest is
+`9306cf8a2897f8cea5c7b1225dcd475ec3c901f3c10ae6c7c40eb8b040c827ae`.
+The broader combined regression and full product acceptance remain separate.

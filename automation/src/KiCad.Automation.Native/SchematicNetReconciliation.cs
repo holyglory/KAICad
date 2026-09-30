@@ -66,15 +66,24 @@ public static class SchematicNetReconciliation
             SchematicNativeRestorationResult? restoration = null;
             if (nativeOwnersChanged)
             {
-                removal = SchematicNativeRemovalProjection.Project(state.Baseline, state.Observed, state.KnowledgeLibraries, token);
+                var sheetChoices = SchematicSheetMoveChoices.Current(state);
+                removal = SchematicNativeRemovalProjection.Project(state.Baseline, state.Observed, state.KnowledgeLibraries, token,
+                    sheetChoices);
+                if (removal.ErrorCode == SchematicNativeSheetChanges.MoveAmbiguous && sheetChoices is null && history is not null
+                    && SchematicSheetMoveChoices.FromRemovalHistory(state, history, token) is { } historicalChoices)
+                    removal = SchematicNativeRemovalProjection.Project(state.Baseline, state.Observed,
+                        state.KnowledgeLibraries, token, historicalChoices);
                 if (removal.BindingCandidate is null)
                 {
-                    if (removal.ErrorCode != "electrical_ownership_changed" || history is null)
+                    if (removal.ErrorCode is not ("electrical_ownership_changed" or SchematicNativeSheetChanges.MoveAmbiguous) || history is null)
                         return new(null, [], [], [], removal.CoverageGaps, removal.ErrorCode, removal.ErrorMessage)
                             { SheetResolutionRequests = removal.SheetRequests.Count == 0 ? null : removal.SheetRequests };
                     try { restoration = SchematicNativeRestorationProjection.Project(state, history, token); }
                     catch (AutomationException error) when (error.Code == "native_ownership_history_not_matched")
                     {
+                        if (removal.ErrorCode == SchematicNativeSheetChanges.MoveAmbiguous)
+                            return new(null, [], [], [], removal.CoverageGaps, removal.ErrorCode, removal.ErrorMessage)
+                                { SheetResolutionRequests = removal.SheetRequests };
                         // No verified history knows these owners: they are symbols placed in KiCad since.
                         var addition = SchematicNativeAdditionProjection.Project(state, history, desiredDocument, null, token);
                         if (addition.Adoption is null)

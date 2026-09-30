@@ -4,7 +4,10 @@ using KiCad.Automation.Model;
 
 namespace KiCad.Automation.Native;
 
-internal sealed record SchematicOwnershipHistory(DesignSynchronizationReceipt Receipt, SchematicDesign Design, bool Latest);
+internal sealed record SchematicOwnershipHistory(DesignSynchronizationReceipt Receipt, SchematicDesign Design, bool Latest)
+{
+    internal string XmlSha256 => Receipt.PreviousSynchronizedXmlSha256 ?? Receipt.PreviousXmlSha256!;
+}
 
 internal static class SchematicOwnershipHistoryReader
 {
@@ -46,12 +49,14 @@ internal static class SchematicOwnershipHistoryReader
         receipts[latest.OperationId] = latest;
         var result = new List<SchematicOwnershipHistory>();
         foreach (var receipt in receipts.Values.Where(r => r.InstanceId == state.InstanceId && r.DesignPath == latest.DesignPath
-                     && r.Version == 2 && r.PreviousXmlPath is not null).OrderBy(r => r.OperationId))
+                     && (r.Version == 3 || r.Version == 2 && r.PreviousXmlPath is not null)).OrderBy(r => r.OperationId))
         {
             token.ThrowIfCancellationRequested();
             if (receipt.NativeDocumentEpoch == state.NativeRevision.Epoch && receipt.NativeRevisionSequence > state.NativeRevision.Sequence)
                 throw new AutomationException("native_ownership_history_ahead", "Retained history follows this captured native revision; refresh the observation before restoring owners.");
-            byte[] bytes = await RetainedXmlHistory.ReadVerifiedAsync(receipt, token);
+            receipt.Validate();
+            byte[] bytes = receipt.Version == 3 ? Encoding.UTF8.GetBytes(receipt.PreviousSynchronizedXml!)
+                : await RetainedXmlHistory.ReadVerifiedAsync(receipt, token);
             var design = SchematicDesignXml.Read(new UTF8Encoding(false, true).GetString(bytes), state.KnowledgeLibraries);
             if (design.Engineering.Circuit.Id == state.Baseline.Engineering.Circuit.Id
                 && Equals(design.Schematic.Document, state.Baseline.Schematic.Document))

@@ -161,6 +161,16 @@ public sealed class DesignSynchronizationReceiptTests
                 receipt with { PreviousXmlSha256 = new string('C', 64) }
             })
                 Assert.ThrowsExactly<AutomationException>(() => invalid.Validate());
+            string previous = SchematicDesignXml.Write(state.Baseline, state.KnowledgeLibraries);
+            var synchronized = receipt with { Version = 3, OperationId = Guid.NewGuid(), PreviousXmlPath = null,
+                PreviousXmlSha256 = null, PreviousSynchronizedXml = previous,
+                PreviousSynchronizedXmlSha256 = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(previous))) };
+            archive.Archive(synchronized); Assert.AreEqual(synchronized, archive.Read(synchronized.OperationId));
+            saved = store.Save(saved.State with { LastSynchronization = synchronized }, saved.RevisionToken);
+            Assert.AreEqual(synchronized, store.Read()!.State.LastSynchronization);
+            foreach (var invalid in new[] { synchronized with { PreviousSynchronizedXml = previous + " " },
+                synchronized with { PreviousSynchronizedXmlSha256 = null }, synchronized with { Version = 2 } })
+                Assert.ThrowsExactly<AutomationException>(() => invalid.Validate());
         }
         finally { Directory.Delete(directory, true); }
     }
@@ -175,16 +185,20 @@ public sealed class DesignSynchronizationReceiptTests
         var current = publication.Recovery;
         var candidate = SchematicDesignXml.Read(Encoding.UTF8.GetString(intent.CandidateFileBytes), current.State.KnowledgeLibraries);
         var electrical = current.State.ObservedElectrical!.Clone(); electrical.Hierarchy.Data = candidate.Schematic.Clone();
-        var receipt = new DesignSynchronizationReceipt(2, intent.OperationId, current.State.InstanceId, intent.DesignPath,
+        string previous = SchematicDesignXml.Write(current.State.Baseline, current.State.KnowledgeLibraries);
+        var receipt = new DesignSynchronizationReceipt(3, intent.OperationId, current.State.InstanceId, intent.DesignPath,
             intent.RequestedRecoveryRevisionToken!, publication.FileSha256, fixture.SaveReceipt.ProcessEpoch,
             electrical.Hierarchy.Revision.Epoch, electrical.Hierarchy.Revision.Sequence, false, true, null, publication.PreviousPath,
-            Convert.ToHexStringLower(SHA256.HashData(intent.ExpectedFileBytes)));
+            Convert.ToHexStringLower(SHA256.HashData(intent.ExpectedFileBytes)), previous,
+            Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(previous))));
         Assert.IsNotNull(receipt.PreviousXmlPath);
         var next = current.State with { Baseline = candidate, DesiredFileBytes = intent.CandidateFileBytes,
             Observed = candidate.Schematic.Clone(), BaselineElectrical = electrical.Clone(), ObservedElectrical = electrical,
             PendingPublication = null, PendingNativeState = null, PendingNativeSave = null, LastSynchronization = receipt };
         foreach (var invalid in new[] { receipt with { PreviousXmlSha256 = new string('d', 64) },
-                     receipt with { PreviousXmlPath = Path.Combine(Path.GetDirectoryName(intent.DesignPath)!, "unrelated.xml") } })
+                     receipt with { PreviousXmlPath = Path.Combine(Path.GetDirectoryName(intent.DesignPath)!, "unrelated.xml") },
+                     receipt with { PreviousSynchronizedXml = previous + " ", PreviousSynchronizedXmlSha256 =
+                         Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(previous + " "))) } })
         {
             Assert.AreEqual("missing_sync_completion_receipt", Assert.ThrowsExactly<AutomationException>(() =>
                 fixture.Store.Save(next with { LastSynchronization = invalid }, current.RevisionToken)).Code);

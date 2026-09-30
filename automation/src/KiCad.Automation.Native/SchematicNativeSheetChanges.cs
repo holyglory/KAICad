@@ -11,6 +11,10 @@ namespace KiCad.Automation.Native;
 public sealed record SchematicSheetResolutionRequest(string Code, Guid ScreenId, string FileName,
     IReadOnlyList<string> FormerPaths, IReadOnlyList<string> NewPaths, IReadOnlyList<Guid> FormerSheetInstanceIds, string Reason);
 
+internal sealed record SchematicSheetPathMove(string Before, string After);
+internal sealed record SchematicSheetInstanceChoices(IReadOnlyList<SchematicSheetPathMove> Moves,
+    IReadOnlyList<string> Retired, IReadOnlyList<string> Added);
+
 /// <summary>How the sheets KiCad shows changed since a snapshot, by exact native identity only (ledger p5f6d5d0ca242d628).
 /// A sheet is identified by the screen (the file) it shows: a sheet file no longer shown at one path and now shown at exactly
 /// one other is that sheet moved, whether or not KiCad kept its sheet symbol's UUID (KiCad's cut and paste gives the pasted
@@ -22,12 +26,13 @@ internal sealed record SchematicNativeSheetChanges(IReadOnlyDictionary<string, s
     IReadOnlyList<string> Inserted, IReadOnlyList<SchematicSheetResolutionRequest> Requests, string? ErrorCode = null, string? ErrorMessage = null)
 {
     public const string MoveAmbiguous = "native_sheet_move_ambiguous";
+    public const string MoveAnswerInvalid = "native_sheet_move_answer_invalid";
     public const string RepeatedUnsupported = "native_sheet_repeated_unsupported";
     /// <summary>A sheet shown at the same place with another file: not reflected yet (the earlier refusal code).</summary>
     public const string FileChanged = "sheet_ownership_changed";
     internal const string MoveAmbiguousMessage = "KiCad shows sheets moved in a way exact identities cannot decide: a sheet file is no longer "
-        + "shown at several places and now shown at several others. Nothing was published. Undo the change in KiCad, then move one of "
-        + "those sheets at a time and let each synchronize.";
+        + "shown at several places and now shown at several others. Nothing was published. Use kicad_design_sheet_move_answer "
+        + "to map the existing instances and identify retired or newly added paths, then refresh and synchronize.";
 
     public bool Changed => Moved.Count != 0 || Removed.Count != 0 || Inserted.Count != 0;
 
@@ -39,7 +44,8 @@ internal sealed record SchematicNativeSheetChanges(IReadOnlyDictionary<string, s
     internal static string Parent(string path) => path.LastIndexOf('/') is var split and >= 0 ? path[..split] : "";
     internal static string Last(string path) => path[(path.LastIndexOf('/') + 1)..];
 
-    internal static SchematicNativeSheetChanges Compare(SchematicHierarchyData before, SchematicHierarchyData after)
+    internal static SchematicNativeSheetChanges Compare(SchematicHierarchyData before, SchematicHierarchyData after,
+        SchematicSheetInstanceChoices? choices = null)
     {
         var was = before.Instances.ToDictionary(Key, s => s.Metadata.ScreenId.Value, StringComparer.Ordinal);
         var now = after.Instances.ToDictionary(Key, s => s.Metadata.ScreenId.Value, StringComparer.Ordinal);
@@ -48,11 +54,57 @@ internal sealed record SchematicNativeSheetChanges(IReadOnlyDictionary<string, s
         var moved = new Dictionary<string, string>(StringComparer.Ordinal);
         List<string> removed = [], inserted = [];
         var requests = new List<SchematicSheetResolutionRequest>();
+        var explicitMoves = new Dictionary<string, string>(StringComparer.Ordinal);
+        var explicitTargets = new HashSet<string>(StringComparer.Ordinal);
+        var explicitRetired = new HashSet<string>(StringComparer.Ordinal);
+        var explicitAdded = new HashSet<string>(StringComparer.Ordinal);
+        static bool Within(string path, string parent) => path == parent || path.StartsWith(parent + "/", StringComparison.Ordinal);
+        SchematicNativeSheetChanges InvalidAnswer() => new(new Dictionary<string, string>(), [], [], [], MoveAnswerInvalid,
+            "The sheet-instance choices must account for the exact former and new paths without duplicates or changed file identities. Nothing was published.");
+        if (choices is not null)
+        {
+            if (choices.Moves.Select(m => m.Before).Distinct(StringComparer.Ordinal).Count() != choices.Moves.Count
+                || choices.Moves.Select(m => m.After).Distinct(StringComparer.Ordinal).Count() != choices.Moves.Count
+                || choices.Retired.Distinct(StringComparer.Ordinal).Count() != choices.Retired.Count
+                || choices.Added.Distinct(StringComparer.Ordinal).Count() != choices.Added.Count
+                || choices.Moves.Any(m => !gone.Contains(m.Before, StringComparer.Ordinal)
+                    || !fresh.Contains(m.After, StringComparer.Ordinal) || was[m.Before] != now[m.After])
+                || choices.Retired.Any(p => !gone.Contains(p, StringComparer.Ordinal))
+                || choices.Added.Any(p => !fresh.Contains(p, StringComparer.Ordinal))) return InvalidAnswer();
+            foreach (string path in gone)
+            {
+                var move = choices.Moves.Where(m => Within(path, m.Before)).OrderByDescending(m => m.Before.Length).FirstOrDefault();
+                string? retired = choices.Retired.Where(p => Within(path, p)).OrderByDescending(p => p.Length).FirstOrDefault();
+                if (move is not null && retired == move.Before) return InvalidAnswer();
+                if (retired is not null && (move is null || retired.Length > move.Before.Length)) explicitRetired.Add(path);
+                else if (move is not null)
+                {
+                    string target = move.After + path[move.Before.Length..];
+                    if (!fresh.Contains(target, StringComparer.Ordinal) || was[path] != now[target]
+                        || !explicitTargets.Add(target)) return InvalidAnswer();
+                    explicitMoves.Add(path, target);
+                }
+            }
+            if (choices.Added.Any(explicitTargets.Contains)) return InvalidAnswer();
+            foreach (string path in fresh)
+                if (!explicitTargets.Contains(path) && choices.Added.Any(p => Within(path, p))) explicitAdded.Add(path);
+        }
         foreach (string screen in gone.Select(p => was[p]).Concat(fresh.Select(p => now[p])).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal))
         {
             var from = gone.Where(p => was[p] == screen).Order(StringComparer.Ordinal).ToArray();
             var to = fresh.Where(p => now[p] == screen).Order(StringComparer.Ordinal).ToArray();
-            if (from.Length == 0) inserted.AddRange(to);
+            bool answered = from.Any(p => explicitMoves.ContainsKey(p) || explicitRetired.Contains(p))
+                || to.Any(p => explicitTargets.Contains(p) || explicitAdded.Contains(p));
+            if (answered)
+            {
+                if (from.Any(p => !explicitMoves.ContainsKey(p) && !explicitRetired.Contains(p))
+                    || to.Any(p => !explicitTargets.Contains(p) && !explicitAdded.Contains(p))) return InvalidAnswer();
+                foreach (string path in from)
+                    if (explicitMoves.TryGetValue(path, out string? target)) moved.Add(path, target);
+                    else removed.Add(path);
+                inserted.AddRange(to.Where(explicitAdded.Contains));
+            }
+            else if (from.Length == 0) inserted.AddRange(to);
             else if (to.Length == 0) removed.AddRange(from);
             else if (from.Length == 1 && to.Length == 1) moved.Add(from[0], to[0]);
             else requests.Add(new(MoveAmbiguous, Guid.Parse(screen), FileName(after, to[0]) ?? FileName(before, from[0]) ?? "", from, to, [],

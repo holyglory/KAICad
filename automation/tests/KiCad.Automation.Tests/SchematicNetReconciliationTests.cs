@@ -351,8 +351,11 @@ public sealed class SchematicNetReconciliationTests
         var changed = state.ObservedElectrical!.Clone(); var symbol = changed.Hierarchy.Data.Instances[1].Items.First(p => p.Is(SchematicSymbolInstance.Descriptor));
         var decoded = symbol.Unpack<SchematicSymbolInstance>(); decoded.Definition.UnitCount++;
         int index = changed.Hierarchy.Data.Instances[1].Items.IndexOf(symbol); changed.Hierarchy.Data.Instances[1].Items[index] = Any.Pack(decoded);
-        Assert.AreEqual("electrical_ownership_changed", SchematicNetReconciliation.Plan(state with
-        { Observed = changed.Hierarchy.Data.Clone(), ObservedElectrical = changed }).ErrorCode);
+        var rebind = SchematicNetReconciliation.Plan(state with
+        { Observed = changed.Hierarchy.Data.Clone(), ObservedElectrical = changed });
+        Assert.AreEqual("native_ownership_resolution_required", rebind.ErrorCode);
+        Assert.IsNotNull(rebind.ResolutionRequests);
+        Assert.IsTrue(rebind.ResolutionRequests!.Any(r => r.Code == "native_component_rebind_required"));
         Assert.ThrowsExactly<OperationCanceledException>(() => SchematicNetReconciliation.Plan(state, new(true)));
     }
 

@@ -1111,6 +1111,14 @@ that file, or publication can converge without replacing it. Recovery verifies
 the retained predecessor against the frozen baseline before advancing. Older
 receipts retain their existing encoding and content-verification rules.
 
+When a native symbol keeps its exact sheet path and UUID but its library identity,
+unit count or pin signature changes, synchronization now treats it as an explicit
+ownership question. The planner offers exact prior component and candidate part
+identities through the existing resolution machinery and performs no name,
+position or pin-number guess. Applying a replacement still requires the
+follow-up component and pin retention and live Change Symbol journey before this
+broader rebinding outcome can close.
+
 `kicad_design_recovery_refresh` persists a freshly captured native hierarchy into
 an existing recovery record. It requires an attached instance and the exact
 recovery revision token. Baseline, libraries and desired-file bytes (including

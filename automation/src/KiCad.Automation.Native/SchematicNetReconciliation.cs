@@ -75,6 +75,15 @@ public static class SchematicNetReconciliation
                         state.KnowledgeLibraries, token, historicalChoices);
                 if (removal.BindingCandidate is null)
                 {
+                    if (removal.ErrorCode == "electrical_ownership_changed" && history is null)
+                    {
+                        var addition = SchematicNativeAdditionProjection.Project(state, null, desiredDocument, null, token);
+                        if (addition.Requests.Count != 0)
+                            return new(null, [], [], [], removal.CoverageGaps.Concat(addition.CoverageGaps).Distinct().ToArray(),
+                                addition.ErrorCode, addition.ErrorMessage)
+                            { ResolutionRequests = addition.Requests, SheetComponentResolutionRequests = addition.SheetComponentRequests.Count == 0 ? null : addition.SheetComponentRequests,
+                              SheetResolutionRequests = addition.SheetRequests.Count == 0 ? null : addition.SheetRequests };
+                    }
                     if (removal.ErrorCode is not ("electrical_ownership_changed" or SchematicNativeSheetChanges.MoveAmbiguous) || history is null)
                         return new(null, [], [], [], removal.CoverageGaps, removal.ErrorCode, removal.ErrorMessage)
                             { SheetResolutionRequests = removal.SheetRequests.Count == 0 ? null : removal.SheetRequests };

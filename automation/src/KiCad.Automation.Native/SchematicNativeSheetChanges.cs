@@ -67,12 +67,8 @@ internal sealed record SchematicNativeSheetChanges(IReadOnlyDictionary<string, s
                 + "than before. A sheet whose file changed cannot be reflected in the design yet; nothing was published. Undo the change in "
                 + "KiCad, or remove the sheet and insert one with the other file." };
         if (requests.Count != 0) return changes with { ErrorCode = MoveAmbiguous, ErrorMessage = MoveAmbiguousMessage };
-        // An inserted sheet that shows a file shown elsewhere too: a new instance of a repeated sheet.
-        foreach (string path in inserted)
-            if (was.ContainsValue(now[path]) || now.Count(p => p.Value == now[path]) > 1)
-                return changes with { ErrorCode = RepeatedUnsupported, ErrorMessage = $"KiCad shows the sheet file {FileName(after, path)} at a new "
-                    + "place while it is also shown elsewhere. A sheet shown several times cannot join the design from KiCad yet; nothing was "
-                    + "published. Undo the insertion in KiCad, or give the new sheet a file of its own." };
+        // Repeated insertions are classified here and admitted only by the addition
+        // projection, which reuses the exact existing definition and unit ownership.
         return changes;
     }
 

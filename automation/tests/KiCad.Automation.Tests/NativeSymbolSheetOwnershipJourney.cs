@@ -493,7 +493,7 @@ public sealed partial class NativeSessionTests
             repeatsNoOp = true, crossPlatformReady = false,
             remaining = new[]
             {
-                "Adding another instance of an existing shared sheet, moving through a shared parent, and reparenting variable-dependent file paths remain explicit topology gaps; ordinary insertion and existing-instance move/removal are verified in the repeated-sheet journey.",
+                "Undrawn or externally owned components in new shared instances, moving through a shared parent, and reparenting variable-dependent file paths remain explicit topology gaps; locally owned shared insertion and existing-instance move/removal are verified in the repeated-sheet journey.",
                 "Answers to unit-owner and unit-grouping requests for new units of multi-unit parts are proven offline only (SymbolSheetOwnershipTests); this journey answers a part request.",
                 "An answer written by hand in the XML is proven offline only; this journey answers through kicad_design_ownership_answer, which writes the same declaration.",
                 "Part and pin rebinding of an existing component has no explicit resolution request yet.",

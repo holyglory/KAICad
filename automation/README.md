@@ -3506,8 +3506,8 @@ physical sheet now publishes one shared component definition and separate,
 path-derived component instances and symbol occurrences. Native references remain
 separate on each instance. Repeated UUID ownership answers require the requested
 sheet path; partial answers stay unresolved and contradictory shared part choices
-are rejected before publication. This does not yet adopt a newly inserted repeated
-sheet instance or resolve unrelated sheet-file replacement.
+are rejected before publication. Shared-instance creation is qualified separately
+below; unrelated sheet-file replacement still needs explicit resolution.
 
 The existing repeated-screen recovery journey now also places a native symbol,
 publishes through the compiled MCP STDIO tools, verifies TP103/TP203 identities,
@@ -3546,8 +3546,40 @@ pipeline, move/removal batches, equality for newly loaded sheets and concurrent
 native-edit refusal. The final ownership regression graph
 `t20260930T014111Z-8c4df7` passed. Only documentation/evidence wording changed afterward.
 
-The parent topology outcome remains open. Creating additional shared-sheet
-instances and reparenting through shared parents are tracked in
-`pc626c6d7d14a0d15`; other variable-backed filenames beyond `KIPRJMOD` are tracked in
-`p2b873890e79c72c2`. These cases are explicitly refused pending their own native
-resolution and ownership proof, rather than guessed or silently converted.
+The parent topology outcome remains open. Shared-parent reparenting is tracked in
+`pd6a383227f9d47b8`; other variable-backed filenames beyond `KIPRJMOD` are tracked in
+`p2b873890e79c72c2`. Shared-instance creation and its remaining ownership cases are
+described below. Unsupported cases preserve the competing versions.
+
+
+Shared-sheet insertion (2026-09-30): a new native instance of a known physical
+sheet reuses its existing sheet and locally owned component definitions. Separate
+component instances are derived from the new path and definition identity;
+occurrences remain bound to the exact native symbol UUIDs and actual references.
+XML may also add a complete shared instance with its explicit model owners,
+native snapshot, path bindings and placement records. This path preserves every
+existing component and physical item, admits only the declared sheet references
+and additional placement records, and rejects swapped definition identities even
+when their part and value match. Placement records are prepared in native path
+order before journaling, with their full values and original request bytes kept
+exact. A model-only addition missing those bindings is refused explicitly.
+
+The full two-project native run `t20260930T022557Z-6bec67` passed all six checks with
+unchanged source. Its shared file contains three one-unit probes per instance;
+new native references TP301–TP303 and XML references TP401–TP403 are kept separate.
+Both insertion directions, no-op repeats, native undo/redo and saved reload pass.
+A swapped-definition candidate leaves native state and the requested XML unchanged;
+reversed placement-record input succeeds after canonical preparation. The retained
+`sheet-topology-proof.json` files are in `native-rebuild/rebuild-evidence`, manifest
+`296b91ae712131943718df3fd32e685ed2cdffe493b14f19d9a43ba56c055cdb`.
+The extended existing ownership fixtures cover deterministic definition reuse and
+refusal to invent an undrawn component reference; final graph
+`t20260930T023802Z-9b35ad` passed. Only build-launch configuration and documentation/
+evidence wording changed after native verification. The repeated recovery build
+now ignores persistent build servers, matching the already verified ownership
+build mode after MSBuild worker exits.
+
+`pc626c6d7d14a0d15` remains open for the ownership remainder in
+`p2d066b3b1abf0c6a`: new instances with undrawn components or units owned outside the
+repeated sheet, including complete multi-unit native proof. Those choices are not
+inferred from names or positions and are not covered by the three-probe journey.

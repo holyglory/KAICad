@@ -201,10 +201,141 @@ public sealed partial class NativeSessionTests
         CollectionAssert.AreEquivalent(settled.Engineering.Circuit.SheetInstances.ToArray(), reopened.Engineering.Circuit.SheetInstances.ToArray());
         CollectionAssert.AreEquivalent(settled.Engineering.Circuit.Components.ToArray(), reopened.Engineering.Circuit.Components.ToArray());
         Assert.AreEqual(saved.State.SaveStableStateSha256, (await Capture()).State.SaveStableStateSha256);
+        // Add a third instance of the same physical file, with explicit native
+        // placement records for its component references, through one real batch.
+        var beforeShared = await Capture();
+        var extra = Symbol(beforeShared, root, repeatedId).Clone();
+        extra.Id.Value = Guid.NewGuid().ToString("D"); extra.NameField.Text.Text_ = "Third channel";
+        extra.PageNumber = "12"; extra.InstanceRecords = null;
+        var extraDocument = Child(root, extra.Id);
+        var repeatedScreen = beforeShared.Electrical.Hierarchy.Data.Instances.Single(s => s.Metadata.Document.Equals(repeatedDocument));
+        var creation = new List<SchematicItemOperation> { new() { TargetDocument = root.Clone(), Create = Any.Pack(extra) } };
+        var physicalSymbols = repeatedScreen.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor))
+            .Select(i => i.Unpack<SchematicSymbolInstance>()).OrderBy(s => s.ReferenceField.Text.Text_, StringComparer.Ordinal).ToArray();
+        for (int i = 0; i < physicalSymbols.Length; ++i)
+        {
+            var instance = physicalSymbols[i].Clone(); instance.Path = extraDocument.SheetPath.Clone();
+            instance.ReferenceField.Text.Text_ = "TP" + (301 + i);
+            var record = new SymbolSheetRecord { ProjectName = root.Project.Name, Reference = instance.ReferenceField.Text.Text_,
+                Unit = instance.Unit.Unit, Variants = instance.Variants?.Clone() ?? new() };
+            record.Path.Add(extraDocument.SheetPath.Path.Select(p => p.Clone())); instance.InstanceRecords.Records.Add(record);
+            creation.Add(new() { TargetDocument = extraDocument.Clone(), Update = Any.Pack(instance) });
+        }
+        await Native(true, creation.ToArray());
+        var sharedAdded = await Publish("native-add-repeated-sheet");
+        Guid extraModel = Binding(sharedAdded, extraDocument).SheetInstanceId;
+        Assert.AreEqual(reopened.Engineering.Circuit.SheetInstances.Single(s => s.Id == repeatedModel).DefinitionId,
+            sharedAdded.Engineering.Circuit.SheetInstances.Single(s => s.Id == extraModel).DefinitionId);
+        var extraOwners = sharedAdded.Engineering.Circuit.Components.Where(c => c.SheetInstanceId == extraModel).ToArray();
+        Assert.HasCount(3, extraOwners);
+        CollectionAssert.AreEquivalent(new[] { "TP301", "TP302", "TP303" }, extraOwners.Select(c => c.Reference).ToArray());
+        CollectionAssert.AreEquivalent(repeatedOwners.Select(c => c.DefinitionId).ToArray(), extraOwners.Select(c => c.DefinitionId).ToArray());
+        await Publish("native-add-repeated-settled");
+        await History("z", extraDocument, false, "native-add-repeated-undo");
+        var sharedRedone = await History("y", extraDocument, true, "native-add-repeated-redo");
+        Assert.AreEqual(extraModel, Binding(sharedRedone, extraDocument).SheetInstanceId);
+        CollectionAssert.AreEquivalent(extraOwners, sharedRedone.Engineering.Circuit.Components.Where(c => c.SheetInstanceId == extraModel).ToArray());
+        // The XML declares one more instance, its model owners, and exact native
+        // placement records. No existing drawing or component is replaced.
+        Guid xmlSheetId = Guid.NewGuid();
+        var xmlNativeId = new KIID { Value = Guid.NewGuid().ToString("D") };
+        var xmlDocument = Child(root, xmlNativeId);
+        var xmlComponents = extraOwners.OrderBy(c => c.Reference, StringComparer.Ordinal).Select((c, i) => c with
+            { Id = Guid.NewGuid(), SheetInstanceId = xmlSheetId, Reference = "TP" + (401 + i) }).ToArray();
+        var ownerMap = extraOwners.OrderBy(c => c.Reference, StringComparer.Ordinal).Zip(xmlComponents).ToDictionary(p => p.First.Id, p => p.Second);
+        var sourceOccurrences = sharedRedone.Engineering.Circuit.Symbols.Where(s => ownerMap.ContainsKey(s.ComponentId)).ToArray();
+        var xmlOccurrences = sourceOccurrences.Select(s => s with { Id = Guid.NewGuid(), ComponentId = ownerMap[s.ComponentId].Id,
+            SheetInstanceId = s.SheetInstanceId is null ? null : xmlSheetId }).ToArray();
+        var extraBindings = sourceOccurrences.Zip(xmlOccurrences).Select(p => new SchematicSymbolBinding(p.Second.Id,
+            sharedRedone.SymbolBindings.Single(b => b.SymbolOccurrenceId == p.First.Id).NativeObjectId)).ToArray();
+        var referenceByNative = extraBindings.ToDictionary(b => b.NativeObjectId.ToString("D"), b => xmlComponents.Single(c =>
+            c.Id == xmlOccurrences.Single(s => s.Id == b.SymbolOccurrenceId).ComponentId).Reference);
+        var drawing = sharedRedone.Schematic.Clone();
+        foreach (var screen in drawing.Instances.Where(s => s.Metadata.ScreenId.Equals(extra.ChildScreenId)))
+            for (int i = 0; i < screen.Items.Count; ++i)
+                if (screen.Items[i].Is(SchematicSymbolInstance.Descriptor))
+                {
+                    var instance = screen.Items[i].Unpack<SchematicSymbolInstance>();
+                    var record = new SymbolSheetRecord { ProjectName = root.Project.Name, Reference = referenceByNative[instance.Id.Value],
+                        Unit = instance.Unit.Unit, Variants = instance.Variants?.Clone() ?? new() };
+                    record.Path.Add(xmlDocument.SheetPath.Path.Select(p => p.Clone())); instance.InstanceRecords.Records.Add(record);
+                    // Deliberately reverse native order: the planner must prepare
+                    // the native representation without changing record values.
+                    var ordered = instance.InstanceRecords.Records.OrderByDescending(r => string.Join('/', r.Path.Select(p => p.Value)), StringComparer.Ordinal).ToArray();
+                    instance.InstanceRecords.Records.Clear(); instance.InstanceRecords.Records.Add(ordered);
+                    screen.Items[i] = Any.Pack(instance);
+                }
+        var xmlScreen = drawing.Instances.Single(s => s.Metadata.Document.Equals(extraDocument)).Clone();
+        xmlScreen.Metadata.Document = xmlDocument.Clone();
+        for (int i = 0; i < xmlScreen.Items.Count; ++i)
+            if (xmlScreen.Items[i].Is(SchematicSymbolInstance.Descriptor))
+            {
+                var instance = xmlScreen.Items[i].Unpack<SchematicSymbolInstance>();
+                instance.Path = xmlDocument.SheetPath.Clone(); instance.ReferenceField.Text.Text_ = referenceByNative[instance.Id.Value];
+                xmlScreen.Items[i] = Any.Pack(instance);
+            }
+        drawing.Instances.Add(xmlScreen);
+        var xmlSheet = Symbol(await Capture(), root, extra.Id).Clone(); xmlSheet.Id = xmlNativeId.Clone();
+        xmlSheet.NameField.Text.Text_ = "XML channel"; xmlSheet.PageNumber = "13";
+        xmlSheet.Position.XNm += 50_800_000;
+        foreach (var field in new[] { xmlSheet.NameField, xmlSheet.FilenameField }.Concat(xmlSheet.UserFields))
+            if (field?.Text?.Position is { } position) position.XNm += 50_800_000;
+        var xmlPlacement = new SheetPlacementRecord { ProjectName = root.Project.Name, PageNumber = "13", Variants = new() };
+        xmlPlacement.Path.Add(root.SheetPath.Path.Select(p => p.Clone()));
+        xmlSheet.InstanceRecords = new() { Records = { xmlPlacement } };
+        drawing.Instances.Single(s => s.Metadata.Document.Equals(root)).Items.Add(Any.Pack(xmlSheet));
+        var localNets = sharedRedone.Engineering.Circuit.Nets.Where(n => n.Pins.Count != 0 && n.Pins.All(p => ownerMap.ContainsKey(p.ComponentId)))
+            .Select(n => n with { Id = Guid.NewGuid(), Name = n.Name + " XML channel",
+                Pins = n.Pins.Select(p => p with { ComponentId = ownerMap[p.ComponentId].Id }).ToArray() }).ToArray();
+        var xmlShared = sharedRedone with { Schematic = drawing, Engineering = sharedRedone.Engineering with
+        { Circuit = sharedRedone.Engineering.Circuit with
+        {
+            SheetInstances = [.. sharedRedone.Engineering.Circuit.SheetInstances, new(xmlSheetId,
+                sharedRedone.Engineering.Circuit.SheetInstances.Single(s => s.Id == extraModel).DefinitionId, Binding(sharedRedone, root).SheetInstanceId)],
+            Components = [.. sharedRedone.Engineering.Circuit.Components, .. xmlComponents],
+            Symbols = [.. sharedRedone.Engineering.Circuit.Symbols, .. xmlOccurrences],
+            Nets = [.. sharedRedone.Engineering.Circuit.Nets, .. localNets]
+        } }, SheetBindings = [.. sharedRedone.SheetBindings, new(xmlSheetId, xmlDocument.SheetPath.Path.Select(p => Guid.Parse(p.Value)).ToArray())],
+            SymbolBindings = [.. sharedRedone.SymbolBindings, .. extraBindings] };
+        // These probes have the same part and value. Swapping their definition
+        // identities must still fail before any native action or publication.
+        var swapped = xmlShared with { Engineering = xmlShared.Engineering with { Circuit = xmlShared.Engineering.Circuit with
+        { Components = xmlShared.Engineering.Circuit.Components.Select(c => c.Id == xmlComponents[0].Id
+            ? c with { DefinitionId = xmlComponents[1].DefinitionId } : c.Id == xmlComponents[1].Id
+                ? c with { DefinitionId = xmlComponents[0].DefinitionId } : c).ToArray() } } };
+        string swappedXml = SchematicDesignXml.Write(swapped, []);
+        await File.WriteAllTextAsync(designPath, swappedXml, new UTF8Encoding(false), token);
+        RequireToolSuccess(await call("kicad_design_candidate_commit", new { instanceId, recoveryPath = store.StatePath,
+            expectedRevisionToken = store.Read()!.RevisionToken, candidateXml = swappedXml,
+            expectedCandidateSha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(swappedXml))),
+            operationId = Guid.NewGuid().ToString("D") }));
+        var beforeRefusal = await Capture();
+        var refusedSwap = await call("kicad_design_sync_plan", Recovery());
+        Assert.IsTrue(refusedSwap.GetProperty("isError").GetBoolean());
+        Assert.AreEqual("xml_shared_sheet_definition_mismatch", refusedSwap.GetProperty("structuredContent").GetProperty("errorCode").GetString());
+        Assert.AreEqual(beforeRefusal, await Capture());
+        Assert.AreEqual(swappedXml, await File.ReadAllTextAsync(designPath, token));
+        var xmlAdded = await Xml(xmlShared, "xml-add-repeated-sheet");
+        Assert.AreEqual(xmlSheetId, Binding(xmlAdded, xmlDocument).SheetInstanceId);
+        CollectionAssert.AreEquivalent(xmlComponents, xmlAdded.Engineering.Circuit.Components.Where(c => c.SheetInstanceId == xmlSheetId).ToArray());
+        await Publish("xml-add-repeated-settled");
+        await History("z", xmlDocument, false, "xml-add-repeated-undo");
+        var xmlRedone = await History("y", xmlDocument, true, "xml-add-repeated-redo");
+        Assert.AreEqual(xmlSheetId, Binding(xmlRedone, xmlDocument).SheetInstanceId);
+        await client.InvokeAsync<RevertDocument, Empty>(new() { Document = root.Clone() }, token);
+        var finalNative = await Capture();
+        RequireToolSuccess(await call("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
+            expectedRevisionToken = store.Read()!.RevisionToken, expectedDocumentEpoch = finalNative.State.Revision.Epoch }));
+        var finalModel = await Publish("shared-instances-reloaded");
+        CollectionAssert.AreEquivalent(xmlComponents, finalModel.Engineering.Circuit.Components.Where(c => c.SheetInstanceId == xmlSheetId).ToArray());
+        CollectionAssert.AreEquivalent(extraOwners, finalModel.Engineering.Circuit.Components.Where(c => c.SheetInstanceId == extraModel).ToArray());
         await File.WriteAllTextAsync(Path.Combine(Path.GetDirectoryName(designPath)!, "sheet-topology-proof.json"), JsonSerializer.Serialize(new
         { instanceId, nativeAdd = true, nativeMove = true, nativeRemove = true, nativeUndoRestoresIdentity = true,
             xmlMove = true, xmlRemove = true, populatedRepeatedMoveBothDirections = true,
             xmlUndoRedoPreservesIdentity = true, nativeRollbackPreservesRecords = true, savedReloadPreservesIdentity = true,
+            nativeRepeatedInsertion = true, nativeRepeatedInsertionUndoRedo = true,
+            xmlRepeatedInsertion = true, xmlRepeatedInsertionUndoRedo = true, repeatedInstancesReloaded = true,
+            swappedDefinitionRefusedWithoutMutation = true, nativeRecordOrderPrepared = true,
             detachedFilesPreserved = true, publicSynchronization = true }), token);
     }
 }

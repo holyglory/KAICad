@@ -410,6 +410,10 @@ public static class SchematicNativeAdditionProjection
             // so a repeated plan, a replay and a redo give the same identities. It is named as KiCad names it.
             var addedSheets = new List<(SheetDefinition Definition, ModelSheetInstance Instance, SchematicSheetBinding Binding)>();
             var keptSheets = kept.SheetBindings.ToDictionary(b => SchematicDesignBindings.PathKey(b.NativePath), b => b.SheetInstanceId, StringComparer.Ordinal);
+            var originalKept = kept;
+            var definitionByScreen = kept.SheetBindings.GroupBy(b => screens[SchematicDesignBindings.PathKey(b.NativePath)].Metadata.ScreenId.Value)
+                .ToDictionary(g => g.Key, g => kept.Engineering.Circuit.SheetInstances.Single(s => s.Id == g.First().SheetInstanceId).DefinitionId);
+            var sheetDefinitions = kept.Engineering.Circuit.Sheets.ToDictionary(s => s.Id);
             foreach (string path in sheetChanges.Inserted)
             {
                 token.ThrowIfCancellationRequested();
@@ -419,25 +423,32 @@ public static class SchematicNativeAdditionProjection
                     return Failure("native_sheet_incomplete", "A sheet inserted in KiCad needs its sheet symbol, a name and a parent sheet to join the design.");
                 var parentPath = PathOf(parent); Guid symbolId = Guid.Parse(SchematicNativeSheetChanges.Last(path));
                 Guid instanceId = AdoptedIdentity("sheet-instance", kept.Engineering.Circuit.Id, parentPath, symbolId);
-                Guid definitionId = AdoptedIdentity("sheet-definition", kept.Engineering.Circuit.Id, parentPath, symbolId);
-                addedSheets.Add((new(definitionId, name, []), new(instanceId, definitionId, parentSheet), new(instanceId, PathOf(path))));
+                string screenId = screens[path].Metadata.ScreenId.Value;
+                if (!definitionByScreen.TryGetValue(screenId, out Guid definitionId))
+                {
+                    definitionId = AdoptedIdentity("sheet-definition", kept.Engineering.Circuit.Id, parentPath, symbolId);
+                    definitionByScreen.Add(screenId, definitionId);
+                    sheetDefinitions.Add(definitionId, new(definitionId, name, []));
+                }
+                addedSheets.Add((sheetDefinitions[definitionId], new(instanceId, definitionId, parentSheet), new(instanceId, PathOf(path))));
                 keptSheets.Add(path, instanceId);
             }
             if (addedSheets.Count != 0)
             {
                 var withSheets = kept.Engineering.Circuit with
                 {
-                    Sheets = [.. kept.Engineering.Circuit.Sheets, .. addedSheets.Select(s => s.Definition)],
+                    Sheets = [.. sheetDefinitions.Values],
                     SheetInstances = [.. kept.Engineering.Circuit.SheetInstances, .. addedSheets.Select(s => s.Instance)]
                 };
-                try { withSheets.Validate(); }
-                catch (AutomationException error)
-                {
-                    return Failure("native_addition_conflict", "The sheets inserted in KiCad cannot join the design as they are: " + error.Message);
-                }
+                // Reused definitions gain their explicit component instances below,
+                // before the resulting circuit is validated as a whole.
                 kept = kept with { Engineering = kept.Engineering with { Circuit = withSheets },
                     SheetBindings = [.. kept.SheetBindings, .. addedSheets.Select(s => s.Binding)] };
             }
+            var repeated = SchematicRepeatedSheetAdoption.Project(originalKept, kept, observed,
+                addedSheets.Select(s => s.Instance.Id).ToHashSet(), token);
+            kept = repeated.Design;
+            var repeatedBindings = repeated.NativeKeys.ToHashSet(StringComparer.Ordinal);
             var keptCircuit = kept.Engineering.Circuit;
             var keptComponents = keptCircuit.Components.ToDictionary(c => c.Id);
             var definitions = keptCircuit.Sheets.SelectMany(s => s.Components).ToDictionary(c => c.Id);
@@ -460,7 +471,7 @@ public static class SchematicNativeAdditionProjection
 
             // Each symbol placed in KiCad, as KiCad shows it.
             var additions = new List<Addition>();
-            foreach (var (path, symbol) in added)
+            foreach (var (path, symbol) in added.Where(a => !repeatedBindings.Contains(a.Path + "#" + a.Symbol.Id.Value)))
             {
                 token.ThrowIfCancellationRequested();
                 var sheet = kept.SheetBindings.Single(b => SchematicDesignBindings.PathKey(b.NativePath) == path);
@@ -750,8 +761,8 @@ public static class SchematicNativeAdditionProjection
                 return Failure("unresolved_added_bindings", "The adopted symbols do not resolve every exact native object.", report.Issues);
             return new(new SchematicNativeRestorationResult(design, null, [], [])
             {
-                AddedOccurrences = [.. addedOccurrences.Select(o => o.Id).Order()],
-                AddedComponents = [.. addedComponents.Select(c => c.Id).Order()],
+                AddedOccurrences = [.. repeated.Occurrences.Concat(addedOccurrences.Select(o => o.Id)).Order()],
+                AddedComponents = [.. repeated.Components.Concat(addedComponents.Select(c => c.Id)).Order()],
                 AddedParts = [.. newParts.Keys.Concat(declaredParts.Select(p => p.Id)).Order()],
                 AnsweredOccurrences = [.. declarations.Values.Select(d => d.Occurrence.Id).Order()],
                 RemovedOccurrences = removal.RemovedOccurrences, ComponentChanges = removal.ComponentChanges,

@@ -4011,7 +4011,7 @@ command=["dotnet","restore","automation/KiCad.Automation.slnx","--locked-mode"]
 name="managed-build"
 tier="development"
 requires=["restore"]
-command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--configuration","Debug"]
+command=["dotnet","build","automation/KiCad.Automation.slnx","--disable-build-servers","--no-restore","--configuration","Debug"]
 
 [[test.repeated-sheet-recovery.check]]
 name="configure"

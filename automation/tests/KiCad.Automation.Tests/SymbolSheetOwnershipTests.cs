@@ -261,6 +261,42 @@ public sealed class SymbolSheetOwnershipTests
         Assert.IsNotNull(declaredResult.Adoption, declaredResult.ErrorCode + ": " + declaredResult.ErrorMessage);
         CollectionAssert.AreEquivalent(newComponents, declaredResult.Adoption.BindingCandidate.Engineering.Circuit.Components
             .Where(c => newComponents.Any(n => n.Id == c.Id)).ToArray());
+
+        // Inserting an entire known physical sheet reuses its existing component
+        // definitions. The binding identity decides ownership, not the new references.
+        var knownSheet = SchematicRebuildTests.Placed();
+        var repeatedSheet = SchematicRebuildTests.WithRepeatedSheet(knownSheet);
+        var insertedState = Checkpointed(knownSheet, repeatedSheet.Schematic);
+        var inserted = SchematicNativeAdditionProjection.Project(insertedState, [], CancellationToken.None);
+        Assert.IsNotNull(inserted.Adoption, inserted.ErrorCode + ": " + inserted.ErrorMessage);
+        var adoptedSheet = inserted.Adoption.BindingCandidate;
+        Guid newSheet = inserted.Adoption.AddedSheetInstances.Single();
+        var templateComponents = knownSheet.Engineering.Circuit.Components.Where(c => c.SheetInstanceId == PsuCpuIds.Id(0x05, 2)).ToArray();
+        var insertedComponents = adoptedSheet.Engineering.Circuit.Components.Where(c => c.SheetInstanceId == newSheet).ToArray();
+        CollectionAssert.AreEquivalent(templateComponents.Select(c => c.DefinitionId).ToArray(), insertedComponents.Select(c => c.DefinitionId).ToArray());
+        Assert.AreEqual(knownSheet.Engineering.Circuit.Sheets.Count, adoptedSheet.Engineering.Circuit.Sheets.Count);
+        Assert.AreEqual(templateComponents.Length, inserted.Adoption.AddedComponents.Count);
+        Assert.IsTrue(SchematicDesignBindings.Inspect(adoptedSheet, []).IdentitiesResolved);
+        var secondPlan = SchematicNativeAdditionProjection.Project(insertedState, [], CancellationToken.None);
+        CollectionAssert.AreEqual(inserted.Adoption.AddedComponents.ToArray(), secondPlan.Adoption!.AddedComponents.ToArray());
+        CollectionAssert.AreEqual(inserted.Adoption.AddedOccurrences.ToArray(), secondPlan.Adoption.AddedOccurrences.ToArray());
+
+        // A model component deliberately left undrawn has no native reference for
+        // the new instance. Preserve that unresolved choice instead of guessing it.
+        var undrawnComponent = templateComponents[0];
+        var undrawnIds = knownSheet.Engineering.Circuit.Symbols.Where(s => s.ComponentId == undrawnComponent.Id).Select(s => s.Id).ToHashSet();
+        var nativeUndrawn = knownSheet.SymbolBindings.Where(b => undrawnIds.Contains(b.SymbolOccurrenceId)).Select(b => b.NativeObjectId.ToString("D")).ToHashSet();
+        var undrawn = knownSheet with { Schematic = knownSheet.Schematic.Clone(), Engineering = knownSheet.Engineering with
+            { Circuit = knownSheet.Engineering.Circuit with { Symbols = knownSheet.Engineering.Circuit.Symbols.Where(s => !undrawnIds.Contains(s.Id)).ToArray() } },
+            SymbolBindings = knownSheet.SymbolBindings.Where(b => !undrawnIds.Contains(b.SymbolOccurrenceId)).ToArray() };
+        foreach (var sheet in undrawn.Schematic.Instances)
+            for (int i = sheet.Items.Count - 1; i >= 0; --i)
+                if (sheet.Items[i].Is(SchematicSymbolInstance.Descriptor) && nativeUndrawn.Contains(sheet.Items[i].Unpack<SchematicSymbolInstance>().Id.Value))
+                    sheet.Items.RemoveAt(i);
+        var undrawnRepeat = SchematicRebuildTests.WithRepeatedSheet(undrawn);
+        var unresolved = SchematicNativeAdditionProjection.Project(Checkpointed(undrawn, undrawnRepeat.Schematic), [], CancellationToken.None);
+        Assert.IsNull(unresolved.Adoption);
+        Assert.AreEqual("native_repeated_sheet_ownership_unresolved", unresolved.ErrorCode);
     }
 
     [TestMethod]

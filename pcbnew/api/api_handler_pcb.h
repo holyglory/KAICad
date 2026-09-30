@@ -26,6 +26,8 @@
 #include <api/board/board_jobs.pb.h>
 #include <api/common/commands/cross_probe_commands.pb.h>
 #include <api/common/commands/project_commands.pb.h>
+#include <api/pcb_drc_job_manager.h>
+#include <api/common/commands/automation_commands.pb.h>
 #include <properties/property_mgr.h>
 
 using namespace kiapi::board::jobs;
@@ -42,6 +44,17 @@ public:
     API_HANDLER_PCB( PCB_EDIT_FRAME* aFrame );
     API_HANDLER_PCB( std::shared_ptr<PCB_CONTEXT> aContext, PCB_EDIT_FRAME* aFrame = nullptr );
 
+    // Native editor boundaries for PCB DRC jobs; the owning frame calls these on
+    // its UI thread. A handler without a frame never subscribes to board events.
+    void DetachDrcBoard( const BOARD* aBoard ) { m_drcJobs.DetachBoard( aBoard ); }
+    void DrcBoardChanged( const BOARD* aBoard ) { m_drcJobs.BoardChanged( aBoard ); }
+    // Recovery checkpoint after activation or a settings notification. A settings
+    // notification passes true: it may have changed library configuration in memory
+    // (path variables, library rows) without a file notification, so library content
+    // is compared for every check. Activation passes false and compares each check's
+    // library configuration first (PCB_DRC_JOB_MANAGER::ObserveInputs).
+    void ObserveNativeDrcInputs( bool aLibraryConfigurationMayHaveChanged );
+
 private:
     typedef std::map<std::string, PROPERTY_BASE*> PROTO_PROPERTY_MAP;
 
@@ -49,6 +62,22 @@ private:
             const HANDLER_CONTEXT<commands::GetOpenDocuments>& aCtx );
 
     HANDLER_RESULT<Empty> handleSaveDocument( const HANDLER_CONTEXT<commands::SaveDocument>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> handleReadLifecycleState(
+            const HANDLER_CONTEXT<kiapi::automation::v1::ReadDocumentLifecycleState>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::PcbDrcState> handleReadDrcState(
+            const HANDLER_CONTEXT<kiapi::automation::v1::ReadPcbDrcState>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> handleStartDrcJob(
+            const HANDLER_CONTEXT<kiapi::automation::v1::StartPcbDrcJob>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> handleReadDrcJob(
+            const HANDLER_CONTEXT<kiapi::automation::v1::ReadPcbDrcJob>& aCtx );
+    tl::expected<kiapi::automation::v1::DocumentLifecycleState, std::string> observeDrcSchematic(
+            const kiapi::common::types::DocumentSpecifier& aDocument );
+    tl::expected<std::string, std::string> observeDrcLibraries( BOARD& aBoard );
+    tl::expected<std::string, std::string> observeDrcAuxiliary( BOARD& aBoard );
+    HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> handleCancelDrcJob(
+            const HANDLER_CONTEXT<kiapi::automation::v1::CancelPcbDrcJob>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> handleRoutePreview(
+            const HANDLER_CONTEXT<kiapi::automation::v1::StartPcbRoutePreview>& aCtx );
 
     HANDLER_RESULT<Empty> handleSaveCopyOfDocument(
             const HANDLER_CONTEXT<commands::SaveCopyOfDocument>& aCtx );
@@ -202,6 +231,8 @@ private:
     PCB_CONTEXT* pcbContext() const { return static_cast<PCB_CONTEXT*>( context() ); }
 
     PCB_EDIT_FRAME* frame() const;
+
+    PCB_DRC_JOB_MANAGER m_drcJobs;
 };
 
 #endif //KICAD_API_HANDLER_PCB_H

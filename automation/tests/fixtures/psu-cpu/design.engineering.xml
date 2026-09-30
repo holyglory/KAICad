@@ -1,0 +1,362 @@
+<engineering-design version="1" xmlns="urn:kicad:automation:engineering-design:1">
+  <circuit id="7e57f1c5-0000-4000-8000-000200000001" version="1" xmlns="urn:kicad:automation:circuit:1">
+  <parts>
+    <part id="7e57f1c5-0000-4000-8000-000300000001" name="Conn_01x02" units="1">
+      <pin number="1" name="Pin_1" unit="1" />
+      <pin number="2" name="Pin_2" unit="1" />
+    </part>
+    <part id="7e57f1c5-0000-4000-8000-000300000002" name="LM2595S-ADJ" units="1">
+      <pin number="1" name="OUT" unit="1" />
+      <pin number="2" name="VIN" unit="1" />
+      <pin number="3" name="GND" unit="1" />
+      <pin number="4" name="FB" unit="1" />
+      <pin number="5" name="ON/~{OFF}" unit="1" />
+    </part>
+    <part id="7e57f1c5-0000-4000-8000-000300000003" name="R" units="1">
+      <pin number="1" name="" unit="1" />
+      <pin number="2" name="" unit="1" />
+    </part>
+    <part id="7e57f1c5-0000-4000-8000-000300000004" name="LP3982ILD-3.3" units="1">
+      <pin number="1" name="OUT" unit="1" />
+      <pin number="2" name="IN" unit="1" />
+      <pin number="3" name="GND" unit="1" />
+      <pin number="4" name="OUT" unit="1" />
+      <pin number="5" name="NC" unit="1" />
+      <pin number="6" name="CC" unit="1" />
+      <pin number="7" name="~{SHDN}" unit="1" />
+      <pin number="8" name="~{FAULT}" unit="1" />
+      <pin number="9" name="EP" unit="1" />
+    </part>
+    <part id="7e57f1c5-0000-4000-8000-000300000005" name="LTC2959" units="1">
+      <pin number="1" name="V_{DD}" unit="1" />
+      <pin number="10" name="GND" unit="1" />
+      <pin number="11" name="EP" unit="1" />
+      <pin number="2" name="SENSEP" unit="1" />
+      <pin number="3" name="CFP" unit="1" />
+      <pin number="4" name="CFN" unit="1" />
+      <pin number="5" name="SENSEN" unit="1" />
+      <pin number="6" name="SCL" unit="1" />
+      <pin number="7" name="SDA" unit="1" />
+      <pin number="8" name="GPIO" unit="1" />
+      <pin number="9" name="V_{REG}" unit="1" />
+    </part>
+    <part id="7e57f1c5-0000-4000-8000-000300000006" name="STM32C011J_4-6_Mx" units="1">
+      <pin number="1" name="PB7/PC14" unit="1" />
+      <pin number="2" name="VDD" unit="1" />
+      <pin number="3" name="VSS" unit="1" />
+      <pin number="4" name="PA0/PA1/PA2/PF2" unit="1" />
+      <pin number="5" name="PA8/PA9/PA11" unit="1" />
+      <pin number="6" name="PA10/PA12" unit="1" />
+      <pin number="7" name="PA13" unit="1" />
+      <pin number="8" name="PA14/PB6/PC15" unit="1" />
+    </part>
+    <part id="7e57f1c5-0000-4000-8000-000300000007" name="F28P659DK8PTPQ1" units="4">
+      <pin number="1" name="GPIO10" unit="2" />
+      <pin number="10" name="GPIO18" unit="2" />
+      <pin number="100" name="GPIO55" unit="2" />
+      <pin number="101" name="GPIO56" unit="2" />
+      <pin number="102" name="GPIO57" unit="2" />
+      <pin number="103" name="GPIO58" unit="2" />
+      <pin number="104" name="GPIO59" unit="2" />
+      <pin number="105" name="GPIO60" unit="2" />
+      <pin number="106" name="GPIO105" unit="2" />
+      <pin number="107" name="GPIO61" unit="2" />
+      <pin number="108" name="GPIO62" unit="2" />
+      <pin number="109" name="GPIO63" unit="2" />
+      <pin number="11" name="GPIO22" unit="2" />
+      <pin number="110" name="GPIO64" unit="2" />
+      <pin number="111" name="GPIO65" unit="2" />
+      <pin number="112" name="GPIO66" unit="2" />
+      <pin number="113" name="GPIO44" unit="2" />
+      <pin number="114" name="VDDIO" unit="4" />
+      <pin number="115" name="GPIO45" unit="2" />
+      <pin number="116" name="GPIO32" unit="2" />
+      <pin number="117" name="VDD" unit="4" />
+      <pin number="118" name="GPIO133" unit="3" />
+      <pin number="119" name="VREGENZ" unit="3" />
+      <pin number="12" name="GPIO19" unit="2" />
+      <pin number="120" name="VDDOSC" unit="4" />
+      <pin number="121" name="GPIO221,X2" unit="3" />
+      <pin number="122" name="VSSOSC" unit="4" />
+      <pin number="123" name="GPIO220,X1" unit="3" />
+      <pin number="124" name="XRSN" unit="3" />
+      <pin number="125" name="GPIO27" unit="2" />
+      <pin number="126" name="GPIO103" unit="2" />
+      <pin number="127" name="VDDIO" unit="4" />
+      <pin number="128" name="GPIO46" unit="2" />
+      <pin number="129" name="GPIO47" unit="2" />
+      <pin number="13" name="GPIO20" unit="2" />
+      <pin number="130" name="GPIO42" unit="2" />
+      <pin number="131" name="GPIO43" unit="2" />
+      <pin number="132" name="GPIO67" unit="2" />
+      <pin number="133" name="GPIO68" unit="2" />
+      <pin number="134" name="GPIO69" unit="2" />
+      <pin number="135" name="GPIO70" unit="2" />
+      <pin number="136" name="GPIO71" unit="2" />
+      <pin number="137" name="VDD" unit="4" />
+      <pin number="138" name="VDDIO" unit="4" />
+      <pin number="139" name="GPIO72" unit="3" />
+      <pin number="14" name="GPIO21" unit="2" />
+      <pin number="140" name="GPIO73" unit="2" />
+      <pin number="141" name="GPIO74" unit="2" />
+      <pin number="142" name="GPIO75" unit="2" />
+      <pin number="143" name="GPIO76" unit="2" />
+      <pin number="144" name="GPIO77" unit="2" />
+      <pin number="145" name="GPIO78" unit="2" />
+      <pin number="146" name="GPIO79" unit="2" />
+      <pin number="147" name="GPIO104" unit="2" />
+      <pin number="148" name="GPIO80" unit="2" />
+      <pin number="149" name="GPIO81" unit="2" />
+      <pin number="15" name="VDDIO" unit="4" />
+      <pin number="150" name="GPIO82" unit="2" />
+      <pin number="151" name="GPIO83" unit="2" />
+      <pin number="152" name="VDDIO" unit="4" />
+      <pin number="153" name="GPIO25" unit="2" />
+      <pin number="154" name="GPIO84" unit="3" />
+      <pin number="155" name="GPIO85" unit="2" />
+      <pin number="156" name="GPIO86" unit="2" />
+      <pin number="157" name="GPIO87" unit="2" />
+      <pin number="158" name="GPIO31" unit="2" />
+      <pin number="159" name="GPIO24" unit="2" />
+      <pin number="16" name="VDD" unit="4" />
+      <pin number="160" name="GPIO0" unit="2" />
+      <pin number="161" name="GPIO1" unit="2" />
+      <pin number="162" name="GPIO2" unit="2" />
+      <pin number="163" name="GPIO3" unit="2" />
+      <pin number="164" name="GPIO4" unit="2" />
+      <pin number="165" name="GPIO5" unit="2" />
+      <pin number="166" name="GPIO6" unit="2" />
+      <pin number="167" name="GPIO7" unit="2" />
+      <pin number="168" name="VDDIO" unit="4" />
+      <pin number="169" name="VDD" unit="4" />
+      <pin number="17" name="GPIO99" unit="2" />
+      <pin number="170" name="GPIO88" unit="2" />
+      <pin number="171" name="GPIO89" unit="2" />
+      <pin number="172" name="GPIO90" unit="2" />
+      <pin number="173" name="GPIO91" unit="2" />
+      <pin number="174" name="GPIO92" unit="2" />
+      <pin number="175" name="GPIO93" unit="2" />
+      <pin number="176" name="GPIO94" unit="2" />
+      <pin number="177" name="VSS" unit="4" />
+      <pin number="18" name="GPIO8" unit="2" />
+      <pin number="19" name="GPIO9" unit="2" />
+      <pin number="2" name="GPIO11" unit="2" />
+      <pin number="20" name="GPIO106" unit="2" />
+      <pin number="21" name="GPIO23" unit="2" />
+      <pin number="22" name="C0,GPIO199" unit="1" />
+      <pin number="23" name="C1,GPIO200" unit="1" />
+      <pin number="24" name="C9,GPIO201" unit="1" />
+      <pin number="25" name="C8,GPIO202" unit="1" />
+      <pin number="26" name="C7,GPIO198" unit="1" />
+      <pin number="27" name="C6,GPIO203" unit="1" />
+      <pin number="28" name="C5,GPIO204" unit="1" />
+      <pin number="29" name="C4,GPIO205" unit="1" />
+      <pin number="3" name="VDDIO" unit="4" />
+      <pin number="30" name="C3,GPIO206" unit="1" />
+      <pin number="31" name="C2" unit="1" />
+      <pin number="32" name="VREFLOC" unit="4" />
+      <pin number="33" name="VREFLOA" unit="4" />
+      <pin number="34" name="VSSA" unit="4" />
+      <pin number="35" name="VREFHIC" unit="4" />
+      <pin number="36" name="VDDA" unit="4" />
+      <pin number="37" name="VREFHIA" unit="4" />
+      <pin number="38" name="A5" unit="1" />
+      <pin number="39" name="A4" unit="1" />
+      <pin number="4" name="GPIO12" unit="2" />
+      <pin number="40" name="A3" unit="1" />
+      <pin number="41" name="A2" unit="1" />
+      <pin number="42" name="A1" unit="1" />
+      <pin number="43" name="A0/DACA_OUT" unit="1" />
+      <pin number="44" name="A14/B14/C14" unit="1" />
+      <pin number="45" name="A15/B15/C15" unit="1" />
+      <pin number="46" name="B0/VDAC" unit="1" />
+      <pin number="47" name="B1/DACC_OUT" unit="1" />
+      <pin number="48" name="B2" unit="1" />
+      <pin number="49" name="B3" unit="1" />
+      <pin number="5" name="GPIO13" unit="2" />
+      <pin number="50" name="VREFLOB" unit="4" />
+      <pin number="51" name="B11" unit="1" />
+      <pin number="52" name="VSSA" unit="4" />
+      <pin number="53" name="VREFHIB" unit="4" />
+      <pin number="54" name="VDDA" unit="4" />
+      <pin number="55" name="B6,GPIO207" unit="1" />
+      <pin number="56" name="B7,GPIO208" unit="1" />
+      <pin number="57" name="A6,GPIO209" unit="1" />
+      <pin number="58" name="A7,GPIO210" unit="1" />
+      <pin number="59" name="A8,GPIO211" unit="1" />
+      <pin number="6" name="GPIO14" unit="2" />
+      <pin number="60" name="A9,GPIO212" unit="1" />
+      <pin number="61" name="B10,GPIO219" unit="1" />
+      <pin number="62" name="A10,GPIO213" unit="1" />
+      <pin number="63" name="A11,GPIO214" unit="1" />
+      <pin number="64" name="B4,GPIO215" unit="1" />
+      <pin number="65" name="B5,GPIO216" unit="1" />
+      <pin number="66" name="B8,GPIO217" unit="1" />
+      <pin number="67" name="B9,GPIO218" unit="1" />
+      <pin number="68" name="VDDIO" unit="4" />
+      <pin number="69" name="GPIO33" unit="2" />
+      <pin number="7" name="GPIO15" unit="2" />
+      <pin number="70" name="GPIO34" unit="2" />
+      <pin number="71" name="GPIO35" unit="2" />
+      <pin number="72" name="VDD3VFL" unit="4" />
+      <pin number="73" name="GPIO29" unit="2" />
+      <pin number="74" name="GPIO28" unit="2" />
+      <pin number="75" name="VDDIO" unit="4" />
+      <pin number="76" name="VDD" unit="4" />
+      <pin number="77" name="GPIO222/TDI" unit="3" />
+      <pin number="78" name="GPIO223/TDO" unit="3" />
+      <pin number="79" name="GPIO30" unit="2" />
+      <pin number="8" name="GPIO16" unit="2" />
+      <pin number="80" name="TMS" unit="3" />
+      <pin number="81" name="TCK" unit="3" />
+      <pin number="82" name="GPIO26" unit="2" />
+      <pin number="83" name="GPIO36" unit="2" />
+      <pin number="84" name="GPIO37" unit="2" />
+      <pin number="85" name="GPIO38" unit="2" />
+      <pin number="86" name="GPIO39" unit="2" />
+      <pin number="87" name="GPIO40" unit="2" />
+      <pin number="88" name="VDDIO" unit="4" />
+      <pin number="89" name="GPIO41" unit="2" />
+      <pin number="9" name="GPIO17" unit="2" />
+      <pin number="90" name="GPIO48" unit="2" />
+      <pin number="91" name="VDDIO" unit="4" />
+      <pin number="92" name="GPIO224/ERRORSTS" unit="3" />
+      <pin number="93" name="GPIO49" unit="2" />
+      <pin number="94" name="GPIO50" unit="2" />
+      <pin number="95" name="GPIO51" unit="2" />
+      <pin number="96" name="GPIO52" unit="2" />
+      <pin number="97" name="GPIO53" unit="2" />
+      <pin number="98" name="GPIO54" unit="2" />
+      <pin number="99" name="VDDIO" unit="4" />
+    </part>
+    <part id="7e57f1c5-0000-4000-8000-000300000008" name="24C16" units="1">
+      <pin number="1" name="A0" unit="1" />
+      <pin number="2" name="A1" unit="1" />
+      <pin number="3" name="A2" unit="1" />
+      <pin number="4" name="GND" unit="0" />
+      <pin number="5" name="SDA" unit="1" />
+      <pin number="6" name="SCL" unit="1" />
+      <pin number="7" name="WP" unit="1" />
+      <pin number="8" name="VCC" unit="0" />
+    </part>
+  </parts>
+  <sheets>
+    <sheet id="7e57f1c5-0000-4000-8000-000400000001" name="System" />
+    <sheet id="7e57f1c5-0000-4000-8000-000400000002" name="PSU">
+      <component id="7e57f1c5-0000-4000-8000-000600000001" part="7e57f1c5-0000-4000-8000-000300000001" value="Conn_01x02" />
+      <component id="7e57f1c5-0000-4000-8000-000600000002" part="7e57f1c5-0000-4000-8000-000300000002" value="LM2595S-ADJ" />
+      <component id="7e57f1c5-0000-4000-8000-000600000003" part="7e57f1c5-0000-4000-8000-000300000003" value="R" />
+      <component id="7e57f1c5-0000-4000-8000-000600000004" part="7e57f1c5-0000-4000-8000-000300000004" value="LP3982ILD-3.3" />
+      <component id="7e57f1c5-0000-4000-8000-000600000005" part="7e57f1c5-0000-4000-8000-000300000005" value="LTC2959" />
+      <component id="7e57f1c5-0000-4000-8000-000600000006" part="7e57f1c5-0000-4000-8000-000300000006" value="STM32C011J_4-6_Mx" />
+    </sheet>
+    <sheet id="7e57f1c5-0000-4000-8000-000400000003" name="CPU">
+      <component id="7e57f1c5-0000-4000-8000-000600000007" part="7e57f1c5-0000-4000-8000-000300000007" value="F28P659DK8PTPQ1" />
+      <component id="7e57f1c5-0000-4000-8000-000600000008" part="7e57f1c5-0000-4000-8000-000300000008" value="24C16" />
+    </sheet>
+    <sheet id="7e57f1c5-0000-4000-8000-000400000004" name="CPU_POWER" />
+  </sheets>
+  <sheet-instances>
+    <instance id="7e57f1c5-0000-4000-8000-000500000001" definition="7e57f1c5-0000-4000-8000-000400000001" />
+    <instance id="7e57f1c5-0000-4000-8000-000500000002" definition="7e57f1c5-0000-4000-8000-000400000002" parent="7e57f1c5-0000-4000-8000-000500000001" />
+    <instance id="7e57f1c5-0000-4000-8000-000500000003" definition="7e57f1c5-0000-4000-8000-000400000003" parent="7e57f1c5-0000-4000-8000-000500000001" />
+    <instance id="7e57f1c5-0000-4000-8000-000500000004" definition="7e57f1c5-0000-4000-8000-000400000004" parent="7e57f1c5-0000-4000-8000-000500000003" />
+  </sheet-instances>
+  <components>
+    <instance id="7e57f1c5-0000-4000-8000-000700000001" definition="7e57f1c5-0000-4000-8000-000600000001" sheet="7e57f1c5-0000-4000-8000-000500000002" reference="J1" />
+    <instance id="7e57f1c5-0000-4000-8000-000700000002" definition="7e57f1c5-0000-4000-8000-000600000002" sheet="7e57f1c5-0000-4000-8000-000500000002" reference="U1" />
+    <instance id="7e57f1c5-0000-4000-8000-000700000003" definition="7e57f1c5-0000-4000-8000-000600000003" sheet="7e57f1c5-0000-4000-8000-000500000002" reference="R1" />
+    <instance id="7e57f1c5-0000-4000-8000-000700000004" definition="7e57f1c5-0000-4000-8000-000600000004" sheet="7e57f1c5-0000-4000-8000-000500000002" reference="U2" />
+    <instance id="7e57f1c5-0000-4000-8000-000700000005" definition="7e57f1c5-0000-4000-8000-000600000005" sheet="7e57f1c5-0000-4000-8000-000500000002" reference="U3" />
+    <instance id="7e57f1c5-0000-4000-8000-000700000006" definition="7e57f1c5-0000-4000-8000-000600000006" sheet="7e57f1c5-0000-4000-8000-000500000002" reference="U4" />
+    <instance id="7e57f1c5-0000-4000-8000-000700000007" definition="7e57f1c5-0000-4000-8000-000600000007" sheet="7e57f1c5-0000-4000-8000-000500000003" reference="U5" />
+    <instance id="7e57f1c5-0000-4000-8000-000700000008" definition="7e57f1c5-0000-4000-8000-000600000008" sheet="7e57f1c5-0000-4000-8000-000500000003" reference="U6" />
+  </components>
+  <nets>
+    <net id="7e57f1c5-0000-4000-8000-000800000001" name="VIN">
+      <pin component="7e57f1c5-0000-4000-8000-000700000001" number="1" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000002" number="2" />
+    </net>
+    <net id="7e57f1c5-0000-4000-8000-000800000002" name="GND">
+      <pin component="7e57f1c5-0000-4000-8000-000700000001" number="2" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000002" number="3" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000004" number="3" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000004" number="9" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000005" number="10" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000006" number="3" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000007" number="177" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000008" number="1" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000008" number="2" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000008" number="3" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000008" number="4" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000008" number="7" />
+    </net>
+    <net id="7e57f1c5-0000-4000-8000-000800000003" name="DCDC_OUT">
+      <pin component="7e57f1c5-0000-4000-8000-000700000002" number="1" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000002" number="4" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000003" number="1" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000005" number="1" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000005" number="2" />
+    </net>
+    <net id="7e57f1c5-0000-4000-8000-000800000004" name="RAIL_A">
+      <pin component="7e57f1c5-0000-4000-8000-000700000003" number="2" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000004" number="2" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000004" number="7" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000005" number="5" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000006" number="2" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000007" number="3" />
+    </net>
+    <net id="7e57f1c5-0000-4000-8000-000800000005" name="RAIL_B">
+      <pin component="7e57f1c5-0000-4000-8000-000700000004" number="1" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000004" number="4" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000005" number="8" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000008" number="8" />
+    </net>
+    <net id="7e57f1c5-0000-4000-8000-000800000006" name="LDO_FAULT">
+      <pin component="7e57f1c5-0000-4000-8000-000700000004" number="8" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000006" number="4" />
+    </net>
+    <net id="7e57f1c5-0000-4000-8000-000800000007" name="PSU_SCL">
+      <pin component="7e57f1c5-0000-4000-8000-000700000005" number="6" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000006" number="5" />
+    </net>
+    <net id="7e57f1c5-0000-4000-8000-000800000008" name="PSU_SDA">
+      <pin component="7e57f1c5-0000-4000-8000-000700000005" number="7" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000006" number="6" />
+    </net>
+    <net id="7e57f1c5-0000-4000-8000-000800000009" name="TELEM_MCU_TO_CPU">
+      <pin component="7e57f1c5-0000-4000-8000-000700000006" number="8" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000007" number="74" />
+    </net>
+    <net id="7e57f1c5-0000-4000-8000-00080000000a" name="TELEM_CPU_TO_MCU">
+      <pin component="7e57f1c5-0000-4000-8000-000700000006" number="1" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000007" number="73" />
+    </net>
+    <net id="7e57f1c5-0000-4000-8000-00080000000b" name="MEM_SCL">
+      <pin component="7e57f1c5-0000-4000-8000-000700000007" number="161" />
+      <pin component="7e57f1c5-0000-4000-8000-000700000008" number="6" />
+    </net>
+  </nets>
+  <symbols>
+    <symbol id="7e57f1c5-0000-4000-8000-000900000001" component="7e57f1c5-0000-4000-8000-000700000001" unit="1" />
+    <symbol id="7e57f1c5-0000-4000-8000-000900000002" component="7e57f1c5-0000-4000-8000-000700000002" unit="1" />
+    <symbol id="7e57f1c5-0000-4000-8000-000900000003" component="7e57f1c5-0000-4000-8000-000700000003" unit="1" />
+    <symbol id="7e57f1c5-0000-4000-8000-000900000004" component="7e57f1c5-0000-4000-8000-000700000004" unit="1" />
+    <symbol id="7e57f1c5-0000-4000-8000-000900000005" component="7e57f1c5-0000-4000-8000-000700000005" unit="1" />
+    <symbol id="7e57f1c5-0000-4000-8000-000900000006" component="7e57f1c5-0000-4000-8000-000700000006" unit="1" />
+    <symbol id="7e57f1c5-0000-4000-8000-000900000007" component="7e57f1c5-0000-4000-8000-000700000007" unit="1" />
+    <symbol id="7e57f1c5-0000-4000-8000-000900000008" component="7e57f1c5-0000-4000-8000-000700000007" unit="2" />
+    <symbol id="7e57f1c5-0000-4000-8000-000900000009" component="7e57f1c5-0000-4000-8000-000700000007" unit="3" />
+    <symbol id="7e57f1c5-0000-4000-8000-00090000000a" component="7e57f1c5-0000-4000-8000-000700000007" unit="4" sheet-instance="7e57f1c5-0000-4000-8000-000500000004" />
+    <symbol id="7e57f1c5-0000-4000-8000-00090000000b" component="7e57f1c5-0000-4000-8000-000700000008" unit="1" />
+  </symbols>
+</circuit>
+  <structure version="1" id="7e57f1c5-0000-4000-8000-000200000002" xmlns="urn:kicad:automation:structure:1">
+  <blocks />
+  <ports />
+  <connections />
+  <statements />
+</structure>
+  <knowledge-libraries />
+  <component-bindings />
+</engineering-design>

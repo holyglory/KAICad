@@ -336,6 +336,11 @@ public:
      */
     virtual void OnPageSettingsChange() {}
 
+    // Editors with project-owned layouts override these; generic viewers retain
+    // the historical global context.
+    virtual wxString GetDrawingSheetFileName() const;
+    virtual void SetDrawingSheetFileName( const wxString& aFileName );
+
     /** Create the status line (like a wxStatusBar). This is actually a KISTATUSBAR status bar.
      * the specified number of fields is the extra number of fields, not the full field count.
      * @return a KISTATUSBAR (derived from wxStatusBar)

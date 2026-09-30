@@ -267,9 +267,9 @@ void JOBSET::RemoveJob( size_t aJobIdx )
 }
 
 
-bool JOBSET::SaveToFile( const wxString& aDirectory, bool aForce )
+bool JOBSET::SaveToFile( const wxString& aDirectory, bool aForce, SETTINGS_SAVE_RESULT* aResult )
 {
-    bool success = JSON_SETTINGS::SaveToFile( aDirectory, aForce );
+    bool success = JSON_SETTINGS::SaveToFile( aDirectory, aForce, aResult );
     if( success )
     {
         m_dirty = false;

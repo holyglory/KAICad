@@ -92,7 +92,7 @@ void SCH_EDIT_FRAME::SaveCopyInUndoList( SCH_SCREEN* aScreen, SCH_ITEM* aItem, U
     // If the last stack was empty, use that one instead of creating a new stack
     if( lastUndo )
     {
-        if( aAppend || !lastUndo->GetCount() )
+        if( ( aAppend && !lastUndo->PreserveSchematicGeometry() ) || !lastUndo->GetCount() )
             commandToUndo = lastUndo;
         else
             PushCommandToUndoList( lastUndo );
@@ -103,6 +103,7 @@ void SCH_EDIT_FRAME::SaveCopyInUndoList( SCH_SCREEN* aScreen, SCH_ITEM* aItem, U
         commandToUndo = new PICKED_ITEMS_LIST();
     }
 
+    commandToUndo->SetPreserveSchematicGeometry( false );
     ITEM_PICKER itemWrapper( aScreen, aItem, aCommandType );
     itemWrapper.SetFlags( aItem->GetFlags() );
 
@@ -151,7 +152,8 @@ void SCH_EDIT_FRAME::SaveCopyInUndoList( const PICKED_ITEMS_LIST& aItemsList, UN
     // If the last stack was empty, use that one instead of creating a new stack
     if( lastUndo )
     {
-        if( aAppend || !lastUndo->GetCount() )
+        if( ( aAppend && lastUndo->PreserveSchematicGeometry() == aItemsList.PreserveSchematicGeometry() )
+            || !lastUndo->GetCount() )
             commandToUndo = lastUndo;
         else
             PushCommandToUndoList( lastUndo );
@@ -250,11 +252,19 @@ void SCH_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList )
     std::set<SCH_TABLE*>   changedTables;
     bool                   updateVariantCtrl = false;
     bool                   dirtyConnectivity = false;
+    bool                   netSettingsChanged = false;
     bool                   rebuildHierarchyNavigator = false;
     bool                   refreshHierarchy = false;
     SCH_CLEANUP_FLAGS      connectivityCleanUp = NO_CLEANUP;
     SCH_SHEET_LIST         sheets= m_schematic->Hierarchy();
     bool                   clearedRepeatItems = false;
+    struct DEFERRED_PAGE_SETTINGS
+    {
+        DS_PROXY_UNDO_ITEM* item;
+        SCH_SCREEN* screen;
+        std::unique_ptr<SCH_PAGE_SETTINGS_UNDO_ITEM> alternate;
+    };
+    std::vector<DEFERRED_PAGE_SETTINGS> deferredPageSettings;
 
     std::map<SCH_LIBRARY_CACHE_UNDO_ITEM*, SCH_SYMBOL_CACHE_STATE> cacheBefore;
     std::vector<std::unique_ptr<SCH_SYMBOL_CACHE_EDIT_SCOPE>> cacheScopes;
@@ -265,6 +275,20 @@ void SCH_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList )
             auto* item = static_cast<SCH_LIBRARY_CACHE_UNDO_ITEM*>( aList->GetPickedItem( ii ) );
             cacheBefore.emplace( item, item->CaptureCurrent() );
             cacheScopes.push_back( std::make_unique<SCH_SYMBOL_CACHE_EDIT_SCOPE>( item->Screen() ) );
+        }
+
+        if( aList->GetPickedItemStatus( ii ) == UNDO_REDO::PAGESETTINGS )
+        {
+            auto* item = static_cast<DS_PROXY_UNDO_ITEM*>( aList->GetPickedItem( ii ) );
+            auto* allPages = dynamic_cast<SCH_PAGE_SETTINGS_UNDO_ITEM*>( item );
+            std::unique_ptr<SCH_PAGE_SETTINGS_UNDO_ITEM> alternate;
+            if( allPages )
+            {
+                alternate = std::make_unique<SCH_PAGE_SETTINGS_UNDO_ITEM>( this );
+                alternate->CopyProjectSettingsScope( *allPages );
+            }
+            deferredPageSettings.push_back( { item,
+                dynamic_cast<SCH_SCREEN*>( aList->GetScreenForItem( ii ) ), std::move( alternate ) } );
         }
     }
 
@@ -372,36 +396,7 @@ void SCH_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList )
         }
         else if( status == UNDO_REDO::PAGESETTINGS )
         {
-            if( GetCurrentSheet() != undoSheet )
-            {
-                SetCurrentSheet( undoSheet );
-                DisplayCurrentSheet();
-            }
-
-            // swap current settings with stored settings
-            DS_PROXY_UNDO_ITEM* item = static_cast<DS_PROXY_UNDO_ITEM*>( eda_item );
-            if( auto* allPages = dynamic_cast<SCH_PAGE_SETTINGS_UNDO_ITEM*>( item ) )
-            {
-                if( !allPages->BusAliasesMatch( Schematic() ) || !allPages->TextVariablesMatch( this )
-                        || allPages->IncludesNetChains() )
-                {
-                    dirtyConnectivity = true;
-                    connectivityCleanUp = GLOBAL_CLEANUP;
-                }
-                SCH_PAGE_SETTINGS_UNDO_ITEM alternate( this );
-                alternate.CopyProjectSettingsScope( *allPages );
-                allPages->RestoreAll( this );
-                *allPages = std::move( alternate );
-            }
-            else
-            {
-                DS_PROXY_UNDO_ITEM alternate( this );
-                item->Restore( this );
-                *item = std::move( alternate );
-            }
-            Schematic().Settings().m_SchDrawingSheetFileName = BASE_SCREEN::m_DrawingSheetFileName;
-            refreshHierarchy = true;
-            rebuildHierarchyNavigator = true;
+            // Already captured once in the prepass; restore after graphical entries.
         }
         else if( status == UNDO_REDO::REPEAT_ITEM )
         {
@@ -509,6 +504,52 @@ void SCH_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList )
         }
     }
 
+    if( refreshHierarchy )
+        Schematic().RefreshHierarchy();
+
+    // Preserve the original reverse traversal order without scheduling any picker twice.
+    for( auto it = deferredPageSettings.rbegin(); it != deferredPageSettings.rend(); ++it )
+    {
+        auto& deferred = *it;
+        auto* item = deferred.item;
+        auto* screen = deferred.screen;
+        sheets = m_schematic->Hierarchy();
+        SCH_SHEET_PATH undoSheet = screen ? sheets.FindSheetForScreen( screen ) : GetCurrentSheet();
+        if( GetCurrentSheet() != undoSheet )
+        {
+            SetCurrentSheet( undoSheet );
+            DisplayCurrentSheet();
+        }
+
+        auto* allPages = dynamic_cast<SCH_PAGE_SETTINGS_UNDO_ITEM*>( item );
+        if( allPages && allPages->IncludesOnlyErc() )
+        {
+            allPages->RestoreErc( this, deferred.alternate.get() );
+            *allPages = std::move( *deferred.alternate );
+        }
+        else if( allPages )
+        {
+            if( !allPages->BusAliasesMatch( Schematic() ) || !allPages->TextVariablesMatch( this )
+                    || allPages->IncludesNetChains() || allPages->IncludesSetup()
+                    || allPages->IncludesNetSettings() )
+            {
+                dirtyConnectivity = true;
+                connectivityCleanUp = GLOBAL_CLEANUP;
+            }
+            netSettingsChanged |= allPages->IncludesNetSettings();
+            allPages->RestoreAll( this, false, deferred.alternate.get() );
+            *allPages = std::move( *deferred.alternate );
+        }
+        else
+        {
+            DS_PROXY_UNDO_ITEM alternate( this );
+            item->Restore( this );
+            *item = std::move( alternate );
+        }
+        refreshHierarchy = true;
+        rebuildHierarchyNavigator = true;
+    }
+
     // We have now swapped all the group parent and group member pointers.  But it is a
     // risky proposition to bet on the pointers being invariant, so validate them all.
     //
@@ -576,7 +617,8 @@ void SCH_EDIT_FRAME::PutDataInPreviousState( PICKED_ITEMS_LIST* aList )
 
         SCH_COMMIT localCommit( m_toolManager );
 
-        RecalculateConnections( &localCommit, connectivityCleanUp );
+        RecalculateConnections( &localCommit, connectivityCleanUp, nullptr, aList->PreserveSchematicGeometry() );
+        if( netSettingsChanged ) SCH_PAGE_SETTINGS_UNDO_ITEM::RefreshNetSettings( this );
 
         if( connectivityCleanUp == GLOBAL_CLEANUP )
             SetSheetNumberAndCount();

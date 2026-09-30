@@ -98,7 +98,7 @@ message OpenDocument
   string path = 2;
 
   // Explicit graphical automation opt-in: initialize an unsaved empty root
-  // schematic when this project's file is absent. Existing files/documents
+  // schematic or PCB when this project's file is absent. Existing files/documents
   // are opened without replacement. Unsupported modes must reject this flag.
   bool create_if_missing = 3;
 }

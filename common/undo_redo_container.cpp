@@ -133,6 +133,7 @@ int PICKED_ITEMS_LIST::FindItem( const EDA_ITEM* aItem ) const
 void PICKED_ITEMS_LIST::ClearItemsList()
 {
     m_ItemsList.clear();
+    m_preserveSchematicGeometry = false;
 }
 
 
@@ -160,6 +161,7 @@ void PICKED_ITEMS_LIST::ClearListAndDeleteItems( std::function<void(EDA_ITEM*)> 
             aItemDeleter( wrapper.GetItem() );
         }
     }
+    m_preserveSchematicGeometry = false;
 }
 
 
@@ -281,6 +283,7 @@ bool PICKED_ITEMS_LIST::RemovePicker( unsigned aIdx )
 void PICKED_ITEMS_LIST::CopyList( const PICKED_ITEMS_LIST& aSource )
 {
     m_ItemsList = aSource.m_ItemsList;  // Vector's copy
+    m_preserveSchematicGeometry = aSource.m_preserveSchematicGeometry;
 }
 
 

@@ -586,6 +586,16 @@ void SCH_EDIT_FRAME::OnCrossProbeFlashTimer( wxTimerEvent& aEvent )
 
 SCH_EDIT_FRAME::~SCH_EDIT_FRAME()
 {
+    // Failed opens and forced teardown do not run doCloseWindow(). Handler
+    // registration must not outlive the frame, including standalone handlers.
+    if( auto* server = Pgm().ApiServerOrNull() )
+    {
+        server->DeregisterHandler( m_apiHandler.get() );
+        server->DeregisterHandler( m_apiHandlerCommon.get() );
+    }
+    if( wxTheApp )
+        wxTheApp->Unbind( EDA_EVT_PLUGIN_AVAILABILITY_CHANGED, &SCH_EDIT_FRAME::onPluginAvailabilityChanged, this );
+
     // Ensure that teardowns without doCloseWindow are fully unregistered
     if( m_schematic )
         Kiway().LocalHistory().UnregisterSaver( m_schematic );
@@ -1814,7 +1824,7 @@ void SCH_EDIT_FRAME::RefreshOperatingPointDisplay()
 }
 
 
-void SCH_EDIT_FRAME::AutoRotateItem( SCH_SCREEN* aScreen, SCH_ITEM* aItem )
+void SCH_EDIT_FRAME::AutoRotateItem( SCH_SCREEN* aScreen, SCH_ITEM* aItem, const SCH_SHEET_PATH* aPath )
 {
     if( aItem->Type() == SCH_GLOBAL_LABEL_T || aItem->Type() == SCH_HIER_LABEL_T )
     {
@@ -1823,7 +1833,7 @@ void SCH_EDIT_FRAME::AutoRotateItem( SCH_SCREEN* aScreen, SCH_ITEM* aItem )
         if( label->AutoRotateOnPlacement() )
         {
             SPIN_STYLE spin = aScreen->GetLabelOrientationForPoint( label->GetPosition(), label->GetSpinStyle(),
-                                                                    &GetCurrentSheet() );
+                                                                    aPath ? aPath : &GetCurrentSheet() );
 
             if( spin != label->GetSpinStyle() )
             {
@@ -1898,7 +1908,7 @@ void SCH_EDIT_FRAME::initScreenZoom()
 
 
 void SCH_EDIT_FRAME::RecalculateConnections( SCH_COMMIT* aCommit, SCH_CLEANUP_FLAGS aCleanupFlags,
-                                             PROGRESS_REPORTER* aProgressReporter )
+                                             PROGRESS_REPORTER* aProgressReporter, bool aPreserveGeometry )
 {
     wxString highlightedConn = GetHighlightedConnection();
     bool     hasHighlightedConn = !highlightedConn.IsEmpty();
@@ -1932,7 +1942,8 @@ void SCH_EDIT_FRAME::RecalculateConnections( SCH_COMMIT* aCommit, SCH_CLEANUP_FL
                                         GetCanvas()->GetView(),
                                         &changeHandler,
                                         m_undoList.m_CommandsList.empty() ? nullptr
-                                                                          : m_undoList.m_CommandsList.back() );
+                                                                          : m_undoList.m_CommandsList.back(),
+                                        aPreserveGeometry );
 
     GetCanvas()->GetView()->UpdateAllItemsConditionally(
             [&]( KIGFX::VIEW_ITEM* aItem ) -> int
@@ -2518,6 +2529,20 @@ void SCH_EDIT_FRAME::onCloseErcDialog( wxCommandEvent& aEvent )
     }
 }
 
+
+void SCH_EDIT_FRAME::RefreshErcDialog()
+{
+    if( m_ercDialog )
+        m_ercDialog->UpdateData();
+    GetCanvas()->GetView()->UpdateAllItems( KIGFX::REPAINT );
+    GetCanvas()->Refresh();
+}
+
+
+bool SCH_EDIT_FRAME::HasOpenSymbolFieldsTableDialog() const
+{
+    return m_symbolFieldsTableDialog && m_symbolFieldsTableDialog->IsShown();
+}
 
 DIALOG_SYMBOL_FIELDS_TABLE* SCH_EDIT_FRAME::GetSymbolFieldsTableDialog()
 {

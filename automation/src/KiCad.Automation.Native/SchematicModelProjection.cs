@@ -22,10 +22,31 @@ public static class SchematicModelProjection
     public static SchematicModelProjectionResult Reconcile(SchematicDesign baseline, EngineeringDesign desired,
         SchematicHierarchyData observed, IReadOnlyCollection<ComponentKnowledgeLibrary> libraries,
         CancellationToken cancellationToken = default)
+        => ReconcileCore(baseline, desired, observed, libraries, false, cancellationToken);
+
+    internal static SchematicModelProjectionResult ReconcileAfterRemovals(SchematicDesign baseline, EngineeringDesign desired,
+        SchematicHierarchyData observed, IReadOnlyCollection<ComponentKnowledgeLibrary> libraries, CancellationToken token)
+        => ReconcileCore(baseline, desired, observed, libraries, true, token);
+
+    internal static SchematicModelProjectionResult ReconcileAfterRestoration(SchematicDesign baseline, EngineeringDesign desired,
+        SchematicHierarchyData observed, SchematicNativeRestorationResult restoration,
+        IReadOnlyCollection<ComponentKnowledgeLibrary> libraries, CancellationToken token)
+        => ReconcileCore(baseline, desired, observed, libraries, false, token, restoration);
+
+    private static SchematicModelProjectionResult ReconcileCore(SchematicDesign baseline, EngineeringDesign desired,
+        SchematicHierarchyData observed, IReadOnlyCollection<ComponentKnowledgeLibrary> libraries,
+        bool allowNativeRemovals, CancellationToken cancellationToken, SchematicNativeRestorationResult? restoration = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var beforeReport = SchematicDesignBindings.Inspect(baseline, libraries, cancellationToken);
-        var afterReport = SchematicDesignBindings.Inspect(baseline with { Engineering = desired, Schematic = observed }, libraries, cancellationToken);
+        var desiredSymbols = desired.Circuit.Symbols.Select(s => s.Id).ToHashSet();
+        var afterDesign = baseline with { Engineering = desired, Schematic = observed,
+            PartSymbols = restoration?.BindingCandidate.PartSymbols ?? baseline.PartSymbols,
+            SheetBindings = restoration?.BindingCandidate.SheetBindings ?? baseline.SheetBindings,
+            SymbolBindings = restoration is not null ? restoration.BindingCandidate.SymbolBindings
+                : allowNativeRemovals ? baseline.SymbolBindings.Where(b => desiredSymbols.Contains(b.SymbolOccurrenceId)).ToArray()
+                : baseline.SymbolBindings };
+        var afterReport = SchematicDesignBindings.Inspect(afterDesign, libraries, cancellationToken);
         var issues = beforeReport.Issues.Concat(afterReport.Issues).Distinct().ToArray();
         var gaps = beforeReport.CoverageGaps.Concat(afterReport.CoverageGaps).Distinct().ToArray();
         if (issues.Length > 0) return new(null, [], issues, true, gaps, "unresolved_design_bindings");
@@ -37,29 +58,47 @@ public static class SchematicModelProjection
                 "Repeated instances of a shared native object disagree about its placement.");
 
         var before = NativeSymbols(baseline, baseline.Schematic);
-        var after = NativeSymbols(baseline, observed);
+        var after = NativeSymbols(afterDesign, observed);
         var source = baseline.Engineering.Circuit;
+        var oldComponents = source.Components.ToDictionary(c => c.Id);
+        var components = desired.Circuit.Components.ToDictionary(c => c.Id);
         // This projection handles properties, not rebinding or structural edits. Preserve such
         // input for the hierarchy/electrical reconciler instead of indexing stale owners.
-        if (!source.Components.Select(c => (c.Id, c.DefinitionId, c.SheetInstanceId)).ToHashSet().SetEquals(
+        if (restoration is not null)
+        {
+            if (SchematicNetReconciliation.Topology(restoration.BindingCandidate.Engineering.Circuit)
+                != SchematicNetReconciliation.Topology(desired.Circuit)
+                || SchematicNetReconciliation.NativeOwners(restoration.BindingCandidate.Schematic) != SchematicNetReconciliation.NativeOwners(observed))
+                return new(null, [], [], true, gaps, "model_topology_changed", "Only verified historical owners can use this projection.");
+        }
+        else if (allowNativeRemovals)
+        {
+            var removal = SchematicNativeRemovalProjection.Project(baseline, observed, libraries, cancellationToken);
+            if (removal.BindingCandidate is null || SchematicNetReconciliation.Topology(removal.BindingCandidate.Engineering.Circuit)
+                != SchematicNetReconciliation.Topology(desired.Circuit))
+                return new(null, [], [], true, gaps, "model_topology_changed", "Only independently validated native removals can use this projection.");
+        }
+        else if (!source.Components.Select(c => (c.Id, c.DefinitionId, c.SheetInstanceId)).ToHashSet().SetEquals(
                 desired.Circuit.Components.Select(c => (c.Id, c.DefinitionId, c.SheetInstanceId)))
             || !source.SheetInstances.ToHashSet().SetEquals(desired.Circuit.SheetInstances)
             || !source.Sheets.SelectMany(s => s.Components.Select(c => (Sheet: s.Id, c.Id, c.PartId))).ToHashSet().SetEquals(
                 desired.Circuit.Sheets.SelectMany(s => s.Components.Select(c => (Sheet: s.Id, c.Id, c.PartId))))
-            || !source.Symbols.Select(s => (s.Id, s.ComponentId)).ToHashSet().SetEquals(
-                desired.Circuit.Symbols.Select(s => (s.Id, s.ComponentId))))
+            || !source.Symbols.Select(s => (s.Id, s.ComponentId,
+                    Sheet: s.EffectiveSheetInstanceId(oldComponents[s.ComponentId]))).ToHashSet().SetEquals(
+                desired.Circuit.Symbols.Select(s => (s.Id, s.ComponentId,
+                    Sheet: s.EffectiveSheetInstanceId(components[s.ComponentId])))))
             return new(null, [], [], true, gaps, "model_topology_changed", "Reconcile changed model ownership before projecting native properties.");
         var conflicts = new List<SchematicProjectionConflict>();
-        var components = desired.Circuit.Components.ToDictionary(c => c.Id);
         var definitions = desired.Circuit.Sheets.SelectMany(s => s.Components).ToDictionary(c => c.Id);
         var symbols = desired.Circuit.Symbols.ToDictionary(s => s.Id);
-        var oldComponents = source.Components.ToDictionary(c => c.Id);
         bool remainder = HasUnprojectedChanges(baseline.Schematic, observed);
 
-        T Merge<T>(Guid owner, string field, T originalModel, T wanted, T originalNative, T currentNative)
+        T Merge<T>(Guid owner, string field, T originalModel, T wanted, T originalNative, T currentNative,
+            Func<T, T, bool>? equivalent = null)
         {
-            if (EqualityComparer<T>.Default.Equals(originalNative, currentNative)) return wanted;
-            if (EqualityComparer<T>.Default.Equals(wanted, originalModel) || EqualityComparer<T>.Default.Equals(wanted, currentNative))
+            equivalent ??= EqualityComparer<T>.Default.Equals;
+            if (equivalent(originalNative, currentNative)) return wanted;
+            if (equivalent(wanted, originalModel) || equivalent(wanted, currentNative))
                 return currentNative;
             conflicts.Add(new(owner, field, "competing_edit", JsonSerializer.SerializeToElement(originalModel),
                 JsonSerializer.SerializeToElement(wanted), JsonSerializer.SerializeToElement(currentNative)));
@@ -67,12 +106,13 @@ public static class SchematicModelProjection
         }
 
         string? Shared(Guid owner, string field, string original, string wanted,
-            IEnumerable<SymbolOccurrence> occurrences, Func<SchematicSymbolInstance, string?> read)
+            IEnumerable<SymbolOccurrence> occurrences, Func<SchematicSymbolInstance, string?> read,
+            IEnumerable<SymbolOccurrence>? expanded = null)
         {
-            var ids = occurrences.Select(s => s.Id).ToArray();
+            var ids = occurrences.Where(s => desiredSymbols.Contains(s.Id)).Select(s => s.Id).ToArray();
             if (ids.Length == 0) return wanted;
             var previous = ids.Select(id => read(before[id])).Distinct(StringComparer.Ordinal).ToArray();
-            var current = ids.Select(id => read(after[id])).Distinct(StringComparer.Ordinal).ToArray();
+            var current = (expanded?.Select(s => s.Id) ?? ids).Select(id => read(after[id])).Distinct(StringComparer.Ordinal).ToArray();
             if (previous.Length != 1 || current.Length != 1 || previous[0] is null || current[0] is null)
             {
                 conflicts.Add(new(owner, field, "inconsistent_native_owners", JsonSerializer.SerializeToElement(previous),
@@ -82,23 +122,25 @@ public static class SchematicModelProjection
             return Merge(owner, field, original, wanted, previous[0], current[0]);
         }
 
-        foreach (var component in source.Components)
+        foreach (var component in source.Components.Where(c => components.ContainsKey(c.Id)))
         {
             cancellationToken.ThrowIfCancellationRequested();
             var wanted = components[component.Id];
             string? reference = Shared(component.Id, "reference", component.Reference, wanted.Reference,
-                source.Symbols.Where(s => s.ComponentId == component.Id), s => s.ReferenceField?.Text?.Text_);
+                source.Symbols.Where(s => s.ComponentId == component.Id), s => s.ReferenceField?.Text?.Text_,
+                restoration is null ? null : desired.Circuit.Symbols.Where(s => s.ComponentId == component.Id));
             components[component.Id] = wanted with { Reference = reference! };
         }
-        foreach (var definition in source.Sheets.SelectMany(s => s.Components))
+        foreach (var definition in source.Sheets.SelectMany(s => s.Components).Where(c => definitions.ContainsKey(c.Id)))
         {
             cancellationToken.ThrowIfCancellationRequested();
             var wanted = definitions[definition.Id];
             string? value = Shared(definition.Id, "value", definition.Value, wanted.Value,
-                source.Symbols.Where(s => oldComponents[s.ComponentId].DefinitionId == definition.Id), s => s.ValueField?.Text?.Text_);
+                source.Symbols.Where(s => oldComponents[s.ComponentId].DefinitionId == definition.Id), s => s.ValueField?.Text?.Text_,
+                restoration is null ? null : desired.Circuit.Symbols.Where(s => components[s.ComponentId].DefinitionId == definition.Id));
             definitions[definition.Id] = wanted with { Value = value! };
         }
-        foreach (var occurrence in source.Symbols)
+        foreach (var occurrence in source.Symbols.Where(s => desiredSymbols.Contains(s.Id)))
         {
             cancellationToken.ThrowIfCancellationRequested();
             var wanted = symbols[occurrence.Id]; var oldNative = before[occurrence.Id]; var newNative = after[occurrence.Id];
@@ -118,11 +160,12 @@ public static class SchematicModelProjection
                 try
                 {
                     var previous = Placement(oldNative); var current = Placement(newNative);
-                    if (occurrence.Placement is not null && occurrence.Placement != previous)
+                    if (occurrence.Placement is not null && !SchematicOrientation.Equivalent(occurrence.Placement, previous))
                         conflicts.Add(new(occurrence.Id, "placement", "unaligned_projection_baseline",
                             JsonSerializer.SerializeToElement(occurrence.Placement), JsonSerializer.SerializeToElement(wanted.Placement),
                             JsonSerializer.SerializeToElement(new { previous, current })));
-                    else placement = Merge(occurrence.Id, "placement", occurrence.Placement, wanted.Placement, previous, current);
+                    else placement = Merge(occurrence.Id, "placement", occurrence.Placement, wanted.Placement, previous, current,
+                        (a, b) => SchematicOrientation.Equivalent(a, b));
                 }
                 catch (AutomationException error)
                 {
@@ -156,7 +199,8 @@ public static class SchematicModelProjection
             .Select(p => (Path: string.Join('/', screen.Metadata.Document.SheetPath.Path.Select(id => id.Value)), Symbol: p.Unpack<SchematicSymbolInstance>())))
             .ToDictionary(p => p.Path + "#" + p.Symbol.Id.Value, p => p.Symbol, StringComparer.Ordinal);
         return design.SymbolBindings.ToDictionary(b => b.SymbolOccurrenceId, b => native[
-            sheets[components[occurrences[b.SymbolOccurrenceId].ComponentId].SheetInstanceId] + "#" + b.NativeObjectId.ToString("D")]);
+            sheets[occurrences[b.SymbolOccurrenceId].EffectiveSheetInstanceId(components[occurrences[b.SymbolOccurrenceId].ComponentId])]
+                + "#" + b.NativeObjectId.ToString("D")]);
     }
 
     internal static SymbolPlacement Placement(SchematicSymbolInstance symbol)

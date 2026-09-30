@@ -24,6 +24,8 @@
 #include <vector>
 
 #include <advanced_config.h>
+#include <api/api_server.h>
+#include <api/document_lifecycle_controller.h>
 #include <confirm.h>
 #include <kidialog.h>
 #include <core/arraydim.h>
@@ -81,7 +83,7 @@
 #include <widgets/filedlg_import_non_kicad.h>
 #include <widgets/kistatusbar.h>
 #include <widgets/wx_html_report_box.h>
-#include <wx_filename.h>  // For ::ResolvePossibleSymlinks()
+#include <wx_filename.h>
 #include <kiplatform/io.h>
 
 #include <wx/stdpaths.h>
@@ -475,9 +477,16 @@ int PCB_EDIT_FRAME::inferLegacyEdgeClearance( BOARD* aBoard, bool aShowUserMsg )
 
 bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, int aCtl )
 {
+    const bool automation = Pgm().ApiServerOrNull() && Pgm().GetApiServer().IsAutomation();
     // This is for python:
     if( aFileSet.size() != 1 )
     {
+        if( automation )
+        {
+            wxLogError( "Automation PCB open requires exactly one native file" );
+            return false;
+        }
+
         DisplayError( this, wxString::Format( "Pcbnew:%s() takes a single filename", __func__ ) );
         return false;
     }
@@ -485,6 +494,36 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
     wxString   fullFileName( aFileSet[0] );
     wxFileName wx_filename( fullFileName );
     wxString   msg;
+
+    if( automation )
+    {
+        wxFileName expected( Prj().GetProjectFullName() );
+        expected.SetExt( FILEEXT::KiCadPcbFileExtension );
+        expected.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+        wxFileName requested( wx_filename );
+        requested.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+
+        // Keep the existing native project and editor owners. Interactive
+        // recovery and imports cannot make decisions on an agent's behalf.
+        if( !wx_filename.IsAbsolute() || requested != expected
+                || wx_filename.GetExt() != FILEEXT::KiCadPcbFileExtension
+                || wxFileName::DirExists( fullFileName )
+                || ( !wx_filename.FileExists() && !( aCtl & KICTL_CREATE ) )
+                || ( wx_filename.FileExists() && !wxFileName::IsFileReadable( fullFileName ) )
+                || IsContentModified() || m_footprintFieldsTableDialog || IsModal()
+                || ( aCtl & ( KICTL_NONKICAD_ONLY | KICTL_IMPORT_LIB ) ) )
+        {
+            wxLogError( "Automation open requires this project's native PCB (or explicit creation) and an idle unmodified editor" );
+            return false;
+        }
+
+        if( !Kiway().LocalHistory().FindStaleAutosaveFiles(
+                    wx_filename.GetPath(), { FILEEXT::KiCadPcbFileExtension } ).empty() )
+        {
+            wxLogError( "Recover stale PCB autosaves interactively before automation open" );
+            return false;
+        }
+    }
 
     if( Kiface().IsSingle() )
         KIPLATFORM::APP::RegisterApplicationRestart( fullFileName );
@@ -507,6 +546,12 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
                         wx_filename.GetFullName(),
                         lock->GetUsername(),
                         lock->GetHostname() );
+
+            if( automation )
+            {
+                wxLogError( "%s", msg );
+                return false;
+            }
 
             if( !AskOverrideLock( this, msg ) )
                 return false;
@@ -534,6 +579,7 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
     pro.SetExt( FILEEXT::ProjectFileExtension );
 
     bool is_new = !wxFileName::IsFileReadable( fullFileName );
+    const auto creationBaseline = is_new ? FILE_CONTENT_BASELINE::Read( fullFileName ) : FILE_CONTENT_BASELINE{};
 
     wxString previousBoardFileName = GetBoard() ? GetBoard()->GetFileName() : wxString();
 
@@ -569,7 +615,10 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
     if( pluginType == PCB_IO_MGR::FILE_TYPE_NONE )
     {
         progressReporter.Hide();
-        DisplayErrorMessage( this, _( "File format is not supported" ), wxEmptyString );
+        if( automation )
+            wxLogError( "PCB file format is not supported" );
+        else
+            DisplayErrorMessage( this, _( "File format is not supported" ), wxEmptyString );
         return false;
     }
 
@@ -615,7 +664,7 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 
     // Crash-recovery: when zip-format autosave is active, look for autosave files newer than
     // the saved board and offer to recover them before the load happens.
-    if( !is_new )
+    if( !is_new && !automation )
         CheckForAutosaveFiles( wx_filename.GetPath(), { FILEEXT::KiCadPcbFileExtension } );
 
     if( is_new )
@@ -624,6 +673,8 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
         GetBoard()->SetProject( &Prj() );
 
         GetBoard()->SetFileName( fullFileName );
+        if( creationBaseline.Known() && !creationBaseline.Exists() )
+            GetBoard()->SetFileBaseline( creationBaseline );
 
         OnModify();
     }
@@ -709,6 +760,9 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
                                 [&]( wxString aTitle, int aIcon, wxString aMessage,
                                      wxString aAction ) -> bool
                                 {
+                                    if( automation )
+                                        THROW_IO_ERROR( "PCB loading requires an interactive decision: " + aMessage );
+
                                     KIDIALOG dlg( nullptr, aMessage, aTitle,
                                                   wxOK | wxCANCEL | aIcon );
 
@@ -723,6 +777,9 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 
             std::unique_ptr<BOARD> loaded =
                     BOARD_LOADER::Load( fullFileName, pluginType, &Prj(), loaderOptions );
+            if( automation && loaded && loaded->GetFileFormatVersionAtLoad() > SEXPR_BOARD_FILE_VERSION )
+                THROW_IO_ERROR( "Automation cannot open a PCB newer than this native writer format" );
+
             loadedBoard = loaded.release();
 
 #if USE_INSTRUMENTATION
@@ -734,7 +791,10 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
         {
             msg.Printf( _( "Error loading PCB '%s'." ), fullFileName );
             progressReporter.Hide();
-            DisplayErrorMessage( this, msg, ffe.Problem() );
+            if( automation )
+                wxLogError( "%s: %s", msg, ffe.Problem() );
+            else
+                DisplayErrorMessage( this, msg, ffe.Problem() );
 
             failedLoad = true;
         }
@@ -744,7 +804,10 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
             {
                 msg.Printf( _( "Error loading PCB '%s'." ), fullFileName );
                 progressReporter.Hide();
-                DisplayErrorMessage( this, msg, ioe.What() );
+                if( automation )
+                    wxLogError( "%s: %s", msg, ioe.What() );
+                else
+                    DisplayErrorMessage( this, msg, ioe.What() );
             }
 
             failedLoad = true;
@@ -753,7 +816,10 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
         {
             msg.Printf( _( "Memory exhausted loading PCB '%s'" ), fullFileName );
             progressReporter.Hide();
-            DisplayErrorMessage( this, msg, wxEmptyString );
+            if( automation )
+                wxLogError( "%s", msg );
+            else
+                DisplayErrorMessage( this, msg, wxEmptyString );
 
             failedLoad = true;
         }
@@ -803,7 +869,7 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
                 // Do not show the inferred edge clearance warning dialog when loading third
                 // party boards.  For some reason the dialog completely hangs all of KiCad and
                 // the imported board cannot be saved.
-                int edgeClearance = inferLegacyEdgeClearance( loadedBoard, !converted );
+                int edgeClearance = inferLegacyEdgeClearance( loadedBoard, !converted && !automation );
                 loadedBoard->GetDesignSettings().m_CopperEdgeClearance = edgeClearance;
             }
 
@@ -977,21 +1043,31 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
                                   bool aChangeProject )
 {
+    const bool automation = Pgm().ApiServerOrNull() && Pgm().GetApiServer().IsAutomation();
+    auto reportFailure = [&]( const wxString& aMessage )
+    {
+        if( automation ) wxLogError( "%s", aMessage );
+        else DisplayError( this, aMessage );
+    };
     // please, keep it simple.  prompting goes elsewhere.
     wxFileName pcbFileName = aFileName;
 
     if( pcbFileName.GetExt() == FILEEXT::LegacyPcbFileExtension )
         pcbFileName.SetExt( FILEEXT::KiCadPcbFileExtension );
 
-    // Write through symlinks, don't replace them
-    WX_FILENAME::ResolvePossibleSymlinks( pcbFileName );
+    // A checked save names the board as the document spells it.
+    const wxString documentPath = pcbFileName.GetFullPath();
 
-    if( !IsWritable( pcbFileName ) )
+    // The board writer follows a symbolic link to its target itself and never replaces the link
+    // (PRETTIFIED_FILE_OUTPUTFORMATTER), so the board keeps the name it was opened with: its loaded
+    // file version is renewed under that name, and its project file is the one beside it.
+
+    if( !IsWritable( pcbFileName, !automation ) )
     {
         wxString msg = wxString::Format( _( "Insufficient permissions to write file '%s'." ),
                                          pcbFileName.GetFullPath() );
 
-        DisplayError( this, msg );
+        reportFailure( msg );
         return false;
     }
 
@@ -1003,12 +1079,66 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
     projectFile.SetExt( FILEEXT::ProjectFileExtension );
     rulesFile.SetExt( FILEEXT::DesignRulesFileExtension );
 
+    // Tell a checked save why the project stops this save. KiCad's own read-only state is a
+    // refusal that making the board's files writable does not fix. A file the file system blocks
+    // is named as well, because a reported problem replaces the checked save's own check of every
+    // file.
+    auto reportProjectProblems = [&]()
+    {
+        using SAVE_PROBLEM = DOCUMENT_LIFECYCLE_CONTROLLER::SAVE_PROBLEM;
+
+        if( !projectFile.FileExists() )
+        {
+            DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem(
+                    SAVE_PROBLEM::SAVE_REFUSED, projectFile.GetFullPath(),
+                    wxS( "the project file does not exist, and automation saves a board only together with its "
+                         "project file" ) );
+        }
+
+        if( const wxString readOnly = DOCUMENT_LIFECYCLE_CONTROLLER::ReadOnlyProjectReason( Prj() );
+            !readOnly.empty() )
+        {
+            DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem( SAVE_PROBLEM::SAVE_REFUSED,
+                                                              Prj().GetProjectFullName(), readOnly );
+        }
+
+        for( const wxString& path : { documentPath, projectFile.GetFullPath() } )
+        {
+            if( const wxString blocker = DOCUMENT_LIFECYCLE_CONTROLLER::WriteBlocker( path );
+                !blocker.empty() && wxFileName::FileExists( path ) )
+            {
+                DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem( SAVE_PROBLEM::WRITE_BLOCKED, path, blocker );
+            }
+        }
+    };
+
+    if( automation && ( !projectFile.FileExists() || !IsWritable( projectFile, false ) ) )
+    {
+        reportProjectProblems();
+        reportFailure( "The project file is missing or not writable; the PCB was not saved" );
+        return false;
+    }
+
     if( projectFile.FileExists() )
     {
-        GetSettingsManager()->SaveProject();
+        StoreProjectEditorState();
+
+        // A project KiCad holds read-only writes nothing, so its settings writer never starts.
+        const bool refused = automation && Prj().IsReadOnly();
+        bool       projectSaved = GetSettingsManager()->SaveProject();
+
+        if( automation && !projectSaved )
+        {
+            if( refused )
+                reportProjectProblems();
+
+            reportFailure( "Project persistence failed; the PCB was not saved" );
+            return false;
+        }
     }
     else if( aChangeProject )
     {
+        StoreProjectEditorState();
         Prj().SetReadOnly( false );
         GetSettingsManager()->SaveProjectAs( projectFile.GetFullPath() );
     }
@@ -1020,8 +1150,9 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
 
     if( !msg.IsEmpty() )
     {
-        DisplayError( this, wxString::Format( _( "Error saving custom rules file '%s'." ),
-                                              rulesFile.GetFullPath() ) );
+        reportFailure( wxString::Format( _( "Error saving custom rules file '%s'." ),
+                                         rulesFile.GetFullPath() ) );
+        if( automation ) return false;
     }
 
     if( projectFile.FileExists() )
@@ -1049,9 +1180,14 @@ bool PCB_EDIT_FRAME::SavePcbFile( const wxString& aFileName, bool addToHistory,
     }
     catch( const IO_ERROR& ioe )
     {
-        DisplayError( this, wxString::Format( _( "Error saving board file '%s'.\n%s" ),
-                                              pcbFileName.GetFullPath(),
-                                              ioe.What() ) );
+        // The writer names the file and the system error, for example a full disk. A checked
+        // save that refused the write itself ignores this report and keeps its own reason.
+        if( automation )
+            DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem(
+                    DOCUMENT_LIFECYCLE_CONTROLLER::SAVE_PROBLEM::WRITE_BLOCKED, documentPath, ioe.Problem() );
+
+        reportFailure( wxString::Format( _( "Error saving board file '%s'.\n%s" ),
+                                         pcbFileName.GetFullPath(), ioe.What() ) );
         return false;
     }
 

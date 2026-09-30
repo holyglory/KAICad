@@ -31,7 +31,7 @@ class GAL_OPTIONS_PANEL;
 class PANEL_SETUP_FORMATTING : public PANEL_SETUP_FORMATTING_BASE
 {
 public:
-    PANEL_SETUP_FORMATTING( wxWindow* aWindow, SCH_EDIT_FRAME* aFrame  );
+    PANEL_SETUP_FORMATTING( wxWindow* aWindow, SCH_EDIT_FRAME* aFrame, SCHEMATIC_SETTINGS* aSettings = nullptr );
 
     bool TransferDataToWindow() override;
     bool TransferDataFromWindow() override;
@@ -42,7 +42,8 @@ protected:
     void onCheckBoxIref( wxCommandEvent& event ) override;
 
 private:
-    SCH_EDIT_FRAME*    m_frame;
+    bool loadSettings( const SCHEMATIC_SETTINGS& aSettings );
+    SCHEMATIC_SETTINGS* m_settings;
 
     UNIT_BINDER        m_textSize;
     UNIT_BINDER        m_lineWidth;

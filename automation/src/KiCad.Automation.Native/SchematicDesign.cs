@@ -7,7 +7,8 @@ namespace KiCad.Automation.Native;
 public sealed record SchematicSheetBinding(Guid SheetInstanceId, IReadOnlyList<Guid> NativePath);
 public sealed record SchematicSymbolBinding(Guid SymbolOccurrenceId, Guid NativeObjectId);
 public sealed record SchematicDesign(EngineeringDesign Engineering, SchematicHierarchyData Schematic,
-    IReadOnlyList<SchematicSheetBinding> SheetBindings, IReadOnlyList<SchematicSymbolBinding> SymbolBindings);
+    IReadOnlyList<SchematicSheetBinding> SheetBindings, IReadOnlyList<SchematicSymbolBinding> SymbolBindings,
+    IReadOnlyList<SchematicPartSymbol>? PartSymbols = null);
 public sealed record SchematicBindingIssue(string Code, Guid? ModelId, string? NativePath, Guid? NativeObjectId);
 public sealed record SchematicBindingDifference(Guid SymbolOccurrenceId, string Field, string? ModelValue, string? NativeValue);
 public sealed record SchematicBindingReport(IReadOnlyList<SchematicBindingIssue> Issues,
@@ -26,6 +27,7 @@ public static class SchematicDesignBindings
     {
         cancellationToken.ThrowIfCancellationRequested();
         design.Engineering.Validate(libraries);
+        SchematicPartSymbols.Validate(design);
         var topology = SchematicHierarchyTopology.Inspect(design.Schematic, cancellationToken);
         var issues = new List<SchematicBindingIssue>();
         var differences = new List<SchematicBindingDifference>();
@@ -112,7 +114,7 @@ public static class SchematicDesignBindings
                 Issue("ambiguous_symbol_binding", binding.SymbolOccurrenceId, native: binding.NativeObjectId);
             else if (!occurrences.TryGetValue(binding.SymbolOccurrenceId, out var occurrence))
                 Issue("unknown_model_symbol", binding.SymbolOccurrenceId, native: binding.NativeObjectId);
-            else if (!mappedSheets.TryGetValue(components[occurrence.ComponentId].SheetInstanceId, out var sheet))
+            else if (!mappedSheets.TryGetValue(occurrence.EffectiveSheetInstanceId(components[occurrence.ComponentId]), out var sheet))
                 Issue("unresolved_symbol_sheet", binding.SymbolOccurrenceId, native: binding.NativeObjectId);
             else candidates.Add((binding, occurrence, sheet.Path, ObjectKey(sheet.Path, binding.NativeObjectId)));
         }

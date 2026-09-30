@@ -30,6 +30,7 @@
 #include <connection_graph.h>
 #include <gal/graphics_abstraction_layer.h>
 #include <sch_edit_frame.h>
+#include <sch_commit.h>
 #include <sch_field.h>
 #include <sch_netchain.h>
 #include <sch_pin.h>
@@ -115,13 +116,11 @@ bool DIALOG_CREATE_NET_CHAIN::TransferDataFromWindow()
     if( !validateAndCreate() )
         return false;
 
-    // Drop livePtr-bearing rows BEFORE the OnModify notify, then reload AFTER.  OnModify()
-    // does not recalculate today, but if a future hook attaches a recalc to it, the cleared
-    // window keeps livePtrs from dangling across the destruction of m_potentialNetChains.
+    // validateAndCreate drops livePtr-bearing rows before pushing its native
+    // commit, which may rebuild the connection graph. Reload only afterward.
     m_rows.clear();
     m_filteredIndices.clear();
     m_nameInput->Clear();
-    m_frame->OnModify();
     loadPotentials();
     rebuildGrid();
 
@@ -179,7 +178,7 @@ bool DIALOG_CREATE_NET_CHAIN::validateAndCreate()
         return false;
     }
 
-    if( graph->GetNetChainByName( name ) )
+    if( graph->GetNetChainByName( name ) || graph->GetNetChainDefinitions().contains( name ) )
     {
         wxMessageBox( wxString::Format( _( "A net chain named '%s' already exists." ), name ), _( "Create Net Chain" ),
                       wxOK | wxICON_ERROR, this );
@@ -187,9 +186,13 @@ bool DIALOG_CREATE_NET_CHAIN::validateAndCreate()
     }
 
     const POTENTIAL_ROW& prow = m_rows[dataIdx];
+    SCH_COMMIT commit( m_frame );
 
     if( prow.livePtr )
     {
+        const auto& members = prow.livePtr->GetSymbols();
+        if( !commit.StageNetChainEdit( std::set<SCH_SYMBOL*>( members.begin(), members.end() ) ) )
+            return false;
         SCH_NETCHAIN* committed = graph->CreateNetChainFromPotential( prow.livePtr, name );
 
         if( !committed )
@@ -211,6 +214,9 @@ bool DIALOG_CREATE_NET_CHAIN::validateAndCreate()
         if( toItem && toItem->Type() == SCH_SYMBOL_T )
             symbols.insert( static_cast<SCH_SYMBOL*>( toItem ) );
 
+        if( !commit.StageNetChainEdit( symbols ) )
+            return false;
+
         SCH_NETCHAIN* committed = graph->CreateManualNetChain( name, symbols, prow.memberNets,
                                                                prow.forceFromPinUuid,
                                                                prow.forceToPinUuid,
@@ -225,6 +231,11 @@ bool DIALOG_CREATE_NET_CHAIN::validateAndCreate()
         }
     }
 
+    // Native commit can invalidate the potential-chain pointers. No row may
+    // retain one while the recalculation and model-change callbacks run.
+    m_rows.clear();
+    m_filteredIndices.clear();
+    commit.Push( _( "Create Net Chain" ) );
     m_createdCount++;
     return true;
 }
@@ -378,7 +389,7 @@ void DIALOG_CREATE_NET_CHAIN::OnFindPathClicked( wxCommandEvent& aEvent )
     {
         for( SCH_PIN* pinB : toPins )
         {
-            SCH_NETCHAIN* chain = graph->FindPotentialNetChainBetweenPins( pinA, pinB );
+            SCH_NETCHAIN* chain = graph->FindPotentialNetChainBetweenPins( pinA, fromSheet, pinB, toSheet );
 
             if( chain && !seenChains.count( chain ) )
             {

@@ -531,6 +531,25 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
 
     m_apiHandler = std::make_unique<API_HANDLER_PCB>( this );
     Pgm().GetApiServer().RegisterHandler( m_apiHandler.get() );
+    // Activation is a DRC recovery checkpoint: changes that reached no notification,
+    // such as edits in another editor of this process, are observed before an agent
+    // reads an older check. The checkpoint runs after the activation event, and at
+    // most one is queued at a time: activations while it is queued (focus changes,
+    // dialogs closing) add none. The queued call is discarded with the frame.
+    Bind( wxEVT_ACTIVATE, [this, pending = std::make_shared<bool>( false )]( wxActivateEvent& event )
+    {
+        if( event.GetActive() && !m_isClosing && m_apiHandler && !*pending )
+        {
+            *pending = true;
+            CallAfter( [this, pending]()
+            {
+                *pending = false;
+                if( !m_isClosing && m_apiHandler )
+                    m_apiHandler->ObserveNativeDrcInputs( false );
+            } );
+        }
+        event.Skip();
+    } );
 
     if( Kiface().IsSingle() )
     {
@@ -764,6 +783,20 @@ void PCB_EDIT_FRAME::OnCrossProbeFlashTimer( wxTimerEvent& aEvent )
 
 PCB_EDIT_FRAME::~PCB_EDIT_FRAME()
 {
+    // DRC receipts must not keep listening to the board this frame is about to free.
+    if( m_apiHandler )
+        m_apiHandler->DetachDrcBoard( GetBoard() );
+
+    // Failed opens use Destroy(), bypassing doCloseWindow(). Never leave the
+    // process-wide dispatcher pointing at handlers owned by this dead frame.
+    if( auto* server = Pgm().ApiServerOrNull() )
+    {
+        server->DeregisterHandler( m_apiHandler.get() );
+        server->DeregisterHandler( m_apiHandlerCommon.get() );
+    }
+    if( wxTheApp )
+        wxTheApp->Unbind( EDA_EVT_PLUGIN_AVAILABILITY_CHANGED, &PCB_EDIT_FRAME::onPluginAvailabilityChanged, this );
+
     // Always ensure that we are unregistered even in a close without graceful doCloseWindow()
     if( GetBoard() )
         Kiway().LocalHistory().UnregisterSaver( GetBoard() );
@@ -844,6 +877,10 @@ void PCB_EDIT_FRAME::detachTextVarTracker()
 
 void PCB_EDIT_FRAME::SetBoard( BOARD* aBoard, bool aBuildConnectivity, PROGRESS_REPORTER* aReporter )
 {
+    // PCB_BASE_FRAME::SetBoard() deletes m_pcb; its DRC receipts become stale first.
+    if( m_apiHandler && m_pcb != aBoard )
+        m_apiHandler->DetachDrcBoard( m_pcb );
+
     // PCB_BASE_FRAME::SetBoard() deletes m_pcb; detach tracker consumers first.
     if( m_pcb )
     {
@@ -1732,7 +1769,10 @@ void PCB_EDIT_FRAME::doCloseWindow()
     if( Prj().GetLocalSettings().ShouldAutoSave() )
     {
         m_netInspectorPanel->SaveSettings();
-        SaveProjectLocalSettings();
+        if( Pgm().ApiServerOrNull() && Pgm().GetApiServer().IsCleanCloseActive() )
+            saveProjectSettings(); // Local UI preferences only; design was checked before closing.
+        else
+            SaveProjectLocalSettings();
     }
     else
     {
@@ -2252,6 +2292,11 @@ void PCB_EDIT_FRAME::SetLastPath( LAST_PATH_TYPE aType, const wxString& aLastPat
 void PCB_EDIT_FRAME::OnModify()
 {
     PCB_BASE_FRAME::OnModify();
+    // This boundary is shared by manual edits, settings changes and undo/redo.
+    // Do not wait for another IPC request to cancel obsolete native work.
+    if( m_apiHandler )
+        m_apiHandler->DrcBoardChanged( GetBoard() );
+
     Kiway().LocalHistory().NoteFileChange( GetBoard()->GetFileName() );
     m_ZoneFillsDirty = true;
 
@@ -2639,7 +2684,16 @@ int PCB_EDIT_FRAME::ShowExchangeFootprintsDialog( FOOTPRINT* aFootprint, bool aU
 
 void PCB_EDIT_FRAME::CommonSettingsChanged( int aFlags )
 {
+    if( ( aFlags & NET_SETTINGS_CHANGED ) && GetBoard() )
+    {
+        GetBoard()->SynchronizeNetsAndNetClasses( false );
+        RefreshProjectNetColors();
+    }
     PCB_BASE_EDIT_FRAME::CommonSettingsChanged( aFlags );
+    // A settings change, such as Configure Paths, may repoint footprint libraries in
+    // memory without any file notification: compare DRC library content too.
+    if( m_apiHandler )
+        m_apiHandler->ObserveNativeDrcInputs( true );
     m_appearancePanel->CommonSettingsChanged( aFlags );
 
     PrepareLayerIndicator();

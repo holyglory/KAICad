@@ -7,7 +7,7 @@ public enum GuidanceStrength { Information, Preference, Requirement }
 public sealed record GuidanceStatement(Guid Id, string Key, string Category, string Text,
     GuidanceStrength Strength, string Applicability, IReadOnlyList<SourceReference> Sources,
     VerificationState Verification = VerificationState.Unverified, Guid? Replaces = null,
-    string? ExceptionRationale = null);
+    string? ExceptionRationale = null, GuidanceQuantity? Quantity = null);
 
 // Library revision is explicit. Resolving an instance never silently upgrades it.
 public sealed record ComponentClass(Guid Id, string Name, Guid? BaseClassId,
@@ -19,10 +19,19 @@ public sealed record ResolvedGuidance(GuidanceStatement Statement, Guid OwnerId,
 public sealed record GuidanceReplacement(ResolvedGuidance Original, ResolvedGuidance Replacement);
 public sealed record GuidanceConflict(string Key, string Applicability, IReadOnlyList<Guid> StatementIds);
 public sealed record GuidanceResolution(IReadOnlyList<ResolvedGuidance> Effective,
-    IReadOnlyList<GuidanceReplacement> Replacements, IReadOnlyList<GuidanceConflict> Conflicts);
+    IReadOnlyList<GuidanceReplacement> Replacements, IReadOnlyList<GuidanceConflict> Conflicts,
+    IReadOnlyList<QuantityIssue>? QuantityIssues = null);
 
 public static class ComponentGuidance
 {
+    /// <summary>Resolve reusable class guidance without inventing a component
+    /// instance. Native symbol inheritance and physical realization remain separate.</summary>
+    public static GuidanceResolution ResolveClass(ComponentKnowledgeLibrary library, Guid classId)
+    {
+        Validate(library);
+        return ResolveChain(Chain(library.Classes.ToDictionary(c => c.Id), classId), []);
+    }
+
     public static void Validate(ComponentKnowledgeLibrary library)
     {
         var ids = new HashSet<Guid>();
@@ -120,15 +129,17 @@ public static class ComponentGuidance
             .Where(g => g.Count() > 1)
             .OrderBy(g => g.Key.Key, StringComparer.Ordinal).ThenBy(g => g.Key.Applicability, StringComparer.Ordinal)
             .Select(g => new GuidanceConflict(g.Key.Key, g.Key.Applicability, g.Select(r => r.Statement.Id).ToArray())).ToArray();
-        return new(ordered, replacements, conflicts);
+        var quantities = ordered.SelectMany(r => r.Statement.Quantity?.Inspect(r.Statement.Id) ?? []).ToArray();
+        return new(ordered, replacements, conflicts, quantities);
     }
 
-    private static void ValidateStatement(GuidanceStatement statement, HashSet<Guid> ids)
+    internal static void ValidateStatement(GuidanceStatement statement, HashSet<Guid> ids)
     {
         AddId(statement.Id, ids);
         Required(statement.Key, "Guidance key");
         Required(statement.Category, "Guidance category");
         Required(statement.Text, "Guidance text");
+        statement.Quantity?.ValidateShape();
         if (!Enum.IsDefined(statement.Strength) || !Enum.IsDefined(statement.Verification))
             throw Invalid("invalid_guidance", "Unknown guidance strength or verification state.");
         foreach (var source in statement.Sources)

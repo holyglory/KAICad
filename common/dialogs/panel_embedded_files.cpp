@@ -93,7 +93,8 @@ PANEL_EMBEDDED_FILES::PANEL_EMBEDDED_FILES( wxWindow* aParent, EMBEDDED_FILES* a
         PANEL_EMBEDDED_FILES_BASE( aParent ),
         m_files( aFiles ),
         m_localFiles( new EMBEDDED_FILES() ),
-        m_inheritedFiles( std::move( aInheritedFiles ) )
+        m_inheritedFiles( std::move( aInheritedFiles ) ),
+        m_deferCommit( ( aFlags & EMBEDDED_FILES_DEFER_COMMIT ) != 0 )
 {
     m_files_grid->SetUseNativeColLabels();
 
@@ -101,6 +102,7 @@ PANEL_EMBEDDED_FILES::PANEL_EMBEDDED_FILES( wxWindow* aParent, EMBEDDED_FILES* a
     // on an isolated working copy.  m_localFiles is committed back to m_files on OK.
     for( auto& [name, file] : m_files->EmbeddedFileMap() )
         m_localFiles->AddFile( new EMBEDDED_FILES::EMBEDDED_FILE( *file ) );
+    m_localFiles->SetAreFontsEmbedded( m_files->GetAreFontsEmbedded() );
 
     for( const EMBEDDED_FILES* inheritedFiles : m_inheritedFiles )
     {
@@ -182,13 +184,19 @@ bool PANEL_EMBEDDED_FILES::TransferDataToWindow()
         ii++;
     }
 
-    m_cbEmbedFonts->SetValue( m_files->GetAreFontsEmbedded() );
+    m_cbEmbedFonts->SetValue( m_deferCommit ? m_localFiles->GetAreFontsEmbedded()
+                                          : m_files->GetAreFontsEmbedded() );
     return true;
 }
 
 
 bool PANEL_EMBEDDED_FILES::TransferDataFromWindow()
 {
+    if( m_deferCommit )
+    {
+        m_localFiles->SetAreFontsEmbedded( m_cbEmbedFonts->IsChecked() );
+        return true;
+    }
     std::optional<bool> deleteReferences;
 
     auto confirmDelete =
@@ -242,6 +250,28 @@ bool PANEL_EMBEDDED_FILES::TransferDataFromWindow()
     m_files->SetAreFontsEmbedded( m_cbEmbedFonts->IsChecked() );
 
     return true;
+}
+
+
+std::set<wxString> PANEL_EMBEDDED_FILES::ConfirmNestedRemovals()
+{
+    std::set<wxString> names;
+    for( const auto& [name, file] : m_files->EmbeddedFileMap() )
+        if( !m_localFiles->HasFile( name ) )
+            m_files->RunOnNestedEmbeddedFiles( [&]( EMBEDDED_FILES* nested )
+            {
+                if( nested->HasFile( name ) ) names.insert( name );
+            } );
+    if( names.empty() ) return names;
+    auto* owner = dynamic_cast<EDA_ITEM*>( m_files );
+    const bool accepted = owner && owner->Type() == SCHEMATIC_T
+            ? IsOK( m_parent, _( "Deleted embedded files are also referenced in some symbols.\n"
+                                "Delete from symbols as well?" ) )
+            : owner && owner->Type() == PCB_T
+                ? IsOK( m_parent, _( "Deleted embedded files are also referenced in some footprints.\n"
+                                    "Delete from footprints as well?" ) ) : false;
+    if( !accepted ) names.clear();
+    return names;
 }
 
 

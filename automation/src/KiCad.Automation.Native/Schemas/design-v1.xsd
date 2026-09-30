@@ -22,5 +22,15 @@
         <xs:attribute name="native" type="c:identity" use="required"/>
       </xs:complexType></xs:element>
     </xs:sequence></xs:complexType></xs:element>
+    <xs:element name="part-symbols" minOccurs="0"><xs:complexType><xs:sequence>
+      <xs:element name="part-symbol" minOccurs="1" maxOccurs="unbounded"><xs:complexType><xs:sequence>
+        <xs:element ref="n:schematic-data"/>
+      </xs:sequence>
+        <xs:attribute name="part" type="c:identity" use="required"/>
+        <xs:attribute name="library" type="xs:string" use="required"/>
+        <xs:attribute name="entry" type="xs:string" use="required"/>
+        <xs:attribute name="body-style" type="xs:positiveInteger" use="required"/>
+      </xs:complexType></xs:element>
+    </xs:sequence></xs:complexType></xs:element>
   </xs:sequence><xs:attribute name="version" type="xs:positiveInteger" use="required" fixed="1"/></xs:complexType></xs:element>
 </xs:schema>

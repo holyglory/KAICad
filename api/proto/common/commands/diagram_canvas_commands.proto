@@ -1,0 +1,4 @@
+/* KiCad per-level diagram canvas commands, owned by Phase 2 lane 2B. GPL-3.0-or-later. */
+syntax = "proto3";
+package kiapi.automation.diagrams.v1;
+option csharp_namespace = "KiCad.Automation.Protocol.Diagrams";

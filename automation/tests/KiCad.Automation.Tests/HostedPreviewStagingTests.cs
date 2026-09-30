@@ -10,6 +10,57 @@ namespace KiCad.Automation.Tests;
 public sealed class HostedPreviewStagingTests
 {
     [TestMethod]
+    public async Task DifferentPlatformSourceBytesKeepBothImmutableSourcesAndExactLinks()
+    {
+        using var f = await Fixture.Create();
+        byte[] macSource = "Synthetic source bytes from another native builder."u8.ToArray();
+        string macHash = Convert.ToHexStringLower(SHA256.HashData(macSource));
+        await File.WriteAllBytesAsync(Path.Combine(f.Previous, f.Source.Path), macSource);
+        var json = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        var previous = JsonSerializer.Deserialize<DownloadManifest>(f.OriginalCatalogue, json)!;
+        var mac = previous.Artifacts[0] with { FileName = "macos-existing.tar.gz", Platform = "osx-arm64",
+            Commit = Fixture.Commit, SourceSha256 = macHash };
+        File.Copy(Path.Combine(f.Previous, "existing.zip"), Path.Combine(f.Previous, mac.FileName));
+        var source = new DownloadArtifact(f.Source.Path, "source", "earlier-preview", Fixture.Commit, macHash, macSource.Length, macHash);
+        await File.WriteAllTextAsync(Path.Combine(f.Previous, "downloads.json"),
+            JsonSerializer.Serialize(new DownloadManifest(1, [.. previous.Artifacts, mac, source]), json));
+        var result = await HostedPreviewStaging.RunAsync(f.Request, default);
+        var manifest = JsonSerializer.Deserialize<DownloadManifest>(await File.ReadAllTextAsync(Path.Combine(result.Directory, "downloads.json")), json)!;
+        Assert.AreEqual(5, manifest.Artifacts.Count);
+        var sources = manifest.Artifacts.Where(x => x.Platform == "source").ToArray();
+        Assert.AreEqual(2, sources.Length);
+        var windowsSource = sources.Single(x => x.Sha256 == f.Source.Sha256);
+        Assert.AreEqual("kicad-codex-" + Fixture.Commit + "-source-" + f.Source.Sha256 + ".tar.gz", windowsSource.FileName);
+        CollectionAssert.AreEqual(macSource, await File.ReadAllBytesAsync(Path.Combine(result.Directory, f.Source.Path)));
+        Assert.AreEqual(f.Source.Sha256, Evidence.Hash(Path.Combine(result.Directory, windowsSource.FileName)));
+        Assert.AreEqual(macHash, manifest.Artifacts.Single(x => x.Platform == "osx-arm64").SourceSha256);
+        Assert.AreEqual(windowsSource.Sha256, manifest.Artifacts.Single(x => x.Platform == "win-x64").SourceSha256);
+        var repeated = await HostedPreviewStaging.RunAsync(f.Request with
+            { Previous = result.Directory, Output = f.Request.Output + "-repeated" }, default);
+        Assert.AreEqual(result.ArtifactCount, repeated.ArtifactCount); Assert.AreEqual(result.CatalogueSha256, repeated.CatalogueSha256);
+        var reused = await HostedPreviewStaging.StagePublicAsync(result.Directory, f.Request.Output + "-reuse",
+            [new(windowsSource with { FileName = f.Source.Path, Version = "later-source-label" }, Path.Combine(f.Candidate, "packages", f.Source.Path))], null, default);
+        Assert.AreEqual(result.ArtifactCount, reused.Count); Assert.AreEqual(result.CatalogueSha256, reused.Hash);
+    }
+
+    [TestMethod]
+    public async Task SourceAliasCannotReplaceAnExistingDifferentArtifact()
+    {
+        using var f = await Fixture.Create();
+        var json = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        var old = JsonSerializer.Deserialize<DownloadManifest>(f.OriginalCatalogue, json)!;
+        var generic = old.Artifacts[0] with { FileName = f.Source.Path };
+        var alias = generic with { FileName = "kicad-codex-" + Fixture.Commit + "-source-" + f.Source.Sha256 + ".tar.gz" };
+        File.Copy(Path.Combine(f.Previous, "existing.zip"), Path.Combine(f.Previous, generic.FileName));
+        File.Copy(Path.Combine(f.Previous, "existing.zip"), Path.Combine(f.Previous, alias.FileName));
+        await File.WriteAllTextAsync(Path.Combine(f.Previous, "downloads.json"), JsonSerializer.Serialize(new DownloadManifest(1,
+            [.. old.Artifacts, generic, alias]), json));
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => HostedPreviewStaging.RunAsync(f.Request, default));
+        Assert.IsFalse(Directory.Exists(f.Request.Output));
+        Assert.AreEqual(alias.Sha256, Evidence.Hash(Path.Combine(f.Previous, alias.FileName)));
+    }
+
+    [TestMethod]
     public async Task CopiesOnlyVerifiedArchivesAndExistingFeedsAndNeverClaimsNativeExecution()
     {
         using var fixture = await Fixture.Create();

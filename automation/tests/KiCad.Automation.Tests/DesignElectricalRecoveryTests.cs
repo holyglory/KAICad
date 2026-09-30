@@ -1,0 +1,444 @@
+using System.Text;
+using System.Text.Json.Nodes;
+using Google.Protobuf;
+using Google.Protobuf.WellKnownTypes;
+using Kiapi.Common;
+using KiCad.Automation.Model;
+using KiCad.Automation.Native;
+using KiCad.Automation.Protocol;
+using SchematicHierarchyData = Kiapi.Schematic.Types.SchematicHierarchyData;
+
+namespace KiCad.Automation.Tests;
+
+[TestClass]
+public sealed class DesignElectricalRecoveryTests
+{
+    private static async Task Isolated(Func<Fixture, Task> test)
+    {
+        string root = Directory.CreateTempSubdirectory("electrical-recovery-").FullName;
+        try { await test(new(root)); }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public Task LegacyAndElectricalCheckpointsRoundTripWithoutChurn() => Isolated(f =>
+    {
+        Assert.IsNull(f.Saved.State.BaselineElectrical); Assert.IsNull(f.Saved.State.ObservedElectrical);
+        Assert.AreEqual(1, JsonNode.Parse(File.ReadAllText(f.Path))!["Version"]!.GetValue<int>());
+        Assert.AreEqual(f.Saved.RevisionToken, f.Store.Save(f.Store.Read()!.State, f.Saved.RevisionToken).RevisionToken);
+        var state = f.Saved.State with { BaselineElectrical = f.Peer.Electrical.Clone(), ObservedElectrical = f.Peer.Electrical.Clone() };
+        var saved = f.Store.Save(state, f.Saved.RevisionToken);
+        Assert.AreEqual(3, JsonNode.Parse(File.ReadAllText(f.Path))!["Version"]!.GetValue<int>());
+        Assert.AreEqual(state.BaselineElectrical, f.Store.Read()!.State.BaselineElectrical);
+        Assert.AreEqual(state.ObservedElectrical, f.Store.Read()!.State.ObservedElectrical);
+        Assert.AreEqual(saved.RevisionToken, f.Store.Save(f.Store.Read()!.State, saved.RevisionToken).RevisionToken);
+        CollectionAssert.AreEqual(f.Saved.State.DesiredFileBytes, f.Store.Read()!.State.DesiredFileBytes);
+        var owner = state.Baseline.Engineering.Circuit.Components.First();
+        var resolution = new DesignRepeatedSheetResolution(SchematicRepeatedSheetChoices.SnapshotToken(state),
+            [new(owner.SheetInstanceId, owner.DefinitionId, "CHOICE301")], []);
+        var chosen = f.Store.Save(state with { RepeatedSheetResolution = resolution }, saved.RevisionToken);
+        Assert.IsNotNull(SchematicRepeatedSheetChoices.Current(f.Store.Read()!.State));
+        var changedElectrical = chosen.State.ObservedElectrical!.Clone(); changedElectrical.Limitations.Add("Changed native coverage");
+        Assert.IsNull(SchematicRepeatedSheetChoices.Current(chosen.State with { ObservedElectrical = changedElectrical }));
+        Assert.AreEqual(chosen.RevisionToken, f.Store.Save(f.Store.Read()!.State, chosen.RevisionToken).RevisionToken);
+        return Task.CompletedTask;
+    });
+
+    [TestMethod]
+    public Task MismatchedAndUnknownCheckpointFieldsCannotReplaceRecovery() => Isolated(f =>
+    {
+        var valid = f.Saved.State with { BaselineElectrical = f.Peer.Electrical.Clone(), ObservedElectrical = f.Peer.Electrical.Clone() };
+        foreach (string kind in new[] { "hierarchy", "revision", "tracking", "future", "baseline-future" })
+        {
+            var state = valid with { BaselineElectrical = valid.BaselineElectrical!.Clone(), ObservedElectrical = valid.ObservedElectrical!.Clone() };
+            if (kind == "hierarchy") state.ObservedElectrical!.Hierarchy.Data.Document.SheetPath.Path[0].Value = Guid.NewGuid().ToString("D");
+            else if (kind == "revision") state.ObservedElectrical!.Hierarchy.Revision.Sequence++;
+            else if (kind == "tracking") state.ObservedElectrical!.Hierarchy.TrackingComplete = true;
+            else if (kind == "baseline-future") state.BaselineElectrical!.Hierarchy.Revision.Sequence++;
+            else state.ObservedElectrical!.MergeFrom(new byte[] { 0x98, 0x06, 0x01 }); // unknown field99
+            Assert.ThrowsExactly<AutomationException>(() => f.Store.Save(state, f.Saved.RevisionToken), kind);
+            Assert.AreEqual(f.Saved.RevisionToken, f.Store.Read()!.RevisionToken);
+        }
+        return Task.CompletedTask;
+    });
+
+    [TestMethod]
+    public Task ElectricalEnvelopeRejectsDuplicateNestedFieldsAndWrongVersion() => Isolated(f =>
+    {
+        f.Store.Save(f.Saved.State with { ObservedElectrical = f.Peer.Electrical }, f.Saved.RevisionToken);
+        string original = File.ReadAllText(f.Path);
+        string duplicated = original.Replace("\"Epoch\":\"electrical-epoch\"", "\"Epoch\":\"electrical-epoch\",\"Epoch\":\"electrical-epoch\"", StringComparison.Ordinal);
+        Assert.AreNotEqual(original, duplicated);
+        File.WriteAllText(f.Path, duplicated);
+        Assert.ThrowsExactly<AutomationException>(() => f.Store.Read());
+        var node = JsonNode.Parse(original)!; node["Version"] = 1;
+        File.WriteAllText(f.Path, node.ToJsonString());
+        Assert.ThrowsExactly<AutomationException>(() => f.Store.Read());
+        File.WriteAllText(f.Path, original);
+        Assert.IsNotNull(f.Store.Read()!.State.ObservedElectrical);
+        return Task.CompletedTask;
+    });
+
+    [TestMethod]
+    public Task InitializeRequiresModelAndNativeAgreementAndPreservesBothBaselines() => Isolated(async f =>
+    {
+        var initialized = await DesignRecoveryInspector.InitializeElectricalBaselineAsync(f.Store, f.Client, f.Saved.RevisionToken);
+        Assert.AreEqual(f.Peer.Electrical, initialized.State.BaselineElectrical);
+        Assert.AreEqual(initialized.State.BaselineElectrical, initialized.State.ObservedElectrical);
+        Assert.AreEqual(f.BaselineXml, SchematicDesignXml.Write(initialized.State.Baseline, initialized.State.KnowledgeLibraries));
+        CollectionAssert.AreEqual(f.Saved.State.DesiredFileBytes, initialized.State.DesiredFileBytes);
+        Assert.AreEqual("electrical_baseline_exists", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+            DesignRecoveryInspector.InitializeElectricalBaselineAsync(f.Store, f.Client, initialized.RevisionToken))).Code);
+        f.Peer.Electrical.Nets.Clear(); f.Peer.Electrical.Hierarchy.Revision.Sequence++;
+        var refreshed = await DesignRecoveryInspector.RefreshAsync(f.Store, f.Client, initialized.RevisionToken, includeElectrical: true);
+        Assert.IsEmpty(refreshed.State.ObservedElectrical!.Nets);
+        Assert.IsNotEmpty(refreshed.State.BaselineElectrical!.Nets);
+        Assert.AreEqual(initialized.State.BaselineElectrical, refreshed.State.BaselineElectrical);
+        Assert.AreEqual(f.BaselineXml, SchematicDesignXml.Write(refreshed.State.Baseline, refreshed.State.KnowledgeLibraries));
+        Assert.AreEqual(refreshed.RevisionToken, (await DesignRecoveryInspector.RefreshAsync(f.Store, f.Client, refreshed.RevisionToken, includeElectrical: true)).RevisionToken);
+    });
+
+    [TestMethod]
+    public Task InitializationNeverHidesPendingOperationsOrWrongConnectivity() => Isolated(async f =>
+    {
+        f.Peer.Electrical.Nets.Clear();
+        Assert.AreEqual("electrical_baseline_mismatch", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+            DesignRecoveryInspector.InitializeElectricalBaselineAsync(f.Store, f.Client, f.Saved.RevisionToken))).Code);
+        Assert.AreEqual(f.Saved.RevisionToken, f.Store.Read()!.RevisionToken);
+        var pending = DesignRecoveryStoreTests.Mutation(f.Saved.State);
+        var saved = f.Store.Save(f.Saved.State with { PendingMutation = pending }, f.Saved.RevisionToken);
+        int calls = f.Peer.Calls;
+        Assert.AreEqual("pending_recovery_requires_reconciliation", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+            DesignRecoveryInspector.InitializeElectricalBaselineAsync(f.Store, f.Client, saved.RevisionToken))).Code);
+        Assert.AreEqual(calls, f.Peer.Calls); Assert.AreEqual(pending, f.Store.Read()!.State.PendingMutation);
+    });
+
+    [TestMethod]
+    public Task InitializationDoesNotReplaceChangedHierarchyOrConcurrentXml() => Isolated(async f =>
+    {
+        f.Peer.Electrical.Hierarchy.Data.Instances[0].Metadata.TextVariables.Add("changed", "native");
+        Assert.AreEqual("electrical_baseline_mismatch", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+            DesignRecoveryInspector.InitializeElectricalBaselineAsync(f.Store, f.Client, f.Saved.RevisionToken))).Code);
+        f.Peer.Electrical.Hierarchy.Data = f.Saved.State.Observed.Clone();
+        f.Peer.BeforeSnapshot = () => f.Store.Save(f.Saved.State with { DesiredFileBytes = [0xfe] }, f.Saved.RevisionToken);
+        Assert.AreEqual("design_recovery_changed", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+            DesignRecoveryInspector.InitializeElectricalBaselineAsync(f.Store, f.Client, f.Saved.RevisionToken))).Code);
+        CollectionAssert.AreEqual(new byte[] { 0xfe }, f.Store.Read()!.State.DesiredFileBytes);
+        Assert.IsNull(f.Store.Read()!.State.BaselineElectrical);
+    });
+
+    // Ledger p91fda8ca22a68141: preview 23's snapshots listed library_cache among the state they could not hold; this build's
+    // snapshot of the same schematic no longer does, because it holds the library cache exactly. A record saved by preview
+    // 23 without an electrical baseline must still establish one against the upgraded KiCad: that retired marker names the
+    // old reader's limits, not the design. Every real difference in the schematic, the library cache included, and any other
+    // coverage difference is still refused. The
+    // NativeXmlRebuild journey proves the same record through the public tools against a live KiCad; this isolates the
+    // comparison rule against the scripted peer, which the journey cannot vary (it would have to edit KiCad itself).
+    // Extends no existing test: the neighbouring cases assert a refusal, this one the absence of a spurious one.
+    [TestMethod]
+    public Task AnEarlierPreviewsCoverageListIsNotANativeEdit() => Isolated(async f =>
+    {
+        string[] upgraded = ["complete_project_settings", "shared_screen_root_ownership", "net_chains"];
+        string[] preview23 = ["complete_project_settings", "shared_screen_root_ownership", "library_cache", "net_chains"];
+        static SchematicHierarchyData Listing(SchematicHierarchyData data, string[] list)
+        {
+            var result = data.Clone();
+            foreach (var screen in result.Instances) { screen.Metadata.UnrepresentedState.Clear(); screen.Metadata.UnrepresentedState.Add(list); }
+            return result;
+        }
+        f.Peer.Electrical.Hierarchy.Data = Listing(f.Peer.Electrical.Hierarchy.Data, upgraded);
+        var written = f.Saved.State.Baseline with { Schematic = Listing(f.Saved.State.Baseline.Schematic, preview23) };
+        var old = f.Store.Save(f.Saved.State with { Baseline = written, Observed = Listing(f.Saved.State.Observed, preview23) }, f.Saved.RevisionToken);
+        Assert.AreEqual(1, JsonNode.Parse(File.ReadAllText(f.Path))!["Version"]!.GetValue<int>(), "A record without electrical checkpoints.");
+        string writtenXml = SchematicDesignXml.Write(written, old.State.KnowledgeLibraries);
+
+        // Must-catch: a schematic that really differs is refused however its coverage list reads: a text variable, and a
+        // library cache the saved snapshot did not hold.
+        f.Peer.Electrical.Hierarchy.Data.Instances[0].Metadata.TextVariables.Add("changed", "native");
+        Assert.AreEqual("electrical_baseline_mismatch", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+            DesignRecoveryInspector.InitializeElectricalBaselineAsync(f.Store, f.Client, old.RevisionToken))).Code);
+        f.Peer.Electrical.Hierarchy.Data.Instances[0].Metadata.TextVariables.Remove("changed");
+        var cached = f.Peer.Electrical.Hierarchy.Data.Instances[0].CachedSymbols;
+        cached.Add(new Kiapi.Schematic.Types.SchematicCachedSymbol { CacheKey = "Device:R_extra", Definition = new() });
+        Assert.AreEqual("electrical_baseline_mismatch", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+            DesignRecoveryInspector.InitializeElectricalBaselineAsync(f.Store, f.Client, old.RevisionToken))).Code);
+        cached.RemoveAt(cached.Count - 1);
+        // Only the retired library_cache marker is exempt: a snapshot that names other state it cannot hold is refused too.
+        f.Peer.Electrical.Hierarchy.Data.Instances[0].Metadata.UnrepresentedState.Add("future_settings");
+        Assert.AreEqual("electrical_baseline_mismatch", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+            DesignRecoveryInspector.InitializeElectricalBaselineAsync(f.Store, f.Client, old.RevisionToken))).Code);
+        f.Peer.Electrical.Hierarchy.Data.Instances[0].Metadata.UnrepresentedState.Remove("future_settings");
+        Assert.AreEqual(old.RevisionToken, f.Store.Read()!.RevisionToken, "A refusal writes nothing.");
+        var differs = Listing(written.Schematic, upgraded);
+        differs.Instances[0].Metadata.TextVariables.Add("changed", "native");
+        Assert.IsFalse(DesignRecoveryInspector.SameSchematicContent(written.Schematic, differs));
+
+        // The same schematic under the upgraded reader's list: the baseline is established and the saved design is kept as
+        // preview 23 wrote it, for the next synchronization to publish with the current list.
+        Assert.IsTrue(DesignRecoveryInspector.SameSchematicContent(written.Schematic, f.Peer.Electrical.Hierarchy.Data));
+        var initialized = await DesignRecoveryInspector.InitializeElectricalBaselineAsync(f.Store, f.Client, old.RevisionToken);
+        Assert.AreEqual(writtenXml, SchematicDesignXml.Write(initialized.State.Baseline, initialized.State.KnowledgeLibraries));
+        Assert.AreEqual(written.Schematic, initialized.State.BaselineElectrical!.Hierarchy.Data, "The baseline checkpoint belongs to the saved baseline.");
+        CollectionAssert.AreEqual(f.Peer.Electrical.Nets.ToArray(), initialized.State.BaselineElectrical.Nets.ToArray());
+        Assert.AreEqual(f.Peer.Electrical, initialized.State.ObservedElectrical, "The observation is KiCad's own, with its current list.");
+        Assert.AreEqual(f.Peer.Electrical.Hierarchy.Data, initialized.State.Observed);
+        CollectionAssert.AreEqual(f.Saved.State.DesiredFileBytes, initialized.State.DesiredFileBytes);
+        var reread = f.Store.Read()!;
+        Assert.AreEqual(initialized.RevisionToken, reread.RevisionToken);
+        Assert.AreEqual(initialized.State.BaselineElectrical, reread.State.BaselineElectrical);
+        Assert.AreEqual(3, JsonNode.Parse(File.ReadAllText(f.Path))!["Version"]!.GetValue<int>(), "The record gained its electrical checkpoints.");
+    });
+
+    // Ledger p91fda8ca22a68141, review of 31cbe4f594: a record preview 23 really wrote, not one this build's store writes with
+    // library_cache put back. automation/tests/fixtures/preview-23-recovery holds, byte for byte, a settled recovery record
+    // (record version 3: electrical checkpoints, nothing pending) and its design file (design XML version 1; the record's
+    // DesiredFileBytes). Native-acceptance run t20260924T160501Z-67b01b captured them on 3f023fc2aa, the source of preview 23
+    // (check journey-native-xml-component-creation, 0bc6ddd7-596f-46bd-ba81-5f424c085ce0-realization-join-anchor-label.recovery.json).
+    // Its design is hierarchical, with one sheet file shown by two sheets. Whatever the record and design formats become, this
+    // file must still read, plan and save as it did. The NativeXmlRebuild journey proves against a live KiCad that this build's
+    // snapshot of such a schematic differs from preview 23's only by the retired library_cache marker; here that snapshot is the
+    // saved observation without it. Unit test, because no journey can run preview 23 itself; it extends no existing test, since
+    // every other record in the suites is written by this build's store. Applied through the executor against an editor that
+    // shows this build's snapshot of that schematic (review of 9c764b5537, seam C), plan and apply agree: the apply publishes
+    // the planned design, whose file no longer lists library_cache, sends no native edit and only saves KiCad's unchanged
+    // sheets, and a second apply is a no-op. The KiCad that saved the record is gone, so the editor is scripted; the
+    // NativeXmlRebuild journey applies a record in the same format against a live KiCad.
+    [TestMethod]
+    public async Task ARecordPreview23WroteReadsPlansAndAppliesAgainstThisBuildsSnapshot()
+    {
+        string fixture = Path.Combine(PsuCpuFixture.RepositoryRoot, "automation", "tests", "fixtures", "preview-23-recovery");
+        string root = Directory.CreateTempSubdirectory("preview-23-recovery-").FullName;
+        try
+        {
+            string path = Path.Combine(root, "recovery.json");
+            File.Copy(Path.Combine(fixture, "settled.recovery.json"), path);
+            byte[] design = File.ReadAllBytes(Path.Combine(fixture, "settled.design.xml"));
+            Assert.AreEqual(3, JsonNode.Parse(File.ReadAllText(path))!["Version"]!.GetValue<int>(), "Electrical checkpoints, nothing pending.");
+            var store = new DesignRecoveryStore(path);
+            var saved = store.Read()!;
+            var state = saved.State;
+            Assert.IsFalse(state.HasPendingWork);
+            CollectionAssert.AreEqual(design, state.DesiredFileBytes, "The design file is the one the record saved.");
+            string designXml = new UTF8Encoding(false, true).GetString(design);
+            StringAssert.StartsWith(designXml, "<design version=\"1\" ");
+            Assert.AreEqual(SchematicDesignXml.Write(state.Baseline, state.KnowledgeLibraries),
+                SchematicDesignXml.Write(SchematicDesignXml.Read(designXml, state.KnowledgeLibraries), state.KnowledgeLibraries),
+                "The design file holds the saved baseline.");
+            // What makes it preview 23's: every snapshot, saved and observed, lists library_cache third of four.
+            string[] preview23 = ["complete_project_settings", "shared_screen_root_ownership", "library_cache", "net_chains"];
+            Assert.HasCount(3, state.Observed.Instances);
+            foreach (var screen in state.Baseline.Schematic.Instances.Concat(state.Observed.Instances))
+                CollectionAssert.AreEqual(preview23, screen.Metadata.UnrepresentedState.ToArray());
+            Assert.AreEqual(state.Baseline.Schematic, state.Observed, "Settled: KiCad showed the saved design.");
+            // Saving it again with this build's store writes the same bytes: upgrading does not churn a record.
+            Assert.AreEqual(saved.RevisionToken, store.Save(state, saved.RevisionToken).RevisionToken);
+
+            // This build's snapshot of the same schematic is the same content and needs no native edit, on every sheet.
+            var upgraded = state.Observed.Clone();
+            foreach (var screen in upgraded.Instances) Assert.IsTrue(screen.Metadata.UnrepresentedState.Remove("library_cache"));
+            Assert.IsTrue(DesignRecoveryInspector.SameSchematicContent(state.Baseline.Schematic, upgraded));
+            Assert.IsEmpty(SchematicHierarchyDelta.Plan(upgraded, state.Baseline.Schematic));
+            Assert.IsEmpty(SchematicHierarchyDelta.Plan(state.Baseline.Schematic, upgraded));
+            for (int i = 0; i < upgraded.Instances.Count; ++i)
+            {
+                Assert.IsEmpty(SchematicItemDelta.Plan(upgraded.Instances[i], state.Baseline.Schematic.Instances[i]));
+                Assert.IsEmpty(SchematicItemDelta.Plan(state.Baseline.Schematic.Instances[i], upgraded.Instances[i]));
+            }
+            // Must-catch on the same record: any other coverage difference is still a change KiCad cannot make.
+            var dropped = upgraded.Clone();
+            foreach (var screen in dropped.Instances) Assert.IsTrue(screen.Metadata.UnrepresentedState.Remove("net_chains"));
+            Assert.IsFalse(DesignRecoveryInspector.SameSchematicContent(state.Baseline.Schematic, dropped));
+            Assert.AreEqual("unsupported_schematic_delta", Assert.ThrowsExactly<AutomationException>(() =>
+                SchematicItemDelta.Plan(dropped.Instances[0], state.Baseline.Schematic.Instances[0])).Code);
+            // A rebuild restores its library caches (every placed symbol's definition is cached under KiCad's key), and
+            // repeated sheet ownership is now typed hierarchy state that the rebuild preserves.
+            Assert.IsFalse(SchematicRebuild.Lost("library_cache", state.Baseline.Schematic));
+            Assert.IsFalse(SchematicRebuild.Lost("shared_screen_root_ownership", state.Baseline.Schematic));
+
+            // Reattached to this build's KiCad, it plans normally: nothing to send, and the design as this build writes it.
+            var observedElectrical = state.ObservedElectrical!.Clone();
+            observedElectrical.Hierarchy.Data = upgraded.Clone();
+            var reattached = state with { Observed = upgraded, ObservedElectrical = observedElectrical };
+            var plan = SchematicSynchronizationPlanner.Plan(reattached);
+            Assert.IsTrue(plan.CanPrepare, plan.ErrorCode + ": " + plan.ErrorMessage);
+            Assert.IsEmpty(plan.NativeOperations, "Nothing to send to KiCad.");
+            Assert.IsFalse(plan.NativeRebuildRequired);
+            Assert.IsFalse(plan.NativeConnectionRealizationRequired);
+            Assert.AreEqual(SchematicDesignXml.Write(state.Baseline with { Schematic = upgraded }, state.KnowledgeLibraries), plan.CandidateXml);
+            Assert.IsFalse(plan.CandidateXml!.Contains("library_cache", StringComparison.Ordinal), "The planned design no longer lists the retired entry.");
+            StringAssert.Contains(designXml, "library_cache", "The saved design file still does.");
+            // The same record saved before electrical checkpoints stops at planning and names the one action that fixes it.
+            var legacy = SchematicSynchronizationPlanner.Plan(reattached with { BaselineElectrical = null });
+            Assert.AreEqual("missing_electrical_baseline", legacy.ErrorCode, legacy.ErrorMessage);
+            StringAssert.Contains(legacy.ErrorMessage, "kicad_design_electrical_baseline_initialize");
+            Assert.IsNull(legacy.Candidate);
+
+            // Applied, the record publishes exactly the planned design: nothing is sent to KiCad, KiCad saves its unchanged
+            // sheets, and the design file drops library_cache.
+            string designPath = Path.Combine(root, "design.xml");
+            File.WriteAllBytes(designPath, design);
+            var attached = store.Save(reattached, saved.RevisionToken);
+            var editor = new ScriptedEditor(reattached, observedElectrical, root);
+            var client = new NativeClient(editor, "ipc:///tmp/preview-23-apply.sock", editor.Epoch);
+            var applied = await SchematicSynchronizationExecutor.ApplyAsync(store, client, designPath, attached.RevisionToken, Guid.NewGuid());
+            Assert.IsFalse(applied.NativeMutationCommitted, "Nothing is sent to KiCad.");
+            Assert.IsTrue(applied.NativeFilesSaved, "KiCad saves its unchanged sheets before the XML is published.");
+            Assert.IsTrue(applied.SynchronizationCommitted);
+            Assert.AreEqual(0, editor.Edits, "No native edit.");
+            Assert.AreEqual(1, editor.Saves);
+            Assert.AreEqual(plan.CandidateXml, File.ReadAllText(designPath), "Plan and apply agree: the planned design is published.");
+            var published = store.Read()!;
+            Assert.IsFalse(published.State.HasPendingWork);
+            Assert.AreEqual(plan.CandidateXml, Encoding.UTF8.GetString(published.State.DesiredFileBytes));
+            Assert.AreEqual(plan.CandidateXml, SchematicDesignXml.Write(published.State.Baseline, published.State.KnowledgeLibraries));
+            var again = await SchematicSynchronizationExecutor.ApplyAsync(store, client, designPath, published.RevisionToken, Guid.NewGuid());
+            Assert.IsFalse(again.NativeFilesSaved, "A second apply is a no-op.");
+            Assert.AreEqual(published.RevisionToken, again.RecoveryRevisionToken);
+            Assert.AreEqual(plan.CandidateXml, File.ReadAllText(designPath));
+            Assert.AreEqual(1, editor.Saves);
+
+            // A native change after the final checked capture must keep publication
+            // pending, even though a refresh would treat this read race as transient.
+            string racedRoot = Directory.CreateDirectory(Path.Combine(root, "raced")).FullName;
+            string racedPath = Path.Combine(racedRoot, "design.xml"); File.WriteAllBytes(racedPath, design);
+            var racedStore = new DesignRecoveryStore(Path.Combine(racedRoot, "recovery.json"));
+            var raced = racedStore.Save(reattached, null);
+            var movingEditor = new ScriptedEditor(reattached, observedElectrical, racedRoot) { AdvanceOnFileRead = true };
+            Guid operation = Guid.NewGuid();
+            Assert.AreEqual("native_changed_during_sync", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+                SchematicSynchronizationExecutor.ApplyAsync(racedStore,
+                    new NativeClient(movingEditor, "ipc:///tmp/preview-23-raced.sock", movingEditor.Epoch),
+                    racedPath, raced.RevisionToken, operation))).Code);
+            var pending = racedStore.Read()!.State;
+            Assert.IsTrue(pending.HasPendingWork); Assert.AreEqual(operation, pending.PendingPublication!.OperationId);
+            Assert.AreEqual(SchematicDesignXml.Write(reattached.Baseline, state.KnowledgeLibraries),
+                SchematicDesignXml.Write(pending.Baseline, state.KnowledgeLibraries));
+            Assert.AreEqual(reattached.LastSynchronization, pending.LastSynchronization);
+            Assert.AreEqual(plan.CandidateXml, File.ReadAllText(racedPath), "The written XML remains available for reconciliation.");
+            Assert.AreEqual(0, movingEditor.Edits); Assert.AreEqual(1, movingEditor.Saves);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    /// <summary>An editor showing one clean, saved checkpoint: its handshake, the checked capture and a checked save that
+    /// changes nothing. Any edit fails the test.</summary>
+    private sealed class ScriptedEditor : INativeTransport
+    {
+        private readonly CheckedSchematicState checkpoint;
+        private readonly string instance;
+        public string Epoch { get; } = Guid.NewGuid().ToString("D");
+        public int Saves, Edits;
+        public bool AdvanceOnFileRead;
+        public ScriptedEditor(DesignRecoveryState state, SchematicElectricalState shown, string directory)
+        {
+            instance = state.InstanceId.ToString("D");
+            string digest = new('c', 64);
+            checkpoint = new() { Electrical = shown.Clone(), State = new()
+            {
+                Document = state.Baseline.Schematic.Document.Clone(), ProcessEpoch = Epoch, NativeIdentity = Guid.NewGuid().ToString("D"),
+                Revision = shown.Hierarchy.Revision.Clone(), StateSha256 = digest, CleanCheckpointSha256 = digest,
+                Scope = DocumentLifecycleScope.DlsSchematicHierarchy, ProjectSettingsIncluded = true
+            } };
+            string file = System.IO.Path.Combine(directory, "fixture.kicad_sch");
+            checkpoint.State.NativeFiles.Add(file);
+            checkpoint.State.FileBaselines.Add(new NativeFileBaselineState { Path = file, BaselinePath = file, BaselineKnown = true, CurrentKnown = true,
+                BaselineExists = true, CurrentExists = true, BaselineSha256 = new string('b', 64), CurrentSha256 = new string('b', 64),
+                BaselineBytes = 3, CurrentBytes = 3, Status = NativeFileBaselineStatus.NfbsUnchanged });
+        }
+        public Task<byte[]> ExchangeAsync(string endpoint, byte[] request, TimeSpan timeout, CancellationToken token = default)
+        {
+            token.ThrowIfCancellationRequested();
+            var message = ApiRequest.Parser.ParseFrom(request).Message; IMessage response;
+            if (message.Is(GetAutomationSession.Descriptor))
+            {
+                var session = new AutomationSession { ProtocolVersion = 1, InstanceId = instance, Epoch = Epoch };
+                if (AdvanceOnFileRead) session.HandledRequests.Add(ReadSchematicFileLocations.Descriptor.FullName);
+                response = session;
+            }
+            else if (message.Is(ReadCheckedSchematicState.Descriptor)) response = checkpoint.Clone();
+            else if (message.Is(ReadSchematicFileLocations.Descriptor))
+            {
+                Assert.IsTrue(AdvanceOnFileRead);
+                checkpoint.State.Revision.Sequence++; checkpoint.Electrical.Hierarchy.Revision.Sequence++;
+                return Task.FromResult(new ApiResponse { Header = new() { KicadToken = Epoch },
+                    Status = new() { Status = (ApiStatusCode)3, ErrorMessage = "revision advanced" } }.ToByteArray());
+            }
+            else if (message.Is(ReadSchematicHierarchyData.Descriptor)) response = checkpoint.Electrical.Hierarchy.Clone();
+            else if (message.Is(CheckedSaveDocument.Descriptor))
+            {
+                var save = message.Unpack<CheckedSaveDocument>(); ++Saves;
+                response = new LifecycleOperationResult { Document = save.Document.Clone(), OperationId = save.OperationId, ProcessEpoch = Epoch,
+                    Status = LifecycleOperationStatus.LosSaved, ObservedState = checkpoint.State.Clone() };
+            }
+            else { ++Edits; throw new AssertFailedException("Publishing a record preview 23 saved must not edit KiCad: " + message.TypeUrl); }
+            return Task.FromResult(new ApiResponse { Header = new() { KicadToken = Epoch },
+                Status = new() { Status = (ApiStatusCode)1 }, Message = Any.Pack(response) }.ToByteArray());
+        }
+    }
+
+    [TestMethod]
+    public Task HierarchyOnlyRefreshInvalidatesStaleElectricalObservationButNotBaseline() => Isolated(async f =>
+    {
+        var initialized = await DesignRecoveryInspector.InitializeElectricalBaselineAsync(f.Store, f.Client, f.Saved.RevisionToken);
+        var same = await DesignRecoveryInspector.RefreshAsync(f.Store, f.Client, initialized.RevisionToken);
+        Assert.AreEqual(initialized.RevisionToken, same.RevisionToken);
+        f.Peer.Electrical.Hierarchy.Revision.Sequence++;
+        var changed = await DesignRecoveryInspector.RefreshAsync(f.Store, f.Client, same.RevisionToken);
+        Assert.IsNull(changed.State.ObservedElectrical);
+        Assert.AreEqual(initialized.State.BaselineElectrical, changed.State.BaselineElectrical);
+    });
+
+    [TestMethod]
+    public Task FailedWriteCancellationAndWrongInstancePreserveOriginalRecovery() => Isolated(async f =>
+    {
+        using (var held = new FileStream(f.Path + ".lock", FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            Assert.AreEqual("design_recovery_io", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+                DesignRecoveryInspector.InitializeElectricalBaselineAsync(f.Store, f.Client, f.Saved.RevisionToken))).Code);
+        Assert.AreEqual(f.Saved.RevisionToken, f.Store.Read()!.RevisionToken);
+        await Assert.ThrowsAsync<OperationCanceledException>(() => DesignRecoveryInspector.InitializeElectricalBaselineAsync(f.Store,
+            f.Client, f.Saved.RevisionToken, new(true)));
+        f.Peer.Instance = Guid.NewGuid().ToString("D");
+        Assert.AreEqual("recovery_instance_mismatch", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+            DesignRecoveryInspector.InitializeElectricalBaselineAsync(f.Store, f.Client, f.Saved.RevisionToken))).Code);
+        Assert.AreEqual(f.Saved.RevisionToken, f.Store.Read()!.RevisionToken);
+    });
+
+    private sealed class Fixture
+    {
+        public string Path { get; }
+        public DesignRecoveryStore Store { get; }
+        public StoredDesignRecovery Saved { get; }
+        public Peer Peer { get; }
+        public NativeClient Client { get; }
+        public string BaselineXml { get; }
+        public Fixture(string root)
+        {
+            var f = SchematicElectricalComparisonTests.Fixture();
+            Path = System.IO.Path.Combine(root, "recovery.json"); Store = new(Path);
+            var instance = Guid.NewGuid(); BaselineXml = SchematicDesignXml.Write(f.Design, [f.Library]);
+            Saved = Store.Save(new(Guid.NewGuid(), instance, new(f.State.Hierarchy.Revision.Epoch, f.State.Hierarchy.Revision.Sequence),
+                false, f.Design, [0xff, 0x3c], f.State.Hierarchy.Data.Clone(), [f.Library]), null);
+            Peer = new(f.State.Clone(), instance.ToString("D"));
+            Client = new(Peer, "ipc:///tmp/electrical-recovery.sock", "process-epoch");
+        }
+    }
+
+    private sealed class Peer(SchematicElectricalState electrical, string instance) : INativeTransport
+    {
+        public SchematicElectricalState Electrical { get; } = electrical;
+        public string Instance { get; set; } = instance;
+        public Action? BeforeSnapshot;
+        public int Calls;
+        public Task<byte[]> ExchangeAsync(string endpoint, byte[] request, TimeSpan timeout, CancellationToken token = default)
+        {
+            token.ThrowIfCancellationRequested(); ++Calls;
+            var message = ApiRequest.Parser.ParseFrom(request).Message; IMessage response;
+            if (message.Is(GetAutomationSession.Descriptor)) response = new AutomationSession { ProtocolVersion = 1, InstanceId = Instance, Epoch = "process-epoch" };
+            else if (message.Is(ReadSchematicElectricalState.Descriptor)) { BeforeSnapshot?.Invoke(); response = Electrical.Clone(); }
+            else if (message.Is(ReadSchematicHierarchyData.Descriptor)) { BeforeSnapshot?.Invoke(); response = Electrical.Hierarchy.Clone(); }
+            else throw new AssertFailedException("Recovery must never mutate the native peer.");
+            return Task.FromResult(new ApiResponse { Header = new() { KicadToken = "process-epoch" },
+                Status = new() { Status = (ApiStatusCode)1 }, Message = Any.Pack(response) }.ToByteArray());
+        }
+    }
+}

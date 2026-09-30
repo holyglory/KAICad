@@ -22,6 +22,7 @@
 #define _JSON_SETTINGS_H
 
 #include <core/wx_stl_compat.h>
+#include <file_content_baseline.h>
 
 #include <utility>
 #include <wx/string.h>
@@ -63,6 +64,8 @@ enum class SETTINGS_LOC {
 };
 
 
+enum class SETTINGS_SAVE_RESULT { SKIPPED, UNCHANGED, STORED, WRITTEN, FAILED };
+
 /// pimpl to allow hiding json.hpp
 class JSON_SETTINGS_INTERNALS;
 
@@ -88,6 +91,8 @@ public:
     wxString GetFilename() const { return m_filename; }
 
     wxString GetFullFilename() const;
+
+    const FILE_CONTENT_BASELINE& FileBaseline() const { return m_fileBaseline; }
 
     void SetFilename( const wxString& aFilename ) { m_filename = aFilename; }
 
@@ -140,6 +145,21 @@ public:
      */
     nlohmann::json CaptureCurrentState() const;
 
+    /** Copy live registered and nested values into a detached settings object.
+     * The caller owns the target and must discard it if decoding fails. This
+     * performs no file I/O, never stores source parameters, and rejects loss
+     * by comparing the resulting live state with the captured source.
+     */
+    void CopyCurrentStateTo( JSON_SETTINGS& aDetachedTarget ) const;
+
+    /** Apply only registered parameter changes between two captured states.
+     * Reject overlapping live edits and changes outside registered ownership
+     * before invoking setters. Keep native owners, stores and file I/O intact.
+     * A rejected setter is rolled back and exact live values are checked.
+     * The caller still owns native undo, notifications and revision admission.
+     */
+    void ApplyCurrentStateDelta( const nlohmann::json& aBefore, const nlohmann::json& aAfter );
+
     /**
      * Loads the backing file from disk and then calls Load()
      * @param aDirectory is the path to the file
@@ -152,7 +172,10 @@ public:
      * @param aDirectory is the directory to save to, including trailing separator
      * @return true if the file was saved
      */
-    virtual bool SaveToFile( const wxString& aDirectory = "", bool aForce = false );
+    // The optional outcome distinguishes benign no-write cases from errors;
+    // the legacy boolean still means that content was written or stored.
+    virtual bool SaveToFile( const wxString& aDirectory = "", bool aForce = false,
+                             SETTINGS_SAVE_RESULT* aResult = nullptr );
 
     /**
      * @return true once the in-memory store has been synchronized with an on-disk file, either
@@ -337,6 +360,7 @@ protected:
 
     /// The filename (not including path) of this settings file (inicode)
     wxString m_filename;
+    FILE_CONTENT_BASELINE m_fileBaseline;
 
     /// The filename of the wxConfig legacy file (if different from m_filename)
     wxString m_legacy_filename;

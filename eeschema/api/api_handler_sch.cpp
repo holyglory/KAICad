@@ -19,7 +19,18 @@
  */
 
 #include <api/api_handler_sch.h>
+#include <api/api_sch_state_groups.h>
+#include <api/api_server.h>
+#include <api/checked_schematic_controller.h>
+#include <pgm_base.h>
 #include <sch_file_versions.h>
+#include <project/project_file.h>
+#include <api/native_state_digest.h>
+#include <api/sch_parity_netlist.h>
+#include <api/native_file_observation.h>
+#include <sch_io/kicad_sexpr/sch_io_kicad_sexpr.h>
+#include <json_common.h>
+#include <project/net_settings.h>
 #include <cmath>
 #include <limits>
 #include <google/protobuf/util/message_differencer.h>
@@ -48,7 +59,15 @@
 #include <sch_netchain.h>
 #include <sch_commit.h>
 #include <api/api_sch_formatting.h>
+#include <api/api_sch_annotation.h>
+#include <api/api_sch_reference_inventory.h>
+#include <api/api_sch_symbol_project_settings.h>
+#include <api/api_sch_bom_settings.h>
+#include <api/api_sch_net_settings.h>
+#include <api/api_sch_erc_settings.h>
+#include <api/api_sch_ngspice_settings.h>
 #include <api/api_sch_field_text_modes.h>
+#include <sim/spice_circuit_model.h>
 #include <sch_symbol_cache_state.h>
 #include <sch_root_instance.h>
 #include <richio.h>
@@ -154,10 +173,18 @@ API_HANDLER_SCH::API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext,
             &API_HANDLER_SCH::handleReadMetadata );
     registerHandler<kiapi::automation::v1::ReadSchematicSaveState, kiapi::automation::v1::SchematicSaveState>(
             &API_HANDLER_SCH::handleReadSaveState );
+    registerHandler<kiapi::automation::v1::ReadDocumentLifecycleState, kiapi::automation::v1::DocumentLifecycleState>(
+            &API_HANDLER_SCH::handleReadLifecycleState );
+    registerHandler<kiapi::automation::v1::ReadSchematicParityNetlist, kiapi::automation::v1::SchematicParityNetlistSnapshot>(
+            &API_HANDLER_SCH::handleReadParityNetlist );
     registerHandler<kiapi::automation::v1::ReadSchematicScreenData, kiapi::automation::v1::SchematicScreenDataSnapshot>(
             &API_HANDLER_SCH::handleReadScreenData );
     registerHandler<kiapi::automation::v1::ReadSchematicHierarchyData, kiapi::automation::v1::SchematicHierarchyDataSnapshot>(
             &API_HANDLER_SCH::handleReadHierarchyData );
+    registerHandler<kiapi::automation::v1::ReadSchematicFileLocations, kiapi::automation::v1::SchematicFileLocations>(
+            &API_HANDLER_SCH::handleReadFileLocations );
+    registerHandler<kiapi::automation::v1::ReadSchematicElectricalState, kiapi::automation::v1::SchematicElectricalState>(
+            &API_HANDLER_SCH::handleReadElectricalState );
     registerHandler<kiapi::automation::v1::CaptureSchematicObservation, kiapi::automation::v1::SchematicObservation>(
             &API_HANDLER_SCH::handleCaptureObservation );
     registerHandler<GetOpenDocuments, GetOpenDocumentsResponse>(
@@ -170,10 +197,18 @@ API_HANDLER_SCH::API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext,
             &API_HANDLER_SCH::handleCapturePreview );
     registerHandler<kiapi::automation::v1::RenderSchematicViews, kiapi::automation::v1::SchematicViewSet>(
             &API_HANDLER_SCH::handleRenderViews );
+    registerHandler<kiapi::automation::v1::StartSimulationJob, kiapi::automation::v1::SimulationJobState>(
+            &API_HANDLER_SCH::handleStartSimulation );
+    registerHandler<kiapi::automation::v1::ReadSimulationJob, kiapi::automation::v1::SimulationJobState>(
+            &API_HANDLER_SCH::handleReadSimulation );
+    registerHandler<kiapi::automation::v1::CancelSimulationJob, kiapi::automation::v1::SimulationJobState>(
+            &API_HANDLER_SCH::handleCancelSimulation );
     registerHandler<kiapi::automation::v1::ActivateSchematicSheet, types::DocumentSpecifier>(
             &API_HANDLER_SCH::handleActivateSheet );
     registerHandler<kiapi::automation::v1::ReadSchematicChangeJournal, kiapi::automation::v1::SchematicChangeJournal>(
             &API_HANDLER_SCH::handleReadChangeJournal );
+    registerHandler<kiapi::automation::v1::SchematicTrackingReadErcMarkers,
+                    kiapi::automation::v1::SchematicTrackingErcMarkers>( &API_HANDLER_SCH::handleReadErcMarkers );
     registerHandler<SaveDocument, google::protobuf::Empty>(
             &API_HANDLER_SCH::handleSaveDocument );
     registerHandler<SaveCopyOfDocument, google::protobuf::Empty>(
@@ -183,6 +218,8 @@ API_HANDLER_SCH::API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext,
     registerHandler<GetItems, GetItemsResponse>( &API_HANDLER_SCH::handleGetItems );
     registerHandler<GetItemsById, GetItemsResponse>( &API_HANDLER_SCH::handleGetItemsById );
     registerHandler<GetBoundingBox, GetBoundingBoxResponse>( &API_HANDLER_SCH::handleGetBoundingBox );
+    registerHandler<kiapi::automation::v1::MeasureSchematicPlacement, kiapi::automation::v1::SchematicPlacementGeometry>(
+            &API_HANDLER_SCH::handleMeasurePlacement );
     registerHandler<kiapi::automation::v1::ReadSchematicPresentationFacts, kiapi::automation::v1::SchematicPresentationFacts>(
             &API_HANDLER_SCH::handleReadPresentationFacts );
 
@@ -224,6 +261,41 @@ std::unique_ptr<COMMIT> API_HANDLER_SCH::createCommit()
         return std::make_unique<SCH_COMMIT>( m_frame );
 
     return std::make_unique<SCH_COMMIT>( toolManager() );
+}
+
+
+std::optional<std::string> API_HANDLER_SCH::ScreenIdentityRefusal( SCHEMATIC& aSchematic, const SCH_SHEET_PATH& aTarget )
+{
+    SCH_SHEET*  sheet = aTarget.Last();
+    SCH_SCREEN* screen = aTarget.LastScreen();
+    if( !sheet || !screen || aSchematic.GetTopLevelSheets().size() != 1
+            || aSchematic.GetTopLevelSheet( 0 ) != sheet )
+        return std::string( "Only the root sheet of a single-root schematic can adopt a screen identity" );
+    const wxFileName file( aSchematic.Project().AbsolutePath( screen->GetFileName() ) );
+    if( screen->GetFileFormatVersionAtLoad() > 0 || screen->FileExists()
+            || ( !screen->GetFileName().IsEmpty() && file.FileExists() ) )
+        return std::string( "Only a root that was never loaded from or saved to a file can adopt a screen identity" );
+    // ERC markers are diagnostics, excluded from the screen's saved item snapshot.
+    // Clearing a saved exclusion leaves its marker as a non-excluded diagnostic;
+    // it does not make this newly created root a populated schematic. Keep the
+    // marker untouched here; typed ERC operations own its exclusion state.
+    bool hasNonMarkerItem = false;
+    for( SCH_ITEM* item : screen->Items() )
+    {
+        if( item->Type() != SCH_MARKER_T )
+        {
+            hasNonMarkerItem = true;
+            break;
+        }
+    }
+    if( hasNonMarkerItem || !screen->GetLibSymbols().empty() )
+        return std::string( "Only an empty root can adopt a screen identity" );
+    for( const SCH_SHEET_PATH& path : aSchematic.Hierarchy() )
+    {
+        if( path.LastScreen() != screen )
+            return std::string( "Only a schematic with nothing but its root can adopt a screen identity" );
+    }
+    return std::nullopt;
 }
 
 
@@ -621,6 +693,53 @@ static HANDLER_RESULT<PAGE_INFO> PreparePageGeometry( const types::PageSettings&
 }
 
 
+using MOVE_PIN_PARTITIONS = std::set<std::set<std::string>>;
+
+// Compare electrical membership, not generated net names or codes. Include
+// singleton pins omitted from the net map and every loaded sheet instance.
+static bool captureMovePinPartitions( SCHEMATIC& aSchematic, MOVE_PIN_PARTITIONS& aPartitions )
+{
+    CONNECTION_GRAPH* graph = aSchematic.ConnectionGraph();
+    if( !graph ) return false;
+    graph->Recalculate( aSchematic.Hierarchy(), true );
+    std::set<std::string> pins;
+    for( const SCH_SHEET_PATH& path : aSchematic.Hierarchy() )
+    {
+        const std::string prefix = path.Path().AsString().ToStdString() + "#";
+        for( SCH_ITEM* item : path.LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
+            for( SCH_PIN* pin : static_cast<SCH_SYMBOL*>( item )->GetPins( &path ) )
+            {
+                if( pin->m_Uuid == niluuid || !pins.insert( prefix + pin->m_Uuid.AsStdString() ).second )
+                    return false;
+            }
+    }
+    std::set<std::string> assigned;
+    for( const auto& entry : graph->GetNetMap() )
+    {
+        if( entry.second.empty() ) continue;
+        const auto* driver = entry.second.front()->GetDriverConnection();
+        if( driver && driver->IsBus() ) continue;
+        std::set<std::string> members;
+        for( CONNECTION_SUBGRAPH* subgraph : entry.second )
+        {
+            const std::string prefix = subgraph->GetSheet().Path().AsString().ToStdString() + "#";
+            for( SCH_ITEM* item : subgraph->GetItems() )
+            {
+                std::string id = prefix + item->m_Uuid.AsStdString();
+                if( item->Type() == SCH_PIN_T && !pins.count( id ) ) return false;
+                if( pins.count( id ) ) members.insert( std::move( id ) );
+            }
+        }
+        for( const std::string& id : members )
+            if( !assigned.insert( id ).second ) return false;
+        if( !members.empty() ) aPartitions.insert( std::move( members ) );
+    }
+    for( const std::string& pin : pins )
+        if( !assigned.count( pin ) ) aPartitions.insert( { pin } );
+    return true;
+}
+
+
 HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH::handleApplyItemBatch(
         const HANDLER_CONTEXT<kiapi::automation::v1::ApplySchematicItemBatch>& aCtx )
 {
@@ -742,10 +861,28 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
     types::ItemHeader header;
     header.mutable_document()->CopyFrom( aCtx.Request.document() );
     kiapi::automation::v1::SchematicItemBatchResult result;
+    // ERC exclusions refer to schematic item identities.  Rebuild batches create
+    // those items in this same atomic commit, so defer ERC decoding until all
+    // staged objects can be exposed through a temporary hierarchy below.
+    const bool rebuilding = aCtx.Request.operations( 0 ).has_rebuild_screen_identity();
+    std::vector<std::pair<const kiapi::automation::v1::SchematicItemOperation*, std::string>> deferredErcSettings;
 
     std::optional<std::vector<std::pair<KIID, int>>> savedSelection;
     std::optional<VECTOR2I> savedReference;
     bool savedHover = false;
+    // Revert can replace objects and clear the visible selection even when a
+    // batch fails before reaching its connected move. Capture once, before
+    // any operation, and restore surviving identities on success or failure.
+    if( m_frame )
+    {
+        savedSelection.emplace();
+        auto& selection = toolManager()->GetTool<SCH_SELECTION_TOOL>()->GetSelection();
+        savedHover = selection.IsHover();
+        if( selection.HasReferencePoint() )
+            savedReference = selection.GetReferencePoint();
+        for( EDA_ITEM* item : selection )
+            savedSelection->emplace_back( item->m_Uuid, item->GetFlags() & ( STARTPOINT | ENDPOINT ) );
+    }
     auto restoreSelection = [&]()
     {
         if( !savedSelection || !m_frame )
@@ -778,6 +915,11 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
             selection.ClearReferencePoint();
     };
 
+    // Set once a connectivity assertion has rebuilt connectivity with this batch's updates
+    // applied (CN-1 §8.1). Rolling back must then forget those connections before Revert
+    // deletes the replaced children they point at, and rebuild from the restored document.
+    bool connectivityEvaluated = false;
+
     auto rollback = [&]()
     {
         // These groups have never become screen-owned. Existing member undo
@@ -788,12 +930,44 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
             if( item->Type() == SCH_GROUP_T )
                 static_cast<SCH_GROUP*>( item.get() )->RemoveAll();
         }
+        if( connectivityEvaluated )
+        {
+            for( const SCH_SHEET_PATH& path : schematic()->Hierarchy() )
+            {
+                for( SCH_ITEM* item : path.LastScreen()->Items() )
+                {
+                    auto forget = [&]( SCH_ITEM* aItem )
+                    {
+                        aItem->ClearConnectedItems( path );
+                        aItem->SetConnectivityDirty();
+                    };
+                    forget( item );
+                    if( item->Type() == SCH_SYMBOL_T )
+                    {
+                        for( const std::unique_ptr<SCH_PIN>& pin : static_cast<SCH_SYMBOL*>( item )->GetRawPins() )
+                            forget( pin.get() );
+                    }
+                    else if( item->Type() == SCH_SHEET_T )
+                    {
+                        for( SCH_SHEET_PIN* pin : static_cast<SCH_SHEET*>( item )->GetPins() )
+                            forget( pin );
+                    }
+                }
+            }
+        }
         auto pending = m_commits.find( aCtx.ClientName );
 
         if( pending != m_commits.end() )
         {
             pending->second.second->Revert();
             m_commits.erase( pending );
+        }
+
+        if( connectivityEvaluated )
+        {
+            connectivityEvaluated = false;
+            if( CONNECTION_GRAPH* graph = schematic()->ConnectionGraph() )
+                graph->Recalculate( schematic()->Hierarchy(), true );
         }
 
         m_activeClients.erase( aCtx.ClientName );
@@ -803,11 +977,11 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
         restoreSelection();
     };
 
-    auto reject = [&]( const std::string& message ) -> HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult>
+    auto reject = [&]( const std::string& message, ApiStatusCode code = ApiStatusCode::AS_BAD_REQUEST ) -> HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult>
     {
         rollback();
         ApiResponseStatus error;
-        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_status( code );
         error.set_error_message( message );
         if( receipt )
         {
@@ -819,6 +993,21 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
 
     try
     {
+        // CN-1 §8.1: admit an exact pin-partition post-condition before any operation, and
+        // capture the partition it is measured against immediately before the first one.
+        CHECKED_SCHEMATIC_CONTROLLER::CONNECTIVITY_ASSERTION assertion;
+        if( auto invalid = CHECKED_SCHEMATIC_CONTROLLER::PrepareConnectivityAssertion( aCtx.Request,
+                    [this]( const types::SheetPath& aPath )
+                    {
+                        return schematic()->Hierarchy().GetSheetPathByKIIDPath( UnpackSheetPath( aPath ) ).has_value();
+                    },
+                    assertion ) )
+            return reject( *invalid );
+        MOVE_PIN_PARTITIONS assertedBefore;
+        if( assertion.index >= 0 && !captureMovePinPartitions( *schematic(), assertedBefore ) )
+            return reject( fmt::format( "Atomic operation {} rejected: Cannot establish exact pin connections "
+                                        "in all loaded sheet instances", assertion.index ) );
+
         // Decode all cache replacements before mutating any native object.
         // Screen UUIDs survive sheet reparenting and disambiguate repeated paths.
         std::map<std::string, SCH_SYMBOL_CACHE_STATE> cacheCandidates;
@@ -845,6 +1034,238 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
             if( auto* screen = path.LastScreen(); screen && cacheCandidates.count( screen->GetUuid().AsStdString() ) )
                 nativeCommit->CaptureLibraryCache( *screen );
         }
+
+        // A paired remove/create of the same sheet symbol reparents its existing
+        // screen. References and variants in that subtree are indexed by full
+        // sheet path; move those records in the same commit, before any result
+        // is observed. Other instances of shared screens keep their records.
+        const SCH_SHEET_LIST originalHierarchy = schematic()->Hierarchy();
+        std::map<KIID_PATH, KIID_PATH> movedPaths;
+
+        struct DECLARED_SHEET_MOVE
+        {
+            SCH_SCREEN* sourceParent;
+            KIID sourceId;
+            SCH_SCREEN* child;
+            KIID_PATH destinationParent;
+            KIID destinationId;
+            std::set<KIID_PATH> destinations;
+        };
+        std::vector<DECLARED_SHEET_MOVE> declaredMoves;
+        std::set<KIID_PATH> retiredPaths, addedPaths, claimedDestinations;
+        auto within = []( const KIID_PATH& path, const KIID_PATH& prefix )
+        {
+            return prefix.size() <= path.size() && std::equal( prefix.begin(), prefix.end(), path.begin() );
+        };
+        auto canonicalPath = []( const types::SheetPath& path, size_t minimum )
+        {
+            if( static_cast<size_t>( path.path_size() ) < minimum ) return false;
+            for( const auto& value : path.path() )
+                if( KIID id( value.value() ); id == niluuid || id.AsStdString() != value.value() ) return false;
+            return true;
+        };
+        auto sameOwner = [&]( const types::DocumentSpecifier& document )
+        {
+            auto owner = document, batchOwner = aCtx.Request.document();
+            owner.clear_sheet_path(); batchOwner.clear_sheet_path();
+            return google::protobuf::util::MessageDifferencer::Equals( owner, batchOwner );
+        };
+        for( const auto& operation : aCtx.Request.operations() )
+        {
+            if( !operation.has_set_sheet_instance_paths() ) continue;
+            auto known = operation; known.DiscardUnknownFields();
+            const auto& declaration = operation.set_sheet_instance_paths();
+            const auto& source = declaration.source_document();
+            const auto& destination = declaration.destination_document();
+            const KIID sourceId( declaration.source_sheet_id().value() );
+            const KIID destinationId( declaration.destination_sheet_id().value() );
+            if( !google::protobuf::util::MessageDifferencer::Equals( known, operation )
+                    || sourceId == niluuid || sourceId.AsStdString() != declaration.source_sheet_id().value()
+                    || destinationId == niluuid || destinationId.AsStdString() != declaration.destination_sheet_id().value()
+                    || !sameOwner( source ) || !sameOwner( destination )
+                    || !canonicalPath( source.sheet_path(), 1 ) || !canonicalPath( destination.sheet_path(), 1 )
+                    || aCtx.Request.document().sheet_path().path_size() != 1
+                    || operation.has_target_document() && !google::protobuf::util::MessageDifferencer::Equals(
+                            operation.target_document(), aCtx.Request.document() ) )
+                return reject( "Sheet-instance mapping requires exact parent targets, canonical identities and a root batch" );
+            auto parent = originalHierarchy.GetSheetPathByKIIDPath( UnpackSheetPath( source.sheet_path() ) );
+            SCH_ITEM* item = parent ? parent->ResolveItem( sourceId ) : nullptr;
+            if( !item || item->Type() != SCH_SHEET_T || !static_cast<SCH_SHEET*>( item )->GetScreen() )
+                return reject( "The mapped source sheet reference is not loaded" );
+            auto* child = static_cast<SCH_SHEET*>( item )->GetScreen();
+            if( std::any_of( declaredMoves.begin(), declaredMoves.end(), [&]( const auto& existing )
+                    { return existing.sourceParent == parent->LastScreen() && existing.sourceId == sourceId; } ) )
+                return reject( "A physical sheet reference can have only one instance mapping" );
+            size_t removals = 0, creations = 0;
+            for( const auto& change : aCtx.Request.operations() )
+            {
+                const auto& target = change.has_target_document() ? change.target_document() : aCtx.Request.document();
+                if( change.has_remove() && change.remove().value() == sourceId.AsStdString()
+                        && google::protobuf::util::MessageDifferencer::Equals( target, source ) ) ++removals;
+                if( change.has_create() && change.create().Is<kiapi::schematic::types::SheetSymbol>()
+                        && google::protobuf::util::MessageDifferencer::Equals( target, destination ) )
+                {
+                    kiapi::schematic::types::SheetSymbol created;
+                    change.create().UnpackTo( &created );
+                    if( created.id().value() == destinationId.AsStdString()
+                            && created.child_screen_id().value() == child->GetUuid().AsStdString() )
+                    {
+                        size_t placements = 0;
+                        for( const auto& record : created.instance_records().records() )
+                        {
+                            if( record.path_size() != destination.sheet_path().path_size()
+                                    || !std::equal( record.path().begin(), record.path().end(), destination.sheet_path().path().begin(),
+                                            []( const auto& a, const auto& b ) { return a.value() == b.value(); } )
+                                    || !record.project_name().empty()
+                                        && record.project_name() != project().GetProjectName().ToStdString( wxConvUTF8 ) ) continue;
+                            ++placements;
+                            if( record.page_number() != created.page_number() )
+                                return reject( "A mapped sheet's page must agree with its destination placement record" );
+                        }
+                        if( placements != 1 )
+                            return reject( "A mapped sheet requires one exact destination placement record" );
+                        ++creations;
+                    }
+                }
+            }
+            if( removals != 1 || creations != 1 )
+                return reject( "An instance mapping requires one exact physical remove/create pair" );
+            std::set<KIID_PATH> sources, covered, destinations;
+            for( const auto& instance : originalHierarchy )
+                if( instance.LastScreen() == parent->LastScreen() )
+                { auto path = instance.Path(); path.push_back( sourceId ); sources.insert( path ); }
+            for( const auto& move : declaration.moves() )
+            {
+                if( !canonicalPath( move.before(), 2 ) || !canonicalPath( move.after(), 2 ) )
+                    return reject( "Mapped instance paths must be canonical full child paths" );
+                auto from = UnpackSheetPath( move.before() ), to = UnpackSheetPath( move.after() );
+                if( !sources.count( from ) || to.back() != destinationId || !covered.insert( from ).second
+                        || !destinations.insert( to ).second || !claimedDestinations.insert( to ).second
+                        || retiredPaths.count( from ) || !movedPaths.emplace( from, to ).second )
+                    return reject( "A sheet-instance mapping contains conflicting or foreign paths" );
+            }
+            for( const auto& entry : declaration.retired() )
+            {
+                if( !canonicalPath( entry, 2 ) ) return reject( "Retired instance paths must be canonical full child paths" );
+                auto path = UnpackSheetPath( entry );
+                if( !sources.count( path ) || !covered.insert( path ).second || movedPaths.count( path )
+                        || !retiredPaths.insert( path ).second )
+                    return reject( "A retired instance is missing, duplicated or also mapped" );
+            }
+            for( const auto& entry : declaration.added() )
+            {
+                if( !canonicalPath( entry, 2 ) ) return reject( "New instance paths must be canonical full child paths" );
+                auto path = UnpackSheetPath( entry );
+                if( path.back() != destinationId || !destinations.insert( path ).second
+                        || !claimedDestinations.insert( path ).second || !addedPaths.insert( path ).second )
+                    return reject( "A new instance path is duplicated or also mapped" );
+            }
+            if( covered != sources || destinations.empty() )
+                return reject( "The instance mapping must account for every source and resulting instance" );
+            declaredMoves.push_back( { parent->LastScreen(), sourceId, child,
+                    UnpackSheetPath( destination.sheet_path() ), destinationId, std::move( destinations ) } );
+        }
+        for( const auto& operation : aCtx.Request.operations() )
+        {
+            if( !operation.has_create() || !operation.create().Is<kiapi::schematic::types::SheetSymbol>() )
+                continue;
+            kiapi::schematic::types::SheetSymbol created;
+            operation.create().UnpackTo( &created );
+            const auto& target = operation.has_target_document() ? operation.target_document() : aCtx.Request.document();
+            if( !target.has_sheet_path() || !created.has_child_screen_id() )
+                continue;
+            for( const auto& removed : aCtx.Request.operations() )
+            {
+                if( !removed.has_remove() || removed.remove().value() != created.id().value() )
+                    continue;
+                const auto& source = removed.has_target_document() ? removed.target_document() : aCtx.Request.document();
+                if( !source.has_sheet_path() ) continue;
+                auto parent = originalHierarchy.GetSheetPathByKIIDPath( UnpackSheetPath( source.sheet_path() ) );
+                if( !parent ) continue;
+                SCH_ITEM* item = parent->ResolveItem( KIID( removed.remove().value() ) );
+                if( !item || item->Type() != SCH_SHEET_T ) continue;
+                auto* sheet = static_cast<SCH_SHEET*>( item );
+                if( !sheet->GetScreen() || sheet->GetScreen()->GetUuid().AsStdString() != created.child_screen_id().value() )
+                    continue;
+                KIID_PATH from = parent->Path(), to = UnpackSheetPath( target.sheet_path() );
+                from.push_back( sheet->m_Uuid ); to.push_back( sheet->m_Uuid );
+                if( std::any_of( declaredMoves.begin(), declaredMoves.end(), [&]( const auto& declared )
+                            { return declared.sourceParent == parent->LastScreen() && declared.sourceId == sheet->m_Uuid; } ) )
+                    continue; // Exact complete mapping replaces inference for this physical reference.
+                if( from == to ) continue;
+                if( std::count_if( originalHierarchy.begin(), originalHierarchy.end(),
+                            [&]( const SCH_SHEET_PATH& path ) { return path.LastScreen() == parent->LastScreen(); } ) != 1 )
+                    return reject( "Reparenting a sheet symbol on a shared parent requires all parent instances to be specified" );
+                auto destination = originalHierarchy.GetSheetPathByKIIDPath( UnpackSheetPath( target.sheet_path() ) );
+                if( destination && std::count_if( originalHierarchy.begin(), originalHierarchy.end(),
+                            [&]( const SCH_SHEET_PATH& path ) { return path.LastScreen() == destination->LastScreen(); } ) != 1 )
+                    return reject( "Reparenting into a shared parent requires explicit ownership for its additional instances" );
+                if( !movedPaths.emplace( from, to ).second )
+                    return reject( "A sheet instance cannot be moved twice in one batch" );
+            }
+        }
+        auto retiredPath = [&]( const KIID_PATH& path )
+        {
+            size_t retired = 0, moved = 0;
+            for( const auto& prefix : retiredPaths ) if( within( path, prefix ) ) retired = std::max( retired, prefix.size() );
+            for( const auto& entry : movedPaths ) if( within( path, entry.first ) ) moved = std::max( moved, entry.first.size() );
+            return retired > moved;
+        };
+        auto movedPath = [&]( const KIID_PATH& path ) -> std::optional<KIID_PATH>
+        {
+            const KIID_PATH* from = nullptr;
+            const KIID_PATH* to = nullptr;
+            for( const auto& [oldPath, newPath] : movedPaths )
+                if( oldPath.size() <= path.size() && ( !from || oldPath.size() > from->size() )
+                        && std::equal( oldPath.begin(), oldPath.end(), path.begin() ) )
+                { from = &oldPath; to = &newPath; }
+            if( !from || retiredPath( path ) ) return std::nullopt;
+            KIID_PATH result = *to;
+            result.insert( result.end(), path.begin() + from->size(), path.end() );
+            return result;
+        };
+        std::set<SCH_SCREEN*> movedScreens;
+        for( const SCH_SHEET_PATH& path : originalHierarchy )
+        {
+            SCH_SCREEN* screen = path.LastScreen();
+            if( ( movedPaths.empty() && retiredPaths.empty() ) || !movedScreens.insert( screen ).second ) continue;
+            for( SCH_ITEM* item : screen->Items() )
+            {
+                if( item->Type() == SCH_SYMBOL_T )
+                {
+                    auto* symbol = static_cast<SCH_SYMBOL*>( item );
+                    const auto instances = symbol->GetInstances();
+                    auto replacements = instances; replacements.clear();
+                    for( auto instance : instances )
+                    {
+                        if( !instance.m_ProjectName.IsEmpty() && instance.m_ProjectName != project().GetProjectName() ) continue;
+                        auto next = movedPath( instance.m_Path );
+                        if( !next && !retiredPath( instance.m_Path ) ) continue;
+                        nativeCommit->Modify( symbol, screen );
+                        symbol->RemoveInstance( instance.m_Path );
+                        if( next ) { instance.m_Path = *next; replacements.push_back( instance ); }
+                        symbol->SetConnectivityDirty();
+                    }
+                    for( const auto& instance : replacements ) symbol->AddHierarchicalReference( instance );
+                }
+                else if( item->Type() == SCH_SHEET_T )
+                {
+                    auto* sheet = static_cast<SCH_SHEET*>( item );
+                    const auto instances = sheet->GetInstances();
+                    auto replacements = instances; replacements.clear();
+                    for( auto instance : instances )
+                    {
+                        if( !instance.m_ProjectName.IsEmpty() && instance.m_ProjectName != project().GetProjectName() ) continue;
+                        auto next = movedPath( instance.m_Path );
+                        if( !next && !retiredPath( instance.m_Path ) ) continue;
+                        nativeCommit->Modify( sheet, screen );
+                        sheet->RemoveInstance( instance.m_Path );
+                        if( next ) { instance.m_Path = *next; replacements.push_back( instance ); }
+                    }
+                    for( const auto& instance : replacements ) sheet->AddInstance( instance );
+                }
+            }
+        }
         int index = 0;
 
         for( const auto& operation : aCtx.Request.operations() )
@@ -868,32 +1289,116 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
             header.mutable_document()->CopyFrom( document );
             result.add_operation_targets()->CopyFrom( document );
 
-            if( operation.has_move_connected_symbols() )
+            if( operation.has_set_sheet_instance_paths() )
+            {
+                // Parsed and applied before physical edits. Complete destination
+                // coverage is checked against the staged hierarchy before commit.
+                continue;
+            }
+            else if( operation.has_rebuild_screen_identity() )
+            {
+                // Rebuilding deleted native files from saved XML: a root KiCad created for the project
+                // adopts the identity its saved root file had.  Refuse anything else, before any edit.
+                auto known = operation;
+                known.DiscardUnknownFields();
+                const std::string& requested = operation.rebuild_screen_identity().value();
+                const KIID id( requested );
+                if( !google::protobuf::util::MessageDifferencer::Equals( known, operation )
+                        || requested.empty() || id == niluuid || id.AsStdString() != requested )
+                    return reject( prefix + "A screen identity requires one canonical nonzero UUID" );
+                if( index != 1 )
+                    return reject( prefix + "A screen identity must be the first operation of its batch" );
+                if( operationId.empty() || !aCtx.Request.has_expected_revision() )
+                    return reject( prefix + "A screen identity requires revision and retry identity" );
+                if( auto refusal = ScreenIdentityRefusal( *schematic(), *targetSheet ) )
+                    return reject( prefix + *refusal );
+                if( !m_frame )
+                    return reject( prefix + "A screen identity requires an editor context" );
+                SCH_SCREEN* screen = targetSheet->LastScreen();
+                if( screen->GetUuid() != id )
+                {
+                    nativeCommit->SetScreenIdentity( screen, id );
+                    result.set_screen_identity_changed( true );
+                }
+            }
+            else if( operation.has_set_symbol_locks() )
+            {
+                const auto& locks = operation.set_symbol_locks();
+                auto known = operation;
+                known.DiscardUnknownFields();
+                if( !google::protobuf::util::MessageDifferencer::Equals( known, operation )
+                        || locks.symbols().empty()
+                        || ( locks.locked() != kiapi::common::types::LS_LOCKED
+                             && locks.locked() != kiapi::common::types::LS_UNLOCKED ) )
+                    return reject( prefix + "Symbol locks require explicit targets and a supported lock state" );
+                if( operationId.empty() || !aCtx.Request.has_expected_revision() )
+                    return reject( prefix + "Symbol locks require revision and retry identity" );
+                std::map<KIID, SCH_SYMBOL*> symbols;
+                for( SCH_ITEM* item : targetSheet->LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
+                    symbols.emplace( item->m_Uuid, static_cast<SCH_SYMBOL*>( item ) );
+                std::set<KIID> targets;
+                for( const auto& target : locks.symbols() )
+                {
+                    const KIID id( target.value() );
+                    if( id == niluuid || id.AsStdString() != target.value() || !targets.insert( id ).second || !symbols.count( id ) )
+                        return reject( prefix + "Each lock target must be a distinct loaded symbol UUID on the target screen" );
+                    if( locks.locked() == kiapi::common::types::LS_UNLOCKED )
+                        if( EDA_GROUP* group = symbols.at( id )->GetParentGroup(); group && group->AsEdaItem()->IsLocked() )
+                            return reject( prefix + "Unlock the containing group before unlocking this symbol" );
+                }
+                const bool locked = locks.locked() == kiapi::common::types::LS_LOCKED;
+                for( const KIID& id : targets )
+                {
+                    SCH_SYMBOL* symbol = symbols.at( id );
+                    if( symbol->IsLocked() == locked ) continue;
+                    nativeCommit->Modify( symbol, targetSheet->LastScreen() );
+                    symbol->SetLocked( locked );
+                    google::protobuf::Any item;
+                    if( !packSchItem( item, symbol, *targetSheet ) )
+                        return reject( prefix + "Cannot serialize the resulting symbol lock state" );
+                    result.add_items()->Swap( &item );
+                }
+            }
+            else if( operation.has_move_connected_symbols() || operation.has_transform_connected_symbols() )
             {
                 if( !m_frame )
                     return reject( prefix + "Connected movement requires an editor context" );
-                if( auto valid = validateDisplayedSheet( document ); !valid )
-                    return reject( prefix + valid.error().error_message() );
                 if( operationId.empty() || !aCtx.Request.has_expected_revision() )
                     return reject( prefix + "Connected movement requires revision and retry identity" );
                 if( !createdItems.empty() )
                     return reject( prefix + "Commit staged creations before connected movement" );
 
+                const bool transforming = operation.has_transform_connected_symbols();
                 const auto& move = operation.move_connected_symbols();
-                auto known = move;
+                const auto& transform = operation.transform_connected_symbols();
+                const auto& symbols = transforming ? transform.symbols() : move.symbols();
+                auto known = operation;
                 known.DiscardUnknownFields();
-                if( !google::protobuf::util::MessageDifferencer::Equals( known, move )
-                        || move.symbols().empty() || !move.has_delta() )
-                    return reject( prefix + "Connected movement requires symbols and a supported displacement" );
-                const int64_t x = move.delta().x_nm();
-                const int64_t y = move.delta().y_nm();
+                if( !google::protobuf::util::MessageDifferencer::Equals( known, operation ) || symbols.empty()
+                    || ( transforming ? !transform.has_pivot() : !move.has_delta() ) )
+                    return reject( prefix + "Connected editing requires explicit symbols and supported geometry" );
+                auto kind = SCH_MOVE_TOOL::CONNECTED_TRANSFORM::NONE;
+                if( transforming )
+                {
+                    switch( transform.kind() )
+                    {
+                    case kiapi::automation::v1::SCT_ROTATE_CLOCKWISE: kind = SCH_MOVE_TOOL::CONNECTED_TRANSFORM::ROTATE_CW; break;
+                    case kiapi::automation::v1::SCT_ROTATE_COUNTERCLOCKWISE: kind = SCH_MOVE_TOOL::CONNECTED_TRANSFORM::ROTATE_CCW; break;
+                    case kiapi::automation::v1::SCT_MIRROR_LEFT_RIGHT: kind = SCH_MOVE_TOOL::CONNECTED_TRANSFORM::MIRROR_LEFT_RIGHT; break;
+                    case kiapi::automation::v1::SCT_MIRROR_UP_DOWN: kind = SCH_MOVE_TOOL::CONNECTED_TRANSFORM::MIRROR_UP_DOWN; break;
+                    default: return reject( prefix + "A supported connected transformation kind is required" );
+                    }
+                }
+                const int64_t x = transforming ? transform.pivot().x_nm() : move.delta().x_nm();
+                const int64_t y = transforming ? transform.pivot().y_nm() : move.delta().y_nm();
                 // Native schematic coordinates use exactly 100 nm per IU.
                 if( x % 100 || y % 100 || x / 100 < std::numeric_limits<int>::min()
                         || x / 100 > std::numeric_limits<int>::max()
                         || y / 100 < std::numeric_limits<int>::min()
                         || y / 100 > std::numeric_limits<int>::max() )
-                    return reject( prefix + "Displacement is outside the exact native schematic coordinate range" );
-                const VECTOR2I delta( x / 100, y / 100 );
+                    return reject( prefix + "Geometry is outside the exact native schematic coordinate range" );
+                const VECTOR2I delta = transforming ? VECTOR2I( 0, 0 ) : VECTOR2I( x / 100, y / 100 );
+                const VECTOR2I pivot = transforming ? VECTOR2I( x / 100, y / 100 ) : VECTOR2I( 0, 0 );
                 std::map<KIID, SCH_ITEM*> available;
                 std::map<KIID, google::protobuf::Any> before;
                 std::set<KIID> locked;
@@ -916,7 +1421,7 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                     }
                 }
                 std::set<KIID> targets;
-                for( const auto& symbol : move.symbols() )
+                for( const auto& symbol : symbols )
                 {
                     const KIID id( symbol.value() );
                     if( id == niluuid || id.AsStdString() != symbol.value() || !targets.insert( id ).second
@@ -925,25 +1430,22 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                     if( available.at( id )->IsLocked() )
                         return reject( prefix + "A requested symbol is locked" );
                 }
-                if( delta == VECTOR2I( 0, 0 ) )
+                if( !transforming && delta == VECTOR2I( 0, 0 ) )
                     continue;
-                auto* selectionTool = toolManager()->GetTool<SCH_SELECTION_TOOL>();
-                if( !savedSelection )
-                {
-                    savedSelection.emplace();
-                    auto& selection = selectionTool->GetSelection();
-                    savedHover = selection.IsHover();
-                    if( selection.HasReferencePoint() )
-                        savedReference = selection.GetReferencePoint();
-                    for( EDA_ITEM* item : selection )
-                        savedSelection->emplace_back( item->m_Uuid, item->GetFlags() & ( STARTPOINT | ENDPOINT ) );
-                }
-                selectionTool->ClearSelection( true );
-                for( const KIID& id : targets )
-                    selectionTool->AddItemToSel( available.at( id ), true );
+                MOVE_PIN_PARTITIONS originalPins;
+                if( !captureMovePinPartitions( *schematic(), originalPins ) )
+                    return reject( prefix + "Cannot establish exact pin connections in all loaded sheet instances" );
                 wxString failure;
-                if( !toolManager()->GetTool<SCH_MOVE_TOOL>()->DragSelectionBy( nativeCommit, delta, failure ) )
+                std::vector<SCH_ITEM*> selected;
+                for( const KIID& id : targets ) selected.push_back( available.at( id ) );
+                const bool moved = toolManager()->GetTool<SCH_MOVE_TOOL>()->DragSelectionBy(
+                        nativeCommit, delta, failure, *targetSheet, selected, kind, pivot );
+                if( !moved )
                     return reject( prefix + failure.ToStdString() );
+
+                MOVE_PIN_PARTITIONS movedPins;
+                if( !captureMovePinPartitions( *schematic(), movedPins ) || movedPins != originalPins )
+                    return reject( prefix + "Connected movement would change pin connectivity in a loaded sheet instance" );
 
                 std::map<KIID, google::protobuf::Any> after;
                 for( SCH_ITEM* item : targetSheet->LastScreen()->Items() )
@@ -1061,6 +1563,23 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                     result.set_library_cache_changed( true );
                 }
             }
+            else if( operation.has_set_erc_settings() )
+            {
+                if( rebuilding )
+                {
+                    deferredErcSettings.emplace_back( &operation, prefix );
+                    continue;
+                }
+                SCH_ERC_SETTINGS::PREPARED candidate;
+                std::string failure;
+                if( !SCH_ERC_SETTINGS::Prepare( operation.set_erc_settings(), *schematic(), candidate, failure ) )
+                    return reject( prefix + failure );
+                const bool changed = SCH_ERC_SETTINGS::Capture( *schematic() ).SerializeAsString()
+                                     != candidate.canonical.SerializeAsString();
+                if( changed && !nativeCommit->SetErcSettings( candidate, failure ) )
+                    return reject( prefix + failure );
+                result.set_erc_settings_changed( result.erc_settings_changed() || changed );
+            }
             else if( operation.has_replace_embedded_files() )
             {
                 const auto& state = operation.replace_embedded_files();
@@ -1115,6 +1634,7 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                 if( known.ByteSizeLong() != desired.ByteSizeLong() )
                     return reject( prefix + "Net chains contain unsupported fields" );
                 std::map<wxString, CONNECTION_GRAPH::NET_CHAIN_DEFINITION> definitions;
+                const auto current = schematic()->ConnectionGraph()->GetNetChainDefinitions();
                 for( const auto& packed : desired.definitions() )
                 {
                     wxString name = wxString::FromUTF8( packed.name() );
@@ -1147,8 +1667,32 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                                 || !definition.memberNets.insert( net ).second )
                             return reject( prefix + "Net chain member nets must be unique nonempty persisted names" );
                     }
+                    if( auto prior = current.find( name ); prior != current.end()
+                        && ( !prior->second.excludedNets.empty() || !prior->second.excludedPins.empty() ) && !packed.has_exclusions() )
+                        return reject( prefix + "Existing removal restrictions require an explicit supported representation" );
+                    for( const auto& value : packed.exclusions().net_names() )
+                    {
+                        wxString net = wxString::FromUTF8( value );
+                        if( net.IsEmpty() || !noNul( value ) || net.StartsWith( SCH_NETCHAIN::SYNTHETIC_NET_PREFIX )
+                            || definition.memberNets.contains( net ) || !definition.excludedNets.insert( net ).second )
+                            return reject( prefix + "Excluded net names must be unique persisted names disjoint from retained members" );
+                    }
+                    auto validId = []( const std::string& id )
+                    { return id.size() == 36 && KIID( id ) != niluuid && KIID( id ).AsStdString() == id; };
+                    for( const auto& anchor : packed.exclusions().pins() )
+                    {
+                        if( !validId( anchor.pin().value() ) || anchor.path().path().empty() )
+                            return reject( prefix + "Excluded pins require exact nonempty UUIDs and sheet paths" );
+                        KIID_PATH path;
+                        for( const auto& id : anchor.path().path() )
+                        {
+                            if( !validId( id.value() ) ) return reject( prefix + "Excluded pin sheet path contains an invalid UUID" );
+                            path.push_back( KIID( id.value() ) );
+                        }
+                        if( !definition.excludedPins.emplace( path, KIID( anchor.pin().value() ) ).second )
+                            return reject( prefix + "Excluded pin identities must be unique" );
+                    }
                 }
-                const auto current = schematic()->ConnectionGraph()->GetNetChainDefinitions();
                 bool equal = current.size() == definitions.size() && std::equal( current.begin(), current.end(), definitions.begin(),
                     []( const auto& a, const auto& b )
                     {
@@ -1156,12 +1700,175 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                         return a.first == b.first && x.terminals.first.ref == y.terminals.first.ref
                                 && x.terminals.first.pin == y.terminals.first.pin && x.terminals.second.ref == y.terminals.second.ref
                                 && x.terminals.second.pin == y.terminals.second.pin && x.netClass == y.netClass
-                                && x.color == y.color && x.memberNets == y.memberNets;
+                                && x.color == y.color && x.memberNets == y.memberNets && x.excludedNets == y.excludedNets
+                                && x.excludedPins == y.excludedPins;
                     } );
                 if( !equal )
                 {
                     static_cast<SCH_COMMIT*>( getCurrentCommit( aCtx.ClientName ) )->SetNetChainDefinitions( definitions );
                     result.set_net_chains_changed( true );
+                }
+            }
+            else if( operation.has_replace_net_chain_classes() )
+            {
+                const auto& desired = operation.replace_net_chain_classes();
+                auto known = desired;
+                known.DiscardUnknownFields();
+                if( known.ByteSizeLong() != desired.ByteSizeLong() )
+                    return reject( prefix + "Net chain classes contain unsupported fields" );
+                std::set<wxString> definitions;
+                auto validText = []( const std::string& text )
+                { return !text.empty() && text.find( '\0' ) == std::string::npos; };
+                for( const auto& name : desired.definitions() )
+                    if( !validText( name ) || !definitions.insert( wxString::FromUTF8( name ) ).second )
+                        return reject( prefix + "Class definitions must be unique nonempty names without NUL" );
+                std::map<wxString, wxString> assignments;
+                for( const auto& [chain, name] : desired.assignments() )
+                {
+                    wxString className = wxString::FromUTF8( name );
+                    if( !validText( chain ) || !validText( name ) || !definitions.contains( className ) )
+                        return reject( prefix + "Class assignments require nonempty chain names and declared classes" );
+                    assignments.emplace( wxString::FromUTF8( chain ), className );
+                }
+                auto settings = project().GetProjectFile().NetSettings();
+                if( !settings ) return reject( prefix + "Project net settings are unavailable" );
+                if( settings->GetNetChainClassDefinitions() != definitions || settings->GetNetChainClasses() != assignments )
+                {
+                    if( !static_cast<SCH_COMMIT*>( getCurrentCommit( aCtx.ClientName ) )->SetNetChainClasses( definitions, assignments ) )
+                        return reject( prefix + "Cannot stage project class changes" );
+                    result.set_net_chain_classes_changed( true );
+                }
+            }
+            else if( operation.has_set_field_templates() )
+            {
+                const auto& desired = operation.set_field_templates();
+                std::string failure;
+                if( !SCH_FIELD_TEMPLATES::Validate( desired, failure ) )
+                    return reject( prefix + failure );
+                if( SCH_FIELD_TEMPLATES::Capture( project().GetProjectFile().m_TemplateFieldNames ).SerializeAsString()
+                        != desired.SerializeAsString() )
+                {
+                    static_cast<SCH_COMMIT*>( getCurrentCommit( aCtx.ClientName ) )->SetFieldTemplates( desired );
+                    result.set_field_templates_changed( true );
+                }
+            }
+            else if( operation.has_set_symbol_comparison() )
+            {
+                const auto& desired = operation.set_symbol_comparison();
+                std::string failure;
+                if( !SCH_SYMBOL_COMPARISON::Validate( desired, failure ) )
+                    return reject( prefix + failure );
+                if( SCH_SYMBOL_COMPARISON::Capture( schematic()->Settings().m_SymbolParity ).SerializeAsString()
+                        != desired.SerializeAsString() )
+                {
+                    static_cast<SCH_COMMIT*>( getCurrentCommit( aCtx.ClientName ) )->SetSymbolComparison( desired );
+                    result.set_symbol_comparison_changed( true );
+                }
+            }
+            else if( operation.has_set_bom_settings() )
+            {
+                const auto& desired = operation.set_bom_settings();
+                std::string failure;
+                if( !SCH_BOM_SETTINGS::Validate( desired, failure ) )
+                    return reject( prefix + failure );
+                if( SCH_BOM_SETTINGS::Capture( schematic()->Settings() ).SerializeAsString()
+                        != desired.SerializeAsString() )
+                {
+                    if( !m_frame )
+                        return reject( prefix + "BOM settings require a schematic editor" );
+                    if( m_frame->HasOpenSymbolFieldsTableDialog() )
+                        return reject( prefix + "Close the Symbol Fields table before replacing BOM settings",
+                                       ApiStatusCode::AS_BUSY );
+                    static_cast<SCH_COMMIT*>( getCurrentCommit( aCtx.ClientName ) )->SetBomSettings( desired );
+                    result.set_bom_settings_changed( true );
+                }
+            }
+            else if( operation.has_set_net_settings() )
+            {
+                const auto& desired = operation.set_net_settings();
+                auto settings = project().GetProjectFile().NetSettings();
+                if( !settings || !m_frame )
+                    return reject( prefix + "Net settings require an available schematic project" );
+                const auto current = SCH_NET_SETTINGS::Capture( *settings );
+                if( !desired.label_assignments().empty() )
+                {
+                    SCH_NET_SETTINGS::MESSAGE observed, supplied;
+                    *observed.mutable_label_assignments() = current.label_assignments();
+                    *supplied.mutable_label_assignments() = desired.label_assignments();
+                    if( !SCH_NET_SETTINGS::Same( observed, supplied ) )
+                        return reject( prefix + "Label class assignments are derived; edit the owning native directives" );
+                }
+                try
+                {
+                    (void) SCH_NET_SETTINGS::PrepareDeclared( desired );
+                    if( !SCH_NET_SETTINGS::SameDeclared( current, desired ) )
+                    {
+                        static_cast<SCH_COMMIT*>( getCurrentCommit( aCtx.ClientName ) )->SetNetSettings( desired );
+                        result.set_net_settings_changed( true );
+                    }
+                }
+                catch( const std::exception& error )
+                {
+                    // Private validation uses exceptions; the transport needs
+                    // an explicit reply, with all earlier operations reverted.
+                    return reject( prefix + error.what() );
+                }
+            }
+            else if( operation.has_set_ngspice_settings() )
+            {
+                const auto& desired = operation.set_ngspice_settings();
+                std::string failure;
+                if( !SCH_NGSPICE_SETTINGS::Validate( desired, failure ) )
+                    return reject( prefix + failure );
+                auto settings = project().GetProjectFile().m_SchematicSettings
+                        ? project().GetProjectFile().m_SchematicSettings->m_NgspiceSettings : nullptr;
+                if( !settings )
+                    return reject( prefix + "Ngspice project settings are unavailable" );
+                if( SCH_NGSPICE_SETTINGS::Capture( *settings ).SerializeAsString()
+                        != desired.SerializeAsString() )
+                {
+                    auto before = project().GetProjectFile().CaptureCurrentState();
+                    auto after = before;
+                    auto& ngspice = after["schematic"]["ngspice"];
+                    ngspice["workbook_filename"] = desired.workbook_filename();
+                    ngspice["fix_include_paths"] = desired.fix_include_paths();
+                    ngspice["model_mode"] = desired.model_mode();
+                    try
+                    {
+                        static_cast<SCH_COMMIT*>( getCurrentCommit( aCtx.ClientName ) )->SetSetupSettings( before, after );
+                    }
+                    catch( const std::exception& error )
+                    {
+                        return reject( prefix + error.what() );
+                    }
+                    result.set_ngspice_settings_changed( true );
+                }
+            }
+            else if( operation.has_set_reference_inventory() )
+            {
+                REFDES_TRACKER prepared;
+                std::string failure;
+                if( !SCH_REFERENCE_INVENTORY::Prepare( operation.set_reference_inventory(), prepared, failure ) )
+                    return reject( prefix + failure );
+                auto tracker = schematic()->Settings().m_refDesTracker;
+                const auto before = tracker ? tracker->GetAllocatedReferences() : std::vector<std::string>{};
+                if( before != prepared.GetAllocatedReferences() )
+                {
+                    static_cast<SCH_COMMIT*>( getCurrentCommit( aCtx.ClientName ) )->SetReferenceInventory( prepared );
+                    result.set_reference_inventory_changed( true );
+                }
+            }
+            else if( operation.has_set_annotation() )
+            {
+                const auto& desired = operation.set_annotation();
+                std::string failure;
+                if( !SCH_ANNOTATION::Validate( desired, failure ) )
+                    return reject( prefix + failure );
+                if( SCH_ANNOTATION::Capture( schematic()->Settings() ).SerializeAsString()
+                        != desired.SerializeAsString() )
+                {
+                    static_cast<SCH_COMMIT*>( getCurrentCommit( aCtx.ClientName ) )->SetAnnotation( desired );
+                    result.set_annotation_changed( true );
                 }
             }
             else if( operation.has_set_formatting() )
@@ -1336,9 +2043,193 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                     }
                 }
             }
+            else if( operation.has_assert_connectivity() )
+            {
+                // Admitted before the first operation: this is the last one, so every
+                // creation and update of the batch is staged, and admission already refused
+                // sheet creation. Measure the partition the commit would produce, with no
+                // cleanup, before anything is pushed.
+                connectivityEvaluated = true;
+                MOVE_PIN_PARTITIONS assertedAfter;
+                bool captured = false;
+                {
+                    // Show staged additions on the screens the commit appends them to, then
+                    // take them off again even if the capture throws. The commit performs
+                    // the real append, including library-cache bookkeeping.
+                    std::vector<std::pair<SCH_SCREEN*, SCH_ITEM*>> shown;
+                    shown.reserve( createdItems.size() );
+                    struct STAGED_VIEW
+                    {
+                        std::vector<std::pair<SCH_SCREEN*, SCH_ITEM*>>& items;
+                        ~STAGED_VIEW()
+                        {
+                            for( auto& [screen, item] : items )
+                            {
+                                screen->Remove( item, false );
+                                item->SetConnectivityDirty();
+                                if( item->Type() == SCH_SYMBOL_T )
+                                {
+                                    for( const std::unique_ptr<SCH_PIN>& pin : static_cast<SCH_SYMBOL*>( item )->GetRawPins() )
+                                        pin->SetConnectivityDirty();
+                                }
+                            }
+                        }
+                    } view{ shown };
+                    for( const auto& [key, item] : createdItems )
+                    {
+                        if( item->Type() == SCH_SHEET_PIN_T || item->Type() == SCH_FIELD_T
+                                || key.first->CheckIfOnDrawList( item.get() ) )
+                            continue;
+                        key.first->Append( item.get(), false );
+                        shown.emplace_back( key.first, item.get() );
+                    }
+                    captured = captureMovePinPartitions( *schematic(), assertedAfter );
+                }
+                // Connectivity again describes the document the commit starts from, so no
+                // live item refers to an addition that is not on its screen yet.
+                if( CONNECTION_GRAPH* graph = schematic()->ConnectionGraph() )
+                    graph->Recalculate( schematic()->Hierarchy(), true );
+                if( !captured )
+                    return reject( prefix + "Cannot establish exact pin connections in all loaded sheet instances" );
+                if( auto failure = CHECKED_SCHEMATIC_CONTROLLER::CheckConnectivity( assertedBefore, assertedAfter,
+                                                                                    assertion.expected ) )
+                    return reject( *failure );
+                result.set_connectivity_assertion_verified( true );
+            }
             else
                 return reject( prefix + "Operation kind is missing" );
         }
+
+        // ERC is applied after all ordinary operations are staged.  This keeps
+        // one commit/undo entry while allowing exclusions to name items and
+        // child sheets created earlier in the same rebuild batch.
+        std::string deferredErcFailure;
+        if( !deferredErcSettings.empty() || !declaredMoves.empty() )
+        {
+            std::vector<std::pair<SCH_SCREEN*, SCH_ITEM*>> shown;
+            shown.reserve( createdItems.size() );
+            struct STAGED_VIEW
+            {
+                SCHEMATIC& schematic;
+                std::vector<std::pair<SCH_SCREEN*, SCH_ITEM*>>& items;
+
+                ~STAGED_VIEW()
+                {
+                    for( auto it = items.rbegin(); it != items.rend(); ++it )
+                        it->first->Remove( it->second, false );
+                    if( !items.empty() )
+                        schematic.RefreshHierarchy();
+                }
+            } stagedView{ *schematic(), shown };
+
+            // Append without library-cache maintenance, matching the checked
+            // connectivity assertion's staged view.  The items remain owned by
+            // createdItems and are removed before the actual commit push.
+            for( const auto& [key, item] : createdItems )
+            {
+                if( item->Type() == SCH_SHEET_PIN_T || item->Type() == SCH_FIELD_T
+                        || key.first->CheckIfOnDrawList( item.get() ) )
+                    continue;
+                key.first->Append( item.get(), false );
+                shown.emplace_back( key.first, item.get() );
+            }
+            schematic()->RefreshHierarchy();
+            for( const auto& declared : declaredMoves )
+            {
+                auto parent = schematic()->Hierarchy().GetSheetPathByKIIDPath( declared.destinationParent );
+                auto* target = parent ? parent->ResolveItem( declared.destinationId ) : nullptr;
+                if( !target || target->Type() != SCH_SHEET_T
+                        || static_cast<SCH_SHEET*>( target )->GetScreen() != declared.child )
+                {
+                    deferredErcFailure = "The mapped destination did not retain the original physical sheet";
+                    break;
+                }
+                std::set<KIID_PATH> actual;
+                for( const auto& instance : schematic()->Hierarchy() )
+                    if( instance.LastScreen() == parent->LastScreen() )
+                    { auto path = instance.Path(); path.push_back( declared.destinationId ); actual.insert( path ); }
+                if( actual != declared.destinations )
+                {
+                    deferredErcFailure = "The mapping does not cover the complete resulting sheet-instance set";
+                    break;
+                }
+            }
+            for( const auto& instance : schematic()->Hierarchy() )
+            {
+                if( !deferredErcFailure.empty() ) break;
+                if( std::none_of( addedPaths.begin(), addedPaths.end(), [&]( const auto& path ) { return within( instance.Path(), path ); } ) )
+                    continue;
+                for( SCH_ITEM* item : instance.LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
+                {
+                    const auto* symbol = static_cast<const SCH_SYMBOL*>( item );
+                    const auto& records = symbol->GetInstances();
+                    if( std::none_of( records.begin(), records.end(), [&]( const auto& record )
+                            { return record.m_Path == instance.Path() && record.m_Unit > 0
+                                && record.m_Unit <= symbol->GetUnitCount()
+                                && ( record.m_ProjectName.IsEmpty() || record.m_ProjectName == project().GetProjectName() ); } ) )
+                    {
+                        deferredErcFailure = "A new sheet instance requires explicit component reference and unit records";
+                        break;
+                    }
+                    bool supplied = false;
+                    for( const auto& operation : aCtx.Request.operations() )
+                    {
+                        const auto* packed = operation.has_create() ? &operation.create()
+                                : operation.has_update() ? &operation.update() : nullptr;
+                        if( !packed || !packed->Is<kiapi::schematic::types::SchematicSymbolInstance>() ) continue;
+                        const auto& document = operation.has_target_document() ? operation.target_document() : aCtx.Request.document();
+                        auto owner = resolveBatchSheet( UnpackSheetPath( document.sheet_path() ) );
+                        if( !owner || owner->LastScreen() != instance.LastScreen() ) continue;
+                        kiapi::schematic::types::SchematicSymbolInstance candidate;
+                        packed->UnpackTo( &candidate );
+                        if( candidate.id().value() != symbol->m_Uuid.AsStdString() ) continue;
+                        for( const auto& declared : candidate.instance_records().records() )
+                        {
+                            if( static_cast<size_t>( declared.path_size() ) != instance.Path().size()
+                                    || !std::equal( declared.path().begin(), declared.path().end(), instance.Path().begin(),
+                                            []( const auto& value, const KIID& id ) { return value.value() == id.AsStdString(); } ) ) continue;
+                            supplied = std::any_of( records.begin(), records.end(), [&]( const auto& actual )
+                            {
+                                return actual.m_Path == instance.Path() && actual.m_Unit == declared.unit()
+                                    && actual.m_Reference.ToStdString() == declared.reference()
+                                    && ( declared.project_name().empty() || declared.project_name() == project().GetProjectName().ToStdString() );
+                            } );
+                            if( supplied ) break;
+                        }
+                        if( supplied ) break;
+                    }
+                    if( !supplied )
+                    {
+                        deferredErcFailure = "A new sheet instance requires explicitly supplied component reference and unit records";
+                        break;
+                    }
+                }
+            }
+
+            std::string failure;
+            for( const auto& [deferred, prefix] : deferredErcSettings )
+            {
+                if( !deferredErcFailure.empty() ) break;
+                SCH_ERC_SETTINGS::PREPARED candidate;
+                if( !SCH_ERC_SETTINGS::Prepare( deferred->set_erc_settings(), *schematic(), candidate, failure ) )
+                {
+                    deferredErcFailure = prefix + failure;
+                    break;
+                }
+                const bool changed = SCH_ERC_SETTINGS::Capture( *schematic() ).SerializeAsString()
+                                     != candidate.canonical.SerializeAsString();
+                if( changed && !nativeCommit->SetErcSettings( candidate, failure ) )
+                {
+                    deferredErcFailure = prefix + failure;
+                    break;
+                }
+                result.set_erc_settings_changed( result.erc_settings_changed() || changed );
+            }
+        }
+        // The temporary hierarchy must be gone before rollback recalculates
+        // connectivity or releases the staged sheets and their marker owners.
+        if( !deferredErcFailure.empty() )
+            return reject( deferredErcFailure );
 
         wxString cacheFailure;
         if( !nativeCommit->ValidateLibraryCaches( cacheFailure ) )
@@ -1352,6 +2243,10 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
         result.mutable_revision()->set_epoch( schematic()->ChangeJournal().Epoch() );
         result.mutable_revision()->set_sequence( std::numeric_limits<uint64_t>::max() );
         result.set_tracking_complete( false );
+
+        if( aCtx.Request.maximum_result_bytes()
+                && result.ByteSizeLong() > aCtx.Request.maximum_result_bytes() )
+            return reject( "Batch result exceeds the reserved reply capacity; no changes were committed" );
 
         // Allocate the retained result before the irreversible commit. An
         // exceptional failure keeps the identity indeterminate, never retryable
@@ -1464,12 +2359,78 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicOperationReceipt> API_HANDLER_SCH
 }
 
 
+std::optional<ApiResponseStatus> API_HANDLER_SCH::validateSnapshotSchema( uint32_t aVersion )
+{
+    if( aVersion <= 10 ) return std::nullopt;
+    ApiResponseStatus error;
+    error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+    error.set_error_message( "Unsupported schematic snapshot schema version" );
+    return error;
+}
+
+
+void API_HANDLER_SCH::projectSnapshotSchema(
+        kiapi::schematic::types::SchematicMetadata& aMetadata, uint32_t aVersion )
+{
+    if( aVersion < 2 && aMetadata.has_erc_settings() )
+    {
+        aMetadata.clear_erc_settings();
+        aMetadata.add_unrepresented_state( "erc_settings_require_snapshot_schema_2" );
+    }
+    if( aVersion < 3 && aMetadata.has_net_chain_classes() )
+    {
+        aMetadata.clear_net_chain_classes();
+        aMetadata.add_unrepresented_state( "net_chain_classes_require_snapshot_schema_3" );
+    }
+    if( aVersion < 4 && !aMetadata.net_chains().empty() )
+    {
+        for( auto& chain : *aMetadata.mutable_net_chains() ) chain.clear_exclusions();
+        aMetadata.add_unrepresented_state( "net_chain_exclusions_require_snapshot_schema_4" );
+    }
+    if( aVersion < 5 && aMetadata.has_annotation() )
+    {
+        aMetadata.clear_annotation();
+        aMetadata.add_unrepresented_state( "annotation_requires_snapshot_schema_5" );
+    }
+    if( aVersion < 6 && aMetadata.has_reference_inventory() )
+    {
+        aMetadata.clear_reference_inventory();
+        aMetadata.add_unrepresented_state( "reference_inventory_requires_snapshot_schema_6" );
+    }
+    if( aVersion < 7 )
+    {
+        aMetadata.clear_field_templates();
+        aMetadata.clear_symbol_comparison();
+        aMetadata.add_unrepresented_state( "symbol_project_settings_require_snapshot_schema_7" );
+    }
+    if( aVersion < 8 )
+    {
+        aMetadata.clear_bom_settings();
+        aMetadata.add_unrepresented_state( "bom_settings_require_snapshot_schema_8" );
+    }
+    if( aVersion < 9 )
+    {
+        aMetadata.clear_net_settings();
+        aMetadata.add_unrepresented_state( "net_settings_require_snapshot_schema_9" );
+    }
+    if( aVersion < 10 && aMetadata.has_ngspice_settings() )
+    {
+        aMetadata.clear_ngspice_settings();
+        aMetadata.add_unrepresented_state( "ngspice_settings_require_snapshot_schema_10" );
+    }
+}
+
+
 HANDLER_RESULT<kiapi::automation::v1::SchematicObservation> API_HANDLER_SCH::handleCaptureObservation(
         const HANDLER_CONTEXT<kiapi::automation::v1::CaptureSchematicObservation>& aCtx )
 {
+    if( auto error = validateSnapshotSchema( aCtx.Request.schema_version() ) )
+        return tl::unexpected( *error );
     HANDLER_CONTEXT<kiapi::automation::v1::ReadSchematicScreenData> query;
     query.ClientName = aCtx.ClientName;
     query.Request.mutable_document()->CopyFrom( aCtx.Request.document() );
+    // Compare full current state across rendering, even for legacy clients.
+    query.Request.set_schema_version( 10 );
     auto before = handleReadScreenData( query );
     if( !before )
         return tl::unexpected( before.error() );
@@ -1499,7 +2460,149 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicObservation> API_HANDLER_SCH::han
     kiapi::automation::v1::SchematicObservation result;
     result.mutable_snapshot()->Swap( &*after );
     result.mutable_preview()->Swap( &*preview );
+    projectSnapshotSchema( *result.mutable_snapshot()->mutable_data()->mutable_metadata(),
+                           aCtx.Request.schema_version() );
     return result;
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> API_HANDLER_SCH::handleReadLifecycleState(
+        const HANDLER_CONTEXT<kiapi::automation::v1::ReadDocumentLifecycleState>& aCtx )
+{
+    if( auto busy = checkForStableObservation() ) return tl::unexpected( *busy );
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+    try
+    {
+        kiapi::automation::v1::DocumentLifecycleState result;
+        result.mutable_document()->CopyFrom( aCtx.Request.document() );
+        result.mutable_revision()->set_epoch( schematic()->ChangeJournal().Epoch() );
+        result.mutable_revision()->set_sequence( schematic()->ChangeJournal().Sequence() );
+        result.set_native_identity( schematic()->RootScreen()->GetUuid().AsStdString() );
+        result.set_process_epoch( apiServer().Token() );
+        result.set_scope( kiapi::automation::v1::DLS_SCHEMATIC_HIERARCHY );
+        // The same grouped state that native change tracking compares, so a tracked owner
+        // records a revision exactly when this digest changes.
+        const SCH_STATE_GROUPS state = SCH_STATE_GROUPS::Capture( *schematic() );
+        std::set<std::string> files;
+        for( SCH_SHEET* sheet : state.WrittenSheets() )
+        {
+            result.set_native_content_dirty( result.native_content_dirty() || sheet->GetScreen()->IsContentModified() );
+            files.insert( project().AbsolutePath( sheet->GetScreen()->GetFileName() ).ToStdString( wxConvUTF8 ) );
+            result.add_file_baselines()->CopyFrom( ObserveNativeFile(
+                    project().AbsolutePath( sheet->GetScreen()->GetFileName() ), sheet->GetScreen()->FileBaseline() ) );
+        }
+        result.set_project_settings_included( true );
+        result.set_complete_change_tracking( false );
+        result.set_disk_baseline_checked( false );
+        for( const auto& file : files ) result.add_native_files( file );
+        result.add_native_files( project().GetProjectFullName().ToStdString( wxConvUTF8 ) );
+        result.add_file_baselines()->CopyFrom( ObserveNativeFile(
+                project().GetProjectFullName(), project().GetProjectFile().FileBaseline() ) );
+        result.set_state_sha256( state.DocumentSha256() );
+        // What a save keeps: publication accepts a save that only rewrote the project-file
+        // entries saving derives from the schematic (a stale sheet list) by this digest.
+        result.set_save_stable_state_sha256( state.SaveStableSha256() );
+        if( result.revision().epoch() != schematic()->ChangeJournal().Epoch()
+                || result.revision().sequence() != schematic()->ChangeJournal().Sequence() )
+        {
+            ApiResponseStatus changed;
+            changed.set_status( ApiStatusCode::AS_BUSY );
+            changed.set_error_message( "Schematic changed during native state observation" );
+            return tl::unexpected( changed );
+        }
+        return result;
+    }
+    catch( const std::exception& error )
+    {
+        ApiResponseStatus failure;
+        failure.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        failure.set_error_message( std::string( "Native state could not be observed: " ) + error.what() );
+        return tl::unexpected( failure );
+    }
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::SchematicParityNetlistSnapshot> API_HANDLER_SCH::handleReadParityNetlist(
+        const HANDLER_CONTEXT<kiapi::automation::v1::ReadSchematicParityNetlist>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    auto fail = []( ApiStatusCode code, const std::string& message ) -> HANDLER_RESULT<SchematicParityNetlistSnapshot>
+    {
+        ApiResponseStatus error;
+        error.set_status( code ); error.set_error_message( message );
+        return tl::unexpected( error );
+    };
+    if( aCtx.Request.schema_version() != 1 )
+        return fail( ApiStatusCode::AS_BAD_REQUEST, "Unsupported schematic parity snapshot version" );
+    // Native netlist paths omit the root UUID. The explicit document sheet path
+    // in source_state anchors them without guessing from names or positions.
+    if( !aCtx.Request.document().has_sheet_path() || aCtx.Request.document().sheet_path().path_size() == 0 )
+        return fail( ApiStatusCode::AS_BAD_REQUEST, "An explicit schematic sheet instance is required for comparison input" );
+    if( auto busy = checkForStableObservation() ) return tl::unexpected( *busy );
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+    if( !aCtx.Request.has_expected_state() )
+        return fail( ApiStatusCode::AS_BAD_REQUEST, "Read the current schematic state before capturing comparison input" );
+
+    auto observe = [&]() -> HANDLER_RESULT<DocumentLifecycleState>
+    {
+        ReadDocumentLifecycleState query;
+        query.mutable_document()->CopyFrom( aCtx.Request.document() );
+        ApiRequest request;
+        request.mutable_message()->PackFrom( query );
+        // Go through the common dispatcher just as an external read does. It
+        // adds the process-owned clean checkpoint used by checked lifecycle calls.
+        auto reply = apiServer().DispatchToHandlers( request );
+        if( !reply ) return tl::unexpected( reply.error() );
+        if( reply->status().status() != ApiStatusCode::AS_OK ) return tl::unexpected( reply->status() );
+        DocumentLifecycleState state;
+        if( !reply->message().UnpackTo( &state ) )
+        {
+            ApiResponseStatus error;
+            error.set_status( ApiStatusCode::AS_NOT_READY );
+            error.set_error_message( "Native schematic state could not be decoded" );
+            return tl::unexpected( error );
+        }
+        return state;
+    };
+    auto before = observe();
+    if( !before ) return tl::unexpected( before.error() );
+    // A journal cursor alone is not sufficient until all native changes are tracked.
+    // Compare the full writer/project state, explicit target and process identity.
+    if( !google::protobuf::util::MessageDifferencer::Equals( *before, aCtx.Request.expected_state() ) )
+        return fail( ApiStatusCode::AS_BUSY, "Schematic state changed; observe it again before capturing comparison input" );
+
+    try
+    {
+        STRING_FORMATTER output;
+        auto warnings = FormatSchematicParityNetlist( *schematic(), output,
+                aCtx.Request.allow_duplicate_sheet_names(), context()->GetKiway() );
+        auto after = observe();
+        if( !after ) return tl::unexpected( after.error() );
+        if( !google::protobuf::util::MessageDifferencer::Equals( *before, *after ) )
+            return fail( ApiStatusCode::AS_BUSY, "Schematic changed while capturing comparison input" );
+        SchematicParityNetlistSnapshot result;
+        result.set_schema_version( 1 );
+        result.mutable_source_state()->CopyFrom( *after );
+        result.set_native_netlist_sexpr( output.GetString() );
+        NATIVE_STATE_DIGEST digest;
+        digest.Append( output.GetString() );
+        result.set_netlist_sha256( digest.Hex() );
+        for( const auto& warning : warnings ) result.add_warnings( warning );
+        return result;
+    }
+    catch( const SCH_PARITY_INPUT_ERROR& error )
+    {
+        bool busy = error.Status() == SCH_PARITY_INPUT_STATUS::EDIT_IN_PROGRESS
+                    || error.Status() == SCH_PARITY_INPUT_STATUS::CONNECTIVITY_PENDING;
+        return fail( busy ? ApiStatusCode::AS_BUSY : ApiStatusCode::AS_BAD_REQUEST, error.what() );
+    }
+    catch( const std::exception& error )
+    {
+        return fail( ApiStatusCode::AS_BAD_REQUEST,
+                     std::string( "Schematic comparison input could not be captured: " ) + error.what() );
+    }
 }
 
 
@@ -1542,6 +2645,8 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicSaveState> API_HANDLER_SCH::handl
 HANDLER_RESULT<kiapi::automation::v1::SchematicScreenDataSnapshot> API_HANDLER_SCH::handleReadScreenData(
         const HANDLER_CONTEXT<kiapi::automation::v1::ReadSchematicScreenData>& aCtx )
 {
+    if( auto error = validateSnapshotSchema( aCtx.Request.schema_version() ) )
+        return tl::unexpected( *error );
     if( auto busy = checkForStableObservation() ) return tl::unexpected( *busy );
     if( auto valid = validateDisplayedSheet( aCtx.Request.document() ); !valid )
         return tl::unexpected( valid.error() );
@@ -1549,6 +2654,7 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicScreenDataSnapshot> API_HANDLER_S
     if( !data ) return tl::unexpected( data.error() );
     kiapi::automation::v1::SchematicScreenDataSnapshot result;
     result.mutable_data()->CopyFrom( *data );
+    projectSnapshotSchema( *result.mutable_data()->mutable_metadata(), aCtx.Request.schema_version() );
     result.mutable_revision()->set_epoch( schematic()->ChangeJournal().Epoch() );
     result.mutable_revision()->set_sequence( schematic()->ChangeJournal().Sequence() );
     result.set_tracking_complete( false );
@@ -1559,9 +2665,20 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicScreenDataSnapshot> API_HANDLER_S
 HANDLER_RESULT<kiapi::automation::v1::SchematicHierarchyDataSnapshot> API_HANDLER_SCH::handleReadHierarchyData(
         const HANDLER_CONTEXT<kiapi::automation::v1::ReadSchematicHierarchyData>& aCtx )
 {
+    if( auto error = validateSnapshotSchema( aCtx.Request.schema_version() ) )
+        return tl::unexpected( *error );
     if( auto busy = checkForStableObservation() ) return tl::unexpected( *busy );
-    if( auto valid = validateDisplayedSheet( aCtx.Request.document() ); !valid )
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
         return tl::unexpected( valid.error() );
+    if( !aCtx.Request.document().has_sheet_path()
+        || UnpackSheetPath( aCtx.Request.document().sheet_path() ).empty()
+        || !resolveBatchSheet( UnpackSheetPath( aCtx.Request.document().sheet_path() ) ) )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( "An explicit loaded schematic sheet instance is required" );
+        return tl::unexpected( error );
+    }
 
     // Do not navigate the UI or yield between instances. Every path is packed
     // from the same native state, including repeated-instance presentation.
@@ -1578,11 +2695,151 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicHierarchyDataSnapshot> API_HANDLE
         PackSheetPath( *document.mutable_sheet_path(), path.Path() );
         auto screen = readScreenDataForPath( path, document );
         if( !screen ) return tl::unexpected( screen.error() );
+        projectSnapshotSchema( *screen->mutable_metadata(), aCtx.Request.schema_version() );
         data->add_instances()->CopyFrom( *screen );
     }
     result.mutable_revision()->set_epoch( schematic()->ChangeJournal().Epoch() );
     result.mutable_revision()->set_sequence( schematic()->ChangeJournal().Sequence() );
     result.set_tracking_complete( false );
+    return result;
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::SchematicFileLocations> API_HANDLER_SCH::handleReadFileLocations(
+        const HANDLER_CONTEXT<kiapi::automation::v1::ReadSchematicFileLocations>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    auto reject = []( const std::string& message ) -> HANDLER_RESULT<SchematicFileLocations>
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( message );
+        return tl::unexpected( error );
+    };
+    if( auto busy = checkForStableObservation() ) return tl::unexpected( *busy );
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+    if( !aCtx.Request.document().has_sheet_path()
+            || !resolveBatchSheet( UnpackSheetPath( aCtx.Request.document().sheet_path() ) ) )
+        return reject( "File locations require an explicit loaded sheet instance" );
+    const std::string epoch = schematic()->ChangeJournal().Epoch();
+    const uint64_t sequence = schematic()->ChangeJournal().Sequence();
+    if( !aCtx.Request.has_expected_revision() || aCtx.Request.expected_revision().epoch() != epoch
+            || aCtx.Request.expected_revision().sequence() != sequence )
+        return reject( "Stale schematic revision; refresh the hierarchy before reading file locations" );
+    std::vector<SCH_SHEET_PATH> paths;
+    for( const SCH_SHEET_PATH& path : schematic()->Hierarchy() ) paths.push_back( path );
+    std::sort( paths.begin(), paths.end(), []( const auto& a, const auto& b ) { return a.Path() < b.Path(); } );
+    SchematicFileLocations result;
+    result.mutable_document()->CopyFrom( aCtx.Request.document() );
+    if( !paths.empty() ) PackSheetPath( *result.mutable_document()->mutable_sheet_path(), paths.front().Path() );
+    result.mutable_revision()->set_epoch( epoch );
+    result.mutable_revision()->set_sequence( sequence );
+    result.set_process_epoch( apiServer().Token() );
+    for( const SCH_SHEET_PATH& path : paths )
+    {
+        SCH_SCREEN* screen = path.LastScreen();
+        if( !screen ) return reject( "A loaded sheet has no physical screen" );
+        wxFileName loaded( screen->GetFileName() );
+        if( !loaded.MakeAbsolute( project().GetProjectPath() ) )
+            return reject( "The loaded schematic filename is not absolute" );
+        loaded.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+        const wxString declared = path.Last()->GetFileName();
+        wxFileName resolved( ExpandEnvVarSubstitutions( declared, &project() ) );
+        const bool absolute = resolved.IsAbsolute();
+        const SCH_SHEET* parentSheet = path.size() > 1 ? path.GetSheet( static_cast<unsigned>( path.size() - 2 ) ) : nullptr;
+        const wxString parent = parentSheet && parentSheet->GetScreen()
+                ? wxFileName( parentSheet->GetScreen()->GetFileName() ).GetPath()
+                : project().GetProjectPath();
+        const bool resolvable = !declared.IsEmpty() && resolved.MakeAbsolute( parent );
+        if( resolvable ) resolved.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+        auto* file = result.add_locations();
+        PackSheetPath( *file->mutable_path(), path.Path() );
+        file->mutable_screen_id()->set_value( screen->GetUuid().AsStdString() );
+        file->set_loaded_filename( loaded.GetFullPath().ToStdString( wxConvUTF8 ) );
+        file->set_declared_filename( declared.ToStdString( wxConvUTF8 ) );
+        if( resolvable ) file->set_resolved_filename( resolved.GetFullPath().ToStdString( wxConvUTF8 ) );
+        file->set_declaration_is_absolute( absolute );
+        file->set_declaration_matches_loaded( resolvable && resolved == loaded );
+    }
+    if( epoch != schematic()->ChangeJournal().Epoch() || sequence != schematic()->ChangeJournal().Sequence() )
+        return reject( "Schematic changed while reading file locations; refresh before retrying" );
+    return result;
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::SchematicElectricalState> API_HANDLER_SCH::handleReadElectricalState(
+        const HANDLER_CONTEXT<kiapi::automation::v1::ReadSchematicElectricalState>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    auto reject = []( ApiStatusCode code, const std::string& message ) -> HANDLER_RESULT<SchematicElectricalState>
+    {
+        ApiResponseStatus error; error.set_status( code ); error.set_error_message( message );
+        return tl::unexpected( error );
+    };
+    if( auto error = validateSnapshotSchema( aCtx.Request.schema_version() ) )
+        return tl::unexpected( *error );
+    HANDLER_CONTEXT<ReadSchematicHierarchyData> query;
+    query.ClientName = aCtx.ClientName;
+    query.Request.mutable_document()->CopyFrom( aCtx.Request.document() );
+    query.Request.set_schema_version( 10 );
+    auto before = handleReadHierarchyData( query );
+    if( !before ) return tl::unexpected( before.error() );
+    if( aCtx.Request.has_expected_revision()
+        && !google::protobuf::util::MessageDifferencer::Equals( aCtx.Request.expected_revision(), before->revision() ) )
+        return reject( ApiStatusCode::AS_BAD_REQUEST, "Stale schematic electrical observation revision" );
+    if( !schematic()->ConnectionGraph() )
+        return reject( ApiStatusCode::AS_NOT_READY, "Schematic connectivity is unavailable" );
+    const SCH_SHEET_PATH humanPath = *context()->GetCurrentSheet();
+    std::map<SCH_SCREEN*, bool> savedFlags;
+    for( const SCH_SHEET_PATH& path : schematic()->Hierarchy() )
+        savedFlags.emplace( path.LastScreen(), path.LastScreen()->IsContentModified() );
+
+    // Refresh computed connectivity only: no CleanUp, annotation, file save,
+    // native commit, or progress callback that can yield to user edits.
+    schematic()->ConnectionGraph()->Recalculate( schematic()->Hierarchy(), true );
+    HANDLER_CONTEXT<kiapi::schematic::commands::GetSchematicNetlist> netQuery;
+    netQuery.ClientName = aCtx.ClientName;
+    netQuery.Request.mutable_document()->CopyFrom( before->data().document() );
+    auto netlist = handleGetSchematicNetlist( netQuery );
+    if( !netlist ) return tl::unexpected( netlist.error() );
+    auto after = handleReadHierarchyData( query );
+    if( !after ) return tl::unexpected( after.error() );
+    if( !google::protobuf::util::MessageDifferencer::Equals( *before, *after )
+        || *context()->GetCurrentSheet() != humanPath
+        || std::ranges::any_of( savedFlags, []( const auto& entry )
+               { return entry.first->IsContentModified() != entry.second; } ) )
+        return reject( ApiStatusCode::AS_NOT_READY, "Schematic changed during electrical observation; retry" );
+
+    SchematicElectricalState result;
+    result.mutable_hierarchy()->Swap( &*after );
+    std::vector<std::pair<std::string, kiapi::schematic::types::SchematicNet>> nets;
+    for( const auto& source : netlist->nets() )
+    {
+        kiapi::schematic::types::SchematicNet net;
+        net.set_name( source.name() );
+        std::map<std::vector<std::string>, std::set<std::string>> memberships;
+        for( const auto& sheet : source.sheets() )
+        {
+            std::vector<std::string> path;
+            for( const auto& id : sheet.path().path() ) path.push_back( id.value() );
+            for( const auto& id : sheet.items() ) memberships[path].insert( id.value() );
+        }
+        for( const auto& [path, ids] : memberships )
+        {
+            auto* sheet = net.add_sheets();
+            for( const auto& id : path ) sheet->mutable_path()->add_path()->set_value( id );
+            for( const auto& id : ids ) sheet->add_items()->set_value( id );
+        }
+        nets.emplace_back( net.SerializeAsString(), std::move( net ) );
+    }
+    std::sort( nets.begin(), nets.end(), []( const auto& a, const auto& b ) { return a.first < b.first; } );
+    for( auto& [key, net] : nets ) result.add_nets()->Swap( &net );
+    for( auto& screen : *result.mutable_hierarchy()->mutable_data()->mutable_instances() )
+        projectSnapshotSchema( *screen.mutable_metadata(), aCtx.Request.schema_version() );
+    result.add_limitations( "Net names are computed labels, not persistent net identities" );
+    result.add_limitations( "Scalar native net memberships exclude bus containers and unconnected artwork without a pin driver" );
+    result.add_limitations( "Complete native serializer and revision coverage remain unfinished; this read is not mutation admission" );
     return result;
 }
 
@@ -1640,13 +2897,18 @@ HANDLER_RESULT<kiapi::schematic::types::SchematicScreenData> API_HANDLER_SCH::re
 HANDLER_RESULT<kiapi::automation::v1::SchematicMetadataSnapshot> API_HANDLER_SCH::handleReadMetadata(
         const HANDLER_CONTEXT<kiapi::automation::v1::ReadSchematicMetadata>& aCtx )
 {
+    if( auto error = validateSnapshotSchema( aCtx.Request.schema_version() ) )
+        return tl::unexpected( *error );
     if( auto busy = checkForStableObservation() )
         return tl::unexpected( *busy );
 
     if( auto valid = validateDisplayedSheet( aCtx.Request.document() ); !valid )
         return tl::unexpected( valid.error() );
 
-    return readMetadataForPath( *m_context->GetCurrentSheet(), aCtx.Request.document() );
+    auto result = readMetadataForPath( *m_context->GetCurrentSheet(), aCtx.Request.document() );
+    if( !result ) return tl::unexpected( result.error() );
+    projectSnapshotSchema( *result->mutable_metadata(), aCtx.Request.schema_version() );
+    return result;
 }
 
 
@@ -1734,10 +2996,40 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicMetadataSnapshot> API_HANDLER_SCH
             for( const wxString& net : definition.memberNets )
                 chain.add_member_nets( net.ToUTF8() );
             chain.set_committed( definition.committed );
+            auto* exclusions = chain.mutable_exclusions();
+            for( const wxString& net : definition.excludedNets ) exclusions->add_net_names( net.ToUTF8() );
+            for( const auto& [path, pin] : definition.excludedPins )
+            {
+                auto* anchor = exclusions->add_pins();
+                anchor->mutable_pin()->set_value( pin.AsStdString() );
+                for( const KIID& id : path ) anchor->mutable_path()->add_path()->set_value( id.AsStdString() );
+            }
         }
     }
 
     *metadata->mutable_formatting() = SCH_FORMATTING::Capture( schematic()->Settings() );
+    *metadata->mutable_annotation() = SCH_ANNOTATION::Capture( schematic()->Settings() );
+    *metadata->mutable_reference_inventory() = SCH_REFERENCE_INVENTORY::Capture( schematic()->Settings() );
+    *metadata->mutable_field_templates() = SCH_FIELD_TEMPLATES::Capture( project().GetProjectFile().m_TemplateFieldNames );
+    *metadata->mutable_symbol_comparison() = SCH_SYMBOL_COMPARISON::Capture( schematic()->Settings().m_SymbolParity );
+    *metadata->mutable_bom_settings() = SCH_BOM_SETTINGS::Capture( schematic()->Settings() );
+    if( auto settings = project().GetProjectFile().NetSettings() )
+        *metadata->mutable_net_settings() = SCH_NET_SETTINGS::Capture( *settings );
+    if( project().GetProjectFile().m_SchematicSettings
+            && project().GetProjectFile().m_SchematicSettings->m_NgspiceSettings )
+    {
+        auto settings = project().GetProjectFile().m_SchematicSettings->m_NgspiceSettings;
+        *metadata->mutable_ngspice_settings() = SCH_NGSPICE_SETTINGS::Capture( *settings );
+    }
+    if( auto settings = project().GetProjectFile().NetSettings() )
+    {
+        auto* classes = metadata->mutable_net_chain_classes();
+        for( const wxString& name : settings->GetNetChainClassDefinitions() )
+            classes->add_definitions( name.ToUTF8() );
+        for( const auto& [chain, name] : settings->GetNetChainClasses() )
+            ( *classes->mutable_assignments() )[chain.ToStdString( wxConvUTF8 )] = name.ToStdString( wxConvUTF8 );
+    }
+    *metadata->mutable_erc_settings() = SCH_ERC_SETTINGS::Capture( *schematic() );
     const auto ratios = schematic()->Settings().DrawingRatios();
     auto* drawing = metadata->mutable_drawing_ratios();
     drawing->set_dash_length_ratio( ratios[0] );
@@ -1746,8 +3038,15 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicMetadataSnapshot> API_HANDLER_SCH
     drawing->set_label_size_ratio( ratios[3] );
     drawing->set_overbar_height_ratio( ratios[4] );
 
-    for( const char* missing : { "complete_project_settings", "shared_screen_root_ownership",
-                                "library_cache", "net_chains" } )
+    // State this snapshot does not hold completely enough to rebuild the saved files from it.
+    // The project file keeps settings the typed fields above do not cover.  The library cache is
+    // cached_symbols, every definition exactly (an unsupported one fails the read), so it is not
+    // named.  Shared-screen root ownership and net chains are named on every snapshot, whatever
+    // the schematic holds: the list is a property of the snapshot, not of the design, so a batch
+    // that adds or removes a repeated sheet or a net chain never changes it.  Whether a given
+    // schematic has any of them is read from its hierarchy and net chains themselves (a rebuild
+    // from saved XML does exactly that).
+    for( const char* missing : { "complete_project_settings", "shared_screen_root_ownership", "net_chains" } )
         metadata->add_unrepresented_state( missing );
 
     const auto& journal = schematic()->ChangeJournal();
@@ -1843,8 +3142,8 @@ HANDLER_RESULT<types::PageSettings> API_HANDLER_SCH::handleSetPageSettings(
         m_frame->GetCanvas()->GetView()->UpdateAllItems( KIGFX::REPAINT );
     }
 
-    onModified();
     schematic()->RecordCommittedChange( DOCUMENT_CHANGE_JOURNAL::KIND::COMMIT, "Edit Page Settings" );
+    onModified();
     return API_HANDLER_EDITOR::handleGetPageSettings( query );
 }
 
@@ -1985,7 +3284,10 @@ std::optional<ApiResponseStatus> API_HANDLER_SCH::checkForStableObservation()
         {
             ApiResponseStatus error;
             error.set_status( ApiStatusCode::AS_BUSY );
-            error.set_error_message( "Finish or cancel the current schematic edit before observing or applying automation changes" );
+            error.set_error_message( fmt::format(
+                    "Finish or cancel the current schematic edit before observing or applying automation changes (item {}, transient flags {})",
+                    item->m_Uuid.AsStdString(),
+                    static_cast<unsigned long long>( item->GetFlags() & ( IN_EDIT | IS_MOVING | IS_NEW ) ) ) );
             return error;
         }
         item->RunOnChildren( [&]( SCH_ITEM* child ) { pending.push_back( child ); },
@@ -2034,6 +3336,52 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicChangeJournal> API_HANDLER_SCH::h
             break;
         }
     }
+
+    return result;
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::SchematicTrackingErcMarkers> API_HANDLER_SCH::handleReadErcMarkers(
+        const HANDLER_CONTEXT<kiapi::automation::v1::SchematicTrackingReadErcMarkers>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> busy = checkForStableObservation() )
+        return tl::unexpected( *busy );
+
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+
+    // Every loaded screen once, through the first sheet instance that shows it.
+    std::vector<std::pair<std::string, kiapi::automation::v1::SchematicTrackingErcMarker>> markers;
+    std::set<SCH_SCREEN*> seen;
+
+    for( const SCH_SHEET_PATH& path : schematic()->Hierarchy() )
+    {
+        SCH_SCREEN* screen = path.LastScreen();
+
+        if( !screen || !seen.insert( screen ).second )
+            continue;
+
+        for( SCH_ITEM* item : screen->Items().OfType( SCH_MARKER_T ) )
+        {
+            const auto* marker = static_cast<SCH_MARKER*>( item );
+            kiapi::automation::v1::SchematicTrackingErcMarker entry;
+            entry.mutable_id()->set_value( marker->m_Uuid.AsStdString() );
+            *entry.mutable_marker() = ERC_EXCLUSION::FromMarker( *marker ).ToProto().marker();
+            entry.set_excluded( marker->IsExcluded() );
+            entry.set_comment( marker->GetComment().ToUTF8() );
+            entry.set_severity( ToProtoEnum<SEVERITY, types::RuleSeverity>( marker->GetSeverity() ) );
+            kiapi::common::PackSheetPath( *entry.mutable_sheet(), path.Path() );
+            markers.emplace_back( entry.marker().SerializeAsString() + entry.id().value(), std::move( entry ) );
+        }
+    }
+
+    std::sort( markers.begin(), markers.end(),
+               []( const auto& a, const auto& b ) { return a.first < b.first; } );
+
+    kiapi::automation::v1::SchematicTrackingErcMarkers result;
+
+    for( auto& [key, entry] : markers )
+        result.add_markers()->Swap( &entry );
 
     return result;
 }
@@ -2182,6 +3530,186 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicPreview> API_HANDLER_SCH::handleC
     result.mutable_png()->resize( stream.GetSize() );
     stream.CopyTo( result.mutable_png()->data(), result.png().size() );
     return result;
+}
+
+namespace
+{
+HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> SimulationError(
+        kiapi::common::ApiStatusCode aCode, const std::string& aMessage )
+{
+    kiapi::common::ApiResponseStatus error;
+    error.set_status( aCode );
+    error.set_error_message( aMessage );
+    return tl::unexpected( error );
+}
+}
+
+HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> API_HANDLER_SCH::handleStartSimulation(
+        const HANDLER_CONTEXT<kiapi::automation::v1::StartSimulationJob>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+
+    if( aCtx.Request.operation_id().empty() )
+        return SimulationError( ApiStatusCode::AS_BAD_REQUEST, "Simulation requires an operation identity" );
+
+    std::string netlist = aCtx.Request.netlist();
+    if( netlist.empty() )
+    {
+        SPICE_CIRCUIT_MODEL model( schematic() );
+        STRING_FORMATTER formatter;
+        WX_STRING_REPORTER reporter;
+        if( !model.GetNetlist( wxS( ".op" ), 0, &formatter, reporter ) )
+            return SimulationError( ApiStatusCode::AS_BAD_REQUEST,
+                                    "KiCad could not generate an ngspice netlist from the current schematic: "
+                                            + reporter.GetMessages().ToStdString() );
+        netlist = formatter.GetString();
+    }
+
+    std::lock_guard<std::mutex> lock( m_simulationMutex );
+    bool start = false;
+    if( m_simulationJob && m_simulationJob->operationId == aCtx.Request.operation_id() )
+    {
+        if( m_simulationJob->netlist != netlist
+                || !google::protobuf::util::MessageDifferencer::Equals( m_simulationJob->document,
+                                                                         aCtx.Request.document() ) )
+            return SimulationError( ApiStatusCode::AS_BAD_REQUEST, "Simulation operation identity was reused with different netlist bytes" );
+    }
+    else if( m_simulationJob && m_simulationJob->status == SIMJS_RUNNING )
+        return SimulationError( ApiStatusCode::AS_BUSY, "Another simulation is running for this schematic instance" );
+    else
+    {
+        start = true;
+        m_simulationJob.emplace();
+        m_simulationJob->jobId = KIID().AsString();
+        m_simulationJob->operationId = aCtx.Request.operation_id();
+        m_simulationJob->processEpoch = aCtx.Request.process_epoch();
+        m_simulationJob->document = aCtx.Request.document();
+        m_simulationJob->netlist = netlist;
+        m_simulationJob->status = SIMJS_RUNNING;
+        m_simulationJob->sequence++;
+    }
+
+        if( !m_automationSimulator )
+        {
+            m_automationSimulator = SIMULATOR::CreateInstance( "ngspice" );
+        if( !m_automationSimulator )
+        {
+            m_simulationJob->status = SIMJS_FAILED;
+            m_simulationJob->errorCode = "simulation_unavailable";
+            m_simulationJob->errorMessage = "KiCad could not create its native ngspice simulator";
+                return SimulationError( ApiStatusCode::AS_NOT_READY, m_simulationJob->errorMessage );
+            }
+            m_automationSimulator->Settings() = m_context->Prj().GetProjectFile().m_SchematicSettings->m_NgspiceSettings;
+            m_automationSimulator->Init();
+        }
+
+    if( start )
+    {
+        std::unique_lock<std::mutex> simulatorLock( m_automationSimulator->GetMutex(), std::try_to_lock );
+        if( !simulatorLock.owns_lock() ) return SimulationError( ApiStatusCode::AS_BUSY, "The KiCad simulator is in use by another owner" );
+        // Project settings may have changed after the automation simulator was
+        // first created. Rebind and reinitialize before every new run so the
+        // XML-restored ngspice compatibility mode is applied to this netlist.
+        m_automationSimulator->Settings() = m_context->Prj().GetProjectFile().m_SchematicSettings->m_NgspiceSettings;
+        m_automationSimulator->Init();
+        if( !m_automationSimulator->LoadNetlist( m_simulationJob->netlist ) || !m_automationSimulator->Run() )
+        {
+            m_simulationJob->status = SIMJS_FAILED;
+            m_simulationJob->errorCode = "simulation_start_failed";
+            m_simulationJob->errorMessage = "KiCad's native ngspice wrapper rejected the netlist or run command";
+            m_simulationJob->workerFinished = true;
+            m_simulationJob->sequence++;
+            SimulationJobState failed;
+            failed.mutable_document()->CopyFrom( aCtx.Request.document() );
+            failed.set_job_id( m_simulationJob->jobId ); failed.set_operation_id( m_simulationJob->operationId );
+            failed.set_process_epoch( m_simulationJob->processEpoch ); failed.set_status( m_simulationJob->status );
+            failed.set_sequence( m_simulationJob->sequence ); failed.set_worker_finished( true );
+            failed.set_error_code( m_simulationJob->errorCode ); failed.set_error_message( m_simulationJob->errorMessage );
+            return failed;
+        }
+    }
+
+    SimulationJobState result;
+    result.mutable_document()->CopyFrom( aCtx.Request.document() );
+    result.set_job_id( m_simulationJob->jobId ); result.set_operation_id( m_simulationJob->operationId );
+    result.set_process_epoch( m_simulationJob->processEpoch ); result.set_status( m_simulationJob->status );
+    result.set_sequence( m_simulationJob->sequence ); result.set_progress( m_simulationJob->status == SIMJS_COMPLETED ? 100 : 0 );
+    return result;
+}
+
+HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> API_HANDLER_SCH::handleReadSimulation(
+        const HANDLER_CONTEXT<kiapi::automation::v1::ReadSimulationJob>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid ) return tl::unexpected( valid.error() );
+    std::lock_guard<std::mutex> lock( m_simulationMutex );
+    if( !m_simulationJob || m_simulationJob->jobId != aCtx.Request.job_id() )
+        return SimulationError( ApiStatusCode::AS_BAD_REQUEST, "No simulation job matches this schematic document" );
+    if( !google::protobuf::util::MessageDifferencer::Equals( m_simulationJob->document,
+                                                              aCtx.Request.document() ) )
+        return SimulationError( ApiStatusCode::AS_BAD_REQUEST, "The simulation job belongs to another schematic document" );
+    if( !aCtx.Request.process_epoch().empty() && aCtx.Request.process_epoch() != m_simulationJob->processEpoch )
+        return SimulationError( ApiStatusCode::AS_BAD_REQUEST, "The simulation process epoch is stale" );
+    if( m_simulationJob->status == SIMJS_RUNNING && m_automationSimulator )
+    {
+        std::unique_lock<std::mutex> simulatorLock( m_automationSimulator->GetMutex(), std::try_to_lock );
+        if( simulatorLock.owns_lock() && !m_automationSimulator->IsRunning() )
+        {
+            m_simulationJob->workerFinished = true;
+            m_simulationJob->status = m_automationSimulator->HasError() ? SIMJS_FAILED : SIMJS_COMPLETED;
+            if( m_simulationJob->status == SIMJS_FAILED )
+            {
+                m_simulationJob->errorCode = "simulation_failed";
+                m_simulationJob->errorMessage = "KiCad's native ngspice engine reported a terminal failure";
+            }
+            m_simulationJob->sequence++;
+            for( const std::string& name : m_automationSimulator->AllVectors() )
+            {
+                if( m_simulationJob->status != SIMJS_COMPLETED ) break;
+                m_simulationJob->vectors.emplace_back();
+                auto& vector = m_simulationJob->vectors.back();
+                vector.set_name( name ); vector.set_complex( false );
+                for( double value : m_automationSimulator->GetRealVector( name ) ) vector.add_values( value );
+            }
+        }
+    }
+    SimulationJobState result;
+    result.mutable_document()->CopyFrom( aCtx.Request.document() ); result.set_job_id( m_simulationJob->jobId );
+    result.set_operation_id( m_simulationJob->operationId ); result.set_process_epoch( m_simulationJob->processEpoch );
+    result.set_status( m_simulationJob->status ); result.set_sequence( m_simulationJob->sequence );
+    result.set_progress( m_simulationJob->status == SIMJS_COMPLETED ? 100 : 0 );
+    result.set_cancellation_requested( m_simulationJob->cancellationRequested ); result.set_worker_finished( m_simulationJob->workerFinished );
+    result.set_error_code( m_simulationJob->errorCode ); result.set_error_message( m_simulationJob->errorMessage );
+    result.mutable_messages()->Add( m_simulationJob->messages.begin(), m_simulationJob->messages.end() );
+    for( const auto& vector : m_simulationJob->vectors ) result.add_vectors()->CopyFrom( vector );
+    return result;
+}
+
+HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> API_HANDLER_SCH::handleCancelSimulation(
+        const HANDLER_CONTEXT<kiapi::automation::v1::CancelSimulationJob>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid ) return tl::unexpected( valid.error() );
+    std::unique_lock<std::mutex> lock( m_simulationMutex );
+    if( !m_simulationJob || m_simulationJob->jobId != aCtx.Request.job_id() )
+        return SimulationError( ApiStatusCode::AS_BAD_REQUEST, "No simulation job matches this schematic document" );
+    if( !google::protobuf::util::MessageDifferencer::Equals( m_simulationJob->document,
+                                                              aCtx.Request.document() ) )
+        return SimulationError( ApiStatusCode::AS_BAD_REQUEST, "The simulation job belongs to another schematic document" );
+    if( m_simulationJob->status == SIMJS_RUNNING && m_automationSimulator )
+    {
+        if( !m_automationSimulator->Stop() )
+            return SimulationError( ApiStatusCode::AS_NOT_READY, "KiCad's native ngspice wrapper did not accept cancellation" );
+        m_simulationJob->cancellationRequested = true; m_simulationJob->workerFinished = true;
+        m_simulationJob->status = SIMJS_CANCELLED; m_simulationJob->sequence++;
+    }
+    lock.unlock();
+    HANDLER_CONTEXT<ReadSimulationJob> read;
+    read.ClientName = aCtx.ClientName; read.Request.mutable_document()->CopyFrom( aCtx.Request.document() );
+    read.Request.set_job_id( aCtx.Request.job_id() ); read.Request.set_process_epoch( aCtx.Request.process_epoch() );
+    return handleReadSimulation( read );
 }
 
 
@@ -3152,6 +4680,11 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
                     sheet->GetScreen()->SetFileName( requested.GetFullPath() );
                     if( sheetProto.has_child_screen_id() )
                         sheet->GetScreen()->SetUuid( KIID( sheetProto.child_screen_id().value() ) );
+                    // The new file's known absence is its baseline, as for a root KiCad creates, so the
+                    // first save may write it and a file appearing there meanwhile is never overwritten.
+                    const FILE_CONTENT_BASELINE absent = FILE_CONTENT_BASELINE::Read( requested.GetFullPath() );
+                    if( absent.Known() && !absent.Exists() )
+                        sheet->GetScreen()->SetFileBaseline( absent );
                 }
                 if( sheetProto.has_child_screen_id()
                         && sheet->GetScreen()->GetUuid().AsStdString() != sheetProto.child_screen_id().value() )
@@ -3457,13 +4990,12 @@ bool API_HANDLER_SCH::setPageSettings( const PAGE_INFO& aPageInfo )
 
 wxString API_HANDLER_SCH::getDrawingSheetFileName()
 {
-    return BASE_SCREEN::m_DrawingSheetFileName;
+    return schematic()->Settings().m_SchDrawingSheetFileName;
 }
 
 
 void API_HANDLER_SCH::setDrawingSheetFileName( const wxString& aFileName )
 {
-    BASE_SCREEN::m_DrawingSheetFileName = aFileName;
     schematic()->Settings().m_SchDrawingSheetFileName = aFileName;
 
     if( m_frame )

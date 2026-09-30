@@ -2650,7 +2650,7 @@ void PNS_KICAD_IFACE_BASE::UpdateItem( PNS::ITEM* aItem )
 }
 
 
-void PNS_KICAD_IFACE::modifyBoardItem( PNS::ITEM* aItem )
+void PNS_KICAD_IFACE::modifyBoardItem( PNS::ITEM* aItem, BOARD_COMMIT& aCommit )
 {
     BOARD_ITEM* board_item = aItem->Parent();
 
@@ -2662,7 +2662,7 @@ void PNS_KICAD_IFACE::modifyBoardItem( PNS::ITEM* aItem )
         PCB_ARC*         arc_board = static_cast<PCB_ARC*>( board_item );
         const SHAPE_ARC* arc_shape = static_cast<const SHAPE_ARC*>( arc->Shape( -1 ) );
 
-        m_commit->Modify( arc_board );
+        aCommit.Modify( arc_board );
 
         arc_board->SetStart( VECTOR2I( arc_shape->GetP0() ) );
         arc_board->SetEnd( VECTOR2I( arc_shape->GetP1() ) );
@@ -2677,7 +2677,7 @@ void PNS_KICAD_IFACE::modifyBoardItem( PNS::ITEM* aItem )
         PCB_TRACK*    track = static_cast<PCB_TRACK*>( board_item );
         const SEG&    s = seg->Seg();
 
-        m_commit->Modify( track );
+        aCommit.Modify( track );
 
         track->SetStart( VECTOR2I( s.A.x, s.A.y ) );
         track->SetEnd( VECTOR2I( s.B.x, s.B.y ) );
@@ -2690,7 +2690,7 @@ void PNS_KICAD_IFACE::modifyBoardItem( PNS::ITEM* aItem )
         PCB_VIA*  via_board = static_cast<PCB_VIA*>( board_item );
         PNS::VIA* via = static_cast<PNS::VIA*>( aItem );
 
-        m_commit->Modify( via_board );
+        aCommit.Modify( via_board );
 
         via_board->SetPosition( VECTOR2I( via->Pos().x, via->Pos().y ) );
         via_board->SetWidth( PADSTACK::TEMP_ALL_LAYERS, via->Diameter( 0 ) );
@@ -2737,7 +2737,7 @@ void PNS_KICAD_IFACE::modifyBoardItem( PNS::ITEM* aItem )
     }
 
     default:
-        m_commit->Modify( aItem->Parent() );
+        aCommit.Modify( aItem->Parent() );
         break;
     }
 }
@@ -2745,7 +2745,7 @@ void PNS_KICAD_IFACE::modifyBoardItem( PNS::ITEM* aItem )
 
 void PNS_KICAD_IFACE::UpdateItem( PNS::ITEM* aItem )
 {
-    modifyBoardItem( aItem );
+    modifyBoardItem( aItem, *m_commit );
 }
 
 
@@ -2908,12 +2908,9 @@ void PNS_KICAD_IFACE::AddItem( PNS::ITEM* aItem )
 }
 
 
-void PNS_KICAD_IFACE::Commit()
+void PNS_KICAD_IFACE::applyFootprintOffsets( BOARD_COMMIT& aCommit )
 {
-    PCB_SELECTION_TOOL*  selTool = m_tool->GetManager()->GetTool<PCB_SELECTION_TOOL>();
     std::set<FOOTPRINT*> processedFootprints;
-
-    EraseView();
 
     for( const auto& [ pad, fpOffset ] : m_fpOffsets )
     {
@@ -2926,11 +2923,20 @@ void PNS_KICAD_IFACE::Commit()
             continue;
 
         processedFootprints.insert( footprint );
-        m_commit->Modify( footprint );
+        aCommit.Modify( footprint );
         footprint->SetPosition( p_new );
     }
 
     m_fpOffsets.clear();
+}
+
+
+void PNS_KICAD_IFACE::Commit()
+{
+    PCB_SELECTION_TOOL* selTool = m_tool->GetManager()->GetTool<PCB_SELECTION_TOOL>();
+
+    EraseView();
+    applyFootprintOffsets( *m_commit );
 
     for( const auto& [ src, items ] : m_replacementMap )
     {

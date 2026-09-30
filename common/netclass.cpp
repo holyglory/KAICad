@@ -163,13 +163,16 @@ void NETCLASS::Serialize( kiapi::common::project::NetClass& nc ) const
 {
     using namespace kiapi::common;
 
+    nc.Clear();
     nc.set_name( m_Name.ToUTF8() );
     nc.set_priority( m_Priority );
 
-    nc.set_type( m_constituents.empty() ? project::NCT_EXPLICIT : project::NCT_IMPLICIT );
-
-    for( NETCLASS* member : m_constituents )
-        nc.add_constituents( member->GetName() );
+    const bool explicitClass = m_constituents.empty()
+            || ( m_constituents.size() == 1 && m_constituents.front() == this );
+    nc.set_type( explicitClass ? project::NCT_EXPLICIT : project::NCT_IMPLICIT );
+    if( !explicitClass )
+        for( NETCLASS* member : m_constituents )
+            nc.add_constituents( member->GetName() );
 
     project::NetClassBoardSettings* board = nc.mutable_board();
 
@@ -202,6 +205,17 @@ void NETCLASS::Serialize( kiapi::common::project::NetClass& nc ) const
                      { *m_ViaDrill, *m_ViaDrill } );
     }
 
+    if( m_uViaDia )
+    {
+        auto* layer = board->mutable_microvia_stack()->add_copper_layers();
+        layer->set_shape( kiapi::board::types::PSS_CIRCLE );
+        layer->set_layer( kiapi::board::types::BL_F_Cu );
+        PackVector2( *layer->mutable_size(), { *m_uViaDia, *m_uViaDia } );
+    }
+    if( m_uViaDrill )
+        PackVector2( *board->mutable_microvia_stack()->mutable_drill()->mutable_diameter(),
+                     { *m_uViaDrill, *m_uViaDrill } );
+
     if( m_pcbColor != COLOR4D::UNSPECIFIED )
         PackColor( *board->mutable_color(), m_pcbColor );
 
@@ -220,11 +234,8 @@ void NETCLASS::Serialize( kiapi::common::project::NetClass& nc ) const
         PackColor( *schematic->mutable_color(), m_schematicColor );
 
     if( m_lineStyle )
-    {
-        // TODO(JE) resolve issues with moving to kicommon
-        // schematic->set_line_style( ToProtoEnum<LINE_STYLE, types::StrokeLineStyle>(
-        //         static_cast<LINE_STYLE>( *m_lineStyle ) ) );
-    }
+        schematic->set_line_style( ToProtoEnum<LINE_STYLE, types::StrokeLineStyle>(
+                static_cast<LINE_STYLE>( *m_lineStyle ) ) );
 
 }
 
@@ -241,15 +252,16 @@ bool NETCLASS::Deserialize( const kiapi::common::project::NetClass& nc )
 {
     using namespace kiapi::common;
 
-
-    m_Name = wxString::FromUTF8( nc.name() );
-    m_Priority = nc.priority();
-
     // We don't allow creating implicit classes directly
-    if( nc.type() == project::NCT_IMPLICIT )
+    if( !project::NetClassType_IsValid( nc.type() ) || nc.type() == project::NCT_IMPLICIT
+            || ( nc.schematic().has_line_style()
+                 && !types::StrokeLineStyle_IsValid( nc.schematic().line_style() ) ) )
         return false;
 
-    SetConstituentNetclasses( {} );
+    m_Name = wxString::FromUTF8( nc.name() );
+    m_isDefault = m_Name == Default;
+    m_Priority = nc.priority();
+    SetConstituentNetclasses( { this } );
 
     if( nc.board().has_clearance() )
         m_Clearance = nc.board().clearance().value_nm();
@@ -275,6 +287,14 @@ bool NETCLASS::Deserialize( const kiapi::common::project::NetClass& nc )
             m_ViaDrill = nc.board().via_stack().drill().diameter().x_nm();
     }
 
+    if( nc.board().has_microvia_stack() )
+    {
+        if( nc.board().microvia_stack().copper_layers_size() > 0 )
+            m_uViaDia = nc.board().microvia_stack().copper_layers( 0 ).size().x_nm();
+        if( nc.board().microvia_stack().has_drill() )
+            m_uViaDrill = nc.board().microvia_stack().drill().diameter().x_nm();
+    }
+
     if( nc.board().has_color() )
         m_pcbColor = UnpackColor( nc.board().color() );
 
@@ -290,9 +310,8 @@ bool NETCLASS::Deserialize( const kiapi::common::project::NetClass& nc )
     if( nc.schematic().has_color() )
         m_schematicColor = UnpackColor( nc.schematic().color() );
 
-    // TODO(JE) resolve issues with moving to kicommon
-    // if( nc.schematic().has_line_style() )
-    //     m_lineStyle = static_cast<int>( FromProtoEnum<LINE_STYLE>( nc.schematic().line_style() ) );
+    if( nc.schematic().has_line_style() )
+        m_lineStyle = static_cast<int>( FromProtoEnum<LINE_STYLE>( nc.schematic().line_style() ) );
 
     return true;
 }

@@ -28,6 +28,7 @@
 #include <memory>
 #include <vector>
 #include <tools/pcb_tool_base.h>
+#include <drc/drc_run_result.h>
 
 
 class PCB_EDIT_FRAME;
@@ -85,8 +86,10 @@ public:
     /**
      * Run the DRC tests.
      */
-    void RunTests( PROGRESS_REPORTER* aProgressReporter, bool aRefillZones,
-                   bool aReportAllTrackErrors, bool aTestFootprints );
+    using RUN_RESULT = DRC_RUN_RESULT;
+
+    [[nodiscard]] RUN_RESULT RunTests( PROGRESS_REPORTER* aProgressReporter, bool aRefillZones,
+                                      bool aReportAllTrackErrors, bool aTestFootprints );
 
     int PrevMarker( const TOOL_EVENT& aEvent );
     int NextMarker( const TOOL_EVENT& aEvent );

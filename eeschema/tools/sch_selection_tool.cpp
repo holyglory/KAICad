@@ -202,17 +202,32 @@ protected:
 
         if( SCH_NETCHAIN* sig = graph->GetNetChainForNet( pin->Connection()->Name() ) )
         {
-            m_oldA = sig->GetTerminalPinA();
-            m_oldB = sig->GetTerminalPinB();
-            m_new = pin->m_Uuid;
+            for( int index = 0; index < 2; ++index )
+            {
+                auto& change = m_changes[index];
+                change.chain = sig->GetName();
+                change.terminal = index;
+                change.expectedPin = index == 0 ? sig->GetTerminalPinA() : sig->GetTerminalPinB();
+                change.expectedReference = sig->GetTerminalRef( index );
+                change.expectedNumber = sig->GetTerminalPinNum( index );
+                change.selectedPin = pin->m_Uuid;
+                change.selectedPath = frame->GetCurrentSheet().Path();
+            }
 
             wxMenuItem* itemA = Append( ID_REPLACE_TERMINAL_PIN_A, _( "Terminal A" ) );
             wxMenuItem* itemB = Append( ID_REPLACE_TERMINAL_PIN_B, _( "Terminal B" ) );
 
-            if( m_oldA == m_new )
+            auto unchanged = [&]( int index )
+            {
+                const auto& change = m_changes[index];
+                return change.expectedPin == pin->m_Uuid
+                        && change.expectedReference == pin->GetParentSymbol()->GetRef( &frame->GetCurrentSheet() )
+                        && change.expectedNumber == pin->GetNumber();
+            };
+            if( unchanged( 0 ) )
                 itemA->Enable( false );
 
-            if( m_oldB == m_new )
+            if( unchanged( 1 ) )
                 itemB->Enable( false );
         }
     }
@@ -222,13 +237,13 @@ protected:
         if( aEvent.GetId() == ID_REPLACE_TERMINAL_PIN_A )
         {
             TOOL_EVENT te = SCH_ACTIONS::replaceTerminalPin.MakeEvent();
-            te.SetParameter( std::make_pair( m_oldA.AsString(), m_new.AsString() ) );
+            te.SetParameter( m_changes[0] );
             return te;
         }
         else if( aEvent.GetId() == ID_REPLACE_TERMINAL_PIN_B )
         {
             TOOL_EVENT te = SCH_ACTIONS::replaceTerminalPin.MakeEvent();
-            te.SetParameter( std::make_pair( m_oldB.AsString(), m_new.AsString() ) );
+            te.SetParameter( m_changes[1] );
             return te;
         }
 
@@ -236,9 +251,7 @@ protected:
     }
 
 private:
-    KIID m_oldA;
-    KIID m_oldB;
-    KIID m_new;
+    SCH_NETCHAIN_TERMINAL_CHANGE m_changes[2];
 };
 
 // Forward declaration of helper used inside NET_CHAIN_MENU::update
@@ -252,7 +265,6 @@ public:
             ACTION_MENU( true )
     {
         SetTitle( _( "Net Chain..." ) );
-        m_replaceMenu = new REPLACE_TERMINAL_PIN_MENU();
     }
 
 protected:
@@ -371,7 +383,11 @@ protected:
         // Replace terminal pin submenu only when a single pin belonging to a chain is selected
         if( singlePin && inSignal )
         {
-            Add( m_replaceMenu );
+            // Clear() destroys wx-owned submenus. Rebuild this child with the
+            // current tool instead of retaining a dangling menu/title pointer.
+            auto* replaceMenu = new REPLACE_TERMINAL_PIN_MENU();
+            replaceMenu->SetTool( selTool );
+            Add( replaceMenu );
             wxLogTrace( "KICAD_NET_CHAIN_MENU", "[NetChainMenu] added replaceTerminalPin submenu" );
         }
 
@@ -417,8 +433,6 @@ protected:
         }
     }
 
-private:
-    REPLACE_TERMINAL_PIN_MENU* m_replaceMenu;
 };
 
 // Extend net-chains menu dynamically with createNetChainBetweenPins when two pins are selected
@@ -436,7 +450,7 @@ static bool addCreateNetChainBetweenPinsIfApplicable( NET_CHAIN_MENU* aMenu, SCH
 
     CONNECTION_GRAPH* graph = aFrame->Schematic().ConnectionGraph();
 
-    if( graph->FindPotentialNetChainBetweenPins( pa, pb ) )
+    if( graph->FindPotentialNetChainBetweenPins( pa, aFrame->GetCurrentSheet(), pb, aFrame->GetCurrentSheet() ) )
     {
         wxString label = wxString::Format( _( "Create Net Chain between %s:%s and %s:%s" ),
                                            pa->GetParentSymbol()->GetRef( &aFrame->GetCurrentSheet() ), pa->GetNumber(),

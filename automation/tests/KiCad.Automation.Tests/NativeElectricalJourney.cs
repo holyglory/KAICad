@@ -72,6 +72,7 @@ public sealed partial class NativeSessionTests
             .Nets.Select(n => n.Name + ":" + string.Join(",", n.Sheets.SelectMany(s => s.Items)
                 .Select(i => i.Value).Order(StringComparer.Ordinal))).Order(StringComparer.Ordinal).ToArray();
         var baseline = await Nets();
+        await VerifyElectricalState(client, document, fixture, evidence, instanceId, token);
         Assert.AreEqual(1, baseline.Length);
         StringAssert.Contains(baseline[0], fixture.PinA);
         StringAssert.Contains(baseline[0], fixture.PinB);
@@ -99,6 +100,14 @@ public sealed partial class NativeSessionTests
         var cursor = new ReadSchematicChangeJournal { Document = document, DocumentEpoch = journal.DocumentEpoch, AfterSequence = journal.Sequence };
         await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(batch, token);
         var afterMove = await Nets();
+        var electricalMove = await client.InvokeAsync<ReadSchematicElectricalState, SchematicElectricalState>(new() { Document = document }, token);
+        Assert.IsTrue(electricalMove.Nets.Any(n => n.Sheets.SelectMany(s => s.Items).Any(i => i.Value == fixture.PinA)
+            && n.Sheets.SelectMany(s => s.Items).Any(i => i.Value == fixture.PinB)));
+        var movedInSnapshot = electricalMove.Hierarchy.Data.Instances.SelectMany(s => s.Items)
+            .Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>())
+            .Single(s => s.Id.Value == fixture.Symbol);
+        Assert.AreEqual(moved.Position, movedInSnapshot.Position);
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-electrical-move-state.json"), SchematicJson.Formatter.Format(electricalMove), token);
         var electricalImage = await client.InvokeAsync<CaptureSchematicPreview, SchematicPreview>(new() { Document = document }, token);
         await File.WriteAllBytesAsync(Path.Combine(evidence, instanceId + "-connected-commit.png"), electricalImage.Png.ToByteArray(), token);
         query.Items.Clear(); query.Items.Add(new KIID { Value = fixture.Symbol });

@@ -6,10 +6,26 @@ namespace KiCad.Automation.Tests;
 
 internal static class WindowsFixtureCleanup
 {
+    internal static async Task PreserveFailuresAsync(Func<Task> action, Func<Task> cleanup)
+    {
+        Exception? primary = null;
+        try { await action(); }
+        catch (Exception error) { primary = error; throw; }
+        finally
+        {
+            try { await cleanup(); }
+            catch (Exception secondary) when (primary is not null)
+            { throw new AggregateException("Native Windows update and owned-fixture cleanup both failed.", primary, secondary); }
+        }
+    }
+
     // Call only after all test-owned processes have exited. Windows may release
     // executable mappings after the exit handle is signalled. Do not clear ACLs,
     // attributes, kill other processes or silently accept a leaked directory.
     public static Task RemoveOwnedTemporaryDirectoryAsync(string path, CancellationToken token = default)
+        => RemoveAsync(ValidateTemporaryRoot(path), token);
+
+    private static string ValidateTemporaryRoot(string path)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
         string absolute = Path.GetFullPath(path);
@@ -17,7 +33,22 @@ internal static class WindowsFixtureCleanup
         if (!Path.IsPathFullyQualified(path) || !string.Equals(Path.GetDirectoryName(absolute), temporary, StringComparison.OrdinalIgnoreCase)
             || !Path.GetFileName(absolute).StartsWith("kw", StringComparison.Ordinal))
             throw new ArgumentException("Cleanup requires an exact, test-owned kw-prefixed temporary directory.");
-        return RemoveAsync(absolute, token);
+        if (Directory.Exists(absolute) && File.GetAttributes(absolute).HasFlag(FileAttributes.ReparsePoint))
+            throw new ArgumentException("The fixture root must not redirect to another directory.");
+        return absolute;
+    }
+
+    public static Task RemoveOwnedTemporaryProjectAsync(string root, string projectName, CancellationToken token = default)
+    {
+        string absolute = ValidateTemporaryRoot(root);
+        if (string.IsNullOrWhiteSpace(projectName) || projectName is "." or ".."
+            || Path.IsPathRooted(projectName) || projectName.IndexOfAny(['/', '\\']) >= 0)
+            throw new ArgumentException("Name one exact immediate project inside the owned fixture.");
+        string project = Path.GetFullPath(Path.Combine(absolute, projectName));
+        if (!string.Equals(Path.GetDirectoryName(project), absolute, StringComparison.OrdinalIgnoreCase)
+            || (Directory.Exists(project) && File.GetAttributes(project).HasFlag(FileAttributes.ReparsePoint)))
+            throw new ArgumentException("The project must not escape or redirect outside the owned fixture.");
+        return RemoveAsync(project, token);
     }
 
     public static Task RemoveOwnedRuntimeDirectoryAsync(string path, CancellationToken token = default)

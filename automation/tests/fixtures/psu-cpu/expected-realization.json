@@ -1,0 +1,463 @@
+{
+  "fixture": "psu-cpu",
+  "version": 1,
+  "graph": "7e57f1c5-0000-4000-8000-001000000001",
+  "circuit": "7e57f1c5-0000-4000-8000-000200000001",
+  "rules": {
+    "signal": "R1",
+    "composite": "R2",
+    "crossLevel": "R3",
+    "pinCodes": ["realization_pin_owner_mismatch", "realization_pin_path_mismatch", "realization_pin_unknown"],
+    "conflictCode": "realization_net_mismatch"
+  },
+  "connections": [
+    {
+      "connection": "7e57f1c5-0000-4000-8000-001600000001",
+      "ordinal": "01",
+      "owner": "System",
+      "name": "DC input",
+      "kind": "Interface",
+      "status": "Abstract",
+      "nets": [],
+      "netNames": [],
+      "boundary": null,
+      "members": [],
+      "pins": []
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-001600000002",
+      "ordinal": "02",
+      "owner": "System",
+      "name": "Power",
+      "kind": "Interface",
+      "status": "Abstract",
+      "nets": [],
+      "netNames": [],
+      "boundary": null,
+      "members": ["7e57f1c5-0000-4000-8000-001600000003", "7e57f1c5-0000-4000-8000-001600000004", "7e57f1c5-0000-4000-8000-001600000005"],
+      "pins": []
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-001600000003",
+      "ordinal": "03",
+      "owner": "System",
+      "name": "Rail A",
+      "kind": "Signal",
+      "status": "Abstract",
+      "nets": [],
+      "netNames": [],
+      "boundary": null,
+      "members": [],
+      "pins": []
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-001600000004",
+      "ordinal": "04",
+      "owner": "System",
+      "name": "Rail B",
+      "kind": "Signal",
+      "status": "Abstract",
+      "nets": [],
+      "netNames": [],
+      "boundary": null,
+      "members": [],
+      "pins": []
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-001600000005",
+      "ordinal": "05",
+      "owner": "System",
+      "name": "Return",
+      "kind": "Signal",
+      "status": "Abstract",
+      "nets": [],
+      "netNames": [],
+      "boundary": null,
+      "members": [],
+      "pins": []
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-001600000006",
+      "ordinal": "06",
+      "owner": "System",
+      "name": "Telemetry",
+      "kind": "Interface",
+      "status": "Abstract",
+      "nets": [],
+      "netNames": [],
+      "boundary": null,
+      "members": ["7e57f1c5-0000-4000-8000-001600000007", "7e57f1c5-0000-4000-8000-001600000008"],
+      "pins": []
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-001600000007",
+      "ordinal": "07",
+      "owner": "System",
+      "name": "MCU to CPU",
+      "kind": "Signal",
+      "status": "Abstract",
+      "nets": [],
+      "netNames": [],
+      "boundary": null,
+      "members": [],
+      "pins": []
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-001600000008",
+      "ordinal": "08",
+      "owner": "System",
+      "name": "CPU to MCU",
+      "kind": "Signal",
+      "status": "Abstract",
+      "nets": [],
+      "netNames": [],
+      "boundary": null,
+      "members": [],
+      "pins": []
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-001600000009",
+      "ordinal": "09",
+      "owner": "PSU",
+      "name": "DC input",
+      "kind": "Signal",
+      "status": "Realized",
+      "nets": ["7e57f1c5-0000-4000-8000-000800000001"],
+      "netNames": ["VIN"],
+      "boundary": 0,
+      "members": [],
+      "pins": [
+        ["J1", "1"],
+        ["U1", "2"]
+      ]
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-00160000000a",
+      "ordinal": "0a",
+      "owner": "PSU",
+      "name": "Rail A",
+      "kind": "Signal",
+      "status": "Realized",
+      "nets": ["7e57f1c5-0000-4000-8000-000800000004"],
+      "netNames": ["RAIL_A"],
+      "boundary": 1,
+      "members": [],
+      "pins": [
+        ["R1", "2"]
+      ]
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-00160000000b",
+      "ordinal": "0b",
+      "owner": "PSU",
+      "name": "LDO supply",
+      "kind": "Signal",
+      "status": "Realized",
+      "nets": ["7e57f1c5-0000-4000-8000-000800000004"],
+      "netNames": ["RAIL_A"],
+      "boundary": 0,
+      "members": [],
+      "pins": [
+        ["R1", "2"],
+        ["U2", "2"]
+      ]
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-00160000000c",
+      "ordinal": "0c",
+      "owner": "PSU",
+      "name": "Rail B",
+      "kind": "Signal",
+      "status": "Realized",
+      "nets": ["7e57f1c5-0000-4000-8000-000800000005"],
+      "netNames": ["RAIL_B"],
+      "boundary": 1,
+      "members": [],
+      "pins": [
+        ["U2", "1"]
+      ]
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-00160000000d",
+      "ordinal": "0d",
+      "owner": "PSU",
+      "name": "Rail A sense",
+      "kind": "SignalGroup",
+      "status": "Realized",
+      "nets": ["7e57f1c5-0000-4000-8000-000800000003", "7e57f1c5-0000-4000-8000-000800000004"],
+      "netNames": ["DCDC_OUT", "RAIL_A"],
+      "boundary": null,
+      "members": ["7e57f1c5-0000-4000-8000-00160000000e", "7e57f1c5-0000-4000-8000-00160000000f"],
+      "pins": []
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-00160000000e",
+      "ordinal": "0e",
+      "owner": "PSU",
+      "name": "Sense+",
+      "kind": "Signal",
+      "status": "Realized",
+      "nets": ["7e57f1c5-0000-4000-8000-000800000003"],
+      "netNames": ["DCDC_OUT"],
+      "boundary": 0,
+      "members": [],
+      "pins": [
+        ["U1", "1"],
+        ["U3", "2"]
+      ]
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-00160000000f",
+      "ordinal": "0f",
+      "owner": "PSU",
+      "name": "Sense-",
+      "kind": "Signal",
+      "status": "Realized",
+      "nets": ["7e57f1c5-0000-4000-8000-000800000004"],
+      "netNames": ["RAIL_A"],
+      "boundary": 0,
+      "members": [],
+      "pins": [
+        ["R1", "2"],
+        ["U3", "5"]
+      ]
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-001600000010",
+      "ordinal": "10",
+      "owner": "PSU",
+      "name": "Rail B sense",
+      "kind": "Signal",
+      "status": "Realized",
+      "nets": ["7e57f1c5-0000-4000-8000-000800000005"],
+      "netNames": ["RAIL_B"],
+      "boundary": 0,
+      "members": [],
+      "pins": [
+        ["U2", "1"],
+        ["U3", "8"]
+      ]
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-001600000011",
+      "ordinal": "11",
+      "owner": "PSU",
+      "name": "Measurements",
+      "kind": "Interface",
+      "status": "Realized",
+      "nets": ["7e57f1c5-0000-4000-8000-000800000007", "7e57f1c5-0000-4000-8000-000800000008"],
+      "netNames": ["PSU_SCL", "PSU_SDA"],
+      "boundary": null,
+      "members": ["7e57f1c5-0000-4000-8000-001600000012", "7e57f1c5-0000-4000-8000-001600000013"],
+      "pins": []
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-001600000012",
+      "ordinal": "12",
+      "owner": "PSU",
+      "name": "I2C SCL",
+      "kind": "Signal",
+      "status": "Realized",
+      "nets": ["7e57f1c5-0000-4000-8000-000800000007"],
+      "netNames": ["PSU_SCL"],
+      "boundary": 0,
+      "members": [],
+      "pins": [
+        ["U3", "6"],
+        ["U4", "5"]
+      ]
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-001600000013",
+      "ordinal": "13",
+      "owner": "PSU",
+      "name": "I2C SDA",
+      "kind": "Signal",
+      "status": "Realized",
+      "nets": ["7e57f1c5-0000-4000-8000-000800000008"],
+      "netNames": ["PSU_SDA"],
+      "boundary": 0,
+      "members": [],
+      "pins": [
+        ["U3", "7"],
+        ["U4", "6"]
+      ]
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-001600000014",
+      "ordinal": "14",
+      "owner": "PSU",
+      "name": "Fault",
+      "kind": "Signal",
+      "status": "Realized",
+      "nets": ["7e57f1c5-0000-4000-8000-000800000006"],
+      "netNames": ["LDO_FAULT"],
+      "boundary": 0,
+      "members": [],
+      "pins": [
+        ["U2", "8"],
+        ["U4", "4"]
+      ]
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-001600000015",
+      "ordinal": "15",
+      "owner": "PSU",
+      "name": "Telemetry",
+      "kind": "Interface",
+      "status": "Realized",
+      "nets": ["7e57f1c5-0000-4000-8000-000800000009", "7e57f1c5-0000-4000-8000-00080000000a"],
+      "netNames": ["TELEM_MCU_TO_CPU", "TELEM_CPU_TO_MCU"],
+      "boundary": null,
+      "members": ["7e57f1c5-0000-4000-8000-001600000016", "7e57f1c5-0000-4000-8000-001600000017"],
+      "pins": []
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-001600000016",
+      "ordinal": "16",
+      "owner": "PSU",
+      "name": "MCU to CPU",
+      "kind": "Signal",
+      "status": "Realized",
+      "nets": ["7e57f1c5-0000-4000-8000-000800000009"],
+      "netNames": ["TELEM_MCU_TO_CPU"],
+      "boundary": 1,
+      "members": [],
+      "pins": [
+        ["U4", "8"]
+      ]
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-001600000017",
+      "ordinal": "17",
+      "owner": "PSU",
+      "name": "CPU to MCU",
+      "kind": "Signal",
+      "status": "Realized",
+      "nets": ["7e57f1c5-0000-4000-8000-00080000000a"],
+      "netNames": ["TELEM_CPU_TO_MCU"],
+      "boundary": 1,
+      "members": [],
+      "pins": [
+        ["U4", "1"]
+      ]
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-001600000018",
+      "ordinal": "18",
+      "owner": "CPU",
+      "name": "Rail A",
+      "kind": "Signal",
+      "status": "Realized",
+      "nets": ["7e57f1c5-0000-4000-8000-000800000004"],
+      "netNames": ["RAIL_A"],
+      "boundary": 1,
+      "members": [],
+      "pins": [
+        ["U5", "3"]
+      ]
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-001600000019",
+      "ordinal": "19",
+      "owner": "CPU",
+      "name": "Rail B",
+      "kind": "Signal",
+      "status": "Realized",
+      "nets": ["7e57f1c5-0000-4000-8000-000800000005"],
+      "netNames": ["RAIL_B"],
+      "boundary": 1,
+      "members": [],
+      "pins": [
+        ["U6", "8"]
+      ]
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-00160000001a",
+      "ordinal": "1a",
+      "owner": "CPU",
+      "name": "Supply status / control",
+      "kind": "Interface",
+      "status": "Realized",
+      "nets": ["7e57f1c5-0000-4000-8000-000800000009", "7e57f1c5-0000-4000-8000-00080000000a"],
+      "netNames": ["TELEM_MCU_TO_CPU", "TELEM_CPU_TO_MCU"],
+      "boundary": null,
+      "members": ["7e57f1c5-0000-4000-8000-00160000001b", "7e57f1c5-0000-4000-8000-00160000001c"],
+      "pins": []
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-00160000001b",
+      "ordinal": "1b",
+      "owner": "CPU",
+      "name": "MCU to CPU",
+      "kind": "Signal",
+      "status": "Realized",
+      "nets": ["7e57f1c5-0000-4000-8000-000800000009"],
+      "netNames": ["TELEM_MCU_TO_CPU"],
+      "boundary": 1,
+      "members": [],
+      "pins": [
+        ["U5", "74"]
+      ]
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-00160000001c",
+      "ordinal": "1c",
+      "owner": "CPU",
+      "name": "CPU to MCU",
+      "kind": "Signal",
+      "status": "Realized",
+      "nets": ["7e57f1c5-0000-4000-8000-00080000000a"],
+      "netNames": ["TELEM_CPU_TO_MCU"],
+      "boundary": 1,
+      "members": [],
+      "pins": [
+        ["U5", "73"]
+      ]
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-00160000001d",
+      "ordinal": "1d",
+      "owner": "CPU",
+      "name": "Memory interface",
+      "kind": "Interface",
+      "status": "Unresolved",
+      "nets": ["7e57f1c5-0000-4000-8000-00080000000b"],
+      "netNames": ["MEM_SCL"],
+      "boundary": null,
+      "members": ["7e57f1c5-0000-4000-8000-00160000001e", "7e57f1c5-0000-4000-8000-00160000001f"],
+      "pins": []
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-00160000001e",
+      "ordinal": "1e",
+      "owner": "CPU",
+      "name": "I2C SCL",
+      "kind": "Signal",
+      "status": "Realized",
+      "nets": ["7e57f1c5-0000-4000-8000-00080000000b"],
+      "netNames": ["MEM_SCL"],
+      "boundary": 0,
+      "members": [],
+      "pins": [
+        ["U5", "161"],
+        ["U6", "6"]
+      ]
+    },
+    {
+      "connection": "7e57f1c5-0000-4000-8000-00160000001f",
+      "ordinal": "1f",
+      "owner": "CPU",
+      "name": "I2C SDA",
+      "kind": "Signal",
+      "status": "Unresolved",
+      "nets": [],
+      "netNames": [],
+      "boundary": null,
+      "members": [],
+      "pins": [
+        ["U6", "5"]
+      ]
+    }
+  ]
+}

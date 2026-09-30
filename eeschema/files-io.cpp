@@ -206,6 +206,7 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
     pro.SetExt( FILEEXT::ProjectFileExtension );
 
     bool is_new = !wxFileName::IsFileReadable( fullFileName );
+    const auto creationBaseline = is_new ? FILE_CONTENT_BASELINE::Read( fullFileName ) : FILE_CONTENT_BASELINE{};
 
     // If its a non-existent schematic and caller thinks it exists
     if( is_new && !( aCtl & KICTL_CREATE ) )
@@ -336,6 +337,8 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
         // mark new, unsaved file as modified.
         GetScreen()->SetContentModified();
         GetScreen()->SetFileName( fullFileName );
+        if( creationBaseline.Known() && !creationBaseline.Exists() )
+            GetScreen()->SetFileBaseline( creationBaseline );
 
         if( schFileType == SCH_IO_MGR::SCH_FILE_T::SCH_FILE_UNKNOWN )
         {

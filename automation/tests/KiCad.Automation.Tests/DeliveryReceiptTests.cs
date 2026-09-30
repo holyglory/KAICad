@@ -1,0 +1,134 @@
+using System.Net;
+using System.Security.Cryptography;
+using System.Text.Json;
+using KiCad.Automation.Distribution;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+
+namespace KiCad.Automation.Tests;
+
+[TestClass]
+public sealed class DeliveryReceiptTests
+{
+    [TestMethod, TestCategory("DeliveryReceipts"), TestCategory("ExternalIntegration")]
+    public async Task ExportActualArchiveAndOwnedWebObservations()
+    {
+        string Required(string key) => Environment.GetEnvironmentVariable(key)
+            ?? throw new AssertFailedException("Missing delivery observation input: " + key);
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, ".devcoordinator.toml")))
+            directory = directory.Parent;
+        string root = directory?.FullName ?? throw new AssertFailedException("Repository root not found.");
+        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+        string output = Directory.CreateDirectory(Required("KICAD_DELIVERY_EVIDENCE")).FullName;
+        var origin = new Uri(Required("KICAD_PUBLIC_DOWNLOAD_URL"));
+        Assert.AreEqual("https", origin.Scheme);
+        string platform = Environment.GetEnvironmentVariable("KICAD_DELIVERY_PLATFORM") ?? "linux-x64";
+        bool routeOnly = Environment.GetEnvironmentVariable("KICAD_DELIVERY_ROUTE_ONLY") == "true";
+        (string target, string format) = platform switch
+        {
+            "linux-x64" => ("linux-x64", "tar.gz"),
+            "osx-arm64" => ("macos-arm64", "tar.gz"),
+            "osx-x64" => ("macos-x64", "tar.gz"),
+            "win-x64" => ("windows-x64", "zip"),
+            _ => throw new AssertFailedException("Unsupported delivery target.")
+        };
+        var feedOrigin = platform == "linux-x64" ? origin : new Uri(origin, "platforms/" + platform + "/");
+        string digest = (await Command(Required("KICAD_COORDINATOR_EXECUTOR"), "source-digest", "--worktree", root))
+            .GetProperty("sha256").GetString()!;
+        Assert.AreEqual(64, digest.Length);
+        byte[] key = await File.ReadAllBytesAsync(Required("KICAD_UPDATE_PUBLISHER_SPKI_FILE"), deadline.Token);
+        using var source = new UpdateDownloader(feedOrigin);
+        byte[] envelope = await source.FetchManifestAsync("preview", deadline.Token);
+        var verified = UpdateManifestCodec.Verify(envelope, key, "preview");
+        Assert.AreEqual(Required("KICAD_DELIVERY_COMMIT"), verified.Release.Commit);
+        var artifact = verified.ForInstallation(platform, format);
+        Assert.IsNotNull(artifact);
+        string scratch = Directory.CreateTempSubdirectory("kicad-delivery-proof-").FullName;
+        try
+        {
+            var downloaded = await source.DownloadAsync(verified, platform, format, scratch,
+                cancellationToken: deadline.Token);
+            string archive = Path.Combine(output, artifact.FileName);
+            File.Copy(downloaded.Path, archive, overwrite: true);
+            await using (var stream = File.OpenRead(archive))
+            {
+                string hash = Convert.ToHexStringLower(await SHA256.HashDataAsync(stream, deadline.Token));
+                Assert.AreEqual(artifact.Sha256, hash);
+                Assert.AreEqual(artifact.Bytes, stream.Length);
+                await Write(platform == "linux-x64" ? "linux.verification.json" : target + ".verification.json", new
+                {
+                    version = 1, kind = "artifact", target, source_sha256 = digest,
+                    file = artifact.FileName, observed_sha256 = hash,
+                    checked_at_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    access = new Uri(feedOrigin, "artifacts/" + Uri.EscapeDataString(artifact.FileName)).AbsoluteUri,
+                    observation = "download_matched"
+                });
+            }
+            string deploymentId = Required("KICAD_DELIVERY_DEPLOYMENT");
+            var before = await Deployment();
+            using var http = new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = false });
+            using var request = new HttpRequestMessage(HttpMethod.Get, origin);
+            request.Headers.Accept.ParseAdd("text/html");
+            using var response = await http.SendAsync(request, deadline.Token);
+            Assert.AreEqual(HttpStatusCode.OK, response.StatusCode);
+            Assert.AreEqual("text/html", response.Content.Headers.ContentType?.MediaType);
+            byte[] html = await response.Content.ReadAsByteArrayAsync(deadline.Token);
+            Assert.IsTrue(System.Text.Encoding.UTF8.GetString(html).Contains(artifact.FileName, StringComparison.Ordinal));
+            await File.WriteAllBytesAsync(Path.Combine(output, "index.html"), html, deadline.Token);
+            var after = await Deployment();
+            Assert.AreEqual(before.GetProperty("current_generation").GetInt32(), after.GetProperty("current_generation").GetInt32());
+            await Write(RouteObservationFile(routeOnly), new
+            {
+                version = 1, kind = RouteObservationKind(routeOnly), target = routeOnly ? target : "downloads-web", source_sha256 = digest,
+                file = "index.html", observed_sha256 = Convert.ToHexStringLower(SHA256.HashData(html)),
+                checked_at_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), access = origin.AbsoluteUri,
+                observation = routeOnly ? "package_route_passed" : "web_route_passed", deployment = new
+                {
+                    deployment_id = deploymentId, generation_number = after.GetProperty("current_generation").GetInt32(),
+                    http_status = (int)response.StatusCode, content_type = response.Content.Headers.ContentType!.ToString()
+                }
+            });
+            Assert.AreEqual(digest, (await Command(Required("KICAD_COORDINATOR_EXECUTOR"),
+                "source-digest", "--worktree", root)).GetProperty("sha256").GetString());
+
+            async Task<JsonElement> Deployment()
+            {
+                var result = await Command("devcoordinator2", "deployment", "status", "--deployment-id", deploymentId, "--format", "json");
+                Assert.IsTrue(result.GetProperty("ok").GetBoolean());
+                var state = result.GetProperty("data");
+                ValidateDeployment(state, deploymentId, requireCurrentSource: !routeOnly);
+                return state.Clone();
+            }
+        }
+        finally { Directory.Delete(scratch, recursive: true); }
+
+        Task Write(string name, object value) => File.WriteAllTextAsync(Path.Combine(output, name),
+            JsonSerializer.Serialize(value), deadline.Token);
+        async Task<JsonElement> Command(string executable, params string[] arguments)
+        {
+            var result = await WindowsLauncherTests.Invoke(executable, arguments, root, deadline.Token, input: null);
+            Assert.AreEqual(0, result.ExitCode, result.Error + "\n" + result.Output[..Math.Min(result.Output.Length, 4096)]);
+            using var document = JsonDocument.Parse(result.Output);
+            return document.RootElement.Clone();
+        }
+    }
+
+    internal static string RouteObservationFile(bool routeOnly) => routeOnly ? "package-route.observation.json" : "web.verification.json";
+    internal static string RouteObservationKind(bool routeOnly) => routeOnly ? "package-route" : "web-deployment";
+
+    internal static void ValidateDeployment(JsonElement state, string deploymentId, bool requireCurrentSource)
+    {
+        Assert.AreEqual(deploymentId, state.GetProperty("deployment_id").GetString());
+        Assert.AreEqual("running", state.GetProperty("state").GetString());
+        Assert.IsTrue(state.GetProperty("public").GetBoolean());
+        int generation = state.GetProperty("current_generation").GetInt32(); Assert.IsTrue(generation > 0);
+        string route = state.GetProperty("route_component").GetString()!;
+        var components = state.GetProperty("components").EnumerateArray().Where(c => c.GetProperty("name").GetString() == route).ToArray();
+        Assert.HasCount(1, components); var component = components[0];
+        Assert.IsTrue(component.GetProperty("owned").GetBoolean());
+        Assert.AreEqual("running", component.GetProperty("state").GetString());
+        Assert.AreEqual("healthy", component.GetProperty("health").GetString());
+        Assert.AreEqual(generation, component.GetProperty("generation").GetInt32());
+        if (requireCurrentSource) Assert.IsTrue(state.GetProperty("readiness").GetProperty("ready").GetBoolean());
+    }
+}

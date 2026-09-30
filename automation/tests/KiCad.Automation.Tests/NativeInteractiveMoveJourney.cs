@@ -55,6 +55,8 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(7, previewError.Status);
             Assert.AreEqual(7, (await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
                 client.InvokeAsync<GetSchematicNetlist, SchematicNetlistResponse>(new() { Document = document }, token))).Status);
+            Assert.AreEqual(7, (await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
+                client.InvokeAsync<ReadSchematicElectricalState, SchematicElectricalState>(new() { Document = document }, token))).Status);
             var mutation = new ApplySchematicItemBatch
             {
                 Document = document, DocumentEpoch = before.Revision.Epoch,

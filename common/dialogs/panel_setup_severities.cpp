@@ -276,7 +276,13 @@ bool PANEL_SETUP_SEVERITIES::TransferDataFromWindow()
         int      pinMapCode = m_pinMapSpecialCase->GetErrorCode();
         SEVERITY severity   = RPT_SEVERITY_UNDEFINED;
 
-        if( m_buttonMap[ pinMapCode ][0]->GetValue() )      severity = RPT_SEVERITY_ERROR;
+        if( m_buttonMap[ pinMapCode ][0]->GetValue() )
+        {
+            // This row offers Enabled/Ignore, not Error/Warning. An unchanged
+            // enabled warning must not be rewritten merely by visiting it.
+            const SEVERITY previous = m_severities[ pinMapCode ];
+            severity = previous == RPT_SEVERITY_WARNING ? RPT_SEVERITY_WARNING : RPT_SEVERITY_ERROR;
+        }
         else if( m_buttonMap[ pinMapCode ][2]->GetValue() ) severity = RPT_SEVERITY_IGNORE;
 
         m_severities[ pinMapCode ] = severity;

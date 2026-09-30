@@ -31,7 +31,8 @@ class SCHEMATIC_SETTINGS;
 class PANEL_EESCHEMA_ANNOTATION_OPTIONS : public PANEL_EESCHEMA_ANNOTATION_OPTIONS_BASE
 {
 public:
-    PANEL_EESCHEMA_ANNOTATION_OPTIONS( wxWindow* aWindow, EDA_BASE_FRAME* schSettingsProvider );
+    PANEL_EESCHEMA_ANNOTATION_OPTIONS( wxWindow* aWindow, EDA_BASE_FRAME* schSettingsProvider,
+                                     SCHEMATIC_SETTINGS* aSettings = nullptr );
 
     bool TransferDataToWindow() override;
     bool TransferDataFromWindow() override;
@@ -44,6 +45,7 @@ private:
     void loadEEschemaSettings( SCHEMATIC_SETTINGS* aCfg );
 
     EDA_BASE_FRAME* m_schSettingsProvider;
+    SCHEMATIC_SETTINGS* m_settings;
 };
 
 

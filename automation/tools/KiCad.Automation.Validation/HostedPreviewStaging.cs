@@ -143,6 +143,18 @@ public static partial class HostedPreviewStaging
                 || !HashPattern().IsMatch(item.SourceSha256 ?? ""))
                 throw new InvalidDataException("Invalid incoming public artifact.");
             await VerifyFile(addition.Source, item.Bytes, item.Sha256, token);
+            if (item.Platform == "source")
+            {
+                Evidence.RequireCommit(item.Commit);
+                // Git archive encodings can differ between native builders.
+                // Source links are byte-bound; never replace a published file
+                // or claim that a different archive has the previous hash.
+                if (merged.Values.Any(x => x.Platform == "source" && x.Commit == item.Commit
+                        && x.Sha256 == item.Sha256 && x.Bytes == item.Bytes))
+                    continue;
+                if (merged.ContainsKey(item.FileName))
+                    item = item with { FileName = "kicad-codex-" + item.Commit + "-source-" + item.Sha256 + ".tar.gz" };
+            }
             if (merged.TryGetValue(item.FileName, out var existing))
             {
                 if (existing != item) throw new InvalidDataException("An existing download has a conflicting identity: " + item.FileName);

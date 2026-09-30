@@ -1,0 +1,377 @@
+/* KiCad recursive diagram editor control. GPL-3.0-or-later. */
+syntax = "proto3";
+package kiapi.automation.diagrams.v1;
+option csharp_namespace = "KiCad.Automation.Protocol.Diagrams";
+import "common/types/diagram_revision_types.proto";
+
+message OpenRecursiveDiagramEditor {
+  uint32 schema_version = 1;
+  string document_id = 2;
+  string repository_root = 3;
+  string source_path = 4;
+  string expected_source_token = 5;
+  string helper_path = 6;
+}
+message ReadRecursiveDiagramEditor { string document_id = 1; }
+message FieldHistoryViewState {
+  string owner_id = 1;
+  string state_id = 2;
+  string context_revision_id = 3;
+  RequirementFieldKind field = 4;
+  uint32 loaded_count = 5;
+  uint32 total_count = 6;
+  string inspected_revision_id = 7;
+  bool loading = 8;
+  string error_message = 9;
+  // Lane 2B: every loaded row of the history list, in list order, as its whole text (the revision label, with the
+  // implementation's name for a row saved in an earlier implementation, the saved marker and the author).
+  repeated string row_labels = 200;
+  // Lane 2B: the same rows exactly as the list shows them at its current width: whole, or with only the earlier
+  // implementation's name shortened with "…" so the version and author stay whole (mockup audit M1-3).
+  repeated string shown_row_labels = 201;
+}
+message DiagramHistoryViewState {
+  BlockSelectionData context = 1;
+  BlockSelectionData inspected = 2;
+  BlockSelectionData preview = 3;
+  uint32 loaded_count = 4;
+  uint32 total_count = 5;
+  bool busy = 6;
+  string error_message = 7;
+}
+// Offscreen views use the native diagram painter and never navigate the editor.
+// Omit selection to capture the current canvas, including its visible draft or
+// historical preview. An explicit selection reads that exact saved diagram.
+message DiagramViewport {
+  double x = 1; double y = 2; double width = 3; double height = 4;
+}
+message RecursiveDiagramViewRequest {
+  string view_id = 1;
+  BlockSelectionData selection = 2;
+  uint32 pixel_width = 3;
+  uint32 pixel_height = 4;
+  DiagramViewport viewport = 5;
+}
+message ObserveRecursiveDiagramEditor {
+  string document_id = 1;
+  string expected_source_token = 2;
+  uint64 expected_view_revision = 3;
+  repeated RecursiveDiagramViewRequest views = 4;
+}
+message RecursiveDiagramView {
+  string view_id = 1;
+  string units = 2;
+  DiagramViewport viewport = 3;
+  uint32 pixel_width = 4;
+  uint32 pixel_height = 5;
+  bytes png = 6;
+  BlockRevisionData diagram = 7;
+  repeated BlockRevisionData children = 8;
+  repeated ConnectionRevisionData connections = 9;
+  RequirementFieldsData requirements = 10;
+  bool contains_unsaved_draft = 11;
+  string coordinate_system = 12;
+  // Schema 2 (contract rbg-v2 section 9.2): what this view actually rendered.
+  ResolvedDiagramLayoutData resolved_layout = 13;
+}
+message RecursiveDiagramObservation {
+  string document_id = 1;
+  string source_token = 2;
+  uint64 view_revision = 3;
+  RecursiveDiagramEditorState editor = 4;
+  repeated RecursiveDiagramView views = 5;
+}
+message RecursiveDiagramEditorState {
+  string document_id = 1;
+  string source_path = 2;
+  string source_token = 3;
+  bool ready = 4;
+  bool busy = 5;
+  bool dirty = 6;
+  bool rendered = 7;
+  uint64 view_revision = 8;
+  uint64 completed_save_count = 9;
+  string error_code = 10;
+  string error_message = 11;
+  repeated BlockSelectionData diagram_path = 12;
+  BlockDraftData draft = 13;
+  ConnectionDraftData connection_draft = 14;
+  string selected_annotation_id = 15;
+  bool implementation_preview = 16;
+  BlockSelectionData preview_selection = 17;
+  string focused_control = 18;
+  uint64 navigation_input_revision = 19;
+  FieldHistoryViewState field_history = 20;
+  DiagramHistoryViewState diagram_history = 21;
+  double canvas_origin_x = 22;
+  double canvas_origin_y = 23;
+  double canvas_scale = 24;
+  uint32 canvas_pixel_width = 25;
+  uint32 canvas_pixel_height = 26;
+  BlockRevisionData canvas_diagram = 27;
+  uint32 resolved_canvas_children = 28;
+  // Schema 2 per-level editor (contract rbg-v2 section 9.1).
+  // On-disk format of the open file (1 or 2).
+  uint32 stored_schema_version = 29;
+  // False disables Save with an explanation.
+  bool source_writable = 30;
+  // The authoritative level draft. draft (13) is the selected block's draft
+  // within it (the level's own draft when the level or a note is selected, a
+  // mirror for a block drawn in this draft), and connection_draft (14) is the
+  // selected connection's draft (a mirror for a connection drawn in this draft).
+  LevelDraftData level_draft = 31;
+  // Session-only pan and zoom per level; never saved and never dirties a draft.
+  repeated DiagramLevelViewportState level_viewports = 32;
+  // "select", "add-block", "connect", "add-port", "note" or "pan".
+  string canvas_tool = 33;
+  string selected_interface_id = 34;
+  // Lane 2B drawing tools (Round A1). The canvas's top-left corner relative to
+  // the editor window, in pixels, so rendered input can target diagram points.
+  int32 canvas_window_x = 200;
+  int32 canvas_window_y = 201;
+  // Whether the canvas-edge drawing palette is shown (View > Drawing palette).
+  bool palette_shown = 202;
+  // The open in-place caption editor: "", "block", "connection", "port" or "rename".
+  string caption_editor = 203;
+  // The canvas hint shared by the toolbar strip and the palette, for example
+  // "Click a port to finish connection".
+  string canvas_hint = 204;
+  // The effects of the last removal, as the editor showed them.
+  repeated LevelEditEffectData last_effects = 205;
+  // The requirement fields the inspector shows for the selected element.
+  repeated RequirementFieldKind shown_requirement_fields = 206;
+  // The owner of selected_interface_id (the level itself or a child block).
+  string selected_interface_owner_id = 207;
+  // A non-modal notice, for example layout positions a rebase replaced.
+  string notice = 208;
+  // The drawing and inspector controls as rendered, for rendered-input journeys.
+  repeated DiagramControlRect controls = 209;
+  // The status bar text as shown, for example why Save is unavailable.
+  string status_text = 210;
+  // Whether a pointer drag on the canvas (a move, resize, port or note drag) is still in progress.
+  bool dragging = 211;
+  // Round A4 (owner decision n0b2a908b00e78823): what each block of the viewed level shows of its
+  // component choices on the canvas, as drawn. A caption-only block has no entry.
+  repeated DiagramCanvasBlockChips block_chips = 212;
+  // The facets the inspector's facet overview lists for the selected block, in facet order:
+  // "purpose", "type", "manufacturer", "family", "model", "orderable-part" or "package".
+  // Only facets that have a value are listed.
+  repeated string shown_facets = 213;
+  // The facet whose detail the inspector shows, or "" when only the overview is shown.
+  string facet_editor = 214;
+  // Why the facet detail's entry cannot be kept yet, as shown beside it; "" when it can.
+  string facet_notice = 215;
+  // Round A3 (owner decision nf53af9d74841b7d3): the details the inspector shows for the selected connection, in
+  // display order: "signals", "direction", "domain", "type" or "endpoints". A detail is shown once it has a value
+  // or once the person added its row; "endpoints" appears only when an end says more than its block or port.
+  repeated string shown_connection_details = 216;
+  // The selected connection's signals, as its Signals row lists them.
+  repeated string shown_signals = 217;
+  // Why the connection's caption or new signal cannot be kept, as shown in the inspector; "" when it can.
+  string connection_notice = 218;
+  // How each connection of the viewed level shows its direction on the canvas, as drawn.
+  repeated DiagramCanvasConnectionMarks connection_marks = 219;
+  // The viewed level's stored frame (its dashed boundary) as drawn, relative to the editor window; absent while the
+  // level has no stored frame. shown is true when the whole frame lies inside the canvas.
+  DiagramControlRect level_frame = 220;
+  // Each port on the level's boundary, with its name (label) as drawn beside the frame, relative to the editor window.
+  // shown is true when the whole name lies inside the canvas.
+  repeated DiagramControlRect boundary_port_names = 221;
+  // Presses the canvas has received, so rendered input can tell a press that changed nothing from one not yet delivered.
+  uint64 canvas_presses = 222;
+  // Each note placed on the viewed level's canvas, as drawn, in the level's note order.
+  repeated DiagramCanvasNote canvas_notes = 223;
+  // Each port drawn on the viewed level (block ports and boundary ports), its square relative to the editor window,
+  // in pixels, with the port's name as label. active is true for the port the Connect tool highlights under the pointer.
+  repeated DiagramControlRect port_marks = 224;
+  // What the Connect tool highlights under the pointer as a valid place to start or finish a connection: a port's ring
+  // or a block's outline, relative to the editor window, with the port's or block's name as label; absent when nothing is.
+  DiagramControlRect connect_target = 225;
+  // Each connection caption of the viewed level, relative to the editor window, with the text drawn as label and the
+  // connection's id as object_id. Every caption is drawn (design QA round 2, R2-P2-1): whole in the nearest clear place beside
+  // its connection or in the free space around it; shortened with "…" only when no clear place holds the whole text, and then
+  // tooltip carries the whole caption. Where not even a shortened text has a clear place (a crowded level), the caption is
+  // shortened to four characters and "…" where it covers least, and enabled is false. shown is false only for a caption
+  // drawn outside the canvas's view.
+  repeated DiagramControlRect connection_captions = 226;
+  // The caption and version line of every block of the viewed level, as drawn.
+  repeated DiagramCanvasBlockText block_texts = 227;
+  // The eight resize handles of the selected block as drawn, relative to the editor window; empty when none are drawn.
+  repeated DiagramControlRect selection_handles = 228;
+  // How often this editor process laid out the computed connection paths of a level since it started (rule F4). A level
+  // whose geometry did not change reuses its last layout, so repainting or reading the state again adds nothing.
+  uint64 route_layouts = 229;
+  // The longest single layout of computed connection paths since the process started, and the latest one, in
+  // microseconds.
+  uint64 slowest_route_layout_micros = 230;
+  uint64 latest_route_layout_micros = 231;
+  // How many distinct level geometries pointer drags reached in this window since it opened: each is one position the
+  // level must be laid out for, however many pointer motions reached it.
+  uint64 drag_positions = 232;
+  // The canvas's tooltip as it is set on the canvas now: the full caption of a shortened connection caption, or the choices
+  // behind a "+N more" chip, under the pointer; empty when the pointer is over neither or not over the canvas. It follows the
+  // canvas as it changes under a pointer that stays still (a level switch, a rename, a new fit or a history preview).
+  string canvas_tooltip = 233;
+  // The Connect tool's preview of the connection in progress as drawn, relative to the editor window, in pixels, from its
+  // first end to the pointer or the port or block the pointer is on; empty when no connection is in progress.
+  repeated DiagramCanvasPoint connect_preview = 234;
+  // Where the Connect hint ("Click a port to finish connection") is drawn beside the preview's end, relative to the editor
+  // window, with the hint as label; absent when it is not drawn.
+  DiagramControlRect connect_hint = 235;
+  // How many pointer motions and entries over the canvas the editor handled since the window opened, and where it last saw
+  // the pointer there, relative to the editor window, so a journey can tell a hover that has not arrived from one that did.
+  uint64 canvas_motions = 236;
+  DiagramCanvasPoint canvas_pointer = 237;
+}
+
+// A point on the canvas, relative to the editor window, in pixels.
+message DiagramCanvasPoint {
+  int32 x = 1;
+  int32 y = 2;
+}
+
+// The text a block shows on the canvas, relative to the editor window, in pixels. Text is drawn whole or not at all.
+message DiagramCanvasBlockText {
+  string block_id = 1;
+  // The block's rectangle as drawn.
+  DiagramControlRect block = 2;
+  // The caption as drawn (shortened with "…" when the block is too narrow); absent when the block is too small for it.
+  DiagramControlRect caption = 3;
+  // The "vN" line of a saved caption-only block; absent when it is not drawn.
+  DiagramControlRect version_line = 4;
+}
+
+// A note on the canvas as drawn: its box relative to the editor window, in pixels (shown is true when the whole box
+// lies inside the canvas), and the lines of text it shows. Lines break between words; only a word wider than the note
+// breaks inside it, and text that does not fit ends the last shown line with "…".
+message DiagramCanvasNote {
+  string annotation_id = 1;
+  DiagramControlRect rect = 2;
+  repeated string lines = 3;
+}
+
+// The arrowheads a connection shows on the canvas for its direction detail; a connection without a
+// direction has no entry.
+message DiagramCanvasConnectionMarks {
+  string connection_id = 1;
+  // The endpoints (by index) an arrowhead points into, in ascending order.
+  repeated uint32 arrow_endpoints = 2;
+  // Each arrowhead as drawn, relative to the editor window, in pixels (one per leg that ends in an arrowhead).
+  repeated DiagramControlRect arrows = 3;
+}
+
+// One component-choice chip on a block, relative to the editor window, in pixels.
+message DiagramCanvasFacetChip {
+  // The facet name, as in RecursiveDiagramEditorState.shown_facets.
+  string facet = 1;
+  // DCSD_SELECTED (chosen) or DCSD_CANDIDATES (candidate).
+  DefinitionChoiceStateData state = 2;
+  // The chip text as drawn, for example "Type: linear regulator".
+  string text = 3;
+  DiagramControlRect rect = 4;
+}
+
+// A chosen or candidate facet shown only as its state mark beside the block's caption, because the block has no
+// room for a chip or a "+N more" chip. Relative to the editor window, in pixels.
+message DiagramCanvasChoiceMark {
+  // The facet name, as in RecursiveDiagramEditorState.shown_facets.
+  string facet = 1;
+  // DCSD_SELECTED (a check) or DCSD_CANDIDATES (a ring).
+  DefinitionChoiceStateData state = 2;
+  DiagramControlRect rect = 3;
+}
+
+// The chips a block shows on the canvas and its Review facets link.
+message DiagramCanvasBlockChips {
+  string block_id = 1;
+  repeated DiagramCanvasFacetChip chips = 2;
+  // Chosen or candidate facets without a drawn chip. The "+N more" chip or the state marks stand for them.
+  uint32 hidden_chips = 3;
+  // The Review facets link as drawn; shown is false when the block is too small for it.
+  DiagramControlRect review_facets = 4;
+  // The state marks drawn beside the caption when no chip fits the block; empty when chips are drawn.
+  repeated DiagramCanvasChoiceMark marks = 5;
+  // The "+N more" chip as drawn; absent when every chosen or candidate facet has a chip or a mark.
+  DiagramControlRect more = 6;
+  // The block's caption text as drawn (clipped to the block's content area).
+  DiagramControlRect caption = 7;
+  // The names of the block's placed ports as drawn just inside its edge; chips, "+N more", marks and the Review facets
+  // link keep clear of them.
+  repeated DiagramControlRect port_names = 8;
+}
+
+// One rendered control relative to the editor window, in pixels. active is the
+// highlighted state of a tool (the toolbar strip and the palette share one tool).
+message DiagramControlRect {
+  string name = 1;
+  int32 x = 2;
+  int32 y = 3;
+  int32 width = 4;
+  int32 height = 5;
+  bool shown = 6;
+  bool enabled = 7;
+  bool active = 8;
+  // The visible label of a button or one-click choice, as drawn (it may be a collapsed short label).
+  string label = 9;
+  // What assistive technology reads from a button, a one-click choice or a facet row, as the toolkit exposes it (GTK's
+  // ATK object); absent for other controls and where the toolkit exposes none.
+  DiagramAccessible accessible = 10;
+  // The diagram object the control is drawn for: the connection id of a connection caption; the owning block's id and the
+  // port's interface id, joined by "/", of a port's square and of a boundary port's name; empty otherwise.
+  string object_id = 11;
+  // The text the control shows on hover: a control's tooltip, the full caption of a connection caption drawn shortened, or
+  // the choices behind a "+N more" chip, one per line; empty when it shows none. (Lane 2B band, 200-299.)
+  string tooltip = 200;
+}
+
+// A control's accessible role, name and state, read back from the toolkit.
+message DiagramAccessible {
+  // The role's name, for example "toggle button", "button" ("push button" before ATK 2.36), "radio button" or "link".
+  string role = 1;
+  // The accessible name.
+  string name = 2;
+  // Whether the control is checked: a pressed toggle button (a tool that is active, a facet row whose detail is open) or a
+  // selected one-click choice.
+  bool checked = 3;
+}
+
+// One diagram level's session viewport, in diagram units.
+message DiagramLevelViewportState {
+  string block_id = 1;
+  double origin_x = 2;
+  double origin_y = 3;
+  double scale = 4;
+}
+
+// The layout a view rendered (contract rbg-v2 section 9.2): stored placements
+// where the level has them, otherwise the deterministic fallback, which is
+// never saved implicitly. Presentation decimals are canonical strings.
+enum ResolvedPlacementSource { RPS_UNSPECIFIED = 0; RPS_PLACED = 1; RPS_FALLBACK = 2; }
+message ResolvedBlockPlacementData {
+  string block_id = 1;
+  DiagramRectData rect = 2;
+  ResolvedPlacementSource source = 3;
+}
+message ResolvedPortPlacementData {
+  string block_id = 1;
+  string interface_id = 2;
+  DiagramPortSide side = 3;
+  string offset = 4;
+  DiagramAnnotationPointData anchor = 5;
+  ResolvedPlacementSource source = 6;
+}
+message ResolvedRouteData {
+  string connection_id = 1;
+  uint32 endpoint_index = 2;
+  repeated DiagramAnnotationPointData points = 3;
+  ResolvedPlacementSource source = 4;
+}
+message ResolvedDiagramLayoutData {
+  repeated ResolvedBlockPlacementData blocks = 1;
+  repeated ResolvedPortPlacementData ports = 2;
+  repeated ResolvedRouteData routes = 3;
+  DiagramRectData frame = 4;
+  ResolvedPlacementSource frame_source = 5;
+  // Stored layout entries whose target is absent from this revision; never rendered.
+  uint32 dormant_entries = 6;
+}

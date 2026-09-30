@@ -22,8 +22,85 @@
 #include <sch_commit.h>
 #include <sch_group.h>
 #include <sch_text.h>
+#include <sch_line.h>
+#include <sch_screen.h>
+#include <sch_symbol.h>
+#include <sch_pin.h>
+#include <lib_symbol.h>
 
 BOOST_AUTO_TEST_SUITE( SchCommit )
+
+BOOST_AUTO_TEST_CASE( CacheValidationIgnoresOnlyChildEnumeration )
+{
+    TOOL_MANAGER manager;
+    // Library-cache undo owns a reference and deletes an unreferenced screen.
+    // Retain the fixture's own reference until the commit has been destroyed.
+    auto releaseScreen = []( SCH_SCREEN* aScreen )
+    {
+        aScreen->DecRefCount();
+        if( aScreen->GetRefCount() == 0 )
+            delete aScreen;
+    };
+    std::unique_ptr<SCH_SCREEN, decltype( releaseScreen )> owner( new SCH_SCREEN, releaseScreen );
+    owner->IncRefCount();
+    SCH_SCREEN& screen = *owner;
+    LIB_SYMBOL library( wxS( "StyleTie" ) );
+    library.SetLibId( LIB_ID( wxS( "Automation" ), wxS( "StyleTie" ) ) );
+    library.SetBodyStyleNames( { "Primary", "Alternate" } );
+    for( int style : { 1, 2 } )
+    {
+        auto* pin = new SCH_PIN( &library );
+        pin->SetNumber( wxS( "1" ) );
+        pin->SetUnit( 1 ); pin->SetBodyStyle( style );
+        library.AddDrawItem( pin );
+    }
+    const wxString key = wxS( "Automation:StyleTie" );
+    auto* symbol = new SCH_SYMBOL;
+    symbol->SetLibId( library.GetLibId() );
+    symbol->SetLibSymbol( new LIB_SYMBOL( library ) );
+    symbol->SetSchSymbolLibraryName( key );
+    screen.Append( symbol, false );
+    screen.AddLibSymbol( key, std::make_unique<LIB_SYMBOL>( library ) );
+    auto& placed = *symbol->GetLibSymbolRef();
+    auto& storedPins = placed.GetDrawItems()[SCH_PIN_T].base();
+    std::swap( storedPins[0], storedPins[1] );
+    SCH_COMMIT commit( &manager );
+    commit.CaptureLibraryCache( screen );
+    wxString failure;
+    BOOST_CHECK_MESSAGE( commit.ValidateLibraryCaches( failure ), failure );
+
+    const wxString original = placed.GetValueField().GetText();
+    placed.GetValueField().SetText( wxS( "different" ) );
+    BOOST_CHECK( !commit.ValidateLibraryCaches( failure ) );
+    placed.GetValueField().SetText( original );
+    auto& pin = placed.GetDrawItems()[SCH_PIN_T].front();
+    const KIID id = pin.m_Uuid;
+    const_cast<KIID&>( pin.m_Uuid ) = KIID();
+    BOOST_CHECK( !commit.ValidateLibraryCaches( failure ) );
+    const_cast<KIID&>( pin.m_Uuid ) = id;
+    BOOST_CHECK( commit.ValidateLibraryCaches( failure ) );
+    placed.AddDrawItem( new SCH_PIN( static_cast<SCH_PIN&>( pin ) ) );
+    BOOST_CHECK( !commit.ValidateLibraryCaches( failure ) );
+}
+
+BOOST_AUTO_TEST_CASE( AppliedAutomationWireRemovalRetainsTheOriginalImage )
+{
+    TOOL_MANAGER manager;
+    SCH_SCREEN screen;
+    auto line = std::make_unique<SCH_LINE>( VECTOR2I( 0, 0 ), LAYER_WIRE );
+    line->SetEndPoint( VECTOR2I( 1000, 0 ) );
+    screen.Append( line.get() );
+    SCH_COMMIT commit( &manager );
+    commit.SetAutomationOrigin( "fixture", "applied-wire-removal" );
+    commit.Modify( line.get(), &screen );
+    line->SetEndPoint( VECTOR2I( 2000, 0 ) );
+    line->SetFlags( IS_MOVING | STRUCT_DELETED );
+    screen.Remove( line.get() );
+    commit.Removed( line.get(), &screen );
+    BOOST_CHECK( line->GetEndPoint() == VECTOR2I( 1000, 0 ) );
+    BOOST_CHECK( !( line->GetFlags() & ( IS_MOVING | IS_NEW | IN_EDIT | STRUCT_DELETED ) ) );
+    BOOST_CHECK_EQUAL( commit.GetStatus( line.get(), &screen ), CHT_REMOVE | CHT_DONE );
+}
 
 BOOST_AUTO_TEST_CASE( RecursesThroughGroups )
 {
@@ -58,4 +135,3 @@ BOOST_AUTO_TEST_CASE( ClearsSelectedByDragFlag )
 }
 
 BOOST_AUTO_TEST_SUITE_END()
-

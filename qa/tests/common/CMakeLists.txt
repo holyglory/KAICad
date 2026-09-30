@@ -158,6 +158,8 @@ set( QA_COMMON_SRCS
     view/test_view_null_safety.cpp
 
     test_netname_validator.cpp
+    test_netclass_proto.cpp
+    test_api_request_target.cpp
 
     # GAL tests
     test_gal_xor_mode.cpp
@@ -180,6 +182,12 @@ set( QA_COMMON_SRCS
     test_settings_manager.cpp
     test_nested_settings.cpp
     test_settings_snapshot.cpp
+    test_project_analysis_snapshot.cpp
+    test_settings_save_outcome.cpp
+    test_native_state_digest.cpp
+    test_file_content_baseline.cpp
+    test_document_lifecycle_controller.cpp
+    test_checked_schematic_controller.cpp
     test_net_settings.cpp
     test_component_class_settings.cpp
     test_project_local_settings.cpp
@@ -280,6 +288,26 @@ kicad_add_boost_test( qa_common qa_common )
 
 setup_qa_env( qa_common )
 
+add_test( NAME qa_file_content_baseline
+    COMMAND $<TARGET_FILE:qa_common> --run_test=FileContentBaseline --log_level=test_suite )
+
+add_test( NAME qa_undo_geometry_policy
+    COMMAND $<TARGET_FILE:qa_common> --run_test=Commit/SchematicGeometryPolicyFollowsTheUndoCommand --log_level=test_suite )
+setup_qa_env( qa_file_content_baseline )
+
+# A focused project-copy target avoids rebuilding unrelated editor test modules.
+add_executable( qa_project_analysis_snapshot
+    ${CMAKE_SOURCE_DIR}/qa/mocks/kicad/common_mocks.cpp
+    test_module.cpp test_project_analysis_snapshot.cpp )
+target_link_libraries( qa_project_analysis_snapshot PRIVATE
+    common libcontext gal pads_common qa_utils Boost::headers Boost::unit_test_framework
+    ${wxWidgets_LIBRARIES} ZLIB::ZLIB ${CMAKE_DL_LIBS} )
+if( TARGET api_schema_build_copy )
+    add_dependencies( qa_project_analysis_snapshot api_schema_build_copy )
+endif()
+kicad_add_boost_test( qa_project_analysis_snapshot qa_project_analysis_snapshot )
+setup_qa_env( qa_project_analysis_snapshot )
+
 # The recovery journal has no GUI dependencies. Keep its focused tests usable
 # without initializing an editor or a display; the cases also run in qa_common.
 add_executable( qa_document_change_journal
@@ -303,6 +331,21 @@ set_tests_properties( qa_automation_update_client PROPERTIES TIMEOUT 60 )
 
 if( UNIX AND NOT APPLE )
     pkg_check_modules( QA_CAPTION_GTK REQUIRED IMPORTED_TARGET gtk+-3.0 )
+    add_executable( qa_diagram_field_history
+        ${CMAKE_SOURCE_DIR}/qa/mocks/kicad/common_mocks.cpp
+        test_module.cpp
+        test_diagram_field_history.cpp
+        ${CMAKE_SOURCE_DIR}/kicad/dialogs/dialog_diagram_field_history.cpp
+        ${CMAKE_SOURCE_DIR}/kicad/dialogs/panel_diagram_history.cpp
+        ${CMAKE_SOURCE_DIR}/kicad/dialogs/dialog_diagram_conflict.cpp )
+    target_compile_definitions( qa_diagram_field_history PRIVATE KICAD_QA_GUI )
+    target_link_libraries( qa_diagram_field_history PRIVATE
+        common libcontext gal pads_common qa_utils Boost::headers Boost::unit_test_framework
+        ${wxWidgets_LIBRARIES} ZLIB::ZLIB ${CMAKE_DL_LIBS} PkgConfig::QA_CAPTION_GTK )
+    if( TARGET api_schema_build_copy )
+        add_dependencies( qa_diagram_field_history api_schema_build_copy )
+    endif()
+    add_dependencies( qa_all_tests qa_diagram_field_history )
     add_executable( qa_automation_caption test_automation_caption.cpp )
     target_link_libraries( qa_automation_caption PRIVATE kiplatform Boost::headers Boost::unit_test_framework ${wxWidgets_LIBRARIES} PkgConfig::QA_CAPTION_GTK )
     add_test( NAME qa_automation_caption COMMAND xvfb-run -a $<TARGET_FILE:qa_automation_caption> --log_level=all )

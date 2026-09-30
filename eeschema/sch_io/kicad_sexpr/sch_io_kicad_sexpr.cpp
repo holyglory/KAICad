@@ -21,6 +21,7 @@
  */
 
 #include <algorithm>
+#include <digesting_file_line_reader.h>
 
 #include <fmt/format.h>
 #include <magic_enum.hpp>
@@ -320,7 +321,7 @@ void SCH_IO_KICAD_SEXPR::loadHierarchy( const SCH_SHEET_PATH& aParentSheetPath, 
 
 void SCH_IO_KICAD_SEXPR::loadFile( const wxString& aFileName, SCH_SHEET* aSheet )
 {
-    FILE_LINE_READER reader( aFileName );
+    DIGESTING_FILE_LINE_READER reader( aFileName );
 
     size_t lineCount = 0;
 
@@ -341,6 +342,7 @@ void SCH_IO_KICAD_SEXPR::loadFile( const wxString& aFileName, SCH_SHEET* aSheet 
                                       m_appending, m_sheetLoad );
 
     parser.ParseSchematic( aSheet );
+    aSheet->GetScreen()->SetFileBaseline( reader.FinishBaseline() );
 
     // Net chains live at the root-sheet level. Sub-sheet parses always produce empty maps,
     // so applying them would wipe the chains restored from the root file.
@@ -358,6 +360,8 @@ void SCH_IO_KICAD_SEXPR::loadFile( const wxString& aFileName, SCH_SHEET* aSheet 
 
         m_schematic->ConnectionGraph()->SetNetChainTerminalRefOverrides( termRefs );
         m_schematic->ConnectionGraph()->SetNetChainMemberNetOverrides( parser.GetNetChainMemberNets() );
+        m_schematic->ConnectionGraph()->SetNetChainExcludedNetOverrides( parser.GetNetChainExcludedNets() );
+        m_schematic->ConnectionGraph()->SetNetChainExcludedPinOverrides( parser.GetNetChainExcludedPins() );
     }
 }
 
@@ -384,6 +388,8 @@ void SCH_IO_KICAD_SEXPR::LoadContent( LINE_READER& aReader, SCH_SHEET* aSheet, i
 
         m_schematic->ConnectionGraph()->SetNetChainTerminalRefOverrides( termRefs );
         m_schematic->ConnectionGraph()->SetNetChainMemberNetOverrides( parser.GetNetChainMemberNets() );
+        m_schematic->ConnectionGraph()->SetNetChainExcludedNetOverrides( parser.GetNetChainExcludedNets() );
+        m_schematic->ConnectionGraph()->SetNetChainExcludedPinOverrides( parser.GetNetChainExcludedPins() );
     }
 }
 
@@ -423,13 +429,19 @@ void SCH_IO_KICAD_SEXPR::SaveSchematicFile( const wxString& aFileName, SCH_SHEET
     formatter.Finish();
 
     if( aSheet->GetScreen() )
+    {
         aSheet->GetScreen()->SetFileExists( true );
+        // Autosave/export copies must not replace the loaded document's baseline.
+        if( FILE_CONTENT_BASELINE::SamePath( aFileName, aSheet->GetScreen()->GetFileName() ) )
+            aSheet->GetScreen()->SetFileBaseline( formatter.CommittedBaseline() );
+    }
 }
 
 
 void SCH_IO_KICAD_SEXPR::FormatSchematicToFormatter( OUTPUTFORMATTER* aOut, SCH_SHEET* aSheet,
                                                       SCHEMATIC* aSchematic,
-                                                      const std::map<std::string, UTF8>* aProperties )
+                                                      const std::map<std::string, UTF8>* aProperties,
+                                                      bool aPrepareResources )
 {
     wxCHECK_RET( aSheet != nullptr, "NULL SCH_SHEET object." );
 
@@ -437,13 +449,21 @@ void SCH_IO_KICAD_SEXPR::FormatSchematicToFormatter( OUTPUTFORMATTER* aOut, SCH_
 
     m_out = aOut;
 
-    Format( aSheet );
+    try
+    {
+        Format( aSheet, aPrepareResources );
+    }
+    catch( ... )
+    {
+        m_out = nullptr;
+        throw;
+    }
 
     m_out = nullptr;
 }
 
 
-void SCH_IO_KICAD_SEXPR::Format( SCH_SHEET* aSheet )
+void SCH_IO_KICAD_SEXPR::Format( SCH_SHEET* aSheet, bool aPrepareResources )
 {
     wxCHECK_RET( aSheet != nullptr, "NULL SCH_SHEET* object." );
     wxCHECK_RET( m_schematic != nullptr, "NULL SCHEMATIC* object." );
@@ -456,10 +476,13 @@ void SCH_IO_KICAD_SEXPR::Format( SCH_SHEET* aSheet )
     // If we've requested to embed the fonts in the schematic, do so.
     // Otherwise, clear the embedded fonts from the schematic.  Embedded
     // fonts will be used if available
-    if( m_schematic->GetAreFontsEmbedded() )
-        m_schematic->EmbedFonts();
-    else
-        m_schematic->GetEmbeddedFiles()->ClearEmbeddedFonts();
+    if( aPrepareResources )
+    {
+        if( m_schematic->GetAreFontsEmbedded() )
+            m_schematic->EmbedFonts();
+        else
+            m_schematic->GetEmbeddedFiles()->ClearEmbeddedFonts();
+    }
 
     m_out->Print( "(kicad_sch (version %d) (generator \"eeschema\") (generator_version %s)",
                   SEXPR_SCHEMATIC_FILE_VERSION,
@@ -589,7 +612,10 @@ void SCH_IO_KICAD_SEXPR::Format( SCH_SHEET* aSheet )
                               KiROUND( c.r * 255.0 ),
                               KiROUND( c.g * 255.0 ),
                               KiROUND( c.b * 255.0 ),
-                              FormatDouble2Str( c.a ).c_str() );
+                              // Opacity is persisted as a double, unlike the
+                              // eight-bit RGB fields. Keep enough digits for
+                              // an exact round trip and idempotent XML sync.
+                              fmt::format( "{:.17g}", c.a ).c_str() );
             }
 
             if( !definition.memberNets.empty() )
@@ -602,6 +628,16 @@ void SCH_IO_KICAD_SEXPR::Format( SCH_SHEET* aSheet )
                 m_out->Print( ")" );
             }
 
+            if( !definition.excludedNets.empty() )
+            {
+                m_out->Print( " (excluded_nets" );
+                for( const wxString& name : definition.excludedNets )
+                    m_out->Print( " %s", m_out->Quotew( name ).c_str() );
+                m_out->Print( ")" );
+            }
+            for( const auto& [path, pin] : definition.excludedPins )
+                m_out->Print( " (excluded_pin %s %s)", m_out->Quotew( path.AsString() ).c_str(),
+                              m_out->Quotew( pin.AsString() ).c_str() );
             m_out->Print( ")" );
         }
     }

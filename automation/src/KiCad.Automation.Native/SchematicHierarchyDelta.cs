@@ -9,6 +9,10 @@ namespace KiCad.Automation.Native;
 /// screen contents. Does not execute, admit revisions or establish complete synchronization.</summary>
 public static class SchematicHierarchyDelta
 {
+    internal static IReadOnlyList<SchematicItemOperation> PlanWithSheetChoices(SchematicHierarchyData current,
+        SchematicHierarchyData desired, SchematicSheetInstanceChoices choices, CancellationToken token = default) =>
+        SchematicSheetMappingOperations.Add(current, desired, choices, Plan(current, desired, token));
+
     public static IReadOnlyList<SchematicItemOperation> Plan(SchematicHierarchyData current,
         SchematicHierarchyData desired, CancellationToken cancellationToken = default)
     {
@@ -22,7 +26,17 @@ public static class SchematicHierarchyDelta
                 || !s.Metadata.TextVariables.Equals(assets.TextVariables) || !s.Metadata.NetChains.Equals(assets.NetChains)
                 || !s.Metadata.VariantDescriptions.Equals(assets.VariantDescriptions)
                 || !Equals(s.Metadata.DrawingRatios, assets.DrawingRatios)
-                || !Equals(s.Metadata.Formatting, assets.Formatting)))
+                || !Equals(s.Metadata.Formatting, assets.Formatting)
+                || !Equals(s.Metadata.Annotation, assets.Annotation)
+                || !Equals(s.Metadata.FieldTemplates, assets.FieldTemplates)
+                || !Equals(s.Metadata.SymbolComparison, assets.SymbolComparison)
+                || !Equals(s.Metadata.BomSettings, assets.BomSettings)
+                || !SchematicNetSettingsState.SameDeclared(s.Metadata.NetSettings, assets.NetSettings)
+                || !Equals(s.Metadata.NgspiceSettings, assets.NgspiceSettings)
+                || !Equals(s.Metadata.NetSettings?.LabelAssignments, assets.NetSettings?.LabelAssignments)
+                || !SchematicReferenceInventoryState.Same(s.Metadata.ReferenceInventory, assets.ReferenceInventory)
+                || !SchematicNetChainClasses.Same(s.Metadata.NetChainClasses, assets.NetChainClasses)
+                || !SchematicErcSettingsValidation.Same(s.Metadata.ErcSettings, assets.ErcSettings)))
                 throw Invalid("Schematic-wide assets, bus aliases, text variables and net chains must agree across all sheet instances.");
         }
         if (!current.Document.Equals(desired.Document))
@@ -66,9 +80,18 @@ public static class SchematicHierarchyDelta
         bool aliasesEmitted = false;
         bool variablesEmitted = false;
         bool chainsEmitted = false;
+        bool chainClassesEmitted = false;
         bool variantsEmitted = false;
         bool drawingRatiosEmitted = false;
         bool formattingEmitted = false;
+        bool annotationEmitted = false;
+        bool fieldTemplatesEmitted = false;
+        bool symbolComparisonEmitted = false;
+        bool bomSettingsEmitted = false;
+        bool netSettingsEmitted = false;
+        bool ngspiceSettingsEmitted = false;
+        bool referenceInventoryEmitted = false;
+        bool ercEmitted = false;
         foreach (var path in after.Keys.Order(StringComparer.Ordinal))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -114,6 +137,46 @@ public static class SchematicHierarchyDelta
                     if (formattingEmitted) continue;
                     formattingEmitted = true;
                 }
+                if (operation.SetAnnotation is not null)
+                {
+                    if (annotationEmitted) continue;
+                    annotationEmitted = true;
+                }
+                if (operation.SetFieldTemplates is not null)
+                {
+                    if (fieldTemplatesEmitted) continue;
+                    fieldTemplatesEmitted = true;
+                }
+                if (operation.SetSymbolComparison is not null)
+                {
+                    if (symbolComparisonEmitted) continue;
+                    symbolComparisonEmitted = true;
+                }
+                if (operation.SetBomSettings is not null)
+                {
+                    if (bomSettingsEmitted) continue;
+                    bomSettingsEmitted = true;
+                }
+                if (operation.SetNetSettings is not null)
+                {
+                    if (netSettingsEmitted) continue;
+                    netSettingsEmitted = true;
+                }
+                if (operation.SetNgspiceSettings is not null)
+                {
+                    if (ngspiceSettingsEmitted) continue;
+                    ngspiceSettingsEmitted = true;
+                }
+                if (operation.SetReferenceInventory is not null)
+                {
+                    if (referenceInventoryEmitted) continue;
+                    referenceInventoryEmitted = true;
+                }
+                if (operation.SetErcSettings is not null)
+                {
+                    if (ercEmitted) continue;
+                    ercEmitted = true;
+                }
                 if (operation.ReplaceVariantRegistry is not null)
                 {
                     if (variantsEmitted) continue;
@@ -133,6 +196,11 @@ public static class SchematicHierarchyDelta
                 {
                     if (chainsEmitted) continue;
                     chainsEmitted = true;
+                }
+                if (operation.ReplaceNetChainClasses is not null)
+                {
+                    if (chainClassesEmitted) continue;
+                    chainClassesEmitted = true;
                 }
                 var targeted = operation.Clone();
                 targeted.TargetDocument = screen.Metadata.Document.Clone();

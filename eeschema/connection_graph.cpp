@@ -3008,12 +3008,12 @@ CONNECTION_GRAPH::BRIDGE_GRAPH CONNECTION_GRAPH::buildBridgeAdjacency()
 {
     BRIDGE_GRAPH result;
 
-    auto getSubgraphNet = [&]( SCH_PIN* aPin ) -> wxString
+    auto getSubgraphNet = [&]( SCH_PIN* aPin, const SCH_SHEET_PATH& aPath ) -> wxString
     {
         if( !aPin )
             return wxString();
 
-        CONNECTION_SUBGRAPH* sg = GetSubgraphForItem( aPin );
+        CONNECTION_SUBGRAPH* sg = GetSubgraphForItem( aPin, aPath );
 
         return sg ? netChainKeyFor( sg->GetNetName(), sg->m_code ) : wxString();
     };
@@ -3126,8 +3126,8 @@ CONNECTION_GRAPH::BRIDGE_GRAPH CONNECTION_GRAPH::buildBridgeAdjacency()
             if( !allow )
                 continue;
 
-            wxString netA = getSubgraphNet( pins[0] );
-            wxString netB = getSubgraphNet( pins[1] );
+            wxString netA = getSubgraphNet( pins[0], sheetPath );
+            wxString netB = getSubgraphNet( pins[1], sheetPath );
 
             if( netA.IsEmpty() || netB.IsEmpty() || netA == netB )
                 continue;
@@ -3157,7 +3157,7 @@ CONNECTION_GRAPH::BRIDGE_GRAPH CONNECTION_GRAPH::buildBridgeAdjacency()
 
             for( SCH_PIN* p : pins )
             {
-                if( CONNECTION_SUBGRAPH* sg = GetSubgraphForItem( p ) )
+                if( CONNECTION_SUBGRAPH* sg = GetSubgraphForItem( p, sheetPath ) )
                 {
                     netToCode[netChainKeyFor( sg->GetNetName(), sg->m_code )] = sg->m_code;
 
@@ -3281,6 +3281,15 @@ CONNECTION_GRAPH::BRIDGE_GRAPH CONNECTION_GRAPH::buildBridgeAdjacency()
 
 void CONNECTION_GRAPH::RebuildNetChains()
 {
+    // Restricted declarations are re-admitted only from a path that still
+    // satisfies their explicit exclusions, never from stale saved membership.
+    std::erase_if( m_committedNetChains, [&]( const auto& chain )
+    {
+        auto it = m_netChainExcludedNetOverrides.find( chain->GetName() );
+        auto pins = m_netChainExcludedPinOverrides.find( chain->GetName() );
+        return ( it != m_netChainExcludedNetOverrides.end() && !it->second.empty() )
+                || ( pins != m_netChainExcludedPinOverrides.end() && !pins->second.empty() );
+    } );
     // Snapshot the committed-chain count so a throw partway through the restore loop can
     // truncate any half-built entries instead of leaving the container partially mutated.
     const size_t committedSnapshot = m_committedNetChains.size();
@@ -3327,12 +3336,12 @@ void CONNECTION_GRAPH::RebuildNetChains()
     // each screen, giving global coverage while preserving expected grouping semantics.
     wxLogTrace( traceSchNetChain, "RebuildNetChains: pass 1 (per-sheet 2-pin symbols)" );
 
-    auto getSubgraphNet = [&]( SCH_PIN* aPin ) -> wxString
+    auto getSubgraphNet = [&]( SCH_PIN* aPin, const SCH_SHEET_PATH& aPath ) -> wxString
     {
         if( !aPin )
             return wxString();
 
-        CONNECTION_SUBGRAPH* sg = GetSubgraphForItem( aPin );
+        CONNECTION_SUBGRAPH* sg = GetSubgraphForItem( aPin, aPath );
 
         return sg ? netChainKeyFor( sg->GetNetName(), sg->m_code ) : wxString();
     };
@@ -3490,30 +3499,24 @@ void CONNECTION_GRAPH::RebuildNetChains()
             committedNames.insert( chain->GetName() );
     }
 
-    for( SCH_ITEM* item : m_items )
+    for( const SCH_SHEET_PATH& labelPath : m_sheetList )
     {
-        if( item->Type() != SCH_LABEL_T )
-            continue;
-
-        SCH_TEXT* label = static_cast<SCH_TEXT*>( item );
-        wxString  net;
-
-        if( CONNECTION_SUBGRAPH* sg = GetSubgraphForItem( item ) )
-            net = sg->GetNetName();
-
-        // Defensive: guard against pathological names
-        if( !net.IsEmpty() && net.Length() < 2048 && netToNetChain.count( net ) )
+        if( !labelPath.LastScreen() ) continue;
+        for( SCH_ITEM* item : labelPath.LastScreen()->Items().OfType( SCH_LABEL_T ) )
         {
-            wxString name = label->GetText();
-            if( name.Length() > 512 )
-                name.Truncate( 512 );
-            if( name.StartsWith( wxS( "/" ) ) )
-                name = name.Mid( 1 );
+            SCH_TEXT* label = static_cast<SCH_TEXT*>( item );
+            wxString  net;
+            if( CONNECTION_SUBGRAPH* sg = GetSubgraphForItem( item, labelPath ) )
+                net = sg->GetNetName();
 
-            // Skip if a committed chain already owns this name; let the terminal-ref /
-            // saved-net-name restore logic below resolve the committed chain on its own.
-            if( !committedNames.count( name ) )
-                netToNetChain[net]->SetName( name );
+            if( !net.IsEmpty() && net.Length() < 2048 && netToNetChain.count( net ) )
+            {
+                wxString name = label->GetText();
+                if( name.Length() > 512 ) name.Truncate( 512 );
+                if( name.StartsWith( wxS( "/" ) ) ) name = name.Mid( 1 );
+                // A label must not steal a committed declaration's name.
+                if( !committedNames.count( name ) ) netToNetChain[net]->SetName( name );
+            }
         }
     }
 
@@ -3548,7 +3551,7 @@ void CONNECTION_GRAPH::RebuildNetChains()
                 SCH_SYMBOL* sym = static_cast<SCH_SYMBOL*>( item );
                 for( SCH_PIN* p : sym->GetPins( &sheetPath ) )
                 {
-                    wxString net = getSubgraphNet( p );
+                    wxString net = getSubgraphNet( p, sheetPath );
                     if( sig->GetNets().count( net ) )
                         pins.push_back( { p, sym, &sheetPath } );
                 }
@@ -3625,6 +3628,8 @@ void CONNECTION_GRAPH::RebuildNetChains()
 
         // Build ref+pin → net lookup from current schematic
         std::map<std::pair<wxString, wxString>, wxString> refPinToNet;
+        std::map<std::pair<wxString, wxString>, KIID> refPinToPin;
+        std::map<std::pair<KIID_PATH, KIID>, wxString> exactPinToNet;
 
         for( const SCH_SHEET_PATH& sp : m_sheetList )
         {
@@ -3640,7 +3645,9 @@ void CONNECTION_GRAPH::RebuildNetChains()
 
                 for( SCH_PIN* pin : sym->GetPins( &sp ) )
                 {
-                    if( CONNECTION_SUBGRAPH* sg = GetSubgraphForItem( pin ) )
+                    if( auto* connection = pin->Connection( &sp ) )
+                        exactPinToNet[{ sp.Path(), pin->m_Uuid }] = connection->Name();
+                    if( CONNECTION_SUBGRAPH* sg = GetSubgraphForItem( pin, sp ) )
                     {
                         // Match potential-chain key construction so unnamed subgraphs use the
                         // synthetic prefix instead of being skipped — without this, a chain
@@ -3648,6 +3655,7 @@ void CONNECTION_GRAPH::RebuildNetChains()
                         // both-endpoint matching.
                         refPinToNet[{ ref, pin->GetNumber() }] =
                                 netChainKeyFor( sg->GetNetName(), sg->m_code );
+                        refPinToPin[{ ref, pin->GetNumber() }] = pin->m_Uuid;
                     }
                 }
             }
@@ -3675,6 +3683,32 @@ void CONNECTION_GRAPH::RebuildNetChains()
             if( !match )
                 continue;
 
+            auto excluded = m_netChainExcludedNetOverrides.find( chainName );
+            auto excludedPins = m_netChainExcludedPinOverrides.find( chainName );
+            bool restricted = ( excluded != m_netChainExcludedNetOverrides.end() && !excluded->second.empty() )
+                || ( excludedPins != m_netChainExcludedPinOverrides.end() && !excludedPins->second.empty() );
+            if( restricted )
+            {
+                if( excludedPins == m_netChainExcludedPinOverrides.end() || excludedPins->second.empty() ) continue;
+                bool unresolvedOrIncluded = std::any_of( excludedPins->second.begin(), excludedPins->second.end(),
+                        [&]( const auto& anchor )
+                        {
+                            auto net = exactPinToNet.find( anchor );
+                            return net == exactPinToNet.end() || net->second.IsEmpty()
+                                    || match->GetNets().contains( net->second );
+                        } );
+                if( unresolvedOrIncluded ) continue;
+            }
+
+            // A potential's endpoint order is derived from screen iteration,
+            // not from the persisted From/To declaration. Save/reload can
+            // change that order; keep the explicitly declared endpoints.
+            const CHAIN_TERMINAL_REFS declared = termRefs;
+            auto pinA = refPinToPin.find( { declared.first.ref, declared.first.pin } );
+            auto pinB = refPinToPin.find( { declared.second.ref, declared.second.pin } );
+            if( pinA != refPinToPin.end() && pinB != refPinToPin.end() )
+                m_netChainTerminalOverrides.try_emplace( chainName, pinA->second, pinB->second );
+
             if( alreadyCommitted.count( chainName ) )
             {
                 auto it = committedByName.find( chainName );
@@ -3688,7 +3722,13 @@ void CONNECTION_GRAPH::RebuildNetChains()
                 continue;
             }
 
-            CreateNetChainFromPotential( match, chainName );
+            SCH_NETCHAIN* restored = CreateNetChainFromPotential( match, chainName );
+            if( !restored ) continue;
+            if( auto pins = m_netChainTerminalOverrides.find( chainName ); pins != m_netChainTerminalOverrides.end() )
+                restored->SetTerminalPins( pins->second.first, pins->second.second );
+            restored->SetTerminalRefs( declared.first.ref, declared.first.pin,
+                                       declared.second.ref, declared.second.pin );
+            m_netChainTerminalRefOverrides[chainName] = declared;
             alreadyCommitted.insert( chainName );
             refreshedThisPass.insert( chainName );
         }
@@ -3703,6 +3743,14 @@ void CONNECTION_GRAPH::RebuildNetChains()
             // Skip chains pass 2a already refreshed; the potential's symbol set is more
             // precise than the broad member-net match collected here.
             if( alreadyCommitted.count( chainName ) && refreshedThisPass.count( chainName ) )
+                continue;
+
+            // A removed endpoint or broken retained path needs explicit
+            // repair. Broad saved membership must not recreate that path.
+            auto excluded = m_netChainExcludedNetOverrides.find( chainName );
+            auto excludedPins = m_netChainExcludedPinOverrides.find( chainName );
+            if( ( excluded != m_netChainExcludedNetOverrides.end() && !excluded->second.empty() )
+                || ( excludedPins != m_netChainExcludedPinOverrides.end() && !excludedPins->second.empty() ) )
                 continue;
 
             auto termIt = m_netChainTerminalRefOverrides.find( chainName );
@@ -3731,7 +3779,7 @@ void CONNECTION_GRAPH::RebuildNetChains()
 
                     for( SCH_PIN* pin : sym->GetPins( &sp ) )
                     {
-                        CONNECTION_SUBGRAPH* sg = GetSubgraphForItem( pin );
+                        CONNECTION_SUBGRAPH* sg = GetSubgraphForItem( pin, sp );
 
                         if( !sg )
                             continue;
@@ -3863,7 +3911,8 @@ SCH_NETCHAIN* CONNECTION_GRAPH::resolvePotentialChainByTerminals(
 }
 
 
-SCH_NETCHAIN* CONNECTION_GRAPH::FindPotentialNetChainBetweenPins( SCH_PIN* aPinA, SCH_PIN* aPinB )
+SCH_NETCHAIN* CONNECTION_GRAPH::FindPotentialNetChainBetweenPins( SCH_PIN* aPinA, const SCH_SHEET_PATH& aPathA,
+                                                                SCH_PIN* aPinB, const SCH_SHEET_PATH& aPathB )
 {
     if( !aPinA || !aPinB )
         return nullptr;
@@ -3871,10 +3920,10 @@ SCH_NETCHAIN* CONNECTION_GRAPH::FindPotentialNetChainBetweenPins( SCH_PIN* aPinA
     wxString netA;
     wxString netB;
 
-    if( CONNECTION_SUBGRAPH* sgA = GetSubgraphForItem( aPinA ) )
+    if( CONNECTION_SUBGRAPH* sgA = GetSubgraphForItem( aPinA, aPathA ) )
         netA = netChainKeyFor( sgA->GetNetName(), sgA->m_code );
 
-    if( CONNECTION_SUBGRAPH* sgB = GetSubgraphForItem( aPinB ) )
+    if( CONNECTION_SUBGRAPH* sgB = GetSubgraphForItem( aPinB, aPathB ) )
         netB = netChainKeyFor( sgB->GetNetName(), sgB->m_code );
 
     if( netA.IsEmpty() || netB.IsEmpty() )
@@ -3900,6 +3949,10 @@ std::map<wxString, CONNECTION_GRAPH::NET_CHAIN_DEFINITION> CONNECTION_GRAPH::Get
         definitions[name].color = color;
     for( const auto& [name, nets] : m_netChainMemberNetOverrides )
         definitions[name].memberNets = nets;
+    for( const auto& [name, nets] : m_netChainExcludedNetOverrides )
+        definitions[name].excludedNets = nets;
+    for( const auto& [name, pins] : m_netChainExcludedPinOverrides )
+        definitions[name].excludedPins = pins;
 
     // Live color/class edits need not have been copied into the restore maps.
     for( const auto& chain : m_committedNetChains )
@@ -3929,12 +3982,16 @@ void CONNECTION_GRAPH::SetNetChainDefinitions( const std::map<wxString, NET_CHAI
     m_netChainNetClassOverrides.clear();
     m_netChainColorOverrides.clear();
     m_netChainMemberNetOverrides.clear();
+    m_netChainExcludedNetOverrides.clear();
+    m_netChainExcludedPinOverrides.clear();
     for( const auto& [name, definition] : aDefinitions )
     {
         m_netChainTerminalRefOverrides[name] = definition.terminals;
         m_netChainNetClassOverrides[name] = definition.netClass;
         m_netChainColorOverrides[name] = definition.color;
         m_netChainMemberNetOverrides[name] = definition.memberNets;
+        m_netChainExcludedNetOverrides[name] = definition.excludedNets;
+        m_netChainExcludedPinOverrides[name] = definition.excludedPins;
     }
     RebuildNetChains();
     ApplyNetChainNetclasses();
@@ -3970,6 +4027,8 @@ bool CONNECTION_GRAPH::DeleteCommittedNetChain( const wxString& aName )
     m_netChainTerminalRefOverrides.erase( aName );
     m_netChainTerminalOverrides.erase( aName );
     m_netChainMemberNetOverrides.erase( aName );
+    m_netChainExcludedNetOverrides.erase( aName );
+    m_netChainExcludedPinOverrides.erase( aName );
 
     return true;
 }
@@ -3996,9 +4055,9 @@ bool CONNECTION_GRAPH::RenameCommittedNetChain( const wxString& aOld, const wxSt
     if( !existing )
         return false;
 
-    // Reject collisions: if some other committed chain already owns aNew, don't
-    // silently merge them.
-    if( findByName( aNew ) )
+    // A declaration whose endpoints cannot currently be resolved still owns
+    // its name. Rekeying into it would overwrite its electrical requirements.
+    if( GetNetChainDefinitions().contains( aNew ) )
         return false;
 
     existing->SetName( aNew );
@@ -4037,6 +4096,8 @@ void CONNECTION_GRAPH::rekeyOverrideMaps( const wxString& aOld, const wxString& 
     rekey( m_netChainTerminalRefOverrides );
     rekey( m_netChainTerminalOverrides );
     rekey( m_netChainMemberNetOverrides );
+    rekey( m_netChainExcludedNetOverrides );
+    rekey( m_netChainExcludedPinOverrides );
 }
 
 
@@ -4078,7 +4139,18 @@ void CONNECTION_GRAPH::refreshCommittedChainPayload( SCH_NETCHAIN* aTarget,
     else
         aTarget->SetTerminalPins( aTerminalPinA, aTerminalPinB );
 
-    aTarget->SetTerminalRefs( aRefA, aPinNumA, aRefB, aPinNumB );
+    // An explicitly retargeted pin has a persisted reference as well as a
+    // runtime UUID. Keep that declared endpoint when refreshing the inferred
+    // potential; otherwise saving after recalculation loses the user's edit.
+    auto refOverride = m_netChainTerminalRefOverrides.find( aTarget->GetName() );
+    if( termOverride != m_netChainTerminalOverrides.end()
+            && refOverride != m_netChainTerminalRefOverrides.end() )
+    {
+        const auto& refs = refOverride->second;
+        aTarget->SetTerminalRefs( refs.first.ref, refs.first.pin, refs.second.ref, refs.second.pin );
+    }
+    else
+        aTarget->SetTerminalRefs( aRefA, aPinNumA, aRefB, aPinNumB );
 
     for( SCH_SYMBOL* sym : aTarget->GetSymbols() )
         sym->SetNetChainName( aTarget->GetName() );
@@ -4329,6 +4401,46 @@ void CONNECTION_GRAPH::ReplaceNetChainTerminalPin( const wxString& aNetChain, co
     }
 }
 
+
+bool CONNECTION_GRAPH::SetNetChainTerminal( const SCH_NETCHAIN_TERMINAL_CHANGE& aChange,
+                                          const SCH_PIN& aPin, const SCH_SHEET_PATH& aPath )
+{
+    if( !m_schematic || aChange.terminal < 0 || aChange.terminal > 1 || aChange.selectedPin != aPin.m_Uuid
+            || aChange.selectedPath != aPath.Path() || !aPath.LastScreen() || !aPin.GetParentSymbol() )
+        return false;
+    bool loaded = false;
+    for( const SCH_SHEET_PATH& path : m_schematic->Hierarchy() )
+        if( path.Path() == aPath.Path() && path.LastScreen() == aPath.LastScreen() ) loaded = true;
+    if( !loaded || aPin.GetParentSymbol()->Schematic() != m_schematic ) return false;
+    bool owned = false;
+    for( SCH_ITEM* item : aPath.LastScreen()->Items() )
+        if( item == aPin.GetParentSymbol() ) owned = true;
+    SCH_CONNECTION* connection = aPin.Connection( &aPath );
+    SCH_NETCHAIN* chain = GetNetChainByName( aChange.chain );
+    if( !owned || !connection || !chain || GetNetChainForNet( connection->Name() ) != chain )
+        return false;
+    const int index = aChange.terminal;
+    const KIID& prior = index == 0 ? chain->GetTerminalPinA() : chain->GetTerminalPinB();
+    if( prior != aChange.expectedPin || chain->GetTerminalRef( index ) != aChange.expectedReference
+            || chain->GetTerminalPinNum( index ) != aChange.expectedNumber )
+        return false;
+    wxString reference = aPin.GetParentSymbol()->GetRef( &aPath );
+    wxString number = aPin.GetNumber();
+    if( reference.IsEmpty() || number.IsEmpty()
+            || ( prior == aPin.m_Uuid && reference == aChange.expectedReference && number == aChange.expectedNumber ) )
+        return false;
+
+    auto pins = std::make_pair( chain->GetTerminalPinA(), chain->GetTerminalPinB() );
+    CHAIN_TERMINAL_REFS refs{ { chain->GetTerminalRef( 0 ), chain->GetTerminalPinNum( 0 ) },
+                              { chain->GetTerminalRef( 1 ), chain->GetTerminalPinNum( 1 ) } };
+    ( index == 0 ? pins.first : pins.second ) = aPin.m_Uuid;
+    ( index == 0 ? refs.first : refs.second ) = { reference, number };
+    chain->SetTerminalPins( pins.first, pins.second );
+    chain->SetTerminalRefs( refs.first.ref, refs.first.pin, refs.second.ref, refs.second.pin );
+    m_netChainTerminalOverrides[aChange.chain] = pins;
+    m_netChainTerminalRefOverrides[aChange.chain] = refs;
+    return true;
+}
 
 void CONNECTION_GRAPH::SetNetChainTerminalOverrides( const std::map<wxString,
                                                 std::pair<KIID, KIID>>& aOverrides )
@@ -5030,6 +5142,19 @@ CONNECTION_SUBGRAPH* CONNECTION_GRAPH::FindFirstSubgraphByName( const wxString& 
     return it->second[0];
 }
 
+
+CONNECTION_SUBGRAPH* CONNECTION_GRAPH::GetSubgraphForItem( SCH_ITEM* aItem, const SCH_SHEET_PATH& aPath ) const
+{
+    auto found = m_item_to_subgraph_map.find( aItem );
+    if( found == m_item_to_subgraph_map.end() ) return nullptr;
+    for( CONNECTION_SUBGRAPH* candidate : found->second )
+    {
+        if( !candidate || candidate->GetSheet() != aPath ) continue;
+        while( candidate->m_absorbed ) candidate = candidate->m_absorbed_by;
+        return candidate;
+    }
+    return nullptr;
+}
 
 CONNECTION_SUBGRAPH* CONNECTION_GRAPH::GetSubgraphForItem( SCH_ITEM* aItem ) const
 {

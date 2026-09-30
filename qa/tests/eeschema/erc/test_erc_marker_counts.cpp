@@ -27,6 +27,8 @@
 #include <erc/erc.h>
 #include <settings/settings_manager.h>
 #include <locale_io.h>
+#include <api/api_sch_erc_settings.h>
+#include <algorithm>
 
 
 struct ERC_MARKER_COUNT_FIXTURE
@@ -92,6 +94,12 @@ BOOST_FIXTURE_TEST_CASE( ERCMarkerCountsExclusion, ERC_MARKER_COUNT_FIXTURE )
     BOOST_REQUIRE( marker != nullptr );
     BOOST_REQUIRE( markerSeverity == RPT_SEVERITY_ERROR || markerSeverity == RPT_SEVERITY_WARNING );
 
+    const auto policyBefore = SCH_ERC_SETTINGS::Capture( *m_schematic );
+    const auto storedBefore = settings.CaptureCurrentState();
+    const auto revisionBefore = m_schematic->ChangeJournal().Sequence();
+    BOOST_CHECK_EQUAL( policyBefore.pin_map_size(), ELECTRICAL_PINTYPES_TOTAL * ELECTRICAL_PINTYPES_TOTAL );
+    BOOST_CHECK( policyBefore.rule_severities_size() > 0 );
+
     BOOST_CHECK( provider.SetMarkerExcluded( marker, true ) );
     BOOST_CHECK( !provider.SetMarkerExcluded( marker, true ) );
 
@@ -99,6 +107,42 @@ BOOST_FIXTURE_TEST_CASE( ERCMarkerCountsExclusion, ERC_MARKER_COUNT_FIXTURE )
     BOOST_CHECK( provider.SetMarkerExcluded( marker, true, wxS( "Intentional fixture exclusion" ) ) );
     BOOST_CHECK( !provider.SetMarkerExcluded( marker, true, wxS( "Intentional fixture exclusion" ) ) );
     BOOST_CHECK_EQUAL( marker->GetComment(), wxS( "Intentional fixture exclusion" ) );
+
+    const auto markerBeforeClone = ERC_EXCLUSION::FromMarker( *marker ).ToProto().SerializeAsString();
+    {
+        std::unique_ptr<SCH_MARKER> copy( static_cast<SCH_MARKER*>( marker->Clone() ) );
+        BOOST_CHECK( copy->GetRCItem() != marker->GetRCItem() );
+        BOOST_CHECK( marker->GetRCItem()->GetParent() == marker );
+        BOOST_CHECK( copy->GetRCItem()->GetParent() == copy.get() );
+        BOOST_CHECK_EQUAL( ERC_EXCLUSION::FromMarker( *copy ).ToProto().SerializeAsString(), markerBeforeClone );
+    }
+    BOOST_CHECK( marker->GetRCItem()->GetParent() == marker );
+    BOOST_CHECK_EQUAL( ERC_EXCLUSION::FromMarker( *marker ).ToProto().SerializeAsString(), markerBeforeClone );
+
+    const auto captured = SCH_ERC_SETTINGS::Capture( *m_schematic );
+    const auto key = ERC_EXCLUSION::FromMarker( *marker ).GetSortKey();
+    int matches = 0;
+    for( const auto& exclusion : captured.exclusions() )
+    {
+        if( exclusion.marker().SerializeAsString() == key )
+        {
+            ++matches;
+            BOOST_CHECK_EQUAL( exclusion.comment(), "Intentional fixture exclusion" );
+        }
+    }
+    BOOST_CHECK_EQUAL( matches, 1 );
+    SCH_ERC_SETTINGS::PREPARED prepared;
+    std::string failure;
+    BOOST_REQUIRE_MESSAGE( SCH_ERC_SETTINGS::Prepare( captured, *m_schematic, prepared, failure ), failure );
+    BOOST_CHECK_EQUAL( prepared.canonical.SerializeAsString(), captured.SerializeAsString() );
+    BOOST_REQUIRE_EQUAL( prepared.exclusions.size(), captured.exclusions_size() );
+    auto reordered = captured;
+    std::reverse( reordered.mutable_rule_severities()->begin(), reordered.mutable_rule_severities()->end() );
+    std::reverse( reordered.mutable_pin_map()->begin(), reordered.mutable_pin_map()->end() );
+    BOOST_REQUIRE_MESSAGE( SCH_ERC_SETTINGS::Prepare( reordered, *m_schematic, prepared, failure ), failure );
+    BOOST_CHECK_EQUAL( prepared.canonical.SerializeAsString(), captured.SerializeAsString() );
+    BOOST_CHECK( settings.CaptureCurrentState() == storedBefore );
+    BOOST_CHECK_EQUAL( m_schematic->ChangeJournal().Sequence(), revisionBefore );
 
     // The exclusion bucket gains one; the marker's original bucket loses one. Total is unchanged.
     BOOST_CHECK_EQUAL( provider.GetCount( RPT_SEVERITY_EXCLUSION ), exclusionsBefore + 1 );
@@ -127,6 +171,8 @@ BOOST_FIXTURE_TEST_CASE( ERCMarkerCountsExclusion, ERC_MARKER_COUNT_FIXTURE )
     // Restoring the marker must move it back and keep counts consistent with a recompute.
     BOOST_CHECK( provider.SetMarkerExcluded( marker, false ) );
     BOOST_CHECK( !provider.SetMarkerExcluded( marker, false ) );
+    BOOST_CHECK_EQUAL( SCH_ERC_SETTINGS::Capture( *m_schematic ).SerializeAsString(),
+                       policyBefore.SerializeAsString() );
 
     BOOST_CHECK_EQUAL( provider.GetCount( RPT_SEVERITY_ERROR ), errorsBefore );
     BOOST_CHECK_EQUAL( provider.GetCount( RPT_SEVERITY_WARNING ), warningsBefore );
@@ -150,4 +196,30 @@ BOOST_FIXTURE_TEST_CASE( ERCSeverityReportsStoredChangesOnly, ERC_MARKER_COUNT_F
     BOOST_CHECK_EQUAL( settings.GetSeverity( ERCE_PIN_NOT_CONNECTED ), changed );
     BOOST_CHECK( settings.SetSeverity( ERCE_PIN_NOT_CONNECTED, previous ) );
     BOOST_CHECK( settings.m_ERCSeverities == original );
+}
+
+
+BOOST_FIXTURE_TEST_CASE( ERCReplacementRejectsIncompletePolicyWithoutChangingLiveState, ERC_MARKER_COUNT_FIXTURE )
+{
+    LOCALE_IO dummy;
+    KI_TEST::LoadSchematic( m_settingsManager, "issue10430", m_schematic );
+    const auto before = SCH_ERC_SETTINGS::Capture( *m_schematic );
+    const auto stored = m_schematic->ErcSettings().CaptureCurrentState();
+    const auto revision = m_schematic->ChangeJournal().Sequence();
+    for( int problem = 0; problem < 5; ++problem )
+    {
+        auto invalid = before;
+        if( problem == 0 ) invalid.mutable_rule_severities()->RemoveLast();
+        if( problem == 1 ) *invalid.add_rule_severities() = invalid.rule_severities( 0 );
+        if( problem == 2 ) invalid.mutable_pin_map()->RemoveLast();
+        if( problem == 3 ) *invalid.mutable_pin_map( 0 ) = invalid.pin_map( 1 );
+        if( problem == 4 ) invalid.mutable_rule_severities( 0 )->set_severity( kiapi::common::types::RS_EXCLUSION );
+        SCH_ERC_SETTINGS::PREPARED prepared;
+        std::string failure;
+        BOOST_CHECK( !SCH_ERC_SETTINGS::Prepare( invalid, *m_schematic, prepared, failure ) );
+        BOOST_CHECK( !failure.empty() );
+        BOOST_CHECK_EQUAL( SCH_ERC_SETTINGS::Capture( *m_schematic ).SerializeAsString(), before.SerializeAsString() );
+        BOOST_CHECK( m_schematic->ErcSettings().CaptureCurrentState() == stored );
+        BOOST_CHECK_EQUAL( m_schematic->ChangeJournal().Sequence(), revision );
+    }
 }

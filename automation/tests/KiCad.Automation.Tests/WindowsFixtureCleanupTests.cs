@@ -5,6 +5,21 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 public sealed class WindowsFixtureCleanupTests
 {
     [TestMethod]
+    public async Task CleanupDoesNotHideThePrimaryFailureOrCancellation()
+    {
+        var primary = new OperationCanceledException("native timeout");
+        var secondary = new IOException("fixture cleanup failed");
+        var combined = await Assert.ThrowsExactlyAsync<AggregateException>(() => WindowsFixtureCleanup.PreserveFailuresAsync(
+            () => Task.FromException(primary), () => Task.FromException(secondary)));
+        Assert.AreSame(primary, combined.InnerExceptions[0]); Assert.AreSame(secondary, combined.InnerExceptions[1]);
+        Assert.AreSame(primary, await Assert.ThrowsExactlyAsync<OperationCanceledException>(() =>
+            WindowsFixtureCleanup.PreserveFailuresAsync(() => Task.FromException(primary), () => Task.CompletedTask)));
+        Assert.AreSame(secondary, await Assert.ThrowsExactlyAsync<IOException>(() =>
+            WindowsFixtureCleanup.PreserveFailuresAsync(() => Task.CompletedTask, () => Task.FromException(secondary))));
+        await WindowsFixtureCleanup.PreserveFailuresAsync(() => Task.CompletedTask, () => Task.CompletedTask);
+    }
+
+    [TestMethod]
     public void OnlyDocumentedAccessAndSharingErrorsAreRetryable()
     {
         Assert.IsTrue(WindowsFixtureCleanup.IsTransient(new IOException("sharing", unchecked((int)0x80070020))));
@@ -58,6 +73,55 @@ public sealed class WindowsFixtureCleanupTests
         {
             // Undo only this test's explicit negative-control setup.
             File.SetAttributes(file, FileAttributes.Normal); Directory.Delete(root, true);
+        }
+    }
+
+    [TestMethod]
+    public async Task NativeNestedProjectHistoryHasAnExplicitNonRedirectedBoundary()
+    {
+        if (!OperatingSystem.IsWindows()) { Assert.Inconclusive("Native Windows project-history deletion."); return; }
+        string root = Directory.CreateTempSubdirectory("kwpair-history-").FullName;
+        string other = Directory.CreateTempSubdirectory("kwpair-other-").FullName;
+        string project = Directory.CreateDirectory(Path.Combine(root, "first")).FullName;
+        string history = Directory.CreateDirectory(Path.Combine(project, ".history", ".git", "objects", "ab")).FullName;
+        string file = Path.Combine(history, new string('e', 38));
+        await File.WriteAllTextAsync(file, "Owned read-only history"); File.SetAttributes(file, FileAttributes.ReadOnly);
+        string preserved = Path.Combine(other, "preserved.txt"); await File.WriteAllTextAsync(preserved, "Unrelated");
+        try
+        {
+            foreach (string invalid in new[] { "..", ".", "first/../second", other })
+                await Assert.ThrowsExactlyAsync<ArgumentException>(() => WindowsFixtureCleanup.RemoveOwnedTemporaryProjectAsync(root, invalid));
+            await WindowsFixtureCleanup.RemoveOwnedTemporaryProjectAsync(root, "first");
+            Assert.IsFalse(Directory.Exists(project)); Assert.IsTrue(Directory.Exists(root));
+            Assert.AreEqual("Unrelated", await File.ReadAllTextAsync(preserved));
+            string redirected = Path.Combine(root, "redirected");
+            var junction = await WindowsLauncherTests.Invoke("cmd.exe", ["/c", "mklink", "/J", redirected, other],
+                root, CancellationToken.None, input: null);
+            Assert.AreEqual(0, junction.ExitCode);
+            try
+            {
+                await Assert.ThrowsExactlyAsync<ArgumentException>(() => WindowsFixtureCleanup.RemoveOwnedTemporaryProjectAsync(root, "redirected"));
+                Assert.AreEqual("Unrelated", await File.ReadAllTextAsync(preserved));
+            }
+            finally { Directory.Delete(redirected); }
+            // Ordinary owned files are removed normally; only the exact history
+            // shape gets native read-only disposition handling.
+            string second = Directory.CreateDirectory(Path.Combine(root, "second")).FullName;
+            string unknown = Path.Combine(second, "unrelated-readonly.txt");
+            await File.WriteAllTextAsync(unknown, "negative control"); File.SetAttributes(unknown, FileAttributes.ReadOnly);
+            try
+            {
+                using var cancel = new CancellationTokenSource(250);
+                await Assert.ThrowsAsync<OperationCanceledException>(() => WindowsFixtureCleanup.RemoveOwnedTemporaryProjectAsync(root, "second", cancel.Token));
+                Assert.IsTrue(File.Exists(unknown));
+            }
+            finally { File.SetAttributes(unknown, FileAttributes.Normal); }
+        }
+        finally
+        {
+            if (Directory.Exists(project)) await WindowsFixtureCleanup.RemoveOwnedTemporaryProjectAsync(root, "first");
+            await WindowsFixtureCleanup.RemoveOwnedTemporaryDirectoryAsync(root);
+            await WindowsFixtureCleanup.RemoveOwnedTemporaryDirectoryAsync(other);
         }
     }
 

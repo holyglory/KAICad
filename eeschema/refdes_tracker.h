@@ -29,6 +29,7 @@
 #include <vector>
 #include <functional>
 #include <algorithm>
+#include <limits>
 
 // Forward declaration
 class SCH_REFERENCE;
@@ -109,7 +110,19 @@ public:
      * @param aData the serialized data string
      * @return true if deserialization was successful
      */
-    bool Deserialize( const std::string& aData );
+    bool Deserialize( const std::string& aData,
+                      size_t aMaxEntries = std::numeric_limits<size_t>::max() );
+
+    /** Canonical persisted reference entries, independent of numbering policy. */
+    std::vector<std::string> GetAllocatedReferences() const;
+
+    /** Validate the complete replacement against native persistence before
+     * changing any allocation. Does not change the reference-reuse preference. */
+    bool ReplaceAllocatedReferences( const std::vector<std::string>& aReferences );
+
+    /** Copy allocation state for native commits/undo, retaining in-session
+     * spellings too. The receiving tracker's policy and threading mode remain. */
+    void CopyAllocatedFrom( const REFDES_TRACKER& aSource );
 
     /**
      * Clear all stored reference designators.

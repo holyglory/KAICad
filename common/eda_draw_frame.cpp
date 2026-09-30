@@ -21,6 +21,7 @@
 
 #include <api/api_plugin_manager.h>
 #include <base_screen.h>
+
 #include <bitmaps.h>
 #include <confirm.h>
 #include <core/arraydim.h>
@@ -90,6 +91,16 @@ END_EVENT_TABLE()
 
 bool EDA_DRAW_FRAME::m_openGLFailureOccured = false;
 
+
+wxString EDA_DRAW_FRAME::GetDrawingSheetFileName() const
+{
+    return BASE_SCREEN::m_DrawingSheetFileName;
+}
+
+void EDA_DRAW_FRAME::SetDrawingSheetFileName( const wxString& name )
+{
+    BASE_SCREEN::m_DrawingSheetFileName = name;
+}
 
 EDA_DRAW_FRAME::EDA_DRAW_FRAME( KIWAY* aKiway, wxWindow* aParent, FRAME_T aFrameType,
                                 const wxString& aTitle, const wxPoint& aPos, const wxSize& aSize,

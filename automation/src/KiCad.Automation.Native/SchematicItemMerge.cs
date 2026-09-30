@@ -41,7 +41,7 @@ public static class SchematicItemMerge
         {
             SchematicCachedSymbol? Find(SchematicScreenData state) => state.CachedSymbols.SingleOrDefault(c => c.CacheKey == key);
             var b = Find(baseline); var x = Find(xml); var n = Find(native);
-            if (!System.Enum.IsDefined(choice) || Choose(b, x, n, out _))
+            if (!System.Enum.IsDefined(choice) || SchematicLibraryCacheEquivalence.Choose(b, x, n, out _))
                 throw new AutomationException("invalid_sync_resolution", "Choose an existing conflicting cache definition by its exact key.");
             void Set(SchematicScreenData state, SchematicCachedSymbol? value)
             {
@@ -205,9 +205,13 @@ public static class SchematicItemMerge
                 Any.Pack(xml.Metadata), Any.Pack(native.Metadata))], error.Message);
         }
 
-        var before = SchematicItemDelta.Index(baseline.Items);
-        var desired = SchematicItemDelta.Index(xml.Items);
-        var current = SchematicItemDelta.Index(native.Items);
+        // Identity selects values, not presentation order. Keep the native
+        // representation, appending new XML entries in their source order.
+        // Baseline-only identities still participate in deletion conflicts.
+        var itemOrder = new List<Guid>();
+        var current = SchematicItemDelta.Index(native.Items, itemOrder);
+        var desired = SchematicItemDelta.Index(xml.Items, itemOrder);
+        var before = SchematicItemDelta.Index(baseline.Items, itemOrder);
         var conflicts = new List<SchematicItemConflict>();
         var merged = native.Clone(); merged.Items.Clear();
         merged.Metadata = chosenMetadata.Clone();
@@ -215,15 +219,16 @@ public static class SchematicItemMerge
         var cacheBefore = baseline.CachedSymbols.ToDictionary(c => c.CacheKey, StringComparer.Ordinal);
         var cacheXml = xml.CachedSymbols.ToDictionary(c => c.CacheKey, StringComparer.Ordinal);
         var cacheNative = native.CachedSymbols.ToDictionary(c => c.CacheKey, StringComparer.Ordinal);
-        foreach (var key in cacheBefore.Keys.Union(cacheXml.Keys).Union(cacheNative.Keys).Order(StringComparer.Ordinal))
+        foreach (var key in native.CachedSymbols.Concat(xml.CachedSymbols).Concat(baseline.CachedSymbols)
+            .Select(symbol => symbol.CacheKey).Distinct(StringComparer.Ordinal))
         {
             var b = cacheBefore.GetValueOrDefault(key); var x = cacheXml.GetValueOrDefault(key);
             var n = cacheNative.GetValueOrDefault(key);
-            if (!Choose(b, x, n, out var selected))
+            if (!SchematicLibraryCacheEquivalence.Choose(b, x, n, out var selected))
                 conflicts.Add(new(null, "cache_definition_changed", Pack(b), Pack(x), Pack(n), key));
             else if (selected is not null) merged.CachedSymbols.Add(selected.Clone());
         }
-        foreach (Guid id in before.Keys.Union(desired.Keys).Union(current.Keys).Order())
+        foreach (Guid id in itemOrder.Distinct())
         {
             before.TryGetValue(id, out var original);
             desired.TryGetValue(id, out var xmlItem);
@@ -297,7 +302,10 @@ public static class SchematicItemMerge
             var copy = metadata.Clone(); copy.EmbeddedFiles = null;
             copy.EmbeddedFonts = false; copy.RootInstance = null; copy.TitleBlock = null; copy.Page = null;
             copy.TextVariables.Clear(); copy.BusAliases.Clear(); copy.NetChains.Clear();
-            copy.VariantDescriptions.Clear(); copy.DrawingRatios = null; copy.Formatting = null; return copy;
+            copy.VariantDescriptions.Clear(); copy.DrawingRatios = null; copy.Formatting = null; copy.ErcSettings = null;
+            copy.NetChainClasses = null; copy.Annotation = null; copy.ReferenceInventory = null;
+            copy.FieldTemplates = null; copy.SymbolComparison = null; copy.BomSettings = null; copy.NetSettings = null;
+            copy.NgspiceSettings = null; return copy;
         }
         var assetsBefore = (baseline.EmbeddedFiles, baseline.EmbeddedFonts);
         var assetsXml = (xml.EmbeddedFiles, xml.EmbeddedFonts);
@@ -312,6 +320,15 @@ public static class SchematicItemMerge
             || !Choose(baseline.Page, xml.Page, native.Page, out var page)
             || !Choose(baseline.DrawingRatios, xml.DrawingRatios, native.DrawingRatios, out var drawing)
             || !MergeFormatting(baseline.Formatting, xml.Formatting, native.Formatting, out var formatting)
+            || !MergeAnnotation(baseline.Annotation, xml.Annotation, native.Annotation, out var annotation)
+            || !Choose(baseline.FieldTemplates, xml.FieldTemplates, native.FieldTemplates, out var templates)
+            || !MergeSymbolComparison(baseline.SymbolComparison, xml.SymbolComparison, native.SymbolComparison, out var comparison)
+            || !MergeBomSettings(baseline.BomSettings, xml.BomSettings, native.BomSettings, out var bom)
+            || !SchematicNetSettingsState.Merge(baseline.NetSettings, xml.NetSettings, native.NetSettings, out var netSettings)
+            || !Choose(baseline.NgspiceSettings, xml.NgspiceSettings, native.NgspiceSettings, out var ngspice)
+            || !MergeReferenceInventory(baseline.ReferenceInventory, xml.ReferenceInventory, native.ReferenceInventory, out var inventory)
+            || !MergeErc(baseline.ErcSettings, xml.ErcSettings, native.ErcSettings, out var erc)
+            || !SchematicNetChainClasses.Merge(baseline.NetChainClasses, xml.NetChainClasses, native.NetChainClasses, out var chainClasses)
             || !Choose(baseline.BusAliases, xml.BusAliases, native.BusAliases, out var aliases)
             || !Choose(assetsBefore, assetsXml, assetsNative, out var assets)) return null;
         var result = rest.Clone(); result.RootInstance = root?.Clone();
@@ -319,6 +336,15 @@ public static class SchematicItemMerge
         result.Page = page?.Clone();
         result.DrawingRatios = drawing?.Clone();
         result.Formatting = formatting?.Clone();
+        result.Annotation = annotation?.Clone();
+        result.FieldTemplates = templates?.Clone();
+        result.SymbolComparison = comparison?.Clone();
+        result.BomSettings = bom?.Clone();
+        result.NetSettings = netSettings?.Clone();
+        result.NgspiceSettings = ngspice?.Clone();
+        result.ReferenceInventory = inventory?.Clone();
+        result.ErcSettings = erc?.Clone();
+        result.NetChainClasses = chainClasses?.Clone();
         result.EmbeddedFiles = assets.Item1?.Clone(); result.EmbeddedFonts = assets.Item2;
         result.TextVariables.Add(variables);
         result.BusAliases.Add(aliases.Select(alias => alias.Clone()));
@@ -379,6 +405,107 @@ public static class SchematicItemMerge
         return result;
     }
 
+    private static bool MergeReferenceInventory(SchematicReferenceInventory? baseline,
+        SchematicReferenceInventory? xml, SchematicReferenceInventory? native,
+        out SchematicReferenceInventory? result)
+    {
+        result = null;
+        // Allocation/deallocation can encode history that is absent from placed
+        // symbols. Preserve one complete selected version; never guess a union.
+        if (SchematicReferenceInventoryState.Same(xml, native)) result = native;
+        else if (SchematicReferenceInventoryState.Same(baseline, xml)) result = native;
+        else if (SchematicReferenceInventoryState.Same(baseline, native)) result = xml;
+        else return false;
+        return true;
+    }
+
+    private static bool MergeBomSettings(SchematicBomSettings? baseline, SchematicBomSettings? xml,
+        SchematicBomSettings? native, out SchematicBomSettings? result)
+    {
+        if (Choose(baseline, xml, native, out result)) return true;
+        if (baseline is null || xml is null || native is null) return false;
+        if (!Choose(baseline.ExportFilename, xml.ExportFilename, native.ExportFilename, out var filename)
+            || !Choose(baseline.SavedViews, xml.SavedViews, native.SavedViews, out var views)
+            || !Choose(baseline.SavedFormats, xml.SavedFormats, native.SavedFormats, out var formats)
+            || !MergeBomView(baseline.CurrentView, xml.CurrentView, native.CurrentView, out var view)
+            || !MergeBomFormat(baseline.CurrentFormat, xml.CurrentFormat, native.CurrentFormat, out var format)) return false;
+        var merged = new SchematicBomSettings { ExportFilename = filename,
+            CurrentView = view?.Clone(), CurrentFormat = format?.Clone() };
+        merged.SavedViews.Add(views.Select(v => v.Clone()));
+        merged.SavedFormats.Add(formats.Select(v => v.Clone()));
+        SchematicBomSettingsValidation.Validate(merged);
+        result = merged;
+        return true;
+    }
+
+    private static bool MergeBomView(SchematicBomView? baseline, SchematicBomView? xml,
+        SchematicBomView? native, out SchematicBomView? result)
+    {
+        if (Choose(baseline, xml, native, out result)) return true;
+        if (baseline is null || xml is null || native is null
+            || !Choose(baseline.Fields, xml.Fields, native.Fields, out var fields)) return false;
+        var merged = new SchematicBomView();
+        merged.Fields.Add(fields.Select(f => f.Clone()));
+        foreach (var field in SchematicBomView.Descriptor.Fields.InFieldNumberOrder().Where(f => f.FieldNumber != 2))
+        {
+            if (!Choose(field.Accessor.GetValue(baseline), field.Accessor.GetValue(xml),
+                field.Accessor.GetValue(native), out var value)) return false;
+            field.Accessor.SetValue(merged, value);
+        }
+        result = merged;
+        return true;
+    }
+
+    private static bool MergeBomFormat(SchematicBomFormat? baseline, SchematicBomFormat? xml,
+        SchematicBomFormat? native, out SchematicBomFormat? result)
+    {
+        if (Choose(baseline, xml, native, out result)) return true;
+        if (baseline is null || xml is null || native is null) return false;
+        var merged = new SchematicBomFormat();
+        foreach (var field in SchematicBomFormat.Descriptor.Fields.InFieldNumberOrder())
+        {
+            if (!Choose(field.Accessor.GetValue(baseline), field.Accessor.GetValue(xml),
+                field.Accessor.GetValue(native), out var value)) return false;
+            field.Accessor.SetValue(merged, value);
+        }
+        result = merged;
+        return true;
+    }
+
+    private static bool MergeSymbolComparison(SchematicSymbolComparisonSettings? baseline,
+        SchematicSymbolComparisonSettings? xml, SchematicSymbolComparisonSettings? native,
+        out SchematicSymbolComparisonSettings? result)
+    {
+        if (Choose(baseline, xml, native, out result)) return true;
+        if (baseline is null || xml is null || native is null) return false;
+        var merged = new SchematicSymbolComparisonSettings();
+        foreach (var field in SchematicSymbolComparisonSettings.Descriptor.Fields.InFieldNumberOrder())
+        {
+            if (!Choose(field.Accessor.GetValue(baseline), field.Accessor.GetValue(xml),
+                field.Accessor.GetValue(native), out var value)) return false;
+            field.Accessor.SetValue(merged, value);
+        }
+        result = merged;
+        return true;
+    }
+
+    private static bool MergeAnnotation(SchematicAnnotationSettings? baseline,
+        SchematicAnnotationSettings? xml, SchematicAnnotationSettings? native,
+        out SchematicAnnotationSettings? result)
+    {
+        if (Choose(baseline, xml, native, out result)) return true;
+        if (baseline is null || xml is null || native is null) return false;
+        var merged = new SchematicAnnotationSettings();
+        foreach (var field in SchematicAnnotationSettings.Descriptor.Fields.InFieldNumberOrder())
+        {
+            if (!Choose(field.Accessor.GetValue(baseline), field.Accessor.GetValue(xml),
+                field.Accessor.GetValue(native), out var value)) return false;
+            field.Accessor.SetValue(merged, value);
+        }
+        result = merged;
+        return true;
+    }
+
     private static bool MergeFormatting(SchematicFormattingSettings? baseline,
         SchematicFormattingSettings? xml, SchematicFormattingSettings? native,
         out SchematicFormattingSettings? result)
@@ -396,6 +523,46 @@ public static class SchematicItemMerge
                 field.Accessor.GetValue(native), out var value)) return false;
             field.Accessor.SetValue(merged, value);
         }
+        result = merged;
+        return true;
+    }
+
+    private static bool MergeErc(SchematicErcSettings? baseline, SchematicErcSettings? xml,
+        SchematicErcSettings? native, out SchematicErcSettings? result)
+    {
+        result = null;
+        if (baseline is null || xml is null || native is null)
+            return Choose(baseline, xml, native, out result);
+        var rules = baseline.RuleSeverities.Select(rule => rule.RuleType).ToHashSet();
+        var before = SchematicErcSettingsValidation.Normalize(baseline, rules);
+        var requested = SchematicErcSettingsValidation.Normalize(xml, rules);
+        var observed = SchematicErcSettingsValidation.Normalize(native, rules);
+        // Canonical comparison must not reorder a chosen native/XML snapshot:
+        // unchanged synchronization must preserve its exact representation.
+        if (requested.Equals(observed) || before.Equals(requested)) { result = native.Clone(); return true; }
+        if (before.Equals(observed)) { result = xml.Clone(); return true; }
+        var merged = new SchematicErcSettings();
+        bool Entries<T>(IEnumerable<T> b, IEnumerable<T> x, IEnumerable<T> n, Func<T, string> key, Action<T> add)
+            where T : class, IMessage<T>
+        {
+            var old = b.ToDictionary(key, StringComparer.Ordinal);
+            var desired = x.ToDictionary(key, StringComparer.Ordinal);
+            var live = n.ToDictionary(key, StringComparer.Ordinal);
+            foreach (string id in n.Select(key).Concat(x.Select(key)).Concat(b.Select(key)).Distinct(StringComparer.Ordinal))
+            {
+                old.TryGetValue(id, out var bv); desired.TryGetValue(id, out var xv); live.TryGetValue(id, out var nv);
+                if (!Choose(bv, xv, nv, out var value)) return false;
+                if (value is not null) add(value.Clone());
+            }
+            return true;
+        }
+        if (!Entries(baseline.RuleSeverities, xml.RuleSeverities, native.RuleSeverities,
+                rule => rule.RuleType.ToString(), merged.RuleSeverities.Add)
+            || !Entries(baseline.PinMap, xml.PinMap, native.PinMap,
+                cell => cell.First + "/" + cell.Second, merged.PinMap.Add)
+            || !Entries(baseline.Exclusions, xml.Exclusions, native.Exclusions,
+                exclusion => exclusion.Marker.ToByteString().ToBase64(), merged.Exclusions.Add)) return false;
+        SchematicErcSettingsValidation.Validate(merged, rules);
         result = merged;
         return true;
     }

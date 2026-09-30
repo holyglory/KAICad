@@ -38,7 +38,7 @@ class WX_PROGRESS_REPORTER;
 class GENERATOR_TOOL : public GENERATOR_TOOL_PNS_PROXY
 {
 public:
-    GENERATOR_TOOL();
+    explicit GENERATOR_TOOL( bool aObserveProperties = true );
     ~GENERATOR_TOOL();
 
     /// @copydoc TOOL_INTERACTIVE::Reset()

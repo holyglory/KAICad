@@ -5,7 +5,12 @@ namespace KiCad.Automation.Native;
 
 /// <summary>One explicitly discovered local subscriber. Closing it only closes
 /// this observation channel, never the editor or a dirty document.</summary>
-public sealed class NativeEventSubscription : IDisposable
+public interface INativeEventSource : IDisposable
+{
+    Task<NativeEventDelivery> ReceiveAsync(CancellationToken token);
+}
+
+public sealed class NativeEventSubscription : INativeEventSource
 {
     private readonly Nng.Socket socket;
     private readonly NativeEventCursor cursor;

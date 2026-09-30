@@ -30,6 +30,7 @@
 
 #include <advanced_config.h>
 #include <api/api_server.h>
+#include <api/document_lifecycle_controller.h>
 #include <background_jobs_monitor.h>
 #include <bitmaps.h>
 #include <build_version.h>
@@ -81,6 +82,7 @@
 #include <atomic>
 #include <update_manager.h>
 #include "automation_update_client.h"
+#include "recursive_diagram_frame.h"
 #include <jobs/jobset.h>
 #include <widgets/wx_aui_art_providers.h>
 
@@ -307,6 +309,7 @@ KICAD_MANAGER_FRAME::KICAD_MANAGER_FRAME( wxWindow* parent, const wxString& titl
     m_acceptedExts.emplace( FILEEXT::DrillFileExtension, &KICAD_MANAGER_ACTIONS::viewDroppedGerbers );
 
     DragAcceptFiles( true );
+    m_diagramEditors = std::make_unique<RECURSIVE_DIAGRAM_CONTROL>( this );
 
     // Explicit installed-launcher context, independent of whether a project is
     // already open. No engineering project can select a helper via its fields.
@@ -395,6 +398,7 @@ KICAD_MANAGER_FRAME::~KICAD_MANAGER_FRAME()
     // must complete before we uninitialize AUI or destroy child windows.
     m_updateManager.reset();
     m_automationUpdateClient.reset();
+    m_diagramEditors.reset();
 
     delete m_actions;
     delete m_toolManager;
@@ -851,6 +855,8 @@ void KICAD_MANAGER_FRAME::OnExit( wxCommandEvent& event )
 
 bool KICAD_MANAGER_FRAME::CloseProject( bool aSave )
 {
+    if( m_diagramEditors && !m_diagramEditors->CloseEditors() )
+        return false;
     if( !Kiway().PlayersClose( false ) )
         return false;
 
@@ -1374,6 +1380,8 @@ void KICAD_MANAGER_FRAME::ProjectChanged()
     if( !Prj().IsNullProject() &&
         Prj().GetProjectLock() == nullptr )
     {
+        const KICAD_API_SERVER* api = Pgm().ApiServerOrNull();
+        const bool              automation = api && api->IsAutomation();
         LOCKFILE lockFile( file );
 
         if( !lockFile.Valid() )
@@ -1384,7 +1392,9 @@ void KICAD_MANAGER_FRAME::ProjectChanged()
                         lockFile.GetUsername(),
                         lockFile.GetHostname() );
 
-            if( AskOverrideLock( this, msg ) )
+            // Automation never waits on a dialog nobody can answer: the project stays read-only,
+            // its reason is logged below, and a checked save names it too.
+            if( !automation && AskOverrideLock( this, msg ) )
             {
                 lockFile.OverrideLock();
             }
@@ -1392,6 +1402,12 @@ void KICAD_MANAGER_FRAME::ProjectChanged()
 
         Prj().SetReadOnly( !lockFile.Valid() || Prj().GetProjectFile().IsReadOnly() );
         Prj().SetProjectLock( new LOCKFILE( std::move( lockFile ) ) );
+
+        if( automation && !Prj().GetProjectLock()->Valid() )
+        {
+            wxLogError( "Automation opened project '%s' read-only: %s", file,
+                        DOCUMENT_LIFECYCLE_CONTROLLER::ReadOnlyProjectReason( Prj() ) );
+        }
     }
 
     wxString title;

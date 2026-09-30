@@ -65,7 +65,18 @@ SCH_MARKER::~SCH_MARKER()
 
 EDA_ITEM* SCH_MARKER::Clone() const
 {
-    return new SCH_MARKER( *this );
+    // Undo images must own their violation data: swapData and destruction
+    // update its parent pointer independently of the live marker.
+    // Allocate it first so allocation failure cannot destroy a shallow copy
+    // and detach the original marker's violation.
+    std::shared_ptr<RC_ITEM> item;
+    if( m_rcItem )
+        item = std::make_shared<ERC_ITEM>( *std::static_pointer_cast<ERC_ITEM>( m_rcItem ) );
+    auto copy = std::make_unique<SCH_MARKER>( *this );
+    copy->m_rcItem = std::move( item );
+    if( copy->m_rcItem )
+        copy->m_rcItem->SetParent( copy.get() );
+    return copy.release();
 }
 
 

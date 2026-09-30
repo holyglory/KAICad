@@ -44,12 +44,12 @@ void SCH_EDIT_FRAME::TestDanglingEnds()
 }
 
 
-bool SCH_EDIT_FRAME::TrimWire( SCH_COMMIT* aCommit, const VECTOR2I& aStart, const VECTOR2I& aEnd )
+bool SCH_EDIT_FRAME::TrimWire( SCH_COMMIT* aCommit, const VECTOR2I& aStart, const VECTOR2I& aEnd, SCH_SCREEN* aScreen )
 {
     if( aStart == aEnd )
         return false;
 
-    SCH_SCREEN*            screen = GetScreen();
+    SCH_SCREEN*            screen = aScreen ? aScreen : GetScreen();
     std::vector<SCH_LINE*> wires;
     BOX2I                  bb( aStart );
 

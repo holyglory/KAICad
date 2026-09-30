@@ -20,6 +20,7 @@
  */
 
 #include <bitmaps.h>
+#include <api/api_sch_state_groups.h>
 #include <sch_edit_frame.h>
 #include <sch_commit.h>
 #include <connection_graph.h>
@@ -576,7 +577,10 @@ void HIERARCHY_PANE::onRightClick( wxTreeItemId aItem )
 
             if( !newName.IsEmpty() )
             {
-                SCH_SHEET_PATH previousSheet = m_frame->GetCurrentSheet();
+                // A new top-level sheet has no undo entry, so make older automation requests
+                // stale explicitly once the hierarchy has been rebuilt.
+                SCH_TRACKED_CHANGE change( m_frame->Schematic(), "New Top-Level Sheet" );
+                SCH_SHEET_PATH     previousSheet = m_frame->GetCurrentSheet();
 
                 // Create new sheet and screen
                 SCH_SHEET* newSheet = new SCH_SHEET( &m_frame->Schematic() );
@@ -613,6 +617,7 @@ void HIERARCHY_PANE::onRightClick( wxTreeItemId aItem )
                 newSheetPath.SetPageNumber( pageStr );
 
                 resyncAfterTopLevelSheetChange( previousSheet );
+                change.Complete();
             }
         }
         break;
@@ -638,11 +643,14 @@ void HIERARCHY_PANE::onRightClick( wxTreeItemId aItem )
                     break;
                 }
 
-                SCH_SHEET_PATH previousSheet = m_frame->GetCurrentSheet();
+                SCH_TRACKED_CHANGE change( m_frame->Schematic(), "Delete Top-Level Sheet" );
+                SCH_SHEET_PATH     previousSheet = m_frame->GetCurrentSheet();
 
-                // Remove from schematic
+                // Remove from schematic.  A refused removal changes nothing and records nothing.
                 if( m_frame->Schematic().RemoveTopLevelSheet( sheet ) )
                     resyncAfterTopLevelSheetChange( previousSheet );
+
+                change.Complete();
             }
         }
         break;

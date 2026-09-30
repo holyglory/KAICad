@@ -117,14 +117,14 @@ public:
     /**
      * Handle the addition of junctions to a selection of objects
      */
-    int AddJunctionsIfNeeded( SCH_COMMIT* aCommit, SCH_SELECTION* aSelection );
+    int AddJunctionsIfNeeded( SCH_COMMIT* aCommit, SCH_SELECTION* aSelection, SCH_SCREEN* aScreen = nullptr );
 
     SCH_JUNCTION* AddJunction( SCH_COMMIT* aCommit, SCH_SCREEN* aScreen, const VECTOR2I& aPos );
 
     /**
      * Logic to remove wires when overlapping correct items
      */
-    int TrimOverLappingWires( SCH_COMMIT* aCommit, SCH_SELECTION* aSelection );
+    int TrimOverLappingWires( SCH_COMMIT* aCommit, SCH_SELECTION* aSelection, SCH_SCREEN* aScreen = nullptr );
 
 private:
     int doDrawSegments( const TOOL_EVENT& aTool, SCH_COMMIT& aCommit, int aType,

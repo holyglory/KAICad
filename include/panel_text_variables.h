@@ -31,7 +31,8 @@ class PROJECT;
 class PANEL_TEXT_VARIABLES: public PANEL_TEXT_VARIABLES_BASE
 {
 public:
-    PANEL_TEXT_VARIABLES(  wxWindow* aParent, PROJECT* aProject  );
+    PANEL_TEXT_VARIABLES( wxWindow* aParent, PROJECT* aProject,
+                          std::map<wxString, wxString>* aDraftVariables = nullptr );
     ~PANEL_TEXT_VARIABLES() override;
 
     bool TransferDataToWindow() override;
@@ -52,6 +53,8 @@ protected:
 
 private:
     PROJECT*                     m_project;
+    std::map<wxString, wxString>* m_variables;
+    bool                         m_detached;
 
     std::map<wxString, wxString> m_lastLoaded;
     int                          m_lastCheckedTicker;

@@ -19,8 +19,11 @@
  */
 
 #include <algorithm>
+#include <exception>
 #include <fstream>
 #include <iomanip>
+#include <memory>
+#include <stdexcept>
 #include <utility>
 #include <sstream>
 
@@ -162,6 +165,7 @@ void JSON_SETTINGS::Load()
 
 bool JSON_SETTINGS::LoadFromFile( const wxString& aDirectory )
 {
+    m_fileBaseline = {};
     // First, load all params to default values
     m_internals->clear();
     Load();
@@ -257,6 +261,9 @@ bool JSON_SETTINGS::LoadFromFile( const wxString& aDirectory )
 
     if( !path.Exists() )
     {
+        // Keep absence distinct from an unreadable or malformed file.
+        const auto absent = FILE_CONTENT_BASELINE::Read( path.GetFullPath() );
+        if( absent.Known() && !absent.Exists() ) m_fileBaseline = absent;
         // Case 1: legacy migration, no .json extension yet
         path.SetExt( getLegacyFileExt() );
 
@@ -284,15 +291,16 @@ bool JSON_SETTINGS::LoadFromFile( const wxString& aDirectory )
 
         try
         {
-            wxFFileInputStream fp( path.GetFullPath(), wxT( "rt" ) );
-            wxStdInputStream fstream( fp );
+            std::string bytes;
+            const auto loaded = FILE_CONTENT_BASELINE::Read( path.GetFullPath(), &bytes );
 
-            if( fp.IsOk() )
+            if( loaded.Known() && loaded.Exists() )
             {
                 *static_cast<nlohmann::json*>( m_internals.get() ) =
-                        nlohmann::json::parse( fstream, nullptr,
+                        nlohmann::json::parse( bytes, nullptr,
                                                /* allow_exceptions = */ true,
                                                /* ignore_comments  = */ true );
+                m_fileBaseline = loaded;
 
                 // Save whatever we loaded, before doing any migration etc
                 m_internals->m_original = *static_cast<nlohmann::json*>( m_internals.get() );
@@ -341,12 +349,14 @@ bool JSON_SETTINGS::LoadFromFile( const wxString& aDirectory )
             }
             else
             {
+                success = false;
                 wxLogTrace( traceSettings, wxT( "%s exists but can't be opened for read" ),
                             GetFullFilename() );
             }
         }
         catch( nlohmann::json::parse_error& error )
         {
+            m_fileBaseline = {};
             success = false;
             wxLogTrace( traceSettings, wxT( "Json parse error reading %s: %s" ),
                         path.GetFullPath(), error.what() );
@@ -465,8 +475,114 @@ std::map<std::string, nlohmann::json> JSON_SETTINGS::GetFileHistories()
 }
 
 
-bool JSON_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce )
+void JSON_SETTINGS::CopyCurrentStateTo( JSON_SETTINGS& aDetachedTarget ) const
 {
+    if( &aDetachedTarget == this ) return;
+    if( m_schemaVersion != aDetachedTarget.m_schemaVersion )
+        throw std::runtime_error( "Cannot copy settings across different native schemas" );
+    const nlohmann::json captured = CaptureCurrentState();
+    auto load = [&]( auto&& self, JSON_SETTINGS& target, const nlohmann::json& state ) -> void
+    {
+        static_cast<nlohmann::json&>( *target.m_internals ) = state;
+        for( PARAM_BASE* parameter : target.m_params )
+            parameter->Load( target, target.m_resetParamsIfMissing );
+        for( NESTED_SETTINGS* child : target.m_nested_settings )
+        {
+            const auto path = target.m_internals->PointerFromString( child->GetPath() );
+            if( !state.contains( path ) )
+                throw std::runtime_error( "Captured settings do not contain the target nested owner" );
+            self( self, *child, state.at( path ) );
+        }
+    };
+    load( load, aDetachedTarget, captured );
+    if( aDetachedTarget.CaptureCurrentState() != captured )
+        throw std::runtime_error( "Detached settings copy would lose or change persisted values" );
+}
+
+void JSON_SETTINGS::ApplyCurrentStateDelta( const nlohmann::json& aBefore,
+                                            const nlohmann::json& aAfter )
+{
+    if( aBefore == aAfter ) return;
+    const nlohmann::json live = CaptureCurrentState();
+    nlohmann::json claimed = aBefore;
+    nlohmann::json expected = live;
+
+    struct CHANGE
+    {
+        PARAM_BASE* parameter;
+        std::unique_ptr<JSON_SETTINGS> before;
+        std::unique_ptr<JSON_SETTINGS> after;
+    };
+    std::vector<CHANGE> changes;
+    auto prepare = [&]( auto&& self, JSON_SETTINGS& owner,
+                        const nlohmann::json::json_pointer& prefix ) -> void
+    {
+        const auto schema = prefix / owner.m_internals->PointerFromString( "meta.version" );
+        if( !aBefore.contains( schema ) || !aAfter.contains( schema )
+                || aBefore.at( schema ) != owner.m_schemaVersion || aAfter.at( schema ) != owner.m_schemaVersion )
+            throw std::runtime_error( "A settings delta cannot change the native schema: " + schema.to_string() );
+        // Match CaptureCurrentState ownership: nested values first, then parent
+        // parameters that can own paths inside those nested records.
+        for( NESTED_SETTINGS* child : owner.m_nested_settings )
+            self( self, *child, prefix / owner.m_internals->PointerFromString( child->GetPath() ) );
+
+        for( PARAM_BASE* parameter : owner.m_params )
+        {
+            const auto local = owner.m_internals->PointerFromString( parameter->GetJsonPath() );
+            const auto path = prefix / local;
+            if( !aBefore.contains( path ) && !aAfter.contains( path ) ) continue;
+            if( !aBefore.contains( path ) || !aAfter.contains( path ) )
+                throw std::runtime_error( "A settings delta cannot remove a registered parameter: " + path.to_string() );
+            if( aBefore.at( path ) == aAfter.at( path ) ) continue;
+            if( !live.contains( path ) || live.at( path ) != aBefore.at( path ) )
+                throw std::runtime_error( "Settings changed since the draft was captured: " + path.to_string() );
+
+            auto input = [&]( const nlohmann::json& value )
+            {
+                auto scratch = std::make_unique<JSON_SETTINGS>( wxEmptyString, SETTINGS_LOC::NONE,
+                                                               owner.m_schemaVersion, false, false, false );
+                static_cast<nlohmann::json&>( *scratch->m_internals ) = live.at( prefix );
+                static_cast<nlohmann::json&>( *scratch->m_internals )[local] = value;
+                return scratch;
+            };
+            changes.push_back( { parameter, input( live.at( path ) ), input( aAfter.at( path ) ) } );
+            claimed[path] = aAfter.at( path );
+            expected[path] = aAfter.at( path );
+        }
+    };
+    prepare( prepare, *this, nlohmann::json::json_pointer{} );
+    if( claimed != aAfter )
+        throw std::runtime_error( "Settings delta changes schema or values outside registered native ownership" );
+
+    size_t applied = 0;
+    try
+    {
+        for( const CHANGE& change : changes )
+        {
+            ++applied; // Include a setter which writes before throwing.
+            change.parameter->Load( *change.after, false );
+        }
+        if( CaptureCurrentState() != expected )
+            throw std::runtime_error( "Native settings setters did not preserve the requested values" );
+    }
+    catch( ... )
+    {
+        const auto failure = std::current_exception();
+        while( applied )
+        {
+            const CHANGE& change = changes[--applied];
+            change.parameter->Load( *change.before, false );
+        }
+        if( CaptureCurrentState() != live )
+            throw std::runtime_error( "Native settings rollback did not restore the original values" );
+        std::rethrow_exception( failure );
+    }
+}
+
+
+bool JSON_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce, SETTINGS_SAVE_RESULT* aResult )
+{
+    if( aResult ) *aResult = SETTINGS_SAVE_RESULT::SKIPPED;
     if( !m_writeFile )
         return false;
 
@@ -495,6 +611,8 @@ bool JSON_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce )
         return false;
     }
 
+    if( aResult ) *aResult = SETTINGS_SAVE_RESULT::FAILED;
+
     // Ensure the path exists, and create it if not.
     if( !path.DirExists() && !path.Mkdir() )
     {
@@ -517,7 +635,10 @@ bool JSON_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce )
     {
         wxCHECK2( settings, continue );
 
-        modified |= settings->SaveToFile();
+        SETTINGS_SAVE_RESULT nestedResult = SETTINGS_SAVE_RESULT::FAILED;
+        modified |= settings->SaveToFile( wxEmptyString, false, &nestedResult );
+        if( nestedResult == SETTINGS_SAVE_RESULT::FAILED )
+            return false;
     }
 
     modified |= Store();
@@ -526,6 +647,7 @@ bool JSON_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce )
     {
         wxLogTrace( traceSettings, wxT( "%s contents not modified, skipping save" ),
                     GetFullFilename() );
+        if( aResult ) *aResult = SETTINGS_SAVE_RESULT::UNCHANGED;
         return false;
     }
     else if( !modified && !aForce && !m_createIfDefault )
@@ -533,6 +655,7 @@ bool JSON_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce )
         wxLogTrace( traceSettings,
                     wxT( "%s contents still default and m_createIfDefault == false; not saving" ),
                     GetFullFilename() );
+        if( aResult ) *aResult = SETTINGS_SAVE_RESULT::SKIPPED;
         return false;
     }
 
@@ -586,18 +709,26 @@ bool JSON_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce )
                                 GetFullFilename() );
 
                     m_modified = false;
+                    m_fileBaseline = FILE_CONTENT_BASELINE::FromBytes( path.GetFullPath(), payload );
 
+                    if( aResult ) *aResult = SETTINGS_SAVE_RESULT::UNCHANGED;
                     return false;
                 }
             }
         }
 
+        FILE_WRITE_OBSERVER::BeforeWrite( path.GetFullPath() );
         if( !KIPLATFORM::IO::AtomicWriteFile( path.GetFullPath(), payload.data(), payload.size(),
                                               &writeError ) )
         {
             wxLogTrace( traceSettings, wxT( "Warning: could not save %s: %s" ), GetFullFilename(),
                         writeError );
             success = false;
+        }
+        else
+        {
+            m_fileBaseline = FILE_CONTENT_BASELINE::FromBytes( path.GetFullPath(), payload );
+            FILE_WRITE_OBSERVER::AfterWrite( m_fileBaseline );
         }
     }
     catch( nlohmann::json::exception& error )
@@ -616,6 +747,7 @@ bool JSON_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce )
     {
         m_modified = false;
         m_fileSynced = true;
+        if( aResult ) *aResult = SETTINGS_SAVE_RESULT::WRITTEN;
     }
 
     return success;

@@ -82,6 +82,8 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicViewSet> API_HANDLER_SCH::handleR
         const HANDLER_CONTEXT<kiapi::automation::v1::RenderSchematicViews>& aCtx )
 {
     using namespace kiapi::automation::v1;
+    if( auto error = validateSnapshotSchema( aCtx.Request.schema_version() ) )
+        return tl::unexpected( *error );
     auto reject = []( const std::string& message ) -> HANDLER_RESULT<SchematicViewSet>
     {
         ApiResponseStatus error;
@@ -264,5 +266,7 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicViewSet> API_HANDLER_SCH::handleR
         return tl::unexpected( error );
     }
     result.mutable_snapshot()->Swap( &*after );
+    projectSnapshotSchema( *result.mutable_snapshot()->mutable_data()->mutable_metadata(),
+                           aCtx.Request.schema_version() );
     return result;
 }

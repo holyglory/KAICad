@@ -998,6 +998,8 @@ void PCB_TUNING_PATTERN::Remove( GENERATOR_TOOL* aTool, BOARD* aBoard, BOARD_COM
         for( BOARD_ITEM* item : routerAddedItems )
             aCommit->Add( item );
     }
+
+    aTool->ApplyRouterUpdates( *aCommit );
 }
 
 
@@ -1443,6 +1445,8 @@ void PCB_TUNING_PATTERN::EditFinish( GENERATOR_TOOL* aTool, BOARD* aBoard, BOARD
                 AddItem( item );
         }
     }
+
+    aTool->ApplyRouterUpdates( *aCommit );
 }
 
 
@@ -1467,6 +1471,7 @@ void PCB_TUNING_PATTERN::EditCancel( GENERATOR_TOOL* aTool, BOARD* aBoard, BOARD
     }
 
     aTool->Router()->StopRouting();
+    aTool->ClearRouterChanges();
 }
 
 

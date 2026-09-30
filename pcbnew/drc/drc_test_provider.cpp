@@ -27,6 +27,7 @@
 #include <pcb_text.h>
 #include <properties/property.h>
 #include <properties/property_mgr.h>
+#include <mutex>
 
 
 // A list of all basic (ie: non-compound) board geometry items
@@ -34,17 +35,30 @@ std::vector<KICAD_T> DRC_TEST_PROVIDER::s_allBasicItems;
 std::vector<KICAD_T> DRC_TEST_PROVIDER::s_allBasicItemsButZones;
 
 
-DRC_TEST_PROVIDER_REGISTRY::~DRC_TEST_PROVIDER_REGISTRY()
+DRC_TEST_PROVIDER_REGISTRY::~DRC_TEST_PROVIDER_REGISTRY() = default;
+
+
+std::vector<std::unique_ptr<DRC_TEST_PROVIDER>> DRC_TEST_PROVIDER_REGISTRY::CreateTestProviders() const
 {
-    for( DRC_TEST_PROVIDER* provider : m_providers )
-        delete provider;
+    std::vector<std::unique_ptr<DRC_TEST_PROVIDER>> providers;
+    providers.reserve( m_factories.size() );
+    for( const auto& factory : m_factories )
+        providers.push_back( factory() );
+    return providers;
 }
 
 
-DRC_SHOWMATCHES_PROVIDER_REGISTRY::~DRC_SHOWMATCHES_PROVIDER_REGISTRY()
+DRC_SHOWMATCHES_PROVIDER_REGISTRY::~DRC_SHOWMATCHES_PROVIDER_REGISTRY() = default;
+
+
+std::vector<std::unique_ptr<DRC_TEST_PROVIDER>>
+DRC_SHOWMATCHES_PROVIDER_REGISTRY::CreateShowMatchesProviders() const
 {
-    for( DRC_TEST_PROVIDER* provider : m_providers )
-        delete provider;
+    std::vector<std::unique_ptr<DRC_TEST_PROVIDER>> providers;
+    providers.reserve( m_factories.size() );
+    for( const auto& factory : m_factories )
+        providers.push_back( factory() );
+    return providers;
 }
 
 
@@ -58,7 +72,8 @@ DRC_TEST_PROVIDER::DRC_TEST_PROVIDER() :
 
 void DRC_TEST_PROVIDER::Init()
 {
-    if( s_allBasicItems.size() == 0 )
+    static std::once_flag initialized;
+    std::call_once( initialized, []
     {
         for( int i = 0; i < MAX_STRUCT_TYPE_ID; i++ )
         {
@@ -70,7 +85,7 @@ void DRC_TEST_PROVIDER::Init()
                     s_allBasicItemsButZones.push_back( (KICAD_T) i );
             }
         }
-    }
+    } );
 }
 
 
@@ -81,7 +96,7 @@ void DRC_TEST_PROVIDER::reportViolation( std::shared_ptr<DRC_ITEM>& item,
                                          const VECTOR2I& aMarkerPos, int aMarkerLayer,
                                          const std::function<void( PCB_MARKER* )>& aPathGenerator )
 {
-    item->SetViolatingTest( this );
+    item->SetViolatingTestName( GetName() );
     m_drcEngine->ReportViolation( item, aMarkerPos, aMarkerLayer, aPathGenerator );
 }
 

@@ -32,6 +32,8 @@
 #include <wx/cmdline.h>
 
 #include <api/api_server.h>
+#include <api/common/commands/automation_commands.pb.h>
+#include <wx/dialog.h>
 #include <api/common/commands/editor_commands.pb.h>
 #include <common.h>
 #include <env_vars.h>
@@ -503,6 +505,31 @@ bool PGM_KICAD::OnPgmInit()
 
         bool loaded = false;
 
+        // An automation start that fails after the manager window was built destroys that window
+        // here, so APP_KICAD::OnInit() deletes it while the program it uses still exists. Left to
+        // wxWidgets, the window was deleted only after OnPgmExit() and KiCad crashed on its way
+        // out (SIGSEGV) instead of ending with its normal failed-start exit code.
+        auto failAutomationStart = [&]()
+        {
+            if( managerFrame )
+            {
+                Kiway.SetTop( nullptr );
+
+                // LoadProject() installs the project in SETTINGS_MANAGER before the
+                // automation-only local-history refusal. Unload that in-memory project
+                // without saving or tagging history before destroying the manager frame;
+                // otherwise OnPgmExit() tears down KiCad interfaces while the failed
+                // project and its history savers are still owned by the process.
+                SETTINGS_MANAGER& manager = Pgm().GetSettingsManager();
+                if( manager.IsProjectOpen() )
+                    manager.UnloadProject( &manager.Prj(), false );
+
+                managerFrame->Destroy();
+            }
+
+            return false;
+        };
+
         // Do not attempt to load a non-existent project file.
         if( !projToLoad.empty() )
         {
@@ -525,7 +552,7 @@ bool PGM_KICAD::OnPgmInit()
                             throw;
 
                         wxLogError( "Automation startup failed: %s", error.What() );
-                        return false;
+                        return failAutomationStart();
                     }
                 }
             }
@@ -534,7 +561,7 @@ bool PGM_KICAD::OnPgmInit()
         if( !loaded && automationMode && !updateManagerMode )
         {
             wxLogError( "Automation project could not be loaded: %s", automationProject );
-            return false;
+            return failAutomationStart();
         }
 
         if( !loaded && appType == KICAD_MAIN_FRAME_T )
@@ -592,11 +619,15 @@ bool PGM_KICAD::OnPgmInit()
                             return tl::unexpected( status );
                         };
 
-                        if( request.type() != types::DOCTYPE_SCHEMATIC )
-                            return fail( AS_UNIMPLEMENTED, "This graphical open operation currently supports schematic documents" );
+                        if( request.type() != types::DOCTYPE_SCHEMATIC && request.type() != types::DOCTYPE_PCB )
+                            return fail( AS_UNIMPLEMENTED, "This graphical open operation supports project schematics and PCBs" );
+
+                        const auto frameType = request.type() == types::DOCTYPE_SCHEMATIC
+                                                       ? FRAME_SCH : FRAME_PCB_EDITOR;
 
                         wxFileName requested( wxString::FromUTF8( request.path() ) );
-                        wxFileName expected( managerFrame->SchFileName() );
+                        wxFileName expected( request.type() == types::DOCTYPE_SCHEMATIC
+                                                     ? managerFrame->SchFileName() : managerFrame->PcbFileName() );
                         requested.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
                         expected.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
 
@@ -606,15 +637,15 @@ bool PGM_KICAD::OnPgmInit()
                         if( !wxFileName( wxString::FromUTF8( request.path() ) ).IsAbsolute()
                                 || requested != expected
                                 || ( !requested.FileExists() && !request.create_if_missing() ) )
-                            return fail( AS_BAD_REQUEST, "An absolute root schematic path for this project is required; missing files require explicit creation" );
+                            return fail( AS_BAD_REQUEST, "An absolute root document path for this project is required; missing files require explicit creation" );
 
-                        KIWAY_PLAYER* player = Kiway.Player( FRAME_SCH, false );
+                        KIWAY_PLAYER* player = Kiway.Player( frameType, false );
 
                         if( player && player->IsModal() )
-                            return fail( AS_BUSY, "The schematic editor has an active modal operation" );
+                            return fail( AS_BUSY, "The requested editor has an active modal operation" );
 
                         if( player && player->GetCurrentFileName().IsEmpty() )
-                            return fail( AS_BUSY, "Close the untitled schematic explicitly before opening another" );
+                            return fail( AS_BUSY, "Close the untitled document explicitly before opening another" );
 
                         if( player && !player->GetCurrentFileName().IsEmpty()
                                 && wxFileName( player->GetCurrentFileName() ) != requested )
@@ -625,10 +656,10 @@ bool PGM_KICAD::OnPgmInit()
                         try
                         {
                             if( !player )
-                                player = Kiway.Player( FRAME_SCH, true );
+                                player = Kiway.Player( frameType, true );
 
                             if( !player )
-                                return fail( AS_NOT_READY, "The schematic editor could not be created" );
+                                return fail( AS_NOT_READY, "The requested editor could not be created" );
 
                             int controls = KICTL_KICAD_ONLY;
                             if( request.create_if_missing() )
@@ -637,7 +668,7 @@ bool PGM_KICAD::OnPgmInit()
                             if( created && !player->OpenProjectFiles( { requested.GetFullPath() }, controls ) )
                             {
                                 player->Destroy();
-                                return fail( AS_BAD_REQUEST, "Schematic load failed; inspect native diagnostics" );
+                                return fail( AS_BAD_REQUEST, "Document load failed; inspect native diagnostics" );
                             }
 
                             player->Show( true );
@@ -652,7 +683,7 @@ bool PGM_KICAD::OnPgmInit()
                         }
 
                         commands::GetOpenDocuments query;
-                        query.set_type( types::DOCTYPE_SCHEMATIC );
+                        query.set_type( request.type() );
                         ApiRequest envelope;
                         envelope.mutable_message()->PackFrom( query );
                         API_RESULT result = m_api_server->DispatchToHandlers( envelope );
@@ -663,11 +694,71 @@ bool PGM_KICAD::OnPgmInit()
                         commands::GetOpenDocumentsResponse documents;
 
                         if( !result->message().UnpackTo( &documents ) || documents.documents_size() != 1 )
-                            return fail( AS_NOT_READY, "The editor did not identify the opened schematic" );
+                            return fail( AS_NOT_READY, "The editor did not identify the opened document" );
 
                         commands::OpenDocumentResponse response;
                         response.mutable_document()->CopyFrom( documents.documents( 0 ) );
+                        if( created && requested.FileExists() )
+                            m_api_server->RememberLoadedDocument( response.document() );
                         return response;
+                    } );
+            m_api_common_handler->SetCloseDocumentHandler(
+                    [this]( const kiapi::common::commands::CloseDocument& request )
+                            -> HANDLER_RESULT<google::protobuf::Empty>
+                    {
+                        using namespace kiapi::common;
+                        auto fail = []( ApiStatusCode code, const std::string& message )
+                                -> HANDLER_RESULT<google::protobuf::Empty>
+                        {
+                            ApiResponseStatus status; status.set_status( code ); status.set_error_message( message );
+                            return tl::unexpected( status );
+                        };
+                        const auto type = request.document().type();
+                        if( type != types::DOCTYPE_SCHEMATIC && type != types::DOCTYPE_PCB )
+                            return fail( AS_UNIMPLEMENTED, "This graphical close operation supports schematics and PCBs" );
+                        if( !m_api_server->IsCleanCloseActive() )
+                            return fail( AS_BAD_REQUEST, "Use CheckedCloseDocument with an exact native state observation" );
+                        const auto frameType = type == types::DOCTYPE_SCHEMATIC ? FRAME_SCH : FRAME_PCB_EDITOR;
+                        KIWAY_PLAYER* player = Kiway.Player( frameType, false );
+                        if( !player || player->IsBeingDeleted() ) return fail( AS_BAD_REQUEST, "Requested editor is not open" );
+                        if( player->IsModal() || player->IsContentModified() )
+                            return fail( AS_BUSY, "Close will not discard unsaved edits or interrupt a modal operation" );
+                        auto hasDialog = [&]( auto&& self, wxWindow* window ) -> bool
+                        {
+                            for( wxWindow* child : window->GetChildren() )
+                                if( ( wxDynamicCast( child, wxDialog ) && child->IsShown() ) || self( self, child ) )
+                                    return true;
+                            return false;
+                        };
+                        if( hasDialog( hasDialog, player ) )
+                            return fail( AS_BUSY, "Close the editor dialogs before closing this document" );
+                        if( type == types::DOCTYPE_SCHEMATIC
+                                && ( Kiway.Player( FRAME_SIMULATOR, false ) || Kiway.Player( FRAME_SCH_SYMBOL_EDITOR, false ) ) )
+                            return fail( AS_BUSY, "Close the associated simulator or symbol editor explicitly first" );
+                        if( type == types::DOCTYPE_PCB && Kiway.Player( FRAME_FOOTPRINT_EDITOR, false ) )
+                            return fail( AS_BUSY, "Close the associated footprint editor explicitly first" );
+                        if( type == types::DOCTYPE_PCB
+                                && wxWindow::FindWindowByName( QUALIFIED_VIEWER3D_FRAMENAME( player ) ) )
+                            return fail( AS_BUSY, "Close the associated 3D viewer explicitly before closing this document" );
+
+                        kiapi::automation::v1::ReadDocumentLifecycleState read;
+                        read.mutable_document()->CopyFrom( request.document() );
+                        ApiRequest envelope; envelope.mutable_message()->PackFrom( read );
+                        auto observed = m_api_server->DispatchToHandlers( envelope );
+                        if( !observed ) return tl::unexpected( observed.error() );
+                        kiapi::automation::v1::DocumentLifecycleState state;
+                        if( observed->status().status() != AS_OK || !observed->message().UnpackTo( &state )
+                                || state.native_content_dirty() || state.clean_checkpoint_sha256().empty()
+                                || state.clean_checkpoint_sha256() != state.state_sha256() )
+                            return fail( AS_BUSY, "Document has not reached a verified clean load/save checkpoint" );
+                        for( const auto& file : state.file_baselines() )
+                            if( file.status() != kiapi::automation::v1::NFBS_UNCHANGED )
+                                return fail( AS_BUSY, "Document files changed outside KiCad; close was refused" );
+                        if( !Kiway.PlayerClose( frameType, false ) )
+                            return fail( AS_BUSY, "Native editor refused to close; no forced close was attempted" );
+                        if( Kiway.Player( frameType, false ) )
+                            return fail( AS_BUSY, "Native editor close has not completed" );
+                        return google::protobuf::Empty{};
                     } );
         }
 
@@ -799,6 +890,9 @@ struct APP_KICAD : public wxApp
 
         if( !program.OnPgmInit() )
         {
+            // Delete the windows a failed start destroyed (PGM_KICAD::OnPgmInit()) while the
+            // program they use still exists, as a normal exit does before OnPgmExit().
+            DeletePendingObjects();
             program.OnPgmExit();
             return false;
         }

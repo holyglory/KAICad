@@ -383,7 +383,7 @@ std::string REFDES_TRACKER::Serialize() const
     return result.str();
 }
 
-bool REFDES_TRACKER::Deserialize( const std::string& aData )
+bool REFDES_TRACKER::Deserialize( const std::string& aData, size_t aMaxEntries )
 {
     std::unique_lock<std::mutex> lock;
 
@@ -432,21 +432,27 @@ bool REFDES_TRACKER::Deserialize( const std::string& aData )
             int start = 0;
             int end = 0;
 
-            if( !parsePositiveInt( match[2], start ) || !parsePositiveInt( match[3], end ) )
+            if( !parsePositiveInt( match[2], start ) || !parsePositiveInt( match[3], end )
+                    || start > end
+                    || static_cast<size_t>( end - start ) + 1 > aMaxEntries - m_allRefDes.size() )
             {
                 clearImpl();
                 return false;
             }
 
-            for( int i = start; i <= end; ++i )
+            for( int i = start; ; ++i )
+            {
                 insertImpl( prefix + std::to_string( i ) );
+                // The inclusive endpoint can be INT_MAX. Never increment it.
+                if( i == end ) break;
+            }
         }
         else if( std::regex_match( unescaped, match, numberedPattern ) )
         {
             std::string prefix = match[1].str();
             int number = 0;
 
-            if( !parsePositiveInt( match[2], number ) )
+            if( !parsePositiveInt( match[2], number ) || m_allRefDes.size() >= aMaxEntries )
             {
                 clearImpl();
                 return false;
@@ -456,6 +462,11 @@ bool REFDES_TRACKER::Deserialize( const std::string& aData )
         }
         else if( std::regex_match( unescaped, match, prefixOnlyPattern ) )
         {
+            if( m_allRefDes.size() >= aMaxEntries )
+            {
+                clearImpl();
+                return false;
+            }
             std::string prefix = match[1].str();
 
             insertImpl( prefix );
@@ -470,6 +481,61 @@ bool REFDES_TRACKER::Deserialize( const std::string& aData )
 
     return true;
 }
+
+std::vector<std::string> REFDES_TRACKER::GetAllocatedReferences() const
+{
+    std::unique_lock<std::mutex> lock;
+    if( m_threadSafe ) lock = std::unique_lock<std::mutex>( m_mutex );
+    std::vector<std::string> references;
+    for( const auto& [prefix, data] : m_prefixData )
+        for( int number : data.m_usedNumbers )
+            references.push_back( number > 0 ? prefix + std::to_string( number ) : prefix );
+    std::sort( references.begin(), references.end() );
+    return references;
+}
+
+
+bool REFDES_TRACKER::ReplaceAllocatedReferences( const std::vector<std::string>& aReferences )
+{
+    // Build and validate away from the live tracker. This uses the owning
+    // native persistence implementation, not another comma/range parser.
+    REFDES_TRACKER candidate;
+    for( const std::string& reference : aReferences )
+    {
+        if( reference.empty() || reference.find( '\0' ) != std::string::npos
+                || !candidate.Insert( reference ) )
+            return false;
+    }
+    auto requested = aReferences;
+    std::sort( requested.begin(), requested.end() );
+    if( candidate.GetAllocatedReferences() != requested ) return false;
+    REFDES_TRACKER persisted;
+    // A literal entry may resemble the native range grammar after escaping.
+    // Its validation must not expand more records than the supplied inventory.
+    if( !persisted.Deserialize( candidate.Serialize(), requested.size() )
+            || persisted.GetAllocatedReferences() != requested )
+        return false;
+    CopyAllocatedFrom( candidate );
+    return true;
+}
+
+
+void REFDES_TRACKER::CopyAllocatedFrom( const REFDES_TRACKER& aSource )
+{
+    if( this == &aSource ) return;
+    // Copy before acquiring the receiving owner or changing its containers.
+    // Allocation/copy failures therefore leave all live data untouched.
+    std::unique_lock<std::mutex> sourceLock;
+    if( aSource.m_threadSafe ) sourceLock = std::unique_lock<std::mutex>( aSource.m_mutex );
+    auto prefixes = aSource.m_prefixData;
+    auto references = aSource.m_allRefDes;
+    if( sourceLock.owns_lock() ) sourceLock.unlock();
+    std::unique_lock<std::mutex> lock;
+    if( m_threadSafe ) lock = std::unique_lock<std::mutex>( m_mutex );
+    m_prefixData.swap( prefixes );
+    m_allRefDes.swap( references );
+}
+
 
 void REFDES_TRACKER::Clear()
 {

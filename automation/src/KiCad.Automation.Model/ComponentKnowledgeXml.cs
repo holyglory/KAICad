@@ -77,12 +77,47 @@ public static class ComponentKnowledgeXml
         }
     }
 
-    private static GuidanceStatement ReadStatement(XElement s) => new(Id(s), Text(s, "key"), Text(s, "category"),
+    internal static GuidanceStatement ReadStatement(XElement s) => new(Id(s), Text(s, "key"), Text(s, "category"),
         s.Element(Ns + "text")!.Value, Enum.Parse<GuidanceStrength>(Text(s, "strength")), Text(s, "applicability"),
         s.Elements(Ns + "source").Select(p => new SourceReference(Text(p, "document"), Text(p, "revision"),
             p.Attribute("page") is XAttribute page ? ReadPage(page.Value) : null,
             (string?)p.Attribute("table"), (string?)p.Attribute("part-variant"))).ToArray(),
-        Enum.Parse<VerificationState>(Text(s, "verification")), OptionalId(s, "replaces"), (string?)s.Element(Ns + "exception-rationale"));
+        Enum.Parse<VerificationState>(Text(s, "verification")), OptionalId(s, "replaces"), (string?)s.Element(Ns + "exception-rationale"),
+        s.Element(Ns + "quantity") is XElement quantity ? ReadQuantity(quantity) : null);
+
+    private static GuidanceQuantity ReadQuantity(XElement value)
+    {
+        decimal? Number(XElement element, string name)
+        {
+            if (element.Attribute(name) is not XAttribute attribute) return null;
+            try
+            {
+                decimal number = XmlConvert.ToDecimal(attribute.Value);
+                if (CanonicalDecimal(attribute.Value) != CanonicalDecimal(XmlConvert.ToString(number)))
+                    throw new AutomationException("invalid_quantity", "Quantity precision exceeds the supported decimal representation; no rounded value was imported.");
+                return number;
+            }
+            catch (Exception error) when (error is FormatException or OverflowException)
+            { throw new AutomationException("invalid_quantity", "Quantity values must fit the supported decimal range."); }
+        }
+        static string CanonicalDecimal(string input)
+        {
+            string text = input.Trim(); bool negative = text.StartsWith('-');
+            text = text.TrimStart('+', '-');
+            int point = text.IndexOf('.');
+            string integer = (point < 0 ? text : text[..point]).TrimStart('0');
+            string fraction = point < 0 ? "" : text[(point + 1)..].TrimEnd('0');
+            if (integer.Length == 0) integer = "0";
+            return (negative && (integer != "0" || fraction.Length != 0) ? "-" : "")
+                + integer + (fraction.Length == 0 ? "" : "." + fraction);
+        }
+        var tolerance = value.Element(Ns + "tolerance");
+        return new(Enum.Parse<ParameterKind>(Text(value, "kind")), Text(value, "unit"),
+            Number(value, "nominal"), Number(value, "minimum"), Number(value, "maximum"),
+            tolerance is null ? null : new(Enum.Parse<ToleranceKind>(Text(tolerance, "kind")),
+                Number(tolerance, "minus")!.Value, Number(tolerance, "plus")!.Value),
+            (string?)value.Attribute("unknown-reason"));
+    }
 
     private static int ReadPage(string value)
     {
@@ -91,10 +126,17 @@ public static class ComponentKnowledgeXml
         return page;
     }
 
-    private static XElement WriteStatement(GuidanceStatement s) => E("guidance", A("id", s.Id), A("key", s.Key),
+    internal static XElement WriteStatement(GuidanceStatement s) => E("guidance", A("id", s.Id), A("key", s.Key),
         A("category", s.Category), A("strength", s.Strength), A("applicability", s.Applicability), A("verification", s.Verification),
         s.Replaces is Guid target ? A("replaces", target) : null, E("text", s.Text),
         s.ExceptionRationale is string rationale ? E("exception-rationale", rationale) : null,
+        s.Quantity is { } q ? E("quantity", A("kind", q.Kind), A("unit", q.Unit),
+            q.Nominal is decimal nominal ? A("nominal", XmlConvert.ToString(nominal)) : null,
+            q.Minimum is decimal minimum ? A("minimum", XmlConvert.ToString(minimum)) : null,
+            q.Maximum is decimal maximum ? A("maximum", XmlConvert.ToString(maximum)) : null,
+            q.UnknownReason is string unknown ? A("unknown-reason", unknown) : null,
+            q.Tolerance is { } tolerance ? E("tolerance", A("kind", tolerance.Kind),
+                A("minus", XmlConvert.ToString(tolerance.Minus)), A("plus", XmlConvert.ToString(tolerance.Plus))) : null) : null,
         s.Sources.Select(p => E("source", A("document", p.DocumentId), A("revision", p.Revision),
             p.Page is int page ? A("page", page) : null, p.Table is string table ? A("table", table) : null,
             p.PartVariant is string variant ? A("part-variant", variant) : null)));

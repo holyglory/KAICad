@@ -23,6 +23,7 @@
 
 #include <api/api_handler_editor.h>
 #include <api/common/commands/automation_commands.pb.h>
+#include <api/common/commands/schematic_tracking_commands.pb.h>
 #include <api/sch_context.h>
 #include <api/common/commands/cross_probe_commands.pb.h>
 #include <api/common/commands/editor_commands.pb.h>
@@ -31,6 +32,10 @@
 #include <api/schematic/schematic_commands.pb.h>
 #include <api/schematic/schematic_jobs.pb.h>
 #include <kiid.h>
+#include <sim/spice_simulator.h>
+
+#include <mutex>
+#include <optional>
 
 using namespace kiapi;
 using namespace kiapi::common;
@@ -40,6 +45,8 @@ using google::protobuf::Empty;
 class SCH_EDIT_FRAME;
 class SCH_ITEM;
 class SCH_SHEET;
+class SCH_SHEET_PATH;
+class SCHEMATIC;
 
 
 class API_HANDLER_SCH : public API_HANDLER_EDITOR
@@ -47,6 +54,15 @@ class API_HANDLER_SCH : public API_HANDLER_EDITOR
 public:
     API_HANDLER_SCH( SCH_EDIT_FRAME* aFrame );
     API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext, SCH_EDIT_FRAME* aFrame = nullptr );
+
+    /**
+     * Why the sheet instance @a aTarget of @a aSchematic cannot adopt a saved screen identity
+     * (rebuild_screen_identity), or nothing when it can: it must be the only top-level sheet of a
+     * schematic that shows nothing else, and its screen must be empty (no items, no library cache)
+     * and never loaded from or saved to a file, with no file at its path on disk.  That is the
+     * root KiCad creates for a project whose schematic files are gone.
+     */
+    static std::optional<std::string> ScreenIdentityRefusal( SCHEMATIC& aSchematic, const SCH_SHEET_PATH& aTarget );
 
 protected:
     std::optional<ApiResponseStatus> checkForHeadless( const std::string& aCommandName ) const;
@@ -102,10 +118,19 @@ protected:
             const HANDLER_CONTEXT<kiapi::automation::v1::ReadSchematicMetadata>& aCtx );
 
 private:
+    static std::optional<kiapi::common::ApiResponseStatus> validateSnapshotSchema( uint32_t aVersion );
+    static void projectSnapshotSchema( kiapi::schematic::types::SchematicMetadata& aMetadata,
+                                       uint32_t aVersion );
     HANDLER_RESULT<kiapi::automation::v1::SchematicSaveState> handleReadSaveState(
             const HANDLER_CONTEXT<kiapi::automation::v1::ReadSchematicSaveState>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> handleReadLifecycleState(
+            const HANDLER_CONTEXT<kiapi::automation::v1::ReadDocumentLifecycleState>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::SchematicParityNetlistSnapshot> handleReadParityNetlist(
+            const HANDLER_CONTEXT<kiapi::automation::v1::ReadSchematicParityNetlist>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::SchematicHierarchyDataSnapshot> handleReadHierarchyData(
             const HANDLER_CONTEXT<kiapi::automation::v1::ReadSchematicHierarchyData>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::SchematicElectricalState> handleReadElectricalState(
+            const HANDLER_CONTEXT<kiapi::automation::v1::ReadSchematicElectricalState>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::SchematicMetadataSnapshot> readMetadataForPath(
             const SCH_SHEET_PATH& aPath, const kiapi::common::types::DocumentSpecifier& aDocument );
     HANDLER_RESULT<kiapi::schematic::types::SchematicScreenData> readScreenDataForPath(
@@ -120,6 +145,8 @@ private:
             const HANDLER_CONTEXT<kiapi::automation::v1::InspectSchematicOperation>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::SchematicPresentationFacts> handleReadPresentationFacts(
             const HANDLER_CONTEXT<kiapi::automation::v1::ReadSchematicPresentationFacts>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::SchematicPlacementGeometry> handleMeasurePlacement(
+            const HANDLER_CONTEXT<kiapi::automation::v1::MeasureSchematicPlacement>& aCtx );
     HANDLER_RESULT<commands::GetBoundingBoxResponse> handleGetBoundingBox(
             const HANDLER_CONTEXT<commands::GetBoundingBox>& aCtx );
     bool m_atomicBatchActive = false;
@@ -141,12 +168,23 @@ private:
     HANDLER_RESULT<google::protobuf::Empty> handleSetTitleBlockInfo(
             const HANDLER_CONTEXT<commands::SetTitleBlockInfo>& aCtx ) override;
     std::optional<ApiResponseStatus> checkForStableObservation();
+    HANDLER_RESULT<kiapi::automation::v1::SchematicFileLocations> handleReadFileLocations(
+            const HANDLER_CONTEXT<kiapi::automation::v1::ReadSchematicFileLocations>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::SchematicChangeJournal> handleReadChangeJournal(
             const HANDLER_CONTEXT<kiapi::automation::v1::ReadSchematicChangeJournal>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::SchematicTrackingErcMarkers> handleReadErcMarkers(
+            const HANDLER_CONTEXT<kiapi::automation::v1::SchematicTrackingReadErcMarkers>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::SchematicPreview> handleCapturePreview(
             const HANDLER_CONTEXT<kiapi::automation::v1::CaptureSchematicPreview>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::SchematicViewSet> handleRenderViews(
             const HANDLER_CONTEXT<kiapi::automation::v1::RenderSchematicViews>& aCtx );
+
+    HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> handleStartSimulation(
+            const HANDLER_CONTEXT<kiapi::automation::v1::StartSimulationJob>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> handleReadSimulation(
+            const HANDLER_CONTEXT<kiapi::automation::v1::ReadSimulationJob>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> handleCancelSimulation(
+            const HANDLER_CONTEXT<kiapi::automation::v1::CancelSimulationJob>& aCtx );
     HANDLER_RESULT<types::DocumentSpecifier> handleActivateSheet(
             const HANDLER_CONTEXT<kiapi::automation::v1::ActivateSchematicSheet>& aCtx );
 
@@ -157,7 +195,28 @@ private:
             const HANDLER_CONTEXT<commands::SaveCopyOfDocument>& aCtx );
 
     HANDLER_RESULT<google::protobuf::Empty>
-    handleRevertDocument( const HANDLER_CONTEXT<commands::RevertDocument>& aCtx );
+            handleRevertDocument( const HANDLER_CONTEXT<commands::RevertDocument>& aCtx );
+
+    struct SIMULATION_JOB
+    {
+        std::string jobId;
+        std::string operationId;
+        std::string processEpoch;
+        kiapi::common::types::DocumentSpecifier document;
+        std::string netlist;
+        uint64_t sequence = 1;
+        bool cancellationRequested = false;
+        bool workerFinished = false;
+        kiapi::automation::v1::SimulationJobStatus status = kiapi::automation::v1::SIMJS_UNKNOWN;
+        std::string errorCode;
+        std::string errorMessage;
+        std::vector<std::string> messages;
+        std::vector<kiapi::automation::v1::SimulationVector> vectors;
+    };
+
+    std::mutex m_simulationMutex;
+    std::shared_ptr<SPICE_SIMULATOR> m_automationSimulator;
+    std::optional<SIMULATION_JOB> m_simulationJob;
 
     HANDLER_RESULT<commands::GetOpenDocumentsResponse>
     handleGetOpenDocuments( const HANDLER_CONTEXT<commands::GetOpenDocuments>& aCtx );

@@ -503,10 +503,13 @@ set( EESCHEMA_SRCS
     api/api_sch_enums.cpp
     api/api_sch_utils.cpp
     api/api_sch_symbol_definition.cpp
+    api/api_sch_state_groups.cpp
     api/api_handler_sch.cpp
     api/api_handler_sch_render.cpp
+    api/api_handler_sch_placement_geometry.cpp
     api/headless_sch_context.cpp
     api/sch_api_save.cpp
+    api/sch_parity_netlist.cpp
     api/sch_context.cpp
 
     libraries/legacy_cache_reconcile.cpp

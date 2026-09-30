@@ -24,38 +24,24 @@ public sealed partial class NativeSessionTests
                  { (false, false, "cancel"), (true, false, "unchanged"), (true, false, "unchanged-again"),
                    (false, true, "cancel-edit"), (true, true, "changed") })
         {
-            // Use the real File menu. Its final entries are Setup, Page Settings,
-            // Print, Plot and Close; menu keyboard navigation skips separators.
-            NativeKeyboard.SchematicShortcut(display, processId, "f", controlKey: false, altKey: true);
-            NativeKeyboard.SchematicShortcut(display, processId, "End", controlKey: false, focusCanvas: false);
-            for (int i = 0; i < 4; ++i)
-                NativeKeyboard.SchematicShortcut(display, processId, "Up", controlKey: false, focusCanvas: false);
-            NativeKeyboard.SchematicShortcut(display, processId, "Return", controlKey: false, focusCanvas: false);
+            await NativeSetupUi.Open(client, document, display, processId, token);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
             timeout.CancelAfter(TimeSpan.FromSeconds(8));
-            while (true)
-            {
-                timeout.Token.ThrowIfCancellationRequested();
-                if (NativeKeyboard.HasWindow(display, processId, "Schematic Setup"))
-                {
-                    try { await client.InvokeAsync<GetPageSettings, PageSettings>(new() { Document = document }, timeout.Token); }
-                    catch (NativeApiException busy) when (busy.Status == 7) { break; }
-                }
-                await Task.Delay(100, timeout.Token);
-            }
             if (edit)
             {
-                // Select Formatting from the native tree, then its second text
-                // entry (Overbar offset ratio). No hidden editor command is used.
-                NativeKeyboard.SchematicShortcut(display, processId, "Home", "Schematic Setup", false,
-                    clickFromLeft: 80, clickFromTop: 40);
-                // PAGED_DIALOG redirects the expanded General root to its
-                // Formatting child. Moving Down again would leave that page.
-                foreach (var key in new[] { "Tab", "Tab" })
-                    NativeKeyboard.SchematicShortcut(display, processId, key, "Schematic Setup", false, false);
-                NativeKeyboard.SchematicShortcut(display, processId, "a", "Schematic Setup", true, false);
+                // Select the real Formatting page and measured Overbar entry;
+                // GTK tab order may visit dialog-wide buttons before the page.
+                await NativeSetupUi.SelectPage(display, processId, 34, token);
+                NativeKeyboard.SchematicShortcut(display, processId, "a", "Schematic Setup", true,
+                    clickFromLeft: 500, clickFromTop: 97);
                 foreach (var key in new[] { "1", "2", "0" })
                     NativeKeyboard.SchematicShortcut(display, processId, key, "Schematic Setup", false, false);
+                // Leaving Formatting must transfer into the shared draft, not
+                // into the live project. Return to it before Cancel or OK.
+                await NativeSetupUi.SelectPage(display, processId, 55, token);
+                await NativeKeyboard.CaptureAsync(display,
+                    Path.Combine(evidence, instanceId + "-setup-" + stage + "-other-page.png"), token);
+                await NativeSetupUi.SelectPage(display, processId, 34, token);
             }
             await NativeKeyboard.CaptureAsync(display,
                 Path.Combine(evidence, instanceId + "-setup-" + stage + ".png"), token);
@@ -93,6 +79,13 @@ public sealed partial class NativeSessionTests
                     await client.InvokeAsync<ReadSchematicSaveState, SchematicSaveState>(new() { Document = document }, token),
                     "Cancelled or unchanged setup must preserve dirty-sheet state.");
         }
+        var acceptedState = await client.InvokeAsync<ReadSchematicScreenData, SchematicScreenDataSnapshot>(
+            new() { Document = document }, token);
+        NativeKeyboard.SchematicShortcut(display, processId, "z");
+        await WaitForState(baseline.Data);
+        NativeKeyboard.SchematicShortcut(display, processId, "click", controlKey: false,
+            clickFromLeft: 280, clickFromTop: 43, focusCanvas: false);
+        await WaitForState(acceptedState.Data);
         var stale = new ApplySchematicItemBatch
         {
             Document = document, DocumentEpoch = baseline.Revision.Epoch, ExpectedRevision = baseline.Revision,
@@ -113,5 +106,19 @@ public sealed partial class NativeSessionTests
             (await client.InvokeAsync<ReadSchematicScreenData, SchematicScreenDataSnapshot>(
                 new() { Document = document }, token)).Data.Metadata.DrawingRatios.OverbarHeightRatio);
         await client.InvokeAsync<SaveDocument, Google.Protobuf.WellKnownTypes.Empty>(new() { Document = document }, token);
+
+        async Task WaitForState(Kiapi.Schematic.Types.SchematicScreenData expected)
+        {
+            using var wait = CancellationTokenSource.CreateLinkedTokenSource(token);
+            wait.CancelAfter(TimeSpan.FromSeconds(8));
+            int delay = 25;
+            while (true)
+            {
+                var state = await client.InvokeAsync<ReadSchematicScreenData, SchematicScreenDataSnapshot>(
+                    new() { Document = document }, wait.Token);
+                if (state.Data.Equals(expected)) return;
+                await Task.Delay(delay, wait.Token); delay = Math.Min(delay * 2, 500);
+            }
+        }
     }
 }

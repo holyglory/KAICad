@@ -121,17 +121,18 @@ void GRID_CELL_COLOR_RENDERER::OnDarkModeToggle()
 // Note: this implementation is an adaptation of wxGridCellBoolEditor
 
 
-GRID_CELL_COLOR_SELECTOR::GRID_CELL_COLOR_SELECTOR( wxWindow* aParent, wxGrid* aGrid ) :
+GRID_CELL_COLOR_SELECTOR::GRID_CELL_COLOR_SELECTOR( wxWindow* aParent, wxGrid* aGrid, bool aAllowOpacity ) :
         m_parent( aParent ),
         m_grid( aGrid ),
-        m_value( COLOR4D::UNSPECIFIED )
+        m_value( COLOR4D::UNSPECIFIED ),
+        m_allowOpacity( aAllowOpacity )
 {
 }
 
 
 wxGridCellEditor* GRID_CELL_COLOR_SELECTOR::Clone() const
 {
-    return new GRID_CELL_COLOR_SELECTOR( m_parent, m_grid );
+    return new GRID_CELL_COLOR_SELECTOR( m_parent, m_grid, m_allowOpacity );
 }
 
 
@@ -147,21 +148,35 @@ void GRID_CELL_COLOR_SELECTOR::Create( wxWindow* aParent, wxWindowID aId,
 
 wxString GRID_CELL_COLOR_SELECTOR::GetValue() const
 {
-    return m_value.ToCSSString();
+    return m_valueText;
 }
 
 
 void GRID_CELL_COLOR_SELECTOR::BeginEdit( int row, int col, wxGrid* grid )
 {
-    m_value.SetFromWxString( grid->GetTable()->GetValue( row, col ) );
+    // wxGrid can activate an editor again while its CallAfter is pending
+    // (for example a click followed by F2). One gesture sequence opens one
+    // picker, not a second modal dialog after the first was cancelled.
+    if( m_dialogPending ) return;
+    m_dialogPending = true;
+    m_valueText = grid->GetTable()->GetValue( row, col );
+    m_value = COLOR4D::UNSPECIFIED;
+    if( !m_valueText.IsEmpty() )
+        m_value.SetFromWxString( m_valueText );
 
     grid->CallAfter(
             [this, row, col]()
             {
-                DIALOG_COLOR_PICKER dialog( m_parent, m_value, false );
+                DIALOG_COLOR_PICKER dialog( m_parent, m_value, m_allowOpacity );
+                int response = dialog.ShowModal();
+                m_dialogPending = false;
 
-                if( dialog.ShowModal() == wxID_OK )
-                    m_value = dialog.GetColor();
+                // Cancel and an unchanged accepted value must not round-trip
+                // the original text through wxColour's eight-bit alpha.
+                if( response != wxID_OK || dialog.GetColor() == m_value )
+                    return;
+                m_value = dialog.GetColor();
+                m_valueText = m_value == COLOR4D::UNSPECIFIED ? wxString() : m_value.ToCSSString();
 
                 m_grid->GetTable()->SetValue( row, col, GetValue() );
                 m_grid->ForceRefresh();
@@ -183,7 +198,7 @@ bool GRID_CELL_COLOR_SELECTOR::EndEdit( int row, int col, const wxGrid* grid,
     if ( newval )
         *newval = GetValue();
 
-    return true;
+    return oldval != GetValue();
 }
 
 
@@ -196,5 +211,3 @@ void GRID_CELL_COLOR_SELECTOR::ApplyEdit( int aRow, int aCol, wxGrid* aGrid )
 void GRID_CELL_COLOR_SELECTOR::Reset()
 {
 }
-
-

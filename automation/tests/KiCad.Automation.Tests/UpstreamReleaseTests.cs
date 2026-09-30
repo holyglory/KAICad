@@ -11,6 +11,21 @@ public sealed class UpstreamReleaseTests
     private static readonly string A = new('a', 40), B = new('b', 40), C = new('c', 40);
 
     [TestMethod]
+    public void NativeWorkflowUsesTheCompiledProvenanceValidator()
+    {
+        var directory = new DirectoryInfo(Environment.CurrentDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, ".github/workflows/native-delivery.yml")))
+            directory = directory.Parent;
+        Assert.IsNotNull(directory, "The source-native workflow must be available to this repository test.");
+        string workflow = File.ReadAllText(Path.Combine(directory.FullName, ".github/workflows/native-delivery.yml"));
+        Assert.IsFalse(workflow.Contains("python", StringComparison.OrdinalIgnoreCase));
+        StringAssert.Contains(workflow, "upstream-verify --repository");
+        StringAssert.Contains(workflow, "git merge-base --is-ancestor f638a860a05b3e48d1074314a656ad9b8f597466 HEAD");
+        Assert.IsTrue(workflow.IndexOf("actions/setup-dotnet", StringComparison.Ordinal)
+            < workflow.IndexOf("name: Verify pinned ancestry", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
     [DataRow("10.0.7", true)]
     [DataRow("11.0.0", true)]
     [DataRow("9.0.9.1", true)]

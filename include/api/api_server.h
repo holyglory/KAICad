@@ -26,6 +26,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <vector>
 
 #include <wx/event.h>
 #include <wx/filename.h>
@@ -34,10 +35,13 @@
 #include <api/api_handler.h>
 
 class API_HANDLER;
+class DOCUMENT_LIFECYCLE_CONTROLLER;
+class CHECKED_SCHEMATIC_CONTROLLER;
 class KINNG_REQUEST_SERVER;
 class KINNG_PUBLISHER;
 class wxEvtHandler;
-namespace kiapi::automation::v1 { class SchematicCommitNotification; }
+namespace kiapi::automation::v1 { class AutomationEvent; class SchematicCommitNotification; }
+namespace kiapi::common::types { class DocumentSpecifier; }
 
 
 wxDECLARE_EVENT( API_REQUEST_EVENT, wxCommandEvent );
@@ -75,6 +79,18 @@ public:
     // handler document validation.
     API_RESULT DispatchToHandlers( ApiRequest& aRequest );
 
+    /**
+     * The fully qualified request message types that this server dispatches at this moment, in
+     * ordinal order: its own session handshake, the automation controllers and every registered
+     * handler.  Editors register their handlers when they open and remove them when they close,
+     * so the list is a snapshot of the current process state, not of the build.  The automation
+     * handshake publishes it as handled_requests.
+     */
+    std::vector<std::string> AdvertisedRequestTypes() const;
+
+    void RememberLoadedDocument( const kiapi::common::types::DocumentSpecifier& aDocument );
+    bool IsCleanCloseActive() const;
+
     void SetReadyToReply( bool aReady = true )
     {
         m_readyToReply.store( aReady, std::memory_order_release );
@@ -97,6 +113,16 @@ public:
 
     bool IsAutomation() const { return !m_automationInstanceId.empty(); }
     const std::string& AutomationInstanceId() const { return m_automationInstanceId; }
+
+    /**
+     * Publish one change on the automation event stream.  Editor-thread only, after the native
+     * state that the payload describes has been committed.
+     *
+     * The caller sets exactly one change payload; the server stamps the envelope (protocol
+     * version, instance, process and event epochs, next sequence) and derives the heartbeat.
+     * Heartbeats themselves are never published through this call.
+     */
+    void PublishAutomationEvent( const kiapi::automation::v1::AutomationEvent& aEvent );
 
     // Editor-thread only, after the native journal has accepted the commit.
     void PublishSchematicCommit( const kiapi::automation::v1::SchematicCommitNotification& aCommit );
@@ -139,6 +165,8 @@ private:
     uint64_t m_eventSequence = 0;
 
     std::set<API_HANDLER*> m_handlers;
+    std::unique_ptr<DOCUMENT_LIFECYCLE_CONTROLLER> m_lifecycle;
+    std::unique_ptr<CHECKED_SCHEMATIC_CONTROLLER> m_checkedSchematic;
 
     std::string m_token;
     std::string m_automationInstanceId;

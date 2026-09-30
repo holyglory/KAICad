@@ -20,6 +20,7 @@
 #pragma once
 
 #include <memory>
+#include <cstdint>
 #include <widgets/paged_dialog.h>
 
 class SCH_EDIT_FRAME;
@@ -30,7 +31,10 @@ class PANEL_SETUP_PINMAP;
 class PANEL_TEXT_VARIABLES;
 class PANEL_SETUP_NETCLASSES;
 class PANEL_SETUP_BUSES;
+class PANEL_SETUP_NET_CHAINS;
 class ERC_ITEM;
+class SCH_SETUP_DRAFT;
+class PANEL_EMBEDDED_FILES;
 
 
 class DIALOG_SCHEMATIC_SETUP : public PAGED_DIALOG
@@ -38,6 +42,7 @@ class DIALOG_SCHEMATIC_SETUP : public PAGED_DIALOG
 public:
     DIALOG_SCHEMATIC_SETUP( SCH_EDIT_FRAME* aFrame );
     ~DIALOG_SCHEMATIC_SETUP() = default;
+    bool TransferDataFromWindow() override;
 
 protected:
     // event handlers
@@ -46,6 +51,10 @@ protected:
 
 protected:
     SCH_EDIT_FRAME*           m_frame;
+    PANEL_SETUP_NET_CHAINS*   m_netChainsPanel = nullptr;
+    PANEL_EMBEDDED_FILES*     m_embeddedFilesPanel = nullptr;
+    std::shared_ptr<SCH_SETUP_DRAFT> m_draft;
+    uint64_t m_initialRevision;
 
     std::shared_ptr<ERC_ITEM> m_pinToPinError;
 

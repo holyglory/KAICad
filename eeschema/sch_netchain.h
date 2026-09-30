@@ -29,6 +29,19 @@
 
 class CONNECTION_GRAPH;
 
+// Exact native context-menu target. A repeated sheet can reuse the same pin
+// UUID, so the selected instance path and persisted terminal identity matter.
+struct SCH_NETCHAIN_TERMINAL_CHANGE
+{
+    wxString chain;
+    int terminal = -1;
+    KIID expectedPin;
+    wxString expectedReference;
+    wxString expectedNumber;
+    KIID selectedPin;
+    KIID_PATH selectedPath;
+};
+
 /**
  * A net chain is a collection of nets that are connected together through
  * passive components.

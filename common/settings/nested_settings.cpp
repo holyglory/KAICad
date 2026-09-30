@@ -126,8 +126,9 @@ bool NESTED_SETTINGS::LoadFromFile( const wxString& aDirectory )
 }
 
 
-bool NESTED_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce )
+bool NESTED_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce, SETTINGS_SAVE_RESULT* aResult )
 {
+    if( aResult ) *aResult = SETTINGS_SAVE_RESULT::SKIPPED;
     if( !m_parent )
         return false;
 
@@ -169,10 +170,13 @@ bool NESTED_SETTINGS::SaveToFile( const wxString& aDirectory, bool aForce )
                         m_schemaVersion );
         }
 
+        if( aResult )
+            *aResult = modified || aForce ? SETTINGS_SAVE_RESULT::STORED : SETTINGS_SAVE_RESULT::UNCHANGED;
         return modified;
     }
     catch( ... )
     {
+        if( aResult ) *aResult = SETTINGS_SAVE_RESULT::FAILED;
         wxLogTrace( traceSettings, wxS( "NESTED_SETTINGS %s: Could not store to %s at %s" ),
                     m_filename,
                     m_parent->GetFilename(),

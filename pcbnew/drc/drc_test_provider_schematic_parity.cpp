@@ -381,8 +381,8 @@ bool DRC_TEST_PROVIDER_SCHEMATIC_PARITY::Run()
 
         if( !netlist )
         {
-            REPORT_AUX( wxT( "No netlist provided, skipping schematic parity tests." ) );
-            return true;
+            REPORT_AUX( wxT( "No netlist provided; schematic parity tests cannot complete." ) );
+            return false;
         }
 
         testNetlist( *netlist );

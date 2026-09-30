@@ -25,6 +25,21 @@ public sealed class WindowsRequalifiedPreviewTests
             archiveSha256 = hash, rebuiltNativeCode = false, exactRetainedPayload = true, nativeEditorJourneyPassed = true, originalReceiptUnchanged = true });
         var bound = WindowsRequalifiedPreview.ValidateProvenance(original, inputs, result, commit);
         Assert.AreEqual(hash, bound.Sha256); Assert.AreEqual(harness, bound.HarnessCommit);
+        var managedFailure = Replace(original, "\"Name\":\"managed-contracts\",\"ExitCode\":0", "\"Name\":\"managed-contracts\",\"ExitCode\":1");
+        var originalNode = System.Text.Json.Nodes.JsonNode.Parse(managedFailure.GetRawText())!;
+        var steps = originalNode["Steps"]!.AsArray(); steps.RemoveAt(steps.Count - 1);
+        managedFailure = JsonSerializer.SerializeToElement(originalNode);
+        Assert.ThrowsExactly<InvalidDataException>(() => WindowsRequalifiedPreview.ValidateProvenance(managedFailure, inputs, result, commit));
+        var recoveryNode = System.Text.Json.Nodes.JsonNode.Parse(result.GetRawText())!;
+        recoveryNode["managedContractsPassed"] = true; recoveryNode["managedRuntimeSourceUnchanged"] = true;
+        var recovery = JsonSerializer.SerializeToElement(recoveryNode);
+        Assert.IsTrue(WindowsRequalifiedPreview.ValidateProvenance(managedFailure, inputs, recovery, commit).RequiresManagedRecovery);
+        foreach (string field in new[] { "managedContractsPassed", "managedRuntimeSourceUnchanged" })
+        {
+            var bad = recoveryNode.DeepClone(); bad[field] = false;
+            Assert.ThrowsExactly<InvalidDataException>(() => WindowsRequalifiedPreview.ValidateProvenance(managedFailure, inputs,
+                JsonSerializer.SerializeToElement(bad), commit));
+        }
         foreach (var invalid in new[] { Replace(result, "passed", "failed"), Replace(result, hash, new string('d', 64)),
             Replace(result, "\"nativeEditorJourneyPassed\":true", "\"nativeEditorJourneyPassed\":false") })
             Assert.ThrowsExactly<InvalidDataException>(() => WindowsRequalifiedPreview.ValidateProvenance(original, inputs, invalid, commit));
@@ -55,5 +70,21 @@ public sealed class WindowsRequalifiedPreviewTests
     {
         using var result = JsonDocument.Parse(value.GetRawText().Replace(before, after, StringComparison.Ordinal));
         return result.RootElement.Clone();
+    }
+
+    [TestMethod]
+    public void ManagedRecoveryNeedsEveryRequiredClassAndAllPassingResults()
+    {
+        string[] classes = ["HostedDeliveryTests", "RuntimeInfoTests", "NngTransportTests", "NativeIpcEndpointTests"];
+        string definitions = string.Concat(classes.Select((name, index) =>
+            $"<UnitTest id='{index}'><TestMethod className='KiCad.Automation.Tests.{name}' /></UnitTest>"));
+        string results = string.Concat(classes.Select((_, index) => $"<UnitTestResult testId='{index}' outcome='Passed' />"));
+        string xml = $"<TestRun xmlns='http://microsoft.com/schemas/VisualStudio/TeamTest/2010'><TestDefinitions>{definitions}</TestDefinitions>"
+            + $"<Results>{results}</Results><Counters total='4' executed='4' passed='4' failed='0' error='0' timeout='0' aborted='0' inconclusive='0' notExecuted='0' /></TestRun>";
+        WindowsRequalifiedPreview.RequirePassingManagedTests(Encoding.UTF8.GetBytes(xml));
+        foreach (string invalid in new[] { xml.Replace("NngTransportTests", "UnrelatedTests"),
+            xml.Replace("outcome='Passed'", "outcome='NotExecuted'"), xml.Replace("passed='4'", "passed='3'"),
+            xml.Replace("error='0'", "error='1'"), xml.Replace("testId='3'", "testId='missing'") })
+            Assert.ThrowsExactly<InvalidDataException>(() => WindowsRequalifiedPreview.RequirePassingManagedTests(Encoding.UTF8.GetBytes(invalid)));
     }
 }

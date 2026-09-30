@@ -650,12 +650,13 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
              }
         }
 
-        if( PCBNEW_SETTINGS* cfg = GetAppSettings<PCBNEW_SETTINGS>( "pcbnew" ) )
+        // Detached edits have no view and must not read mutable live-editor preferences.
+        if( view && !staleRuleAreas.empty() )
         {
-            if( !staleRuleAreas.empty() && (   cfg->m_Display.m_TrackClearance == SHOW_WITH_VIA_ALWAYS
-                                            || cfg->m_Display.m_PadClearance ) )
+            if( PCBNEW_SETTINGS* cfg = GetAppSettings<PCBNEW_SETTINGS>( "pcbnew" ) )
             {
-                if( view )
+                if( cfg->m_Display.m_TrackClearance == SHOW_WITH_VIA_ALWAYS
+                    || cfg->m_Display.m_PadClearance )
                     view->UpdateCollidingItems( staleRuleAreas, { PCB_TRACE_T, PCB_ARC_T, PCB_VIA_T, PCB_PAD_T } );
             }
         }

@@ -28,6 +28,8 @@
 #include <api/api_handler.h>
 #include <api/api_utils.h> // traceApi
 #include <api/api_server.h>
+#include <api/document_lifecycle_controller.h>
+#include <api/checked_schematic_controller.h>
 #include <api/api_socket_url.h>
 #include <kiid.h>
 #include <kinng.h>
@@ -40,6 +42,7 @@
 
 #include <api/common/envelope.pb.h>
 #include <api/common/commands/automation_commands.pb.h>
+#include <google/protobuf/descriptor.h>
 
 #ifdef __UNIX__
 #include <sys/file.h>
@@ -59,6 +62,8 @@ KICAD_API_SERVER::KICAD_API_SERVER( bool aAutoStart ) :
         m_token( KIID().AsStdString() ),
         m_readyToReply( false )
 {
+    m_lifecycle = std::make_unique<DOCUMENT_LIFECYCLE_CONTROLLER>();
+    m_checkedSchematic = std::make_unique<CHECKED_SCHEMATIC_CONTROLLER>();
     if( !aAutoStart )
         return;
 
@@ -244,31 +249,49 @@ bool KICAD_API_SERVER::Running() const
     return m_server && m_server->Running();
 }
 
-void KICAD_API_SERVER::PublishSchematicCommit(
-        const kiapi::automation::v1::SchematicCommitNotification& aCommit )
+void KICAD_API_SERVER::PublishAutomationEvent(
+        const kiapi::automation::v1::AutomationEvent& aEvent )
 {
+    using EVENT = kiapi::automation::v1::AutomationEvent;
+
+    // Only changes advance the sequence; heartbeats are derived below.
+    wxCHECK( aEvent.payload_case() != EVENT::PAYLOAD_NOT_SET
+                     && aEvent.payload_case() != EVENT::kHeartbeat, /* void */ );
+
     if( !m_eventPublisher ) return;
     if( m_eventSequence == std::numeric_limits<uint64_t>::max() )
     {
         m_eventEpoch = KIID().AsStdString();
         m_eventSequence = 0;
     }
-    kiapi::automation::v1::AutomationEvent event;
+    // The envelope belongs to this stream, whatever the caller left in it.
+    EVENT event = aEvent;
     event.set_protocol_version( 1 );
     event.set_instance_id( m_automationInstanceId );
     event.set_process_epoch( m_token );
     event.set_event_epoch( m_eventEpoch );
     event.set_sequence( ++m_eventSequence );
-    *event.mutable_schematic_commit() = aCommit;
-    kiapi::automation::v1::AutomationEvent heartbeat = event;
+    EVENT heartbeat = event;
     heartbeat.mutable_heartbeat(); // Clears the mutually exclusive change payload.
     m_eventPublisher->Publish( event.SerializeAsString(), heartbeat.SerializeAsString() );
+}
+
+
+void KICAD_API_SERVER::PublishSchematicCommit(
+        const kiapi::automation::v1::SchematicCommitNotification& aCommit )
+{
+    if( !m_eventPublisher ) return;
+    kiapi::automation::v1::AutomationEvent event;
+    *event.mutable_schematic_commit() = aCommit;
+    PublishAutomationEvent( event );
 }
 
 
 void KICAD_API_SERVER::RegisterHandler( API_HANDLER* aHandler )
 {
     wxCHECK( aHandler, /* void */ );
+    wxCHECK( !aHandler->m_apiServer || aHandler->m_apiServer == this, /* void */ );
+    aHandler->m_apiServer = this;
     m_handlers.insert( aHandler );
 }
 
@@ -276,6 +299,8 @@ void KICAD_API_SERVER::RegisterHandler( API_HANDLER* aHandler )
 void KICAD_API_SERVER::DeregisterHandler( API_HANDLER* aHandler )
 {
     m_handlers.erase( aHandler );
+    if( aHandler && aHandler->m_apiServer == this )
+        aHandler->m_apiServer = nullptr;
 }
 
 
@@ -369,8 +394,33 @@ void KICAD_API_SERVER::handleApiRequestString( std::string& aRequestString )
             session.set_instance_id( m_automationInstanceId );
             session.set_project_path( m_automationProjectPath );
             session.set_epoch( m_token );
+            // Lets a client that attached to this process tell later whether it is still running.
+            session.set_process_id( static_cast<uint32_t>( ::wxGetProcessId() ) );
+
+            // Named feature contracts, each listed only when the whole feature works in this build.
             session.add_capabilities( "session.info" );
             session.add_capabilities( "version.read" );
+
+            // XML connections drawn as labelled wires and admitted only when KiCad proves the
+            // resulting pin connections (cn1-wiring-intent.md §8.3).  Only the KiCad manager runs
+            // in automation mode (kicad.cpp).  Started for a project (--automation), it hosts that
+            // project's schematic editor in this process, and that editor serves every piece the
+            // contract requires: the atomic connectivity assertion of ApplySchematicItemBatch
+            // (api_handler_sch.cpp), which the checked controller admits and verifies
+            // (checked_schematic_controller.cpp), label and other item_candidates measurement
+            // (api_handler_sch_placement_geometry.cpp), and the pin power facts and incomplete-pin
+            // reasons of every measured pin (api_sch_utils.cpp).  Like the other feature contracts
+            // it describes the process, so it stays the same while editors open and close;
+            // handled_requests below says what is dispatched right now.  The empty update manager
+            // (--update-manager, no project) provides no document callbacks and never serves a
+            // schematic, so the whole feature cannot work there and it is not advertised.
+            if( !m_automationProjectPath.empty() )
+                session.add_capabilities( "schematic.connection-realization.v1" );
+
+            // The individual requests this process dispatches right now.
+            for( const std::string& type : AdvertisedRequestTypes() )
+                session.add_handled_requests( type );
+
             session.set_event_endpoint( m_eventEndpoint );
             session.set_event_epoch( m_eventEpoch );
             reply.mutable_message()->PackFrom( session );
@@ -418,6 +468,30 @@ void KICAD_API_SERVER::handleApiRequestString( std::string& aRequestString )
 API_RESULT KICAD_API_SERVER::DispatchToHandlers( ApiRequest& aRequest )
 {
     wxASSERT( wxIsMainThread() );
+    if( CHECKED_SCHEMATIC_CONTROLLER::Handles( aRequest ) )
+    {
+        if( !IsAutomation() )
+        {
+            ApiResponseStatus error;
+            error.set_status( ApiStatusCode::AS_UNIMPLEMENTED );
+            error.set_error_message( "Checked schematic batches require an explicit automation instance" );
+            return tl::unexpected( error );
+        }
+        return m_checkedSchematic->Handle( aRequest, m_token,
+                [this]( ApiRequest& request ) { return DispatchToHandlers( request ); } );
+    }
+    if( DOCUMENT_LIFECYCLE_CONTROLLER::Handles( aRequest ) )
+    {
+        if( !IsAutomation() )
+        {
+            ApiResponseStatus error;
+            error.set_status( ApiStatusCode::AS_UNIMPLEMENTED );
+            error.set_error_message( "Checked lifecycle operations require an explicit automation instance" );
+            return tl::unexpected( error );
+        }
+        return m_lifecycle->Handle( aRequest, m_token,
+                [this]( ApiRequest& request ) { return DispatchToHandlers( request ); } );
+    }
     ApiResponseStatus unhandled;
     unhandled.set_status( ApiStatusCode::AS_UNHANDLED );
     API_RESULT result = tl::unexpected( unhandled );
@@ -434,9 +508,88 @@ API_RESULT KICAD_API_SERVER::DispatchToHandlers( ApiRequest& aRequest )
             break;
     }
 
+    if( result && aRequest.message().Is<kiapi::automation::v1::ReadDocumentLifecycleState>() )
+    {
+        kiapi::automation::v1::DocumentLifecycleState state;
+        if( result->message().UnpackTo( &state ) )
+        {
+            m_lifecycle->AnnotateCleanState( state );
+            result->mutable_message()->PackFrom( state );
+        }
+    }
     return result;
 }
 
+namespace
+{
+// The checked schematic controller claims requests by type through a static predicate, before
+// any handler sees them, and does not publish its list.  Probe that predicate with every message
+// in the given scope, nested messages included, so the advertisement follows its dispatch rule
+// rather than a copied list.  The native capability probe fails if a claimed type is declared
+// outside this scope.
+void collectCheckedSchematicTypes( const google::protobuf::Descriptor* aMessage, std::set<std::string>& aTypes )
+{
+    const std::string name( aMessage->full_name() );
+    ApiRequest        probe;
+    probe.mutable_message()->set_type_url( "type.googleapis.com/" + name );
+
+    if( CHECKED_SCHEMATIC_CONTROLLER::Handles( probe ) )
+        aTypes.insert( name );
+
+    for( int i = 0; i < aMessage->nested_type_count(); ++i )
+        collectCheckedSchematicTypes( aMessage->nested_type( i ), aTypes );
+}
+} // namespace
+
+
+std::vector<std::string> KICAD_API_SERVER::AdvertisedRequestTypes() const
+{
+    std::set<std::string> types;
+
+    // Outside automation mode the handshake and both controllers refuse every request they claim.
+    if( IsAutomation() )
+    {
+        const google::protobuf::Descriptor* session = kiapi::automation::v1::GetAutomationSession::descriptor();
+        types.insert( std::string( session->full_name() ) );
+
+        // The lifecycle controller's Handles() reads this same list.
+        for( const std::string& type : DOCUMENT_LIFECYCLE_CONTROLLER::RequestTypes() )
+            types.insert( type );
+
+        // Every checked schematic request is declared beside the handshake in the automation
+        // protocol.
+        const google::protobuf::FileDescriptor* file = session->file();
+
+        for( int i = 0; i < file->message_type_count(); ++i )
+            collectCheckedSchematicTypes( file->message_type( i ), types );
+    }
+
+    for( const API_HANDLER* handler : m_handlers )
+    {
+        for( std::string& type : handler->HandledMessageTypes() )
+            types.insert( std::move( type ) );
+    }
+
+    return { types.begin(), types.end() };
+}
+
+
+void KICAD_API_SERVER::RememberLoadedDocument( const kiapi::common::types::DocumentSpecifier& document )
+{
+    kiapi::automation::v1::ReadDocumentLifecycleState read;
+    read.mutable_document()->CopyFrom( document );
+    ApiRequest request;
+    request.mutable_message()->PackFrom( read );
+    auto result = DispatchToHandlers( request );
+    kiapi::automation::v1::DocumentLifecycleState state;
+    if( result && result->status().status() == ApiStatusCode::AS_OK && result->message().UnpackTo( &state ) )
+        m_lifecycle->RememberCleanState( state );
+}
+
+bool KICAD_API_SERVER::IsCleanCloseActive() const
+{
+    return m_lifecycle->IsCleanCloseActive();
+}
 
 void KICAD_API_SERVER::log( const std::string& aOutput )
 {

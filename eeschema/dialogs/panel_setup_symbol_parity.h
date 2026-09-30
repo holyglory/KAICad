@@ -29,7 +29,7 @@ class SCHEMATIC_SETTINGS;
 class PANEL_SETUP_SYMBOL_PARITY : public PANEL_SETUP_SYMBOL_PARITY_BASE
 {
 public:
-    PANEL_SETUP_SYMBOL_PARITY( wxWindow* aWindow, SCH_EDIT_FRAME* aFrame  );
+    PANEL_SETUP_SYMBOL_PARITY( wxWindow* aWindow, SCH_EDIT_FRAME* aFrame, SCHEMATIC_SETTINGS* aSettings = nullptr );
 
     bool TransferDataToWindow() override;
     bool TransferDataFromWindow() override;
@@ -37,7 +37,6 @@ public:
     void ImportSettingsFrom( SYMBOL_PARITY_SETTINGS& aSettings );
 
 private:
-    SCH_EDIT_FRAME*    m_frame;
+    SCHEMATIC_SETTINGS* m_settings;
 };
-
 

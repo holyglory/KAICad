@@ -1,0 +1,977 @@
+/* KiCad recursive diagram and requirement history data. GPL-3.0-or-later. */
+syntax = "proto3";
+package kiapi.automation.diagrams.v1;
+option csharp_namespace = "KiCad.Automation.Protocol.Diagrams";
+
+import "google/protobuf/timestamp.proto";
+import "common/types/structural_types.proto";
+
+// Shared Phase 2 seam. Lanes add fields and values only between their own
+// "-- lane" markers, numbered inside their band (2A 100-199, 2B 200-299,
+// 2C 300-399, 2D 400-499), and new messages only inside their "== lane"
+// block at the end of this file. SharedProtoBandTests enforces this.
+
+// Typed model exchange, not an independently enabled editing capability.
+// Revisions pin child occurrences exactly; reading never follows today's heads.
+message BlockSelectionData {
+  string block_id = 1;
+  string state_id = 2;
+  string revision_id = 3;
+}
+message RequirementFieldsData { string general = 1; string schematic = 2; string routing = 3; }
+enum DiagramActorKind {
+  DAK_UNKNOWN = 0;
+  DAK_USER = 1;
+  DAK_AGENT = 2;
+  DAK_IMPORT = 3;
+  DAK_EDITOR = 4;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
+  // -- lane 2D (400-499) --
+  // -- end lane 2D --
+}
+enum RequirementFieldKind { RFK_UNKNOWN = 0; RFK_GENERAL = 1; RFK_SCHEMATIC = 2; RFK_ROUTING = 3; }
+message DiagramRevisionOriginData {
+  DiagramActorKind kind = 1;
+  string actor = 2;
+  google.protobuf.Timestamp recorded_at = 3;
+  string summary = 4;
+  repeated kiapi.automation.structure.v1.StructuralSourceReference sources = 5;
+  repeated string input_ids = 6;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
+  // -- lane 2D (400-499) --
+  // -- end lane 2D --
+}
+message FieldRestorationData { RequirementFieldKind field = 1; string source_revision_id = 2; }
+message RequirementRevisionData {
+  string id = 1;
+  optional string parent_id = 2;
+  RequirementFieldsData fields = 3;
+  DiagramRevisionOriginData origin = 4;
+  repeated FieldRestorationData restorations = 5;
+}
+message RequirementHistoryData {
+  string document_id = 1;
+  string owner_id = 2;
+  string state_id = 3;
+  repeated RequirementRevisionData revisions = 4;
+}
+message FieldHistoryEntryData {
+  string requirement_revision_id = 1;
+  string context_revision_id = 2;
+  uint32 context_version = 3;
+  string owner_name = 4;
+  string text = 5;
+  DiagramRevisionOriginData origin = 6;
+  bool is_saved_text = 7;
+}
+message FieldHistoryPageData {
+  string document_id = 1;
+  string owner_id = 2;
+  string state_id = 3;
+  RequirementFieldKind field = 4;
+  string context_revision_id = 5;
+  uint32 context_version = 6;
+  string requirement_revision_id = 7;
+  string saved_text = 8;
+  uint32 offset = 9;
+  uint32 total = 10;
+  repeated FieldHistoryEntryData entries = 11;
+}
+message DiagramHistoryEntryData {
+  BlockSelectionData selection = 1;
+  uint32 version = 2;
+  string name = 3;
+  DiagramRevisionOriginData origin = 4;
+  uint32 child_count = 5;
+  uint32 connection_count = 6;
+  uint32 annotation_count = 7;
+  bool is_context = 8;
+  // Only the per-level layout changed in this revision.
+  bool layout_only = 9;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+message DiagramHistoryPageData {
+  string document_id = 1;
+  BlockSelectionData context = 2;
+  uint32 context_version = 3;
+  uint32 offset = 4;
+  uint32 total = 5;
+  repeated DiagramHistoryEntryData entries = 6;
+}
+enum DiagramChangeKind { DHCK_UNKNOWN = 0; DHCK_ADDED = 1; DHCK_REMOVED = 2; DHCK_CHANGED = 3; DHCK_REORDERED = 4; }
+enum DiagramChangeCategory {
+  DHCC_UNKNOWN = 0;
+  DHCC_NAME = 1;
+  DHCC_REQUIREMENT = 2;
+  DHCC_BLOCK = 3;
+  DHCC_CONNECTION = 4;
+  DHCC_INTERFACE = 5;
+  DHCC_COMMENT = 6;
+  DHCC_DEFINITION = 7;
+  DHCC_PHYSICAL_ALLOCATION = 8;
+  DHCC_LAYOUT = 9;
+  DHCC_INTERFACE_REALIZATION = 10;
+  DHCC_INTERCONNECT_REALIZATION = 11;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
+}
+message DiagramHistoryChangeData {
+  DiagramChangeCategory category = 1;
+  DiagramChangeKind kind = 2;
+  string object_id = 3;
+  string name = 4;
+  RequirementFieldKind field = 5;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+message DiagramHistoryComparisonData {
+  string document_id = 1;
+  BlockSelectionData context = 2;
+  BlockSelectionData inspected = 3;
+  uint32 context_version = 4;
+  uint32 inspected_version = 5;
+  DiagramRevisionOriginData inspected_origin = 6;
+  repeated DiagramHistoryChangeData changes = 7;
+}
+message PrepareDiagramRestorationData { BlockDraftData draft = 1; BlockSelectionData source = 2; }
+message BlockDesignStateData {
+  string id = 1;
+  string block_id = 2;
+  string name = 3;
+  string head_revision_id = 4;
+  BlockSelectionData forked_from = 5;
+  bool archived = 6;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+enum ImplementationChangeKind { ICK_UNKNOWN = 0; ICK_RENAME = 1; ICK_ARCHIVE = 2; ICK_RESTORE = 3; }
+message ImplementationChangeData {
+  string id = 1; string state_id = 2; ImplementationChangeKind kind = 3;
+  string before_name = 4; string after_name = 5; bool before_archived = 6; bool after_archived = 7;
+  DiagramRevisionOriginData origin = 8;
+}
+enum DefinitionChoiceStateData { DCSD_UNSPECIFIED = 0; DCSD_UNKNOWN = 1; DCSD_CANDIDATES = 2; DCSD_SELECTED = 3; }
+message DefinitionTextChoiceData {
+  DefinitionChoiceStateData state = 1;
+  repeated string values = 2;
+  kiapi.automation.structure.v1.StructuralGuidanceStrength strength = 3;
+  string applicability = 4;
+  repeated kiapi.automation.structure.v1.StructuralSourceReference sources = 5;
+  kiapi.automation.structure.v1.StructuralVerification verification = 6;
+  optional string unknown_reason = 7;
+}
+message KnowledgeClassReferenceData { string library_id = 1; string library_revision = 2; string class_id = 3; }
+message DefinitionClassChoiceData {
+  DefinitionChoiceStateData state = 1;
+  repeated KnowledgeClassReferenceData values = 2;
+  kiapi.automation.structure.v1.StructuralGuidanceStrength strength = 3;
+  string applicability = 4;
+  repeated kiapi.automation.structure.v1.StructuralSourceReference sources = 5;
+  kiapi.automation.structure.v1.StructuralVerification verification = 6;
+  optional string unknown_reason = 7;
+}
+message BlockDefinitionData {
+  DefinitionTextChoiceData purpose = 1;
+  DefinitionTextChoiceData type = 2;
+  DefinitionTextChoiceData manufacturer = 3;
+  DefinitionTextChoiceData family = 4;
+  DefinitionTextChoiceData model = 5;
+  DefinitionTextChoiceData orderable_part = 6;
+  DefinitionTextChoiceData package = 7;
+  DefinitionClassChoiceData knowledge_class = 8;
+}
+message BlockRevisionData {
+  BlockSelectionData selection = 1;
+  optional string parent_revision_id = 2;
+  string name = 3;
+  string requirement_revision_id = 4;
+  repeated BlockSelectionData children = 5;
+  DiagramRevisionOriginData origin = 6;
+  BlockSelectionData restored_from = 7;
+  BlockLocalDiagramData local_diagram = 8;
+  BlockDefinitionData definition = 9;
+  BlockComponentBindingsData component_bindings = 10;
+  BlockPhysicalAllocationData physical_allocation = 11;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
+}
+// Exact electrical realizations are independent of chosen model/package text.
+message ComponentRealizationData { string design_id = 1; string circuit_id = 2; string component_id = 3; }
+message BlockComponentBindingsData { repeated ComponentRealizationData targets = 1; }
+enum PhysicalAllocationKindData {
+  PAK_UNKNOWN = 0;
+  PAK_COMPONENT = 1;
+  PAK_BOARD = 2;
+  PAK_BOARD_STACK = 3;
+  PAK_ASSEMBLY = 4;
+  PAK_HARNESS = 5;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+enum PhysicalAllocationStateData { PAS_UNKNOWN = 0; PAS_PARTIAL = 1; PAS_RESOLVED = 2; }
+message PhysicalAllocationTargetData {
+  string id = 1; PhysicalAllocationKindData kind = 2; string name = 3;
+  optional string reference = 4; optional string repository_path = 5; optional string parent_id = 6;
+}
+message BlockPhysicalAllocationData {
+  PhysicalAllocationStateData state = 1; repeated PhysicalAllocationTargetData targets = 2;
+  optional string unknown_reason = 3;
+}
+message DiagramRefinementAttachmentData {
+  string id = 1; string original_name = 2; string asset_path = 3;
+  string content_sha256 = 4; int64 byte_count = 5; string media_type = 6;
+  kiapi.automation.structure.v1.StructuralSourceReference source = 7;
+}
+message DiagramRefinementInputData {
+  string id = 1; string document_id = 2; string source_sha256 = 3;
+  repeated BlockSelectionData block_path = 4;
+  repeated ConnectionSelectionData connection_path = 5;
+  string prompt = 6; DiagramRevisionOriginData origin = 7;
+  repeated DiagramRefinementAttachmentData attachments = 8;
+}
+message RecursiveBlockGraphData {
+  uint32 schema_version = 1;
+  string document_id = 2;
+  BlockSelectionData selected_root = 3;
+  repeated BlockDesignStateData states = 4;
+  repeated BlockRevisionData revisions = 5;
+  repeated RequirementHistoryData requirement_histories = 6;
+  repeated ConnectionArchiveData connection_archives = 7;
+  repeated ImplementationChangeData implementation_changes = 8;
+  repeated DiagramRefinementInputData refinement_inputs = 9;
+  repeated BlockProposalRecordData proposals = 10;
+  // 11 was the flat-diagram conversion receipt, retired unused: legacy flat diagrams are discarded, not
+  // converted (owner decision n9af098253fec71da). A sender still setting it is refused as an unknown field.
+  reserved 11;
+  reserved "migration";
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
+}
+enum BlockProposalIssueKindData { BPIK_UNRESOLVED = 0; BPIK_CONFLICTING = 1; BPIK_UNSUPPORTED = 2; }
+message BlockProposalIssueData {
+  string id = 1; BlockProposalIssueKindData kind = 2; string message = 3;
+  optional string target_id = 4; repeated kiapi.automation.structure.v1.StructuralSourceReference sources = 5;
+}
+message BlockProposalRecordData {
+  string id = 1; string input_id = 2; string request_sha256 = 3;
+  repeated BlockSelectionData base_path = 4; BlockSelectionData candidate = 5;
+  repeated BlockProposalIssueData issues = 6; DiagramRevisionOriginData origin = 7;
+}
+
+message RecursiveEditorDocument {
+  uint32 schema_version = 1;
+  string document_id = 2;
+  string source_path = 3;
+  string source_token = 4;
+  RecursiveBlockGraphData graph = 5;
+  // On-disk format (1 or 2); a version 1 file upgrades only on a changed write.
+  uint32 stored_schema_version = 6;
+  bool source_writable = 7;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
+}
+enum RecursiveFileAction {
+  RFA_READ = 0;
+  RFA_BLOCK_FIELD_HISTORY = 1;
+  RFA_CONNECTION_FIELD_HISTORY = 2;
+  RFA_SAVE_BLOCK = 3;
+  RFA_REBASE_REQUIREMENTS = 4;
+  RFA_SAVE_CONNECTION = 5;
+  RFA_SAVE_IMPLEMENTATION = 6;
+  RFA_MANAGE_IMPLEMENTATION = 7;
+  RFA_DIAGRAM_HISTORY = 8;
+  RFA_COMPARE_DIAGRAM_HISTORY = 9;
+  RFA_PREPARE_DIAGRAM_RESTORATION = 10;
+  RFA_PREPARE_LEVEL_EDIT = 11;
+  RFA_SAVE_LEVEL = 12;
+  RFA_REBASE_LEVEL = 13;
+  RFA_PREPARE_REPARENT = 14;
+  RFA_REPARENT_BLOCK = 15;
+  RFA_CREATE_DIAGRAM = 16;
+  // 17 and 18 were the flat-diagram conversion (prepare and convert), retired unimplemented (owner decision
+  // n9af098253fec71da). The helper refuses a request naming either as unsupported_diagram_file_request
+  // before any file access.
+  reserved 17, 18;
+  reserved "RFA_PREPARE_MIGRATION", "RFA_MIGRATE_FLAT_DIAGRAM";
+  RFA_DISCOVER_DIAGRAMS = 19;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+enum ImplementationActionKind { IAK_UNKNOWN = 0; IAK_NEW = 1; IAK_DUPLICATE = 2; IAK_RENAME = 3; IAK_ARCHIVE = 4; IAK_RESTORE = 5; }
+message ManageImplementationData {
+  ImplementationActionKind action = 1;
+  BlockSelectionData expected_root = 2;
+  BlockSelectionData source = 3;
+  string name = 4;
+  string new_state_id = 5;
+  string new_revision_id = 6;
+  string new_requirement_revision_id = 7;
+  string change_id = 8;
+  DiagramRevisionOriginData origin = 9;
+}
+message ConnectionDraftData {
+  ConnectionSelectionData baseline = 1;
+  string name = 2;
+  DiagramConnectionKind kind = 3;
+  repeated DiagramEndpointBindingData endpoints = 4;
+  repeated ConnectionSelectionData members = 5;
+  string baseline_requirement_revision_id = 6;
+  RequirementFieldsData baseline_fields = 7;
+  RequirementFieldsData fields = 8;
+  repeated FieldRestorationData restored_fields = 9;
+  DiagramAnnotationListData diagram_annotations = 10;
+  DiagramDomain domain = 11;
+  DiagramConnectionDirection direction = 12;
+  InterconnectRealizationData realization = 13;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+message DiagramAnnotationListData { repeated DiagramAnnotationData annotations = 1; }
+message SaveConnectionDraftData {
+  BlockSelectionData expected_root = 1;
+  repeated BlockSelectionData block_path = 2;
+  repeated ConnectionSelectionData connection_path = 3;
+  ConnectionDraftData draft = 4;
+  string new_connection_revision_id = 5;
+  string new_requirement_revision_id = 6;
+  repeated string connection_ancestor_revision_ids = 7;
+  string new_block_revision_id = 8;
+  string new_block_requirement_revision_id = 9;
+  repeated string block_ancestor_revision_ids = 10;
+  DiagramRevisionOriginData origin = 11;
+  // -- lane 2B (200-299) --
+  // Members created while this save refines the connection's members into groups, pairs and signals (ledger
+  // pf92d0ecdec8805b4). Each is a new connection occurrence with one implementation, one revision and its own three
+  // requirement fields; its members name, by connection id, direct members of the refined connection (kept at their
+  // exact saved revision) or other members created by this save. The draft's member list names each new member by its
+  // exact selection. member_of is never set here.
+  repeated NewConnectionData new_members = 200;
+  // -- end lane 2B --
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
+}
+message RequirementConflictData { RequirementFieldKind field = 1; string baseline = 2; string draft = 3; string saved = 4; }
+message RequirementResolutionData {
+  string document_id = 1;
+  string owner_id = 2;
+  string state_id = 3;
+  string baseline_revision_id = 4;
+  string saved_revision_id = 5;
+  RequirementFieldsData baseline = 6;
+  RequirementFieldsData draft = 7;
+  RequirementFieldsData saved = 8;
+  RequirementFieldKind field = 9;
+  string text = 10;
+}
+message RebaseRequirementsRequest {
+  BlockDraftData draft = 1;
+  repeated RequirementResolutionData resolutions = 2;
+}
+message RequirementMergeData {
+  BlockSelectionData expected_root = 1;
+  repeated BlockSelectionData block_path = 2;
+  BlockDraftData original_draft = 3;
+  BlockDraftData saved_draft = 4;
+  BlockDraftData candidate = 5;
+  repeated RequirementConflictData conflicts = 6;
+  uint32 base_context_version = 7;
+  uint32 saved_context_version = 8;
+  DiagramRevisionOriginData saved_origin = 9;
+}
+message BlockDraftData {
+  BlockSelectionData baseline = 1;
+  string name = 2;
+  repeated BlockSelectionData children = 3;
+  string baseline_requirement_revision_id = 4;
+  RequirementFieldsData baseline_fields = 5;
+  RequirementFieldsData fields = 6;
+  repeated FieldRestorationData restored_fields = 7;
+  BlockSelectionData restored_from = 8;
+  BlockLocalDiagramData local_diagram = 9;
+  BlockDefinitionData definition = 10;
+  BlockComponentBindingsData component_bindings = 11;
+  BlockPhysicalAllocationData physical_allocation = 12;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
+}
+message SaveBlockDraftData {
+  BlockSelectionData expected_root = 1;
+  repeated BlockSelectionData block_path = 2;
+  BlockDraftData draft = 3;
+  string new_revision_id = 4;
+  string new_requirement_revision_id = 5;
+  repeated string ancestor_revision_ids = 6;
+  DiagramRevisionOriginData origin = 7;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
+}
+message RecursiveFileRequest {
+  uint32 schema_version = 1;
+  RecursiveFileAction action = 2;
+  string repository_root = 3;
+  string source_path = 4;
+  string document_id = 5;
+  string expected_source_token = 6;
+  BlockSelectionData block = 7;
+  ConnectionSelectionData connection = 8;
+  RequirementFieldKind field = 9;
+  int32 offset = 10;
+  int32 limit = 11;
+  SaveBlockDraftData save = 12;
+  RebaseRequirementsRequest rebase = 13;
+  SaveConnectionDraftData save_connection = 14;
+  ManageImplementationData implementation = 15;
+  BlockSelectionData inspected_block = 16;
+  PrepareDiagramRestorationData restoration = 17;
+  LevelEditCommandData level_edit = 18;
+  SaveLevelDraftData save_level = 19;
+  RebaseLevelData rebase_level = 20;
+  ReparentBlockData reparent = 21;
+  CreateDiagramData create = 22;
+  // 23 was the retired flat-diagram conversion payload (see RecursiveFileAction 17 and 18).
+  reserved 23;
+  reserved "migrate";
+  DiscoverDiagramsData discover = 24;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+message RecursiveFileResult {
+  bool success = 1;
+  RecursiveEditorDocument document = 2;
+  FieldHistoryPageData history = 3;
+  string source_token = 4;
+  string error_code = 5;
+  string error_message = 6;
+  RequirementMergeData merge = 7;
+  string implementation_id = 8;
+  DiagramHistoryPageData diagram_history = 9;
+  DiagramHistoryComparisonData diagram_comparison = 10;
+  BlockDraftData prepared_draft = 11;
+  // 1 when a write upgraded a version 1 file.
+  uint32 upgraded_from_schema_version = 12;
+  LevelEditResultData level_edit = 13;
+  LevelMergeData level_merge = 14;
+  ReparentPreviewData reparent_preview = 15;
+  DiagramDiscoveryData discovery = 16;
+  // 17 was the retired flat-diagram conversion result (see RecursiveFileAction 17 and 18).
+  reserved 17;
+  reserved "migration";
+  SaveSummaryData save_summary = 18;
+  repeated DiagramErrorDetailData error_details = 19;
+  bool created = 20;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+
+message DiagramBoundaryInterfaceData {
+  string id = 1;
+  string name = 2;
+  string intent = 3;
+  DiagramDomain domain = 4;
+  DiagramInterfaceDirection direction = 5;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+message BlockLocalDiagramData {
+  repeated DiagramBoundaryInterfaceData interfaces = 1;
+  repeated ConnectionSelectionData connections = 2;
+  repeated DiagramAnnotationData annotations = 3;
+  DiagramPresentationViewData presentation = 4;
+  repeated InterfaceRealizationData interface_realizations = 5;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+enum DiagramAnnotationRole { DAR_UNKNOWN = 0; DAR_COMMENT = 1; DAR_INSTRUCTION = 2; }
+enum DiagramAnnotationTargetKind { DAT_UNKNOWN = 0; DAT_CANVAS = 1; DAT_BLOCK = 2; DAT_CONNECTION = 3; }
+message DiagramAnnotationPointData { string x = 1; string y = 2; }
+message DiagramAnnotationStrokeData { repeated DiagramAnnotationPointData points = 1; }
+message DiagramAnnotationData {
+  string id = 1;
+  DiagramAnnotationRole role = 2;
+  string text = 3;
+  DiagramAnnotationTargetKind target_kind = 4;
+  optional string target_id = 5;
+  optional string unresolved_reason = 6;
+  DiagramAnnotationPointData position = 7;
+  repeated DiagramAnnotationStrokeData strokes = 8;
+  DiagramRevisionOriginData origin = 9;
+  string units = 10;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+message ConnectionSelectionData { string connection_id = 1; string state_id = 2; string revision_id = 3; }
+message ConnectionDesignStateData { string id = 1; string connection_id = 2; string name = 3; string head_revision_id = 4; }
+enum DiagramConnectionKind {
+  DCK_UNKNOWN = 0;
+  DCK_ABSTRACT = 1;
+  DCK_INTERFACE = 2;
+  DCK_SIGNAL_GROUP = 3;
+  DCK_DIFFERENTIAL_PAIR = 4;
+  DCK_SIGNAL = 5;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+message ConnectionRevisionData {
+  ConnectionSelectionData selection = 1;
+  optional string parent_revision_id = 2;
+  string name = 3;
+  DiagramConnectionKind kind = 4;
+  repeated DiagramEndpointBindingData endpoints = 5;
+  string requirement_revision_id = 6;
+  repeated ConnectionSelectionData members = 7;
+  DiagramRevisionOriginData origin = 8;
+  DiagramDomain domain = 9;
+  DiagramConnectionDirection direction = 10;
+  // A link is never equated with copper; the owning design is always explicit.
+  InterconnectRealizationData realization = 11;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
+}
+message ConnectionArchiveData {
+  string document_id = 1;
+  string owner_block_id = 2;
+  repeated ConnectionDesignStateData states = 3;
+  repeated ConnectionRevisionData revisions = 4;
+  repeated RequirementHistoryData requirement_histories = 5;
+}
+
+enum DiagramEndpointKind {
+  DEK_UNKNOWN = 0;
+  DEK_UNRESOLVED = 1;
+  DEK_INTERFACE = 2;
+  DEK_COMPATIBLE = 3;
+  DEK_CANDIDATES = 4;
+  DEK_PIN = 5;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+message DiagramPinTargetData {
+  string design_id = 1;
+  string component_id = 2;
+  repeated string sheet_instance_path = 3;
+  string pin = 4;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
+}
+message DiagramPinSelectorData {
+  string role = 1;
+  string protocol = 2;
+  repeated string required_functions = 3;
+  repeated kiapi.automation.structure.v1.StructuralSourceReference sources = 4;
+}
+message DiagramEndpointBindingData {
+  DiagramEndpointKind kind = 1;
+  string block_id = 2;
+  optional string interface_id = 3;
+  string intent = 4;
+  DiagramPinSelectorData selector = 5;
+  repeated DiagramPinTargetData candidates = 6;
+  DiagramPinTargetData pin = 7;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
+}
+
+// Recursive-block-graph schema 2 (contract rbg-v2). Decoders reject enum zero
+// and map C# = proto - 1, except DiagramDomain, DiagramInterfaceDirection and
+// DiagramConnectionDirection, whose zero is a valid Unspecified cast directly.
+enum DiagramDomain { DD_UNSPECIFIED = 0; DD_POWER = 1; DD_DATA = 2; DD_CONTROL = 3; DD_ANALOG = 4; DD_MECHANICAL = 5; }
+enum DiagramInterfaceDirection { DIDR_UNSPECIFIED = 0; DIDR_INPUT = 1; DIDR_OUTPUT = 2; DIDR_BIDIRECTIONAL = 3; }
+enum DiagramConnectionDirection { DCDR_UNSPECIFIED = 0; DCDR_FROM_FIRST = 1; DCDR_TO_FIRST = 2; DCDR_BIDIRECTIONAL = 3; }
+enum DiagramPortSide { DPS_UNSPECIFIED = 0; DPS_LEFT = 1; DPS_RIGHT = 2; DPS_TOP = 3; DPS_BOTTOM = 4; }
+enum DiagramRealizationState { DRS_UNSPECIFIED = 0; DRS_UNKNOWN = 1; DRS_PARTIAL = 2; DRS_RESOLVED = 3; }
+
+// Per-level layout, versioned with the owning block revision. Decimals are
+// canonical strings; a missing entry means unplaced, never a stored fallback.
+message DiagramRectData { string x = 1; string y = 2; string width = 3; string height = 4; }
+message DiagramBlockPlacementData {
+  string block_id = 1;
+  DiagramRectData rect = 2;
+  bool locked = 3;
+  optional uint32 fill_rgb = 4;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+message DiagramPortPlacementData {
+  string block_id = 1;
+  string interface_id = 2;
+  DiagramPortSide side = 3;
+  string offset = 4;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+message DiagramConnectionRouteData {
+  string connection_id = 1;
+  uint32 endpoint_index = 2;
+  repeated DiagramAnnotationPointData waypoints = 3;
+  DiagramAnnotationPointData label = 4;
+  bool locked = 5;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+message DiagramPresentationViewData {
+  // Must equal "diagram-unit".
+  string units = 1;
+  DiagramRectData frame = 2;
+  // Z-order: later placements paint on top.
+  repeated DiagramBlockPlacementData blocks = 3;
+  repeated DiagramPortPlacementData ports = 4;
+  repeated DiagramConnectionRouteData routes = 5;
+  // 6: reserved for an authored home framing (home_viewport), not part of schema 2.
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+
+// A block boundary mapped to its interior. No record means "not stated".
+enum InterfaceRealizationTargetKind {
+  IRTK_UNSPECIFIED = 0;
+  IRTK_CHILD_INTERFACE = 1;
+  IRTK_LOCAL_CONNECTION = 2;
+  IRTK_PIN = 3;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+message InterfaceRealizationTargetData {
+  InterfaceRealizationTargetKind kind = 1;
+  optional string block_id = 2;
+  optional string interface_id = 3;
+  optional string connection_id = 4;
+  DiagramPinTargetData pin = 5;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+message InterfaceRealizationData {
+  string interface_id = 1;
+  DiagramRealizationState state = 2;
+  repeated InterfaceRealizationTargetData targets = 3;
+  optional string unresolved_reason = 4;
+  repeated kiapi.automation.structure.v1.StructuralSourceReference sources = 5;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+
+// Typed interconnect segments and joins on a connection revision.
+enum InterconnectSegmentKind {
+  ISK_UNSPECIFIED = 0;
+  ISK_BOARD_NET = 1;
+  ISK_CONNECTOR = 2;
+  ISK_HARNESS = 3;
+  ISK_HARDWARE_INTERFACE = 4;
+  ISK_EXTERNAL = 5;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+message InterconnectSegmentData {
+  string id = 1;
+  InterconnectSegmentKind kind = 2;
+  optional string label = 3;
+  optional string design_id = 4;
+  optional string circuit_id = 5;
+  optional string net_id = 6;
+  optional string component_id = 7;
+  repeated DiagramPinTargetData pins = 8;
+  optional string physical_target_id = 9;
+  optional string hardware_interface_id = 10;
+  optional string reference = 11;
+  optional string repository_path = 12;
+  optional string unresolved_reason = 13;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+message InterconnectJoinData { string first_segment_id = 1; string second_segment_id = 2; }
+message InterconnectRealizationData {
+  DiagramRealizationState state = 1;
+  repeated InterconnectSegmentData segments = 2;
+  repeated InterconnectJoinData joins = 3;
+  optional string unresolved_reason = 4;
+  repeated kiapi.automation.structure.v1.StructuralSourceReference sources = 5;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+
+// One Save/Decline scope per diagram level, its edit commands and stale-save rebase.
+message NewBlockOccurrenceData {
+  BlockSelectionData selection = 1;
+  string requirement_revision_id = 2;
+  string implementation_name = 3;
+  string name = 4;
+  RequirementFieldsData fields = 5;
+  repeated DiagramBoundaryInterfaceData interfaces = 6;
+  BlockDefinitionData definition = 7;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+message NewConnectionData {
+  ConnectionSelectionData selection = 1;
+  string requirement_revision_id = 2;
+  string implementation_name = 3;
+  string name = 4;
+  DiagramConnectionKind kind = 5;
+  DiagramDomain domain = 6;
+  DiagramConnectionDirection direction = 7;
+  repeated DiagramEndpointBindingData endpoints = 8;
+  RequirementFieldsData fields = 9;
+  InterconnectRealizationData realization = 10;
+  // -- lane 2B (200-299) --
+  // Round A3 (owner decision nf53af9d74841b7d3): a signal drawn into a connection of this level. It names
+  // that root connection (a connection drawn in this draft, or one this draft edits and lists it among its
+  // members); it is a member of that connection and never a root of its own. Unset for a root connection.
+  optional string member_of = 200;
+  // Only for SaveConnectionDraftData.new_members: the connection ids this new member groups, in order. A level draft's
+  // drawn connections and signals never carry it (refused as invalid_recursive_diagram_data).
+  repeated string members = 201;
+  // -- end lane 2B --
+}
+message LevelDraftData {
+  BlockDraftData scope = 1;
+  repeated BlockDraftData child_drafts = 2;
+  repeated ConnectionDraftData connection_drafts = 3;
+  repeated NewBlockOccurrenceData new_children = 4;
+  repeated NewConnectionData new_connections = 5;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+message RevisionIdAssignmentData { string object_id = 1; string new_revision_id = 2; string new_requirement_revision_id = 3; }
+message SaveLevelDraftData {
+  BlockSelectionData expected_root = 1;
+  repeated BlockSelectionData block_path = 2;
+  LevelDraftData draft = 3;
+  string new_revision_id = 4;
+  string new_requirement_revision_id = 5;
+  repeated string ancestor_revision_ids = 6;
+  repeated RevisionIdAssignmentData child_revisions = 7;
+  repeated RevisionIdAssignmentData connection_revisions = 8;
+  DiagramRevisionOriginData origin = 9;
+  repeated RequirementResolutionData resolutions = 10;
+  bool select_implementation = 11;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+message SaveSummaryData {
+  bool changed = 1;
+  repeated BlockSelectionData created_block_revisions = 2;
+  repeated ConnectionSelectionData created_connection_revisions = 3;
+  uint32 pruned_presentation_entries = 4;
+  BlockSelectionData selected_root = 5;
+  repeated BlockSelectionData created_ancestors = 6;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+message DiagramErrorDetailData {
+  string kind = 1;
+  string scope_block_id = 2;
+  string object_id = 3;
+  string message = 4;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+enum LevelEditCommandKind {
+  LECK_UNSPECIFIED = 0;
+  LECK_REMOVE_CHILD = 1;
+  LECK_REMOVE_CONNECTION = 2;
+  LECK_REMOVE_INTERFACE = 3;
+  // -- lane 2B (200-299) --
+  // Removes signals (members) of one connection of the level: connection_id names the connection and
+  // member_ids the signals; notes and realizations on them are cascaded as for a removed connection.
+  LECK_REMOVE_CONNECTION_MEMBERS = 200;
+  // -- end lane 2B --
+}
+message LevelEditCommandData {
+  BlockSelectionData expected_root = 1;
+  repeated BlockSelectionData block_path = 2;
+  LevelDraftData draft = 3;
+  LevelEditCommandKind kind = 4;
+  optional string block_id = 5;
+  optional string connection_id = 6;
+  optional string interface_id = 7;
+  bool detach_connections = 8;
+  DiagramRevisionOriginData origin = 9;
+  // -- lane 2B (200-299) --
+  // The signals LECK_REMOVE_CONNECTION_MEMBERS removes; empty for every other removal.
+  repeated string member_ids = 200;
+  // -- end lane 2B --
+}
+enum LevelEditEffectKind {
+  LEEK_UNSPECIFIED = 0;
+  LEEK_CHILD_REMOVED = 1;
+  LEEK_CONNECTION_REMOVED = 2;
+  LEEK_INTERFACE_REMOVED = 3;
+  LEEK_ANNOTATION_UNRESOLVED = 4;
+  LEEK_REALIZATION_TARGET_REMOVED = 5;
+  LEEK_REALIZATION_STATE_CHANGED = 6;
+  LEEK_REALIZATION_REMOVED = 7;
+  LEEK_PRESENTATION_ENTRY_REMOVED = 8;
+  // -- lane 2B (200-299) --
+  // A note whose exact target returns to this level becomes resolved again (a block moved back).
+  LEEK_ANNOTATION_RESOLVED = 200;
+  // -- end lane 2B --
+}
+message LevelEditEffectData { LevelEditEffectKind kind = 1; string object_id = 2; string scope_block_id = 3; string detail = 4; }
+message LevelEditResultData { LevelDraftData draft = 1; repeated LevelEditEffectData effects = 2; }
+message RebaseLevelData { LevelDraftData draft = 1; repeated RequirementResolutionData resolutions = 2; }
+enum LevelConflictKind {
+  LCK_UNSPECIFIED = 0;
+  LCK_REQUIREMENT_TEXT = 1;
+  LCK_NAME = 2;
+  LCK_INTERFACE = 3;
+  LCK_CHILD_SET = 4;
+  LCK_CONNECTION = 5;
+  LCK_ANNOTATION = 6;
+  LCK_DEFINITION = 7;
+  LCK_COMPONENT_BINDINGS = 8;
+  LCK_PHYSICAL_ALLOCATION = 9;
+  LCK_INTERFACE_REALIZATION = 10;
+  LCK_STALE_CHILD = 11;
+  LCK_SELECTED_IMPLEMENTATION_CHANGED = 12;
+  LCK_OWNER_REMOVED = 13;
+  LCK_DANGLING_REFERENCE = 14;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+message LevelConflictData {
+  LevelConflictKind kind = 1;
+  string owner_id = 2;
+  string owner_state_id = 3;
+  string object_id = 4;
+  RequirementFieldKind field = 5;
+  string baseline = 6;
+  string draft = 7;
+  string saved = 8;
+  string message = 9;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+message PresentationOverrideData {
+  // block:<id>, port:<block>:<interface>, route:<connection>:<endpoint index> or frame.
+  string element_key = 1;
+  string saved_value_json = 2;
+}
+message LevelMergeData {
+  BlockSelectionData expected_root = 1;
+  repeated BlockSelectionData block_path = 2;
+  LevelDraftData original_draft = 3;
+  LevelDraftData candidate = 4;
+  repeated LevelConflictData conflicts = 5;
+  repeated PresentationOverrideData presentation_overrides = 6;
+  uint32 base_context_version = 7;
+  uint32 saved_context_version = 8;
+  DiagramRevisionOriginData saved_origin = 9;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+
+// Moving a block to another parent: an immediately saved management action.
+message ReparentBlockData {
+  BlockSelectionData expected_root = 1;
+  repeated BlockSelectionData source_parent_path = 2;
+  repeated BlockSelectionData target_parent_path = 3;
+  string block_id = 4;
+  repeated string detach_connection_ids = 5;
+  DiagramBlockPlacementData target_placement = 6;
+  // Each assignment leaves new_requirement_revision_id empty.
+  repeated RevisionIdAssignmentData new_revisions = 7;
+  DiagramRevisionOriginData origin = 8;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+message ReparentPreviewData {
+  repeated string required_detach_connection_ids = 1;
+  repeated LevelEditEffectData effects = 2;
+  repeated string successor_block_ids = 3;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+
+// Creating a diagram and finding a project's diagrams. Legacy flat structural diagrams are discarded, not
+// converted (owner decision n9af098253fec71da): the conversion request, result and receipt are retired.
+message CreateDiagramData {
+  string operation_id = 1;
+  string root_name = 2;
+  string implementation_name = 3;
+  RequirementFieldsData fields = 4;
+  DiagramRevisionOriginData origin = 5;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+message DiscoverDiagramsData {
+  string project_file = 1;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+enum DiscoveredDiagramStatus { DDS_UNSPECIFIED = 0; DDS_READY = 1; DDS_READ_ONLY = 2; DDS_TOO_NEW = 3; DDS_INVALID = 4; DDS_UNREADABLE = 5; }
+message DiscoveredDiagramData {
+  string path = 1;
+  DiscoveredDiagramStatus status = 2;
+  string document_id = 3;
+  uint32 stored_schema_version = 4;
+  string source_token = 5;
+  string root_name = 6;
+  // 7 and 8 named the flat diagram a converted diagram came from; retired with the conversion.
+  reserved 7, 8;
+  reserved "migrated_from_structure_id", "migrated_from_path";
+  string error_code = 9;
+  string error_message = 10;
+  bool conventional = 11;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+message DiagramDiscoveryData {
+  string repository_root = 1;
+  string project_file = 2;
+  repeated DiscoveredDiagramData diagrams = 3;
+  // 4 listed legacy flat diagrams for conversion; discovery never lists them.
+  reserved 4;
+  reserved "flat_diagrams";
+  string suggested_new_path = 5;
+  bool suggested_path_exists = 6;
+  optional string manifest_path = 7;
+  optional string manifest_token = 8;
+  bool truncated = 9;
+  // -- lane 2B (200-299) --
+  // -- end lane 2B --
+}
+
+// == lane 2A messages ==
+// == end ==
+
+// == lane 2B messages ==
+// == end ==
+
+// == lane 2C messages ==
+// == end ==

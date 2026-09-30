@@ -97,6 +97,14 @@ public:
     PROJECT();
     virtual ~PROJECT();
 
+    /**
+     * Copy current settings into an analysis-only project with independent ownership.
+     * Call at an editor checkpoint: this does not synchronize access to live settings.
+     * Does not copy locks, editor/library adapters or history registrations. External
+     * library/rule files still require separate capture by the analysis owner.
+     */
+    std::unique_ptr<PROJECT> CloneForAnalysis() const;
+
     //-----<Cross Module API>----------------------------------------------------
 
     virtual bool TextVarResolver( wxString* aToken ) const;
@@ -375,6 +383,11 @@ private:
 
     /// Backing store for project local settings -- owned by SETTINGS_MANAGER
     PROJECT_LOCAL_SETTINGS*  m_localSettings;
+
+    // Ordinary projects borrow SETTINGS_MANAGER stores; detached analysis projects
+    // own their stores so neither live edits nor source destruction can affect them.
+    std::unique_ptr<PROJECT_FILE> m_analysisProjectFile;
+    std::unique_ptr<PROJECT_LOCAL_SETTINGS> m_analysisLocalSettings;
 
     std::map<KIID, wxString> m_sheetNames;
 

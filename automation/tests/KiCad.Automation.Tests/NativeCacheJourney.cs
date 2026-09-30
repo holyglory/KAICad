@@ -28,7 +28,7 @@ public sealed partial class NativeSessionTests
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-cache-" + phase + ".xml"),
                 SchematicDataXml.Write(observation.Snapshot.Data), token);
         }
-        var baseline = await Read();
+        var originalFixture = await Read();
         SchematicItemOperation Cache(SchematicScreenData data)
         {
             var state = new SchematicLibraryCacheState { ScreenId = data.Metadata.ScreenId.Clone() };
@@ -45,6 +45,28 @@ public sealed partial class NativeSessionTests
         }
         async Task<SchematicItemBatchResult> Apply(ApplySchematicItemBatch batch) =>
             await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(batch, token);
+
+        // Build the intended local-definition fixture explicitly. Previous
+        // revisions accidentally depended on a placement-only decode bug to
+        // allocate a cache alias before this journey began.
+        var fixtureSymbol = originalFixture.Data.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor))
+            .Select(i => i.Unpack<SchematicSymbolInstance>()).OrderBy(s => s.Id.Value, StringComparer.Ordinal).First();
+        string existingKey = fixtureSymbol.LibName.Length != 0 ? fixtureSymbol.LibName
+            : (fixtureSymbol.LibraryId ?? fixtureSymbol.Definition.Id).LibraryNickname + ":"
+                + (fixtureSymbol.LibraryId ?? fixtureSymbol.Definition.Id).EntryName;
+        var localCache = originalFixture.Data.CachedSymbols.Single(c => c.CacheKey == existingKey).Clone();
+        localCache.CacheKey = "AutomationCache:LocallyEdited";
+        localCache.Definition.Id = new() { LibraryNickname = "AutomationCache", EntryName = "LocallyEdited" };
+        localCache.Definition.Keywords += " explicit-local-fixture";
+        var localSymbol = fixtureSymbol.Clone();
+        localSymbol.LibName = localCache.CacheKey;
+        localSymbol.Definition.Id = localCache.Definition.Id.Clone();
+        localSymbol.Definition.Keywords = localCache.Definition.Keywords;
+        var localData = originalFixture.Data.Clone(); localData.CachedSymbols.Add(localCache);
+        var setup = Batch(originalFixture, localData);
+        setup.Operations.Insert(0, new SchematicItemOperation { Update = Any.Pack(localSymbol) });
+        await Apply(setup);
+        var baseline = await Read();
 
         var noChange = await Apply(Batch(baseline, baseline.Data));
         Assert.IsFalse(noChange.LibraryCacheChanged);
@@ -130,5 +152,10 @@ public sealed partial class NativeSessionTests
             Update = baseline.Data.Items.First(i => i.Is(SchematicText.Descriptor)).Clone() });
         await Apply(restore);
         Assert.AreEqual(baseline.Data, (await Read()).Data);
+        var end = await Read();
+        var cleanup = Batch(end, originalFixture.Data);
+        cleanup.Operations.Insert(0, new SchematicItemOperation { Update = Any.Pack(fixtureSymbol) });
+        await Apply(cleanup);
+        Assert.AreEqual(originalFixture.Data, (await Read()).Data, "Explicit local fixture setup must not leak into later journeys.");
     }
 }

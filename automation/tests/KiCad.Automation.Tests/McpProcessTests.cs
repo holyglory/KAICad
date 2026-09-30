@@ -7,6 +7,7 @@ using KiCad.Automation.Native;
 using Google.Protobuf.WellKnownTypes;
 using Kiapi.Schematic.Types;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using Protocol = KiCad.Automation.Protocol;
 
 namespace KiCad.Automation.Tests;
 
@@ -44,6 +45,47 @@ public sealed class McpProcessTests
             string[] names = listed.GetProperty("result").GetProperty("tools").EnumerateArray()
                 .Select(t => t.GetProperty("name").GetString()!).ToArray();
             CollectionAssert.Contains(names, "kicad_instances_list");
+            CollectionAssert.Contains(names, "kicad_instance_capabilities");
+            CollectionAssert.Contains(names, "kicad_service_capabilities");
+            CollectionAssert.Contains(names, "kicad_pcb_drc_start");
+            CollectionAssert.Contains(names, "kicad_pcb_drc_job");
+            CollectionAssert.Contains(names, "kicad_pcb_drc_cancel");
+            CollectionAssert.Contains(names, "kicad_diagram_physical_allocation");
+            CollectionAssert.Contains(names, "kicad_diagram_physical_allocation_set");
+            CollectionAssert.Contains(names, "kicad_simulation_start");
+            CollectionAssert.Contains(names, "kicad_simulation_job");
+            CollectionAssert.Contains(names, "kicad_simulation_wait");
+            CollectionAssert.Contains(names, "kicad_simulation_cancel");
+            // Deck admission runs before any instance lookup, so a script deck is refused
+            // even when no native editor could ever receive it.
+            var scriptDeck = await Request(9089, "tools/call", new { name = "kicad_simulation_start", arguments = new
+            {
+                instanceId = Guid.NewGuid().ToString("D"), expectedInstanceEpoch = Guid.NewGuid().ToString("D"), document = new { },
+                netlist = "Divider\nR1 in 0 1k\n.control\nshell touch pwned\n.endc\n.end\n", operationId = Guid.NewGuid()
+            } });
+            Assert.IsTrue(scriptDeck.GetProperty("result").GetProperty("isError").GetBoolean());
+            Assert.AreEqual("simulation_deck_rejected", scriptDeck.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            CollectionAssert.Contains(names, "kicad_pcb_items_read");
+            CollectionAssert.Contains(names, "kicad_pcb_items_create");
+            CollectionAssert.Contains(names, "kicad_pcb_items_update");
+            CollectionAssert.Contains(names, "kicad_pcb_guide_create");
+            CollectionAssert.Contains(names, "kicad_pcb_guide_svg_create");
+            CollectionAssert.Contains(names, "kicad_pcb_route_candidate_from_guide");
+            CollectionAssert.Contains(names, "kicad_pcb_route_candidate_validate");
+            CollectionAssert.Contains(names, "kicad_pcb_render_3d");
+            CollectionAssert.Contains(names, "kicad_pcb_route_geometry");
+            CollectionAssert.Contains(names, "kicad_pcb_route_preview");
+            var unknownCapabilities = await Request(3, "tools/call", new { name = "kicad_instance_capabilities",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D") } });
+            Assert.IsTrue(unknownCapabilities.GetProperty("result").GetProperty("isError").GetBoolean());
+            foreach (string suffix in new[] { "start", "list", "wait", "resume", "stop" })
+                CollectionAssert.Contains(names, "kicad_design_native_intake_" + suffix);
+            var nativeIntakes = await Request(9060, "tools/call", new { name = "kicad_design_native_intake_list",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D") } });
+            Assert.AreEqual(0, nativeIntakes.GetProperty("result").GetProperty("structuredContent").GetProperty("sessions").GetArrayLength());
+            var invalidNativeIntake = await Request(9061, "tools/call", new { name = "kicad_design_native_intake_start",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), recoveryPath = "relative.json" } });
+            Assert.AreEqual("invalid_native_intake_target", invalidNativeIntake.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
             CollectionAssert.Contains(names, "kicad_instance_reconnect_after_update");
             var invalidReconnect = await Request(1000, "tools/call", new { name = "kicad_instance_reconnect_after_update",
                 arguments = new { instanceId = Guid.NewGuid().ToString("D"), installationRoot = Path.Combine(state, "absent-installation"),
@@ -52,50 +94,127 @@ public sealed class McpProcessTests
             Assert.AreEqual("invalid_operation", invalidReconnect.GetProperty("result").GetProperty("structuredContent").GetProperty("code").GetString());
             CollectionAssert.Contains(names, "kicad_schematic_open");
             CollectionAssert.Contains(names, "kicad_schematic_create");
+            CollectionAssert.Contains(names, "kicad_pcb_open");
+            CollectionAssert.Contains(names, "kicad_pcb_create");
+            CollectionAssert.Contains(names, "kicad_document_state");
+            CollectionAssert.Contains(names, "kicad_document_save");
+            CollectionAssert.Contains(names, "kicad_schematic_apply_checked_batch");
+            CollectionAssert.Contains(names, "kicad_schematic_checked_state");
+            CollectionAssert.Contains(names, "kicad_schematic_checked_batch_receipt");
+            // A checked object batch that is unreadable, carries an object type this server does not know, or names no
+            // attached KiCad is refused before anything is sent, and the agent is told why. The LocalLabel written the way
+            // the tool description shows is read, so its refusal comes from the instance lookup; the same batch with an
+            // unknown @type is refused as unreadable and names that type. Checks against an observed state need a real
+            // editor: NativeSessionTests.CheckedBatchesRejectChangedStateAndPreserveNativeUndo drives the same tools there.
+            string checkedBatch = SchematicJson.Formatter.Format(new Protocol.CheckedSchematicBatch
+            {
+                Batch = new() { OperationId = Guid.NewGuid().ToString("D"), Operations = { new Protocol.SchematicItemOperation
+                    { Create = Any.Pack(new LocalLabel { Id = new() { Value = Guid.NewGuid().ToString("D") } }) } } }
+            });
+            string unknownType = checkedBatch.Replace("kiapi.schematic.types.LocalLabel", "kiapi.schematic.types.NoSuchObject", StringComparison.Ordinal);
+            Assert.AreNotEqual(checkedBatch, unknownType, "The batch carries the typed LocalLabel.");
+            foreach (var (requestId, tool, requestJson, code, detail) in new[]
+            {
+                (9090, "kicad_schematic_apply_checked_batch", "{\"batch\":", "invalid_checked_batch", ""),
+                (9091, "kicad_schematic_apply_checked_batch", checkedBatch, "unknown_instance", ""),
+                (9092, "kicad_schematic_checked_batch_receipt", checkedBatch, "unknown_instance", ""),
+                (9093, "kicad_schematic_apply_checked_batch", unknownType, "invalid_checked_batch", "kiapi.schematic.types.NoSuchObject")
+            })
+            {
+                var refused = (await Request(requestId, "tools/call", new { name = tool,
+                    arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson } })).GetProperty("result");
+                Assert.IsTrue(refused.GetProperty("isError").GetBoolean(), refused.GetRawText());
+                var refusal = refused.GetProperty("structuredContent");
+                Assert.AreEqual(code, refusal.GetProperty("errorCode").GetString(), refused.GetRawText());
+                Assert.IsFalse(refusal.GetProperty("mutationSubmitted").GetBoolean(), refused.GetRawText());
+                Assert.AreEqual("not_submitted", refusal.GetProperty("outcome").GetString(), refused.GetRawText());
+                StringAssert.Contains(refusal.GetProperty("errorMessage").GetString(), detail, refused.GetRawText());
+            }
+            StringAssert.Contains(listed.GetProperty("result").GetProperty("tools").EnumerateArray()
+                .Single(t => t.GetProperty("name").GetString() == "kicad_schematic_apply_checked_batch").GetProperty("description").GetString(),
+                "\"@type\":\"type.googleapis.com/kiapi.schematic.types.LocalLabel\"", "The tool shows an agent how to write a typed object.");
+            // The checked view takes the rendered sheet and the checked state together for an explicit schematic root and a
+            // displayed sheet of that same schematic. An unreadable or non-root document, a view of another schematic, or an
+            // instance this server never attached is refused before KiCad is asked. The capture itself, and the observe-then-
+            // apply loop it serves, need a real editor: NativeSessionTests.AgentAndPersonEditingTogetherNeverGetStaleOrPartialEdits.
+            CollectionAssert.Contains(names, "kicad_schematic_checked_view");
+            string viewRoot = Guid.NewGuid().ToString("D");
+            string ViewDocument(params string[] path)
+            {
+                var sheetPath = new Kiapi.Common.Types.SheetPath();
+                sheetPath.Path.Add(path.Select(id => new Kiapi.Common.Types.KIID { Value = id }));
+                return SchematicJson.Formatter.Format(new Kiapi.Common.Types.DocumentSpecifier
+                {
+                    Type = (Kiapi.Common.Types.DocumentType)1, SheetPath = sheetPath,
+                    Project = new Kiapi.Common.Types.ProjectSpecifier { Name = "fixture", Path = state }
+                });
+            }
+            foreach (var (requestId, documentJson, viewDocumentJson, code) in new (int, string, string?, string)[]
+            {
+                (9094, "{\"type\":", null, "invalid_checked_document"),
+                (9095, ViewDocument(viewRoot, Guid.NewGuid().ToString("D")), null, "invalid_checked_document"),
+                (9096, ViewDocument(viewRoot), ViewDocument(Guid.NewGuid().ToString("D")), "invalid_checked_document"),
+                (9097, ViewDocument(viewRoot), ViewDocument(viewRoot, Guid.NewGuid().ToString("D")), "unknown_instance"),
+                (9098, ViewDocument(viewRoot), null, "unknown_instance")
+            })
+            {
+                string instanceId = Guid.NewGuid().ToString("D");
+                object arguments = viewDocumentJson is null ? new { instanceId, documentJson } : new { instanceId, documentJson, viewDocumentJson };
+                var refused = (await Request(requestId, "tools/call", new { name = "kicad_schematic_checked_view", arguments })).GetProperty("result");
+                Assert.IsTrue(refused.GetProperty("isError").GetBoolean(), refused.GetRawText());
+                Assert.AreEqual(code, refused.GetProperty("structuredContent").GetProperty("code").GetString(), refused.GetRawText());
+                Assert.IsFalse(refused.GetProperty("content").EnumerateArray().Any(block => block.GetProperty("type").GetString() == "image"),
+                    "A refused view carries no image.");
+            }
+            Assert.IsTrue(listed.GetProperty("result").GetProperty("tools").EnumerateArray()
+                .Single(t => t.GetProperty("name").GetString() == "kicad_schematic_checked_view").GetProperty("annotations")
+                .GetProperty("readOnlyHint").GetBoolean(), "Taking a view never edits the design.");
+            CollectionAssert.Contains(names, "kicad_document_operation");
+            CollectionAssert.Contains(names, "kicad_pcb_drc_state");
+            CollectionAssert.Contains(names, "kicad_pcb_drc_start");
+            CollectionAssert.Contains(names, "kicad_pcb_drc_job");
+            CollectionAssert.Contains(names, "kicad_pcb_drc_cancel");
+            CollectionAssert.Contains(names, "kicad_document_close");
             CollectionAssert.Contains(names, "kicad_schematic_preview");
+            CollectionAssert.Contains(names, "kicad_schematic_electrical_state");
+            CollectionAssert.Contains(names, "kicad_schematic_measure_placement");
+            // Flat structural diagrams are discarded, not converted (decision n9af098253fec71da): no flat
+            // editor tool and no conversion tool is advertised; the per-level diagram tools remain.
+            CollectionAssert.DoesNotContain(names, "kicad_structure_open");
+            CollectionAssert.DoesNotContain(names, "kicad_structure_state");
+            CollectionAssert.DoesNotContain(names, "kicad_diagram_migrate");
+            Assert.IsFalse(names.Any(name => name.StartsWith("kicad_structure_", StringComparison.Ordinal)), string.Join(", ", names));
+            CollectionAssert.Contains(names, "kicad_diagram_open");
+            CollectionAssert.Contains(names, "kicad_diagram_connection_endpoint_set");
+            CollectionAssert.Contains(names, "kicad_diagram_connection_members_refine");
+            CollectionAssert.Contains(names, "kicad_diagram_agent_context");
+            CollectionAssert.Contains(names, "kicad_diagram_proposal_compare");
+            var invalidGeometry = await Request(9088, "tools/call", new { name = "kicad_schematic_measure_placement",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}" } });
+            Assert.IsTrue(invalidGeometry.GetProperty("result").GetProperty("isError").GetBoolean());
+            CollectionAssert.Contains(names, "kicad_design_electrical_baseline_initialize");
+            CollectionAssert.Contains(names, "kicad_design_connectivity_compare");
+            var electricalFixture = SchematicElectricalComparisonTests.Fixture();
+            var compare = await Request(9070, "tools/call", new { name = "kicad_design_connectivity_compare", arguments = new
+            {
+                designXml = SchematicDesignXml.Write(electricalFixture.Design, [electricalFixture.Library]),
+                electricalStateJson = SchematicJson.Formatter.Format(electricalFixture.State),
+                knowledgeLibraryXml = new[] { ComponentKnowledgeXml.WriteLibrary(electricalFixture.Library) }
+            } });
+            Assert.IsTrue(compare.GetProperty("result").GetProperty("structuredContent").GetProperty("connectivityEquivalent").GetBoolean());
+            var malformedElectrical = await Request(9071, "tools/call", new { name = "kicad_design_connectivity_compare", arguments = new
+            {
+                designXml = SchematicDesignXml.Write(electricalFixture.Design, [electricalFixture.Library]),
+                electricalStateJson = "{broken", knowledgeLibraryXml = new[] { ComponentKnowledgeXml.WriteLibrary(electricalFixture.Library) }
+            } });
+            Assert.AreEqual("invalid_electrical_snapshot", malformedElectrical.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
             CollectionAssert.Contains(names, "kicad_schematic_render_views");
             CollectionAssert.Contains(names, "kicad_schematic_sheet_activate");
             CollectionAssert.Contains(names, "kicad_schematic_move_connected_symbols");
-            CollectionAssert.Contains(names, "kicad_pcb_route_plan");
+            CollectionAssert.Contains(names, "kicad_schematic_transform_connected_symbols");
+            CollectionAssert.Contains(names, "kicad_pcb_route_candidate_from_guide");
+            CollectionAssert.Contains(names, "kicad_pcb_route_candidate_validate");
             CollectionAssert.Contains(names, "kicad_schematic_xml_plan");
-            CollectionAssert.Contains(names, "kicad_capabilities");
-            CollectionAssert.Contains(names, "kicad_pcb_open");
-            CollectionAssert.Contains(names, "kicad_pcb_create");
-            CollectionAssert.Contains(names, "kicad_pcb_stackup");
-            CollectionAssert.Contains(names, "kicad_pcb_layers");
-            CollectionAssert.Contains(names, "kicad_pcb_set_layers");
-            CollectionAssert.Contains(names, "kicad_pcb_nets");
-            CollectionAssert.Contains(names, "kicad_pcb_items");
-            CollectionAssert.Contains(names, "kicad_pcb_connected_items");
-            CollectionAssert.Contains(names, "kicad_pcb_refill_zones");
-            CollectionAssert.Contains(names, "kicad_pcb_save");
-            CollectionAssert.Contains(names, "kicad_pcb_revert");
-            CollectionAssert.Contains(names, "kicad_pcb_create_items");
-            CollectionAssert.Contains(names, "kicad_pcb_update_items");
-            CollectionAssert.Contains(names, "kicad_pcb_delete_items");
-            CollectionAssert.Contains(names, "kicad_pcb_route_plan");
-            CollectionAssert.Contains(names, "kicad_pcb_route_commit");
-            CollectionAssert.Contains(names, "kicad_library_open");
-            CollectionAssert.Contains(names, "kicad_library_create_items");
-            CollectionAssert.Contains(names, "kicad_library_update_items");
-            CollectionAssert.Contains(names, "kicad_library_delete_items");
-            CollectionAssert.Contains(names, "kicad_schematic_apply_batch");
-            CollectionAssert.Contains(names, "kicad_schematic_save");
-            CollectionAssert.Contains(names, "kicad_pcb_export_svg");
-            CollectionAssert.Contains(names, "kicad_pcb_render_3d");
-            CollectionAssert.Contains(names, "kicad_pcb_export_3d");
-            CollectionAssert.Contains(names, "kicad_pcb_export_manufacturing");
-            CollectionAssert.Contains(names, "kicad_pcb_design_rules_get");
-            CollectionAssert.Contains(names, "kicad_pcb_design_rules_set");
-            CollectionAssert.Contains(names, "kicad_pcb_custom_rules_get");
-            CollectionAssert.Contains(names, "kicad_pcb_custom_rules_set");
-            CollectionAssert.Contains(names, "kicad_pcb_import_netlist");
-            CollectionAssert.Contains(names, "kicad_pcb_plot_settings_get");
-            CollectionAssert.Contains(names, "kicad_pcb_plot_settings_set");
-            CollectionAssert.Contains(names, "kicad_pcb_embedded_files_get");
-            CollectionAssert.Contains(names, "kicad_pcb_embedded_files_set");
-            CollectionAssert.Contains(names, "kicad_pcb_appearance_get");
-            CollectionAssert.Contains(names, "kicad_pcb_appearance_set");
             JsonElement call = await Request(3, "tools/call", new { name = "kicad_instances_list", arguments = new { } });
             Assert.IsFalse(call.TryGetProperty("error", out _), call.ToString());
             JsonElement result = call.GetProperty("result");
@@ -130,6 +249,25 @@ public sealed class McpProcessTests
             JsonElement recovered = await Request(6, "tools/call", new { name = "kicad_component_guidance_resolve",
                 arguments = new { circuitXml, libraryXml, bindingXml } });
             Assert.IsTrue(ReadGuidance(recovered).Valid, "A rejected input must not poison later requests.");
+            var quantityNote = note with { Quantity = new(ParameterKind.AbsoluteMaximum, "V", Maximum: 5m),
+                Sources = [new("synthetic-datasheet", "rev-A", 2, "Absolute maximum", "example-package")] };
+            var quantityLibrary = library with { Classes = [new(typeId, "Example class", null, [quantityNote])] };
+            string quantityXml = ComponentKnowledgeXml.WriteLibrary(quantityLibrary);
+            var quantityReply = ReadGuidance(await Request(9085, "tools/call", new { name = "kicad_component_guidance_resolve",
+                arguments = new { circuitXml, libraryXml = quantityXml, bindingXml } }));
+            Assert.IsTrue(quantityReply.Valid);
+            Assert.AreEqual(quantityNote.Quantity, quantityReply.Resolution!.Effective.Single().Statement.Quantity);
+            Assert.AreEqual(quantityNote.Sources[0], quantityReply.Resolution.Effective.Single().Statement.Sources[0]);
+            Assert.AreEqual(VerificationState.Unverified, quantityReply.Resolution.Effective.Single().Statement.Verification);
+            var badQuantity = ReadGuidance(await Request(9086, "tools/call", new { name = "kicad_component_guidance_resolve",
+                arguments = new { circuitXml, libraryXml = quantityXml.Replace("maximum=\"5\"", "maximum=\"NaN\"", StringComparison.Ordinal), bindingXml } }));
+            Assert.IsFalse(badQuantity.Valid);
+            var conflictingLibrary = library with { Classes = [new(typeId, "Example class", null,
+                [quantityNote with { Quantity = new(ParameterKind.OperatingLimit, "V", Minimum: 5m, Maximum: 3m) }])] };
+            var quantityRecovery = ReadGuidance(await Request(9087, "tools/call", new { name = "kicad_component_guidance_resolve",
+                arguments = new { circuitXml, libraryXml = ComponentKnowledgeXml.WriteLibrary(conflictingLibrary), bindingXml } }));
+            Assert.IsTrue(quantityRecovery.Valid, "Valid reports structural validity; engineering issues remain explicit.");
+            Assert.AreEqual("inverted_range", quantityRecovery.Resolution!.QuantityIssues!.Single().Code);
             CollectionAssert.Contains(names, "kicad_engineering_design_validate");
             var (engineering, engineeringLibrary) = EngineeringDesignXmlTests.Fixture();
             string engineeringXml = EngineeringDesignXml.Write(engineering, [engineeringLibrary]);
@@ -138,6 +276,7 @@ public sealed class McpProcessTests
                 arguments = new { designXml = engineeringXml, knowledgeLibraryXml } });
             var engineeringState = engineeringResult.GetProperty("result").GetProperty("structuredContent");
             Assert.IsTrue(engineeringState.GetProperty("modelValid").GetBoolean());
+            Assert.IsTrue(engineeringState.GetProperty("netBindingsResolved").GetBoolean());
             Assert.AreEqual(engineering.Circuit.Id, engineeringState.GetProperty("designId").GetGuid());
             Assert.AreEqual(1, engineeringState.GetProperty("guidance").EnumerateObject().Count());
             var missingLibrary = await Request(1002, "tools/call", new { name = "kicad_engineering_design_validate",
@@ -148,6 +287,15 @@ public sealed class McpProcessTests
             var engineeringRecovery = await Request(1003, "tools/call", new { name = "kicad_engineering_design_validate",
                 arguments = new { designXml = engineeringXml, knowledgeLibraryXml } });
             Assert.IsTrue(engineeringRecovery.GetProperty("result").GetProperty("structuredContent").GetProperty("modelValid").GetBoolean());
+            var split = UnresolvedNetBindingTests.Split();
+            string unresolvedXml = EngineeringDesignXml.Write(new(split.After, split.Pending, [], []), []);
+            var unresolved = await Request(1004, "tools/call", new { name = "kicad_engineering_design_validate",
+                arguments = new { designXml = unresolvedXml, knowledgeLibraryXml = Array.Empty<string>() } });
+            var unresolvedState = unresolved.GetProperty("result").GetProperty("structuredContent");
+            Assert.IsTrue(unresolvedState.GetProperty("modelValid").GetBoolean());
+            Assert.IsFalse(unresolvedState.GetProperty("netBindingsResolved").GetBoolean());
+            Assert.AreEqual(2, unresolvedState.GetProperty("unresolvedNetBindings").GetArrayLength());
+            Assert.AreEqual(split.Before.Nets[0].Id, unresolvedState.GetProperty("unresolvedNetBindings")[0].GetProperty("formerNetId").GetGuid());
             CollectionAssert.Contains(names, "kicad_design_bindings_inspect");
             var (linkedDesign, linkedLibrary) = SchematicDesignTests.Fixture();
             string linkedXml = SchematicDesignXml.Write(linkedDesign, [linkedLibrary]);
@@ -263,6 +411,262 @@ public sealed class McpProcessTests
             Assert.IsFalse(chosenHierarchyState.GetProperty("liveMutationAuthorized").GetBoolean());
             CollectionAssert.Contains(names, "kicad_design_recovery_plan");
             CollectionAssert.Contains(names, "kicad_design_recovery_resolve");
+            CollectionAssert.Contains(names, "kicad_design_nets_reconcile");
+            CollectionAssert.Contains(names, "kicad_design_sync_plan");
+            CollectionAssert.Contains(names, "kicad_design_sync_apply");
+            var invalidApply = await Request(4083, "tools/call", new { name = "kicad_design_sync_apply",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), recoveryPath = Path.Combine(state, "missing-recovery.json"),
+                    designPath = Path.Combine(state, "design.xml"), expectedRevisionToken = "stale", operationId = Guid.NewGuid().ToString("D") } });
+            Assert.IsTrue(invalidApply.GetProperty("result").GetProperty("isError").GetBoolean());
+            Assert.AreEqual("missing_design_recovery", invalidApply.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            CollectionAssert.Contains(names, "kicad_design_recovery_release_exited");
+            // A synchronization left pending in a recovery record is released only on a proven exit of exactly the KiCad
+            // process epoch that holds it. With no attached KiCad, the only proof is a saved registration of that epoch:
+            // written on this machine in an earlier boot it proves the exit; written on another computer (a different
+            // machine ID, whose boot always differs) it proves nothing. The release keeps the whole operation in a receipt
+            // and clears only the pending operation. The native journey NativeSessionTests.NativeCrashReleasesTheExitedOperation
+            // proves release, resume and roll-back against killed KiCad processes.
+            using (var released = new DesignPublicationRecoveryTests.Fixture())
+            {
+                var held = released.Saved;
+                string heldInstance = held.State.InstanceId.ToString("D"), heldEpoch = held.State.PendingNativeState!.ProcessEpoch;
+                string heldOperation = held.State.PendingPublication!.OperationId.ToString("D");
+                string nativeFile = held.State.PendingNativeSave!.ExpectedState.FileBaselines.Single().Path;
+                await File.WriteAllTextAsync(nativeFile, "(kicad_sch (version 20250114))", timeout.Token);
+                async Task<JsonElement> Release(int id, string token, string operation, string continuation) =>
+                    (await Request(id, "tools/call", new { name = "kicad_design_recovery_release_exited", arguments = new
+                        { instanceId = heldInstance, recoveryPath = released.RecordPath, expectedRevisionToken = token, operationId = operation, continuation } }))
+                    .GetProperty("result");
+                string Code(JsonElement result) => result.GetProperty("structuredContent").GetProperty("errorCode").GetString()!;
+                byte[] heldBytes = await File.ReadAllBytesAsync(released.RecordPath, timeout.Token);
+                Assert.AreEqual("invalid_continuation", Code(await Release(4090, held.RevisionToken, heldOperation, "discard")));
+                Assert.AreEqual("released_operation_mismatch", Code(await Release(4091, held.RevisionToken, Guid.NewGuid().ToString("D"), "resume")));
+                var unproven = await Release(4092, held.RevisionToken, heldOperation, "resume");
+                Assert.AreEqual("operation_exit_unproven", Code(unproven), unproven.GetRawText());
+                StringAssert.Contains(unproven.GetProperty("structuredContent").GetProperty("errorMessage").GetString(), heldEpoch);
+                var live = ProcessIdentity.Record(Environment.ProcessId)!;
+                async Task Registration(ProcessStartIdentity identity, string? registry = null, string? epoch = null) => await File.WriteAllTextAsync(
+                    Path.Combine(registry ?? state, heldInstance + ".json"),
+                    JsonSerializer.Serialize(new InstanceRecord(heldInstance, Path.Combine(state, "released-project", "fixture.kicad_pro"),
+                        NativeIpcEndpoint.FromSocketPath(Path.Combine(NativeIpcEndpoint.RuntimeDirectory(heldInstance), "api.sock")), epoch ?? heldEpoch,
+                        Environment.ProcessId, DateTimeOffset.UtcNow, identity)), timeout.Token);
+                await Registration(live with { MachineId = "0123456789abcdef0123456789abcdef", BootId = Guid.NewGuid().ToString("D") });
+                Assert.AreEqual("operation_exit_unproven", Code(await Release(4093, held.RevisionToken, heldOperation, "resume")),
+                    "A registration written on another computer never proves the exit.");
+                // The recovery store takes only an exit an instance registry proved (a ProvenInstanceExit, which nothing else
+                // creates), and only the exit of exactly the process epoch that holds the operation: here a registry proves
+                // that another epoch of the instance ended on this machine (its registration names an earlier boot).
+                string otherRegistry = Directory.CreateDirectory(Path.Combine(state, "other-epoch-registry")).FullName;
+                string otherEpoch = Guid.NewGuid().ToString("D");
+                await Registration(live with { BootId = Guid.NewGuid().ToString("D") }, otherRegistry, otherEpoch);
+                var otherProcess = await ProvenInstanceExit.ProveAsync(new InstanceRegistry(new NngTransport(), otherRegistry), heldInstance, otherEpoch,
+                    timeout.Token) ?? throw new AssertFailedException("The registry proves the other epoch's exit.");
+                Assert.AreEqual(otherEpoch, otherProcess.Exit.Epoch);
+                Assert.AreEqual("operation_exit_unproven", Assert.ThrowsExactly<AutomationException>(() =>
+                    new DesignRecoveryStore(released.RecordPath).ReleaseExitedOperation(held, otherProcess)).Code);
+                Directory.Delete(otherRegistry, true);
+                CollectionAssert.AreEqual(heldBytes, await File.ReadAllBytesAsync(released.RecordPath, timeout.Token), "A refused release changes nothing.");
+                Assert.IsFalse(Directory.Exists(DesignReleasedOperations.Directory(released.RecordPath)), "A refused release keeps no receipt.");
+
+                await Registration(live with { BootId = Guid.NewGuid().ToString("D") });
+                var release = await Release(4094, held.RevisionToken, heldOperation, "resume");
+                Assert.IsFalse(release.TryGetProperty("isError", out var releaseError) && releaseError.GetBoolean(), release.GetRawText());
+                var view = release.GetProperty("structuredContent");
+                Assert.AreEqual("released", view.GetProperty("outcome").GetString(), "No KiCad runs for the instance, so nothing continues yet.");
+                Assert.IsTrue(view.GetProperty("releasedNow").GetBoolean());
+                Assert.AreEqual(heldEpoch, view.GetProperty("releasedEpoch").GetString());
+                Assert.AreEqual(InstanceExit.ProcessAbsentEvidence, view.GetProperty("exit").GetProperty("evidence").GetString());
+                CollectionAssert.AreEqual(new[] { nativeFile }, view.GetProperty("replacedFiles").EnumerateArray().Select(f => f.GetString()).ToArray());
+                var after = new DesignRecoveryStore(released.RecordPath).Read()!;
+                Assert.AreEqual(view.GetProperty("recoveryRevisionToken").GetString(), after.RevisionToken);
+                Assert.IsFalse(after.State.HasPendingWork);
+                Assert.IsNull(after.State.PendingNativeState);
+                Assert.IsNull(after.State.PendingNativeSave);
+                Assert.AreEqual(SchematicDesignXml.Write(held.State.Baseline, held.State.KnowledgeLibraries),
+                    SchematicDesignXml.Write(after.State.Baseline, after.State.KnowledgeLibraries), "The release never advances the baseline.");
+                CollectionAssert.AreEqual(held.State.DesiredFileBytes, after.State.DesiredFileBytes);
+                Assert.AreEqual(held.State.NativeRevision, after.State.NativeRevision);
+                var receipt = DesignReleasedOperations.Read(view.GetProperty("receiptPath").GetString()!);
+                Assert.AreEqual(held.State.PendingPublication.OperationId, receipt.OperationId);
+                Assert.AreEqual(held.RevisionToken, receipt.ReleasedFromRevisionToken);
+                Assert.AreEqual(held.State.PendingNativeState, receipt.NativeState(), "The receipt keeps the operation's native state.");
+                Assert.AreEqual(held.State.PendingNativeSave, receipt.NativeSave(), "The receipt keeps the save KiCad was cut off in.");
+                CollectionAssert.AreEqual(held.State.PendingPublication.CandidateFileBytes, receipt.PendingPublication!.CandidateFileBytes);
+                CollectionAssert.AreEqual(held.State.PendingPublication.ExpectedFileBytes, receipt.PendingPublication.ExpectedFileBytes);
+                Assert.IsTrue(receipt.Files.Single().Replaced);
+                Assert.AreEqual(heldEpoch, receipt.Exit.Epoch);
+                // Called again after the release: nothing is released twice, and it still waits for a running KiCad.
+                var again = (await Release(4095, after.RevisionToken, heldOperation, "roll-back")).GetProperty("structuredContent");
+                Assert.AreEqual("released", again.GetProperty("outcome").GetString(), again.GetRawText());
+                Assert.IsFalse(again.GetProperty("releasedNow").GetBoolean());
+                Assert.AreEqual(after.RevisionToken, new DesignRecoveryStore(released.RecordPath).Read()!.RevisionToken);
+                // Until the operation is continued the record stays on the ended KiCad's document session: a save that attaches
+                // it to another session, as kicad_design_recovery_reattach does, is refused, since the KiCad started again may
+                // hold part of the operation's result. The native journey shows the reattach tool refusing it. Only the
+                // continuation that ExitedOperationRelease journals moves the record, once; ordinary saves work again after it.
+                var store = new DesignRecoveryStore(released.RecordPath);
+                DesignRecoveryState Session(DesignRecoveryState recovery) => recovery with
+                    { NativeRevision = new(Guid.NewGuid().ToString("D"), 1), ObservedElectrical = null, HierarchyResolution = null };
+                var moved = Session(after.State);
+                var refusedReattach = Assert.ThrowsExactly<AutomationException>(() => store.Save(moved, after.RevisionToken));
+                Assert.AreEqual("released_operation_requires_continuation", refusedReattach.Code);
+                StringAssert.Contains(refusedReattach.Message, heldOperation);
+                StringAssert.Contains(refusedReattach.Message, "kicad_design_recovery_release_exited");
+                Assert.AreEqual(after.RevisionToken, store.Read()!.RevisionToken, "A refused reattachment changes nothing.");
+                var continued = store.ContinueReleasedOperation(moved, after.RevisionToken, receipt);
+                Assert.AreEqual(moved.NativeRevision, continued.State.NativeRevision);
+                Assert.AreEqual("released_operation_not_open", Assert.ThrowsExactly<AutomationException>(() =>
+                    store.ContinueReleasedOperation(Session(continued.State), continued.RevisionToken, receipt)).Code, "An operation is continued once.");
+                var reattached = store.Save(Session(continued.State), continued.RevisionToken);
+                Assert.AreNotEqual(continued.RevisionToken, reattached.RevisionToken, "Once continued, the record can be attached like any other.");
+                // A refusal once the operation is released keeps the release and says so: the error reply names the receipt and
+                // the record's current revision token, and whether this call released the operation.
+                var superseded = await Release(4096, reattached.RevisionToken, heldOperation, "resume");
+                Assert.IsTrue(superseded.GetProperty("isError").GetBoolean(), superseded.GetRawText());
+                Assert.AreEqual("released_operation_superseded", Code(superseded), superseded.GetRawText());
+                var refusal = superseded.GetProperty("structuredContent");
+                Assert.IsFalse(refusal.GetProperty("releasedNow").GetBoolean(), refusal.GetRawText());
+                Assert.AreEqual(heldEpoch, refusal.GetProperty("releasedEpoch").GetString());
+                Assert.AreEqual(view.GetProperty("receiptPath").GetString(), refusal.GetProperty("receiptPath").GetString());
+                Assert.AreEqual(reattached.RevisionToken, refusal.GetProperty("recoveryRevisionToken").GetString());
+                StringAssert.Contains(refusal.GetProperty("errorMessage").GetString(), "stays released (receipt " + view.GetProperty("receiptPath").GetString());
+                Assert.AreEqual(reattached.RevisionToken, store.Read()!.RevisionToken, "A refused continuation changes nothing.");
+                File.Delete(Path.Combine(state, heldInstance + ".json"));
+            }
+            CollectionAssert.Contains(names, "kicad_design_recovery_resolve_pending");
+            CollectionAssert.Contains(names, "kicad_design_block_owners_plan");
+            CollectionAssert.Contains(names, "kicad_design_block_owners_apply");
+            // A synchronization that KiCad applied but whose follow-up check refused it is left only through
+            // kicad_design_recovery_resolve_pending, bound to exactly the pending operation and recovery revision. Every choice
+            // checks KiCad first, so with no KiCad attached nothing is resolved and nothing changes. The native journey
+            // NativeSessionTests.DeletedNativeSheetsRebuildFromXmlWithoutLoss proves undo, discard and keep against a real KiCad.
+            using (var stuck = new DesignPublicationRecoveryTests.Fixture())
+            {
+                var held = stuck.Saved;
+                string heldInstance = held.State.InstanceId.ToString("D"), heldOperation = held.State.PendingPublication!.OperationId.ToString("D");
+                async Task<JsonElement> Resolve(int id, string revision, string operation, string choice) =>
+                    (await Request(id, "tools/call", new { name = "kicad_design_recovery_resolve_pending", arguments = new
+                        { instanceId = heldInstance, recoveryPath = stuck.RecordPath, expectedRevisionToken = revision, operationId = operation, choice } }))
+                    .GetProperty("result");
+                string Code(JsonElement result) => result.GetProperty("structuredContent").GetProperty("errorCode").GetString()!;
+                byte[] heldBytes = await File.ReadAllBytesAsync(stuck.RecordPath, timeout.Token);
+                Assert.AreEqual("invalid_resolution_choice", Code(await Resolve(4100, held.RevisionToken, heldOperation, "roll-back")));
+                Assert.AreEqual("design_recovery_changed", Code(await Resolve(4101, new string('0', 64), heldOperation, "undo")));
+                Assert.AreEqual("pending_operation_mismatch", Code(await Resolve(4102, held.RevisionToken, Guid.NewGuid().ToString("D"), "undo")));
+                // This operation had already asked KiCad to save its result: only keeping that result, or completing it, is left.
+                var saving = await Resolve(4103, held.RevisionToken, heldOperation, "discard");
+                Assert.AreEqual("pending_native_save_started", Code(saving), saving.GetRawText());
+                StringAssert.Contains(saving.GetProperty("structuredContent").GetProperty("errorMessage").GetString(), "keep-and-replan");
+                var unattached = await Resolve(4104, held.RevisionToken, heldOperation, "keep-and-replan");
+                Assert.AreEqual("instance_not_attached", Code(unattached), unattached.GetRawText());
+                StringAssert.Contains(unattached.GetProperty("structuredContent").GetProperty("errorMessage").GetString(), "kicad_instance_attach");
+                CollectionAssert.AreEqual(heldBytes, await File.ReadAllBytesAsync(stuck.RecordPath, timeout.Token), "Every refusal changes nothing.");
+                Assert.IsFalse(Directory.Exists(DesignPendingResolutions.Directory(stuck.RecordPath)), "A refused resolution keeps no receipt.");
+                DesignPendingResolution Receipt(Guid operation, string choice, string outcome, string from, Guid? continuation) => new(
+                    DesignPendingResolution.CurrentSchemaVersion, operation, null, held.State.InstanceId, choice, outcome, from, "publication", "ordinary",
+                    "completed", held.State.PendingNativeState!.ProcessEpoch, held.State.NativeRevision, held.State.NativeRevision, null, 0, continuation,
+                    false, new string('0', 64), new string('0', 64), null, null, null, null, null, DateTimeOffset.UtcNow);
+                // A receipt that an attempt left when its record replacement failed is never reported as the operation's
+                // resolution: the record still holds the operation, so a call naming that attempt's revision is refused.
+                string earlier = new string('e', 64);
+                DesignPendingResolutions.Write(stuck.RecordPath, Receipt(Guid.Parse(heldOperation), "undo", DesignPendingResolution.Undone, earlier, null));
+                var stale = await Resolve(4105, earlier, heldOperation, "undo");
+                Assert.AreEqual("design_recovery_changed", Code(stale), stale.GetRawText());
+                // The publication of a result KiCad kept (keep-and-replan) sends no native edit of its own: undo is refused before
+                // KiCad is contacted, and the refusal names the ways out.
+                DesignPendingResolutions.Write(stuck.RecordPath, Receipt(Guid.NewGuid(), "keep-and-replan", DesignPendingResolution.KeepPending,
+                    held.RevisionToken, Guid.Parse(heldOperation)));
+                var keptUndo = await Resolve(4106, held.RevisionToken, heldOperation, "undo");
+                Assert.AreEqual("kept_result_pending", Code(keptUndo), keptUndo.GetRawText());
+                string keptMessage = keptUndo.GetProperty("structuredContent").GetProperty("errorMessage").GetString()!;
+                StringAssert.Contains(keptMessage, "kicad_design_sync_apply");
+                StringAssert.Contains(keptMessage, "keep-and-replan");
+                StringAssert.Contains(keptMessage, "discard");
+                CollectionAssert.AreEqual(heldBytes, await File.ReadAllBytesAsync(stuck.RecordPath, timeout.Token), "Every refusal changes nothing.");
+            }
+            string syncRecoveryPath = Path.Combine(state, "designs", "sync-recovery.json");
+            var syncFixture = SchematicSynchronizationPlanTests.Fixture();
+            var syncStore = new DesignRecoveryStore(syncRecoveryPath);
+            var syncSaved = syncStore.Save(syncFixture, null);
+            byte[] syncOriginal = await File.ReadAllBytesAsync(syncRecoveryPath, timeout.Token);
+            var syncPlan = await Request(4080, "tools/call", new { name = "kicad_design_sync_plan",
+                arguments = new { instanceId = syncFixture.InstanceId.ToString("D"), recoveryPath = syncRecoveryPath,
+                    expectedRevisionToken = syncSaved.RevisionToken } });
+            Assert.IsFalse(syncPlan.GetProperty("result").GetProperty("isError").GetBoolean(),
+                syncPlan.GetProperty("result").GetProperty("structuredContent").GetProperty("errorMessage").GetString());
+            var syncData = syncPlan.GetProperty("result").GetProperty("structuredContent");
+            Assert.IsTrue(syncData.GetProperty("canPrepare").GetBoolean());
+            Assert.IsFalse(syncData.GetProperty("liveMutationAuthorized").GetBoolean());
+            Assert.IsFalse(syncData.GetProperty("designFileWritten").GetBoolean());
+            Assert.IsFalse(syncData.GetProperty("baselineAdvanced").GetBoolean());
+            Assert.AreEqual(SchematicDesignXml.Write(syncFixture.Baseline, syncFixture.KnowledgeLibraries),
+                syncData.GetProperty("candidateDesignXml").GetString());
+            string candidateXml = syncData.GetProperty("candidateDesignXml").GetString()!;
+            var candidateDesign = SchematicDesignXml.Read(candidateXml, syncFixture.KnowledgeLibraries);
+            candidateDesign.Schematic.Instances[0].Metadata.TitleBlock.Title = "Stored production MCP candidate";
+            candidateXml = SchematicDesignXml.Write(candidateDesign, syncFixture.KnowledgeLibraries);
+            string candidateHash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(candidateXml)));
+            var candidateCommit = await Request(4084, "tools/call", new { name = "kicad_design_candidate_commit",
+                arguments = new { instanceId = syncFixture.InstanceId.ToString("D"), recoveryPath = syncRecoveryPath,
+                    expectedRevisionToken = syncSaved.RevisionToken, candidateXml, expectedCandidateSha256 = candidateHash,
+                    operationId = Guid.NewGuid().ToString("D") } });
+            var candidateCommitResult = candidateCommit.GetProperty("result");
+            Assert.IsFalse(candidateCommitResult.TryGetProperty("isError", out var candidateCommitError) && candidateCommitError.GetBoolean());
+            var candidateCommitState = candidateCommit.GetProperty("result").GetProperty("structuredContent");
+            Assert.IsTrue(candidateCommitState.GetProperty("desiredCandidateStored").GetBoolean());
+            Assert.IsFalse(candidateCommitState.GetProperty("designFileWritten").GetBoolean());
+            Assert.IsFalse(candidateCommitState.GetProperty("nativeMutationCommitted").GetBoolean());
+            var committedRecoveryBytes = await File.ReadAllBytesAsync(syncRecoveryPath, timeout.Token);
+            CollectionAssert.AreNotEqual(syncOriginal, committedRecoveryBytes);
+            Assert.AreEqual(candidateCommitState.GetProperty("recoveryRevisionToken").GetString(), syncStore.Read()!.RevisionToken);
+            var staleSync = await Request(4081, "tools/call", new { name = "kicad_design_sync_plan",
+                arguments = new { instanceId = syncFixture.InstanceId.ToString("D"), recoveryPath = syncRecoveryPath,
+                    expectedRevisionToken = "stale" } });
+            Assert.AreEqual("design_recovery_changed", staleSync.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            var wrongSync = await Request(4082, "tools/call", new { name = "kicad_design_sync_plan",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), recoveryPath = syncRecoveryPath,
+                    expectedRevisionToken = syncSaved.RevisionToken } });
+            Assert.AreEqual("recovery_instance_mismatch", wrongSync.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            await Assert.ThrowsExactlyAsync<OperationCanceledException>(() => new RecoveryTools().PlanSynchronization(
+                syncFixture.InstanceId.ToString("D"), syncRecoveryPath, syncSaved.RevisionToken, new CancellationToken(true)));
+            CollectionAssert.AreEqual(committedRecoveryBytes, await File.ReadAllBytesAsync(syncRecoveryPath, timeout.Token));
+            string netRecoveryPath = Path.Combine(state, "designs", "net-recovery.json");
+            var netFixture = SchematicNetReconciliationTests.Fixture();
+            var netStore = new DesignRecoveryStore(netRecoveryPath);
+            var netSaved = netStore.Save(netFixture, null);
+            byte[] netOriginalBytes = await File.ReadAllBytesAsync(netRecoveryPath, timeout.Token);
+            var netPlan = await Request(4070, "tools/call", new { name = "kicad_design_nets_reconcile",
+                arguments = new { instanceId = netFixture.InstanceId.ToString("D"), recoveryPath = netRecoveryPath,
+                    expectedRevisionToken = netSaved.RevisionToken } });
+            var netPlanState = netPlan.GetProperty("result").GetProperty("structuredContent");
+            Assert.IsTrue(netPlanState.GetProperty("canPlan").GetBoolean());
+            Assert.IsFalse(netPlanState.GetProperty("liveMutationAuthorized").GetBoolean());
+            Assert.AreEqual(EngineeringDesignXml.Write(netFixture.Baseline.Engineering, netFixture.KnowledgeLibraries),
+                netPlanState.GetProperty("candidateEngineeringXml").GetString());
+            Assert.AreEqual(netSaved.RevisionToken, netStore.Read()!.RevisionToken);
+            var staleNetPlan = await Request(4071, "tools/call", new { name = "kicad_design_nets_reconcile",
+                arguments = new { instanceId = netFixture.InstanceId.ToString("D"), recoveryPath = netRecoveryPath,
+                    expectedRevisionToken = "stale" } });
+            Assert.AreEqual("design_recovery_changed", staleNetPlan.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            var foreignNetPlan = await Request(4072, "tools/call", new { name = "kicad_design_nets_reconcile",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), recoveryPath = netRecoveryPath,
+                    expectedRevisionToken = netSaved.RevisionToken } });
+            Assert.AreEqual("recovery_instance_mismatch", foreignNetPlan.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            using (var cancelledNetPlan = new CancellationTokenSource())
+            {
+                cancelledNetPlan.Cancel();
+                Assert.ThrowsExactly<OperationCanceledException>(() => new RecoveryTools().ReconcileNets(
+                    netFixture.InstanceId.ToString("D"), netRecoveryPath, netSaved.RevisionToken, cancelledNetPlan.Token));
+            }
+            CollectionAssert.AreEqual(netOriginalBytes, await File.ReadAllBytesAsync(netRecoveryPath, timeout.Token));
+            var incompleteNetSaved = netStore.Save(netFixture with { BaselineElectrical = null }, netSaved.RevisionToken);
+            var incompleteNetPlan = await Request(4073, "tools/call", new { name = "kicad_design_nets_reconcile",
+                arguments = new { instanceId = netFixture.InstanceId.ToString("D"), recoveryPath = netRecoveryPath,
+                    expectedRevisionToken = incompleteNetSaved.RevisionToken } });
+            Assert.IsTrue(incompleteNetPlan.GetProperty("result").GetProperty("isError").GetBoolean());
+            Assert.AreEqual("missing_electrical_baseline", incompleteNetPlan.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            Assert.AreEqual(incompleteNetSaved.RevisionToken, netStore.Read()!.RevisionToken);
             string recoveryPath = Path.Combine(state, "designs", "design-recovery.json");
             var recoveryFixture = DesignRecoveryStoreTests.Fixture();
             recoveryFixture = recoveryFixture with
@@ -662,6 +1066,410 @@ public sealed class McpProcessTests
                 if (response.RootElement.TryGetProperty("id", out var responseId) && responseId.GetInt32() == id)
                     return response.RootElement.Clone();
             }
+        }
+    }
+
+    // Decision n39ac0ccc5c9270f2 / ledger pbfcccd896f17cf27 through the compiled server. kicad_design_sync_plan
+    // classifies a saved connection-only revision with the handshake this server recorded when it attached the
+    // instance and never contacts KiCad for it; with no attached instance it is today's plan; reattaching refreshes
+    // the record. The automatic worker and apply take their own live handshakes and classify the same revision the
+    // same way. A scripted editor on the real NNG transport stands in for KiCad so both handshakes, with and without
+    // schematic.connection-realization.v1, can be driven here; NativeSessionTests (VerifyRecordedHandshakePlanning) proves
+    // the advertised case against a real KiCad started for a project, which advertises it (CN-1 §8.3). With the capability the planner plans the connection's realization
+    // (CN-1 §4.3), and the scripted editor refuses the realization's measurement, so the worker and apply must both
+    // stop with that measurement's code (CN-1 §13) after sending the editor the same requests.
+    [TestMethod]
+    public async Task SyncPreviewClassifiesWithTheAttachedInstancesHandshakeOverStdio()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-mcp-handshake-").FullName;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
+        try
+        {
+            string project = Directory.CreateDirectory(Path.Combine(root, "project")).FullName;
+            var state = ConnectionOnlyRevision(project);
+            string instanceId = state.InstanceId.ToString("D");
+            using var editor = new ScriptedNngEditor(root, state, Path.Combine(project, "fixture.kicad_pro"));
+            string handshake = Protocol.GetAutomationSession.Descriptor.FullName, capture = Protocol.ReadCheckedSchematicState.Descriptor.FullName,
+                observe = Protocol.ReadSchematicElectricalState.Descriptor.FullName, measure = Protocol.MeasureSchematicPlacement.Descriptor.FullName;
+            var advertising = editor.Session(advertises: true);
+            Assert.AreEqual(SchematicConnectedAdditionKind.Admitted,
+                SchematicConnectedAddition.Classify(state, DesignRecoveryStore.ReadDesired(state), advertising).Kind,
+                "The saved revision only adds a connection over drawn pins.");
+            var today = SchematicSynchronizationPlanner.Plan(state);
+            var realizing = SchematicSynchronizationPlanner.Plan(state, advertising);
+            Assert.IsTrue(today.CanPrepare, today.ErrorMessage);
+            Assert.IsFalse(today.NativeConnectionRealizationRequired);
+            Assert.IsTrue(realizing.CanPrepare, realizing.ErrorCode + ": " + realizing.ErrorMessage);
+            Assert.IsTrue(realizing.NativeConnectionRealizationRequired,
+                "With the capability an admitted connection-only revision plans a native realization (CN-1 §4.3): " + realizing.ErrorMessage);
+
+            int records = 0;
+            (string Recovery, string Design, string Token) Record()
+            {
+                string folder = Directory.CreateDirectory(Path.Combine(root, "records", (++records).ToString())).FullName;
+                string recovery = Path.Combine(folder, "recovery.json"), design = Path.Combine(folder, "design.xml");
+                File.WriteAllBytes(design, state.DesiredFileBytes);
+                return (recovery, design, new DesignRecoveryStore(recovery).Save(state, null).RevisionToken);
+            }
+            await using var mcp = await StdioMcpFixture.StartAsync(Path.Combine(root, "mcp-state"), Path.Combine(root, "mcp.stderr.log"), timeout.Token);
+            var preview = Record();
+            async Task<JsonElement> Preview() => (await mcp.Tool("kicad_design_sync_plan", new { instanceId,
+                recoveryPath = preview.Recovery, expectedRevisionToken = preview.Token })).GetProperty("structuredContent");
+            // The worker discovers the editor, refreshes its observation, plans with its own handshake and applies.
+            async Task<(string? Code, string[] Requests, DesignRecoveryState Record)> Worker()
+            {
+                var target = Record(); int from = editor.Requests.Length;
+                var started = await mcp.Tool("kicad_design_automatic_sync_start", new { instanceId, recoveryPath = target.Recovery,
+                    designPath = target.Design, expectedRecoveryRevision = target.Token });
+                Assert.IsFalse(started.TryGetProperty("isError", out var failed) && failed.GetBoolean(), started.GetRawText());
+                string sessionId = started.GetProperty("structuredContent").GetProperty("sessionId").GetString()!;
+                var status = started.GetProperty("structuredContent").GetProperty("status");
+                while (status.GetProperty("phase").GetString() is not ("Paused" or "Watching" or "Stopped" or "InvalidDesign"))
+                    status = (await mcp.Tool("kicad_design_automatic_sync_wait", new { instanceId, sessionId,
+                        afterSequence = status.GetProperty("sequence").GetUInt64() })).GetProperty("structuredContent").GetProperty("status");
+                var stopped = await mcp.Tool("kicad_design_automatic_sync_stop", new { instanceId, sessionId });
+                Assert.AreEqual("Stopped", stopped.GetProperty("structuredContent").GetProperty("status").GetProperty("phase").GetString(), stopped.GetRawText());
+                Assert.AreEqual("Paused", status.GetProperty("phase").GetString(), status.GetRawText());
+                return (status.GetProperty("errorCode").GetString(), editor.Requests[from..], new DesignRecoveryStore(target.Recovery).Read()!.State);
+            }
+            async Task<(string? Code, string[] Requests, DesignRecoveryState Record)> Apply()
+            {
+                var target = Record(); int from = editor.Requests.Length;
+                var result = await mcp.Tool("kicad_design_sync_apply", new { instanceId, recoveryPath = target.Recovery,
+                    designPath = target.Design, expectedRevisionToken = target.Token, operationId = Guid.NewGuid().ToString("D") });
+                Assert.IsTrue(result.GetProperty("isError").GetBoolean(), "The scripted editor cannot complete an application: " + result.GetRawText());
+                return (result.GetProperty("structuredContent").GetProperty("errorCode").GetString(), editor.Requests[from..],
+                    new DesignRecoveryStore(target.Recovery).Read()!.State);
+            }
+            string[] workerStart = [handshake, capture, handshake, observe];
+
+            // Without an attached instance the preview is today's plan, and nothing contacts the editor.
+            var unattached = await Preview();
+            RequirePreviewPlan(today, unattached);
+            Assert.IsEmpty(editor.Requests);
+
+            // Attached to an editor that advertises realization, the preview classifies with the recorded handshake.
+            editor.Advertises = true;
+            var attached = await mcp.Tool("kicad_instance_attach", new { endpoint = editor.Endpoint, expectedInstanceId = instanceId });
+            Assert.IsFalse(attached.TryGetProperty("isError", out var attachFailed) && attachFailed.GetBoolean(), attached.GetRawText());
+            CollectionAssert.AreEqual(new[] { handshake }, editor.Requests, "Attaching reads one handshake.");
+            var recorded = await Preview();
+            RequirePreviewPlan(realizing, recorded);
+            Assert.AreNotEqual(unattached.GetRawText(), recorded.GetRawText(), "The recorded handshake decides the classification.");
+            Assert.HasCount(1, editor.Requests, "The preview never contacts KiCad.");
+
+            // The worker and apply, each with its own advertising handshake, classify the revision the same way.
+            var worker = await Worker();
+            var apply = await Apply();
+            CollectionAssert.AreEqual(workerStart, worker.Requests.Take(4).ToArray(), string.Join(", ", worker.Requests));
+            // Both hand the realization to its measurement of the captured checkpoint (CN-1 §9.1). The scripted editor
+            // refuses the measurement, so both stop with the same code and nothing is journaled, drawn or saved.
+            CollectionAssert.AreEqual(apply.Requests, worker.Requests[4..], "The worker's application sends exactly apply's requests: " + string.Join(", ", worker.Requests));
+            CollectionAssert.AreEqual(new[] { handshake, capture }, apply.Requests.Take(2).ToArray(), string.Join(", ", apply.Requests));
+            Assert.IsGreaterThan(2, apply.Requests.Length, "After the capture the realization measures the checkpoint: " + string.Join(", ", apply.Requests));
+            Assert.IsTrue(apply.Requests.Skip(2).All(r => r == measure),
+                "After the capture the realization only measures the checkpoint: " + string.Join(", ", apply.Requests));
+            Assert.AreEqual(SchematicConnectionErrors.RealizationMeasurementUnsupported, apply.Code, "Apply stops at the refused measurement.");
+            Assert.AreEqual(apply.Code, worker.Code, "The worker pauses with apply's code.");
+            Assert.IsFalse(worker.Record.HasPendingWork, "Nothing is journaled before the editor has been measured.");
+            Assert.IsFalse(apply.Record.HasPendingWork, "Nothing is journaled before the editor has been measured.");
+            Console.WriteLine($"Advertised handshake: the planner plans a native realization; "
+                + $"worker {worker.Code} after [{string.Join(", ", worker.Requests)}]; apply {apply.Code} after [{string.Join(", ", apply.Requests)}].");
+
+            // The preview reads the record made at attach, not the live editor: after the editor stops advertising the
+            // preview is unchanged until the instance is reattached, which refreshes the record.
+            editor.Advertises = false;
+            int beforeReattach = editor.Requests.Length;
+            Assert.AreEqual(recorded.GetRawText(), (await Preview()).GetRawText(), "Only attachment records a handshake.");
+            Assert.HasCount(beforeReattach, editor.Requests, "The preview never contacts KiCad.");
+            var reattached = await mcp.Tool("kicad_instance_reattach", new { instanceId });
+            Assert.IsFalse(reattached.TryGetProperty("isError", out var reattachFailed) && reattachFailed.GetBoolean(), reattached.GetRawText());
+            Assert.AreEqual(unattached.GetRawText(), (await Preview()).GetRawText(),
+                "Reattaching refreshes the recorded handshake; without the capability the preview is today's plan.");
+
+            // Without the capability the worker and apply take today's general path: both journal the XML publication
+            // and refuse it, because the editor does not show the new connection.
+            worker = await Worker();
+            apply = await Apply();
+            CollectionAssert.AreEqual(workerStart, worker.Requests.Take(4).ToArray(), string.Join(", ", worker.Requests));
+            CollectionAssert.AreEqual(new[] { handshake, capture, capture }, apply.Requests, string.Join(", ", apply.Requests));
+            CollectionAssert.AreEqual(apply.Requests, worker.Requests[4..], "The worker's application sends exactly apply's requests: " + string.Join(", ", worker.Requests));
+            foreach (var (name, result) in new[] { ("worker", worker), ("apply", apply) })
+            {
+                Assert.AreEqual("native_sync_connectivity_mismatch", result.Code, name);
+                Assert.IsNotNull(result.Record.PendingPublication, $"The {name} journals the general path's XML publication.");
+                Assert.IsNull(result.Record.PendingLayout, $"The {name} must not plan a connection realization.");
+                Assert.IsNull(result.Record.PendingMutation, $"The {name} has no native batch to send.");
+            }
+            Console.WriteLine($"Unadvertised handshake after reattach: worker {worker.Code} after [{string.Join(", ", worker.Requests)}]; "
+                + $"apply {apply.Code} after [{string.Join(", ", apply.Requests)}].");
+            CollectionAssert.DoesNotContain(editor.Requests, Protocol.CheckedSchematicBatch.Descriptor.FullName, "Nothing is drawn.");
+            CollectionAssert.DoesNotContain(editor.Requests, Protocol.CheckedSaveDocument.Descriptor.FullName, "Nothing is saved.");
+            Assert.AreEqual(preview.Token, new DesignRecoveryStore(preview.Recovery).Read()!.RevisionToken, "The preview writes nothing.");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    // The public preview reports exactly the planner's own plan for the same record and handshake. The test sync host
+    // (SyncHarnessProcessTests) holds its preview to the same comparison.
+    internal static void RequirePreviewPlan(SchematicSynchronizationPlan expected, JsonElement preview)
+    {
+        Assert.AreEqual(expected.CanPrepare, preview.GetProperty("canPrepare").GetBoolean(), preview.GetRawText());
+        Assert.AreEqual(expected.ErrorCode, preview.GetProperty("errorCode").GetString(), preview.GetRawText());
+        Assert.AreEqual(expected.CandidateXml, preview.GetProperty("candidateDesignXml").GetString(), preview.GetRawText());
+        CollectionAssert.AreEqual(expected.NativeOperations.Select(o => SchematicJson.Formatter.Format(o)).ToArray(),
+            preview.GetProperty("nativeOperationsJson").EnumerateArray().Select(o => o.GetString()).ToArray(), preview.GetRawText());
+        Assert.AreEqual(expected.NativeConnectivityValidationRequired, preview.GetProperty("nativeConnectivityValidationRequired").GetBoolean(),
+            preview.GetRawText());
+
+        // CN-1 §9.5: whether apply draws the connections in KiCad, and a summary of what it will draw.
+        Assert.AreEqual(expected.NativeConnectionRealizationRequired, preview.GetProperty("connectionRealizationRequired").GetBoolean(),
+            preview.GetRawText());
+        var intent = preview.GetProperty("connectionIntent");
+        if (expected.Connections is not { } planned)
+        {
+            Assert.AreEqual(JsonValueKind.Null, intent.ValueKind, "Only a realization plan previews connections: " + preview.GetRawText());
+            return;
+        }
+        // A realization plan publishes no XML and sends no ready-made operations: apply measures KiCad and draws first.
+        Assert.IsTrue(preview.GetProperty("canPrepare").GetBoolean(), preview.GetRawText());
+        Assert.AreEqual(JsonValueKind.Null, preview.GetProperty("candidateDesignXml").ValueKind, preview.GetRawText());
+        Assert.AreEqual(0, preview.GetProperty("nativeOperationsJson").GetArrayLength(), preview.GetRawText());
+        Assert.IsTrue(preview.GetProperty("nativeConnectivityValidationRequired").GetBoolean(), preview.GetRawText());
+        Assert.AreEqual(JsonValueKind.Object, intent.ValueKind, preview.GetRawText());
+        string json = intent.GetRawText();
+        // The published summary shape: exactly these property names on every object, so a renamed or dropped field
+        // changes the public JSON only together with this contract.
+        void Shape(JsonElement shown, params string[] names) =>
+            CollectionAssert.AreEquivalent(names, shown.EnumerateObject().Select(p => p.Name).ToArray(), "Summary fields: " + shown.GetRawText());
+        Shape(intent, "version", "circuitId", "nativeRevision", "desiredSha256", "nets", "screens", "ports", "expectedGroupCount",
+            "expectedPinCount", "createdSymbolIds");
+        Shape(intent.GetProperty("nativeRevision"), "epoch", "sequence");
+        Assert.AreEqual(planned.Version, intent.GetProperty("version").GetInt32(), json);
+        Assert.AreEqual(planned.CircuitId, intent.GetProperty("circuitId").GetGuid(), json);
+        Assert.AreEqual(planned.DesiredSha256, intent.GetProperty("desiredSha256").GetString(), json);
+        Assert.AreEqual(planned.NativeRevision.Epoch, intent.GetProperty("nativeRevision").GetProperty("epoch").GetString(), json);
+        Assert.AreEqual(planned.NativeRevision.Sequence, intent.GetProperty("nativeRevision").GetProperty("sequence").GetUInt64(), json);
+        static (Guid, string?) Pin(JsonElement pin) => (pin.GetProperty("componentId").GetGuid(), pin.GetProperty("pin").GetString());
+        // CN-1 §5.9 publishes these scope and role names; renaming an enum member must not silently rename them.
+        static string ScopeName(ConnectionScope scope) => scope switch
+        {
+            ConnectionScope.Local => "Local", ConnectionScope.Global => "Global",
+            _ => throw new AssertFailedException("CN-1 §5.9 names no connection scope " + (int)scope + ".")
+        };
+        static string RoleName(ConnectionMemberRole role) => role switch
+        {
+            ConnectionMemberRole.Signal => "Signal", ConnectionMemberRole.PowerCarrier => "PowerCarrier",
+            ConnectionMemberRole.ImplicitPower => "ImplicitPower",
+            _ => throw new AssertFailedException("CN-1 §5.9 names no member role " + (int)role + ".")
+        };
+
+        // Every connected net with its scope and global name, and the pins it gains.
+        var nets = intent.GetProperty("nets").EnumerateArray().ToArray();
+        Assert.IsNotEmpty(planned.Nets, "A realization plan connects at least one net.");
+        Assert.HasCount(planned.Nets.Count, nets, json);
+        foreach (var (net, shown) in planned.Nets.Zip(nets))
+        {
+            Shape(shown, "netId", "name", "scope", "globalName", "addedPins");
+            foreach (var pin in shown.GetProperty("addedPins").EnumerateArray()) Shape(pin, "componentId", "pin");
+            Assert.AreEqual(net.NetId, shown.GetProperty("netId").GetGuid(), json);
+            Assert.AreEqual(net.Name, shown.GetProperty("name").GetString(), json);
+            Assert.AreEqual(ScopeName(net.Scope), shown.GetProperty("scope").GetString(), json);
+            Assert.AreEqual(net.GlobalName, shown.GetProperty("globalName").GetString(), json);
+            CollectionAssert.AreEqual(net.AddedPins.Select(p => ((Guid, string?))(p.ComponentId, p.Pin)).ToArray(),
+                shown.GetProperty("addedPins").EnumerateArray().Select(Pin).ToArray(), json);
+        }
+
+        // Every sheet island to draw, with its label text, join need and each member's role and stub need.
+        var screens = intent.GetProperty("screens").EnumerateArray().ToArray();
+        Assert.HasCount(planned.Screens.Count, screens, json);
+        foreach (var (screen, shownScreen) in planned.Screens.Zip(screens))
+        {
+            Shape(shownScreen, "screenId", "instancePaths", "islands");
+            Assert.AreEqual(screen.ScreenId, shownScreen.GetProperty("screenId").GetGuid(), json);
+            CollectionAssert.AreEqual(screen.InstancePathKeys.ToArray(),
+                shownScreen.GetProperty("instancePaths").EnumerateArray().Select(p => p.GetString()).ToArray(), json);
+            var islands = shownScreen.GetProperty("islands").EnumerateArray().ToArray();
+            Assert.HasCount(screen.Islands.Count, islands, json);
+            foreach (var (island, shown) in screen.Islands.Zip(islands))
+            {
+                Shape(shown, "netId", "sheetPath", "scope", "labelText", "members", "anchorHasMatchingDriver", "joinRequired",
+                    "joinCandidates", "uplinkSheetSymbolId", "childSheetSymbolIds");
+                Assert.AreEqual(island.NetId, shown.GetProperty("netId").GetGuid(), json);
+                Assert.AreEqual(island.SheetPathKey, shown.GetProperty("sheetPath").GetString(), json);
+                Assert.AreEqual(ScopeName(island.Scope), shown.GetProperty("scope").GetString(), json);
+                Assert.AreEqual(island.LabelText, shown.GetProperty("labelText").GetString(), json);
+                Assert.AreEqual(island.JoinRequired, shown.GetProperty("joinRequired").GetBoolean(), json);
+                Assert.AreEqual(island.AnchorHasMatchingDriver, shown.GetProperty("anchorHasMatchingDriver").GetBoolean(), json);
+                CollectionAssert.AreEqual(island.JoinCandidates.Select(p => p.PlacedPinId).ToArray(),
+                    shown.GetProperty("joinCandidates").EnumerateArray().Select(p => p.GetGuid()).ToArray(), json);
+                Assert.AreEqual(island.UplinkSheetSymbolId?.ToString("D"), shown.GetProperty("uplinkSheetSymbolId").GetString(), json);
+                CollectionAssert.AreEqual(island.ChildSheetSymbolIds.ToArray(),
+                    shown.GetProperty("childSheetSymbolIds").EnumerateArray().Select(p => p.GetGuid()).ToArray(), json);
+                var members = shown.GetProperty("members").EnumerateArray().ToArray();
+                Assert.HasCount(island.Members.Count, members, json);
+                foreach (var (member, shownMember) in island.Members.Zip(members))
+                {
+                    Shape(shownMember, "componentId", "pin", "placedPinId", "symbolId", "createdSymbol", "role", "alreadyConnected",
+                        "requiresStub", "powerName");
+                    Assert.AreEqual(((Guid, string?))(member.Pin.Endpoint.ComponentId, member.Pin.Endpoint.Pin), Pin(shownMember), json);
+                    Assert.AreEqual(member.Pin.PlacedPinId, shownMember.GetProperty("placedPinId").GetGuid(), json);
+                    Assert.AreEqual(member.Pin.SymbolId, shownMember.GetProperty("symbolId").GetGuid(), json);
+                    Assert.AreEqual(member.Pin.CreatedSymbol, shownMember.GetProperty("createdSymbol").GetBoolean(), json);
+                    Assert.AreEqual(RoleName(member.Role), shownMember.GetProperty("role").GetString(), json);
+                    Assert.AreEqual(member.AlreadyConnected, shownMember.GetProperty("alreadyConnected").GetBoolean(), json);
+                    Assert.AreEqual(member.RequiresStub, shownMember.GetProperty("requiresStub").GetBoolean(), json);
+                    Assert.AreEqual(member.PowerName, shownMember.GetProperty("powerName").GetString(), json);
+                }
+            }
+        }
+
+        // Every sheet crossing, and the number of native pin groups apply must prove in one commit.
+        var ports = intent.GetProperty("ports").EnumerateArray().ToArray();
+        Assert.HasCount(planned.Ports.Count, ports, json);
+        foreach (var (port, shown) in planned.Ports.Zip(ports))
+        {
+            Shape(shown, "netId", "childPath", "parentPath", "sheetSymbolId", "portText", "sheetPinExists", "uplinkLabelExists");
+            Assert.AreEqual(port.NetId, shown.GetProperty("netId").GetGuid(), json);
+            Assert.AreEqual(port.ChildPathKey, shown.GetProperty("childPath").GetString(), json);
+            Assert.AreEqual(port.ParentPathKey, shown.GetProperty("parentPath").GetString(), json);
+            Assert.AreEqual(port.SheetSymbolId, shown.GetProperty("sheetSymbolId").GetGuid(), json);
+            Assert.AreEqual(port.PortText, shown.GetProperty("portText").GetString(), json);
+            Assert.AreEqual(port.SheetPinExists, shown.GetProperty("sheetPinExists").GetBoolean(), json);
+            Assert.AreEqual(port.UplinkLabelExists, shown.GetProperty("uplinkLabelExists").GetBoolean(), json);
+        }
+        Assert.AreEqual(planned.ExpectedGroups.Count, intent.GetProperty("expectedGroupCount").GetInt32(), json);
+        Assert.AreEqual(planned.ExpectedGroups.Sum(g => g.Count), intent.GetProperty("expectedPinCount").GetInt32(), json);
+        CollectionAssert.AreEqual(planned.CreatedSymbolIds.ToArray(),
+            intent.GetProperty("createdSymbolIds").EnumerateArray().Select(p => p.GetGuid()).ToArray(), json);
+        var drawn = planned.Screens.SelectMany(s => s.Islands).ToArray();
+        Console.WriteLine($"Previewed connections: nets [{string.Join(", ", planned.Nets.Select(n => $"{n.Name} {n.Scope}{(n.GlobalName is null ? "" : " " + n.GlobalName)}"))}]; "
+            + $"islands [{string.Join(", ", drawn.Select(i => $"'{i.LabelText}' {i.Members.Count(m => m.RequiresStub)}/{i.Members.Count} stubs"
+                + (i.JoinRequired ? " join" : "")))}]; ports {planned.Ports.Count}; expected native groups {planned.ExpectedGroups.Count}.");
+    }
+
+    // The planning fixture with one saved XML revision that only joins two drawn pins (as in
+    // AutomaticDesignSynchronizationTests), moved into a real project folder where an automatic worker keeps its
+    // history. The editor checkpoint carries one exact native revision, and every sheet reports the connection
+    // grid realization draws on (CN-1 §6.1).
+    private static DesignRecoveryState ConnectionOnlyRevision(string projectDirectory)
+    {
+        var state = SchematicSynchronizationPlanTests.Fixture();
+        var schematic = state.Baseline.Schematic.Clone();
+        schematic.Document.Project.Path = projectDirectory;
+        foreach (var screen in schematic.Instances)
+        {
+            if (screen.Metadata.Document?.Project is { } owner) owner.Path = projectDirectory;
+            screen.Metadata.Formatting = SchematicFormattingTests.Formatting();
+        }
+        var revision = new Protocol.DocumentRevision { Epoch = Guid.NewGuid().ToString("D"), Sequence = state.NativeRevision.Sequence };
+        var baselineElectrical = state.BaselineElectrical!.Clone();
+        baselineElectrical.Hierarchy.Data = schematic.Clone(); baselineElectrical.Hierarchy.Revision = revision.Clone();
+        var observedElectrical = state.ObservedElectrical!.Clone();
+        observedElectrical.Hierarchy.Data = schematic.Clone(); observedElectrical.Hierarchy.Revision = revision.Clone();
+        state = state with { Baseline = state.Baseline with { Schematic = schematic }, Observed = schematic.Clone(),
+            NativeRevision = new(revision.Epoch, revision.Sequence), BaselineElectrical = baselineElectrical, ObservedElectrical = observedElectrical };
+        var circuit = state.Baseline.Engineering.Circuit;
+        var design = state.Baseline with { Engineering = state.Baseline.Engineering with { Circuit = circuit with { Nets =
+            [.. circuit.Nets, new CircuitNet(Guid.NewGuid(), "SIG", [new(circuit.Components[0].Id, "1"), new(circuit.Components[1].Id, "1")])] } } };
+        return state with { DesiredFileBytes = System.Text.Encoding.UTF8.GetBytes(SchematicDesignXml.Write(design, state.KnowledgeLibraries)) };
+    }
+
+    /// <summary>An editor on the real NNG request/reply transport. It answers its handshake, the checked checkpoint
+    /// capture and the electrical observation of one saved state, refuses every other request, and records each
+    /// request by message name. It stands in only for a KiCad that advertises schematic.connection-realization.v1,
+    /// which no native build does yet (CN-1 §8.3).</summary>
+    private sealed class ScriptedNngEditor : IDisposable
+    {
+        private readonly Nng.Socket socket;
+        private readonly Task serving;
+        private readonly object gate = new();
+        private readonly List<string> requests = [];
+        private readonly string instanceId, projectPath, eventEndpoint, epoch = Guid.NewGuid().ToString("D");
+        private readonly Protocol.CheckedSchematicState checkpoint;
+        private readonly Protocol.SchematicElectricalState electrical;
+        private volatile bool advertises;
+        internal string Endpoint { get; }
+        internal bool Advertises { get => advertises; set => advertises = value; }
+        internal string[] Requests { get { lock (gate) return [.. requests]; } }
+
+        internal ScriptedNngEditor(string directory, DesignRecoveryState state, string projectPath)
+        {
+            instanceId = state.InstanceId.ToString("D"); this.projectPath = projectPath;
+            Endpoint = NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "editor.sock"));
+            // Nothing publishes here: the worker's event subscription waits, which is all this check needs.
+            eventEndpoint = NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "events.sock"));
+            electrical = state.ObservedElectrical!.Clone();
+            checkpoint = new Protocol.CheckedSchematicState
+            {
+                Electrical = electrical.Clone(),
+                State = new() { Document = state.Baseline.Schematic.Document.Clone(), ProcessEpoch = epoch,
+                    NativeIdentity = Guid.NewGuid().ToString("D"), Revision = electrical.Hierarchy.Revision.Clone(),
+                    Scope = Protocol.DocumentLifecycleScope.DlsSchematicHierarchy, ProjectSettingsIncluded = true,
+                    StateSha256 = new string('a', 64) }
+            };
+            string file = Path.Combine(Path.GetDirectoryName(projectPath)!, "fixture.kicad_sch");
+            checkpoint.State.NativeFiles.Add(file);
+            checkpoint.State.FileBaselines.Add(new Protocol.NativeFileBaselineState { Path = file, BaselinePath = file,
+                BaselineKnown = true, BaselineExists = true, BaselineSha256 = new string('b', 64), BaselineBytes = 1,
+                CurrentKnown = true, CurrentExists = true, CurrentSha256 = new string('b', 64), CurrentBytes = 1,
+                Status = Protocol.NativeFileBaselineStatus.NfbsUnchanged });
+            Nng.Check(Nng.nng_rep0_open(out socket));
+            try
+            {
+                Nng.Check(Nng.nng_setopt_size(socket, "recv-size-max", 8 * 1024 * 1024));
+                Nng.Check(Nng.nng_listen(socket, Endpoint, IntPtr.Zero, 0));
+            }
+            catch { Nng.nng_close(socket); throw; }
+            serving = Task.Factory.StartNew(Serve, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+        }
+
+        internal Protocol.AutomationSession Session(bool advertises)
+        {
+            var session = new Protocol.AutomationSession { ProtocolVersion = 1, InstanceId = instanceId, ProjectPath = projectPath,
+                Epoch = epoch, EventEndpoint = eventEndpoint, EventEpoch = epoch };
+            session.Capabilities.Add("session.info");
+            if (advertises) session.Capabilities.Add(SchematicConnectedAddition.NativeCapability);
+            return session;
+        }
+
+        private void Serve()
+        {
+            // Closing the socket ends the blocked receive.
+            while (true)
+            {
+                nuint size = 0;
+                if (Nng.nng_recv(socket, out IntPtr buffer, ref size, 1) != 0) return;
+                byte[] request = new byte[checked((int)size)];
+                try { System.Runtime.InteropServices.Marshal.Copy(buffer, request, 0, request.Length); }
+                finally { Nng.nng_free(buffer, size); }
+                byte[] reply = Answer(request);
+                if (Nng.nng_send(socket, reply, (nuint)reply.Length, 0) != 0) return;
+            }
+        }
+
+        private byte[] Answer(byte[] bytes)
+        {
+            var message = Kiapi.Common.ApiRequest.Parser.ParseFrom(bytes).Message;
+            lock (gate) requests.Add(message.TypeUrl[(message.TypeUrl.LastIndexOf('/') + 1)..]);
+            Google.Protobuf.IMessage? reply = message.Is(Protocol.GetAutomationSession.Descriptor) ? Session(advertises)
+                : message.Is(Protocol.ReadCheckedSchematicState.Descriptor) ? checkpoint.Clone()
+                : message.Is(Protocol.ReadSchematicElectricalState.Descriptor) ? electrical.Clone() : null;
+            var response = new Kiapi.Common.ApiResponse
+            {
+                Header = new() { KicadToken = epoch },
+                Status = new() { Status = (Kiapi.Common.ApiStatusCode)(reply is null ? 3 : 1),
+                    ErrorMessage = reply is null ? "Refused by the scripted editor" : "" }
+            };
+            if (reply is not null) response.Message = Any.Pack(reply);
+            return Google.Protobuf.MessageExtensions.ToByteArray(response);
+        }
+
+        public void Dispose()
+        {
+            Nng.nng_close(socket);
+            try { serving.Wait(TimeSpan.FromSeconds(5)); }
+            catch (AggregateException) { }
         }
     }
 

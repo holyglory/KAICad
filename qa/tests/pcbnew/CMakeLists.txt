@@ -67,6 +67,8 @@ set( QA_PCBNEW_SRCS
     test_footprint_editor_tabs.cpp
     test_footprint_import_reconciler.cpp
     test_footprint_library_adapter.cpp
+    test_zone_fill_outcome.cpp
+    test_detached_generator_context.cpp
     test_footprint_load_save.cpp
     test_footprint_realignment.cpp
     test_cross_probe_selection.cpp
@@ -204,6 +206,15 @@ set( QA_PCBNEW_SRCS
     drc/test_drc_tuner_agreement.cpp
     drc/test_drc_skew_arc.cpp
     drc/test_drc_unconnected_items_exclusion_loss.cpp
+    drc/test_drc_run_scope.cpp
+    drc/test_drc_provider_isolation.cpp
+    drc/test_drc_document_snapshot.cpp
+    drc/test_drc_copper_preparation.cpp
+    drc/test_drc_schematic_input.cpp
+    drc/test_drc_library_inputs.cpp
+    drc/test_drc_drawing_sheet_inputs.cpp
+    drc/test_drc_captured_rules.cpp
+    drc/test_pcb_drc_job_lifecycle.cpp
     drc/test_drc_via_dangling.cpp
     drc/test_drc_keepout_disallow.cpp
     drc/test_drc_tuning_profiles.cpp
@@ -259,6 +270,7 @@ set( QA_PCBNEW_SRCS
     pcb_io/sprint_layout/test_sprint_layout_import.cpp
 
     pcb_io/kicad_sexpr/test_kicad_sexpr.cpp
+    test_pcb_project_editor_state.cpp
 
     pcb_io/easyedapro/test_easyedapro_import.cpp
     pcb_io/easyedapro/test_easyedapro_v3_import.cpp
@@ -427,6 +439,10 @@ function( add_pcbnew_test_group GROUP_NAME FILTER )
     setup_qa_env( ${TEST_NAME} )
 endfunction()
 
+add_pcbnew_test_group( state_format "KiCadSexprIO/StateSerializationPreservesCurrentEmbeddedResources" )
+add_pcbnew_test_group( file_baseline "KiCadSexprIO/FileBaselineSurvivesNativeLoadSaveAndCopy" )
+add_pcbnew_test_group( project_editor_state "PcbProjectEditorState" )
+
 # Zone fill and zone tests (~40s)
 set( PCBNEW_ZONE_TESTS
     "BasicZoneFills\
@@ -518,6 +534,18 @@ add_pcbnew_test_group( multichannel "${PCBNEW_MULTICHANNEL_TESTS}" )
 add_pcbnew_test_group( drc_regression "${PCBNEW_DRC_REGRESSION_TESTS}" )
 add_pcbnew_test_group( drc_solder_mask "${PCBNEW_DRC_SOLDER_MASK_TESTS}" )
 add_pcbnew_test_group( constraints "${PCBNEW_CONSTRAINTS_TESTS}" )
+add_pcbnew_test_group( drc_run_scope "DrcRunScope" )
+add_pcbnew_test_group( drc_provider_isolation "DrcProviderIsolation" )
+add_pcbnew_test_group( drc_document_snapshot "DrcDocumentSnapshot" )
+add_pcbnew_test_group( drc_copper_preparation "DrcCopperPreparation" )
+add_pcbnew_test_group( drc_schematic_input "DrcSchematicInput" )
+add_pcbnew_test_group( drc_library_inputs "DrcLibraryInputs" )
+add_pcbnew_test_group( drc_drawing_sheet_inputs "DrcDrawingSheetInputs" )
+add_pcbnew_test_group( drc_captured_rules "DrcCapturedRules" )
+add_pcbnew_test_group( footprint_library_adapter "FootprintLibraryAdapter" )
+add_pcbnew_test_group( zone_fill_outcome "ZoneFillOutcome" )
+add_pcbnew_test_group( detached_generator_context "DetachedGeneratorContext" )
+add_pcbnew_test_group( drc_job_lifecycle "PcbDrcJobLifecycle" )
 
 # Catch-all for everything not in a named group.  New tests automatically
 # land here so they are never silently skipped.
@@ -583,6 +611,18 @@ set( PCBNEW_EXCLUDED_FROM_OTHER
 :!DRCTrackToPadBridgeTest\
 :!FootprintLevelSolderMaskExpansion\
 :!SolderMaskExpansionPerformance\
+:!DrcRunScope\
+:!DrcProviderIsolation\
+:!DrcDocumentSnapshot\
+:!DrcCopperPreparation\
+:!DrcSchematicInput\
+:!DrcLibraryInputs\
+:!DrcDrawingSheetInputs\
+:!DrcCapturedRules\
+:!FootprintLibraryAdapter\
+:!ZoneFillOutcome\
+:!DetachedGeneratorContext\
+:!PcbDrcJobLifecycle\
 :!PlanegcsSmokeSolve\
 :!ConstraintSolver*" )
 

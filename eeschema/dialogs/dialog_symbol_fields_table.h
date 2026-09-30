@@ -20,6 +20,7 @@
 
 #pragma once
 
+#include <optional>
 #include <set>
 #include <vector>
 
@@ -32,6 +33,7 @@
 wxDECLARE_EVENT( EDA_EVT_CLOSE_DIALOG_SYMBOL_FIELDS_TABLE, wxCommandEvent );
 
 class SCH_EDIT_FRAME;
+class SCH_COMMIT;
 class JOB_EXPORT_BOM;
 class TEMPLATES;
 
@@ -44,6 +46,8 @@ public:
 
     bool TransferDataToWindow() override;
     bool TransferDataFromWindow() override;
+    void ShowEditTab();
+    void ShowExportTab();
 
 private:
     wxGridCellEditor* createDatasheetEditor() override;
@@ -57,6 +61,14 @@ private:
      * field names in use.
      */
     void LoadFieldNames();
+    void stageBomSettings( SCH_COMMIT& aCommit, bool aSaveFilename );
+
+    /// A changed export file name is saved with the project, so it becomes an undoable,
+    /// recorded commit rather than a bare modified flag.
+    void OnExport( wxCommandEvent& aEvent ) override;
+    void onBomSettingsChanged() override;
+    FIELDS_TABLE_BOM_SETTINGS readBomUiSettings();
+    void recordInitialBomUiState();
 
     void OnTableSelectionChanged( const std::set<int>& aRows ) override;
 
@@ -105,6 +117,9 @@ private:
     TEMPLATES&                         m_templateFieldNames;
 
     bool m_aborted = false;
+    FIELDS_TABLE_BOM_SETTINGS m_bomUiBaseline;
+    std::optional<wxString>   m_exportFileNameBeforeExport;
+    bool m_bomInitialViewSelected = false;
 
 public:
     bool WasAborted() const { return m_aborted; }

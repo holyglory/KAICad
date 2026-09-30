@@ -9,48 +9,224 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace KiCad.Automation.Tests;
 
-// Actual KiCad manager processes on a test-owned X server. This is NOT the
-// schematic/PCB rendered editing acceptance journey and does not claim it is.
+// Real KiCad manager/editor processes on a test-owned X server. Focused
+// diagnostic entry points reuse the same fixture; full qualification is separate.
 [TestClass]
 [TestCategory("NativeSession")]
 public sealed partial class NativeSessionTests
 {
-    [TestMethod]
-    public async Task TwoNativeProjectsHaveIndependentEpochsAndCanReattach()
+    [TestMethod, TestCategory("NativeSourceSession")]
+    public Task TwoNativeProjectsHaveIndependentEpochsAndCanReattach() => RunNativeSessions(NativeJourney.Foundation);
+
+    [TestMethod, TestCategory("NativeTableVariant")]
+    public Task TableVariantActionsPreserveNativeHistory() => RunNativeSessions(NativeJourney.TableVariants);
+
+    [TestMethod, TestCategory("NativeNetChains")]
+    public Task NetChainMetadataPreservesNativeHistory() => RunNativeSessions(NativeJourney.NetChains);
+
+    [TestMethod, TestCategory("NativeSetupDraft")]
+    public Task SetupDraftPreservesCancelledPageChangesAndNativeHistory() => RunNativeSessions(NativeJourney.Setup);
+
+    [TestMethod, TestCategory("NativeBomSettings")]
+    public Task BomPreferencesRoundTripThroughXmlAndNativeEdits() => RunNativeSessions(NativeJourney.BomSettings);
+
+    [TestMethod, TestCategory("NativeNetSettings")]
+    public Task NetClassesRoundTripThroughXmlAndNativeEdits() => RunNativeSessions(NativeJourney.NetSettings);
+
+    [TestMethod, TestCategory("NativeHierarchyPolicy")]
+    public Task ProjectElectricalPolicySurvivesNativeHierarchyRoundTrips() => RunNativeSessions(NativeJourney.HierarchyPolicy);
+
+    [TestMethod, TestCategory("NativeSynchronizationPlan")]
+    public Task ManualNativeMovesPrepareOneConsistentXmlDesign() => RunNativeSessions(NativeJourney.SynchronizationPlan);
+
+    [TestMethod, TestCategory("NativeCheckedSchematicBatch")]
+    public Task CheckedBatchesRejectChangedStateAndPreserveNativeUndo() => RunNativeSessions(NativeJourney.CheckedBatch);
+
+    [TestMethod, TestCategory("NativeOffscreenConnectedMove")]
+    public Task OffscreenConnectedMovesPreserveTheVisibleEditor() => RunNativeSessions(NativeJourney.OffscreenMove);
+
+    [TestMethod, TestCategory("NativeTransformSynchronization")]
+    public Task XmlTransformsRecoverAfterServiceInterruptionAndNativeHistory() => RunNativeSessions(NativeJourney.TransformSync);
+
+    [TestMethod, TestCategory("NativeSymbolSheetOwnership")]
+    public Task MultiUnitComponentsKeepOneIdentityAcrossNativeSheets() => RunNativeSessions(NativeJourney.SymbolSheets);
+
+    [TestMethod, TestCategory("NativeXmlComponentCreation")]
+    public Task XmlComponentsAreCreatedAndRestoredThroughNativeHistory() => RunNativeSessions(NativeJourney.ComponentCreation);
+
+    [TestMethod, TestCategory("NativeRecursiveEditor")]
+    [DataRow("light")]
+    [DataRow("dark")]
+    public Task RecursiveEditorNavigatesLevelsAndSavesRequirementHistory(string theme) => RunNativeSessions(NativeJourney.RecursiveEditor, theme);
+
+    [TestMethod, TestCategory("NativeSimulation")]
+    public Task NativeSimulationUsesKiCadNgspiceAndReturnsVectors() => RunNativeSessions(NativeJourney.Simulation);
+
+    [TestMethod, TestCategory("NativePcbItems")]
+    public Task NativePcbItemsAreCreatedAndUpdatedThroughMcp() => RunNativeSessions(NativeJourney.PcbItems);
+
+    // Shared PSU/CPU acceptance journeys (psu-cpu-fixture-and-ownership.md §1.9).
+    // Each ends Inconclusive (not passed) until its fixture seed and lane journey
+    // land; a category joins native-acceptance only after integration.
+    [TestMethod, TestCategory("NativePsuCpuSeed")]
+    public Task PsuCpuFixtureSeedsLoadWithExactIdentities() => RunNativeSessions(NativeJourney.PsuCpuSeed);
+
+    [TestMethod, TestCategory("NativePsuCpuComponentCreation")]
+    public Task PsuCpuComponentsAreCreatedAcrossSheetsFromXml() => RunNativeSessions(NativeJourney.PsuCpuComponentCreation);
+
+    [TestMethod, TestCategory("NativeConnectedRealization")]
+    public Task PsuCpuXmlRealizesAConnectedHierarchicalSchematic() => RunNativeSessions(NativeJourney.ConnectedRealization);
+
+    [TestMethod, TestCategory("NativeDiagramCanvas")]
+    [DataRow("light")]
+    [DataRow("dark")]
+    public Task PerLevelCanvasEditsPersistLayout(string theme) => RunNativeSessions(NativeJourney.DiagramCanvas, theme);
+
+    [TestMethod, TestCategory("NativeRepeatedSheetRebuild")]
+    public Task RepeatedPhysicalSheetRebuildPreservesEveryInstance() => RunNativeSessions(NativeJourney.RepeatedSheetRebuild);
+
+    [TestMethod, TestCategory("NativeRepeatedSheetOwnership")]
+    public Task RepeatedSheetsResolveUnitsOwnedOnAnotherSheet() => RunNativeSessions(NativeJourney.RepeatedSheetOwnership);
+
+    [TestMethod, TestCategory("NativeXmlRebuild")]
+    public Task DeletedNativeSheetsRebuildFromXmlWithoutLoss() => RunNativeSessions(NativeJourney.XmlRebuild);
+
+    [TestMethod, TestCategory("NativeProjectRecoveryContainer")]
+    public Task DeletedProjectContainerRecoversThroughNativeStart() => RunNativeSessions(NativeJourney.ProjectRecoveryContainer);
+
+    [TestMethod, TestCategory("NativeProjectRecovery")]
+    public Task DeletedProjectFileRecoversThroughNativeStart() => RunNativeSessions(NativeJourney.ProjectRecovery);
+
+    [TestMethod, TestCategory("NativeOwnershipSync")]
+    public Task NativeEditsReachTheOwningBlockByExactIdentity() => RunNativeSessions(NativeJourney.OwnershipSync);
+
+    [TestMethod, TestCategory("NativeCrash")]
+    public Task NativeCrashKeepsXmlAndRegistryTruthful() => RunNativeSessions(NativeJourney.NativeCrash);
+
+    // The same crash fixture: the synchronizations the mid-apply kills left pending are released, then resumed or rolled
+    // back on the KiCad started again (decision nd2e75380e7f8aa7f).
+    [TestMethod, TestCategory("NativeCrash")]
+    public Task NativeCrashReleasesTheExitedOperation() => RunNativeSessions(NativeJourney.NativeCrashRelease);
+
+    // An agent observes and edits the live schematic over MCP STDIO 50 times in each editor while the harness, as a person
+    // at the keyboard of the same window, edits it at varying moments (item observe-apply-stress, ledger p60776bb2239d1087).
+    [TestMethod, TestCategory("NativeObserveApplyStress")]
+    public Task AgentAndPersonEditingTogetherNeverGetStaleOrPartialEdits() => RunNativeSessions(NativeJourney.ObserveApplyStress);
+
+    [TestMethod, TestCategory("NativeComponentRebind")]
+    public Task NativeComponentReplacementKeepsExactInstructionsAndHistory() => RunNativeSessions(NativeJourney.ComponentRebind);
+
+    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, RecursiveEditor, Simulation, PcbItems,
+        PsuCpuSeed, PsuCpuComponentCreation, ConnectedRealization, DiagramCanvas, XmlRebuild, RepeatedSheetRebuild, ProjectRecovery, ProjectRecoveryContainer, OwnershipSync, NativeCrash, NativeCrashRelease,
+        ObserveApplyStress, RepeatedSheetOwnership, ComponentRebind }
+
+    private async Task RunNativeSessions(NativeJourney journey, string theme = "light")
     {
         Assert.IsTrue(OperatingSystem.IsLinux(), "This virtual-display check is Linux-only, not native Mac evidence.");
         string root = FindRoot();
         string executable = Path.Combine(root, "automation", "artifacts", "native", "kicad", "kicad");
         Assert.IsTrue(File.Exists(executable), "The linked native manager must be built first.");
-        string evidence = NativeEvidenceDirectory.Begin(Path.Combine(root, "automation", "artifacts"));
+        string artifacts = Path.Combine(root, "automation", "artifacts");
+        string evidence = NativeEvidenceDirectory.Begin(journey == NativeJourney.Foundation ? artifacts
+            : Path.Combine(artifacts, journey switch { NativeJourney.TableVariants => "native-table-variants",
+                NativeJourney.Setup => "native-setup-draft", NativeJourney.BomSettings => "native-bom-settings",
+                NativeJourney.NetSettings => "native-net-settings",
+                NativeJourney.HierarchyPolicy => "native-hierarchy-policy",
+                NativeJourney.SynchronizationPlan => "native-synchronization-plan",
+                NativeJourney.CheckedBatch => "native-checked-batch",
+                NativeJourney.OffscreenMove => "native-offscreen-move",
+                NativeJourney.TransformSync => "native-transform-sync",
+                NativeJourney.SymbolSheets => "native-symbol-sheet-ownership",
+                NativeJourney.ComponentCreation => "native-xml-component-creation",
+                NativeJourney.ComponentRebind => "native-component-rebind",
+                NativeJourney.RecursiveEditor => Path.Combine("native-recursive-editor", theme),
+                NativeJourney.Simulation => "native-simulation",
+                NativeJourney.PcbItems => "native-pcb-items",
+                NativeJourney.PsuCpuSeed => "native-psu-cpu-seed",
+                NativeJourney.PsuCpuComponentCreation => "native-psu-cpu-creation",
+                NativeJourney.ConnectedRealization => "native-connected-realization",
+                NativeJourney.DiagramCanvas => Path.Combine("native-diagram-canvas", theme),
+                NativeJourney.XmlRebuild => "native-xml-rebuild",
+                NativeJourney.RepeatedSheetRebuild => "native-repeated-rebuild",
+                NativeJourney.RepeatedSheetOwnership => "native-repeated-ownership",
+                NativeJourney.ProjectRecovery => "native-project-recovery",
+                NativeJourney.ProjectRecoveryContainer => "native-project-recovery-container",
+                NativeJourney.OwnershipSync => "native-ownership-sync",
+                NativeJourney.NativeCrash => "native-crash",
+                NativeJourney.NativeCrashRelease => "native-crash-release",
+                NativeJourney.ObserveApplyStress => "native-observe-apply-stress",
+                _ => "native-net-chains" }));
         string temporary = Directory.CreateTempSubdirectory("kicad-native-").FullName;
-        // Aggregate ceiling for the expanded editor journey. Local startup,
-        // undo and competing-instance deadlines remain separately bounded.
-        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(300));
+        // The earlier composed journey took 433s before expanded Setup and
+        // annotation coverage. Keep all per-action limits and focused ceilings;
+        // only the full two-editor sequence receives the measured workload margin.
+        // Connected-layout recovery adds twelve real service stop/restart
+        // cases. The first editor took 159.5s in aa4d8d; the old 300s ceiling
+        // cut off the second. Per-action deadlines remain unchanged.
+        // Component creation measured 251-294s on 2026-09-23 (one run cut off at
+        // 300s after every assertion passed), so it joins the heavy group.
+        // These are containment ceilings, not performance claims. With four lanes
+        // sharing the host (p95 CPU about 98%), passing runs reached 585/600s
+        // (foundation), 387/420s (checked batch) and 245/300s (net settings), and
+        // six runs on 2026-09-23 failed only on the ceiling. All ceilings are 1.5x
+        // their idle-host sizing; per-action deadlines are unchanged.
+        int aggregateSeconds = journey == NativeJourney.Foundation ? 900
+            : journey == NativeJourney.CheckedBatch ? 630
+            // The expanded ownership journey measured 1026.6s for one editor in
+            // f53c86; both editors need this aggregate margin. Action limits stay fixed.
+            : journey == NativeJourney.OwnershipSync ? 2700
+            : journey is NativeJourney.RecursiveEditor or NativeJourney.SymbolSheets or NativeJourney.ComponentCreation or NativeJourney.PsuCpuComponentCreation
+                or NativeJourney.ConnectedRealization ? 900
+            // Combined parent creation adds two move/history/reload paths. The
+            // preceding316ad4 reached XML admission at865.7s across both editors.
+            : journey is NativeJourney.RepeatedSheetRebuild ? 1500
+            // c18fb2 completed the first editor in1020s; both independent
+            // editors and their full history/reload paths share this ceiling.
+            : journey is NativeJourney.RepeatedSheetOwnership ? 2400
+            : journey is NativeJourney.XmlRebuild ? 1200
+            : journey == NativeJourney.ProjectRecovery ? 2400 : 450;
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(aggregateSeconds));
         var elapsed = Stopwatch.StartNew();
+        async Task Measure(string stage, Func<Task> action)
+        {
+            var started = elapsed.Elapsed;
+            Console.WriteLine($"Native phase {stage} started at {started.TotalSeconds:F1}s.");
+            try { await action(); }
+            finally { Console.WriteLine($"Native phase {stage} ended after {(elapsed.Elapsed - started).TotalSeconds:F1}s at {elapsed.Elapsed.TotalSeconds:F1}s."); }
+        }
         var processes = new List<Process>();
         var captures = new List<Task>();
         try
         {
             var displayStart = new ProcessStartInfo("Xvfb") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
-            foreach (string arg in new[] { "-displayfd", "1", "-screen", "0", "1280x900x24", "-nolisten", "tcp" })
+            string screen = journey is NativeJourney.RecursiveEditor
+                or NativeJourney.ConnectedRealization or NativeJourney.DiagramCanvas
+                ? "1600x1150x24" : "1280x900x24";
+            foreach (string arg in new[] { "-displayfd", "1", "-screen", "0", screen, "-nolisten", "tcp" })
                 displayStart.ArgumentList.Add(arg);
             Process display = Process.Start(displayStart)!;
             processes.Add(display);
             captures.Add(Capture(display.StandardError, Path.Combine(evidence, "xvfb.stderr.log")));
             string? displayNumber = await display.StandardOutput.ReadLineAsync(deadline.Token);
             Assert.IsTrue(int.TryParse(displayNumber, out _), "Xvfb did not allocate a display.");
-            await VerifyCliCreationRejection(executable, ":" + displayNumber, temporary, evidence, deadline.Token);
-            await VerifyRootCreationRejections(executable, ":" + displayNumber, temporary, evidence, deadline.Token);
-            await VerifyInterruptedStartup(executable, ":" + displayNumber, temporary, evidence, deadline.Token);
-            await VerifyFailedStartup(executable, temporary, evidence, deadline.Token);
+            if (journey == NativeJourney.Foundation)
+            {
+                await VerifyCliCreationRejection(executable, ":" + displayNumber, temporary, evidence, deadline.Token);
+                await VerifyRootCreationRejections(executable, ":" + displayNumber, temporary, evidence, deadline.Token);
+                await VerifyInterruptedStartup(executable, ":" + displayNumber, temporary, evidence, deadline.Token);
+                await VerifyFailedStartup(executable, temporary, evidence, deadline.Token);
+            }
             var registry = new InstanceRegistry(new NngTransport(), Path.Combine(temporary, "registry"));
             var launched = new List<(string Id, string Endpoint, string Project, string RootId)>();
             for (int index = 0; index < 2; index++)
             {
                 string id = Guid.NewGuid().ToString("D");
                 string projectDirectory = Path.Combine(temporary, index.ToString());
+                if (journey == NativeJourney.NetSettings)
+                    projectDirectory = Path.Combine(projectDirectory, "電源");
                 Directory.CreateDirectory(projectDirectory);
+                if (journey == NativeJourney.ComponentRebind)
+                    await PrepareRebindLibrary(projectDirectory, deadline.Token);
                 string project = Path.Combine(projectDirectory, "fixture.kicad_pro");
                 string declaredRootId = (index == 0 ? Guid.NewGuid() : Guid.Empty).ToString("D");
                 // PROJECT_FILE schema 3 requires meta.version; an empty object
@@ -58,6 +234,8 @@ public sealed partial class NativeSessionTests
                 await File.WriteAllTextAsync(project, System.Text.Json.JsonSerializer.Serialize(new
                 {
                     meta = new { version = 3 }, text_variables = new { ENGINEERING_NOTE = "電源 & timing" },
+                    net_settings = new { meta = new { version = 5 }, net_chain_class_definitions = new[] { "emptygroup" }, net_chain_classes = new Dictionary<string, string>
+                        { ["AUTOMATION_PATH"] = "fastbus", ["UNAFFECTED_CHAIN"] = "preserved" } },
                     schematic = new
                     {
                         top_level_sheets = new[] { new { uuid = declaredRootId, name = "fixture", filename = "fixture.kicad_sch" } },
@@ -76,6 +254,12 @@ public sealed partial class NativeSessionTests
                 start.Environment["WXTRACE"] = "KICAD_SETTINGS";
                 start.Environment["XDG_CONFIG_HOME"] = Path.Combine(projectDirectory, "config");
                 start.Environment["XDG_CACHE_HOME"] = Path.Combine(projectDirectory, "cache");
+                if (journey == NativeJourney.RepeatedSheetRebuild)
+                {
+                    start.Environment["KAICAD_FIXTURE_SHEET_ROOT"] = Path.Combine(projectDirectory, "sheet-topology");
+                    start.Environment["KAICAD_FIXTURE_SHEET_LEAF"] = "adopted-nested.kicad_sch";
+                }
+                if (journey is NativeJourney.RecursiveEditor or NativeJourney.DiagramCanvas) start.Environment["GTK_THEME"] = theme == "dark" ? "Adwaita:dark" : "Adwaita";
                 foreach (string arg in new[] { "--new", "--automation", id, "--api-socket", socket,
                                                "--automation-log", Path.Combine(evidence, $"native-{index}.log"),
                                                "--software-rendering", project })
@@ -116,6 +300,7 @@ public sealed partial class NativeSessionTests
 
             // Open actual graphical editors through the manager's own IPC peer.
             // The fixture has native drawing content, not a mocked editor result.
+            var synchronizationFailures = new List<Exception>();
             foreach (var target in launched)
             {
                 Console.WriteLine($"Native editor journey {target.Id} started at {elapsed.Elapsed.TotalSeconds:F1}s.");
@@ -126,7 +311,7 @@ public sealed partial class NativeSessionTests
                 Directory.CreateDirectory(hotkeyDirectory);
                 // Only the fixture's isolated user configuration is changed.
                 await File.WriteAllTextAsync(Path.Combine(hotkeyDirectory, "user.hotkeys"),
-                    "common.Control.pageSettings\tCtrl+F12\t\n", deadline.Token);
+                    "common.Control.pageSettings\tCtrl+F12\t\ncommon.Interactive.groupEnter\tCtrl+Shift+J\t\ncommon.Interactive.groupLeave\tCtrl+Shift+K\t\n", deadline.Token);
                 string schematic = Path.ChangeExtension(target.Project, ".kicad_sch");
                 var missing = await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
                     client.InvokeAsync<OpenDocument, OpenDocumentResponse>(
@@ -135,19 +320,53 @@ public sealed partial class NativeSessionTests
                 var emptyRoot = await VerifyEmptyRootCreation(client, schematic,
                     Path.ChangeExtension(launched.Single(p => p.Id != target.Id).Project, ".kicad_sch"),
                     evidence, target.Id, target.RootId, deadline.Token);
+                if (journey is NativeJourney.PsuCpuSeed or NativeJourney.PsuCpuComponentCreation or NativeJourney.ConnectedRealization or NativeJourney.DiagramCanvas
+                    or NativeJourney.XmlRebuild or NativeJourney.ProjectRecovery or NativeJourney.ProjectRecoveryContainer or NativeJourney.OwnershipSync
+                    or NativeJourney.NativeCrash or NativeJourney.NativeCrashRelease or NativeJourney.RepeatedSheetOwnership)
+                {
+                    // PSU/CPU journeys seed the shared frozen fixture on this native-created
+                    // root instead of the probe fixture. An Inconclusive lane stub ends the
+                    // test as not passed; real failures still let the other project run.
+                    Process nativeProcess = processes.Single(p => p.Id == registry.Get(target.Id).ProcessId);
+                    try
+                    {
+                        await RunPsuCpuJourney(journey, registry, client, emptyRoot, Path.GetDirectoryName(schematic)!, nativeProcess,
+                            ":" + displayNumber, evidence, target.Id, processes.Add, deadline.Token);
+                    }
+                    catch (Exception error) when (error is not AssertInconclusiveException && !deadline.IsCancellationRequested)
+                    {
+                        synchronizationFailures.Add(error);
+                        await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-psu-cpu-failure.txt"), error.ToString(), deadline.Token);
+                    }
+                    Console.WriteLine($"Focused {journey} {target.Id} completed at {elapsed.Elapsed.TotalSeconds:F1}s.");
+                    continue;
+                }
                 // Saving the native-created root records its instance identity
                 // in the project. Reuse that identity in the populated fixture.
                 string rootId = emptyRoot.SheetPath.Path[0].Value;
+                string rootScreenId = Guid.NewGuid().ToString("D");
+                Assert.AreNotEqual(rootId, rootScreenId, "Exercise distinct project-instance and file-screen identities.");
                 string textId = Guid.NewGuid().ToString("D");
                 var electrical = MakeElectricalFixture(rootId);
                 var hierarchyFixture = await MakeHierarchyFixture(rootId, Path.GetDirectoryName(schematic)!, deadline.Token);
+                if (journey == NativeJourney.OffscreenMove)
+                {
+                    string childFile = Path.Combine(Path.GetDirectoryName(schematic)!, "shared-child.kicad_sch");
+                    string childSource = await File.ReadAllTextAsync(childFile, deadline.Token);
+                    string separateWires = $$"""
+                        (lib_symbols)
+                        (wire (pts (xy 80 80) (xy 90 80)) (stroke (width 0) (type default)) (uuid {{Guid.NewGuid():D}}))
+                        (wire (pts (xy 90 80) (xy 100 80)) (stroke (width 0) (type default)) (uuid {{Guid.NewGuid():D}}))
+                        """;
+                    await File.WriteAllTextAsync(childFile, childSource.Replace("(lib_symbols)", separateWires, StringComparison.Ordinal), deadline.Token);
+                }
                 var embeddedAsset = await MakeEmbeddedAssetFixture(root, deadline.Token);
                 Assert.AreEqual(1, hierarchyFixture.Contents.Split("(page \"2\")", StringSplitOptions.None).Length - 1);
                 // Deliberately duplicate the root's page number. Native loading
                 // must repair it to page 2 without a modal acknowledgement.
                 string repairableHierarchy = hierarchyFixture.Contents.Replace("(page \"2\")", "(page \"1\")", StringComparison.Ordinal);
                 await File.WriteAllTextAsync(schematic,
-                    $"(kicad_sch (version 20250114) (generator eeschema) (uuid {Guid.NewGuid()}) (paper \"A4\") " + electrical.Contents + repairableHierarchy +
+                    $"(kicad_sch (version 20250114) (generator eeschema) (uuid {rootScreenId}) (paper \"A4\") " + electrical.Contents + repairableHierarchy +
                     "(text \"Native automation fixture\" (at 50 50 0) (effects (font (size 1.27 1.27))) " +
                     $"(uuid {textId})) (sheet_instances (path \"/\" (page \"1\"))) {embeddedAsset.Native})", deadline.Token);
                 // The native-created empty document was saved and checked above.
@@ -215,6 +434,190 @@ public sealed partial class NativeSessionTests
                 Assert.AreEqual(3, rejectedPreview.Status);
                 Assert.AreEqual(opened.Document, (await client.InvokeAsync<CaptureSchematicPreview, SchematicPreview>(
                     new() { Document = opened.Document }, deadline.Token)).Document);
+                if (journey != NativeJourney.Foundation)
+                {
+                    int focusProcessId = processes.Single(p => p.StartInfo.ArgumentList.Contains(target.Project)).Id;
+                    await client.InvokeAsync<SaveDocument, Empty>(new() { Document = opened.Document }, deadline.Token);
+                    Console.WriteLine($"Focused {journey} {target.Id} reached its target at {elapsed.Elapsed.TotalSeconds:F1}s.");
+                    if (journey == NativeJourney.Setup)
+                    {
+                        await VerifyAnnotation(client, opened.Document, focusProcessId, ":" + displayNumber,
+                            evidence, deadline.Token);
+                        await VerifyReferenceInventory(client, opened.Document, focusProcessId, ":" + displayNumber,
+                            evidence, deadline.Token);
+                        await VerifyFieldTemplateRemoval(client, opened.Document, focusProcessId, ":" + displayNumber,
+                            evidence, deadline.Token);
+                        await VerifySymbolProjectSettings(client, opened.Document, focusProcessId, ":" + displayNumber,
+                            evidence, deadline.Token);
+                        await VerifySnapshotSchemaVersions(client, opened.Document, deadline.Token);
+                        await VerifyManualSetup(client, opened.Document, focusProcessId, ":" + displayNumber,
+                            evidence, target.Id, deadline.Token);
+                        await VerifySetupPinMap(client, opened.Document, focusProcessId, ":" + displayNumber,
+                            evidence, target.Id, deadline.Token);
+                        await VerifySetupImport(client, opened.Document, focusProcessId, ":" + displayNumber,
+                            evidence, target.Id, deadline.Token);
+                        await VerifySetupAssets(client, opened.Document, focusProcessId, ":" + displayNumber,
+                            evidence, target.Id, deadline.Token);
+                    }
+                    else if (journey == NativeJourney.BomSettings)
+                    {
+                        await VerifyBomSettings(client, opened.Document, focusProcessId, ":" + displayNumber,
+                            evidence, deadline.Token);
+                        await VerifySnapshotSchemaVersions(client, opened.Document, deadline.Token);
+                    }
+                    else if (journey == NativeJourney.NetSettings)
+                    {
+                        var originalPage = await client.InvokeAsync<GetPageSettings, PageSettings>(
+                            new() { Document = opened.Document }, deadline.Token);
+                        await VerifyPageSettings(client, opened.Document, focusProcessId, ":" + displayNumber,
+                            Path.GetDirectoryName(schematic)!, evidence, target.Id, deadline.Token);
+                        await client.InvokeAsync<SetPageSettings, PageSettings>(
+                            new() { Document = opened.Document, PageSettings = originalPage }, deadline.Token);
+                        await VerifyNetSettings(client, opened.Document, focusProcessId, ":" + displayNumber,
+                            evidence, deadline.Token);
+                        await VerifyBoardNetSettings(client, opened.Document, target.Project, focusProcessId,
+                            ":" + displayNumber, evidence, deadline.Token);
+                        await VerifySnapshotSchemaVersions(client, opened.Document, deadline.Token);
+                        await VerifyParityNetlistCapture(client, opened.Document, electrical, evidence, deadline.Token);
+                    }
+                    else if (journey == NativeJourney.ComponentRebind)
+                    {
+                        try
+                        {
+                            await FocusedSchematicShortcut(client, opened.Document, focusProcessId, ":" + displayNumber, "", deadline.Token);
+                            await VerifySharedScreenConnectedMove(client, opened.Document, hierarchyFixture, focusProcessId,
+                                ":" + displayNumber, evidence, target.Id, target.Id == launched.Last().Id, deadline.Token);
+                            await VerifyNativeComponentRebinding(client, opened.Document, focusProcessId,
+                                ":" + displayNumber, evidence, target.Id, target.Id == launched.Last().Id, deadline.Token);
+                        }
+                        catch (Exception error) when (!deadline.IsCancellationRequested)
+                        {
+                            synchronizationFailures.Add(error);
+                            await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-rebind-failure.txt"), error.ToString(), deadline.Token);
+                        }
+                    }
+                    else if (journey == NativeJourney.RepeatedSheetRebuild)
+                    {
+                        try
+                        {
+                            // The shared-screen journey compares keyboard focus too. Establish its
+                            // normal human starting focus before capturing the baseline and history.
+                            await FocusedSchematicShortcut(client, opened.Document, focusProcessId,
+                                ":" + displayNumber, "", deadline.Token);
+                            await VerifySharedScreenConnectedMove(client, opened.Document, hierarchyFixture, focusProcessId,
+                                ":" + displayNumber, evidence, target.Id, target.Id == launched.Last().Id, deadline.Token);
+                            await VerifyRepeatedSheetRebuild(client, opened.Document, hierarchyFixture, focusProcessId,
+                                ":" + displayNumber, evidence, target.Id, deadline.Token);
+                        }
+                        catch (Exception error) when (!deadline.IsCancellationRequested)
+                        {
+                            synchronizationFailures.Add(error);
+                            await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-repeated-rebuild-failure.txt"), error.ToString(), deadline.Token);
+                        }
+                    }
+                    else if (journey == NativeJourney.OffscreenMove)
+                    {
+                        await VerifyConnectedSymbolMove(client, opened.Document, electrical, textId, focusProcessId,
+                            ":" + displayNumber, evidence, target.Id, deadline.Token);
+                        try
+                        {
+                            await VerifyOffscreenConnectedMove(client, opened.Document, electrical, hierarchyFixture,
+                                focusProcessId, ":" + displayNumber, evidence, target.Id, deadline.Token);
+                            await VerifySharedScreenConnectedMove(client, opened.Document, hierarchyFixture,
+                                focusProcessId, ":" + displayNumber, evidence, target.Id,
+                                target.Id == launched.Last().Id, deadline.Token);
+                            await VerifyMultiUnitConnectedMove(client, opened.Document, hierarchyFixture,
+                                focusProcessId, ":" + displayNumber, evidence, target.Id, deadline.Token);
+                        }
+                        catch (Exception error) when (!deadline.IsCancellationRequested)
+                        {
+                            synchronizationFailures.Add(error);
+                            await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-offscreen-failure.txt"), error.ToString(), deadline.Token);
+                            Console.WriteLine($"Offscreen move failed for {target.Id}; preserve it and continue the independent project.");
+                        }
+                    }
+                    else if (journey == NativeJourney.RecursiveEditor)
+                    {
+                        try { await VerifyRecursiveEditor(client, focusProcessId, ":" + displayNumber, evidence, target.Id, deadline.Token); }
+                        catch (Exception error) when (!deadline.IsCancellationRequested)
+                        { synchronizationFailures.Add(error); await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-recursive-failure.txt"), error.ToString(), deadline.Token); }
+                    }
+                    else if (journey == NativeJourney.ComponentCreation)
+                    {
+                        try
+                        {
+                            await VerifyXmlComponentCreation(client, opened.Document, focusProcessId, ":" + displayNumber,
+                                evidence, target.Id, target.Id == launched.Last().Id, deadline.Token);
+                        }
+                        catch (Exception error) when (!deadline.IsCancellationRequested)
+                        {
+                            synchronizationFailures.Add(error);
+                            await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-creation-failure.txt"), error.ToString(), deadline.Token);
+                        }
+                    }
+                    else if (journey == NativeJourney.Simulation)
+                        await VerifyNativeSimulation(client, opened.Document, evidence, target.Id, deadline.Token);
+                    else if (journey == NativeJourney.PcbItems)
+                        await VerifyNativePcbItems(client, opened.Document, evidence, target.Id, deadline.Token);
+                    else if (journey == NativeJourney.SymbolSheets)
+                    {
+                        try
+                        {
+                            await VerifyNativeSymbolSheetOwnership(client, opened.Document, hierarchyFixture, evidence, target.Id,
+                                focusProcessId, ":" + displayNumber, deadline.Token);
+                        }
+                        catch (Exception error) when (!deadline.IsCancellationRequested)
+                        {
+                            synchronizationFailures.Add(error);
+                            await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-symbol-sheets-failure.txt"), error.ToString(), deadline.Token);
+                        }
+                    }
+                    else if (journey is NativeJourney.CheckedBatch or NativeJourney.TransformSync)
+                    {
+                        if (journey == NativeJourney.CheckedBatch)
+                            await VerifyCheckedSchematicBatch(client, opened.Document, focusProcessId,
+                                ":" + displayNumber, evidence, target.Id, deadline.Token);
+                        try
+                        {
+                            await VerifySynchronizationExecution(client, opened.Document, focusProcessId,
+                                ":" + displayNumber, evidence, target.Id, deadline.Token, journey == NativeJourney.TransformSync);
+                        }
+                        catch (Exception error) when (!deadline.IsCancellationRequested)
+                        {
+                            synchronizationFailures.Add(error);
+                            await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-sync-execution-failure.txt"), error.ToString(), deadline.Token);
+                            Console.WriteLine($"Synchronization failed for {target.Id}; preserve it and continue the independent project.");
+                        }
+                    }
+                    else if (journey == NativeJourney.ObserveApplyStress)
+                    {
+                        try
+                        {
+                            await VerifyObserveApplyStress(client, opened.Document, focusProcessId, ":" + displayNumber,
+                                evidence, target.Id, deadline.Token);
+                        }
+                        catch (Exception error) when (!deadline.IsCancellationRequested)
+                        {
+                            synchronizationFailures.Add(error);
+                            await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-stress-failure.txt"), error.ToString(), deadline.Token);
+                            Console.WriteLine($"Observe-apply stress failed for {target.Id}; preserve it and continue the independent project.");
+                        }
+                    }
+                    else if (journey == NativeJourney.SynchronizationPlan)
+                        await VerifyInteractiveMoveAdmission(client, opened.Document, electrical, focusProcessId,
+                            ":" + displayNumber, evidence, target.Id, deadline.Token);
+                    else if (journey == NativeJourney.HierarchyPolicy)
+                        await VerifyHierarchyProjectPolicy(client, opened.Document, hierarchyFixture,
+                            focusProcessId, ":" + displayNumber, evidence, deadline.Token);
+                    else if (journey == NativeJourney.TableVariants)
+                        await VerifyTableVariantEdits(client, opened.Document, schematic, focusProcessId,
+                            ":" + displayNumber, evidence, deadline.Token);
+                    else
+                        await VerifyNetChainMetadata(client, opened.Document, schematic, electrical, focusProcessId,
+                            ":" + displayNumber, evidence, deadline.Token);
+                    Console.WriteLine($"Focused {journey} {target.Id} completed at {elapsed.Elapsed.TotalSeconds:F1}s.");
+                    continue;
+                }
                 var journal = await client.InvokeAsync<ReadSchematicChangeJournal, SchematicChangeJournal>(
                     new() { Document = opened.Document }, deadline.Token);
                 Assert.IsTrue(journal.ResetRequired);
@@ -455,8 +858,23 @@ public sealed partial class NativeSessionTests
                     evidence, target.Id, textId, hierarchyFixture, deadline.Token);
                 await VerifyManualSetup(client, opened.Document, nativeProcessId, ":" + displayNumber,
                     evidence, target.Id, deadline.Token);
+                await VerifyAnnotation(client, opened.Document, nativeProcessId, ":" + displayNumber,
+                    evidence, deadline.Token);
+                await Measure("reference-inventory", () => VerifyReferenceInventory(client, opened.Document, nativeProcessId, ":" + displayNumber,
+                    evidence, deadline.Token));
+                await Measure("field-templates", () => VerifyFieldTemplateRemoval(client, opened.Document, nativeProcessId, ":" + displayNumber,
+                    evidence, deadline.Token));
+                await Measure("symbol-project-settings", () => VerifySymbolProjectSettings(client, opened.Document, nativeProcessId, ":" + displayNumber,
+                    evidence, deadline.Token));
+                await VerifySetupPinMap(client, opened.Document, nativeProcessId, ":" + displayNumber,
+                    evidence, target.Id, deadline.Token);
+                await VerifySetupImport(client, opened.Document, nativeProcessId, ":" + displayNumber,
+                    evidence, target.Id, deadline.Token);
+                await Measure("setup-assets", () => VerifySetupAssets(client, opened.Document, nativeProcessId, ":" + displayNumber,
+                    evidence, target.Id, deadline.Token));
                 await VerifyNativeEvents(client, registry.Client(launched.Single(p => p.Id != target.Id).Id),
                     opened.Document, textId, nativeProcessId, ":" + displayNumber, evidence, target.Id, deadline.Token);
+                await Measure("snapshot-schemas", () => VerifySnapshotSchemaVersions(client, opened.Document, deadline.Token));
                 await VerifyNativeSymbolXml(client, opened.Document, electrical, evidence, target.Id, deadline.Token);
                 await VerifyNativeCacheTransaction(client, opened.Document, nativeProcessId,
                     ":" + displayNumber, evidence, target.Id, deadline.Token);
@@ -469,7 +887,7 @@ public sealed partial class NativeSessionTests
                 await VerifySheetXml(client, opened.Document, hierarchyFixture, evidence, target.Id,
                     nativeProcessId, ":" + displayNumber, deadline.Token);
                 await VerifyMetadataXml(client, opened.Document, hierarchyFixture, evidence, target.Id,
-                    embeddedAsset.Expected, nativeProcessId, ":" + displayNumber, deadline.Token);
+                    embeddedAsset.Expected, rootScreenId, nativeProcessId, ":" + displayNumber, deadline.Token);
                 await VerifyNativeAssetRestore(client, opened.Document, textId, nativeProcessId,
                     ":" + displayNumber, deadline.Token);
                 await VerifyTitleBatch(client, opened.Document, nativeProcessId, ":" + displayNumber, deadline.Token);
@@ -481,7 +899,7 @@ public sealed partial class NativeSessionTests
                     ":" + displayNumber, deadline.Token);
                 await VerifySharedRootOwnership(client, opened.Document, hierarchyFixture, schematic, nativeProcessId,
                     ":" + displayNumber, evidence, target.Id, deadline.Token);
-                await VerifyNetChainMetadata(client, opened.Document, schematic, electrical, nativeProcessId, ":" + displayNumber, deadline.Token);
+                await Measure("net-chains", () => VerifyNetChainMetadata(client, opened.Document, schematic, electrical, nativeProcessId, ":" + displayNumber, evidence, deadline.Token));
                 await VerifyVariantDescriptionDialog(client, opened.Document, schematic, nativeProcessId, ":" + displayNumber, evidence, deadline.Token);
                 await VerifyVariantRegistryXml(client, opened.Document, schematic, nativeProcessId, ":" + displayNumber, deadline.Token);
                 await VerifyDrawingRatios(client, opened.Document, schematic, nativeProcessId, ":" + displayNumber, evidence, deadline.Token);
@@ -491,39 +909,53 @@ public sealed partial class NativeSessionTests
                 Console.WriteLine($"Native editor journey {target.Id} completed at {elapsed.Elapsed.TotalSeconds:F1}s.");
             }
 
-            // A competing process must fail without showing a lock-override
-            // dialog or disturbing the two existing writers.
-            var competingStart = new ProcessStartInfo(executable)
+            try
             {
-                WorkingDirectory = Path.GetDirectoryName(launched[0].Project)!,
-                UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true
-            };
-            competingStart.Environment["DISPLAY"] = ":" + displayNumber;
-            competingStart.Environment["KICAD_RUN_FROM_BUILD_DIR"] = "1";
-            competingStart.Environment["XDG_CONFIG_HOME"] = Path.Combine(temporary, "competing-config");
-            competingStart.Environment["XDG_CACHE_HOME"] = Path.Combine(temporary, "competing-cache");
-            string competingLog = Path.Combine(evidence, "competing-native.log");
-            foreach (string arg in new[] { "--new", "--automation", Guid.NewGuid().ToString("D"),
-                                           "--api-socket", Path.Combine(temporary, "competing.sock"),
-                                           "--automation-log", competingLog,
-                                           "--software-rendering", launched[0].Project })
-                competingStart.ArgumentList.Add(arg);
-            Process competing = Process.Start(competingStart)!;
-            processes.Add(competing);
-            captures.Add(Capture(competing.StandardOutput, Path.Combine(evidence, "competing.stdout.log")));
-            captures.Add(Capture(competing.StandardError, Path.Combine(evidence, "competing.stderr.log")));
-            using var rejectionDeadline = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
-            rejectionDeadline.CancelAfter(TimeSpan.FromSeconds(15));
-            await competing.WaitForExitAsync(rejectionDeadline.Token);
-            Assert.AreNotEqual(0, competing.ExitCode, "A second writable process must reject the owned project.");
-            StringAssert.Contains(await File.ReadAllTextAsync(competingLog, deadline.Token), "already open");
+                // A competing process must fail without showing a lock-override
+                // dialog or disturbing the two existing writers.
+                var competingStart = new ProcessStartInfo(executable)
+                {
+                    WorkingDirectory = Path.GetDirectoryName(launched[0].Project)!,
+                    UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true
+                };
+                competingStart.Environment["DISPLAY"] = ":" + displayNumber;
+                competingStart.Environment["KICAD_RUN_FROM_BUILD_DIR"] = "1";
+                competingStart.Environment["XDG_CONFIG_HOME"] = Path.Combine(temporary, "competing-config");
+                competingStart.Environment["XDG_CACHE_HOME"] = Path.Combine(temporary, "competing-cache");
+                string competingLog = Path.Combine(evidence, "competing-native.log");
+                foreach (string arg in new[] { "--new", "--automation", Guid.NewGuid().ToString("D"),
+                                               "--api-socket", Path.Combine(temporary, "competing.sock"),
+                                               "--automation-log", competingLog,
+                                               "--software-rendering", launched[0].Project })
+                    competingStart.ArgumentList.Add(arg);
+                Process competing = Process.Start(competingStart)!;
+                processes.Add(competing);
+                captures.Add(Capture(competing.StandardOutput, Path.Combine(evidence, "competing.stdout.log")));
+                captures.Add(Capture(competing.StandardError, Path.Combine(evidence, "competing.stderr.log")));
+                using var rejectionDeadline = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
+                rejectionDeadline.CancelAfter(TimeSpan.FromSeconds(15));
+                await competing.WaitForExitAsync(rejectionDeadline.Token);
+                Assert.AreNotEqual(0, competing.ExitCode, "A second writable process must reject the owned project.");
+                StringAssert.Contains(await File.ReadAllTextAsync(competingLog, deadline.Token), "already open");
+            }
+            catch (Exception error) when (!deadline.IsCancellationRequested)
+            { synchronizationFailures.Add(error); }
             foreach (var target in launched)
-                Assert.AreEqual(registry.Get(target.Id).Epoch,
-                    (await registry.Client(target.Id).HandshakeAsync(deadline.Token)).Epoch);
+            {
+                try
+                {
+                    Assert.AreEqual(registry.Get(target.Id).Epoch,
+                        (await registry.Client(target.Id).HandshakeAsync(deadline.Token)).Epoch);
+                }
+                catch (Exception error) when (!deadline.IsCancellationRequested)
+                { synchronizationFailures.Add(error); }
+            }
+            if (synchronizationFailures.Count != 0)
+                throw new AggregateException("Native synchronization execution failed; each independent project was exercised.", synchronizationFailures);
         }
         catch (OperationCanceledException error) when (deadline.IsCancellationRequested)
         {
-            Assert.Fail($"The aggregate native-session ceiling of 300 seconds expired after {elapsed.Elapsed.TotalSeconds:F1}s. "
+            Assert.Fail($"The aggregate native-session ceiling of {aggregateSeconds} seconds expired after {elapsed.Elapsed.TotalSeconds:F1}s. "
                 + $"This is not a successful journey or an individual-operation timeout. Original cancellation: {error}");
         }
         finally
@@ -546,6 +978,39 @@ public sealed partial class NativeSessionTests
             foreach (Process process in processes) process.Dispose();
             Directory.Delete(temporary, true);
         }
+    }
+
+    // Seeds per psu-cpu-fixture-and-ownership.md §1.9. The seed journey itself
+    // prepares and checks S0, S1 and S2 inside the parent fixture.
+    private static async Task RunPsuCpuJourney(NativeJourney journey, InstanceRegistry registry, NativeClient client, DocumentSpecifier emptyRoot,
+        string projectDirectory, Process native, string display, string evidence, string instanceId, Action<Process> ownProcess, CancellationToken token)
+    {
+        if (journey == NativeJourney.PsuCpuSeed)
+        {
+            await PsuCpuFixture.VerifySeedsAsync(client, emptyRoot, projectDirectory, evidence, token);
+            return;
+        }
+        var seed = journey switch
+        {
+            NativeJourney.PsuCpuComponentCreation or NativeJourney.ConnectedRealization or NativeJourney.OwnershipSync
+                or NativeJourney.NativeCrash or NativeJourney.NativeCrashRelease or NativeJourney.RepeatedSheetOwnership => PsuCpuSeed.Sheets,
+            NativeJourney.XmlRebuild or NativeJourney.ProjectRecovery or NativeJourney.ProjectRecoveryContainer => PsuCpuSeed.RootOnly,
+            NativeJourney.DiagramCanvas => PsuCpuSeed.None,
+            _ => throw new ArgumentOutOfRangeException(nameof(journey), journey, "Not a PSU/CPU journey.")
+        };
+        var context = await PsuCpuFixture.PrepareNativeAsync(client, emptyRoot, projectDirectory, seed, evidence, token);
+        await (journey switch
+        {
+            NativeJourney.PsuCpuComponentCreation => VerifyPsuCpuComponentCreation(client, context, native.Id, display, evidence, instanceId, token),
+            NativeJourney.ConnectedRealization => VerifyPsuCpuConnectedRealization(client, context, native.Id, display, evidence, instanceId, token),
+            NativeJourney.DiagramCanvas => VerifyPsuCpuDiagramCanvas(client, context, native.Id, display, evidence, instanceId, token),
+            NativeJourney.XmlRebuild => VerifyPsuCpuXmlRebuild(client, context, native.Id, display, evidence, instanceId, token),
+            NativeJourney.ProjectRecovery or NativeJourney.ProjectRecoveryContainer => VerifyPsuCpuProjectFileRecovery(registry, client, context, native, display, evidence, instanceId, ownProcess, journey == NativeJourney.ProjectRecovery, token),
+            NativeJourney.OwnershipSync => VerifyPsuCpuOwnershipSync(client, context, native.Id, display, evidence, instanceId, token),
+            NativeJourney.RepeatedSheetOwnership => VerifyRepeatedExternalOwners(client, context, native.Id, display, evidence, instanceId, token),
+            NativeJourney.NativeCrashRelease => VerifyPsuCpuExitedOperationRelease(client, context, native, native.Id, display, evidence, instanceId, token),
+            _ => VerifyPsuCpuNativeCrash(client, context, native, native.Id, display, evidence, instanceId, token)
+        });
     }
 
     private static async Task Capture(StreamReader input, string path)

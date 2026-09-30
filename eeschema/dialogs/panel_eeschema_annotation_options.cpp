@@ -29,9 +29,9 @@
 
 
 PANEL_EESCHEMA_ANNOTATION_OPTIONS::PANEL_EESCHEMA_ANNOTATION_OPTIONS(
-        wxWindow* aWindow, EDA_BASE_FRAME* schSettingsProvider ) :
+        wxWindow* aWindow, EDA_BASE_FRAME* schSettingsProvider, SCHEMATIC_SETTINGS* aSettings ) :
         PANEL_EESCHEMA_ANNOTATION_OPTIONS_BASE( aWindow ),
-        m_schSettingsProvider( schSettingsProvider )
+        m_schSettingsProvider( schSettingsProvider ), m_settings( aSettings )
 {
     annotate_down_right_bitmap->SetBitmap( KiBitmapBundle( BITMAPS::annotate_down_right ) );
     annotate_right_down_bitmap->SetBitmap( KiBitmapBundle( BITMAPS::annotate_right_down ) );
@@ -87,7 +87,9 @@ void PANEL_EESCHEMA_ANNOTATION_OPTIONS::loadEEschemaSettings( SCHEMATIC_SETTINGS
 
 bool PANEL_EESCHEMA_ANNOTATION_OPTIONS::TransferDataToWindow()
 {
-    if( SCH_EDIT_FRAME* schFrame = dynamic_cast<SCH_EDIT_FRAME*>( m_schSettingsProvider ) )
+    if( m_settings )
+        loadEEschemaSettings( m_settings );
+    else if( SCH_EDIT_FRAME* schFrame = dynamic_cast<SCH_EDIT_FRAME*>( m_schSettingsProvider ) )
         loadEEschemaSettings( &schFrame->Schematic().Settings() );
 
     return true;
@@ -96,9 +98,10 @@ bool PANEL_EESCHEMA_ANNOTATION_OPTIONS::TransferDataToWindow()
 
 bool PANEL_EESCHEMA_ANNOTATION_OPTIONS::TransferDataFromWindow()
 {
-    if( SCH_EDIT_FRAME* schFrame = dynamic_cast<SCH_EDIT_FRAME*>( m_schSettingsProvider ) )
+    SCH_EDIT_FRAME* schFrame = dynamic_cast<SCH_EDIT_FRAME*>( m_schSettingsProvider );
+    if( m_settings || schFrame )
     {
-        SCHEMATIC_SETTINGS& projSettings = schFrame->Schematic().Settings();
+        SCHEMATIC_SETTINGS& projSettings = m_settings ? *m_settings : schFrame->Schematic().Settings();
 
         projSettings.m_AnnotateSortOrder = m_rbSortBy_Y_Position->GetValue() ?
                 ANNOTATE_ORDER_T::SORT_BY_Y_POSITION : ANNOTATE_ORDER_T::SORT_BY_X_POSITION;

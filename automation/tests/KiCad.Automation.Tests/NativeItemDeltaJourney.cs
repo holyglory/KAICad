@@ -127,7 +127,15 @@ public sealed partial class NativeSessionTests
             "Undo must restore the image as well as the stored objects.");
         var reverseXml = SchematicItemMerge.Plan(checkpoint.State.Baseline, checkpoint.State.Xml, undone.Data);
         Assert.IsTrue(reverseXml.CanApply); Assert.AreEqual(0, reverseXml.NativeOperations.Count);
-        Assert.AreEqual(undone.Data, reverseXml.Merged, "Native undo must be available for reverse XML synchronization.");
+        if (!undone.Data.Equals(reverseXml.Merged))
+        {
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-reverse-undo-native.json"),
+                SchematicJson.Formatter.Format(undone.Data), token);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-reverse-undo-merged.json"),
+                SchematicJson.Formatter.Format(reverseXml.Merged!), token);
+            Assert.Fail("Native undo must be available for reverse XML synchronization.\n"
+                + NativeSnapshotDifference.Describe(undone.Data, reverseXml.Merged!));
+        }
         NativeKeyboard.SchematicShortcut(display, processId, "y");
         using var redoDeadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         redoDeadline.CancelAfter(TimeSpan.FromSeconds(5));

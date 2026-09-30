@@ -69,7 +69,12 @@ public sealed record Circuit(
         {
             Identity(component.Id);
             RequireText(component.Reference, "Component reference");
-            if (!references.Add(component.Reference)) throw Invalid("Component references must be unique in the design.");
+            // KiCad uses a trailing '?' for an unannotated reference. Such
+            // placeholders are intentionally repeatable until annotation;
+            // assigned references remain unique design-wide.
+            if (!component.Reference.EndsWith("?", StringComparison.Ordinal)
+                && !references.Add(component.Reference))
+                throw Invalid("Assigned component references must be unique in the design.");
             if (!instances.TryGetValue(component.SheetInstanceId, out var instance)
                 || !sheets[instance.DefinitionId].Components.Any(c => c.Id == component.DefinitionId))
                 throw Invalid("Component does not belong to its sheet definition.");
@@ -105,6 +110,8 @@ public sealed record Circuit(
             if (symbol.Unit < 1 || symbol.Unit > parts[definitions[component.DefinitionId].PartId].Units
                 || !units.Add((symbol.ComponentId, symbol.Unit)))
                 throw Invalid("Symbol units must be declared and unique per component instance.");
+            if (!instances.ContainsKey(symbol.EffectiveSheetInstanceId(component)))
+                throw Invalid("Symbol occurrence references an unknown sheet instance.");
             symbol.Placement?.Validate();
         }
     }
@@ -130,7 +137,12 @@ public sealed record SheetInstance(Guid Id, Guid DefinitionId, Guid? ParentId);
 public sealed record ComponentInstance(Guid Id, Guid DefinitionId, Guid SheetInstanceId, string Reference);
 public sealed record PinEndpoint(Guid ComponentId, string Pin);
 public sealed record CircuitNet(Guid Id, string Name, IReadOnlyList<PinEndpoint> Pins);
-public sealed record SymbolOccurrence(Guid Id, Guid ComponentId, int Unit, SymbolPlacement? Placement);
+public sealed record SymbolOccurrence(Guid Id, Guid ComponentId, int Unit, SymbolPlacement? Placement, Guid? SheetInstanceId = null)
+{
+    public Guid EffectiveSheetInstanceId(ComponentInstance component) => component.Id == ComponentId
+        ? SheetInstanceId ?? component.SheetInstanceId
+        : throw Circuit.Invalid("Resolve a symbol location only through its exact component owner.");
+}
 
 // Millimetres and degrees are explicit in the field names and XML attributes.
 // Mirror is represented independently from rotation; neither affects connectivity.

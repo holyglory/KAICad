@@ -336,7 +336,15 @@ public sealed partial class NativeSessionTests
             await Call("kicad_schematic_data", new { instanceId, documentJson = "{}" }, error: true);
             await Call("kicad_schematic_hierarchy_data", new { instanceId, documentJson = "{}" }, error: true);
             await Call("kicad_schematic_hierarchy_data", new { instanceId = Guid.NewGuid().ToString("D"), documentJson = JsonFormatter.Default.Format(document) }, error: true);
-            await Call("kicad_schematic_hierarchy_data", new { instanceId, documentJson = JsonFormatter.Default.Format(child) }, error: true);
+            var visibleBeforeHiddenRead = await native.InvokeAsync<GetOpenDocuments, GetOpenDocumentsResponse>(new() { Type = (DocumentType)1 }, token);
+            var hiddenHierarchy = await Call("kicad_schematic_hierarchy_data", new { instanceId, documentJson = JsonFormatter.Default.Format(child) });
+            var hiddenData = (Kiapi.Schematic.Types.SchematicHierarchyData)SchematicDataXml.Read(hiddenHierarchy.GetProperty("structuredContent").GetProperty("xml").GetString()!);
+            Assert.AreEqual(document, hiddenData.Document);
+            Assert.IsTrue(hiddenData.Instances.Any(s => s.Metadata.Document.Equals(child)));
+            Assert.AreEqual(visibleBeforeHiddenRead, await native.InvokeAsync<GetOpenDocuments, GetOpenDocumentsResponse>(new() { Type = (DocumentType)1 }, token));
+            var unloadedHierarchyTarget = child.Clone();
+            unloadedHierarchyTarget.SheetPath.Path.Add(new KIID { Value = Guid.NewGuid().ToString("D") });
+            await Call("kicad_schematic_hierarchy_data", new { instanceId, documentJson = JsonFormatter.Default.Format(unloadedHierarchyTarget) }, error: true);
             await Call("kicad_schematic_observe", new { instanceId, documentJson = "{}" }, error: true);
             await Call("kicad_schematic_observe", new { instanceId = Guid.NewGuid().ToString("D"), documentJson = JsonFormatter.Default.Format(document) }, error: true);
             await Call("kicad_schematic_observe", new { instanceId, documentJson = JsonFormatter.Default.Format(child) }, error: true);
@@ -407,8 +415,13 @@ public sealed partial class NativeSessionTests
         {
             var response = await Request("tools/call", new { name, arguments });
             var result = response.GetProperty("result");
-            Assert.AreEqual(error, result.TryGetProperty("isError", out var failed) && failed.GetBoolean(),
-                name + ": " + result.GetRawText());
+            bool actualError = result.TryGetProperty("isError", out var failed) && failed.GetBoolean();
+            if (error != actualError)
+            {
+                string unexpected = Path.Combine(evidence, instanceId + "-mcp-unexpected-" + nextId + ".json");
+                await File.WriteAllTextAsync(unexpected, result.GetRawText(), token);
+                Assert.AreEqual(error, actualError, name + "; full response retained at " + unexpected);
+            }
             return result;
         }
 

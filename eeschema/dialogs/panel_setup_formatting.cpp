@@ -28,9 +28,9 @@
 #include <project/net_settings.h>
 
 
-PANEL_SETUP_FORMATTING::PANEL_SETUP_FORMATTING( wxWindow* aWindow, SCH_EDIT_FRAME* aFrame  ) :
+PANEL_SETUP_FORMATTING::PANEL_SETUP_FORMATTING( wxWindow* aWindow, SCH_EDIT_FRAME* aFrame, SCHEMATIC_SETTINGS* aSettings ) :
         PANEL_SETUP_FORMATTING_BASE( aWindow ),
-        m_frame( aFrame ),
+        m_settings( aSettings ? aSettings : &aFrame->Schematic().Settings() ),
         m_textSize( aFrame, m_textSizeLabel, m_textSizeCtrl, m_textSizeUnits ),
         m_lineWidth( aFrame, m_lineWidthLabel, m_lineWidthCtrl, m_lineWidthUnits ),
         m_pinSymbolSize( aFrame, m_pinSymbolSizeLabel, m_pinSymbolSizeCtrl, m_pinSymbolSizeUnits ),
@@ -63,7 +63,12 @@ void PANEL_SETUP_FORMATTING::onCheckBoxIref( wxCommandEvent& event )
 
 bool PANEL_SETUP_FORMATTING::TransferDataToWindow()
 {
-    SCHEMATIC_SETTINGS& settings = m_frame->Schematic().Settings();
+    return loadSettings( *m_settings );
+}
+
+
+bool PANEL_SETUP_FORMATTING::loadSettings( const SCHEMATIC_SETTINGS& settings )
+{
 
     m_textSize.SetUnits( EDA_UNITS::MILS );
     m_lineWidth.SetUnits( EDA_UNITS::MILS );
@@ -120,7 +125,7 @@ bool PANEL_SETUP_FORMATTING::TransferDataFromWindow()
     if( !m_connectionGridSize.Validate( MIN_CONNECTION_GRID_MILS, 10000, EDA_UNITS::MILS ) )
         return false;
 
-    SCHEMATIC_SETTINGS& settings = m_frame->Schematic().Settings();
+    SCHEMATIC_SETTINGS& settings = *m_settings;
 
     settings.m_DefaultTextSize = m_textSize.GetIntValue();
     settings.m_DefaultLineWidth = m_lineWidth.GetIntValue();
@@ -173,26 +178,9 @@ bool PANEL_SETUP_FORMATTING::TransferDataFromWindow()
 
 void PANEL_SETUP_FORMATTING::ImportSettingsFrom( SCHEMATIC_SETTINGS& aSettings )
 {
-    m_textSize.SetValue( aSettings.m_DefaultTextSize );
-    m_lineWidth.SetValue( aSettings.m_DefaultLineWidth );
-    m_pinSymbolSize.SetValue( aSettings.m_PinSymbolSize );
-    m_showDNPMarkers->SetValue( aSettings.m_ShowDNPMarkers );
-    m_connectionGridSize.SetValue( aSettings.m_ConnectionGridSize );
-
-    m_showIntersheetsReferences->SetValue( aSettings.m_IntersheetRefsShow );
-    m_radioFormatStandard->SetValue( aSettings.m_IntersheetRefsFormatShort );
-    m_radioFormatAbbreviated->SetValue( !aSettings.m_IntersheetRefsFormatShort );
-    m_prefixCtrl->ChangeValue( aSettings.m_IntersheetRefsPrefix );
-    m_suffixCtrl->ChangeValue( aSettings.m_IntersheetRefsSuffix );
-    m_listOwnPage->SetValue( aSettings.m_IntersheetRefsListOwnPage );
-
-#define SET_VALUE( ctrl, units, value ) \
-        ctrl->SetValue( EDA_UNIT_UTILS::UI::StringFromValue( unityScale, units, value ) )
-
-    SET_VALUE( m_textOffsetRatioCtrl, EDA_UNITS::PERCENT, aSettings.m_TextOffsetRatio * 100.0 );
-    SET_VALUE( m_dashLengthCtrl, EDA_UNITS::UNSCALED, aSettings.m_DashedLineDashRatio );
-    SET_VALUE( m_gapLengthCtrl, EDA_UNITS::UNSCALED, aSettings.m_DashedLineGapRatio );
-    SET_VALUE( m_labelSizeRatioCtrl, EDA_UNITS::PERCENT, aSettings.m_LabelSizeRatio * 100.0 );
-
-#undef SET_VALUE
+    // Use the same complete mapping as normal load. The former separate path
+    // inverted the reference-format choice and omitted overbar, junction/hop
+    // sizes and operating-point formatting. Neither path writes the draft until
+    // validation succeeds and the page transfers its pending values.
+    loadSettings( aSettings );
 }

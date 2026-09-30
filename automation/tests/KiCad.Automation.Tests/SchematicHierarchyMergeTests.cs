@@ -1,4 +1,5 @@
 using Google.Protobuf.WellKnownTypes;
+using Kiapi.Common.Types;
 using Kiapi.Schematic.Types;
 using KiCad.Automation.Native;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
@@ -86,6 +87,23 @@ public sealed class SchematicHierarchyMergeTests
         var conflict = SchematicHierarchyMerge.Plan(b, x, n);
         Assert.IsFalse(conflict.CanApply); Assert.IsNull(conflict.Merged); Assert.IsEmpty(conflict.NativeOperations);
         Assert.IsTrue(conflict.Conflicts.Any(c => c.Reason == "sheet_delete_modify" && c.Xml is null && c.Native is not null));
+
+        var withBranch = b.Clone(); var branch = AddBranch(withBranch); Note(branch, "Second note");
+        var reordered = withBranch.Clone(); var requestedBranch = reordered.Instances[^1];
+        var reversed = requestedBranch.Items.Reverse().ToArray(); requestedBranch.Items.Clear(); requestedBranch.Items.Add(reversed);
+        var deleted = withBranch.Clone(); var referenceId = branch.Metadata.Document.SheetPath.Path[^1];
+        var parent = deleted.Instances[0];
+        parent.Items.Remove(parent.Items.Single(i => i.Is(SheetSymbol.Descriptor) && i.Unpack<SheetSymbol>().Id.Equals(referenceId)));
+        deleted.Instances.RemoveAt(deleted.Instances.Count - 1);
+        string beforeOrder = SchematicDataXml.Write(reordered);
+        var orderOnly = SchematicHierarchyMerge.Plan(withBranch, reordered, deleted);
+        Assert.IsTrue(orderOnly.CanApply, orderOnly.ErrorMessage); Assert.IsEmpty(orderOnly.Conflicts); Assert.IsEmpty(orderOnly.NativeOperations);
+        Assert.AreEqual(beforeOrder, SchematicDataXml.Write(reordered), "Comparison must not reorder the saved XML input.");
+        var changed = requestedBranch.Items[0].Unpack<SchematicText>(); changed.Text.Text_ = "An actual conflicting edit";
+        requestedBranch.Items[0] = Any.Pack(changed);
+        var realConflict = SchematicHierarchyMerge.Plan(withBranch, reordered, deleted);
+        Assert.IsFalse(realConflict.CanApply); Assert.IsEmpty(realConflict.NativeOperations);
+        Assert.IsTrue(realConflict.Conflicts.Any(c => c.Reason == "sheet_delete_modify"));
     }
 
     [TestMethod]
@@ -120,6 +138,98 @@ public sealed class SchematicHierarchyMergeTests
         Assert.AreEqual("merge_document_changed", SchematicHierarchyMerge.Plan(b, other, b).ErrorCode);
         using var cancel = new CancellationTokenSource(); cancel.Cancel();
         Assert.ThrowsExactly<OperationCanceledException>(() => SchematicHierarchyMerge.Plan(b, b, b, cancel.Token));
+    }
+
+    [TestMethod]
+    public void ElectricalProjectPolicySurvivesConcurrentSheetInsertionAndRemoval()
+    {
+        foreach (bool remove in new[] { false, true })
+        {
+            var baseline = SchematicHierarchyTopologyTests.Fixture();
+            foreach (var screen in baseline.Instances)
+            {
+                screen.Metadata.ErcSettings = SchematicErcSettingsTests.Fixture();
+                screen.Metadata.ErcSettings.Exclusions.Clear();
+                screen.Metadata.NetChainClasses = new()
+                {
+                    Definitions = { "Used", "Unused" }, Assignments = { ["Signal"] = "Used" }
+                };
+            }
+            var xml = baseline.Clone(); var native = baseline.Clone();
+            if (remove) RemoveFirstBranch(xml); else AddBranch(xml);
+            foreach (var screen in native.Instances)
+            {
+                screen.Metadata.ErcSettings.RuleSeverities[0].Severity = RuleSeverity.RsError;
+                screen.Metadata.NetChainClasses.Definitions.Add("Added");
+            }
+            var merged = SchematicHierarchyMerge.Plan(baseline, xml, native);
+            Assert.IsTrue(merged.CanApply, merged.ErrorMessage);
+            foreach (var screen in merged.Merged!.Instances)
+            {
+                Assert.AreEqual(native.Instances[0].Metadata.ErcSettings, screen.Metadata.ErcSettings);
+                Assert.AreEqual(native.Instances[0].Metadata.NetChainClasses, screen.Metadata.NetChainClasses);
+            }
+            Assert.AreEqual(0, merged.NativeOperations.Count(o => o.SetErcSettings is not null || o.ReplaceNetChainClasses is not null));
+            var reverse = SchematicHierarchyMerge.Plan(baseline, native, xml);
+            Assert.IsTrue(reverse.CanApply, reverse.ErrorMessage);
+            Assert.AreEqual(1, reverse.NativeOperations.Count(o => o.SetErcSettings is not null));
+            Assert.AreEqual(1, reverse.NativeOperations.Count(o => o.ReplaceNetChainClasses is not null));
+            Assert.AreEqual(merged.Merged, reverse.Merged);
+            foreach (var screen in xml.Instances) screen.Metadata.ErcSettings.RuleSeverities[0].Severity = RuleSeverity.RsIgnore;
+            var originalXml = xml.Clone(); var originalNative = native.Clone();
+            Assert.IsFalse(SchematicHierarchyMerge.Plan(baseline, xml, native).CanApply);
+            Assert.AreEqual(originalXml, xml); Assert.AreEqual(originalNative, native);
+        }
+    }
+
+    [TestMethod]
+    public void SymbolProjectSettingsKeepOneOwnerDuringSheetStructureChanges()
+    {
+        foreach (bool remove in new[] { false, true })
+        {
+            var baseline = SchematicHierarchyTopologyTests.Fixture();
+            foreach (var screen in baseline.Instances)
+            {
+                screen.Metadata.FieldTemplates = SchematicSymbolProjectSettingsTests.Templates();
+                screen.Metadata.SymbolComparison = new() { MissingFields = true };
+            }
+            var xml = baseline.Clone(); var native = baseline.Clone();
+            if (remove) RemoveFirstBranch(xml); else AddBranch(xml);
+            foreach (var screen in native.Instances)
+            {
+                screen.Metadata.FieldTemplates.Fields.Clear();
+                screen.Metadata.SymbolComparison.FieldTexts = true;
+            }
+            var merged = SchematicHierarchyMerge.Plan(baseline, xml, native);
+            Assert.IsTrue(merged.CanApply, merged.ErrorMessage);
+            Assert.IsTrue(merged.Merged!.Instances.All(s => s.Metadata.FieldTemplates.Fields.Count == 0 && s.Metadata.SymbolComparison.FieldTexts));
+            Assert.AreEqual(0, merged.NativeOperations.Count(o => o.SetFieldTemplates is not null || o.SetSymbolComparison is not null));
+            var reverse = SchematicHierarchyMerge.Plan(baseline, native, xml);
+            Assert.IsTrue(reverse.CanApply, reverse.ErrorMessage);
+            Assert.AreEqual(1, reverse.NativeOperations.Count(o => o.SetFieldTemplates is not null));
+            Assert.AreEqual(1, reverse.NativeOperations.Count(o => o.SetSymbolComparison is not null));
+            Assert.AreEqual(merged.Merged, reverse.Merged);
+        }
+    }
+
+    [TestMethod]
+    public void AnnotationPolicyKeepsOneOwnerAcrossBranchInsertionAndRemoval()
+    {
+        foreach (bool remove in new[] { false, true })
+        {
+            var baseline = SchematicHierarchyTopologyTests.Fixture();
+            foreach (var screen in baseline.Instances) screen.Metadata.Annotation = SchematicAnnotationTests.Policy();
+            var xml = baseline.Clone(); var native = baseline.Clone();
+            if (remove) RemoveFirstBranch(xml); else AddBranch(xml);
+            foreach (var screen in native.Instances) screen.Metadata.Annotation.StartAfter = 741;
+            var merged = SchematicHierarchyMerge.Plan(baseline, xml, native);
+            Assert.IsTrue(merged.CanApply, merged.ErrorMessage);
+            Assert.IsTrue(merged.Merged!.Instances.All(s => s.Metadata.Annotation.StartAfter == 741));
+            Assert.AreEqual(0, merged.NativeOperations.Count(o => o.SetAnnotation is not null));
+            var reverse = SchematicHierarchyMerge.Plan(baseline, native, xml);
+            Assert.IsTrue(reverse.CanApply, reverse.ErrorMessage);
+            Assert.AreEqual(1, reverse.NativeOperations.Count(o => o.SetAnnotation is not null));
+        }
     }
 
     [TestMethod]

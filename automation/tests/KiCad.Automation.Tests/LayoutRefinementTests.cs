@@ -9,6 +9,25 @@ public sealed class LayoutRefinementTests
     private static readonly DocumentRevision Revision = new("fixture-epoch", 3);
     private static SymbolPlacement Placement(int index) => new(index * 12.7m, 25.4m, 0, false, false, false);
     [TestMethod]
+    public void AdditionOnlyRefinementProtectsExistingSymbolsEvenWithoutXmlCoordinates()
+    {
+        var current = CircuitXmlTests.Fixture().WithoutPlacement();
+        var previous = current with { Symbols = current.Symbols.SkipLast(1).ToArray() };
+        var added = current.Symbols.Last();
+        var request = LayoutRefinement.ForAddedSymbols(previous, current, Revision, "Preserve existing native layout.");
+        CollectionAssert.AreEqual(new[] { added.Id }, request.AffectedSymbols.ToArray());
+        var result = request.ApplyCandidate(current, Revision, [new(added.Id, Placement(9))]);
+        CollectionAssert.AreEqual(previous.Symbols.ToArray(), result.Symbols.SkipLast(1).ToArray());
+        Assert.ThrowsExactly<AutomationException>(() => request.ApplyCandidate(current, Revision,
+            [new(current.Symbols[0].Id, Placement(1)), new(added.Id, Placement(9))]));
+        Assert.ThrowsExactly<AutomationException>(() => LayoutRefinement.ForAddedSymbols(current, current, Revision, ""));
+        Assert.ThrowsExactly<AutomationException>(() => LayoutRefinement.ForAddedSymbols(previous, current,
+            Revision with { Epoch = "" }, ""));
+        Assert.ThrowsExactly<AutomationException>(() => LayoutRefinement.ForAddedSymbols(previous,
+            current with { Symbols = current.Symbols.Select((s, i) => i == 0 ? s with { Placement = Placement(1) } : s).ToArray() }, Revision, ""));
+    }
+
+    [TestMethod]
     public void InitialCandidatePreservesCircuitAndRemainsSeparateFromOriginal()
     {
         var circuit = CircuitXmlTests.Fixture().WithoutPlacement();

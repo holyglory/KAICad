@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:kicad:automation:block-definition:1"
+           xmlns="urn:kicad:automation:block-definition:1" elementFormDefault="qualified">
+  <xs:simpleType name="state"><xs:restriction base="xs:string">
+    <xs:enumeration value="Unspecified"/><xs:enumeration value="Unknown"/><xs:enumeration value="Candidates"/><xs:enumeration value="Selected"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="strength"><xs:restriction base="xs:string">
+    <xs:enumeration value="Information"/><xs:enumeration value="Preference"/><xs:enumeration value="Requirement"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="verification"><xs:restriction base="xs:string">
+    <xs:enumeration value="Unknown"/><xs:enumeration value="Unverified"/><xs:enumeration value="Verified"/>
+    <xs:enumeration value="Violated"/><xs:enumeration value="Unsupported"/><xs:enumeration value="Conflicting"/>
+  </xs:restriction></xs:simpleType>
+  <xs:simpleType name="identity"><xs:restriction base="xs:string"><xs:pattern value="[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"/></xs:restriction></xs:simpleType>
+  <xs:complexType name="source">
+    <xs:attribute name="document" type="xs:string" use="required"/><xs:attribute name="revision" type="xs:string" use="required"/>
+    <xs:attribute name="page" type="xs:positiveInteger"/><xs:attribute name="table" type="xs:string"/><xs:attribute name="part-variant" type="xs:string"/>
+  </xs:complexType>
+  <xs:attributeGroup name="metadata">
+    <xs:attribute name="state" type="state" use="required"/><xs:attribute name="strength" type="strength" use="required"/>
+    <xs:attribute name="verification" type="verification" use="required"/>
+  </xs:attributeGroup>
+  <xs:complexType name="text-choice"><xs:sequence>
+    <xs:element name="applicability" type="xs:string"/><xs:element name="unknown-reason" type="xs:string" minOccurs="0"/>
+    <xs:element name="values"><xs:complexType><xs:sequence><xs:element name="value" type="xs:string" minOccurs="0" maxOccurs="unbounded"/></xs:sequence></xs:complexType></xs:element>
+    <xs:element name="source" type="source" minOccurs="0" maxOccurs="unbounded"/>
+  </xs:sequence><xs:attributeGroup ref="metadata"/></xs:complexType>
+  <xs:complexType name="class-choice"><xs:sequence>
+    <xs:element name="applicability" type="xs:string"/><xs:element name="unknown-reason" type="xs:string" minOccurs="0"/>
+    <xs:element name="values"><xs:complexType><xs:sequence><xs:element name="value" minOccurs="0" maxOccurs="unbounded"><xs:complexType>
+      <xs:attribute name="library" type="identity" use="required"/><xs:attribute name="revision" type="xs:string" use="required"/>
+      <xs:attribute name="class" type="identity" use="required"/>
+    </xs:complexType></xs:element></xs:sequence></xs:complexType></xs:element>
+    <xs:element name="source" type="source" minOccurs="0" maxOccurs="unbounded"/>
+  </xs:sequence><xs:attributeGroup ref="metadata"/></xs:complexType>
+  <xs:element name="definition"><xs:complexType><xs:sequence>
+    <xs:element name="purpose" type="text-choice" minOccurs="0"/><xs:element name="type" type="text-choice" minOccurs="0"/>
+    <xs:element name="manufacturer" type="text-choice" minOccurs="0"/><xs:element name="family" type="text-choice" minOccurs="0"/>
+    <xs:element name="model" type="text-choice" minOccurs="0"/><xs:element name="orderable-part" type="text-choice" minOccurs="0"/>
+    <xs:element name="package" type="text-choice" minOccurs="0"/><xs:element name="knowledge-class" type="class-choice" minOccurs="0"/>
+  </xs:sequence><xs:attribute name="version" type="xs:positiveInteger" use="required" fixed="1"/></xs:complexType></xs:element>
+</xs:schema>

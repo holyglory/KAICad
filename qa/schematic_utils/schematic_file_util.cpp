@@ -175,6 +175,8 @@ std::unique_ptr<SCHEMATIC> ReadSchematicFromStream( std::istream& aStream, PROJE
 
         schematic->ConnectionGraph()->SetNetChainTerminalRefOverrides( termRefs );
         schematic->ConnectionGraph()->SetNetChainMemberNetOverrides( parser.GetNetChainMemberNets() );
+        schematic->ConnectionGraph()->SetNetChainExcludedNetOverrides( parser.GetNetChainExcludedNets() );
+        schematic->ConnectionGraph()->SetNetChainExcludedPinOverrides( parser.GetNetChainExcludedPins() );
     }
 
     return schematic;

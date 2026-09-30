@@ -286,6 +286,26 @@ NET_SETTINGS::NET_SETTINGS( JSON_SETTINGS* aParent, const std::string& aPath ) :
     // Let the save drop removed chains instead of merging them back in
     m_params.back()->SetClearUnknownKeys();
 
+    m_params.emplace_back( new PARAM_LAMBDA<nlohmann::json>( "net_chain_class_definitions",
+            [&]() -> nlohmann::json
+            {
+                auto result = nlohmann::json::array();
+                for( const wxString& name : GetNetChainClassDefinitions() )
+                    result.push_back( std::string( name.ToUTF8() ) );
+                return result;
+            },
+            [&]( const nlohmann::json& value )
+            {
+                if( !value.is_array() ) return;
+                std::set<wxString> names;
+                for( const auto& entry : value )
+                {
+                    wxString name = entry.get<wxString>();
+                    if( !name.IsEmpty() ) names.insert( name );
+                }
+                m_netChainClassDefinitions = std::move( names );
+            }, nlohmann::json::array() ) );
+
     m_params.emplace_back( new PARAM_LAMBDA<nlohmann::json>( "net_chain_netclasses",
             [&]() -> nlohmann::json
             {
@@ -499,6 +519,8 @@ bool NET_SETTINGS::operator==( const NET_SETTINGS& aOther ) const
         return false;
 
     if( m_netChainClasses != aOther.m_netChainClasses )
+        return false;
+    if( GetNetChainClassDefinitions() != aOther.GetNetChainClassDefinitions() )
         return false;
 
     if( m_netChainNetClasses != aOther.m_netChainNetClasses )
@@ -860,6 +882,11 @@ void NET_SETTINGS::SetNetColorAssignment( const wxString& netName, const KIGFX::
     m_netColorAssignments[netName] = color;
 }
 
+
+void NET_SETTINGS::RemoveNetColorAssignment( const wxString& name )
+{
+    m_netColorAssignments.erase( name );
+}
 
 const std::map<wxString, KIGFX::COLOR4D>& NET_SETTINGS::GetNetColorAssignments() const
 {

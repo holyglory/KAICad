@@ -1,0 +1,168 @@
+{
+  "fixture": "psu-cpu",
+  "version": 1,
+  "stage": "Complete",
+  "seed": "Sheets",
+  "sheets": [
+    {"key": "ROOT", "modelSheetInstance": "7e57f1c5-0000-4000-8000-000500000001", "definition": "7e57f1c5-0000-4000-8000-000400000001", "parent": null, "file": "fixture.kicad_sch", "sheetName": null, "nativeSheetSymbol": null, "nativeScreen": "7e57f1c5-0000-4000-8000-002000000001", "page": "1", "paper": "A4"},
+    {"key": "PSU", "modelSheetInstance": "7e57f1c5-0000-4000-8000-000500000002", "definition": "7e57f1c5-0000-4000-8000-000400000002", "parent": "ROOT", "file": "psu.kicad_sch", "sheetName": "PSU", "nativeSheetSymbol": "7e57f1c5-0000-4000-8000-002000000002", "nativeScreen": "7e57f1c5-0000-4000-8000-002000000005", "page": "2", "paper": "A4"},
+    {"key": "CPU", "modelSheetInstance": "7e57f1c5-0000-4000-8000-000500000003", "definition": "7e57f1c5-0000-4000-8000-000400000003", "parent": "ROOT", "file": "cpu.kicad_sch", "sheetName": "CPU", "nativeSheetSymbol": "7e57f1c5-0000-4000-8000-002000000003", "nativeScreen": "7e57f1c5-0000-4000-8000-002000000006", "page": "3", "paper": "A3"},
+    {"key": "CPU_POWER", "modelSheetInstance": "7e57f1c5-0000-4000-8000-000500000004", "definition": "7e57f1c5-0000-4000-8000-000400000004", "parent": "CPU", "file": "cpu_power.kicad_sch", "sheetName": "CPU_POWER", "nativeSheetSymbol": "7e57f1c5-0000-4000-8000-002000000004", "nativeScreen": "7e57f1c5-0000-4000-8000-002000000007", "page": "4", "paper": "A4"}
+  ],
+  "symbols": [
+    {"component": "7e57f1c5-0000-4000-8000-000700000001", "occurrence": "7e57f1c5-0000-4000-8000-000900000001", "reference": "J1", "libId": "Connector_Generic:Conn_01x02", "value": "Conn_01x02", "unit": 1, "sheet": "PSU"},
+    {"component": "7e57f1c5-0000-4000-8000-000700000002", "occurrence": "7e57f1c5-0000-4000-8000-000900000002", "reference": "U1", "libId": "Regulator_Switching:LM2595S-ADJ", "value": "LM2595S-ADJ", "unit": 1, "sheet": "PSU"},
+    {"component": "7e57f1c5-0000-4000-8000-000700000003", "occurrence": "7e57f1c5-0000-4000-8000-000900000003", "reference": "R1", "libId": "Device:R", "value": "R", "unit": 1, "sheet": "PSU"},
+    {"component": "7e57f1c5-0000-4000-8000-000700000004", "occurrence": "7e57f1c5-0000-4000-8000-000900000004", "reference": "U2", "libId": "Regulator_Linear:LP3982ILD-3.3", "value": "LP3982ILD-3.3", "unit": 1, "sheet": "PSU"},
+    {"component": "7e57f1c5-0000-4000-8000-000700000005", "occurrence": "7e57f1c5-0000-4000-8000-000900000005", "reference": "U3", "libId": "Battery_Management:LTC2959", "value": "LTC2959", "unit": 1, "sheet": "PSU"},
+    {"component": "7e57f1c5-0000-4000-8000-000700000006", "occurrence": "7e57f1c5-0000-4000-8000-000900000006", "reference": "U4", "libId": "MCU_ST_STM32C0:STM32C011J_4-6_Mx", "value": "STM32C011J_4-6_Mx", "unit": 1, "sheet": "PSU"},
+    {"component": "7e57f1c5-0000-4000-8000-000700000007", "occurrence": "7e57f1c5-0000-4000-8000-000900000007", "reference": "U5", "libId": "Library:F28P659DK8PTPQ1", "value": "F28P659DK8PTPQ1", "unit": 1, "sheet": "CPU"},
+    {"component": "7e57f1c5-0000-4000-8000-000700000007", "occurrence": "7e57f1c5-0000-4000-8000-000900000008", "reference": "U5", "libId": "Library:F28P659DK8PTPQ1", "value": "F28P659DK8PTPQ1", "unit": 2, "sheet": "CPU"},
+    {"component": "7e57f1c5-0000-4000-8000-000700000007", "occurrence": "7e57f1c5-0000-4000-8000-000900000009", "reference": "U5", "libId": "Library:F28P659DK8PTPQ1", "value": "F28P659DK8PTPQ1", "unit": 3, "sheet": "CPU"},
+    {"component": "7e57f1c5-0000-4000-8000-000700000007", "occurrence": "7e57f1c5-0000-4000-8000-00090000000a", "reference": "U5", "libId": "Library:F28P659DK8PTPQ1", "value": "F28P659DK8PTPQ1", "unit": 4, "sheet": "CPU_POWER"},
+    {"component": "7e57f1c5-0000-4000-8000-000700000008", "occurrence": "7e57f1c5-0000-4000-8000-00090000000b", "reference": "U6", "libId": "pic_programmer:24C16", "value": "24C16", "unit": 1, "sheet": "CPU"}
+  ],
+  "nets": [
+    {
+      "net": "7e57f1c5-0000-4000-8000-000800000001",
+      "name": "VIN",
+      "pins": [
+        ["J1", "1"],
+        ["U1", "2"]
+      ]
+    },
+    {
+      "net": "7e57f1c5-0000-4000-8000-000800000002",
+      "name": "GND",
+      "pins": [
+        ["J1", "2"],
+        ["U1", "3"],
+        ["U2", "3"],
+        ["U2", "9"],
+        ["U3", "10"],
+        ["U4", "3"],
+        ["U5", "177"],
+        ["U6", "1"],
+        ["U6", "2"],
+        ["U6", "3"],
+        ["U6", "4"],
+        ["U6", "7"]
+      ]
+    },
+    {
+      "net": "7e57f1c5-0000-4000-8000-000800000003",
+      "name": "DCDC_OUT",
+      "pins": [
+        ["R1", "1"],
+        ["U1", "1"],
+        ["U1", "4"],
+        ["U3", "1"],
+        ["U3", "2"]
+      ]
+    },
+    {
+      "net": "7e57f1c5-0000-4000-8000-000800000004",
+      "name": "RAIL_A",
+      "pins": [
+        ["R1", "2"],
+        ["U2", "2"],
+        ["U2", "7"],
+        ["U3", "5"],
+        ["U4", "2"],
+        ["U5", "3"]
+      ]
+    },
+    {
+      "net": "7e57f1c5-0000-4000-8000-000800000005",
+      "name": "RAIL_B",
+      "pins": [
+        ["U2", "1"],
+        ["U2", "4"],
+        ["U3", "8"],
+        ["U6", "8"]
+      ]
+    },
+    {
+      "net": "7e57f1c5-0000-4000-8000-000800000006",
+      "name": "LDO_FAULT",
+      "pins": [
+        ["U2", "8"],
+        ["U4", "4"]
+      ]
+    },
+    {
+      "net": "7e57f1c5-0000-4000-8000-000800000007",
+      "name": "PSU_SCL",
+      "pins": [
+        ["U3", "6"],
+        ["U4", "5"]
+      ]
+    },
+    {
+      "net": "7e57f1c5-0000-4000-8000-000800000008",
+      "name": "PSU_SDA",
+      "pins": [
+        ["U3", "7"],
+        ["U4", "6"]
+      ]
+    },
+    {
+      "net": "7e57f1c5-0000-4000-8000-000800000009",
+      "name": "TELEM_MCU_TO_CPU",
+      "pins": [
+        ["U4", "8"],
+        ["U5", "74"]
+      ]
+    },
+    {
+      "net": "7e57f1c5-0000-4000-8000-00080000000a",
+      "name": "TELEM_CPU_TO_MCU",
+      "pins": [
+        ["U4", "1"],
+        ["U5", "73"]
+      ]
+    },
+    {
+      "net": "7e57f1c5-0000-4000-8000-00080000000b",
+      "name": "MEM_SCL",
+      "pins": [
+        ["U5", "161"],
+        ["U6", "6"]
+      ]
+    }
+  ],
+  "isolatedPins": {
+    "U1": ["5"],
+    "U2": ["5", "6"],
+    "U3": ["11", "3", "4", "9"],
+    "U4": ["7"],
+    "U5": {
+      "allExcept": ["161", "177", "3", "73", "74"]
+    },
+    "U6": ["5"]
+  },
+  "hierarchicalLabels": {
+    "CPU": ["GND", "RAIL_A", "RAIL_B", "TELEM_CPU_TO_MCU", "TELEM_MCU_TO_CPU"],
+    "CPU_POWER": ["GND", "RAIL_A"],
+    "PSU": ["GND", "RAIL_A", "RAIL_B", "TELEM_CPU_TO_MCU", "TELEM_MCU_TO_CPU"],
+    "ROOT": []
+  },
+  "sheetPins": {
+    "CPU": ["GND", "RAIL_A", "RAIL_B", "TELEM_CPU_TO_MCU", "TELEM_MCU_TO_CPU"],
+    "CPU_POWER": ["GND", "RAIL_A"],
+    "PSU": ["GND", "RAIL_A", "RAIL_B", "TELEM_CPU_TO_MCU", "TELEM_MCU_TO_CPU"]
+  },
+  "requiredLocalLabelNames": {
+    "CPU": ["MEM_SCL"],
+    "PSU": ["DCDC_OUT", "LDO_FAULT", "PSU_SCL", "PSU_SDA", "VIN"]
+  },
+  "allowedLabelNames": {
+    "CPU": ["GND", "MEM_SCL", "RAIL_A", "RAIL_B", "TELEM_CPU_TO_MCU", "TELEM_MCU_TO_CPU"],
+    "CPU_POWER": ["GND", "RAIL_A"],
+    "PSU": ["DCDC_OUT", "GND", "LDO_FAULT", "PSU_SCL", "PSU_SDA", "RAIL_A", "RAIL_B", "TELEM_CPU_TO_MCU", "TELEM_MCU_TO_CPU", "VIN"],
+    "ROOT": ["GND", "RAIL_A", "RAIL_B", "TELEM_CPU_TO_MCU", "TELEM_MCU_TO_CPU"]
+  },
+  "forbidden": ["global_label", "power_symbol", "no_connect", "bus", "bus_entry", "unlisted_text", "cross_net_wire", "mem_sda_net"],
+  "netNameRule": "leaf",
+  "presentation": {"pageInsetMm": 10, "reservedBottomMm": 50, "symbolBodiesDisjoint": true}
+}

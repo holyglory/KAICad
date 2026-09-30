@@ -35,6 +35,7 @@
 #include <drc/drc_rule.h>
 #include <drc/drc_rule_condition.h>
 #include <drc/drc_test_provider.h>
+#include <drawing_sheet/ds_data_model.h>
 #include <drc/drc_item.h>
 #include <drc/drc_cache_generator.h>
 #include <board.h>
@@ -98,6 +99,18 @@ DRC_ENGINE::DRC_ENGINE( BOARD* aBoard, BOARD_DESIGN_SETTINGS *aSettings ) :
 
     for( int ii = DRCE_FIRST; ii <= DRCE_LAST; ++ii )
         m_errorLimits[ii] = ERROR_LIMIT;
+}
+
+
+void DRC_ENGINE::SetDrawingSheetModel( std::unique_ptr<DS_DATA_MODEL> aModel )
+{
+    m_drawingSheetModel = std::move( aModel );
+}
+
+
+void DRC_ENGINE::ClearDrawingSheetModel()
+{
+    m_drawingSheetModel.reset();
 }
 
 
@@ -665,41 +678,44 @@ void DRC_ENGINE::loadRules( const wxFileName& aPath )
 {
     if( m_board && aPath.FileExists() )
     {
-        std::vector<std::shared_ptr<DRC_RULE>> rules;
-
         if( FILE* fp = wxFopen( aPath.GetFullPath(), wxT( "rt" ) ) )
         {
             FILE_LINE_READER lineReader( fp, aPath.GetFullPath() );  // Will close rules file
-            wxString         rulesText;
-
-            std::function<bool( wxString* )> resolver =
-                    [&]( wxString* token ) -> bool
-                    {
-                        if( IsComponentClassSelector( *token ) )
-                            return false;
-
-                        return m_board->ResolveTextVar( token, 0 );
-                    };
-
-            while( char* line = lineReader.ReadLine() )
-            {
-                wxString str( line );
-                str = m_board->ConvertCrossReferencesToKIIDs( str );
-                str = ExpandTextVars( str, &resolver );
-
-                rulesText << str << '\n';
-            }
-
-            DRC_RULES_PARSER parser( rulesText, aPath.GetFullPath() );
-            parser.Parse( rules, m_logReporter );
+            loadRules( lineReader, aPath.GetFullPath() );
         }
-
-        // Copy the rules into the member variable afterwards so that if Parse() throws then
-        // the possibly malformed rules won't contaminate the current ruleset.
-
-        for( std::shared_ptr<DRC_RULE>& rule : rules )
-            m_rules.push_back( rule );
     }
+}
+
+void DRC_ENGINE::loadRules( LINE_READER& aReader, const wxString& aSourceName, bool aStrict )
+{
+    std::vector<std::shared_ptr<DRC_RULE>> rules;
+    wxString rulesText;
+    std::function<bool( wxString* )> resolver = [&]( wxString* token ) -> bool
+    {
+        if( IsComponentClassSelector( *token ) ) return false;
+        return m_board->ResolveTextVar( token, 0 );
+    };
+    while( char* line = aReader.ReadLine() )
+    {
+        wxString str( line );
+        str = m_board->ConvertCrossReferencesToKIIDs( str );
+        rulesText << ExpandTextVars( str, &resolver );
+        // A read line keeps its own line break; adding another would double every line
+        // number the parser reports.
+        if( !str.EndsWith( wxT( "\n" ) ) ) rulesText << '\n';
+    }
+    DRC_RULES_PARSER parser( rulesText, aSourceName );
+    // Captured verification inputs must fail on malformed rules even when a
+    // diagnostic logger is present. UI file parsing retains its existing mode.
+    parser.Parse( rules, aStrict ? nullptr : m_logReporter );
+    if( aStrict && parser.IsTooRecent() )
+    {
+        throw DRC_RULES_TOO_RECENT( wxString::Format(
+                wxT( "'%s' declares a design rules version newer than %d, the newest this KiCad reads." ),
+                aSourceName, DRC_RULE_FILE_VERSION ).ToStdString( wxConvUTF8 ) );
+    }
+    // Publish only after successful parsing, preserving the existing native contract.
+    for( auto& rule : rules ) m_rules.push_back( std::move( rule ) );
 }
 
 
@@ -778,9 +794,9 @@ void DRC_ENGINE::compileRules()
 
 void DRC_ENGINE::InitEngine( const std::shared_ptr<DRC_RULE>& rule )
 {
-    m_testProviders = DRC_SHOWMATCHES_PROVIDER_REGISTRY::Instance().GetShowMatchesProviders();
+    m_testProviders = DRC_SHOWMATCHES_PROVIDER_REGISTRY::Instance().CreateShowMatchesProviders();
 
-    for( DRC_TEST_PROVIDER* provider : m_testProviders )
+    for( const auto& provider : m_testProviders )
     {
         if( m_logReporter )
             m_logReporter->Report( wxString::Format( wxT( "Create DRC provider: '%s'" ), provider->GetName() ) );
@@ -833,9 +849,25 @@ void DRC_ENGINE::InitEngine( const std::shared_ptr<DRC_RULE>& rule )
 
 void DRC_ENGINE::InitEngine( const wxFileName& aRulePath )
 {
-    m_testProviders = DRC_TEST_PROVIDER_REGISTRY::Instance().GetTestProviders();
+    initEngine( [&] { loadRules( aRulePath ); } );
+}
 
-    for( DRC_TEST_PROVIDER* provider : m_testProviders )
+
+void DRC_ENGINE::InitEngineFromText( const std::string& aRuleText, const wxString& aSourceName )
+{
+    initEngine( [&]
+    {
+        STRING_LINE_READER reader( aRuleText, aSourceName );
+        loadRules( reader, aSourceName, true );
+    } );
+}
+
+
+void DRC_ENGINE::initEngine( const std::function<void()>& aLoadRules )
+{
+    m_testProviders = DRC_TEST_PROVIDER_REGISTRY::Instance().CreateTestProviders();
+
+    for( const auto& provider : m_testProviders )
     {
         if( m_logReporter )
             m_logReporter->Report( wxString::Format( wxT( "Create DRC provider: '%s'" ), provider->GetName() ) );
@@ -882,7 +914,7 @@ void DRC_ENGINE::InitEngine( const wxFileName& aRulePath )
     try         // attempt to load full set of rules (implicit + user rules)
     {
         loadImplicitRules();
-        loadRules( aRulePath );
+        aLoadRules();
         compileRules();
     }
     catch( PARSE_ERROR& original_parse_error )
@@ -909,9 +941,20 @@ void DRC_ENGINE::InitEngine( const wxFileName& aRulePath )
 }
 
 
-void DRC_ENGINE::RunTests( EDA_UNITS aUnits, bool aReportAllTrackErrors, bool aTestFootprints,
-                           BOARD_COMMIT* aCommit )
+DRC_RUN_RESULT DRC_ENGINE::RunTests( EDA_UNITS aUnits, bool aReportAllTrackErrors,
+                                    bool aTestFootprints, BOARD_COMMIT* aCommit )
 {
+    if( IsCancelled() )
+        return DRC_RUN_RESULT::CANCELLED;
+
+    if( !m_board || !m_designSettings || !m_rulesValid )
+        return DRC_RUN_RESULT::INCOMPLETE;
+
+    // Parity is an explicit requested check. A missing input is not an empty
+    // schematic and must not become a successful run with that check skipped.
+    if( aTestFootprints && !m_schematicNetlist )
+        return DRC_RUN_RESULT::INCOMPLETE;
+
     PROF_TIMER timer;
 
     SetUserUnits( aUnits );
@@ -937,14 +980,15 @@ void DRC_ENGINE::RunTests( EDA_UNITS aUnits, bool aReportAllTrackErrors, bool aT
     cacheGenerator.SetDRCEngine( this );
 
     if( !cacheGenerator.Run() )         // ... and regenerate them.
-        return;
+        return IsCancelled() ? DRC_RUN_RESULT::CANCELLED : DRC_RUN_RESULT::INCOMPLETE;
 
     // Recompute component classes
     m_board->GetComponentClassManager().ForceComponentClassRecalculation();
 
     int timestamp = m_board->GetTimeStamp();
+    bool allProvidersCompleted = true;
 
-    for( DRC_TEST_PROVIDER* provider : m_testProviders )
+    for( const auto& provider : m_testProviders )
     {
         if( m_logReporter )
             m_logReporter->Report( wxString::Format( wxT( "Run DRC provider: '%s'" ), provider->GetName() ) );
@@ -952,7 +996,10 @@ void DRC_ENGINE::RunTests( EDA_UNITS aUnits, bool aReportAllTrackErrors, bool aT
         PROF_TIMER providerTimer;
 
         if( !provider->RunTests( aUnits ) )
+        {
+            allProvidersCompleted = false;
             break;
+        }
 
         providerTimer.Stop();
         wxLogTrace( traceDrcProfile, "DRC provider '%s' took %0.3f ms", provider->GetName(), providerTimer.msecs() );
@@ -963,7 +1010,13 @@ void DRC_ENGINE::RunTests( EDA_UNITS aUnits, bool aReportAllTrackErrors, bool aT
 
     // DRC tests are multi-threaded; anything that causes us to attempt to re-generate the
     // caches while DRC is running is problematic.
-    wxASSERT( timestamp == m_board->GetTimeStamp() );
+    if( timestamp != m_board->GetTimeStamp() )
+        return DRC_RUN_RESULT::INCOMPLETE;
+
+    if( IsCancelled() )
+        return DRC_RUN_RESULT::CANCELLED;
+
+    return allProvidersCompleted ? DRC_RUN_RESULT::COMPLETED : DRC_RUN_RESULT::INCOMPLETE;
 }
 
 
@@ -2326,7 +2379,7 @@ void DRC_ENGINE::ReportViolation( const std::shared_ptr<DRC_ITEM>& aItem, const 
     if( m_logReporter )
     {
         wxString msg = wxString::Format( wxT( "Test '%s': %s (code %d)" ),
-                                         aItem->GetViolatingTest()->GetName(),
+                                         aItem->GetViolatingTestName(),
                                          aItem->GetErrorMessage( false ),
                                          aItem->GetErrorCode() );
 
@@ -2890,10 +2943,10 @@ bool ruleMatchesPair( const DRC_RULE& aRule, const BOARD_ITEM* aItemA, const BOA
 
 DRC_TEST_PROVIDER* DRC_ENGINE::GetTestProvider( const wxString& name ) const
 {
-    for( DRC_TEST_PROVIDER* prov : m_testProviders )
+    for( const auto& prov : m_testProviders )
     {
         if( name == prov->GetName() )
-            return prov;
+            return prov.get();
     }
 
     return nullptr;

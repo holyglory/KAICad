@@ -64,7 +64,7 @@ private:
 class GRID_CELL_COLOR_SELECTOR : public wxGridCellEditor
 {
 public:
-    GRID_CELL_COLOR_SELECTOR( wxWindow* aParent, wxGrid* aGrid );
+    GRID_CELL_COLOR_SELECTOR( wxWindow* aParent, wxGrid* aGrid, bool aAllowOpacity = false );
 
     wxGridCellEditor* Clone() const override;
     void Create( wxWindow* aParent, wxWindowID aId, wxEvtHandler* aEventHandler ) override;
@@ -80,6 +80,9 @@ protected:
     wxWindow*      m_parent;
     wxGrid*        m_grid;
     KIGFX::COLOR4D m_value;
+    wxString      m_valueText;
+    bool          m_allowOpacity;
+    bool          m_dialogPending = false;
 
     wxDECLARE_NO_COPY_CLASS( GRID_CELL_COLOR_SELECTOR );
 };

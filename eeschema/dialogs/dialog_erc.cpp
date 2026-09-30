@@ -22,6 +22,7 @@
 #include <settings/settings_manager.h>
 #include <advanced_config.h>
 #include <gestfich.h>
+#include <sch_commit.h>
 #include <sch_screen.h>
 #include <sch_edit_frame.h>
 #include <widgets/wx_infobar.h>
@@ -324,6 +325,18 @@ void DIALOG_ERC::Report( const wxString& aMessage )
 
 void DIALOG_ERC::UpdateData()
 {
+    m_ignoredList->DeleteAllItems();
+    for( const RC_ITEM& item : ERC_ITEM::GetItemsWithSeverities() )
+    {
+        if( m_parent->Schematic().ErcSettings().GetSeverity( item.GetErrorCode() ) == RPT_SEVERITY_IGNORE )
+        {
+            wxListItem row;
+            row.SetId( m_ignoredList->GetItemCount() );
+            row.SetText( wxT( " • " ) + item.GetErrorText( true ) );
+            row.SetData( item.GetErrorCode() );
+            m_ignoredList->InsertItem( row );
+        }
+    }
     m_markerTreeModel->Update( m_markerProvider, getSeverities() );
     updateDisplayedCounts();
 }
@@ -394,6 +407,12 @@ void DIALOG_ERC::OnDeleteOneClick( wxCommandEvent& aEvent )
 {
     if( m_notebook->GetSelection() == 0 )
     {
+        // Deleting an excluded violation deletes an exclusion the project saves: one undoable
+        // change.  Deleting a computed violation changes nothing that is saved and records
+        // nothing; the next Run ERC computes it again.
+        SCH_COMMIT commit( m_parent );
+        commit.StageErcEdit();
+
         // Clear the selection.  It may be the selected ERC marker.
         m_parent->GetToolManager()->RunAction( ACTIONS::selectionClear );
 
@@ -401,6 +420,11 @@ void DIALOG_ERC::OnDeleteOneClick( wxCommandEvent& aEvent )
 
         // redraw the schematic
         redrawDrawPanel();
+
+        if( commit.ErcEditChanged() )
+            commit.Push( _( "Delete ERC exclusion" ) );
+        else
+            commit.Revert();
     }
 
     updateDisplayedCounts();
@@ -430,12 +454,22 @@ void DIALOG_ERC::OnDeleteAllClick( wxCommandEvent& event )
             includeExclusions = true;
     }
 
+    // Deleting the exclusions too deletes exclusions the project saves: one undoable change.
+    // Deleting only computed violations records nothing.
+    SCH_COMMIT commit( m_parent );
+    commit.StageErcEdit();
+
     deleteAllMarkers( includeExclusions );
     m_ercRun = false;
 
     // redraw the schematic
     redrawDrawPanel();
     updateDisplayedCounts();
+
+    if( commit.ErcEditChanged() )
+        commit.Push( _( "Delete ERC exclusions" ) );
+    else
+        commit.Revert();
 }
 
 
@@ -819,8 +853,13 @@ void DIALOG_ERC::OnERCItemRClick( wxDataViewEvent& aEvent )
                      _( "Open the Schematic Setup dialog" ) );
     }
 
-    bool modified = false;
-    int  command = GetPopupMenuSelectionFromUser( menu );
+    // Exclusions, comments and severities are saved ERC settings: each accepted edit is one
+    // undoable change, staged after any modal prompt and before the settings change.  The
+    // Setup, inspection and fix actions push their own changes.
+    SCH_COMMIT commit( m_parent );
+    bool       staged = false;
+    bool       modified = false;
+    int        command = GetPopupMenuSelectionFromUser( menu );
 
     switch( command )
     {
@@ -832,7 +871,8 @@ void DIALOG_ERC::OnERCItemRClick( wxDataViewEvent& aEvent )
             if( dlg.ShowModal() == wxID_CANCEL )
                 break;
 
-            modified = setMarkerExcluded( m_markerProvider, marker, true, dlg.GetValue() );
+            staged = commit.StageErcEdit();
+            setMarkerExcluded( m_markerProvider, marker, true, dlg.GetValue() );
 
             // Update view
             static_cast<RC_TREE_MODEL*>( aEvent.GetModel() )->ValueChanged( node );
@@ -843,7 +883,8 @@ void DIALOG_ERC::OnERCItemRClick( wxDataViewEvent& aEvent )
     case ID_REMOVE_EXCLUSION:
         if( SCH_MARKER* marker = dynamic_cast<SCH_MARKER*>( node->m_RcItem->GetParent() ) )
         {
-            modified = setMarkerExcluded( m_markerProvider, marker, false );
+            staged = commit.StageErcEdit();
+            setMarkerExcluded( m_markerProvider, marker, false );
             m_parent->GetCanvas()->GetView()->Update( marker );
 
             // The restored severity may fall outside the current filter, so re-filter when it no
@@ -873,7 +914,8 @@ void DIALOG_ERC::OnERCItemRClick( wxDataViewEvent& aEvent )
                 comment = dlg.GetValue();
             }
 
-            modified = setMarkerExcluded( m_markerProvider, marker, true, comment );
+            staged = commit.StageErcEdit();
+            setMarkerExcluded( m_markerProvider, marker, true, comment );
 
             m_parent->GetCanvas()->GetView()->Update( marker );
 
@@ -897,6 +939,7 @@ void DIALOG_ERC::OnERCItemRClick( wxDataViewEvent& aEvent )
         break;
 
     case ID_SET_SEVERITY_TO_ERROR:
+        staged = commit.StageErcEdit();
         modified = settings.SetSeverity( rcItem->GetErrorCode(), RPT_SEVERITY_ERROR );
 
         if( !modified )
@@ -915,6 +958,7 @@ void DIALOG_ERC::OnERCItemRClick( wxDataViewEvent& aEvent )
         break;
 
     case ID_SET_SEVERITY_TO_WARNING:
+        staged = commit.StageErcEdit();
         modified = settings.SetSeverity( rcItem->GetErrorCode(), RPT_SEVERITY_WARNING );
 
         if( !modified )
@@ -934,6 +978,8 @@ void DIALOG_ERC::OnERCItemRClick( wxDataViewEvent& aEvent )
 
     case ID_SET_SEVERITY_TO_IGNORE:
     {
+        // Ignoring a rule also deletes its markers, exclusions included; undo restores both.
+        staged = commit.StageErcEdit();
         modified = settings.SetSeverity( rcItem->GetErrorCode(), RPT_SEVERITY_IGNORE );
 
         if( rcItem->GetErrorCode() == ERCE_PIN_TO_PIN_ERROR )
@@ -974,13 +1020,18 @@ void DIALOG_ERC::OnERCItemRClick( wxDataViewEvent& aEvent )
         break;
     }
 
-    if( modified )
+    if( staged )
     {
-        updateDisplayedCounts();
-        redrawDrawPanel();
-        m_parent->OnModify();
-        m_parent->Schematic().RecordCommittedChange( DOCUMENT_CHANGE_JOURNAL::KIND::COMMIT,
-                                                    "Edit ERC overrides" );
+        if( commit.ErcEditChanged() )
+        {
+            updateDisplayedCounts();
+            redrawDrawPanel();
+            commit.Push( _( "Edit ERC overrides" ) );
+        }
+        else
+        {
+            commit.Revert();
+        }
     }
 }
 
@@ -1003,13 +1054,18 @@ void DIALOG_ERC::OnIgnoredItemRClick( wxListEvent& event )
     {
         if( settings.GetSeverity( errorCode ) != severity )
         {
+            // A saved severity is one undoable change.
+            SCH_COMMIT commit( m_parent );
+            commit.StageErcEdit();
             settings.SetSeverity( errorCode, (SEVERITY) severity );
 
             updateDisplayedCounts();
             redrawDrawPanel();
-            m_parent->OnModify();
-            m_parent->Schematic().RecordCommittedChange( DOCUMENT_CHANGE_JOURNAL::KIND::COMMIT,
-                                                        "Edit ERC overrides" );
+
+            if( commit.ErcEditChanged() )
+                commit.Push( _( "Edit ERC overrides" ) );
+            else
+                commit.Revert();
         }
     }
 }
@@ -1085,6 +1141,10 @@ void DIALOG_ERC::ExcludeMarker( SCH_MARKER* aMarker )
     if( !marker || marker->IsExcluded() )
         return;
 
+    // The exclusion is saved with the project: one undoable change.
+    SCH_COMMIT commit( m_parent );
+    commit.StageErcEdit();
+
     // Route through the provider so its cached counts stay in sync even when the dialog is not on
     // the violations tab and has no tree node to refresh.
     setMarkerExcluded( m_markerProvider, marker, true );
@@ -1102,9 +1162,11 @@ void DIALOG_ERC::ExcludeMarker( SCH_MARKER* aMarker )
 
     updateDisplayedCounts();
     redrawDrawPanel();
-    m_parent->OnModify();
-    m_parent->Schematic().RecordCommittedChange( DOCUMENT_CHANGE_JOURNAL::KIND::COMMIT,
-                                                "Edit ERC overrides" );
+
+    if( commit.ErcEditChanged() )
+        commit.Push( _( "Edit ERC overrides" ) );
+    else
+        commit.Revert();
 }
 
 

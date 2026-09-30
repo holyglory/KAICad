@@ -14,10 +14,61 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class SchematicViewTools(InstanceRegistry registry)
 {
-    [McpServerTool(Name = "kicad_design_recovery_refresh"),
-     Description("Capture and persist the current native hierarchy into an existing recovery record for an explicitly attached instance. Requires the absolute recovery path and exact expected recovery revision token. Preserves baseline, desired XML bytes and libraries. Rejects unconfirmed pending mutations; use recovery observation and reconciliation first. Changed native data/revision invalidates saved hierarchy choices. A concurrent recovery write rejects the refresh. Does not modify KiCad, write design XML, advance the baseline, or imply complete tracking or automatic synchronization.")]
-    public Task<CallToolResult> RefreshRecovery(string instanceId, string recoveryPath,
-        string expectedRevisionToken, CancellationToken cancellationToken) => Execute(async () =>
+    [McpServerTool(Name = "kicad_schematic_measure_placement", ReadOnly = true),
+     Description("Measure native schematic envelopes and exact pin connection points without changing the design or human view. requestJson is MeasureSchematicPlacement protobuf JSON with an explicit document/sheet path, expectedRevision, optional detached symbol candidates and optional detached local, global or hierarchical label prototypes (itemCandidates, at most 256 candidates in total, each with a new identity). Coordinates are sheet-space nanometres; pin directions are dimensionless signed unit vectors toward the symbol body. Each pin reports its effective electrical type and any implicit global or local power connection with its net name. Each symbol reports whether its pin mapping is complete and, if not, why; unavailable or incomplete pins must not be guessed. Returns structured geometry only, not a matching image, wire routing, clearance approval or readability certificate. Older native builds explicitly report pin geometry unavailable; complete revision tracking remains unqualified.")]
+    public Task<CallToolResult> MeasurePlacement(string instanceId, string requestJson,
+        CancellationToken cancellationToken) => Execute(async () =>
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var request = SchematicJson.Parser.Parse<MeasureSchematicPlacement>(requestJson);
+        if (request.Document is null || request.Document.Type != (DocumentType)1
+            || request.Document.SheetPath is null || request.Document.SheetPath.Path.Count == 0
+            || request.ExpectedRevision is null || string.IsNullOrWhiteSpace(request.ExpectedRevision.Epoch))
+            throw new AutomationException("invalid_geometry_target", "Specify the schematic sheet and exact document revision.");
+        SchematicPlacementGeometry observed;
+        try
+        {
+            observed = await registry.Client(instanceId).InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(
+                request, cancellationToken);
+        }
+        catch (NngException error)
+        {
+            throw new AutomationException("native_observation_unavailable", error.Message);
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!request.Document.Equals(observed.Document) || !request.ExpectedRevision.Equals(observed.Revision))
+            throw new AutomationException("native_observation_mismatch", "The returned geometry does not match the requested sheet and revision.");
+        if (observed.Obstacles.Concat(observed.Candidates).Any(item => item.SymbolPins is { Complete: false, Pins.Count: > 0 }))
+            throw new AutomationException("incomplete_pin_geometry", "An incomplete native pin mapping returned partial endpoints; discard this observation.");
+        var data = JsonSerializer.SerializeToElement(new
+        {
+            instanceId, coordinateSystem = "schematic-sheet", distanceUnit = "nm",
+            pinGeometryAvailable = observed.PinGeometryAvailable, trackingComplete = false,
+            geometry = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(observed)),
+            limitations = observed.PinGeometryAvailable ? Array.Empty<string>()
+                : ["This native build does not expose pin geometry; absent pin data does not mean the symbol has no pins."],
+            nativeDocumentEdited = false, viewChanged = false
+        });
+        return new CallToolResult { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+    });
+
+    [McpServerTool(Name = "kicad_schematic_electrical_state", ReadOnly = true),
+     Description("Capture the loaded schematic hierarchy and native scalar-net memberships together at one stable revision, for an explicit attached instance and loaded sheet target. Does not navigate the human view, save, annotate or repair the design. requestJson is ReadSchematicElectricalState protobuf JSON with document and optional expectedRevision. Net names are labels, not persistent net identities; membership uses exact sheet paths and UUIDs. Returns typed hierarchy XML, native revision, memberships and explicit coverage limitations. This is not full reconstruction, simulation or mutation admission.")]
+    public Task<CallToolResult> ReadElectricalState(string instanceId, string requestJson, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        var request = SchematicJson.Parser.Parse<ReadSchematicElectricalState>(requestJson);
+        var observed = await registry.Client(instanceId).InvokeAsync<ReadSchematicElectricalState, SchematicElectricalState>(request, cancellationToken);
+        var data = JsonSerializer.SerializeToElement(new { instanceId,
+            state = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(observed)),
+            xml = SchematicDataXml.Write(observed.Hierarchy.Data), liveMutationAuthorized = false });
+        return new CallToolResult { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+    });
+
+    [McpServerTool(Name = "kicad_design_propose_initial_layout", ReadOnly = true),
+     Description("Propose positions for coordinate-free additions of known parts in an explicitly attached schematic. Requires the absolute recovery path and exact recovery token, nanometre grid/clearance/inset, and one usable-page region with title-block/artwork reservations per affected physical screen UUID. Uses revision-bound native body/visible-field measurements, combines repeated sheet envelopes and preserves existing or explicitly positioned symbols. Additions whose XML also connects their pins are accepted only when the attached editor reports it can draw and verify XML connections: each new symbol then goes to the free place nearest the already placed pins it connects to (preferredAnchors), keeps room for the connection stubs and labels its pins and theirs will receive, and a new single-pin global power symbol is turned and seated on the end of its partner pin's stub when that spot is free (powerAttachments). Returns desired XML plus scoped visual-refinement context; no-space returns issues without a partial candidate. Does not write XML/recovery, edit KiCad, generate wiring or certify readability. Review and publish the proposed XML through normal revision-safe synchronization, then verify native connectivity and rendered presentation.")]
+    public Task<CallToolResult> ProposeInitialLayout(string instanceId, string recoveryPath,
+        string expectedRevisionToken, long gridNm, long clearanceNm, long pageInsetNm,
+        SchematicLayoutRegion[] regions, string userInstructions, CancellationToken cancellationToken) => Execute(async () =>
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!Path.IsPathFullyQualified(recoveryPath))
@@ -27,22 +78,25 @@ public sealed class SchematicViewTools(InstanceRegistry registry)
         if (saved.State.InstanceId.ToString("D") != instanceId)
             throw new AutomationException("recovery_instance_mismatch", "The recovery record belongs to a different instance.");
         if (saved.RevisionToken != expectedRevisionToken)
-            throw new AutomationException("design_recovery_changed", "Recovery state changed; reload it before refresh.");
-        var refreshed = await DesignRecoveryInspector.RefreshAsync(store, registry.Client(instanceId), expectedRevisionToken, cancellationToken);
-        var structured = JsonSerializer.SerializeToElement(new
-        {
-            instanceId, recoveryRevisionToken = refreshed.RevisionToken,
-            nativeRevision = refreshed.State.NativeRevision, trackingComplete = refreshed.State.TrackingComplete,
-            choicesInvalidated = saved.State.HierarchyResolution is not null && refreshed.State.HierarchyResolution is null,
-            changed = saved.RevisionToken != refreshed.RevisionToken, liveMutationAuthorized = false
-        });
-        return new CallToolResult { Content = [new TextContentBlock { Text = structured.GetRawText() }], StructuredContent = structured };
+            throw new AutomationException("design_recovery_changed", "Reload the recovery record before proposing layout.");
+        var proposal = await SchematicInitialLayoutPlanner.ProposeAsync(registry.Client(instanceId), saved.State,
+            new(gridNm, clearanceNm, pageInsetNm), regions, userInstructions, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (store.Read()?.RevisionToken != saved.RevisionToken)
+            throw new AutomationException("design_recovery_changed", "The recovery record changed during layout measurement; request a fresh proposal.");
+        var data = JsonSerializer.SerializeToElement(new { instanceId, recoveryRevisionToken = saved.RevisionToken,
+            nativeRevision = saved.State.NativeRevision, canPropose = proposal.CanPropose, desiredXml = proposal.DesiredXml,
+            layout = proposal.Layout, refinement = proposal.Refinement, limitations = proposal.Limitations,
+            preferredAnchors = proposal.PreferredAnchors, powerAttachments = proposal.PowerAttachments,
+            requiresVisualReview = true, requiresNativeConnectivityValidation = true,
+            nativeDocumentEdited = false, designFileWritten = false, recoveryWritten = false });
+        return new CallToolResult { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
     });
 
-    [McpServerTool(Name = "kicad_design_recovery_observe", ReadOnly = true),
-     Description("Observe a saved full-design recovery record against its explicitly attached KiCad instance. recoveryPath is an absolute DesignRecoveryStore file path; optional expectedRevisionToken rejects a changed recovery record. Verifies the exact pending command receipt, then reads the current native hierarchy with matching instance, root, epoch and non-regressing revision. Returns the original receipt separately from current state, which may include later edits or undo. Preserves invalid desired XML, baseline, pending operation and files. Does not resubmit edits, resolve conflicts, advance synchronization or imply full native coverage. The pending target (or saved root when none) must be readable by the native editor.")]
-    public Task<CallToolResult> ObserveRecovery(string instanceId, string recoveryPath,
-        CancellationToken cancellationToken, string? expectedRevisionToken = null) => Execute(async () =>
+    [McpServerTool(Name = "kicad_design_propose_field_layout", ReadOnly = true),
+     Description("Propose field-only layout changes in a synchronized design recovery snapshot. Requires its absolute path, exact instance ID and recovery token. Each change addresses an exact model symbol occurrence, standard field slot or custom-field index plus expected name, nanometre position, cardinal text rotation and native alignment. Preserves text, visibility, circuit meaning, symbol placement and locks. Repeated sheet instances share field geometry; conflicting alias proposals fail. Returns desired XML only, without writing files or editing KiCad. Apply through normal revision-safe synchronization and then verify native connectivity and rendered readability; the proposal itself is not a readability certificate.")]
+    public Task<CallToolResult> ProposeFieldLayout(string instanceId, string recoveryPath,
+        string expectedRevisionToken, SchematicFieldPlacement[] changes, CancellationToken cancellationToken) => Execute(() =>
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!Path.IsPathFullyQualified(recoveryPath))
@@ -51,21 +105,17 @@ public sealed class SchematicViewTools(InstanceRegistry registry)
         var saved = store.Read() ?? throw new AutomationException("missing_design_recovery", "No saved design recovery state exists.");
         if (saved.State.InstanceId.ToString("D") != instanceId)
             throw new AutomationException("recovery_instance_mismatch", "The recovery record belongs to a different instance.");
-        if (expectedRevisionToken is not null && saved.RevisionToken != expectedRevisionToken)
-            throw new AutomationException("design_recovery_changed", "Recovery state changed; reload it before observation.");
-        var observed = await DesignRecoveryInspector.ObserveAsync(store, registry.Client(instanceId), cancellationToken);
-        if (observed.Inspection.RevisionToken != saved.RevisionToken)
-            throw new AutomationException("design_recovery_changed", "Recovery state changed during observation; reload it before continuing.");
-        var structured = JsonSerializer.SerializeToElement(new
-        {
-            instanceId, recoveryRevisionToken = observed.Inspection.RevisionToken,
-            disposition = observed.Inspection.Disposition.ToString(), trackingComplete = observed.Snapshot.TrackingComplete,
-            receipt = observed.Inspection.Receipt is null ? (JsonElement?)null :
-                JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(observed.Inspection.Receipt)),
-            snapshot = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(observed.Snapshot)),
-            xml = SchematicDataXml.Write(observed.Snapshot.Data)
-        });
-        return new CallToolResult { Content = [new TextContentBlock { Text = structured.GetRawText() }], StructuredContent = structured };
+        if (saved.RevisionToken != expectedRevisionToken)
+            throw new AutomationException("design_recovery_changed", "Reload the recovery record before proposing field layout.");
+        var proposal = SchematicFieldLayoutPlanner.Propose(saved.State, changes, cancellationToken);
+        if (store.Read()?.RevisionToken != saved.RevisionToken)
+            throw new AutomationException("design_recovery_changed", "The recovery record changed during layout preparation.");
+        cancellationToken.ThrowIfCancellationRequested();
+        var data = JsonSerializer.SerializeToElement(new { instanceId, recoveryRevisionToken = saved.RevisionToken,
+            nativeRevision = saved.State.NativeRevision, desiredXml = proposal.DesiredXml, affectedSymbols = proposal.AffectedSymbols,
+            nativeOperationCount = proposal.Operations.Count, requiresNativeConnectivityValidation = true, requiresRenderedReview = true,
+            nativeDocumentEdited = false, designFileWritten = false, recoveryWritten = false });
+        return Task.FromResult(new CallToolResult { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data });
     });
 
     [McpServerTool(Name = "kicad_schematic_render_views", ReadOnly = true),
@@ -135,7 +185,7 @@ public sealed class SchematicViewTools(InstanceRegistry registry)
         });
 
     [McpServerTool(Name = "kicad_schematic_hierarchy_data", ReadOnly = true),
-     Description("Read every loaded schematic sheet instance and its supported objects/settings in one native dispatch, without navigating the visible editor. Supply the explicit currently displayed sheet target. Repeated instances retain separate paths and shared screen identities. Returns typed XML and explicit unsupported-state entries; incomplete tracking and serializer coverage are not full reconstruction or mutation-admission proof. No files or designs are changed.")]
+     Description("Read every loaded schematic sheet instance and its supported objects/settings in one native dispatch, without navigating the visible editor. Supply an explicit loaded sheet target; it need not be currently displayed. Repeated instances retain separate paths and shared screen identities. Returns typed XML and explicit unsupported-state entries; incomplete tracking and serializer coverage are not full reconstruction or mutation-admission proof. No files or designs are changed.")]
     public Task<CallToolResult> ReadHierarchyData(string instanceId, string documentJson, CancellationToken cancellationToken) =>
         Execute(async () =>
         {
@@ -210,14 +260,23 @@ public sealed class SchematicViewTools(InstanceRegistry registry)
         });
 
     [McpServerTool(Name = "kicad_schematic_check_presentation", ReadOnly = true),
-     Description("Check current-sheet native geometry for page overflow, image bounds, font-size policy, reference visibility and more than two unrelated signal crossings. Supply explicit minimum/maximum text height in millimetres. Returns object-linked findings and repair targets. Partial coverage: full glyph clipping/occlusion, independent sheet contexts and complete revision tracking remain unfinished; missing wire bindings are reported. Never interpret this partial report as a complete verification pass.")]
+     Description("Find presentation problems an AI or person must repair: page overflow, cropped images, text outside the font-size policy, text painted upside down or top to bottom, hidden, empty or unannotated reference designators, overlapping symbol bodies, labels and field text, and signals crossing unrelated wiring more than twice. Supply explicit minimum/maximum text height in millimetres. By default checks the sheet KiCad displays (documentJson must name it). With includeSubsheets=true, checks the sheet instance documentJson names and every loaded sheet instance below it (the whole hierarchy from the root sheet, or one branch from a child sheet), without changing the design or the displayed sheet. Both modes apply the same rules: each sheet instance is measured by KiCad at its own instance with its own references and painted field glyphs; power and '#' symbols need no visible reference; overlapToleranceMm (default 0.5, at least 0 and below 0.635, half the 1.27 mm grid) is the overlap depth allowed where objects are meant to touch, such as a label on a pin end. The report states the policy it applied (text limits, crossing limit and overlap tolerance); an invalid policy is refused with invalid_presentation before KiCad is asked anything. Optional expectedRevisionJson ({\"epoch\",\"sequence\"}) is the document revision the caller observed: the check is refused with presentation_revision_changed when KiCad holds another revision (this refusal comes first, even for a sheet instance deleted since), as it is when the design changes during the check; a sheet instance KiCad has not loaded is refused with presentation_sheet_not_loaded. Every finding names its sheet path and sheet name, the document revision, the affected object IDs, the measured value, the threshold and their unit (mm, degrees or count; an unreadable reference is measured as 0 visible designators against 1 required), except the notices that a measurement is unavailable; repair targets name each field by its owner, field name and sheet path. Coverage stays partial: text crossed by wires, pin names, graphics or the drawing-sheet frame and title block, and complete revision tracking, are not measured, so never read a report without findings as a complete verification pass.")]
     public Task<CallToolResult> CheckPresentation(string instanceId, string documentJson,
-        decimal minimumTextHeightMm, decimal maximumTextHeightMm, CancellationToken cancellationToken) =>
+        decimal minimumTextHeightMm, decimal maximumTextHeightMm, CancellationToken cancellationToken,
+        bool includeSubsheets = false, decimal overlapToleranceMm = PresentationPolicy.DefaultOverlapToleranceMm,
+        string? expectedRevisionJson = null) =>
         Execute(async () =>
         {
-            var check = await NativePresentationChecks.CheckAsync(registry.Client(instanceId), ParseDocument(documentJson),
-                new(minimumTextHeightMm, maximumTextHeightMm), cancellationToken);
-            var result = JsonSerializer.SerializeToElement(new { instanceId, check },
+            var policy = new PresentationPolicy(minimumTextHeightMm, maximumTextHeightMm,
+                OverlapToleranceMm: overlapToleranceMm);
+            var client = registry.Client(instanceId);
+            var document = ParseDocument(documentJson);
+            var expected = string.IsNullOrWhiteSpace(expectedRevisionJson) ? null
+                : SchematicJson.Parser.Parse<Protocol.DocumentRevision>(expectedRevisionJson);
+            var check = includeSubsheets
+                ? await NativePresentationChecks.CheckHierarchyAsync(client, document, policy, cancellationToken, expected)
+                : await NativePresentationChecks.CheckAsync(client, document, policy, cancellationToken, expected);
+            var result = JsonSerializer.SerializeToElement(new { instanceId, includeSubsheets, check },
                 new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
                     Converters = { new JsonStringEnumConverter() } });
             return new CallToolResult

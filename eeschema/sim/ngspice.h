@@ -77,6 +77,8 @@ public:
     ///< @copydoc SPICE_SIMULATOR::IsRunning()
     bool IsRunning() override final;
 
+    bool HasError() const override final { return m_error; }
+
     ///< @copydoc SPICE_SIMULATOR::Command()
     bool Command( const std::string& aCmd ) override final;
 

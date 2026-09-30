@@ -22,8 +22,17 @@ public sealed class InstanceReplacementTests
             var second = await registry.AttachAsync(otherEndpoint, other.InstanceId);
             var oldClient = registry.Client(previous.InstanceId); var otherClient = registry.Client(second.InstanceId);
             byte[] otherSaved = await File.ReadAllBytesAsync(Path.Combine(state, second.InstanceId + ".json"));
-            original.Epoch = "replacement"; Guid operation = Guid.NewGuid();
+            // Each attachment records the handshake that verified it; reads are copies (decision n39ac0ccc5c9270f2).
+            Assert.AreEqual("original", registry.AttachedHandshake(previous.InstanceId)!.Epoch);
+            registry.AttachedHandshake(previous.InstanceId)!.Epoch = "altered copy";
+            Assert.AreEqual("original", registry.AttachedHandshake(previous.InstanceId)!.Epoch);
+            Assert.IsNull(registry.AttachedHandshake(Guid.NewGuid().ToString("D")));
+            original.Epoch = "replacement"; original.Features = ["replacement.feature"]; Guid operation = Guid.NewGuid();
             var result = await registry.AdoptVerifiedReplacementAsync(previous, nextEndpoint, original.Epoch, 42, operation);
+            // The adopted replacement's own handshake replaces the recorded one; the other instance keeps its own.
+            Assert.AreEqual("replacement", registry.AttachedHandshake(previous.InstanceId)!.Epoch);
+            CollectionAssert.AreEqual(new[] { "replacement.feature" }, registry.AttachedHandshake(previous.InstanceId)!.Capabilities.ToArray());
+            Assert.AreEqual("other", registry.AttachedHandshake(second.InstanceId)!.Epoch);
             Assert.IsFalse(result.Reused); Assert.AreEqual(original.Epoch, result.Instance.Epoch);
             Assert.AreEqual(nextEndpoint, registry.Client(previous.InstanceId).Endpoint);
             Assert.AreNotSame(oldClient, registry.Client(previous.InstanceId));
@@ -31,8 +40,10 @@ public sealed class InstanceReplacementTests
             CollectionAssert.AreEqual(otherSaved, await File.ReadAllBytesAsync(Path.Combine(state, second.InstanceId + ".json")));
             await Assert.ThrowsExactlyAsync<AutomationException>(() => oldClient.HandshakeAsync());
             var restarted = new InstanceRegistry(peers, state);
+            Assert.IsNull(restarted.AttachedHandshake(previous.InstanceId), "A saved registration is not a recorded handshake.");
             var reused = await restarted.AdoptVerifiedReplacementAsync(previous, nextEndpoint, original.Epoch, 42, operation);
             Assert.IsTrue(reused.Reused); Assert.AreEqual(result.Instance, reused.Instance);
+            Assert.AreEqual("replacement", restarted.AttachedHandshake(previous.InstanceId)!.Epoch, "Reusing a receipt records the live handshake.");
             var reattached = await new InstanceRegistry(peers, state).ReattachAsync(previous.InstanceId);
             Assert.AreEqual(result.Instance.Epoch, reattached.Epoch);
             Assert.AreEqual(result.Instance.Endpoint, reattached.Endpoint);

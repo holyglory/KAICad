@@ -62,13 +62,39 @@ API_HANDLER_COMMON::API_HANDLER_COMMON() :
             &API_HANDLER_COMMON::handleGetTextVariables );
     registerHandler<SetTextVariables, Empty>(
             &API_HANDLER_COMMON::handleSetTextVariables );
-    registerHandler<OpenDocument, OpenDocumentResponse>(
-            &API_HANDLER_COMMON::handleOpenDocument );
-    registerHandler<CloseDocument, Empty>(
-            &API_HANDLER_COMMON::handleCloseDocument );
-    registerHandler<CloseAllDocuments, Empty>(
-            &API_HANDLER_COMMON::handleCloseAllDocuments );
 
+    // OpenDocument, CloseDocument and CloseAllDocuments are registered by their setters, only
+    // while the KiCad mode that serves them has set their callbacks.
+}
+
+
+void API_HANDLER_COMMON::SetOpenDocumentHandler( OPEN_DOCUMENT_HANDLER aHandler )
+{
+    m_openDocumentHandler = std::move( aHandler );
+    m_handlers.erase( std::string( OpenDocument().GetTypeName() ) );
+
+    if( m_openDocumentHandler )
+        registerHandler<OpenDocument, OpenDocumentResponse>( &API_HANDLER_COMMON::handleOpenDocument );
+}
+
+
+void API_HANDLER_COMMON::SetCloseDocumentHandler( CLOSE_DOCUMENT_HANDLER aHandler )
+{
+    m_closeDocumentHandler = std::move( aHandler );
+    m_handlers.erase( std::string( CloseDocument().GetTypeName() ) );
+
+    if( m_closeDocumentHandler )
+        registerHandler<CloseDocument, Empty>( &API_HANDLER_COMMON::handleCloseDocument );
+}
+
+
+void API_HANDLER_COMMON::SetCloseAllDocumentsHandler( CLOSE_ALL_DOCUMENTS_HANDLER aHandler )
+{
+    m_closeAllDocumentsHandler = std::move( aHandler );
+    m_handlers.erase( std::string( CloseAllDocuments().GetTypeName() ) );
+
+    if( m_closeAllDocumentsHandler )
+        registerHandler<CloseAllDocuments, Empty>( &API_HANDLER_COMMON::handleCloseAllDocuments );
 }
 
 
@@ -413,14 +439,7 @@ HANDLER_RESULT<Empty> API_HANDLER_COMMON::handleSetTextVariables(
 HANDLER_RESULT<OpenDocumentResponse> API_HANDLER_COMMON::handleOpenDocument(
         const HANDLER_CONTEXT<OpenDocument>& aCtx )
 {
-    if( !m_openDocumentHandler )
-    {
-        ApiResponseStatus e;
-        e.set_status( ApiStatusCode::AS_UNIMPLEMENTED );
-        e.set_error_message( "OpenDocument is not available in this KiCad mode" );
-        return tl::unexpected( e );
-    }
-
+    // Registered only while m_openDocumentHandler is set.
     return m_openDocumentHandler( aCtx.Request );
 }
 
@@ -428,27 +447,13 @@ HANDLER_RESULT<OpenDocumentResponse> API_HANDLER_COMMON::handleOpenDocument(
 HANDLER_RESULT<Empty> API_HANDLER_COMMON::handleCloseDocument(
         const HANDLER_CONTEXT<CloseDocument>& aCtx )
 {
-    if( !m_closeDocumentHandler )
-    {
-        ApiResponseStatus e;
-        e.set_status( ApiStatusCode::AS_UNIMPLEMENTED );
-        e.set_error_message( "CloseDocument is not available in this KiCad mode" );
-        return tl::unexpected( e );
-    }
-
+    // Registered only while m_closeDocumentHandler is set.
     return m_closeDocumentHandler( aCtx.Request );
 }
 
 
 HANDLER_RESULT<Empty> API_HANDLER_COMMON::handleCloseAllDocuments( const HANDLER_CONTEXT<CloseAllDocuments>& aCtx )
 {
-    if( !m_closeAllDocumentsHandler )
-    {
-        ApiResponseStatus e;
-        e.set_status( ApiStatusCode::AS_UNIMPLEMENTED );
-        e.set_error_message( "CloseAllDocuments is not available in this KiCad mode" );
-        return tl::unexpected( e );
-    }
-
+    // Registered only while m_closeAllDocumentsHandler is set.
     return m_closeAllDocumentsHandler( aCtx.Request );
 }

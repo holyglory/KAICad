@@ -40,13 +40,30 @@ public sealed class InstanceToolBoundaryTests
         string root = Directory.CreateTempSubdirectory("kicad-instance-boundary-").FullName;
         try
         {
-            var transport = new NativeClientTests.FixtureTransport { ProjectPath = Path.Combine(root, "fixture.kicad_pro") };
+            // The fixture answers like a released KiCad built before handled_requests: feature
+            // contracts only, no list of the requests it handles.
+            string[] features = ["session.info", "version.read"];
+            var transport = new NativeClientTests.FixtureTransport { ProjectPath = Path.Combine(root, "fixture.kicad_pro"), Features = features };
             var registry = new InstanceRegistry(transport, root);
             var tools = new InstanceTools(registry);
             string endpoint = NativeIpcEndpoint.FromSocketPath(Path.Combine(Path.GetTempPath(), "instance-boundary.sock"));
             var attached = await tools.Attach(endpoint, transport.InstanceId, default);
             Assert.IsFalse(attached.IsError ?? false);
             var original = registry.Get(transport.InstanceId);
+            // Inspecting that older build reports its features and unknown request coverage, never
+            // an empty or invented list of handlers.
+            var inspected = await tools.Inspect(transport.InstanceId, default);
+            Assert.IsFalse(inspected.IsError ?? false, ((TextContentBlock)inspected.Content.Single()).Text);
+            using (var inspection = JsonDocument.Parse(((TextContentBlock)inspected.Content.Single()).Text))
+            {
+                var instance = inspection.RootElement;
+                Assert.AreEqual(transport.InstanceId, instance.GetProperty("instanceId").GetString());
+                Assert.AreEqual("isolated-protocol-fixture", instance.GetProperty("nativeVersion").GetString());
+                CollectionAssert.AreEqual(features, instance.GetProperty("nativeCapabilities").EnumerateArray().Select(n => n.GetString()!).ToArray());
+                Assert.AreEqual("unknown", instance.GetProperty("nativeRequestCoverage").GetString());
+                Assert.AreEqual(JsonValueKind.Null, instance.GetProperty("nativeRequests").ValueKind, instance.GetRawText());
+                Assert.AreEqual(instance.GetRawText(), inspected.StructuredContent!.Value.GetRawText());
+            }
             var wrong = await tools.Attach(endpoint, Guid.NewGuid().ToString("D"), default);
             Assert.IsTrue(wrong.IsError);
             using var message = JsonDocument.Parse(((TextContentBlock)wrong.Content.Single()).Text);

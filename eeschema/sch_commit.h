@@ -26,18 +26,27 @@
 #include <map>
 #include <optional>
 #include <array>
+#include <set>
+#include <nlohmann/json_fwd.hpp>
 #include <connection_graph.h>
 
 class EMBEDDED_FILES;
 namespace kiapi::schematic::types { class SchematicFormattingSettings; }
+namespace kiapi::schematic::types { class SchematicAnnotationSettings; }
+namespace kiapi::schematic::types { class SchematicFieldTemplates; class SchematicSymbolComparisonSettings; class SchematicBomSettings; class SchematicNetSettings; }
+class REFDES_TRACKER;
 class BUS_ALIAS;
 class SCH_EMBEDDED_FILES_UNDO_ITEM;
 class SCH_PAGE_SETTINGS_UNDO_ITEM;
+class SCH_MARKER;
+namespace SCH_ERC_SETTINGS { struct PREPARED; }
 class SCH_LIBRARY_CACHE_UNDO_ITEM;
 class SCH_SYMBOL_CACHE_EDIT_SCOPE;
 class SCH_SYMBOL_CACHE_STATE;
 class SCH_SHEET;
 class SCH_SCREEN;
+class SCH_SYMBOL;
+class SCHEMATIC;
 class TITLE_BLOCK;
 class PAGE_INFO;
 
@@ -68,8 +77,46 @@ public:
 
     virtual void Revert() override;
     bool Empty() const override;
+
+    /**
+     * True when pushing this commit would change what is saved.  Only the staged items are
+     * compared, each with the copy the commit saved when it was staged, in the form the
+     * schematic writer saves; the rest of the design is never written.  An added or removed
+     * item, or any staged setting, library cache, embedded file or ERC marker, counts as a
+     * change, and so does a reference inventory that differs from the one the commit kept
+     * (KeepReferenceInventory()): designators handed out are saved with the project.
+     */
+    bool PersistsChange( SCHEMATIC& aSchematic ) const;
+
+    /**
+     * Forget every staged edit without applying or reverting it: only the saved copies are
+     * freed.  For a commit whose items were freed with a replaced document.
+     */
+    void Abandon();
+
+    /**
+     * Keep the project's reference inventory (the designators annotation has handed out,
+     * saved with the project settings) as it is now, before annotating items this commit adds
+     * or changes.  Reverting the commit returns the designators handed out since; pushing it
+     * keeps them handed out.  Only the first call keeps a copy.
+     */
+    void KeepReferenceInventory();
+
+    /**
+     * KeepReferenceInventory() for @a aSchematic, the schematic-only form for a commit that has
+     * no schematic editor (a headless schematic or a test).  Like the editor form, it keeps
+     * nothing for a symbol editor commit, and only the first call keeps a copy.
+     */
+    void KeepReferenceInventory( SCHEMATIC& aSchematic );
+
+    /// A copy of @a aSchematic's reference inventory, or null when it has none.
+    static std::unique_ptr<REFDES_TRACKER> CopyReferenceInventory( SCHEMATIC& aSchematic );
+
+    /// Return @a aSchematic's reference inventory to @a aKept (none: empty).
+    static void RestoreReferenceInventory( SCHEMATIC& aSchematic, const REFDES_TRACKER* aKept );
     void SetAutomationOrigin( const std::string& aOriginId, const std::string& aOperationId )
     {
+        m_automationBatch = true;
         m_originId = aOriginId;
         m_operationId = aOperationId;
     }
@@ -80,15 +127,42 @@ public:
     void ReplaceLibraryCache( SCH_SCREEN& aScreen, SCH_SYMBOL_CACHE_STATE& aCandidate );
     bool ValidateLibraryCaches( wxString& aFailure );
     void SetRootInstance( SCH_SHEET* aSheet, const std::optional<wxString>& aPageNumber );
+    /**
+     * Give @a aScreen the identity @a aId (a rebuilt root adopting the identity its saved file had).
+     * Only the screen's own identity changes; sheets and paths keep theirs.  Undo, redo and a
+     * rejected batch restore it with the page states.  The caller checks that the change is safe.
+     */
+    void SetScreenIdentity( SCH_SCREEN* aScreen, const KIID& aId );
     void SetTitleBlock( SCH_SCREEN* aScreen, const TITLE_BLOCK& aTitle );
     void SetBusAliases( const std::vector<std::shared_ptr<BUS_ALIAS>>& aAliases );
     void SetTextVariables( const std::map<wxString, wxString>& aVariables );
+    void SetSetupSettings( const nlohmann::json& aBefore, const nlohmann::json& aAfter );
     void SetVariantDescription( const wxString& aName, const wxString& aDescription );
     void StageVariantRegistry();
     void SetDrawingRatios( const std::array<double, 5>& aRatios );
     void SetFormatting( const kiapi::schematic::types::SchematicFormattingSettings& aFormatting );
+    void SetAnnotation( const kiapi::schematic::types::SchematicAnnotationSettings& aAnnotation );
+    void SetReferenceInventory( const REFDES_TRACKER& aPrepared );
+    void SetFieldTemplates( const kiapi::schematic::types::SchematicFieldTemplates& aValue );
+    void SetSymbolComparison( const kiapi::schematic::types::SchematicSymbolComparisonSettings& aValue );
+    void SetBomSettings( const kiapi::schematic::types::SchematicBomSettings& aValue );
+    void SetNetSettings( const kiapi::schematic::types::SchematicNetSettings& aValue );
+    bool SetErcSettings( SCH_ERC_SETTINGS::PREPARED& aPrepared, std::string& aFailure );
+    /**
+     * Capture the saved ERC settings before an ERC dialog edit changes them in place, so the
+     * edit becomes one undoable change.  History keeps the rules, pin conflicts and exclusions
+     * by value, never an ERC marker pointer: markers are deleted outside commits.
+     */
+    bool StageErcEdit();
+    /// True when the saved ERC settings differ from the ones StageErcEdit captured.
+    bool ErcEditChanged() const;
     void SetVariantRegistry( const std::map<wxString, wxString>& aDescriptions );
+    // Stage graph declarations and the exact affected symbols before a native
+    // net-chain action. Shared screens are captured once; foreign owners fail.
+    bool StageNetChainEdit( const std::set<SCH_SYMBOL*>& aSymbols );
     void SetNetChainDefinitions( const std::map<wxString, CONNECTION_GRAPH::NET_CHAIN_DEFINITION>& aDefinitions );
+    bool SetNetChainClasses( const std::set<wxString>& aDefinitions,
+                            const std::map<wxString, wxString>& aAssignments );
     void SetPageSettings( SCH_SCREEN* aScreen, const PAGE_INFO& aPage,
                           const wxString& aDrawingSheet, const wxString& aPreparedLayout );
     COMMIT& Stage( EDA_ITEM *aItem, CHANGE_TYPE aChangeType, BASE_SCREEN *aScreen = nullptr,
@@ -99,6 +173,23 @@ public:
 private:
     std::string m_originId;
     std::string m_operationId;
+    bool m_automationBatch = false;
+
+    /// An ERC marker staged by Add, Modify or Remove.  It stays out of the undo entry: the
+    /// commit applies or reverts it itself and history keeps it as a detached record.
+    struct STAGED_MARKER
+    {
+        SCH_MARKER*                 marker;
+        SCH_SCREEN*                 screen;
+        int                         type;       ///< CHT_ADD, CHT_MODIFY or CHT_REMOVE.
+        bool                        added;      ///< First staged as an addition by this commit.
+        std::unique_ptr<SCH_MARKER> image;      ///< Modify only: the state to revert to.
+    };
+
+    std::vector<STAGED_MARKER> m_ercMarkers;
+    bool stageErcMarker( SCH_MARKER* aMarker, int aChangeType, BASE_SCREEN* aScreen );
+    void pushErcMarkers();
+    void revertErcMarkers();
     EDA_ITEM* undoLevelItem( EDA_ITEM* aItem ) const override;
 
     EDA_ITEM* makeImage( EDA_ITEM* aItem ) const override;
@@ -118,4 +209,7 @@ private:
     std::map<SCH_SCREEN*, std::unique_ptr<SCH_SYMBOL_CACHE_EDIT_SCOPE>> m_libraryCacheScopes;
     bool m_libraryCacheChanged = false;
     bool m_connectivitySettingsChanged = false;
+    bool m_netSettingsChanged = false;
+    bool m_referenceInventoryKept = false;               ///< KeepReferenceInventory() was called.
+    std::unique_ptr<REFDES_TRACKER> m_referenceInventory; ///< The kept inventory, if there was one.
 };

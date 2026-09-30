@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Text.Json;
 using Google.Protobuf;
 using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
@@ -10,57 +11,128 @@ using ModelContextProtocol.Protocol;
 
 namespace KiCad.Automation.Mcp;
 
-public sealed record InstanceView(string InstanceId, string ProjectPath, DateTimeOffset LastVerifiedAt);
+public sealed record InstanceView(string InstanceId, string ProjectPath, DateTimeOffset LastVerifiedAt,
+                                  string? Epoch = null, int? ProcessId = null, string? ProcessState = null,
+                                  InstanceExitView? Exit = null, InstanceReplacementView? Replaces = null);
+// How a KiCad process ended, as this server proved it (see InstanceExit).
+public sealed record InstanceExitView(string Epoch, int ProcessId, int? ExitCode, int? Signal, string? SignalName,
+                                      string Evidence, DateTimeOffset ObservedAt, string Description);
+// The registration a started or attached KiCad continues, because its process is proven to have ended.
+public sealed record InstanceReplacementView(string Epoch, int? ProcessId, string Endpoint, InstanceExitView Exit);
+// NativeCapabilities keeps its original meaning: the named feature contracts of the handshake.
 public sealed record InspectedInstance(string InstanceId, string ProjectPath, string NativeVersion,
-                                      IReadOnlyList<string> NativeCapabilities);
+                                      IReadOnlyList<string> NativeCapabilities, string NativeRequestCoverage,
+                                      IReadOnlyList<NativeRequestCapability>? NativeRequests);
+public sealed record InstanceCapability(string Name, string Scope, string Source, string Availability,
+                                        string RevisionContract, bool NativeAdvertised);
 
 [McpServerToolType]
 public sealed class InstanceTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_instances_list", ReadOnly = true),
-     Description("List instances attached to this MCP server. LastVerifiedAt is historical, not a claim that the process is still running.")]
-    public IReadOnlyList<InstanceView> List() => registry.List().Select(View).ToArray();
+     Description("List instances attached to this MCP server with their process epoch, process ID and processState, without contacting KiCad. processState is 'running' when this server observes the same KiCad process still running (one it started and that KiCad names as itself, or on Linux one whose process ID and start time it recorded), 'exited' when the process is proven to have ended, with exit: its exit status and, when the status is the one reported for a process ended by a signal, that signal (for example exit status 137, reported for signal 9, SIGKILL; a program that itself exits with 137 is reported the same way; a process this server did not start has evidence 'process-absent' and no exit status), or 'unverified' when this server cannot observe the process. Tools called for an exited instance fail with instance_exited. LastVerifiedAt is historical; a running process can still be busy or not answering."),
+     KiCadCapability("service", "compiled-mcp", "explicit instance ID"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TwoNativeProjectsHaveIndependentEpochsAndCanReattach", "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public IReadOnlyList<InstanceView> List() => registry.Statuses().Select(status => View(status.Instance) with
+    {
+        ProcessState = status.State, Exit = status.Exit is null ? null : ExitView(status.Exit)
+    }).ToArray();
 
     [McpServerTool(Name = "kicad_instance_saved_sessions", ReadOnly = true),
-     Description("List saved connection records, including after MCP restarts. These are historical verification records, not live process status or attached sessions. Reattach the chosen instance to verify its identity and recover it.")]
+     Description("List saved connection records, including after MCP restarts. These are historical verification records, not live process status or attached sessions. Reattach the chosen instance to verify its identity and recover it."),
+     KiCadCapability("service", "compiled-mcp", "none; returns saved instance IDs to reattach"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TwoNativeProjectsHaveIndependentEpochsAndCanReattach", "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public async Task<CallToolResult> SavedSessions(CancellationToken cancellationToken) =>
         await InstanceToolBoundary.Run<IReadOnlyList<InstanceView>>(async () =>
             (await registry.SavedSessionsAsync(cancellationToken)).Select(View).ToArray());
 
     [McpServerTool(Name = "kicad_instance_pending_launches", ReadOnly = true),
-     Description("List unverified startup receipts after interrupted or cancelled starts. A receipt does not mean KiCad is running. Use its instance ID with reattach to verify and recover the native session.")]
+     Description("List unverified startup receipts after interrupted or cancelled starts. A receipt does not mean KiCad is running. Use its instance ID with reattach to verify and recover the native session."),
+     KiCadCapability("service", "compiled-mcp", "none; returns unverified launch receipts by instance ID"),
+     KiCadVerification(KiCadVerificationLevel.NativeJourney, "NativeSessionTests.TwoNativeProjectsHaveIndependentEpochsAndCanReattach", "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> PendingLaunches(CancellationToken cancellationToken) =>
         InstanceToolBoundary.Run(() => registry.PendingLaunchesAsync(cancellationToken));
 
     [McpServerTool(Name = "kicad_instance_start"),
-     Description("Start a separate native KiCad automation process for an existing .kicad_pro. Requires the matching fork executable; preserves the process when MCP disconnects.")]
+     Description("Start a separate native KiCad automation process for an existing .kicad_pro. Requires the matching fork executable; preserves the process when MCP disconnects. A project whose attached KiCad may still run is refused (project_owned), and so is a project whose saved registration's KiCad (after an MCP restart) is shown to be still running that instance; reattach that one instead. When the project's KiCad is proven to have ended (processState 'exited' in kicad_instances_list, or its recorded process no longer exists), the new process continues the same instance ID with a new epoch, and replaces names the ended registration and how it ended, so recovery records of that instance can be reattached to it. A saved registration whose KiCad this server can neither prove ended nor show running does not block the start: the new KiCad gets a new instance ID, and KiCad itself refuses a project another KiCad has open (start_failed)."),
+     KiCadCapability("service", "compiled-mcp plus native-process", "absolute matching executable, existing .kicad_pro path"),
+     KiCadVerification(KiCadVerificationLevel.NativeJourney, "NativeSessionTests.TwoNativeProjectsHaveIndependentEpochsAndCanReattach")]
     public async Task<CallToolResult> Start(string executable, string projectPath, CancellationToken cancellationToken,
         [Description("Use the native software-rendering path. Defaults to enabled on Linux and native preferences on Mac.")]
         bool? softwareRendering = null) =>
-        await InstanceToolBoundary.Run(async () => View(await registry.StartAsync(executable, projectPath, cancellationToken, softwareRendering)));
+        await InstanceToolBoundary.Run(async () =>
+            Registered(await registry.StartInstanceAsync(executable, projectPath, cancellationToken, softwareRendering)));
 
     [McpServerTool(Name = "kicad_instance_attach"),
-     Description("Attach an explicitly identified automation instance at an absolute ipc:/// endpoint. Verifies the expected UUID before recording the connection.")]
+     Description("Attach an explicitly identified automation instance at an absolute ipc:/// endpoint. Verifies the expected UUID before recording the connection, and observes the process KiCad names in its handshake when that process runs this instance (processState). A different KiCad process under an instance ID this server knows is refused (instance_changed) unless the registered process is proven to have ended; the new process then continues that instance ID with its own epoch, and replaces names the ended registration and how it ended."),
+     KiCadCapability("service", "compiled-mcp plus native-api", "absolute ipc endpoint, expected instance ID"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TwoNativeProjectsHaveIndependentEpochsAndCanReattach")]
     public async Task<CallToolResult> Attach(string endpoint, string expectedInstanceId, CancellationToken cancellationToken) =>
-        await InstanceToolBoundary.Run(async () => View(await registry.AttachAsync(endpoint, expectedInstanceId, cancellationToken)));
+        await InstanceToolBoundary.Run(async () => Registered(await registry.AttachInstanceAsync(endpoint, expectedInstanceId, cancellationToken)));
 
     [McpServerTool(Name = "kicad_instance_reattach"),
-     Description("Recover a saved session or an unverified interrupted launch after an MCP restart. Verifies the instance and project, and checks the previous process epoch when one was recorded. Never restarts or kills KiCad.")]
+     Description("Recover a saved session or an unverified interrupted launch after an MCP restart. Verifies the instance and project, and checks the previous process epoch when one was recorded. Never restarts or kills KiCad."),
+     KiCadCapability("service", "compiled-mcp plus native-api", "saved instance ID, recorded process epoch"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TwoNativeProjectsHaveIndependentEpochsAndCanReattach")]
     public async Task<CallToolResult> Reattach(string instanceId, CancellationToken cancellationToken) =>
-        await InstanceToolBoundary.Run(async () => View(await registry.ReattachAsync(instanceId, cancellationToken)));
+        await InstanceToolBoundary.Run(async () => Registered(new(await registry.ReattachAsync(instanceId, cancellationToken), null, null)));
 
     [McpServerTool(Name = "kicad_instance_inspect", ReadOnly = true),
-     Description("Verify a live native instance and return its actual build version and advertised native capabilities.")]
+     Description("Verify a live native instance and return its actual build version, its advertised native capabilities (named feature contracts such as session.info, each advertised only when the whole feature works) and nativeRequests: the request types it dispatches to registered handlers right now. nativeRequestCoverage is 'unknown' and nativeRequests null for a KiCad built before that list existed."),
+     KiCadCapability("service", "compiled-mcp", "verified instance epoch"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TwoNativeProjectsHaveIndependentEpochsAndCanReattach", "InstanceToolBoundaryTests.CompiledStdioReturnsActionableUnknownInstanceErrorAndRecovers")]
     public Task<CallToolResult> Inspect(string instanceId, CancellationToken cancellationToken) => InstanceToolBoundary.Run<InspectedInstance>(async () =>
     {
         NativeClient client = registry.Client(instanceId);
         AutomationSession session = await client.HandshakeAsync(cancellationToken);
         GetVersionResponse version = await client.GetVersionAsync(cancellationToken);
-        return new(session.InstanceId, session.ProjectPath, version.Version.FullVersion, session.Capabilities.ToArray());
+        var native = CapabilityCatalog.Native(session);
+        return new(session.InstanceId, session.ProjectPath, version.Version.FullVersion, native.Features,
+                   native.RequestCoverage, native.Requests);
     });
 
+    [McpServerTool(Name = "kicad_instance_capabilities", ReadOnly = true),
+     Description("Return the versioned capability catalogue of one verified native instance and this MCP server, read from its handshake. nativeFeatures are the named feature contracts it advertises, each only when the whole feature works. nativeRequests are the request types it dispatches to registered handlers right now; opening or closing an editor changes them, and nativeRequestCoverage is 'unknown' with nativeRequests null for a KiCad built before that list existed. serviceCapabilities list every tool registered in this server with its scope, target and revision contract and verification evidence, and limitations name unfinished work that no registered tool provides. Does not change documents."),
+     KiCadCapability("service", "compiled-mcp plus native-handshake", "explicit instance ID, verified instance epoch"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TwoNativeProjectsHaveIndependentEpochsAndCanReattach", "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> Capabilities(string instanceId, McpServer server, CancellationToken cancellationToken) => InstanceToolBoundary.Run(async () =>
+    {
+        var client = registry.Client(instanceId);
+        var session = await client.HandshakeAsync(cancellationToken);
+        var version = await client.GetVersionAsync(cancellationToken);
+        var native = CapabilityCatalog.Native(session);
+        var service = CapabilityCatalog.Service(RegisteredTools(server));
+        return new
+        {
+            schemaVersion = CapabilityCatalog.SchemaVersion, session.InstanceId, session.ProjectPath, session.Epoch,
+            nativeVersion = version.Version.FullVersion, nativeFeatures = native.Features,
+            nativeRequestCoverage = native.RequestCoverage, nativeRequests = native.Requests,
+            serviceCapabilities = service, limitations = CapabilityCatalog.Limitations(service), notes = CapabilityCatalog.Notes
+        };
+    });
+
+    [McpServerTool(Name = "kicad_service_capabilities", ReadOnly = true),
+     Description("Return this MCP server's own capability catalogue without contacting KiCad: every registered tool with its scope, target and revision contract and verification evidence, plus unfinished work that no registered tool provides. Use kicad_instance_capabilities for the request types a running KiCad supports."),
+     KiCadCapability("service", "compiled-mcp", "none"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TwoNativeProjectsHaveIndependentEpochsAndCanReattach", "CapabilityCatalogTests.CompiledServerAdvertisesExactlyItsRegisteredTools")]
+    public Task<CallToolResult> ServiceCapabilitiesCatalog(McpServer server) => InstanceToolBoundary.Run(() =>
+    {
+        var service = CapabilityCatalog.Service(RegisteredTools(server));
+        return Task.FromResult(new
+        {
+            schemaVersion = CapabilityCatalog.SchemaVersion, serviceCapabilities = service,
+            limitations = CapabilityCatalog.Limitations(service), notes = CapabilityCatalog.Notes
+        });
+    });
+
+    // The tools/list catalogue itself: the collection the server lists and dispatches.
+    private static IEnumerable<McpServerTool> RegisteredTools(McpServer server) =>
+        server.ServerOptions.ToolCollection ?? throw new InvalidOperationException("The MCP server has no tool collection.");
+
     [McpServerTool(Name = "kicad_documents_list", ReadOnly = true),
-     Description("Query actual open documents of one kind in an identified instance. Kinds: schematic, symbol, pcb, footprint. Does not open or change a document.")]
+     Description("Query actual open documents of one kind in an identified instance. Kinds: schematic, symbol, pcb, footprint. Does not open or change a document."),
+     KiCadCapability("document", "native-api", "explicit instance ID, document kind"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TwoNativeProjectsHaveIndependentEpochsAndCanReattach")]
     public Task<CallToolResult> Documents(string instanceId, string kind, CancellationToken cancellationToken) => InstanceToolBoundary.Run(async () =>
     {
         // Numeric values are the shared DocumentType protobuf wire contract.
@@ -75,20 +147,60 @@ public sealed class InstanceTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_schematic_open"),
-     Description("Open an existing root .kicad_sch in the graphical editor belonging to an explicitly attached instance. Currently requires the project's root schematic path; does not switch projects or import other formats. Returns its native project/sheet descriptor. Repeating an open preserves the current document. Does not provide revision-safe editing or rendering.")]
+     Description("Open an existing root .kicad_sch in the graphical editor belonging to an explicitly attached instance. Currently requires the project's root schematic path; does not switch projects or import other formats. Returns its native project/sheet descriptor. Repeating an open preserves the current document. Does not provide revision-safe editing or rendering."),
+     KiCadCapability("document", "native-api", "explicit instance ID, absolute project-root .kicad_sch path"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NetClassesRoundTripThroughXmlAndNativeEdits")]
     public Task<CallToolResult> OpenSchematic(string instanceId, string path, CancellationToken cancellationToken) => InstanceToolBoundary.Run(async () =>
     {
         OpenDocumentResponse response = await registry.Client(instanceId).OpenRootSchematicAsync(path, cancellationToken);
         return JsonFormatter.Default.Format(response.Document);
     });
 
-    private static InstanceView View(InstanceRecord record) => new(record.InstanceId, record.ProjectPath, record.VerifiedAt);
+    private static InstanceView View(InstanceRecord record) => new(record.InstanceId, record.ProjectPath, record.VerifiedAt,
+        record.Epoch, record.ProcessId);
+
+    // A verified registration with what this server can prove about its process right now.
+    private InstanceView Registered(InstanceRegistration registration)
+    {
+        var status = registry.Statuses().SingleOrDefault(s => s.Instance.InstanceId == registration.Instance.InstanceId);
+        return View(registration.Instance) with
+        {
+            ProcessState = status?.State, Exit = status?.Exit is { } ended ? ExitView(ended) : null,
+            Replaces = registration.Replaced is { } replaced && registration.ReplacedExit is { } exit
+                ? new InstanceReplacementView(replaced.Epoch, replaced.ProcessId, replaced.Endpoint, ExitView(exit)) : null
+        };
+    }
+
+    private static InstanceExitView ExitView(InstanceExit exit) => new(exit.Epoch, exit.ProcessId, exit.ExitCode, exit.Signal,
+        exit.SignalName, exit.Evidence, exit.ObservedAt, "KiCad " + exit.Describe() + ".");
 
     [McpServerTool(Name = "kicad_schematic_create"),
-     Description("Create an unsaved empty root schematic for an explicitly attached instance if its project-root .kicad_sch is missing. Existing files and already open documents are returned without replacement. Requires an absolute path belonging to that instance's project. Save explicitly to persist the new schematic. Does not reconstruct a design or create another project.")]
+     Description("Create an unsaved empty root schematic for an explicitly attached instance if its project-root .kicad_sch is missing. Existing files and already open documents are returned without replacement. Requires an absolute path belonging to that instance's project. Save explicitly to persist the new schematic. Does not reconstruct a design or create another project."),
+     KiCadCapability("document", "native-api", "explicit instance ID, absolute project-root .kicad_sch path"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TwoNativeProjectsHaveIndependentEpochsAndCanReattach")]
     public Task<CallToolResult> CreateSchematic(string instanceId, string path, CancellationToken cancellationToken) => InstanceToolBoundary.Run(async () =>
     {
         var response = await registry.Client(instanceId).CreateRootSchematicAsync(path, cancellationToken);
+        return JsonFormatter.Default.Format(response.Document);
+    });
+
+    [McpServerTool(Name = "kicad_pcb_open"),
+     Description("Open the existing project-root .kicad_pcb in the graphical editor belonging to an explicitly attached instance. Requires an absolute path belonging to that project; does not switch projects or import other formats. Returns the native project/board descriptor. Repeating an open preserves the current document. Does not provide revision-safe board editing or rendering."),
+     KiCadCapability("document", "native-api", "explicit instance ID, absolute project-root .kicad_pcb path"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NetClassesRoundTripThroughXmlAndNativeEdits")]
+    public Task<CallToolResult> OpenPcb(string instanceId, string path, CancellationToken cancellationToken) => InstanceToolBoundary.Run(async () =>
+    {
+        var response = await registry.Client(instanceId).OpenRootBoardAsync(path, cancellationToken);
+        return JsonFormatter.Default.Format(response.Document);
+    });
+
+    [McpServerTool(Name = "kicad_pcb_create"),
+     Description("Create an unsaved empty project-root PCB in an explicitly attached native instance if its .kicad_pcb file is missing. Existing files and open boards are returned without replacement. Requires an absolute path belonging to that instance's project. Save explicitly to persist the board. Does not place components or route a board."),
+     KiCadCapability("document", "native-api", "explicit instance ID, absolute project-root .kicad_pcb path"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NetClassesRoundTripThroughXmlAndNativeEdits", "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
+    public Task<CallToolResult> CreatePcb(string instanceId, string path, CancellationToken cancellationToken) => InstanceToolBoundary.Run(async () =>
+    {
+        var response = await registry.Client(instanceId).CreateRootBoardAsync(path, cancellationToken);
         return JsonFormatter.Default.Format(response.Document);
     });
 }

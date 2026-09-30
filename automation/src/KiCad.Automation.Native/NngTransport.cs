@@ -51,6 +51,7 @@ public sealed class NngTransport : INativeTransport
         Nng.Check(Nng.nng_req0_open(out Nng.Socket socket));
         using var handle = new SocketLifetime(socket);
         using CancellationTokenRegistration registration = cancellationToken.Register(handle.Dispose);
+        bool delivered = false;
         try
         {
             Nng.Check(Nng.nng_setopt_ms(socket, "send-timeout", timeoutMs));
@@ -58,7 +59,10 @@ public sealed class NngTransport : INativeTransport
             // Nonblocking connection lets the timeout/cancellation cover an unavailable peer.
             Nng.Check(Nng.nng_dial(socket, endpoint, IntPtr.Zero, 2));
             cancellationToken.ThrowIfCancellationRequested();
+            // A REQ send completes only once a connected peer pipe takes the request. Until then
+            // closing this socket discards it, so the peer can never receive it later.
             Nng.Check(Nng.nng_send(socket, request, (nuint)request.Length, 0));
+            delivered = true;
             nuint length = 0;
             Nng.Check(Nng.nng_recv(socket, out IntPtr data, ref length, 1));
             try
@@ -74,6 +78,10 @@ public sealed class NngTransport : INativeTransport
         {
             throw new OperationCanceledException(cancellationToken);
         }
+        catch (NngException error) when (delivered)
+        {
+            throw new NngException(error.ErrorCode, error.Message, requestDelivered: true);
+        }
     }
 
     private sealed class SocketLifetime(Nng.Socket socket) : IDisposable
@@ -87,9 +95,15 @@ public sealed class NngTransport : INativeTransport
     }
 }
 
-public sealed class NngException(int errorCode, string message) : IOException(message)
+public sealed class NngException(int errorCode, string message, bool requestDelivered = false) : IOException(message)
 {
     public int ErrorCode { get; } = errorCode;
+
+    /// <summary>
+    /// True when the request had reached the peer's connection before this failure, for example a
+    /// reply timeout: the peer may still act on it. False means the peer never received it.
+    /// </summary>
+    public bool RequestDelivered { get; } = requestDelivered;
 }
 
 internal static class Nng

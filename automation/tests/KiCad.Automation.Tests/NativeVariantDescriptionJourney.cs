@@ -256,5 +256,6 @@ public sealed partial class NativeSessionTests
             edited = await Read();
             NativeKeyboard.SchematicShortcut(display, processId, "z"); await ChangedSince(edited); await SavedOperation(false);
         }
+        await VerifyTableVariantEdits(client, root, rootFile, processId, display, evidence, token);
     }
 }

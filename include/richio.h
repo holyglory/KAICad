@@ -36,6 +36,7 @@
 
 #include <ki_exception.h>
 #include <kicommon.h>
+#include <file_content_baseline.h>
 #include <io/kicad/kicad_io_utils.h>
 
 
@@ -547,6 +548,9 @@ public:
      */
     bool Finish() override;
 
+    /// Exact written bytes; unknown until Finish succeeds. Does not read the destination.
+    FILE_CONTENT_BASELINE CommittedBaseline() const;
+
 protected:
     void write( const char* aOutBuf, int aCount ) override;
 
@@ -555,6 +559,8 @@ private:
     wxString                  m_filename;   ///< final destination path
     wxString                  m_tempPath;   ///< sibling temp file being written
     bool                      m_committed;  ///< set true once rename has landed
+    wxString                  m_requestedFilename;
+    bool                      m_textMode;
     std::string               m_buf;
     KICAD_FORMAT::FORMAT_MODE m_mode;
 };

@@ -14,7 +14,7 @@ public static class SchematicItemDelta
 {
     // Pinned fork eeschema/sch_file_versions.h. Native journey asserts this
     // value against the actual build; upgrading needs explicit coverage work.
-    public const uint SupportedWriterFormatVersion = 20260907;
+    public const uint SupportedWriterFormatVersion = 20260912;
     private static readonly MessageDescriptor[] ItemTypes =
     [
         SchematicLine.Descriptor, Junction.Descriptor, NoConnectMarker.Descriptor, BusEntry.Descriptor,
@@ -225,13 +225,27 @@ public static class SchematicItemDelta
         var before = IndexCache(current);
         var after = IndexCache(desired);
         if (before.Count != after.Count || before.Any(entry =>
-                !after.TryGetValue(entry.Key, out var value) || !entry.Value.Equals(value)))
+                !after.TryGetValue(entry.Key, out var value) || !SchematicLibraryCacheEquivalence.Equal(entry.Value, value)))
         {
             var state = new SchematicLibraryCacheState { ScreenId = current.Metadata.ScreenId.Clone() };
             state.Definitions.Add(after.Values.OrderBy(c => c.CacheKey, StringComparer.Ordinal).Select(c => c.Clone()));
             return new SchematicItemOperation { ReplaceLibraryCache = state };
         }
         return null;
+    }
+
+    /// <summary>Coverage markers earlier builds listed on every snapshot for state this build's snapshot holds exactly: the
+    /// library cache, which builds up to preview 23 listed although their cached symbols held every definition (a definition
+    /// they could not read failed the whole read; decision n864adb64162e43c5). A record those builds saved differs from this
+    /// build's snapshot of the same schematic only by these entries.</summary>
+    internal static readonly IReadOnlySet<string> RetiredCoverageMarkers = new HashSet<string>(StringComparer.Ordinal) { "library_cache" };
+
+    /// <summary>Whether two snapshot coverage lists name the same unrepresented state, apart from retired markers.</summary>
+    internal static bool SameCoverage(IEnumerable<string> first, IEnumerable<string> second)
+    {
+        ArgumentNullException.ThrowIfNull(first);
+        ArgumentNullException.ThrowIfNull(second);
+        return first.Where(m => !RetiredCoverageMarkers.Contains(m)).SequenceEqual(second.Where(m => !RetiredCoverageMarkers.Contains(m)), StringComparer.Ordinal);
     }
 
     private static List<SchematicItemOperation> MetadataOperations(SchematicMetadata current, SchematicMetadata desired)
@@ -249,9 +263,92 @@ public static class SchematicItemDelta
         remainder.VariantDescriptions.Clear(); remainder.VariantDescriptions.Add(current.VariantDescriptions);
         remainder.DrawingRatios = current.DrawingRatios?.Clone();
         remainder.Formatting = current.Formatting?.Clone();
+        remainder.Annotation = current.Annotation?.Clone();
+        remainder.ReferenceInventory = current.ReferenceInventory?.Clone();
+        remainder.FieldTemplates = current.FieldTemplates?.Clone();
+        remainder.SymbolComparison = current.SymbolComparison?.Clone();
+        remainder.BomSettings = current.BomSettings?.Clone();
+        remainder.NetSettings = current.NetSettings?.Clone();
+        remainder.ErcSettings = current.ErcSettings?.Clone();
+        remainder.NgspiceSettings = current.NgspiceSettings?.Clone();
+        remainder.NetChainClasses = current.NetChainClasses?.Clone();
+        // A record an earlier preview saved lists the retired library_cache marker where this build does not; that is no
+        // change to the schematic. Any other difference in the coverage list still stops planning.
+        if (SameCoverage(current.UnrepresentedState, desired.UnrepresentedState))
+        { remainder.UnrepresentedState.Clear(); remainder.UnrepresentedState.Add(current.UnrepresentedState); }
         if (!current.Equals(remainder))
             throw Invalid("Unsupported settings or document identity changed; those changes cannot be discarded.");
         var operations = new List<SchematicItemOperation>();
+        if (current.NetSettings is not null || desired.NetSettings is not null)
+        {
+            var before = current.NetSettings ?? throw Invalid("The native peer did not capture declared net settings.");
+            var after = desired.NetSettings ?? throw Invalid("Declared net settings cannot be omitted or inferred from defaults.");
+            if (!SchematicNetSettingsState.SameDeclared(before, after))
+                operations.Add(new() { SetNetSettings = SchematicNetSettingsState.Declared(after) });
+        }
+        if (current.NgspiceSettings is not null || desired.NgspiceSettings is not null)
+        {
+            var before = current.NgspiceSettings ?? throw Invalid("The native peer did not capture ngspice project settings.");
+            var after = desired.NgspiceSettings ?? throw Invalid("Ngspice project settings cannot be omitted or inferred from defaults.");
+            if (after.WorkbookFilename.Contains('\0'))
+                throw Invalid("Ngspice workbook filename cannot contain NUL.");
+            if (after.ModelMode is < 0 or > 5)
+                throw Invalid("Ngspice model mode must be a supported compatibility value.");
+            if (!before.Equals(after)) operations.Add(new() { SetNgspiceSettings = after.Clone() });
+        }
+        if (current.BomSettings is not null || desired.BomSettings is not null)
+        {
+            var before = current.BomSettings ?? throw Invalid("The native peer did not capture BOM settings.");
+            var after = desired.BomSettings ?? throw Invalid("BOM settings cannot be omitted or inferred from defaults.");
+            SchematicBomSettingsValidation.Validate(before);
+            SchematicBomSettingsValidation.Validate(after);
+            if (!before.Equals(after)) operations.Add(new() { SetBomSettings = after.Clone() });
+        }
+        if (current.FieldTemplates is not null || desired.FieldTemplates is not null)
+        {
+            var before = current.FieldTemplates ?? throw Invalid("The native peer did not capture project field templates.");
+            var after = desired.FieldTemplates ?? throw Invalid("Field templates cannot be omitted or inferred from global defaults.");
+            SchematicFieldTemplatesValidation.Validate(before);
+            SchematicFieldTemplatesValidation.Validate(after);
+            if (!before.Equals(after)) operations.Add(new() { SetFieldTemplates = after.Clone() });
+        }
+        if (current.SymbolComparison is not null || desired.SymbolComparison is not null)
+        {
+            var before = current.SymbolComparison ?? throw Invalid("The native peer did not capture symbol comparison policy.");
+            var after = desired.SymbolComparison ?? throw Invalid("Symbol comparison policy cannot be omitted or inferred.");
+            if (!before.Equals(after)) operations.Add(new() { SetSymbolComparison = after.Clone() });
+        }
+        if (current.ReferenceInventory is not null || desired.ReferenceInventory is not null)
+        {
+            var before = current.ReferenceInventory ?? throw Invalid("The native peer did not capture allocated references.");
+            var after = desired.ReferenceInventory ?? throw Invalid("The reference inventory cannot be omitted or inferred from placed components.");
+            if (!SchematicReferenceInventoryState.Same(before, after))
+                operations.Add(new() { SetReferenceInventory = SchematicReferenceInventoryState.Normalize(after) });
+        }
+        if (current.Annotation is not null || desired.Annotation is not null)
+        {
+            var before = current.Annotation ?? throw Invalid("The native peer did not capture annotation policy.");
+            var after = desired.Annotation ?? throw Invalid("Annotation policy cannot be removed or inferred from defaults.");
+            SchematicAnnotation.Validate(before);
+            SchematicAnnotation.Validate(after);
+            if (!before.Equals(after)) operations.Add(new() { SetAnnotation = after.Clone() });
+        }
+        if (current.NetChainClasses is not null || desired.NetChainClasses is not null)
+        {
+            var before = current.NetChainClasses ?? throw Invalid("The native peer did not capture the net-chain class registry.");
+            var after = desired.NetChainClasses ?? throw Invalid("The class registry cannot be removed or inferred from defaults.");
+            if (!SchematicNetChainClasses.Same(before, after))
+                operations.Add(new() { ReplaceNetChainClasses = SchematicNetChainClasses.Normalize(after) });
+        }
+        if (current.ErcSettings is not null || desired.ErcSettings is not null)
+        {
+            var beforeErc = current.ErcSettings ?? throw Invalid("The native peer did not capture an ERC policy catalogue.");
+            var afterErc = desired.ErcSettings ?? throw Invalid("ERC settings cannot be removed or inferred from defaults.");
+            var rules = beforeErc.RuleSeverities.Select(rule => rule.RuleType).ToHashSet();
+            var before = SchematicErcSettingsValidation.Normalize(beforeErc, rules);
+            var after = SchematicErcSettingsValidation.Normalize(afterErc, rules);
+            if (!before.Equals(after)) operations.Add(new() { SetErcSettings = after });
+        }
         if (!Equals(current.Formatting, desired.Formatting))
         {
             var formatting = desired.Formatting ?? throw Invalid("Project formatting cannot be removed or inferred from application defaults.");
@@ -299,6 +396,24 @@ public static class SchematicItemDelta
                 if (chain.MemberNets.Any(n => n.Length == 0 || !NoNul(n) || n.StartsWith("__SG_", StringComparison.Ordinal))
                     || chain.MemberNets.Distinct(StringComparer.Ordinal).Count() != chain.MemberNets.Count)
                     throw Invalid("Net chain member nets must be unique nonempty persisted names.");
+                if (prior?.Exclusions is { } priorExclusions && (priorExclusions.NetNames.Count != 0 || priorExclusions.Pins.Count != 0)
+                    && chain.Exclusions is null)
+                    throw Invalid("Removal restrictions cannot be cleared by an older or incomplete representation.");
+                if (chain.Exclusions is { } exclusions && (exclusions.NetNames.Any(n => n.Length == 0 || !NoNul(n)
+                    || n.StartsWith("__SG_", StringComparison.Ordinal) || chain.MemberNets.Contains(n))
+                    || exclusions.NetNames.Distinct(StringComparer.Ordinal).Count() != exclusions.NetNames.Count))
+                    throw Invalid("Excluded net names must be unique persisted names disjoint from retained members.");
+                if (chain.Exclusions is { } anchored)
+                {
+                    bool ExactId(string? text) => Guid.TryParseExact(text, "D", out var id)
+                        && id != Guid.Empty && id.ToString("D") == text;
+                    var identities = new HashSet<string>(StringComparer.Ordinal);
+                    foreach (var anchor in anchored.Pins)
+                        if (anchor.Pin is null || !ExactId(anchor.Pin.Value) || anchor.Path is null || anchor.Path.Path.Count == 0
+                            || anchor.Path.Path.Any(id => !ExactId(id.Value))
+                            || !identities.Add(string.Join('/', anchor.Path.Path.Select(p => p.Value).Append(anchor.Pin.Value))))
+                            throw Invalid("Excluded pins require unique exact UUIDs and nonempty sheet paths.");
+                }
                 SchematicDataXml.Write(chain);
                 var declaration = chain.Clone(); declaration.Committed = false;
                 state.Definitions.Add(declaration);
@@ -354,7 +469,7 @@ public static class SchematicItemDelta
         return operations;
     }
 
-    internal static Dictionary<Guid, IMessage> Index(IEnumerable<Any> items)
+    internal static Dictionary<Guid, IMessage> Index(IEnumerable<Any> items, ICollection<Guid>? order = null)
     {
         var result = new Dictionary<Guid, IMessage>();
         foreach (var item in items)
@@ -381,6 +496,7 @@ public static class SchematicItemDelta
             var field = descriptor.FindFieldByName("id");
             var id = Identity(field?.Accessor.GetValue(decoded) as KIID);
             if (!result.TryAdd(id, decoded)) throw Invalid("Duplicate native object identity.");
+            order?.Add(id);
         }
         return result;
     }

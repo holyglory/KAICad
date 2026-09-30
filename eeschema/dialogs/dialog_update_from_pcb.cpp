@@ -18,6 +18,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <api/api_sch_state_groups.h>
 #include <backannotate.h>
 #include <dialog_update_from_pcb.h>
 #include <sch_edit_frame.h>
@@ -120,6 +121,11 @@ void DIALOG_UPDATE_FROM_PCB::OnUpdateClick( wxCommandEvent& event )
                             m_cbPreferPinSwaps->GetValue(),
                             false );
 
+    // Back annotation pushes its own commit.  The reference refresh after it is outside that
+    // commit, so the whole update is compared with the persisted state: a real update is one
+    // revision and a board that matches the schematic leaves the document unmodified.
+    SCH_TRACKED_CHANGE change( m_frame->Schematic(), "Update Schematic from PCB" );
+
     if( backAnno.FetchNetlistFromPCB( netlist ) && backAnno.BackAnnotateSymbols( netlist ) )
     {
         for( SCH_SHEET_PATH& sheet : m_frame->Schematic().Hierarchy() )
@@ -127,7 +133,10 @@ void DIALOG_UPDATE_FROM_PCB::OnUpdateClick( wxCommandEvent& event )
 
         m_frame->SetSheetNumberAndCount();
         m_frame->SyncView();
-        m_frame->OnModify();
+
+        if( change.Complete() )
+            m_frame->OnModify();
+
         m_frame->GetCanvas()->Refresh();
 
         if( m_cbRelinkFootprints->GetValue() )

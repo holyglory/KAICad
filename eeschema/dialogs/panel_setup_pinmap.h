@@ -35,7 +35,7 @@ class wxColour;
 class PANEL_SETUP_PINMAP : public PANEL_SETUP_PINMAP_BASE
 {
 public:
-    PANEL_SETUP_PINMAP( wxWindow* aWindow, SCH_EDIT_FRAME* aParent );
+    PANEL_SETUP_PINMAP( wxWindow* aWindow, SCH_EDIT_FRAME* aParent, ERC_SETTINGS* aSettings = nullptr );
     ~PANEL_SETUP_PINMAP();
 
     void ImportSettingsFrom( PIN_ERROR aPinMap[][ELECTRICAL_PINTYPES_TOTAL] );
@@ -52,7 +52,7 @@ private:
     DECLARE_EVENT_TABLE()
 
     SCH_EDIT_FRAME*  m_parent;
-    SCHEMATIC*       m_schematic;
+    ERC_SETTINGS*   m_settings;
     wxColour         m_btnBackground;
     wxWindow*        m_buttonList[ELECTRICAL_PINTYPES_TOTAL][ELECTRICAL_PINTYPES_TOTAL];
     bool             m_initialized;

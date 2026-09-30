@@ -152,6 +152,7 @@ public:
 #define ENVVARS_CHANGED  0x0001
 #define TEXTVARS_CHANGED 0x0002
 #define HOTKEYS_CHANGED  0x0004
+#define NET_SETTINGS_CHANGED 0x0008
 
     /**
      * Notification event that some of the common (suite-wide) settings have changed.
@@ -211,4 +212,3 @@ private:
     TOOLS_HOLDER* m_holder;
     TOOL_EVENT    m_event;
 };
-

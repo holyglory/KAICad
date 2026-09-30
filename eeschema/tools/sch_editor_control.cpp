@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <chrono>
 #include <api/api_plugin_manager.h>
+#include <api/api_sch_state_groups.h>
 #include <confirm.h>
 #include <connection_graph.h>
 #include <design_block.h>
@@ -502,34 +503,51 @@ int SCH_EDITOR_CONTROL::PageSetup( const TOOL_EVENT& aEvent )
     // clears Redo, which must survive opening and cancelling this dialog.
     auto undoItem = std::make_unique<SCH_PAGE_SETTINGS_UNDO_ITEM>( m_frame );
 
+    // The dialog writes straight into the design, outside any commit, but only the paper and
+    // title block of the current screen and of every screen it exports them to, the drawing
+    // sheet file name (a project setting) and the embedded drawing sheet (schematic embedded
+    // files, which choosing a file adds to even before OK).  It writes no item or library cache,
+    // so those parts are compared exactly as they are saved, without writing the whole design
+    // twice.  Only a real change becomes a revision, an undo entry and a modified document; an
+    // unchanged OK leaves all three alone.
+    SCH_TRACKED_CHANGE change( m_frame->Schematic(), "Edit Page Settings", SCH_PERSISTED_PARTS::PageSettings() );
+
     DIALOG_EESCHEMA_PAGE_SETTINGS dlg( m_frame, m_frame->Schematic().GetEmbeddedFiles(),
                                        VECTOR2I( MAX_PAGE_SIZE_EESCHEMA_MILS, MAX_PAGE_SIZE_EESCHEMA_MILS ) );
-    dlg.SetWksFileName( BASE_SCREEN::m_DrawingSheetFileName );
+    dlg.SetWksFileName( m_frame->GetDrawingSheetFileName() );
+
+    // The shared dialog would mark the document modified on every OK; this owner marks it
+    // only when the comparison below finds a change.
+    dlg.DeferModifiedNotification();
 
     if( dlg.ShowModal() == wxID_OK )
     {
-        PICKED_ITEMS_LIST undoCmd;
-        undoCmd.PushItem( ITEM_PICKER( m_frame->GetScreen(), undoItem.get(), UNDO_REDO::PAGESETTINGS ) );
-        undoCmd.SetDescription( _( "Page Settings" ) );
-        m_frame->SaveCopyInUndoList( undoCmd, UNDO_REDO::PAGESETTINGS, false );
-        undoItem.release();
+        if( change.Complete() )
+        {
+            PICKED_ITEMS_LIST undoCmd;
+            undoCmd.PushItem( ITEM_PICKER( m_frame->GetScreen(), undoItem.get(), UNDO_REDO::PAGESETTINGS ) );
+            undoCmd.SetDescription( _( "Page Settings" ) );
+            m_frame->SaveCopyInUndoList( undoCmd, UNDO_REDO::PAGESETTINGS, false );
+            undoItem.release();
+
+            m_frame->OnModify();
+        }
 
         // Update text variables
         m_frame->GetCanvas()->GetView()->MarkDirty();
         m_frame->GetCanvas()->GetView()->UpdateAllItems( KIGFX::REPAINT );
         m_frame->GetCanvas()->Refresh();
-
-        m_frame->OnModify();
-        m_frame->Schematic().RecordCommittedChange( DOCUMENT_CHANGE_JOURNAL::KIND::COMMIT,
-                                                   "Edit Page Settings" );
     }
     else
     {
         undoItem->RestoreAll( m_frame );
-        m_frame->Schematic().Settings().m_SchDrawingSheetFileName = BASE_SCREEN::m_DrawingSheetFileName;
         m_frame->GetCanvas()->GetView()->MarkDirty();
         m_frame->GetCanvas()->GetView()->UpdateAllItems( KIGFX::REPAINT );
         m_frame->GetCanvas()->Refresh();
+
+        // Anything the preview left behind that the restoration did not undo is still recorded.
+        if( change.Complete() )
+            m_frame->OnModify();
     }
 
     return 0;
@@ -569,6 +587,11 @@ bool SCH_EDITOR_CONTROL::RescueSymbolLibTableProject( bool aRunningOnDemand )
 
 bool SCH_EDITOR_CONTROL::rescueProject( RESCUER& aRescuer, bool aRunningOnDemand )
 {
+    // Rescued symbols, relinked library links and the project's rescue library are applied
+    // directly and clear undo, so compare the persisted schematic and project state: the
+    // rescue is one revision when it changed anything and none when it was declined.
+    SCH_TRACKED_CHANGE change( m_frame->Schematic(), "Rescue Symbols" );
+
     if( !RESCUER::RescueProject( m_frame, aRescuer, aRunningOnDemand ) )
         return false;
 
@@ -590,7 +613,9 @@ bool SCH_EDITOR_CONTROL::rescueProject( RESCUER& aRescuer, bool aRunningOnDemand
         m_frame->ClearUndoRedoList();
         m_frame->SyncView();
         m_frame->GetCanvas()->Refresh();
-        m_frame->OnModify();
+
+        if( change.Complete() )
+            m_frame->OnModify();
     }
 
     return true;
@@ -1289,26 +1314,31 @@ int SCH_EDITOR_CONTROL::RemoveFromNetChain( const TOOL_EVENT& aEvent )
     KIGFX::VIEW_CONTROLS* controls  = getViewControls();
     VECTOR2D              cursorPos = controls->GetCursorPosition( !aEvent.DisableGridSnapping() );
 
-    SCH_ITEM* target = nullptr;
-
-    // Prefer current selection; otherwise, use item under cursor
-    if( selTool && selTool->GetSelection().GetSize() == 1 )
-        target = static_cast<SCH_ITEM*>( selTool->GetSelection().Front() );
-    else if( selTool )
-        target = static_cast<SCH_ITEM*>( selTool->GetNode( cursorPos ) );
-
-    if( !target )
-        return 0;
-
-    SCH_CONNECTION* conn = target->Connection();
-    if( !conn )
-        return 0;
-
     SCHEMATIC& schematic = editFrame->Schematic();
     SCH_SCREEN* screen = editFrame->GetCurrentSheet().LastScreen();
+    CONNECTION_GRAPH* graph = schematic.ConnectionGraph();
+    if( !screen || !graph ) return 0;
+
+    std::set<wxString> selectedNets;
+    auto addTarget = [&]( SCH_ITEM* target )
+    {
+        SCH_CONNECTION* connection = target ? target->Connection( &editFrame->GetCurrentSheet() ) : nullptr;
+        if( connection && graph->GetNetChainForNet( connection->Name() ) )
+            selectedNets.insert( connection->Name() );
+    };
+    // The menu accepts multiple selected pins. Never fall back to an unrelated
+    // cursor item when an explicit selection was supplied.
+    if( selTool && !selTool->GetSelection().Empty() )
+    {
+        for( EDA_ITEM* item : selTool->GetSelection() )
+            addTarget( dynamic_cast<SCH_ITEM*>( item ) );
+    }
+    else if( selTool )
+        addTarget( static_cast<SCH_ITEM*>( selTool->GetNode( cursorPos ) ) );
+    if( selectedNets.empty() ) return 0;
 
     // Find any 2-pin symbols that bridge this connection's net into another net and disable propagation
-    int disabled = 0;
+    std::set<SCH_SYMBOL*> bridges;
 
     for( SCH_ITEM* item : screen->Items().OfType( SCH_SYMBOL_T ) )
     {
@@ -1329,28 +1359,58 @@ int SCH_EDITOR_CONTROL::RemoveFromNetChain( const TOOL_EVENT& aEvent )
 
         // If either side matches the selected net and the other side is a different net,
         // this symbol is bridging the selected net into its chain.
-        if( ( ca->Name() == conn->Name() && cb->Name() != conn->Name() )
-            || ( cb->Name() == conn->Name() && ca->Name() != conn->Name() ) )
+        if( ca->Name() != cb->Name()
+            && ( selectedNets.contains( ca->Name() ) || selectedNets.contains( cb->Name() ) ) )
         {
             if( symbol->GetPassthroughMode() != SCH_SYMBOL::PASSTHROUGH_MODE::BLOCK )
-            {
-                symbol->SetPassthroughMode( SCH_SYMBOL::PASSTHROUGH_MODE::BLOCK );
-                disabled++;
-            }
+                bridges.insert( symbol );
         }
     }
 
-    if( disabled > 0 )
+    auto definitions = graph->GetNetChainDefinitions();
+    std::set<SCH_SYMBOL*> affected = bridges;
+    bool membershipChanged = false;
+    for( auto& [name, definition] : definitions )
     {
-        // Rebuild connectivity/chains so the change takes effect
-        CONNECTION_GRAPH* graph = schematic.ConnectionGraph();
-        if( graph )
+        if( !definition.committed ) continue;
+        bool changed = false;
+        for( const wxString& net : selectedNets )
         {
-            wxLogTrace( "KICAD_SCH_HIGHLIGHT", "RemoveFromNetChain: disabled=%d, rebuilding chains", disabled );
-            SCH_SHEET_LIST sheets = schematic.Hierarchy();
-            graph->Recalculate( sheets, /*aUnconditional=*/true );
-            m_frame->GetCanvas()->Refresh();
+            if( definition.memberNets.erase( net ) )
+            {
+                definition.excludedNets.insert( net );
+                // Capture all placed-pin owners, including repeated-sheet
+                // paths. A later label rename cannot remove this restriction.
+                for( const SCH_SHEET_PATH& path : schematic.Hierarchy() )
+                {
+                    if( !path.LastScreen() ) continue;
+                    for( SCH_ITEM* item : path.LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
+                        for( SCH_PIN* pin : static_cast<SCH_SYMBOL*>( item )->GetPins( &path ) )
+                            if( auto* connection = pin->Connection( &path ); connection && connection->Name() == net )
+                                definition.excludedPins.emplace( path.Path(), pin->m_Uuid );
+                }
+                changed = true;
+            }
         }
+        if( changed )
+        {
+            membershipChanged = true;
+            if( auto* chain = graph->GetNetChainByName( name ) )
+                affected.insert( chain->GetSymbols().begin(), chain->GetSymbols().end() );
+        }
+    }
+    if( membershipChanged )
+    {
+        SCH_COMMIT commit( editFrame );
+        if( !commit.StageNetChainEdit( affected ) ) return 0;
+        for( SCH_SYMBOL* symbol : bridges )
+            symbol->SetPassthroughMode( SCH_SYMBOL::PASSTHROUGH_MODE::BLOCK );
+        // Keep original endpoint and class intent in an uncommitted declaration
+        // if the retained path no longer spans it. Never guess new terminals.
+        commit.SetNetChainDefinitions( definitions );
+        commit.Push( _( "Remove from Net Chain" ) );
+        editFrame->UpdateNetHighlightStatus();
+        editFrame->GetCanvas()->Refresh();
     }
 
     return 0;
@@ -1828,15 +1888,20 @@ int SCH_EDITOR_CONTROL::HighlightNetCursor( const TOOL_EVENT& aEvent )
 int SCH_EDITOR_CONTROL::ReplaceTerminalPin( const TOOL_EVENT& aEvent )
 {
     SCH_EDIT_FRAME* editFrame = static_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );
-    auto ids = aEvent.Parameter<std::pair<wxString, wxString>>();
-    wxString oldStr = ids.first;
-    wxString newStr = ids.second;
-    KIID oldPin( oldStr );
-    KIID newPin( newStr );
-    wxString sig = editFrame->GetHighlightedNetChain();
-
-    if( !sig.IsEmpty() )
-        editFrame->Schematic().ConnectionGraph()->ReplaceNetChainTerminalPin( sig, oldPin, newPin );
+    const auto change = aEvent.Parameter<SCH_NETCHAIN_TERMINAL_CHANGE>();
+    const auto& selection = m_toolMgr->GetTool<SCH_SELECTION_TOOL>()->GetSelection();
+    if( selection.GetSize() != 1 ) return 0;
+    auto* pin = dynamic_cast<SCH_PIN*>( selection.Front() );
+    if( !pin || pin->m_Uuid != change.selectedPin || editFrame->GetCurrentSheet().Path() != change.selectedPath )
+        return 0;
+    auto* graph = editFrame->Schematic().ConnectionGraph();
+    if( !graph ) return 0;
+    SCH_COMMIT commit( editFrame );
+    if( commit.StageNetChainEdit( {} ) && graph->SetNetChainTerminal( change, *pin, editFrame->GetCurrentSheet() ) )
+    {
+        commit.Push( _( "Replace terminal pin" ) );
+        editFrame->UpdateNetHighlightStatus();
+    }
 
     return 0;
 }
@@ -1860,7 +1925,29 @@ int SCH_EDITOR_CONTROL::NameNetChain( const TOOL_EVENT& aEvent )
 
         if( !newName.IsEmpty() && newName != sig->GetName() )
         {
-            sig->SetName( newName );
+            if( !SCH_NETCHAIN::IsValidName( newName ) )
+            {
+                DisplayError( editFrame, _( "Chain name cannot contain spaces, quotes, or parentheses." ) );
+                return 0;
+            }
+            if( graph->GetNetChainByName( newName ) || graph->GetNetChainDefinitions().contains( newName ) )
+            {
+                DisplayError( editFrame, wxString::Format( _( "A net chain named '%s' already exists." ), newName ) );
+                return 0;
+            }
+            wxString oldName = sig->GetName();
+            const auto& members = sig->GetSymbols();
+            SCH_COMMIT commit( editFrame );
+            if( !commit.StageNetChainEdit( std::set<SCH_SYMBOL*>( members.begin(), members.end() ) )
+                    || !graph->RenameCommittedNetChain( oldName, newName ) )
+                return 0;
+            if( auto settings = editFrame->Prj().GetProjectFile().NetSettings() )
+            {
+                wxString chainClass = settings->GetNetChainClass( oldName );
+                settings->SetNetChainClass( oldName, wxEmptyString );
+                settings->SetNetChainClass( newName, chainClass );
+            }
+            commit.Push( _( "Name Net Chain" ) );
 
             editFrame->SetHighlightedNetChain( newName );
             TOOL_EVENT dummy;
@@ -1889,7 +1976,8 @@ int SCH_EDITOR_CONTROL::CreateNetChainBetweenPins( const TOOL_EVENT& aEvent )
     SCH_EDIT_FRAME* editFrame = static_cast<SCH_EDIT_FRAME*>( m_toolMgr->GetToolHolder() );
     CONNECTION_GRAPH* graph = editFrame->Schematic().ConnectionGraph();
 
-    SCH_NETCHAIN* potential = graph->FindPotentialNetChainBetweenPins( pinA, pinB );
+    SCH_NETCHAIN* potential = graph->FindPotentialNetChainBetweenPins( pinA, editFrame->GetCurrentSheet(),
+                                                                     pinB, editFrame->GetCurrentSheet() );
     if( !potential )
     {
         DisplayError( editFrame, _( "No potential net chain connects the selected pins." ) );
@@ -1949,8 +2037,23 @@ int SCH_EDITOR_CONTROL::CreateNetChainBetweenPins( const TOOL_EVENT& aEvent )
         return 0; // cancelled
     }
 
+    if( !SCH_NETCHAIN::IsValidName( name ) )
+    {
+        DisplayError( editFrame, _( "Chain name cannot contain spaces, quotes, or parentheses." ) );
+        return 0;
+    }
+    if( graph->GetNetChainByName( name ) || graph->GetNetChainDefinitions().contains( name ) )
+    {
+        DisplayError( editFrame, wxString::Format( _( "A net chain named '%s' already exists." ), name ) );
+        return 0;
+    }
+    const auto& members = potential->GetSymbols();
+    SCH_COMMIT commit( editFrame );
+    if( !commit.StageNetChainEdit( std::set<SCH_SYMBOL*>( members.begin(), members.end() ) ) )
+        return 0;
     if( graph->CreateNetChainFromPotential( potential, name ) )
     {
+        commit.Push( _( "Create Net Chain" ) );
         // Replace temporary highlight with new chain name
         editFrame->SetHighlightedNetChain( name );
         editFrame->SetHighlightedConnection( wxEmptyString );
@@ -2022,6 +2125,28 @@ int SCH_EDITOR_CONTROL::ShowCreateNetChain( const TOOL_EVENT& aEvent )
 }
 
 
+/// True when an undo or redo command restores ERC markers.  An open ERC dialog lists marker
+/// pointers, so it is rebuilt once the whole command is restored.  History never holds a marker
+/// pointer (the ERC dialog deletes markers outside commits), so only its ERC settings record is
+/// inspected, never a marker.
+static bool restoresErcMarkers( const PICKED_ITEMS_LIST& aList )
+{
+    for( unsigned ii = 0; ii < aList.GetCount(); ++ii )
+    {
+        if( aList.GetPickedItemStatus( ii ) != UNDO_REDO::PAGESETTINGS )
+            continue;
+
+        if( auto* settings = dynamic_cast<SCH_PAGE_SETTINGS_UNDO_ITEM*>( aList.GetPickedItem( ii ) );
+            settings && settings->IncludesErcMarkers() )
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+
 int SCH_EDITOR_CONTROL::Undo( const TOOL_EVENT& aEvent )
 {
     wxCHECK( m_frame, 0 );
@@ -2039,6 +2164,9 @@ int SCH_EDITOR_CONTROL::Undo( const TOOL_EVENT& aEvent )
 
     m_frame->PutDataInPreviousState( undo_list );
 
+    if( restoresErcMarkers( *undo_list ) )
+        m_frame->RefreshErcDialog();
+
     // Now push the old command to the RedoList
     undo_list->ReversePickersListOrder();
     m_frame->PushCommandToRedoList( undo_list );
@@ -2046,10 +2174,10 @@ int SCH_EDITOR_CONTROL::Undo( const TOOL_EVENT& aEvent )
     m_toolMgr->GetTool<SCH_SELECTION_TOOL>()->RebuildSelection();
 
     m_frame->GetCanvas()->Refresh();
-    m_frame->OnModify();
 
     m_frame->Schematic().RecordCommittedChange( DOCUMENT_CHANGE_JOURNAL::KIND::UNDO,
                                                "Undo" );
+    m_frame->OnModify();
 
     return 0;
 }
@@ -2073,6 +2201,9 @@ int SCH_EDITOR_CONTROL::Redo( const TOOL_EVENT& aEvent )
     /* Redo the command: */
     m_frame->PutDataInPreviousState( list );
 
+    if( restoresErcMarkers( *list ) )
+        m_frame->RefreshErcDialog();
+
     /* Put the old list in UndoList */
     list->ReversePickersListOrder();
     m_frame->PushCommandToUndoList( list );
@@ -2080,10 +2211,10 @@ int SCH_EDITOR_CONTROL::Redo( const TOOL_EVENT& aEvent )
     m_toolMgr->GetTool<SCH_SELECTION_TOOL>()->RebuildSelection();
 
     m_frame->GetCanvas()->Refresh();
-    m_frame->OnModify();
 
     m_frame->Schematic().RecordCommittedChange( DOCUMENT_CHANGE_JOURNAL::KIND::REDO,
                                                "Redo" );
+    m_frame->OnModify();
 
     return 0;
 }
@@ -2665,6 +2796,10 @@ int SCH_EDITOR_CONTROL::Paste( const TOOL_EVENT& aEvent )
     // SCH_SEXP_PLUGIN added the items to the paste screen, but not to the view or anything
     // else.  Pull them back out to start with.
     SCH_COMMIT             commit( m_toolMgr );
+
+    // Annotating the pasted symbols below hands out designators, which the project's reference
+    // inventory records.  A paste that is cancelled places nothing and returns them.
+    commit.KeepReferenceInventory();
     EDA_ITEMS              loadedItems;
     std::vector<SCH_ITEM*> sortedLoadedItems;
     bool                   sheetsPasted = false;
@@ -3116,11 +3251,8 @@ int SCH_EDITOR_CONTROL::Paste( const TOOL_EVENT& aEvent )
     // schematic file.
     prunePastedSymbolInstances();
 
-    SCH_SHEET_LIST sheets = m_frame->Schematic().Hierarchy();
-    SCH_SCREENS    allScreens( m_frame->Schematic().Root() );
-
-    allScreens.PruneOrphanedSymbolInstances( m_frame->Prj().GetProjectName(), sheets );
-    allScreens.PruneOrphanedSheetInstances( m_frame->Prj().GetProjectName(), sheets );
+    // Orphaned instance paths on every sheet are pruned when the paste is placed (below): pruning
+    // them here, outside the commit, would change saved sheets even when the paste is cancelled.
 
     // Now clear the previous selection, select the pasted items, and fire up the "move" tool.
     m_toolMgr->RunAction( ACTIONS::selectionClear );
@@ -3276,6 +3408,14 @@ int SCH_EDITOR_CONTROL::Paste( const TOOL_EVENT& aEvent )
 
         if( m_toolMgr->RunSynchronousAction( SCH_ACTIONS::move, &commit ) )
         {
+            // Keep the pasted instance paths, and those already on every sheet, from accumulating
+            // in the saved files; part of this placement's revision.
+            SCH_SHEET_LIST sheets = m_frame->Schematic().Hierarchy();
+            SCH_SCREENS    allScreens( m_frame->Schematic().Root() );
+
+            allScreens.PruneOrphanedSymbolInstances( m_frame->Prj().GetProjectName(), sheets );
+            allScreens.PruneOrphanedSheetInstances( m_frame->Prj().GetProjectName(), sheets );
+
             // Pushing the commit will update the connectivity.
             commit.Push( _( "Paste" ) );
 

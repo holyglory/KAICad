@@ -21,6 +21,7 @@
 #define PANEL_SETUP_NET_CHAINS_H
 
 #include <map>
+#include <memory>
 #include <set>
 #include <vector>
 #include <wx/string.h>
@@ -30,14 +31,17 @@
 
 class SCH_EDIT_FRAME;
 class SCH_NETCHAIN;
+class SCH_COMMIT;
+class NET_SETTINGS;
 
 
 /**
  * Schematic-Setup tab for managing committed net chains.
  *
  * All edits are buffered in m_chainRows / m_classRows so that pressing Cancel
- * in the parent dialog leaves the live model untouched.  TransferDataFromWindow
- * applies them in dependency order:
+ * in the parent dialog leaves the live model untouched. TransferDataFromWindow
+ * validates the buffer; ApplyEdits joins the accepted parent transaction in
+ * dependency order:
  *
  *   1. Rename committed chains   (via RenameCommittedNetChain)
  *   2. Update colour / netclass override on each committed chain
@@ -48,7 +52,8 @@ class SCH_NETCHAIN;
 class PANEL_SETUP_NET_CHAINS : public PANEL_SETUP_NET_CHAINS_BASE
 {
 public:
-    PANEL_SETUP_NET_CHAINS( wxWindow* aParent, SCH_EDIT_FRAME* aFrame );
+    PANEL_SETUP_NET_CHAINS( wxWindow* aParent, SCH_EDIT_FRAME* aFrame,
+                            std::shared_ptr<NET_SETTINGS> aDraftSettings = nullptr );
 
     ~PANEL_SETUP_NET_CHAINS() override;
 
@@ -56,7 +61,12 @@ public:
     bool TransferDataFromWindow() override;
     bool Validate() override;
 
-    bool ApplyEdits();
+    bool ApplyEdits( SCH_COMMIT* aParentCommit = nullptr );
+    void CommitEdits();
+    void RollbackEdits();
+    void ReleaseModelPointers();
+    void RebindModelPointers();
+    void RefreshNetClassChoices();
 
 protected:
     void OnDeleteChainClicked( wxCommandEvent& aEvent ) override;
@@ -114,6 +124,8 @@ private:
     void updateMembersDetail( int aRow );
 
     SCH_EDIT_FRAME* m_frame;
+    std::unique_ptr<SCH_COMMIT> m_pendingCommit;
+    std::shared_ptr<NET_SETTINGS> m_draftSettings;
 
     std::vector<CHAIN_ROW> m_chainRows;
     std::vector<int>       m_gridToChainIdx;

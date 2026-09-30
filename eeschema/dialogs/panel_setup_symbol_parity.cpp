@@ -23,16 +23,16 @@
 #include <panel_setup_symbol_parity.h>
 
 
-PANEL_SETUP_SYMBOL_PARITY::PANEL_SETUP_SYMBOL_PARITY( wxWindow* aWindow, SCH_EDIT_FRAME* aFrame  ) :
+PANEL_SETUP_SYMBOL_PARITY::PANEL_SETUP_SYMBOL_PARITY( wxWindow* aWindow, SCH_EDIT_FRAME* aFrame, SCHEMATIC_SETTINGS* aSettings ) :
         PANEL_SETUP_SYMBOL_PARITY_BASE( aWindow ),
-        m_frame( aFrame )
+        m_settings( aSettings ? aSettings : &aFrame->Schematic().Settings() )
 {
 }
 
 
 bool PANEL_SETUP_SYMBOL_PARITY::TransferDataToWindow()
 {
-    SYMBOL_PARITY_SETTINGS& settings = m_frame->Schematic().Settings().m_SymbolParity;
+    SYMBOL_PARITY_SETTINGS& settings = m_settings->m_SymbolParity;
 
     m_missingFields->SetValue( settings.m_MissingFields );
     m_extraFields->SetValue( settings.m_ExtraFields );
@@ -55,7 +55,7 @@ bool PANEL_SETUP_SYMBOL_PARITY::TransferDataToWindow()
 
 bool PANEL_SETUP_SYMBOL_PARITY::TransferDataFromWindow()
 {
-    SYMBOL_PARITY_SETTINGS& settings = m_frame->Schematic().Settings().m_SymbolParity;
+    SYMBOL_PARITY_SETTINGS& settings = m_settings->m_SymbolParity;
 
     settings.m_MissingFields = m_missingFields->GetValue();
     settings.m_ExtraFields = m_extraFields->GetValue();

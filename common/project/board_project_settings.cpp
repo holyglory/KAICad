@@ -78,7 +78,7 @@ nlohmann::json PARAM_LAYER_PRESET::presetsToJson()
 
 void PARAM_LAYER_PRESET::jsonToPresets( const nlohmann::json& aJson )
 {
-    if( aJson.empty() || !aJson.is_array() )
+    if( !aJson.is_array() )
         return;
 
     m_presets->clear();
@@ -216,7 +216,7 @@ nlohmann::json PARAM_VIEWPORT::viewportsToJson()
 
 void PARAM_VIEWPORT::jsonToViewports( const nlohmann::json& aJson )
 {
-    if( aJson.empty() || !aJson.is_array() )
+    if( !aJson.is_array() )
         return;
 
     m_viewports->clear();

@@ -9,15 +9,328 @@ import "common/types/base_types.proto";
 import "common/types/embedded_files.proto";
 import "google/protobuf/any.proto";
 import "schematic/schematic_types.proto";
+import "board/board_rules.proto";
+import "board/board_types.proto";
+
+// Shared Phase 2 seam. Lanes add fields and values only between their own
+// "-- lane" markers, numbered inside their band (2A 100-199, 2B 200-299,
+// 2C 300-399, 2D 400-499), and new messages only inside their "== lane"
+// block at the end of this file. SharedProtoBandTests enforces this.
+
+message ReadPcbDrcState {
+  kiapi.common.types.DocumentSpecifier document = 1;
+}
+
+// Native derived comparison input, NOT the editable engineering XML or a
+// schematic reconstruction payload. Kept undiscoverable until capture is qualified.
+message ReadSchematicParityNetlist {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  DocumentLifecycleState expected_state = 2;
+  uint32 schema_version = 3;
+  bool allow_duplicate_sheet_names = 4;
+}
+
+message SchematicParityNetlistSnapshot {
+  uint32 schema_version = 1;
+  DocumentLifecycleState source_state = 2;
+  string native_netlist_sexpr = 3;
+  string netlist_sha256 = 4;
+  repeated string warnings = 5;
+}
+
+message PcbDrcFinding {
+  string native_id = 1;
+  kiapi.board.DrcMarker marker = 2;
+  bool excluded = 3;
+  string comment = 4;
+}
+
+// Existing native marker inventory, not an assertion of fresh verification.
+message PcbDrcState {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  DocumentRevision revision = 2;
+  string process_epoch = 3;
+  bool running = 4;
+  bool marker_snapshot_complete = 5;
+  bool results_freshness_known = 6;
+  repeated PcbDrcFinding findings = 7;
+}
+
+// Live PCB DRC job control. These messages are intentionally not registered
+// as MCP tools until the native job owner and cancellation path are present.
+message StartPcbDrcJob {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  bool refill_zones = 3;
+  bool report_all_track_errors = 4;
+  bool test_footprints = 5;
+  DocumentRevision expected_revision = 6;
+  string process_epoch = 7;
+  // Required for test_footprints. Captured natively from this explicit schematic
+  // state; clients do not supply their own substitute netlist.
+  DocumentLifecycleState expected_schematic_state = 8;
+  bool allow_duplicate_sheet_names = 9;
+  // Optional guide-derived copper candidates. Native DRC applies these only to
+  // its detached snapshot; the live board is never mutated by a dry run.
+  repeated google.protobuf.Any candidate_items = 10;
+}
+
+message ReadPcbDrcJob {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string job_id = 2;
+  string process_epoch = 3;
+}
+
+message CancelPcbDrcJob {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string job_id = 2;
+  string process_epoch = 3;
+}
+
+// Native KiCad simulator jobs. The eeschema owner uses its existing
+// SPICE_SIMULATOR/ngspice integration; MCP only addresses the job.
+message StartSimulationJob {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  string process_epoch = 3;
+  string netlist = 4;
+}
+message ReadSimulationJob {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string job_id = 2;
+  string process_epoch = 3;
+}
+message CancelSimulationJob {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string job_id = 2;
+  string process_epoch = 3;
+}
+enum SimulationJobStatus {
+  SIMJS_UNKNOWN = 0;
+  SIMJS_RUNNING = 1;
+  SIMJS_COMPLETED = 2;
+  SIMJS_CANCELLED = 3;
+  SIMJS_FAILED = 4;
+}
+message SimulationVector {
+  string name = 1;
+  repeated double values = 2;
+  bool complex = 3;
+}
+message SimulationJobState {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string job_id = 2;
+  string operation_id = 3;
+  string process_epoch = 4;
+  SimulationJobStatus status = 5;
+  uint64 sequence = 6;
+  double progress = 7;
+  string error_code = 8;
+  string error_message = 9;
+  bool cancellation_requested = 10;
+  bool worker_finished = 11;
+  repeated string messages = 12;
+  repeated SimulationVector vectors = 13;
+}
+
+enum PcbDrcJobStatus {
+  PDRCJS_UNKNOWN = 0;
+  PDRCJS_QUEUED = 1;
+  PDRCJS_RUNNING = 2;
+  PDRCJS_COMPLETED = 3;
+  PDRCJS_CANCELLED = 4;
+  PDRCJS_FAILED = 5;
+  PDRCJS_STALE = 6;
+  PDRCJS_INCOMPLETE = 7;
+}
+
+message PcbDrcJobState {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string job_id = 2;
+  string operation_id = 3;
+  DocumentRevision checked_revision = 4;
+  string process_epoch = 5;
+  PcbDrcJobStatus status = 6;
+  double progress = 7;
+  string phase = 8;
+  string error_code = 9;
+  string error_message = 10;
+  bool results_fresh = 11;
+  repeated PcbDrcFinding findings = 12;
+  // A request to stop is not a terminal cancellation receipt.
+  bool cancellation_requested = 13;
+  bool worker_finished = 14;
+  // False until all declared project/rule dependencies are captured exactly.
+  bool snapshot_complete = 15;
+  DocumentLifecycleState checked_schematic_state = 16;
+  repeated string input_warnings = 17;
+  bool candidate_dry_run = 18;
+  repeated string candidate_item_ids = 19;
+}
+
+// Read-only native PNS route preview. The router operates on its in-memory
+// branch and returns typed candidates; no live board commit is performed.
+message StartPcbRoutePreview {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  string process_epoch = 3;
+  DocumentRevision expected_revision = 4;
+  string start_item_id = 5;
+  kiapi.common.types.Vector2 start = 6;
+  repeated kiapi.common.types.Vector2 waypoints = 7;
+  kiapi.board.types.BoardLayer layer = 8;
+  bool force_finish = 9;
+}
+
+message PcbRoutePreviewState {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  DocumentRevision checked_revision = 3;
+  string process_epoch = 4;
+  bool completed = 5;
+  string error_code = 6;
+  string error_message = 7;
+  repeated google.protobuf.Any route_items = 8;
+  bool preview_only = 9;
+  bool native_commit = 10;
+}
 
 message ReadSchematicMetadata {
   kiapi.common.types.DocumentSpecifier document = 1;
+  // 0/1: legacy fields with explicit missing-ERC coverage; 2: includes ERC;
+  // 3: also includes the net-chain class registry and assignments.
+  // 4: includes explicit net-chain member exclusions.
+  // 5: includes persisted reference-numbering policy.
+  // 6: includes the inventory of previously allocated reference designators.
+  // 7: includes project field templates and symbol/library comparison policy.
+  // 8: includes project BOM settings.
+  // 9: includes declared project net settings.
+  // 10: includes persisted ngspice project settings.
+  // Unknown versions are rejected, never silently simplified.
+  uint32 schema_version = 2;
 }
 
 // Native in-memory save flags, not a filesystem comparison or complete project
 // persistence audit. Querying never saves, navigates or reloads the editor.
 message ReadSchematicSaveState {
   kiapi.common.types.DocumentSpecifier document = 1;
+}
+
+// Read-only full native-writer state observation. Not yet a lifecycle mutation
+// token: callers must honor the explicit change/disk coverage below.
+message ReadDocumentLifecycleState {
+  kiapi.common.types.DocumentSpecifier document = 1;
+}
+
+enum DocumentLifecycleScope {
+  DLS_UNKNOWN = 0;
+  DLS_SCHEMATIC_HIERARCHY = 1;
+  DLS_PCB = 2;
+}
+
+enum NativeFileBaselineStatus {
+  NFBS_UNKNOWN = 0;
+  NFBS_UNCHANGED = 1;
+  NFBS_CHANGED = 2;
+  NFBS_WRONG_PATH = 3;
+  NFBS_UNREADABLE = 4;
+}
+
+// Read-only comparison with bytes previously loaded/written by the native owner.
+// An unknown baseline is not an absent file and never authorizes persistence.
+message NativeFileBaselineState {
+  string path = 1;
+  string baseline_path = 2;
+  bool baseline_known = 3;
+  bool baseline_exists = 4;
+  string baseline_sha256 = 5;
+  uint64 baseline_bytes = 6;
+  bool current_known = 7;
+  bool current_exists = 8;
+  string current_sha256 = 9;
+  uint64 current_bytes = 10;
+  NativeFileBaselineStatus status = 11;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
+}
+
+message DocumentLifecycleState {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  DocumentRevision revision = 2;
+  string native_identity = 3;
+  string state_sha256 = 4;
+  DocumentLifecycleScope scope = 5;
+  bool native_content_dirty = 6;
+  bool project_settings_included = 7;
+  bool complete_change_tracking = 8;
+  bool disk_baseline_checked = 9;
+  repeated string native_files = 10;
+  repeated NativeFileBaselineState file_baselines = 11;
+  string process_epoch = 12;
+  // Exact native state at a successful load/save checkpoint; empty means unavailable.
+  string clean_checkpoint_sha256 = 13;
+  // -- lane 2C (300-399) --
+  // state_sha256 without the project-file entries that every save writes from the schematic
+  // itself: the sheet list, the top-level sheet list, the root sheet's revision kept for IPC-2581
+  // and the project file name.  Saving writes nothing else into the project settings, so a save
+  // that only rewrites a stale sheet list (a project KiCad has not saved yet, or sheets added or
+  // renamed since the last save) changes state_sha256 but not this digest.  Empty when
+  // unavailable; a client must then require state_sha256 itself to be unchanged.
+  string save_stable_state_sha256 = 300;
+  // -- end lane 2C --
+  // -- lane 2D (400-499) --
+  // -- end lane 2D --
+}
+
+message CheckedSaveDocument {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  DocumentLifecycleState expected_state = 3;
+  // -- lane 2D (400-499) --
+  // -- end lane 2D --
+}
+
+// Clean-only: this request never authorizes saving or discarding unsaved changes.
+message CheckedCloseDocument {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  DocumentLifecycleState expected_state = 3;
+  // -- lane 2D (400-499) --
+  // -- end lane 2D --
+}
+
+message ReadLifecycleOperation {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  string process_epoch = 3;
+}
+
+enum LifecycleOperationStatus {
+  LOS_UNKNOWN = 0;
+  LOS_SAVED = 1;
+  LOS_REJECTED = 2;
+  LOS_FAILED = 3;
+  LOS_INDETERMINATE = 4;
+  LOS_CLOSED = 5;
+}
+
+message LifecycleOperationResult {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  string process_epoch = 3;
+  LifecycleOperationStatus status = 4;
+  string error_code = 5;
+  string error_message = 6;
+  DocumentLifecycleState observed_state = 7;
+  // -- lane 2D (400-499) --
+  // Observed document files this save replaced on disk, in write order. A failed save that lists
+  // files here left the disk partly updated; the editor still holds the complete design.
+  repeated string written_files = 400;
+  // Observed document files the file system would not let KiCad write (a read-only file or folder,
+  // a full disk, ...). A refusal that writable files would not fix never lists a file here. The
+  // error message says why for each one.
+  repeated string blocked_files = 401;
+  // -- end lane 2D --
 }
 
 message SchematicSaveState {
@@ -37,6 +350,7 @@ message SchematicMetadataSnapshot {
 
 message ReadSchematicScreenData {
   kiapi.common.types.DocumentSpecifier document = 1;
+  uint32 schema_version = 2;
 }
 
 message SchematicScreenDataSnapshot {
@@ -47,18 +361,63 @@ message SchematicScreenDataSnapshot {
 
 message ReadSchematicHierarchyData {
   kiapi.common.types.DocumentSpecifier document = 1;
+  uint32 schema_version = 2;
 }
 
 message SchematicHierarchyDataSnapshot {
   kiapi.schematic.types.SchematicHierarchyData data = 1;
   DocumentRevision revision = 2;
   bool tracking_complete = 3;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
+}
+
+// Read-only local provenance, separate from portable design XML and snapshot schemas.
+// The expected revision is required; this request never navigates or changes KiCad.
+message ReadSchematicFileLocations {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  DocumentRevision expected_revision = 2;
+}
+
+message SchematicFileLocation {
+  kiapi.common.types.SheetPath path = 1;
+  kiapi.common.types.KIID screen_id = 2;
+  string loaded_filename = 3;
+  string declared_filename = 4;
+  string resolved_filename = 5;
+  bool declaration_is_absolute = 6;
+  bool declaration_matches_loaded = 7;
+}
+
+message SchematicFileLocations {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  DocumentRevision revision = 2;
+  repeated SchematicFileLocation locations = 3;
+  string process_epoch = 4;
+}
+
+// One native checkpoint for electrical reconciliation. Net names are display
+// values, not persistent net identities; memberships use sheet paths and UUIDs.
+message ReadSchematicElectricalState {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  uint32 schema_version = 2;
+  // Optional observation precondition, not native mutation admission.
+  DocumentRevision expected_revision = 3;
+}
+
+message SchematicElectricalState {
+  SchematicHierarchyDataSnapshot hierarchy = 1;
+  repeated kiapi.schematic.types.SchematicNet nets = 2;
+  repeated string limitations = 3;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 // Current-canvas capture and supported objects collected in one native dispatch.
 // Incomplete tracking/serializer coverage remain explicit; not edit admission.
 message CaptureSchematicObservation {
   kiapi.common.types.DocumentSpecifier document = 1;
+  uint32 schema_version = 2;
 }
 
 message SchematicObservation {
@@ -78,6 +437,25 @@ message AutomationSession {
   // Separate local notification channel; no request may infer another endpoint.
   string event_endpoint = 6;
   string event_epoch = 7;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
+  // -- lane 2D (400-499) --
+  // 400 held a format marker for capabilities during lane 2D development and is not reused.
+  reserved 400;
+  reserved "capability_format";
+  // The fully qualified request message types this process dispatches at the time of the reply,
+  // in ordinal order, read from its registered handlers and automation controllers. Editors add
+  // their types when they open and remove them when they close. A dispatched request can still be
+  // rejected for its target, its arguments or the editor's state. capabilities (5) keeps the named
+  // feature contracts. A peer that answers this handshake always dispatches GetAutomationSession,
+  // so an empty list means a peer built before this field, whose request coverage is unknown.
+  repeated string handled_requests = 401;
+  // The operating-system process ID of this KiCad process, 0 when unknown. An automation client
+  // uses it only to observe whether this same process is still running, together with the start
+  // time the operating system reports for it, so a KiCad that ended can be reported as ended; it
+  // never signals or stops KiCad through it.
+  uint32 process_id = 402;
+  // -- end lane 2D --
 }
 
 // Notifications are hints to committed state, not a replacement for native
@@ -94,7 +472,13 @@ message AutomationEvent {
   oneof payload {
     AutomationHeartbeat heartbeat = 6;
     SchematicCommitNotification schematic_commit = 7;
+    // 20-29: held for the Phase 3 recursive-diagram document notifications
+    // (contract rbg-v2 section 13), declared by the parent at a later freeze.
+    // -- lane 2C (300-399) --
+    // -- end lane 2C --
   }
+  // -- lane 2D (400-499) --
+  // -- end lane 2D --
 }
 
 message AutomationHeartbeat {}
@@ -106,6 +490,8 @@ message SchematicCommitNotification {
   DocumentRevision revision = 2;
   SchematicChange change = 3;
   bool tracking_complete = 4;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 // An epoch changes when its native process restarts. Sequence numbers alone
@@ -159,6 +545,7 @@ message SchematicViewport {
 message RenderSchematicViews {
   kiapi.common.types.DocumentSpecifier document = 1;
   repeated SchematicRenderView views = 2;
+  uint32 schema_version = 3;
 }
 
 message SchematicRenderView {
@@ -189,8 +576,129 @@ message SchematicViewSet {
 
 // Native current-sheet geometry facts for presentation checks. These do not
 // imply independent rendering, full glyph/clip coverage or safe edit admission.
+// Read-only measurement of detached symbol proposals and existing obstacles.
+// Never inserts items or navigates the human editor to measure another sheet.
+message MeasureSchematicPlacement {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  DocumentRevision expected_revision = 2;
+  repeated kiapi.schematic.types.SchematicSymbolInstance candidates = 3;
+  uint32 schema_version = 4;
+  // Detached LocalLabel, GlobalLabel or HierarchicalLabel prototypes. Like
+  // candidates: a canonical new UUID absent from the document and unique in the
+  // request, a position on the 100 nm quantum and single-line text. Never
+  // inserted or committed. At most 256 candidates and item candidates together.
+  repeated google.protobuf.Any item_candidates = 5;
+  // 6: reserved for explicit variant selection (p20323), declared at a later seam freeze.
+  // -- lane 2A (100-199) --
+  // Also return the presentation facts of this sheet instance (presentation), measured on
+  // private copies at this instance: its own references, units and field text, painted glyph
+  // extents and native net identities. Servers that predate this field refuse the request.
+  bool include_presentation = 100;
+  // -- end lane 2A --
+}
+
+message SchematicPlacementGeometry {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  DocumentRevision revision = 2;
+  kiapi.common.types.KIID screen_id = 3;
+  kiapi.common.types.Box2 page_bounds = 4;
+  repeated SchematicPlacementBounds obstacles = 5;
+  repeated SchematicPlacementBounds candidates = 6;
+  // Bounding envelopes are conservative. They are not a readability pass.
+  repeated string limitations = 7;
+  // False on older servers; per-symbol completeness remains separate.
+  bool pin_geometry_available = 8;
+  // One entry per request item candidate, in request order: the candidate id,
+  // its position as anchor and the envelope native renders after insertion
+  // (label body and visible fields, including an automatic intersheet-references
+  // field). symbol_pins is absent.
+  repeated SchematicPlacementBounds item_candidates = 9;
+  // 10: held for the CN-1 milestone 2 measurement extension, declared at a later seam freeze.
+  // -- lane 2A (100-199) --
+  // Present only when include_presentation was requested; document and revision equal this
+  // response's. Unlike ReadSchematicPresentationFacts it measures any loaded sheet instance, not
+  // only the displayed one, and fills every lane 2A presentation field.
+  SchematicPresentationFacts presentation = 100;
+  // The drawing sheet (page frame, title block and any other drawing-sheet art) KiCad draws on
+  // this sheet instance, which is no schematic item and so no obstacle. Absent from peers that
+  // predate it, and when KiCad cannot measure its drawing sheet (a limitation then says why).
+  SchematicWiringDrawingSheet drawing_sheet = 101;
+  // True when every symbol in obstacles and candidates reports visible_field_bounds; false from
+  // peers that predate that field, whose symbols cannot be told apart from ones with no visible field.
+  bool field_bounds_reported = 102;
+  // -- end lane 2A --
+}
+
+message SchematicPlacementBounds {
+  kiapi.common.types.KIID id = 1;
+  kiapi.common.types.Vector2 anchor = 2;
+  kiapi.common.types.Box2 bounds = 3;
+  // Absent for objects other than symbols. Never infer pins from the envelope.
+  SchematicSymbolPinGeometry symbol_pins = 4;
+  // -- lane 2A (100-199) --
+  // For a symbol: the sheet-space bounds of each field it shows at this instance (visible, not private
+  // and with text there, as the painter draws it), in field order, each one of the boxes that bounds
+  // takes in. Empty for any other object.
+  repeated kiapi.common.types.Box2 visible_field_bounds = 100;
+  // -- end lane 2A --
+}
+
+enum SchematicPinGeometryIncompleteReason {
+  // Complete geometry, or a peer that predates this field.
+  SPGIR_UNSPECIFIED = 0;
+  SPGIR_DEFINITION_UNRESOLVED = 1;
+  SPGIR_PLACED_IDENTITY_MISSING = 2;
+  SPGIR_VARIANT_PIN_MAPPING_UNRESOLVED = 3;
+  // 4-7: reserved for exact variant pin identities (p20323), declared at a later seam freeze.
+}
+
+message SchematicSymbolPinGeometry {
+  bool complete = 1;
+  repeated SchematicPinAnchor pins = 2;
+  repeated string limitations = 3;
+  // Set whenever complete is false.
+  SchematicPinGeometryIncompleteReason incomplete_reason = 4;
+  // 5: reserved for per-variant pin geometry (p20323), declared at a later seam freeze.
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
+}
+
+enum SchematicPinPowerScope {
+  SPPS_NONE = 0;
+  SPPS_GLOBAL = 1;
+  SPPS_LOCAL = 2;
+}
+
+message SchematicPinAnchor {
+  kiapi.common.types.KIID id = 1;
+  kiapi.common.types.KIID library_pin_id = 2;
+  string number = 3;
+  string name = 4;
+  // Electrical connection point in schematic sheet-space nanometres.
+  kiapi.common.types.Vector2 position = 5;
+  // Dimensionless signed unit vector from the connection toward the pin body.
+  int32 body_direction_x = 6;
+  int32 body_direction_y = 7;
+  // Zero means common to all units/body styles, not the selected occurrence.
+  int32 unit = 8;
+  int32 body_style = 9;
+  bool visible = 10;
+  // Effective type, with the active alternate applied.
+  kiapi.common.types.ElectricalPinType electrical_type = 11;
+  // Whether this placed pin is an implicit global or local power connection.
+  SchematicPinPowerScope power_scope = 12;
+  // Resolved implicit net name (the power symbol's value on this sheet path, or
+  // the shown pin name); empty when power_scope is SPPS_NONE.
+  string power_net = 13;
+  // 14: held for CN-1 connected realization, declared at a later seam freeze.
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
+}
+
 message ReadSchematicPresentationFacts {
   kiapi.common.types.DocumentSpecifier document = 1;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
 }
 
 message SchematicPresentationFacts {
@@ -202,6 +710,11 @@ message SchematicPresentationFacts {
   repeated string limitations = 6;
   repeated SchematicPresentationWire wires = 7;
   repeated kiapi.common.types.Vector2 junctions = 8;
+  // -- lane 2A (100-199) --
+  // Human-readable sheet-instance path (for example "/CPU/CPU_POWER/") and page number.
+  string sheet_name = 100;
+  string page_number = 101;
+  // -- end lane 2A --
 }
 
 message SchematicPresentationWire {
@@ -210,6 +723,8 @@ message SchematicPresentationWire {
   kiapi.common.types.Vector2 end = 3;
   // Native graph code, scoped to the document revision. Not a persistent XML net ID.
   string signal_key = 4;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
 }
 
 message SchematicPresentationObject {
@@ -227,6 +742,30 @@ message SchematicPresentationObject {
   // Text-box/table container bounds do not include overflowing text. Native
   // font metrics, transformed to sheet coordinates; not a clipping rectangle.
   kiapi.common.types.Box2 text_bounds = 9;
+  // -- lane 2A (100-199) --
+  // Extent of the glyphs the schematic painter draws for this text: its draw position,
+  // justification, rotation, effective stroke width, font and metrics, from the exact native
+  // glyph geometry. Absent for objects without painted glyphs.
+  kiapi.common.types.Box2 glyph_bounds = 100;
+  // Painted reading direction in degrees counter-clockwise, in [0, 360): 0 reads left to right,
+  // 90 bottom to top, 180 upside down, 270 top to bottom. Absent for objects without text.
+  optional double reading_angle_degrees = 101;
+  // The reference designator of a symbol that must show one: every symbol except power and
+  // virtual ('#') symbols, whose references KiCad hides by design.
+  bool designator_required = 102;
+  // What the object is on its sheet, deciding which overlap rules apply: "symbol" (body and
+  // pins), "sheet" (sheet symbol body), "label" (label body), "field", "sheet_pin", "text" or
+  // "other". Empty from peers that predate it.
+  string presentation_role = 103;
+  // For a "symbol": its drawn body without the pins, that is its graphics and the root of every
+  // visible pin (LIB_SYMBOL::GetBodyBoundingBox without pins), in sheet coordinates; bounds also
+  // takes in the pins. Absent for other objects and from peers that predate it.
+  kiapi.common.types.Box2 body_bounds = 104;
+  // For a "symbol": every visible pin as the painter draws it, an open two-point line from the
+  // pin's connection point to its root, in sheet coordinates. Empty for other objects and from
+  // peers that predate it.
+  repeated kiapi.common.types.PolyLine pin_lines = 105;
+  // -- end lane 2A --
 }
 
 // Recovery-journal foundation. Until tracking_complete becomes true, this
@@ -236,6 +775,8 @@ message ReadSchematicChangeJournal {
   kiapi.common.types.DocumentSpecifier document = 1;
   string document_epoch = 2;
   uint64 after_sequence = 3;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 message SchematicChangeJournal {
@@ -244,10 +785,19 @@ message SchematicChangeJournal {
   bool reset_required = 3;
   bool tracking_complete = 4;
   repeated SchematicChange changes = 5;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 message SchematicChange {
-  enum Kind { UNKNOWN = 0; COMMIT = 1; UNDO = 2; REDO = 3; }
+  enum Kind {
+    UNKNOWN = 0;
+    COMMIT = 1;
+    UNDO = 2;
+    REDO = 3;
+    // -- lane 2C (300-399) --
+    // -- end lane 2C --
+  }
   uint64 sequence = 1;
   Kind kind = 2;
   string description = 3;
@@ -255,6 +805,8 @@ message SchematicChange {
   // identifies the original automation commit, not all later uses of its undo.
   string origin_id = 4;
   string operation_id = 5;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 // Native atomic-commit primitive. Not exposed as a completed MCP mutation:
@@ -276,6 +828,73 @@ message ApplySchematicItemBatch {
   // Optional synchronization origin. Requires retry identity and expected
   // revision. Recorded only when this batch actually commits a change.
   string origin_id = 7;
+  // Optional serialized reply allowance, enforced before the native commit.
+  // Zero retains the ordinary native receipt budget. The checked controller
+  // sets a bounded allowance from its remaining process-owned receipt space.
+  uint32 maximum_result_bytes = 8;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
+}
+
+// A separate command, not an optional guard on a legacy batch: an older peer
+// must reject it rather than ignore the precondition and execute unchecked.
+message CheckedSchematicBatch {
+  ApplySchematicItemBatch batch = 1;
+  DocumentLifecycleState expected_state = 2;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
+}
+
+// Capture the planner input and the checked-batch precondition at one native
+// checkpoint. Only a root schematic target is valid for this whole-design read.
+message ReadCheckedSchematicState {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string process_epoch = 2;
+}
+
+message CheckedSchematicState {
+  DocumentLifecycleState state = 1;
+  SchematicElectricalState electrical = 2;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
+}
+
+message ReadCheckedSchematicBatchReceipt {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string process_epoch = 2;
+  string operation_id = 3;
+  CheckedSchematicBatch expected_request = 4;
+}
+
+enum CheckedSchematicBatchStatus {
+  CSBS_UNKNOWN = 0;
+  CSBS_NOT_FOUND = 1;
+  CSBS_REJECTED = 2;
+  CSBS_COMPLETED = 3;
+  // Native execution may have occurred. Inspect preserved state; never retry
+  // with a new operation ID merely because its post-observation failed.
+  CSBS_INDETERMINATE = 4;
+}
+
+message CheckedSchematicBatchReceipt {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string process_epoch = 2;
+  string operation_id = 3;
+  CheckedSchematicBatchStatus status = 4;
+  bool expected_request_verified = 5;
+  SchematicItemBatchResult result = 6;
+  DocumentLifecycleState observed_before = 7;
+  DocumentLifecycleState observed_after = 8;
+  string error_code = 9;
+  string error_message = 10;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
+  // -- lane 2D (400-499) --
+  // -- end lane 2D --
 }
 
 message SchematicItemOperation {
@@ -301,21 +920,126 @@ message SchematicItemOperation {
     SchematicLibraryCacheState replace_library_cache = 14;
     kiapi.schematic.types.SchematicFormattingSettings set_formatting = 15;
     SchematicConnectedSymbolMove move_connected_symbols = 16;
+    // Complete validated ERC replacement. Clients must discover actual native
+    // support; older handlers do not implement this operation.
+    kiapi.schematic.types.SchematicErcSettings set_erc_settings = 17;
+    kiapi.schematic.types.SchematicNetChainClassState replace_net_chain_classes = 18;
+    kiapi.schematic.types.SchematicAnnotationSettings set_annotation = 19;
+    kiapi.schematic.types.SchematicReferenceInventory set_reference_inventory = 20;
+    kiapi.schematic.types.SchematicFieldTemplates set_field_templates = 21;
+    kiapi.schematic.types.SchematicSymbolComparisonSettings set_symbol_comparison = 22;
+    kiapi.schematic.types.SchematicBomSettings set_bom_settings = 23;
+    kiapi.schematic.types.SchematicNetSettings set_net_settings = 24;
+    SchematicConnectedSymbolTransform transform_connected_symbols = 25;
+    SchematicSymbolLocks set_symbol_locks = 26;
+    // At most one, and only as the final operation, without target_document and
+    // alongside only create, update and replace_library_cache operations. The
+    // batch needs operation_id and expected_revision. A mismatch rejects the whole
+    // batch with the prefix "connectivity_postcondition_failed:" and no state change.
+    SchematicConnectivityAssertion assert_connectivity = 27;
+    kiapi.schematic.types.SchematicNgspiceSettings set_ngspice_settings = 28;
+    // -- lane 2A (100-199) --
+    // -- end lane 2A --
+    // -- lane 2C (300-399) --
+    // Rebuilding deleted native files from saved XML: the screen identity the root's saved file had.
+    // A schematic KiCad creates for a project whose files are missing gets a new root screen
+    // identity; this gives that root the recorded one, so the rebuilt root file is the original.
+    // Nothing else changes: not the root sheet's own identity, which the project file declares,
+    // nor any path. Only as the first operation, targeting the root sheet of a single-root
+    // schematic whose only screen was never loaded or saved and holds no item or cached
+    // definition, and never an identity another loaded screen has. Undo and a rejected batch
+    // restore the previous identity.
+    kiapi.common.types.KIID rebuild_screen_identity = 300;
+    // Complete instance ownership for physical sheet remove/create pairs in
+    // this batch. One declaration per physical reference, targeting the root. Older peers
+    // reject this operation instead of silently ignoring path ownership.
+    SchematicSheetInstancePaths set_sheet_instance_paths = 301;
+    // -- end lane 2C --
   }
 }
 
-// Finite native drag, not an interactive mouse action. Currently requires the
-// explicitly targeted sheet to be displayed. The enclosing batch owns undo,
+message SchematicSheetInstanceMove {
+  kiapi.common.types.SheetPath before = 1;
+  kiapi.common.types.SheetPath after = 2;
+}
+
+// Each path includes the moved sheet symbol itself. Descendant records follow
+// the most specific declared path. Every affected old instance must be moved
+// or explicitly retired, and every resulting instance moved or explicitly
+// added. New component references and units come from the batch's complete
+// symbol placement records, never from names, ordering or guessed copies.
+message SchematicSheetInstancePaths {
+  repeated SchematicSheetInstanceMove moves = 1;
+  repeated kiapi.common.types.SheetPath retired = 2;
+  repeated kiapi.common.types.SheetPath added = 3;
+  // The exact parent targets and reference IDs of one remove/create pair.
+  // This also binds a move where every old instance is retired and all
+  // resulting instances are explicitly new; file-name matching is forbidden.
+  kiapi.common.types.DocumentSpecifier source_document = 4;
+  kiapi.common.types.KIID source_sheet_id = 5;
+  kiapi.common.types.DocumentSpecifier destination_document = 6;
+  kiapi.common.types.KIID destination_sheet_id = 7;
+}
+
+// Finite native drag, not an interactive mouse action. Uses the explicitly
+// targeted loaded sheet and all of its active units. The enclosing batch owns undo,
 // revision admission and retry identity. Connected wires/labels may also change.
 message SchematicConnectedSymbolMove {
   repeated kiapi.common.types.KIID symbols = 1;
   kiapi.common.types.Vector2 delta = 2;
 }
 
+enum SchematicConnectedTransformKind {
+  SCT_UNKNOWN = 0;
+  SCT_ROTATE_CLOCKWISE = 1;
+  SCT_ROTATE_COUNTERCLOCKWISE = 2;
+  SCT_MIRROR_LEFT_RIGHT = 3;
+  SCT_MIRROR_UP_DOWN = 4;
+}
+
+// Relative transform around an explicit sheet-space pivot in nanometers.
+// Left/right reverses X around pivot.x; up/down reverses Y around pivot.y.
+// Attached wire ends and labels participate; all-instance pin connectivity
+// must remain equivalent. Does not request automatic field placement.
+message SchematicConnectedSymbolTransform {
+  repeated kiapi.common.types.KIID symbols = 1;
+  kiapi.common.types.Vector2 pivot = 2;
+  SchematicConnectedTransformKind kind = 3;
+}
+
+// Changes only the lock flag, preserving geometry already produced earlier in
+// the same native batch. Shared sheet instances refer to one physical symbol.
+message SchematicSymbolLocks {
+  repeated kiapi.common.types.KIID symbols = 1;
+  kiapi.common.types.LockedState locked = 2;
+}
+
+// Exact final pin partition of a batch: the groups it states replace every
+// captured group they touch, and every other group stays unchanged.
+message SchematicConnectivityAssertion {
+  // Must be 1.
+  uint32 version = 1;
+  // Complete final membership of every affected group; nonempty and disjoint.
+  repeated SchematicPinGroup expected_groups = 2;
+  // 3-5: held for the CN-1 native assertion, declared at a later seam freeze.
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
+}
+
+// Exact loaded sheet-instance path (packed like SchematicNetSheetContents.path)
+// plus the placed pin UUID.
+message SchematicPinGroup {
+  repeated kiapi.schematic.types.SchematicNetChainPinAnchor pins = 1;
+}
+
 message SchematicLibraryCacheState {
   // Stable screen identity also admits cache ownership before sheet reparenting.
   kiapi.common.types.KIID screen_id = 1;
   repeated kiapi.schematic.types.SchematicCachedSymbol definitions = 2;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 message SchematicEmbeddedFileState {
@@ -335,6 +1059,8 @@ message SchematicNetChainState {
   // Full replacement of schematic-wide declarations. committed is an
   // observation, not an instruction; callers must clear it on every entry.
   repeated kiapi.schematic.types.SchematicNetChainDefinition definitions = 1;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
 }
 
 message SchematicVariantRegistryState {
@@ -363,6 +1089,23 @@ message SchematicItemBatchResult {
   // Retried operations retain their original result, not the current revision.
   DocumentRevision revision = 15;
   bool tracking_complete = 16;
+  bool erc_settings_changed = 17;
+  bool net_chain_classes_changed = 18;
+  bool annotation_changed = 19;
+  bool reference_inventory_changed = 20;
+  bool field_templates_changed = 21;
+  bool symbol_comparison_changed = 22;
+  bool bom_settings_changed = 23;
+  bool net_settings_changed = 24;
+  // True only when an assert_connectivity operation was evaluated and passed.
+  bool connectivity_assertion_verified = 25;
+  bool ngspice_settings_changed = 26;
+  // -- lane 2A (100-199) --
+  // -- end lane 2A --
+  // -- lane 2C (300-399) --
+  // True only when a rebuild_screen_identity operation changed the root screen's identity.
+  bool screen_identity_changed = 300;
+  // -- end lane 2C --
 }
 
 message InspectSchematicOperation {
@@ -386,4 +1129,47 @@ message SchematicOperationReceipt {
   // True only when the retained command matched expected_request. Older
   // peers and NOT_FOUND responses cannot establish payload verification.
   bool expected_request_verified = 8;
+  // -- lane 2C (300-399) --
+  // -- end lane 2C --
+  // -- lane 2D (400-499) --
+  // -- end lane 2D --
 }
+
+// == lane 2A messages ==
+// What a drawing-sheet item draws (DS_DRAW_ITEM_BASE type).
+enum SchematicWiringDrawingSheetItemKind {
+  SWR_DRAWING_SHEET_ITEM_UNSPECIFIED = 0;
+  SWR_DRAWING_SHEET_ITEM_LINE = 1;
+  SWR_DRAWING_SHEET_ITEM_RECTANGLE = 2;
+  SWR_DRAWING_SHEET_ITEM_TEXT = 3;
+  SWR_DRAWING_SHEET_ITEM_POLYGON = 4;
+  SWR_DRAWING_SHEET_ITEM_BITMAP = 5;
+}
+
+// One item KiCad draws for the drawing sheet, with its sheet-space bounding box: a line's or
+// rectangle's end points (without the pen width), a text's box, a polygon's or bitmap's extent.
+message SchematicWiringDrawingSheetItem {
+  SchematicWiringDrawingSheetItemKind kind = 1;
+  kiapi.common.types.Box2 bounds = 2;
+  // For a line or a rectangle, the width of the pen the canvas strokes it with, centred on the
+  // bounds above, so that the stroke reaches half of it past them; zero for a text, polygon or
+  // bitmap, whose bounds already hold everything it draws.
+  int64 stroke_width_nm = 3;
+}
+
+// The drawing sheet KiCad draws on one sheet instance, built from its own drawing-sheet model at
+// this instance's page size, first-page option, page number and title block, as its canvas draws it.
+message SchematicWiringDrawingSheet {
+  // The page shrunk by the drawing sheet's left, top, right and bottom margins: the frame its
+  // corner-anchored items are placed in.
+  kiapi.common.types.Box2 margin_frame = 1;
+  // Every item it draws, in drawing order.
+  repeated SchematicWiringDrawingSheetItem items = 2;
+}
+// == end ==
+
+// == lane 2C messages ==
+// == end ==
+
+// == lane 2D messages ==
+// == end ==

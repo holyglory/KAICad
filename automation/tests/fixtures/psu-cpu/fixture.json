@@ -1,0 +1,27 @@
+{
+  "fixture": "psu-cpu",
+  "version": 1,
+  "idPrefix": "7e57f1c5-0000-4000-8000-",
+  "files": {
+    "parts.json": "81063789e8576a4e9c9586452f77776792cb49f2e05eae85e03036df8a43129f",
+    "lib_symbols.kicad_sexpr": "a9b4753e6d6d189bd6cfd68eb5b231b67b0ceabb4fd7df39a0dc5e41374c2d1d",
+    "hardware.xml": "67e7a4c7653069edbc0b8891618acfa517005d52d9084e71e036dda6250a02e5",
+    "design.engineering.xml": "76d652b344286013642a916140dbab2df1aaf2a6a5474d0cc486aa1eb0d8e8e4",
+    "flat-structure.engineering.xml": "cc7996309d3d872a59a4cccc28830a1935a3f5038f914b15789512d67d84be81",
+    "system.blocks.xml": "008f91cfa59041c88b6a584be077b65707a0aefa68ab1c2390995658b77009b3",
+    "expected-native.json": "6b47b0ad936bdae8cee0657cd892f32748c7a25a42ebaa98be8fe3bb926265fe",
+    "expected-realization.json": "1f39d5c6627926981424efe8dbf754da34fc799f7bf1382aaf7983419b5574a1",
+    "expected-migration.json": "2c5ec3376acaa1e325a4f7799dba0e000aceec62288adee676ba54b046501196"
+  },
+  "symbols": [
+    {"cacheKey": "Connector_Generic:Conn_01x02", "sourcePath": "qa/data/pcbnew/issue21739/topology_mismatch.kicad_sch", "gitBlob": "aa19dde7083e17dc5b9b964cfdf972a33a10eb3f"},
+    {"cacheKey": "Regulator_Switching:LM2595S-ADJ", "sourcePath": "qa/data/pcbnew/issue23658/issue23658.kicad_sch", "gitBlob": "7ca406bfd26350986cf8d19b5f05f4f8b98357a1"},
+    {"cacheKey": "Device:R", "sourcePath": "qa/data/libraries/Device.kicad_sym", "gitBlob": "44d6aed53aabf464eb88ad1925ea39f578a01278"},
+    {"cacheKey": "Regulator_Linear:LP3982ILD-3.3", "sourcePath": "qa/data/eeschema/issue6588.kicad_sch", "gitBlob": "16198a2086e2d65a336fa41775c90b0eac73c4eb"},
+    {"cacheKey": "Battery_Management:LTC2959", "sourcePath": "qa/data/pcbnew/issue24474/issue24474.kicad_sch", "gitBlob": "29e8bc8c5dc5e409a7fff3885cda6b2de5facd8c"},
+    {"cacheKey": "MCU_ST_STM32C0:STM32C011J_4-6_Mx", "sourcePath": "qa/data/eeschema/api_kitchen_sink.kicad_sch", "gitBlob": "d6e844a33232f5179211af7eba8f6867d340d915"},
+    {"cacheKey": "Library:F28P659DK8PTPQ1", "sourcePath": "qa/data/eeschema/issue19646/MCU.kicad_sch", "gitBlob": "019e6b225fd3c86e5130f9dccc32fb99e08cdc63"},
+    {"cacheKey": "pic_programmer:24C16", "sourcePath": "qa/data/cli/variants/pic_sockets.kicad_sch", "gitBlob": "d02d7bc49709ee32b6b8d1e153e28a50b9a3a3fa"}
+  ],
+  "normalizedAt": "8d82705ea2a3555e2288ee2f573b6a64b76da753"
+}

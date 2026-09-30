@@ -151,6 +151,7 @@ public:
 
     /// Return a reference to the project this schematic is part of
     PROJECT& Project() const { return *m_project; }
+    PROJECT* GetProject() const { return m_project; }
     void SetProject( PROJECT* aPrj );
 
     const std::map<wxString, wxString>* GetProperties() { return &m_properties; }
@@ -526,7 +527,7 @@ public:
      * @param aCommit Transaction container used to record changes for undo/redo
      * @param aScreen is the screen to examine, or nullptr to examine the current screen
      */
-    void CleanUp( SCH_COMMIT* aCommit, SCH_SCREEN* aScreen = nullptr );
+    void CleanUp( SCH_COMMIT* aCommit, SCH_SCREEN* aScreen = nullptr, bool aUpdateEditorSelection = true );
 
     /**
      * Generate the connection data for the entire schematic hierarchy.
@@ -536,7 +537,8 @@ public:
                                  PROGRESS_REPORTER* aProgressReporter = nullptr,
                                  KIGFX::SCH_VIEW* aSchView = nullptr,
                                  std::function<void( SCH_ITEM* )>* aChangedItemHandler = nullptr,
-                                 PICKED_ITEMS_LIST*                aLastChangeList = nullptr );
+                                 PICKED_ITEMS_LIST*                aLastChangeList = nullptr,
+                                 bool aPreserveGeometry = false );
 
     /**
      * Store all existing annotations in the REFDES_TRACKER.

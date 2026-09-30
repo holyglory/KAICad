@@ -47,13 +47,13 @@ BEGIN_EVENT_TABLE( PANEL_SETUP_PINMAP, PANEL_SETUP_PINMAP_BASE )
 END_EVENT_TABLE()
 
 
-PANEL_SETUP_PINMAP::PANEL_SETUP_PINMAP( wxWindow* aWindow, SCH_EDIT_FRAME* parent ) :
+PANEL_SETUP_PINMAP::PANEL_SETUP_PINMAP( wxWindow* aWindow, SCH_EDIT_FRAME* parent, ERC_SETTINGS* aSettings ) :
     PANEL_SETUP_PINMAP_BASE( aWindow ),
     m_buttonList(),
     m_initialized( false )
 {
     m_parent    = parent;
-    m_schematic = &parent->Schematic();
+    m_settings = aSettings ? aSettings : &parent->Schematic().ErcSettings();
     m_btnBackground = wxSystemSettings::GetColour( wxSystemColour::wxSYS_COLOUR_WINDOW );
 
     reBuildMatrixPanel();
@@ -82,7 +82,7 @@ PANEL_SETUP_PINMAP::~PANEL_SETUP_PINMAP()
 
 void PANEL_SETUP_PINMAP::ResetPanel()
 {
-    m_schematic->ErcSettings().ResetPinMap();
+    m_settings->ResetPinMap();
     reBuildMatrixPanel();
 }
 
@@ -164,7 +164,7 @@ void PANEL_SETUP_PINMAP::reBuildMatrixPanel()
         for( int jj = 0; jj <= ii; jj++ )
         {
             // Add column labels (only once)
-            PIN_ERROR diag = m_schematic->ErcSettings().GetPinMapValue( ii, jj );
+            PIN_ERROR diag = m_settings->GetPinMapValue( ii, jj );
 
             int x = pos.x + ( jj * ( bitmapSize.x + text_padding.x ) );
 
@@ -258,13 +258,13 @@ void PANEL_SETUP_PINMAP::changeErrorLevel( wxCommandEvent& event )
     ELECTRICAL_PINTYPE y = static_cast<ELECTRICAL_PINTYPE>( ii % PINMAP_TYPE_COUNT );
     wxWindow* butt = static_cast<wxWindow*>( event.GetEventObject() );
 
-    int level = static_cast<int>( m_schematic->ErcSettings().GetPinMapValue( y, x ) );
+    int level = static_cast<int>( m_settings->GetPinMapValue( y, x ) );
     level     = ( level + 1 ) % 3;
 
     setDRCMatrixButtonState( butt, static_cast<PIN_ERROR>( level ) );
 
-    m_schematic->ErcSettings().SetPinMapValue( y, x, static_cast<PIN_ERROR>( level ) );
-    m_schematic->ErcSettings().SetPinMapValue( x, y, static_cast<PIN_ERROR>( level ) );
+    m_settings->SetPinMapValue( y, x, static_cast<PIN_ERROR>( level ) );
+    m_settings->SetPinMapValue( x, y, static_cast<PIN_ERROR>( level ) );
 }
 
 
@@ -273,8 +273,10 @@ void PANEL_SETUP_PINMAP::ImportSettingsFrom( PIN_ERROR aPinMap[][ELECTRICAL_PINT
     for( int ii = 0; ii < PINMAP_TYPE_COUNT; ii++ )
     {
         for( int jj = 0; jj <= ii; jj++ )
+        {
+            m_settings->SetPinMapValue( ii, jj, aPinMap[ii][jj] );
+            m_settings->SetPinMapValue( jj, ii, aPinMap[ii][jj] );
             setDRCMatrixButtonState( m_buttonList[ii][jj], aPinMap[ii][jj] );
+        }
     }
 }
-
-

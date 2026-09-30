@@ -13,7 +13,7 @@ namespace KiCad.Automation.Tests;
 public sealed partial class NativeSessionTests
 {
     private static async Task VerifyNetChainMetadata(NativeClient client, DocumentSpecifier root,
-        string rootFile, ElectricalFixture fixture, int processId, string display, CancellationToken token)
+        string rootFile, ElectricalFixture fixture, int processId, string display, string evidence, CancellationToken token)
     {
         await client.InvokeAsync<SaveDocument, Empty>(new() { Document = root }, token);
         byte[] original = await File.ReadAllBytesAsync(rootFile, token);
@@ -40,6 +40,7 @@ public sealed partial class NativeSessionTests
             (net_chain "PARTIAL_PATH" (from "NOT_PRESENT" "1"))
             (net_chain "NAMED_ONLY")
             """;
+        Exception? primaryFailure = null;
         try
         {
             await File.WriteAllTextAsync(rootFile, native.Insert(end, definitions), token);
@@ -81,6 +82,9 @@ public sealed partial class NativeSessionTests
                 Assert.IsTrue(imported.Data.Instances[0].Metadata.NetChains.Equals(screen.Metadata.NetChains),
                     "Saving and reloading must retain both committed and unresolved net-chain declarations. Observed: "
                     + string.Join(", ", screen.Metadata.NetChains.Select(c => c.Name)));
+
+            await VerifyNetChainNameDialog(client, root, rootFile, fixture.PinA, processId, display, evidence, token);
+            saved = await client.InvokeAsync<ReadSchematicHierarchyData, SchematicHierarchyDataSnapshot>(query, token);
 
             Task<SchematicHierarchyDataSnapshot> Read() =>
                 client.InvokeAsync<ReadSchematicHierarchyData, SchematicHierarchyDataSnapshot>(query, token);
@@ -255,11 +259,30 @@ public sealed partial class NativeSessionTests
             await History("z", mergedNative.Data);
             await History("z", nativeVersion.Data);
             await History("z", persisted.Data);
+            await VerifyInferredNetChainCreation(client, root, rootFile, processId, display, evidence, token);
+        }
+        catch (Exception error)
+        {
+            primaryFailure = error;
+            await File.WriteAllTextAsync(Path.Combine(evidence, "chain-primary-failure.txt"), error.ToString(), CancellationToken.None);
+            try { await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, "chain-primary-failure.png"), CancellationToken.None); }
+            catch (Exception capture) { Console.Error.WriteLine("Chain failure capture: " + capture.Message); }
+            throw;
         }
         finally
         {
-            await File.WriteAllBytesAsync(rootFile, original, CancellationToken.None);
-            await client.InvokeAsync<RevertDocument, Empty>(new() { Document = root }, token);
+            try
+            {
+                await File.WriteAllBytesAsync(rootFile, original, CancellationToken.None);
+                // Restoration has its own finite allowance: a spent journey
+                // token must not manufacture a second failure before trying.
+                using var cleanupDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                await client.InvokeAsync<RevertDocument, Empty>(new() { Document = root }, cleanupDeadline.Token);
+            }
+            catch (Exception cleanup) when (primaryFailure is not null)
+            {
+                throw new AggregateException("Native chain journey and fixture restoration failed; both results are retained.", primaryFailure, cleanup);
+            }
         }
         var restored = await client.InvokeAsync<ReadSchematicHierarchyData, SchematicHierarchyDataSnapshot>(query, token);
         foreach (var screen in restored.Data.Instances)

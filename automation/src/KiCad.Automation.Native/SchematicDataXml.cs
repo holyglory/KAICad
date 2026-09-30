@@ -31,7 +31,10 @@ public static class SchematicDataXml
         RequireRoot(message.Descriptor);
         var root = new XElement(Ns + "schematic-data", new XAttribute("version", "1"),
             WriteMessage(message, message.Descriptor.FullName));
-        string xml = Render(root);
+        string xml;
+        try { xml = Render(root); }
+        catch (Exception error) when (error is XmlException or ArgumentException)
+        { throw Invalid("Native text cannot be represented as XML: " + error.Message); }
         // Unknown protobuf fields, noncanonical Any type URLs and other data
         // not representable by this version must fail, never silently disappear.
         if (!message.Equals(Read(xml)))

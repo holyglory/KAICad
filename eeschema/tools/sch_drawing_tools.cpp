@@ -59,6 +59,8 @@
 #include <sch_bitmap.h>
 #include <schematic.h>
 #include <sch_commit.h>
+#include <refdes_tracker.h>
+#include <api/api_sch_state_groups.h>
 #include <scoped_set_reset.h>
 #include <libraries/legacy_symbol_library.h>
 #include <eeschema_settings.h>
@@ -210,6 +212,12 @@ int SCH_DRAWING_TOOLS::PlaceSymbol( const TOOL_EVENT& aEvent )
                 m_frame->GetCanvas()->SetCurrentCursor( symbol ? KICURSOR::MOVING : KICURSOR::COMPONENT );
             };
 
+    // Annotating a symbol before it is placed hands out a designator, which the project's
+    // reference inventory (saved with the project settings) records.  A symbol that is dropped
+    // instead of placed returns it: the inventory from before its annotation is kept until then.
+    std::unique_ptr<REFDES_TRACKER> inventoryBeforeCarried;
+    bool                            carriedAnnotated = false;
+
     auto cleanup =
             [&]()
             {
@@ -217,6 +225,13 @@ int SCH_DRAWING_TOOLS::PlaceSymbol( const TOOL_EVENT& aEvent )
                 m_view->ClearPreview();
                 delete symbol;
                 symbol = nullptr;
+
+                if( carriedAnnotated )
+                {
+                    SCH_COMMIT::RestoreReferenceInventory( m_frame->Schematic(), inventoryBeforeCarried.get() );
+                    inventoryBeforeCarried.reset();
+                    carriedAnnotated = false;
+                }
 
                 existingRefs.Clear();
                 hierarchy.GetSymbols( existingRefs, SYMBOL_FILTER_ALL );
@@ -227,6 +242,12 @@ int SCH_DRAWING_TOOLS::PlaceSymbol( const TOOL_EVENT& aEvent )
             [&]()
             {
                 EESCHEMA_SETTINGS* cfg = m_frame->eeconfig();
+
+                if( !carriedAnnotated )
+                {
+                    inventoryBeforeCarried = SCH_COMMIT::CopyReferenceInventory( m_frame->Schematic() );
+                    carriedAnnotated = true;
+                }
 
                 // Then we need to annotate all instances by sheet
                 for( SCH_SHEET_PATH& instance : newInstances )
@@ -485,6 +506,10 @@ int SCH_DRAWING_TOOLS::PlaceSymbol( const TOOL_EVENT& aEvent )
                 lwbTool->AddJunctionsIfNeeded( &commit, &m_selectionTool->GetSelection() );
 
                 commit.Push( _( "Place Symbol" ) );
+
+                // The placed symbol keeps its designator.
+                inventoryBeforeCarried.reset();
+                carriedAnnotated = false;
 
                 // A preselected single-unit symbol exits here rather than re-opening the
                 // chooser.  Multi-unit placement must fall through to the unit continuation
@@ -852,16 +877,40 @@ int SCH_DRAWING_TOOLS::ImportSheet( const TOOL_EVENT& aEvent )
                 for( EDA_ITEM* item : screen->Items() )
                     item->SetFlags( SKIP_STRUCT );
 
+                // Loading the file changes more than the placed items, which the placement
+                // commit stages and a cancel reverts (returning the designators annotating them
+                // handed out).  Outside that commit it can change only: the identity of an
+                // existing item on any sheet (when the file repeats an identity the design
+                // already uses, whichever duplicate comes later in sheet order gets a new UUID,
+                // and on a sheet below this one that is the existing item); this screen's cached
+                // library definitions (merged, and an equal one refreshed in place); the
+                // schematic-wide embedded files, embedded fonts flag and net chains the file
+                // carries; and the project's bus aliases and reference inventory.  Those parts
+                // are compared exactly as they are saved, without writing the whole design; the
+                // file's child sheets get screens of their own, which leave with their placed
+                // sheet.  A kept placement is recorded by its commit; a cancelled or refused one
+                // is recorded only if it still left a saved change.
+                SCH_TRACKED_CHANGE change( m_frame->Schematic(), placingDesignBlock
+                                                                 ? "Add Design Block"
+                                                                 : "Import Schematic Sheet Content",
+                                           SCH_PERSISTED_PARTS::SheetImport( sheetPath.LastScreen() ) );
+
                 if( !m_frame->LoadSheetFromFile( sheetPath.Last(), &sheetPath, sheetFileName, true,
                                                  placingDesignBlock ) )
                 {
+                    // A refused file is refused before anything is appended; completing here
+                    // records a change only if loading it still left one.
+                    if( change.Complete() )
+                        m_frame->OnModify();
+
                     return false;
                 }
 
                 m_frame->SetSheetNumberAndCount();
 
+                // The placement commit below marks the document modified when it is pushed; a
+                // cancelled placement is marked only when the import left a saved change.
                 m_frame->SyncView();
-                m_frame->OnModify();
                 m_frame->HardRedraw(); // Full reinit of the current screen and the display.
 
                 SCH_GROUP* group = nullptr;
@@ -1008,6 +1057,9 @@ int SCH_DRAWING_TOOLS::ImportSheet( const TOOL_EVENT& aEvent )
                 else
                 {
                     commit.Revert();
+
+                    if( change.Complete() )
+                        m_frame->OnModify();
                 }
 
                 selectionTool->RebuildSelection();
@@ -3179,20 +3231,22 @@ int SCH_DRAWING_TOOLS::doSyncSheetsPins( std::list<SCH_SHEET_PATH> sheetPaths, S
                          SHEET_SYNCHRONIZATION_AGENT::MODIFICATION const& aModify )
                     {
                         SCH_COMMIT commit( m_toolMgr );
+                        wxString   message;
 
                         if( auto pin = dynamic_cast<SCH_SHEET_PIN*>( aItem ) )
                         {
                             commit.Modify( pin->GetParent(), aPath.LastScreen() );
                             aModify();
-                            commit.Push( _( "Modify sheet pin" ) );
+                            message = _( "Modify sheet pin" );
                         }
                         else
                         {
                             commit.Modify( aItem, aPath.LastScreen() );
                             aModify();
-                            commit.Push( _( "Modify schematic item" ) );
+                            message = _( "Modify schematic item" );
                         }
 
+                        commit.Push( message );
                         updateItem( aItem, true );
                         m_frame->OnModify();
                     },

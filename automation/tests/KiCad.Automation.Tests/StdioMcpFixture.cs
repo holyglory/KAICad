@@ -7,6 +7,7 @@ namespace KiCad.Automation.Tests;
 internal interface IMcpToolClient : IAsyncDisposable
 {
     Task<JsonElement> Tool(string name, object arguments);
+    Task<JsonElement> ListTools(string? cursor);
 }
 
 /// <summary>Compiled black-box test client; owns only its MCP child, never KiCad.</summary>
@@ -18,6 +19,7 @@ internal sealed class StdioMcpFixture : IMcpToolClient
     private readonly Task diagnostics;
     private int nextId;
     private bool disposed;
+    public bool ForcedTermination { get; private set; }
     private StdioMcpFixture(Process process, string evidence, CancellationToken token)
     {
         this.process = process; this.token = token;
@@ -52,6 +54,16 @@ internal sealed class StdioMcpFixture : IMcpToolClient
     public async Task<JsonElement> Tool(string name, object arguments) =>
         (await Request("tools/call", new { name, arguments })).GetProperty("result").Clone();
 
+    public async Task<JsonElement> ListTools(string? cursor) =>
+        (await Request("tools/list", cursor is null ? new { } : (object)new { cursor })).GetProperty("result").Clone();
+
+    internal async Task TerminateAsync()
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        if (!process.HasExited) { ForcedTermination = true; process.Kill(entireProcessTree: true); }
+        await process.WaitForExitAsync();
+    }
+
     private async Task<JsonElement> Request(string method, object parameters)
     {
         int id = ++nextId;
@@ -74,7 +86,11 @@ internal sealed class StdioMcpFixture : IMcpToolClient
         process.StandardInput.Close();
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         try { await process.WaitForExitAsync(deadline.Token); }
-        catch (OperationCanceledException) { if (!process.HasExited) process.Kill(); await process.WaitForExitAsync(); }
+        catch (OperationCanceledException)
+        {
+            if (!process.HasExited) { ForcedTermination = true; process.Kill(); }
+            await process.WaitForExitAsync();
+        }
         finally
         {
             diagnosticsStop.Cancel();

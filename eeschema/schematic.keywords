@@ -180,6 +180,8 @@ show_name
 size
 from
 net_chain
+excluded_nets
+excluded_pin
 nets
 to
 span
@@ -214,4 +216,3 @@ xy
 x
 y
 yes
-

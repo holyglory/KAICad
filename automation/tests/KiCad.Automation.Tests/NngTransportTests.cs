@@ -122,6 +122,42 @@ public sealed class NngTransportTests
         }
     }
 
+    // A lifecycle caller must know whether KiCad may still act on a request that got no reply.
+    // The native journey cannot keep KiCad silent after it took a request, so both transport
+    // outcomes are proved here against the real NNG library.
+    [TestMethod]
+    public async Task TimeoutsSayWhetherThePeerReceivedTheRequest()
+    {
+        string directory = Directory.CreateTempSubdirectory("kng-").FullName;
+        Nng.Check(Nng.nng_rep0_open(out var socket));
+        try
+        {
+            string silent = NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "silent.sock"));
+            Nng.Check(Nng.nng_listen(socket, silent, IntPtr.Zero, 0));
+            var received = Task.Run(() =>
+            {
+                Nng.Check(Nng.nng_setopt_ms(socket, "recv-timeout", 5000));
+                nuint size = 0;
+                Nng.Check(Nng.nng_recv(socket, out IntPtr buffer, ref size, 1));
+                Nng.nng_free(buffer, size); // Received, never answered.
+            });
+            var unanswered = await Assert.ThrowsExactlyAsync<NngException>(() =>
+                new NngTransport().ExchangeAsync(silent, [1, 2, 3], TimeSpan.FromMilliseconds(500)));
+            await received;
+            Assert.IsTrue(unanswered.RequestDelivered, "The peer took the request, so it may still act on it.");
+
+            string absent = NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "absent.sock"));
+            var unsent = await Assert.ThrowsExactlyAsync<NngException>(() =>
+                new NngTransport().ExchangeAsync(absent, [4], TimeSpan.FromMilliseconds(300)));
+            Assert.IsFalse(unsent.RequestDelivered, "No peer ever took the request.");
+        }
+        finally
+        {
+            Nng.nng_close(socket);
+            Directory.Delete(directory, true);
+        }
+    }
+
     [TestMethod]
     public async Task MissingPeerCanBeCancelledAndRetriedWithoutLeakingSocket()
     {

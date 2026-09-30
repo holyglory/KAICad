@@ -121,6 +121,29 @@ public sealed class DesignRecoveryInspectorTests
         Assert.AreEqual(saved.State.Observed, result.Snapshot.Data);
         Assert.AreEqual(saved.RevisionToken, store.Read()!.RevisionToken);
         Assert.AreEqual(1, transport.Snapshots);
+        transport.FileLocationStatus = 3;
+        transport.AdvanceOnFileRefusal = true;
+        Assert.AreEqual(NativeSheetFileLocations.ObservationChanged, (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+            DesignRecoveryInspector.ObserveAsync(store, transport.Client()))).Code);
+        Assert.AreEqual(3, transport.Snapshots, "A refused read is classified from one fresh hierarchy, without an internal retry loop.");
+        Assert.AreEqual(saved.RevisionToken, store.Read()!.RevisionToken);
+        Assert.AreEqual(saved.State.PendingMutation, store.Read()!.State.PendingMutation);
+        transport.AdvanceOnFileRefusal = false;
+        transport.FileRefusals = 0;
+        Assert.AreEqual(3, (await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
+            DesignRecoveryInspector.ObserveAsync(store, transport.Client()))).Status,
+            "A refusal with no actual revision advance is still a real error.");
+        Assert.AreEqual(saved.RevisionToken, store.Read()!.RevisionToken);
+        transport.AdvanceOnFileRefusal = true;
+        transport.ChangeSnapshot = snapshot =>
+        {
+            snapshot.Revision.Sequence += 8;
+            if (transport.FileRefusals > 0) snapshot.Revision.Epoch = "different-document-session";
+        };
+        Assert.AreEqual(3, (await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
+            DesignRecoveryInspector.ObserveAsync(store, transport.Client()))).Status,
+            "A different document session is never classified as a retryable revision advance.");
+        Assert.AreEqual(saved.RevisionToken, store.Read()!.RevisionToken);
     });
 
     [TestMethod]
@@ -297,6 +320,8 @@ public sealed class DesignRecoveryInspectorTests
         public Action<SchematicHierarchyDataSnapshot>? ChangeSnapshot;
         public Action? BeforeSnapshotReply;
         public int Snapshots;
+        public int FileLocationStatus, FileRefusals;
+        public bool AdvanceOnFileRefusal;
         public int Calls, Inspections;
         public InspectSchematicOperation? LastInspection;
         public NativeClient Client() => new(this, "ipc:///fixture-recovery.sock", "process-epoch");
@@ -309,7 +334,18 @@ public sealed class DesignRecoveryInspectorTests
             IMessage reply;
             bool inspection = message.Is(InspectSchematicOperation.Descriptor);
             if (message.Is(GetAutomationSession.Descriptor))
-                reply = new AutomationSession { ProtocolVersion = 1, InstanceId = InstanceId, Epoch = "process-epoch" };
+            {
+                var session = new AutomationSession { ProtocolVersion = 1, InstanceId = InstanceId, Epoch = "process-epoch" };
+                if (FileLocationStatus != 0) session.HandledRequests.Add(ReadSchematicFileLocations.Descriptor.FullName);
+                reply = session;
+            }
+            else if (message.Is(ReadSchematicFileLocations.Descriptor))
+            {
+                Assert.AreEqual(3, FileLocationStatus);
+                if (AdvanceOnFileRefusal) FileRefusals++;
+                return Task.FromResult(new ApiResponse { Header = new() { KicadToken = "process-epoch" },
+                    Status = new() { Status = (ApiStatusCode)FileLocationStatus, ErrorMessage = "file observation refused" } }.ToByteArray());
+            }
             else if (inspection)
             {
                 Inspections++;
@@ -337,7 +373,7 @@ public sealed class DesignRecoveryInspectorTests
                 var snapshot = new SchematicHierarchyDataSnapshot
                 {
                     Data = saved.Observed.Clone(),
-                    Revision = new() { Epoch = saved.NativeRevision.Epoch, Sequence = saved.NativeRevision.Sequence + 1 },
+                    Revision = new() { Epoch = saved.NativeRevision.Epoch, Sequence = saved.NativeRevision.Sequence + 1 + (ulong)FileRefusals },
                     TrackingComplete = false
                 };
                 ChangeSnapshot?.Invoke(snapshot);

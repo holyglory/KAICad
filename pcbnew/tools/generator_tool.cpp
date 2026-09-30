@@ -32,10 +32,13 @@
 #include <properties/property_mgr.h>
 
 
-GENERATOR_TOOL::GENERATOR_TOOL() :
+GENERATOR_TOOL::GENERATOR_TOOL( bool aObserveProperties ) :
         GENERATOR_TOOL_PNS_PROXY( "pcbnew.Generators" ),
         m_mgrDialog( nullptr )
 {
+    // Detached verification owns its model and must not react to live editor
+    // property notifications dispatched through the process-wide manager.
+    if( !aObserveProperties ) return;
     m_boardItemListener = PROPERTY_MANAGER::Instance().RegisterListener(
             TYPE_HASH( BOARD_ITEM ),
             [&]( INSPECTABLE* aItem, PROPERTY_BASE* aProperty, COMMIT* aCommit )

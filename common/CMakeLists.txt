@@ -340,6 +340,8 @@ set( KICOMMON_SRCS
     remote_provider_utils.cpp
     reporter.cpp
     richio.cpp
+    file_content_baseline.cpp
+    file_write_observer.cpp
     scintilla_tricks.cpp
     search_stack.cpp
     searchhelpfilefullpath.cpp
@@ -366,6 +368,8 @@ set( KICOMMON_SRCS
     api/api_plugin.cpp
     api/api_plugin_manager.cpp
     api/api_server.cpp
+    api/document_lifecycle_controller.cpp
+    api/checked_schematic_controller.cpp
     api/api_utils.cpp
     api/cross_probe_client.cpp
     api/python_manager.cpp

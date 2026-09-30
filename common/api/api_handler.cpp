@@ -19,12 +19,22 @@
  */
 
 #include <api/api_handler.h>
+#include <stdexcept>
 #include <wx/wx.h>
 
 using kiapi::common::ApiRequest, kiapi::common::ApiResponse, kiapi::common::ApiResponseStatus;
 
 
 const wxString API_HANDLER::m_defaultCommitMessage = _( "Modification from API" );
+
+
+KICAD_API_SERVER& API_HANDLER::apiServer() const
+{
+    if( !m_apiServer )
+        throw std::logic_error( "API handler is not registered with a server" );
+
+    return *m_apiServer;
+}
 
 
 API_RESULT API_HANDLER::Handle( ApiRequest& aMsg )
@@ -58,4 +68,17 @@ API_RESULT API_HANDLER::Handle( ApiRequest& aMsg )
     status.set_status( ApiStatusCode::AS_UNHANDLED );
     // This response is used internally; no need for an error message
     return tl::unexpected( status );
+}
+
+
+std::vector<std::string> API_HANDLER::HandledMessageTypes() const
+{
+    std::vector<std::string> types;
+    types.reserve( m_handlers.size() );
+
+    // std::map keeps its keys in ordinal order.
+    for( const auto& [typeName, handler] : m_handlers )
+        types.push_back( typeName );
+
+    return types;
 }

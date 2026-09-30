@@ -22,7 +22,10 @@
 #define KICAD_API_HANDLER_H
 
 #include <functional>
+#include <map>
 #include <optional>
+#include <string>
+#include <vector>
 
 #include <fmt/format.h>
 #include <tl/expected.hpp>
@@ -38,6 +41,8 @@
 
 using kiapi::common::ApiRequest, kiapi::common::ApiResponse;
 using kiapi::common::ApiResponseStatus, kiapi::common::ApiStatusCode;
+
+class KICAD_API_SERVER;
 
 typedef tl::expected<ApiResponse, ApiResponseStatus> API_RESULT;
 
@@ -67,7 +72,29 @@ public:
      */
     API_RESULT Handle( ApiRequest& aMsg );
 
+    /**
+     * The fully qualified protobuf type names of the request messages that Handle() dispatches,
+     * in ordinal order.  This is the registration table itself, so an automation handshake that
+     * advertises it cannot claim a request this handler would not dispatch.  A handler that cannot
+     * serve a request in the current process mode should leave it unregistered rather than refuse
+     * it.  A dispatched request can still be rejected for its target, its arguments or the
+     * editor's state.
+     */
+    std::vector<std::string> HandledMessageTypes() const;
+
 protected:
+
+    // The server that registered this handler owns its process token and nested dispatch.
+    // A headless command may own that server without installing a desktop-global server.
+    KICAD_API_SERVER& apiServer() const;
+    KICAD_API_SERVER* apiServerOrNull() const { return m_apiServer; }
+
+    // Called after typed decoding and before command-specific busy or
+    // validation checks. Non-editor handlers keep their existing behavior.
+    virtual std::optional<ApiResponseStatus> checkRequestTarget( const google::protobuf::Message& ) const
+    {
+        return std::nullopt;
+    }
 
     /**
      * A handler for outer messages (envelopes) that will unpack to inner messages and call a
@@ -107,6 +134,9 @@ protected:
                     if( !tryUnpack( aRequest, envelope, ctx.Request ) )
                         return envelope;
 
+                    if( auto target = checkRequestTarget( ctx.Request ) )
+                        return tl::unexpected( *target );
+
                     ctx.ClientName = aRequest.header().client_name();
 
                     HANDLER_RESULT<ResponseType> response =
@@ -131,6 +161,9 @@ protected:
     static const wxString m_defaultCommitMessage;
 
 private:
+
+    friend class KICAD_API_SERVER;
+    KICAD_API_SERVER* m_apiServer = nullptr;
 
     template<typename MessageType>
     bool tryUnpack( ApiRequest& aRequest, ApiResponse& aReply, MessageType& aDest )

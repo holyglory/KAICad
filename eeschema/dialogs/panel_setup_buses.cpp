@@ -31,9 +31,11 @@
 #include "grid_tricks.h"
 #include <wx/clipbrd.h>
 
-PANEL_SETUP_BUSES::PANEL_SETUP_BUSES( wxWindow* aWindow, SCH_EDIT_FRAME* aFrame ) :
+PANEL_SETUP_BUSES::PANEL_SETUP_BUSES( wxWindow* aWindow, SCH_EDIT_FRAME* aFrame,
+                                    std::map<wxString, std::vector<wxString>>* aDraftAliases ) :
         PANEL_SETUP_BUSES_BASE( aWindow ),
         m_frame( aFrame ),
+        m_draftAliases( aDraftAliases ),
         m_lastAlias( 0 ),
         m_membersGridDirty( false ),
         m_errorGrid( nullptr ),
@@ -105,7 +107,7 @@ void PANEL_SETUP_BUSES::loadAliases()
 {
     m_aliases.clear();
 
-    const auto& projectAliases = m_frame->Prj().GetProjectFile().m_BusAliases;
+    const auto& projectAliases = m_draftAliases ? *m_draftAliases : m_frame->Prj().GetProjectFile().m_BusAliases;
 
     std::vector<std::pair<wxString, std::vector<wxString>>> aliasList( projectAliases.begin(),
                                                                       projectAliases.end() );
@@ -158,7 +160,14 @@ bool PANEL_SETUP_BUSES::TransferDataFromWindow()
     // Associate the respective members with the last alias that is active.
     updateAliasMembers( m_lastAlias );
 
-    m_frame->Schematic().SetBusAliases( m_aliases );
+    if( m_draftAliases )
+    {
+        std::map<wxString, std::vector<wxString>> updated;
+        for( const auto& alias : m_aliases ) updated[alias->GetName()] = alias->Members();
+        m_draftAliases->swap( updated );
+    }
+    else
+        m_frame->Schematic().SetBusAliases( m_aliases );
 
     return true;
 }

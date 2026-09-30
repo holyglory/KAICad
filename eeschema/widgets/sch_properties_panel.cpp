@@ -352,7 +352,8 @@ void SCH_PROPERTIES_PANEL::onEditPinMap( wxCommandEvent& aEvent )
 
     if( retval == SYMBOL_PROPS_EDIT_OK )
     {
-        editFrame->OnModify();
+        // The dialog pushed its own tracked commit, which marks the document modified, or
+        // reverted an unchanged edit, which must leave the document and its revision alone.
         AfterCommit();
     }
     else if( retval == SYMBOL_PROPS_WANT_SET_VARIANT_SYMBOL )

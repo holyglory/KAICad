@@ -132,6 +132,138 @@
           }
         }
       ]
+    },
+    {
+      "name": "linux-light",
+      "url": "https://kicad.vr.ae/?theme=light&platform=linux-x64",
+      "journeys": [
+        {
+          "id": "download",
+          "name": "Choose and download a KiCad build",
+          "frequencyPercent": 100,
+          "risk": "normal"
+        }
+      ],
+      "primaryJourney": "download",
+      "regions": [
+        {
+          "selector": "[data-ui-region='download-primary']",
+          "role": "primary-content",
+          "journey": "download"
+        }
+      ],
+      "theme": "light",
+      "reviewInputs": [
+        {
+          "path": "automation/tools/KiCad.Automation.Downloads/DownloadPage.cs",
+          "kind": "ui-code"
+        },
+        {
+          "path": "automation/tools/KiCad.Automation.Downloads/Web",
+          "kind": "asset"
+        }
+      ],
+      "sourceBinding": {
+        "expected": "landing-v1"
+      },
+      "waitFor": {
+        "selector": "#recommended .primary",
+        "renderFrames": 2
+      },
+      "states": [
+        {
+          "name": "releases",
+          "actions": [
+            {
+              "action": "hover",
+              "selector": "#release-list > summary"
+            },
+            {
+              "action": "click",
+              "selector": "#release-list > summary"
+            }
+          ],
+          "regions": [
+            {
+              "selector": "#release-list",
+              "role": "primary-content",
+              "journey": "download"
+            }
+          ],
+          "continuation": {
+            "kind": "in-page",
+            "anchor": "#releases-heading",
+            "focusWithin": "#release-list",
+            "maxScrollDelta": 8
+          }
+        }
+      ]
+    },
+    {
+      "name": "linux-dark",
+      "url": "https://kicad.vr.ae/?theme=dark&platform=linux-x64",
+      "journeys": [
+        {
+          "id": "download",
+          "name": "Choose and download a KiCad build",
+          "frequencyPercent": 100,
+          "risk": "normal"
+        }
+      ],
+      "primaryJourney": "download",
+      "regions": [
+        {
+          "selector": "[data-ui-region='download-primary']",
+          "role": "primary-content",
+          "journey": "download"
+        }
+      ],
+      "theme": "dark",
+      "reviewInputs": [
+        {
+          "path": "automation/tools/KiCad.Automation.Downloads/DownloadPage.cs",
+          "kind": "ui-code"
+        },
+        {
+          "path": "automation/tools/KiCad.Automation.Downloads/Web",
+          "kind": "asset"
+        }
+      ],
+      "sourceBinding": {
+        "expected": "landing-v1"
+      },
+      "waitFor": {
+        "selector": "#recommended .primary",
+        "renderFrames": 2
+      },
+      "states": [
+        {
+          "name": "releases",
+          "actions": [
+            {
+              "action": "hover",
+              "selector": "#release-list > summary"
+            },
+            {
+              "action": "click",
+              "selector": "#release-list > summary"
+            }
+          ],
+          "regions": [
+            {
+              "selector": "#release-list",
+              "role": "primary-content",
+              "journey": "download"
+            }
+          ],
+          "continuation": {
+            "kind": "in-page",
+            "anchor": "#releases-heading",
+            "focusWithin": "#release-list",
+            "maxScrollDelta": 8
+          }
+        }
+      ]
     }
   ],
   "viewports": [
@@ -146,7 +278,7 @@
       "height": 1700
     }
   ],
-  "maxPageCount": 8,
+  "maxPageCount": 16,
   "performance": {
     "ttfbMs": 10,
     "lcpMs": 800,

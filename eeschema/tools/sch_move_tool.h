@@ -37,6 +37,7 @@ class SCH_SELECTION;
 class SCH_SHEET;
 class SCH_COMMIT;
 class SCH_ITEM;
+class SCH_PIN;
 class EE_GRID_HELPER;
 
 enum GRID_HELPER_GRIDS : int;
@@ -62,6 +63,8 @@ public:
         BREAK,
         SLICE
     };
+
+    enum class CONNECTED_TRANSFORM { NONE, ROTATE_CW, ROTATE_CCW, MIRROR_LEFT_RIGHT, MIRROR_UP_DOWN };
 
     SCH_MOVE_TOOL();
     ~SCH_MOVE_TOOL() override { }
@@ -89,7 +92,29 @@ public:
     // commit, rollback and restoration of the user's original selection.
     bool DragSelectionBy( SCH_COMMIT* aCommit, const VECTOR2I& aDelta, wxString& aError );
 
+    // Uses an explicit instance and private selection without editor navigation.
+    bool DragSelectionBy( SCH_COMMIT* aCommit, const VECTOR2I& aDelta, wxString& aError,
+                          const SCH_SHEET_PATH& aPath, const std::vector<SCH_ITEM*>& aItems,
+                          CONNECTED_TRANSFORM aTransform = CONNECTED_TRANSFORM::NONE,
+                          const VECTOR2I& aPivot = VECTOR2I( 0, 0 ) );
+
 private:
+    SCH_SCREEN* moveScreen() const;
+    SCH_SHEET_PATH movePath() const;
+    void updateItem( EDA_ITEM* aItem, bool aUpdateRTree ) const;
+    void addDragSelection( EDA_ITEM* aItem );
+    void removeDragSelection();
+    std::vector<VECTOR2I> moveConnectionPoints( SCH_ITEM* aItem ) const;
+    bool moveConnectedAt( SCH_ITEM* aItem, const VECTOR2I& aPoint ) const;
+    std::set<SCH_ITEM*> moveConnectionCandidates( SCH_ITEM* aItem, const VECTOR2I& aPoint ) const;
+    const SCH_SHEET_PATH* m_explicitMovePath = nullptr;
+    SCH_SELECTION* m_privateMoveSelection = nullptr;
+    std::map<SCH_ITEM*, std::vector<SCH_PIN*>> m_contextPins;
+    std::map<VECTOR2I, std::set<SCH_ITEM*>> m_contextPinOwners;
+    CONNECTED_TRANSFORM m_connectedTransform = CONNECTED_TRANSFORM::NONE;
+    VECTOR2I m_transformPivot;
+    bool transformConnectedSelection( SCH_SELECTION& aSelection, wxString& aError );
+
     bool doMoveSelection( const TOOL_EVENT& aEvent, SCH_COMMIT* aCommit );
 
     void moveItem( EDA_ITEM* aItem, const VECTOR2I& aDelta );

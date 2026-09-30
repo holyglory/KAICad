@@ -231,6 +231,11 @@ public sealed partial class NativeSessionTests
             var viewTarget = document.Clone(); viewTarget.SheetPath.Path.Add(new KIID { Value = sheetId });
             Assert.AreEqual(viewTarget, await client.InvokeAsync<ActivateSchematicSheet, DocumentSpecifier>(new() { Document = viewTarget }, token));
             Assert.AreEqual(viewTarget, (await client.InvokeAsync<GetOpenDocuments, GetOpenDocumentsResponse>(new() { Type = (DocumentType)1 }, token)).Documents.Single());
+            var electricalRoot = await client.InvokeAsync<ReadSchematicElectricalState, SchematicElectricalState>(new() { Document = document }, token);
+            var electricalChild = await client.InvokeAsync<ReadSchematicElectricalState, SchematicElectricalState>(new() { Document = viewTarget }, token);
+            Assert.AreEqual(document, electricalRoot.Hierarchy.Data.Document);
+            Assert.AreEqual(electricalRoot, electricalChild, "Loaded-sheet targeting must observe the same whole hierarchy without changing the visible sheet.");
+            Assert.AreEqual(viewTarget, (await client.InvokeAsync<GetOpenDocuments, GetOpenDocumentsResponse>(new() { Type = (DocumentType)1 }, token)).Documents.Single());
             var childImage = await client.InvokeAsync<CaptureSchematicPreview, SchematicPreview>(new() { Document = viewTarget }, token);
             Assert.AreEqual(viewTarget, childImage.Document);
             Assert.AreNotEqual(rootImage.Png, childImage.Png, "Navigation must render child contents rather than reuse the root image.");

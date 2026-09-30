@@ -28,6 +28,13 @@
 #include <api/api_pcb_utils.h>
 #include <api/api_enums.h>
 #include <api/api_utils.h>
+#include <api/api_server.h>
+#include <api/native_state_digest.h>
+#include <google/protobuf/util/message_differencer.h>
+#include <api/native_file_observation.h>
+#include <project/project_file.h>
+#include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
+#include <json_common.h>
 #include <api/cross_probe_client.h>
 #include <wx/log.h>
 #include <base_screen.h>
@@ -40,7 +47,13 @@
 #include <netinfo.h>
 #include <pad.h>
 #include <pcb_draw_panel_gal.h>
+#include <api/pcb_drc_run_inputs.h>
+#include <drc/drc_library_inputs.h>
+#include <drawing_sheet/ds_data_model.h>
+#include <drawing_sheet/ds_proxy_view_item.h>
+#include <project_pcb.h>
 #include <pcb_edit_frame.h>
+#include <pgm_base.h>
 #include <pcb_group.h>
 #include <pcb_reference_image.h>
 #include <pcb_shape.h>
@@ -48,6 +61,7 @@
 #include <pcb_textbox.h>
 #include <pcb_track.h>
 #include <pcbnew_id.h>
+#include <pcbnew_settings.h>
 #include <pcb_marker.h>
 #include <pcb_point.h>
 #include <kiway.h>
@@ -74,9 +88,19 @@
 #include <project.h>
 #include <tool/actions.h>
 #include <tool/tool_manager.h>
+#include <tools/drc_tool.h>
 #include <tools/pcb_actions.h>
 #include <tools/pcb_selection_tool.h>
 #include <tools/zone_filler_tool.h>
+#include <tools/generator_tool.h>
+#include <router/router_tool.h>
+#include <router/pns_kicad_iface.h>
+#include <router/pns_segment.h>
+#include <router/pns_arc.h>
+#include <router/pns_via.h>
+#include <router/pns_line.h>
+#include <router/pns_routing_settings.h>
+#include <pcbnew_settings.h>
 #include <zone.h>
 #include <zone_filler.h>
 
@@ -105,11 +129,35 @@ API_HANDLER_PCB::API_HANDLER_PCB( PCB_EDIT_FRAME* aFrame ) :
 
 
 API_HANDLER_PCB::API_HANDLER_PCB( std::shared_ptr<PCB_CONTEXT> aContext, PCB_EDIT_FRAME* aFrame ) :
-        API_HANDLER_BOARD( std::move( aContext ), aFrame )
+        API_HANDLER_BOARD( std::move( aContext ), aFrame ),
+        m_drcJobs( [this]( BOARD& source ) { return observeDrcAuxiliary( source ); } )
 {
+    // Only the editor frame detaches before it replaces or destroys its board.
+    if( aFrame )
+    {
+        m_drcJobs.EnableNativeEvents( [this]( BOARD& source ) -> FOOTPRINT_LIBRARY_ADAPTER*
+        {
+            return &source == board() ? PROJECT_PCB::FootprintLibAdapter( &project() ) : nullptr;
+        } );
+    }
+
     registerHandler<GetOpenDocuments, GetOpenDocumentsResponse>(
             &API_HANDLER_PCB::handleGetOpenDocuments );
     registerHandler<SaveDocument, Empty>( &API_HANDLER_PCB::handleSaveDocument );
+    registerHandler<kiapi::automation::v1::ReadDocumentLifecycleState, kiapi::automation::v1::DocumentLifecycleState>(
+            &API_HANDLER_PCB::handleReadLifecycleState );
+    registerHandler<kiapi::automation::v1::ReadPcbDrcState, kiapi::automation::v1::PcbDrcState>(
+            &API_HANDLER_PCB::handleReadDrcState );
+    // The manager runs against a detached board/project snapshot, so these
+    // jobs do not hold or mutate the live editor while DRC is running.
+    registerHandler<kiapi::automation::v1::StartPcbDrcJob, kiapi::automation::v1::PcbDrcJobState>(
+            &API_HANDLER_PCB::handleStartDrcJob );
+    registerHandler<kiapi::automation::v1::ReadPcbDrcJob, kiapi::automation::v1::PcbDrcJobState>(
+            &API_HANDLER_PCB::handleReadDrcJob );
+    registerHandler<kiapi::automation::v1::CancelPcbDrcJob, kiapi::automation::v1::PcbDrcJobState>(
+            &API_HANDLER_PCB::handleCancelDrcJob );
+    registerHandler<kiapi::automation::v1::StartPcbRoutePreview, kiapi::automation::v1::PcbRoutePreviewState>(
+            &API_HANDLER_PCB::handleRoutePreview );
     registerHandler<SaveCopyOfDocument, Empty>( &API_HANDLER_PCB::handleSaveCopyOfDocument );
     registerHandler<RevertDocument, Empty>( &API_HANDLER_PCB::handleRevertDocument );
 
@@ -209,13 +257,488 @@ HANDLER_RESULT<GetOpenDocumentsResponse> API_HANDLER_PCB::handleGetOpenDocuments
     doc.set_type( DocumentType::DOCTYPE_PCB );
     doc.set_board_filename( fn.GetFullName() );
 
-    doc.mutable_project()->set_name( project().GetProjectName().ToStdString() );
-    doc.mutable_project()->set_path( project().GetProjectDirectory().ToStdString() );
+    doc.mutable_project()->set_name( project().GetProjectName().ToStdString( wxConvUTF8 ) );
+    // Use the same project representation as schematic documents in this
+    // instance, including the directory separator returned by GetProjectPath.
+    doc.mutable_project()->set_path( project().GetProjectPath().ToStdString( wxConvUTF8 ) );
 
     response.mutable_documents()->Add( std::move( doc ) );
     return response;
 }
 
+
+HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> API_HANDLER_PCB::handleReadLifecycleState(
+        const HANDLER_CONTEXT<kiapi::automation::v1::ReadDocumentLifecycleState>& aCtx )
+{
+    if( auto busy = checkForBusy() ) return tl::unexpected( *busy );
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+    try
+    {
+        kiapi::automation::v1::DocumentLifecycleState result;
+        result.mutable_document()->CopyFrom( aCtx.Request.document() );
+        result.set_native_identity( board()->m_Uuid.AsStdString() );
+        result.set_process_epoch( apiServer().Token() );
+        result.mutable_revision()->set_epoch( result.native_identity() );
+        const int sequence = board()->GetTimeStamp();
+        if( sequence < 0 ) throw std::runtime_error( "Board observation counter requires a new document epoch" );
+        result.mutable_revision()->set_sequence( static_cast<uint64_t>( sequence ) );
+        result.set_scope( kiapi::automation::v1::DLS_PCB );
+        result.set_native_content_dirty( frame() ? frame()->IsContentModified() : board()->IsModified() );
+        NATIVE_DOCUMENT_DIGEST digest;
+        NATIVE_STATE_DIGEST content, settings;
+        PCB_IO_KICAD_SEXPR writer;
+        writer.FormatBoardToFormatter( &content, board(), nullptr, false );
+        digest.Add( "board", content );
+        settings.Append( ( frame() ? frame()->CaptureProjectEditorState()
+                                  : project().GetProjectFile().CaptureCurrentState() ).dump() );
+        digest.Add( "project-settings", settings );
+        result.set_project_settings_included( true );
+        result.set_complete_change_tracking( false );
+        result.set_disk_baseline_checked( false );
+        result.add_native_files( project().AbsolutePath( board()->GetFileName() ).ToStdString( wxConvUTF8 ) );
+        result.add_native_files( project().GetProjectFullName().ToStdString( wxConvUTF8 ) );
+        result.add_file_baselines()->CopyFrom( ObserveNativeFile(
+                project().AbsolutePath( board()->GetFileName() ), board()->FileBaseline() ) );
+        result.add_file_baselines()->CopyFrom( ObserveNativeFile(
+                project().GetProjectFullName(), project().GetProjectFile().FileBaseline() ) );
+        result.set_state_sha256( digest.Hex() );
+        if( result.native_identity() != board()->m_Uuid.AsStdString() || sequence != board()->GetTimeStamp() )
+        {
+            ApiResponseStatus changed;
+            changed.set_status( ApiStatusCode::AS_BUSY );
+            changed.set_error_message( "PCB changed during native state observation" );
+            return tl::unexpected( changed );
+        }
+        return result;
+    }
+    catch( const std::exception& error )
+    {
+        // The exception's own problem text (for an IO_ERROR, its Problem()), not the pointer
+        // IO_ERROR::what() returns into the conversion cache of that string (p10897cd52e677d15).
+        ApiResponseStatus failure;
+        failure.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        failure.set_error_message( "Native state could not be observed: " + PcbDrcExceptionMessage( error ) );
+        return tl::unexpected( failure );
+    }
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::PcbDrcState> API_HANDLER_PCB::handleReadDrcState(
+        const HANDLER_CONTEXT<kiapi::automation::v1::ReadPcbDrcState>& aCtx )
+{
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+    kiapi::automation::v1::PcbDrcState result;
+    result.mutable_document()->CopyFrom( aCtx.Request.document() );
+    result.set_process_epoch( apiServer().Token() );
+    result.mutable_revision()->set_epoch( board()->m_Uuid.AsStdString() );
+    const int sequence = board()->GetTimeStamp();
+    if( sequence < 0 )
+    {
+        ApiResponseStatus error; error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( "PCB observation counter requires a new document epoch" );
+        return tl::unexpected( error );
+    }
+    result.mutable_revision()->set_sequence( sequence );
+    if( frame() && frame()->GetToolManager() )
+        if( const DRC_TOOL* tool = frame()->GetToolManager()->GetTool<DRC_TOOL>() )
+            result.set_running( tool->IsDRCRunning() );
+    result.set_results_freshness_known( false );
+    if( result.running() ) return result;
+    if( auto busy = checkForBusy() ) return tl::unexpected( *busy );
+    std::map<std::string, PCB_MARKER*> markers;
+    for( PCB_MARKER* marker : board()->Markers() )
+    {
+        if( !marker || !markers.emplace( marker->m_Uuid.AsStdString(), marker ).second )
+        {
+            ApiResponseStatus error;
+            error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            error.set_error_message( "Native DRC inventory contains a missing or duplicate marker" );
+            return tl::unexpected( error );
+        }
+    }
+    for( const auto& [id, marker] : markers )
+    {
+        if( !marker->GetRCItem() )
+        {
+            ApiResponseStatus error; error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            error.set_error_message( "A native DRC marker has no rule-check data" );
+            return tl::unexpected( error );
+        }
+        google::protobuf::Any encoded;
+        try
+        {
+            marker->Serialize( encoded );
+        }
+        catch( const std::exception& error )
+        {
+            ApiResponseStatus failure;
+            failure.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            failure.set_error_message( std::string( "Native DRC marker serialization failed: " )
+                                       + error.what() );
+            return tl::unexpected( failure );
+        }
+        auto* finding = result.add_findings();
+        if( !encoded.UnpackTo( finding->mutable_marker() ) )
+        {
+            ApiResponseStatus error; error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            error.set_error_message( "Native DRC marker serialization failed" );
+            return tl::unexpected( error );
+        }
+        finding->set_native_id( id ); finding->set_excluded( marker->IsExcluded() );
+        finding->set_comment( marker->GetComment().ToStdString( wxConvUTF8 ) );
+    }
+    if( sequence != board()->GetTimeStamp() || result.revision().epoch() != board()->m_Uuid.AsStdString() )
+    {
+        ApiResponseStatus error; error.set_status( ApiStatusCode::AS_BUSY );
+        error.set_error_message( "PCB changed during DRC marker observation" );
+        return tl::unexpected( error );
+    }
+    result.set_marker_snapshot_complete( true );
+    return result;
+}
+
+HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleStartDrcJob(
+        const HANDLER_CONTEXT<kiapi::automation::v1::StartPcbDrcJob>& aCtx )
+{
+    if( auto busy = checkForBusy() ) return tl::unexpected( *busy );
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+
+    auto replay = m_drcJobs.ReadOperation( aCtx.Request, *board(), apiServer().Token(),
+            [this]( const auto& document ) { return observeDrcSchematic( document ); },
+            [this]( BOARD& source ) { return observeDrcLibraries( source ); } );
+    if( !replay )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST ); error.set_error_message( replay.error() );
+        return tl::unexpected( error );
+    }
+    if( replay->has_value() ) return **replay;
+
+    auto* libraries = PROJECT_PCB::FootprintLibAdapter( &project() );
+    auto* drawing = frame() ? frame()->GetCanvas()->GetDrawingSheet() : nullptr;
+    if( !libraries || !drawing )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( "Native DRC requires initialized project library and drawing-sheet inputs" );
+        return tl::unexpected( error );
+    }
+    PCB_DRC_CAPTURE_CONTEXT capture{ *libraries, DS_DATA_MODEL::GetTheInstance(), drawing->m_Uuid,
+                                    frame()->GetPcbNewSettings()->m_PnsSettings.get() };
+    kiapi::automation::v1::SchematicParityNetlistSnapshot schematic;
+    if( aCtx.Request.test_footprints() )
+    {
+        const auto& expected = aCtx.Request.expected_schematic_state();
+        if( !aCtx.Request.has_expected_schematic_state()
+            || expected.process_epoch() != apiServer().Token()
+            || !google::protobuf::util::MessageDifferencer::Equals(
+                    expected.document().project(), aCtx.Request.document().project() ) )
+        {
+            ApiResponseStatus error;
+            error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            error.set_error_message( "DRC parity requires an observed schematic in this project and native process" );
+            return tl::unexpected( error );
+        }
+        kiapi::automation::v1::ReadSchematicParityNetlist query;
+        query.set_schema_version( 1 );
+        query.mutable_document()->CopyFrom( expected.document() );
+        query.mutable_expected_state()->CopyFrom( expected );
+        query.set_allow_duplicate_sheet_names( aCtx.Request.allow_duplicate_sheet_names() );
+        ApiRequest envelope;
+        envelope.mutable_message()->PackFrom( query );
+        auto response = apiServer().DispatchToHandlers( envelope );
+        if( !response ) return tl::unexpected( response.error() );
+        if( response->status().status() != ApiStatusCode::AS_OK ) return tl::unexpected( response->status() );
+        if( !response->message().UnpackTo( &schematic ) )
+        {
+            ApiResponseStatus error;
+            error.set_status( ApiStatusCode::AS_NOT_READY );
+            error.set_error_message( "Native schematic comparison response could not be decoded" );
+            return tl::unexpected( error );
+        }
+        capture.schematic = &schematic;
+    }
+    auto started = m_drcJobs.Start( aCtx.Request, *board(), apiServer().Token(), capture );
+    if( !started )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( started.error() );
+        return tl::unexpected( error );
+    }
+    return *started;
+}
+
+tl::expected<kiapi::automation::v1::DocumentLifecycleState, std::string> API_HANDLER_PCB::observeDrcSchematic(
+        const kiapi::common::types::DocumentSpecifier& document )
+{
+    kiapi::automation::v1::ReadDocumentLifecycleState query;
+    query.mutable_document()->CopyFrom( document );
+    ApiRequest envelope;
+    envelope.mutable_message()->PackFrom( query );
+    auto response = apiServer().DispatchToHandlers( envelope );
+    if( !response ) return tl::unexpected( response.error().error_message() );
+    if( response->status().status() != ApiStatusCode::AS_OK )
+        return tl::unexpected( response->status().error_message() );
+    kiapi::automation::v1::DocumentLifecycleState state;
+    if( !response->message().UnpackTo( &state ) ) return tl::unexpected( "Native schematic state could not be decoded" );
+    return state;
+}
+
+tl::expected<std::string, std::string> API_HANDLER_PCB::observeDrcLibraries( BOARD& source )
+{
+    if( &source != board() ) return tl::unexpected( "Library observation target changed" );
+    auto* libraries = PROJECT_PCB::FootprintLibAdapter( &project() );
+    if( !libraries ) return tl::unexpected( "Native footprint libraries are unavailable" );
+    auto captured = DRC_LIBRARY_INPUTS::Capture( source, *libraries );
+    if( !captured ) return tl::unexpected( "Native footprint library observation was cancelled" );
+    return captured->ContentFingerprint();
+}
+
+void API_HANDLER_PCB::ObserveNativeDrcInputs( bool aLibraryConfigurationMayHaveChanged )
+{
+    if( !board() || !apiServerOrNull() ) return;
+    m_drcJobs.ObserveInputs( *board(), apiServer().Token(),
+            [this]( const auto& document ) { return observeDrcSchematic( document ); },
+            [this]( BOARD& source ) { return observeDrcLibraries( source ); },
+            aLibraryConfigurationMayHaveChanged );
+}
+
+tl::expected<std::string, std::string> API_HANDLER_PCB::observeDrcAuxiliary( BOARD& source )
+{
+    if( &source != board() || !frame() ) return tl::unexpected( "Native editor inputs are unavailable" );
+    auto* libraries = PROJECT_PCB::FootprintLibAdapter( &project() );
+    auto* drawing = frame()->GetCanvas()->GetDrawingSheet();
+    if( !libraries || !drawing ) return tl::unexpected( "Native drawing inputs are unavailable" );
+    PCB_DRC_CAPTURE_CONTEXT current{ *libraries, DS_DATA_MODEL::GetTheInstance(), drawing->m_Uuid,
+                                    frame()->GetPcbNewSettings()->m_PnsSettings.get() };
+    return PCB_DRC_AUXILIARY_BASELINE::Capture( current ).Fingerprint();
+}
+
+HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleReadDrcJob(
+        const HANDLER_CONTEXT<kiapi::automation::v1::ReadPcbDrcJob>& aCtx )
+{
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+
+    auto read = m_drcJobs.Read( aCtx.Request, *board(), apiServer().Token(),
+            [this]( const auto& document ) { return observeDrcSchematic( document ); },
+            [this]( BOARD& source ) { return observeDrcLibraries( source ); } );
+    if( !read )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( read.error() );
+        return tl::unexpected( error );
+    }
+    return *read;
+}
+
+HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleCancelDrcJob(
+        const HANDLER_CONTEXT<kiapi::automation::v1::CancelPcbDrcJob>& aCtx )
+{
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+
+    auto cancelled = m_drcJobs.Cancel( aCtx.Request, *board(), apiServer().Token(),
+            [this]( const auto& document ) { return observeDrcSchematic( document ); },
+            [this]( BOARD& source ) { return observeDrcLibraries( source ); } );
+    if( !cancelled )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( cancelled.error() );
+        return tl::unexpected( error );
+    }
+    return *cancelled;
+}
+
+namespace
+{
+ApiResponseStatus RoutePreviewError( const std::string& aMessage,
+                                     ApiStatusCode aStatus = ApiStatusCode::AS_BAD_REQUEST )
+{
+    ApiResponseStatus error;
+    error.set_status( aStatus );
+    error.set_error_message( aMessage );
+    return error;
+}
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> API_HANDLER_PCB::handleRoutePreview(
+        const HANDLER_CONTEXT<kiapi::automation::v1::StartPcbRoutePreview>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    using kiapi::board::types::BoardLayer;
+
+    if( auto busy = checkForBusy() ) return tl::unexpected( *busy );
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+
+    const auto& request = aCtx.Request;
+    BOARD* target = board();
+    if( request.operation_id().empty() || request.operation_id() == niluuid.AsStdString() )
+        return tl::unexpected( RoutePreviewError( "A route preview requires a nonempty operation ID" ) );
+    if( request.process_epoch() != apiServer().Token() )
+        return tl::unexpected( RoutePreviewError( "The route preview process epoch is stale" ) );
+    if( !request.has_expected_revision()
+        || request.expected_revision().epoch() != target->m_Uuid.AsStdString()
+        || request.expected_revision().sequence() != static_cast<uint64_t>( target->GetTimeStamp() ) )
+        return tl::unexpected( RoutePreviewError( "The PCB changed since the requested route preview revision" ) );
+    if( request.waypoints_size() == 0 || request.waypoints_size() > 256 )
+        return tl::unexpected( RoutePreviewError( "A route preview requires one to 256 waypoints" ) );
+    if( !request.has_start() )
+        return tl::unexpected( RoutePreviewError( "A route preview requires an explicit start point" ) );
+
+    PCB_LAYER_ID boardLayer = FromProtoEnum<PCB_LAYER_ID>( request.layer() );
+    if( !IsCopperLayer( boardLayer ) )
+        return tl::unexpected( RoutePreviewError( "A route preview must use a copper layer" ) );
+    BOARD_ITEM* startBoardItem = target->ResolveItem( KIID( request.start_item_id() ), true );
+    if( !startBoardItem || !startBoardItem->IsConnected() )
+        return tl::unexpected( RoutePreviewError( "The route preview start item is not a connected board object" ) );
+
+    PCBNEW_SETTINGS* pcbSettings = frame() ? frame()->GetPcbNewSettings() : nullptr;
+    if( !pcbSettings || !pcbSettings->m_PnsSettings )
+        return tl::unexpected( RoutePreviewError( "Native routing settings are unavailable", ApiStatusCode::AS_UNIMPLEMENTED ) );
+    auto snapshotSettings = std::make_unique<PNS::ROUTING_SETTINGS>( nullptr,
+                                                                       pcbSettings->m_PnsSettings->GetPath() );
+    pcbSettings->m_PnsSettings->CopyCurrentStateTo( *snapshotSettings );
+    TOOL_MANAGER previewManager;
+    previewManager.SetEnvironment( target, nullptr, nullptr, nullptr, nullptr );
+    auto* generatorTool = new GENERATOR_TOOL( false );
+    previewManager.RegisterTool( generatorTool );
+    try { generatorTool->InitializeSnapshot( std::move( snapshotSettings ) ); }
+    catch( const std::exception& error )
+    { return tl::unexpected( RoutePreviewError( error.what() ) ); }
+    PNS::ROUTER* router = generatorTool->Router();
+    PNS_KICAD_IFACE* iface = generatorTool->GetInterface();
+    PNS::ITEM* startItem = router->GetWorld()->FindItemByParent( startBoardItem );
+    if( !startItem )
+        return tl::unexpected( RoutePreviewError( "The start item is not available in the native router world" ) );
+    const VECTOR2I start( request.start().x_nm(), request.start().y_nm() );
+    const int pnsLayer = iface->GetPNSLayerFromBoardLayer( boardLayer );
+    PNS::SIZES_SETTINGS sizes( router->Sizes() );
+    if( !iface->ImportSizes( sizes, startItem, nullptr, start ) )
+        return tl::unexpected( RoutePreviewError( "The native router could not resolve track and via sizes" ) );
+    router->UpdateSizes( sizes );
+    router->SetMode( PNS::PNS_MODE_ROUTE_SINGLE );
+    if( !router->StartRouting( start, startItem, pnsLayer ) )
+        return tl::unexpected( RoutePreviewError( router->FailureReason().ToStdString() ) );
+
+    std::string failure;
+    for( int index = 0; index < request.waypoints_size(); ++index )
+    {
+        const VECTOR2I point( request.waypoints( index ).x_nm(), request.waypoints( index ).y_nm() );
+        if( !router->Move( point, nullptr ) )
+        {
+            failure = router->FailureReason().ToStdString();
+            break;
+        }
+        const bool last = index == request.waypoints_size() - 1;
+        if( last && !router->FixRoute( point, nullptr, request.force_finish(), false ) )
+        {
+            failure = router->FailureReason().ToStdString();
+            break;
+        }
+        if( !last ) router->FixRoute( point, nullptr, false, false );
+    }
+
+    std::vector<PNS::ITEM*> removed, added, heads;
+    if( failure.empty() ) router->GetUpdatedItems( removed, added, heads );
+    router->StopRouting();
+    if( !failure.empty() ) return tl::unexpected( RoutePreviewError( failure ) );
+    if( heads.empty() ) return tl::unexpected( RoutePreviewError( "The native router produced no preview geometry" ) );
+
+    PcbRoutePreviewState response;
+    response.mutable_document()->CopyFrom( request.document() );
+    response.set_operation_id( request.operation_id() );
+    response.mutable_checked_revision()->CopyFrom( request.expected_revision() );
+    response.set_process_epoch( request.process_epoch() );
+    response.set_completed( true );
+    response.set_preview_only( true );
+    response.set_native_commit( false );
+    int index = 0;
+    for( PNS::ITEM* item : heads )
+    {
+        const std::string netName = iface->GetNetName( item->Net() ).ToStdString();
+        auto addSegment = [&]( const VECTOR2I& start, const VECTOR2I& end, int width, int pnsLayer )
+        {
+            kiapi::board::types::Track track;
+            track.mutable_id()->set_value( KIID::FromName( request.operation_id() + "-preview-" + std::to_string( index++ ) ).AsStdString() );
+            track.mutable_start()->set_x_nm( start.x ); track.mutable_start()->set_y_nm( start.y );
+            track.mutable_end()->set_x_nm( end.x ); track.mutable_end()->set_y_nm( end.y );
+            track.mutable_width()->set_value_nm( width );
+            track.set_layer( ToProtoEnum<PCB_LAYER_ID, BoardLayer>( iface->GetBoardLayerFromPNSLayer( pnsLayer ) ) );
+            track.mutable_net()->set_name( netName );
+            response.add_route_items()->PackFrom( track );
+        };
+        auto addArc = [&]( const SHAPE_ARC& arc, int width, int pnsLayer )
+        {
+            kiapi::board::types::Arc value;
+            value.mutable_id()->set_value( KIID::FromName( request.operation_id() + "-preview-" + std::to_string( index++ ) ).AsStdString() );
+            value.mutable_start()->set_x_nm( arc.GetP0().x ); value.mutable_start()->set_y_nm( arc.GetP0().y );
+            value.mutable_mid()->set_x_nm( arc.GetArcMid().x ); value.mutable_mid()->set_y_nm( arc.GetArcMid().y );
+            value.mutable_end()->set_x_nm( arc.GetP1().x ); value.mutable_end()->set_y_nm( arc.GetP1().y );
+            value.mutable_width()->set_value_nm( width );
+            value.set_layer( ToProtoEnum<PCB_LAYER_ID, BoardLayer>( iface->GetBoardLayerFromPNSLayer( pnsLayer ) ) );
+            value.mutable_net()->set_name( netName );
+            response.add_route_items()->PackFrom( value );
+        };
+        auto addVia = [&]( const PNS::VIA& via )
+        {
+            kiapi::board::types::Via value;
+            value.mutable_id()->set_value( KIID::FromName( request.operation_id() + "-preview-" + std::to_string( index++ ) ).AsStdString() );
+            value.mutable_position()->set_x_nm( via.Pos().x ); value.mutable_position()->set_y_nm( via.Pos().y );
+            value.mutable_net()->set_name( netName );
+            value.set_type( ToProtoEnum<VIATYPE, kiapi::board::types::ViaType>( via.ViaType() ) );
+            auto* padStack = value.mutable_pad_stack();
+            padStack->set_type( kiapi::board::types::PST_NORMAL );
+            for( int layer = via.Layers().Start(); layer <= via.Layers().End(); ++layer )
+                padStack->add_layers( ToProtoEnum<PCB_LAYER_ID, BoardLayer>( iface->GetBoardLayerFromPNSLayer( layer ) ) );
+            padStack->mutable_drill()->mutable_diameter()->set_x_nm( via.Drill() );
+            padStack->mutable_drill()->mutable_diameter()->set_y_nm( via.Drill() );
+            response.add_route_items()->PackFrom( value );
+        };
+        if( PNS::LINE::ClassOf( item ) )
+        {
+            auto* line = static_cast<PNS::LINE*>( item );
+            const SHAPE_LINE_CHAIN& chain = line->CLine();
+            std::set<size_t> emittedArcs;
+            for( size_t segment = 0; segment < chain.SegmentCount(); ++segment )
+            {
+                if( chain.IsArcSegment( segment ) )
+                {
+                    const size_t arcIndex = static_cast<size_t>( chain.ArcIndex( segment ) );
+                    if( emittedArcs.insert( arcIndex ).second ) addArc( chain.Arc( arcIndex ), line->Width(), line->Layers().Start() );
+                }
+                else
+                    addSegment( chain.CSegment( segment ).A, chain.CSegment( segment ).B, line->Width(), line->Layers().Start() );
+            }
+            if( line->EndsWithVia() ) addVia( line->Via() );
+        }
+        else if( PNS::SEGMENT::ClassOf( item ) )
+        {
+            auto* segment = static_cast<PNS::SEGMENT*>( item );
+            addSegment( segment->Seg().A, segment->Seg().B, segment->Width(), segment->Layer() );
+        }
+        else if( PNS::ARC::ClassOf( item ) )
+        {
+            auto* arc = static_cast<PNS::ARC*>( item );
+            addArc( arc->CArc(), arc->Width(), arc->Layer() );
+        }
+        else if( PNS::VIA::ClassOf( item ) )
+        {
+            addVia( *static_cast<PNS::VIA*>( item ) );
+        }
+    }
+    if( response.route_items_size() == 0 )
+        return tl::unexpected( RoutePreviewError( "The native router returned unsupported preview geometry" ) );
+    return response;
+}
 
 HANDLER_RESULT<Empty> API_HANDLER_PCB::handleSaveDocument(
         const HANDLER_CONTEXT<SaveDocument>& aCtx )
@@ -228,7 +751,13 @@ HANDLER_RESULT<Empty> API_HANDLER_PCB::handleSaveDocument(
     if( !documentValidation )
         return tl::unexpected( documentValidation.error() );
 
-    pcbContext()->SaveBoard();
+    if( !pcbContext()->SaveBoard() )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( "PCB persistence failed; the native document remains open" );
+        return tl::unexpected( error );
+    }
     return Empty();
 }
 
@@ -278,7 +807,13 @@ HANDLER_RESULT<Empty> API_HANDLER_PCB::handleSaveCopyOfDocument(
 
     if( board->GetFileName().Matches( boardPath.GetFullPath() ) )
     {
-        pcbContext()->SaveBoard();
+        if( !pcbContext()->SaveBoard() )
+        {
+            ApiResponseStatus error;
+            error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            error.set_error_message( "PCB persistence failed; the native document remains open" );
+            return tl::unexpected( error );
+        }
         return Empty();
     }
 
@@ -287,7 +822,13 @@ HANDLER_RESULT<Empty> API_HANDLER_PCB::handleSaveCopyOfDocument(
     if( aCtx.Request.has_options() )
         includeProject = aCtx.Request.options().include_project();
 
-    pcbContext()->SavePcbCopy( boardPath.GetFullPath(), includeProject, /* aHeadless = */ true );
+    if( !pcbContext()->SavePcbCopy( boardPath.GetFullPath(), includeProject, /* aHeadless = */ true ) )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( "PCB copy could not be saved; inspect native diagnostics" );
+        return tl::unexpected( error );
+    }
 
     return Empty();
 }
@@ -328,6 +869,54 @@ HANDLER_RESULT<Empty> API_HANDLER_PCB::handleRevertDocument(
 }
 
 
+namespace
+{
+std::optional<ApiResponseStatus> BoardProjectRefusal( const DocumentSpecifier& aDocument,
+                                                      const PROJECT& aOpen, bool aAutomation )
+{
+    const std::string& name = aDocument.project().name();
+    const std::string& path = aDocument.project().path();
+    const std::string document = aDocument.board_filename().empty()
+            ? std::string( "the requested document" )
+            : fmt::format( "the requested document {}", aDocument.board_filename() );
+    const std::string openProject = aOpen.IsNullProject()
+            ? std::string( "no project open" )
+            : fmt::format( "project '{}' at '{}' open", aOpen.GetProjectName().ToStdString( wxConvUTF8 ),
+                           aOpen.GetProjectPath().ToStdString( wxConvUTF8 ) );
+    auto refusal = []( const std::string& message )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( message );
+        return error;
+    };
+
+    if( !aDocument.has_project() )
+    {
+        if( !aAutomation )
+            return std::nullopt;
+        return refusal( fmt::format( "{} names no project; this KiCad instance has {} and accepts a board request only with its project named by its absolute folder path",
+                                     document, openProject ) );
+    }
+
+    wxFileName requested = wxFileName::DirName( wxString::FromUTF8( path ) );
+    if( !requested.IsAbsolute() )
+        return refusal( fmt::format( "{} names project '{}' by the folder '{}', which is not an absolute path; name the project by its absolute folder path",
+                                     document, name, path ) );
+
+    wxFileName current = wxFileName::DirName( aOpen.GetProjectPath() );
+    requested.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+    current.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+    if( requested == current && path.find( '\0' ) == std::string::npos
+            && name == aOpen.GetProjectName().ToStdString( wxConvUTF8 ) )
+        return std::nullopt;
+
+    return refusal( fmt::format( "{} of project '{}' at '{}' is not open in this KiCad instance, which has {}; send the request to the KiCad instance that has that project open",
+                                 document, name, path, openProject ) );
+}
+}
+
+
 tl::expected<bool, ApiResponseStatus> API_HANDLER_PCB::validateDocumentInternal( const DocumentSpecifier& aDocument ) const
 {
     if( aDocument.type() != DocumentType::DOCTYPE_PCB )
@@ -337,6 +926,10 @@ tl::expected<bool, ApiResponseStatus> API_HANDLER_PCB::validateDocumentInternal(
         e.set_error_message( "the requested document is not a board" );
         return tl::unexpected( e );
     }
+
+    if( std::optional<ApiResponseStatus> refusal = BoardProjectRefusal(
+                aDocument, project(), apiServerOrNull() && apiServer().IsAutomation() ) )
+        return tl::unexpected( *refusal );
 
     wxFileName fn( pcbContext()->GetCurrentFileName() );
 
@@ -1373,13 +1966,13 @@ bool API_HANDLER_PCB::setPageSettings( const PAGE_INFO& aPageInfo )
 
 wxString API_HANDLER_PCB::getDrawingSheetFileName()
 {
-    return BASE_SCREEN::m_DrawingSheetFileName;
+    return project().GetProjectFile().m_BoardDrawingSheetFile;
 }
 
 
 void API_HANDLER_PCB::setDrawingSheetFileName( const wxString& aFileName )
 {
-    BASE_SCREEN::m_DrawingSheetFileName = aFileName;
+    project().GetProjectFile().m_BoardDrawingSheetFile = aFileName;
 
     if( frame() )
         frame()->LoadDrawingSheet();

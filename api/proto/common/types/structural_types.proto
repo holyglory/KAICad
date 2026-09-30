@@ -1,0 +1,20 @@
+/* KiCad engineering statement and source types shared by the diagram protocol. GPL-3.0-or-later. */
+syntax = "proto3";
+package kiapi.automation.structure.v1;
+option csharp_namespace = "KiCad.Automation.Protocol.Structural";
+
+// Statement, guidance and source vocabulary carried by per-level diagram
+// requirements, definitions, refinement inputs and proposals.
+enum StructuralStatementRole { SSR_INTENT = 0; SSR_INTERPRETATION = 1; SSR_REALIZATION = 2; }
+enum StructuralGuidanceStrength { SGS_INFORMATION = 0; SGS_PREFERENCE = 1; SGS_REQUIREMENT = 2; }
+message StructuralSourceReference {
+  string document_id = 1;
+  string revision = 2;
+  optional int32 page = 3;
+  optional string table = 4;
+  optional string part_variant = 5;
+}
+enum StructuralVerification {
+  SV_UNKNOWN = 0; SV_UNVERIFIED = 1; SV_VERIFIED = 2; SV_VIOLATED = 3;
+  SV_UNSUPPORTED = 4; SV_CONFLICTING = 5;
+}

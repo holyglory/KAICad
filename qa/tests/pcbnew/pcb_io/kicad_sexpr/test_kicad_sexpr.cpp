@@ -34,6 +34,8 @@
 #include <io/kicad/kicad_io_utils.h>
 #include <progress_reporter.h>
 #include <richio.h>
+#include <embedded_files.h>
+#include <api/native_state_digest.h>
 
 #include <board.h>
 #include <board_connected_item.h>
@@ -63,6 +65,60 @@ struct KICAD_SEXPR_FIXTURE
  * Declares the struct as the Boost test fixture.
  */
 BOOST_FIXTURE_TEST_SUITE( KiCadSexprIO, KICAD_SEXPR_FIXTURE )
+
+BOOST_AUTO_TEST_CASE( FileBaselineSurvivesNativeLoadSaveAndCopy )
+{
+    namespace fs = std::filesystem;
+    const auto directory = fs::temp_directory_path() / ( "kicad-pcb-baseline-" + KIID().AsStdString() );
+    BOOST_REQUIRE( fs::create_directory( directory ) );
+    struct CLEANUP { fs::path path; ~CLEANUP() { std::error_code error; fs::remove_all( path, error ); } } cleanup{ directory };
+    const auto path = directory / "baseline.kicad_pcb";
+    const wxString file = wxString::FromUTF8( path.string() );
+    BOARD board;
+    board.SetFileName( file );
+    kicadPlugin.SaveBoard( file, &board );
+    const auto baseline = board.FileBaseline();
+    BOOST_CHECK( baseline.Check( file ) == FILE_BASELINE_CHECK::UNCHANGED );
+    std::unique_ptr<BOARD> loaded( kicadPlugin.LoadBoard( file, nullptr ) );
+    BOOST_REQUIRE( loaded );
+    BOOST_CHECK_EQUAL( loaded->FileBaseline().Sha256(), baseline.Sha256() );
+    kicadPlugin.SaveBoard( wxString::FromUTF8( ( directory / "copy.kicad_pcb" ).string() ), loaded.get() );
+    BOOST_CHECK_EQUAL( loaded->FileBaseline().Path().ToStdString( wxConvUTF8 ),
+                       baseline.Path().ToStdString( wxConvUTF8 ) );
+    { std::ofstream external( path, std::ios::app ); external << "\n;external edit\n"; }
+    BOOST_CHECK( loaded->FileBaseline().Check( file ) == FILE_BASELINE_CHECK::CHANGED );
+    BOOST_CHECK( board.FileBaseline().Check( file ) == FILE_BASELINE_CHECK::CHANGED );
+}
+
+BOOST_AUTO_TEST_CASE( StateSerializationPreservesCurrentEmbeddedResources )
+{
+    BOARD board;
+    board.SetAreFontsEmbedded( false );
+    auto asset = std::make_shared<EMBEDDED_FILES::EMBEDDED_FILE>();
+    asset->name = "retained.ttf";
+    asset->type = EMBEDDED_FILES::EMBEDDED_FILE::FILE_TYPE::FONT;
+    asset->decompressedData = { 'f', 'i', 'x', 't', 'u', 'r', 'e' };
+    BOOST_REQUIRE( EMBEDDED_FILES::CompressAndEncode( *asset ) == EMBEDDED_FILES::RETURN_CODE::OK );
+    board.GetEmbeddedFiles()->AddFile( asset );
+    const auto encoded = asset->compressedEncodedData;
+    const auto hash = asset->data_hash;
+    STRING_FORMATTER first, second;
+    kicadPlugin.FormatBoardToFormatter( &first, &board, nullptr, false );
+    kicadPlugin.FormatBoardToFormatter( &second, &board, nullptr, false );
+    BOOST_CHECK_EQUAL( first.GetString(), second.GetString() );
+    NATIVE_STATE_DIGEST streamed;
+    kicadPlugin.FormatBoardToFormatter( &streamed, &board, nullptr, false );
+    BOOST_CHECK_EQUAL( streamed.Hex(), picosha2::hash256_hex_string( first.GetString() ) );
+    BOOST_CHECK_EQUAL( streamed.Bytes(), first.GetString().size() );
+    BOOST_CHECK( first.GetString().find( "retained.ttf" ) != std::string::npos );
+    BOOST_REQUIRE( board.GetEmbeddedFiles()->GetEmbeddedFile( "retained.ttf" ) == asset.get() );
+    BOOST_CHECK_EQUAL( asset->compressedEncodedData, encoded );
+    BOOST_CHECK_EQUAL( asset->data_hash, hash );
+    STRING_FORMATTER saved;
+    kicadPlugin.FormatBoardToFormatter( &saved, &board );
+    BOOST_CHECK( board.GetEmbeddedFiles()->GetEmbeddedFile( "retained.ttf" ) == nullptr );
+    BOOST_CHECK( saved.GetString().find( "retained.ttf" ) == std::string::npos );
+}
 
 
 /**

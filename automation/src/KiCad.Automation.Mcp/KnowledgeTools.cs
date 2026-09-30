@@ -1,6 +1,8 @@
 using System.ComponentModel;
+using System.Text.Json;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
+using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
 namespace KiCad.Automation.Mcp;
@@ -10,7 +12,14 @@ public sealed record GuidanceToolResult(bool Valid, Guid? ComponentInstanceId, G
 
 public sealed record EngineeringDesignToolResult(bool ModelValid, Guid? DesignId,
     IReadOnlyDictionary<Guid, GuidanceResolution>? Guidance, IReadOnlyList<Guid>? UnrealizedConnections,
-    string? ErrorCode, string? ErrorMessage);
+    string? ErrorCode, string? ErrorMessage, IReadOnlyList<UnresolvedNetBinding>? UnresolvedNetBindings = null,
+    IReadOnlyList<UnresolvedComponentReference>? UnresolvedComponentReferences = null,
+    IReadOnlyList<UnresolvedGuidanceBinding>? UnresolvedGuidanceBindings = null)
+{
+    public bool NetBindingsResolved => ModelValid && UnresolvedNetBindings is not { Count: > 0 };
+    public bool ComponentReferencesResolved => ModelValid && UnresolvedComponentReferences is not { Count: > 0 }
+        && UnresolvedGuidanceBindings is not { Count: > 0 };
+}
 
 public sealed record DesignBindingToolResult(bool DocumentParsed, SchematicBindingReport? BindingReport,
     string? ErrorCode, string? ErrorMessage);
@@ -23,6 +32,79 @@ public sealed record DesignProjectionToolResult(string? CandidateEngineeringXml,
 [McpServerToolType]
 public sealed class KnowledgeTools
 {
+    [McpServerTool(Name = "kicad_component_package_mapping_validate", ReadOnly = true, UseStructuredContent = true),
+     Description("Validate an exact component-to-package pin/pad mapping against circuit:1 XML. Requires explicit part/component/package revision identities, every electrical pin mapped once, and every pad either mapped or explicitly unused. Reports validation only; it does not read libraries, infer pad numbers or create native footprints/boards.")]
+    public CallToolResult ValidatePackageMapping(string circuitXml, JsonElement mappingJson, CancellationToken cancellationToken)
+    {
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var circuit = CircuitXml.Read(circuitXml);
+            var mapping = JsonSerializer.Deserialize<ComponentPackageMapping>(mappingJson.GetRawText(), new JsonSerializerOptions(JsonSerializerDefaults.Web))
+                ?? throw new AutomationException("invalid_component_package_mapping", "Supply a typed package mapping.");
+            mapping.Validate(circuit);
+            var data = JsonSerializer.SerializeToElement(new
+            {
+                valid = true, partId = mapping.PartId, componentId = mapping.ComponentId,
+                package = mapping.PackageId, revision = mapping.PackageRevision,
+                pinCount = mapping.PinMappings.Length, padCount = mapping.Pads.Length,
+                explicitlyUnusedPads = mapping.ExplicitlyUnusedPads, nativeCreation = false
+            }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+        }
+        catch (Exception error) when (error is AutomationException or JsonException)
+        {
+            var data = JsonSerializer.SerializeToElement(new { valid = false,
+                errorCode = error is AutomationException known ? known.Code : "invalid_mapping_json", errorMessage = error.Message });
+            return new() { IsError = true, Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+        }
+    }
+
+    [McpServerTool(Name = "kicad_component_guidance_propose", ReadOnly = true, UseStructuredContent = true),
+     Description("Propose one source-backed reusable class-guidance statement and return a new knowledge-library XML revision. Numeric facts require an explicit classification, unit, exact source document/revision/page reference and preserve nominal/operating-limit/absolute-maximum/measurement semantics. Contradictory ranges are returned as issues, not repaired. The tool does not interpret prose, write files, create native symbols/footprints or change a design instance.")]
+    public CallToolResult ProposeGuidance(string libraryXml, Guid classId, string newRevision,
+        JsonElement statementJson, CancellationToken cancellationToken)
+    {
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var library = ComponentKnowledgeXml.ReadLibrary(libraryXml);
+            var statement = JsonSerializer.Deserialize<GuidanceStatement>(statementJson.GetRawText(), new JsonSerializerOptions(JsonSerializerDefaults.Web))
+                ?? throw new AutomationException("invalid_guidance_authoring", "Supply a typed guidance statement.");
+            var result = ComponentKnowledgeAuthoring.AddClassGuidance(library, classId, newRevision, statement);
+            var data = JsonSerializer.SerializeToElement(new
+            {
+                libraryId = result.Library.Id, previousRevision = library.Revision, revision = result.Library.Revision,
+                statement = result.Added, quantityIssues = result.QuantityIssues,
+                libraryXml = ComponentKnowledgeXml.WriteLibrary(result.Library), nativeCreation = false,
+                sourceTextInterpreted = false
+            }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            return new() { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+        }
+        catch (Exception error) when (error is AutomationException or JsonException)
+        {
+            string code = error is AutomationException known ? known.Code : "invalid_guidance_json";
+            var data = JsonSerializer.SerializeToElement(new { errorCode = code, errorMessage = error.Message });
+            return new() { IsError = true, Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
+        }
+    }
+
+    [McpServerTool(Name = "kicad_design_connectivity_compare", ReadOnly = true, UseStructuredContent = true),
+     Description("Compare the supplied design:1 engineering model with one native SchematicElectricalState protobuf-JSON snapshot using exact sheet/symbol/placed-pin bindings. Returns missing or ambiguous pin bindings and split/joined pin partitions. Net names are not identity matches, and snapshot net indexes are not persistent IDs. Requires exact declared knowledge-library XML. Does not read a live editor, assign successor nets, transfer requirements, change either design, or establish complete native coverage or mutation admission.")]
+    public SchematicElectricalComparisonResult CompareConnectivity(string designXml, string electricalStateJson,
+        string[] knowledgeLibraryXml, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            var libraries = knowledgeLibraryXml.Select(ComponentKnowledgeXml.ReadLibrary).ToArray();
+            return SchematicElectricalComparison.Compare(SchematicDesignXml.Read(designXml, libraries),
+                SchematicJson.Parser.Parse<KiCad.Automation.Protocol.SchematicElectricalState>(electricalStateJson), libraries, cancellationToken);
+        }
+        catch (Exception error) when (error is AutomationException or Google.Protobuf.InvalidJsonException or Google.Protobuf.InvalidProtocolBufferException)
+        { return new(false, false, [], [], [], error is AutomationException known ? known.Code : "invalid_electrical_snapshot", error.Message); }
+    }
+
     [McpServerTool(Name = "kicad_design_reconcile_properties", ReadOnly = true, UseStructuredContent = true),
      Description("Prepare a three-way reverse projection from supplied baseline design:1 XML, desired engineering-design:1 XML and observed typed schematic hierarchy XML. Requires declared knowledge libraries. Reconciles native reference/value/unit/placement changes through explicit bindings while preserving desired instructions and reporting competing edits. Candidate XML is only an engineering-model proposal: unprojected native snapshot changes and coverage gaps remain explicit. Does not read or write files, access a live editor, compare connectivity, verify live revisions, advance synchronization state or apply changes. No candidate is returned for property conflicts or unresolved identity.")]
     public DesignProjectionToolResult ReconcileProperties(string baselineDesignXml, string desiredEngineeringXml,
@@ -76,7 +158,7 @@ public sealed class KnowledgeTools
     }
 
     [McpServerTool(Name = "kicad_engineering_design_validate", ReadOnly = true, UseStructuredContent = true),
-     Description("Validate supplied engineering-design:1 XML and its exact declared knowledge-library XML documents. Checks electrical/structural references and resolves inherited versus local component guidance without changing either. Returns conflicting named-property assignments and abstract connections with no explicit net realization. Does not read files, infer prose contradictions, verify electrical performance, compare a live schematic, generate native files or synchronize edits. This engineering intent model is not a complete native schematic snapshot.")]
+     Description("Validate supplied engineering-design:1 XML and its exact declared knowledge-library XML documents. Checks electrical/structural references and resolves inherited versus local component guidance without changing either. Reports retained unresolved component/pin/guidance references separately; detached guidance is not reported as assigned to a live component. Returns conflicting named-property assignments and abstract connections with no explicit net realization. Does not read files, infer prose contradictions, verify electrical performance, compare a live schematic, generate native files or synchronize edits. This engineering intent model is not a complete native schematic snapshot.")]
     public EngineeringDesignToolResult ValidateDesign(string designXml, string[] knowledgeLibraryXml,
         CancellationToken cancellationToken)
     {
@@ -92,7 +174,8 @@ public sealed class KnowledgeTools
             EngineeringDesign design = EngineeringDesignXml.Read(designXml, libraries);
             cancellationToken.ThrowIfCancellationRequested();
             return new(true, design.Circuit.Id, design.Validate(libraries),
-                design.Structure.Connections.Where(c => c.NetIds.Count == 0).Select(c => c.Id).Order().ToArray(), null, null);
+                design.Structure.Connections.Where(c => c.NetIds.Count == 0).Select(c => c.Id).Order().ToArray(), null, null,
+                design.Structure.UnresolvedNetBindings, design.Structure.UnresolvedComponentReferences, design.UnresolvedGuidanceBindings);
         }
         catch (AutomationException error)
         {
@@ -101,7 +184,7 @@ public sealed class KnowledgeTools
     }
 
     [McpServerTool(Name = "kicad_component_guidance_resolve", ReadOnly = true),
-     Description("Validate supplied electrical circuit, component knowledge library and instance-binding XML, then resolve inherited and local text guidance for that exact component. Returns sources, explicit replacement history and competing named-property assignments. Does not infer prose contradictions, verify engineering claims, or apply placement/routing/native edits. Inputs use circuit:1 and knowledge:1 namespaces, not a complete design.xml.")]
+     Description("Validate supplied electrical circuit, component knowledge library and instance-binding XML, then resolve inherited and local text/numerical guidance for that exact component. Returns explicit quantity kinds and units, sources, replacement history, competing named-property assignments and numerical range issues. Valid means structurally valid input, not verified engineering claims or absence of conflicts. Does not infer values from prose, turn absolute maxima into operating limits, or apply placement/routing/native edits. Inputs use circuit:1 and knowledge:1 namespaces, not a complete design.xml.")]
     public GuidanceToolResult Resolve(string circuitXml, string libraryXml, string bindingXml,
                                       CancellationToken cancellationToken)
     {

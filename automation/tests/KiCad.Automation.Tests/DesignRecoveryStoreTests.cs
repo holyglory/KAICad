@@ -1,6 +1,8 @@
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Google.Protobuf;
+using Kiapi.Schematic.Types;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
@@ -11,6 +13,31 @@ namespace KiCad.Automation.Tests;
 [TestClass]
 public sealed class DesignRecoveryStoreTests
 {
+    [TestMethod]
+    public void ComputedNetChainMembershipIsTheOnlyDerivedPublicationDifference()
+    {
+        var source = Fixture();
+        var before = source.Baseline with { Schematic = source.Baseline.Schematic.Clone() };
+        foreach (var screen in before.Schematic.Instances)
+            screen.Metadata.NetChains.Add(new SchematicNetChainDefinition
+            {
+                Name = "PATH", From = new() { Reference = "U1", Pin = "1" },
+                To = new() { Reference = "U2", Pin = "1" }, MemberNets = { "/A" }
+            });
+        var after = before with { Schematic = before.Schematic.Clone() };
+        foreach (var screen in after.Schematic.Instances)
+        {
+            screen.Metadata.NetChains[0].Committed = true;
+            screen.Metadata.NetChains[0].Exclusions = new();
+        }
+        byte[] beforeBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(before, source.KnowledgeLibraries));
+        byte[] afterBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(after, source.KnowledgeLibraries));
+        Assert.IsTrue(DesignRecoveryStore.ComputedNetChainOnlyChange(beforeBytes, afterBytes, source.KnowledgeLibraries));
+        after.Schematic.Instances[0].Metadata.NetChains[0].NetClass = "changed";
+        afterBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(after, source.KnowledgeLibraries));
+        Assert.IsFalse(DesignRecoveryStore.ComputedNetChainOnlyChange(beforeBytes, afterBytes, source.KnowledgeLibraries));
+    }
+
     internal static DesignRecoveryState Fixture()
     {
         var (design, library) = SchematicModelProjectionTests.Fixture();
@@ -59,6 +86,58 @@ public sealed class DesignRecoveryStoreTests
             SchematicDesignXml.Write(recovered.State.Baseline, recovered.State.KnowledgeLibraries));
         CollectionAssert.AreEqual(state.KnowledgeLibraries.Select(ComponentKnowledgeXml.WriteLibrary).ToArray(),
             recovered.State.KnowledgeLibraries.Select(ComponentKnowledgeXml.WriteLibrary).ToArray());
+        var locations = new SchematicFileLocations { Document = state.Observed.Document.Clone(), ProcessEpoch = "fixture-process",
+            Revision = new() { Epoch = state.NativeRevision.Epoch, Sequence = state.NativeRevision.Sequence } };
+        foreach (var screen in state.Observed.Instances)
+        {
+            string nativePath = SchematicNativeSheetChanges.Key(screen);
+            string filename = Path.Combine(Path.GetTempPath(), screen.Metadata.ScreenId.Value + ".kicad_sch");
+            locations.Locations.Add(new SchematicFileLocation { Path = screen.Metadata.Document.SheetPath.Clone(), ScreenId = screen.Metadata.ScreenId.Clone(),
+                LoadedFilename = filename, ResolvedFilename = filename, DeclarationMatchesLoaded = true,
+                DeclaredFilename = SchematicNativeSheetChanges.SheetSymbolOf(state.Observed, nativePath)?.FilenameField?.Text?.Text_ ?? filename });
+        }
+        var withFiles = store.Save(state with { NativeFileLocations = locations }, saved.RevisionToken);
+        Assert.AreEqual(locations, new DesignRecoveryStore(path).Read()!.State.NativeFileLocations);
+        using (var document = JsonDocument.Parse(File.ReadAllBytes(path))) Assert.AreEqual(11, document.RootElement.GetProperty("Version").GetInt32());
+        Assert.AreEqual(withFiles.RevisionToken, store.Save(withFiles.State, withFiles.RevisionToken).RevisionToken);
+        var incomplete = locations.Clone(); incomplete.Locations.RemoveAt(0);
+        Assert.ThrowsExactly<AutomationException>(() => store.Save(withFiles.State with { NativeFileLocations = incomplete }, withFiles.RevisionToken));
+        Assert.AreEqual(withFiles.RevisionToken, store.Read()!.RevisionToken, "A bad file observation cannot replace recovery.");
+        var stale = locations.Clone(); stale.Revision.Sequence--;
+        Assert.IsNull(NativeSheetFileLocations.Find(withFiles.State with { NativeFileLocations = stale },
+            SchematicNativeSheetChanges.Key(state.Observed.Instances[0])), "Stale provenance is never used to resolve a move.");
+        var owner = state.Baseline.Engineering.Circuit.Components.First();
+        var reference = new SchematicSheetComponentReference(owner.SheetInstanceId, owner.DefinitionId, "UNPLACED301");
+        var choices = new DesignRepeatedSheetResolution(SchematicRepeatedSheetChoices.SnapshotToken(withFiles.State), [reference], []);
+        var withChoices = store.Save(withFiles.State with { RepeatedSheetResolution = choices }, withFiles.RevisionToken);
+        var reopenedChoices = store.Read()!;
+        Assert.IsTrue(SchematicRepeatedSheetChoices.Same(choices, reopenedChoices.State.RepeatedSheetResolution));
+        using (var document = JsonDocument.Parse(File.ReadAllBytes(path))) Assert.AreEqual(12, document.RootElement.GetProperty("Version").GetInt32());
+        Assert.AreEqual(withChoices.RevisionToken, store.Save(reopenedChoices.State, withChoices.RevisionToken).RevisionToken);
+        Assert.IsNotNull(SchematicRepeatedSheetChoices.Current(reopenedChoices.State));
+        var changedObserved = state.Observed.Clone(); changedObserved.Instances[0].Metadata.TitleBlock ??= new();
+        changedObserved.Instances[0].Metadata.TitleBlock.Title = "Changed without full tracking";
+        Assert.IsNull(SchematicRepeatedSheetChoices.Current(reopenedChoices.State with { Observed = changedObserved }));
+        Assert.ThrowsExactly<AutomationException>(() => store.Save(reopenedChoices.State with
+            { RepeatedSheetResolution = choices with { ComponentReferences = [reference, reference] } }, withChoices.RevisionToken));
+        Assert.AreEqual(withChoices.RevisionToken, store.Read()!.RevisionToken);
+        var former = state.Baseline.SheetBindings.First(b => b.NativePath.Count > 1);
+        var destination = former.NativePath.ToArray(); destination[^1] = Guid.NewGuid();
+        var sheetMoves = new DesignSheetMoveResolution(SchematicRepeatedSheetChoices.SnapshotToken(reopenedChoices.State),
+            [new(former.SheetInstanceId, destination)], [], []);
+        var retainedMoves = store.Save(reopenedChoices.State with { SheetMoveResolution = sheetMoves }, withChoices.RevisionToken);
+        Assert.IsTrue(SchematicSheetMoveChoices.Same(sheetMoves, store.Read()!.State.SheetMoveResolution));
+        using (var document = JsonDocument.Parse(File.ReadAllBytes(path))) Assert.AreEqual(13, document.RootElement.GetProperty("Version").GetInt32());
+        Assert.IsNotNull(SchematicSheetMoveChoices.Current(retainedMoves.State));
+        Assert.IsNull(SchematicSheetMoveChoices.Current(retainedMoves.State with { Observed = changedObserved }));
+        Assert.ThrowsExactly<AutomationException>(() => store.Save(retainedMoves.State with
+            { SheetMoveResolution = sheetMoves with { RetiredSheetInstanceIds = [former.SheetInstanceId] } }, retainedMoves.RevisionToken));
+        var pendingChoices = store.Save(retainedMoves.State with { PendingMutation = Mutation(retainedMoves.State) }, retainedMoves.RevisionToken);
+        Assert.AreEqual("ownership_resolution_pending", Assert.ThrowsExactly<AutomationException>(() => store.Save(pendingChoices.State with
+            { SheetMoveResolution = null }, pendingChoices.RevisionToken)).Code);
+        Assert.AreEqual("ownership_resolution_pending", Assert.ThrowsExactly<AutomationException>(() => store.Save(pendingChoices.State with
+            { RepeatedSheetResolution = choices with { ComponentReferences = [reference with { Reference = "UNPLACED302" }] } }, pendingChoices.RevisionToken)).Code);
+        Assert.AreEqual(pendingChoices.RevisionToken, store.Read()!.RevisionToken);
     });
 
     [TestMethod]

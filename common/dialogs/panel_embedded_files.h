@@ -28,6 +28,7 @@
 #include "grid_tricks.h"
 
 #define NO_MARGINS 0x0001
+#define EMBEDDED_FILES_DEFER_COMMIT 0x0002
 
 
 class EMBEDDED_FILES_GRID_TRICKS : public GRID_TRICKS
@@ -68,6 +69,8 @@ public:
     EMBEDDED_FILES* GetLocalFiles() { return m_localFiles; }
     EMBEDDED_FILES::EMBEDDED_FILE* AddEmbeddedFile( const wxString& aFileName );
     bool RemoveEmbeddedFile( const wxString& aFileName );
+    // Called by an accepting parent transaction, never by page switching.
+    std::set<wxString> ConfirmNestedRemovals();
 
 protected:
     void onFontEmbedClick( wxCommandEvent& event ) override;
@@ -80,4 +83,5 @@ private:
     EMBEDDED_FILES* m_localFiles;
     std::vector<const EMBEDDED_FILES*> m_inheritedFiles;
     std::set<wxString>                 m_inheritedFileNames;
+    bool m_deferCommit = false;
 };

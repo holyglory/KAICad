@@ -32,7 +32,8 @@ class BUS_ALIAS;
 class PANEL_SETUP_BUSES : public PANEL_SETUP_BUSES_BASE
 {
 public:
-    PANEL_SETUP_BUSES( wxWindow* aWindow, SCH_EDIT_FRAME* aFrame );
+    PANEL_SETUP_BUSES( wxWindow* aWindow, SCH_EDIT_FRAME* aFrame,
+                       std::map<wxString, std::vector<wxString>>* aDraftAliases = nullptr );
 
     ~PANEL_SETUP_BUSES();
 
@@ -68,6 +69,7 @@ protected:
 
 private:
     SCH_EDIT_FRAME* m_frame;
+    std::map<wxString, std::vector<wxString>>* m_draftAliases;
     wxString        m_membersLabelTemplate;
 
     std::vector< std::shared_ptr<BUS_ALIAS> > m_aliases;

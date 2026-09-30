@@ -32,6 +32,7 @@
 #include <drc/drc_engine.h>
 #include <drc/drc_item.h>
 #include <drc/drc_test_provider.h>
+#include <drc/drc_library_inputs.h>
 #include <project_pcb.h>
 #include <string_utils.h>
 
@@ -57,6 +58,9 @@ public:
     virtual bool Run() override;
 
     virtual const wxString GetName() const override { return wxT( "library_parity" ); };
+
+private:
+    bool runCaptured( const DRC_LIBRARY_INPUTS& aInputs );
 };
 
 
@@ -1073,6 +1077,8 @@ bool FOOTPRINT::FootprintNeedsUpdate( const FOOTPRINT* aLibFP, int aCompareFlags
 bool DRC_TEST_PROVIDER_LIBRARY_PARITY::Run()
 {
     BOARD*   board = m_drcEngine->GetBoard();
+    if( const DRC_LIBRARY_INPUTS* inputs = m_drcEngine->GetLibraryInputs() )
+        return runCaptured( *inputs );
     PROJECT* project = board->GetProject();
 
     if( !project )
@@ -1219,4 +1225,57 @@ bool DRC_TEST_PROVIDER_LIBRARY_PARITY::Run()
 namespace detail
 {
 static DRC_REGISTER_TEST_PROVIDER<DRC_TEST_PROVIDER_LIBRARY_PARITY> dummy;
+}
+
+bool DRC_TEST_PROVIDER_LIBRARY_PARITY::runCaptured( const DRC_LIBRARY_INPUTS& aInputs )
+{
+    if( !reportPhase( _( "Checking board footprints against library..." ) ) ) return false;
+    for( FOOTPRINT* footprint : m_drcEngine->GetBoard()->Footprints() )
+    {
+        if( m_drcEngine->IsCancelled() ) return false;
+        if( m_drcEngine->IsErrorLimitExceeded( DRCE_LIB_FOOTPRINT_ISSUES )
+                && m_drcEngine->IsErrorLimitExceeded( DRCE_LIB_FOOTPRINT_MISMATCH ) ) return true;
+        const LIB_ID& id = footprint->GetFPID();
+        if( id.GetLibNickname().empty() ) continue;
+        const auto* entry = aInputs.Find( id );
+        if( !entry ) return false; // Missing captured input is an incomplete check, never a pass.
+
+        const wxString libraryName = id.GetLibNickname();
+        const wxString footprintName = id.GetLibItemName();
+        wxString message;
+        int code = DRCE_LIB_FOOTPRINT_ISSUES;
+        switch( entry->status )
+        {
+        case DRC_LIBRARY_INPUTS::STATUS::MISSING_LIBRARY:
+            message.Printf( _( "The current configuration does not include the footprint library '%s'" ),
+                            UnescapeString( id.GetLibNickname() ) );
+            break;
+        case DRC_LIBRARY_INPUTS::STATUS::DISABLED_LIBRARY:
+            message.Printf( _( "The footprint library '%s' is not enabled in the current configuration" ),
+                            UnescapeString( id.GetLibNickname() ) );
+            break;
+        case DRC_LIBRARY_INPUTS::STATUS::UNAVAILABLE_LIBRARY:
+            message.Printf( _( "The footprint library '%s' is unavailable at '%s'" ),
+                            UnescapeString( id.GetLibNickname() ), entry->uri );
+            break;
+        case DRC_LIBRARY_INPUTS::STATUS::UNAVAILABLE_FOOTPRINT:
+            message.Printf( _( "Footprint '%s' could not be loaded from library '%s'" ),
+                            footprintName, libraryName );
+            break;
+        case DRC_LIBRARY_INPUTS::STATUS::LOADED:
+            if( !entry->footprint ) return false;
+            if( !footprint->FootprintNeedsUpdate( entry->footprint.get(), BOARD_ITEM::COMPARE_FLAGS::DRC ) )
+                continue;
+            code = DRCE_LIB_FOOTPRINT_MISMATCH;
+            message.Printf( _( "Footprint '%s' does not match copy in library '%s'" ),
+                            footprintName, libraryName );
+            break;
+        }
+        if( m_drcEngine->IsErrorLimitExceeded( code ) ) continue;
+        auto finding = DRC_ITEM::Create( code );
+        finding->SetErrorMessage( message );
+        finding->SetItems( footprint );
+        reportViolation( finding, footprint->GetPosition(), UNDEFINED_LAYER );
+    }
+    return !m_drcEngine->IsCancelled();
 }

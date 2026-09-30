@@ -19,6 +19,7 @@
  */
 
 #include <wx/dir.h>
+#include <digesting_file_line_reader.h>
 #include <wx/ffile.h>
 #include <wx/log.h>
 #include <wx/msgdlg.h>
@@ -304,11 +305,14 @@ void PCB_IO_KICAD_SEXPR::SaveBoard( const wxString& aFileName, BOARD* aBoard,
     PRETTIFIED_FILE_OUTPUTFORMATTER formatter( aFileName );
     FormatBoardToFormatter( &formatter, aBoard, aProperties );
     formatter.Finish();
+    if( FILE_CONTENT_BASELINE::SamePath( aFileName, aBoard->GetFileName() ) )
+        aBoard->SetFileBaseline( formatter.CommittedBaseline() );
 }
 
 
 void PCB_IO_KICAD_SEXPR::FormatBoardToFormatter( OUTPUTFORMATTER* aOut, BOARD* aBoard,
-                                                  const std::map<std::string, UTF8>* aProperties )
+                                                  const std::map<std::string, UTF8>* aProperties,
+                                                  bool aPrepareResources )
 {
     init( aProperties );
 
@@ -316,20 +320,29 @@ void PCB_IO_KICAD_SEXPR::FormatBoardToFormatter( OUTPUTFORMATTER* aOut, BOARD* a
 
     // If the user wants fonts embedded, make sure that they are added to the board.  Otherwise,
     // remove any fonts that were previously embedded.
-    if( m_board->GetAreFontsEmbedded() )
-        m_board->EmbedFonts();
-    else
-        m_board->GetEmbeddedFiles()->ClearEmbeddedFonts();
+    if( aPrepareResources )
+    {
+        if( m_board->GetAreFontsEmbedded() )
+            m_board->EmbedFonts();
+        else
+            m_board->GetEmbeddedFiles()->ClearEmbeddedFonts();
+    }
 
     m_out = aOut;
 
-    m_out->Print( "(kicad_pcb (version %d) (generator \"pcbnew\") (generator_version %s)",
-                  SEXPR_BOARD_FILE_VERSION,
-                  m_out->Quotew( GetMajorMinorVersion() ).c_str() );
-
-    Format( aBoard );
-
-    m_out->Print( ")" );
+    try
+    {
+        m_out->Print( "(kicad_pcb (version %d) (generator \"pcbnew\") (generator_version %s)",
+                      SEXPR_BOARD_FILE_VERSION,
+                      m_out->Quotew( GetMajorMinorVersion() ).c_str() );
+        Format( aBoard );
+        m_out->Print( ")" );
+    }
+    catch( ... )
+    {
+        m_out = nullptr;
+        throw;
+    }
 
     m_out = nullptr;
 }
@@ -3520,7 +3533,7 @@ BOARD* PCB_IO_KICAD_SEXPR::LoadBoard( const wxString& aFileName, BOARD* aAppendT
                                       const std::map<std::string, UTF8>* aProperties,
                                       PROJECT* aProject )
 {
-    FILE_LINE_READER reader( aFileName );
+    DIGESTING_FILE_LINE_READER reader( aFileName );
 
     unsigned lineCount = 0;
 
@@ -3544,7 +3557,13 @@ BOARD* PCB_IO_KICAD_SEXPR::LoadBoard( const wxString& aFileName, BOARD* aAppendT
 
     // Give the filename to the board if it's new
     if( !aAppendToMe )
+    {
         board->SetFileName( aFileName );
+        // Do not leak the parsed board if finishing the file read fails.
+        std::unique_ptr<BOARD> owned( board );
+        board->SetFileBaseline( reader.FinishBaseline() );
+        owned.release();
+    }
 
     return board;
 }

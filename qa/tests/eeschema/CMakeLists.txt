@@ -194,6 +194,7 @@ set( QA_EESCHEMA_SRCS
     test_sch_api_hittest.cpp
     test_sch_api_proto.cpp
     test_sch_commit.cpp
+    test_sch_change_tracking.cpp
     test_shape_corner_radius.cpp
     test_sch_group.cpp
     test_pin_numbers.cpp
@@ -215,9 +216,15 @@ set( QA_EESCHEMA_SRCS
     test_sch_sheet_path.cpp
     test_sch_sheet_list.cpp
     test_sch_symbol.cpp
+    test_sch_variant_pin_mapping.cpp
     test_symbol_api_semantics.cpp
     test_schematic_formatting.cpp
+    test_schematic_setup_draft.cpp
+    test_schematic_bom_settings.cpp
+    test_net_settings_capture.cpp
     test_schematic_initialization.cpp
+    test_schematic_state_format.cpp
+    test_sch_parity_netlist.cpp
     test_schematic_symbol_library_identity.cpp
     test_sch_table.cpp
     test_sch_textbox.cpp
@@ -341,20 +348,66 @@ add_test( NAME qa_schematic_formatting
     COMMAND $<TARGET_FILE:qa_eeschema> --run_test=SchematicFormatting --log_level=test_suite )
 setup_qa_env( qa_schematic_formatting )
 
+# How API requests and replies map onto schematic items, labels and their fields included.
+add_test( NAME qa_api_sch_proto
+    COMMAND $<TARGET_FILE:qa_eeschema> --run_test=ApiSchProto --log_level=test_suite )
+setup_qa_env( qa_api_sch_proto )
+
+# Change tracking as eeschema links it: the source oracle and the tracked change itself. The cost
+# measurement on the largest demo stays opt-in, as its disabled() decorator intends; the native
+# event journey runs it by name.
+add_test( NAME qa_sch_change_tracking
+    COMMAND $<TARGET_FILE:qa_eeschema>
+        --run_test=SchChangeTracking:SchTrackedChange:!SchTrackedChange/MeasuresTrackingCostOnTheLargestDemo
+        --log_level=test_suite )
+setup_qa_env( qa_sch_change_tracking )
+
+# Pin geometry facts (lane 2A) live in test_sch_variant_pin_mapping.cpp, which was registered before
+# it had any cases. The ctest is registered as soon as that file declares test cases, so a renamed or
+# missing suite then fails rather than dropping out; configuration re-runs whenever the file changes.
+set_property( DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+              ${CMAKE_CURRENT_SOURCE_DIR}/test_sch_variant_pin_mapping.cpp )
+file( STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/test_sch_variant_pin_mapping.cpp QA_SCH_VARIANT_PIN_MAPPING_CASES
+      REGEX "BOOST_(AUTO|FIXTURE|DATA)_TEST_CASE" )
+
+if( QA_SCH_VARIANT_PIN_MAPPING_CASES )
+    add_test( NAME qa_sch_pin_geometry_facts
+        COMMAND $<TARGET_FILE:qa_eeschema> --run_test=SchematicPinGeometryFacts --log_level=test_suite )
+    setup_qa_env( qa_sch_pin_geometry_facts )
+endif()
+
 setup_qa_env( qa_eeschema )
 
 # Focused native save/load acceptance without rebuilding every eeschema test.
 add_executable( qa_symbol_graphic_identity
     ${CMAKE_SOURCE_DIR}/qa/mocks/kicad/common_mocks.cpp
+    ../common/test_document_lifecycle_controller.cpp
+    ../common/test_checked_schematic_controller.cpp
+    ../common/test_file_content_baseline.cpp
+    ../common/test_native_state_digest.cpp
+    test_schematic_state_format.cpp
+    test_sch_parity_netlist.cpp
     test_module.cpp
+    test_sch_commit.cpp
+    # The change-tracking oracle and its eeschema-linked tracked-change checks; native-foundation
+    # builds and runs this target, so the eeschema-linked part runs there as well.
+    test_sch_change_tracking.cpp
     test_symbol_graphic_identity.cpp
     test_symbol_api_semantics.cpp
     test_schematic_formatting.cpp
+    test_schematic_setup_draft.cpp
+    test_schematic_bom_settings.cpp
+    test_net_settings_capture.cpp
     test_schematic_initialization.cpp
     test_sch_text_presentation.cpp
     test_drawing_sheet_context.cpp
     erc/test_erc_marker_counts.cpp
+    net_chains/test_net_chain_recalc_refresh.cpp
+    net_chains/test_net_chain_remove_rename.cpp
     ../common/test_settings_snapshot.cpp
+    ../common/test_settings_save_outcome.cpp
+    ../common/test_netclass_proto.cpp
+    ../common/test_api_request_target.cpp
     ../libs/kinng/test_publisher.cpp
 )
 target_link_libraries( qa_symbol_graphic_identity PRIVATE
@@ -369,5 +422,67 @@ setup_qa_env( qa_symbol_graphic_identity )
 
 add_test( NAME qa_erc_override_edits
     COMMAND $<TARGET_FILE:qa_symbol_graphic_identity>
-        --run_test=ERCMarkerCountsExclusion,ERCSeverityReportsStoredChangesOnly --log_level=test_suite )
+        --run_test=ERCMarkerCountsExclusion,ERCSeverityReportsStoredChangesOnly,ERCReplacementRejectsIncompletePolicyWithoutChangingLiveState --log_level=test_suite )
 setup_qa_env( qa_erc_override_edits )
+
+add_test( NAME qa_net_chain_terminals
+    COMMAND $<TARGET_FILE:qa_symbol_graphic_identity>
+        --run_test=NetChain_SetTerminalPersistsExactSelectedPin,NetChain_RefreshPreservesTerminalPinOverride,NetChain_RenamePreservesUnresolvedDeclaration,NetChain_RestoreKeepsDeclaredTerminalOrder,NetChain_RemoveRenameRoundTrip,NetChain_OpacityWriterPreservesDoublePrecision,NetChain_UnassignedClassesPersistAndCompare,NetChain_ExcludedMembersCannotReturnThroughRestore,NetChain_ExcludedPinPathIsolatesRepeatedScreens --log_level=test_suite )
+setup_qa_env( qa_net_chain_terminals )
+
+add_test( NAME qa_symbol_update_identity
+    COMMAND $<TARGET_FILE:qa_symbol_graphic_identity>
+        --run_test=SymbolApiSemantics/LoadedSymbolDefinitionRemainsEqualThroughPlacementOnlyUpdate,ImplicitAndNamedBodyStylesRetainNativeCacheIdentity,FieldCustomPropertiesSurviveDecodeAndLibraryReload,PinAnchorsRejectIncompleteMappings --log_level=test_suite )
+setup_qa_env( qa_symbol_update_identity )
+
+add_test( NAME qa_schematic_setup_draft
+    COMMAND $<TARGET_FILE:qa_symbol_graphic_identity>
+        --run_test=SettingsSnapshot:SchematicDraftDoesNotChangeLiveProjectOrReferenceTracker:SchematicDraftAppliesOnlyItsChangedOwnersAndCanUndo:AnnotationPolicyPreservesAllocatedDesignators:ReferenceInventoryValidatesBeforeReplacingAllocationState:ProjectFieldTemplatesCanBeExplicitlyEmpty:SymbolProjectSettingsMatchPersistedFields --log_level=test_suite )
+setup_qa_env( qa_schematic_setup_draft )
+
+add_test( NAME qa_schematic_bom_settings
+    COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=SchematicBomSettings --log_level=test_suite )
+setup_qa_env( qa_schematic_bom_settings )
+
+add_test( NAME qa_netclass_proto
+    COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=NetclassProto --log_level=test_suite )
+setup_qa_env( qa_netclass_proto )
+
+add_test( NAME qa_api_request_target
+    COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=ApiRequestTarget --log_level=test_suite )
+setup_qa_env( qa_api_request_target )
+
+add_test( NAME qa_settings_save_outcome
+    COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=SettingsSaveOutcome --log_level=test_suite )
+setup_qa_env( qa_settings_save_outcome )
+
+add_test( NAME qa_schematic_state_format
+    COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=SchematicStateFormat --log_level=test_suite )
+setup_qa_env( qa_schematic_state_format )
+
+add_test( NAME qa_schematic_parity_netlist
+    COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=SchematicParityNetlist --log_level=test_suite )
+setup_qa_env( qa_schematic_parity_netlist )
+
+add_test( NAME qa_native_state_digest
+    COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=NativeStateDigest --log_level=test_suite )
+setup_qa_env( qa_native_state_digest )
+
+add_test( NAME qa_file_content_baseline
+    COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=FileContentBaseline --log_level=test_suite )
+setup_qa_env( qa_file_content_baseline )
+
+add_test( NAME qa_document_lifecycle_controller
+    COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=DocumentLifecycleController --log_level=test_suite )
+setup_qa_env( qa_document_lifecycle_controller )
+
+add_test( NAME qa_checked_schematic_controller
+    COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=CheckedSchematicBatchController --log_level=test_suite )
+setup_qa_env( qa_checked_schematic_controller )
+
+add_test( NAME qa_net_settings_capture
+    COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=NetSettingsCapture --log_level=test_suite )
+
+add_test( NAME qa_automation_wire_rollback
+    COMMAND $<TARGET_FILE:qa_symbol_graphic_identity> --run_test=SchCommit --log_level=test_suite )
+setup_qa_env( qa_net_settings_capture )

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "product": "kicad-codex",
+  "channel": "preview",
+  "sequence": 8,
+  "version": "preview-20260916-c26503fdc350",
+  "commit": "c26503fdc350abf63e4d2588955ccdc2690d682e",
+  "artifacts": [{
+    "platform": "win-x64",
+    "format": "zip",
+    "fileName": "kicad-codex-c26503fdc350abf63e4d2588955ccdc2690d682e-windows-x64.zip",
+    "bytes": 359390039,
+    "sha256": "48fb6d6a8685adf46733efb45fd054fced800ac9eed1452c2124444a1c9f2bf8"
+  }]
+}

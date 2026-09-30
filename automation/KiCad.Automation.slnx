@@ -1,4 +1,5 @@
 <Solution>
+  <Project Path="tests/KiCad.Automation.SyncHarness/KiCad.Automation.SyncHarness.csproj" />
   <Project Path="tools/KiCad.Automation.PackageProbe/KiCad.Automation.PackageProbe.csproj" />
   <Project Path="src/KiCad.Automation.Distribution/KiCad.Automation.Distribution.csproj" />
   <Project Path="tools/KiCad.Automation.Downloads/KiCad.Automation.Downloads.csproj" />

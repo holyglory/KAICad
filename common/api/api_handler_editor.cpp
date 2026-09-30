@@ -22,6 +22,7 @@
 
 #include <api/api_enums.h>
 #include <api/api_utils.h>
+#include <api/api_request_target.h>
 #include <eda_base_frame.h>
 #include <eda_item.h>
 #include <title_block.h>
@@ -38,6 +39,8 @@ ApiResponseStatus StagedTransactionBusy()
     error.set_error_message( "A staged transaction owns this document; finish or cancel it first" );
     return error;
 }
+
+
 }
 
 
@@ -53,6 +56,17 @@ API_HANDLER_EDITOR::API_HANDLER_EDITOR( EDA_BASE_FRAME* aFrame ) :
     registerHandler<HitTest, HitTestResponse>( &API_HANDLER_EDITOR::handleHitTest );
     registerHandler<GetTitleBlockInfo, types::TitleBlockInfo>( &API_HANDLER_EDITOR::handleGetTitleBlockInfo );
     registerHandler<SetTitleBlockInfo, google::protobuf::Empty>( &API_HANDLER_EDITOR::handleSetTitleBlockInfo );
+}
+
+
+std::optional<ApiResponseStatus> API_HANDLER_EDITOR::checkRequestTarget(
+        const google::protobuf::Message& aRequest ) const
+{
+    if( !kiapi::common::RequestTargetsOtherDocument( aRequest, thisDocumentType() ) )
+        return std::nullopt;
+    ApiResponseStatus result;
+    result.set_status( ApiStatusCode::AS_UNHANDLED );
+    return result;
 }
 
 
@@ -191,16 +205,17 @@ void API_HANDLER_EDITOR::pushCurrentCommit( const std::string& aClientName,
 
 HANDLER_RESULT<bool> API_HANDLER_EDITOR::validateDocument( const DocumentSpecifier& aDocument )
 {
-    if( !validateDocumentInternal( aDocument ) )
-    {
-        ApiResponseStatus e;
-        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
-        e.set_error_message( fmt::format( "the requested document {} is not open",
-                                          aDocument.board_filename() ) );
-        return tl::unexpected( e );
-    }
+    tl::expected<bool, ApiResponseStatus> valid = validateDocumentInternal( aDocument );
+    if( valid ) return true;
 
-    return true;
+    ApiResponseStatus e = valid.error();
+    if( thisDocumentType() == types::DOCTYPE_PCB )
+        return tl::unexpected( e );
+
+    ApiResponseStatus generic;
+    generic.set_status( ApiStatusCode::AS_BAD_REQUEST );
+    generic.set_error_message( fmt::format( "the requested document {} is not open", aDocument.board_filename() ) );
+    return tl::unexpected( generic );
 }
 
 

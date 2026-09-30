@@ -51,6 +51,7 @@ class SCHEMATIC;
 class SCH_EDIT_FRAME;
 class SCH_HIERLABEL;
 class SCH_PIN;
+struct SCH_NETCHAIN_TERMINAL_CHANGE;
 class SCH_SHEET_PIN;
 class SCH_NETCHAIN;
 
@@ -460,6 +461,8 @@ public:
     SCH_NETCHAIN* GetNetChainForNet( const wxString& aNet );
     SCH_NETCHAIN* GetNetChainByName( const wxString& aName );
     void ReplaceNetChainTerminalPin( const wxString& aNetChain, const KIID& aPrev, const KIID& aNew );
+    bool SetNetChainTerminal( const SCH_NETCHAIN_TERMINAL_CHANGE& aChange,
+                             const SCH_PIN& aPin, const SCH_SHEET_PATH& aPath );
     void SetNetChainTerminalOverrides( const std::map<wxString, std::pair<KIID, KIID>>& aOverrides );
 
     /**
@@ -481,6 +484,7 @@ public:
     {
         wxString ref;
         wxString pin;
+        bool operator==( const CHAIN_TERMINAL_REF& ) const = default;
     };
     using CHAIN_TERMINAL_REFS = std::pair<CHAIN_TERMINAL_REF, CHAIN_TERMINAL_REF>;
 
@@ -524,6 +528,16 @@ public:
         return m_netChainMemberNetOverrides;
     }
 
+    void SetNetChainExcludedNetOverrides( const std::map<wxString, std::set<wxString>>& aOverrides )
+    {
+        m_netChainExcludedNetOverrides = aOverrides;
+    }
+    using EXCLUDED_PINS = std::set<std::pair<KIID_PATH, KIID>>;
+    void SetNetChainExcludedPinOverrides( const std::map<wxString, EXCLUDED_PINS>& aOverrides )
+    {
+        m_netChainExcludedPinOverrides = aOverrides;
+    }
+
     /**
      * Return the subgraph for a given net name on a given sheet.
      *
@@ -545,6 +559,7 @@ public:
     CONNECTION_SUBGRAPH* FindFirstSubgraphByName( const wxString& aNetName );
 
     CONNECTION_SUBGRAPH* GetSubgraphForItem( SCH_ITEM* aItem ) const;
+    CONNECTION_SUBGRAPH* GetSubgraphForItem( SCH_ITEM* aItem, const SCH_SHEET_PATH& aPath ) const;
 
     const std::vector<CONNECTION_SUBGRAPH*>& GetAllSubgraphs( const wxString& aNetName ) const;
 
@@ -929,7 +944,8 @@ public:
     const std::vector<std::unique_ptr<SCH_NETCHAIN>>& GetPotentialNetChains() const { return m_potentialNetChains; }
 
     /** Locate a potential net chain that contains both pins (by subgraph net membership). */
-    SCH_NETCHAIN* FindPotentialNetChainBetweenPins( SCH_PIN* aPinA, SCH_PIN* aPinB );
+    SCH_NETCHAIN* FindPotentialNetChainBetweenPins( SCH_PIN* aPinA, const SCH_SHEET_PATH& aPathA,
+                                                  SCH_PIN* aPinB, const SCH_SHEET_PATH& aPathB );
 
     /** Promote a potential net chain to an actual user net chain with the provided name. */
     SCH_NETCHAIN* CreateNetChainFromPotential( SCH_NETCHAIN* aPotential, const wxString& aName );
@@ -966,7 +982,10 @@ public:
         wxString netClass;
         COLOR4D color = COLOR4D::UNSPECIFIED;
         std::set<wxString> memberNets;
+        std::set<wxString> excludedNets;
+        EXCLUDED_PINS excludedPins;
         bool committed = false;
+        bool operator==( const NET_CHAIN_DEFINITION& ) const = default;
     };
 
     // Shared by persistence and structured observation. Retain pending intent;
@@ -1135,6 +1154,8 @@ private:
     std::map<wxString, COLOR4D>               m_netChainColorOverrides;
     std::map<wxString, CHAIN_TERMINAL_REFS>    m_netChainTerminalRefOverrides;
     std::map<wxString, std::set<wxString>>    m_netChainMemberNetOverrides;
+    std::map<wxString, std::set<wxString>>    m_netChainExcludedNetOverrides;
+    std::map<wxString, EXCLUDED_PINS>        m_netChainExcludedPinOverrides;
 
     int m_last_net_code;
 

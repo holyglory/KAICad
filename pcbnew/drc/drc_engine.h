@@ -22,6 +22,7 @@
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <stdexcept>
 #include <vector>
 #include <unordered_map>
 
@@ -30,6 +31,7 @@
 #include <units_provider.h>
 #include <lset.h>
 #include <drc/drc_rule.h>
+#include <drc/drc_run_result.h>
 
 
 /**
@@ -64,12 +66,26 @@ namespace std
 }
 
 
+/**
+ * Captured custom design rules declare a rules format newer than this KiCad reads. The rules
+ * cannot be used as written; the check that captured them cannot run.
+ */
+class DRC_RULES_TOO_RECENT : public std::runtime_error
+{
+public:
+    using std::runtime_error::runtime_error;
+};
+
+
 class BOARD_COMMIT;
 class BOARD_DESIGN_SETTINGS;
 class DRC_TEST_PROVIDER;
+class DRC_LIBRARY_INPUTS;
+class LINE_READER;
 class DRC_TEST_PROVIDER_CREEPAGE;
 class PCB_EDIT_FRAME;
 class DS_PROXY_VIEW_ITEM;
+class DS_DATA_MODEL;
 class BOARD_ITEM;
 class BOARD;
 class PCB_MARKER;
@@ -150,6 +166,13 @@ public:
 
     void SetDrawingSheet( DS_PROXY_VIEW_ITEM* aDrawingSheet ) { m_drawingSheet = aDrawingSheet; }
     DS_PROXY_VIEW_ITEM* GetDrawingSheet() const { return m_drawingSheet; }
+    void SetDrawingSheetModel( std::unique_ptr<DS_DATA_MODEL> aModel );
+    void ClearDrawingSheetModel();
+    DS_DATA_MODEL* GetDrawingSheetModel() const { return m_drawingSheetModel.get(); }
+
+    void SetLibraryInputs( std::shared_ptr<const DRC_LIBRARY_INPUTS> aInputs )
+    { m_libraryInputs = std::move( aInputs ); }
+    const DRC_LIBRARY_INPUTS* GetLibraryInputs() const { return m_libraryInputs.get(); }
 
     void SetDebugOverlay( std::shared_ptr<KIGFX::VIEW_OVERLAY> aOverlay )
     {
@@ -193,13 +216,21 @@ public:
      */
     void InitEngine( const wxFileName& aRulePath );
 
+    /**
+     * Parse already captured UTF-8 rule content; no file access occurs here.
+     *
+     * @throws PARSE_ERROR if the rules contain errors
+     * @throws DRC_RULES_TOO_RECENT if the rules declare a newer rules format
+     */
+    void InitEngineFromText( const std::string& aRuleText, const wxString& aSourceName );
+
     void InitEngine( const std::shared_ptr<DRC_RULE>& rule );
 
     /**
      * Run the DRC tests.
      */
-    void RunTests( EDA_UNITS aUnits, bool aReportAllTrackErrors, bool aTestFootprints,
-                   BOARD_COMMIT* aCommit = nullptr );
+    DRC_RUN_RESULT RunTests( EDA_UNITS aUnits, bool aReportAllTrackErrors, bool aTestFootprints,
+                             BOARD_COMMIT* aCommit = nullptr );
 
     bool IsErrorLimitExceeded( int error_code );
 
@@ -298,7 +329,14 @@ public:
     bool HasUserDefinedPhysicalConstraint();
     std::set<int> QueryDistinctConstraints( DRC_CONSTRAINT_T aConstraintId );
 
-    std::vector<DRC_TEST_PROVIDER*> GetTestProviders() const { return m_testProviders; };
+    std::vector<DRC_TEST_PROVIDER*> GetTestProviders() const
+    {
+        std::vector<DRC_TEST_PROVIDER*> providers;
+        providers.reserve( m_testProviders.size() );
+        for( const auto& provider : m_testProviders )
+            providers.push_back( provider.get() );
+        return providers;
+    }
 
     DRC_TEST_PROVIDER* GetTestProvider( const wxString& name ) const;
 
@@ -347,6 +385,8 @@ private:
      * @throws PARSE_ERROR
      */
     void loadRules( const wxFileName& aPath );
+    void loadRules( LINE_READER& aReader, const wxString& aSourceName, bool aStrict = false );
+    void initEngine( const std::function<void()>& aLoadRules );
 
     void compileRules();
 
@@ -370,11 +410,14 @@ protected:
     BOARD_DESIGN_SETTINGS*     m_designSettings;
     BOARD*                     m_board;
     DS_PROXY_VIEW_ITEM*        m_drawingSheet;
+    std::unique_ptr<DS_DATA_MODEL> m_drawingSheetModel;
+    std::shared_ptr<const DRC_LIBRARY_INPUTS> m_libraryInputs;
     NETLIST*                   m_schematicNetlist;
 
     std::vector<std::shared_ptr<DRC_RULE>>  m_rules;
     bool                                    m_rulesValid;
-    std::vector<DRC_TEST_PROVIDER*>         m_testProviders;
+    // Providers keep mutable board/engine state. Never share them between engines.
+    std::vector<std::unique_ptr<DRC_TEST_PROVIDER>> m_testProviders;
 
     std::vector<int>           m_errorLimits;
     mutable std::mutex         m_errorLimitsMutex;

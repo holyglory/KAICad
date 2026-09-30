@@ -43,7 +43,7 @@ public sealed class WindowsIntegratedUpdateTests
         string evidence = Directory.CreateDirectory(Path.Combine(Environment.GetEnvironmentVariable("KICAD_HOSTED_FIXTURE_EVIDENCE")
             ?? TestContext.TestResultsDirectory!, reconnectMcp ? "windows-integrated-mcp-update" : "windows-integrated-update")).FullName;
         using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(25));
-        try
+        await WindowsFixtureCleanup.PreserveFailuresAsync(async () =>
         {
             DirectoryInfo? repository = new(AppContext.BaseDirectory);
             while (repository is not null && !File.Exists(Path.Combine(repository.FullName, "KiCad.Automation.slnx"))) repository = repository.Parent;
@@ -61,12 +61,15 @@ public sealed class WindowsIntegratedUpdateTests
             await File.WriteAllTextAsync(Path.Combine(evidence, "native-worker.stdout.log"), worker.Output, deadline.Token);
             await File.WriteAllTextAsync(Path.Combine(evidence, "native-worker.stderr.log"), worker.Error, deadline.Token);
             Assert.AreEqual(0, worker.ExitCode, "The native update worker failed; inspect its result and retained cleanup evidence.");
-        }
-        finally
+        }, async () =>
         {
             foreach (string file in Directory.GetFiles(evidence, "*", SearchOption.AllDirectories)) TestContext.AddResultFile(file);
+            // The two known project roots own their separate native Git
+            // history. Do not search arbitrary descendants for read-only data.
+            await WindowsFixtureCleanup.RemoveOwnedTemporaryProjectAsync(scratch, "first");
+            await WindowsFixtureCleanup.RemoveOwnedTemporaryProjectAsync(scratch, "second");
             await WindowsFixtureCleanup.RemoveOwnedTemporaryDirectoryAsync(scratch);
-        }
+        });
     }
 
     private async Task RunNativeAsync(bool reconnectMcp, string scratch)

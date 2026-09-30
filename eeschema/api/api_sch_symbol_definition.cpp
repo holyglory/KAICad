@@ -370,7 +370,14 @@ std::unique_ptr<LIB_SYMBOL> UnpackSymbolDefinition(
         for( const SchematicBodyStyle& bodyStyle : def.body_style() )
             bodyStyleNames.emplace_back( wxString::FromUTF8( bodyStyle.name() ) );
 
-        libSymbol->SetBodyStyleNames( bodyStyleNames );
+        // A single native body style has no persisted name. Its display
+        // description is "?"; storing that placeholder as an explicit name
+        // makes an otherwise unchanged definition differ from its cache.
+        if( def.demorgan_body_styles()
+            || ( bodyStyleNames.size() == 1 && bodyStyleNames.front() == wxS( "?" ) ) )
+            libSymbol->SetBodyStyleNames( {} );
+        else
+            libSymbol->SetBodyStyleNames( bodyStyleNames );
         libSymbol->SetBodyStyleCount( static_cast<int>( bodyStyleNames.size() ), false, false );
     }
     libSymbol->SetHasDeMorganBodyStyles( def.demorgan_body_styles() );

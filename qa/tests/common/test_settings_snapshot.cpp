@@ -41,9 +41,118 @@ public:
     bool Dirty() const { return m_modified; }
     int value = 3;
 };
+
+class DELTA_ROOT : public JSON_SETTINGS
+{
+public:
+    DELTA_ROOT() : JSON_SETTINGS( "delta-fixture", SETTINGS_LOC::NONE, 0, false, false, false )
+    {
+        m_params.emplace_back( new PARAM<int>( "first", &first, 1 ) );
+        m_params.emplace_back( new PARAM<int>( "unrelated", &unrelated, 9 ) );
+        m_params.emplace_back( new PARAM_LAMBDA<int>( "last", [this]() { return last; },
+            [this]( int value )
+            {
+                ++setterCalls;
+                last = value;
+                if( value == reject ) throw std::runtime_error( "fixture setter failure after writing" );
+                if( value == coerce ) last = 0;
+            }, 2 ) );
+    }
+    int first = 1, last = 2, unrelated = 9;
+    int reject = -1, coerce = -1, setterCalls = 0;
+};
 }
 
 BOOST_AUTO_TEST_SUITE( SettingsSnapshot )
+
+BOOST_AUTO_TEST_CASE( DeltaPreservesUnrelatedOwnersAndStoresAndSupportsUndoRedo )
+{
+    SNAPSHOT_ROOT root; SNAPSHOT_CHILD child( &root, "design" );
+    SNAPSHOT_CHILD grandchild( &child, "formatting" );
+    child.Set<int>( "shared", 99 ); // Stale child-store copy must not override the parent owner.
+    root.Set<int>( "unknown.extension", 19 );
+    const auto before = root.CaptureCurrentState();
+    root.value = 7; root.shared = 11; grandchild.value = 13;
+    const auto after = root.CaptureCurrentState();
+    root.value = 1; root.shared = 5; grandchild.value = 3;
+    child.value = 17; // Unrelated edit made after the draft was captured.
+    const auto live = root.CaptureCurrentState();
+    const auto store = static_cast<const nlohmann::json&>( *root.Internals() );
+    const auto nestedStore = static_cast<const nlohmann::json&>( *child.Internals() );
+    auto expected = after; expected["design"]["value"] = 17;
+    root.ApplyCurrentStateDelta( before, after );
+    BOOST_CHECK( root.CaptureCurrentState() == expected );
+    root.ApplyCurrentStateDelta( after, before );
+    BOOST_CHECK( root.CaptureCurrentState() == live );
+    root.ApplyCurrentStateDelta( before, after );
+    BOOST_CHECK( root.CaptureCurrentState() == expected );
+    BOOST_CHECK( static_cast<const nlohmann::json&>( *root.Internals() ) == store );
+    BOOST_CHECK( static_cast<const nlohmann::json&>( *child.Internals() ) == nestedStore );
+    BOOST_CHECK( !root.Dirty() && !child.Dirty() && !grandchild.Dirty() );
+}
+
+BOOST_AUTO_TEST_CASE( DeltaRejectsUnownedOrStaleChangesBeforeAnySetter )
+{
+    DELTA_ROOT root;
+    const auto before = root.CaptureCurrentState();
+    auto after = before; after["first"] = 3; after["last"] = 4;
+    root.first = 5;
+    const auto live = root.CaptureCurrentState();
+    BOOST_CHECK_THROW( root.ApplyCurrentStateDelta( before, after ), std::runtime_error );
+    BOOST_CHECK( root.CaptureCurrentState() == live );
+    BOOST_CHECK_EQUAL( root.setterCalls, 0 );
+    root.first = 1;
+    auto unowned = after; unowned["unknown"] = 8;
+    BOOST_CHECK_THROW( root.ApplyCurrentStateDelta( before, unowned ), std::runtime_error );
+    auto missing = after; missing.erase( "last" );
+    BOOST_CHECK_THROW( root.ApplyCurrentStateDelta( before, missing ), std::runtime_error );
+    auto schema = after; schema["meta"]["version"] = 100;
+    BOOST_CHECK_THROW( root.ApplyCurrentStateDelta( before, schema ), std::runtime_error );
+    BOOST_CHECK( root.CaptureCurrentState() == before );
+    BOOST_CHECK_EQUAL( root.setterCalls, 0 );
+    root.ApplyCurrentStateDelta( before, before );
+    BOOST_CHECK_EQUAL( root.setterCalls, 0 );
+}
+
+BOOST_AUTO_TEST_CASE( DeltaRestoresEarlierAndThrowingSettersAndRejectsSilentCoercion )
+{
+    DELTA_ROOT root; SNAPSHOT_CHILD child( &root, "nested" );
+    const auto before = root.CaptureCurrentState();
+    const auto store = static_cast<const nlohmann::json&>( *root.Internals() );
+    auto after = before; after["first"] = 3; after["last"] = 4; after["nested"]["value"] = 7;
+    root.reject = 4;
+    BOOST_CHECK_THROW( root.ApplyCurrentStateDelta( before, after ), std::runtime_error );
+    BOOST_CHECK( root.CaptureCurrentState() == before );
+    BOOST_CHECK_EQUAL( root.setterCalls, 2 );
+    root.reject = -1; root.coerce = 4;
+    BOOST_CHECK_THROW( root.ApplyCurrentStateDelta( before, after ), std::runtime_error );
+    BOOST_CHECK( root.CaptureCurrentState() == before );
+    root.coerce = -1;
+    root.ApplyCurrentStateDelta( before, after );
+    BOOST_CHECK( root.CaptureCurrentState() == after );
+    BOOST_CHECK( static_cast<const nlohmann::json&>( *root.Internals() ) == store );
+}
+
+BOOST_AUTO_TEST_CASE( DetachedCopyPreservesSourceStoresAndOwnsNestedValues )
+{
+    SNAPSHOT_ROOT source; SNAPSHOT_CHILD child( &source, "design" );
+    SNAPSHOT_CHILD grandchild( &child, "formatting" );
+    source.value = 23; child.value = 45; grandchild.value = 67;
+    source.Set<int>( "unknown.extension", 19 );
+    const auto stored = static_cast<const nlohmann::json&>( *source.Internals() );
+    const auto nestedStored = static_cast<const nlohmann::json&>( *child.Internals() );
+    const auto before = source.CaptureCurrentState();
+    SNAPSHOT_ROOT target; SNAPSHOT_CHILD targetChild( &target, "design" );
+    SNAPSHOT_CHILD targetGrandchild( &targetChild, "formatting" );
+    source.CopyCurrentStateTo( target );
+    BOOST_CHECK( target.CaptureCurrentState() == before );
+    target.value = 101; targetChild.value = 103; targetGrandchild.value = 107;
+    BOOST_CHECK( source.CaptureCurrentState() == before );
+    BOOST_CHECK( static_cast<const nlohmann::json&>( *source.Internals() ) == stored );
+    BOOST_CHECK( static_cast<const nlohmann::json&>( *child.Internals() ) == nestedStored );
+    source.fail = true;
+    BOOST_CHECK_THROW( source.CopyCurrentStateTo( target ), std::runtime_error );
+}
 
 BOOST_AUTO_TEST_CASE( CapturesLiveNestedValuesWithoutWritingAnyStoreOrDirtyFlag )
 {

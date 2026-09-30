@@ -25,6 +25,7 @@
 #include <sch_edit_frame.h>
 #include <wildcards_and_files_ext.h>
 #include <sch_commit.h>
+#include <api/api_sch_state_groups.h>
 #include <sch_sheet_path.h>
 #include <sch_symbol.h>
 #include <sch_reference_list.h>
@@ -87,17 +88,22 @@ void SCH_EDITOR_CONTROL::AssignFootprints( const std::string& aChangedSetOfRefer
                     // symbol (even though it lists these instances separately).
                     wxString        oldfp = refs[ii].GetFootprint();
                     SCH_FIELD*      footprintField = symbol->GetField( FIELD_T::FOOTPRINT );
+                    bool            hide = oldfp.IsEmpty() && footprintField->IsVisible();
 
-                    if( oldfp.IsEmpty() && footprintField->IsVisible() )
-                        footprintField->SetVisible( false );
-
-                    if( oldfp != footprint )
+                    // Hiding an empty footprint field is a saved change too, so stage it in the
+                    // same undoable commit instead of editing the field before the commit copy.
+                    if( hide || oldfp != footprint )
                     {
                         isChanged = true;
                         SCH_SCREEN* screen = refs[ii].GetSheetPath().LastScreen();
 
                         commit.Modify( symbol, screen, RECURSE_MODE::NO_RECURSE );
-                        footprintField->SetText( footprint );
+
+                        if( hide )
+                            footprintField->SetVisible( false );
+
+                        if( oldfp != footprint )
+                            footprintField->SetText( footprint );
                     }
                 }
             }
@@ -227,6 +233,10 @@ int SCH_EDITOR_CONTROL::ImportFPAssignments( const TOOL_EVENT& aEvent )
     bool forceVisibility = (choiceDlg.GetSelection() != 0 );
     bool visibilityState = (choiceDlg.GetSelection() == 1 );
 
+    // The link file edits footprint fields directly.  Compare the persisted state so that
+    // importing assignments the schematic already has is not reported as a design edit.
+    SCH_TRACKED_CHANGE change( m_frame->Schematic(), "Import Footprint Assignments" );
+
     if( !processCmpToFootprintLinkFile( filename, forceVisibility, visibilityState ) )
     {
         wxString msg = wxString::Format( _( "Failed to open symbol-footprint link file '%s'." ),
@@ -236,8 +246,12 @@ int SCH_EDITOR_CONTROL::ImportFPAssignments( const TOOL_EVENT& aEvent )
         return 0;
     }
 
-    m_frame->SyncView();
-    m_frame->GetCanvas()->Refresh();
-    m_frame->OnModify();
+    if( change.Complete() )
+    {
+        m_frame->SyncView();
+        m_frame->GetCanvas()->Refresh();
+        m_frame->OnModify();
+    }
+
     return 0;
 }

@@ -1,0 +1,537 @@
+using System.Text;
+using Google.Protobuf.WellKnownTypes;
+using Kiapi.Schematic.Types;
+using KiCad.Automation.Model;
+using KiCad.Automation.Native;
+using KiCad.Automation.Protocol;
+
+namespace KiCad.Automation.Tests;
+
+[TestClass]
+public sealed class SchematicNetReconciliationTests
+{
+    internal static DesignRecoveryState Fixture()
+    {
+        var f = SchematicElectricalComparisonTests.Fixture();
+        var statement = f.Design.Engineering.Structure.Statements[0] with
+        { TargetId = f.Design.Engineering.Circuit.Nets[0].Id, Text = " Preserve supply requirements\r\nwithout guessing.",
+            Sources = [new("datasheet", "B", 9, "limits", "industrial")] };
+        var design = f.Design with { Engineering = f.Design.Engineering with
+        { Structure = f.Design.Engineering.Structure with { Statements = [statement, f.Design.Engineering.Structure.Statements[1]] } } };
+        return new(Guid.NewGuid(), Guid.NewGuid(), new(f.State.Hierarchy.Revision.Epoch, f.State.Hierarchy.Revision.Sequence), false,
+            design, Encoding.UTF8.GetBytes(SchematicDesignXml.Write(design, [f.Library])), f.State.Hierarchy.Data.Clone(), [f.Library],
+            BaselineElectrical: f.State.Clone(), ObservedElectrical: f.State.Clone());
+    }
+
+    internal static DesignRecoveryState Desired(DesignRecoveryState state, EngineeringDesign desired) => state with
+    { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(state.Baseline with { Engineering = desired }, state.KnowledgeLibraries)) };
+
+    internal static DesignRecoveryState NativeGroups(DesignRecoveryState state, params PinEndpoint[][] groups)
+    {
+        var native = state.ObservedElectrical!.Clone(); native.Hierarchy.Revision.Sequence++; native.Nets.Clear();
+        foreach (var group in groups)
+        {
+            var net = new SchematicNet { Name = "Observed " + native.Nets.Count };
+            var sheets = new Dictionary<string, SchematicNetSheetContents>();
+            foreach (var endpoint in group)
+            {
+                var component = state.Baseline.Engineering.Circuit.Components.Single(c => c.Id == endpoint.ComponentId);
+                var binding = state.Baseline.SheetBindings.Single(s => s.SheetInstanceId == component.SheetInstanceId);
+                string path = string.Join('/', binding.NativePath.Select(id => id.ToString("D")));
+                var screen = native.Hierarchy.Data.Instances.Single(s => string.Join('/', s.Metadata.Document.SheetPath.Path.Select(p => p.Value)) == path);
+                if (!sheets.TryGetValue(path, out var contents)) sheets.Add(path, contents = new() { Path = screen.Metadata.Document.SheetPath.Clone() });
+                foreach (var occurrence in state.Baseline.Engineering.Circuit.Symbols.Where(s => s.ComponentId == component.Id))
+                {
+                    string id = state.Baseline.SymbolBindings.Single(s => s.SymbolOccurrenceId == occurrence.Id).NativeObjectId.ToString("D");
+                    var symbol = screen.Items.Where(p => p.Is(SchematicSymbolInstance.Descriptor)).Select(p => p.Unpack<SchematicSymbolInstance>()).Single(s => s.Id.Value == id);
+                    foreach (var pin in symbol.Definition.Items.Select(c => c.Item.Unpack<SchematicPin>()).Where(p => p.Number == endpoint.Pin))
+                        contents.Items.Add(pin.Id.Clone());
+                }
+            }
+            net.Sheets.Add(sheets.OrderBy(s => s.Key, StringComparer.Ordinal).Select(s => s.Value)); native.Nets.Add(net);
+        }
+        return state with { Observed = native.Hierarchy.Data.Clone(), ObservedElectrical = native,
+            NativeRevision = new(native.Hierarchy.Revision.Epoch, native.Hierarchy.Revision.Sequence) };
+    }
+
+    // The PSU/CPU fixture's Components stage as the editor holds it once created, saved, reloaded and reattached (the
+    // settled plan of the rendered PSU/CPU creation journey): every part placed from the frozen definitions, no net in the
+    // XML, and the native snapshot as KiCad shows it, where the LP3982 U2 joins the pins 1 and 4 it draws at one point
+    // (decision kicad-stacked-pins-one-node-20260924). Pins in <paramref name="wired"/> are also connected to that native
+    // net since the baseline, as a wire drawn in KiCad would connect them.
+    private static (DesignRecoveryState State, Func<string, string, PinEndpoint> Pin) PsuCpuSettled(params (string Reference, string Number)[] wired)
+        => PsuCpuState(null, [], wired);
+
+    // The same settled editor with the XML net LDO_SENSE holding <paramref name="xmlNet"/> in both the baseline and the
+    // desired XML (none when null). KiCad's net of the stacked U2 pins also holds <paramref name="baselineWired"/> in the
+    // saved baseline and <paramref name="observedWired"/> now.
+    private static (DesignRecoveryState State, Func<string, string, PinEndpoint> Pin) PsuCpuState((string Reference, string Number)[]? xmlNet,
+        (string Reference, string Number)[] baselineWired, (string Reference, string Number)[] observedWired)
+    {
+        var (sheets, components) = SchematicNativeCreationProjectionTests.PsuCpuComponents();
+        var typed = components with { PartSymbols = SchematicSynchronizationPlanTests.WithLibraryPinTypes(components.PartSymbols!) };
+        var placed = SchematicNativeCreationProjection.Project(sheets, typed, []).Candidate;
+        var circuit = placed.Engineering.Circuit;
+        var owners = circuit.Components.ToDictionary(c => c.Id);
+        var references = circuit.Components.ToDictionary(c => c.Reference, c => c.Id);
+        PinEndpoint Pin(string reference, string number) => new(references[reference], number);
+        if (xmlNet is not null)
+            placed = placed with { Engineering = placed.Engineering with { Circuit = circuit with
+                { Nets = [new(Guid.Parse("5d0e7f3c-2b41-4c8a-9e6d-1f2a3b4c5d6e"), "LDO_SENSE", [.. xmlNet.Select(p => Pin(p.Reference, p.Number))])] } } };
+        SchematicNet Net(IEnumerable<(string Reference, string Number)> pins)
+        {
+            var net = new SchematicNet { Name = "Net-(U2-OUT-Pad1)" };
+            var contents = new SortedDictionary<string, SchematicNetSheetContents>(StringComparer.Ordinal);
+            foreach (var (reference, number) in pins)
+            foreach (var occurrence in circuit.Symbols.Where(s => s.ComponentId == references[reference]))
+            {
+                var path = placed.SheetBindings.Single(b => b.SheetInstanceId == occurrence.EffectiveSheetInstanceId(owners[occurrence.ComponentId])).NativePath;
+                string key = string.Join('/', path.Select(id => id.ToString("D")));
+                var screen = placed.Schematic.Instances.Single(i => string.Join('/', i.Metadata.Document.SheetPath.Path.Select(p => p.Value)) == key);
+                string native = placed.SymbolBindings.Single(b => b.SymbolOccurrenceId == occurrence.Id).NativeObjectId.ToString("D");
+                var symbol = screen.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>()).Single(s => s.Id.Value == native);
+                foreach (var child in symbol.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)
+                    && !(c.Unit?.Unit is > 0 && c.Unit.Unit != occurrence.Unit)))
+                {
+                    var pin = child.Item.Unpack<SchematicPin>();
+                    if (pin.LibraryPinId is null || pin.Number != number) continue;
+                    if (!contents.TryGetValue(key, out var sheet)) contents.Add(key, sheet = new() { Path = screen.Metadata.Document.SheetPath.Clone() });
+                    sheet.Items.Add(pin.Id.Clone());
+                }
+            }
+            net.Sheets.Add(contents.Values);
+            return net;
+        }
+        (string, string)[] stacked = [("U2", "1"), ("U2", "4")];
+        var baseline = new SchematicElectricalState { Hierarchy = new() { Data = placed.Schematic.Clone(),
+            Revision = new() { Epoch = "psu-cpu-settled", Sequence = 7 }, TrackingComplete = false } };
+        baseline.Nets.Add(Net([.. stacked, .. baselineWired]));
+        var observed = baseline.Clone(); observed.Hierarchy.Revision.Sequence = 8;
+        observed.Nets.Clear(); observed.Nets.Add(Net([.. stacked, .. observedWired]));
+        return (new(Guid.NewGuid(), Guid.NewGuid(), new("psu-cpu-settled", 8), false, placed,
+            Encoding.UTF8.GetBytes(SchematicDesignXml.Write(placed, [])), observed.Hierarchy.Data.Clone(), [],
+            BaselineElectrical: baseline, ObservedElectrical: observed), Pin);
+    }
+
+    // After save, reload and reattach, the native observation shows KiCad's join of U2's stacked pins although the XML leaves
+    // them unconnected. That join is not a native edit: the plan keeps the published XML exactly and adds no generated net
+    // (ledger p1c0985fabea9cbbe; before, it added "Net-(U2-OUT-Pad1)" holding exactly U2.1 and U2.4).
+    [TestMethod]
+    public void KiCadsJoinOfStackedPinsAddsNoNet()
+    {
+        var (state, pin) = PsuCpuSettled();
+        var before = SchematicElectricalComparison.Compare(state.Baseline, state.BaselineElectrical!, state.KnowledgeLibraries);
+        Assert.IsTrue(before.PinBindingsComplete && before.ConnectivityEquivalent, "KiCad's join is exactly what the XML describes.");
+        CollectionAssert.AreEquivalent(new[] { pin("U2", "1"), pin("U2", "4") }, before.StackedPins!.Single().ToArray());
+        var result = SchematicNetReconciliation.Plan(state);
+        Assert.IsNotNull(result.Candidate, result.ErrorCode + ": " + result.ErrorMessage);
+        Assert.IsEmpty(result.Candidate.Circuit.Nets, "KiCad's join of the stacked pins must not become a generated net.");
+        Assert.AreEqual(EngineeringDesignXml.Write(state.Baseline.Engineering, []), EngineeringDesignXml.Write(result.Candidate, []));
+        Assert.IsEmpty(result.NetChanges); Assert.IsEmpty(result.Conflicts);
+        Assert.IsTrue(SchematicElectricalComparison.Compare(state.Baseline with { Engineering = result.Candidate }, state.ObservedElectrical!, [])
+            .ConnectivityEquivalent);
+    }
+
+    // An XML net that names only one of the stacked pins keeps its identity and exactly its own pins: KiCad's join brings the
+    // other stacked pin into that net natively, and the net is found by the pins KiCad joins to it rather than reissued
+    // under a generated identity. Here the XML connects U2.1 to U3.1 and the editor shows the same connection.
+    [TestMethod]
+    public void XmlNetOnOneStackedPinKeepsItsIdentityAndPins()
+    {
+        var (state, pin) = PsuCpuSettled(("U3", "1"));
+        var circuit = state.Baseline.Engineering.Circuit;
+        var named = new CircuitNet(Guid.NewGuid(), "LDO_SENSE", [pin("U2", "1"), pin("U3", "1")]);
+        var desired = state.Baseline.Engineering with { Circuit = circuit with { Nets = [named] } };
+        state = Desired(state, desired);
+        Assert.IsTrue(SchematicElectricalComparison.Compare(state.Baseline, state.BaselineElectrical!, []).ConnectivityEquivalent);
+        var result = SchematicNetReconciliation.Plan(state);
+        Assert.IsNotNull(result.Candidate, result.ErrorCode + ": " + result.ErrorMessage);
+        Assert.AreEqual(EngineeringDesignXml.Write(desired, []), EngineeringDesignXml.Write(result.Candidate, []));
+        CollectionAssert.AreEquivalent(new[] { pin("U2", "1"), pin("U3", "1") }, result.Candidate.Circuit.Nets.Single().Pins.ToArray());
+        Assert.IsEmpty(result.NetChanges); Assert.IsEmpty(result.Conflicts);
+        Assert.IsTrue(SchematicElectricalComparison.Compare(state.Baseline with { Engineering = result.Candidate }, state.ObservedElectrical!, [])
+            .ConnectivityEquivalent, "The kept net is exactly what the editor shows once KiCad joins U2.4 to it.");
+    }
+
+    // Precision: a real native connection of the stacked pins to another pin is a native edit, reconciled as one generated
+    // net holding all three pins under KiCad's own net name, as for any native join.
+    [TestMethod]
+    public void RealNativeConnectionOfStackedPinsIsStillReconciled()
+    {
+        var (state, pin) = PsuCpuSettled(("U3", "1"));
+        var result = SchematicNetReconciliation.Plan(state);
+        Assert.IsNotNull(result.Candidate, result.ErrorCode + ": " + result.ErrorMessage);
+        var added = result.Candidate.Circuit.Nets.Single();
+        CollectionAssert.AreEquivalent(new[] { pin("U2", "1"), pin("U2", "4"), pin("U3", "1") }, added.Pins.ToArray());
+        Assert.AreEqual("Net-(U2-OUT-Pad1)", added.Name);
+        Assert.IsEmpty(result.NetChanges); Assert.IsEmpty(result.Conflicts);
+    }
+
+    // The settled plan when the XML already connects one of the stacked pins: the baseline and the desired XML both hold
+    // LDO_SENSE (U2.1 and U3.1), and KiCad showed and still shows that net with U2.4 joined. Nothing changed, so the
+    // candidate is exactly the XML and no net identity moves.
+    [TestMethod]
+    public void SettledXmlNetOnOneStackedPinStaysExactlyTheXml()
+    {
+        var (state, pin) = PsuCpuState([("U2", "1"), ("U3", "1")], [("U3", "1")], [("U3", "1")]);
+        var net = state.Baseline.Engineering.Circuit.Nets.Single();
+        Assert.IsTrue(SchematicElectricalComparison.Compare(state.Baseline, state.BaselineElectrical!, []).ConnectivityEquivalent,
+            "KiCad's net with U2.4 joined is exactly what the XML describes.");
+        var result = SchematicNetReconciliation.Plan(state);
+        Assert.IsNotNull(result.Candidate, result.ErrorCode + ": " + result.ErrorMessage);
+        Assert.AreEqual(EngineeringDesignXml.Write(state.Baseline.Engineering, []), EngineeringDesignXml.Write(result.Candidate, []));
+        var kept = result.Candidate.Circuit.Nets.Single();
+        Assert.AreEqual(net.Id, kept.Id); Assert.AreEqual(net.Name, kept.Name);
+        CollectionAssert.AreEqual(new[] { pin("U2", "1"), pin("U3", "1") }, kept.Pins.ToArray());
+        Assert.IsEmpty(result.NetChanges); Assert.IsEmpty(result.Conflicts);
+    }
+
+    // Decided result for a real native edit on such a net: deleting LDO_SENSE's wire in KiCad (U2.1 no longer reaches U3.1)
+    // splits it as any native split does (NativeSplitCreatesStableNewIdsAndRetainsRequirementsUnresolved). Each native group
+    // becomes a generated net as KiCad shows it: U2.1 with the U2.4 it stacks, under KiCad's net name, and U3.1 alone.
+    // LDO_SENSE is retired as a split whose binding needs resolution. Generated nets always hold KiCad's groups, stacked pins
+    // included (as in RealNativeConnectionOfStackedPinsIsStillReconciled); naming U2.1 without U2.4 is equivalent under the
+    // one-node rule (decision kicad-stacked-pins-one-node-20260924) but would describe less than the connection KiCad draws.
+    [TestMethod]
+    public void DeletedWireOfAStackedPinsNetSplitsAsKiCadShowsIt()
+    {
+        var (state, pin) = PsuCpuState([("U2", "1"), ("U3", "1")], [("U3", "1")], []);
+        var retired = state.Baseline.Engineering.Circuit.Nets.Single();
+        var result = SchematicNetReconciliation.Plan(state);
+        Assert.IsNotNull(result.Candidate, result.ErrorCode + ": " + result.ErrorMessage);
+        var nets = result.Candidate.Circuit.Nets;
+        Assert.HasCount(2, nets);
+        Assert.IsFalse(nets.Any(n => n.Id == retired.Id));
+        var joined = nets.Single(n => n.Pins.Contains(pin("U2", "1")));
+        CollectionAssert.AreEquivalent(new[] { pin("U2", "1"), pin("U2", "4") }, joined.Pins.ToArray());
+        Assert.AreEqual("Net-(U2-OUT-Pad1)", joined.Name);
+        var alone = nets.Single(n => n.Id != joined.Id);
+        CollectionAssert.AreEqual(new[] { pin("U3", "1") }, alone.Pins.ToArray());
+        var change = result.NetChanges.Single();
+        Assert.AreEqual(retired.Id, change.FormerNetId);
+        Assert.AreEqual(NetBindingChangeKind.Split, change.Change);
+        CollectionAssert.AreEquivalent(new[] { joined.Id, alone.Id }, change.CandidateNetIds.ToArray());
+        Assert.IsEmpty(result.Conflicts);
+        Assert.IsTrue(SchematicElectricalComparison.Compare(state.Baseline with { Engineering = result.Candidate }, state.ObservedElectrical!, [])
+            .ConnectivityEquivalent, "The candidate is exactly what the editor shows after the wire was deleted.");
+    }
+
+    [TestMethod]
+    public void NoChangePreservesExactDesiredIdentityAndSemanticNames()
+    {
+        var state = Fixture();
+        var desired = state.Baseline.Engineering with { Circuit = state.Baseline.Engineering.Circuit with
+        { Nets = state.Baseline.Engineering.Circuit.Nets.Select(n => n with { Name = "Desired semantic label" }).ToArray() } };
+        state = Desired(state, desired);
+        var result = SchematicNetReconciliation.Plan(state);
+        Assert.IsNotNull(result.Candidate, result.ErrorMessage);
+        Assert.AreEqual(EngineeringDesignXml.Write(desired, state.KnowledgeLibraries), EngineeringDesignXml.Write(result.Candidate, state.KnowledgeLibraries));
+        Assert.IsEmpty(result.NetChanges); Assert.IsEmpty(result.Conflicts);
+    }
+
+    [TestMethod]
+    public void NativeSplitCreatesStableNewIdsAndRetainsRequirementsUnresolved()
+    {
+        var state = Fixture(); var old = state.Baseline.Engineering.Circuit.Nets.Single();
+        state = NativeGroups(state, [old.Pins[0]], [old.Pins[1]]);
+        string input = SchematicDesignXml.Write(state.Baseline, state.KnowledgeLibraries);
+        var result = SchematicNetReconciliation.Plan(state); Assert.IsNotNull(result.Candidate, result.ErrorMessage);
+        Assert.AreEqual(2, result.Candidate.Circuit.Nets.Count);
+        Assert.IsFalse(result.Candidate.Circuit.Nets.Any(n => n.Id == old.Id));
+        Assert.AreEqual(NetBindingChangeKind.Split, result.NetChanges.Single().Change);
+        Assert.AreEqual(2, result.Candidate.Structure.UnresolvedNetBindings!.Count);
+        foreach (var expected in state.Baseline.Engineering.Structure.Statements)
+        {
+            var actual = result.Candidate.Structure.Statements.Single(s => s.Id == expected.Id);
+            Assert.AreEqual(expected.TargetId, actual.TargetId);
+            Assert.AreEqual(expected.Role, actual.Role); Assert.AreEqual(expected.Strength, actual.Strength);
+            Assert.AreEqual(expected.Text, actual.Text); Assert.AreEqual(expected.Connection, actual.Connection);
+            CollectionAssert.AreEquivalent(expected.DerivedFrom.ToArray(), actual.DerivedFrom.ToArray());
+            CollectionAssert.AreEquivalent(expected.Sources.ToArray(), actual.Sources.ToArray());
+        }
+        Assert.IsTrue(SchematicElectricalComparison.Compare(state.Baseline with { Engineering = result.Candidate }, state.ObservedElectrical!, state.KnowledgeLibraries).ConnectivityEquivalent);
+        string candidate = EngineeringDesignXml.Write(result.Candidate, state.KnowledgeLibraries);
+        Assert.AreEqual(candidate, EngineeringDesignXml.Write(SchematicNetReconciliation.Plan(state).Candidate!, state.KnowledgeLibraries));
+        var reversed = state.ObservedElectrical!.Clone(); var nets = reversed.Nets.Reverse().ToArray(); reversed.Nets.Clear(); reversed.Nets.Add(nets);
+        Assert.AreEqual(candidate, EngineeringDesignXml.Write(SchematicNetReconciliation.Plan(state with { ObservedElectrical = reversed }).Candidate!, state.KnowledgeLibraries));
+        Assert.AreEqual(input, SchematicDesignXml.Write(state.Baseline, state.KnowledgeLibraries));
+    }
+
+    // Isolated rule of keep-and-replan (kicad_design_recovery_resolve_pending, ledger p0aa59a1dfc8701ea): for a result KiCad
+    // committed and the person keeps, KiCad's connections win. The native journey behind
+    // NativeSessionTests.DeletedNativeSheetsRebuildFromXmlWithoutLoss keeps results whose connections are the XML's; a genuine
+    // difference cannot be drawn there without changing the frozen PSU/CPU partition, so the rules are checked here.
+    [TestMethod]
+    public void KeptResultTakesKiCadsConnectionsAndReportsTheNetsItChanged()
+    {
+        var state = Fixture(); var circuit = state.Baseline.Engineering.Circuit; var old = circuit.Nets.Single();
+        var a = circuit.Components[0].Id; var b = circuit.Components[1].Id;
+        string Write(EngineeringDesign design) => EngineeringDesignXml.Write(design, state.KnowledgeLibraries);
+        // Connections as the design says: the design is kept exactly.
+        var same = SchematicNetReconciliation.PlanKept(state.Baseline, state.ObservedElectrical!, state.OriginId, state.KnowledgeLibraries);
+        Assert.IsNotNull(same.Candidate, same.ErrorMessage);
+        Assert.AreEqual(Write(state.Baseline.Engineering), Write(same.Candidate));
+        Assert.IsEmpty(same.NetChanges);
+
+        // KiCad splits the design's net and joins two pins no net names.
+        var kicad = NativeGroups(state, [old.Pins[0]], [old.Pins[1]], [new(a, "7"), new(b, "7")]);
+        var design = state.Baseline with { Schematic = kicad.Observed };
+        var kept = SchematicNetReconciliation.PlanKept(design, kicad.ObservedElectrical!, state.OriginId, state.KnowledgeLibraries);
+        Assert.IsNotNull(kept.Candidate, kept.ErrorMessage);
+        var change = kept.NetChanges.Single();
+        Assert.AreEqual(old.Id, change.FormerNetId);
+        Assert.AreEqual(NetBindingChangeKind.Split, change.Change);
+        Assert.IsFalse(kept.Candidate.Circuit.Nets.Any(n => n.Id == old.Id), "The split net is no longer the design's net.");
+        Assert.AreEqual(3, kept.Candidate.Circuit.Nets.Count);
+        var joined = kept.Candidate.Circuit.Nets.Single(n => n.Pins.Contains(new(a, "7")));
+        CollectionAssert.AreEquivalent(new PinEndpoint[] { new(a, "7"), new(b, "7") }, joined.Pins.ToArray());
+        Assert.AreEqual("Observed 2", joined.Name, "A net KiCad made is named as KiCad names it.");
+        Assert.IsTrue(kept.Candidate.Structure.HasUnresolvedNetBindings, "Requirements on the split net wait for explicit resolution.");
+        Assert.IsTrue(SchematicElectricalComparison.Compare(design with { Engineering = kept.Candidate }, kicad.ObservedElectrical!,
+            state.KnowledgeLibraries).ConnectivityEquivalent, "The kept design describes KiCad's connections.");
+        Assert.AreEqual(Write(kept.Candidate), Write(SchematicNetReconciliation.PlanKept(design, kicad.ObservedElectrical!, state.OriginId,
+            state.KnowledgeLibraries).Candidate!), "Generated identities are stable.");
+    }
+
+    [TestMethod]
+    public void NativeJoinAndIndependentXmlJoinBothSurvive()
+    {
+        var state = Fixture(); var circuit = state.Baseline.Engineering.Circuit;
+        var a = circuit.Components[0].Id; var b = circuit.Components[1].Id;
+        var desiredNet = new CircuitNet(Guid.NewGuid(), "XML connection", [new(a, "1"), new(b, "1")]);
+        state = Desired(state, state.Baseline.Engineering with { Circuit = circuit with { Nets = [.. circuit.Nets, desiredNet] } });
+        state = NativeGroups(state, circuit.Nets[0].Pins.ToArray(), [new(a, "7"), new(b, "7")]);
+        var result = SchematicNetReconciliation.Plan(state); Assert.IsNotNull(result.Candidate, result.ErrorMessage);
+        Assert.AreEqual(3, result.Candidate.Circuit.Nets.Count);
+        var preserved = result.Candidate.Circuit.Nets.Single(n => n.Id == desiredNet.Id);
+        Assert.AreEqual(desiredNet.Name, preserved.Name);
+        CollectionAssert.AreEquivalent(desiredNet.Pins.ToArray(), preserved.Pins.ToArray());
+        Assert.IsTrue(result.Candidate.Circuit.Nets.Any(n => n.Pins.Contains(new(a, "7")) && n.Pins.Contains(new(b, "7"))));
+        Assert.IsEmpty(result.NetChanges);
+    }
+
+    [TestMethod]
+    public void ConvergentExplicitXmlSplitKeepsItsSelectedIds()
+    {
+        var state = Fixture(); var circuit = state.Baseline.Engineering.Circuit; var old = circuit.Nets[0];
+        var left = old with { Pins = [old.Pins[0]], Name = "Chosen left" };
+        var right = new CircuitNet(Guid.NewGuid(), "Chosen right", [old.Pins[1]]);
+        state = Desired(state, state.Baseline.Engineering with { Circuit = circuit with { Nets = [left, right] } });
+        state = NativeGroups(state, [old.Pins[0]], [old.Pins[1]]);
+        var result = SchematicNetReconciliation.Plan(state); Assert.IsNotNull(result.Candidate, result.ErrorMessage);
+        CollectionAssert.AreEquivalent(new[] { left.Id, right.Id }, result.Candidate.Circuit.Nets.Select(n => n.Id).ToArray());
+        Assert.IsFalse(result.Candidate.Structure.HasUnresolvedNetBindings);
+        Assert.IsEmpty(result.NetChanges);
+    }
+
+    [TestMethod]
+    public void OverlappingSplitAndJoinReturnsNoPartialCandidate()
+    {
+        var state = Fixture(); var circuit = state.Baseline.Engineering.Circuit; var old = circuit.Nets[0];
+        state = Desired(state, state.Baseline.Engineering with { Circuit = circuit with
+        { Nets = [old with { Pins = [.. old.Pins, new(circuit.Components[0].Id, "1")] }] } });
+        state = NativeGroups(state, [old.Pins[0]], [old.Pins[1]]);
+        byte[] wanted = state.DesiredFileBytes.ToArray();
+        var result = SchematicNetReconciliation.Plan(state);
+        Assert.IsNull(result.Candidate); Assert.IsNotEmpty(result.Conflicts); Assert.IsEmpty(result.NetChanges);
+        CollectionAssert.AreEqual(wanted, state.DesiredFileBytes);
+    }
+
+    [TestMethod]
+    public void MissingBaselinePendingMutationChangedOwnershipAndInvalidXmlStayUnresolved()
+    {
+        var state = Fixture();
+        Assert.AreEqual("missing_electrical_baseline", SchematicNetReconciliation.Plan(state with { BaselineElectrical = null }).ErrorCode);
+        Assert.AreEqual("missing_electrical_observation", SchematicNetReconciliation.Plan(state with { ObservedElectrical = null }).ErrorCode);
+        Assert.AreEqual("pending_recovery_requires_reconciliation", SchematicNetReconciliation.Plan(state with { PendingMutation = DesignRecoveryStoreTests.Mutation(state) }).ErrorCode);
+        Assert.AreEqual("invalid_desired_design", SchematicNetReconciliation.Plan(state with { DesiredFileBytes = [0xff] }).ErrorCode);
+        var desired = state.Baseline.Engineering with { Circuit = state.Baseline.Engineering.Circuit with
+        { Symbols = state.Baseline.Engineering.Circuit.Symbols.Skip(1).ToArray() } };
+        Assert.AreEqual("electrical_ownership_changed", SchematicNetReconciliation.Plan(Desired(state, desired)).ErrorCode);
+        var changed = state.ObservedElectrical!.Clone(); var symbol = changed.Hierarchy.Data.Instances[1].Items.First(p => p.Is(SchematicSymbolInstance.Descriptor));
+        var decoded = symbol.Unpack<SchematicSymbolInstance>(); decoded.Definition.UnitCount++;
+        int index = changed.Hierarchy.Data.Instances[1].Items.IndexOf(symbol); changed.Hierarchy.Data.Instances[1].Items[index] = Any.Pack(decoded);
+        var rebind = SchematicNetReconciliation.Plan(state with
+        { Observed = changed.Hierarchy.Data.Clone(), ObservedElectrical = changed });
+        Assert.AreEqual("native_ownership_resolution_required", rebind.ErrorCode);
+        Assert.IsNotNull(rebind.ResolutionRequests);
+        var request = rebind.ResolutionRequests!.Single(r => r.Code == "native_component_rebind_required");
+        Assert.AreEqual(Guid.Parse(decoded.Id.Value), request.NativeObjectId);
+        Assert.HasCount(1, rebind.ResolutionRequests, "An absent optional part declaration does not change the other native symbols.");
+        Assert.AreEqual(request.ProposedComponentId, request.CandidateComponentIds.Single());
+        Assert.IsTrue(request.CandidatePartIds.Count > 0);
+        Assert.IsNotNull(request.FormerPins); Assert.IsNotNull(request.ReplacementPins);
+        VerifyReplacementAnswerRetention();
+        VerifyMultiUnitReplacementAnswers();
+        Assert.ThrowsExactly<OperationCanceledException>(() => SchematicNetReconciliation.Plan(state, new(true)));
+    }
+
+    private static void VerifyReplacementAnswerRetention()
+    {
+        var baseline = SchematicRebuildTests.Placed();
+        var owner = baseline.Engineering.Circuit.Components.Single(c => c.Reference == "R1");
+        var pinNote = new EngineeringStatement(Guid.NewGuid(), owner.Id, EngineeringStatementRole.Intent,
+            GuidanceStrength.Requirement, "Preserve the exact pin instruction.\r\nDo not infer its replacement.",
+            new(new(owner.Id, "2"), new(owner.Id, "1")), [], [new("datasheet", "B", 9, "pins", "source text")]);
+        baseline = baseline with { Engineering = baseline.Engineering with { Structure = baseline.Engineering.Structure with
+            { Statements = [.. baseline.Engineering.Structure.Statements, pinNote] } } };
+        var occurrence = baseline.Engineering.Circuit.Symbols.Single(s => s.ComponentId == owner.Id);
+        var binding = baseline.SymbolBindings.Single(b => b.SymbolOccurrenceId == occurrence.Id);
+        var path = baseline.SheetBindings.Single(s => s.SheetInstanceId == owner.SheetInstanceId).NativePath;
+        var observed = baseline.Schematic.Clone();
+        var screen = observed.Instances.Single(s => SchematicNativeSheetChanges.Key(s) == SchematicDesignBindings.PathKey(path));
+        int index = screen.Items.ToList().FindIndex(i => i.Is(SchematicSymbolInstance.Descriptor)
+            && i.Unpack<SchematicSymbolInstance>().Id.Value == binding.NativeObjectId.ToString("D"));
+        var replacement = screen.Items[index].Unpack<SchematicSymbolInstance>();
+        replacement.LibraryId.EntryName += "Rebound";
+        var library = replacement.LibraryId.Clone();
+        replacement.Definition.Id = library.Clone(); replacement.LibName = "";
+        foreach (var child in replacement.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)))
+        {
+            var pin = child.Item.Unpack<SchematicPin>();
+            if (pin.Number == "2") pin.Number = "3";
+            child.Item = Any.Pack(pin);
+        }
+        screen.Items[index] = Any.Pack(replacement);
+        // The captured placed definition is enough to bind its pins. No unseen cache is fabricated.
+        var state = SchematicRebuildTests.State(baseline, baseline, observed);
+        state = state with { BaselineElectrical = SymbolSheetOwnershipTests.Isolated(baseline.Schematic, state.BaselineElectrical!.Hierarchy.Revision),
+            ObservedElectrical = SymbolSheetOwnershipTests.Isolated(observed, state.ObservedElectrical!.Hierarchy.Revision) };
+        var plan = SchematicSynchronizationPlanner.Plan(state);
+        Assert.AreEqual(SchematicNativeAdditionProjection.ResolutionRequired, plan.ErrorCode);
+        var request = plan.Electrical!.ResolutionRequests!.Single();
+        Assert.AreEqual(owner.Id, request.FormerComponentId);
+        Assert.IsTrue(request.ReplacementPins!.Any(p => p.Number == "3"));
+        string directory = Directory.CreateTempSubdirectory("rebind-contract-").FullName;
+        try
+        {
+            var store = new DesignRecoveryStore(Path.Combine(directory, "recovery.json"));
+            var saved = store.Save(state, null);
+            var answer = new SchematicOwnershipAnswer(binding.NativeObjectId, request.CandidatePartIds.Single(), owner.Id)
+            { NativePath = path, PinMappings = [new("1", "1"), new("2", "3")] };
+            foreach (var invalid in new[] { answer with { PinMappings = [new("1", "1")] },
+                answer with { PinMappings = [new("1", "1"), new("2", "1")] }, answer with { PartId = Guid.NewGuid() } })
+            {
+                Assert.ThrowsExactly<AutomationException>(() => SchematicNativeRebinding.Retain(store, saved, [invalid], default));
+                Assert.AreEqual(saved.RevisionToken, store.Read()!.RevisionToken);
+            }
+            var chosen = SchematicNativeRebinding.Retain(store, saved, [answer], default);
+            CollectionAssert.AreEqual(state.DesiredFileBytes, chosen.State.DesiredFileBytes);
+            Assert.AreEqual(state.Observed, chosen.State.Observed);
+            var reopened = store.Read()!;
+            Assert.IsNotNull(reopened.State.ComponentRebindResolution);
+            var applied = SchematicSynchronizationPlanner.Plan(reopened.State);
+            Assert.IsTrue(applied.CanPrepare, applied.ErrorCode + ": " + applied.ErrorMessage);
+            Assert.IsEmpty(applied.NativeOperations);
+            Assert.AreEqual(owner, applied.Candidate!.Engineering.Circuit.Components.Single(c => c.Id == owner.Id));
+            Assert.AreEqual(occurrence.Id, applied.Candidate.Engineering.Circuit.Symbols.Single(s => s.ComponentId == owner.Id).Id);
+            Assert.AreEqual(answer.PartId, applied.Candidate.Engineering.Circuit.Sheets.SelectMany(s => s.Components)
+                .Single(d => d.Id == owner.DefinitionId).PartId);
+            Assert.AreEqual(System.Text.Json.JsonSerializer.Serialize(pinNote with { Connection = pinNote.Connection! with { First = new(owner.Id, "3") } }),
+                System.Text.Json.JsonSerializer.Serialize(applied.Candidate.Engineering.Structure.Statements.Single(s => s.Id == pinNote.Id)));
+            var unresolvedStore = new DesignRecoveryStore(Path.Combine(directory, "unresolved.json"));
+            var unresolvedInput = unresolvedStore.Save(state, null);
+            var unresolved = SchematicNativeRebinding.Retain(unresolvedStore, unresolvedInput,
+                [answer with { PinMappings = [new("1", "1"), new("2", null)] }], default);
+            var unresolvedPlan = SchematicSynchronizationPlanner.Plan(unresolved.State);
+            Assert.IsTrue(unresolvedPlan.CanPrepare, unresolvedPlan.ErrorCode + ": " + unresolvedPlan.ErrorMessage);
+            Assert.AreEqual(System.Text.Json.JsonSerializer.Serialize(pinNote),
+                System.Text.Json.JsonSerializer.Serialize(unresolvedPlan.Candidate!.Engineering.Structure.Statements.Single(s => s.Id == pinNote.Id)));
+            var retainedPin = unresolvedPlan.Candidate.Engineering.Structure.UnresolvedComponentReferences!
+                .Single(p => p.OwnerId == pinNote.Id);
+            Assert.AreEqual(new ComponentReferenceTarget(owner.Id, "2"), retainedPin.FormerTarget);
+            Assert.IsEmpty(retainedPin.CandidateTargets);
+            var later = state.Observed.Clone(); later.Instances[0].Metadata.TitleBlock = new() { Title = "Later edit" };
+            var laterElectrical = reopened.State.ObservedElectrical!.Clone(); laterElectrical.Hierarchy.Data = later.Clone();
+            var stale = SchematicNetReconciliation.Plan(reopened.State with { Observed = later, ObservedElectrical = laterElectrical });
+            Assert.AreEqual(SchematicNativeAdditionProjection.ResolutionRequired, stale.ErrorCode);
+            var pending = store.Save(reopened.State with { PendingMutation = DesignRecoveryStoreTests.Mutation(reopened.State) }, reopened.RevisionToken);
+            Assert.ThrowsExactly<AutomationException>(() => store.Save(pending.State with { ComponentRebindResolution = null }, pending.RevisionToken));
+            Assert.AreEqual(pending.RevisionToken, store.Read()!.RevisionToken);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    private static void VerifyMultiUnitReplacementAnswers()
+    {
+        var baseline = SchematicRebuildTests.Placed();
+        var units = baseline.Engineering.Circuit.Symbols.GroupBy(s => s.ComponentId).First(g => g.Count() > 1).ToArray();
+        var bindings = baseline.SymbolBindings.ToDictionary(b => b.SymbolOccurrenceId, b => b.NativeObjectId);
+        var owner = baseline.Engineering.Circuit.Components.Single(c => c.Id == units[0].ComponentId);
+        var part = baseline.Engineering.Circuit.Parts.Single(p => p.Id == baseline.Engineering.Circuit.Sheets
+            .SelectMany(s => s.Components).Single(d => d.Id == owner.DefinitionId).PartId);
+        var observed = baseline.Schematic.Clone();
+        DesignRecoveryState State()
+        {
+            var value = SchematicRebuildTests.State(baseline, baseline, observed);
+            return value with { BaselineElectrical = SymbolSheetOwnershipTests.Isolated(baseline.Schematic, value.BaselineElectrical!.Hierarchy.Revision),
+                ObservedElectrical = SymbolSheetOwnershipTests.Isolated(observed, value.ObservedElectrical!.Hierarchy.Revision) };
+        }
+        void Replace(SymbolOccurrence occurrence)
+        {
+            string id = bindings[occurrence.Id].ToString("D");
+            var screen = observed.Instances.Single(s => s.Items.Any(i => i.Is(SchematicSymbolInstance.Descriptor)
+                && i.Unpack<SchematicSymbolInstance>().Id.Value == id));
+            int index = screen.Items.ToList().FindIndex(i => i.Is(SchematicSymbolInstance.Descriptor)
+                && i.Unpack<SchematicSymbolInstance>().Id.Value == id);
+            var symbol = screen.Items[index].Unpack<SchematicSymbolInstance>();
+            symbol.LibraryId.EntryName += "Rebound"; symbol.Definition.Id = symbol.LibraryId.Clone(); symbol.LibName = "";
+            screen.Items[index] = Any.Pack(symbol);
+        }
+        SchematicOwnershipAnswer[] Answers(DesignRecoveryState state) => SchematicNetReconciliation.Plan(state).ResolutionRequests!
+            .Select(r => new SchematicOwnershipAnswer(r.NativeObjectId, r.CandidatePartIds.Single(), r.FormerComponentId)
+            { NativePath = r.NativePath.Split('/').Select(Guid.Parse).ToArray(),
+                PinMappings = part.Pins.Select(p => new SchematicPinRebindAnswer(p.Number, p.Number)).ToArray() }).ToArray();
+        string directory = Directory.CreateTempSubdirectory("multi-unit-rebind-").FullName;
+        try
+        {
+            Replace(units[0]);
+            var partialStore = new DesignRecoveryStore(Path.Combine(directory, "partial.json"));
+            var partial = partialStore.Save(State(), null);
+            Assert.ThrowsExactly<AutomationException>(() => SchematicNativeRebinding.Retain(partialStore, partial, Answers(partial.State), default),
+                "A single unit cannot silently change the part used by its unchanged units.");
+            Assert.AreEqual(partial.RevisionToken, partialStore.Read()!.RevisionToken);
+            foreach (var unit in units.Skip(1)) Replace(unit);
+            var store = new DesignRecoveryStore(Path.Combine(directory, "complete.json"));
+            var saved = store.Save(State(), null);
+            var answers = Answers(saved.State); Assert.HasCount(units.Length, answers);
+            Assert.ThrowsExactly<AutomationException>(() => SchematicNativeRebinding.Retain(store, saved, answers.Take(1).ToArray(), default));
+            var chosen = SchematicNativeRebinding.Retain(store, saved, answers, default);
+            var plan = SchematicSynchronizationPlanner.Plan(chosen.State);
+            Assert.IsTrue(plan.CanPrepare, plan.ErrorCode + ": " + plan.ErrorMessage);
+            Assert.AreEqual(owner, plan.Candidate!.Engineering.Circuit.Components.Single(c => c.Id == owner.Id));
+            CollectionAssert.AreEquivalent(units, plan.Candidate.Engineering.Circuit.Symbols.Where(s => s.ComponentId == owner.Id).ToArray());
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [TestMethod]
+    public void GeneratedIdCannotSilentlyReuseARetiredExplicitNetIdentity()
+    {
+        var state = Fixture(); var old = state.Baseline.Engineering.Circuit.Nets.Single();
+        state = NativeGroups(state, [old.Pins[0]], [old.Pins[1]]);
+        var initial = SchematicNetReconciliation.Plan(state); Assert.IsNotNull(initial.Candidate);
+        var collision = initial.Candidate.Circuit.Nets[0].Id;
+        var desired = state.Baseline.Engineering with
+        {
+            Circuit = state.Baseline.Engineering.Circuit with { Nets = [old with { Id = collision }] },
+            Structure = new(Guid.NewGuid(), [], [], [], [])
+        };
+        var result = SchematicNetReconciliation.Plan(Desired(state, desired));
+        Assert.IsNull(result.Candidate);
+        Assert.AreEqual("generated_net_identity_conflict", result.ErrorCode);
+    }
+
+    [TestMethod]
+    public void FurtherChangesUpdateOnlyExplicitCandidatePossibilities()
+    {
+        var f = UnresolvedNetBindingTests.Split();
+        var next = f.After with { Nets = [new(Guid.NewGuid(), "Merged again", f.Before.Nets[0].Pins)] };
+        var result = f.Pending.RetainUnresolvedNets(f.After, next, f.After.Nets.Select(n =>
+            new NetIdentityChange(n.Id, NetBindingChangeKind.Merged, "Candidate merged", [next.Nets[0].Id])).ToArray());
+        Assert.AreEqual(f.Pending.Statements[0], result.Statements[0]);
+        Assert.AreEqual(f.Pending.UnresolvedNetBindings![0].FormerNetId, result.UnresolvedNetBindings![0].FormerNetId);
+        Assert.IsTrue(result.UnresolvedNetBindings.All(b => b.CandidateNetIds.SequenceEqual([next.Nets[0].Id])));
+        Assert.IsTrue(result.HasUnresolvedNetBindings);
+    }
+}

@@ -31,6 +31,7 @@
 #include <template_fieldnames.h>
 #include <kiface_base.h>
 #include <sch_edit_frame.h>
+#include <schematic.h>
 #include <sch_group.h>
 #include <widgets/wx_infobar.h>
 #include <sch_reference_list.h>
@@ -52,6 +53,7 @@
 #include <tools/sch_actions.h>
 #include <tools/sch_selection_tool.h>
 #include <sch_sheet_path.h>
+#include <api/api_sch_bom_settings.h>
 
 wxDEFINE_EVENT( EDA_EVT_CLOSE_DIALOG_SYMBOL_FIELDS_TABLE, wxCommandEvent );
 
@@ -502,6 +504,8 @@ bool DIALOG_SYMBOL_FIELDS_TABLE::TransferDataToWindow()
     // user's current selection.
     EnableSelectionEvents();
 
+    if( !m_job ) m_bomUiBaseline = readBomUiSettings();
+
     return true;
 }
 
@@ -525,12 +529,15 @@ bool DIALOG_SYMBOL_FIELDS_TABLE::TransferDataFromWindow()
     wxString       currentVariant = m_parent->Schematic().GetCurrentVariant();
 
     m_dataModel->ApplyData( commit, m_templateFieldNames, currentVariant );
+    stageBomSettings( commit, true );
 
     if( !commit.Empty() )
     {
         commit.Push( wxS( "Symbol Fields Table Edit" ) );  // Push clears the commit buffer.
         m_parent->OnModify();
     }
+
+    m_bomUiBaseline = readBomUiSettings();
 
     // Reset the view to where we left the user
     m_parent->SetCurrentSheet( currentSheet );
@@ -794,11 +801,92 @@ void DIALOG_SYMBOL_FIELDS_TABLE::OnTableSelectionChanged( const std::set<int>& a
 }
 
 
+FIELDS_TABLE_BOM_SETTINGS DIALOG_SYMBOL_FIELDS_TABLE::readBomUiSettings()
+{
+    FIELDS_TABLE_BOM_SETTINGS desired = m_cfgBomSettings;
+    desired.m_BomPresets = GetUserBomPresets();
+    desired.m_BomSettings = m_dataModel->GetBomSettings();
+    desired.m_BomFmtPresets = GetUserBomFmtPresets();
+    desired.m_BomFmtSettings = GetCurrentBomFmtSettings();
+    desired.m_BomExportFileName = m_outputFileName->GetValue();
+    return desired;
+}
+
+void DIALOG_SYMBOL_FIELDS_TABLE::recordInitialBomUiState()
+{
+    if( !m_job && !m_bomInitialViewSelected )
+    {
+        m_bomUiBaseline = readBomUiSettings();
+        m_bomInitialViewSelected = true;
+    }
+}
+
+void DIALOG_SYMBOL_FIELDS_TABLE::ShowEditTab()
+{
+    DIALOG_FIELDS_TABLE::ShowEditTab();
+    recordInitialBomUiState();
+}
+
+void DIALOG_SYMBOL_FIELDS_TABLE::ShowExportTab()
+{
+    DIALOG_FIELDS_TABLE::ShowExportTab();
+    recordInitialBomUiState();
+}
+
+void DIALOG_SYMBOL_FIELDS_TABLE::stageBomSettings( SCH_COMMIT& aCommit, bool aSaveFilename )
+{
+    auto desired = SCH_BOM_SETTINGS::PrepareUiEdit( m_cfgBomSettings, m_bomUiBaseline,
+                                                   readBomUiSettings(), aSaveFilename );
+    aCommit.SetBomSettings( SCH_BOM_SETTINGS::Capture( desired ) );
+    // The typed commit owns persisted fields. Retain the exact UI transient
+    // flags as well, without serializing them or creating a false revision.
+    SCH_BOM_SETTINGS::Swap( m_cfgBomSettings, desired );
+}
+
+void DIALOG_SYMBOL_FIELDS_TABLE::OnExport( wxCommandEvent& aEvent )
+{
+    // The shared export writes a changed output file name straight into the project's BOM
+    // settings and then calls onBomSettingsChanged().  Remember the saved name it replaces.
+    m_exportFileNameBeforeExport = m_cfgBomSettings.m_BomExportFileName;
+    DIALOG_FIELDS_TABLE::OnExport( aEvent );
+    m_exportFileNameBeforeExport.reset();
+}
+
+
+void DIALOG_SYMBOL_FIELDS_TABLE::onBomSettingsChanged()
+{
+    if( !m_exportFileNameBeforeExport || m_job )
+    {
+        // Only an interactive export is expected to change the saved BOM settings here.  If
+        // another path does, the replaced value is unknown, so the change cannot become an
+        // undoable commit; it still must make older automation requests stale and be saved.
+        wxFAIL_MSG( wxS( "Only an interactive BOM export changes saved BOM settings here" ) );
+        m_parent->Schematic().RecordCommittedChange( DOCUMENT_CHANGE_JOURNAL::KIND::COMMIT,
+                                                     "Change BOM Export File Name" );
+        m_parent->OnModify();
+        return;
+    }
+
+    // Put the replaced name back and apply the new one through a commit: saving the project
+    // writes it, so it is an undoable edit that makes older automation requests stale.
+    FIELDS_TABLE_BOM_SETTINGS desired = m_cfgBomSettings;
+    m_cfgBomSettings.m_BomExportFileName = *m_exportFileNameBeforeExport;
+
+    SCH_COMMIT commit( m_parent );
+    commit.SetBomSettings( SCH_BOM_SETTINGS::Capture( desired ) );
+
+    // Keep the exact live objects, as stageBomSettings does; the commit owns the saved fields.
+    SCH_BOM_SETTINGS::Swap( m_cfgBomSettings, desired );
+
+    if( !commit.Empty() )
+        commit.Push( _( "Change BOM Export File Name" ) );
+}
+
+
 void DIALOG_SYMBOL_FIELDS_TABLE::OnSaveAndContinue( wxCommandEvent& aEvent )
 {
     if( TransferDataFromWindow() )
     {
-        m_cfgBomSettings.m_BomExportFileName = m_outputFileName->GetValue();
         m_parent->SaveProject();
         ClearModify();
     }
@@ -832,12 +920,6 @@ void DIALOG_SYMBOL_FIELDS_TABLE::OnOk( wxCommandEvent& aEvent )
     }
     else
     {
-        if( m_cfgBomSettings.m_BomExportFileName != m_outputFileName->GetValue() )
-        {
-            m_cfgBomSettings.m_BomExportFileName = m_outputFileName->GetValue();
-            m_parent->OnModify();
-        }
-
         Close();
     }
 }
@@ -866,8 +948,12 @@ void DIALOG_SYMBOL_FIELDS_TABLE::OnClose( wxCloseEvent& aEvent )
         }
     }
 
-    if( savePresets( true ) )
-        m_parent->OnModify();
+    // Upstream retains view/preset preferences on close, including Cancel;
+    // the unsaved export filename is still discarded by OnCancel above.
+    SCH_COMMIT commit( m_parent );
+    stageBomSettings( commit, false );
+    if( !commit.Empty() )
+        commit.Push( wxS( "Symbol Fields Table Edit" ) );
 
     // Stop listening to schematic events
     m_parent->Schematic().RemoveListener( this );
@@ -1219,8 +1305,9 @@ void DIALOG_SYMBOL_FIELDS_TABLE::onRenameVariant( wxCommandEvent& aEvent )
         }
     }
 
-    m_parent->Schematic().RenameVariant( oldVariantName, newVariantName );
-    m_parent->OnModify();
+    SCH_COMMIT commit( m_parent );
+    m_parent->Schematic().RenameVariant( oldVariantName, newVariantName, &commit );
+    commit.Push( _( "Rename Design Variant" ) );
 
     wxArrayString ctrlContents = m_variantListBox->GetStrings();
     ctrlContents.Remove( oldVariantName );
@@ -1276,8 +1363,9 @@ void DIALOG_SYMBOL_FIELDS_TABLE::onCopyVariant( wxCommandEvent& aEvent )
         return;
     }
 
-    m_parent->Schematic().CopyVariant( sourceVariantName, newVariantName );
-    m_parent->OnModify();
+    SCH_COMMIT commit( m_parent );
+    m_parent->Schematic().CopyVariant( sourceVariantName, newVariantName, &commit );
+    commit.Push( _( "Copy Design Variant" ) );
 
     wxArrayString ctrlContents = m_variantListBox->GetStrings();
     ctrlContents.Add( newVariantName );
@@ -1337,8 +1425,9 @@ void DIALOG_SYMBOL_FIELDS_TABLE::onEditVariantDescription( wxCommandEvent& aEven
 
     wxString newDesc = descCtrl->GetValue().Trim().Trim( false );
 
-    m_parent->Schematic().SetVariantDescription( variantName, newDesc );
-    m_parent->OnModify();
+    SCH_COMMIT commit( m_parent );
+    commit.SetVariantDescription( variantName, newDesc );
+    commit.Push( _( "Edit Variant Description" ) );
 }
 
 

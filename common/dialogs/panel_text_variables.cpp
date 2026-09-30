@@ -37,9 +37,12 @@ enum TEXT_VAR_GRID_COLUMNS
 };
 
 
-PANEL_TEXT_VARIABLES::PANEL_TEXT_VARIABLES( wxWindow* aParent, PROJECT* aProject ) :
+PANEL_TEXT_VARIABLES::PANEL_TEXT_VARIABLES( wxWindow* aParent, PROJECT* aProject,
+                                          std::map<wxString, wxString>* aDraftVariables ) :
         PANEL_TEXT_VARIABLES_BASE( aParent ),
         m_project( aProject ),
+        m_variables( aDraftVariables ? aDraftVariables : &aProject->GetTextVars() ),
+        m_detached( aDraftVariables != nullptr ),
         m_lastCheckedTicker( 0 ),
         m_errorRow( -1 ),
         m_errorCol( -1 )
@@ -69,12 +72,12 @@ PANEL_TEXT_VARIABLES::PANEL_TEXT_VARIABLES( wxWindow* aParent, PROJECT* aProject
           {
               // Careful of consuming CPU in an idle event handler.  Check the ticker first to
               // see if there's even a possibility of the text variables having changed.
-              if( m_project->GetTextVarsTicker() > m_lastCheckedTicker )
+              if( !m_detached && m_project->GetTextVarsTicker() > m_lastCheckedTicker )
               {
                   wxWindow* dialog = wxGetTopLevelParent( this );
                   wxWindow* topLevelFocus = wxGetTopLevelParent( wxWindow::FindFocus() );
 
-                  if( topLevelFocus == dialog && m_lastLoaded != m_project->GetTextVars() )
+                  if( topLevelFocus == dialog && m_lastLoaded != *m_variables )
                       checkReload();
               }
           } );
@@ -105,7 +108,7 @@ void PANEL_TEXT_VARIABLES::checkReload()
     {
         m_TextVars->ClearRows();
 
-        m_lastLoaded = m_project->GetTextVars();
+        m_lastLoaded = *m_variables;
 
         for( const auto& var : m_lastLoaded )
             AppendTextVar( var.first, var.second );
@@ -115,7 +118,7 @@ void PANEL_TEXT_VARIABLES::checkReload()
 
 bool PANEL_TEXT_VARIABLES::TransferDataToWindow()
 {
-    m_lastLoaded = m_project->GetTextVars();
+    m_lastLoaded = *m_variables;
     m_lastCheckedTicker = m_project->GetTextVarsTicker();
 
     for( const auto& var : m_lastLoaded )
@@ -159,7 +162,7 @@ bool PANEL_TEXT_VARIABLES::TransferDataFromWindow()
         }
     }
 
-    std::map<wxString, wxString>& variables = m_project->GetTextVars();
+    std::map<wxString, wxString>& variables = *m_variables;
 
     variables.clear();
 

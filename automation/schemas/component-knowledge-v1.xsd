@@ -16,6 +16,25 @@
     <xs:sequence>
       <xs:element name="text" type="xs:string"/>
       <xs:element name="exception-rationale" type="xs:string" minOccurs="0"/>
+      <xs:element name="quantity" minOccurs="0"><xs:complexType>
+        <xs:sequence><xs:element name="tolerance" minOccurs="0"><xs:complexType>
+          <xs:attribute name="kind" use="required"><xs:simpleType><xs:restriction base="xs:string">
+            <xs:enumeration value="Absolute"/><xs:enumeration value="Percent"/>
+          </xs:restriction></xs:simpleType></xs:attribute>
+          <xs:attribute name="minus" type="xs:decimal" use="required"/>
+          <xs:attribute name="plus" type="xs:decimal" use="required"/>
+        </xs:complexType></xs:element></xs:sequence>
+        <xs:attribute name="kind" use="required"><xs:simpleType><xs:restriction base="xs:string">
+          <xs:enumeration value="Unclassified"/><xs:enumeration value="Nominal"/>
+          <xs:enumeration value="OperatingLimit"/><xs:enumeration value="AbsoluteMaximum"/>
+          <xs:enumeration value="Measurement"/>
+        </xs:restriction></xs:simpleType></xs:attribute>
+        <xs:attribute name="unit" type="xs:string" use="required"/>
+        <xs:attribute name="nominal" type="xs:decimal"/>
+        <xs:attribute name="minimum" type="xs:decimal"/>
+        <xs:attribute name="maximum" type="xs:decimal"/>
+        <xs:attribute name="unknown-reason" type="xs:string"/>
+      </xs:complexType></xs:element>
       <xs:element name="source" minOccurs="0" maxOccurs="unbounded"><xs:complexType>
         <xs:attribute name="document" type="xs:string" use="required"/>
         <xs:attribute name="revision" type="xs:string" use="required"/>
@@ -32,6 +51,7 @@
     <xs:attribute name="verification" type="verification" use="required"/>
     <xs:attribute name="replaces" type="identity"/>
   </xs:complexType>
+  <xs:element name="guidance" type="guidance"/>
   <xs:element name="component-library"><xs:complexType><xs:sequence>
     <xs:element name="class" minOccurs="0" maxOccurs="unbounded"><xs:complexType><xs:sequence>
       <xs:element name="guidance" type="guidance" minOccurs="0" maxOccurs="unbounded"/>

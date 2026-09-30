@@ -52,7 +52,11 @@ public static class EngineeringDesignXml
                     throw new AutomationException("missing_knowledge_library", "Supply the referenced knowledge library: " + id);
                 bindings.Add(ComponentKnowledgeXml.ReadBinding(Section(element), library));
             }
-            var result = new EngineeringDesign(circuit, structure, references, bindings);
+            var unresolved = root.Element(Ns + "unresolved-guidance-bindings")?.Elements(Ns + "binding")
+                .Select(e => new UnresolvedGuidanceBinding(Guid.ParseExact(e.Attribute("component")!.Value, "D"),
+                    Enum.Parse<ComponentReferenceChangeKind>(e.Attribute("change")!.Value), e.Element(Ns + "reason")!.Value,
+                    e.Elements(Ns + "candidate").Select(c => Guid.ParseExact(c.Attribute("component")!.Value, "D")).ToArray())).ToArray();
+            var result = new EngineeringDesign(circuit, structure, references, bindings, unresolved);
             result.Validate(libraries);
             return result;
         }
@@ -72,7 +76,11 @@ public static class EngineeringDesignXml
             new XElement(Ns + "knowledge-libraries", design.KnowledgeLibraries.OrderBy(l => l.Id).Select(l =>
                 new XElement(Ns + "library", new XAttribute("id", l.Id), new XAttribute("path", l.Path), new XAttribute("revision", l.Revision)))),
             new XElement(Ns + "component-bindings", design.ComponentBindings.OrderBy(b => b.ComponentInstanceId).Select(b =>
-                EngineeringXmlText.Parse(ComponentKnowledgeXml.WriteBinding(b, available[b.LibraryId])))));
+                EngineeringXmlText.Parse(ComponentKnowledgeXml.WriteBinding(b, available[b.LibraryId])))),
+            design.UnresolvedGuidanceBindings is not { Count: > 0 } ? null : new XElement(Ns + "unresolved-guidance-bindings",
+                design.UnresolvedGuidanceBindings.OrderBy(b => b.ComponentInstanceId).Select(b => new XElement(Ns + "binding",
+                    new XAttribute("component", b.ComponentInstanceId), new XAttribute("change", b.Change), new XElement(Ns + "reason", b.Reason),
+                    b.CandidateComponentIds.Order().Select(id => new XElement(Ns + "candidate", new XAttribute("component", id)))))));
         new XDocument(root).Validate(Schema.Value, null);
         return EngineeringXmlText.Render(root);
     }

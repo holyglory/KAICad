@@ -1,0 +1,1885 @@
+using System.Collections.Immutable;
+using System.Diagnostics;
+using System.Text.Json.Nodes;
+using System.Xml.Linq;
+using Google.Protobuf;
+using KiCad.Automation.Mcp;
+using KiCad.Automation.Model;
+using KiCad.Automation.Native;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+using P = KiCad.Automation.Protocol.Diagrams;
+
+namespace KiCad.Automation.Tests;
+
+[TestClass]
+public sealed class RecursiveEditorFileCommandTests
+{
+    [TestMethod]
+    public async Task WholeHistoryComparisonAndRestorationPreparationAreReadOnlyAndRevisionBound()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-whole-history-").FullName;
+        try
+        {
+            var original = LinkedDiagramFixture.Create().Graph;
+            var graph = RecursiveBlockFixture.RefineRoot(original, DiagramRequirementField.General, 2);
+            string path = Path.Combine(root, "design.xml"), xml = RecursiveBlockGraphXml.Write(graph);
+            await File.WriteAllTextAsync(path, xml);
+            var request = new P.RecursiveFileRequest { SchemaVersion = 2, RepositoryRoot = root,
+                SourcePath = path, DocumentId = graph.DocumentId.ToString("D") };
+            request.ExpectedSourceToken = (await Invoke(request)).SourceToken;
+            request.Action = P.RecursiveFileAction.RfaDiagramHistory; request.Block = Selection(graph.SelectedRoot); request.Limit = 2;
+            var history = await Invoke(request); Assert.IsTrue(history.Success); Assert.HasCount(2, history.DiagramHistory.Entries);
+            Assert.AreEqual(3U, history.DiagramHistory.Total); Assert.IsNull(history.Document);
+            request.Offset = 2; var older = await Invoke(request); Assert.IsTrue(older.Success);
+            Assert.AreEqual(original.SelectedRoot.RevisionId.ToString("D"), older.DiagramHistory.Entries.Single().Selection.RevisionId);
+            request.Action = P.RecursiveFileAction.RfaCompareDiagramHistory; request.Offset = request.Limit = 0; request.InspectedBlock = Selection(original.SelectedRoot);
+            var compared = await Invoke(request); Assert.IsTrue(compared.Success); Assert.HasCount(1, compared.DiagramComparison.Changes);
+            Assert.AreEqual(P.RequirementFieldKind.RfkGeneral, compared.DiagramComparison.Changes[0].Field);
+            request.Action = P.RecursiveFileAction.RfaPrepareDiagramRestoration; request.Block = request.InspectedBlock = null;
+            request.Restoration = new() { Draft = RecursiveBlockCodec.Encode(graph.StartDraft(graph.SelectedRoot)), Source = Selection(original.SelectedRoot) };
+            var prepared = await Invoke(request); Assert.IsTrue(prepared.Success);
+            Assert.AreEqual(original.SelectedRoot.RevisionId.ToString("D"), prepared.PreparedDraft.RestoredFrom.RevisionId);
+            Assert.AreEqual(original.Requirements(original.SelectedRoot).Requirements.General, prepared.PreparedDraft.Fields.General);
+            Assert.AreEqual(graph.SelectedRoot.RevisionId.ToString("D"), prepared.PreparedDraft.Baseline.RevisionId);
+            Assert.AreEqual(xml, await File.ReadAllTextAsync(path));
+            var ambiguous = request.Clone(); ambiguous.Block = Selection(graph.SelectedRoot);
+            Assert.IsFalse((await Invoke(ambiguous)).Success, "Restoration must not accept unrelated history paging targets.");
+            ambiguous = request.Clone(); ambiguous.Offset = 1;
+            Assert.IsFalse((await Invoke(ambiguous)).Success);
+            ambiguous = request.Clone(); ambiguous.Action = P.RecursiveFileAction.RfaRead;
+            Assert.IsFalse((await Invoke(ambiguous)).Success, "A read request cannot smuggle restoration data.");
+            var dirty = request.Clone(); dirty.Restoration.Draft.Fields.Routing = "Retain my separate draft.";
+            var rejected = await Invoke(dirty); Assert.IsFalse(rejected.Success); Assert.AreEqual("dirty_block_draft", rejected.ErrorCode);
+            Assert.AreEqual("Retain my separate draft.", dirty.Restoration.Draft.Fields.Routing);
+            await File.AppendAllTextAsync(path, "\n");
+            var stale = await Invoke(request); Assert.IsFalse(stale.Success); Assert.IsNull(stale.PreparedDraft);
+            Assert.AreEqual("recursive_block_file_changed", stale.ErrorCode); Assert.AreEqual(xml + "\n", await File.ReadAllTextAsync(path));
+        }
+        finally { Directory.Delete(root, true); }
+
+        static P.BlockSelectionData Selection(BlockSelection s) => new() { BlockId = s.BlockId.ToString("D"), StateId = s.StateId.ToString("D"), RevisionId = s.RevisionId.ToString("D") };
+    }
+
+    [TestMethod]
+    public async Task OlderHistoryPagesKeepTheirExactContextAndRejectChangedFiles()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-history-pages-").FullName;
+        try
+        {
+            var initial = RecursiveBlockFixture.Create().Graph;
+            var graph = RecursiveBlockFixture.RefineRoot(initial, DiagramRequirementField.General, 205);
+            string path = Path.Combine(root, "design.xml"), xml = RecursiveBlockGraphXml.Write(graph);
+            await File.WriteAllTextAsync(path, xml);
+            var request = new P.RecursiveFileRequest { SchemaVersion = 2, RepositoryRoot = root,
+                SourcePath = path, DocumentId = graph.DocumentId.ToString("D") };
+            var read = await Invoke(request); Assert.IsTrue(read.Success);
+            request.ExpectedSourceToken = read.SourceToken; request.Action = P.RecursiveFileAction.RfaBlockFieldHistory;
+            request.Block = new() { BlockId = graph.SelectedRoot.BlockId.ToString("D"), StateId = graph.SelectedRoot.StateId.ToString("D"), RevisionId = graph.SelectedRoot.RevisionId.ToString("D") };
+            request.Field = P.RequirementFieldKind.RfkGeneral; request.Limit = 200;
+            var first = await Invoke(request); Assert.IsTrue(first.Success); Assert.HasCount(200, first.History.Entries);
+            request.Offset = 200;
+            var older = await Invoke(request); Assert.IsTrue(older.Success); Assert.HasCount(6, older.History.Entries);
+            Assert.AreEqual(first.History.ContextRevisionId, older.History.ContextRevisionId);
+            Assert.AreEqual(first.History.SavedText, older.History.SavedText);
+            Assert.AreEqual(initial.Requirements(initial.SelectedRoot).RevisionId.ToString("D"), older.History.Entries[^1].RequirementRevisionId);
+            var changed = RecursiveBlockFixture.RefineRoot(graph, DiagramRequirementField.Routing, 1);
+            string changedXml = RecursiveBlockGraphXml.Write(changed); await File.WriteAllTextAsync(path, changedXml);
+            var stale = await Invoke(request); Assert.IsFalse(stale.Success); Assert.AreEqual("recursive_block_file_changed", stale.ErrorCode);
+            Assert.IsNull(stale.History); Assert.AreEqual(changedXml, await File.ReadAllTextAsync(path));
+            var currentRead = request.Clone(); currentRead.Action = P.RecursiveFileAction.RfaRead;
+            currentRead.Block = null; currentRead.Field = P.RequirementFieldKind.RfkUnknown; currentRead.Offset = currentRead.Limit = 0; currentRead.ExpectedSourceToken = "";
+            request.ExpectedSourceToken = (await Invoke(currentRead)).SourceToken;
+            var recovered = await Invoke(request); Assert.IsTrue(recovered.Success);
+            Assert.AreEqual(older.History, recovered.History, "A refreshed file still permits inspecting the exact old context, not today's head.");
+            Assert.AreEqual(changedXml, await File.ReadAllTextAsync(path));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public async Task CompiledReadAndScopedHistoryCommandsPreserveTheSavedDesign()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-recursive-command-").FullName;
+        try
+        {
+            var fixture = LinkedDiagramFixture.Create(); string path = Path.Combine(root, "design.xml");
+            string xml = RecursiveBlockGraphXml.Write(fixture.Graph); await File.WriteAllTextAsync(path, xml);
+            var request = new P.RecursiveFileRequest { SchemaVersion = 2, RepositoryRoot = root,
+                SourcePath = path, DocumentId = fixture.Graph.DocumentId.ToString("D") };
+            var read = await Invoke(request);
+            Assert.IsTrue(read.Success); Assert.AreEqual(request.DocumentId, read.Document.DocumentId);
+            Assert.AreEqual(xml, RecursiveBlockGraphXml.Write(KiCad.Automation.Native.RecursiveBlockCodec.Decode(read.Document.Graph)));
+            var cpu = fixture.Blocks["CPU"];
+            request.Action = P.RecursiveFileAction.RfaBlockFieldHistory;
+            request.Block = new() { BlockId = cpu.BlockId.ToString("D"), StateId = cpu.StateId.ToString("D"), RevisionId = cpu.RevisionId.ToString("D") };
+            request.Field = P.RequirementFieldKind.RfkGeneral; request.Limit = 50; request.ExpectedSourceToken = read.SourceToken;
+            var history = await Invoke(request);
+            Assert.IsTrue(history.Success); Assert.IsNull(history.Document);
+            Assert.AreEqual(cpu.BlockId.ToString("D"), history.History.OwnerId);
+            Assert.AreEqual(fixture.Graph.Requirements(cpu).Requirements.General, history.History.SavedText);
+            request.Action = P.RecursiveFileAction.RfaConnectionFieldHistory;
+            var link = fixture.Links["CPU/Memory"];
+            request.Connection = new() { ConnectionId = link.ConnectionId.ToString("D"), StateId = link.StateId.ToString("D"), RevisionId = link.RevisionId.ToString("D") };
+            var connection = await Invoke(request);
+            Assert.IsTrue(connection.Success); Assert.AreEqual(link.ConnectionId.ToString("D"), connection.History.OwnerId);
+            var wrongScope = request.Clone(); var psu = fixture.Blocks["PSU"];
+            wrongScope.Block = new() { BlockId = psu.BlockId.ToString("D"), StateId = psu.StateId.ToString("D"), RevisionId = psu.RevisionId.ToString("D") };
+            Assert.IsFalse((await Invoke(wrongScope)).Success);
+            request.ExpectedSourceToken = new string('0', 64);
+            var stale = await Invoke(request);
+            Assert.IsFalse(stale.Success); Assert.AreEqual("recursive_block_file_changed", stale.ErrorCode);
+            Assert.AreEqual(xml, await File.ReadAllTextAsync(path));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public async Task CompiledSavePublishesOneSuccessorAndRejectsStaleRetriesWithoutLosingHistory()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-recursive-save-command-").FullName;
+        try
+        {
+            var fixture = LinkedDiagramFixture.Create(); var graph = fixture.Graph;
+            string path = Path.Combine(root, "design.xml"); await File.WriteAllTextAsync(path, RecursiveBlockGraphXml.Write(graph));
+            var request = new P.RecursiveFileRequest { SchemaVersion = 2, RepositoryRoot = root, SourcePath = path, DocumentId = graph.DocumentId.ToString("D") };
+            var read = await Invoke(request);
+            var block = fixture.Blocks["PSU"]; var draft = graph.StartDraft(block);
+            draft = draft with { Requirements = draft.Requirements.Edit(DiagramRequirementField.General, "A native editor requirement.") };
+            var save = new P.SaveBlockDraftData
+            {
+                ExpectedRoot = read.Document.Graph.SelectedRoot.Clone(), Draft = KiCad.Automation.Native.RecursiveBlockCodec.Encode(draft),
+                NewRevisionId = Guid.NewGuid().ToString("D"), NewRequirementRevisionId = Guid.NewGuid().ToString("D"),
+                Origin = new() { Kind = P.DiagramActorKind.DakEditor, Actor = "Native editor",
+                    RecordedAt = Google.Protobuf.WellKnownTypes.Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow), Summary = "Edit requirements" }
+            };
+            save.BlockPath.Add(save.ExpectedRoot.Clone()); save.BlockPath.Add(save.Draft.Baseline.Clone());
+            save.AncestorRevisionIds.Add(Guid.NewGuid().ToString("D"));
+            request.Action = P.RecursiveFileAction.RfaSaveBlock; request.ExpectedSourceToken = read.SourceToken; request.Save = save;
+            var saved = await Invoke(request);
+            Assert.IsTrue(saved.Success); Assert.AreNotEqual(read.SourceToken, saved.SourceToken);
+            var loaded = KiCad.Automation.Native.RecursiveBlockCodec.Decode(saved.Document.Graph);
+            var psu = loaded.Inspect(loaded.SelectedRoot).Children[0];
+            Assert.AreEqual("A native editor requirement.", loaded.Requirements(psu).Requirements.General);
+            Assert.AreEqual(graph.Requirements(block).Requirements.General, loaded.Requirements(block).Requirements.General);
+            Assert.AreEqual(RequirementRevisionActor.Editor, loaded.Inspect(psu).Origin.ActorKind);
+            var stale = await Invoke(request);
+            Assert.IsFalse(stale.Success); Assert.AreEqual("recursive_block_file_changed", stale.ErrorCode);
+            var reread = request.Clone(); reread.Action = P.RecursiveFileAction.RfaRead; reread.Save = null; reread.ExpectedSourceToken = "";
+            var after = await Invoke(reread);
+            Assert.AreEqual(saved.SourceToken, after.SourceToken);
+            Assert.AreEqual(loaded.Revisions.Length, KiCad.Automation.Native.RecursiveBlockCodec.Decode(after.Document.Graph).Revisions.Length);
+            var unchanged = KiCad.Automation.Native.RecursiveBlockCodec.Encode(loaded.StartDraft(psu));
+            request.ExpectedSourceToken = saved.SourceToken; request.Save.Draft = unchanged;
+            request.Save.ExpectedRoot = saved.Document.Graph.SelectedRoot.Clone(); request.Save.BlockPath.Clear();
+            request.Save.BlockPath.Add(request.Save.ExpectedRoot.Clone()); request.Save.BlockPath.Add(unchanged.Baseline.Clone());
+            request.Save.NewRevisionId = Guid.NewGuid().ToString("D"); request.Save.NewRequirementRevisionId = Guid.NewGuid().ToString("D");
+            request.Save.AncestorRevisionIds[0] = Guid.NewGuid().ToString("D");
+            var noOp = await Invoke(request);
+            Assert.IsTrue(noOp.Success); Assert.AreEqual(saved.SourceToken, noOp.SourceToken);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public async Task CompiledImplementationManagementCreatesRenamesRemovesAndRestoresWithoutDeletingHistory()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-implementation-management-").FullName;
+        try
+        {
+            var f = LinkedDiagramFixture.Create(); var graph = f.Graph; var cpu = f.Blocks["CPU"];
+            string path = Path.Combine(root, "design.xml"); await File.WriteAllTextAsync(path, RecursiveBlockGraphXml.Write(graph));
+            var request = new P.RecursiveFileRequest { SchemaVersion = 2, RepositoryRoot = root, SourcePath = path, DocumentId = graph.DocumentId.ToString("D") };
+            var read = await Invoke(request);
+            var source = new P.BlockSelectionData { BlockId = cpu.BlockId.ToString("D"), StateId = cpu.StateId.ToString("D"), RevisionId = cpu.RevisionId.ToString("D") };
+            var management = new P.ManageImplementationData { Action = P.ImplementationActionKind.IakDuplicate,
+                ExpectedRoot = read.Document.Graph.SelectedRoot.Clone(), Source = source, Name = "Serviceable alternative",
+                NewStateId = Guid.NewGuid().ToString("D"), NewRevisionId = Guid.NewGuid().ToString("D"), NewRequirementRevisionId = Guid.NewGuid().ToString("D"),
+                Origin = new() { Kind = P.DiagramActorKind.DakEditor, Actor = "Native editor", Summary = "Implementation management fixture",
+                    RecordedAt = Google.Protobuf.WellKnownTypes.Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow) } };
+            request.Action = P.RecursiveFileAction.RfaManageImplementation; request.Implementation = management; request.ExpectedSourceToken = read.SourceToken;
+            var created = await Invoke(request); Assert.IsTrue(created.Success, created.ErrorMessage);
+            Assert.AreEqual(management.NewStateId, created.ImplementationId);
+            var loaded = RecursiveBlockCodec.Decode(created.Document.Graph);
+            Assert.AreEqual(graph.SelectedRoot, loaded.SelectedRoot); Assert.AreEqual(graph.States.Length + 1, loaded.States.Length);
+            Assert.AreEqual(cpu, loaded.States.Single(s => s.Id.ToString("D") == created.ImplementationId).ForkedFrom);
+            var stale = await Invoke(request); Assert.IsFalse(stale.Success); Assert.AreEqual("recursive_block_file_changed", stale.ErrorCode);
+            management.Source = new() { BlockId = cpu.BlockId.ToString("D"), StateId = created.ImplementationId, RevisionId = management.NewRevisionId };
+            management.NewStateId = ""; management.NewRevisionId = ""; management.NewRequirementRevisionId = "";
+            management.Action = P.ImplementationActionKind.IakRename; management.Name = "Thermal alternative"; management.ChangeId = Guid.NewGuid().ToString("D");
+            request.ExpectedSourceToken = created.SourceToken;
+            var renamed = await Invoke(request); Assert.IsTrue(renamed.Success, renamed.ErrorMessage);
+            Assert.AreEqual("Thermal alternative", renamed.Document.Graph.States.Single(s => s.Id == created.ImplementationId).Name);
+            management.Action = P.ImplementationActionKind.IakArchive; management.Name = ""; management.ChangeId = Guid.NewGuid().ToString("D"); request.ExpectedSourceToken = renamed.SourceToken;
+            var removed = await Invoke(request); Assert.IsTrue(removed.Success, removed.ErrorMessage);
+            Assert.IsTrue(removed.Document.Graph.States.Single(s => s.Id == created.ImplementationId).Archived);
+            Assert.AreEqual(renamed.Document.Graph.Revisions.Count, removed.Document.Graph.Revisions.Count);
+            management.Action = P.ImplementationActionKind.IakRestore; management.ChangeId = Guid.NewGuid().ToString("D"); request.ExpectedSourceToken = removed.SourceToken;
+            var restored = await Invoke(request); Assert.IsTrue(restored.Success, restored.ErrorMessage);
+            Assert.IsFalse(restored.Document.Graph.States.Single(s => s.Id == created.ImplementationId).Archived);
+            Assert.AreEqual(3, restored.Document.Graph.ImplementationChanges.Count);
+            request.ExpectedSourceToken = restored.SourceToken; management.Action = P.ImplementationActionKind.IakArchive;
+            management.Source = source; management.ChangeId = Guid.NewGuid().ToString("D");
+            var activeRemoval = await Invoke(request); Assert.IsFalse(activeRemoval.Success); Assert.AreEqual("implementation_is_selected", activeRemoval.ErrorCode);
+            Assert.AreEqual(RecursiveBlockGraphXml.Write(RecursiveBlockCodec.Decode(restored.Document.Graph), 2), await File.ReadAllTextAsync(path));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public async Task CompiledImplementationSaveKeepsPreviewInactiveUntilGuardedPublication()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-implementation-command-").FullName;
+        try
+        {
+            var f = LinkedDiagramFixture.Create(); var graph = f.Graph; var cpu = f.Blocks["CPU"];
+            var state = graph.States.Single(s => s.BlockId == cpu.BlockId && s.Id != cpu.StateId);
+            var selection = new BlockSelection(cpu.BlockId, state.Id, state.HeadRevisionId);
+            string path = Path.Combine(root, "design.xml"); string original = RecursiveBlockGraphXml.Write(graph);
+            await File.WriteAllTextAsync(path, original);
+            var request = new P.RecursiveFileRequest { SchemaVersion = 2, RepositoryRoot = root, SourcePath = path, DocumentId = graph.DocumentId.ToString("D") };
+            var read = await Invoke(request); var draft = graph.StartDraft(selection);
+            draft = draft with { Requirements = draft.Requirements.Edit(DiagramRequirementField.General, "A different implementation choice") };
+            Assert.AreEqual(original, await File.ReadAllTextAsync(path));
+            request.Action = P.RecursiveFileAction.RfaSaveImplementation; request.ExpectedSourceToken = read.SourceToken;
+            request.Save = new() { ExpectedRoot = read.Document.Graph.SelectedRoot.Clone(), Draft = KiCad.Automation.Native.RecursiveBlockCodec.Encode(draft),
+                NewRevisionId = Guid.NewGuid().ToString("D"), NewRequirementRevisionId = Guid.NewGuid().ToString("D"), Origin = new()
+                    { Kind = P.DiagramActorKind.DakEditor, Actor = "Native editor", Summary = "Choose implementation", RecordedAt = Google.Protobuf.WellKnownTypes.Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow) } };
+            request.Save.BlockPath.Add(request.Save.ExpectedRoot.Clone());
+            request.Save.BlockPath.Add(new P.BlockSelectionData { BlockId = cpu.BlockId.ToString("D"), StateId = cpu.StateId.ToString("D"), RevisionId = cpu.RevisionId.ToString("D") });
+            request.Save.AncestorRevisionIds.Add(Guid.NewGuid().ToString("D"));
+            var saved = await Invoke(request); Assert.IsTrue(saved.Success, saved.ErrorMessage);
+            var loaded = KiCad.Automation.Native.RecursiveBlockCodec.Decode(saved.Document.Graph);
+            var chosen = loaded.Inspect(loaded.SelectedRoot).Children[1]; Assert.AreEqual(state.Id, chosen.StateId);
+            Assert.AreEqual("A different implementation choice", loaded.Requirements(chosen).Requirements.General);
+            Assert.AreEqual(cpu, loaded.Inspect(graph.SelectedRoot).Children[1]);
+            var stale = await Invoke(request); Assert.IsFalse(stale.Success); Assert.AreEqual("recursive_block_file_changed", stale.ErrorCode);
+            Assert.AreEqual(RecursiveBlockGraphXml.Write(loaded, 2), await File.ReadAllTextAsync(path));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public async Task CompiledConnectionSavePreservesTheOldInterfaceAndContainingDiagram()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-connection-command-").FullName;
+        try
+        {
+            var f = LinkedDiagramFixture.Create(); var graph = f.Graph; var cpu = f.Blocks["CPU"]; var link = f.Links["CPU/Memory"];
+            string path = Path.Combine(root, "design.xml"); await File.WriteAllTextAsync(path, RecursiveBlockGraphXml.Write(graph));
+            var request = new P.RecursiveFileRequest { SchemaVersion = 2, RepositoryRoot = root, SourcePath = path, DocumentId = graph.DocumentId.ToString("D") };
+            var read = await Invoke(request);
+            var draft = graph.Connections(cpu.BlockId).StartDraft(link);
+            draft = draft with { Requirements = draft.Requirements.Edit(DiagramRequirementField.Routing, "Keep memory routes away from noisy power.") };
+            var data = KiCad.Automation.Native.RecursiveBlockCodec.Encode(draft);
+            var save = new P.SaveConnectionDraftData { ExpectedRoot = read.Document.Graph.SelectedRoot.Clone(), Draft = data,
+                NewConnectionRevisionId = Guid.NewGuid().ToString("D"), NewRequirementRevisionId = Guid.NewGuid().ToString("D"),
+                NewBlockRevisionId = Guid.NewGuid().ToString("D"), NewBlockRequirementRevisionId = Guid.NewGuid().ToString("D"),
+                Origin = new() { Kind = P.DiagramActorKind.DakEditor, Actor = "Native editor", Summary = "Edit connection requirements",
+                    RecordedAt = Google.Protobuf.WellKnownTypes.Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow) } };
+            save.BlockPath.Add(save.ExpectedRoot.Clone());
+            save.BlockPath.Add(new P.BlockSelectionData { BlockId = cpu.BlockId.ToString("D"), StateId = cpu.StateId.ToString("D"), RevisionId = cpu.RevisionId.ToString("D") });
+            save.ConnectionPath.Add(data.Baseline.Clone()); save.BlockAncestorRevisionIds.Add(Guid.NewGuid().ToString("D"));
+            request.Action = P.RecursiveFileAction.RfaSaveConnection; request.SaveConnection = save; request.ExpectedSourceToken = read.SourceToken;
+            var saved = await Invoke(request); Assert.IsTrue(saved.Success, saved.ErrorMessage);
+            var updated = KiCad.Automation.Native.RecursiveBlockCodec.Decode(saved.Document.Graph);
+            var newCpu = updated.Inspect(updated.SelectedRoot).Children[1]; var newLink = updated.Inspect(newCpu).LocalDiagram.Connections[2];
+            Assert.AreEqual("Keep memory routes away from noisy power.", updated.Connections(cpu.BlockId).Requirements(newLink).Requirements.Routing);
+            Assert.AreEqual("", updated.Connections(cpu.BlockId).Requirements(link).Requirements.Routing);
+            Assert.AreEqual(link, updated.Inspect(cpu).LocalDiagram.Connections[2]);
+            var stale = await Invoke(request); Assert.IsFalse(stale.Success); Assert.AreEqual("recursive_block_file_changed", stale.ErrorCode);
+            Assert.AreEqual(RecursiveBlockGraphXml.Write(updated, 2), await File.ReadAllTextAsync(path));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public async Task CompiledConflictComparisonPreservesVersionsAndBindsChoicesToExactSavedBytes()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-recursive-merge-command-").FullName;
+        try
+        {
+            var graph = RecursiveBlockFixture.Create().Graph; string path = Path.Combine(root, "design.xml");
+            await File.WriteAllTextAsync(path, RecursiveBlockGraphXml.Write(graph));
+            var readRequest = new P.RecursiveFileRequest { SchemaVersion = 2, RepositoryRoot = root, SourcePath = path, DocumentId = graph.DocumentId.ToString("D") };
+            var first = await Invoke(readRequest);
+            var local = graph.StartDraft(graph.SelectedRoot);
+            local = local with { Requirements = local.Requirements.Edit(DiagramRequirementField.Routing, "Top edge") };
+            var remote = graph.StartDraft(graph.SelectedRoot);
+            remote = remote with { Requirements = remote.Requirements.Edit(DiagramRequirementField.Routing, "Bottom edge") };
+            var latest = graph.SaveDraft(graph.SelectedRoot, [graph.SelectedRoot], remote, Guid.NewGuid(), Guid.NewGuid(), [], RecursiveBlockFixture.Origin()).Graph;
+            string latestXml = RecursiveBlockGraphXml.Write(latest); await File.WriteAllTextAsync(path, latestXml);
+            var request = readRequest.Clone(); request.Action = P.RecursiveFileAction.RfaRebaseRequirements;
+            request.ExpectedSourceToken = first.SourceToken;
+            request.Rebase = new() { Draft = KiCad.Automation.Native.RecursiveBlockCodec.Encode(local) };
+            var compared = await Invoke(request);
+            Assert.IsTrue(compared.Success); Assert.IsNull(compared.Merge.Candidate); Assert.HasCount(1, compared.Merge.Conflicts);
+            Assert.AreEqual("Top edge", compared.Merge.Conflicts[0].Draft); Assert.AreEqual("Bottom edge", compared.Merge.Conflicts[0].Saved);
+            Assert.AreEqual(latestXml, await File.ReadAllTextAsync(path));
+            request.ExpectedSourceToken = compared.SourceToken;
+            request.Rebase.Resolutions.Add(new P.RequirementResolutionData
+            {
+                DocumentId = graph.DocumentId.ToString("D"), OwnerId = graph.SelectedRoot.BlockId.ToString("D"), StateId = graph.SelectedRoot.StateId.ToString("D"),
+                BaselineRevisionId = compared.Merge.OriginalDraft.BaselineRequirementRevisionId,
+                SavedRevisionId = compared.Merge.SavedDraft.BaselineRequirementRevisionId,
+                Baseline = compared.Merge.OriginalDraft.BaselineFields.Clone(), Draft = compared.Merge.OriginalDraft.Fields.Clone(),
+                Saved = compared.Merge.SavedDraft.Fields.Clone(), Field = P.RequirementFieldKind.RfkRouting, Text = "Chosen combined text"
+            });
+            var resolved = await Invoke(request);
+            Assert.IsTrue(resolved.Success); Assert.IsNotNull(resolved.Merge.Candidate);
+            Assert.AreEqual("Chosen combined text", resolved.Merge.Candidate.Fields.Routing);
+            Assert.AreEqual(latestXml, await File.ReadAllTextAsync(path)); // Compare is not save.
+            await File.AppendAllTextAsync(path, "\n");
+            var stale = await Invoke(request);
+            Assert.IsFalse(stale.Success); Assert.AreEqual("stale_requirement_resolution", stale.ErrorCode);
+            Assert.AreEqual("Chosen combined text", request.Rebase.Resolutions[0].Text);
+            Assert.AreEqual(latestXml + "\n", await File.ReadAllTextAsync(path));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public async Task MalformedAndCancelledCommandsReturnFailureWithoutWritingOrStartingAnMcpSession()
+    {
+        using var output = new StringWriter();
+        Assert.AreEqual(1, await RecursiveFileCommand.RunAsync(new StringReader("{not json"), output, CancellationToken.None));
+        Assert.IsFalse(P.RecursiveFileResult.Parser.ParseJson(output.ToString()).Success);
+        using var cancellation = new CancellationTokenSource(); cancellation.Cancel();
+        using var cancelledOutput = new StringWriter();
+        Assert.AreEqual(1, await RecursiveFileCommand.RunAsync(new StringReader("{}"), cancelledOutput, cancellation.Token));
+        Assert.AreEqual("cancelled", P.RecursiveFileResult.Parser.ParseJson(cancelledOutput.ToString()).ErrorCode);
+        var wrongVersion = await Invoke(new P.RecursiveFileRequest { SchemaVersion = 999 });
+        Assert.IsFalse(wrongVersion.Success); Assert.AreEqual("unsupported_diagram_file_request", wrongVersion.ErrorCode);
+        // Contract rbg-v2 sections 2.3 and 2.4: the helper speaks exactly schema 2. An older editor's schema 1 request is refused
+        // before any file access, so it can never drop layout, realizations, domains or directions it cannot carry.
+        var level = await Invoke(new P.RecursiveFileRequest { SchemaVersion = 1, Action = P.RecursiveFileAction.RfaSaveLevel });
+        Assert.IsFalse(level.Success); Assert.AreEqual("unsupported_diagram_file_request", level.ErrorCode);
+        string root = Directory.CreateTempSubdirectory("kicad-schema-two-fields-").FullName;
+        try
+        {
+            var graph = LinkedDiagramFixture.Create().Graph;
+            string path = Path.Combine(root, "design.xml"), xml = RecursiveBlockGraphXml.Write(graph);
+            await File.WriteAllTextAsync(path, xml);
+            var read = new P.RecursiveFileRequest { SchemaVersion = 2, RepositoryRoot = root, SourcePath = path, DocumentId = graph.DocumentId.ToString("D") };
+            var loaded = await Run(JsonFormatter.Default.Format(read)); Assert.IsTrue(loaded.Success, loaded.ErrorMessage);
+            var rebase = read.Clone(); rebase.Action = P.RecursiveFileAction.RfaRebaseRequirements; rebase.ExpectedSourceToken = loaded.SourceToken;
+            rebase.Rebase = new() { Draft = RecursiveBlockCodec.Encode(graph.StartDraft(graph.SelectedRoot)) };
+            var compared = await Run(JsonFormatter.Default.Format(rebase)); Assert.IsTrue(compared.Success, compared.ErrorMessage); // Precision: the implemented request works.
+            var probes = new List<(string Name, string Json)>();
+            var old = read.Clone(); old.SchemaVersion = 1; probes.Add(("schema 1 read", JsonFormatter.Default.Format(old)));
+            var oldRebase = rebase.Clone(); oldRebase.SchemaVersion = 1; probes.Add(("schema 1 rebase", JsonFormatter.Default.Format(oldRebase)));
+            // The retired flat-diagram conversion (owner decision n9af098253fec71da), as an earlier client wrote it: this build's
+            // protocol can no longer express it, so it arrives as reserved names and numbers.
+            foreach (var action in RetiredConversionActions) probes.Add((action.ToJsonString(), WithRetired(read, action)));
+            probes.Add(("migrate", WithRetired(read, migrate: new JsonObject())));
+            foreach (var (name, json) in probes)
+            {
+                var rejected = await Run(json);
+                Assert.IsFalse(rejected.Success, name); Assert.AreEqual("unsupported_diagram_file_request", rejected.ErrorCode, name);
+            }
+            Assert.AreEqual(xml, await File.ReadAllTextAsync(path));
+        }
+        finally { Directory.Delete(root, true); }
+
+        static async Task<P.RecursiveFileResult> Run(string json)
+        {
+            using var response = new StringWriter();
+            await RecursiveFileCommand.RunAsync(new StringReader(json), response, CancellationToken.None);
+            return P.RecursiveFileResult.Parser.ParseJson(response.ToString());
+        }
+    }
+
+    // ---- Schema 2 through the compiled diagram helper (contract rbg-v2 sections 2 and 7) ----
+
+    private static P.BlockSelectionData Data(BlockSelection s) => new() { BlockId = s.BlockId.ToString("D"), StateId = s.StateId.ToString("D"), RevisionId = s.RevisionId.ToString("D") };
+    private static P.DiagramRevisionOriginData EditorOrigin(string summary) => new() { Kind = P.DiagramActorKind.DakEditor, Actor = "Native editor",
+        RecordedAt = Google.Protobuf.WellKnownTypes.Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow), Summary = summary };
+    private static P.RecursiveFileRequest ReadRequest(string root, string path, RecursiveBlockGraph graph, uint schema) =>
+        new() { SchemaVersion = schema, RepositoryRoot = root, SourcePath = path, DocumentId = graph.DocumentId.ToString("D") };
+    private static P.RecursiveFileRequest SaveBlockRequest(P.RecursiveFileRequest read, string token, BlockSelection root, RecursiveBlockDraft draft,
+        ImmutableArray<BlockSelection> path, uint schema)
+    {
+        var request = read.Clone(); request.SchemaVersion = schema; request.Action = P.RecursiveFileAction.RfaSaveBlock; request.ExpectedSourceToken = token;
+        request.Save = new() { ExpectedRoot = Data(root), Draft = RecursiveBlockCodec.Encode(draft), NewRevisionId = Guid.NewGuid().ToString("D"),
+            NewRequirementRevisionId = Guid.NewGuid().ToString("D"), Origin = EditorOrigin("Edit level") };
+        request.Save.BlockPath.Add(path.Select(Data)); request.Save.AncestorRevisionIds.Add(path.Skip(1).Select(_ => Guid.NewGuid().ToString("D")));
+        return request;
+    }
+    private static XName RootName(string xml) => XElement.Parse(xml).Name;
+
+    [TestMethod]
+    public async Task SchemaTwoReadsReportTheStoredFormatAndWritabilityWithoutChangingTheFile()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-schema-two-read-").FullName;
+        try
+        {
+            var v1 = LinkedDiagramFixture.Create().Graph; var v2 = SchemaTwoFixture.Create().Graph;
+            string first = Path.Combine(root, "v1.xml"), second = Path.Combine(root, "v2.xml");
+            string v1Xml = RecursiveBlockGraphXml.Write(v1, 1), v2Xml = RecursiveBlockGraphXml.Write(v2);
+            await File.WriteAllTextAsync(first, v1Xml); await File.WriteAllTextAsync(second, v2Xml);
+            var modified = File.GetLastWriteTimeUtc(first);
+            var old = await Invoke(ReadRequest(root, first, v1, 2));
+            Assert.IsTrue(old.Success, old.ErrorMessage);
+            Assert.AreEqual(2U, old.Document.SchemaVersion); Assert.AreEqual(2U, old.Document.Graph.SchemaVersion);
+            Assert.AreEqual(1U, old.Document.StoredSchemaVersion); Assert.IsTrue(old.Document.SourceWritable); Assert.AreEqual(0U, old.UpgradedFromSchemaVersion);
+            Assert.AreEqual(v1Xml, RecursiveBlockGraphXml.Write(RecursiveBlockCodec.Decode(old.Document.Graph), 1));
+            var current = await Invoke(ReadRequest(root, second, v2, 2));
+            Assert.IsTrue(current.Success, current.ErrorMessage); Assert.AreEqual(2U, current.Document.StoredSchemaVersion);
+            Assert.AreEqual(v2Xml, RecursiveBlockGraphXml.Write(RecursiveBlockCodec.Decode(current.Document.Graph)), "Every schema 2 fact crosses the helper.");
+            var psu = current.Document.Graph.Revisions.Single(r => r.Selection.RevisionId == SchemaTwoFixtureRevision(v2, "PSU"));
+            Assert.AreEqual("diagram-unit", psu.LocalDiagram.Presentation.Units); Assert.AreEqual("1200", psu.LocalDiagram.Presentation.Frame.Width);
+            Assert.AreEqual(P.DiagramRealizationState.DrsPartial, psu.LocalDiagram.InterfaceRealizations.Single().State);
+            if (!OperatingSystem.IsWindows())
+            {
+                File.SetUnixFileMode(second, UnixFileMode.UserRead | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+                var readOnly = await Invoke(ReadRequest(root, second, v2, 2));
+                Assert.IsTrue(readOnly.Success, readOnly.ErrorMessage); Assert.IsFalse(readOnly.Document.SourceWritable, "Save must be disabled for a read-only file.");
+            }
+            Assert.AreEqual(v1Xml, await File.ReadAllTextAsync(first)); Assert.AreEqual(v2Xml, await File.ReadAllTextAsync(second));
+            Assert.AreEqual(modified, File.GetLastWriteTimeUtc(first), "The writability probe never touches the file.");
+            var future = await Invoke(ReadRequest(root, first, v1, 3));
+            Assert.IsFalse(future.Success); Assert.AreEqual("unsupported_diagram_file_request", future.ErrorCode);
+            await File.WriteAllTextAsync(Path.Combine(root, "v3.xml"), v2Xml.Replace(RecursiveBlockGraphXml.Namespace,
+                "urn:kicad:automation:recursive-block-graph:3", StringComparison.Ordinal));
+            var tooNew = await Invoke(ReadRequest(root, Path.Combine(root, "v3.xml"), v2, 2));
+            Assert.IsFalse(tooNew.Success); Assert.AreEqual("diagram_schema_too_new", tooNew.ErrorCode);
+        }
+        finally
+        {
+            if (!OperatingSystem.IsWindows())
+                foreach (string file in Directory.EnumerateFiles(root)) File.SetUnixFileMode(file, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            Directory.Delete(root, true);
+        }
+
+        static string SchemaTwoFixtureRevision(RecursiveBlockGraph graph, string name) =>
+            graph.Walk(graph.SelectedRoot).Single(s => graph.Inspect(s).Name == name).RevisionId.ToString("D");
+    }
+
+    [TestMethod]
+    public async Task TheFirstChangedSaveUpgradesAVersionOneFileAndUnchangedSavesKeepItsBytes()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-schema-two-save-").FullName;
+        try
+        {
+            var f = LinkedDiagramFixture.Create(); var graph = f.Graph;
+            // A version 1 file as an earlier build stored it (the explicit version 1 writer).
+            string path = Path.Combine(root, "design.xml"), original = RecursiveBlockGraphXml.Write(graph, 1);
+            await File.WriteAllTextAsync(path, original);
+            var read = ReadRequest(root, path, graph, 2); var loaded = await Invoke(read);
+            var psu = f.Blocks["PSU"];
+            // An unchanged save writes nothing and upgrades nothing.
+            var unchanged = await Invoke(SaveBlockRequest(read, loaded.SourceToken, graph.SelectedRoot, graph.StartDraft(psu), [graph.SelectedRoot, psu], 2));
+            Assert.IsTrue(unchanged.Success, unchanged.ErrorMessage); Assert.AreEqual(loaded.SourceToken, unchanged.SourceToken);
+            Assert.IsFalse(unchanged.SaveSummary.Changed); Assert.AreEqual(0U, unchanged.UpgradedFromSchemaVersion);
+            Assert.AreEqual(1U, unchanged.Document.StoredSchemaVersion);
+            Assert.AreEqual(original, await File.ReadAllTextAsync(path), "R4: an unchanged save leaves a version 1 file byte-identical.");
+            // R4: the first changed write stores schema 2, even for a change version 1 could hold, and reports the upgrade.
+            var edit = graph.StartDraft(psu);
+            edit = edit with { Requirements = edit.Requirements.Edit(DiagramRequirementField.General, "Supply the CPU.") };
+            var textSaved = await Invoke(SaveBlockRequest(read, loaded.SourceToken, graph.SelectedRoot, edit, [graph.SelectedRoot, psu], 2));
+            Assert.IsTrue(textSaved.Success, textSaved.ErrorMessage); Assert.AreEqual(1U, textSaved.UpgradedFromSchemaVersion);
+            Assert.AreEqual(2U, textSaved.Document.StoredSchemaVersion);
+            string textXml = await File.ReadAllTextAsync(path);
+            Assert.AreEqual(XName.Get("recursive-block-graph", RecursiveBlockGraphXml.Namespace), RootName(textXml));
+            Assert.IsFalse(XElement.Parse(textXml).Descendants().Any(e => e.Name.NamespaceName is RecursiveBlockGraphXml.NamespaceV1 or DiagramConnectionArchiveXml.NamespaceV1),
+                "The embedded connection archives move to schema 2 with the document.");
+            var afterText = RecursiveBlockCodec.Decode(textSaved.Document.Graph);
+            Assert.AreEqual(textXml, RecursiveBlockGraphXml.Write(afterText, 2), "R5: the stored schema 2 text is canonical.");
+            Assert.AreEqual(textXml, RecursiveBlockGraphXml.Write(RecursiveBlockGraphXml.Read(textXml), 2));
+            // The upgrade itself adds no revision and no history row: only the edited PSU revision, its root snapshot and one requirement revision.
+            Assert.IsTrue(textSaved.SaveSummary.Changed); Assert.HasCount(1, textSaved.SaveSummary.CreatedBlockRevisions);
+            Assert.HasCount(1, textSaved.SaveSummary.CreatedAncestors);
+            Assert.AreEqual(graph.Revisions.Length + 2, afterText.Revisions.Length);
+            Assert.AreEqual(graph.RequirementHistories.Sum(h => h.Revisions.Length) + 1, afterText.RequirementHistories.Sum(h => h.Revisions.Length));
+            Assert.IsTrue(graph.Revisions.All(r => afterText.Inspect(r.Selection).LocalDiagram.SameContents(r.LocalDiagram)), "Every version 1 fact is kept.");
+            foreach (var archive in graph.ConnectionArchives) Assert.IsTrue(afterText.Connections(archive.OwnerBlockId).Retains(archive));
+            // Later writes keep version 2 without a further upgrade report; a layout change also prunes dormant layout entries.
+            var newPsu = afterText.Inspect(afterText.SelectedRoot).Children[0];
+            var layout = afterText.StartDraft(newPsu);
+            layout = layout with { Diagram = layout.LocalDiagram with { Presentation = new(
+                [new(f.Blocks["Power stage"].BlockId, new(140, 110, 240, 145)), new(f.Blocks["Regulator"].BlockId, new(0, 0, 10, 10))],
+                [new(f.Blocks["Power stage"].BlockId, f.Ports["Power stage/Output"], DiagramPortSide.Right, 72.5m)], []) } };
+            var upgraded = await Invoke(SaveBlockRequest(read, textSaved.SourceToken, afterText.SelectedRoot, layout, [afterText.SelectedRoot, newPsu], 2));
+            Assert.IsTrue(upgraded.Success, upgraded.ErrorMessage);
+            Assert.AreEqual(0U, upgraded.UpgradedFromSchemaVersion); Assert.AreEqual(2U, upgraded.Document.StoredSchemaVersion);
+            Assert.AreEqual(1U, upgraded.SaveSummary.PrunedPresentationEntries, "The Regulator is not a child of PSU, so its placement is dormant.");
+            string upgradedXml = await File.ReadAllTextAsync(path);
+            Assert.AreEqual(XName.Get("recursive-block-graph", RecursiveBlockGraphXml.Namespace), RootName(upgradedXml));
+            var stored = RecursiveBlockGraphXml.Read(upgradedXml); var laidOut = stored.Inspect(stored.SelectedRoot).Children[0];
+            Assert.AreEqual(1, stored.Inspect(laidOut).LocalDiagram.Layout.Blocks.Length);
+            Assert.AreEqual(72.5m, stored.Inspect(laidOut).LocalDiagram.Layout.Ports.Single().Offset);
+            Assert.IsTrue(afterText.Revisions.All(r => stored.Inspect(r.Selection).LocalDiagram.SameContents(r.LocalDiagram)), "Every earlier fact is kept.");
+            var again = stored.StartDraft(laidOut);
+            again = again with { Requirements = again.Requirements.Edit(DiagramRequirementField.Routing, "Short supply loops.") };
+            var later = await Invoke(SaveBlockRequest(read, upgraded.SourceToken, stored.SelectedRoot, again, [stored.SelectedRoot, laidOut], 2));
+            Assert.IsTrue(later.Success, later.ErrorMessage); Assert.AreEqual(0U, later.UpgradedFromSchemaVersion); Assert.AreEqual(2U, later.Document.StoredSchemaVersion);
+            // A connection's direction and interconnect realization save through the same protocol.
+            var latest = RecursiveBlockCodec.Decode(later.Document.Graph); var cpu = f.Blocks["CPU"]; var link = f.Links["CPU/Memory"];
+            var connection = latest.Connections(cpu.BlockId).StartDraft(link) with { Direction = DiagramConnectionDirection.FromFirst,
+                Realization = new(DiagramRealizationState.Unknown, [], [], "Memory bus wiring is not chosen.", []) };
+            var save = new P.SaveConnectionDraftData { ExpectedRoot = Data(latest.SelectedRoot), Draft = RecursiveBlockCodec.Encode(connection),
+                NewConnectionRevisionId = Guid.NewGuid().ToString("D"), NewRequirementRevisionId = Guid.NewGuid().ToString("D"),
+                NewBlockRevisionId = Guid.NewGuid().ToString("D"), NewBlockRequirementRevisionId = Guid.NewGuid().ToString("D"), Origin = EditorOrigin("Direction") };
+            save.BlockPath.Add(Data(latest.SelectedRoot)); save.BlockPath.Add(Data(cpu)); save.ConnectionPath.Add(save.Draft.Baseline.Clone());
+            save.BlockAncestorRevisionIds.Add(Guid.NewGuid().ToString("D"));
+            var connectionRequest = read.Clone(); connectionRequest.Action = P.RecursiveFileAction.RfaSaveConnection;
+            connectionRequest.ExpectedSourceToken = later.SourceToken; connectionRequest.SaveConnection = save;
+            var linked = await Invoke(connectionRequest); Assert.IsTrue(linked.Success, linked.ErrorMessage);
+            var withLink = RecursiveBlockCodec.Decode(linked.Document.Graph);
+            var newLink = withLink.Inspect(withLink.Inspect(withLink.SelectedRoot).Children[1]).LocalDiagram.Connections[2];
+            var revision = withLink.Connections(cpu.BlockId).Inspect(newLink);
+            Assert.AreEqual(DiagramConnectionDirection.FromFirst, revision.Direction);
+            Assert.AreEqual(DiagramRealizationState.Unknown, revision.Realization!.State);
+            Assert.AreEqual(RecursiveBlockGraphXml.Write(withLink, 2), await File.ReadAllTextAsync(path));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public async Task SchemaOneExchangesAreRefusedBeforeAnyFileAccess()
+    {
+        // Contract rbg-v2 sections 2.3 and 2.4: the native editor, the helper and kicad_diagram_open moved to schema 2 together.
+        // An older editor would send a draft without layout, realizations, domains or directions, and a save would erase them,
+        // so every schema 1 request is refused before any file access, on version 1 and version 2 files alike.
+        string root = Directory.CreateTempSubdirectory("kicad-schema-one-refusal-").FullName;
+        try
+        {
+            var f = SchemaTwoFixture.Create(); var graph = f.Graph; var psu = f.Linked.Blocks["PSU"];
+            string path = Path.Combine(root, "v2.xml"), xml = RecursiveBlockGraphXml.Write(graph); await File.WriteAllTextAsync(path, xml);
+            var plain = LinkedDiagramFixture.Create();
+            string plainPath = Path.Combine(root, "v1.xml"), plainXml = RecursiveBlockGraphXml.Write(plain.Graph, 1); await File.WriteAllTextAsync(plainPath, plainXml);
+            var two = await Invoke(ReadRequest(root, path, graph, 2)); Assert.IsTrue(two.Success, two.ErrorMessage); // Precision.
+            var twoPlain = await Invoke(ReadRequest(root, plainPath, plain.Graph, 2)); Assert.IsTrue(twoPlain.Success, twoPlain.ErrorMessage);
+            var requests = new List<(string Name, P.RecursiveFileRequest Request)>();
+            foreach (var (file, document, token, name) in new[] { (path, graph, two.SourceToken, "v2"), (plainPath, plain.Graph, twoPlain.SourceToken, "v1") })
+            {
+                requests.Add((name + " read", ReadRequest(root, file, document, 1)));
+                var history = ReadRequest(root, file, document, 1); history.Action = P.RecursiveFileAction.RfaDiagramHistory; history.Block = Data(document.SelectedRoot);
+                requests.Add((name + " history", history));
+                var block = document.Walk(document.SelectedRoot).Skip(1).First();
+                var edit = document.StartDraft(block);
+                edit = edit with { Requirements = edit.Requirements.Edit(DiagramRequirementField.Schematic, "Keep the regulator sheet first.") };
+                requests.Add((name + " save", SaveBlockRequest(ReadRequest(root, file, document, 1), token, document.SelectedRoot, edit, [document.SelectedRoot, block], 1)));
+                var manage = ReadRequest(root, file, document, 1); manage.Action = P.RecursiveFileAction.RfaManageImplementation; manage.ExpectedSourceToken = token;
+                manage.Implementation = new() { Action = P.ImplementationActionKind.IakDuplicate, ExpectedRoot = Data(document.SelectedRoot), Source = Data(block),
+                    Name = "Copy", NewStateId = Guid.NewGuid().ToString("D"), NewRevisionId = Guid.NewGuid().ToString("D"),
+                    NewRequirementRevisionId = Guid.NewGuid().ToString("D"), Origin = EditorOrigin("Duplicate") };
+                requests.Add((name + " manage", manage));
+                var level = ReadRequest(root, file, document, 1); level.Action = P.RecursiveFileAction.RfaSaveLevel; level.ExpectedSourceToken = token;
+                level.SaveLevel = new() { ExpectedRoot = Data(document.SelectedRoot), Draft = RecursiveBlockCodec.Encode(document.StartLevelDraft(document.SelectedRoot)) };
+                requests.Add((name + " level save", level));
+            }
+            foreach (var (name, request) in requests)
+            {
+                var refused = await Invoke(request);
+                Assert.IsFalse(refused.Success, name); Assert.AreEqual("unsupported_diagram_file_request", refused.ErrorCode, name);
+                Assert.IsNull(refused.Document, name);
+            }
+            Assert.AreEqual(xml, await File.ReadAllTextAsync(path), "No schema 1 exchange changed the schema 2 file.");
+            Assert.AreEqual(plainXml, await File.ReadAllTextAsync(plainPath), "No schema 1 exchange changed the version 1 file.");
+            _ = psu;
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public async Task MovingABlockIsPreviewedThenSavedOnceWithEveryCheckFailingClosed()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-reparent-command-").FullName;
+        try
+        {
+            var f = LinkedDiagramFixture.Create(); var graph = f.Graph;
+            // A version 1 file as an earlier build stored it (the explicit version 1 writer); the move is its first changed write.
+            string path = Path.Combine(root, "design.xml"), xml = RecursiveBlockGraphXml.Write(graph, 1); await File.WriteAllTextAsync(path, xml);
+            var read = ReadRequest(root, path, graph, 2); var loaded = await Invoke(read);
+            var system = graph.SelectedRoot; var psu = f.Blocks["PSU"]; var cpu = f.Blocks["CPU"]; var telemetry = f.Blocks["Telemetry"];
+            var attached = f.Links["PSU/Telemetry"].ConnectionId;
+            P.RecursiveFileRequest Move(P.RecursiveFileAction action, Guid block, ImmutableArray<BlockSelection> source, ImmutableArray<BlockSelection> target,
+                IEnumerable<Guid>? detach = null, bool ids = true, string? token = null)
+            {
+                var request = read.Clone(); request.Action = action; request.ExpectedSourceToken = token ?? loaded.SourceToken;
+                request.Reparent = new() { ExpectedRoot = Data(system), BlockId = block.ToString("D"),
+                    TargetPlacement = new() { BlockId = block.ToString("D"), Rect = new() { X = "400", Y = "120.000000", Width = "240", Height = "145" } } };
+                request.Reparent.SourceParentPath.Add(source.Select(Data)); request.Reparent.TargetParentPath.Add(target.Select(Data));
+                request.Reparent.DetachConnectionIds.Add((detach ?? []).Select(id => id.ToString("D")));
+                if (ids)
+                {
+                    foreach (var owner in source.Concat(target).Select(s => s.BlockId).Distinct())
+                        request.Reparent.NewRevisions.Add(new P.RevisionIdAssignmentData { ObjectId = owner.ToString("D"), NewRevisionId = Guid.NewGuid().ToString("D") });
+                    request.Reparent.Origin = EditorOrigin("Move to another block");
+                }
+                return request;
+            }
+            var preview = await Invoke(Move(P.RecursiveFileAction.RfaPrepareReparent, telemetry.BlockId, [system, psu], [system, cpu], ids: false));
+            Assert.IsTrue(preview.Success, preview.ErrorMessage); Assert.IsNull(preview.Document);
+            CollectionAssert.AreEqual(new[] { attached.ToString("D") }, preview.ReparentPreview.RequiredDetachConnectionIds.ToArray());
+            CollectionAssert.AreEqual(new[] { P.LevelEditEffectKind.LeekChildRemoved, P.LevelEditEffectKind.LeekConnectionRemoved },
+                preview.ReparentPreview.Effects.Select(e => e.Kind).ToArray());
+            Assert.IsTrue(preview.ReparentPreview.Effects.All(e => e.ScopeBlockId == psu.BlockId.ToString("D")));
+            CollectionAssert.AreEqual(new[] { system.BlockId, psu.BlockId, cpu.BlockId }.Select(id => id.ToString("D")).ToArray(),
+                preview.ReparentPreview.SuccessorBlockIds.ToArray());
+            Assert.AreEqual(xml, await File.ReadAllTextAsync(path), "A preview never writes.");
+            foreach (var (name, request, code) in new[]
+            {
+                ("connected", Move(P.RecursiveFileAction.RfaReparentBlock, telemetry.BlockId, [system, psu], [system, cpu]), "reparent_connected_block"),
+                ("extra detach", Move(P.RecursiveFileAction.RfaReparentBlock, telemetry.BlockId, [system, psu], [system, cpu], [attached, f.Links["PSU/Supply"].ConnectionId]),
+                    "reparent_disposition_mismatch"),
+                ("cycle", Move(P.RecursiveFileAction.RfaReparentBlock, psu.BlockId, [system], [system, psu, telemetry]), "reparent_cycle"),
+                ("root", Move(P.RecursiveFileAction.RfaReparentBlock, system.BlockId, [system], [system, cpu]), "reparent_root"),
+                ("same parent", Move(P.RecursiveFileAction.RfaReparentBlock, telemetry.BlockId, [system, psu], [system, psu], [attached]), "reparent_same_parent"),
+                ("not a child", Move(P.RecursiveFileAction.RfaReparentBlock, f.Blocks["Memory"].BlockId, [system, psu], [system, cpu]), "reparent_block_not_child"),
+                ("wrong path", Move(P.RecursiveFileAction.RfaReparentBlock, telemetry.BlockId, [system, cpu, psu], [system, cpu], [attached]),
+                    "reparent_not_in_selected_design"),
+                ("no identities", Move(P.RecursiveFileAction.RfaReparentBlock, telemetry.BlockId, [system, psu], [system, cpu], [attached], ids: false),
+                    "invalid_reparent_request"),
+                ("stale", Move(P.RecursiveFileAction.RfaReparentBlock, telemetry.BlockId, [system, psu], [system, cpu], [attached], token: new string('0', 64)),
+                    "recursive_block_file_changed"),
+            })
+            {
+                var refused = await Invoke(request);
+                Assert.IsFalse(refused.Success, name); Assert.AreEqual(code, refused.ErrorCode, name + ": " + refused.ErrorMessage);
+            }
+            var reused = Move(P.RecursiveFileAction.RfaReparentBlock, telemetry.BlockId, [system, psu], [system, cpu], [attached]);
+            reused.Reparent.NewRevisions[0].NewRevisionId = psu.RevisionId.ToString("D");
+            var reusedResult = await Invoke(reused); Assert.AreEqual("identity_reused", reusedResult.ErrorCode);
+            var misplaced = Move(P.RecursiveFileAction.RfaReparentBlock, telemetry.BlockId, [system, psu], [system, cpu], [attached]);
+            misplaced.Reparent.TargetPlacement.BlockId = psu.BlockId.ToString("D");
+            Assert.AreEqual("invalid_presentation_view", (await Invoke(misplaced)).ErrorCode);
+            Assert.AreEqual(xml, await File.ReadAllTextAsync(path), "Refused moves never write.");
+            var moved = await Invoke(Move(P.RecursiveFileAction.RfaReparentBlock, telemetry.BlockId, [system, psu], [system, cpu], [attached]));
+            Assert.IsTrue(moved.Success, moved.ErrorMessage);
+            Assert.AreEqual(1U, moved.UpgradedFromSchemaVersion, "R4: the move is the first changed write of this version 1 file.");
+            Assert.HasCount(2, moved.SaveSummary.CreatedBlockRevisions); Assert.HasCount(1, moved.SaveSummary.CreatedAncestors);
+            var after = RecursiveBlockCodec.Decode(moved.Document.Graph);
+            var newPsu = after.Inspect(after.SelectedRoot).Children[0]; var newCpu = after.Inspect(after.SelectedRoot).Children[1];
+            CollectionAssert.AreEqual(new[] { f.Blocks["Power stage"] }, after.Inspect(newPsu).Children.ToArray());
+            CollectionAssert.AreEqual(new[] { f.Blocks["Processor"], f.Blocks["Memory"], telemetry }, after.Inspect(newCpu).Children.ToArray(),
+                "The moved block keeps its exact identity and revision.");
+            Assert.IsFalse(after.Inspect(newPsu).LocalDiagram.Connections.Any(c => c.ConnectionId == attached));
+            Assert.IsNotNull(after.Connections(psu.BlockId).Inspect(f.Links["PSU/Telemetry"]), "The detached connection stays in PSU's archive history.");
+            Assert.AreEqual(120m, after.Inspect(newCpu).LocalDiagram.Layout.Blocks.Single().Rect.Y, "Protocol decimals are canonicalized exactly.");
+            Assert.IsTrue(after.Walk(system).Contains(telemetry) && graph.Inspect(psu).Children.Contains(telemetry), "The old root still reproduces the old hierarchy.");
+            Assert.AreEqual(RecursiveBlockGraphXml.Write(after, 2), await File.ReadAllTextAsync(path));
+            var retry = await Invoke(Move(P.RecursiveFileAction.RfaReparentBlock, telemetry.BlockId, [system, psu], [system, cpu], [attached]));
+            Assert.AreEqual("recursive_block_file_changed", retry.ErrorCode, "A retry with the preview's token cannot move twice.");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public async Task MovingABlockUpAndDownALevelPreviewsEveryEffectOnBothLevelsAndSavesOneSuccessorPerBlock()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-reparent-schema-two-").FullName;
+        try
+        {
+            // Schema 2 fixture: PSU has a note on Power stage, a Partial realization of PSU/Power through Supply and Power stage,
+            // and a layout with Power stage, its port and the Supply route. System keeps a dormant placement and port of Power
+            // stage and a note whose target was removed earlier, as a copied older layout would.
+            var f = SchemaTwoFixture.Create(); var g = f.Graph; var l = f.Linked;
+            var system = g.SelectedRoot; var psu = l.Blocks["PSU"]; var cpu = l.Blocks["CPU"]; var power = l.Blocks["Power stage"];
+            Guid output = l.Ports["Power stage/Output"], psuPower = l.Ports["PSU/Power"], supply = l.Links["PSU/Supply"].ConnectionId;
+            var heatNote = new DiagramAnnotation(Guid.NewGuid(), DiagramAnnotationRole.Comment, "Check the power stage heat sink.",
+                new(DiagramAnnotationTargetKind.Block, power.BlockId), new(120, 90), [], SchemaTwoFixture.Origin);
+            var returnNote = new DiagramAnnotation(Guid.NewGuid(), DiagramAnnotationRole.Instruction, "Keep the power stage near the input connector.",
+                new(DiagramAnnotationTargetKind.Block, power.BlockId, "Target removed from this diagram level."), null, [], SchemaTwoFixture.Origin);
+            var graph = new RecursiveBlockGraph(g.DocumentId, g.SelectedRoot, g.States, g.Revisions.Select(r =>
+                r.Selection == psu ? r with { Diagram = r.LocalDiagram with { Annotations = [heatNote] } }
+                : r.Selection == system ? r with { Diagram = r.LocalDiagram with { Annotations = [returnNote], Presentation = r.LocalDiagram.Layout with {
+                    Blocks = r.LocalDiagram.Layout.BlockPlacements.Add(new(power.BlockId, new(820, 80, 200, 120))),
+                    Ports = r.LocalDiagram.Layout.PortPlacements.Add(new(power.BlockId, output, DiagramPortSide.Right, 30)) } } }
+                : r), g.RequirementHistories, g.ConnectionArchives);
+            string path = Path.Combine(root, "design.xml"), xml = RecursiveBlockGraphXml.Write(graph); await File.WriteAllTextAsync(path, xml);
+            var read = ReadRequest(root, path, graph, 2); var loaded = await Invoke(read); Assert.IsTrue(loaded.Success, loaded.ErrorMessage);
+            Assert.AreEqual(2U, loaded.Document.StoredSchemaVersion);
+            static string Effect(P.LevelEditEffectKind kind, Guid objectId, Guid scope, string detail) => $"{kind} {objectId:D} {scope:D} {detail}";
+            static string[] Ordered(IEnumerable<(P.LevelEditEffectKind Kind, Guid Object, Guid Scope, string Detail)> effects) => [.. effects
+                .OrderBy(e => (int)e.Kind).ThenBy(e => e.Object.ToString("D"), StringComparer.Ordinal).ThenBy(e => e.Detail, StringComparer.Ordinal)
+                .ThenBy(e => e.Scope.ToString("D"), StringComparer.Ordinal).Select(e => Effect(e.Kind, e.Object, e.Scope, e.Detail))];
+            static string[] Actual(P.ReparentPreviewData preview) => [.. preview.Effects.Select(e => Effect(e.Kind, Guid.Parse(e.ObjectId), Guid.Parse(e.ScopeBlockId), e.Detail))];
+
+            // Move 1: Power stage from PSU up to System (the target parent is an ancestor of the source parent).
+            var up = MoveRequest(read, P.RecursiveFileAction.RfaPrepareReparent, system, power.BlockId, [system, psu], [system], [supply],
+                new() { BlockId = power.BlockId.ToString("D"), Rect = new() { X = "760", Y = "300", Width = "203.2", Height = "152.4" } }, loaded.SourceToken, null);
+            var preview = await Invoke(up); Assert.IsTrue(preview.Success, preview.ErrorMessage);
+            CollectionAssert.AreEqual(new[] { supply.ToString("D") }, preview.ReparentPreview.RequiredDetachConnectionIds.ToArray());
+            CollectionAssert.AreEqual(new[] { system.BlockId, psu.BlockId }.Select(id => id.ToString("D")).ToArray(), preview.ReparentPreview.SuccessorBlockIds.ToArray());
+            CollectionAssert.AreEqual(Ordered(
+            [
+                (P.LevelEditEffectKind.LeekChildRemoved, power.BlockId, psu.BlockId, "Power stage"),
+                (P.LevelEditEffectKind.LeekConnectionRemoved, supply, psu.BlockId, "Supply"),
+                (P.LevelEditEffectKind.LeekAnnotationUnresolved, heatNote.Id, psu.BlockId, "Target removed from this diagram level."),
+                (P.LevelEditEffectKind.LeekRealizationTargetRemoved, psuPower, psu.BlockId, $"ChildInterface {power.BlockId:D}/{output:D}"),
+                (P.LevelEditEffectKind.LeekRealizationTargetRemoved, psuPower, psu.BlockId, $"LocalConnection {supply:D}"),
+                (P.LevelEditEffectKind.LeekRealizationStateChanged, psuPower, psu.BlockId, "Partial -> Unknown"),
+                (P.LevelEditEffectKind.LeekPresentationEntryRemoved, power.BlockId, psu.BlockId, $"block:{power.BlockId:D}"),
+                (P.LevelEditEffectKind.LeekPresentationEntryRemoved, output, psu.BlockId, $"port:{power.BlockId:D}:{output:D}"),
+                (P.LevelEditEffectKind.LeekPresentationEntryRemoved, supply, psu.BlockId, $"route:{supply:D}:1"),
+                // The target level: the dormant placement and port of the arriving block are dropped and its note resolves again.
+                (P.LevelEditEffectKind.LeekPresentationEntryRemoved, power.BlockId, system.BlockId, $"block:{power.BlockId:D}"),
+                (P.LevelEditEffectKind.LeekPresentationEntryRemoved, output, system.BlockId, $"port:{power.BlockId:D}:{output:D}"),
+                (P.LevelEditEffectKind.LeekAnnotationResolved, returnNote.Id, system.BlockId, "Target returned to this diagram level."),
+            ]), Actual(preview.ReparentPreview));
+            Assert.AreEqual(xml, await File.ReadAllTextAsync(path), "A preview never writes.");
+            var upIds = new Dictionary<Guid, Guid> { [system.BlockId] = Guid.NewGuid(), [psu.BlockId] = Guid.NewGuid() };
+            var movedUp = await Invoke(MoveRequest(read, P.RecursiveFileAction.RfaReparentBlock, system, power.BlockId, [system, psu], [system], [supply],
+                up.Reparent.TargetPlacement, loaded.SourceToken, upIds));
+            Assert.IsTrue(movedUp.Success, movedUp.ErrorMessage);
+            Assert.AreEqual(0U, movedUp.UpgradedFromSchemaVersion); Assert.AreEqual(2U, movedUp.Document.StoredSchemaVersion);
+            Assert.IsTrue(movedUp.SaveSummary.Changed); Assert.HasCount(2, movedUp.SaveSummary.CreatedBlockRevisions);
+            Assert.IsEmpty(movedUp.SaveSummary.CreatedAncestors, "The target parent is the root, so no other snapshot is needed.");
+            Assert.AreEqual(2U, movedUp.SaveSummary.PrunedPresentationEntries, "The dormant placement and port of Power stage in System.");
+            var afterUp = RecursiveBlockCodec.Decode(movedUp.Document.Graph);
+            string upXml = await File.ReadAllTextAsync(path);
+            Assert.AreEqual(RecursiveBlockGraphXml.Write(afterUp, 2), upXml); Assert.AreEqual(upXml, RecursiveBlockGraphXml.Write(RecursiveBlockGraphXml.Read(upXml), 2));
+            var system1 = new BlockSelection(system.BlockId, system.StateId, upIds[system.BlockId]);
+            var psu1 = new BlockSelection(psu.BlockId, psu.StateId, upIds[psu.BlockId]);
+            Assert.AreEqual(system1, afterUp.SelectedRoot);
+            Assert.AreEqual(graph.Revisions.Length + 2, afterUp.Revisions.Length, "Exactly one successor for System and one for PSU.");
+            // The root's one successor holds both changes: its new PSU child and the arriving block with its placement.
+            var rootAfterUp = afterUp.Inspect(system1);
+            Assert.AreEqual(system.RevisionId, rootAfterUp.ParentRevisionId); Assert.AreEqual("Native editor", rootAfterUp.Origin.Actor);
+            CollectionAssert.AreEqual(new[] { psu1, cpu, power }, rootAfterUp.Children.ToArray(), "The moved block keeps its exact identity and revision.");
+            Assert.AreEqual(new DiagramRect(760, 300, 203.2m, 152.4m), rootAfterUp.LocalDiagram.Layout.BlockPlacements.Single(b => b.BlockId == power.BlockId).Rect);
+            Assert.IsFalse(rootAfterUp.LocalDiagram.Layout.PortPlacements.Any(p => p.BlockId == power.BlockId));
+            var resolved = rootAfterUp.LocalDiagram.Notes.Single(); Assert.AreEqual(returnNote.Id, resolved.Id);
+            Assert.IsNull(resolved.Target.UnresolvedReason); Assert.AreEqual("Native editor", resolved.Origin.Actor);
+            Assert.IsTrue(graph.Inspect(system).LocalDiagram.SameContents(rootAfterUp.LocalDiagram with
+            {
+                Annotations = [returnNote],
+                Presentation = rootAfterUp.LocalDiagram.Layout with { Blocks = [.. rootAfterUp.LocalDiagram.Layout.BlockPlacements.Where(b => b.BlockId != power.BlockId)
+                    .Append(new DiagramBlockPlacement(power.BlockId, new(820, 80, 200, 120)))],
+                    Ports = rootAfterUp.LocalDiagram.Layout.PortPlacements.Add(new(power.BlockId, output, DiagramPortSide.Right, 30)) }
+            }), "Nothing else changes at the target level.");
+            // The source level loses the block, its attached connection, their layout and realization targets; its note is kept unresolved.
+            var psuAfterUp = afterUp.Inspect(psu1);
+            Assert.AreEqual(psu.RevisionId, psuAfterUp.ParentRevisionId);
+            CollectionAssert.AreEqual(new[] { l.Blocks["Telemetry"] }, psuAfterUp.Children.ToArray());
+            CollectionAssert.AreEqual(new[] { l.Links["PSU/Telemetry"] }, psuAfterUp.LocalDiagram.Connections.ToArray());
+            var downgraded = psuAfterUp.LocalDiagram.Realizations.Single();
+            Assert.AreEqual(psuPower, downgraded.InterfaceId); Assert.AreEqual(DiagramRealizationState.Unknown, downgraded.State);
+            Assert.IsEmpty(downgraded.TargetList); Assert.AreEqual("Realizing element was removed.", downgraded.UnresolvedReason);
+            var psuLayout = psuAfterUp.LocalDiagram.Layout;
+            Assert.IsFalse(psuLayout.BlockPlacements.Any(b => b.BlockId == power.BlockId)); Assert.IsFalse(psuLayout.PortPlacements.Any(p => p.BlockId == power.BlockId));
+            Assert.IsEmpty(psuLayout.ConnectionRoutes); Assert.AreEqual(new DiagramRect(0, 0, 1200, 800), psuLayout.Frame);
+            CollectionAssert.AreEqual(new[] { l.Blocks["Telemetry"].BlockId, l.Blocks["Regulator"].BlockId }, psuLayout.BlockPlacements.Select(b => b.BlockId).ToArray(),
+                "The other placements, including the dormant Regulator entry, are kept verbatim.");
+            Assert.AreEqual("Target removed from this diagram level.", psuAfterUp.LocalDiagram.Notes.Single().Target.UnresolvedReason);
+            Assert.IsNotNull(afterUp.Connections(psu.BlockId).Inspect(l.Links["PSU/Supply"]), "The detached connection stays in PSU's archive history.");
+            CollectionAssert.AreEqual(graph.Inspect(system).Children.ToArray(), afterUp.Inspect(system).Children.ToArray(), "The old root still reproduces the old hierarchy.");
+            Assert.IsTrue(afterUp.Inspect(psu).Children.Contains(power));
+
+            // Move 2: Power stage from System down into CPU (the source parent is an ancestor of the target parent), unplaced there.
+            var down = MoveRequest(read, P.RecursiveFileAction.RfaPrepareReparent, system1, power.BlockId, [system1], [system1, cpu], [], null, movedUp.SourceToken, null);
+            var downPreview = await Invoke(down); Assert.IsTrue(downPreview.Success, downPreview.ErrorMessage);
+            Assert.IsEmpty(downPreview.ReparentPreview.RequiredDetachConnectionIds);
+            CollectionAssert.AreEqual(new[] { system.BlockId, cpu.BlockId }.Select(id => id.ToString("D")).ToArray(), downPreview.ReparentPreview.SuccessorBlockIds.ToArray());
+            CollectionAssert.AreEqual(Ordered(
+            [
+                (P.LevelEditEffectKind.LeekChildRemoved, power.BlockId, system.BlockId, "Power stage"),
+                (P.LevelEditEffectKind.LeekAnnotationUnresolved, returnNote.Id, system.BlockId, "Target removed from this diagram level."),
+                (P.LevelEditEffectKind.LeekPresentationEntryRemoved, power.BlockId, system.BlockId, $"block:{power.BlockId:D}"),
+            ]), Actual(downPreview.ReparentPreview));
+            var downIds = new Dictionary<Guid, Guid> { [system.BlockId] = Guid.NewGuid(), [cpu.BlockId] = Guid.NewGuid() };
+            var movedDown = await Invoke(MoveRequest(read, P.RecursiveFileAction.RfaReparentBlock, system1, power.BlockId, [system1], [system1, cpu], [], null,
+                movedUp.SourceToken, downIds));
+            Assert.IsTrue(movedDown.Success, movedDown.ErrorMessage);
+            Assert.HasCount(2, movedDown.SaveSummary.CreatedBlockRevisions); Assert.IsEmpty(movedDown.SaveSummary.CreatedAncestors);
+            Assert.AreEqual(0U, movedDown.SaveSummary.PrunedPresentationEntries);
+            var afterDown = RecursiveBlockCodec.Decode(movedDown.Document.Graph);
+            Assert.AreEqual(RecursiveBlockGraphXml.Write(afterDown, 2), await File.ReadAllTextAsync(path));
+            var system2 = new BlockSelection(system.BlockId, system.StateId, downIds[system.BlockId]);
+            var cpu1 = new BlockSelection(cpu.BlockId, cpu.StateId, downIds[cpu.BlockId]);
+            Assert.AreEqual(system2, afterDown.SelectedRoot); Assert.AreEqual(afterUp.Revisions.Length + 2, afterDown.Revisions.Length);
+            var rootAfterDown = afterDown.Inspect(system2);
+            Assert.AreEqual(system1.RevisionId, rootAfterDown.ParentRevisionId);
+            CollectionAssert.AreEqual(new[] { psu1, cpu1 }, rootAfterDown.Children.ToArray(), "One root successor removes the block and pins the new CPU.");
+            Assert.IsFalse(rootAfterDown.LocalDiagram.Layout.BlockPlacements.Any(b => b.BlockId == power.BlockId));
+            Assert.AreEqual("Target removed from this diagram level.", rootAfterDown.LocalDiagram.Notes.Single().Target.UnresolvedReason);
+            var cpuAfterDown = afterDown.Inspect(cpu1);
+            Assert.AreEqual(cpu.RevisionId, cpuAfterDown.ParentRevisionId);
+            CollectionAssert.AreEqual(new[] { l.Blocks["Processor"], l.Blocks["Memory"], power }, cpuAfterDown.Children.ToArray());
+            Assert.IsNull(cpuAfterDown.LocalDiagram.Presentation, "Without a target placement the moved block is unplaced.");
+            Assert.IsTrue(graph.Inspect(cpu).LocalDiagram.SameContents(cpuAfterDown.LocalDiagram));
+
+            // Stale requests are refused before anything is written.
+            string current = await File.ReadAllTextAsync(path);
+            var staleRoot = await Invoke(MoveRequest(read, P.RecursiveFileAction.RfaReparentBlock, system, l.Blocks["Telemetry"].BlockId, [system, psu], [system, cpu],
+                [l.Links["PSU/Telemetry"].ConnectionId], null, movedDown.SourceToken, new() { [system.BlockId] = Guid.NewGuid(), [psu.BlockId] = Guid.NewGuid(), [cpu.BlockId] = Guid.NewGuid() }));
+            Assert.IsFalse(staleRoot.Success); Assert.AreEqual("stale_root_revision", staleRoot.ErrorCode, staleRoot.ErrorMessage);
+            Assert.AreEqual(current, await File.ReadAllTextAsync(path));
+            // A newer saved CPU revision that the root does not pin yet makes CPU a stale parent.
+            var candidate = graph.AppendRevision(cpu.RevisionId, graph.Inspect(cpu) with
+                { Selection = cpu with { RevisionId = Guid.NewGuid() }, ParentRevisionId = cpu.RevisionId, Name = "CPU" });
+            string stalePath = Path.Combine(root, "stale.xml"), staleXml = RecursiveBlockGraphXml.Write(candidate); await File.WriteAllTextAsync(stalePath, staleXml);
+            var staleRead = ReadRequest(root, stalePath, candidate, 2); var staleLoaded = await Invoke(staleRead); Assert.IsTrue(staleLoaded.Success, staleLoaded.ErrorMessage);
+            foreach (var action in new[] { P.RecursiveFileAction.RfaPrepareReparent, P.RecursiveFileAction.RfaReparentBlock })
+            {
+                var staleParent = await Invoke(MoveRequest(staleRead, action, system, l.Blocks["Telemetry"].BlockId, [system, psu], [system, cpu],
+                    [l.Links["PSU/Telemetry"].ConnectionId], null, staleLoaded.SourceToken,
+                    action == P.RecursiveFileAction.RfaPrepareReparent ? null
+                        : new Dictionary<Guid, Guid> { [system.BlockId] = Guid.NewGuid(), [psu.BlockId] = Guid.NewGuid(), [cpu.BlockId] = Guid.NewGuid() }));
+                Assert.IsFalse(staleParent.Success, action.ToString()); Assert.AreEqual("stale_parent_revision", staleParent.ErrorCode, staleParent.ErrorMessage);
+            }
+            Assert.AreEqual(staleXml, await File.ReadAllTextAsync(stalePath));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public async Task MovingABlockRefusesARevisionIdentityAlreadyUsedByAProposalIssue()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-reparent-identity-").FullName;
+        try
+        {
+            var f = RecursiveBlockProposalTests.Fixture();
+            var prepared = BlockProposalCompiler.Prepare(f.Graph, f.Proposal);
+            var record = new BlockProposalRecord(f.Proposal.Id, f.Proposal.InputId, BlockProposalFiles.Fingerprint(f.Proposal), f.Proposal.BasePath,
+                f.Proposal.Candidate, f.Proposal.Issues, prepared.Graph.Inspect(f.Proposal.Candidate).Origin);
+            var graph = prepared.Graph.WithProposal(record); Guid issue = record.Issues.Single().Id;
+            string path = Path.Combine(root, "design.xml"), xml = RecursiveBlockGraphXml.Write(graph, 1); await File.WriteAllTextAsync(path, xml);
+            var read = ReadRequest(root, path, graph, 2); var loaded = await Invoke(read); Assert.IsTrue(loaded.Success, loaded.ErrorMessage);
+            var system = graph.SelectedRoot; var psu = graph.Inspect(system).Children[0]; var cpu = graph.Inspect(system).Children[1];
+            var telemetry = graph.Inspect(psu).Children[1]; Guid attached = graph.Inspect(psu).LocalDiagram.Connections[1].ConnectionId;
+            var reused = await Invoke(MoveRequest(read, P.RecursiveFileAction.RfaReparentBlock, system, telemetry.BlockId, [system, psu], [system, cpu], [attached], null,
+                loaded.SourceToken, new() { [system.BlockId] = Guid.NewGuid(), [psu.BlockId] = issue, [cpu.BlockId] = Guid.NewGuid() }));
+            Assert.IsFalse(reused.Success); Assert.AreEqual("identity_reused", reused.ErrorCode, "A proposal issue identity is already used by this document.");
+            Assert.AreEqual(xml, await File.ReadAllTextAsync(path));
+            // Precision: the same move with fresh identities is saved.
+            var moved = await Invoke(MoveRequest(read, P.RecursiveFileAction.RfaReparentBlock, system, telemetry.BlockId, [system, psu], [system, cpu], [attached], null,
+                loaded.SourceToken, new() { [system.BlockId] = Guid.NewGuid(), [psu.BlockId] = Guid.NewGuid(), [cpu.BlockId] = Guid.NewGuid() }));
+            Assert.IsTrue(moved.Success, moved.ErrorMessage); Assert.AreEqual(1U, moved.UpgradedFromSchemaVersion);
+            Assert.AreEqual(issue, RecursiveBlockCodec.Decode(moved.Document.Graph).Proposals.Single().Issues.Single().Id);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    private static P.RecursiveFileRequest MoveRequest(P.RecursiveFileRequest read, P.RecursiveFileAction action, BlockSelection expectedRoot, Guid block,
+        ImmutableArray<BlockSelection> source, ImmutableArray<BlockSelection> target, IEnumerable<Guid> detach, P.DiagramBlockPlacementData? placement,
+        string token, Dictionary<Guid, Guid>? newRevisionIds)
+    {
+        var request = read.Clone(); request.Action = action; request.ExpectedSourceToken = token;
+        request.Reparent = new() { ExpectedRoot = Data(expectedRoot), BlockId = block.ToString("D") };
+        if (placement is not null) request.Reparent.TargetPlacement = placement.Clone();
+        request.Reparent.SourceParentPath.Add(source.Select(Data)); request.Reparent.TargetParentPath.Add(target.Select(Data));
+        request.Reparent.DetachConnectionIds.Add(detach.Select(id => id.ToString("D")));
+        if (newRevisionIds is not null)
+        {
+            foreach (var (owner, revision) in newRevisionIds)
+                request.Reparent.NewRevisions.Add(new P.RevisionIdAssignmentData { ObjectId = owner.ToString("D"), NewRevisionId = revision.ToString("D") });
+            request.Reparent.Origin = EditorOrigin("Move to another block");
+        }
+        return request;
+    }
+
+    [TestMethod]
+    public async Task RemovingAnInterfaceStillInUseReturnsEachUseAsErrorDetails()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-interface-in-use-").FullName;
+        try
+        {
+            var f = LinkedDiagramFixture.Create(); var graph = f.Graph;
+            string path = Path.Combine(root, "design.xml"), xml = RecursiveBlockGraphXml.Write(graph); await File.WriteAllTextAsync(path, xml);
+            var read = ReadRequest(root, path, graph, 2); var loaded = await Invoke(read);
+            var psu = f.Blocks["PSU"]; var power = f.Blocks["Power stage"];
+            var draft = graph.StartDraft(power);
+            draft = draft with { Diagram = draft.LocalDiagram with { Interfaces = [] } };
+            var refused = await Invoke(SaveBlockRequest(read, loaded.SourceToken, graph.SelectedRoot, draft, [graph.SelectedRoot, psu, power], 2));
+            Assert.IsFalse(refused.Success); Assert.AreEqual("boundary_interface_in_use", refused.ErrorCode);
+            var detail = refused.ErrorDetails.Single();
+            Assert.AreEqual("connection", detail.Kind); Assert.AreEqual(psu.BlockId.ToString("D"), detail.ScopeBlockId);
+            Assert.AreEqual(f.Links["PSU/Supply"].ConnectionId.ToString("D"), detail.ObjectId);
+            StringAssert.Contains(detail.Message, "Supply");
+            Assert.AreEqual(xml, await File.ReadAllTextAsync(path));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public async Task FlatConversionStaysClosedAndEveryPayloadBelongsToItsAction()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-schema-two-closed-").FullName;
+        try
+        {
+            var f = LinkedDiagramFixture.Create(); var graph = f.Graph;
+            string path = Path.Combine(root, "design.xml"), xml = RecursiveBlockGraphXml.Write(graph, 1); await File.WriteAllTextAsync(path, xml);
+            var read = ReadRequest(root, path, graph, 2); var loaded = await Invoke(read); Assert.IsTrue(loaded.Success, loaded.ErrorMessage);
+            // Flat-diagram conversion (actions 17 and 18 and its migrate payload) was retired unimplemented: legacy flat diagrams are
+            // discarded, not converted (owner decision n9af098253fec71da). An earlier client's request names reserved entries and is
+            // refused through the compiled helper before any file access, saying the entry was retired.
+            var retired = new List<(string Name, string Json)>();
+            foreach (var action in RetiredConversionActions) retired.Add((action.ToJsonString(), WithRetired(read, action)));
+            retired.Add(("migrate payload on a read", WithRetired(read, migrate: new JsonObject())));
+            var conversion = read.Clone(); conversion.DocumentId = "";
+            retired.Add(("complete conversion request", WithRetired(conversion, JsonValue.Create("RFA_MIGRATE_FLAT_DIAGRAM")!,
+                RetiredConversionPayload(Path.Combine(root, "flat.engineering.xml"), new string('a', 64)))));
+            foreach (var (name, json) in retired)
+            {
+                var (rejected, _) = await InvokeJson(json);
+                Assert.IsFalse(rejected.Success, name); Assert.AreEqual("unsupported_diagram_file_request", rejected.ErrorCode, name);
+                StringAssert.Contains(rejected.ErrorMessage, "was retired from the recursive diagram protocol", name);
+                Assert.IsNull(rejected.Document, name);
+            }
+            // Precision: an unknown name that was never declared is refused the same way (strict unknown-field rejection,
+            // contract rbg-v2 section 2.3) without being called retired.
+            var future = JsonNode.Parse(JsonFormatter.Default.Format(read))!.AsObject(); future["action"] = "RFA_OPEN_CANVAS";
+            var (unknown, _) = await InvokeJson(future.ToJsonString());
+            Assert.AreEqual("unsupported_diagram_file_request", unknown.ErrorCode, unknown.ErrorMessage);
+            Assert.IsFalse(unknown.ErrorMessage.Contains("retired", StringComparison.Ordinal), unknown.ErrorMessage);
+            var probes = new List<(string Name, P.RecursiveFileRequest Request, string Code)>();
+            // The level actions (11-13) accept only their own payloads (contract rbg-v2 section 7).
+            foreach (var (name, attach) in new (string, Action<P.RecursiveFileRequest>)[]
+            {
+                ("level_edit", r => r.LevelEdit = new()), ("save_level", r => r.SaveLevel = new()), ("rebase_level", r => r.RebaseLevel = new()),
+            })
+            { var probe = read.Clone(); attach(probe); probes.Add((name + " payload on a read", probe, "ambiguous_diagram_file_request")); }
+            var pagedLevel = read.Clone(); pagedLevel.Action = P.RecursiveFileAction.RfaRebaseLevel; pagedLevel.RebaseLevel = new(); pagedLevel.Limit = 3;
+            probes.Add(("paged level rebase", pagedLevel, "ambiguous_diagram_file_request"));
+            // Each level action needs its own payload, and a save or removal the exact observed file token (section 7
+            // step 3); these use the stable section 11 code rather than an action-specific one.
+            foreach (var action in new[] { P.RecursiveFileAction.RfaPrepareLevelEdit, P.RecursiveFileAction.RfaSaveLevel, P.RecursiveFileAction.RfaRebaseLevel })
+            {
+                var probe = read.Clone(); probe.Action = action; probe.ExpectedSourceToken = loaded.SourceToken;
+                probes.Add((action + " without its payload", probe, "ambiguous_diagram_file_request"));
+            }
+            var tokenless = read.Clone(); tokenless.Action = P.RecursiveFileAction.RfaSaveLevel; tokenless.SaveLevel = new();
+            probes.Add(("level save without the observed token", tokenless, "ambiguous_diagram_file_request"));
+            var malformedToken = read.Clone(); malformedToken.Action = P.RecursiveFileAction.RfaPrepareLevelEdit; malformedToken.LevelEdit = new();
+            malformedToken.ExpectedSourceToken = "not-a-file-token";
+            probes.Add(("removal with a malformed token", malformedToken, "ambiguous_diagram_file_request"));
+            // Create and discover (actions 16 and 19) are implemented (RecursiveDiagramCreationTests); they name no existing
+            // document, so a document identity, and their payloads on any other action, are ambiguous (section 7).
+            foreach (var action in new[] { P.RecursiveFileAction.RfaCreateDiagram, P.RecursiveFileAction.RfaDiscoverDiagrams })
+            { var probe = read.Clone(); probe.Action = action; probes.Add((action + " with a document", probe, "ambiguous_diagram_file_request")); }
+            foreach (var (name, attach) in new (string, Action<P.RecursiveFileRequest>)[]
+            {
+                ("create", r => r.Create = new()),
+                ("discover", r => r.Discover = new() { ProjectFile = Path.Combine(root, "board.kicad_pro") }),
+            })
+            { var probe = read.Clone(); attach(probe); probes.Add((name + " payload on a read", probe, "ambiguous_diagram_file_request")); }
+            var stray = read.Clone(); stray.Reparent = new(); probes.Add(("reparent payload on a read", stray, "ambiguous_diagram_file_request"));
+            var paged = read.Clone(); paged.Action = P.RecursiveFileAction.RfaPrepareReparent; paged.ExpectedSourceToken = loaded.SourceToken;
+            paged.Reparent = new(); paged.Limit = 5; probes.Add(("paged move", paged, "ambiguous_diagram_file_request"));
+            foreach (var (name, request, code) in probes)
+            {
+                var rejected = await Invoke(request);
+                Assert.IsFalse(rejected.Success, name); Assert.AreEqual(code, rejected.ErrorCode, name);
+            }
+            Assert.AreEqual(xml, await File.ReadAllTextAsync(path));
+            // Precision: schema 2 accepts and keeps the implemented nested fields a schema 1 exchange refuses.
+            var draft = graph.StartDraft(f.Blocks["PSU"]);
+            draft = draft with { Diagram = draft.LocalDiagram with { Interfaces = draft.LocalDiagram.Interfaces.SetItem(0,
+                draft.LocalDiagram.Interfaces[0] with { Direction = DiagramInterfaceDirection.Output }) } };
+            var accepted = await Invoke(SaveBlockRequest(read, loaded.SourceToken, graph.SelectedRoot, draft, [graph.SelectedRoot, f.Blocks["PSU"]], 2));
+            Assert.IsTrue(accepted.Success, accepted.ErrorMessage); Assert.AreEqual(1U, accepted.UpgradedFromSchemaVersion);
+            var saved = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(path));
+            Assert.AreEqual(DiagramInterfaceDirection.Output, saved.Inspect(saved.Inspect(saved.SelectedRoot).Children[0]).LocalDiagram.Interfaces[0].Direction);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    // ---- Level drafts through the compiled helper (contract rbg-v2 sections 4.6-4.8 and 7) ----
+
+    [TestMethod]
+    public async Task DrawnBlocksConnectionsAndPortsSaveAsOneLevelRevisionRemovalsCascadeAndStaleSavesRebase()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-level-draft-").FullName;
+        try
+        {
+            var f = LinkedDiagramFixture.Create(); var graph = f.Graph;
+            // A version 1 file as an earlier build stored it; the first changed level save upgrades it (R4).
+            string path = Path.Combine(root, "design.xml"), original = RecursiveBlockGraphXml.Write(graph, 1); await File.WriteAllTextAsync(path, original);
+            var read = ReadRequest(root, path, graph, 2); var loaded = await Invoke(read); Assert.IsTrue(loaded.Success, loaded.ErrorMessage);
+            var system = graph.SelectedRoot; var psu = f.Blocks["PSU"]; var cpu = f.Blocks["CPU"];
+            var unchanged = await Invoke(SaveLevelRequest(read, loaded.SourceToken, system, [system], graph.StartLevelDraft(system)));
+            Assert.IsTrue(unchanged.Success, unchanged.ErrorMessage); Assert.IsFalse(unchanged.SaveSummary.Changed); Assert.AreEqual(0U, unchanged.UpgradedFromSchemaVersion);
+            Assert.AreEqual(original, await File.ReadAllTextAsync(path), "An unchanged level save writes nothing.");
+
+            // Drawn in one level draft: a caption-only block, a level-boundary port on the frame, a port on the PSU's edge,
+            // a connection from the PSU's Power interface to the new block, one from the boundary port, the layout of every
+            // block, and a requirement edit of an existing connection.
+            var ldo = new BlockSelection(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
+            var drawnBlock = new NewBlockOccurrence(ldo, Guid.NewGuid(), "Initial", "LDO", DiagramRequirements.Empty, [], null);
+            Guid dcInput = Guid.NewGuid(), enable = Guid.NewGuid();
+            var rail = new ConnectionSelection(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
+            var feed = new ConnectionSelection(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
+            NewConnectionOccurrence Link(ConnectionSelection selection, string name, DiagramEndpointBinding first) => new(selection, Guid.NewGuid(), "Initial", name,
+                DiagramConnectionKind.Abstract, DiagramDomain.Unspecified, DiagramConnectionDirection.Unspecified, [first, DiagramEndpointBinding.Unknown(ldo.BlockId)],
+                DiagramRequirements.Empty, null);
+            var railLink = Link(rail, "Rail", new(DiagramEndpointKind.Interface, psu.BlockId, f.Ports["PSU/Power"], "", null, [], null));
+            var feedLink = Link(feed, "Feed", new(DiagramEndpointKind.Interface, system.BlockId, dcInput, "", null, [], null));
+            var psuDraft = graph.StartDraft(psu);
+            psuDraft = psuDraft with { Diagram = psuDraft.LocalDiagram with { Interfaces = psuDraft.LocalDiagram.Interfaces.Add(new(enable, "Enable", "")) } };
+            var layout = new DiagramPresentationView(
+                [new(psu.BlockId, new(140, 110, 240, 145)), new(cpu.BlockId, new(510, 110, 240, 145)), new(ldo.BlockId, new(140, 400, 240, 140))],
+                [new(system.BlockId, dcInput, DiagramPortSide.Left, 60), new(psu.BlockId, enable, DiagramPortSide.Bottom, 120)], [], new(0, 0, 900, 700));
+            var power = graph.Connections(system.BlockId).StartDraft(f.Links["System/Power"]);
+            power = power with { Requirements = power.Requirements.Edit(DiagramRequirementField.Routing, "Short and wide.") };
+            var level = graph.StartLevelDraft(system);
+            level = level with
+            {
+                Scope = level.Scope with { Children = level.Scope.Children.Add(ldo), Diagram = level.Scope.LocalDiagram with {
+                    Interfaces = level.Scope.LocalDiagram.Interfaces.Add(new(dcInput, "DC input", "")),
+                    Connections = level.Scope.LocalDiagram.Connections.Add(rail).Add(feed), Presentation = layout } },
+                ChildDrafts = [psuDraft], ConnectionDrafts = [power], NewChildren = [drawnBlock], NewConnections = [railLink, feedLink]
+            };
+            // Refusals first; each leaves the file unchanged.
+            var refusals = new List<(string Name, RecursiveLevelDraft Draft, string Code)>
+            {
+                ("blank caption", level with { NewChildren = [drawnBlock with { Name = "  " }] }, "invalid_level_draft"),
+                ("reused identity", level with { NewChildren = [drawnBlock with { Selection = ldo with { StateId = cpu.StateId } }],
+                    Scope = level.Scope with { Children = level.Scope.Children.SetItem(2, ldo with { StateId = cpu.StateId }) } }, "identity_reused"),
+                ("child interior", level with { ChildDrafts = [psuDraft with { Children = psuDraft.Children.RemoveAt(0) }] }, "child_interior_edit_not_allowed"),
+            };
+            foreach (var (name, draft, code) in refusals)
+            {
+                var refused = await Invoke(SaveLevelRequest(read, loaded.SourceToken, system, [system], draft));
+                Assert.IsFalse(refused.Success, name); Assert.AreEqual(code, refused.ErrorCode, name);
+            }
+            Assert.AreEqual(original, await File.ReadAllTextAsync(path));
+            var saved = await Invoke(SaveLevelRequest(read, loaded.SourceToken, system, [system], level));
+            Assert.IsTrue(saved.Success, saved.ErrorMessage); Assert.IsTrue(saved.SaveSummary.Changed); Assert.AreEqual(1U, saved.UpgradedFromSchemaVersion);
+            Assert.HasCount(3, saved.SaveSummary.CreatedBlockRevisions, "The drawn block, the PSU's successor and the level itself.");
+            Assert.HasCount(3, saved.SaveSummary.CreatedConnectionRevisions, "Rail, Feed and the Power successor.");
+            Assert.IsEmpty(saved.SaveSummary.CreatedAncestors);
+            string savedXml = await File.ReadAllTextAsync(path); var stored = RecursiveBlockGraphXml.Read(savedXml);
+            Assert.AreEqual(savedXml, RecursiveBlockGraphXml.Write(RecursiveBlockCodec.Decode(saved.Document.Graph)));
+            var top = stored.Inspect(stored.SelectedRoot);
+            Assert.HasCount(3, top.Children); Assert.AreEqual(ldo, top.Children[2]);
+            Assert.AreEqual("LDO", stored.Inspect(ldo).Name); Assert.IsNull(stored.Inspect(ldo).Diagram, "A drawn block starts as its caption only.");
+            Assert.AreEqual(DiagramRequirements.Empty, stored.Requirements(ldo).Requirements);
+            Assert.AreEqual(psu.StateId, top.Children[0].StateId); Assert.AreNotEqual(psu.RevisionId, top.Children[0].RevisionId);
+            Assert.IsTrue(stored.Inspect(top.Children[0]).LocalDiagram.Interfaces.Any(i => i.Id == enable && i.Name == "Enable"));
+            Assert.AreEqual(cpu, top.Children[1], "An untouched child keeps its revision.");
+            Assert.IsTrue(top.LocalDiagram.Interfaces.Any(i => i.Id == dcInput && i.Name == "DC input"));
+            Assert.IsTrue(DiagramPresentationView.Same(layout, top.LocalDiagram.Presentation), "The level's layout is stored exactly.");
+            var archive = stored.Connections(system.BlockId);
+            var railRevision = archive.Inspect(top.LocalDiagram.Connections.Single(c => c.ConnectionId == rail.ConnectionId));
+            Assert.AreEqual("Rail", railRevision.Name); Assert.AreEqual(DiagramEndpointKind.Unresolved, railRevision.Endpoints[1].Kind);
+            Assert.AreEqual(DiagramRequirements.Empty, archive.Requirements(railRevision.Selection).Requirements);
+            var powerNow = top.LocalDiagram.Connections.Single(c => c.ConnectionId == f.Links["System/Power"].ConnectionId);
+            Assert.AreNotEqual(f.Links["System/Power"], powerNow); Assert.AreEqual("Short and wide.", archive.Requirements(powerNow).Requirements.Routing);
+            Assert.IsTrue(graph.Revisions.All(r => stored.Inspect(r.Selection).LocalDiagram.SameContents(r.LocalDiagram)), "Every earlier revision is kept.");
+            var stale = await Invoke(SaveLevelRequest(read, loaded.SourceToken, system, [system], level));
+            Assert.IsFalse(stale.Success); Assert.AreEqual("recursive_block_file_changed", stale.ErrorCode);
+            Assert.AreEqual(savedXml, await File.ReadAllTextAsync(path));
+
+            // Removals are prepared by the helper's one cascade and never write.
+            var current = stored.StartLevelDraft(stored.SelectedRoot);
+            var removedBlock = await Invoke(LevelEditRequest(read, saved.SourceToken, stored.SelectedRoot, [stored.SelectedRoot], current,
+                P.LevelEditCommandKind.LeckRemoveChild, block: psu.BlockId));
+            Assert.IsTrue(removedBlock.Success, removedBlock.ErrorMessage);
+            var effects = removedBlock.LevelEdit.Effects;
+            Assert.AreEqual(psu.BlockId.ToString("D"), effects.Single(e => e.Kind == P.LevelEditEffectKind.LeekChildRemoved).ObjectId);
+            Assert.AreEqual(3, effects.Count(e => e.Kind == P.LevelEditEffectKind.LeekConnectionRemoved), "Power, Telemetry and Rail end on the PSU.");
+            Assert.IsTrue(effects.Any(e => e.Kind == P.LevelEditEffectKind.LeekPresentationEntryRemoved && e.Detail == "block:" + psu.BlockId.ToString("D")));
+            Assert.IsTrue(effects.Any(e => e.Kind == P.LevelEditEffectKind.LeekPresentationEntryRemoved && e.Detail.StartsWith("port:" + psu.BlockId.ToString("D"), StringComparison.Ordinal)));
+            var withoutPsu = RecursiveBlockCodec.Decode(removedBlock.LevelEdit.Draft, graph.DocumentId);
+            Assert.IsFalse(withoutPsu.Scope.Children.Any(c => c.BlockId == psu.BlockId));
+            Assert.AreEqual(feed.ConnectionId, withoutPsu.Scope.LocalDiagram.Connections.Single().ConnectionId, "Only the connection that does not touch the PSU stays.");
+            var removedLink = await Invoke(LevelEditRequest(read, saved.SourceToken, stored.SelectedRoot, [stored.SelectedRoot], current,
+                P.LevelEditCommandKind.LeckRemoveConnection, connection: rail.ConnectionId));
+            Assert.IsTrue(removedLink.Success, removedLink.ErrorMessage);
+            Assert.AreEqual(rail.ConnectionId.ToString("D"), removedLink.LevelEdit.Effects.Single().ObjectId);
+            // An interface still used by connections on this level is removed only together with them.
+            var inUse = await Invoke(LevelEditRequest(read, saved.SourceToken, stored.SelectedRoot, [stored.SelectedRoot], current,
+                P.LevelEditCommandKind.LeckRemoveInterface, block: system.BlockId, boundary: dcInput));
+            Assert.IsFalse(inUse.Success); Assert.AreEqual("boundary_interface_in_use", inUse.ErrorCode);
+            Assert.AreEqual(feed.ConnectionId.ToString("D"), inUse.ErrorDetails.Single().ObjectId);
+            var detached = await Invoke(LevelEditRequest(read, saved.SourceToken, stored.SelectedRoot, [stored.SelectedRoot], current,
+                P.LevelEditCommandKind.LeckRemoveInterface, block: system.BlockId, boundary: dcInput, detach: true));
+            Assert.IsTrue(detached.Success, detached.ErrorMessage);
+            CollectionAssert.AreEquivalent(new[] { P.LevelEditEffectKind.LeekConnectionRemoved, P.LevelEditEffectKind.LeekInterfaceRemoved,
+                P.LevelEditEffectKind.LeekPresentationEntryRemoved }, detached.LevelEdit.Effects.Select(e => e.Kind).ToArray());
+            // A child's interface its own diagram still uses is detached inside that child first.
+            var inner = await Invoke(LevelEditRequest(read, saved.SourceToken, stored.SelectedRoot, [stored.SelectedRoot], current,
+                P.LevelEditCommandKind.LeckRemoveInterface, block: psu.BlockId, boundary: f.Ports["PSU/Telemetry"], detach: true));
+            Assert.IsFalse(inner.Success); Assert.AreEqual("boundary_interface_in_use", inner.ErrorCode);
+            Assert.AreEqual(psu.BlockId.ToString("D"), inner.ErrorDetails.Single().ScopeBlockId);
+            var missing = await Invoke(LevelEditRequest(read, saved.SourceToken, stored.SelectedRoot, [stored.SelectedRoot], current,
+                P.LevelEditCommandKind.LeckRemoveChild, block: Guid.NewGuid()));
+            Assert.IsFalse(missing.Success); Assert.AreEqual("level_edit_target_missing", missing.ErrorCode);
+            var changedFile = await Invoke(LevelEditRequest(read, loaded.SourceToken, stored.SelectedRoot, [stored.SelectedRoot], current,
+                P.LevelEditCommandKind.LeckRemoveChild, block: psu.BlockId));
+            Assert.IsFalse(changedFile.Success); Assert.AreEqual("recursive_block_file_changed", changedFile.ErrorCode);
+            Assert.AreEqual(savedXml, await File.ReadAllTextAsync(path), "Preparing removals never writes.");
+
+            // A stale save rebases: another editor's independent change composes with this draft.
+            var remote = stored.StartDraft(top.Children[1]);
+            remote = remote with { Requirements = remote.Requirements.Edit(DiagramRequirementField.Routing, "Remote CPU routing.") };
+            var remoteGraph = stored.SaveDraft(stored.SelectedRoot, [stored.SelectedRoot, top.Children[1]], remote, Guid.NewGuid(), Guid.NewGuid(), [Guid.NewGuid()],
+                RecursiveBlockFixture.Origin("Another agent")).Graph;
+            await File.WriteAllTextAsync(path, RecursiveBlockGraphXml.Write(remoteGraph));
+            var local = stored.StartLevelDraft(stored.SelectedRoot);
+            local = local with { Scope = local.Scope with {
+                Requirements = local.Scope.Requirements.Edit(DiagramRequirementField.General, "Local system text."),
+                Diagram = local.Scope.LocalDiagram with { Presentation = layout with { Blocks = layout.Blocks.SetItem(2, new(ldo.BlockId, new(300, 420, 240, 140))) } } } };
+            var staleLocal = await Invoke(SaveLevelRequest(read, saved.SourceToken, stored.SelectedRoot, [stored.SelectedRoot], local));
+            Assert.AreEqual("recursive_block_file_changed", staleLocal.ErrorCode);
+            var composed = await Invoke(RebaseLevelRequest(read, "", local));
+            Assert.IsTrue(composed.Success, composed.ErrorMessage); Assert.IsEmpty(composed.LevelMerge.Conflicts);
+            var candidate = RecursiveBlockCodec.Decode(composed.LevelMerge.Candidate, graph.DocumentId);
+            Assert.AreEqual(remoteGraph.SelectedRoot, candidate.Scope.Baseline);
+            Assert.AreEqual(remoteGraph.Inspect(remoteGraph.SelectedRoot).Children[1], candidate.Scope.Children[1], "The newer saved CPU is kept.");
+            Assert.AreEqual(300m, candidate.Scope.LocalDiagram.Layout.Blocks.Single(b => b.BlockId == ldo.BlockId).Rect.X, "The draft's move is kept.");
+            Assert.AreEqual("Local system text.", candidate.Scope.Requirements.Requirements.General);
+            var rebased = await Invoke(SaveLevelRequest(read, composed.SourceToken, remoteGraph.SelectedRoot, [remoteGraph.SelectedRoot], candidate));
+            Assert.IsTrue(rebased.Success, rebased.ErrorMessage);
+            var both = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(path));
+            Assert.AreEqual("Local system text.", both.Requirements(both.SelectedRoot).Requirements.General);
+            Assert.AreEqual("Remote CPU routing.", both.Requirements(both.Inspect(both.SelectedRoot).Children[1]).Requirements.Routing);
+
+            // The same text changed on both sides is a conflict the user resolves; the choice is bound to the exact file.
+            var remoteText = both.StartDraft(both.SelectedRoot);
+            remoteText = remoteText with { Requirements = remoteText.Requirements.Edit(DiagramRequirementField.General, "Remote system text.") };
+            var latest = both.SaveDraft(both.SelectedRoot, [both.SelectedRoot], remoteText, Guid.NewGuid(), Guid.NewGuid(), [], RecursiveBlockFixture.Origin("Another agent")).Graph;
+            await File.WriteAllTextAsync(path, RecursiveBlockGraphXml.Write(latest));
+            var mine = both.StartLevelDraft(both.SelectedRoot);
+            mine = mine with { Scope = mine.Scope with { Requirements = mine.Scope.Requirements.Edit(DiagramRequirementField.General, "My system text.") } };
+            var conflicting = await Invoke(RebaseLevelRequest(read, "", mine));
+            Assert.IsTrue(conflicting.Success, conflicting.ErrorMessage); Assert.IsNull(conflicting.LevelMerge.Candidate);
+            var conflict = conflicting.LevelMerge.Conflicts.Single();
+            Assert.AreEqual(P.LevelConflictKind.LckRequirementText, conflict.Kind); Assert.AreEqual(P.RequirementFieldKind.RfkGeneral, conflict.Field);
+            Assert.AreEqual(("My system text.", "Remote system text."), (conflict.Draft, conflict.Saved));
+            var choice = new P.RequirementResolutionData { DocumentId = graph.DocumentId.ToString("D"), OwnerId = system.BlockId.ToString("D"),
+                StateId = system.StateId.ToString("D"), BaselineRevisionId = mine.Scope.Requirements.Baseline.RevisionId.ToString("D"),
+                SavedRevisionId = latest.Requirements(latest.SelectedRoot).RevisionId.ToString("D"),
+                Baseline = Fields(mine.Scope.Requirements.Baseline.Requirements), Draft = Fields(mine.Scope.Requirements.Requirements),
+                Saved = Fields(latest.Requirements(latest.SelectedRoot).Requirements), Field = P.RequirementFieldKind.RfkGeneral, Text = "Merged system text." };
+            var resolve = RebaseLevelRequest(read, conflicting.SourceToken, mine); resolve.RebaseLevel.Resolutions.Add(choice);
+            var resolved = await Invoke(resolve);
+            Assert.IsTrue(resolved.Success, resolved.ErrorMessage); Assert.IsEmpty(resolved.LevelMerge.Conflicts);
+            Assert.AreEqual("Merged system text.", resolved.LevelMerge.Candidate.Scope.Fields.General);
+            await File.AppendAllTextAsync(path, "\n");
+            var moved = await Invoke(resolve);
+            Assert.IsFalse(moved.Success); Assert.AreEqual("stale_requirement_resolution", moved.ErrorCode);
+
+            // Layout never blocks a rebase (section 4.8). The same block moved differently on both sides keeps the draft's
+            // position and reports the saved one; separate moves compose silently; the same move on both sides is no override.
+            DiagramPresentationView Moved(RecursiveBlockGraph on, Guid block, decimal x, decimal y)
+            {
+                var view = on.Inspect(on.SelectedRoot).LocalDiagram.Layout;
+                return view with { Blocks = [.. view.Blocks.Select(b => b.BlockId == block ? b with { Rect = b.Rect with { X = x, Y = y } } : b)] };
+            }
+            RecursiveLevelDraft Arranged(RecursiveBlockGraph on, DiagramPresentationView view)
+            {
+                var start = on.StartLevelDraft(on.SelectedRoot);
+                return start with { Scope = start.Scope with { Diagram = start.Scope.LocalDiagram with { Presentation = view } } };
+            }
+            var remoteMove = latest.StartDraft(latest.SelectedRoot);
+            remoteMove = remoteMove with { Diagram = remoteMove.LocalDiagram with { Presentation = Moved(latest, psu.BlockId, 100, 100) } };
+            var arranged = latest.SaveDraft(latest.SelectedRoot, [latest.SelectedRoot], remoteMove, Guid.NewGuid(), Guid.NewGuid(), [],
+                RecursiveBlockFixture.Origin("Another agent")).Graph;
+            await File.WriteAllTextAsync(path, RecursiveBlockGraphXml.Write(arranged));
+            var bothMoved = await Invoke(RebaseLevelRequest(read, "", Arranged(latest, Moved(latest, psu.BlockId, 180, 110))));
+            Assert.IsTrue(bothMoved.Success, bothMoved.ErrorMessage); Assert.IsEmpty(bothMoved.LevelMerge.Conflicts);
+            var keptPosition = bothMoved.LevelMerge.PresentationOverrides.Single();
+            Assert.AreEqual("block:" + psu.BlockId.ToString("D"), keptPosition.ElementKey);
+            var savedPosition = System.Text.Json.JsonDocument.Parse(keptPosition.SavedValueJson).RootElement.GetProperty("rect");
+            Assert.AreEqual((100m, 100m), (savedPosition.GetProperty("x").GetDecimal(), savedPosition.GetProperty("y").GetDecimal()),
+                "The override reports the saved position the draft replaced.");
+            var keptDraft = RecursiveBlockCodec.Decode(bothMoved.LevelMerge.Candidate, graph.DocumentId);
+            Assert.AreEqual(new DiagramRect(180, 110, 240, 145), keptDraft.Scope.LocalDiagram.Layout.Blocks.Single(b => b.BlockId == psu.BlockId).Rect);
+            var separate = await Invoke(RebaseLevelRequest(read, "", Arranged(latest, Moved(latest, cpu.BlockId, 520, 120))));
+            Assert.IsTrue(separate.Success, separate.ErrorMessage);
+            Assert.IsEmpty(separate.LevelMerge.Conflicts); Assert.IsEmpty(separate.LevelMerge.PresentationOverrides, "Moves of different blocks compose silently.");
+            var separateLayout = RecursiveBlockCodec.Decode(separate.LevelMerge.Candidate, graph.DocumentId).Scope.LocalDiagram.Layout;
+            Assert.AreEqual(new DiagramRect(100, 100, 240, 145), separateLayout.Blocks.Single(b => b.BlockId == psu.BlockId).Rect, "The saved move is kept.");
+            Assert.AreEqual(new DiagramRect(520, 120, 240, 145), separateLayout.Blocks.Single(b => b.BlockId == cpu.BlockId).Rect, "The draft's move is kept.");
+            var sameMove = await Invoke(RebaseLevelRequest(read, "", Arranged(latest, Moved(latest, psu.BlockId, 100, 100))));
+            Assert.IsTrue(sameMove.Success, sameMove.ErrorMessage);
+            Assert.IsEmpty(sameMove.LevelMerge.Conflicts); Assert.IsEmpty(sameMove.LevelMerge.PresentationOverrides, "The same move on both sides is no override.");
+            var keptSave = await Invoke(SaveLevelRequest(read, bothMoved.SourceToken, arranged.SelectedRoot, [arranged.SelectedRoot], keptDraft));
+            Assert.IsTrue(keptSave.Success, keptSave.ErrorMessage);
+            var afterLayout = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(path));
+            Assert.AreEqual(new DiagramRect(180, 110, 240, 145), afterLayout.Inspect(afterLayout.SelectedRoot).LocalDiagram.Layout.Blocks
+                .Single(b => b.BlockId == psu.BlockId).Rect, "Saving the rebased level stores the draft's position.");
+
+            // Changes a draft cannot combine keep the draft and list each conflict: another editor removed the drawn LDO (with the
+            // connections ending on it) and renamed the level, while this draft renamed the LDO and the level, or connected to it.
+            var levelPath = ImmutableArray.Create(afterLayout.SelectedRoot);
+            var (withoutLdo, _) = RecursiveLevelEdits.Apply(afterLayout, levelPath, afterLayout.StartLevelDraft(afterLayout.SelectedRoot),
+                new LevelEditCommand(LevelEditCommandKind.RemoveChild, ldo.BlockId, null, null, false, RecursiveBlockFixture.Origin("Another agent")));
+            withoutLdo = withoutLdo with { Scope = withoutLdo.Scope with { Name = "Remote system" } };
+            var remoteRemoval = afterLayout.SaveLevelDraft(afterLayout.SelectedRoot, levelPath, withoutLdo,
+                new LevelRevisionIds(Guid.NewGuid(), Guid.NewGuid(), [], ImmutableDictionary<Guid, LevelRevisionId>.Empty, ImmutableDictionary<Guid, LevelRevisionId>.Empty),
+                RecursiveBlockFixture.Origin("Another agent")).Graph;
+            await File.WriteAllTextAsync(path, RecursiveBlockGraphXml.Write(remoteRemoval));
+            var removedBytes = await File.ReadAllTextAsync(path);
+            var ldoNow = afterLayout.Inspect(afterLayout.SelectedRoot).Children.Single(c => c.BlockId == ldo.BlockId);
+            var editsLdo = afterLayout.StartLevelDraft(afterLayout.SelectedRoot);
+            editsLdo = editsLdo with { Scope = editsLdo.Scope with { Name = "Local system" },
+                ChildDrafts = [afterLayout.StartDraft(ldoNow) with { Name = "LDO regulator" }] };
+            var staleChild = await Invoke(RebaseLevelRequest(read, "", editsLdo));
+            Assert.IsTrue(staleChild.Success, staleChild.ErrorMessage); Assert.IsNull(staleChild.LevelMerge.Candidate, "A conflicting draft is kept, never saved.");
+            CollectionAssert.AreEquivalent(new[] { P.LevelConflictKind.LckName, P.LevelConflictKind.LckStaleChild },
+                staleChild.LevelMerge.Conflicts.Select(c => c.Kind).ToArray());
+            Assert.AreEqual(ldo.BlockId.ToString("D"), staleChild.LevelMerge.Conflicts.Single(c => c.Kind == P.LevelConflictKind.LckStaleChild).ObjectId);
+            var sense = new ConnectionSelection(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
+            var connectsLdo = afterLayout.StartLevelDraft(afterLayout.SelectedRoot);
+            connectsLdo = connectsLdo with
+            {
+                Scope = connectsLdo.Scope with { Diagram = connectsLdo.Scope.LocalDiagram with { Connections = connectsLdo.Scope.LocalDiagram.Connections.Add(sense) } },
+                NewConnections = [new(sense, Guid.NewGuid(), "Initial", "Sense", DiagramConnectionKind.Abstract, DiagramDomain.Unspecified,
+                    DiagramConnectionDirection.Unspecified, [DiagramEndpointBinding.Unknown(cpu.BlockId), DiagramEndpointBinding.Unknown(ldo.BlockId)],
+                    DiagramRequirements.Empty, null)]
+            };
+            var dangling = await Invoke(RebaseLevelRequest(read, "", connectsLdo));
+            Assert.IsTrue(dangling.Success, dangling.ErrorMessage); Assert.IsNull(dangling.LevelMerge.Candidate);
+            var danglingConflict = dangling.LevelMerge.Conflicts.Single();
+            Assert.AreEqual((P.LevelConflictKind.LckDanglingReference, sense.ConnectionId.ToString("D")), (danglingConflict.Kind, danglingConflict.ObjectId));
+            Assert.AreEqual(removedBytes, await File.ReadAllTextAsync(path), "Comparing never writes.");
+        }
+        finally { Directory.Delete(root, true); }
+
+        static P.RequirementFieldsData Fields(DiagramRequirements value) => new() { General = value.General, Schematic = value.Schematic, Routing = value.Routing };
+    }
+
+    // ---- Connection signals (Round A3, owner decision nf53af9d74841b7d3) ----
+    // The native journey (VerifyConnectionDetails) adds and removes signals through the rendered inspector; this test drives the
+    // same compiled helper with the drafts the editor never sends, to prove each member-list rule fails closed without writing.
+
+    [TestMethod]
+    public async Task ConnectionSignalsSaveAsMembersAndSavedSignalsLeaveThroughTheRemovalCascade()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-connection-signals-").FullName;
+        try
+        {
+            var f = LinkedDiagramFixture.Create(); var graph = f.Graph;
+            string path = Path.Combine(root, "design.xml"), original = RecursiveBlockGraphXml.Write(graph); await File.WriteAllTextAsync(path, original);
+            var read = ReadRequest(root, path, graph, 2); var loaded = await Invoke(read); Assert.IsTrue(loaded.Success, loaded.ErrorMessage);
+            var system = graph.SelectedRoot; var psu = f.Blocks["PSU"]; var cpu = f.Blocks["CPU"]; var powerLink = f.Links["System/Power"];
+            var archive = graph.Connections(system.BlockId);
+            ImmutableArray<DiagramEndpointBinding> ends = [DiagramEndpointBinding.Unknown(psu.BlockId), DiagramEndpointBinding.Unknown(cpu.BlockId)];
+            static ConnectionSelection Fresh() => new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
+            NewConnectionOccurrence Signal(string name, Guid parent, ImmutableArray<DiagramEndpointBinding> at) => new(Fresh(), Guid.NewGuid(), "Initial", name,
+                DiagramConnectionKind.Signal, DiagramDomain.Unspecified, DiagramConnectionDirection.Unspecified, at, DiagramRequirements.Empty, null, parent);
+            // Drawn in one level draft: I2C with its signals SDA and SCL and three more details, and the saved Power gaining GND. The
+            // level also gains a Debug port on its boundary, where an agent's SCL ends instead of the CPU.
+            var i2c = Fresh(); var debug = Guid.NewGuid();
+            var drawnI2c = new NewConnectionOccurrence(i2c, Guid.NewGuid(), "Initial", "I2C", DiagramConnectionKind.Interface, DiagramDomain.Data,
+                DiagramConnectionDirection.FromFirst, ends, DiagramRequirements.Empty, null);
+            var sda = Signal("SDA", i2c.ConnectionId, ends);
+            var scl = Signal("SCL", i2c.ConnectionId, [ends[0], new(DiagramEndpointKind.Interface, system.BlockId, debug, "", null, [], null)]);
+            var gnd = Signal("GND", powerLink.ConnectionId, archive.Inspect(powerLink).Endpoints);
+            var power = archive.StartDraft(powerLink) with { Members = [gnd.Selection], Direction = DiagramConnectionDirection.FromFirst, Domain = DiagramDomain.Power };
+            var level = graph.StartLevelDraft(system);
+            level = level with
+            {
+                Scope = level.Scope with { Diagram = level.Scope.LocalDiagram with { Connections = level.Scope.LocalDiagram.Connections.Add(i2c),
+                    Interfaces = level.Scope.LocalDiagram.Interfaces.Add(new(debug, "Debug", "Test-only boundary port.")) } },
+                ConnectionDrafts = [power], NewConnections = [drawnI2c, sda, scl, gnd]
+            };
+            // Each malformed member list is refused and leaves the file unchanged.
+            var refusals = new List<(string Name, RecursiveLevelDraft Draft, string Code)>
+            {
+                ("a signal that is also a root", level with { Scope = level.Scope with { Diagram = level.Scope.LocalDiagram with {
+                    Connections = level.Scope.LocalDiagram.Connections.Add(sda.Selection) } } }, "invalid_level_draft"),
+                ("a signal of a connection not on this level", level with { NewConnections = [drawnI2c, sda, scl, gnd with { MemberOf = Guid.NewGuid() }] },
+                    "invalid_level_draft"),
+                ("a signal of a saved connection the draft does not edit", level with { ConnectionDrafts = [] }, "invalid_level_draft"),
+                ("a signal of another signal", level with { NewConnections = [drawnI2c, sda, scl with { MemberOf = sda.Selection.ConnectionId }, gnd] }, "invalid_level_draft"),
+                ("a signal the connection does not list", level with { ConnectionDrafts = [power with { Members = [] }] }, "connection_member_edit_requires_member_path"),
+                ("a signal listed twice", level with { ConnectionDrafts = [power with { Members = [gnd.Selection, gnd.Selection] }] },
+                    "connection_member_edit_requires_member_path"),
+                ("a single signal with signals", level with { NewConnections = [drawnI2c with { Kind = DiagramConnectionKind.Signal }, sda, scl, gnd] },
+                    "invalid_diagram_connection_archive"),
+            };
+            foreach (var (name, draft, code) in refusals)
+            {
+                var refused = await Invoke(SaveLevelRequest(read, loaded.SourceToken, system, [system], draft));
+                Assert.IsFalse(refused.Success, name); Assert.AreEqual(code, refused.ErrorCode, name);
+            }
+            Assert.AreEqual(original, await File.ReadAllTextAsync(path));
+            var saved = await Invoke(SaveLevelRequest(read, loaded.SourceToken, system, [system], level));
+            Assert.IsTrue(saved.Success, saved.ErrorMessage);
+            Assert.HasCount(5, saved.SaveSummary.CreatedConnectionRevisions, "I2C, SDA, SCL, GND and the Power successor.");
+            string savedXml = await File.ReadAllTextAsync(path); var stored = RecursiveBlockGraphXml.Read(savedXml);
+            Assert.AreEqual(savedXml, RecursiveBlockGraphXml.Write(RecursiveBlockCodec.Decode(saved.Document.Graph)));
+            var top = stored.Inspect(stored.SelectedRoot); var links = stored.Connections(system.BlockId);
+            var i2cSaved = links.Inspect(top.LocalDiagram.Connections.Single(c => c.ConnectionId == i2c.ConnectionId));
+            CollectionAssert.AreEqual(new[] { "SDA", "SCL" }, i2cSaved.Members.Select(m => links.Inspect(m).Name).ToArray(), "The signals keep the order they were added in.");
+            Assert.IsTrue(i2cSaved.Members.All(m => links.Inspect(m).Kind == DiagramConnectionKind.Signal && links.Inspect(m).Members.IsEmpty));
+            Assert.IsTrue(links.Inspect(i2cSaved.Members[0]).Endpoints.Length == ends.Length
+                && links.Inspect(i2cSaved.Members[0]).Endpoints.Zip(ends).All(e => e.First.SameDefinition(e.Second)), "SDA runs between its connection's ends.");
+            Assert.AreEqual(debug, links.Inspect(i2cSaved.Members[1]).Endpoints[1].InterfaceId, "SCL ends on the level's Debug port.");
+            Assert.AreEqual((DiagramConnectionKind.Interface, DiagramDomain.Data, DiagramConnectionDirection.FromFirst), (i2cSaved.Kind, i2cSaved.Domain, i2cSaved.Direction));
+            Assert.IsFalse(top.LocalDiagram.Connections.Any(c => c.ConnectionId == sda.Selection.ConnectionId), "A signal is never a connection of the level itself.");
+            var powerSaved = top.LocalDiagram.Connections.Single(c => c.ConnectionId == powerLink.ConnectionId);
+            Assert.AreNotEqual(powerLink, powerSaved);
+            Assert.AreEqual(gnd.Selection, links.Inspect(powerSaved).Members.Single());
+            Assert.AreEqual((DiagramDomain.Power, DiagramConnectionDirection.FromFirst), (links.Inspect(powerSaved).Domain, links.Inspect(powerSaved).Direction));
+            Assert.IsTrue(links.Inspect(powerLink).Members.IsEmpty, "The earlier Power revision keeps its history unchanged.");
+
+            // L3 on a connection that already has saved signals (contract erratum, owner decision ne0261047035e58c6): I2C's draft lists
+            // the saved signals it keeps (SDA, SCL) in their saved order, then exactly the signals drawn for I2C in this draft. Every
+            // other member list is refused with connection_member_edit_requires_member_path and nothing is written.
+            var alert = Signal("ALERT", i2c.ConnectionId, ends);
+            var vbus = Signal("VBUS", powerLink.ConnectionId, links.Inspect(powerSaved).Endpoints);
+            var i2cHead = i2cSaved.Selection;
+            RecursiveLevelDraft EditI2c(ImmutableArray<ConnectionSelection> members, params NewConnectionOccurrence[] drawnHere) =>
+                stored.StartLevelDraft(stored.SelectedRoot) with
+                {
+                    ConnectionDrafts = [links.StartDraft(i2cHead) with { Members = members }], NewConnections = [.. drawnHere]
+                };
+            var memberRefusals = new (string Name, RecursiveLevelDraft Draft)[]
+            {
+                ("the saved signals out of their saved order", EditI2c([scl.Selection, sda.Selection])),
+                ("a kept saved signal listed twice", EditI2c([sda.Selection, sda.Selection, scl.Selection])),
+                ("a drawn signal before the kept ones", EditI2c([alert.Selection, sda.Selection, scl.Selection], alert)),
+                ("a drawn signal between the kept ones", EditI2c([sda.Selection, alert.Selection, scl.Selection], alert)),
+                ("a saved signal of another connection", EditI2c([sda.Selection, gnd.Selection])),
+                ("a signal drawn for another connection", EditI2c([sda.Selection, scl.Selection, vbus.Selection], vbus) with
+                {
+                    ConnectionDrafts = [links.StartDraft(i2cHead) with { Members = [sda.Selection, scl.Selection, vbus.Selection] },
+                        links.StartDraft(powerSaved) with { Members = [gnd.Selection, vbus.Selection] }]
+                }),
+            };
+            foreach (var (name, draft) in memberRefusals)
+            {
+                var refused = await Invoke(SaveLevelRequest(read, saved.SourceToken, stored.SelectedRoot, [stored.SelectedRoot], draft));
+                Assert.IsFalse(refused.Success, name); Assert.AreEqual("connection_member_edit_requires_member_path", refused.ErrorCode, name);
+            }
+            Assert.AreEqual(savedXml, await File.ReadAllTextAsync(path), "A refused member list writes nothing.");
+            // The positive control for the refusals above: the one member list the rule accepts (the saved signals in their saved
+            // order, then the signal drawn for I2C) saves through the same EditI2c draft. It is saved to a copy of the file, so the
+            // steps below still start from the saved design.
+            string copy = Path.Combine(root, "accepted-members.xml"); await File.WriteAllTextAsync(copy, savedXml);
+            var copyRead = ReadRequest(root, copy, stored, 2); var copyLoaded = await Invoke(copyRead); Assert.IsTrue(copyLoaded.Success, copyLoaded.ErrorMessage);
+            var accepted = await Invoke(SaveLevelRequest(copyRead, copyLoaded.SourceToken, stored.SelectedRoot, [stored.SelectedRoot],
+                EditI2c([sda.Selection, scl.Selection, alert.Selection], alert)));
+            Assert.IsTrue(accepted.Success, accepted.ErrorMessage);
+            var acceptedGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(copy)); var acceptedLinks = acceptedGraph.Connections(system.BlockId);
+            var acceptedI2c = acceptedLinks.Inspect(acceptedGraph.Inspect(acceptedGraph.SelectedRoot).LocalDiagram.Connections.Single(c => c.ConnectionId == i2c.ConnectionId));
+            CollectionAssert.AreEqual(new[] { "SDA", "SCL", "ALERT" }, acceptedI2c.Members.Select(m => acceptedLinks.Inspect(m).Name).ToArray(),
+                "The saved signals keep their order and the drawn one follows them.");
+            Assert.AreEqual(savedXml, await File.ReadAllTextAsync(path), "Saving the copy leaves the design itself unchanged.");
+
+            // A saved signal leaves through the helper's removal cascade: a note on it becomes unresolved, and nothing is written.
+            var note = new DiagramAnnotation(Guid.NewGuid(), DiagramAnnotationRole.Comment, "Return current flows here.",
+                new(DiagramAnnotationTargetKind.Connection, gnd.Selection.ConnectionId), null, [], RecursiveBlockFixture.Origin());
+            var current = stored.StartLevelDraft(stored.SelectedRoot);
+            current = current with { Scope = current.Scope with { Diagram = current.Scope.LocalDiagram with {
+                Annotations = current.Scope.LocalDiagram.Notes.Add(note) } } };
+            var removed = await Invoke(LevelEditRequest(read, saved.SourceToken, stored.SelectedRoot, [stored.SelectedRoot], current,
+                P.LevelEditCommandKind.LeckRemoveConnectionMembers, connection: powerLink.ConnectionId, members: [gnd.Selection.ConnectionId]));
+            Assert.IsTrue(removed.Success, removed.ErrorMessage);
+            CollectionAssert.AreEquivalent(new[] { (P.LevelEditEffectKind.LeekConnectionRemoved, "GND"),
+                (P.LevelEditEffectKind.LeekAnnotationUnresolved, "Target removed from this diagram level.") },
+                removed.LevelEdit.Effects.Select(e => (e.Kind, e.Detail)).ToArray());
+            var withoutGnd = RecursiveBlockCodec.Decode(removed.LevelEdit.Draft, graph.DocumentId);
+            Assert.IsTrue(withoutGnd.ConnectionDrafts.Single(d => d.Baseline.ConnectionId == powerLink.ConnectionId).Members.IsEmpty);
+            Assert.AreEqual(powerSaved, withoutGnd.Scope.LocalDiagram.Connections.Single(c => c.ConnectionId == powerLink.ConnectionId), "Power itself stays.");
+            Assert.IsNotNull(withoutGnd.Scope.LocalDiagram.Notes.Single().Target.UnresolvedReason);
+            Assert.AreEqual(savedXml, await File.ReadAllTextAsync(path), "Preparing a removal never writes.");
+            var afterRemoval = await Invoke(SaveLevelRequest(read, saved.SourceToken, stored.SelectedRoot, [stored.SelectedRoot], withoutGnd));
+            Assert.IsTrue(afterRemoval.Success, afterRemoval.ErrorMessage);
+            var removedGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(path)); var removedLinks = removedGraph.Connections(system.BlockId);
+            var powerNow = removedLinks.Inspect(removedGraph.Inspect(removedGraph.SelectedRoot).LocalDiagram.Connections.Single(c => c.ConnectionId == powerLink.ConnectionId));
+            Assert.IsTrue(powerNow.Members.IsEmpty); Assert.AreEqual(DiagramDomain.Power, powerNow.Domain, "Only the signal left.");
+            Assert.AreEqual("GND", removedLinks.Inspect(gnd.Selection).Name, "The removed signal's saved revision stays in history.");
+
+            // A signal drawn in a draft simply goes; removing its connection takes its drawn signals with it.
+            var later = removedGraph.StartLevelDraft(removedGraph.SelectedRoot);
+            var i2cNow = removedGraph.Inspect(removedGraph.SelectedRoot).LocalDiagram.Connections.Single(c => c.ConnectionId == i2c.ConnectionId);
+            var intLine = Signal("INT", i2c.ConnectionId, ends);
+            var i2cDraft = removedLinks.StartDraft(i2cNow); i2cDraft = i2cDraft with { Members = i2cDraft.Members.Add(intLine.Selection) };
+            later = later with { ConnectionDrafts = [i2cDraft], NewConnections = [intLine] };
+            string token = afterRemoval.SourceToken;
+            var dropped = await Invoke(LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], later,
+                P.LevelEditCommandKind.LeckRemoveConnectionMembers, connection: i2c.ConnectionId, members: [intLine.Selection.ConnectionId]));
+            Assert.IsTrue(dropped.Success, dropped.ErrorMessage);
+            var droppedDraft = RecursiveBlockCodec.Decode(dropped.LevelEdit.Draft, graph.DocumentId);
+            Assert.IsEmpty(droppedDraft.NewConnections);
+            CollectionAssert.AreEqual(removedLinks.Inspect(i2cNow).Members.ToArray(), droppedDraft.ConnectionDrafts.Single().Members.ToArray(),
+                "Only the drawn signal left the connection's member list.");
+            var gone = await Invoke(LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], later,
+                P.LevelEditCommandKind.LeckRemoveConnection, connection: i2c.ConnectionId));
+            Assert.IsTrue(gone.Success, gone.ErrorMessage);
+            Assert.IsEmpty(RecursiveBlockCodec.Decode(gone.LevelEdit.Draft, graph.DocumentId).NewConnections, "The drawn signal goes with its connection.");
+            // Removals read the signals the draft keeps, one list for what a connection touches and for what goes with it. While I2C
+            // keeps SCL, removing the Debug port is refused until I2C is detached, and detaching takes I2C with it. Once SCL has left I2C
+            // in the draft, Debug goes alone, I2C stays with SDA, and the level saves.
+            var fresh = removedGraph.StartLevelDraft(removedGraph.SelectedRoot);
+            var inUse = await Invoke(LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], fresh,
+                P.LevelEditCommandKind.LeckRemoveInterface, block: system.BlockId, boundary: debug));
+            Assert.IsFalse(inUse.Success); Assert.AreEqual("boundary_interface_in_use", inUse.ErrorCode);
+            var detached = await Invoke(LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], fresh,
+                P.LevelEditCommandKind.LeckRemoveInterface, block: system.BlockId, boundary: debug, detach: true));
+            Assert.IsTrue(detached.Success, detached.ErrorMessage);
+            Assert.IsTrue(detached.LevelEdit.Effects.Any(e => (e.Kind, e.Detail) == (P.LevelEditEffectKind.LeekConnectionRemoved, "I2C")), "Detaching takes I2C with SCL.");
+            var sclLeft = await Invoke(LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], fresh,
+                P.LevelEditCommandKind.LeckRemoveConnectionMembers, connection: i2c.ConnectionId, members: [scl.Selection.ConnectionId]));
+            Assert.IsTrue(sclLeft.Success, sclLeft.ErrorMessage);
+            var debugAlone = await Invoke(LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot],
+                RecursiveBlockCodec.Decode(sclLeft.LevelEdit.Draft, graph.DocumentId), P.LevelEditCommandKind.LeckRemoveInterface, block: system.BlockId, boundary: debug));
+            Assert.IsTrue(debugAlone.Success, debugAlone.ErrorMessage);
+            CollectionAssert.AreEqual(new[] { (P.LevelEditEffectKind.LeekInterfaceRemoved, "Debug") },
+                debugAlone.LevelEdit.Effects.Select(e => (e.Kind, e.Detail)).ToArray(), "Only the port goes; no connection uses it any more.");
+            var withoutDebug = RecursiveBlockCodec.Decode(debugAlone.LevelEdit.Draft, graph.DocumentId);
+            Assert.IsTrue(withoutDebug.Scope.LocalDiagram.Connections.Any(c => c.ConnectionId == i2c.ConnectionId), "I2C stays.");
+            var debugSaved = await Invoke(SaveLevelRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], withoutDebug));
+            Assert.IsTrue(debugSaved.Success, debugSaved.ErrorMessage);
+            var debugGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(path)); var debugLinks = debugGraph.Connections(system.BlockId);
+            var debugTop = debugGraph.Inspect(debugGraph.SelectedRoot);
+            Assert.IsFalse(debugTop.LocalDiagram.Interfaces.Any(i => i.Id == debug));
+            CollectionAssert.AreEqual(new[] { "SDA" }, debugLinks.Inspect(debugTop.LocalDiagram.Connections.Single(c => c.ConnectionId == i2c.ConnectionId))
+                .Members.Select(m => debugLinks.Inspect(m).Name).ToArray());
+            token = debugSaved.SourceToken; removedGraph = debugGraph;
+            later = removedGraph.StartLevelDraft(removedGraph.SelectedRoot);
+            // Removals that name no signal of that connection, or the same one twice, or signals on another kind of removal, fail closed.
+            foreach (var (members, kind, code) in new (Guid[] Members, P.LevelEditCommandKind Kind, string Code)[]
+            {
+                ([Guid.NewGuid()], P.LevelEditCommandKind.LeckRemoveConnectionMembers, "level_edit_target_missing"),
+                ([sda.Selection.ConnectionId, sda.Selection.ConnectionId], P.LevelEditCommandKind.LeckRemoveConnectionMembers, "level_edit_target_missing"),
+                ([], P.LevelEditCommandKind.LeckRemoveConnectionMembers, "level_edit_target_missing"),
+                ([sda.Selection.ConnectionId], P.LevelEditCommandKind.LeckRemoveConnection, "invalid_level_draft"),
+            })
+            {
+                var refused = await Invoke(LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], later, kind,
+                    connection: i2c.ConnectionId, members: members));
+                Assert.IsFalse(refused.Success, code); Assert.AreEqual(code, refused.ErrorCode);
+            }
+            // A removal of signals names only the connection and its signals: naming a block or a port, or asking to detach, fails closed.
+            foreach (var (name, request) in new (string Name, P.RecursiveFileRequest Request)[]
+            {
+                ("with a block", LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], later,
+                    P.LevelEditCommandKind.LeckRemoveConnectionMembers, block: psu.BlockId, connection: i2c.ConnectionId, members: [sda.Selection.ConnectionId])),
+                ("with a port", LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], later,
+                    P.LevelEditCommandKind.LeckRemoveConnectionMembers, connection: i2c.ConnectionId, boundary: f.Ports["PSU/Power"], members: [sda.Selection.ConnectionId])),
+                ("detaching", LevelEditRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], later,
+                    P.LevelEditCommandKind.LeckRemoveConnectionMembers, connection: i2c.ConnectionId, detach: true, members: [sda.Selection.ConnectionId])),
+            })
+            {
+                var refused = await Invoke(request);
+                Assert.IsFalse(refused.Success, name); Assert.AreEqual("level_edit_target_missing", refused.ErrorCode, name);
+            }
+            Assert.AreEqual(await File.ReadAllTextAsync(path), RecursiveBlockGraphXml.Write(removedGraph));
+
+            // A saved signal may also leave a connection draft directly (erratum L3), but the graph's own checks refuse the save while
+            // anything still points at it. I2C gains INT, the level gains an IRQ port that INT realizes, and a note is left on INT.
+            var interrupt = Signal("INT", i2c.ConnectionId, ends); var irq = Guid.NewGuid();
+            var onInterrupt = new DiagramAnnotation(Guid.NewGuid(), DiagramAnnotationRole.Comment, "Open drain; pulled up on the CPU side.",
+                new(DiagramAnnotationTargetKind.Connection, interrupt.Selection.ConnectionId), null, [], RecursiveBlockFixture.Origin());
+            ConnectionSelection Root(RecursiveBlockGraph on, Guid id) => on.Inspect(on.SelectedRoot).LocalDiagram.Connections.Single(c => c.ConnectionId == id);
+            var withInterrupt = removedGraph.StartLevelDraft(removedGraph.SelectedRoot); var here = withInterrupt.Scope.LocalDiagram;
+            withInterrupt = withInterrupt with
+            {
+                Scope = withInterrupt.Scope with { Diagram = here with
+                {
+                    Interfaces = here.Interfaces.Add(new(irq, "IRQ", "Test-only interrupt output.")), Annotations = here.Notes.Add(onInterrupt),
+                    InterfaceRealizations = here.Realizations.Add(new(irq, DiagramRealizationState.Resolved,
+                        [InterfaceRealizationTarget.LocalConnection(interrupt.Selection.ConnectionId)], null, []))
+                } },
+                ConnectionDrafts = [removedGraph.Connections(system.BlockId).StartDraft(Root(removedGraph, i2c.ConnectionId)) with
+                    { Members = [sda.Selection, interrupt.Selection] }],
+                NewConnections = [interrupt]
+            };
+            var interruptSaved = await Invoke(SaveLevelRequest(read, token, removedGraph.SelectedRoot, [removedGraph.SelectedRoot], withInterrupt));
+            Assert.IsTrue(interruptSaved.Success, interruptSaved.ErrorMessage);
+            string interruptXml = await File.ReadAllTextAsync(path); var interruptGraph = RecursiveBlockGraphXml.Read(interruptXml);
+            var interruptLinks = interruptGraph.Connections(system.BlockId);
+            CollectionAssert.AreEqual(new[] { "SDA", "INT" }, interruptLinks.Inspect(Root(interruptGraph, i2c.ConnectionId)).Members
+                .Select(m => interruptLinks.Inspect(m).Name).ToArray(), "I2C keeps SDA and adds the signal drawn for it.");
+            // The same direct drop of INT, with the note still resolved or the IRQ realization still naming INT, and with neither.
+            RecursiveLevelDraft DropInterrupt(bool noteOnInterrupt, bool realizedByInterrupt)
+            {
+                var drop = interruptGraph.StartLevelDraft(interruptGraph.SelectedRoot); var local = drop.Scope.LocalDiagram;
+                return drop with
+                {
+                    Scope = drop.Scope with { Diagram = local with
+                    {
+                        Annotations = [.. local.Notes.Select(n => n.Id != onInterrupt.Id || noteOnInterrupt ? n
+                            : n with { Target = n.Target with { UnresolvedReason = "Target removed from this diagram level." } })],
+                        InterfaceRealizations = [.. local.Realizations.Select(r => r.InterfaceId != irq || realizedByInterrupt ? r
+                            : r with { State = DiagramRealizationState.Unknown, Targets = [], UnresolvedReason = "Realizing element was removed." })]
+                    } },
+                    ConnectionDrafts = [interruptLinks.StartDraft(Root(interruptGraph, i2c.ConnectionId)) with { Members = [sda.Selection] }]
+                };
+            }
+            foreach (var (name, draft, code) in new (string Name, RecursiveLevelDraft Draft, string Code)[]
+            {
+                ("a resolved note still targets INT", DropInterrupt(noteOnInterrupt: true, realizedByInterrupt: false), "invalid_recursive_block_graph"),
+                ("the IRQ realization still targets INT", DropInterrupt(noteOnInterrupt: false, realizedByInterrupt: true), "invalid_interface_realization"),
+            })
+            {
+                var refused = await Invoke(SaveLevelRequest(read, interruptSaved.SourceToken, interruptGraph.SelectedRoot, [interruptGraph.SelectedRoot], draft));
+                Assert.IsFalse(refused.Success, name); Assert.AreEqual(code, refused.ErrorCode, name);
+            }
+            Assert.AreEqual(interruptXml, await File.ReadAllTextAsync(path), "A refused drop writes nothing.");
+            var directDrop = await Invoke(SaveLevelRequest(read, interruptSaved.SourceToken, interruptGraph.SelectedRoot, [interruptGraph.SelectedRoot],
+                DropInterrupt(noteOnInterrupt: false, realizedByInterrupt: false)));
+            Assert.IsTrue(directDrop.Success, directDrop.ErrorMessage);
+            var dropGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(path)); var dropLinks = dropGraph.Connections(system.BlockId);
+            var dropTop = dropGraph.Inspect(dropGraph.SelectedRoot);
+            CollectionAssert.AreEqual(new[] { sda.Selection }, dropLinks.Inspect(Root(dropGraph, i2c.ConnectionId)).Members.ToArray(), "INT left I2C.");
+            Assert.AreEqual("INT", dropLinks.Inspect(interrupt.Selection).Name, "INT's saved revision stays in history.");
+            Assert.IsNotNull(dropTop.LocalDiagram.Notes.Single(n => n.Id == onInterrupt.Id).Target.UnresolvedReason, "The note is kept, unresolved.");
+            Assert.AreEqual(DiagramRealizationState.Unknown, dropTop.LocalDiagram.Realizations.Single(r => r.InterfaceId == irq).State);
+
+            // A rebase carries drawn signals with their root (erratum, section 4.8): a drawn root keeps its signals, and a saved root's
+            // connection draft carries the signals drawn for it. Another writer's change elsewhere composes with them; a change to that
+            // same saved root is a connection conflict with no candidate, so nothing drawn is dropped.
+            async Task<string> Rename(RecursiveBlockGraph on, string at, Guid connection, string name)
+            {
+                var other = on.StartLevelDraft(on.SelectedRoot);
+                other = other with { ConnectionDrafts = [on.Connections(system.BlockId).StartDraft(Root(on, connection)) with { Name = name }] };
+                var written = await Invoke(SaveLevelRequest(read, at, on.SelectedRoot, [on.SelectedRoot], other));
+                Assert.IsTrue(written.Success, written.ErrorMessage);
+                return written.SourceToken;
+            }
+            var wake = Signal("WAKE", i2c.ConnectionId, ends); var reset = Fresh(); var nrst = Signal("nRST", reset.ConnectionId, ends);
+            var mine = dropGraph.StartLevelDraft(dropGraph.SelectedRoot);
+            mine = mine with
+            {
+                Scope = mine.Scope with { Diagram = mine.Scope.LocalDiagram with { Connections = mine.Scope.LocalDiagram.Connections.Add(reset) } },
+                ConnectionDrafts = [dropLinks.StartDraft(Root(dropGraph, i2c.ConnectionId)) with { Members = [sda.Selection, wake.Selection] }],
+                NewConnections = [wake, new(reset, Guid.NewGuid(), "Initial", "Reset", DiagramConnectionKind.SignalGroup, DiagramDomain.Control,
+                    DiagramConnectionDirection.FromFirst, ends, DiagramRequirements.Empty, null), nrst]
+            };
+            var telemetry = f.Links["System/Telemetry"].ConnectionId;
+            await Rename(dropGraph, directDrop.SourceToken, telemetry, "Telemetry bus");
+            var carried = await Invoke(RebaseLevelRequest(read, "", mine));
+            Assert.IsTrue(carried.Success, carried.ErrorMessage); Assert.IsEmpty(carried.LevelMerge.Conflicts);
+            var candidate = RecursiveBlockCodec.Decode(carried.LevelMerge.Candidate, graph.DocumentId);
+            CollectionAssert.AreEqual(new[] { "WAKE", "Reset", "nRST" }, candidate.NewConnections.Select(c => c.Name).ToArray(),
+                "The drawn signals and the drawn root are kept.");
+            CollectionAssert.AreEqual(new[] { sda.Selection, wake.Selection }, candidate.ConnectionDrafts.Single().Members.ToArray(),
+                "I2C's draft still lists WAKE after the saved SDA.");
+            var carriedSaved = await Invoke(SaveLevelRequest(read, carried.SourceToken, candidate.Scope.Baseline, [candidate.Scope.Baseline], candidate));
+            Assert.IsTrue(carriedSaved.Success, carriedSaved.ErrorMessage);
+            var signalGraph = RecursiveBlockGraphXml.Read(await File.ReadAllTextAsync(path)); var signalLinks = signalGraph.Connections(system.BlockId);
+            Assert.AreEqual("Telemetry bus", signalLinks.Inspect(Root(signalGraph, telemetry)).Name, "The other writer's change is kept.");
+            CollectionAssert.AreEqual(new[] { "SDA", "WAKE" }, signalLinks.Inspect(Root(signalGraph, i2c.ConnectionId)).Members
+                .Select(m => signalLinks.Inspect(m).Name).ToArray());
+            CollectionAssert.AreEqual(new[] { "nRST" }, signalLinks.Inspect(Root(signalGraph, reset.ConnectionId)).Members
+                .Select(m => signalLinks.Inspect(m).Name).ToArray());
+            var sleep = Signal("SLEEP", i2c.ConnectionId, ends);
+            var mineAgain = signalGraph.StartLevelDraft(signalGraph.SelectedRoot);
+            mineAgain = mineAgain with
+            {
+                ConnectionDrafts = [signalLinks.StartDraft(Root(signalGraph, i2c.ConnectionId)) with { Members = [sda.Selection, wake.Selection, sleep.Selection] }],
+                NewConnections = [sleep]
+            };
+            await Rename(signalGraph, carriedSaved.SourceToken, i2c.ConnectionId, "I2C bus");
+            string renamedXml = await File.ReadAllTextAsync(path);
+            var clash = await Invoke(RebaseLevelRequest(read, "", mineAgain));
+            Assert.IsTrue(clash.Success, clash.ErrorMessage); Assert.IsNull(clash.LevelMerge.Candidate, "No candidate drops SLEEP.");
+            var connectionConflict = clash.LevelMerge.Conflicts.Single();
+            Assert.AreEqual((P.LevelConflictKind.LckConnection, i2c.ConnectionId.ToString("D")), (connectionConflict.Kind, connectionConflict.ObjectId));
+            Assert.AreEqual(renamedXml, await File.ReadAllTextAsync(path), "A rebase never writes.");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    /// <summary>Ledger pf92d0ecdec8805b4 through the compiled helper process (the connection save an agent tool sends) on the shared
+    /// PSU/CPU design (psu-cpu-fixture-and-ownership.md section 1.5). On the PSU level, Rail B's end on the PSU's own Power port is
+    /// left explicitly unresolved and then bound to that port again, which carries it through the levels to the System's Power
+    /// connection and its rails. The PSU's Telemetry signals are refined into a UART group and a new SYNC differential pair, and the
+    /// System's Power rails into a group; every current member keeps its exact revision and requirement history, new members start
+    /// their own three requirement fields with the agent's sources, and the PSU's stated realization of its Telemetry port stays
+    /// exact. Every refused save writes nothing.</summary>
+    [TestMethod]
+    public async Task AgentConnectionEditsBindEndsThroughTheLevelsAndRefineMembersInOneGuardedSave()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-connection-refinement-").FullName;
+        try
+        {
+            static Guid K(int kind, long n) => PsuCpuIds.Id(kind, n);
+            var fixture = PsuCpuFixture.Graph(); var psu = fixture.Inspect(fixture.SelectedRoot).Children[0];
+            Guid powerPort = K(0x15, 3), telemetryPort = K(0x15, 4);
+            // The PSU level states how its Telemetry port is realized inside: by the two signals of its Telemetry connection.
+            var stated = new InterfaceRealization(telemetryPort, DiagramRealizationState.Resolved,
+                [InterfaceRealizationTarget.LocalConnection(K(0x16, 0x16)), InterfaceRealizationTarget.LocalConnection(K(0x16, 0x17))], null, []);
+            var realized = fixture.StartDraft(psu);
+            realized = realized with { Diagram = realized.LocalDiagram with { InterfaceRealizations = [stated] } };
+            var start = fixture.SaveDraft(fixture.SelectedRoot, [fixture.SelectedRoot, psu], realized, Guid.NewGuid(), Guid.NewGuid(), [Guid.NewGuid()],
+                RecursiveBlockFixture.Origin()).Graph;
+            string path = Path.Combine(root, "system.blocks.xml"); await File.WriteAllTextAsync(path, RecursiveBlockGraphXml.Write(start));
+            var read = ReadRequest(root, path, start, 2); var loaded = await Invoke(read); Assert.IsTrue(loaded.Success, loaded.ErrorMessage);
+            ImmutableArray<SourceReference> sources = [new("psu-cpu-interface-notes", "rev-1", 2, null, null)];
+            RequirementRevisionOrigin Agent(string summary) => new(RequirementRevisionActor.Agent, "Refinement agent", DateTimeOffset.UtcNow, summary, sources, [Guid.NewGuid()]);
+            var graph = start; string token = loaded.SourceToken;
+            async Task<P.RecursiveFileResult> Saved(P.RecursiveFileRequest request, string step)
+            {
+                var result = await Invoke(request);
+                Assert.IsTrue(result.Success, step + ": " + result.ErrorCode + " " + result.ErrorMessage);
+                string xml = await File.ReadAllTextAsync(path);
+                graph = RecursiveBlockGraphXml.Read(xml); token = result.SourceToken;
+                Assert.AreEqual(xml, RecursiveBlockGraphXml.Write(RecursiveBlockCodec.Decode(result.Document.Graph)), step + ": the result describes the file.");
+                return result;
+            }
+            async Task Refused(P.RecursiveFileRequest request, string code, string step)
+            {
+                string before = await File.ReadAllTextAsync(path);
+                var result = await Invoke(request);
+                Assert.IsFalse(result.Success, step); Assert.AreEqual(code, result.ErrorCode, step + ": " + result.ErrorMessage);
+                Assert.AreEqual(before, await File.ReadAllTextAsync(path), step + ": a refused save writes nothing.");
+            }
+            string[] Ids(IEnumerable<P.ConnectionSelectionData> rows) => [.. rows.Select(r => r.ConnectionId)];
+
+            // Rail B's end on the PSU's Power port becomes explicitly unresolved on the PSU level's own boundary. Only Rail B, the PSU
+            // and the System gain a revision; Rail B's other end keeps its exact pin and its requirement text is unchanged.
+            ImmutableArray<BlockSelection> psuPath = [graph.SelectedRoot, graph.Inspect(graph.SelectedRoot).Children[0]];
+            var railB = graph.Inspect(psuPath[1]).LocalDiagram.Connections.Single(c => c.ConnectionId == K(0x16, 0x0c));
+            var target = RecursiveConnectionEdits.Locate(graph, graph.SelectedRoot, psuPath, [railB]);
+            var unbound = RecursiveConnectionEdits.SetEndpoint(graph, target, 1, ConnectionEndpointAction.Unbind, null, null, "Which PSU output carries Rail B is open.");
+            var before = graph;
+            var saved = await Saved(SaveConnectionRequest(read, token, graph.SelectedRoot, psuPath, [railB], unbound, Agent("Unbind connection end")), "unbind");
+            var (levelPath, linkPath) = RecursiveConnectionEdits.Follow(graph, psuPath, [railB]);
+            var links = graph.Connections(psu.BlockId); var railBNow = links.Inspect(linkPath[0]); var railBBefore = links.Inspect(railB);
+            Assert.IsTrue(railBNow.Endpoints[1].SameDefinition(DiagramEndpointBinding.Unknown(psu.BlockId, "Which PSU output carries Rail B is open.")),
+                "The end is Unresolved on the PSU level's own boundary, without a port, and says what is open.");
+            Assert.IsTrue(railBNow.Endpoints[0].SameDefinition(railBBefore.Endpoints[0]), "The other end keeps its exact pin.");
+            Assert.AreEqual((DiagramEndpointKind.Interface, psu.BlockId, (Guid?)powerPort), (railBBefore.Endpoints[1].Kind, railBBefore.Endpoints[1].BlockId,
+                railBBefore.Endpoints[1].InterfaceId), "The earlier revision keeps the binding in history.");
+            Assert.AreEqual(railB.RevisionId, railBNow.ParentRevisionId);
+            Assert.AreEqual(links.Requirements(railB).Requirements, links.Requirements(linkPath[0]).Requirements, "Rail B's requirement fields are unchanged.");
+            CollectionAssert.AreEqual(new[] { linkPath[0].ConnectionId.ToString("D") }, Ids(saved.SaveSummary.CreatedConnectionRevisions));
+            CollectionAssert.AreEqual(new[] { levelPath[1].RevisionId.ToString("D") }, saved.SaveSummary.CreatedBlockRevisions.Select(r => r.RevisionId).ToArray());
+            CollectionAssert.AreEqual(new[] { levelPath[0].RevisionId.ToString("D") }, saved.SaveSummary.CreatedAncestors.Select(r => r.RevisionId).ToArray());
+            Assert.AreEqual(sources.Single(), railBNow.Origin.Sources.Single(), "The agent's source is recorded on the new revision.");
+            CollectionAssert.AreEqual(before.Inspect(before.SelectedRoot).LocalDiagram.Connections.ToArray(),
+                graph.Inspect(graph.SelectedRoot).LocalDiagram.Connections.ToArray(), "The System's connections keep their exact revisions.");
+
+            // Bound to the port on the PSU level's boundary again: through that port the end reaches the System's Power connection and its
+            // three rails, which use the PSU's Power port from outside. Binding it the same way once more changes nothing and writes nothing.
+            target = RecursiveConnectionEdits.Locate(graph, graph.SelectedRoot, levelPath, linkPath);
+            var bound = RecursiveConnectionEdits.SetEndpoint(graph, target, 1, ConnectionEndpointAction.Bind, psu.BlockId, powerPort,
+                "Rail B leaves the PSU through its Power port.");
+            await Saved(SaveConnectionRequest(read, token, graph.SelectedRoot, levelPath, linkPath, bound, Agent("Bind connection end")), "bind");
+            (levelPath, linkPath) = RecursiveConnectionEdits.Follow(graph, levelPath, linkPath);
+            var endpoint = graph.Connections(psu.BlockId).Inspect(linkPath[0]).Endpoints[1];
+            Assert.AreEqual((DiagramEndpointKind.Interface, psu.BlockId, (Guid?)powerPort, "Rail B leaves the PSU through its Power port."),
+                (endpoint.Kind, endpoint.BlockId, endpoint.InterfaceId, endpoint.Intent));
+            var mapping = RecursiveConnectionEdits.Boundary(graph, levelPath, endpoint)!;
+            Assert.AreEqual(("Power", levelPath[0]), (mapping.InterfaceName, mapping.ParentLevel));
+            CollectionAssert.AreEquivalent(new[] { K(0x16, 2), K(0x16, 3), K(0x16, 4), K(0x16, 5) }, mapping.ParentConnections.Select(c => c.ConnectionId).ToArray(),
+                "The System's Power connection and its rails use the PSU's Power port from outside.");
+            Assert.IsNull(mapping.Realization, "No realization of the Power port is stated, and none is derived.");
+            target = RecursiveConnectionEdits.Locate(graph, graph.SelectedRoot, levelPath, linkPath);
+            string boundXml = await File.ReadAllTextAsync(path);
+            var same = await Invoke(SaveConnectionRequest(read, token, graph.SelectedRoot, levelPath, linkPath,
+                RecursiveConnectionEdits.SetEndpoint(graph, target, 1, ConnectionEndpointAction.Bind, psu.BlockId, powerPort, null), Agent("Bind connection end")));
+            Assert.IsTrue(same.Success, same.ErrorMessage); Assert.IsFalse(same.SaveSummary.Changed, "An end that would not change is not saved.");
+            Assert.AreEqual(boundXml, await File.ReadAllTextAsync(path));
+
+            // Ends the level does not have are refused, and so is a save against an earlier file.
+            var railBDraft = graph.Connections(psu.BlockId).StartDraft(linkPath[0]);
+            var cpuPort = new DiagramEndpointBinding(DiagramEndpointKind.Interface, K(0x11, 3), K(0x15, 5), "", null, [], null);
+            await Refused(SaveConnectionRequest(read, token, graph.SelectedRoot, levelPath, linkPath, railBDraft with { Endpoints = railBDraft.Endpoints.SetItem(1, cpuPort) },
+                Agent("Bind connection end")), "connection_edit_target_missing", "an end on a block of another level");
+            var otherPort = new DiagramEndpointBinding(DiagramEndpointKind.Interface, psu.BlockId, K(0x15, 0x0f), "", null, [], null);
+            await Refused(SaveConnectionRequest(read, token, graph.SelectedRoot, levelPath, linkPath, railBDraft with { Endpoints = railBDraft.Endpoints.SetItem(1, otherPort) },
+                Agent("Bind connection end")), "connection_edit_target_missing", "an end on a port its block does not have");
+            await Refused(SaveConnectionRequest(read, loaded.SourceToken, start.SelectedRoot, psuPath, [railB], unbound, Agent("Unbind connection end")),
+                "recursive_block_file_changed", "a save against the file before the agent's edits");
+
+            // The PSU's Telemetry signals become a UART group, and a new SYNC differential pair of two new signals joins them.
+            var telemetry = graph.Inspect(levelPath[1]).LocalDiagram.Connections.Single(c => c.ConnectionId == K(0x16, 0x15));
+            target = RecursiveConnectionEdits.Locate(graph, graph.SelectedRoot, levelPath, [telemetry]);
+            Guid uart = Guid.NewGuid(), sync = Guid.NewGuid(), plus = Guid.NewGuid(), minus = Guid.NewGuid();
+            var (refined, created) = RecursiveConnectionEdits.RefineMembers(target, [uart, sync],
+                [new(uart, "UART", [K(0x16, 0x16), K(0x16, 0x17)], DiagramConnectionKind.SignalGroup, "Keep both directions of the link together.", "",
+                    "Route the two lines side by side."),
+                 new(sync, "SYNC", [plus, minus], DiagramConnectionKind.DifferentialPair, "", "Draw the pair as one bus.", "Match the pair's lengths."),
+                 new(plus, "SYNC+", []), new(minus, "SYNC-", [])], Guid.NewGuid, "Initial");
+            var refine = SaveConnectionRequest(read, token, graph.SelectedRoot, levelPath, [telemetry], refined, Agent("Refine connection members"), created);
+            // Refused member lists write nothing.
+            ImmutableArray<NewConnectionMember> Replace(Guid id, Func<NewConnectionMember, NewConnectionMember> change) =>
+                [.. created.Select(m => m.Selection.ConnectionId == id ? change(m) : m)];
+            var extra = created.Single(m => m.Selection.ConnectionId == plus) with { Selection = new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid()),
+                RequirementRevisionId = Guid.NewGuid(), Name = "SYNC spare" };
+            var refusals = new (string Step, P.RecursiveFileRequest Request, string Code)[]
+            {
+                ("a new member reusing a connection identity", SaveConnectionRequest(read, token, graph.SelectedRoot, levelPath, [telemetry], refined,
+                    Agent("Refine connection members"), Replace(plus, m => m with { Selection = m.Selection with { ConnectionId = K(0x16, 0x0e) } }))
+                    , "identity_reused"),
+                ("a member placed twice", SaveConnectionRequest(read, token, graph.SelectedRoot, levelPath, [telemetry],
+                    refined with { Members = refined.Members.Add(target.Connection.Members[0]) }, Agent("Refine connection members"), created), "invalid_connection_refinement"),
+                ("a pair of three signals", SaveConnectionRequest(read, token, graph.SelectedRoot, levelPath, [telemetry], refined, Agent("Refine connection members"),
+                    [.. Replace(sync, m => m with { Members = [plus, minus, extra.Selection.ConnectionId] }), extra]), "invalid_connection_refinement"),
+                ("a new member nothing contains", SaveConnectionRequest(read, token, graph.SelectedRoot, levelPath, [telemetry], refined, Agent("Refine connection members"),
+                    [.. created, extra]), "invalid_connection_refinement"),
+                ("a group of a member of another connection", SaveConnectionRequest(read, token, graph.SelectedRoot, levelPath, [telemetry], refined,
+                    Agent("Refine connection members"), Replace(uart, m => m with { Members = [K(0x16, 0x16), K(0x16, 0x0e)] })), "invalid_connection_refinement"),
+            };
+            foreach (var (step, request, code) in refusals) await Refused(request, code, step);
+            var signal = refine.Clone(); signal.SaveConnection.NewMembers[2].MemberOf = K(0x16, 0x15).ToString("D");
+            await Refused(signal, "invalid_recursive_diagram_data", "a new member that names a level draft's connection");
+            saved = await Saved(refine, "refine telemetry");
+            (levelPath, linkPath) = RecursiveConnectionEdits.Follow(graph, levelPath, [telemetry]);
+            links = graph.Connections(psu.BlockId);
+            var telemetryNow = links.Inspect(linkPath[0]);
+            CollectionAssert.AreEqual(new[] { "UART", "SYNC" }, telemetryNow.Members.Select(m => links.Inspect(m).Name).ToArray());
+            var uartNow = links.Inspect(telemetryNow.Members[0]); var syncNow = links.Inspect(telemetryNow.Members[1]);
+            CollectionAssert.AreEqual(links.Inspect(telemetry).Members.ToArray(), uartNow.Members.ToArray(),
+                "MCU to CPU and CPU to MCU keep their exact saved revisions inside UART.");
+            foreach (var kept in uartNow.Members)
+                Assert.AreEqual(before.Connections(psu.BlockId).Requirements(kept), links.Requirements(kept), "A kept member keeps its requirement history.");
+            Assert.AreEqual((DiagramConnectionKind.SignalGroup, DiagramConnectionKind.DifferentialPair), (uartNow.Kind, syncNow.Kind));
+            CollectionAssert.AreEqual(new[] { ("SYNC+", DiagramConnectionKind.Signal), ("SYNC-", DiagramConnectionKind.Signal) },
+                syncNow.Members.Select(m => (links.Inspect(m).Name, links.Inspect(m).Kind)).ToArray());
+            Assert.AreEqual(new DiagramRequirements("Keep both directions of the link together.", "", "Route the two lines side by side."),
+                links.Requirements(telemetryNow.Members[0]).Requirements, "UART starts with its own three requirement fields.");
+            Assert.AreEqual(new DiagramRequirements("", "Draw the pair as one bus.", "Match the pair's lengths."), links.Requirements(telemetryNow.Members[1]).Requirements);
+            Assert.AreEqual(links.Requirements(telemetry).Requirements, links.Requirements(linkPath[0]).Requirements, "Telemetry's own fields are unchanged.");
+            Assert.IsTrue(new[] { uartNow, syncNow }.Concat(syncNow.Members.Select(links.Inspect)).All(m => m.Origin.Sources.SequenceEqual(sources)
+                && m.ParentRevisionId is null && m.Endpoints.Length == 2
+                && m.Endpoints.Zip(telemetryNow.Endpoints).All(e => e.First.SameDefinition(e.Second))),
+                "Each new member records the agent's source, starts its own history and runs between Telemetry's drawn ends.");
+            CollectionAssert.AreEqual(links.Inspect(telemetry).Members.ToArray(), before.Connections(psu.BlockId).Inspect(telemetry).Members.ToArray(),
+                "The earlier Telemetry revision keeps its two signals.");
+            Assert.HasCount(5, saved.SaveSummary.CreatedConnectionRevisions, "UART, SYNC, SYNC+, SYNC- and Telemetry's successor.");
+            // The PSU's Telemetry port is still realized by exactly the same two signals, now inside UART; from outside, the System's
+            // Telemetry connection and its signals still use that port.
+            var psuNow = graph.Inspect(levelPath[1]);
+            Assert.IsTrue(stated.SameContents(psuNow.LocalDiagram.Realizations.Single()), "The realization of the Telemetry port stays exact.");
+            var telemetryMapping = RecursiveConnectionEdits.Boundary(graph, levelPath, telemetryNow.Endpoints[1])!;
+            CollectionAssert.AreEquivalent(new[] { K(0x16, 6), K(0x16, 7), K(0x16, 8) }, telemetryMapping.ParentConnections.Select(c => c.ConnectionId).ToArray());
+            Assert.IsTrue(stated.SameContents(telemetryMapping.Realization));
+
+            // The System's Power rails become one group beside Return. The PSU keeps its revision; through its Power port Rail B still
+            // reaches Power and each rail, now also the new group.
+            var power = graph.Inspect(graph.SelectedRoot).LocalDiagram.Connections.Single(c => c.ConnectionId == K(0x16, 2));
+            target = RecursiveConnectionEdits.Locate(graph, graph.SelectedRoot, [graph.SelectedRoot], [power]);
+            Guid rails = Guid.NewGuid();
+            (refined, created) = RecursiveConnectionEdits.RefineMembers(target, [rails, K(0x16, 5)],
+                [new(rails, "Supply rails", [K(0x16, 3), K(0x16, 4)], DiagramConnectionKind.SignalGroup, "Deliver both regulated rails to the CPU.")],
+                Guid.NewGuid, "Initial");
+            var psuBefore = levelPath[1];
+            await Saved(SaveConnectionRequest(read, token, graph.SelectedRoot, [graph.SelectedRoot], [power], refined, Agent("Refine connection members"), created),
+                "refine power");
+            var system = graph.Connections(graph.SelectedRoot.BlockId); var powerNow = system.Inspect(graph.Inspect(graph.SelectedRoot).LocalDiagram.Connections
+                .Single(c => c.ConnectionId == K(0x16, 2)));
+            CollectionAssert.AreEqual(new[] { "Supply rails", "Return" }, powerNow.Members.Select(m => system.Inspect(m).Name).ToArray());
+            CollectionAssert.AreEqual(system.Inspect(power).Members.Take(2).ToArray(), system.Inspect(powerNow.Members[0]).Members.ToArray());
+            Assert.AreEqual(psuBefore, graph.Inspect(graph.SelectedRoot).Children[0], "The PSU keeps its revision.");
+            (levelPath, linkPath) = RecursiveConnectionEdits.Follow(graph, levelPath, linkPath);
+            CollectionAssert.AreEquivalent(new[] { K(0x16, 2), rails, K(0x16, 3), K(0x16, 4), K(0x16, 5) },
+                RecursiveConnectionEdits.Boundary(graph, levelPath, endpoint)!.ParentConnections.Select(c => c.ConnectionId).ToArray(),
+                "Rail B reaches Power, the new group and each rail through the PSU's Power port.");
+
+            // A level draft's drawn connection lists no members of its own: the member list belongs to a connection save only.
+            var drawn = new NewConnectionOccurrence(new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid()), Guid.NewGuid(), "Initial", "Status",
+                DiagramConnectionKind.Abstract, DiagramDomain.Unspecified, DiagramConnectionDirection.Unspecified,
+                [DiagramEndpointBinding.Unknown(K(0x11, 2)), DiagramEndpointBinding.Unknown(K(0x11, 3))], DiagramRequirements.Empty, null);
+            var level = graph.StartLevelDraft(graph.SelectedRoot);
+            level = level with { Scope = level.Scope with { Diagram = level.Scope.LocalDiagram with { Connections = level.Scope.LocalDiagram.Connections.Add(drawn.Selection) } },
+                NewConnections = [drawn] };
+            var withMembers = SaveLevelRequest(read, token, graph.SelectedRoot, [graph.SelectedRoot], level);
+            withMembers.SaveLevel.Draft.NewConnections[0].Members.Add(K(0x16, 5).ToString("D"));
+            await Refused(withMembers, "invalid_recursive_diagram_data", "a level draft's drawn connection with members");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    private static P.RecursiveFileRequest SaveConnectionRequest(P.RecursiveFileRequest read, string token, BlockSelection expectedRoot,
+        ImmutableArray<BlockSelection> blockPath, ImmutableArray<ConnectionSelection> connectionPath, DiagramConnectionDraft draft,
+        RequirementRevisionOrigin origin, IEnumerable<NewConnectionMember>? members = null)
+    {
+        var request = read.Clone(); request.Action = P.RecursiveFileAction.RfaSaveConnection; request.ExpectedSourceToken = token;
+        request.SaveConnection = new() { ExpectedRoot = Data(expectedRoot), Draft = RecursiveBlockCodec.Encode(draft),
+            NewConnectionRevisionId = Guid.NewGuid().ToString("D"), NewRequirementRevisionId = Guid.NewGuid().ToString("D"),
+            NewBlockRevisionId = Guid.NewGuid().ToString("D"), NewBlockRequirementRevisionId = Guid.NewGuid().ToString("D"),
+            Origin = RecursiveBlockCodec.EncodeOrigin(origin) };
+        request.SaveConnection.BlockPath.Add(blockPath.Select(Data));
+        request.SaveConnection.ConnectionPath.Add(connectionPath.Select(RecursiveBlockCodec.EncodeSelection));
+        request.SaveConnection.BlockAncestorRevisionIds.Add(blockPath.Skip(1).Select(_ => Guid.NewGuid().ToString("D")));
+        request.SaveConnection.ConnectionAncestorRevisionIds.Add(connectionPath.Skip(1).Select(_ => Guid.NewGuid().ToString("D")));
+        request.SaveConnection.NewMembers.Add((members ?? []).Select(RecursiveBlockCodec.Encode));
+        return request;
+    }
+
+    private static P.RecursiveFileRequest SaveLevelRequest(P.RecursiveFileRequest read, string token, BlockSelection expectedRoot,
+        ImmutableArray<BlockSelection> path, RecursiveLevelDraft draft)
+    {
+        var request = read.Clone(); request.Action = P.RecursiveFileAction.RfaSaveLevel; request.ExpectedSourceToken = token;
+        request.SaveLevel = new() { ExpectedRoot = Data(expectedRoot), Draft = RecursiveBlockCodec.Encode(draft), NewRevisionId = Guid.NewGuid().ToString("D"),
+            NewRequirementRevisionId = Guid.NewGuid().ToString("D"), Origin = EditorOrigin("Edit diagram level") };
+        request.SaveLevel.BlockPath.Add(path.Select(Data)); request.SaveLevel.AncestorRevisionIds.Add(path.Skip(1).Select(_ => Guid.NewGuid().ToString("D")));
+        foreach (var child in draft.ChildDrafts)
+            request.SaveLevel.ChildRevisions.Add(new P.RevisionIdAssignmentData { ObjectId = child.Baseline.BlockId.ToString("D"),
+                NewRevisionId = Guid.NewGuid().ToString("D"), NewRequirementRevisionId = Guid.NewGuid().ToString("D") });
+        foreach (var link in draft.ConnectionDrafts)
+            request.SaveLevel.ConnectionRevisions.Add(new P.RevisionIdAssignmentData { ObjectId = link.Baseline.ConnectionId.ToString("D"),
+                NewRevisionId = Guid.NewGuid().ToString("D"), NewRequirementRevisionId = Guid.NewGuid().ToString("D") });
+        return request;
+    }
+
+    private static P.RecursiveFileRequest LevelEditRequest(P.RecursiveFileRequest read, string token, BlockSelection expectedRoot,
+        ImmutableArray<BlockSelection> path, RecursiveLevelDraft draft, P.LevelEditCommandKind kind, Guid? block = null, Guid? connection = null,
+        Guid? boundary = null, bool detach = false, IEnumerable<Guid>? members = null)
+    {
+        var request = read.Clone(); request.Action = P.RecursiveFileAction.RfaPrepareLevelEdit; request.ExpectedSourceToken = token;
+        request.LevelEdit = new() { ExpectedRoot = Data(expectedRoot), Draft = RecursiveBlockCodec.Encode(draft), Kind = kind, DetachConnections = detach,
+            Origin = EditorOrigin("Remove from diagram level") };
+        request.LevelEdit.BlockPath.Add(path.Select(Data));
+        if (block is { } owner) request.LevelEdit.BlockId = owner.ToString("D");
+        if (connection is { } link) request.LevelEdit.ConnectionId = link.ToString("D");
+        if (boundary is { } port) request.LevelEdit.InterfaceId = port.ToString("D");
+        request.LevelEdit.MemberIds.Add((members ?? []).Select(m => m.ToString("D")));
+        return request;
+    }
+
+    private static P.RecursiveFileRequest RebaseLevelRequest(P.RecursiveFileRequest read, string token, RecursiveLevelDraft draft)
+    {
+        var request = read.Clone(); request.Action = P.RecursiveFileAction.RfaRebaseLevel; request.ExpectedSourceToken = token;
+        request.RebaseLevel = new() { Draft = RecursiveBlockCodec.Encode(draft) };
+        return request;
+    }
+
+    /// <summary>Runs one request through the production helper process (<c>kicad-mcp --diagram-file</c>).</summary>
+    internal static async Task<P.RecursiveFileResult> Invoke(P.RecursiveFileRequest request) =>
+        (await InvokeJson(JsonFormatter.Default.Format(request))).Result;
+
+    /// <summary>The retired flat-diagram conversion actions (reserved 17 and 18) as an earlier client wrote them: by name, as
+    /// protobuf JSON prints enum values, and by number.</summary>
+    internal static readonly JsonNode[] RetiredConversionActions =
+        [JsonValue.Create("RFA_PREPARE_MIGRATION")!, JsonValue.Create("RFA_MIGRATE_FLAT_DIAGRAM")!, JsonValue.Create(17), JsonValue.Create(18)];
+
+    /// <summary>The request as JSON with the retired action and/or migrate payload an earlier build could send.</summary>
+    internal static string WithRetired(P.RecursiveFileRequest request, JsonNode? action = null, JsonObject? migrate = null)
+    {
+        var json = JsonNode.Parse(JsonFormatter.Default.Format(request))!.AsObject();
+        if (action is not null) json["action"] = action.DeepClone();
+        if (migrate is not null) json["migrate"] = migrate;
+        return json.ToJsonString();
+    }
+
+    /// <summary>A complete payload of the retired conversion request (the removed MigrateFlatDiagramData).</summary>
+    internal static JsonObject RetiredConversionPayload(string flatSourcePath, string flatSourceToken) => new()
+    {
+        ["operationId"] = Guid.NewGuid().ToString("D"), ["flatSourcePath"] = flatSourcePath, ["expectedFlatSourceToken"] = flatSourceToken,
+        ["rootName"] = "System", ["implementationName"] = "Initial",
+        ["origin"] = new JsonObject { ["kind"] = "DAK_IMPORT", ["actor"] = "Earlier project manager", ["recordedAt"] = "2026-09-23T00:00:00Z",
+            ["summary"] = "Convert the flat structural diagram" },
+    };
+
+    /// <summary>Runs the compiled helper (<c>kicad-mcp --diagram-file</c>, the process the native editor starts) on raw request
+    /// JSON and returns its parsed result and the exact JSON it wrote.</summary>
+    internal static async Task<(P.RecursiveFileResult Result, string Json)> InvokeJson(string json)
+    {
+        string? root = null;
+        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
+            if (File.Exists(Path.Combine(dir.FullName, "automation", "KiCad.Automation.slnx"))) { root = dir.FullName; break; }
+        Assert.IsNotNull(root);
+        string configuration = new DirectoryInfo(AppContext.BaseDirectory).Parent!.Name;
+        var start = new ProcessStartInfo("dotnet") { UseShellExecute = false, RedirectStandardInput = true,
+            RedirectStandardOutput = true, RedirectStandardError = true };
+        start.ArgumentList.Add(Path.Combine(root, "automation", "src", "KiCad.Automation.Mcp", "bin", configuration, "net10.0", "kicad-mcp.dll"));
+        start.ArgumentList.Add("--diagram-file");
+        using var process = Process.Start(start)!;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        try
+        {
+            var diagnostics = process.StandardError.ReadToEndAsync(timeout.Token);
+            var response = process.StandardOutput.ReadToEndAsync(timeout.Token);
+            await process.StandardInput.WriteAsync(json); process.StandardInput.Close();
+            await process.WaitForExitAsync(timeout.Token);
+            string written = await response;
+            var result = P.RecursiveFileResult.Parser.ParseJson(written);
+            Assert.AreEqual(result.Success ? 0 : 1, process.ExitCode, await diagnostics);
+            return (result, written);
+        }
+        finally { if (!process.HasExited) { process.Kill(entireProcessTree: true); await process.WaitForExitAsync(); } }
+    }
+}

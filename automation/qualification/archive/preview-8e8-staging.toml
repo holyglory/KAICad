@@ -1,0 +1,78 @@
+# Historical one-shot staging recipes. Outputs and receipts are immutable.
+# Not loaded by DevCoordinator; current platform checks remain in the root declaration.
+
+[test.stage-mac-8e8]
+timeout_seconds=2400
+env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.stage-mac-8e8.check]]
+name="build"
+tier="development"
+role="preflight"
+invalidates=["contracts", "import-arm64", "import-intel", "sign-arm64", "sign-intel", "feeds"]
+command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+
+[[test.stage-mac-8e8.check]]
+name="contracts"
+tier="development"
+role="preflight"
+invalidates=["import-arm64", "import-intel", "sign-arm64", "sign-intel", "feeds"]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "FullyQualifiedName~HostedPreviewStagingTests|FullyQualifiedName~PlatformUpdateFeedTests", "--logger", "trx", "--results-directory", "automation/artifacts/mac-8e8-staging-tests"]
+retained_artifacts=[{ name = "staging-contracts", path = "automation/artifacts/mac-8e8-staging-tests", max_bytes = 16777216 }]
+
+[[test.stage-mac-8e8.check]]
+name="import-arm64"
+tier="development"
+command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-hosted", "--candidate", "/mnt/build-storage/codex/kicad/evidence/github-35352182872-arm64-8e8/kicad-delivery", "--commit", "8e8de1fd68e392e7cb55924a79e83ede5dddba1b", "--platform", "osx-arm64", "--run-id", "35352182872", "--version", "preview-20260918-8e8de1fd68e3", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/linux-8e8de1fd-signed-000019", "--output", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-8e8-import"]
+
+[[test.stage-mac-8e8.check]]
+name="import-intel"
+tier="development"
+requires=["import-arm64"]
+command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-hosted", "--candidate", "/mnt/build-storage/codex/kicad/evidence/github-35352182872-intel-8e8/kicad-delivery", "--commit", "8e8de1fd68e392e7cb55924a79e83ede5dddba1b", "--platform", "osx-x64", "--run-id", "35352182872", "--version", "preview-20260918-8e8de1fd68e3", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-8e8-import", "--output", "/mnt/build-storage/codex/kicad/public-candidates/mac-both-8e8-import"]
+
+[[test.stage-mac-8e8.check]]
+name="sign-arm64"
+tier="development"
+requires=["import-arm64"]
+command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "release-sign", "--release", "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/distribution/releases/preview-osx-arm64-000011.json", "--artifacts", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-8e8-import", "--private", "/mnt/build-storage/codex/kicad/signing/preview-publisher.pkcs8", "--output", "/mnt/build-storage/codex/kicad/public-candidates/mac-arm64-8e8-preview11.json", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/linux-8e8de1fd-signed-000019/updates/platforms/osx-arm64/preview.json"]
+
+[[test.stage-mac-8e8.check]]
+name="sign-intel"
+tier="development"
+requires=["import-intel"]
+command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "release-sign", "--release", "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/distribution/releases/preview-osx-x64-000010.json", "--artifacts", "/mnt/build-storage/codex/kicad/public-candidates/mac-both-8e8-import", "--private", "/mnt/build-storage/codex/kicad/signing/preview-publisher.pkcs8", "--output", "/mnt/build-storage/codex/kicad/public-candidates/mac-intel-8e8-preview10.json", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/linux-8e8de1fd-signed-000019/updates/platforms/osx-x64/preview.json"]
+
+[[test.stage-mac-8e8.check]]
+name="feeds"
+tier="development"
+requires=["sign-arm64", "sign-intel"]
+command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-platform-feeds", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/mac-both-8e8-import", "--output", "/mnt/build-storage/codex/kicad/public-candidates/mac-both-8e8-signed", "--publisher", "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", "--sources", "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/distribution/releases/platform-mac-8e8.json"]
+
+[test.stage-windows-8e8]
+timeout_seconds=1800
+env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
+
+[[test.stage-windows-8e8.check]]
+name="build"
+tier="development"
+role="preflight"
+invalidates=["import", "sign", "feeds"]
+command=["dotnet", "build", "automation/tools/KiCad.Automation.Validation/KiCad.Automation.Validation.csproj", "--no-restore", "--configuration", "Debug"]
+
+[[test.stage-windows-8e8.check]]
+name="import"
+tier="development"
+command=["dotnet","automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll","stage-requalified-windows","--candidate","/mnt/build-storage/codex/kicad/evidence/github-35352182872-windows-8e8-failed/kicad-delivery","--qualification","/mnt/build-storage/codex/kicad/evidence/github-35384795477-windows-8e8-requalified/kicad-windows-preflight","--repository","/mnt/build-storage/codex/kicad/worktrees/source-release-8e8de1fd","--commit","8e8de1fd68e392e7cb55924a79e83ede5dddba1b","--run-id","35384795477","--version","preview-20260918-8e8de1fd68e3","--previous","/mnt/build-storage/codex/kicad/public-candidates/mac-both-8e8-signed","--output","/mnt/build-storage/codex/kicad/public-candidates/windows-8e8-import"]
+
+[[test.stage-windows-8e8.check]]
+name="sign"
+tier="development"
+requires=["import"]
+command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "release-sign", "--release", "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/distribution/releases/preview-win-x64-000009.json", "--artifacts", "/mnt/build-storage/codex/kicad/public-candidates/windows-8e8-import", "--private", "/mnt/build-storage/codex/kicad/signing/preview-publisher.pkcs8", "--output", "/mnt/build-storage/codex/kicad/public-candidates/windows-8e8-preview9.json", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/mac-both-8e8-signed/updates/platforms/win-x64/preview.json"]
+
+[[test.stage-windows-8e8.check]]
+name="feeds"
+tier="development"
+requires=["sign"]
+command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Debug/net10.0/kicad-validate.dll", "stage-platform-feeds", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/windows-8e8-import", "--output", "/mnt/build-storage/codex/kicad/public-candidates/windows-8e8-signed-000009", "--publisher", "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", "--sources", "/mnt/build-storage/codex/kicad/worktrees/delivery-next.HAjDme/automation/distribution/releases/platform-windows-000009.json"]

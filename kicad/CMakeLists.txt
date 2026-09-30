@@ -19,6 +19,11 @@ include_directories(
 set( KICAD_SRCS
     automation_update_client.cpp
     automation_update_windows.cpp
+    recursive_diagram_frame.cpp
+    recursive_diagram_canvas.cpp
+    dialogs/dialog_diagram_field_history.cpp
+    dialogs/panel_diagram_history.cpp
+    dialogs/dialog_diagram_conflict.cpp
     dialogs/dialog_destination.cpp
     dialogs/dialog_destination_base.cpp
     dialogs/dialog_archive_job_settings.cpp

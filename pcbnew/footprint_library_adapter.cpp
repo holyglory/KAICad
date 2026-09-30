@@ -250,7 +250,7 @@ long long FOOTPRINT_LIBRARY_ADAPTER::GenerateTimestamp( const wxString* aNicknam
 }
 
 
-void FOOTPRINT_LIBRARY_ADAPTER::RefreshLibraryIfChanged( const wxString& aNickname )
+void FOOTPRINT_LIBRARY_ADAPTER::RefreshLibraryIfChanged( const wxString& aNickname, bool aForceReload )
 {
     std::optional<LIB_DATA*> maybeLib = fetchIfLoaded( aNickname );
 
@@ -270,12 +270,17 @@ void FOOTPRINT_LIBRARY_ADAPTER::RefreshLibraryIfChanged( const wxString& aNickna
         std::shared_lock lock( PreloadedFootprintsMutex );
         auto             tsIt = PreloadedTimestamps.Get().find( aNickname );
 
-        if( tsIt != PreloadedTimestamps.Get().end() && tsIt->second == currentTimestamp )
+        if( !aForceReload && tsIt != PreloadedTimestamps.Get().end() && tsIt->second == currentTimestamp )
             return;
 
         wxLogTrace( traceLibraries, "FP: %s changed on disk, re-enumerating", aNickname );
     }
 
+    if( aForceReload )
+    {
+        std::lock_guard pluginGuard( pluginMutex( aNickname ) );
+        plugin->ClearCachedFootprints( uri );
+    }
     enumerateLibrary( lib, uri );
 }
 

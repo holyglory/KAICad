@@ -162,6 +162,8 @@ public:
      * Load the drawing sheet file.
      */
     void LoadDrawingSheet();
+    wxString GetDrawingSheetFileName() const override;
+    void SetDrawingSheetFileName( const wxString& aFileName ) override;
 
     void ShowSchematicSetupDialog( const wxString& aInitialPage = wxEmptyString );
 
@@ -227,7 +229,7 @@ public:
     /**
      * Automatically set the rotation of an item (if the item supports it).
      */
-    void AutoRotateItem( SCH_SCREEN* aScreen, SCH_ITEM* aItem );
+    void AutoRotateItem( SCH_SCREEN* aScreen, SCH_ITEM* aItem, const SCH_SHEET_PATH* aPath = nullptr );
 
     /**
      * Update the hierarchy navigation tree and history
@@ -406,11 +408,17 @@ public:
      * When the sheet number is used in annotation, each sheet annotation starts from sheet
      * number * 100.  In other words the first sheet uses 100 to 199, the second sheet uses
      * 200 to 299, and so on.
+     *
+     * Every annotation is staged in @a aCommit, which keeps the reference inventory from before
+     * it.  Repairing duplicate time stamps is not: it gives items new identities directly.
+     *
+     * @return the number of duplicated item identities replaced (always 0 unless
+     *         @a aRepairTimestamps).  The caller records them, as they lie outside @a aCommit.
      */
-    void AnnotateSymbols( SCH_COMMIT* aCommit, ANNOTATE_SCOPE_T aAnnotateScope, ANNOTATE_ORDER_T aSortOption,
-                          ANNOTATE_ALGO_T aAlgoOption, bool aRecursive, int aStartNumber, bool aResetAnnotation,
-                          bool aRegroupUnits, bool aRepairTimestamps, REPORTER& aReporter,
-                          SYMBOL_FILTER aSymbolFilter );
+    int AnnotateSymbols( SCH_COMMIT* aCommit, ANNOTATE_SCOPE_T aAnnotateScope, ANNOTATE_ORDER_T aSortOption,
+                         ANNOTATE_ALGO_T aAlgoOption, bool aRecursive, int aStartNumber, bool aResetAnnotation,
+                         bool aRegroupUnits, bool aRepairTimestamps, REPORTER& aReporter,
+                         SYMBOL_FILTER aSymbolFilter );
 
     /**
      * Check for annotation errors.
@@ -519,7 +527,7 @@ public:
      * @param aEnd The ending point for trimming
      * @return True if any wires were changed by this operation
      */
-    bool TrimWire( SCH_COMMIT* aCommit, const VECTOR2I& aStart, const VECTOR2I& aEnd );
+    bool TrimWire( SCH_COMMIT* aCommit, const VECTOR2I& aStart, const VECTOR2I& aEnd, SCH_SCREEN* aScreen = nullptr );
 
     void OnOpenPcbnew();
     void OnOpenCvpcb();
@@ -810,7 +818,7 @@ public:
      * Generate the connection data for the entire schematic hierarchy.
      */
     void RecalculateConnections( SCH_COMMIT* aCommit, SCH_CLEANUP_FLAGS aCleanupFlags,
-                                 PROGRESS_REPORTER* aProgressReporter = nullptr );
+                                 PROGRESS_REPORTER* aProgressReporter = nullptr, bool aPreserveGeometry = false );
 
     /**
      * Called after the preferences dialog is run.
@@ -873,8 +881,10 @@ public:
     DIALOG_BOOK_REPORTER* GetSymbolDiffDialog();
 
     DIALOG_ERC* GetErcDialog();
+    void RefreshErcDialog();
 
     DIALOG_SYMBOL_FIELDS_TABLE* GetSymbolFieldsTableDialog();
+    bool HasOpenSymbolFieldsTableDialog() const;
 
     wxGenericTreeCtrl* GetNetNavigator();
 

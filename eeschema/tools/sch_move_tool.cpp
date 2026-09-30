@@ -144,9 +144,9 @@ static void sheetBorderPos( const SCH_SHEET* aSheet, long long aArc, VECTOR2I& a
 }
 
 
-static void cloneWireConnection( SCH_LINE* aNewLine, SCH_ITEM* aSource, SCH_EDIT_FRAME* aFrame )
+static void cloneWireConnection( SCH_LINE* aNewLine, SCH_ITEM* aSource, const SCH_SHEET_PATH& aPath )
 {
-    if( !aNewLine || !aSource || !aFrame )
+    if( !aNewLine || !aSource )
         return;
 
     SCH_LINE* sourceLine = dynamic_cast<SCH_LINE*>( aSource );
@@ -154,7 +154,7 @@ static void cloneWireConnection( SCH_LINE* aNewLine, SCH_ITEM* aSource, SCH_EDIT
     if( !sourceLine )
         return;
 
-    SCH_SHEET_PATH sheetPath = aFrame->GetCurrentSheet();
+    SCH_SHEET_PATH sheetPath = aPath;
     SCH_CONNECTION* sourceConnection = sourceLine->Connection( &sheetPath );
 
     if( !sourceConnection )
@@ -338,8 +338,8 @@ void SCH_MOVE_TOOL::orthoLineDrag( SCH_COMMIT* aCommit, SCH_LINE* line, const VE
             foundLine = new SCH_LINE( unselectedEnd, line->GetLayer() );
             foundLine->SetFlags( IS_NEW );
             foundLine->SetLastResolvedState( line );
-            cloneWireConnection( foundLine, line, m_frame );
-            m_frame->AddToScreen( foundLine, m_frame->GetScreen() );
+            cloneWireConnection( foundLine, line, movePath() );
+            m_frame->AddToScreen( foundLine, moveScreen() );
             m_newDragLines.insert( foundLine );
 
             // We just broke off of the existing items, so replace all of them with our new
@@ -365,7 +365,7 @@ void SCH_MOVE_TOOL::orthoLineDrag( SCH_COMMIT* aCommit, SCH_LINE* line, const VE
 
             if( !foundLine->HasFlag( IS_CHANGED ) && !foundLine->HasFlag( IS_NEW ) )
             {
-                aCommit->Modify( (SCH_ITEM*) foundLine, m_frame->GetScreen() );
+                aCommit->Modify( (SCH_ITEM*) foundLine, moveScreen() );
 
                 if( !foundLine->IsSelected() )
                     m_changedDragLines.insert( foundLine );
@@ -418,8 +418,8 @@ void SCH_MOVE_TOOL::orthoLineDrag( SCH_COMMIT* aCommit, SCH_LINE* line, const VE
                 m_lineConnectionCache[bendLine].clear();
                 m_lineConnectionCache[foundLine].clear();
 
-                m_frame->RemoveFromScreen( bendLine, m_frame->GetScreen() );
-                m_frame->RemoveFromScreen( foundLine, m_frame->GetScreen() );
+                m_frame->RemoveFromScreen( bendLine, moveScreen() );
+                m_frame->RemoveFromScreen( foundLine, moveScreen() );
 
                 m_newDragLines.erase( bendLine );
                 m_newDragLines.erase( foundLine );
@@ -471,8 +471,8 @@ void SCH_MOVE_TOOL::orthoLineDrag( SCH_COMMIT* aCommit, SCH_LINE* line, const VE
             a->SetFlags( IS_NEW );
             a->SetConnectivityDirty( true );
             a->SetLastResolvedState( line );
-            cloneWireConnection( a, line, m_frame );
-            m_frame->AddToScreen( a, m_frame->GetScreen() );
+            cloneWireConnection( a, line, movePath() );
+            m_frame->AddToScreen( a, moveScreen() );
             m_newDragLines.insert( a );
 
             SCH_LINE* b = new SCH_LINE( a->GetStartPoint(), line->GetLayer() );
@@ -480,8 +480,8 @@ void SCH_MOVE_TOOL::orthoLineDrag( SCH_COMMIT* aCommit, SCH_LINE* line, const VE
             b->SetFlags( IS_NEW | STARTPOINT );
             b->SetConnectivityDirty( true );
             b->SetLastResolvedState( line );
-            cloneWireConnection( b, line, m_frame );
-            m_frame->AddToScreen( b, m_frame->GetScreen() );
+            cloneWireConnection( b, line, movePath() );
+            m_frame->AddToScreen( b, moveScreen() );
             m_newDragLines.insert( b );
 
             xBendCount += yMoveBit;
@@ -623,7 +623,7 @@ void SCH_MOVE_TOOL::preprocessBreakOrSliceSelection( SCH_COMMIT* aCommit, const 
         return;
 
     KIGFX::VIEW_CONTROLS* controls = getViewControls();
-    SCH_SCREEN*           screen = m_frame->GetScreen();
+    SCH_SCREEN*           screen = moveScreen();
     VECTOR2I              cursorPos = controls->GetCursorPosition( !aEvent.DisableGridSnapping() );
 
     bool useCursorForSingleLine = false;
@@ -666,9 +666,286 @@ void SCH_MOVE_TOOL::preprocessBreakOrSliceSelection( SCH_COMMIT* aCommit, const 
 }
 
 
+SCH_SCREEN* SCH_MOVE_TOOL::moveScreen() const
+{
+    return m_explicitMovePath ? m_explicitMovePath->LastScreen() : m_frame->GetScreen();
+}
+
+
+SCH_SHEET_PATH SCH_MOVE_TOOL::movePath() const
+{
+    return m_explicitMovePath ? *m_explicitMovePath : m_frame->GetCurrentSheet();
+}
+
+
+void SCH_MOVE_TOOL::updateItem( EDA_ITEM* aItem, bool aUpdateRTree ) const
+{
+    if( !m_privateMoveSelection )
+    {
+        SCH_TOOL_BASE<SCH_EDIT_FRAME>::updateItem( aItem, aUpdateRTree );
+        return;
+    }
+
+    if( auto* item = dynamic_cast<SCH_ITEM*>( aItem ) )
+    {
+        item->ClearCaches();
+        if( aUpdateRTree ) moveScreen()->Update( item );
+    }
+}
+
+
+void SCH_MOVE_TOOL::addDragSelection( EDA_ITEM* aItem )
+{
+    if( !m_privateMoveSelection )
+    {
+        m_selectionTool->AddItemToSel( aItem, QUIET_MODE );
+        return;
+    }
+
+    aItem->SetSelected();
+    m_privateMoveSelection->Add( aItem );
+    static_cast<SCH_ITEM*>( aItem )->RunOnChildren(
+            []( SCH_ITEM* aChild ) { aChild->SetSelected(); }, RECURSE_MODE::NO_RECURSE );
+}
+
+
+void SCH_MOVE_TOOL::removeDragSelection()
+{
+    if( !m_privateMoveSelection )
+    {
+        m_selectionTool->RemoveItemsFromSel( &m_dragAdditions, QUIET_MODE );
+        return;
+    }
+
+    const auto items = m_privateMoveSelection->Items();
+    for( EDA_ITEM* item : items )
+    {
+        if( std::find( m_dragAdditions.begin(), m_dragAdditions.end(), item->m_Uuid ) == m_dragAdditions.end() )
+            continue;
+        item->ClearSelected();
+        static_cast<SCH_ITEM*>( item )->RunOnChildren(
+                []( SCH_ITEM* aChild ) { aChild->ClearSelected(); }, RECURSE_MODE::NO_RECURSE );
+        m_privateMoveSelection->Remove( item );
+    }
+}
+
+
+std::vector<VECTOR2I> SCH_MOVE_TOOL::moveConnectionPoints( SCH_ITEM* aItem ) const
+{
+    if( auto found = m_contextPins.find( aItem ); m_privateMoveSelection && found != m_contextPins.end() )
+    {
+        std::set<VECTOR2I> points;
+        for( SCH_PIN* pin : found->second ) points.insert( pin->GetPosition() );
+        return { points.begin(), points.end() };
+    }
+    return aItem->GetConnectionPoints();
+}
+
+
+bool SCH_MOVE_TOOL::moveConnectedAt( SCH_ITEM* aItem, const VECTOR2I& aPoint ) const
+{
+    if( aItem->GetFlags() & ( STRUCT_DELETED | SKIP_STRUCT ) ) return false;
+    if( m_privateMoveSelection && m_contextPins.count( aItem ) )
+    {
+        const auto points = moveConnectionPoints( aItem );
+        return std::find( points.begin(), points.end(), aPoint ) != points.end();
+    }
+    return aItem->IsConnected( aPoint );
+}
+
+
+std::set<SCH_ITEM*> SCH_MOVE_TOOL::moveConnectionCandidates( SCH_ITEM* aItem, const VECTOR2I& aPoint ) const
+{
+    std::set<SCH_ITEM*> candidates;
+    for( SCH_ITEM* item : moveScreen()->Items().Overlapping( aItem->GetBoundingBox() ) )
+        candidates.insert( item );
+    if( m_privateMoveSelection )
+    {
+        // Another unit's pins can lie outside the visible unit's cached box.
+        for( SCH_ITEM* item : moveScreen()->Items().Overlapping( aPoint, 1 ) ) candidates.insert( item );
+        if( auto found = m_contextPinOwners.find( aPoint ); found != m_contextPinOwners.end() )
+            candidates.insert( found->second.begin(), found->second.end() );
+    }
+    return candidates;
+}
+
+
+bool SCH_MOVE_TOOL::DragSelectionBy( SCH_COMMIT* aCommit, const VECTOR2I& aDelta, wxString& aError,
+                                    const SCH_SHEET_PATH& aPath, const std::vector<SCH_ITEM*>& aItems,
+                                    CONNECTED_TRANSFORM aTransform, const VECTOR2I& aPivot )
+{
+    if( !aCommit || aItems.empty() || aPath.size() == 0 || !aPath.LastScreen() || m_inMoveTool || m_moveInProgress
+        || m_explicitMovePath )
+    {
+        aError = "Private connected movement requires an idle tool and an explicit sheet instance";
+        return false;
+    }
+
+    // The physical drawing is shared. Include every pin actually used by a
+    // loaded instance, without switching the visible unit or changing symbols.
+    std::map<SCH_ITEM*, std::vector<SCH_PIN*>> contextPins;
+    std::map<VECTOR2I, std::set<SCH_ITEM*>> contextOwners;
+    for( SCH_ITEM* item : aPath.LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
+    {
+        auto* symbol = static_cast<SCH_SYMBOL*>( item );
+        std::set<SCH_PIN*> pins;
+        for( const SCH_SHEET_PATH& instance : m_frame->Schematic().Hierarchy() )
+        {
+            if( instance.LastScreen() != aPath.LastScreen() ) continue;
+            for( SCH_PIN* pin : symbol->GetPins( &instance ) )
+            {
+                if( !pin->GetLibPin() )
+                {
+                    aError = "Connected movement requires resolved library pin geometry for every instance";
+                    return false;
+                }
+                pins.insert( pin );
+                contextOwners[pin->GetPosition()].insert( symbol );
+            }
+        }
+        contextPins[item] = { pins.begin(), pins.end() };
+    }
+
+    std::map<KIID, EDA_ITEM_FLAGS> flags;
+    auto remember = [&]( SCH_ITEM* item ) { flags.emplace( item->m_Uuid, item->GetFlags() ); };
+    for( SCH_ITEM* item : aPath.LastScreen()->Items() )
+    {
+        remember( item );
+        item->RunOnChildren( remember, RECURSE_MODE::RECURSE );
+    }
+    SCH_SELECTION selection;
+    m_contextPins = std::move( contextPins );
+    m_contextPinOwners = std::move( contextOwners );
+    m_explicitMovePath = &aPath;
+    m_privateMoveSelection = &selection;
+    m_connectedTransform = aTransform;
+    m_transformPivot = aPivot;
+    auto release = [&]()
+    {
+        auto restore = [&]( SCH_ITEM* item )
+        {
+            if( auto found = flags.find( item->m_Uuid ); found != flags.end() )
+            {
+                item->ClearFlags();
+                item->SetFlags( found->second );
+            }
+            else
+                item->ClearFlags( SELECTED | STARTPOINT | ENDPOINT | IS_MOVING | SELECTED_BY_DRAG );
+        };
+        for( SCH_ITEM* item : aPath.LastScreen()->Items() )
+        {
+            restore( item );
+            item->RunOnChildren( restore, RECURSE_MODE::RECURSE );
+        }
+        m_privateMoveSelection = nullptr;
+        m_explicitMovePath = nullptr;
+        m_contextPins.clear();
+        m_contextPinOwners.clear();
+        m_connectedTransform = CONNECTED_TRANSFORM::NONE;
+    };
+    try
+    {
+        // Existing human selection is not input to this finite operation.
+        // Preserve it by identity while the shared physical screen is edited.
+        auto isolate = []( SCH_ITEM* item ) { item->ClearFlags( SELECTED | STARTPOINT | ENDPOINT | SELECTED_BY_DRAG ); };
+        for( SCH_ITEM* item : aPath.LastScreen()->Items() )
+        {
+            isolate( item );
+            item->RunOnChildren( isolate, RECURSE_MODE::RECURSE );
+        }
+        for( SCH_ITEM* item : aItems ) addDragSelection( item );
+        bool result = DragSelectionBy( aCommit, aDelta, aError );
+        release();
+        return result;
+    }
+    catch( ... )
+    {
+        release();
+        throw;
+    }
+}
+
+
+bool SCH_MOVE_TOOL::transformConnectedSelection( SCH_SELECTION& aSelection, wxString& aError )
+{
+    auto safePoint = [&]( const VECTOR2I& point )
+    {
+        const int64_t px = m_transformPivot.x, py = m_transformPivot.y;
+        const int64_t dx = int64_t{ point.x } - px, dy = int64_t{ point.y } - py;
+        auto fits = []( int64_t value ) { return value >= std::numeric_limits<int>::min() && value <= std::numeric_limits<int>::max(); };
+        int64_t x = point.x, y = point.y;
+        switch( m_connectedTransform )
+        {
+        case CONNECTED_TRANSFORM::ROTATE_CW: x = px - dy; y = py + dx; break;
+        case CONNECTED_TRANSFORM::ROTATE_CCW: x = px + dy; y = py - dx; break;
+        case CONNECTED_TRANSFORM::MIRROR_LEFT_RIGHT:
+            if( !fits( 2 * px ) ) return false;
+            x = px - dx; break;
+        case CONNECTED_TRANSFORM::MIRROR_UP_DOWN:
+            if( !fits( 2 * py ) ) return false;
+            y = py - dy; break;
+        case CONNECTED_TRANSFORM::NONE: return false;
+        }
+        return fits( dx ) && fits( dy ) && fits( x ) && fits( y )
+                && fits( x - point.x ) && fits( y - point.y );
+    };
+    for( EDA_ITEM* selected : aSelection )
+    {
+        auto* item = static_cast<SCH_ITEM*>( selected );
+        const BOX2I bounds = item->GetBoundingBox();
+        for( const VECTOR2I& point : { bounds.GetOrigin(), bounds.GetEnd(),
+                VECTOR2I( bounds.GetLeft(), bounds.GetBottom() ), VECTOR2I( bounds.GetRight(), bounds.GetTop() ) } )
+            if( !safePoint( point ) )
+            {
+                aError = "Connected transformation exceeds native coordinate arithmetic range";
+                return false;
+            }
+        if( auto found = m_contextPins.find( item ); found != m_contextPins.end() )
+            for( SCH_PIN* pin : found->second )
+                if( !safePoint( pin->GetPosition() ) )
+                {
+                    aError = "Connected transformation exceeds an active unit's native pin range";
+                    return false;
+                }
+    }
+    for( EDA_ITEM* selected : aSelection )
+    {
+        auto* item = static_cast<SCH_ITEM*>( selected );
+        if( item->GetParent() && item->GetParent()->IsSelected() ) continue;
+        switch( m_connectedTransform )
+        {
+        case CONNECTED_TRANSFORM::ROTATE_CW: item->Rotate( m_transformPivot, false ); break;
+        case CONNECTED_TRANSFORM::ROTATE_CCW: item->Rotate( m_transformPivot, true ); break;
+        case CONNECTED_TRANSFORM::MIRROR_LEFT_RIGHT: item->MirrorHorizontally( m_transformPivot.x ); break;
+        case CONNECTED_TRANSFORM::MIRROR_UP_DOWN: item->MirrorVertically( m_transformPivot.y ); break;
+        case CONNECTED_TRANSFORM::NONE: break;
+        }
+        if( item->Type() == SCH_SYMBOL_T && ( m_connectedTransform == CONNECTED_TRANSFORM::MIRROR_LEFT_RIGHT
+                || m_connectedTransform == CONNECTED_TRANSFORM::MIRROR_UP_DOWN ) )
+            item->SetFieldsAutoplaced( AUTOPLACE_NONE );
+        updateItem( item, false );
+    }
+
+    // A label on a partially transformed wire does not undergo a rigid move
+    // with both ends. Retain its electrical attachment using native geometry.
+    for( const auto& [label, info] : m_specialCaseLabels )
+    {
+        SCH_LINE* line = info.attachedLine;
+        if( !label || !line ) continue;
+        if( info.trackMovingEnd && line->HasFlag( STARTPOINT ) != line->HasFlag( ENDPOINT ) )
+            label->SetPosition( line->HasFlag( STARTPOINT ) ? line->GetStartPoint() : line->GetEndPoint() );
+        else if( !line->HitTest( label->GetPosition(), 1 ) )
+            label->SetPosition( SEG( line->GetStartPoint(), line->GetEndPoint() ).NearestPoint( label->GetPosition() ) );
+        updateItem( label, false );
+    }
+    updateStoredPositions( aSelection );
+    return true;
+}
+
+
 bool SCH_MOVE_TOOL::DragSelectionBy( SCH_COMMIT* aCommit, const VECTOR2I& aDelta, wxString& aError )
 {
-    SCH_SELECTION& selection = m_selectionTool->GetSelection();
+    SCH_SELECTION& selection = m_privateMoveSelection ? *m_privateMoveSelection : m_selectionTool->GetSelection();
     if( !aCommit || selection.Empty() || m_inMoveTool || m_moveInProgress )
     {
         aError = "Connected movement requires an idle tool and an explicit nonempty selection";
@@ -704,9 +981,9 @@ bool SCH_MOVE_TOOL::DragSelectionBy( SCH_COMMIT* aCommit, const VECTOR2I& aDelta
         // Leave staged additions for the caller's commit rollback.
         for( SCH_LINE* line : m_newDragLines )
         {
-            if( !( aCommit->GetStatus( line, m_frame->GetScreen() ) & CHT_ADD ) )
+            if( !( aCommit->GetStatus( line, moveScreen() ) & CHT_ADD ) )
             {
-                m_frame->RemoveFromScreen( line, m_frame->GetScreen() );
+                m_frame->RemoveFromScreen( line, moveScreen() );
                 delete line;
             }
         }
@@ -717,8 +994,9 @@ bool SCH_MOVE_TOOL::DragSelectionBy( SCH_COMMIT* aCommit, const VECTOR2I& aDelta
             static_cast<SCH_ITEM*>( item )->RunOnChildren(
                     []( SCH_ITEM* child ) { child->ClearFlags( IS_MOVING ); }, RECURSE_MODE::RECURSE );
         }
-        for( const HIDDEN_JUNCTION& hidden : m_hiddenJunctions )
-            m_view->Hide( hidden.m_junction, false );
+        if( !m_privateMoveSelection )
+            for( const HIDDEN_JUNCTION& hidden : m_hiddenJunctions )
+                m_view->Hide( hidden.m_junction, false );
         releaseState();
     };
 
@@ -738,7 +1016,13 @@ bool SCH_MOVE_TOOL::DragSelectionBy( SCH_COMMIT* aCommit, const VECTOR2I& aDelta
         m_moveInProgress = true;
         int xBendCount = 1;
         int yBendCount = 1;
-        performItemMove( selection, aDelta, aCommit, xBendCount, yBendCount, grid );
+        if( m_connectedTransform == CONNECTED_TRANSFORM::NONE )
+            performItemMove( selection, aDelta, aCommit, xBendCount, yBendCount, grid );
+        else if( !transformConnectedSelection( selection, aError ) )
+        {
+            abandon();
+            return false;
+        }
         finalizeMoveOperation( selection, aCommit, false, internalPoints, false );
         releaseState();
         return true;
@@ -1007,7 +1291,7 @@ bool SCH_MOVE_TOOL::doMoveSelection( const TOOL_EVENT& aEvent, SCH_COMMIT* aComm
                 previewItems.push_back( line );
 
             std::vector<SCH_JUNCTION*> previewJunctions =
-                    JUNCTION_HELPERS::PreviewJunctions( m_frame->GetScreen(), previewItems );
+                    JUNCTION_HELPERS::PreviewJunctions( moveScreen(), previewItems );
 
             if( netCollisionMonitor )
                 netCollisionMonitor->Update( previewJunctions, selection );
@@ -1350,7 +1634,7 @@ void SCH_MOVE_TOOL::setupItemsForDrag( SCH_SELECTION& aSelection, SCH_COMMIT* aC
             break;
 
         default:
-            connections = item->GetConnectionPoints();
+            connections = moveConnectionPoints( item );
         }
 
         for( const VECTOR2I& point : connections )
@@ -1368,7 +1652,7 @@ void SCH_MOVE_TOOL::setupItemsForDrag( SCH_SELECTION& aSelection, SCH_COMMIT* aC
     for( EDA_ITEM* item : connectedDragItems )
     {
         m_dragAdditions.push_back( item->m_Uuid );
-        m_selectionTool->AddItemToSel( item, QUIET_MODE );
+        addDragSelection( item );
     }
 
     // Pre-cache all connections of our selected objects so we can keep track of what they
@@ -1396,7 +1680,16 @@ void SCH_MOVE_TOOL::setupItemsForMove( SCH_SELECTION& aSelection, std::vector<DA
 {
     // Mark the edges of the block with dangling flags for a move
     for( EDA_ITEM* item : aSelection )
-        static_cast<SCH_ITEM*>( item )->GetEndPoints( aInternalPoints );
+    {
+        auto found = m_contextPins.find( static_cast<SCH_ITEM*>( item ) );
+        if( m_privateMoveSelection && found != m_contextPins.end() )
+        {
+            for( SCH_PIN* pin : found->second )
+                aInternalPoints.emplace_back( PIN_END, pin->GetLibPin(), pin->GetPosition(), static_cast<SCH_ITEM*>( item ) );
+        }
+        else
+            static_cast<SCH_ITEM*>( item )->GetEndPoints( aInternalPoints );
+    }
 
     std::vector<DANGLING_END_ITEM> endPointsByType = aInternalPoints;
     std::vector<DANGLING_END_ITEM> endPointsByPos = endPointsByType;
@@ -1421,7 +1714,7 @@ void SCH_MOVE_TOOL::prepareMoveItems( SCH_SELECTION& aSelection, SCH_COMMIT* aCo
     aInternalPoints.clear();
     clearNewDragLines();
 
-    for( SCH_ITEM* it : m_frame->GetScreen()->Items() )
+    for( SCH_ITEM* it : moveScreen()->Items() )
     {
         it->ClearFlags( SELECTED_BY_DRAG );
 
@@ -1447,11 +1740,11 @@ void SCH_MOVE_TOOL::prepareMoveItems( SCH_SELECTION& aSelection, SCH_COMMIT* aCo
 
             // While SCH_COMMIT::Push() will add any new items to the entered group, we need
             // to do it earlier so that the previews while moving are correct.
-            if( SCH_GROUP* enteredGroup = m_selectionTool->GetEnteredGroup() )
+            if( SCH_GROUP* enteredGroup = m_privateMoveSelection ? nullptr : m_selectionTool->GetEnteredGroup() )
             {
                 if( schItem->IsGroupableType() && !schItem->GetParentGroup() )
                 {
-                    aCommit->Modify( enteredGroup, m_frame->GetScreen(), RECURSE_MODE::NO_RECURSE );
+                    aCommit->Modify( enteredGroup, moveScreen(), RECURSE_MODE::NO_RECURSE );
                     enteredGroup->AddItem( schItem );
                 }
             }
@@ -1462,7 +1755,7 @@ void SCH_MOVE_TOOL::prepareMoveItems( SCH_SELECTION& aSelection, SCH_COMMIT* aCo
         }
         else
         {
-            aCommit->Modify( schItem, m_frame->GetScreen(), RECURSE_MODE::RECURSE );
+            aCommit->Modify( schItem, moveScreen(), RECURSE_MODE::RECURSE );
         }
 
         schItem->SetFlags( IS_MOVING );
@@ -1589,7 +1882,7 @@ SCH_SHEET* SCH_MOVE_TOOL::findTargetSheet( const SCH_SELECTION& aSelection, cons
     }
 
     // Determine potential target sheet
-    SCH_SHEET* sheet = dynamic_cast<SCH_SHEET*>( m_frame->GetScreen()->GetItem( aCursorPos, 0, SCH_SHEET_T ) );
+    SCH_SHEET* sheet = dynamic_cast<SCH_SHEET*>( moveScreen()->GetItem( aCursorPos, 0, SCH_SHEET_T ) );
 
     if( sheet && ( sheet->IsSelected() || sheet->HasFlag( IS_MOVING ) ) )
         sheet = nullptr;  // Never target a selected sheet
@@ -1612,7 +1905,7 @@ SCH_SHEET* SCH_MOVE_TOOL::findTargetSheet( const SCH_SELECTION& aSelection, cons
 
             // Find first non-selected sheet whose body fully contains the selection or at
             // least contains its center point
-            for( SCH_ITEM* it : m_frame->GetScreen()->Items().OfType( SCH_SHEET_T ) )
+            for( SCH_ITEM* it : moveScreen()->Items().OfType( SCH_SHEET_T ) )
             {
                 SCH_SHEET* candidate = static_cast<SCH_SHEET*>( it );
 
@@ -2130,7 +2423,7 @@ void SCH_MOVE_TOOL::recordRedundantJunctions( SCH_SELECTION& aSelection )
 
         for( const VECTOR2I& pt : line->GetConnectionPoints() )
         {
-            SCH_JUNCTION* jct = static_cast<SCH_JUNCTION*>( m_frame->GetScreen()->GetItem( pt, 0, SCH_JUNCTION_T ) );
+            SCH_JUNCTION* jct = static_cast<SCH_JUNCTION*>( moveScreen()->GetItem( pt, 0, SCH_JUNCTION_T ) );
 
             if( jct && !jct->IsSelected()
                 && std::none_of( m_hiddenJunctions.begin(), m_hiddenJunctions.end(),
@@ -2140,12 +2433,13 @@ void SCH_MOVE_TOOL::recordRedundantJunctions( SCH_SELECTION& aSelection )
                                  } ) )
             {
                 JUNCTION_HELPERS::POINT_INFO info =
-                        JUNCTION_HELPERS::AnalyzePoint( m_frame->GetScreen()->Items(), pt, false );
+                        JUNCTION_HELPERS::AnalyzePoint( moveScreen()->Items(), pt, false );
 
                 if( !info.isJunction )
                 {
                     m_hiddenJunctions.push_back( { jct, line->m_Uuid, pt == line->GetStartPoint() } );
-                    m_view->Hide( jct, true );
+                    if( !m_privateMoveSelection )
+                        m_view->Hide( jct, true );
                 }
             }
         }
@@ -2158,11 +2452,12 @@ void SCH_MOVE_TOOL::recordRedundantJunctions( SCH_SELECTION& aSelection )
 
 void SCH_MOVE_TOOL::migrateHiddenJunctions( SCH_COMMIT* aCommit )
 {
-    SCH_SCREEN* screen = m_frame->GetScreen();
+    SCH_SCREEN* screen = moveScreen();
 
     for( const HIDDEN_JUNCTION& hidden : m_hiddenJunctions )
     {
-        m_view->Hide( hidden.m_junction, false );
+        if( !m_privateMoveSelection )
+            m_view->Hide( hidden.m_junction, false );
 
         SCH_LINE* line = dynamic_cast<SCH_LINE*>( m_frame->Schematic().ResolveItem( hidden.m_lineId, nullptr, true ) );
 
@@ -2177,7 +2472,7 @@ void SCH_MOVE_TOOL::migrateHiddenJunctions( SCH_COMMIT* aCommit )
         {
             aCommit->Modify( hidden.m_junction, screen );
             hidden.m_junction->SetPosition( newPos );
-            m_frame->UpdateItem( hidden.m_junction, false, true );
+            updateItem( hidden.m_junction, true );
         }
     }
 }
@@ -2195,7 +2490,7 @@ void SCH_MOVE_TOOL::finalizeMoveOperation( SCH_SELECTION& aSelection, SCH_COMMIT
     for( SCH_LINE* newLine : m_newDragLines )
     {
         newLine->ClearEditFlags();
-        aCommit->Added( newLine, m_frame->GetScreen() );
+        aCommit->Added( newLine, moveScreen() );
     }
 
     // These lines have been changed, but aren't selected. We need to manually clear these
@@ -2225,7 +2520,7 @@ void SCH_MOVE_TOOL::finalizeMoveOperation( SCH_SELECTION& aSelection, SCH_COMMIT
     if( aSelection.GetSize() == 1 && aSelection.Front()->IsNew() )
         m_frame->SaveCopyForRepeatItem( static_cast<SCH_ITEM*>( aSelection.Front() ) );
 
-    m_selectionTool->RemoveItemsFromSel( &m_dragAdditions, QUIET_MODE );
+    removeDragSelection();
 
     SCH_LINE_WIRE_BUS_TOOL* lwbTool = m_toolMgr->GetTool<SCH_LINE_WIRE_BUS_TOOL>();
 
@@ -2233,8 +2528,8 @@ void SCH_MOVE_TOOL::finalizeMoveOperation( SCH_SELECTION& aSelection, SCH_COMMIT
     // to denote the state
     for( const DANGLING_END_ITEM& it : aInternalPoints )
     {
-        if( m_frame->GetScreen()->IsExplicitJunctionNeeded( it.GetPosition() ) )
-            lwbTool->AddJunction( aCommit, m_frame->GetScreen(), it.GetPosition() );
+        if( moveScreen()->IsExplicitJunctionNeeded( it.GetPosition() ) )
+            lwbTool->AddJunction( aCommit, moveScreen(), it.GetPosition() );
     }
 
     // Create a selection of original selection, drag selected/changed items, and new bend
@@ -2248,11 +2543,11 @@ void SCH_MOVE_TOOL::finalizeMoveOperation( SCH_SELECTION& aSelection, SCH_COMMIT
     for( SCH_LINE* line : m_changedDragLines )
         selectionCopy.Add( line );
 
-    lwbTool->TrimOverLappingWires( aCommit, &selectionCopy );
+    lwbTool->TrimOverLappingWires( aCommit, &selectionCopy, moveScreen() );
 
     migrateHiddenJunctions( aCommit );
 
-    lwbTool->AddJunctionsIfNeeded( aCommit, &selectionCopy );
+    lwbTool->AddJunctionsIfNeeded( aCommit, &selectionCopy, moveScreen() );
 
     // This needs to run prior to `RecalculateConnections` because we need to identify the
     // lines that are newly dangling
@@ -2261,17 +2556,17 @@ void SCH_MOVE_TOOL::finalizeMoveOperation( SCH_SELECTION& aSelection, SCH_COMMIT
 
     // Auto-rotate any moved labels
     for( EDA_ITEM* item : aSelection )
-        m_frame->AutoRotateItem( m_frame->GetScreen(), static_cast<SCH_ITEM*>( item ) );
+        m_frame->AutoRotateItem( moveScreen(), static_cast<SCH_ITEM*>( item ), m_explicitMovePath );
 
     // Clear SELECTED_BY_DRAG and other temp flags before CleanUp so that cleanup can properly
     // process all items, including removing zero-length wires and unwanted stubs
-    for( EDA_ITEM* item : m_frame->GetScreen()->Items() )
+    for( EDA_ITEM* item : moveScreen()->Items() )
         item->ClearTempFlags();
 
     for( EDA_ITEM* item : selectionCopy )
         item->ClearTempFlags();
 
-    m_frame->Schematic().CleanUp( aCommit );
+    m_frame->Schematic().CleanUp( aCommit, moveScreen(), !m_privateMoveSelection );
 
     // Mirror the IS_MOVING flag propagation done at the start of the move so that child items
     // (e.g. label fields, symbol pins/fields) don't keep their edit flags after the move ends.
@@ -2286,7 +2581,7 @@ void SCH_MOVE_TOOL::finalizeMoveOperation( SCH_SELECTION& aSelection, SCH_COMMIT
                         RECURSE_MODE::RECURSE );
             };
 
-    for( EDA_ITEM* item : m_frame->GetScreen()->Items() )
+    for( EDA_ITEM* item : moveScreen()->Items() )
     {
         item->ClearEditFlags();
 
@@ -2309,7 +2604,7 @@ void SCH_MOVE_TOOL::finalizeMoveOperation( SCH_SELECTION& aSelection, SCH_COMMIT
 
     if( aUnselect )
         m_toolMgr->RunAction( ACTIONS::selectionClear );
-    else
+    else if( !m_privateMoveSelection )
         m_selectionTool->RebuildSelection();  // Schematic cleanup might have merged lines, etc.
 }
 
@@ -2318,7 +2613,7 @@ void SCH_MOVE_TOOL::moveSelectionToSheet( SCH_SELECTION& aSelection, SCH_SHEET* 
                                           SCH_COMMIT* aCommit )
 {
     SCH_SCREEN* destScreen = aTargetSheet->GetScreen();
-    SCH_SCREEN* srcScreen = m_frame->GetScreen();
+    SCH_SCREEN* srcScreen = moveScreen();
 
     BOX2I bbox;
 
@@ -2370,15 +2665,24 @@ void SCH_MOVE_TOOL::moveSelectionToSheet( SCH_SELECTION& aSelection, SCH_SHEET* 
 
 void SCH_MOVE_TOOL::trimDanglingLines( SCH_COMMIT* aCommit )
 {
+    if( m_privateMoveSelection )
+    {
+        // The setup index used pre-move positions. Dangling-line cleanup must
+        // recognize pins at their new positions in every active unit.
+        m_contextPinOwners.clear();
+        for( const auto& [symbol, pins] : m_contextPins )
+            for( SCH_PIN* pin : pins ) m_contextPinOwners[pin->GetPosition()].insert( symbol );
+    }
     // Need a local cleanup first to ensure we remove unneeded junctions
-    m_frame->Schematic().CleanUp( aCommit, m_frame->GetScreen() );
+    m_frame->Schematic().CleanUp( aCommit, moveScreen(), !m_privateMoveSelection );
 
     std::set<SCH_ITEM*> danglers;
 
     std::function<void( SCH_ITEM* )> changeHandler =
             [&]( SCH_ITEM* aChangedItem ) -> void
             {
-                m_toolMgr->GetView()->Update( aChangedItem, KIGFX::REPAINT );
+                if( !m_privateMoveSelection )
+                    m_toolMgr->GetView()->Update( aChangedItem, KIGFX::REPAINT );
 
                 if( aChangedItem->IsSelected() )
                     return;
@@ -2387,10 +2691,14 @@ void SCH_MOVE_TOOL::trimDanglingLines( SCH_COMMIT* aCommit )
 
                 if( !line )
                     return;
+                const bool startDangling = line->IsStartDangling()
+                        && !( m_privateMoveSelection && m_contextPinOwners.count( line->GetStartPoint() ) );
+                const bool endDangling = line->IsEndDangling()
+                        && !( m_privateMoveSelection && m_contextPinOwners.count( line->GetEndPoint() ) );
 
                 // Split segments that are dangling get trimmed back since they extend
                 // past the break point.
-                if( line->HasFlag( IS_BROKEN ) && line->IsDangling() )
+                if( line->HasFlag( IS_BROKEN ) && ( startDangling || endDangling ) )
                 {
                     danglers.insert( aChangedItem );
                 }
@@ -2398,28 +2706,38 @@ void SCH_MOVE_TOOL::trimDanglingLines( SCH_COMMIT* aCommit )
                 // stubs that should be removed. Wires with only one connected end are
                 // still providing connectivity and must be preserved.
                 else if( line->HasFlag( IS_NEW ) && !line->HasFlag( IS_BROKEN )
-                         && line->IsStartDangling() && line->IsEndDangling() )
+                         && startDangling && endDangling )
                 {
                     danglers.insert( aChangedItem );
                 }
             };
 
-    m_frame->GetScreen()->TestDanglingEnds( nullptr, &changeHandler );
+    moveScreen()->TestDanglingEnds( nullptr, &changeHandler );
 
     for( SCH_ITEM* line : danglers )
     {
         line->SetFlags( STRUCT_DELETED );
-        aCommit->Removed( line, m_frame->GetScreen() );
+        aCommit->Removed( line, moveScreen() );
         updateItem( line, false ); // Update any cached visuals before commit processes
-        m_frame->RemoveFromScreen( line, m_frame->GetScreen() );
+        m_frame->RemoveFromScreen( line, moveScreen() );
     }
 }
 
 
 void SCH_MOVE_TOOL::getConnectedItems( SCH_ITEM* aOriginalItem, const VECTOR2I& aPoint, EDA_ITEMS& aList )
 {
-    EE_RTREE&         items = m_frame->GetScreen()->Items();
-    EE_RTREE::EE_TYPE itemsOverlapping = items.Overlapping( aOriginalItem->GetBoundingBox() );
+    std::vector<SCH_ITEM*> itemsOverlapping;
+    if( m_privateMoveSelection )
+    {
+        const auto candidates = moveConnectionCandidates( aOriginalItem, aPoint );
+        itemsOverlapping.assign( candidates.begin(), candidates.end() );
+    }
+    else
+    {
+        // Preserve ordinary mouse-drag spatial traversal and tie breaking.
+        for( SCH_ITEM* item : moveScreen()->Items().Overlapping( aOriginalItem->GetBoundingBox() ) )
+            itemsOverlapping.push_back( item );
+    }
     SCH_ITEM*         foundJunction = nullptr;
     SCH_ITEM*         foundSymbol   = nullptr;
 
@@ -2430,7 +2748,7 @@ void SCH_MOVE_TOOL::getConnectedItems( SCH_ITEM* aOriginalItem, const VECTOR2I& 
     // we need to prioritize the pin version in some cases.
     for( SCH_ITEM* item : itemsOverlapping )
     {
-        if( item != aOriginalItem && item->IsConnected( aPoint ) )
+        if( item != aOriginalItem && moveConnectedAt( item, aPoint ) )
         {
             if( item->Type() == SCH_JUNCTION_T )
                 foundJunction = item;
@@ -2473,7 +2791,7 @@ void SCH_MOVE_TOOL::getConnectedItems( SCH_ITEM* aOriginalItem, const VECTOR2I& 
                 continue;
             }
 
-            if( test->IsConnected( aPoint ) )
+            if( moveConnectedAt( test, aPoint ) )
                 aList.push_back( test );
 
             // Labels can connect to a wire (or bus) anywhere along the length
@@ -2508,7 +2826,7 @@ void SCH_MOVE_TOOL::getConnectedItems( SCH_ITEM* aOriginalItem, const VECTOR2I& 
         case SCH_SYMBOL_T:
         case SCH_JUNCTION_T:
         case SCH_NO_CONNECT_T:
-            if( test->IsConnected( aPoint ) )
+            if( moveConnectedAt( test, aPoint ) )
                 aList.push_back( test );
 
             break;
@@ -2552,13 +2870,10 @@ void SCH_MOVE_TOOL::getConnectedItems( SCH_ITEM* aOriginalItem, const VECTOR2I& 
 void SCH_MOVE_TOOL::getConnectedDragItems( SCH_COMMIT* aCommit, SCH_ITEM* aSelectedItem, const VECTOR2I& aPoint,
                                            EDA_ITEMS& aList )
 {
-    EE_RTREE&              items = m_frame->GetScreen()->Items();
-    std::set<SCH_ITEM*>    connectableCandidates;
+    EE_RTREE&              items = moveScreen()->Items();
+    auto                  connectableCandidates = moveConnectionCandidates( aSelectedItem, aPoint );
     std::vector<SCH_ITEM*> itemsConnectable;
     bool                   ptHasUnselectedJunction = false;
-
-    for( SCH_ITEM* item : items.Overlapping( aSelectedItem->GetBoundingBox() ) )
-        connectableCandidates.insert( item );
 
     // Labels can connect at their anchor even if the label bbox doesn't overlap the target, e.g.
     // sheet pins can do this sometimes with just net labels and no wires.
@@ -2602,17 +2917,17 @@ void SCH_MOVE_TOOL::getConnectedDragItems( SCH_COMMIT* aCommit, SCH_ITEM* aSelec
                 if( selectedLine )
                 {
                     newWire->SetLastResolvedState( selected );
-                    cloneWireConnection( newWire, selectedLine, m_frame );
+                    cloneWireConnection( newWire, selectedLine, movePath() );
                 }
                 else if( fixedLine )
                 {
                     newWire->SetLastResolvedState( fixed );
-                    cloneWireConnection( newWire, fixedLine, m_frame );
+                    cloneWireConnection( newWire, fixedLine, movePath() );
                 }
 
                 newWire->SetEndPoint( end );
-                m_frame->AddToScreen( newWire, m_frame->GetScreen() );
-                commit->Added( newWire, m_frame->GetScreen() );
+                m_frame->AddToScreen( newWire, moveScreen() );
+                commit->Added( newWire, moveScreen() );
 
                 return newWire;
             };
@@ -2628,8 +2943,8 @@ void SCH_MOVE_TOOL::getConnectedDragItems( SCH_COMMIT* aCommit, SCH_ITEM* aSelec
                 if( line->IsBus() )
                     junction->SetLayer( LAYER_BUS_JUNCTION );
 
-                m_frame->AddToScreen( junction, m_frame->GetScreen() );
-                commit->Added( junction, m_frame->GetScreen() );
+                m_frame->AddToScreen( junction, moveScreen() );
+                commit->Added( junction, moveScreen() );
 
                 return junction;
             };
@@ -2762,7 +3077,7 @@ void SCH_MOVE_TOOL::getConnectedDragItems( SCH_COMMIT* aCommit, SCH_ITEM* aSelec
                         if( aPoint != line->GetStartPoint() && aPoint != line->GetEndPoint() )
                         {
                             // Split line in half
-                            aCommit->Modify( line, m_frame->GetScreen() );
+                            aCommit->Modify( line, moveScreen() );
 
                             VECTOR2I oldEnd = line->GetEndPoint();
                             line->SetEndPoint( aPoint );
@@ -2839,7 +3154,7 @@ void SCH_MOVE_TOOL::getConnectedDragItems( SCH_COMMIT* aCommit, SCH_ITEM* aSelec
 
         case SCH_SYMBOL_T:
         case SCH_JUNCTION_T:
-            if( test->IsConnected( aPoint ) && !newWire )
+            if( moveConnectedAt( test, aPoint ) && !newWire )
             {
                 // Add a new wire between the symbol or junction and the selected item so
                 // the selected item can be dragged.
@@ -3050,7 +3365,7 @@ int SCH_MOVE_TOOL::AlignToGrid( const TOOL_EVENT& aEvent )
     auto doMoveItem =
             [&]( EDA_ITEM* item, const VECTOR2I& delta )
             {
-                commit.Modify( item, m_frame->GetScreen(), RECURSE_MODE::RECURSE );
+                commit.Modify( item, moveScreen(), RECURSE_MODE::RECURSE );
 
                 // Ensure only one end is moved when calling moveItem
                 // i.e. we are in drag mode
@@ -3063,7 +3378,7 @@ int SCH_MOVE_TOOL::AlignToGrid( const TOOL_EVENT& aEvent )
                 updateItem( item, true );
             };
 
-    for( SCH_ITEM* it : m_frame->GetScreen()->Items() )
+    for( SCH_ITEM* it : moveScreen()->Items() )
     {
         if( !it->IsSelected() )
             it->ClearFlags( STARTPOINT | ENDPOINT );
@@ -3099,7 +3414,7 @@ int SCH_MOVE_TOOL::AlignToGrid( const TOOL_EVENT& aEvent )
     recordRedundantJunctions( selection );
 
     std::vector<EDA_ITEM*> items( selection.begin(), selection.end() );
-    AlignSchematicItemsToGrid( m_frame->GetScreen(), items, grid, selectionGrid, callbacks );
+    AlignSchematicItemsToGrid( moveScreen(), items, grid, selectionGrid, callbacks );
 
     SCH_LINE_WIRE_BUS_TOOL* lwbTool = m_toolMgr->GetTool<SCH_LINE_WIRE_BUS_TOOL>();
     lwbTool->TrimOverLappingWires( &commit, &selection );
@@ -3119,7 +3434,7 @@ void SCH_MOVE_TOOL::clearNewDragLines()
     // Remove new bend lines added during the drag
     for( SCH_LINE* newLine : m_newDragLines )
     {
-        m_frame->RemoveFromScreen( newLine, m_frame->GetScreen() );
+        m_frame->RemoveFromScreen( newLine, moveScreen() );
         delete newLine;
     }
 

@@ -62,6 +62,46 @@ public sealed class NativeClientTests
     }
 
     [TestMethod]
+    public async Task BoardOpenAndCreationKeepExplicitTypePathAndCreationIntent()
+    {
+        var transport = new ScriptTransport((_, _) => SnapshotReply(new OpenDocumentResponse(), 1));
+        var client = new NativeClient(transport, "ipc:///tmp/board-open.sock");
+        foreach (string path in new[] { "relative.kicad_pcb", "/tmp/legacy.brd", "" })
+        {
+            Assert.ThrowsExactly<AutomationException>(() => client.OpenRootBoardAsync(path));
+            Assert.ThrowsExactly<AutomationException>(() => client.CreateRootBoardAsync(path));
+        }
+        Assert.IsEmpty(transport.Requests);
+        string absolute = Path.Combine(Path.GetTempPath(), "native-board-open-電源.kicad_pcb");
+        await client.OpenRootBoardAsync(absolute);
+        await client.CreateRootBoardAsync(absolute);
+        Assert.HasCount(2, transport.Requests);
+        var normal = transport.Requests[0].Message.Unpack<OpenDocument>();
+        var create = transport.Requests[1].Message.Unpack<OpenDocument>();
+        Assert.AreEqual((Kiapi.Common.Types.DocumentType)3, normal.Type);
+        Assert.AreEqual(absolute, normal.Path); Assert.IsFalse(normal.CreateIfMissing);
+        normal.CreateIfMissing = true; Assert.AreEqual(normal, create);
+    }
+
+    [TestMethod]
+    public async Task BoardOpenPreservesNativeFailureAndPreCancelledCallsNeverReachTransport()
+    {
+        var transport = new ScriptTransport((_, attempt) => SnapshotReply(new OpenDocumentResponse(),
+            attempt == 1 ? 3 : 1, "The selected project board is locked"));
+        var client = new NativeClient(transport, "ipc:///tmp/board-failure.sock");
+        string path = Path.Combine(Path.GetTempPath(), "native-board-recovery.kicad_pcb");
+        using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
+        await Assert.ThrowsAsync<OperationCanceledException>(() => client.CreateRootBoardAsync(path, cancelled.Token));
+        Assert.IsEmpty(transport.Requests);
+        var error = await Assert.ThrowsExactlyAsync<NativeApiException>(() => client.OpenRootBoardAsync(path));
+        Assert.AreEqual(3, error.Status);
+        Assert.HasCount(1, transport.Requests, "A failed open must not retry implicitly or create a replacement.");
+        await client.OpenRootBoardAsync(path);
+        Assert.HasCount(2, transport.Requests);
+        Assert.IsFalse(transport.Requests[1].Message.Unpack<OpenDocument>().CreateIfMissing);
+    }
+
+    [TestMethod]
     public void SchematicOpenRequiresAnExplicitNativePath()
     {
         var fixture = new FixtureTransport();
@@ -74,6 +114,150 @@ public sealed class NativeClientTests
         Assert.IsNull(fixture.LastRequest, "Invalid paths must fail before transport.");
     }
 
+    [TestMethod]
+    public async Task SnapshotRequestsOptIntoCurrentFieldsWithoutChangingCallerMessages()
+    {
+        IMessage[] requests = [new ReadSchematicMetadata(), new ReadSchematicScreenData(),
+            new ReadSchematicHierarchyData(), new ReadSchematicElectricalState(), new CaptureSchematicObservation(), new RenderSchematicViews()];
+        foreach (var request in requests)
+        {
+            var field = request.Descriptor.FindFieldByName("schema_version");
+            var current = NativeClient.CurrentSnapshotRequest(request);
+            Assert.AreNotSame(request, current);
+            Assert.AreEqual(0U, field.Accessor.GetValue(request));
+            Assert.AreEqual(10U, field.Accessor.GetValue(current));
+            foreach (uint explicitVersion in new[] { 1U, 2U, 3U, 4U, 5U })
+            {
+                field.Accessor.SetValue(request, explicitVersion);
+                Assert.AreSame(request, NativeClient.CurrentSnapshotRequest(request));
+                Assert.AreEqual(explicitVersion, field.Accessor.GetValue(request));
+            }
+        }
+        var other = new ReadSchematicSaveState();
+        Assert.AreSame(other, NativeClient.CurrentSnapshotRequest(other));
+        var transport = new FixtureTransport();
+        var client = new NativeClient(transport, "ipc:///tmp/schema-fixture.sock");
+        var query = new ReadSchematicMetadata();
+        // The transport is deliberately a protocol fixture, not a native peer.
+        await client.InvokeAsync<ReadSchematicMetadata, GetVersionResponse>(query);
+        Assert.AreEqual(10U, transport.LastRequest!.Message.Unpack<ReadSchematicMetadata>().SchemaVersion);
+        Assert.AreEqual(0U, query.SchemaVersion);
+    }
+
+    [TestMethod]
+    [DataRow(1U)]
+    [DataRow(2U)]
+    [DataRow(3U)]
+    [DataRow(4U)]
+    [DataRow(5U)]
+    [DataRow(6U)]
+    [DataRow(7U)]
+    [DataRow(8U)]
+    [DataRow(9U)]
+    [DataRow(10U)]
+    public async Task AutomaticSnapshotNegotiationIsBoundedPinnedAndCachedPerPeer(uint maximum)
+    {
+        var payload = new SchematicMetadataSnapshot { Metadata = new(), TrackingComplete = false };
+        payload.Metadata.UnrepresentedState.Add("fixture-unrepresented-feature");
+        var transport = new ScriptTransport((request, _) => SnapshotReply(payload,
+            request.Message.Unpack<ReadSchematicMetadata>().SchemaVersion > maximum ? 3 : 1));
+        var client = new NativeClient(transport, "ipc:///tmp/schema-negotiation.sock");
+        var query = new ReadSchematicMetadata();
+        var result = await client.InvokeAsync<ReadSchematicMetadata, SchematicMetadataSnapshot>(query);
+        Assert.AreEqual(payload, result); // Coverage limitations are not discarded or invented.
+        CollectionAssert.AreEqual(Enumerable.Range(1, 10).Reverse().Select(x => (uint)x).Where(x => x >= maximum).ToArray(),
+            transport.Requests.Select(x => x.Message.Unpack<ReadSchematicMetadata>().SchemaVersion).ToArray());
+        Assert.AreEqual(0U, query.SchemaVersion);
+        Assert.AreEqual("schema-peer", client.Epoch);
+        foreach (var request in transport.Requests.Skip(1)) Assert.AreEqual("schema-peer", request.Header.KicadToken);
+        int count = transport.Requests.Count;
+        await client.InvokeAsync<ReadSchematicMetadata, SchematicMetadataSnapshot>(query);
+        Assert.HasCount(count + 1, transport.Requests);
+        Assert.AreEqual(maximum, transport.Requests[^1].Message.Unpack<ReadSchematicMetadata>().SchemaVersion);
+        var independent = new NativeClient(transport, "ipc:///tmp/another-schema-peer.sock");
+        await independent.InvokeAsync<ReadSchematicMetadata, SchematicMetadataSnapshot>(query);
+        Assert.AreEqual(10U, transport.Requests[count + 1].Message.Unpack<ReadSchematicMetadata>().SchemaVersion);
+    }
+
+    [TestMethod]
+    public async Task ExplicitSchemasAndMutationsNeverNegotiateOrRetry()
+    {
+        foreach (uint version in new[] { 1U, 3U, 4U, 5U })
+        {
+            var transport = new ScriptTransport((_, _) => SnapshotReply(new SchematicMetadataSnapshot(), 3));
+            var client = new NativeClient(transport, "ipc:///tmp/explicit-schema.sock");
+            await Assert.ThrowsExactlyAsync<NativeApiException>(() => client.InvokeAsync<ReadSchematicMetadata, SchematicMetadataSnapshot>(
+                new() { SchemaVersion = version }));
+            Assert.HasCount(1, transport.Requests);
+            Assert.AreEqual(version, transport.Requests[0].Message.Unpack<ReadSchematicMetadata>().SchemaVersion);
+        }
+        var mutationTransport = new ScriptTransport((_, _) => SnapshotReply(new SchematicItemBatchResult(), 3));
+        var mutationClient = new NativeClient(mutationTransport, "ipc:///tmp/mutation-no-retry.sock");
+        await Assert.ThrowsExactlyAsync<NativeApiException>(() => mutationClient.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(new()));
+        Assert.HasCount(1, mutationTransport.Requests);
+    }
+
+    [TestMethod]
+    [DataRow(7, "Unsupported schematic snapshot schema version")]
+    [DataRow(3, "Wrong document")]
+    [DataRow(8, "Unsupported schematic snapshot schema version")]
+    public async Task UnrelatedFailuresCannotTriggerSchemaDowngrade(int status, string message)
+    {
+        var transport = new ScriptTransport((_, _) => SnapshotReply(new SchematicMetadataSnapshot(), status, message));
+        var client = new NativeClient(transport, "ipc:///tmp/unrelated-schema-error.sock");
+        await Assert.ThrowsExactlyAsync<NativeApiException>(() => client.InvokeAsync<ReadSchematicMetadata, SchematicMetadataSnapshot>(new()));
+        Assert.HasCount(1, transport.Requests);
+    }
+
+    [TestMethod]
+    public async Task SchemaNegotiationStopsAtOneAndRejectsEpochChangesCancellationAndTimeout()
+    {
+        var rejected = new ScriptTransport((_, _) => SnapshotReply(new SchematicMetadataSnapshot(), 3));
+        await Assert.ThrowsExactlyAsync<NativeApiException>(() => new NativeClient(rejected, "ipc:///tmp/rejected-schema.sock")
+            .InvokeAsync<ReadSchematicMetadata, SchematicMetadataSnapshot>(new()));
+        CollectionAssert.AreEqual(Enumerable.Range(1, 10).Reverse().Select(x => (uint)x).ToArray(),
+            rejected.Requests.Select(x => x.Message.Unpack<ReadSchematicMetadata>().SchemaVersion).ToArray());
+
+        var replaced = new ScriptTransport((_, attempt) =>
+        {
+            var reply = SnapshotReply(new SchematicMetadataSnapshot(), attempt == 1 ? 3 : 1);
+            if (attempt > 1) reply.Header.KicadToken = "replacement-peer";
+            return reply;
+        });
+        var changed = await Assert.ThrowsExactlyAsync<AutomationException>(() => new NativeClient(replaced, "ipc:///tmp/replaced-schema.sock")
+            .InvokeAsync<ReadSchematicMetadata, SchematicMetadataSnapshot>(new()));
+        Assert.AreEqual("instance_changed", changed.Code);
+        Assert.HasCount(2, replaced.Requests);
+
+        using var cancellation = new CancellationTokenSource();
+        var cancelled = new ScriptTransport((_, _) => { cancellation.Cancel(); return SnapshotReply(new SchematicMetadataSnapshot(), 3); });
+        await Assert.ThrowsExactlyAsync<OperationCanceledException>(() => new NativeClient(cancelled, "ipc:///tmp/cancelled-schema.sock")
+            .InvokeAsync<ReadSchematicMetadata, SchematicMetadataSnapshot>(new(), cancellation.Token));
+        Assert.HasCount(1, cancelled.Requests);
+        var timedOut = new ScriptTransport((_, _) => throw new TimeoutException("fixture timeout"));
+        await Assert.ThrowsExactlyAsync<TimeoutException>(() => new NativeClient(timedOut, "ipc:///tmp/timed-out-schema.sock")
+            .InvokeAsync<ReadSchematicMetadata, SchematicMetadataSnapshot>(new()));
+        Assert.HasCount(1, timedOut.Requests);
+    }
+
+    private static ApiResponse SnapshotReply(IMessage payload, int status,
+        string error = "Unsupported schematic snapshot schema version") => new()
+    {
+        Header = new() { KicadToken = "schema-peer" },
+        Status = new() { Status = (ApiStatusCode)status, ErrorMessage = status == 1 ? "" : error },
+        Message = Any.Pack(payload)
+    };
+
+    private sealed class ScriptTransport(Func<ApiRequest, int, ApiResponse> reply) : INativeTransport
+    {
+        public List<ApiRequest> Requests { get; } = new();
+        public Task<byte[]> ExchangeAsync(string endpoint, byte[] request, TimeSpan timeout, CancellationToken cancellationToken = default)
+        {
+            Requests.Add(ApiRequest.Parser.ParseFrom(request));
+            return Task.FromResult(reply(Requests[^1], Requests.Count).ToByteArray());
+        }
+    }
+
     internal sealed class FixtureTransport : INativeTransport
     {
         public string Epoch { get; set; } = "fixture-epoch";
@@ -81,13 +265,19 @@ public sealed class NativeClientTests
         public bool WrongType { get; set; }
         public string InstanceId { get; } = Guid.NewGuid().ToString("D");
         public string ProjectPath { get; set; } = "/fixture/test.kicad_pro";
+        // Feature contracts of the handshake. Like a KiCad built before handled_requests, the
+        // fixture never lists the requests it handles.
+        public string[] Features { get; set; } = [];
+        // The process ID the handshake reports; 0, like a KiCad built before the field, means unknown.
+        public uint ProcessId { get; set; }
         public ApiRequest? LastRequest { get; private set; }
 
         public Task<byte[]> ExchangeAsync(string endpoint, byte[] request, TimeSpan timeout, CancellationToken cancellationToken = default)
         {
             LastRequest = ApiRequest.Parser.ParseFrom(request);
             IMessage payload = LastRequest.Message.Is(GetAutomationSession.Descriptor) && !WrongType
-                ? new AutomationSession { ProtocolVersion = 1, InstanceId = InstanceId, ProjectPath = ProjectPath, Epoch = Epoch }
+                ? new AutomationSession { ProtocolVersion = 1, InstanceId = InstanceId, ProjectPath = ProjectPath, Epoch = Epoch, Capabilities = { Features },
+                    ProcessId = ProcessId }
                 : new GetVersionResponse { Version = new Kiapi.Common.Types.KiCadVersion { FullVersion = "isolated-protocol-fixture" } };
             return Task.FromResult(new ApiResponse
             {

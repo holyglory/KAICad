@@ -168,22 +168,67 @@ public sealed class SchematicPlacementPlanTests
     }
 
     [TestMethod]
-    public void RotationLocksAndUnalignedBaselinesAreNotSilentlyTranslated()
+    public void LockOnlyChangesUseNativeLocksAndUnalignedBaselinesRemainRejected()
     {
         var (baseline, library) = Fixture();
-        foreach (var desired in new[] {
-            Change(baseline, s => s.Placement! with { RotationDegrees = 90 }),
-            Change(baseline, s => s.Placement! with { Locked = true }),
-            Change(baseline, s => s.Placement! with { MirrorX = true }) })
+        foreach (var desired in new[] { Change(baseline, s => s.Placement! with { Locked = true }) })
         {
             var result = SchematicPlacementPlan.Plan(baseline, desired, baseline.Schematic, [library]);
-            Assert.IsTrue(result.Issues.Any(i => i.Code == "nontranslation_placement_change"));
-            Assert.AreEqual(0, result.Operations.Count);
+            Assert.IsEmpty(result.Issues);
+            Assert.AreEqual(2, result.Operations.Count);
+            Assert.IsTrue(result.Operations.All(o => o.SetSymbolLocks?.Locked == Kiapi.Common.Types.LockedState.LsLocked));
         }
         var badBaseline = baseline with { Engineering = Change(baseline, s => s.Placement! with { XMillimeters = 12 }) };
         var mismatch = SchematicPlacementPlan.Plan(badBaseline, badBaseline.Engineering, baseline.Schematic, [library]);
         Assert.IsTrue(mismatch.Issues.Any(i => i.Code == "unaligned_placement_baseline"));
         Assert.AreEqual(0, mismatch.Operations.Count);
+    }
+
+    [TestMethod]
+    public void ExplicitUnlockPrecedesMovementAndRequestedLockFollowsIt()
+    {
+        var (baseline, library) = Fixture();
+        var wanted = Change(baseline, s => s.Placement! with { XMillimeters = s.Placement.XMillimeters + 2.54m, Locked = true });
+        var locking = SchematicPlacementPlan.Plan(baseline, wanted, baseline.Schematic, [library]);
+        Assert.IsEmpty(locking.Issues);
+        Assert.IsNotNull(locking.Operations[0].MoveConnectedSymbols);
+        Assert.IsTrue(locking.Operations.Skip(1).All(o => o.SetSymbolLocks?.Locked == Kiapi.Common.Types.LockedState.LsLocked));
+        Edit(baseline.Schematic, s => s.Locked = Kiapi.Common.Types.LockedState.LsLocked);
+        baseline = baseline with { Engineering = Change(baseline, s => s.Placement! with { Locked = true }) };
+        wanted = Change(baseline, s => s.Placement! with { XMillimeters = s.Placement.XMillimeters + 2.54m, Locked = false });
+        var unlocking = SchematicPlacementPlan.Plan(baseline, wanted, baseline.Schematic, [library]);
+        Assert.IsEmpty(unlocking.Issues);
+        Assert.IsTrue(unlocking.Operations.Take(2).All(o => o.SetSymbolLocks?.Locked == Kiapi.Common.Types.LockedState.LsUnlocked));
+        Assert.IsNotNull(unlocking.Operations[^1].MoveConnectedSymbols);
+        var proposal = new PlacementTools().PlanPlacement(SchematicDesignXml.Write(baseline, [library]),
+            EngineeringDesignXml.Write(wanted, [library]), SchematicDataXml.Write(baseline.Schematic),
+            [ComponentKnowledgeXml.WriteLibrary(library)], default);
+        Assert.IsEmpty(proposal.Issues); Assert.AreEqual(2, proposal.Unlocks!.Count); Assert.IsEmpty(proposal.Locks!);
+    }
+
+    [TestMethod]
+    public void SharedTransformsPrecedeGroupedTranslationsAndEquivalentEncodingDoesNotMove()
+    {
+        var (baseline, library) = Fixture();
+        var desired = Change(baseline, s => s.Placement! with
+        { RotationDegrees = (s.Placement.RotationDegrees + 90) % 360, XMillimeters = s.Placement.XMillimeters + 2.54m });
+        var plan = SchematicPlacementPlan.Plan(baseline, desired, baseline.Schematic, [library]);
+        Assert.IsEmpty(plan.Issues);
+        var transforms = plan.Operations.TakeWhile(o => o.TransformConnectedSymbols is not null).ToArray();
+        Assert.AreEqual(2, transforms.Length);
+        Assert.IsTrue(plan.Operations.Skip(transforms.Length).All(o => o.MoveConnectedSymbols is not null));
+        Assert.AreEqual(2, transforms.SelectMany(o => o.TransformConnectedSymbols.Symbols).Select(s => s.Value).Distinct().Count());
+        var proposal = new PlacementTools().PlanPlacement(SchematicDesignXml.Write(baseline, [library]),
+            EngineeringDesignXml.Write(desired, [library]), SchematicDataXml.Write(baseline.Schematic),
+            [ComponentKnowledgeXml.WriteLibrary(library)], default);
+        Assert.IsNull(proposal.ErrorCode); Assert.AreEqual(transforms.Length, proposal.Transforms!.Count);
+        Assert.AreEqual(plan.Operations.Count - transforms.Length, proposal.Moves.Count);
+        var equivalent = Change(baseline, s => s.Placement! with
+        { RotationDegrees = (s.Placement.RotationDegrees + 180) % 360, MirrorX = !s.Placement.MirrorX, MirrorY = !s.Placement.MirrorY });
+        Assert.IsEmpty(SchematicPlacementPlan.Plan(baseline, equivalent, baseline.Schematic, [library]).Operations);
+        var aliasBaseline = baseline with { Engineering = equivalent };
+        var unchanged = SchematicPlacementPlan.Plan(aliasBaseline, equivalent, baseline.Schematic, [library]);
+        Assert.IsEmpty(unchanged.Issues); Assert.IsEmpty(unchanged.Operations);
     }
 
     [TestMethod]

@@ -4,7 +4,187 @@ Development branch: `main` (the original `feature/codex-kicad-automation` branch
 `f638a860a05b3e48d1074314a656ad9b8f597466`. This is an incomplete implementation
 of the approved six-milestone program, not a release.
 
-## Windows preview — September 11, 2026
+Current downloads are on [kicad.vr.ae](https://kicad.vr.ae/). The
+[Mac preview installation guide](distribution/mac-preview-install.md) covers the
+September 15 Apple Silicon and Intel builds, including managed-update setup.
+The [Windows preview installation guide](distribution/windows-preview-install.md)
+covers the September 16 Windows package and its managed updater.
+To point Codex Desktop or a second MCP client such as Claude Code at a newly installed
+Linux preview's MCP server, and to confirm which server is really running, follow the
+[Codex runtime refresh runbook](docs/codex-runtime-refresh.md).
+
+## Try provisional Schematic Setup edits in a source build
+
+The feature branch contains the native Setup change from
+`54e61d57ae0aa051ccd86aab2138f8de9d1cd5b5`. This section describes that source
+increment, not the older Mac/Windows downloads or a qualified cross-platform release.
+
+Open a disposable project in its Schematic Editor, then choose **File → Schematic
+Setup**. Change the overbar offset under **Formatting**, switch to another page,
+and press **Cancel**. Reopen Setup: the original value must remain. Repeat with
+one **Pin Conflicts Map** cell. Its pending color change must also disappear on
+Cancel. Pressing **OK** instead accepts the edit; the editor's Undo and Redo
+controls must restore and reapply it together with its native revision.
+
+To check error recovery, change a pin-conflict cell, switch to Formatting, enter
+`0` for the connection grid and press OK. The validation error must leave Setup
+open. Correct the grid to its previous value: OK must retain the pending pin-rule
+edit, while Cancel must discard it. No XML editing is needed for this journey.
+
+For a configured Linux source checkout, the compiled two-editor verification is:
+
+```sh
+devcoordinator2 test start . --test native-setup-dialog --tier development
+```
+
+The test owns disposable projects and a virtual display. The formatting and
+pin-map page-switch/Cancel/OK/Undo/Redo paths, plus later-page validation recovery,
+have real Linux evidence. Complete import, nested embedded-file and dependent-page
+coverage are still being qualified; native Mac Setup evidence and full automatic
+XML synchronization remain open. The authoritative completion state is in
+DevCoordinator, not this usage guide.
+
+## Linux preview — September 25, 2026
+
+[Linux application and MCP](https://kicad.vr.ae/artifacts/kicad-codex-preview-20260925T142556Z-51abb3af7e05-debian13-x64.tar.gz)
+and [matching source](https://kicad.vr.ae/artifacts/kicad-codex-preview-20260925T142556Z-51abb3af7e05-source.tar.gz)
+identify `51abb3af7e054f42487da42df28fc63e8e11dc68`, signed preview sequence 24.
+Extract and run `./kicad-codex`; use `./kicad-mcp` for the matching STDIO tools.
+Existing Linux installations offer it through the caption Update button.
+
+Compared with sequence 23 it adds, as preliminary features:
+
+- **XML connections become labelled wires.** When saved XML adds connections, apply
+  draws a short wire and a net label from each new pin, with hierarchical labels and
+  sheet pins where a net crosses sheets, in one KiCad edit that KiCad accepts only if the
+  pin connections are exactly the XML's nets; one undo removes the whole drawing. KiCad
+  started for a project advertises `schematic.connection-realization.v1`; the empty update
+  manager does not. `kicad_design_sync_plan` says beforehand which connections apply will
+  draw (`connectionRealizationRequired`, `connectionIntent`).
+- **Lost schematic files are rebuilt from XML.** After the `.kicad_sch` files of a project
+  are deleted, reattaching the recovery record and applying rebuilds every sheet, symbol,
+  label and sheet pin from the last synchronized XML, byte for byte, keeping the project
+  file. New empty sheets added in XML are created in KiCad.
+- **Crash recovery.** If KiCad is killed while applying or saving an XML change,
+  `kicad_design_recovery_release_exited` resumes or rolls back that operation in the KiCad
+  started again, and never takes its partial result for a user edit.
+- **Steadier synchronization.** After a reload, KiCad's own join of a symbol's stacked pins
+  no longer adds a net to the XML, and the first save of a project KiCad never saved no
+  longer leaves the apply unfinished.
+- **Diagram editor polish.** Design review fixes (clearer dark-theme selection, active tools
+  and ports), each drawn connection gets its own path, and Clear facet no longer overlaps
+  the strength choices.
+- **Presentation checks** can cover a whole loaded sheet hierarchy, and new connected parts
+  are placed next to the pins they join, with room for each connection.
+
+The diagram editor stays preliminary: its design audit still finds eight moderate differences
+from the approved sketches, for example a new connection's name not yet shown on the canvas.
+
+Not yet included: wires routed between pins (connections are drawn as labelled stubs),
+opening a diagram from the project manager, rebuilding designs with net chains or with one
+sheet file shown by several sheets, and full two-way ownership synchronization of parts
+added in KiCad. Mac and Windows builds stay on hold until the XML editing workflow is
+complete.
+
+Every gate ran on the exact commit before publication: the composed native acceptance,
+now 24 checks including the PSU/CPU creation, connection, rebuild, crash and diagram
+canvas journeys (`t20260925T110834Z-6b2cf9`: 23 passed; its BOM settings journey missed a
+5-second popup wait on a fully loaded host and passed on the same commit in a clean
+checkout, `t20260925T141858Z-7e9653`), the PSU/CPU fixture with the lost-files rebuild,
+the update manager, a cold checkout's Setup, the unit suites and the installed-package
+journey. Public run `t20260925T143552Z-6876f7` verified the downloads, the signed caption
+update from sequence 23 and the landing page; delivery receipts `t20260925T144525Z-069be7`.
+Existing Mac and Windows downloads stay available.
+
+### Earlier Linux preview — September 24, 2026
+
+[Linux application and MCP](https://kicad.vr.ae/artifacts/kicad-codex-preview-20260924T181444Z-3f023fc2aa35-debian13-x64.tar.gz)
+and [matching source](https://kicad.vr.ae/artifacts/kicad-codex-preview-20260924T181444Z-3f023fc2aa35-source.tar.gz)
+identify `3f023fc2aa358dfef4002fd5df52e7f9dfcd3c92`, signed preview sequence 23.
+Extract and run `./kicad-codex`; use `./kicad-mcp` for the matching STDIO tools.
+Existing Linux installations offer it through the caption Update button.
+
+Compared with sequence 22 it adds, as preliminary features:
+
+- **Per-level diagram editor.** `kicad_diagram_create` makes a new system diagram whose
+  root is only its caption, and `kicad_diagram_discover` finds a project's diagrams. At
+  every level you can add caption-only blocks, connect ports and blocks, place level
+  ports, move, resize, delete and undo, from the toolbar or the canvas-edge palette, with
+  layout saved per level through Save and Decline. Blocks and connections grow with
+  "+ Add detail" and "+ Add requirement": connections gain signals, direction, domain and
+  type; blocks show chips for decided or candidate component choices with Review facets.
+  Diagram files use format 2 (format 1 files upgrade on their first change). The older
+  flat structural editor and its `kicad_structure_*` tools are removed.
+- **XML component creation** of parts whose units sit on different sheets and of parts
+  with stacked pins (KiCad's join of a symbol's stacked pins counts as one point).
+- **ERC settings** (severities, pin map, exclusions with comments) synchronize both ways
+  through automatic synchronization; ERC dialog edits are undoable.
+- **Stale AI edits are refused** after more native changes (symbol and sheet properties,
+  Page Settings, Setup, Annotate, sheet import), and these checks stay fast on large designs.
+- **Capability truth.** `kicad_instance_capabilities` lists each running KiCad's feature
+  flags and the requests it handles right now; `kicad_service_capabilities` describes the
+  MCP server without contacting KiCad.
+- **Save and close failures** return precise codes (`file_not_writable`, `partial_save`,
+  `native_save_refused`, `native_save_failed` and others) and keep unsaved work.
+
+Groundwork for turning XML connections into wires is included but switched off: KiCad
+does not advertise `schematic.connection-realization.v1` yet. Known limitations: the
+diagram editor's dark-theme selection and other design-QA polish are still being fixed,
+Clear facet can overlap the strength choices in a narrow inspector, and opening a diagram
+from the project manager is not built yet.
+
+Every gate ran on the exact commit before publication: the composed native acceptance
+(19 checks, `t20260924T160501Z-67b01b`), a cold checkout's Setup, DRC contracts,
+component creation including the PSU/CPU fixture, the per-level editor and canvas,
+fixture and library suites, and the installed-package journey. Public run
+`t20260924T182746Z-f2a26d` verified the downloads, the signed caption update from
+sequence 22 and the landing page; delivery receipts `t20260924T183807Z-fbb632`. Mac and
+Windows builds remain on hold until the XML editing workflow is complete; their existing
+downloads stay available.
+
+### Earlier Linux preview — September 23, 2026
+
+[Linux application and MCP](https://kicad.vr.ae/artifacts/kicad-codex-preview-20260923T140030Z-be8312a6716c-debian13-x64.tar.gz)
+and [matching source](https://kicad.vr.ae/artifacts/kicad-codex-preview-20260923T140030Z-be8312a6716c-source.tar.gz)
+identify `be8312a6716c0f892da4c1eb0b7824eaa4fd9aba`, signed preview sequence 22.
+Extract and run `./kicad-codex`; use `./kicad-mcp` for the matching STDIO tools.
+Existing Linux installations offer it through the caption Update button.
+
+Compared with sequence 21 it adds, as preliminary tools: native ngspice simulation
+jobs (caller-supplied decks must be plain circuits: no `.control`/`.exec` blocks,
+`*ng_script` decks or `.include`/`.lib` file references; an empty netlist simulates
+the deck KiCad generates from the schematic), revision-guarded PCB item editing,
+non-copper visual routing guides, route candidates, numerical route geometry and
+native route previews, and detached PCB DRC jobs. DRC jobs never claim a complete
+input snapshot or fresh results yet. Committing routed copper is not included.
+
+Every gate ran on the exact commit before publication (native Setup from a cold
+checkout, recursive editor and field history in both themes, simulation, PCB items,
+net settings with DRC jobs, structural editor, the DRC contract suites, managed
+contracts and the installed-package journey). Public runs `t20260923T141053Z-f8ccb4`
+and `t20260923T141935Z-2d25fe` verified the downloads, the signed caption update
+from sequence 21 and the landing page. Mac and Windows builds remain on hold until
+the XML editing workflow is complete; their existing downloads stay available.
+
+### Earlier Linux preview — September 11, 2026
+
+[Linux application and MCP](https://kicad.vr.ae/artifacts/kicad-codex-preview-20260911T163551Z-dd74f7aca989-debian13-x64.tar.gz)
+and [matching source](https://kicad.vr.ae/artifacts/kicad-codex-preview-20260911T163551Z-dd74f7aca989-source.tar.gz)
+identify `dd74f7aca9892b4301a2a200dbc64db9fa77a578`, signed preview sequence 15.
+Extract and run `./kicad-codex`; use `./kicad-mcp` for the matching STDIO tools.
+This build adds continuous native-event intake into saved recovery state and
+typed ERC configuration capture/restore. Intake is not yet automatic design-XML
+write-back or full bidirectional synchronization.
+
+Public run `t20260911T165510Z-2f9025` verified all 60 existing/new downloads and
+the real Linux update/Save/restart journey with two designs, same-process MCP
+reconnection, matching images/state and a subsequent MCP restart. Legacy MCP
+clients receive an explicit missing-ERC coverage warning instead of unknown
+fields they cannot preserve; current clients request the complete supported
+snapshot. Native Mac/Windows and actual Codex Desktop qualification of this
+increment remain open. Older previews and platform feeds remain available.
+
+## Earlier Windows checkpoint — September 11, 2026
 
 [Windows x64 application and MCP](https://kicad.vr.ae/artifacts/kicad-codex-433c5e1fdf5954955a19df546236dce78e78b5b0-windows-x64.zip)
 and [matching source](https://kicad.vr.ae/artifacts/kicad-codex-433c5e1fdf5954955a19df546236dce78e78b5b0-source.tar.gz)
@@ -31,7 +211,7 @@ rejection and subsequent recovery passed without changing the selected version.
 That is not a two-version upgrade or editor restart. The actual Windows
 Update-button and post-update MCP journey remain under qualification.
 
-## Latest Apple Silicon preview — September 11, 2026
+## Earlier Apple Silicon checkpoint — September 11, 2026
 
 [Apple Silicon application and MCP](https://kicad.vr.ae/artifacts/kicad-codex-3ac5af02cb7eee653578e0d5c85b7d841eb8724a-macos-arm64.tar.gz)
 and [matching source](https://kicad.vr.ae/artifacts/kicad-codex-3ac5af02cb7eee653578e0d5c85b7d841eb8724a-source.tar.gz)
@@ -56,7 +236,7 @@ images, and native undo were observed. This is more than a standalone MCP harnes
 but does not establish native-Mac Codex frontend identity, automatic reverse XML
 synchronization, or complete Desktop qualification. Those outcomes remain open.
 
-### Latest Intel preview — September 11, 2026
+### Earlier Intel checkpoint — September 11, 2026
 
 [Intel application and MCP](https://kicad.vr.ae/artifacts/kicad-codex-3ac5af02cb7eee653578e0d5c85b7d841eb8724a-macos-x64.tar.gz)
 now uses the same `3ac5af02cb7eee653578e0d5c85b7d841eb8724a` source as Apple
@@ -584,6 +764,171 @@ harness; it does not replace helpers inside either signed application package.
 
 ## Current source boundary
 
+### Automatic component creation and reattachment (Linux source qualification)
+
+The initialized design recovery workflow can now create unconnected components
+whose exact part/unit definitions already exist in the schematic. Supply new
+component definitions, component instances and symbol occurrences with placement
+in the engineering section of `design.xml`; retain the existing native snapshot
+and bindings. The planner generates deterministic symbol and placed-pin IDs,
+copies the required library cache to target sheets, and keeps repeated-sheet
+instances on one physical drawing. Existing circuit, sheet and binding changes
+must be reconciled separately. New libraries and connected additions still
+require their unfinished definition and wiring workflows.
+
+For coordinate-free additions of those same supported parts, use the read-only
+`kicad_design_propose_initial_layout(instanceId, recoveryPath,
+expectedRevisionToken, gridNm, clearanceNm, pageInsetNm, regions,
+userInstructions)` tool. Each region names an affected physical screen UUID,
+usable bounds and reserved areas, including page artwork/title blocks. Distances
+are nanometres. Native KiCad measures the actual symbol and visible-field bounds
+without changing the displayed sheet; repeated instances contribute their union.
+Existing positions and explicit new placements remain unchanged. No-space or
+conflicting input produces no partial XML proposal.
+
+The result contains proposed `desiredXml` and a revision-bound visual-refinement
+request scoped only to new symbols. Existing native geometry stays protected
+even when its optional XML coordinates are absent. Review/publish that proposal
+through the normal synchronization workflow, then check connectivity and rendered
+presentation. The tool itself writes neither the recovery record nor design XML.
+This is an initial arrangement, not a readability certificate: inherited fields
+can still overlap until they are refined. `kicad_design_propose_field_layout`
+proposes field positions for exact symbol fields (addressed by symbol or slot and
+expected name and revision) while preserving content, visibility, locks and repeated
+geometry; review and apply it through the same synchronization workflow. Neither
+tool creates unknown parts, generates wiring, infers drawing-sheet reservations or
+performs AI reasoning inside the service; general occlusion remains open.
+`kicad_schematic_check_presentation` checks the displayed sheet by default, or with
+`includeSubsheets=true` the sheet instance `documentJson` names and every loaded sheet
+instance below it, each measured by KiCad at its own instance without changing the
+design or the displayed sheet. Both modes apply the same rules, refuse a stale
+`expectedRevisionJson` first as `presentation_revision_changed`, and report the policy
+they applied. Coverage is partial: text crossed by wires, pin names, graphics or the
+drawing-sheet frame and title block is not measured yet, so a report without findings
+is not a complete verification pass.
+
+For an explicitly attached instance and initialized recovery record, use
+`kicad_design_automatic_sync_start(instanceId, recoveryPath, designPath,
+expectedRecoveryRevision)`. Its returned session is inspected through `_list`,
+waited on with `_wait` and stopped with `_stop`; `_resume` requires the current
+paused sequence. File notifications and native commit events drive supported
+application. Stopping the service leaves KiCad running and preserves dirty work.
+
+Reloading a document changes its native epoch. Ordinary recovery refresh refuses
+that change. Stop the old sync session, read the new epoch using
+`kicad_schematic_checked_state`, then call
+`kicad_design_recovery_reattach(instanceId, recoveryPath, expectedRevisionToken,
+expectedDocumentEpoch)`. This records a fresh observation without editing KiCad,
+writing XML or advancing the synchronized baseline. Pending old-session actions
+must be resolved first. Inspect `kicad_design_sync_plan` for intervening edits,
+then start automatic synchronization with the returned recovery token.
+
+Repeated sheet-file recovery is also verified in the current source. The native
+journey `RepeatedPhysicalSheetRebuildPreservesEveryInstance` uses a root and two
+sheet instances of one physical child, with separate references and three known
+pin networks. It deletes both schematic files, rebuilds through public sync tools,
+and checks exact project/schematic bytes, shared screen identity, net chains,
+failed-batch rollback, a second-apply no-op, undo/redo and save/reopen. Run
+`t20260929T223705Z-eacde0` passed on two real Linux KiCad projects. This verifies
+recovery of existing XML-bound repeated sheets; adopting newly repeated sheets or
+newly placed symbols on shared sheets remains a separate ownership workflow.
+
+For source builds with `kicad_project_recovery_start`, a stopped instance can also
+recover when its `.kicad_pro` and schematic files are missing. Supply its exact
+`instanceId`, saved `recoveryPath`, current `expectedRevisionToken`, and matching
+native `executable`. The tool requires a settled synchronized design and no pending
+or released operation. It creates only the missing project container, preserves an
+existing file, and starts the same registered instance with a new process epoch.
+Then use `kicad_schematic_create` for the original root path, read its checked state,
+call `kicad_design_recovery_reattach`, and plan/apply the rebuild as above. Schematic
+settings captured in XML are restored; unrelated board-only settings are outside
+this reconstruction. Unresolved native local history still requires recovery before
+automation; it is never deleted or silently accepted.
+
+If startup is interrupted while KiCad remains alive, inspect
+`kicad_instance_pending_launches` and call `kicad_instance_reattach` for that exact
+instance. Repeating start is refused while its launch is unresolved, including from
+another MCP service using the registry. A process proven to have exited before
+readiness releases its launch reservation so a corrected startup can be retried;
+an unverified process is preserved. `kicad_project_recovery_create` performs just
+the guarded container creation when a separate explicit startup is preferred.
+
+When KiCad ends while a synchronization is applying or saving its edit, the record
+keeps that operation and it is never replayed on another KiCad process. Start KiCad
+again for the project (`kicad_instance_start`, which continues the instance ID), stop
+any paused automatic session, and call `kicad_design_recovery_release_exited` with the
+operation ID and `resume` or `roll-back`. The operation is released only when the
+server proves that exactly the KiCad process holding it has ended: its own observer
+saw it end, or a saved registration from the same machine, boot and process ID
+namespace shows it gone; a registration written on another computer never counts. The
+release keeps a receipt of the whole operation beside the record and checks every
+sheet the new KiCad loaded: each must be the last synchronized version or exactly the
+operation's result, so a user edit is never taken for it (`released_operation_diverged`
+otherwise). `resume` applies only the part the new KiCad does not hold yet and publishes
+the operation's XML; `roll-back` removes the partial result and publishes the last
+synchronized design, keeping the replaced XML as the previous version. Either completes
+through `kicad_design_sync_apply` with the returned `continuationOperationId` and
+`requestedRecoveryRevisionToken`, or through automatic synchronization. Until then the
+record cannot be attached to another KiCad session (`kicad_design_recovery_reattach`
+returns `released_operation_requires_continuation`). If the XML was already being
+published when KiCad ended, `resume` refuses (`released_publication_started`) and says
+whether roll-back still works. Edits the user made after the restart are handled per sheet:
+the continuation changes only the operation's own sheets (`operationSheets`); notes, text,
+drawings, images, tables and page settings on other sheets (`sheetsWithOtherEdits`) are kept
+and published, while components, wires, labels and sheet changes there are refused with
+`released_operation_edits_not_carried`, and any edit on the operation's own sheets with
+`released_operation_sheets_edited`. Each refusal names the edits and the way out (undo them,
+or close without saving and reopen, then call again). A refusal after a release returns
+`releasedNow`, the receipt path and the new `recoveryRevisionToken`; sheet lists are `null`
+when no comparison was made. The PSU/CPU `native-crash` graph proves both continuations on
+killed KiCad processes, including a user edit on another sheet.
+
+When KiCad applied a synchronization but the check that follows refused it (for example
+`native_sync_connectivity_mismatch` or `realization_resolution_mismatch`), retrying repeats the
+refusal. While that KiCad runs, stop any automatic session and call
+`kicad_design_recovery_resolve_pending(instanceId, recoveryPath, expectedRevisionToken,
+operationId, choice)` with `undo` (removes exactly that change from KiCad in one checked edit),
+`keep-and-replan` (keeps KiCad's result, re-plans the XML from it with KiCad's connections
+winning, and publishes through `kicad_design_sync_apply` with the returned
+`continuationOperationId`) or `discard` (once KiCad already shows the design as it was before,
+or never received the edit). The XML and the baseline stay unchanged until a consistent result
+is published, every refusal names a choice that works, and a receipt is kept in
+`<recoveryPath>.resolved`. An automatic session whose KiCad ends pauses at once with
+`instance_exited` and needs KiCad started again and the record reattached.
+
+Symbols placed in KiCad join the XML design with identities derived from the circuit, the
+native sheet path and the symbol's own UUID, so a repeated plan, a replay or a redo gives the
+same identities. Their part is the one existing part drawn or declared with the same library
+symbol and exactly the same pins; otherwise a new part is made from that symbol's pins.
+`kicad_design_sync_plan` reports `addedSymbolOccurrences`, `addedComponents`, `addedParts` and
+`ownershipResolutionRequests`. When a part or unit cannot be decided exactly, automatic
+synchronization pauses with `native_ownership_resolution_required` and publishes nothing.
+
+`kicad_design_automatic_sync_start` accepts an optional `blockGraphPath` and `designId`; after
+each synchronization a placed component joins the block of its sheet only when exactly one
+block owns everything else on that sheet. Otherwise it pauses with
+`block_owner_resolution_required` and the plan lists `candidateBlockIds`; answer with
+`kicad_diagram_components_set` and resume. `kicad_design_block_owners_plan` and
+`kicad_design_block_owners_apply` do the same on request (apply is guarded by the block graph
+file's SHA-256). Units or components the XML removes are removed in KiCad; the pins only a
+removed unit draws must leave their nets first (`xml_removal_unit_pins_connected`). If KiCad
+also changed, both versions are kept and synchronization pauses
+(`ownership_change_with_xml_edits`). Placing a symbol before the design was ever synchronized
+fails with `missing_native_ownership_history`; history that exists but cannot be verified fails
+with `unverified_native_ownership_history`. Sheets added, removed or moved in KiCad, and XML
+sheet removals and moves, are not synchronized yet.
+
+Run `devcoordinator2 test start . --test native-xml-component-creation --tier
+development --client codex` for the two-editor Linux journey. It checks XML-driven
+root/repeated-sheet creation, unchanged connectivity, exact retry, cancellation,
+stale-request rejection, service termination after native commit, automatic
+file-event creation, keyboard undo/redo, save/reload and public MCP reattachment.
+This is source qualification, not a claim that existing downloads contain these
+changes, that layouts are human-reviewed, or that Mac/Windows/Codex Desktop are
+qualified. General creation remains open in outcome `pd983fe2bff600f07`.
+
+### Engineering model and existing source capabilities
+
 The compiled C# service uses the official MCP SDK over STDIO and generated KiCad
 protobuf messages over a native NNG binding. It provides explicit session start,
 attach, reattach, inspection, root-schematic opening and open-document queries.
@@ -596,6 +941,23 @@ have no explicit net realization. The strict `engineering-design:1` XML section
 preserves these owners together; it is not a native schematic snapshot and does
 not generate or synchronize native files. Missing libraries and unknown fields
 are errors, not silently discarded inputs.
+
+Guidance statements may also carry an optional typed `quantity`: explicit unit,
+nominal/minimum/maximum decimal values, absolute or percent minus/plus tolerance,
+and a reason when the value is unknown. Classification is explicit:
+`Unclassified`, `Nominal`, `OperatingLimit`, `AbsoluteMaximum`, or `Measurement`.
+It is independent of requirement strength and verification. Applicability and
+document revision/page/table/part-variant evidence stay on the owning statement;
+library inheritance and explicit instance replacements preserve the old quantity.
+An absolute maximum is never converted into an operating recommendation.
+
+The resolver preserves contradictory ranges and reports `quantityIssues` with
+the exact statement IDs. A valid response means structurally valid input, not
+verified engineering claims or a conflict-free design. Unknown values remain
+unknown; values outside exact supported decimal precision are rejected rather
+than rounded. Existing text-only XML is unchanged. This is explicit model input
+and compiled MCP resolution, not automatic datasheet interpretation, arbitrary
+unit conversion, physical verification, or native guidance-authoring UI.
 
 `kicad_design_bindings_inspect` accepts the composed `design:1` document: the
 engineering section, typed native schematic hierarchy and explicit sheet/symbol
@@ -614,14 +976,28 @@ models. Its candidate is only a property-level proposal: other native snapshot
 changes and coverage gaps remain explicit. It performs no file writes, connectivity
 comparison, live revision admission or synchronization checkpoint advancement.
 
-`kicad_design_plan_placement` prepares forward connected-symbol translations from
+`kicad_design_plan_placement` prepares forward connected-symbol placement from
 the same baseline, desired engineering model, observed hierarchy and declared
 libraries. It combines equal-displacement symbols on one sheet into a native
 selection and resolves repeated-screen geometry once by exact identity. Existing
-locks, conflicting shared placements, rotation/mirroring changes and unsupported
-electrical changes prevent partial movement proposals. Missing coordinates do not
-request movement. Results retain coverage gaps and unprojected native changes;
-they require live revision admission and connectivity verification before use.
+locks, conflicting shared placements and unsupported electrical changes prevent
+partial proposals. Explicit unlocks run first, followed by ordered quarter-turn/
+reflection proposals, grouped translations, and requested locks. A containing
+group's lock must be removed explicitly before an individual unlock can succeed.
+Transforms use exact native pivots. Equivalent angle/mirror encodings do not
+request another edit. Missing coordinates do not request movement. Results retain
+coverage gaps and unprojected native changes; they require live state admission
+and connectivity verification before use.
+
+The internal executor has two-editor Linux proof for root-sheet XML transforms,
+native geometry capture, all six service-interruption checkpoints, no-op
+convergence and native undo/redo back into XML. Its large native replies are
+budgeted before commit, so a reply-capacity rejection does not leave an unreported
+edit. This does not advertise production automatic synchronization or complete
+cross-platform qualification. Run the focused test with
+`devcoordinator2 test start . --test native-transform-sync --tier development --client codex`.
+That journey also checks lock-only changes, unlock-and-move, move-and-lock,
+protected group rejection, failed-batch rollback and lock history back into XML.
 
 The internal `DesignRecoveryStore` preserves the full composed baseline, observed
 hierarchy, declared library snapshots, exact desired-file bytes (including invalid
@@ -674,6 +1050,92 @@ inspection, persistent choices and reopening, wrong-instance/stale-write/locked-
 file failures followed by success; direct handler checks cover cancellation
 before the write. Native application and automatic synchronization remain separate.
 
+The high-level synchronization executor is advertised as `kicad_design_sync_apply`
+(since `4b9cdd9b86`), and `kicad_design_candidate_commit` stores a validated XML
+candidate for it. Apply requires the exact recovery token, absolute XML destination
+and a caller-stable operation ID; it replays a completed operation from its receipt
+and reports stale instances, changed files, conflicts and interrupted phases as
+explicit recovery results. Its Linux evidence is the two-editor MCP lifecycle
+(automatic native/XML application, invalid-file pause and recovery, missed-event
+reattach, ownership rejection and dirty-editor preservation). Interruption across
+creation, removal and placement, ownership changes and other platforms remain open
+under Coordinator outcomes `p7e712f1bb764e327` and `p74ee7c1da24272d9`; do not treat
+it as cross-platform evidence.
+
+Version-6 recovery records additionally bind an XML publication to its exact
+operation ID, destination, staged/displaced paths, original bytes, candidate bytes
+and phase. File-level recovery can distinguish a replacement that has already
+happened from one still needing execution, without swapping the files back. A
+changed or incomplete retained file pauses recovery; matching independent saves
+converge without another replacement. Publication alone never advances the design
+baseline. The record also covers publication without a schematic mutation, and
+pending publication blocks fresh planning and observation refresh. The internal
+native executor now uses this journal, validates native structure/connectivity,
+and replays the exact saved edit/save requests after lost replies. A focused
+two-editor Linux journey verifies title-metadata changes in both directions,
+lost edit/save replies, unchanged reapplication and keyboard-undo write-back.
+This is not proof of every edit type, process-crash recovery, the high-level MCP
+surface or the automatic event loop. Retained-file cleanup remains open.
+Existing version-1 through version-5 records remain
+readable and are not rewritten merely because the reader supports version 6.
+
+Version 7 binds pending synchronization to a caller-stable operation ID and the
+original recovery token. Its latest completed receipt is committed atomically
+with the new baseline, then retained as an immutable operation file before later
+work can replace that receipt. Historical replay returns the recorded native
+result without contacting KiCad; it is not a current design observation. Reusing
+an ID with different inputs is rejected. The executor also checks the actual XML
+before resuming native actions, even if file intake has not yet seen a save.
+The focused Linux journey verifies these paths. A first synchronization may need
+to establish a known full-content save checkpoint; later unchanged requests do
+not rewrite the design or baseline. A compiled test-only STDIO host now calls
+the same synchronization handler and is forcibly terminated after native-edit
+reply, native-save reply, or completion before the MCP reply. The focused Linux
+journey repeats those three boundaries for two real editor instances, reattaches
+from a fresh host and verifies the same operation and revision, preserved dirty
+work, native/XML agreement and connectivity. It is not a shipped server mode or
+Codex Desktop proof. The journey also covers service termination after staging,
+XML replacement, baseline commit, receipt archival and retained-history movement.
+Completed displaced XML is moved without overwrite or copy/delete fallback into
+`.kicad-sync-history/<operation-id>.xml` beside the design. Immutable receipts
+resolve the original or archived location; collisions, missing files, links and
+unexpected paths remain explicit. History is preserved, not purged. Cleanup
+status is separate from the historical native result, and replay itself remains
+read-only. Broader edit qualification remains open; the normal MCP server
+advertises the apply tool and the `kicad_design_automatic_sync_*` lifecycle tools.
+
+Synchronization receipt version 3 additionally retains the previous synchronized
+design and its content digest inside the immutable operation receipt. This is
+distinct from displaced user XML: a requested XML edit can already have replaced
+that file, or publication can converge without replacing it. Recovery verifies
+the retained predecessor against the frozen baseline before advancing. Older
+receipts retain their existing encoding and content-verification rules.
+
+When an existing native symbol changes its library, units or pin identities,
+synchronization compares it with its exact saved native counterpart and returns
+`native_component_rebind_required` in `ownershipResolutionRequests`. The request
+includes its former component, part and pins, replacement pins and candidate
+parts. Use `kicad_design_ownership_answer` with each exact native path, the
+existing component ID, selected part ID and a complete `pinMappings` list.
+Each entry names `FormerPin` and `ReplacementPin`; null keeps the former pin's
+instructions unresolved. Numbers, names and geometry never infer that choice.
+
+Recovery envelope 14 retains those answers for the exact snapshot without
+changing XML or KiCad. Normal synchronization publishes the complete replacement,
+keeps component/occurrence identities and current instructions, and checks actual
+native connections. All units and repeated instances must agree about the
+replacement definition. Completed receipts preserve the mapping and verified
+predecessor so keyboard undo/redo can reverse the explicit choice. Conflicting
+history or stale inputs require a new answer.
+
+Selected native run `t20260930T195217Z-7a159a` passed in two Linux projects,
+including a physical symbol shared by two sheet instances. It covers native
+checked symbol replacement, public MCP answers, incomplete-answer refusal,
+unchanged XML/native state while answering, instruction and identity retention,
+electrical equivalence, keyboard undo/redo, saved reload and repeat publication.
+This is native API and editor-history evidence; it does not claim a manual
+Change Symbol dialog journey or cross-platform qualification.
+
 `kicad_design_recovery_refresh` persists a freshly captured native hierarchy into
 an existing recovery record. It requires an attached instance and the exact
 recovery revision token. Baseline, libraries and desired-file bytes (including
@@ -684,6 +1146,8 @@ rejected: inspect and reconcile their exact receipts before replacing the saved
 revision needed for retry. This operation only refreshes the recovery observation;
 it does not write the design XML or edit KiCad. Incomplete native tracking remains
 explicit and is not authorization for synchronized mutation.
+When the record keeps pin connections, the refresh captures them too, so a refreshed
+record can be planned and applied again.
 
 The internal `DesignRecoveryFileObserver` subscribes to an explicit design file
 before its initial read. Each notification captures the current saved bytes into
@@ -704,8 +1168,247 @@ file ownership. Session IDs do not survive service restart; start a new intake
 against the retained recovery record. These tools never launch or close editors,
 apply native changes, or advance the baseline. Continuous file intake is not yet
 automatic bidirectional synchronization.
-Successful plans include merged XML, ordered native operations and explicit
-coverage gaps. This tool does not access files, apply a batch, resolve electrical
+
+The source MCP service also provides `kicad_design_native_intake_start`,
+`_list`, `_wait`, `_resume` and `_stop`. Start takes an explicitly attached
+`instanceId` and an absolute `recoveryPath`; the existing recovery record owns
+the exact schematic hierarchy target. The observer verifies the native process
+and event stream, subscribes before its first snapshot, and saves committed
+native edits into recovery state while no tool call is active. Child sheets
+remain in the same exact project/root scope. Missed-event hints request a new
+snapshot; unchanged heartbeats do not repeatedly read the design.
+
+Use `_wait` without `afterSequence` to inspect, or with the last returned
+sequence to await a change. Persistence failures pause the observer; repair the
+failure and pass the current sequence to `_resume`. Replaced processes, event
+streams and prolonged silence require a newly verified attachment and intake.
+`_list` recovers an ID after a lost start reply. IDs are local to the MCP
+process. `_stop` and MCP shutdown await observer cleanup without closing KiCad
+or discarding dirty documents. Baseline requirements, desired XML bytes
+(including invalid input) and pending-operation identities remain preserved.
+
+This native intake is **observation into recovery state**, not automatic
+design-XML write-back, native delta application or complete revision admission.
+Those workflows remain unfinished. Native intake is included in the Linux
+preview described above; Mac/Windows qualification of these tools is separate
+from the focused managed/STDIO and Linux native checks.
+Linux native run `t20260911T151857Z-9b14cc` passed all 11 foundation checks on
+`0fe15e0a79cf3ae3cfb65899567abd0d65a2932a`, including real MCP event intake,
+native edits and keyboard undo/redo, persistence failure and explicit resume,
+preserved invalid desired bytes/baseline, and graceful MCP shutdown with an
+active observer. Native Mac/Windows and actual Codex Desktop qualification of
+these new tools remain separate, unfinished release work.
+
+The engineering structure also has optional typed `unresolved-net-bindings`.
+These preserve an affected statement or structural connection, its former net
+identity, change reason and possible current-net candidates after an explicit
+split, merge, removal or identity change. Candidates are not assignments:
+`kicad_engineering_design_validate` reports them separately and returns
+`netBindingsResolved: false`. Requirement text, strength and provenance remain
+unchanged, and explicit reassignment resolves only the selected owner. Ordinary
+undeclared dangling references are still rejected. This model/XML support is
+not yet connected to automatic native electrical reconciliation and is not in
+the currently published packages.
+
+Optional `unresolved-component-references` and `unresolved-guidance-bindings`
+also retain component targets, either endpoint of a concrete pin instruction,
+block realizations and class/instance guidance when ownership disappears or is
+reidentified. Former identities, exact owner/slot, reasons and explicit candidate
+identities remain typed data. Retained text, strength and provenance are unchanged.
+The normal validator reports `componentReferencesResolved: false`; detached
+guidance is excluded from the live assignment map. Explicit model resolution
+changes only the chosen reference and refuses to overwrite another component's
+guidance. Native-only deletion now uses this retention support through the
+internal executor described below; general automatic ownership reconciliation
+remains unfinished.
+
+Each symbol occurrence may specify `sheet-instance` independently of its physical
+component's owner sheet. Omission retains the original owner-sheet default.
+This allows units of one component to occupy different sheets without duplicating
+the component or its pin identities. Binding, property and placement operations
+use the occurrence's exact sheet. Electrical comparison uses only active-unit
+and active-body-style pins; known library pins on undrawn units are reported as
+`undrawnPins`, without inventing placed identities or net connections. Missing
+active pins still fail comparison. Linux real-editor run
+`t20260916T011840Z-31098d` verifies cross-sheet reference/placement updates,
+connectivity, preservation of another visible sheet, replay and undrawn-pin
+accounting in two instances. Automatic ownership-change reconciliation and
+native Mac/Windows qualification remain separate unfinished work.
+
+The model's `PinPartitionEvolution` merges connections when exact pin sets
+change. A pin absent on one side is not treated as deliberately disconnected.
+Independent additions and removals can merge; deletion versus rewiring,
+contradictory new-pin connections and inconsistent transitive joins return no
+candidate. `t20260916T013559Z-afb38f` checks every three-/four-pin presence and
+partition combination against an independent pairwise definition, plus large
+sparse inputs. The net reconciler now uses this merge without inferring component
+ownership or replacement identities.
+
+The internal synchronization executor can project native-only symbol deletion
+into XML through exact saved sheet paths and UUIDs. Removing one drawn unit keeps
+its physical component; removing its last drawing retires the component only
+when shared-definition ownership remains valid. Detached component/pin guidance,
+structural instructions and retired-net requirements remain explicit. Concurrent
+circuit/layout XML edits, sheet changes, new symbols and ambiguous shared-definition
+retirement pause preparation without discarding either version.
+Linux run `t20260916T015039Z-c53380` verifies unit and whole-component deletion,
+actual pin connectivity, preserving instructions and repeat-safe XML publication
+in two editors. These deletions use native API operations and explicit internal
+executor calls; this is not manual rendered-UI or event-driven automatic-apply
+qualification. Interrupted recovery during ownership changes, broader
+creation/rebinding and Mac/Windows qualification remain open.
+This source increment is not in the frozen `c26503fdc3` build or published previews.
+
+New synchronization receipts use version 2 and bind retained prior XML to its
+SHA-256 digest, derived from the immutable publication request. History inspection
+and verified reading reject changed or missing bytes; archiving does not move a
+changed file. Version-1 receipts remain readable for replay and inspection but do
+not prove prior content and cannot supply verified automatic identity restoration.
+The 49 focused checks in `t20260916T020853Z-02f629` cover compatibility, exact
+digest/path binding, persistence, changed content and cancellation. Linux native
+run `t20260916T022832Z-a313c3` additionally verifies exact retained bytes after
+deletion and service termination/restart at publication replacement, baseline
+commit and history archival in both editor instances.
+
+Native undo restoration now reads verified historical declarations without
+replacing current instructions or live objects with an old XML document. It
+requires exact native owners and a compatible deletion predecessor, rejects
+ambiguous mappings, and restores a historical net ID only for its exact pin group.
+Only bindings that were resolved in the selected predecessor are reinstated.
+Restored geometry comes from the current native checkpoint. Missing, changed,
+legacy-only, foreign-circuit or future-revision history cannot authorize a candidate.
+The public read-only `kicad_design_sync_plan` and internal executor use the same
+history-aware preparation. Instruction-only edits can merge; competing circuit
+and layout changes still pause synchronization.
+
+The plan also says when apply will draw in KiCad rather than publish a prepared XML.
+When the saved XML only adds connections (between pins already drawn, or to parts it
+also adds) and leaves every existing part, symbol, sheet, binding and connection
+unchanged, and the handshake recorded at attach advertises
+`schematic.connection-realization.v1`, a plan that can be prepared returns
+`connectionRealizationRequired: true`, `candidateDesignXml: null` and a
+`connectionIntent` summary: each net with its scope and global name, each sheet's
+labelled island, the sheet ports, how many native pin groups KiCad must confirm and
+the symbols apply creates. Every other plan, including one that cannot be prepared,
+returns `connectionRealizationRequired: false` and `connectionIntent: null`.
+
+`nativeRebuildRequired` and `rebuildSheetInstances` report the two cases where apply
+creates native sheets from XML:
+
+- **New sheets.** When the saved XML adds empty sheets below sheets KiCad shows, apply
+  creates the sheet symbols and their files. Parts go in a later XML revision, once
+  their sheets exist.
+- **Lost schematic files.** If a project's `.kicad_sch` files are deleted, open the
+  project so KiCad creates a new empty root, reattach the recovery record with
+  `kicad_design_recovery_reattach`, then plan and apply as usual. Apply rebuilds every
+  sheet, symbol, pin, label, sheet pin, library cache entry, page and title block from
+  the XML last synchronized with KiCad, with the original identities, and the saved
+  files match the originals byte for byte. The new root first takes back the old
+  root's identity; undo returns to the empty root. The rebuild keeps the existing
+  `.kicad_pro` and never rewrites it.
+
+The rebuild refuses, before KiCad is touched: XML edited after the files were lost
+(`rebuild_requires_settled_xml`); net chains, and sheet files shared by several sheets,
+which it cannot rebuild yet (`rebuild_state_unrepresented`); project settings shown in
+KiCad that differ from the XML's (`rebuild_project_settings_changed`: change them back in
+KiCad, or restore the project file saved with the XML and reopen the project, then refresh
+the recovery record before rebuilding); and any planned change other than the root
+identity, page, title block, root page and embedded files (`rebuild_operation_unsupported`).
+A project file changed on disk after KiCad loaded it is refused at apply
+(`native_file_conflict`). A fully wired design is rebuilt too: the PSU/CPU Complete stage,
+drawn through XML, comes back byte for byte after its schematic files are deleted. The
+snapshot's list of state it does not hold no longer names the library cache, which it now
+holds exactly. A recovery record saved by an earlier preview reattaches and plans normally
+after upgrading (its design file keeps the old list until the next synchronization publishes
+the design); one saved before electrical checkpoints asks for
+`kicad_design_electrical_baseline_initialize` first.
+Linux native run `t20260916T032035Z-c12d41` verifies real keyboard undo/redo of
+unit and component deletions in two editors, including history older than the
+latest receipt, exact restored identities, preserved newer instructions, actual
+connectivity, normal STDIO planning and repeat-safe reverse publication.
+This does not qualify event-driven automatic application, arbitrary creation or
+rebinding, or the Mac/Windows/Codex Desktop journey.
+
+When verified histories disagree, `kicad_design_owner_history_inspect` returns
+the eligible mappings and an exact input-snapshot token. The corresponding
+`kicad_design_owner_history_resolve` records one operation choice using both that
+token and the current recovery revision; `kicad_design_owner_history_clear`
+removes a stale choice without editing XML or native objects. Recovery envelope
+version 9 persists a selected choice while older records retain their encoding.
+History/content, XML, native revision and library changes invalidate the choice.
+Pending synchronization freezes it; successful baseline commit clears it.
+Focused checks cover competing mappings, stale/wrong targets, corruption,
+cancellation, reopening and normal STDIO calls. Linux run
+`t20260916T042123Z-84519a` also selects history through MCP, applies native keyboard
+restoration, and terminates/restarts the service during publication replacement,
+baseline commit and retained-history archival in two editors. Both the chosen
+mapping and newer instructions survive without repeated native mutation.
+These later source changes are not included in the frozen `c26503fdc3` packages.
+
+`kicad_schematic_electrical_state` reads a loaded hierarchy and scalar-net
+memberships in one native request. It accepts an explicit loaded sheet and an
+optional expected revision; the sheet does not have to be visible. The native
+read refreshes computed connectivity without cleanup, annotation or saving and
+rejects changes across its capture. Net names are labels, not stable identities.
+`kicad_design_connectivity_compare` compares supplied electrical state against
+the engineering model through explicit sheet, symbol and placed-pin identities,
+reporting split/joined pin partitions separately from missing bindings and
+serializer coverage. It never transfers net requirements or edits a design.
+These new electrical tools passed Linux native/MCP qualification in
+`t20260911T183246Z-7d102b` on `cde8c2a7d539afab0e93c351f2d4d80d87ba53e8`:
+the independently declared two-probe circuit matches before a manual
+disconnection, reports a split afterward, and matches again after native undo.
+Hidden/repeated sheets, exact revision rejection, unchanged save/view state and
+all existing foundation checks passed. The tools are not yet in the published
+packages. Complete revision admission, Mac/Windows/actual-Desktop qualification
+and automatic electrical propagation remain unfinished.
+
+Recovery can retain separate baseline and current electrical checkpoints.
+Version 3 stores typed net XML, revision/coverage and limitations alongside the
+already-owned hierarchies; legacy recovery records remain readable without
+being rewritten when unchanged. `kicad_design_electrical_baseline_initialize`
+requires the exact recovery token, no pending operation, an unchanged native
+baseline hierarchy and agreement of explicitly mapped circuit pins. It will not
+replace an existing baseline. Native intake refreshes current connectivity,
+while preserving the original baseline, requirements and desired bytes. A
+hierarchy-only refresh discards a now-stale electrical observation instead of
+pretending it still matches. This source-only recovery integration passed all
+11 Linux native checks in `t20260911T191535Z-583a7e` on
+`86ac7cef7555f00a9592f09e2bd8d2bd48b90004`, including MCP initialization
+refusals, manual disconnection/undo observation, preserved baseline and invalid
+desired bytes, and unchanged recovery writes. It does not yet publish design
+XML or apply electrical changes automatically, and its Mac/Windows/actual-Desktop
+qualification remains unfinished.
+
+`kicad_design_nets_reconcile` plans three-way pin connectivity from a saved
+electrical baseline, desired XML and current native observation. It requires an
+explicit instance, absolute recovery-record path and exact recovery token;
+it does not establish live freshness. Independent and matching edits combine,
+but contradictory connectivity returns conflicts without a partial candidate.
+Exact surviving XML net groups keep their explicit identities and semantic
+names. New groups receive deterministic identities; requirements on ambiguous
+splits or merges remain unresolved, with possible replacements rather than
+guessed assignments. Later changes update those possibilities without losing
+the original requirement. Names and locations never establish identity.
+
+The result is candidate engineering XML only. This tool does not write design
+files, edit KiCad or advance the synchronized baseline. Changed component,
+sheet, unit or pin ownership requires separate reconciliation. The focused
+compiled STDIO checks and exhaustive four-pin partition oracle are covered by
+the `net-reconciliation` development graph; `native-foundation` additionally
+checks a real manual disconnection and Undo against the proposed model. This
+source-only tool is not yet included in public packages; automatic publication
+and Mac/Windows/actual-Desktop qualification remain unfinished.
+Native run `t20260911T195851Z-e88a9a` passed all 11 foundation checks on
+`a4519ba6a0ec8068c27eaccee6ea836063f5a5db`, with unchanged source. Its real
+manual disconnection produced two proposed nets and an unresolved original
+requirement; native Undo returned the exact original engineering XML. The
+saved recovery baseline and intentionally invalid desired bytes were preserved.
+The same run passed the exhaustive partition oracle, identity-collision guard,
+independent/convergent/conflicting edit cases and compiled STDIO tool checks.
+
+Successful `kicad_schematic_hierarchy_reconcile` plans include merged XML,
+ordered native operations and explicit coverage gaps. That tool does not access files, apply a batch, resolve electrical
 intent or advance the synchronized baseline. Concurrent edits inside a reparented
 branch can still require explicit conflict resolution. Linux native tests verify
 independent text/placement reconciliation, repeated-sheet operation deduplication,
@@ -781,11 +1484,30 @@ schematic writer cannot save that representation. This preserves the existing
 native format instead of allowing an edit that later blocks saving.
 
 The native extension adds explicit automation startup and session discovery.
-Its capability response currently advertises only `session.info` and
-`version.read`. A Linux native check has opened schematic windows in two isolated
+Its handshake reports two lists. `capabilities` names feature contracts, each
+listed only when the whole feature works in that build; this build names
+`session.info` and `version.read`. `handled_requests` names every request type
+the process dispatches to a registered handler at that moment, once each in
+ordinal order: the handshake itself, the checked document save and close
+requests and the request that reads their outcome, the checked schematic
+requests, and the requests of each editor that is open.
+Opening or closing an editor changes the list, and a listed request can still be
+refused for its target, its arguments or the editor's state.
+`kicad_instance_capabilities` publishes these as `nativeFeatures` and
+`nativeRequests`, and `kicad_instance_inspect` as `nativeCapabilities` and
+`nativeRequests`; both set `nativeRequestCoverage` to `handled-requests`. A
+KiCad built before `handled_requests` existed sends no list: both tools then
+report `nativeRequestCoverage` `unknown` and `nativeRequests` null, which means
+its request support is not known, not that it handles nothing, and they never
+present a request type as a feature. `kicad_service_capabilities` returns this
+MCP server's own catalogue without contacting KiCad: every registered tool with
+its scope, target, revision contract and verification evidence, and the
+unfinished work that no registered tool provides.
+
+A Linux native check has opened schematic windows in two isolated
 instances and captured their actual software-rendered canvases as PNGs. This
 preview is exposed through a preliminary MCP tool with viewport metadata and an
-explicitly incomplete revision-tracking flag. Current-sheet presentation checks,
+explicitly incomplete revision-tracking flag. Presentation checks of the displayed sheet or a whole loaded hierarchy,
 sheet activation and operation-receipt inspection are also exposed. Independent
 region/layer images of any explicitly targeted loaded sheet are available through
 the separate render tool below. PCB/3D views and complete synchronized
@@ -867,11 +1589,12 @@ occlusion analysis.
 Full glyph clipping/occlusion and complete multi-page coverage remain open;
 an incomplete report cannot declare the diagram clear.
 
-Each native journey retains only `automation/artifacts/native-session-current`.
-Before the next journey, that directory is moved intact into
-`automation/artifacts/native-session-history`; older `native-session-results`
-outputs are preserved too. This keeps per-run evidence bounded without deleting
-historical local artifacts. Coordinator retains the hash-bound run archive.
+The full native journey retains `automation/artifacts/native-session-current`.
+Focused table-variant and net-chain journeys use the same current/history layout
+under `automation/artifacts/native-table-variants` and `automation/artifacts/native-net-chains`.
+Before the next journey, its current directory is moved intact into the matching
+`native-session-history`; older test results are preserved too. Coordinator retains
+the hash-bound run archive.
 
 The read-only `kicad_schematic_metadata` tool returns typed screen identity,
 page/title data, project text variables, bus aliases and embedded-file records.
@@ -884,6 +1607,74 @@ on repeated sheets, typed XML equality, save/reload and restoring the original f
 The XML planner supports schematic-wide declaration replacement/removal in one native
 undoable batch. Membership is recomputed: callers cannot force the observed `committed`
 flag. Native journeys cover rollback, retries, no-ops and keyboard undo/redo.
+
+In the development source, native **Tools → Create Net Chain**, two-pin creation,
+chain naming and terminal replacement, and the **Schematic Setup → Net Chains**
+name/class/netclass/color/deletion controls use native commits. The Linux journey
+verifies both manual links and a real four-net path through three resistors in two
+independent editor instances. It checks Cancel, unchanged OK, reserved-name rejection,
+stale requests, exact Undo/Redo, and save/reload. Declared endpoint order and opacity
+survive reload; the color picker exposes opacity and preserves unchanged values.
+Run the `native-net-chains` development graph in an isolated build worktree to repeat
+this journey. Its focused pass is not whole-project or native-Mac qualification.
+
+The development removal action records explicit removed-member restrictions,
+including exact placed-pin UUIDs and sheet-instance paths. It subtracts the
+selected electrical net and blocks adjacent propagation without rewiring the
+circuit. If the original path or endpoints no longer resolve, the declaration
+stays uncommitted with its original endpoints and class intent; it does not guess
+new endpoints or revive membership from a saved-net fallback. Native tests cover
+label renames, splits/merges and shared-screen instance isolation; rendered tests
+cover terminal, interior, multi-pin and manual no-bridge removals with save/reload
+and Undo/Redo. Full integration remains tracked under `peb6785f04af5b15c`.
+All-page Schematic Setup cancellation
+(`pef184f5d6044415b`) also remains open in the Coordinator ledger.
+These source changes are not yet part of the public downloads.
+
+The development build's **Schematic Setup → Net Chains → Net Chain Classes**
+page now keeps a class created with **Add** even before a chain uses it.
+The class registry is stored separately from its assignments in the project;
+older assignment-only projects retain their existing class names. Focused Linux
+journeys cover empty/duplicate-name rejection, individual-dialog and whole-setup
+Cancel, unused and assigned class rename/delete, exact Undo/Redo, and native
+save/reopen without losing unrelated assignments.
+
+Typed schematic metadata includes `net_chain_classes` with `definitions` and
+`assignments`. The XML planner emits one validated project-wide operation across
+repeated sheets. Independent edits merge; deleting a class while another edit
+assigns a chain to it produces a conflict, not a guessed reassignment. Literal
+Unicode names survive XML and presentation-order changes create no native edit.
+Snapshot schema 3 includes this state. Requests for schemas 0/1/2 receive an
+explicit coverage gap and no unknown class fields; absent state never means an
+instruction to clear the registry. These are KiCad net-chain groups, not the
+separate inheritable component-guidance classes. Broader integration and platform
+qualification remain distinct from this focused Linux evidence.
+Snapshot schema 4 adds presence-aware chain exclusions. Earlier schemas omit
+those fields with an explicit coverage gap; an older/incomplete replacement
+cannot clear existing restrictions by leaving the exclusion field out.
+
+Snapshot schema 5 adds the project annotation policy: numbering order (X/Y),
+method (incremental, sheet × 100, sheet × 1000), exact starting number and
+reference reuse. Typed XML retains these independently of symbol positions and
+already placed references. Changing the policy uses one revision-bound native
+commit; independent policy-field edits merge, while competing values conflict.
+Older snapshots report the missing policy explicitly instead of supplying defaults.
+The focused Linux Setup journey covers real Annotation-page edits, page-switch
+Cancel, complete policy import, native Undo/Redo, retry/stale/no-op behavior and
+save/reopen. Run `devcoordinator2 test start /absolute/isolated/worktree --test
+native-setup-dialog --tier development` against the development source.
+Snapshot schema 6 adds `reference_inventory.allocated`: explicit entries such as
+`R17`, including historical references absent from the current schematic. A
+replacement leaves numbering policy unchanged, validates against native
+persistence before mutation and is undoable. Missing legacy data cannot clear
+the inventory; competing allocation-history changes remain conflicts. The
+focused Linux journey has exercised XML apply, invalid input, no-op/retry/stale
+requests, Undo/Redo, explicit clearing and save/reopen. The strengthened range
+expansion guard and composed integration remain under qualification in
+`p72f9010349b0093e`. Remaining project settings, whole-design reconstruction and
+native-Mac qualification stay open. These are source-build integration features,
+not new visible controls or a claim about the published packages.
+
 The net-chain coverage gap remains until complete identity and electrical-change
 restoration are qualified; this is not proof of full schematic reconstruction.
 Its structured result retains incomplete revision tracking and lists
@@ -895,10 +1686,10 @@ checks payload preservation, native legacy-checksum migration, repeated-sheet
 metadata and the compiled MCP round trip.
 Metadata also distinguishes `loaded_native_format_version` (the version read
 from disk; zero means unknown) from `writer_native_format_version` (this build's
-save format). Native tests pin the latter to fork version `20260907` and preserve both through
+save format). Native tests pin the latter to fork version `20260912` and preserve both through
 typed XML and compiled MCP. These are provenance fields, not editable settings
 or proof of complete serializer compatibility. Item planning rejects a loaded
-or writer version above the supported `20260907` ceiling, and a loaded version
+or writer version above the supported `20260912` ceiling, and a loaded version
 above a declared nonzero writer version. The native journey checks that ceiling
 against the actual writer. Read-only typed XML still preserves newer provenance
 for inspection. Zero-version legacy DTO plans remain inspectable but are not
@@ -969,6 +1760,15 @@ and XML registry changes combined with symbol placement. Per-symbol description
 projections are validated but never sent as a second registry write; independent
 registry-description and placement changes merge without a false object conflict.
 This is not complete change-stream coverage or automatic bidirectional sync.
+The Symbol Fields Table's Rename, Copy and Edit Description buttons also use
+these native commits. Their rendered cancellation/no-op, save, stale-request,
+Undo/Redo and exact restored-state journeys passed on both Linux project
+instances in `t20260911T210335Z-6f8ab2` (all 11 foundation checks, unchanged
+`94e2c9fc95535e97cfdebee7686d116965023b94`). The same candidate passed the
+focused `native-table-variants` graph in `t20260911T205750Z-b27b85`; it reuses
+the actual native fixture and assertions but is not a substitute for the full
+foundation or release pass. These table-path fixes are source-only until
+packaged, with native Mac/Windows and actual Codex Desktop qualification open.
 Compiled STDIO tests cover discovery, target preservation, conflict/malformed-input
 rejection and recovery. The underlying planner is exercised by the real Linux
 editor journey; this is not Codex Desktop or native Mac qualification.
@@ -985,6 +1785,18 @@ zoom-out in both instances: image/scale changes preserve supported design conten
 revision and unsaved state. Zoom follows native preset steps, not an exact inverse
 of an arbitrary starting fit scale. Mid-capture layer-change race injection and
 independent render contexts remain unqualified.
+
+`kicad_schematic_checked_view(instanceId, documentJson, viewDocumentJson?)` returns the
+displayed sheet's PNG and the whole-schematic checked state from one native request, captured
+with no editor event in between, so the image and the state always describe the same revision;
+a change during capture refuses it, and an inconsistent reply is refused as
+`invalid_checked_view`. Plan a batch from `structuredContent.checked` and send it with
+`kicad_schematic_apply_checked_batch`; a batch planned from a changed view is refused as
+`stale_document_state` and changes nothing. The Linux journey
+`AgentAndPersonEditingTogetherNeverGetStaleOrPartialEdits` (graph
+`native-observe-apply-stress`) runs this loop 50 times in each of two editors while real
+keyboard edits land at varying moments, including during the apply, and undoes every step at
+the end.
 Compiled MCP journeys
 compare native image bytes and data on root/repeated sheets and exercise target
 and open-commit rejection with recovery. Tracking and serializer coverage remain
@@ -1021,10 +1833,17 @@ schematic/project files unchanged. Linux journeys exercise explicit resolution,
 undo back into conflict, redo and reload from both displayed instances. Broader
 flat-hierarchy qualification and complete document reconstruction remain open.
 
-No revision-safe editing, synchronized rendering, XML reconstruction, automatic
-synchronization, routing, document extraction or simulation tools are advertised.
-Their absence is unfinished work, not a reduction of scope. The authoritative
-DevCoordinator completion ledger retains these outcomes.
+Preliminary tools are advertised for revision-safe schematic batches
+(`kicad_schematic_apply_checked_batch`), synchronization apply and the automatic
+synchronization lifecycle, source PDF page reading (`kicad_source_pdf_page`), PCB
+item editing and visual guides (`kicad_pcb_items_*`, `kicad_pcb_guide_*`), route
+candidates, geometry and native route previews (`kicad_pcb_route_*`), detached PCB
+DRC jobs (`kicad_pcb_drc_*`; ordinary jobs never claim a complete input snapshot or
+fresh results) and ngspice simulation jobs (`kicad_simulation_*`; supplied decks may
+not contain interpreter blocks or file includes). Committing routed copper, complete
+XML reconstruction, lossless ownership changes, simulation result retention and
+revision binding remain unfinished work, not a reduction of scope. The
+authoritative DevCoordinator completion ledger retains these outcomes.
 
 ## Source ownership
 
@@ -1082,13 +1901,22 @@ The MCP result reports `NotConfirmed` for errors after submission rather than
 asserting that the native edit was rolled back. Use an explicit observation after
 the result to obtain image and supported state together.
 
-The native `move_connected_symbols` batch operation currently requires the
-targeted sheet to be displayed and does not consume creations staged earlier in
-the same batch. It is not full electrical correctness verification, unrestricted
-offscreen editing, complete revision tracking or automatic XML synchronization.
-The compiled editor journey covers actual MCP movement, connection preservation,
-retry/stale behavior, observation and native undo; it is Linux evidence, not a
-Codex Desktop or native-Mac qualification.
+`kicad_schematic_transform_connected_symbols` adds clockwise/counterclockwise
+quarter-turns and left-right/up-down reflections about an explicit sheet-space
+pivot in nanometers. Left-right reverses X; up-down reverses Y. Both tools operate
+on loaded displayed or non-displayed sheets, including all active units of a
+shared drawing, without navigating the visible editor. Rejected batches preserve
+surviving selection identities as well as design geometry.
+
+These native operations do not consume creations staged earlier in the same
+batch. They are not full electrical correctness verification, complete revision
+tracking or automatic XML synchronization. XML-driven transforms have controlled
+Linux proof, including hidden physical sheets and attached label guidance. The
+compiled editor journey covers both tools, all four
+transforms, connection preservation, rejection/rollback, retry/stale behavior,
+observations and native undo/redo in two Linux editor instances. This is not
+Codex Desktop or native-Mac qualification. Run the focused journey with
+`devcoordinator2 test start . --test native-offscreen-move --tier development --client codex`.
 
 ### Running checks
 
@@ -1147,6 +1975,26 @@ undo support from this change. Read-only settings capture preserves stores and
 dirty flags, follows nested/parent parameter ownership, and compares persisted
 values rather than transient preset flags; genuine serialization failures remain
 conservative invalidations. Ordinary best-effort saving is unchanged.
+
+ERC override edits now advance the native journal when an exclusion flag,
+exclusion comment, or stored severity changes. Cancelling a comment or accepting
+the same text leaves the revision and dirty state unchanged. The rendered Linux
+journey exercises the real context menu, comment cancellation/edit/no-op,
+restoring an exclusion, changing severity, rejecting a stale native batch, and
+saving the resulting project settings while another project remains unchanged.
+These are existing KiCad controls with improved change tracking, not a new
+annotation interface or automatic XML synchronization. ERC settings do not gain
+undo support from this change.
+
+The `native-foundation` development graph restores locked managed dependencies
+and builds CVPCB and the package-manager schemas needed by a fresh source editor.
+It runs source-editor journeys separately from package updater journeys, which
+retain their signed-catalogue checks. Frozen Linux checkpoint
+`t20260911T124004Z-a428dd` passed all eleven checks at commit
+`9e3d57faf5dccee669d0d295b07db69d8b4cbbc5` with unchanged source. This is native
+development evidence, not a published package, native-Mac qualification, or full
+ERC/settings revision coverage.
+
 The journal still reports
 `tracking_complete=false`: other direct settings/property paths,
 complete change payloads and exhaustive revision tracking remain open. Native
@@ -1295,8 +2143,10 @@ live ownership while retaining its original membership for undo, so the same
 batch can transfer survivors into an existing or newly created group. Tests cover
 rollback, retries, undo/redo, persistence and reversing that transfer to recreate
 the original groups. Complete group/hierarchy qualification remains open.
-The fork's `20260907` schematic and symbol-library format persists UUIDs for
-symbol-definition graphics, text, and library-owned pins. This is a local format extension, not an
+The fork introduced schematic and symbol-library UUID persistence in `20260907` for
+symbol-definition graphics, text, and library-owned pins. Schematic format
+`20260912` additionally persists explicit chain exclusions and pin/path anchors;
+the symbol-library version remains `20260907`. These are local format extensions, not an
 upstream upgrade. Older files without those IDs remain readable; older KiCad
 readers may reject newly saved files. Group persistence checks compare complete
 screen snapshots, including symbol graphics, without dropping identities.
@@ -1652,7 +2502,7 @@ MCP EOF must leave the native editor alive. It does not use
 Run from this Linux checkout:
 
 ```sh
-devcoordinator2 test start /home/holyglory/kicad --test linux-package-stage --tier development --client codex
+devcoordinator2 test start <candidate-worktree> --test linux-package-stage --tier development --client codex
 ```
 
 Each candidate retains its `staging.json` inventory; the generated
@@ -1724,7 +2574,7 @@ partially installed; Mac archive preparation remains separate work.
 Run focused signature, HTTPS transfer and persistence checks with:
 
 ```sh
-devcoordinator2 test start /home/holyglory/kicad --test update-contracts --tier development --client codex
+devcoordinator2 test start <candidate-worktree> --test update-contracts --tier development --client codex
 ```
 
 The focused contracts use synthetic release payloads and ephemeral test keys.
@@ -1887,7 +2737,7 @@ these checks; this is Linux evidence, not a completed different-build update,
 dirty-editor restart, production feed or native-Mac execution.
 
 ```sh
-devcoordinator2 test start /home/holyglory/kicad --test native-updater-journey --tier development --client codex
+devcoordinator2 test start <candidate-worktree> --test native-updater-journey --tier development --client codex
 ```
 
 ### Native restart handoff (Linux, preliminary)
@@ -2251,3 +3101,807 @@ devcoordinator2 test start /absolute/path/to/kicad --test automation --check res
 
 Compiled handler and STDIO evidence is not evidence of operation in Codex
 Desktop or on macOS. Those acceptance checks remain required separately.
+
+### Project PCB opening (development branch)
+
+With a matching native build, `kicad_pcb_open` opens an existing project-root
+`.kicad_pcb` in the same instance as its schematic. `kicad_pcb_create` explicitly
+creates an unsaved empty board when that file is absent. Both require an attached
+`instanceId` and an absolute project-owned `path`; repeating the operation keeps
+the existing board. Closing the MCP connection does not close the editor.
+
+Locked, malformed, future-format and recovery-needed files return errors without
+hidden dialogs or replacement of the schematic. These tools do not place or route
+components. Guarded MCP save and clean-only close are described below. General
+revision-safe PCB mutations and full lifecycle qualification remain unfinished.
+
+The focused Linux journey opens two independent native projects, creates and
+reopens their boards over real MCP STDIO, and checks shared net-class updates,
+native undo/redo, geometry and lock preservation, persistence and recovery. Run:
+
+```sh
+devcoordinator2 test start /absolute/worktree --test native-net-settings --tier development
+```
+
+This is scoped Linux integration evidence, not full XML reconstruction,
+automatic repository synchronization, Codex Desktop or native-Mac qualification.
+
+### Guarded document lifecycle (development branch)
+
+With the matching native build, call `kicad_document_state` for the explicit
+instance/document, then pass its complete JSON result as `expectedStateJson` to
+`kicad_document_save`, together with `instanceId` and a new UUID `operationId`.
+The native process checks the observed document identity, revision, full model
+fingerprint and loaded file versions. The actual writers check file versions
+again before replacement. Unknown or changed baselines refuse admission.
+
+After a timeout, reuse the exact request and operation ID or query
+`kicad_document_operation` with the original document descriptor, operation ID
+and process epoch. A retained receipt is replayed without another save, including
+after an MCP reconnect. Failed and indeterminate results require inspection;
+do not invent a new operation ID merely to bypass an uncertain result.
+
+Linux native run `t20260913T010338Z-c02c70` passed the compiled contracts and real
+two-instance MCP/editor saves, stale rejection, retry no-write assertions and
+receipt lookup after reconnect. This evidence covers its frozen candidate, not
+the public packages or Mac/Desktop execution. The guard does not provide an
+atomic multi-file transaction or protection against arbitrary uncooperative
+writers. General change tracking remains explicitly incomplete.
+
+`kicad_document_close` takes `instanceId`, the complete `expectedStateJson` and a
+new `operationId`. It requires state matching a native loaded/saved checkpoint
+and refuses dirty or stale state, pending dialogs and associated editors/viewers.
+It does not implicitly save, discard changes, force closure or stop the native
+process. Query its receipt with `kicad_document_operation` after closure or an MCP
+reconnect; retries must reuse the identical request and operation ID.
+
+Linux run `t20260913T024019Z-0f674e` proved saved and read-only close/reopen for
+both schematic and PCB documents, unchanged design bytes and timestamps, receipt
+recovery after reconnect, and preservation of the other editor. That proof is
+bound to its exact candidate; it does not qualify the public packages, later
+source changes or Mac/Desktop execution. Field-specific editor-state coverage,
+Save As, atomic multi-file persistence and complete lifecycle/platform acceptance
+remain open.
+
+### PCB DRC marker inventory (development branch)
+
+With the matching native build, `kicad_pcb_drc_state` takes `instanceId` and
+`documentJson` identifying the PCB. It returns the existing native violations,
+their marker identities and geometry, exclusion flags and comments, together
+with the document revision and process epoch. It does not start a DRC run.
+
+While the native checker is running, the result has `running: true` and no
+marker snapshot. Otherwise `markerSnapshotComplete` identifies a complete
+inventory of the markers currently present. `resultsFreshnessKnown` remains
+false: an empty inventory is not proof that the current board passed DRC.
+Markers can predate a design edit or have been manually deleted. Re-run KiCad's
+checker when current verification is needed; native DRC job control and
+result-to-design revision qualification remain unfinished.
+
+Linux run `t20260913T041710Z-0cee9d` passed all seven development stages on
+`222d65281389c66d3f1077c650fa27208383dc52`, including eleven native regression
+groups and both project instances. The actual DRC dialog journey proved comment
+cancellation, exclusion/save/reload/rerun/removal, wrong-target rejection and
+STDIO MCP inventory equality. Board-level exclusions use an explicit owning-board
+reference so they survive the native board UUID changing on reload; unrelated
+unresolved object IDs are not guessed or rebound.
+
+The same run proved that an open native 3D viewer blocks checked PCB close,
+preserves both windows and files, and permits normal close/reopen after explicitly
+closing the viewer. This is close-safety evidence, not qualification of MCP 3D
+rendering. The receipt covers its frozen Linux candidate, not public packages,
+later source changes or Mac/Desktop execution. A complete input snapshot and result freshness for DRC jobs remain open in
+completion-ledger outcome `p23deb822a36256a6`.
+
+### PCB design-rule check jobs (development branch)
+
+`kicad_pcb_drc_start`, `kicad_pcb_drc_job` and `kicad_pcb_drc_cancel` run KiCad's own checker on a detached copy of an
+explicitly named board at the exact revision the agent observed. Linux run `t20260925T234453Z-24318d` proved them through the compiled MCP
+STDIO server against the rendered PCB editors of two KiCad instances at once. Both checks ran together, and the agent saw
+each one reach KiCad's copper clearance step and its copper sliver step. Each completed check reported exactly six real
+findings, all naming its own board's test copper and bound to the revision it was asked for: two copper clearance
+violations (two parallel tracks, and a track and a via), three dangling tracks and one dangling via. A check cancelled
+once the agent saw it in its copper sliver step ended cancelled, with no findings, only after its worker had stopped;
+the other project's check beside it completed with the same findings as before. A custom rules file with an item KiCad
+does not know ended the check failed with `design_rules_invalid`, naming the file and the item's exact line and offset.
+After the cancellation, and after the rules were corrected (the broken item removed, a rule that matches no net kept),
+new checks reported exactly the first findings. Cancels, reads and starts sent to the wrong instance, with the other
+process's epoch or for a stale revision were refused without changing either board. After every outcome the editor it
+happened in accepted an edit and saved it. In project B only, Ctrl+Z and Ctrl+Y in the rendered PCB editor then undid
+and redid the agent's last edit, and the result saved. A rules file that declares a newer rules version also fails with
+`design_rules_invalid`; the native unit tests prove that case, the journey does not. Ordinary checks never claim a
+complete input snapshot or fresh results (outcome `p23deb822a36256a6`). While a check runs, `phase` names KiCad's
+current check step; `progress` is the furthest fraction any single step has reached, not an overall percentage.
+
+### Recursive structural diagrams (Linux source increment)
+
+The native recursive editor opens one connected diagram level at a time.
+System, PSU, CPU and their children use the same block/revision model. Every
+saved parent pins exact child revisions; inspecting old data does not follow
+today's mutable implementation heads. Connections have independent endpoint
+states, member histories and General/Schematic/Routing requirements. Unknown
+pins, protocols and values remain unknown.
+
+This increment is on `codex/recursive-diagram-history`; it is not yet a claim
+about the packages currently on the public download site. Mac and Windows
+builds remain held until the complete agreed XML editing workflow is implemented.
+
+With a matching compiled companion and native manager, an attached MCP client can
+call `kicad_diagram_open(instanceId, repositoryRoot, sourcePath, documentId)`.
+The file must be a supported typed `recursive-block-graph` document inside the
+explicit repository. `kicad_diagram_state(instanceId, documentId)` reports the
+current diagram path, file token, block/connection draft, dirty/busy/rendered
+state, selected annotation and errors. Opening is asynchronous: wait for a
+ready state without an error. These calls do not imply electrical realization
+or synchronized schematic/PCB generation. This per-level editor is the only
+diagram editor; the earlier flat structural editor and its tools were removed.
+
+Agents can use `kicad_diagram_read` with the same instance/repository/path/document
+target to inspect one saved diagram level without opening a window. Omit all
+block/state/revision IDs to read the selected root, or supply all three to inspect
+an exact saved or historical block. The result contains direct child selections,
+requirements, boundary interfaces, selected connection/member details, partial
+endpoints, comments, implementation metadata, the source token and native instance
+epoch. It is saved model data, not an unsaved window draft or electrical proof.
+`kicad_diagram_field_history` reads a bounded page for an exact block, optionally
+one exact connection/member, and General/Schematic/Routing field. Its total and
+offset allow agents to reach older history without changing the selected design.
+
+In the recursive window:
+
+- Select a block and use **Open diagram**, or double-click it. Back/Up return to
+  containing diagrams. Arrow keys select peer blocks; Enter opens the selected
+  block and Backspace goes up when the canvas has focus.
+- The compact implementation control in the diagram header previews another
+  existing implementation. Preview is visibly distinct and does not write the
+  file. **Save** selects it and publishes any edits as a new revision;
+  **Decline** returns to the latest saved choice. Other implementations and old
+  root snapshots remain available. Selection rejects incompatible boundary
+  interfaces or stale file versions instead of applying part of the change.
+  `Ctrl+I` opens the implementation menu. This selects the conceptual diagram;
+  it does not claim coherent native schematic/PCB activation yet.
+- That menu also provides **New**, **Duplicate**, **Rename**, **Remove** and
+  **Restore removed implementation**. New retains the source requirements,
+  boundary interfaces and notes but starts with no internal blocks/connections;
+  displaced note targets remain explicitly unresolved. Duplicate retains the
+  exact source graph. Both record their source and start unselected. Naming
+  cancellation writes nothing; names must be nonempty and distinct within the
+  block. Removal hides an inactive implementation without deleting its history;
+  choose and save a replacement before removing an active implementation.
+  Unsaved content must first be saved or declined before management actions.
+  `Ctrl+R` reloads saved data with the existing draft-preservation choices.
+- Select a connection by clicking its line, or cycle the local connections with
+  `L` on the canvas. Its endpoint summary describes the actual current binding,
+  not a claimed native net or compatibility proof.
+- Edit the three requirement fields and use **Save** or **Decline**. Save creates
+  new immutable revisions where content changed; unchanged saves do not churn
+  files. Decline reloads saved content and never writes an old baseline over a
+  newer file. `Ctrl+1/2/3` focuses the corresponding field.
+- **History** beside a field compares its earlier values with the exact saved
+  context. Restoring copies only that field into the draft; Save publishes it.
+  `Alt+H` opens history from a focused requirement field. For histories longer
+  than the first 200 changes, **Load older** (`Alt+O`) appends another bounded
+  page without changing the inspected revision. Close/Escape and restoring an
+  already-loaded value remain available during loading. A failed read preserves
+  the loaded rows and draft; a changed saved file requires closing history and
+  reloading its context. The saved marker stays before a long actor name.
+- **History** in the diagram header (`Ctrl+H`) opens whole-diagram history at
+  the current level. Selecting a row shows the actual author, time and content
+  changes while leaving the canvas and any editing draft untouched. **Preview**
+  explicitly shows that historical diagram read-only; **Return to current**
+  restores the prior view. **Restore as draft** retains exact children,
+  connections, interfaces and notes, then normal Save creates a new successor.
+  An existing dirty draft first offers Save, Decline or Cancel. Older pages,
+  changed-file errors, retry and closing during loading preserve saved history.
+  Source-instruction opening is still separate unfinished work; no missing
+  source is presented as an enabled link.
+- For block requirement conflicts, compare Base, Your draft and Latest saved.
+  Choose the draft, saved text, or explicitly write merged text. All overlapping
+  fields require a choice. Independent fields can compose without a modal.
+  Another file change invalidates old resolution choices while retaining their
+  text. Structural changes and connection conflicts are not silently guessed.
+- Edit **Comments** on blocks and connections. The comment selector preserves
+  separate notes; **New comment** adds another. `Ctrl+4` focuses comment text and
+  `Ctrl+5` focuses its selector when present. Clearing a text-only comment removes
+  it from the draft; old revisions retain it.
+- **Note** places a free-space comment. Edit it in Comments, drag it on the
+  canvas, then Save. Undo/redo includes note movement. XML stores exact target
+  identities, note coordinates and provenance. Stored sketch paths are retained;
+  a native sketch-creation tool is not yet qualified.
+
+None of these actions invokes an AI agent. The optional global agent-console
+integration is still separate unfinished work.
+
+An agent can use `kicad_diagram_manage_implementation` for the equivalent saved-model
+operations. Supply the observed instance epoch, exact source file token, expected
+root and source selections, action, operation UUID and actor name. The operation
+UUID becomes the new state identity for creation, or the retained management
+event identity for rename/remove/restore. Stale file tokens or epochs fail without
+applying a second edit. An already-open native draft is not silently replaced by
+an agent's file update; reload or reconcile it explicitly. Management history
+retains old names and removal/restoration state, in addition to immutable design
+revisions. This is conceptual model management, not native schematic/PCB activation.
+
+`kicad_diagram_history` and `kicad_diagram_history_compare` expose bounded exact-
+context revision lists and content differences. `kicad_diagram_prepare_restoration`
+returns a typed historical draft without writing the file or replacing an open
+window draft. The explicit context/source selections and observed file token
+remain distinct from choosing an implementation or saving a new revision.
+
+Block revisions also retain independent definition choices: purpose, type,
+manufacturer, family, model, orderable part, package and knowledge class. Each
+choice can be unspecified, explicitly unknown (with a reason), a candidate list,
+or selected. Strength, applicability, verification and source references remain
+attached to that choice. A package can therefore be constrained before a model
+is chosen; no completion percentage or invented electrical value is required.
+
+`kicad_diagram_definition_set` updates only these choices on an exact block path
+and saved-source token. It preserves requirement text, connections, sibling
+blocks and previous revisions; an unchanged definition produces no file churn.
+`kicad_diagram_definition_guidance` reads explicitly supplied repository-relative
+knowledge-library files and resolves each class against its declared identity
+and revision. Candidate classes stay separate. Missing libraries, revisions or
+classes remain explicit, and returned hashes identify the actual library bytes.
+Resolving a class does not fabricate a physical component or claim compatibility.
+
+Definition fields round-trip through XML and shared messages and survive native
+Save/Decline and history restoration. The first native preservation run is
+`t20260920T081144Z-d90a1f`; combined live guidance, actual MCP definition edits,
+no-op/stale requests and missing-library behavior passed in both native themes
+with `t20260920T082202Z-413cbd`.
+There are no new raw-XML forms or component-choice controls in this increment.
+Native generation, physical allocation and component-selection UI remain
+separate unfinished work; these fields alone do not generate a schematic.
+
+Component realizations are explicit, separate bindings: a block can refer to zero,
+one or several exact electrical components across declared child designs. Each
+target retains the design, circuit and component identities in the block's own
+revision. Choosing a model/package string never creates one of these bindings.
+`kicad_diagram_components_set` saves this list with the normal exact root/path,
+source hash, operation ID and process-epoch guards. Earlier bindings remain in
+history; changed bindings are not silently merged into a requirement-only draft.
+
+`kicad_diagram_components` inspects the chosen saved revision against an explicitly
+supplied `hardware.xml` path and hash. It reads the manifest's declared model and
+knowledge-library files, returns their hashes and resolves all symbol units through
+their existing sheet-instance mappings. A renamed component keeps its identity;
+missing designs/components, replaced circuits and broken native mappings do not
+fall back to similar names or coordinates. Native locations are withheld when the
+design's identity mappings are unresolved, with the diagnostics returned instead.
+These observations describe saved XML snapshots, not a live editor revision or
+electrical correctness. Native preservation, MCP mutation/inspection and rendered
+history/restore/Decline/Save passed in both themes with
+`t20260920T090734Z-89bbe9`. The earlier `520f92` failure is retained: the test had
+opened PSU history while expecting a root revision; the corrected test explicitly
+navigates and asserts its scope. Native navigation controls, physical allocation
+and net/pin refinement remain separate unfinished outcomes.
+
+The original refinement-input model and strict XML contract are also defined:
+prompt text, historical block/connection paths, source hashes, attachment names/
+media types/byte counts and document revision/page/table/variant provenance.
+`t20260920T091402Z-3602f2` verifies the initial model/XML contract.
+
+Original inputs now live in the diagram's immutable input archive. An agent can
+use `kicad_diagram_refinement_asset_capture` to preserve an explicitly observed
+repository file by hash and byte count, then `kicad_diagram_refinement_input_record`
+to record the prompt, exact context and returned attachments. Recording does not
+select a new design, edit a native object, replace a draft or start an agent.
+Files are streamed into a content-addressed archive; a later source replacement
+or deletion does not change the preserved original. Corrupt existing assets are
+reported, never silently overwritten or treated as valid evidence.
+
+`kicad_diagram_refinement_input_read` returns the original prompt, pinned historical
+block/connection context and current asset integrity. Later implementation heads
+do not replace that context. `kicad_diagram_definition_set` and
+`kicad_diagram_components_set` accept an optional `refinementInputId`, keeping
+the original input and source provenance linked to their new revisions. The
+reference must belong to the targeted block's captured scope, not an unrelated unit.
+
+The Linux native/MCP journey `t20260920T094814Z-d0b60d` passes original capture,
+record/read, repeated insertion, source replacement, native Save/Decline/history
+preservation and agent-origin linkage in both themes. It is real SDK-client and
+native-editor evidence, not qualification of the currently registered Codex Desktop
+server or another agent application. No new raw-XML or chat interface is introduced.
+
+`AlreadyPresent` is only an observation of an identical input in the current XML;
+it is not a receipt clearing an earlier ambiguous publication. The service retains
+durable Prepared/Replacing/Published receipts in its existing local state directory.
+`kicad_diagram_refinement_publication` inspects those receipts, or explicitly resumes
+with `resume=true`. A pending exchange requires the exact before/after file hashes
+and original staged/retained paths. If another writer's contents were displaced,
+recovery leaves both versions for review. `CompletedPreviously` describes historical
+publication, not a promise that today's file still has those bytes.
+
+The focused `t20260920T110127Z-5ea985` run includes real helper-process termination
+after intent persistence, before exchange, after exchange and after receipt
+confirmation, followed by recovery from the same state directory. It also tests
+concurrent-save preservation and cancellation. The final
+`t20260920T110322Z-57aa11` run passes the combined contracts and real native/MCP
+journeys in both themes, including publication inspection/resume and wrong-ID/epoch
+rejection. This qualifies original-input preservation and its file recovery on Linux,
+not the complete prompt-to-design workflow. Whole block/decomposition proposals
+remain `p1231ce557d949a70`, with actual agent client qualification under
+`pa48933d0fe0a5c2f`.
+Linux proof does not lift the Mac/Windows hold or establish native-Mac execution.
+See [the contract](qualification/agent-refinement-contract.md).
+
+Whole agent proposals are now retained and publishable as independent candidates.
+`kicad_diagram_proposal_publish` accepts the complete typed proposal payload after
+strict normalization: nested block revisions, connection/member revisions, partial
+endpoints, General/Schematic/Routing text, definitions and unresolved issues. It
+retains the request locally before guarded XML publication. Existing heads and the
+selected root do not move. `kicad_diagram_proposal_read` returns the candidate's
+exact closure and issues; `kicad_diagram_proposal_select` is a separate guarded
+choice that updates containing snapshots only when the current root/path still
+matches. `kicad_diagram_proposal_retained` recovers the request after a stale or
+failed publication. Unknown proposal IDs, changed targets and reused IDs with
+different content are rejected.
+
+Agents can also grow connections the way people do in the editor.
+`kicad_diagram_connection_endpoint_set` binds or unbinds one end of a connection to a
+block interface or a level-boundary port, with an explicit unresolved state, and
+`kicad_diagram_connection_members_refine` groups a connection's signals into members
+(groups, pairs, signals) that keep their own General/Schematic/Routing fields and
+history. Both check the current revision and refuse stale or ambiguous targets without
+partial writes: `connection_edit_target_missing`, `ambiguous_connection_edit`,
+`invalid_connection_refinement`, `invalid_connection_edit_operation` and
+`stale_connection_parent`. A connection's new revision takes the operation ID, so a
+client whose call was cut off can see whether it landed, and repeating it writes
+nothing. Field history continues across implementations and chosen proposals: a
+revision derived from another implementation names it as its parent.
+
+`kicad_diagram_agent_context` gives any agent one revision-bound bundle for a chosen
+level: the diagram, its direct children, the General/Schematic/Routing fields,
+comments on elements and free space, and the prompt and attachment references, each
+with its exact revision. `kicad_diagram_proposal_compare` compares a proposal built on
+an older revision with today's design and names exactly which elements changed on
+each side, or reports that the proposal was already adopted; a publish whose request
+no longer prepares against today's file is refused as `block_proposal_source_changed`
+with `comparisonUnavailable` naming the cause. The contract is in
+`automation/qualification/agent-refinement-contract.md`.
+
+The complete proposal model has contract coverage for a power unit decomposed into
+converters plus telemetry and a partly resolved signal bundle. The native journey
+also publishes and reads a proposal through MCP in both themes. These tools do not
+generate native schematics/PCBs, start agents, or trigger from Save/Decline; native
+activation and actual Codex/second-agent qualification remain open.
+
+`kicad_diagram_observe` returns native-rendered PNGs and matching diagram objects.
+Read `kicad_diagram_state` first, then supply that document's `sourceToken` and
+`viewRevision`. Each view names its pixel dimensions and may select an exact
+saved block/implementation/revision; omitting the selection uses the current
+canvas, including its visible draft or historical preview. An optional viewport
+uses `x`, `y`, `width`, and `height` in diagram units, with X right and Y down.
+The service can render another level and a detail region in the same request
+without moving the user's window, changing selection, discarding a draft or saving.
+
+The structured response identifies each view, actual viewport, source/view
+revision, diagram objects and whether it includes an unsaved draft. Known zero
+coordinates and false flags remain explicit. `imageReferences` maps view IDs to
+image content indices and SHA-256 values; PNG bytes are image content, not duplicated
+inside the structured metadata. Requests support one to eight views, 64–4096 pixels
+per dimension and 16 Mi-pixels total. An unrepresentable native zoom is rejected,
+not silently clamped into false geometry. Request another observation for more
+views. This is abstract-diagram rendering, not schematic/PCB realization or
+electrical validation.
+
+Scoped Linux observation proof is `t20260920T064819Z-ace160`: actual STDIO image
+content, current/saved/historical/detail views, empty implementations, unchanged
+editor state, stale/wrong targets, invalid viewport/duplicate requests, cancellation
+before capture and successful capture after errors in both themes. Actual Codex
+Desktop image delivery and native-platform qualification remain separate work.
+
+Focused Linux development verification uses:
+
+```sh
+devcoordinator2 test start . --test diagram-requirement-history --tier development --client codex
+```
+
+The graph checks managed contracts, builds matching C++ messages and the native
+editor, exercises the history/conflict dialogs in both themes, and drives two
+independent KiCad instances through navigation, editing, persistence and recovery.
+Compiled STDIO and native Linux evidence is not proof of actual Codex Desktop or
+native Mac integration. The authoritative unfinished outcomes include recursive
+UI `pc12a7fddf47cab23`, field history `p390b40bed99e0ab2`, connection refinement
+`pf92d0ecdec8805b4`, annotations `p47c5ac4e8184b9a4`, and opening retained source
+instructions from history `pb09aa30cf44e609b`. Whole-diagram history, preview and
+restoration `pb0847a7ffd99250a` passed the expanded Linux native and STDIO journeys
+in `t20260920T061636Z-21b360`, including root/child restoration, dirty choices,
+stale-page recovery, compact controls, native keyboard focus and visible canvas.
+Field-history pagination beyond 200
+changes passed the scoped Linux run `t20260920T042520Z-4974e9`, including actual
+editor restoration, stale-page recovery, cancellation and both themes. Its
+outcome is `p8ebf18838a55934f`; the wider history workflow is still incomplete.
+Implementation management is tracked
+by `p5848545e243151a7`; scoped Linux evidence is separate from cross-platform
+qualification. Complete
+graph conflict handling, structural/native generation and reverse synchronization,
+schematic/PCB markup, and full platform qualification remain open.
+
+
+Headless server ownership (2026-09-29): native handlers obtain process identity and
+internal dispatch from the API server that registered them. A standalone
+`kicad-cli api-server` no longer dereferences the absent desktop server when
+reading board state, DRC markers or job requests. The existing two-project PCB
+journey now also opens a third headless project, verifies exact wrong-project,
+closed-board and relative-path refusals, rechecks its own board state and saved
+board/project bytes, and requires clean shutdown. Headless DRC starts still
+refuse missing drawing-sheet inputs; this is not qualification of headless DRC
+execution. Complete governed run `t20260929T234156Z-ffaf58` passed all eight
+checks, including the graphical two-project DRC journey and native lifecycle
+contracts, with unchanged source. Its retained `native-net-settings-evidence`
+contains `pcb-headless-project-refusal.json`.
+
+
+Repeated-sheet native adoption (2026-09-30): placing a symbol on an existing shared
+physical sheet now publishes one shared component definition and separate,
+path-derived component instances and symbol occurrences. Native references remain
+separate on each instance. Repeated UUID ownership answers require the requested
+sheet path; partial answers stay unresolved and contradictory shared part choices
+are rejected before publication. Shared-instance creation is qualified separately
+below; unrelated sheet-file replacement still needs explicit resolution.
+
+The existing repeated-screen recovery journey now also places a native symbol,
+publishes through the compiled MCP STDIO tools, verifies TP103/TP203 identities,
+exact recorded publication bytes, unchanged native state and connectivity, no-op
+repeat, real keyboard undo/redo, and saved reload in two projects. Native run
+`t20260930T001458Z-8597d1` passed all six checks with unchanged source; each project's
+`adoption-proof.json` is retained in `native-rebuild/rebuild-evidence`. Exact
+UUID-addressed item comparison permits only native enumeration order; every item
+value, metadata field and binding remains exact. The extended existing ownership
+fixtures cover pathless, partial, conflicting and agreed answers; all 150 focused
+checks passed in `t20260930T002243Z-2b2715`. No product source changed after the native
+pass. The focused ownership build ignores persistent build servers after two
+MSBuild child-node exits in the isolated checkout; it keeps the same tests.
+
+
+Sheet topology synchronization (2026-09-30): native sheet insertion now carries its
+new bindings through property reconciliation and publication. XML can move an
+existing sheet to another parent or unlink a branch through the existing checked
+native batch. Sheet-symbol, screen, component and occurrence identities remain
+stable; relative filenames are adjusted when the parent directory changes, and
+unlinked files are preserved. A native batch that reparents an existing sheet
+moves descendant reference and variant records in the same undoable commit;
+other instances of shared screens keep their records. Publication still requires
+exact native objects and connectivity. Planned placement records use KiCad's
+canonical path order; no comparison accepts changed record values.
+
+Complete native run `t20260930T013235Z-75ddb0` passed all six checks with unchanged
+source. In two projects it verified native add/move/remove, native undo, an XML
+move between directories, populated repeated-instance moves in both directions,
+rollback after an invalid later operation, XML branch removal with detached files
+unchanged, XML undo/redo and saved reload. Each retained `sheet-topology-proof.json`
+is in `native-rebuild/rebuild-evidence`; manifest
+`0ff5e97c8f03d5493787deb7c9694d5f35d2b2a3ab4b42e9babb6054f460a190`.
+The existing planner test also checks insertion through the full ownership
+pipeline, move/removal batches, equality for newly loaded sheets and concurrent
+native-edit refusal. The final ownership regression graph
+`t20260930T014111Z-8c4df7` passed. Only documentation/evidence wording changed afterward.
+
+The parent topology outcome remains open. Shared-parent reparenting is tracked in
+`pd6a383227f9d47b8`. Native variable-backed filename resolution is qualified below
+under `p2b873890e79c72c2`. Shared-instance creation and its remaining ownership cases
+are also described below. Unsupported cases preserve the competing versions.
+
+
+Shared-sheet insertion (2026-09-30): a new native instance of a known physical
+sheet reuses its existing sheet and locally owned component definitions. Separate
+component instances are derived from the new path and definition identity;
+occurrences remain bound to the exact native symbol UUIDs and actual references.
+XML may also add a complete shared instance with its explicit model owners,
+native snapshot, path bindings and placement records. This path preserves every
+existing component and physical item, admits only the declared sheet references
+and additional placement records, and rejects swapped definition identities even
+when their part and value match. Placement records are prepared in native path
+order before journaling, with their full values and original request bytes kept
+exact. A model-only addition missing those bindings is refused explicitly.
+
+The full two-project native run `t20260930T022557Z-6bec67` passed all six checks with
+unchanged source. Its shared file contains three one-unit probes per instance;
+new native references TP301–TP303 and XML references TP401–TP403 are kept separate.
+Both insertion directions, no-op repeats, native undo/redo and saved reload pass.
+A swapped-definition candidate leaves native state and the requested XML unchanged;
+reversed placement-record input succeeds after canonical preparation. The retained
+`sheet-topology-proof.json` files are in `native-rebuild/rebuild-evidence`, manifest
+`296b91ae712131943718df3fd32e685ed2cdffe493b14f19d9a43ba56c055cdb`.
+The extended existing ownership fixtures cover deterministic definition reuse and
+refusal to invent an undrawn component reference; final graph
+`t20260930T023802Z-9b35ad` passed. Only build-launch configuration and documentation/
+evidence wording changed after native verification. The repeated recovery build
+now ignores persistent build servers, matching the already verified ownership
+build mode after MSBuild worker exits.
+
+`pc626c6d7d14a0d15` remains open for the ownership remainder in
+`p2d066b3b1abf0c6a`: new instances with undrawn components or units owned outside the
+repeated sheet, including complete multi-unit native proof. Those choices are not
+inferred from names or positions and are not covered by the three-probe journey.
+
+
+Native file-location provenance (2026-09-30): `ReadSchematicFileLocations` reports
+loaded file paths and the current native resolution of filename expressions at an
+exact schematic revision. It is read-only and does not navigate the editor.
+Recovery refresh, reattachment and completed synchronization retain the optional
+observation in recovery envelope version 11; design XML remains portable and
+contains no new absolute-path provenance. Older recovery records still read, and
+older native builds without the request keep the existing literal/KIPRJMOD path.
+
+Sheet relocation uses the loaded native file and parent directories. Absolute
+variable expressions remain unchanged; relative expressions are prefixed for the
+new parent without expanding variables in the companion. Missing, stale or
+inconsistent observations cannot authorize variable resolution; an expression
+that no longer resolves to the loaded file is explicitly refused.
+
+Complete native run `t20260930T031947Z-d09107` passed six checks with unchanged
+source. Both projects gave KiCad and the compiled MCP process conflicting variable
+values, then verified the correct loaded files, preserved variable expressions,
+read-only observation, stale-revision refusal, directory moves, rollback,
+undo/redo and reload. Retained `sheet-topology-proof.json` files are under
+`native-rebuild/rebuild-evidence`, manifest
+`0548639cbd28b825f52c337eb337fe3305b5d6acba3b67db50933a7fb3a6c6b4`.
+The final expanded recovery/observer/client/ownership graph
+`t20260930T033049Z-320c7f` passed. Existing fixture tests cover version-11 round-trip
+and no-churn saves, bad-observation preservation, stale provenance, and rejection
+when declared and loaded files differ. Only test coverage/configuration and
+documentation/evidence wording changed after native verification.
+
+
+### Repeated-sheet ownership answer responses (2026-09-30)
+
+`kicad_design_ownership_answer` retains the full occurrence-to-native-symbol
+binding through its pre-publication check and response. One physical symbol UUID
+can appear on several sheet paths; each answered occurrence now returns its own
+`sheetInstanceId` and `nativePath` alongside the existing identity, part, unit and
+reference fields. Response preparation happens before the guarded XML write.
+The existing recovery-save failure response still states that the XML was written
+when the recovery record could not take it in.
+
+The real two-project baseline `t20260930T035956Z-5ca63b` reproduced the old failure:
+both valid answers reached the XML, but looking up a single occurrence by native
+UUID failed before updating the recovery record. Both retained observations show
+`xmlChanged: true`, `recoveryMatchesXml: false`, and `nativeUnchanged: true`.
+The earlier `t20260930T035515Z-597f1e` stopped at a test JSON field-name mismatch;
+it does not establish the product defect.
+
+Complete native run `t20260930T040546Z-5c6430` passed all six checks with unchanged
+source. Its two `adoption-proof.json` files verify conflicting-answer refusal,
+both returned paths and references, matching XML/recovery bytes, public
+synchronization, no-op repeats, exact undo/redo identities and saved reload.
+Source digest: `7ed9dbd6c83964ae38be576e2609c300a64a68937084a5d86d410cd23f1d6c54`.
+The retained `native-rebuild/rebuild-evidence` artifact has manifest
+`83ada158525c27944455aa23f5c0436290a795d06a3bc91b0c001ef3f249f02a`.
+The final ownership graph `t20260930T041731Z-60214c` passed all three checks and
+237 supporting cases, including ordinary answer refusals and a recovery record
+that cannot be written. Only this documentation changed after those passes.
+
+This qualifies repeated-instance part answers. The later PSU/CPU journey below also qualifies live multi-unit owner/grouping
+answers. New repeated sheets with undrawn or externally owned components remain
+under `p2d066b3b1abf0c6a`.
+
+
+### Native observation races and explicit unit ownership (2026-09-30)
+
+File-location provenance stays bound to the hierarchy revision. When KiCad
+refuses a file-location read, the companion classifies it as transient only
+if one fresh hierarchy proves that the same document and session advanced.
+The automatic worker retains its input and waits for its existing event or
+heartbeat before reading again. It does not publish mixed revisions or retry
+all invalid requests. If the same race occurs while finishing publication,
+the operation remains pending with `native_changed_during_sync`; its baseline
+and completion receipt do not advance. Capture file provenance immediately
+after the native snapshot, before local serialization and recovery-file reads.
+
+The existing PSU/CPU journey now answers both multi-unit decisions through
+`kicad_design_ownership_answer`: a newly drawn U5 power unit joins U5 across
+sheets, and two new U9 units become one physical component. It verifies rejected
+choices leave the native state, XML and record unchanged; valid choices reach
+the automatic worker and survive exact undo/redo and no-op replay.
+
+The baseline `t20260930T042927Z-eb28ff` exposed the stale read pause in both
+projects. The next run `t20260930T051533Z-f53c86` completed all cases in one
+project and passed full XML reconstruction; the old shared 1200-second ceiling
+then cancelled the second project. Its helper incorrectly called cancellation
+a step timeout. Cancellation now propagates honestly. The expanded two-editor
+journey has a 2700-second aggregate ceiling and a 3000-second outer check limit;
+individual action deadlines and assertions are unchanged. Ownership initializes
+its own S1 fixture, so its focused graph no longer orders it after the independent
+XML-reconstruction journey. The complete native acceptance graph keeps its order.
+
+Final selected native run `t20260930T055558Z-01d5bc` passed all six selected build
+and ownership checks with unchanged source. Both retained proof files report
+`existingOwnerPreserved`, `newUnitsGrouped`, `conflictingChoicesRefused`,
+`workerResumedAndPublished`, `separateSheetLocationPreserved`, `exactUndoRedo`
+and `repeatNoOp`. This is focused behavioral evidence, not a complete release run.
+Source: `88ec6db6580d6976254f4a65f8543a385717347e8f86d9c8ae5f975155658be3`.
+The `ownership-sync/native-ownership-sync-evidence` artifact manifest is
+`5b277731494eca5e897d6d01010fc18c4daa4b02d7052e5d5c5db06e66c5b871`.
+Supporting `t20260930T050911Z-9afcae` passed all three checks and 248 cases,
+including revision-advance recall, unchanged/wrong-session refusal, event-driven
+retry and pending-publication preservation. Product source stayed unchanged
+after that focused pass; later edits affect the harness limits and documentation.
+
+
+### Repeated-sheet ownership choices (2026-09-30)
+
+A new instance of an existing sheet can preserve components which have no drawing
+and units owned on another sheet. `kicad_design_sync_plan` returns
+`sheetComponentResolutionRequests` for missing references and the existing
+`ownershipResolutionRequests` for ambiguous parts or unit owners.
+`kicad_design_repeated_sheet_answer` retains explicit choices in the recovery
+record, without writing partial XML or changing KiCad. References name the exact
+sheet instance and component definition; symbol choices name the full native
+path. Resolve missing references before remaining unit choices, then plan/apply
+or resume synchronization to publish the complete design. The older symbol-only
+answer path refuses newly inserted shared sheets and names the correct tool.
+
+Recovery envelope 12 preserves these choices while keeping older records
+readable. Choices bind the baseline, desired XML, native hierarchy and revision,
+electrical checkpoints, native file provenance and knowledge libraries. New
+observations invalidate old choices; pending operations keep their original
+choices until completion. Unknown, duplicate and conflicting choices are refused.
+Partial reference answers cannot retain assigned duplicates, while intentional
+unannotated references such as `R?` remain valid.
+
+An explicit symbol declaration can prove the pins of a wholly undrawn component.
+They have no placed UUID or native net membership; declaring the symbol does not
+prove a connection. Native redo restores an undrawn component's explicit
+reference and value from content-verified history, retaining the stricter field
+agreement checks for drawn units. XML shared-sheet additions can place a missing
+unit of an existing external owner on the new path and add its real connections,
+without cloning the owner or changing earlier connectivity.
+
+Placement records follow native `KIID_PATH` ordering: path depth first, then
+UUIDs. The retained failing candidate from `t20260930T075117Z-9640df` had U5 at
+depth 3 before U900/U901 at depth 2; native serialization requires the shallower
+paths first. All affected shared-sheet, reparenting and symbol-creation
+preparation now follows that ordering. Exact native/candidate validation stays
+in place, with deterministic failing identifiers and full mismatch capture in
+the regression fixture.
+
+Complete native `t20260930T083225Z-7620c9` passed all seven checks with unchanged
+source. Both reference projects verify explicit undrawn references, unknown and
+duplicate refusals, stale choices after edit/undo, publication, exact history and
+reload. Both external-owner projects verify native choices, invalid-owner and
+legacy-tool refusals without writes, connected XML insertion, separate owners
+and connections, exact undo/redo/reload and no-op replay. Source digest:
+`157a2de89eaf9343e53803403ce9d5fd857d5c56613bb7ff37c652c3c8732603`.
+Retained `native-rebuild/rebuild-evidence` manifest:
+`4f69fceb7ea931a5be78912e6ffd8890ffe037604f152830e8c4e6ba3b02807f`.
+Retained `native-external/external-owner-evidence` manifest:
+`926ba508b256ccbfb7e8c9ce2a09b41237089a64f3224c818e3cc5dd15feb199`.
+The matching isolated focused run `t20260930T083225Z-dcb78d` passed 254 cases.
+The native graph independently runs both journeys under Coordinator capacity,
+with shared build prerequisites and separate fixture/evidence paths. These are
+focused capability proofs, not a complete release acceptance claim.
+
+Moving references through shared parent files remains open under
+`pd6a383227f9d47b8`. The new-unique-sheet ownership case is qualified below.
+
+
+### Ownership answers for a new sheet (2026-09-30)
+
+When KiCad creates a new physical sheet and places an ambiguous symbol on it
+before synchronization, `kicad_design_ownership_answer` retains the validated
+choice in recovery. It returns `answersRetained: true` and
+`designFileWritten: false`; remaining questions are returned if the ownership
+projection is not yet complete. A missing path is normalized only when exactly
+one observed occurrence has that UUID. Wrong parts and ambiguous identities are
+refused without changing the record, XML or native design. Existing-sheet
+answers keep their guarded XML-write behavior.
+
+The next plan/apply or automatic resume uses the retained choice to publish the
+whole new sheet, its definition, component and exact native binding together.
+It never writes a component referring to a sheet missing from the XML. Choices
+keep the same input digest and pending-operation protections as repeated-sheet
+answers, and clear on completed synchronization.
+
+Complete native `t20260930T085545Z-4b5855` passed all seven checks with unchanged
+source. Both topology proof files report `uniqueSheetAnswerRetained`,
+`uniqueSheetPublishedTogether` and `uniqueSheetAnswerUndoRedoReload`. Each case
+creates the new sheet and ambiguous probe in one native batch, refuses a wrong
+part, retains the chosen part without an XML/native write, publishes both objects,
+and checks a no-op repeat, exact undo/redo and saved reload. The external-owner
+regression also passed in both projects. Source digest:
+`47ec05d3984621dd334a0e3aabed52876b36f2ed55fbcdba3c30e004801d4030`.
+Retained reference-journey manifest:
+`c66deaa239e8bcf597e9a7bc3d795c2212101186a285a67ea3255f8f950cc098`.
+Retained external-owner manifest:
+`60ac72ca5060f1bc253b4c7a644c28fc56d5f7a5d2a7acaa0d32c76799f67386`.
+Matching focused `t20260930T085046Z-60a165` passed. Only documentation and one
+clarifying tool-description sentence changed afterward; execution behavior is
+unchanged. This closes `pd618bdab49c2ad0f` and its broader answer outcome
+`p35cfdc0345e056a5`; shared-parent relocation and combined new-parent moves remain
+separate unfinished topology outcomes.
+
+
+### Combined creation and sheet moves (2026-09-30)
+
+An existing sheet can move into a unique parent created in the same native edit.
+Complete bound XML can likewise create a parent and move a populated subtree
+beneath it. A private comparison view inserts only the new containers before
+reusing the existing move/removal projection; it is never persisted as a native
+or electrical observation. The new parent keeps supplied artwork and the existing
+child keeps its model and native identities. Verified history restores the parent
+and the child's location together on redo.
+
+Known schematic-wide coverage stays in the candidate. Only a native-command
+copy omits matching inherited coverage markers for a newly created screen;
+unknown state remains an explicit refusal. Item enumeration order is ignored only
+when comparing exact UUID-addressed screen contents for unchanged and
+convergent/delete cases. Metadata and item bytes remain exact, and real content
+changes still produce a conflict. The regression reverses baseline item order
+before native undo to prove this distinction.
+
+The earlier completion claim preceded final native acceptance and was withdrawn.
+`4f8388` exposed the fixture note's missing explicit unlocked state; `f5acbd`
+then exposed an item-order-only delete/modify conflict in one project. Provisional
+shared-parent admission commit `71c1770b23` failed to compile and did not establish
+complete instance mappings; `7ab1443f9e` restores its previous guard. Those runs
+and commits remain history, not completion proof.
+
+Fresh complete `t20260930T111443Z-217254` passed all seven checks with unchanged
+source. Both topology proofs confirm native/XML combined moves, populated nested
+paths, parent artwork, failure rollback, exact undo/redo and saved reload. Both
+external-owner regressions passed too. Source digest:
+`6266b2af55d00a230f04bf008d7192e51d327d09b66f18a8b953c29cbc472735`.
+Topology artifact manifest:
+`1b8cb5544e4f93fa22f3b2a1e69a0e843eef227e638f248d382f0c6c4d6c82a7`.
+External-owner artifact manifest:
+`f2ac1738ab677c90a69daffd1223624ea96901618fd3bcefbeb3cc670f1e51e4`.
+
+At that checkpoint, `pfd3b84bd1d59b91c` remained open for populated new-parent
+component creation under `pa0569df11b611af2`. The later proof below closes that
+gap; shared-parent relocation remains separately open under `pd6a383227f9d47b8`.
+
+### Populated parent creation with existing connections (2026-09-30)
+
+One complete XML candidate can create a unique parent containing a declared
+multi-unit component, move an existing populated child into it, and connect the
+new component to an existing component on another sheet. Private topology and
+declaration checks retain the original native checkpoints; publication still
+requires the complete requested drawing and actual native pin connections to
+agree. Native pin/type-bucket and cache ordering are prepared without changing
+pin payloads, identities or the supplied XML.
+
+Complete `t20260930T132128Z-e0c21c` passed all seven checks with unchanged source
+in 2135.493 seconds. Both external-owner project proofs confirm the four new
+units, real wire and cross-sheet connection to an existing CPU, ownership
+refusal, atomic rollback, exact undo/redo, saved reload and a no-op repeat.
+Both topology regressions also passed. The earlier `c18fb2` completed one project
+but exhausted the aggregate journey ceiling in the second; `9b6e9b` then rejected
+an existing symbol incorrectly supplied as a detached measurement candidate.
+The final fixture reads existing pins from the native obstacle measurements and
+preserves that API's refusal guard. Per-call timings remain in the retained
+evidence; the 2400-second aggregate is a test containment limit, not a product
+response target.
+
+Verified source digest:
+`4d80bd4d1b20703197c423f088a1c73904782598c0183cb8c9432a7c0eb60650`.
+External-owner artifact manifest:
+`6a3ed966c4b1d1b2f3dda4d0bdd361cdae75d6741b3d0c0b7a4b67d8ea1452c5`.
+Topology artifact manifest:
+`5b5d97bc31c66d99ea3b2e663af260b9b9c7304900faf62f113c7b9408e6fb64`.
+Only this evidence description changed after the run. This qualifies
+`pa0569df11b611af2` and the combined unique-parent outcome
+`pfd3b84bd1d59b91c`; shared-parent moves, broader topology work and full product
+acceptance remain open. No new packaged release is claimed.
+
+### Explicit shared-parent instance mapping
+
+Moving one physical sheet reference through a repeated parent can create or retire
+several sheet instances. The atomic native operation carries complete moved,
+retired and added paths alongside one physical remove/create pair. It validates
+the resulting hierarchy, explicit component-instance records and displayed page
+records before committing. Complete XML candidates supply their stable instance
+identities; ambiguous native edits use `kicad_design_sheet_move_answer` with the
+current recovery revision. Recovery envelope version 13 persists that answer,
+invalidates it after input changes and clears it after successful synchronization.
+Retaining an answer alone changes neither KiCad nor the XML file.
+
+Selected native run `t20260930T171728Z-5a3aff` passed in both real projects with
+unchanged source. It verifies XML collapse/expansion, preserved identities and
+connections, conflicting-history refusal, the public answer-and-apply path,
+undo/redo, saved reload and repeat publication. Its retained source digest is
+`143d5e252fdc033715514351176afc8218b0587f88dc3c6a4a7f0c7d170b1da4`;
+the evidence manifest is
+`9306cf8a2897f8cea5c7b1225dcd475ec3c901f3c10ae6c7c40eb8b040c827ae`.
+The broader combined regression and full product acceptance remain separate.

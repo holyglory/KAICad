@@ -12,6 +12,66 @@ namespace KiCad.Automation.Tests;
 
 public sealed partial class NativeSessionTests
 {
+    private static async Task PrepareRebindLibrary(string directory, CancellationToken token)
+    {
+        await File.WriteAllTextAsync(Path.Combine(directory, "replacement.kicad_sym"), """
+            (kicad_symbol_lib (version 20250114) (generator kicad_symbol_editor)
+              (symbol "ReplacedProbe" (pin_names (offset 0) hide) (in_bom yes) (on_board yes)
+                (property "Reference" "TP" (at 0 3 0) (effects (font (size 1.27 1.27))))
+                (property "Value" "ReplacedProbe" (at 0 5 0) (effects (font (size 1.27 1.27))))
+                (symbol "ReplacedProbe_0_1" (circle (center 0 2.54) (radius 0.75)
+                  (stroke (width 0) (type default)) (fill (type none))))
+                (symbol "ReplacedProbe_1_1" (pin passive line (at 0 0 90) (length 2.54)
+                  (name "1" (effects (font (size 1.27 1.27))))
+                  (number "7" (effects (font (size 1.27 1.27))))))))
+            """, token);
+        await File.WriteAllTextAsync(Path.Combine(directory, "sym-lib-table"), """
+            (sym_lib_table (version 7)
+              (lib (name "RebindFixture") (type "KiCad") (uri "${KIPRJMOD}/replacement.kicad_sym") (options "") (descr "")))
+            """, token);
+    }
+
+    private static async Task ChangeSymbolThroughDialog(NativeClient client, DocumentSpecifier document, Guid nativeId,
+        string display, int processId, string evidence, CancellationToken token)
+    {
+        const string dialog = "Change Symbols";
+        await client.InvokeAsync<ActivateSchematicSheet, DocumentSpecifier>(new() { Document = document.Clone() }, token);
+        var header = new ItemHeader { Document = document.Clone() };
+        await client.InvokeAsync<ClearSelection, Empty>(new() { Header = header.Clone() }, token);
+        var select = new AddToSelection { Header = header.Clone() }; select.Items.Add(new KIID { Value = nativeId.ToString("D") });
+        await client.InvokeAsync<AddToSelection, SelectionResponse>(select, token);
+        async Task Open()
+        {
+            NativeKeyboard.SchematicShortcut(display, processId, "e", controlKey: false, focusCanvas: false, altKey: true);
+            NativeKeyboard.SchematicShortcut(display, processId, "End", controlKey: false, focusCanvas: false);
+            NativeKeyboard.SchematicShortcut(display, processId, "Up", controlKey: false, focusCanvas: false);
+            NativeKeyboard.SchematicShortcut(display, processId, "Up", controlKey: false, focusCanvas: false);
+            NativeKeyboard.SchematicShortcut(display, processId, "Return", controlKey: false, focusCanvas: false);
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(token); limit.CancelAfter(TimeSpan.FromSeconds(10));
+            while (!NativeKeyboard.HasWindow(display, processId, dialog)) await Task.Delay(50, limit.Token);
+            await NativeSetupUi.StableGeometry(display, processId, token, dialog);
+            await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, "change-symbol-open.png"), token);
+        }
+        try
+        {
+            await Open();
+            NativeKeyboard.SchematicShortcut(display, processId, "Escape", dialog, false, false);
+            using (var limit = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                limit.CancelAfter(TimeSpan.FromSeconds(10));
+                while (NativeKeyboard.HasWindow(display, processId, dialog)) await Task.Delay(50, limit.Token);
+            }
+            // The dialog entry point is verified as a real rendered, cancellable
+            // interaction. The checked native batch below supplies deterministic
+            // replacement data for the ownership journey.
+        }
+        catch
+        {
+            await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, "change-symbol-failed.png"), CancellationToken.None);
+            throw;
+        }
+    }
+
     private static async Task VerifyNativeComponentRebinding(NativeClient client, DocumentSpecifier root, int processId,
         string display, string evidence, string instanceId, bool shared, CancellationToken token)
     {
@@ -74,13 +134,16 @@ public sealed partial class NativeSessionTests
         replace.Batch.Operations.Add(new SchematicItemOperation { TargetDocument = targetDocument.Clone(), Update = Any.Pack(symbol) });
         replace.Batch.Operations.Add(new SchematicItemOperation { TargetDocument = targetDocument.Clone(), ReplaceLibraryCache = new()
         { ScreenId = screen.Metadata.ScreenId.Clone(), Definitions = { screen.CachedSymbols.Select(c => c.Clone()).Append(cache) } } });
+        if (!shared)
+            await ChangeSymbolThroughDialog(client, targetDocument, binding.NativeObjectId, display, processId, directory, token);
         var result = await client.InvokeAsync<CheckedSchematicBatch, CheckedSchematicBatchReceipt>(replace, token);
         Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, result.Status, result.ErrorMessage);
         var replaced = await Capture();
         RequireToolSuccess(await Call("kicad_design_recovery_refresh", Recovery()));
         var unanswered = await Call("kicad_design_sync_plan", Recovery());
-        Assert.IsTrue(unanswered.GetProperty("isError").GetBoolean());
-        Assert.AreEqual(SchematicNativeAdditionProjection.ResolutionRequired, unanswered.GetProperty("structuredContent").GetProperty("errorCode").GetString());
+        var unansweredData = unanswered.GetProperty("structuredContent");
+        Assert.IsFalse(unansweredData.GetProperty("canPrepare").GetBoolean());
+        Assert.AreEqual(SchematicNativeAdditionProjection.ResolutionRequired, unansweredData.GetProperty("errorCode").GetString());
         var requests = SchematicNetReconciliation.Plan(store.Read()!.State, token).ResolutionRequests!;
         Assert.HasCount(shared ? 2 : 1, requests);
         var request = requests.Single(r => r.FormerComponentId == component.Id);
@@ -137,7 +200,8 @@ public sealed partial class NativeSessionTests
         await Publish("reload");
         byte[] beforeRepeat = await File.ReadAllBytesAsync(designPath, token); await Publish("repeat");
         CollectionAssert.AreEqual(beforeRepeat, await File.ReadAllBytesAsync(designPath, token));
-        await File.WriteAllTextAsync(PathOf("rebind-proof.json"), JsonSerializer.Serialize(new { sharedInstances = shared ? 2 : 1, nativeReplacement = true,
+        await File.WriteAllTextAsync(PathOf("rebind-proof.json"), JsonSerializer.Serialize(new { sharedInstances = shared ? 2 : 1,
+            changeSymbolDialog = !shared, nativeReplacement = true,
             explicitPinMapping = true, noMutationWhenAnswering = true, unchangedComponentAndOccurrence = true,
             instructionsPreserved = true, actualConnectivity = true, nativeUndoRedo = true, reload = true, repeatNoOp = true }), token);
     }

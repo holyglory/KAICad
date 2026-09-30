@@ -193,14 +193,27 @@ public sealed class DesignLayoutRecoveryTests
         var title = new SchematicItemOperation { SetTitleBlock = new() };
         new DesignRecoveryStore(f.Path + ".rebuilt.json").Save(f.Saved.State with { PendingMutation = LaneMutation(f, identity, page, title, Created()),
             PendingLayout = f.Intent with { Lane = DesignLayoutIntent.RebuildLane } }, null);
+        // Approved XML rebuild settings (decisions kicad-rebuild-text-vars-20260927
+        // and kicad-rebuild-formatting-20260927) stay journaled with the rebuild.
+        // Their payload validation is covered by the existing rebuild tests.
+        var formatting = new SchematicItemOperation { SetFormatting = new() };
+        var variables = new SchematicItemOperation { ReplaceTextVariables = new() };
+        foreach (var setting in new[] { formatting, variables })
+        {
+            var store = new DesignRecoveryStore(f.Path + ".project-" + setting.OperationCase + ".json");
+            var mutation = LaneMutation(f, identity, page, setting, Created());
+            store.Save(f.Saved.State with { PendingMutation = mutation,
+                PendingLayout = f.Intent with { Lane = DesignLayoutIntent.RebuildLane } }, null);
+            Assert.AreEqual(mutation, store.Read()!.State.PendingMutation);
+        }
         foreach (var (layout, operations) in new (DesignLayoutIntent, SchematicItemOperation[])[]
         {
             (f.Intent with { Lane = DesignLayoutIntent.RebuildLane }, [page, identity, Created()]),       // identity not first
             (connection, [page, Created(), Assertion()]),                                               // not a connection realization's
             (f.Intent with { Lane = DesignLayoutIntent.RebuildLane }, [identity, move]),                  // never a connected move
-            // Never a project setting: the project file is kept and a rebuild never overwrites it (lane 2C review).
-            (f.Intent with { Lane = DesignLayoutIntent.RebuildLane }, [identity, page, new SchematicItemOperation { SetFormatting = new() }, Created()]),
-            (f.Intent with { Lane = DesignLayoutIntent.RebuildLane }, [identity, new SchematicItemOperation { ReplaceTextVariables = new() }, Created()]),
+            // Connection realization still cannot mutate project settings.
+            (connection, [formatting, Created(), Assertion()]),
+            (connection, [variables, Created(), Assertion()]),
         })
             Assert.AreEqual("invalid_layout_intent", Assert.ThrowsExactly<AutomationException>(() => new DesignRecoveryStore(f.Path + ".refused.json").Save(
                 f.Saved.State with { PendingMutation = LaneMutation(f, operations), PendingLayout = layout }, null)).Code);

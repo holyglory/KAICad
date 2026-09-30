@@ -2998,7 +2998,7 @@ name="rendered"
 tier="development"
 requires=["native-build"]
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeXmlComponentCreation", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-xml-component-creation-tests"]
-retained_artifacts=[{ name = "native-xml-component-creation-tests", path = "automation/artifacts/native-xml-component-creation-tests", max_bytes = 16777216 }, { name = "native-xml-component-creation-evidence", path = "automation/artifacts/native-xml-component-creation/native-session-current", max_bytes = 33554432 }]
+retained_artifacts=[{ name = "native-xml-component-creation-tests", path = "automation/artifacts/native-xml-component-creation-tests", max_bytes = 16777216 }, { name = "native-xml-component-creation-evidence", path = "automation/artifacts/native-xml-component-creation/native-session-current", max_bytes = 268435456 }]
 
 # Creation-only PSU/CPU journey on the frozen S1 seed: the fixture's Components
 # stage from XML, including U5 unit 4 on CPU_POWER (ledger p95e0c19e6143deb6).

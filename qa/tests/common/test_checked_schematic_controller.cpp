@@ -167,7 +167,7 @@ BOOST_AUTO_TEST_CASE( CombinedCaptureBindsElectricalDataToOneUnchangedNativeStat
     CheckedSchematicState state; BOOST_REQUIRE( response->message().UnpackTo( &state ) );
     BOOST_CHECK( MessageDifferencer::Equals( state.state(), f.state ) );
     BOOST_CHECK( MessageDifferencer::Equals( state.electrical().hierarchy().revision(), f.state.revision() ) );
-    BOOST_CHECK_EQUAL( f.electricalSchema, 9 );
+    BOOST_CHECK_EQUAL( f.electricalSchema, 10 );
     BOOST_CHECK_EQUAL( f.mutations, 0 );
     f.changeDuringCapture = true;
     BOOST_CHECK( !f.Handle( query ) ); BOOST_CHECK_EQUAL( f.mutations, 0 );

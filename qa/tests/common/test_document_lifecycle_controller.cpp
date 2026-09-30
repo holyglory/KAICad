@@ -218,7 +218,7 @@ struct CHECKED_VIEW_FIXTURE
             CaptureSchematicObservation capture;
             BOOST_REQUIRE( aRequest.message().UnpackTo( &capture ) );
             BOOST_CHECK( google::protobuf::util::MessageDifferencer::Equals( capture.document(), sheet ) );
-            BOOST_CHECK_EQUAL( capture.schema_version(), 9u );
+            BOOST_CHECK_EQUAL( capture.schema_version(), 10u );
             reply.mutable_message()->PackFrom( observation );
         }
         else if( aRequest.message().Is<ReadDocumentLifecycleState>() )

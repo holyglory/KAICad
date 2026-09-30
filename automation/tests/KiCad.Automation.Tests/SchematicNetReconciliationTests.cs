@@ -355,7 +355,9 @@ public sealed class SchematicNetReconciliationTests
         { Observed = changed.Hierarchy.Data.Clone(), ObservedElectrical = changed });
         Assert.AreEqual("native_ownership_resolution_required", rebind.ErrorCode);
         Assert.IsNotNull(rebind.ResolutionRequests);
-        Assert.IsTrue(rebind.ResolutionRequests!.Any(r => r.Code == "native_component_rebind_required"));
+        var request = rebind.ResolutionRequests!.Single(r => r.Code == "native_component_rebind_required");
+        Assert.AreEqual(request.ProposedComponentId, request.CandidateComponentIds.Single());
+        Assert.IsTrue(request.CandidatePartIds.Count > 0);
         Assert.ThrowsExactly<OperationCanceledException>(() => SchematicNetReconciliation.Plan(state, new(true)));
     }
 

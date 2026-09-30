@@ -627,9 +627,21 @@ public static class SchematicNativeAdditionProjection
                 Guid derived = addition.DerivedPart;
                 if (reboundKeys.Contains(addition.Key) && answer is null)
                 {
+                    // A changed library signature cannot safely preserve the former component: its
+                    // remaining units would have a different part definition. Offer the proposed
+                    // component unless exact evidence proves the old part is the same replacement.
+                    var componentChoices = new List<Guid> { addition.Proposed };
+                    if (reboundComponents.TryGetValue(addition.Key, out var formerComponent)
+                        && components.TryGetValue(formerComponent, out var formerOwner)
+                        && definitions.TryGetValue(formerOwner.DefinitionId, out var formerDefinition)
+                        && parts.TryGetValue(formerDefinition.PartId, out var formerPart)
+                        && Signature(formerPart.Units, formerPart.Pins) == addition.Signature
+                        && evidence.TryGetValue(formerPart.Id, out var formerLibraries)
+                        && formerLibraries.Contains(addition.Library))
+                        componentChoices.Insert(0, formerComponent);
                     requests.Add(Request(addition, "native_component_rebind_required",
                         candidates.Count == 0 ? [derived] : [.. candidates.Order()],
-                        [reboundComponents[addition.Key], addition.Proposed],
+                        componentChoices,
                         "KiCad changed the library definition or pin identities of an existing component. Choose the exact replacement part and whether to preserve its component identity; no name, position or pin-number inference is applied."));
                     continue;
                 }

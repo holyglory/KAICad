@@ -242,6 +242,7 @@ internal static class SchematicSynchronizationExecutor
         // Preserve native enumeration in its own electrical checkpoint. XML
         // enumeration is not an object-property change and need not be rewritten.
         var baseline = candidate with { Schematic = final.Electrical.Hierarchy.Data.Clone() };
+        var fileLocations = await NativeSheetFileLocations.CaptureAsync(client, final.Electrical.Hierarchy, token);
         var resultReceipt = new DesignSynchronizationReceipt(2, intent.OperationId, saved.State.InstanceId,
             intent.DesignPath, intent.RequestedRecoveryRevisionToken!, publication.FileSha256, client.Epoch,
             final.State.Revision.Epoch, final.State.Revision.Sequence, receipt is not null, true,
@@ -254,7 +255,7 @@ internal static class SchematicSynchronizationExecutor
             TrackingComplete = final.Electrical.Hierarchy.TrackingComplete, BaselineElectrical = final.Electrical.Clone(),
             ObservedElectrical = final.Electrical.Clone(), PendingMutation = null, PendingNativeState = null,
             PendingNativeSave = null, PendingCandidateFileBytes = null, PendingPublication = null, HierarchyResolution = null,
-            LastSynchronization = resultReceipt, OwnershipResolution = null
+            LastSynchronization = resultReceipt, OwnershipResolution = null, NativeFileLocations = fileLocations
         }, saved.RevisionToken);
         if (checkpoint is not null) await checkpoint("baseline-committed", CancellationToken.None);
         // A failure here leaves the complete result in the atomic recovery

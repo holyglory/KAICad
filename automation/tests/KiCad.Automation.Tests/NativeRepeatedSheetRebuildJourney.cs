@@ -73,7 +73,11 @@ public sealed partial class NativeSessionTests
             new(original.State.Revision.Epoch, original.State.Revision.Sequence), original.Electrical.Hierarchy.TrackingComplete,
             baseline, xml, baseline.Schematic.Clone(), [], BaselineElectrical: original.Electrical.Clone(),
             ObservedElectrical: original.Electrical.Clone()), null);
-        await using var host = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.ProductionStartInfo(),
+        var mcpStart = SyncHarnessProcessTests.ProductionStartInfo();
+        // The companion must use KiCad's loaded-file observation, not its own environment.
+        mcpStart.Environment["KAICAD_FIXTURE_SHEET_ROOT"] = Path.Combine(fixture.Directory, "wrong-agent-directory");
+        mcpStart.Environment["KAICAD_FIXTURE_SHEET_LEAF"] = "wrong-agent-file.kicad_sch";
+        await using var host = await StdioMcpFixture.StartAsync(mcpStart,
             FileName("mcp-state"), FileName("mcp.log"), token);
         int step = 0;
         async Task<JsonElement> Call(string name, object arguments)

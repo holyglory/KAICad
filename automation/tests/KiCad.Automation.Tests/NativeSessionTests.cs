@@ -237,6 +237,11 @@ public sealed partial class NativeSessionTests
                 start.Environment["WXTRACE"] = "KICAD_SETTINGS";
                 start.Environment["XDG_CONFIG_HOME"] = Path.Combine(projectDirectory, "config");
                 start.Environment["XDG_CACHE_HOME"] = Path.Combine(projectDirectory, "cache");
+                if (journey == NativeJourney.RepeatedSheetRebuild)
+                {
+                    start.Environment["KAICAD_FIXTURE_SHEET_ROOT"] = Path.Combine(projectDirectory, "sheet-topology");
+                    start.Environment["KAICAD_FIXTURE_SHEET_LEAF"] = "adopted-nested.kicad_sch";
+                }
                 if (journey is NativeJourney.RecursiveEditor or NativeJourney.DiagramCanvas) start.Environment["GTK_THEME"] = theme == "dark" ? "Adwaita:dark" : "Adwaita";
                 foreach (string arg in new[] { "--new", "--automation", id, "--api-socket", socket,
                                                "--automation-log", Path.Combine(evidence, $"native-{index}.log"),

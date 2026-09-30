@@ -168,6 +168,8 @@ private:
     HANDLER_RESULT<google::protobuf::Empty> handleSetTitleBlockInfo(
             const HANDLER_CONTEXT<commands::SetTitleBlockInfo>& aCtx ) override;
     std::optional<ApiResponseStatus> checkForStableObservation();
+    HANDLER_RESULT<kiapi::automation::v1::SchematicFileLocations> handleReadFileLocations(
+            const HANDLER_CONTEXT<kiapi::automation::v1::ReadSchematicFileLocations>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::SchematicChangeJournal> handleReadChangeJournal(
             const HANDLER_CONTEXT<kiapi::automation::v1::ReadSchematicChangeJournal>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::SchematicTrackingErcMarkers> handleReadErcMarkers(

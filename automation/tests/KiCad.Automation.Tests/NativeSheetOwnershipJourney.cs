@@ -83,20 +83,33 @@ public sealed partial class NativeSessionTests
         }
         var original = await Publish("initial");
         var before = await Capture();
+        var nativeFiles = await client.InvokeAsync<ReadSchematicFileLocations, SchematicFileLocations>(new()
+            { Document = root.Clone(), ExpectedRevision = before.State.Revision.Clone() }, token);
+        NativeSheetFileLocations.Validate(nativeFiles, before.Electrical.Hierarchy, client.Epoch);
+        Assert.AreEqual(before, await Capture(), "File-location observation changes neither content nor editor context.");
+        var staleFileRead = new ReadSchematicFileLocations { Document = root.Clone(), ExpectedRevision = before.State.Revision.Clone() };
+        staleFileRead.ExpectedRevision.Sequence++;
+        Assert.AreEqual(3, (await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
+            client.InvokeAsync<ReadSchematicFileLocations, SchematicFileLocations>(staleFileRead, token))).Status);
+        Assert.AreEqual(before, await Capture());
         var parent = Symbol(before, root, new KIID { Value = fixture.First }).Clone();
         parent.Id.Value = Guid.NewGuid().ToString("D"); parent.ChildScreenId.Value = Guid.NewGuid().ToString("D");
         Directory.CreateDirectory(Path.Combine(fixture.Directory, "sheet-topology"));
-        parent.NameField.Text.Text_ = "Added parent"; parent.FilenameField.Text.Text_ = "sheet-topology/adopted-parent.kicad_sch";
+        parent.NameField.Text.Text_ = "Added parent"; parent.FilenameField.Text.Text_ = "${KAICAD_FIXTURE_SHEET_ROOT}/adopted-parent.kicad_sch";
         parent.PageNumber = "10"; parent.InstanceRecords = null; parent.Variants = new(); parent.Path = root.SheetPath.Clone();
         await Native(true, new SchematicItemOperation { TargetDocument = root.Clone(), Create = Any.Pack(parent) });
         var parentDocument = Child(root, parent.Id);
         var withParent = await Publish("native-add-parent");
+        Assert.IsNotNull(store.Read()!.State.NativeFileLocations);
+        var parentFile = NativeSheetFileLocations.Find(store.Read()!.State, string.Join('/', parentDocument.SheetPath.Path.Select(p => p.Value)));
+        Assert.IsNotNull(parentFile); Assert.IsTrue(parentFile.DeclarationIsAbsolute && parentFile.DeclarationMatchesLoaded);
+        Assert.AreEqual(Path.Combine(fixture.Directory, "sheet-topology", "adopted-parent.kicad_sch"), parentFile.LoadedFilename);
         Guid parentModel = Binding(withParent, parentDocument).SheetInstanceId;
         Assert.AreEqual(original.Engineering.Circuit.SheetInstances.Count + 1, withParent.Engineering.Circuit.SheetInstances.Count);
 
         var nested = Symbol(await Capture(), root, parent.Id).Clone();
         nested.Id.Value = Guid.NewGuid().ToString("D"); nested.ChildScreenId.Value = Guid.NewGuid().ToString("D");
-        nested.NameField.Text.Text_ = "Added nested"; nested.FilenameField.Text.Text_ = "../adopted-nested.kicad_sch";
+        nested.NameField.Text.Text_ = "Added nested"; nested.FilenameField.Text.Text_ = "../${KAICAD_FIXTURE_SHEET_LEAF}";
         nested.PageNumber = "11"; nested.InstanceRecords = null; nested.Path = parentDocument.SheetPath.Clone();
         await Native(true, new SchematicItemOperation { TargetDocument = parentDocument.Clone(), Create = Any.Pack(nested) });
         var nestedDocument = Child(parentDocument, nested.Id);
@@ -106,7 +119,7 @@ public sealed partial class NativeSessionTests
 
         var moved = Symbol(await Capture(), parentDocument, nested.Id).Clone();
         moved.Path = root.SheetPath.Clone(); moved.InstanceRecords = null;
-        moved.FilenameField.Text.Text_ = "adopted-nested.kicad_sch";
+        moved.FilenameField.Text.Text_ = "${KAICAD_FIXTURE_SHEET_LEAF}";
         await Native(true, new SchematicItemOperation { TargetDocument = parentDocument.Clone(), Remove = nested.Id.Clone() },
             new SchematicItemOperation { TargetDocument = root.Clone(), Create = Any.Pack(moved) });
         nestedDocument = Child(root, nested.Id);
@@ -131,6 +144,7 @@ public sealed partial class NativeSessionTests
         var reparent = undone with { Engineering = undone.Engineering with { Circuit = undone.Engineering.Circuit with
         { SheetInstances = undone.Engineering.Circuit.SheetInstances.Select(s => s.Id == nestedModel ? s with { ParentId = parentModel } : s).ToArray() } } };
         var fromXml = await Xml(reparent, "xml-reparent");
+        Assert.AreEqual("../${KAICAD_FIXTURE_SHEET_LEAF}", Symbol(await Capture(), parentDocument, nested.Id).FilenameField.Text.Text_);
         Assert.AreEqual(nestedModel, Binding(fromXml, Child(parentDocument, nested.Id)).SheetInstanceId);
         Assert.AreEqual(parentModel, fromXml.Engineering.Circuit.SheetInstances.Single(s => s.Id == nestedModel).ParentId);
         // Move one instance of the populated shared screen. Its other instance,
@@ -336,6 +350,8 @@ public sealed partial class NativeSessionTests
             nativeRepeatedInsertion = true, nativeRepeatedInsertionUndoRedo = true,
             xmlRepeatedInsertion = true, xmlRepeatedInsertionUndoRedo = true, repeatedInstancesReloaded = true,
             swappedDefinitionRefusedWithoutMutation = true, nativeRecordOrderPrepared = true,
+            nativeVariablePathsPreserved = true, conflictingCompanionEnvironmentIgnored = true,
+            fileLocationObservationReadOnly = true, staleFileLocationReadRefused = true,
             detachedFilesPreserved = true, publicSynchronization = true }), token);
     }
 }

@@ -34,12 +34,13 @@ public static class DesignRecoveryReattachment
             throw Error("invalid_recovery_revision", "The native document session changed again or its revision regressed.");
         // Validate the captured representation; keep coverage limitations explicit.
         _ = SchematicDataXml.Read(SchematicDataXml.Write(observed.Electrical.Hierarchy.Data));
+        var files = await NativeSheetFileLocations.CaptureAsync(client, observed.Electrical.Hierarchy, token, session);
         token.ThrowIfCancellationRequested();
         return store.Save(saved.State with
         {
             Observed = observed.Electrical.Hierarchy.Data.Clone(), ObservedElectrical = observed.Electrical.Clone(),
             NativeRevision = new(revision.Epoch, revision.Sequence), TrackingComplete = observed.Electrical.Hierarchy.TrackingComplete,
-            HierarchyResolution = null, OwnershipResolution = null
+            HierarchyResolution = null, OwnershipResolution = null, NativeFileLocations = files
         }, expectedRecoveryRevision);
     }
 

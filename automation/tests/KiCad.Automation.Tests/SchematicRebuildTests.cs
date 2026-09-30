@@ -253,6 +253,49 @@ public sealed class SchematicRebuildTests
         var conflict = SchematicSynchronizationPlanner.Plan(State(complete, movedModel, concurrent));
         Assert.IsFalse(conflict.CanPrepare); Assert.IsEmpty(conflict.NativeOperations);
         Assert.AreEqual("ownership_change_with_xml_edits", conflict.ErrorCode);
+
+        // Native file provenance resolves variables without consulting the test
+        // process environment. Existing literal-only records retain their fallback.
+        var variable = complete with { Schematic = complete.Schematic.Clone() };
+        var modelPaths = variable.SheetBindings.ToDictionary(b => b.SheetInstanceId, b => SchematicDesignBindings.PathKey(b.NativePath));
+        var filePaths = variable.Engineering.Circuit.SheetInstances.ToDictionary(s => s.Id,
+            s => Path.Combine(Path.GetTempPath(), "native-file-observation", s.Id == sheets[1] ? "sub" : "files", s.Id.ToString("D") + ".kicad_sch"));
+        filePaths[movedId] = Path.Combine(Path.GetTempPath(), "native-file-observation", "external", "power.kicad_sch");
+        foreach (var sheet in variable.Engineering.Circuit.SheetInstances.Where(s => s.ParentId is not null))
+        {
+            var native = SchematicNativeSheetChanges.SheetSymbolOf(variable.Schematic, modelPaths[sheet.Id])!;
+            native.FilenameField.Text.Text_ = sheet.Id == movedId ? "${NATIVE_POWER_DIR}/power.kicad_sch"
+                : Path.GetRelativePath(Path.GetDirectoryName(filePaths[sheet.ParentId!.Value])!, filePaths[sheet.Id]);
+            var parent = variable.Schematic.Instances.Single(s => SchematicNativeSheetChanges.Key(s) == modelPaths[sheet.ParentId!.Value]);
+            int index = parent.Items.ToList().FindIndex(i => i.Is(SheetSymbol.Descriptor) && i.Unpack<SheetSymbol>().Id.Equals(native.Id));
+            parent.Items[index] = Any.Pack(native);
+        }
+        var wantedVariable = variable with { Engineering = movedModel.Engineering };
+        var variableState = State(variable, wantedVariable);
+        var nativeFiles = new SchematicFileLocations { Document = variable.Schematic.Document.Clone(), ProcessEpoch = "fixture-process",
+            Revision = new() { Epoch = variableState.NativeRevision.Epoch, Sequence = variableState.NativeRevision.Sequence } };
+        foreach (var sheet in variable.Engineering.Circuit.SheetInstances)
+        {
+            var screen = variable.Schematic.Instances.Single(s => SchematicNativeSheetChanges.Key(s) == modelPaths[sheet.Id]);
+            nativeFiles.Locations.Add(new SchematicFileLocation { Path = screen.Metadata.Document.SheetPath.Clone(), ScreenId = screen.Metadata.ScreenId.Clone(),
+                LoadedFilename = filePaths[sheet.Id], ResolvedFilename = filePaths[sheet.Id], DeclarationMatchesLoaded = true,
+                DeclarationIsAbsolute = sheet.Id == movedId,
+                DeclaredFilename = SchematicNativeSheetChanges.SheetSymbolOf(variable.Schematic, modelPaths[sheet.Id])?.FilenameField.Text.Text_ ?? filePaths[sheet.Id] });
+        }
+        variableState = variableState with { NativeFileLocations = nativeFiles };
+        var variablePlan = SchematicSynchronizationPlanner.Plan(variableState);
+        Assert.IsTrue(variablePlan.CanPrepare, variablePlan.ErrorCode + ": " + variablePlan.ErrorMessage);
+        string newPath = SchematicDesignBindings.PathKey(variablePlan.Candidate!.SheetBindings.Single(b => b.SheetInstanceId == movedId).NativePath);
+        Assert.AreEqual("${NATIVE_POWER_DIR}/power.kicad_sch",
+            SchematicNativeSheetChanges.SheetSymbolOf(variablePlan.Candidate.Schematic, newPath)!.FilenameField.Text.Text_);
+        var drifted = nativeFiles.Clone(); drifted.Locations.Single(f => f.LoadedFilename == filePaths[movedId]).DeclarationMatchesLoaded = false;
+        var drift = SchematicSynchronizationPlanner.Plan(variableState with { NativeFileLocations = drifted });
+        Assert.IsFalse(drift.CanPrepare); Assert.IsEmpty(drift.NativeOperations);
+        Assert.AreEqual("native_sheet_file_resolution_changed", drift.ErrorCode);
+        var staleFiles = nativeFiles.Clone(); staleFiles.Revision.Sequence--;
+        var stalePlan = SchematicSynchronizationPlanner.Plan(variableState with { NativeFileLocations = staleFiles });
+        Assert.IsFalse(stalePlan.CanPrepare); Assert.IsEmpty(stalePlan.NativeOperations);
+        Assert.AreEqual("xml_sheet_filename_unresolved", stalePlan.ErrorCode);
     }
 
     [TestMethod]

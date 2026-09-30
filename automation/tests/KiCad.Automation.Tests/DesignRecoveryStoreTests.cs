@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Google.Protobuf;
 using Kiapi.Schematic.Types;
@@ -85,6 +86,26 @@ public sealed class DesignRecoveryStoreTests
             SchematicDesignXml.Write(recovered.State.Baseline, recovered.State.KnowledgeLibraries));
         CollectionAssert.AreEqual(state.KnowledgeLibraries.Select(ComponentKnowledgeXml.WriteLibrary).ToArray(),
             recovered.State.KnowledgeLibraries.Select(ComponentKnowledgeXml.WriteLibrary).ToArray());
+        var locations = new SchematicFileLocations { Document = state.Observed.Document.Clone(), ProcessEpoch = "fixture-process",
+            Revision = new() { Epoch = state.NativeRevision.Epoch, Sequence = state.NativeRevision.Sequence } };
+        foreach (var screen in state.Observed.Instances)
+        {
+            string nativePath = SchematicNativeSheetChanges.Key(screen);
+            string filename = Path.Combine(Path.GetTempPath(), screen.Metadata.ScreenId.Value + ".kicad_sch");
+            locations.Locations.Add(new SchematicFileLocation { Path = screen.Metadata.Document.SheetPath.Clone(), ScreenId = screen.Metadata.ScreenId.Clone(),
+                LoadedFilename = filename, ResolvedFilename = filename, DeclarationMatchesLoaded = true,
+                DeclaredFilename = SchematicNativeSheetChanges.SheetSymbolOf(state.Observed, nativePath)?.FilenameField?.Text?.Text_ ?? filename });
+        }
+        var withFiles = store.Save(state with { NativeFileLocations = locations }, saved.RevisionToken);
+        Assert.AreEqual(locations, new DesignRecoveryStore(path).Read()!.State.NativeFileLocations);
+        using (var document = JsonDocument.Parse(File.ReadAllBytes(path))) Assert.AreEqual(11, document.RootElement.GetProperty("Version").GetInt32());
+        Assert.AreEqual(withFiles.RevisionToken, store.Save(withFiles.State, withFiles.RevisionToken).RevisionToken);
+        var incomplete = locations.Clone(); incomplete.Locations.RemoveAt(0);
+        Assert.ThrowsExactly<AutomationException>(() => store.Save(withFiles.State with { NativeFileLocations = incomplete }, withFiles.RevisionToken));
+        Assert.AreEqual(withFiles.RevisionToken, store.Read()!.RevisionToken, "A bad file observation cannot replace recovery.");
+        var stale = locations.Clone(); stale.Revision.Sequence--;
+        Assert.IsNull(NativeSheetFileLocations.Find(withFiles.State with { NativeFileLocations = stale },
+            SchematicNativeSheetChanges.Key(state.Observed.Instances[0])), "Stale provenance is never used to resolve a move.");
     });
 
     [TestMethod]

@@ -59,6 +59,14 @@ internal static class SchematicXmlSheetChanges
             string NativeFile(Guid id)
             {
                 if (fileNames.TryGetValue(id, out var known)) return known;
+                if (NativeSheetFileLocations.Find(state, oldPaths[id]) is { } location)
+                {
+                    if (!location.DeclarationMatchesLoaded)
+                        throw new AutomationException("native_sheet_file_resolution_changed",
+                            "The sheet filename expression no longer resolves to the file KiCad loaded. Reopen or resolve that difference before moving the sheet.");
+                    fileNames.Add(id, location.LoadedFilename);
+                    return location.LoadedFilename;
+                }
                 var sheet = before[id];
                 string file;
                 if (sheet.ParentId is not { } parent)
@@ -117,7 +125,23 @@ internal static class SchematicXmlSheetChanges
                     string oldDirectory = Path.GetDirectoryName(NativeFile(before[sheet.Id].ParentId!.Value))!;
                     string newDirectory = Path.GetDirectoryName(NativeFile(parent))!;
                     if (!string.Equals(oldDirectory, newDirectory, StringComparison.Ordinal))
-                        symbol.FilenameField.Text.Text_ = Path.GetRelativePath(newDirectory, NativeFile(sheet.Id)).Replace('\\', '/');
+                    {
+                        string originalName = symbol.FilenameField.Text.Text_;
+                        if (originalName.Contains('$') || originalName.Contains('%'))
+                        {
+                            var location = NativeSheetFileLocations.Find(state, oldPath);
+                            if (location is null)
+                                throw new AutomationException("xml_sheet_filename_unresolved", "Refresh the native file-location observation before moving this variable-backed sheet.");
+                            _ = NativeFile(sheet.Id); // Reject an expression that drifted from the loaded file.
+                            if (!location.DeclarationIsAbsolute)
+                            {
+                                string prefix = Path.GetRelativePath(newDirectory, oldDirectory).Replace('\\', '/');
+                                symbol.FilenameField.Text.Text_ = prefix == "." ? originalName : prefix + "/" + originalName;
+                            }
+                        }
+                        else
+                            symbol.FilenameField.Text.Text_ = Path.GetRelativePath(newDirectory, NativeFile(sheet.Id)).Replace('\\', '/');
+                    }
                 }
                 if (symbol.InstanceRecords is { } placements)
                 {

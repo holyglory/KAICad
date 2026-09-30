@@ -14,7 +14,6 @@ finite_services=["probe"]
 build=true
 timeout_seconds=900
 
-# User-selected public download-only route: https://kicad.vr.ae.
 # Immutable checkout generations keep development builds away from the server.
 [deployment.downloads]
 source=["checkout"]
@@ -1610,7 +1609,7 @@ command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--disable-build
 [[test.native-owner-restoration.check]]
 name="contracts"
 tier="development"
-command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--configuration", "Debug", "--no-build", "--no-restore", "--filter", "FullyQualifiedName~SymbolSheetOwnershipTests|FullyQualifiedName~AutomaticDesignSynchronizationTests|FullyQualifiedName~SchematicOwnershipResolutionTests|FullyQualifiedName~SchematicNativeRestorationTests|FullyQualifiedName~SchematicNativeRemovalProjectionTests|FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicPropertyProjectionTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicNetReconciliationTests|FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~RetainedXmlHistoryTests|FullyQualifiedName~DesignSynchronizationReceiptTests|FullyQualifiedName~McpProcessTests|FullyQualifiedName~PinPartition", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-owner-restoration"]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--configuration", "Debug", "--no-build", "--no-restore", "--filter", "FullyQualifiedName~SchematicRebuildTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignRecoveryReattachmentTests|FullyQualifiedName~DesignRecoveryNativeObserverTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~SymbolSheetOwnershipTests|FullyQualifiedName~AutomaticDesignSynchronizationTests|FullyQualifiedName~SchematicOwnershipResolutionTests|FullyQualifiedName~SchematicNativeRestorationTests|FullyQualifiedName~SchematicNativeRemovalProjectionTests|FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicPropertyProjectionTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicNetReconciliationTests|FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~RetainedXmlHistoryTests|FullyQualifiedName~DesignSynchronizationReceiptTests|FullyQualifiedName~McpProcessTests|FullyQualifiedName~PinPartition", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-owner-restoration"]
 retained_artifacts=[{ name = "native-owner-restoration", path = "automation/artifacts/native-owner-restoration", max_bytes = 16777216 }]
 
 [test.native-removal-projection]

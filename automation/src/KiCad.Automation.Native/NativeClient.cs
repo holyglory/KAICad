@@ -19,6 +19,8 @@ public sealed class NativeClient(INativeTransport transport, string endpoint, st
     private readonly string clientName = $"kicad-automation-{Guid.NewGuid():N}";
     private string? epoch = expectedEpoch;
     private uint snapshotSchema = 10;
+    private HashSet<string> handledRequests = new(StringComparer.Ordinal);
+    internal bool LastHandshakeHandles(string request) => handledRequests.Contains(request);
     public string Endpoint { get; } = endpoint;
     public string Epoch => epoch ?? throw new InvalidOperationException("Handshake has not completed.");
 
@@ -36,6 +38,7 @@ public sealed class NativeClient(INativeTransport transport, string endpoint, st
             new GetAutomationSession(), cancellationToken);
         if (session.ProtocolVersion != 1 || string.IsNullOrWhiteSpace(session.InstanceId) || session.Epoch != Epoch)
             throw new AutomationException("incompatible_native", "The native peer does not implement the required automation session contract.");
+        handledRequests = session.HandledRequests.ToHashSet(StringComparer.Ordinal);
         return session;
     }
 

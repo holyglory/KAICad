@@ -19,7 +19,8 @@ public sealed record DesignRecoveryInspection(string RevisionToken, DesignRecove
     LifecycleOperationResult? SaveReceipt = null);
 
 public sealed record DesignRecoveryObservation(DesignRecoveryInspection Inspection,
-    SchematicHierarchyDataSnapshot Snapshot, SchematicElectricalState? Electrical = null);
+    SchematicHierarchyDataSnapshot Snapshot, SchematicElectricalState? Electrical = null,
+    SchematicFileLocations? FileLocations = null);
 
 /// <summary>Inspect the saved operation only. Never submit, clear a pending edit,
 /// replace the desired file, or advance the synchronized baseline.</summary>
@@ -61,6 +62,7 @@ public static class DesignRecoveryInspector
             NativeRevision = new(snapshot.Revision.Epoch, snapshot.Revision.Sequence),
             TrackingComplete = snapshot.TrackingComplete,
             ObservedElectrical = observed.Electrical ?? (changed ? null : saved.State.ObservedElectrical),
+            NativeFileLocations = observed.FileLocations,
             HierarchyResolution = changed || electricalChanged ? null : saved.State.HierarchyResolution
         }, expectedRevisionToken);
     }
@@ -100,7 +102,8 @@ public static class DesignRecoveryInspector
         // Validate supported typed serialization before handing data to reconciliation.
         // Explicit coverage gaps and incomplete tracking remain in the returned snapshot.
         _ = SchematicDataXml.Read(SchematicDataXml.Write(snapshot.Data));
-        return new(inspection, snapshot, electrical);
+        var files = await NativeSheetFileLocations.CaptureAsync(client, snapshot, cancellationToken, session);
+        return new(inspection, snapshot, electrical, files);
     }
 
     /// <summary>Bootstrap only a missing electrical baseline after proving that

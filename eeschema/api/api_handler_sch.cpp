@@ -181,6 +181,8 @@ API_HANDLER_SCH::API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext,
             &API_HANDLER_SCH::handleReadScreenData );
     registerHandler<kiapi::automation::v1::ReadSchematicHierarchyData, kiapi::automation::v1::SchematicHierarchyDataSnapshot>(
             &API_HANDLER_SCH::handleReadHierarchyData );
+    registerHandler<kiapi::automation::v1::ReadSchematicFileLocations, kiapi::automation::v1::SchematicFileLocations>(
+            &API_HANDLER_SCH::handleReadFileLocations );
     registerHandler<kiapi::automation::v1::ReadSchematicElectricalState, kiapi::automation::v1::SchematicElectricalState>(
             &API_HANDLER_SCH::handleReadElectricalState );
     registerHandler<kiapi::automation::v1::CaptureSchematicObservation, kiapi::automation::v1::SchematicObservation>(
@@ -2485,6 +2487,69 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicHierarchyDataSnapshot> API_HANDLE
     result.mutable_revision()->set_epoch( schematic()->ChangeJournal().Epoch() );
     result.mutable_revision()->set_sequence( schematic()->ChangeJournal().Sequence() );
     result.set_tracking_complete( false );
+    return result;
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::SchematicFileLocations> API_HANDLER_SCH::handleReadFileLocations(
+        const HANDLER_CONTEXT<kiapi::automation::v1::ReadSchematicFileLocations>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    auto reject = []( const std::string& message ) -> HANDLER_RESULT<SchematicFileLocations>
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( message );
+        return tl::unexpected( error );
+    };
+    if( auto busy = checkForStableObservation() ) return tl::unexpected( *busy );
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+    if( !aCtx.Request.document().has_sheet_path()
+            || !resolveBatchSheet( UnpackSheetPath( aCtx.Request.document().sheet_path() ) ) )
+        return reject( "File locations require an explicit loaded sheet instance" );
+    const std::string epoch = schematic()->ChangeJournal().Epoch();
+    const uint64_t sequence = schematic()->ChangeJournal().Sequence();
+    if( !aCtx.Request.has_expected_revision() || aCtx.Request.expected_revision().epoch() != epoch
+            || aCtx.Request.expected_revision().sequence() != sequence )
+        return reject( "Stale schematic revision; refresh the hierarchy before reading file locations" );
+    std::vector<SCH_SHEET_PATH> paths;
+    for( const SCH_SHEET_PATH& path : schematic()->Hierarchy() ) paths.push_back( path );
+    std::sort( paths.begin(), paths.end(), []( const auto& a, const auto& b ) { return a.Path() < b.Path(); } );
+    SchematicFileLocations result;
+    result.mutable_document()->CopyFrom( aCtx.Request.document() );
+    if( !paths.empty() ) PackSheetPath( *result.mutable_document()->mutable_sheet_path(), paths.front().Path() );
+    result.mutable_revision()->set_epoch( epoch );
+    result.mutable_revision()->set_sequence( sequence );
+    result.set_process_epoch( apiServer().Token() );
+    for( const SCH_SHEET_PATH& path : paths )
+    {
+        SCH_SCREEN* screen = path.LastScreen();
+        if( !screen ) return reject( "A loaded sheet has no physical screen" );
+        wxFileName loaded( screen->GetFileName() );
+        if( !loaded.MakeAbsolute( project().GetProjectPath() ) )
+            return reject( "The loaded schematic filename is not absolute" );
+        loaded.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+        const wxString declared = path.Last()->GetFileName();
+        wxFileName resolved( ExpandEnvVarSubstitutions( declared, &project() ) );
+        const bool absolute = resolved.IsAbsolute();
+        const SCH_SHEET* parentSheet = path.size() > 1 ? path.GetSheet( static_cast<unsigned>( path.size() - 2 ) ) : nullptr;
+        const wxString parent = parentSheet && parentSheet->GetScreen()
+                ? wxFileName( parentSheet->GetScreen()->GetFileName() ).GetPath()
+                : project().GetProjectPath();
+        const bool resolvable = !declared.IsEmpty() && resolved.MakeAbsolute( parent );
+        if( resolvable ) resolved.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+        auto* file = result.add_locations();
+        PackSheetPath( *file->mutable_path(), path.Path() );
+        file->mutable_screen_id()->set_value( screen->GetUuid().AsStdString() );
+        file->set_loaded_filename( loaded.GetFullPath().ToStdString( wxConvUTF8 ) );
+        file->set_declared_filename( declared.ToStdString( wxConvUTF8 ) );
+        if( resolvable ) file->set_resolved_filename( resolved.GetFullPath().ToStdString( wxConvUTF8 ) );
+        file->set_declaration_is_absolute( absolute );
+        file->set_declaration_matches_loaded( resolvable && resolved == loaded );
+    }
+    if( epoch != schematic()->ChangeJournal().Epoch() || sequence != schematic()->ChangeJournal().Sequence() )
+        return reject( "Schematic changed while reading file locations; refresh before retrying" );
     return result;
 }
 

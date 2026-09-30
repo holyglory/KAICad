@@ -372,6 +372,30 @@ message SchematicHierarchyDataSnapshot {
   // -- end lane 2C --
 }
 
+// Read-only local provenance, separate from portable design XML and snapshot schemas.
+// The expected revision is required; this request never navigates or changes KiCad.
+message ReadSchematicFileLocations {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  DocumentRevision expected_revision = 2;
+}
+
+message SchematicFileLocation {
+  kiapi.common.types.SheetPath path = 1;
+  kiapi.common.types.KIID screen_id = 2;
+  string loaded_filename = 3;
+  string declared_filename = 4;
+  string resolved_filename = 5;
+  bool declaration_is_absolute = 6;
+  bool declaration_matches_loaded = 7;
+}
+
+message SchematicFileLocations {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  DocumentRevision revision = 2;
+  repeated SchematicFileLocation locations = 3;
+  string process_epoch = 4;
+}
+
 // One native checkpoint for electrical reconciliation. Net names are display
 // values, not persistent net identities; memberships use sheet paths and UUIDs.
 message ReadSchematicElectricalState {

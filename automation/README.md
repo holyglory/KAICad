@@ -3547,9 +3547,9 @@ native-edit refusal. The final ownership regression graph
 `t20260930T014111Z-8c4df7` passed. Only documentation/evidence wording changed afterward.
 
 The parent topology outcome remains open. Shared-parent reparenting is tracked in
-`pd6a383227f9d47b8`; other variable-backed filenames beyond `KIPRJMOD` are tracked in
-`p2b873890e79c72c2`. Shared-instance creation and its remaining ownership cases are
-described below. Unsupported cases preserve the competing versions.
+`pd6a383227f9d47b8`. Native variable-backed filename resolution is qualified below
+under `p2b873890e79c72c2`. Shared-instance creation and its remaining ownership cases
+are also described below. Unsupported cases preserve the competing versions.
 
 
 Shared-sheet insertion (2026-09-30): a new native instance of a known physical
@@ -3583,3 +3583,31 @@ build mode after MSBuild worker exits.
 `p2d066b3b1abf0c6a`: new instances with undrawn components or units owned outside the
 repeated sheet, including complete multi-unit native proof. Those choices are not
 inferred from names or positions and are not covered by the three-probe journey.
+
+
+Native file-location provenance (2026-09-30): `ReadSchematicFileLocations` reports
+loaded file paths and the current native resolution of filename expressions at an
+exact schematic revision. It is read-only and does not navigate the editor.
+Recovery refresh, reattachment and completed synchronization retain the optional
+observation in recovery envelope version 11; design XML remains portable and
+contains no new absolute-path provenance. Older recovery records still read, and
+older native builds without the request keep the existing literal/KIPRJMOD path.
+
+Sheet relocation uses the loaded native file and parent directories. Absolute
+variable expressions remain unchanged; relative expressions are prefixed for the
+new parent without expanding variables in the companion. Missing, stale or
+inconsistent observations cannot authorize variable resolution; an expression
+that no longer resolves to the loaded file is explicitly refused.
+
+Complete native run `t20260930T031947Z-d09107` passed six checks with unchanged
+source. Both projects gave KiCad and the compiled MCP process conflicting variable
+values, then verified the correct loaded files, preserved variable expressions,
+read-only observation, stale-revision refusal, directory moves, rollback,
+undo/redo and reload. Retained `sheet-topology-proof.json` files are under
+`native-rebuild/rebuild-evidence`, manifest
+`0548639cbd28b825f52c337eb337fe3305b5d6acba3b67db50933a7fb3a6c6b4`.
+The final expanded recovery/observer/client/ownership graph
+`t20260930T033049Z-320c7f` passed. Existing fixture tests cover version-11 round-trip
+and no-churn saves, bad-observation preservation, stale provenance, and rejection
+when declared and loaded files differ. Only test coverage/configuration and
+documentation/evidence wording changed after native verification.

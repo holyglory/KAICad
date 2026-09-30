@@ -12,9 +12,9 @@ namespace KiCad.Automation.Native;
 internal static class SchematicXmlSheetChanges
 {
     internal static SchematicSynchronizationPlan? Prepare(DesignRecoveryState state, SchematicDesign desired,
-        SchematicHierarchyMergeResult hierarchy, CancellationToken token)
+        SchematicHierarchyMergeResult hierarchy, CancellationToken token, SchematicDesign? comparisonBaseline = null)
     {
-        var baseline = state.Baseline;
+        var baseline = comparisonBaseline ?? state.Baseline;
         var before = baseline.Engineering.Circuit.SheetInstances.ToDictionary(s => s.Id);
         var after = desired.Engineering.Circuit.SheetInstances.ToDictionary(s => s.Id);
         if (after.Keys.Any(id => !before.ContainsKey(id))
@@ -54,12 +54,14 @@ internal static class SchematicXmlSheetChanges
                     && (!newPaths.TryGetValue(binding.SheetInstanceId, out var next) || SchematicDesignBindings.PathKey(binding.NativePath) != next))
                     return Failure("xml_sheet_binding_changed", "A sheet move keeps its native sheet-symbol identity; preserve its current binding or the corresponding new parent path.");
 
-            var sourceScreens = state.Observed.Instances.ToDictionary(SchematicNativeSheetChanges.Key, StringComparer.Ordinal);
+            var source = comparisonBaseline?.Schematic ?? state.Observed;
+            var sourceScreens = source.Instances.ToDictionary(SchematicNativeSheetChanges.Key, StringComparer.Ordinal);
             var fileNames = new Dictionary<Guid, string>();
             string NativeFile(Guid id)
             {
                 if (fileNames.TryGetValue(id, out var known)) return known;
-                if (NativeSheetFileLocations.Find(state, oldPaths[id]) is { } location)
+                if (state.Baseline.SheetBindings.Any(b => b.SheetInstanceId == id)
+                    && NativeSheetFileLocations.Find(state, oldPaths[id]) is { } location)
                 {
                     if (!location.DeclarationMatchesLoaded)
                         throw new AutomationException("native_sheet_file_resolution_changed",
@@ -73,7 +75,7 @@ internal static class SchematicXmlSheetChanges
                     file = Path.Combine(state.Observed.Document.Project.Path, state.Observed.Document.Project.Name + ".kicad_sch");
                 else
                 {
-                    string relative = SchematicNativeSheetChanges.SheetSymbolOf(state.Observed, oldPaths[id])?.FilenameField?.Text?.Text_
+                    string relative = SchematicNativeSheetChanges.SheetSymbolOf(source, oldPaths[id])?.FilenameField?.Text?.Text_
                         ?? throw new AutomationException("xml_sheet_filename_missing", "A moved sheet needs its recorded native filename.");
                     relative = relative.Replace("${KIPRJMOD}", state.Observed.Document.Project.Path, StringComparison.Ordinal)
                         .Replace("$(KIPRJMOD)", state.Observed.Document.Project.Path, StringComparison.Ordinal);
@@ -83,7 +85,7 @@ internal static class SchematicXmlSheetChanges
                 }
                 fileNames.Add(id, file); return file;
             }
-            var drawing = state.Observed.Clone(); drawing.Instances.Clear();
+            var drawing = source.Clone(); drawing.Instances.Clear();
             var output = new Dictionary<Guid, SchematicScreenData>();
             foreach (Guid id in after.Keys)
             {
@@ -116,7 +118,7 @@ internal static class SchematicXmlSheetChanges
             foreach (var sheet in after.Values.Where(s => s.ParentId is not null))
             {
                 string oldPath = oldPaths[sheet.Id];
-                var symbol = SchematicNativeSheetChanges.SheetSymbolOf(state.Observed, oldPath)?.Clone()
+                var symbol = SchematicNativeSheetChanges.SheetSymbolOf(source, oldPath)?.Clone()
                     ?? throw new AutomationException("xml_sheet_reference_missing", "The saved sheet has no exact native parent reference.");
                 Guid parent = sheet.ParentId!.Value;
                 SetPath(symbol.Path.Path, newPaths[parent]);
@@ -187,7 +189,23 @@ internal static class SchematicXmlSheetChanges
                 SheetBindings = nativeModel.SheetBindings, SymbolBindings = nativeModel.SymbolBindings };
             var bindings = SchematicDesignBindings.Inspect(candidate, state.KnowledgeLibraries, token);
             if (!bindings.IdentitiesResolved) return Failure("xml_sheet_binding_invalid", "The requested hierarchy has unresolved native owners.", bindings.Issues);
-            var operations = SchematicHierarchyDelta.Plan(state.Observed, drawing, token);
+            var deltaTarget = drawing;
+            if (comparisonBaseline is not null)
+            {
+                // The native serializer reports schematic-wide coverage on newly
+                // created screens. Keep that evidence in the candidate; only the
+                // explicit creation-command copy omits the inherited markers.
+                deltaTarget = drawing.Clone();
+                var loadedScreens = state.Observed.Instances.Select(s => s.Metadata.ScreenId.Value).ToHashSet(StringComparer.Ordinal);
+                var rootCoverage = state.Observed.Instances.Single(s => s.Metadata.Document.Equals(state.Observed.Document)).Metadata.UnrepresentedState;
+                foreach (var addedScreen in deltaTarget.Instances.Where(s => !loadedScreens.Contains(s.Metadata.ScreenId.Value)))
+                {
+                    if (!addedScreen.Metadata.UnrepresentedState.SequenceEqual(rootCoverage))
+                        return Failure("xml_new_parent_coverage_changed", "A new parent must preserve the current schematic coverage evidence.");
+                    addedScreen.Metadata.UnrepresentedState.Clear();
+                }
+            }
+            var operations = SchematicHierarchyDelta.Plan(state.Observed, deltaTarget, token);
             if (operations.Count == 0) return Failure("xml_sheet_nothing_to_apply", "The requested sheet change produced no native hierarchy operation.");
             var electrical = new SchematicNetReconciliationResult(engineering, [], projected.RetiredNets, [], projected.CoverageGaps,
                 RemovedSymbolOccurrences: projected.RemovedOccurrences, ComponentChanges: projected.ComponentChanges)

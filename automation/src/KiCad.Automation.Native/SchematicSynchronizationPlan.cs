@@ -125,6 +125,8 @@ public static class SchematicSynchronizationPlanner
                 return SchematicConnectedAdditionPlanner.Prepare(state, desired, hierarchy, connected, gaps, token);
             if (SchematicXmlSharedSheetChanges.Prepare(state, desired, hierarchy, token) is { } sharedSheets)
                 return sharedSheets;
+            if (SchematicXmlNewParentMoves.Prepare(state, desired, hierarchy, token) is { } combinedSheetMoves)
+                return combinedSheetMoves;
             if (SchematicXmlSheetChanges.Prepare(state, desired, hierarchy, token) is { } sheetChanges)
                 return sheetChanges;
             // A sheet generation or lost-files rebuild; an unexplained refusal is design_sync_conflict.

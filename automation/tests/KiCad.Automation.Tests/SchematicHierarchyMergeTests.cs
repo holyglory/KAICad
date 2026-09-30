@@ -87,6 +87,23 @@ public sealed class SchematicHierarchyMergeTests
         var conflict = SchematicHierarchyMerge.Plan(b, x, n);
         Assert.IsFalse(conflict.CanApply); Assert.IsNull(conflict.Merged); Assert.IsEmpty(conflict.NativeOperations);
         Assert.IsTrue(conflict.Conflicts.Any(c => c.Reason == "sheet_delete_modify" && c.Xml is null && c.Native is not null));
+
+        var withBranch = b.Clone(); var branch = AddBranch(withBranch); Note(branch, "Second note");
+        var reordered = withBranch.Clone(); var requestedBranch = reordered.Instances[^1];
+        var reversed = requestedBranch.Items.Reverse().ToArray(); requestedBranch.Items.Clear(); requestedBranch.Items.Add(reversed);
+        var deleted = withBranch.Clone(); var referenceId = branch.Metadata.Document.SheetPath.Path[^1];
+        var parent = deleted.Instances[0];
+        parent.Items.Remove(parent.Items.Single(i => i.Is(SheetSymbol.Descriptor) && i.Unpack<SheetSymbol>().Id.Equals(referenceId)));
+        deleted.Instances.RemoveAt(deleted.Instances.Count - 1);
+        string beforeOrder = SchematicDataXml.Write(reordered);
+        var orderOnly = SchematicHierarchyMerge.Plan(withBranch, reordered, deleted);
+        Assert.IsTrue(orderOnly.CanApply, orderOnly.ErrorMessage); Assert.IsEmpty(orderOnly.Conflicts); Assert.IsEmpty(orderOnly.NativeOperations);
+        Assert.AreEqual(beforeOrder, SchematicDataXml.Write(reordered), "Comparison must not reorder the saved XML input.");
+        var changed = requestedBranch.Items[0].Unpack<SchematicText>(); changed.Text.Text_ = "An actual conflicting edit";
+        requestedBranch.Items[0] = Any.Pack(changed);
+        var realConflict = SchematicHierarchyMerge.Plan(withBranch, reordered, deleted);
+        Assert.IsFalse(realConflict.CanApply); Assert.IsEmpty(realConflict.NativeOperations);
+        Assert.IsTrue(realConflict.Conflicts.Any(c => c.Reason == "sheet_delete_modify"));
     }
 
     [TestMethod]

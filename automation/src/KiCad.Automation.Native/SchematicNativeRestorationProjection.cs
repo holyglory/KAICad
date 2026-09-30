@@ -77,7 +77,6 @@ internal static class SchematicNativeRestorationProjection
             if (!report.IdentitiesResolved || report.Differences.Any(d => d.Field == "unit")) continue;
             var reduced = SchematicNativeRemovalProjection.Project(entry.Design, state.Baseline.Schematic, state.KnowledgeLibraries, token);
             if (reduced.BindingCandidate is null || reduced.RemovedOccurrences.Count == 0 && reduced.RemovedSheetInstances.Count == 0
-                || reduced.MovedSheetInstances.Count != 0
                 || SchematicNetReconciliation.Topology(reduced.BindingCandidate.Engineering.Circuit) != currentTopology
                 || SchematicNetReconciliation.Bindings(reduced.BindingCandidate) != currentBindings) continue;
             candidates.Add(Build(state, entry, token));
@@ -129,6 +128,12 @@ internal static class SchematicNativeRestorationProjection
         var sheetDefinitions = current.Sheets.Select(s => s.Id).ToHashSet();
         var restoredSheets = old.SheetInstances.Where(s => !sheetIds.Contains(s.Id)).ToArray();
         var restoredSheetIds = restoredSheets.Select(s => s.Id).ToHashSet();
+        var historicalSheets = old.SheetInstances.ToDictionary(s => s.Id);
+        var historicalBindings = history.Design.SheetBindings.ToDictionary(b => b.SheetInstanceId);
+        var currentSheetBindings = baseline.SheetBindings.ToDictionary(b => b.SheetInstanceId);
+        var movedSheetIds = current.SheetInstances.Where(s => historicalSheets[s.Id].ParentId != s.ParentId
+            || historicalBindings[s.Id].NativePath[^1] != currentSheetBindings[s.Id].NativePath[^1])
+            .Select(s => s.Id).ToArray();
         var next = current with
         {
             Components = [.. current.Components, .. restoredComponents],
@@ -136,11 +141,12 @@ internal static class SchematicNativeRestorationProjection
             Sheets = [.. current.Sheets.Select(s => s with { Components = [.. s.Components,
                 .. old.Sheets.Single(o => o.Id == s.Id).Components.Where(c => !definitions.Contains(c.Id)).OrderBy(c => c.Id)] }),
                 .. old.Sheets.Where(s => !sheetDefinitions.Contains(s.Id))],
-            SheetInstances = [.. current.SheetInstances, .. restoredSheets]
+            SheetInstances = [.. current.SheetInstances.Select(s => s with { ParentId = historicalSheets[s.Id].ParentId }), .. restoredSheets]
         };
         var addedSymbols = restoredSymbols.Select(s => s.Id).ToHashSet();
         var design = baseline with { Engineering = baseline.Engineering with { Circuit = next }, Schematic = state.Observed.Clone(),
-            SheetBindings = [.. baseline.SheetBindings, .. history.Design.SheetBindings.Where(b => restoredSheetIds.Contains(b.SheetInstanceId))],
+            SheetBindings = [.. baseline.SheetBindings.Select(b => historicalBindings[b.SheetInstanceId]),
+                .. history.Design.SheetBindings.Where(b => restoredSheetIds.Contains(b.SheetInstanceId))],
             SymbolBindings = [.. baseline.SymbolBindings, .. history.Design.SymbolBindings.Where(b => addedSymbols.Contains(b.SymbolOccurrenceId))
                 .OrderBy(b => b.SymbolOccurrenceId)] };
         var native = SchematicModelProjection.NativeSymbols(design, state.Observed);
@@ -177,7 +183,7 @@ internal static class SchematicNativeRestorationProjection
         if (!report.IdentitiesResolved)
             throw Error("unresolved_restored_bindings", "The restored declarations do not resolve every exact native object.");
         return new(design, history, addedSymbols.Order().ToArray(), restoredIds.Order().ToArray())
-            { RestoredSheetInstances = [.. restoredSheets.Select(s => s.Id)] };
+            { RestoredSheetInstances = [.. restoredSheets.Select(s => s.Id)], MovedSheetInstances = movedSheetIds };
     }
 
     internal static EngineeringDesign ResolveRetained(EngineeringDesign design, SchematicNativeRestorationResult restoration,
@@ -357,10 +363,7 @@ public static class SchematicNativeAdditionProjection
                 return Failure(sheetChanges.ErrorCode, sheetChanges.ErrorMessage!) with
                     { SheetRequests = SchematicNativeRemovalProjection.Requests(sheetChanges, baseline) };
             var inserted = sheetChanges.Inserted.ToHashSet(StringComparer.Ordinal);
-            bool Within(string path, string sheet) => path == sheet || path.StartsWith(sheet + "/", StringComparison.Ordinal);
-            if (sheetChanges.Moved.Values.FirstOrDefault(to => inserted.Any(sheet => Within(to, sheet))) is { } into)
-                return Failure(MoveIntoNewSheet, "KiCad shows an existing sheet moved into a sheet inserted in the same change. Nothing was "
-                    + "published. Undo the move in KiCad, let the new sheet synchronize, then move the sheet into it.");
+            var insertedParents = SchematicInsertedParents.Prepare(baseline, observed, sheetChanges, token);
 
             var circuit = baseline.Engineering.Circuit;
             var components = circuit.Components.ToDictionary(c => c.Id);
@@ -401,14 +404,15 @@ public static class SchematicNativeAdditionProjection
             {
                 var screen = withoutAdded.Instances[index];
                 string path = Key(screen);
-                if (inserted.Contains(path)) { withoutAdded.Instances.RemoveAt(index); continue; }
+                if (inserted.Contains(path) && !insertedParents.Paths.Contains(path)) { withoutAdded.Instances.RemoveAt(index); continue; }
                 for (int i = screen.Items.Count - 1; i >= 0; --i)
                     if (screen.Items[i].Is(SchematicSymbolInstance.Descriptor)
                             && !bound.Contains(path + "#" + screen.Items[i].Unpack<SchematicSymbolInstance>().Id.Value)
-                        || screen.Items[i].Is(SheetSymbol.Descriptor) && inserted.Contains(path + "/" + screen.Items[i].Unpack<SheetSymbol>().Id?.Value))
+                        || screen.Items[i].Is(SheetSymbol.Descriptor) && inserted.Contains(path + "/" + screen.Items[i].Unpack<SheetSymbol>().Id?.Value)
+                            && !insertedParents.Paths.Contains(path + "/" + screen.Items[i].Unpack<SheetSymbol>().Id?.Value))
                         screen.Items.RemoveAt(i);
             }
-            var removal = SchematicNativeRemovalProjection.Project(baseline, withoutAdded, libraries, token);
+            var removal = SchematicNativeRemovalProjection.Project(insertedParents.Baseline, withoutAdded, libraries, token);
             gaps.AddRange(removal.CoverageGaps);
             if (removal.BindingCandidate is null)
                 return Failure(removal.ErrorCode ?? "electrical_ownership_changed", removal.ErrorMessage
@@ -425,6 +429,7 @@ public static class SchematicNativeAdditionProjection
             var sheetDefinitions = kept.Engineering.Circuit.Sheets.ToDictionary(s => s.Id);
             foreach (string path in sheetChanges.Inserted)
             {
+                if (insertedParents.Paths.Contains(path)) continue;
                 token.ThrowIfCancellationRequested();
                 var sheetSymbol = SchematicNativeSheetChanges.SheetSymbolOf(observed, path);
                 string parent = SchematicNativeSheetChanges.Parent(path);
@@ -783,7 +788,7 @@ public static class SchematicNativeAdditionProjection
                 AddedParts = [.. newParts.Keys.Concat(declaredParts.Select(p => p.Id)).Order()],
                 AnsweredOccurrences = [.. declarations.Values.Select(d => d.Occurrence.Id).Order()],
                 RemovedOccurrences = removal.RemovedOccurrences, ComponentChanges = removal.ComponentChanges,
-                AddedSheetInstances = [.. addedSheets.Select(s => s.Instance.Id)],
+                AddedSheetInstances = [.. insertedParents.Instances, .. addedSheets.Select(s => s.Instance.Id)],
                 RemovedSheetInstances = removal.RemovedSheetInstances, MovedSheetInstances = removal.MovedSheetInstances
             }, [], [], gaps.Distinct().ToArray());
 

@@ -173,7 +173,9 @@ public sealed partial class NativeSessionTests
             : journey == NativeJourney.OwnershipSync ? 2700
             : journey is NativeJourney.RecursiveEditor or NativeJourney.SymbolSheets or NativeJourney.ComponentCreation or NativeJourney.PsuCpuComponentCreation
                 or NativeJourney.ConnectedRealization ? 900
-            : journey is NativeJourney.RepeatedSheetRebuild ? 900
+            // Combined parent creation adds two move/history/reload paths. The
+            // preceding316ad4 reached XML admission at865.7s across both editors.
+            : journey is NativeJourney.RepeatedSheetRebuild ? 1500
             : journey is NativeJourney.RepeatedSheetOwnership ? 1200
             : journey is NativeJourney.XmlRebuild ? 1200
             : journey == NativeJourney.ProjectRecovery ? 2400 : 450;

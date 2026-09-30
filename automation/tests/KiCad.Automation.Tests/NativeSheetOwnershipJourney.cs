@@ -448,6 +448,140 @@ public sealed partial class NativeSessionTests
         var uniqueFinal = await Publish("unique-sheet-owner-reloaded");
         Assert.AreEqual(uniqueOwner, uniqueFinal.Engineering.Circuit.Components.Single(c => c.Id == uniqueOwner.Id));
         Assert.AreEqual(uniqueNative, uniqueFinal.SymbolBindings.Single(b => b.SymbolOccurrenceId == uniqueOccurrence).NativeObjectId);
+        // A new parent and a populated existing child move arrive in one commit.
+        var combinedBefore = store.Read()!.State.Baseline;
+        var combinedParent = Symbol(await Capture(), root, extra.Id).Clone();
+        combinedParent.Id.Value = Guid.NewGuid().ToString("D"); combinedParent.ChildScreenId.Value = Guid.NewGuid().ToString("D");
+        combinedParent.NameField.Text.Text_ = "Combined parent"; combinedParent.FilenameField.Text.Text_ = "combined-parent.kicad_sch";
+        combinedParent.PageNumber = "93"; combinedParent.InstanceRecords = null;
+        var combinedDocument = Child(root, combinedParent.Id);
+        var movedIntoNew = Symbol(await Capture(), root, extra.Id).Clone();
+        movedIntoNew.Path = combinedDocument.SheetPath.Clone(); movedIntoNew.InstanceRecords = null;
+        SchematicItemOperation[] combinedOperations =
+        [new() { TargetDocument = root.Clone(), Create = Any.Pack(combinedParent) },
+            new() { TargetDocument = root.Clone(), Remove = extra.Id.Clone() },
+            new() { TargetDocument = combinedDocument.Clone(), Create = Any.Pack(movedIntoNew) }];
+        await Native(false, [.. combinedOperations, new SchematicItemOperation()]);
+        Assert.IsFalse(File.Exists(Path.Combine(fixture.Directory, "combined-parent.kicad_sch")));
+        await Native(true, combinedOperations);
+        var combinedPublished = await Publish("native-create-parent-and-move-child");
+        Guid combinedModel = Binding(combinedPublished, combinedDocument).SheetInstanceId;
+        Assert.AreEqual(extraModel, Binding(combinedPublished, Child(combinedDocument, extra.Id)).SheetInstanceId);
+        Assert.AreEqual(combinedModel, combinedPublished.Engineering.Circuit.SheetInstances.Single(s => s.Id == extraModel).ParentId);
+        CollectionAssert.AreEquivalent(extraOwners, combinedPublished.Engineering.Circuit.Components.Where(c => c.SheetInstanceId == extraModel).ToArray());
+        await Publish("native-combined-repeat");
+        var combinedUndone = await History("z", combinedDocument, false, "native-combined-undo");
+        Assert.AreEqual(extraModel, Binding(combinedUndone, extraDocument).SheetInstanceId);
+        Assert.AreEqual(combinedBefore.Engineering.Circuit.SheetInstances.Single(s => s.Id == extraModel),
+            combinedUndone.Engineering.Circuit.SheetInstances.Single(s => s.Id == extraModel));
+        var combinedRedone = await History("y", combinedDocument, true, "native-combined-redo");
+        Assert.AreEqual(combinedModel, Binding(combinedRedone, combinedDocument).SheetInstanceId);
+        Assert.AreEqual(extraModel, Binding(combinedRedone, Child(combinedDocument, extra.Id)).SheetInstanceId);
+        await client.InvokeAsync<RevertDocument, Empty>(new() { Document = root.Clone() }, token);
+        var combinedReload = await Capture();
+        RequireToolSuccess(await call("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
+            expectedRevisionToken = store.Read()!.RevisionToken, expectedDocumentEpoch = combinedReload.State.Revision.Epoch }));
+        var combinedFinal = await Publish("native-combined-reloaded");
+        CollectionAssert.AreEquivalent(extraOwners, combinedFinal.Engineering.Circuit.Components.Where(c => c.SheetInstanceId == extraModel).ToArray());
+        var xmlParentReference = Symbol(await Capture(), root, combinedParent.Id).Clone();
+        xmlParentReference.Id.Value = Guid.NewGuid().ToString("D"); xmlParentReference.ChildScreenId.Value = Guid.NewGuid().ToString("D");
+        xmlParentReference.NameField.Text.Text_ = "XML combined parent"; xmlParentReference.FilenameField.Text.Text_ = "xml-combined-parent.kicad_sch";
+        xmlParentReference.PageNumber = "94";
+        foreach (var record in xmlParentReference.InstanceRecords.Records) record.PageNumber = "94";
+        var xmlParentDocument = Child(root, xmlParentReference.Id);
+        var xmlChildDocument = Child(xmlParentDocument, combinedParent.Id);
+        string oldChildPrefix = string.Join('/', combinedDocument.SheetPath.Path.Select(p => p.Value));
+        var combinedDrawing = combinedFinal.Schematic.Clone();
+        var oldParentScreen = combinedDrawing.Instances.Single(s => s.Metadata.Document.Equals(combinedDocument));
+        var oldContainer = combinedDrawing.Instances.Single(s => s.Metadata.Document.Equals(root));
+        var childPacked = oldContainer.Items.Single(i => i.Is(SheetSymbol.Descriptor) && i.Unpack<SheetSymbol>().Id.Equals(combinedParent.Id));
+        var childReference = childPacked.Unpack<SheetSymbol>(); oldContainer.Items.Remove(childPacked);
+        childReference.Path = xmlParentDocument.SheetPath.Clone();
+        foreach (var record in childReference.InstanceRecords.Records)
+            if (record.Path.SequenceEqual(root.SheetPath.Path))
+            { record.Path.Clear(); record.Path.Add(xmlParentDocument.SheetPath.Path.Select(p => p.Clone())); }
+        foreach (var screen in combinedDrawing.Instances)
+        {
+            Repath(screen.Metadata.Document.SheetPath.Path);
+            for (int i = 0; i < screen.Items.Count; ++i)
+            {
+                if (screen.Items[i].Is(SchematicSymbolInstance.Descriptor))
+                {
+                    var symbol = screen.Items[i].Unpack<SchematicSymbolInstance>(); Repath(symbol.Path.Path);
+                    foreach (var record in symbol.InstanceRecords.Records) Repath(record.Path);
+                    var ordered = symbol.InstanceRecords.Records.OrderBy(r => r.Path.Count).ThenBy(r => string.Join('/', r.Path.Select(p => p.Value)), StringComparer.Ordinal).ToArray();
+                    symbol.InstanceRecords.Records.Clear(); symbol.InstanceRecords.Records.Add(ordered); screen.Items[i] = Any.Pack(symbol);
+                }
+                else if (screen.Items[i].Is(SheetSymbol.Descriptor))
+                {
+                    var sheet = screen.Items[i].Unpack<SheetSymbol>(); Repath(sheet.Path.Path);
+                    foreach (var record in sheet.InstanceRecords.Records) Repath(record.Path);
+                    screen.Items[i] = Any.Pack(sheet);
+                }
+            }
+        }
+        var newParentScreen = oldParentScreen.Clone(); newParentScreen.Metadata.Document = xmlParentDocument.Clone();
+        newParentScreen.Metadata.ScreenId = xmlParentReference.ChildScreenId.Clone(); newParentScreen.Items.Clear();
+        newParentScreen.Metadata.LoadedNativeFormatVersion = 0; newParentScreen.Metadata.RootInstance = new();
+        newParentScreen.Items.Add(Any.Pack(childReference)); combinedDrawing.Instances.Add(newParentScreen);
+        var parentNote = new SchematicText { Id = new() { Value = Guid.NewGuid().ToString("D") },
+            Text = template.ValueField.Text.Clone(), Locked = LockedState.LsUnlocked };
+        // Preserve the failing item-order relation: native UUID enumeration puts
+        // the existing child before this note even if model serialization does not.
+        parentNote.Id.Value = "ffffffff-ffff-4fff-bfff-fffffffffff0";
+        parentNote.Text.Text_ = "Combined parent"; parentNote.Text.Position = new() { XNm = 25_400_000, YNm = 25_400_000 };
+        newParentScreen.Items.Add(Any.Pack(parentNote));
+        combinedDrawing.Instances.Single(s => s.Metadata.Document.Equals(root)).Items.Add(Any.Pack(xmlParentReference));
+        Guid xmlCombinedModel = Guid.NewGuid(), xmlCombinedDefinition = Guid.NewGuid();
+        var xmlCombined = combinedFinal with { Schematic = combinedDrawing, Engineering = combinedFinal.Engineering with
+        { Circuit = combinedFinal.Engineering.Circuit with
+        {
+            Sheets = [.. combinedFinal.Engineering.Circuit.Sheets, new(xmlCombinedDefinition, "XML combined parent", [])],
+            SheetInstances = [.. combinedFinal.Engineering.Circuit.SheetInstances.Select(s => s.Id == combinedModel ? s with { ParentId = xmlCombinedModel } : s),
+                new(xmlCombinedModel, xmlCombinedDefinition, Binding(combinedFinal, root).SheetInstanceId)]
+        } }, SheetBindings = [.. combinedFinal.SheetBindings.Select(b =>
+            b.NativePath.Take(combinedDocument.SheetPath.Path.Count).SequenceEqual(combinedDocument.SheetPath.Path.Select(p => Guid.Parse(p.Value)))
+                ? b with { NativePath = [.. xmlChildDocument.SheetPath.Path.Select(p => Guid.Parse(p.Value)), .. b.NativePath.Skip(combinedDocument.SheetPath.Path.Count)] } : b),
+            new(xmlCombinedModel, xmlParentDocument.SheetPath.Path.Select(p => Guid.Parse(p.Value)).ToArray())] };
+        var xmlCombinedPublished = await Xml(xmlCombined, "xml-create-parent-and-move-child");
+        Assert.AreEqual(xmlCombinedModel, Binding(xmlCombinedPublished, xmlParentDocument).SheetInstanceId);
+        Assert.AreEqual(combinedModel, Binding(xmlCombinedPublished, xmlChildDocument).SheetInstanceId);
+        Assert.AreEqual(extraModel, Binding(xmlCombinedPublished, Child(xmlChildDocument, extra.Id)).SheetInstanceId);
+        CollectionAssert.AreEquivalent(extraOwners, xmlCombinedPublished.Engineering.Circuit.Components.Where(c => c.SheetInstanceId == extraModel).ToArray());
+        await Publish("xml-combined-repeat");
+        var reorder = store.Read()!;
+        var orderOnlyDesign = SchematicDesignXml.Read(Encoding.UTF8.GetString(reorder.State.DesiredFileBytes), []);
+        var orderOnlyScreen = orderOnlyDesign.Schematic.Instances.Single(s => s.Metadata.Document.Equals(xmlParentDocument));
+        var nativeOrder = reorder.State.Baseline.Schematic.Instances.Single(s => s.Metadata.Document.Equals(xmlParentDocument)).Items;
+        var alternateOrder = nativeOrder.Reverse().Select(i => i.Clone()).ToArray(); orderOnlyScreen.Items.Clear(); orderOnlyScreen.Items.Add(alternateOrder);
+        Assert.IsFalse(nativeOrder.SequenceEqual(orderOnlyScreen.Items));
+        string orderOnlyXml = SchematicDesignXml.Write(orderOnlyDesign, []);
+        await File.WriteAllTextAsync(designPath, orderOnlyXml, new UTF8Encoding(false), token);
+        RequireToolSuccess(await call("kicad_design_candidate_commit", new { instanceId, recoveryPath = store.StatePath,
+            expectedRevisionToken = reorder.RevisionToken, candidateXml = orderOnlyXml,
+            expectedCandidateSha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(orderOnlyXml))),
+            operationId = Guid.NewGuid().ToString("D") }));
+        var xmlCombinedUndone = await History("z", xmlParentDocument, false, "xml-combined-undo");
+        Assert.AreEqual(extraModel, Binding(xmlCombinedUndone, Child(combinedDocument, extra.Id)).SheetInstanceId);
+        var xmlCombinedRedone = await History("y", xmlParentDocument, true, "xml-combined-redo");
+        Assert.AreEqual(xmlCombinedModel, Binding(xmlCombinedRedone, xmlParentDocument).SheetInstanceId);
+        await client.InvokeAsync<RevertDocument, Empty>(new() { Document = root.Clone() }, token);
+        var xmlCombinedReload = await Capture();
+        RequireToolSuccess(await call("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
+            expectedRevisionToken = store.Read()!.RevisionToken, expectedDocumentEpoch = xmlCombinedReload.State.Revision.Epoch }));
+        var xmlCombinedFinal = await Publish("xml-combined-reloaded");
+        CollectionAssert.AreEquivalent(extraOwners, xmlCombinedFinal.Engineering.Circuit.Components.Where(c => c.SheetInstanceId == extraModel).ToArray());
+        Assert.IsTrue(xmlCombinedFinal.Schematic.Instances.Single(s => s.Metadata.Document.Equals(xmlParentDocument)).Items
+            .Any(i => i.Is(SchematicText.Descriptor) && i.Unpack<SchematicText>().Id.Equals(parentNote.Id)
+                && i.Unpack<SchematicText>().Text.Text_ == parentNote.Text.Text_));
+
+        void Repath(Google.Protobuf.Collections.RepeatedField<KIID> path)
+        {
+            string current = string.Join('/', path.Select(p => p.Value));
+            if (current != oldChildPrefix && !current.StartsWith(oldChildPrefix + "/", StringComparison.Ordinal)) return;
+            var suffix = path.Skip(combinedDocument.SheetPath.Path.Count).Select(p => p.Clone()).ToArray();
+            path.Clear(); path.Add(xmlChildDocument.SheetPath.Path.Select(p => p.Clone())); path.Add(suffix);
+        }
         await File.WriteAllTextAsync(Path.Combine(Path.GetDirectoryName(designPath)!, "sheet-topology-proof.json"), JsonSerializer.Serialize(new
         { instanceId, nativeAdd = true, nativeMove = true, nativeRemove = true, nativeUndoRestoresIdentity = true,
             xmlMove = true, xmlRemove = true, populatedRepeatedMoveBothDirections = true,
@@ -457,6 +591,8 @@ public sealed partial class NativeSessionTests
             swappedDefinitionRefusedWithoutMutation = true, nativeRecordOrderPrepared = true,
             undrawnReferencePreserved = true, unknownOrDuplicateReferenceRefused = true, staleReferenceChoiceRefused = true,
             uniqueSheetAnswerRetained = true, uniqueSheetPublishedTogether = true, uniqueSheetAnswerUndoRedoReload = true,
+            combinedParentMove = true, combinedParentMoveRollback = true, combinedParentMoveUndoRedoReload = true,
+            xmlCombinedParentMove = true, xmlCombinedNestedPathsPreserved = true, newParentArtworkPreserved = true, xmlCombinedParentMoveUndoRedoReload = true,
             nativeVariablePathsPreserved = true, conflictingCompanionEnvironmentIgnored = true,
             fileLocationObservationReadOnly = true, staleFileLocationReadRefused = true,
             detachedFilesPreserved = true, publicSynchronization = true }), token);

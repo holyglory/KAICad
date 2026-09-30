@@ -296,6 +296,88 @@ public sealed class SchematicRebuildTests
         var stalePlan = SchematicSynchronizationPlanner.Plan(variableState with { NativeFileLocations = staleFiles });
         Assert.IsFalse(stalePlan.CanPrepare); Assert.IsEmpty(stalePlan.NativeOperations);
         Assert.AreEqual("xml_sheet_filename_unresolved", stalePlan.ErrorCode);
+        await CombinedParentAndChildMoveKeepsExistingOwners();
+    }
+
+    private static async Task CombinedParentAndChildMoveKeepsExistingOwners()
+    {
+        var baseline = Placed(); var circuit = baseline.Engineering.Circuit;
+        Guid childId = PsuCpuIds.Id(0x05, 2), rootId = PsuCpuIds.Id(0x05, 1), parentId = Guid.NewGuid(), definitionId = Guid.NewGuid();
+        var childBinding = baseline.SheetBindings.Single(b => b.SheetInstanceId == childId);
+        var rootBinding = baseline.SheetBindings.Single(b => b.SheetInstanceId == rootId);
+        var newNativeId = Guid.NewGuid(); var parentPath = rootBinding.NativePath.Append(newNativeId).ToArray();
+        var childPath = parentPath.Append(childBinding.NativePath[^1]).ToArray();
+        var data = baseline.Schematic.Clone();
+        var root = data.Instances.Single(s => SchematicNativeSheetChanges.Key(s) == SchematicDesignBindings.PathKey(rootBinding.NativePath));
+        var child = data.Instances.Single(s => SchematicNativeSheetChanges.Key(s) == SchematicDesignBindings.PathKey(childBinding.NativePath));
+        var packed = root.Items.Single(i => i.Is(SheetSymbol.Descriptor)
+            && i.Unpack<SheetSymbol>().Id.Value == childBinding.NativePath[^1].ToString("D"));
+        var childSymbol = packed.Unpack<SheetSymbol>(); root.Items.Remove(packed);
+        var parentSymbol = childSymbol.Clone(); parentSymbol.Id.Value = newNativeId.ToString("D");
+        parentSymbol.ChildScreenId.Value = Guid.NewGuid().ToString("D"); parentSymbol.NameField.Text.Text_ = "Combined parent";
+        parentSymbol.FilenameField.Text.Text_ = "combined-parent.kicad_sch"; parentSymbol.PageNumber = "44";
+        if (parentSymbol.InstanceRecords is { } parentRecords)
+            foreach (var record in parentRecords.Records) record.PageNumber = "44";
+        root.Items.Add(Any.Pack(parentSymbol));
+        var parent = child.Clone(); parent.Metadata.ScreenId = parentSymbol.ChildScreenId.Clone(); parent.Items.Clear(); parent.CachedSymbols.Clear();
+        parent.Metadata.LoadedNativeFormatVersion = 0; parent.Metadata.RootInstance = new();
+        Set(parent.Metadata.Document.SheetPath.Path, parentPath);
+        Set(child.Metadata.Document.SheetPath.Path, childPath); Set(childSymbol.Path.Path, parentPath);
+        if (childSymbol.InstanceRecords is { } childRecords)
+            foreach (var record in childRecords.Records) Set(record.Path, parentPath);
+        parent.Items.Add(Any.Pack(childSymbol)); data.Instances.Add(parent);
+        var note = new SchematicText { Id = new() { Value = Guid.NewGuid().ToString("D") },
+            Text = child.Items.First(i => i.Is(SchematicSymbolInstance.Descriptor)).Unpack<SchematicSymbolInstance>().ValueField.Text.Clone(),
+            Locked = LockedState.LsUnlocked };
+        note.Text.Text_ = "New parent note"; parent.Items.Add(Any.Pack(note));
+        for (int i = 0; i < child.Items.Count; ++i)
+            if (child.Items[i].Is(SchematicSymbolInstance.Descriptor))
+            {
+                var symbol = child.Items[i].Unpack<SchematicSymbolInstance>(); Set(symbol.Path.Path, childPath);
+                foreach (var record in symbol.InstanceRecords.Records) Set(record.Path, childPath);
+                child.Items[i] = Any.Pack(symbol);
+            }
+        var desired = baseline with { Schematic = data, Engineering = baseline.Engineering with { Circuit = circuit with
+        { Sheets = [.. circuit.Sheets, new(definitionId, "Combined parent", [])],
+            SheetInstances = [.. circuit.SheetInstances.Select(s => s.Id == childId ? s with { ParentId = parentId } : s), new(parentId, definitionId, rootId)] } },
+            SheetBindings = [.. baseline.SheetBindings.Select(b => b.SheetInstanceId == childId ? b with { NativePath = childPath } : b), new(parentId, parentPath)] };
+        var state = State(baseline, desired);
+        state = state with { BaselineElectrical = SymbolSheetOwnershipTests.Isolated(baseline.Schematic, state.BaselineElectrical!.Hierarchy.Revision),
+            ObservedElectrical = SymbolSheetOwnershipTests.Isolated(baseline.Schematic, state.ObservedElectrical!.Hierarchy.Revision) };
+        var plan = SchematicSynchronizationPlanner.Plan(state);
+        Assert.IsTrue(plan.CanPrepare, plan.ErrorCode + ": " + plan.ErrorMessage);
+        CollectionAssert.AreEqual(new[] { parentId }, plan.Electrical!.AddedSheetInstances!.ToArray());
+        CollectionAssert.Contains(plan.Electrical.MovedSheetInstances!.ToArray(), childId);
+        CollectionAssert.AreEquivalent(circuit.Components.ToArray(), plan.Candidate!.Engineering.Circuit.Components.ToArray());
+        Assert.AreEqual(parentId, plan.Candidate.Engineering.Circuit.SheetInstances.Single(s => s.Id == childId).ParentId);
+        Assert.IsTrue(plan.Candidate.Schematic.Instances.SelectMany(s => s.Items).Any(i => i.Equals(Any.Pack(note))),
+            "New-parent artwork is explicit XML intent, not an existing symbol ownership change.");
+        var unknownCoverage = desired with { Schematic = desired.Schematic.Clone() };
+        unknownCoverage.Schematic.Instances.Single(s => s.Metadata.ScreenId.Equals(parentSymbol.ChildScreenId)).Metadata.UnrepresentedState.Add("new-unknown-state");
+        var unknownCoveragePlan = SchematicSynchronizationPlanner.Plan(state with
+            { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(unknownCoverage, [])) });
+        Assert.IsFalse(unknownCoveragePlan.CanPrepare); Assert.IsEmpty(unknownCoveragePlan.NativeOperations);
+        Assert.IsFalse(string.IsNullOrWhiteSpace(unknownCoveragePlan.ErrorCode), "Unknown native state must remain an explicit refusal.");
+        var changed = baseline.Schematic.Clone(); changed.Instances[0].Metadata.TitleBlock ??= new(); changed.Instances[0].Metadata.TitleBlock.Title = "Independent native edit";
+        var conflict = SchematicSynchronizationPlanner.Plan(state with { Observed = changed,
+            ObservedElectrical = SymbolSheetOwnershipTests.Isolated(changed, state.ObservedElectrical.Hierarchy.Revision) });
+        Assert.AreEqual("ownership_change_with_xml_edits", conflict.ErrorCode, conflict.ErrorMessage); Assert.IsEmpty(conflict.NativeOperations);
+        string directory = Directory.CreateTempSubdirectory("combined-sheet-move-").FullName;
+        try
+        {
+            var store = new DesignRecoveryStore(Path.Combine(directory, "recovery.json"));
+            var native = state with { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(baseline, [])), Observed = data,
+                ObservedElectrical = SymbolSheetOwnershipTests.Isolated(data, state.ObservedElectrical.Hierarchy.Revision) };
+            var saved = store.Save(native, null); var adopted = await SchematicSynchronizationPlanner.PlanWithHistoryAsync(store, saved);
+            Assert.IsTrue(adopted.CanPrepare, adopted.ErrorCode + ": " + adopted.ErrorMessage);
+            Assert.IsEmpty(adopted.NativeOperations); Assert.HasCount(1, adopted.Electrical!.AddedSheetInstances!);
+            CollectionAssert.AreEquivalent(circuit.Components.ToArray(), adopted.Candidate!.Engineering.Circuit.Components.ToArray());
+            Assert.AreEqual(adopted.Electrical.AddedSheetInstances!.Single(), adopted.Candidate.Engineering.Circuit.SheetInstances.Single(s => s.Id == childId).ParentId);
+        }
+        finally { Directory.Delete(directory, true); }
+
+        static void Set(Google.Protobuf.Collections.RepeatedField<KIID> path, IEnumerable<Guid> ids)
+        { path.Clear(); path.Add(ids.Select(id => new KIID { Value = id.ToString("D") })); }
     }
 
     [TestMethod]

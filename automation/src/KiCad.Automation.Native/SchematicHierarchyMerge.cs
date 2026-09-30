@@ -1,3 +1,4 @@
+using Google.Protobuf.WellKnownTypes;
 using Kiapi.Schematic.Types;
 using KiCad.Automation.Model;
 using KiCad.Automation.Protocol;
@@ -48,7 +49,7 @@ public static class SchematicHierarchyMerge
         var unresolved = Plan(baseline, xml, native, cancellationToken);
         var paths = unresolved.Conflicts.Select(c => c.InstancePath).ToHashSet(StringComparer.Ordinal);
         foreach (var (path, choice) in choices)
-            if (!paths.Contains(path) || !Enum.IsDefined(choice))
+            if (!paths.Contains(path) || !System.Enum.IsDefined(choice))
                 throw new AutomationException("invalid_hierarchy_resolution", "Choose an existing conflicting sheet path and a supported version.");
         if (choices.Count == 0 || unresolved.ErrorCode is not null) return unresolved;
         return PlanCore(baseline, xml, native, choices, cancellationToken);
@@ -57,6 +58,22 @@ public static class SchematicHierarchyMerge
     public static SchematicHierarchyMergeResult Plan(SchematicHierarchyData baseline,
         SchematicHierarchyData xml, SchematicHierarchyData native, CancellationToken cancellationToken = default) =>
         PlanCore(baseline, xml, native, null, cancellationToken);
+
+    private static bool SameScreen(SchematicScreenData? first, SchematicScreenData? second)
+    {
+        if (Equals(first, second)) return true;
+        if (first is null || second is null) return false;
+        // Native enumeration may change after save. UUID-addressed item order
+        // is not an edit, including when the other side removes the sheet.
+        // Keep every item byte and all metadata exact; duplicate IDs still fail.
+        static SchematicScreenData Ordered(SchematicScreenData screen)
+        {
+            var result = screen.Clone();
+            var items = SchematicItemDelta.Index(screen.Items).OrderBy(p => p.Key).Select(p => Any.Pack(p.Value)).ToArray();
+            result.Items.Clear(); result.Items.Add(items); return result;
+        }
+        return Ordered(first).Equals(Ordered(second));
+    }
 
     private static SchematicHierarchyMergeResult PlanCore(SchematicHierarchyData baseline,
         SchematicHierarchyData xml, SchematicHierarchyData native,
@@ -111,9 +128,9 @@ public static class SchematicHierarchyMerge
                 SchematicScreenData? chosen;
                 if (choices is not null && choices.TryGetValue(path, out var choice))
                     chosen = choice switch { SchematicConflictChoice.Xml => x, SchematicConflictChoice.Native => n, _ => b };
-                else if (Equals(compareX, compareN)) chosen = x;
-                else if (Equals(compareB, compareX)) chosen = n;
-                else if (Equals(compareB, compareN)) chosen = x;
+                else if (SameScreen(compareX, compareN)) chosen = x;
+                else if (SameScreen(compareB, compareX)) chosen = n;
+                else if (SameScreen(compareB, compareN)) chosen = x;
                 else if (b is not null && x is not null && n is not null)
                 {
                     var itemMerge = SchematicItemMerge.PlanWithNewSheets(compareB!, compareX!, compareN!, newSheetIds);

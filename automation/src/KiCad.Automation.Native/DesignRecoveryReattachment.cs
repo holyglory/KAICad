@@ -33,8 +33,8 @@ public static class DesignRecoveryReattachment
             || (revision.Epoch == saved.State.NativeRevision.Epoch && revision.Sequence < saved.State.NativeRevision.Sequence))
             throw Error("invalid_recovery_revision", "The native document session changed again or its revision regressed.");
         // Validate the captured representation; keep coverage limitations explicit.
-        _ = SchematicDataXml.Read(SchematicDataXml.Write(observed.Electrical.Hierarchy.Data));
         var files = await NativeSheetFileLocations.CaptureAsync(client, observed.Electrical.Hierarchy, token, session);
+        _ = SchematicDataXml.Read(SchematicDataXml.Write(observed.Electrical.Hierarchy.Data));
         token.ThrowIfCancellationRequested();
         return store.Save(saved.State with
         {

@@ -212,6 +212,14 @@ public sealed class AutomaticDesignSynchronization : IAsyncDisposable
                     Publish(AutomaticDesignPhase.WaitingForEditor, Inspect().RecoveryRevisionToken,
                         operation, false, "native_busy", error.Message);
                 }
+                catch (AutomationException error) when (error.Code == NativeSheetFileLocations.ObservationChanged)
+                {
+                    // Preserve the input until the next native/file event or heartbeat;
+                    // do not spin or publish a hierarchy paired with another revision.
+                    Queue(input, wake: false);
+                    Publish(AutomaticDesignPhase.WaitingForEditor, Inspect().RecoveryRevisionToken,
+                        operation, false, error.Code, error.Message);
+                }
                 catch (Exception error)
                 {
                     string code = error is AutomationException known ? known.Code : error is NativeApiException native

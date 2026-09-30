@@ -1346,7 +1346,7 @@ name="managed-build"
 tier="development"
 role="preflight"
 invalidates=["fixture-contracts", "symbol-normalization"]
-command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--disable-build-servers", "--no-restore", "--configuration", "Debug"]
 
 [[test.psu-cpu-fixture.check]]
 name="fixture-contracts"
@@ -1379,9 +1379,7 @@ tier="development"
 requires=["native-build"]
 command=["cmake", "--build", "automation/artifacts/native", "--target", "kicad", "kicad-cli", "eeschema_kiface", "pcbnew_kiface", "cvpcb_kiface", "schema_build_copy", "api_schema_build_copy", "bitmap_archive_build"]
 
-# Loads seeds S0, S1 and S2 in a real editor and checks exact identities, captured
-# pin IDs against lib_symbols.kicad_sexpr and every NativePsuCpuSeed contract code.
-# Lanes 2A, 2C and 2D start from this API, so it gates the Phase 2 fan-out.
+# Verify live S0/S1/S2 identities, lib_symbols.kicad_sexpr pin IDs and every NativePsuCpuSeed code.
 [[test.psu-cpu-fixture.check]]
 name="native-seed"
 tier="development"
@@ -1403,9 +1401,8 @@ retained_artifacts=[{ name = "native-xml-rebuild-tests", path = "automation/arti
 [[test.psu-cpu-fixture.check]]
 name="ownership-sync"
 tier="development"
-requires=["native-runtime"]
-after=["xml-rebuild"]
-timeout_seconds=1500
+requires=["managed-build", "native-runtime"]
+timeout_seconds=3000
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeOwnershipSync", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-ownership-sync-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{ name = "native-ownership-sync-tests", path = "automation/artifacts/native-ownership-sync-tests", max_bytes = 16777216 }, { name = "native-ownership-sync-evidence", path = "automation/artifacts/native-ownership-sync/native-session-current", max_bytes = 67108864 }]
 
@@ -1609,7 +1606,7 @@ command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--disable-build
 [[test.native-owner-restoration.check]]
 name="contracts"
 tier="development"
-command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--configuration", "Debug", "--no-build", "--no-restore", "--filter", "FullyQualifiedName~SchematicRebuildTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignRecoveryReattachmentTests|FullyQualifiedName~DesignRecoveryNativeObserverTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~SymbolSheetOwnershipTests|FullyQualifiedName~AutomaticDesignSynchronizationTests|FullyQualifiedName~SchematicOwnershipResolutionTests|FullyQualifiedName~SchematicNativeRestorationTests|FullyQualifiedName~SchematicNativeRemovalProjectionTests|FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicPropertyProjectionTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicNetReconciliationTests|FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~RetainedXmlHistoryTests|FullyQualifiedName~DesignSynchronizationReceiptTests|FullyQualifiedName~McpProcessTests|FullyQualifiedName~PinPartition", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-owner-restoration"]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--configuration", "Debug", "--no-build", "--no-restore", "--filter", "FullyQualifiedName~SchematicRebuildTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignElectricalRecoveryTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignRecoveryReattachmentTests|FullyQualifiedName~DesignRecoveryNativeObserverTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~SymbolSheetOwnershipTests|FullyQualifiedName~AutomaticDesignSynchronizationTests|FullyQualifiedName~SchematicOwnershipResolutionTests|FullyQualifiedName~SchematicNativeRestorationTests|FullyQualifiedName~SchematicNativeRemovalProjectionTests|FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicPropertyProjectionTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicNetReconciliationTests|FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~RetainedXmlHistoryTests|FullyQualifiedName~DesignSynchronizationReceiptTests|FullyQualifiedName~McpProcessTests|FullyQualifiedName~PinPartition", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-owner-restoration"]
 retained_artifacts=[{ name = "native-owner-restoration", path = "automation/artifacts/native-owner-restoration", max_bytes = 16777216 }]
 
 [test.native-removal-projection]
@@ -3516,7 +3513,7 @@ name="journey-psu-cpu-ownership-sync"
 tier="development"
 requires=["native-build"]
 after=["journey-native-observe-apply-stress"]
-timeout_seconds=1500
+timeout_seconds=3000
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeOwnershipSync", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-ownership-sync-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{ name = "native-ownership-sync-tests", path = "automation/artifacts/native-ownership-sync-tests", max_bytes = 16777216 }, { name = "native-ownership-sync-evidence", path = "automation/artifacts/native-ownership-sync/native-session-current", max_bytes = 67108864 }]
 

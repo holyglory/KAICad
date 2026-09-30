@@ -3641,6 +3641,48 @@ The final ownership graph `t20260930T041731Z-60214c` passed all three checks and
 237 supporting cases, including ordinary answer refusals and a recovery record
 that cannot be written. Only this documentation changed after those passes.
 
-This qualifies repeated-instance part answers. Live multi-unit owner/grouping
-answers remain open under `p35cfdc0345e056a5`; new repeated sheets with undrawn or
-externally owned components remain under `p2d066b3b1abf0c6a`.
+This qualifies repeated-instance part answers. The later PSU/CPU journey below also qualifies live multi-unit owner/grouping
+answers. New repeated sheets with undrawn or externally owned components remain
+under `p2d066b3b1abf0c6a`.
+
+
+### Native observation races and explicit unit ownership (2026-09-30)
+
+File-location provenance stays bound to the hierarchy revision. When KiCad
+refuses a file-location read, the companion classifies it as transient only
+if one fresh hierarchy proves that the same document and session advanced.
+The automatic worker retains its input and waits for its existing event or
+heartbeat before reading again. It does not publish mixed revisions or retry
+all invalid requests. If the same race occurs while finishing publication,
+the operation remains pending with `native_changed_during_sync`; its baseline
+and completion receipt do not advance. Capture file provenance immediately
+after the native snapshot, before local serialization and recovery-file reads.
+
+The existing PSU/CPU journey now answers both multi-unit decisions through
+`kicad_design_ownership_answer`: a newly drawn U5 power unit joins U5 across
+sheets, and two new U9 units become one physical component. It verifies rejected
+choices leave the native state, XML and record unchanged; valid choices reach
+the automatic worker and survive exact undo/redo and no-op replay.
+
+The baseline `t20260930T042927Z-eb28ff` exposed the stale read pause in both
+projects. The next run `t20260930T051533Z-f53c86` completed all cases in one
+project and passed full XML reconstruction; the old shared 1200-second ceiling
+then cancelled the second project. Its helper incorrectly called cancellation
+a step timeout. Cancellation now propagates honestly. The expanded two-editor
+journey has a 2700-second aggregate ceiling and a 3000-second outer check limit;
+individual action deadlines and assertions are unchanged. Ownership initializes
+its own S1 fixture, so its focused graph no longer orders it after the independent
+XML-reconstruction journey. The complete native acceptance graph keeps its order.
+
+Final selected native run `t20260930T055558Z-01d5bc` passed all six selected build
+and ownership checks with unchanged source. Both retained proof files report
+`existingOwnerPreserved`, `newUnitsGrouped`, `conflictingChoicesRefused`,
+`workerResumedAndPublished`, `separateSheetLocationPreserved`, `exactUndoRedo`
+and `repeatNoOp`. This is focused behavioral evidence, not a complete release run.
+Source: `88ec6db6580d6976254f4a65f8543a385717347e8f86d9c8ae5f975155658be3`.
+The `ownership-sync/native-ownership-sync-evidence` artifact manifest is
+`5b277731494eca5e897d6d01010fc18c4daa4b02d7052e5d5c5db06e66c5b871`.
+Supporting `t20260930T050911Z-9afcae` passed all three checks and 248 cases,
+including revision-advance recall, unchanged/wrong-session refusal, event-driven
+retry and pending-publication preservation. Product source stayed unchanged
+after that focused pass; later edits affect the harness limits and documentation.

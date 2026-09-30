@@ -7,14 +7,33 @@ namespace KiCad.Automation.Native;
 /// <summary>Validates runtime file provenance without expanding variables in the companion.</summary>
 internal static class NativeSheetFileLocations
 {
+    internal const string ObservationChanged = "native_observation_changed";
+
     internal static async Task<SchematicFileLocations?> CaptureAsync(NativeClient client,
         SchematicHierarchyDataSnapshot snapshot, CancellationToken token, AutomationSession? session = null)
     {
         bool supported = session is null ? client.LastHandshakeHandles(ReadSchematicFileLocations.Descriptor.FullName)
             : session.HandledRequests.Contains(ReadSchematicFileLocations.Descriptor.FullName);
         if (!supported) return null;
-        var files = await client.InvokeAsync<ReadSchematicFileLocations, SchematicFileLocations>(new()
-            { Document = snapshot.Data.Document.Clone(), ExpectedRevision = snapshot.Revision.Clone() }, token);
+        SchematicFileLocations files;
+        try
+        {
+            files = await client.InvokeAsync<ReadSchematicFileLocations, SchematicFileLocations>(new()
+                { Document = snapshot.Data.Document.Clone(), ExpectedRevision = snapshot.Revision.Clone() }, token);
+        }
+        catch (NativeApiException error) when (error.Status == 3)
+        {
+            // A second read may race a real native edit. Prove revision advancement
+            // before treating a refusal as transient; other bad requests still fail.
+            var current = await client.InvokeAsync<ReadSchematicHierarchyData, SchematicHierarchyDataSnapshot>(new()
+                { Document = snapshot.Data.Document.Clone() }, token);
+            if (current.Data?.Document is { } document && document.Equals(snapshot.Data.Document)
+                && current.Revision is { } revision && revision.Epoch == snapshot.Revision.Epoch
+                && revision.Sequence > snapshot.Revision.Sequence)
+                throw new AutomationException(ObservationChanged,
+                    "KiCad changed while its hierarchy and file locations were being observed; read a fresh observation.");
+            throw;
+        }
         Validate(files, snapshot, client.Epoch);
         return files;
     }

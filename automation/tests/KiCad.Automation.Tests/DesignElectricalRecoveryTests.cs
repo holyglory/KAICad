@@ -288,6 +288,26 @@ public sealed class DesignElectricalRecoveryTests
             Assert.AreEqual(published.RevisionToken, again.RecoveryRevisionToken);
             Assert.AreEqual(plan.CandidateXml, File.ReadAllText(designPath));
             Assert.AreEqual(1, editor.Saves);
+
+            // A native change after the final checked capture must keep publication
+            // pending, even though a refresh would treat this read race as transient.
+            string racedRoot = Directory.CreateDirectory(Path.Combine(root, "raced")).FullName;
+            string racedPath = Path.Combine(racedRoot, "design.xml"); File.WriteAllBytes(racedPath, design);
+            var racedStore = new DesignRecoveryStore(Path.Combine(racedRoot, "recovery.json"));
+            var raced = racedStore.Save(reattached, null);
+            var movingEditor = new ScriptedEditor(reattached, observedElectrical, racedRoot) { AdvanceOnFileRead = true };
+            Guid operation = Guid.NewGuid();
+            Assert.AreEqual("native_changed_during_sync", (await Assert.ThrowsExactlyAsync<AutomationException>(() =>
+                SchematicSynchronizationExecutor.ApplyAsync(racedStore,
+                    new NativeClient(movingEditor, "ipc:///tmp/preview-23-raced.sock", movingEditor.Epoch),
+                    racedPath, raced.RevisionToken, operation))).Code);
+            var pending = racedStore.Read()!.State;
+            Assert.IsTrue(pending.HasPendingWork); Assert.AreEqual(operation, pending.PendingPublication!.OperationId);
+            Assert.AreEqual(SchematicDesignXml.Write(reattached.Baseline, state.KnowledgeLibraries),
+                SchematicDesignXml.Write(pending.Baseline, state.KnowledgeLibraries));
+            Assert.AreEqual(reattached.LastSynchronization, pending.LastSynchronization);
+            Assert.AreEqual(plan.CandidateXml, File.ReadAllText(racedPath), "The written XML remains available for reconciliation.");
+            Assert.AreEqual(0, movingEditor.Edits); Assert.AreEqual(1, movingEditor.Saves);
         }
         finally { Directory.Delete(root, true); }
     }
@@ -300,6 +320,7 @@ public sealed class DesignElectricalRecoveryTests
         private readonly string instance;
         public string Epoch { get; } = Guid.NewGuid().ToString("D");
         public int Saves, Edits;
+        public bool AdvanceOnFileRead;
         public ScriptedEditor(DesignRecoveryState state, SchematicElectricalState shown, string directory)
         {
             instance = state.InstanceId.ToString("D");
@@ -320,8 +341,21 @@ public sealed class DesignElectricalRecoveryTests
         {
             token.ThrowIfCancellationRequested();
             var message = ApiRequest.Parser.ParseFrom(request).Message; IMessage response;
-            if (message.Is(GetAutomationSession.Descriptor)) response = new AutomationSession { ProtocolVersion = 1, InstanceId = instance, Epoch = Epoch };
+            if (message.Is(GetAutomationSession.Descriptor))
+            {
+                var session = new AutomationSession { ProtocolVersion = 1, InstanceId = instance, Epoch = Epoch };
+                if (AdvanceOnFileRead) session.HandledRequests.Add(ReadSchematicFileLocations.Descriptor.FullName);
+                response = session;
+            }
             else if (message.Is(ReadCheckedSchematicState.Descriptor)) response = checkpoint.Clone();
+            else if (message.Is(ReadSchematicFileLocations.Descriptor))
+            {
+                Assert.IsTrue(AdvanceOnFileRead);
+                checkpoint.State.Revision.Sequence++; checkpoint.Electrical.Hierarchy.Revision.Sequence++;
+                return Task.FromResult(new ApiResponse { Header = new() { KicadToken = Epoch },
+                    Status = new() { Status = (ApiStatusCode)3, ErrorMessage = "revision advanced" } }.ToByteArray());
+            }
+            else if (message.Is(ReadSchematicHierarchyData.Descriptor)) response = checkpoint.Electrical.Hierarchy.Clone();
             else if (message.Is(CheckedSaveDocument.Descriptor))
             {
                 var save = message.Unpack<CheckedSaveDocument>(); ++Saves;

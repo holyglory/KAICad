@@ -164,7 +164,9 @@ public sealed partial class NativeSessionTests
         // their idle-host sizing; per-action deadlines are unchanged.
         int aggregateSeconds = journey == NativeJourney.Foundation ? 900
             : journey == NativeJourney.CheckedBatch ? 630
-            : journey == NativeJourney.OwnershipSync ? 1200
+            // The expanded ownership journey measured 1026.6s for one editor in
+            // f53c86; both editors need this aggregate margin. Action limits stay fixed.
+            : journey == NativeJourney.OwnershipSync ? 2700
             : journey is NativeJourney.RecursiveEditor or NativeJourney.SymbolSheets or NativeJourney.ComponentCreation or NativeJourney.PsuCpuComponentCreation
                 or NativeJourney.ConnectedRealization ? 900
             : journey is NativeJourney.RepeatedSheetRebuild ? 900

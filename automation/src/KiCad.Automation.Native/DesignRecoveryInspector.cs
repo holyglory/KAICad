@@ -89,8 +89,6 @@ public static class DesignRecoveryInspector
             ? electrical?.Hierarchy ?? throw new AutomationException("invalid_recovery_snapshot", "The electrical response has no hierarchy snapshot.")
             : await client.InvokeAsync<ReadSchematicHierarchyData, SchematicHierarchyDataSnapshot>(new() { Document = target }, cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
-        if (store.Read()?.RevisionToken != saved.RevisionToken)
-            throw new AutomationException("design_recovery_changed", "Recovery state changed during observation; reload it before continuing.");
         if (snapshot.Data?.Document is null || !snapshot.Data.Document.Equals(saved.State.Baseline.Schematic.Document))
             throw new AutomationException("invalid_recovery_snapshot", "The native snapshot identifies a different design.");
         ulong minimumSequence = Math.Max(saved.State.NativeRevision.Sequence,
@@ -101,8 +99,11 @@ public static class DesignRecoveryInspector
             throw new AutomationException("invalid_recovery_revision", "The native snapshot predates recovery or belongs to a different document session.");
         // Validate supported typed serialization before handing data to reconciliation.
         // Explicit coverage gaps and incomplete tracking remain in the returned snapshot.
-        _ = SchematicDataXml.Read(SchematicDataXml.Write(snapshot.Data));
         var files = await NativeSheetFileLocations.CaptureAsync(client, snapshot, cancellationToken, session);
+        _ = SchematicDataXml.Read(SchematicDataXml.Write(snapshot.Data));
+        cancellationToken.ThrowIfCancellationRequested();
+        if (store.Read()?.RevisionToken != saved.RevisionToken)
+            throw new AutomationException("design_recovery_changed", "Recovery state changed during observation; reload it before continuing.");
         return new(inspection, snapshot, electrical, files);
     }
 

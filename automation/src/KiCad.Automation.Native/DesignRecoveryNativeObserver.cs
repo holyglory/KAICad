@@ -77,8 +77,8 @@ public sealed class DesignRecoveryNativeObserver : IDisposable
             var reason = pendingReason ?? throw new InvalidOperationException("A native observation requires a pending reason.");
 
             // File intake may have saved independent desired bytes while a
-            // native snapshot was in flight. Retry that CAS conflict only;
-            // semantic conflicts and pending mutations still pause intake.
+            // native snapshot was in flight. Retry that conflict or a proven native
+            // revision advance; semantic conflicts and pending mutations still pause intake.
             for (int attempt = 0; ; ++attempt)
             {
                 var before = Read();
@@ -106,7 +106,8 @@ public sealed class DesignRecoveryNativeObserver : IDisposable
                     pendingReason = null; pendingDelivery = null;
                     return result;
                 }
-                catch (AutomationException error) when (error.Code == "design_recovery_changed" && attempt < 2) { }
+                catch (AutomationException error) when (attempt < 2 && error.Code is
+                    "design_recovery_changed" or NativeSheetFileLocations.ObservationChanged) { }
             }
         }
         catch (AutomationException error)

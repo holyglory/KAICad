@@ -16,12 +16,15 @@ namespace KiCad.Automation.Tests;
 public sealed class AutomaticDesignSynchronizationTests
 {
     [TestMethod]
-    public async Task BusyObservationWaitsForAnEventAndIdleHeartbeatsDoNotRefreshDesigns()
+    [DataRow("native_busy")]
+    [DataRow(NativeSheetFileLocations.ObservationChanged)]
+    public async Task BusyObservationWaitsForAnEventAndIdleHeartbeatsDoNotRefreshDesigns(string reason)
     {
-        using var driver = new Driver { RefreshError = new NativeApiException(7, "native edit in progress") };
+        using var driver = new Driver { RefreshError = reason == "native_busy"
+            ? new NativeApiException(7, "native edit in progress") : new AutomationException(reason, "observation revision advanced") };
         await using var session = new AutomaticDesignSynchronization(driver);
         var waiting = await Until(session, s => s.Phase == AutomaticDesignPhase.WaitingForEditor);
-        Assert.AreEqual("native_busy", waiting.ErrorCode);
+        Assert.AreEqual(reason, waiting.ErrorCode);
         Assert.AreEqual(1, driver.RefreshCount); Assert.AreEqual(0, driver.Applies);
         await driver.ObservedReasons.Reader.ReadAsync();
         driver.RefreshError = null;

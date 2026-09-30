@@ -358,6 +358,7 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(blocksBeforeRepeat, await BlocksSha());
         await ApplyUnchanged("removal-repeat");
         Step("XML removal applied in KiCad", new { removedNative });
+        await VerifyUnitAnswers(current, beforeRemoval.Electrical.Hierarchy.Data);
 
         // ---- 6. Simultaneous conflicting edits of one component keep both versions and pause -------------------------
         // The person moves U3 (the PSU's LTC2959) in KiCad while the XML removes U3. Applying the removal would discard the
@@ -485,6 +486,8 @@ public sealed partial class NativeSessionTests
                 refusedParts = new { otherPins = PsuCpuIds.Id(0x03, 2), otherLibrarySymbol = capacitor.Id },
                 answeredWith = SchematicNativeAdditionProjection.AnswerTool, answeredPart = sense.Id, component = r2Component, occurrence = r2Occurrence,
                 owner = "Processor", workerResumedAndPublished = true, repeatNoOp = true, undoRemoves = true, redoRestoresAnsweredPart = true },
+            unitAnswers = new { existingOwnerPreserved = true, newUnitsGrouped = true, conflictingChoicesRefused = true,
+                workerResumedAndPublished = true, separateSheetLocationPreserved = true, exactUndoRedo = true, repeatNoOp = true },
             firstSynchronization = new { neverSynchronizedRecord = true, component = j5Component, occurrence = j5Occurrence, part = PsuCpuIds.Id(0x03, 1),
                 owner = "System", adoptedByWorker = true, repeatNoOp = true },
             xmlRemoval = new { removedNative, previewExact = true, appliedInKiCad = true, bindingDetached = true },
@@ -494,7 +497,6 @@ public sealed partial class NativeSessionTests
             remaining = new[]
             {
                 "Undrawn or externally owned components in new shared instances and moving through shared parents remain explicit topology gaps; locally owned shared insertion, existing-instance move/removal and native-variable filename resolution are verified in the repeated-sheet journey.",
-                "Answers to unit-owner and unit-grouping requests for new units of multi-unit parts are proven offline only (SymbolSheetOwnershipTests); this journey answers a part request.",
                 "An answer written by hand in the XML is proven offline only; this journey answers through kicad_design_ownership_answer, which writes the same declaration.",
                 "Part and pin rebinding of an existing component has no explicit resolution request yet.",
                 "A KiCad undo that restores symbols in the same change as new placements is refused (native_restoration_with_additions).",
@@ -512,6 +514,123 @@ public sealed partial class NativeSessionTests
         string? Code(JsonElement status) => status.GetProperty("errorCode").GetString();
         bool Settled(Func<SchematicDesign, bool> done) => store.Read() is { } record && !record.State.HasPendingWork && done(record.State.Baseline);
 
+        async Task VerifyUnitAnswers(SchematicDesign beforeUnitRemoval, SchematicHierarchyData nativeBeforeRemoval)
+        {
+            Guid processor = PsuCpuIds.Id(0x07, 7), powerSheet = PsuCpuIds.Id(0x05, 4);
+            var returnedPower = Place(NativeOf(beforeUnitRemoval, nativeBeforeRemoval, unitFour), "U5", cpuPower,
+                Grid(power.LeftNm + 127_000_000), Grid(power.BottomNm + 50_800_000));
+            Guid powerNative = Guid.Parse(returnedPower.Id.Value);
+            int componentCount = store.Read()!.State.Baseline.Engineering.Circuit.Components.Count;
+            await NativeBatch("Place a new drawing of U5's power unit", cpuPower,
+                new SchematicItemOperation { Create = Any.Pack(returnedPower) });
+            var started = await host.Tool("kicad_design_automatic_sync_start", new { instanceId, recoveryPath = store.StatePath,
+                designPath = path, expectedRecoveryRevision = store.Read()!.RevisionToken,
+                blockGraphPath = blocksPath, designId = designId.ToString("D") });
+            RequireToolSuccess(started);
+            sessionId = started.GetProperty("structuredContent").GetProperty("sessionId").GetString()!;
+            sequence = started.GetProperty("structuredContent").GetProperty("status").GetProperty("sequence").GetUInt64();
+            await Worker("undecidable unit owner", s => Phase(s) == "Paused" && Code(s) == SchematicNativeAdditionProjection.ResolutionRequired);
+            var requests = await Requests("unit-owner");
+            var request = requests.Single();
+            Assert.AreEqual(SchematicNativeAdditionProjection.UnitOwnerAmbiguous, request.GetProperty("Code").GetString());
+            CollectionAssert.AreEqual(new[] { processor }, request.GetProperty("CandidateComponentIds").EnumerateArray().Select(p => p.GetGuid()).ToArray());
+            await Refuse("unit-own-component", SchematicNativeAdditionProjection.AnswerInvalid,
+                [new { nativeObjectId = powerNative, componentId = PsuCpuIds.Id(0x07, 1) }]);
+            var answeredPower = await AcceptUnits("unit-existing-owner", [new { nativeObjectId = powerNative, componentId = processor }]);
+            var powerRow = answeredPower.GetProperty("answeredSymbols").EnumerateArray().Single();
+            Guid powerOccurrence = powerRow.GetProperty("occurrenceId").GetGuid();
+            Assert.AreEqual(processor, powerRow.GetProperty("componentId").GetGuid());
+            Assert.AreEqual(powerSheet, powerRow.GetProperty("sheetInstanceId").GetGuid());
+            await Resume("unit owner answered", d => d.SymbolBindings.Any(b => b.SymbolOccurrenceId == powerOccurrence));
+            var joined = await Published();
+            Assert.AreEqual(componentCount, joined.Engineering.Circuit.Components.Count);
+            CollectionAssert.AreEquivalent(new[] { 1, 2, 3, 4 }, joined.Engineering.Circuit.Symbols
+                .Where(s => s.ComponentId == processor).Select(s => s.Unit).ToArray());
+            Assert.AreEqual(powerSheet, joined.Engineering.Circuit.Symbols.Single(s => s.Id == powerOccurrence).SheetInstanceId);
+            await History("unit owner", [powerOccurrence]);
+
+            // Two new units named U9 need one explicit physical owner, including
+            // the founder inferred from the answered unit's proposed-owner choice.
+            var cpuSheet = Sheet(PsuCpuIds.Id(0x05, 3));
+            SchematicSymbolInstance CopyUnit(int unit)
+            {
+                Guid occurrence = beforeUnitRemoval.Engineering.Circuit.Symbols.Single(s => s.ComponentId == processor && s.Unit == unit).Id;
+                var source = NativeOf(beforeUnitRemoval, nativeBeforeRemoval, occurrence);
+                return Place(source, "U9", cpuSheet, source.Position.XNm, source.Position.YNm + 101_600_000);
+            }
+            var firstUnit = CopyUnit(1); var secondUnit = CopyUnit(2);
+            Guid firstId = Guid.Parse(firstUnit.Id.Value), secondId = Guid.Parse(secondUnit.Id.Value);
+            await NativeBatch("Place two new U9 units", cpuSheet,
+                new SchematicItemOperation { Create = Any.Pack(firstUnit) }, new SchematicItemOperation { Create = Any.Pack(secondUnit) });
+            await Worker("undecidable unit grouping", s => Phase(s) == "Paused" && Code(s) == SchematicNativeAdditionProjection.ResolutionRequired);
+            requests = await Requests("unit-grouping");
+            Assert.HasCount(2, requests);
+            Assert.IsTrue(requests.All(r => r.GetProperty("Code").GetString() == SchematicNativeAdditionProjection.UnitGroupingAmbiguous));
+            Guid owner = requests.Single(r => r.GetProperty("NativeObjectId").GetGuid() == firstId).GetProperty("ProposedComponentId").GetGuid();
+            Guid otherOwner = requests.Single(r => r.GetProperty("NativeObjectId").GetGuid() == secondId).GetProperty("ProposedComponentId").GetGuid();
+            await Refuse("unit-split-owner", "native_addition_conflict",
+                [new { nativeObjectId = firstId, componentId = owner }, new { nativeObjectId = secondId, componentId = otherOwner }]);
+            var groupedAnswer = await AcceptUnits("unit-group-owner", [new { nativeObjectId = secondId, componentId = owner }]);
+            var rows = groupedAnswer.GetProperty("answeredSymbols").EnumerateArray().ToArray();
+            Assert.HasCount(2, rows); Assert.IsTrue(rows.All(r => r.GetProperty("componentId").GetGuid() == owner));
+            var groupedOccurrences = rows.Select(r => r.GetProperty("occurrenceId").GetGuid()).ToArray();
+            await Resume("unit grouping answered", d => d.Engineering.Circuit.Components.Any(c => c.Id == owner));
+            var grouped = await Published();
+            Assert.AreEqual(componentCount + 1, grouped.Engineering.Circuit.Components.Count);
+            CollectionAssert.AreEquivalent(new[] { 1, 2 }, grouped.Engineering.Circuit.Symbols.Where(s => s.ComponentId == owner).Select(s => s.Unit).ToArray());
+            Assert.AreEqual("U9", grouped.Engineering.Circuit.Components.Single(c => c.Id == owner).Reference);
+            await History("unit grouping", groupedOccurrences);
+            RequireToolSuccess(await host.Tool("kicad_design_automatic_sync_stop", new { instanceId, sessionId }));
+            RequireToolSuccess(await host.Tool("kicad_design_recovery_refresh", Recovery()));
+            await NoOpPlan("unit-answers-repeat-plan");
+            await ApplyUnchanged("unit-answers-repeat");
+            Step("unit ownership answers published", new { processor, powerOccurrence, groupedOwner = owner, groupedOccurrences });
+
+            async Task<JsonElement[]> Requests(string name)
+            {
+                var preview = await host.Tool("kicad_design_sync_plan", Recovery());
+                await File.WriteAllTextAsync(Evidence(name + "-plan.json"), RetainedToolEvidence(preview), token);
+                var content = preview.GetProperty("structuredContent");
+                Assert.AreEqual(SchematicNativeAdditionProjection.ResolutionRequired, content.GetProperty("errorCode").GetString());
+                return content.GetProperty("ownershipResolutionRequests").EnumerateArray().Select(r => r.Clone()).ToArray();
+            }
+            async Task<JsonElement> Choose(string name, object[] answers)
+            {
+                var answer = await host.Tool("kicad_design_ownership_answer", new { instanceId, recoveryPath = store.StatePath,
+                    expectedRevisionToken = store.Read()!.RevisionToken, designPath = path, answers });
+                await File.WriteAllTextAsync(Evidence(name + "-answer.json"), RetainedToolEvidence(answer), token);
+                return answer;
+            }
+            async Task Refuse(string name, string code, object[] answers)
+            {
+                var native = await Capture(); var revision = store.Read()!.RevisionToken; byte[] bytes = await File.ReadAllBytesAsync(path, token);
+                var answer = await Choose(name, answers);
+                Assert.AreEqual(code, answer.GetProperty("structuredContent").GetProperty("errorCode").GetString());
+                Assert.AreEqual(native, await Capture()); Assert.AreEqual(revision, store.Read()!.RevisionToken);
+                CollectionAssert.AreEqual(bytes, await File.ReadAllBytesAsync(path, token));
+            }
+            async Task<JsonElement> AcceptUnits(string name, object[] answers)
+            {
+                var native = await Capture(); var answer = await Choose(name, answers); RequireToolSuccess(answer);
+                CollectionAssert.AreEqual(await File.ReadAllBytesAsync(path, token), store.Read()!.State.DesiredFileBytes);
+                Assert.AreEqual(native, await Capture()); return answer.GetProperty("structuredContent").Clone();
+            }
+            async Task Resume(string name, Func<SchematicDesign, bool> reached)
+            {
+                RequireToolSuccess(await host.Tool("kicad_design_automatic_sync_resume", new { instanceId, sessionId, expectedSequence = sequence }));
+                await Worker(name, s => Phase(s) == "Watching" && Settled(reached));
+            }
+            async Task History(string name, Guid[] occurrences)
+            {
+                var expectedOccurrences = (await Published()).Engineering.Circuit.Symbols.Where(s => occurrences.Contains(s.Id)).ToArray();
+                await FocusedSchematicShortcut(client, document, processId, display, "z", token);
+                await Worker(name + " undo", s => Phase(s) == "Watching" && Settled(d => !d.Engineering.Circuit.Symbols.Any(o => occurrences.Contains(o.Id))));
+                await FocusedSchematicShortcut(client, document, processId, display, "y", token);
+                await Worker(name + " redo", s => Phase(s) == "Watching" && Settled(d => occurrences.All(id => d.Engineering.Circuit.Symbols.Any(o => o.Id == id))));
+                CollectionAssert.AreEquivalent(expectedOccurrences, (await Published()).Engineering.Circuit.Symbols.Where(s => occurrences.Contains(s.Id)).ToArray());
+            }
+        }
+
         // Waits for the worker's statuses until one satisfies reached, starting with the one already seen (the worker may have
         // settled before the call); a new pause or stop fails with its status. The status already seen is only a starting
         // point: a pause seen before resuming is not a new pause.
@@ -523,7 +642,10 @@ public sealed partial class NativeSessionTests
             {
                 var call = host.Tool("kicad_design_automatic_sync_wait", new { instanceId, sessionId, afterSequence = after });
                 if (await Task.WhenAny(call, Task.Delay(TimeSpan.FromSeconds(Math.Max(1, 120 - deadline.Elapsed.TotalSeconds)), token)) != call)
+                {
+                    token.ThrowIfCancellationRequested();
                     throw new AssertFailedException($"{what}: the worker did not settle within 120 s; last sequence {sequence}.");
+                }
                 var next = await call; RequireToolSuccess(next);
                 var status = next.GetProperty("structuredContent").GetProperty("status").Clone();
                 sequence = after = status.GetProperty("sequence").GetUInt64();

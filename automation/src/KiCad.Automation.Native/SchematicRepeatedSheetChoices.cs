@@ -21,7 +21,7 @@ internal static class SchematicRepeatedSheetChoices
 
     internal static async Task<(StoredDesignRecovery Recovery, SchematicNativeAdditionResult Projection)> RetainAsync(
         DesignRecoveryStore store, StoredDesignRecovery saved, IReadOnlyList<SchematicSheetComponentReference> references,
-        IReadOnlyList<SchematicOwnershipAnswer> symbolOwners, CancellationToken token)
+        IReadOnlyList<SchematicOwnershipAnswer> symbolOwners, CancellationToken token, bool allowNewFiles = false)
     {
         if (saved.State.HasPendingWork)
             throw new AutomationException("pending_recovery_requires_reconciliation", "Finish or reconcile the pending synchronization before changing repeated-sheet choices.");
@@ -33,7 +33,7 @@ internal static class SchematicRepeatedSheetChoices
         var oldScreens = saved.State.Baseline.Schematic.Instances.Select(s => s.Metadata.ScreenId.Value).ToHashSet(StringComparer.Ordinal);
         var inserted = changes.Inserted.ToHashSet(StringComparer.Ordinal);
         if (changes.ErrorCode is not null || !saved.State.Observed.Instances.Any(s => inserted.Contains(SchematicNativeSheetChanges.Key(s))
-            && oldScreens.Contains(s.Metadata.ScreenId.Value)))
+            && (allowNewFiles || oldScreens.Contains(s.Metadata.ScreenId.Value))))
             throw new AutomationException(Invalid, "The observed native change must insert another instance of an existing sheet file.");
         var current = saved.State.RepeatedSheetResolution is { } previous && previous.SnapshotToken == snapshot ? previous : null;
         var mergedReferences = (current?.ComponentReferences ?? []).ToDictionary(r => (r.SheetInstanceId, r.ComponentDefinitionId));

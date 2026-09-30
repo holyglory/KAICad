@@ -3742,5 +3742,40 @@ with shared build prerequisites and separate fixture/evidence paths. These are
 focused capability proofs, not a complete release acceptance claim.
 
 Moving references through shared parent files remains open under
-`pd6a383227f9d47b8`. Ownership answers for a new unique sheet created in the same
-native change remain under `pd618bdab49c2ad0f`.
+`pd6a383227f9d47b8`. The new-unique-sheet ownership case is qualified below.
+
+
+### Ownership answers for a new sheet (2026-09-30)
+
+When KiCad creates a new physical sheet and places an ambiguous symbol on it
+before synchronization, `kicad_design_ownership_answer` retains the validated
+choice in recovery. It returns `answersRetained: true` and
+`designFileWritten: false`; remaining questions are returned if the ownership
+projection is not yet complete. A missing path is normalized only when exactly
+one observed occurrence has that UUID. Wrong parts and ambiguous identities are
+refused without changing the record, XML or native design. Existing-sheet
+answers keep their guarded XML-write behavior.
+
+The next plan/apply or automatic resume uses the retained choice to publish the
+whole new sheet, its definition, component and exact native binding together.
+It never writes a component referring to a sheet missing from the XML. Choices
+keep the same input digest and pending-operation protections as repeated-sheet
+answers, and clear on completed synchronization.
+
+Complete native `t20260930T085545Z-4b5855` passed all seven checks with unchanged
+source. Both topology proof files report `uniqueSheetAnswerRetained`,
+`uniqueSheetPublishedTogether` and `uniqueSheetAnswerUndoRedoReload`. Each case
+creates the new sheet and ambiguous probe in one native batch, refuses a wrong
+part, retains the chosen part without an XML/native write, publishes both objects,
+and checks a no-op repeat, exact undo/redo and saved reload. The external-owner
+regression also passed in both projects. Source digest:
+`47ec05d3984621dd334a0e3aabed52876b36f2ed55fbcdba3c30e004801d4030`.
+Retained reference-journey manifest:
+`c66deaa239e8bcf597e9a7bc3d795c2212101186a285a67ea3255f8f950cc098`.
+Retained external-owner manifest:
+`60ac72ca5060f1bc253b4c7a644c28fc56d5f7a5d2a7acaa0d32c76799f67386`.
+Matching focused `t20260930T085046Z-60a165` passed. Only documentation and one
+clarifying tool-description sentence changed afterward; execution behavior is
+unchanged. This closes `pd618bdab49c2ad0f` and its broader answer outcome
+`p35cfdc0345e056a5`; shared-parent relocation and combined new-parent moves remain
+separate unfinished topology outcomes.

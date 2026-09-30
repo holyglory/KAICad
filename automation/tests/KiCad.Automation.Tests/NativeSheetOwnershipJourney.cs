@@ -393,6 +393,61 @@ public sealed partial class NativeSessionTests
         var finalModel = await Publish("shared-instances-reloaded");
         CollectionAssert.AreEquivalent(xmlComponents, finalModel.Engineering.Circuit.Components.Where(c => c.SheetInstanceId == xmlSheetId).ToArray());
         CollectionAssert.AreEquivalent(extraOwners, finalModel.Engineering.Circuit.Components.Where(c => c.SheetInstanceId == extraModel).ToArray());
+
+        // A new physical sheet and its ambiguous symbol arrive in one native
+        // commit. Retain the part choice without emitting incomplete sheet XML.
+        var uniqueSheet = Symbol(await Capture(), root, extra.Id).Clone();
+        uniqueSheet.Id.Value = Guid.NewGuid().ToString("D"); uniqueSheet.ChildScreenId.Value = Guid.NewGuid().ToString("D");
+        uniqueSheet.NameField.Text.Text_ = "New ownership sheet"; uniqueSheet.FilenameField.Text.Text_ = "unique-ownership.kicad_sch";
+        uniqueSheet.PageNumber = "92"; uniqueSheet.InstanceRecords = null;
+        var uniqueDocument = Child(root, uniqueSheet.Id);
+        var template = (await Capture()).Electrical.Hierarchy.Data.Instances.Single(s => s.Metadata.Document.Equals(root)).Items
+            .First(i => i.Is(SchematicSymbolInstance.Descriptor)).Unpack<SchematicSymbolInstance>();
+        var uniqueSymbol = Place(template, "TP900", uniqueDocument, 50_800_000, 50_800_000);
+        Guid uniqueNative = Guid.Parse(uniqueSymbol.Id.Value);
+        await Native(true, new SchematicItemOperation { TargetDocument = root.Clone(), Create = Any.Pack(uniqueSheet) },
+            new SchematicItemOperation { TargetDocument = uniqueDocument.Clone(), Create = Any.Pack(uniqueSymbol) });
+        RequireToolSuccess(await call("kicad_design_recovery_refresh", Recovery()));
+        var uniquePlan = await call("kicad_design_sync_plan", Recovery());
+        Assert.AreEqual(SchematicNativeAdditionProjection.ResolutionRequired, uniquePlan.GetProperty("structuredContent").GetProperty("errorCode").GetString());
+        var uniqueRequest = uniquePlan.GetProperty("structuredContent").GetProperty("ownershipResolutionRequests").EnumerateArray().Single();
+        Assert.AreEqual(uniqueNative, uniqueRequest.GetProperty("NativeObjectId").GetGuid());
+        Guid selectedPart = finalModel.Engineering.Circuit.Parts.Single(p => p.Name == "Alternative fixture probe").Id;
+        byte[] uniqueBefore = await File.ReadAllBytesAsync(designPath, token);
+        var uniqueNativeBefore = await Capture(); string uniqueToken = store.Read()!.RevisionToken;
+        object UniqueChoice(Guid part) => new { instanceId, recoveryPath = store.StatePath, designPath,
+            expectedRevisionToken = store.Read()!.RevisionToken, answers = new[] { new { nativeObjectId = uniqueNative, partId = part } } };
+        var invalidPart = await call("kicad_design_ownership_answer", UniqueChoice(Guid.NewGuid()));
+        Assert.IsTrue(invalidPart.GetProperty("isError").GetBoolean());
+        Assert.AreEqual(SchematicNativeAdditionProjection.AnswerInvalid, invalidPart.GetProperty("structuredContent").GetProperty("errorCode").GetString());
+        Assert.AreEqual(uniqueToken, store.Read()!.RevisionToken); Assert.AreEqual(uniqueNativeBefore, await Capture());
+        CollectionAssert.AreEqual(uniqueBefore, await File.ReadAllBytesAsync(designPath, token));
+        var uniqueAnswer = await call("kicad_design_ownership_answer", UniqueChoice(selectedPart));
+        RequireToolSuccess(uniqueAnswer);
+        Assert.IsTrue(uniqueAnswer.GetProperty("structuredContent").GetProperty("answersRetained").GetBoolean());
+        Assert.IsFalse(uniqueAnswer.GetProperty("structuredContent").GetProperty("designFileWritten").GetBoolean());
+        CollectionAssert.AreEqual(uniqueBefore, await File.ReadAllBytesAsync(designPath, token));
+        Assert.AreEqual(uniqueNativeBefore, await Capture());
+        var uniquePublished = await Publish("unique-sheet-owner-answer");
+        Guid uniqueModel = Binding(uniquePublished, uniqueDocument).SheetInstanceId;
+        var uniqueOwner = uniquePublished.Engineering.Circuit.Components.Single(c => c.SheetInstanceId == uniqueModel);
+        Assert.AreEqual("TP900", uniqueOwner.Reference);
+        Assert.AreEqual(selectedPart, uniquePublished.Engineering.Circuit.Sheets.SelectMany(s => s.Components).Single(d => d.Id == uniqueOwner.DefinitionId).PartId);
+        Guid uniqueOccurrence = uniquePublished.SymbolBindings.Single(b => b.NativeObjectId == uniqueNative).SymbolOccurrenceId;
+        Assert.AreEqual(uniqueOwner.Id, uniquePublished.Engineering.Circuit.Symbols.Single(s => s.Id == uniqueOccurrence).ComponentId);
+        Assert.IsNull(store.Read()!.State.RepeatedSheetResolution);
+        byte[] uniqueBytes = await File.ReadAllBytesAsync(designPath, token); await Publish("unique-sheet-owner-repeat");
+        CollectionAssert.AreEqual(uniqueBytes, await File.ReadAllBytesAsync(designPath, token));
+        await History("z", uniqueDocument, false, "unique-sheet-owner-undo");
+        var uniqueRedone = await History("y", uniqueDocument, true, "unique-sheet-owner-redo");
+        Assert.AreEqual(uniqueOwner, uniqueRedone.Engineering.Circuit.Components.Single(c => c.Id == uniqueOwner.Id));
+        await client.InvokeAsync<RevertDocument, Empty>(new() { Document = root.Clone() }, token);
+        var uniqueReloaded = await Capture();
+        RequireToolSuccess(await call("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
+            expectedRevisionToken = store.Read()!.RevisionToken, expectedDocumentEpoch = uniqueReloaded.State.Revision.Epoch }));
+        var uniqueFinal = await Publish("unique-sheet-owner-reloaded");
+        Assert.AreEqual(uniqueOwner, uniqueFinal.Engineering.Circuit.Components.Single(c => c.Id == uniqueOwner.Id));
+        Assert.AreEqual(uniqueNative, uniqueFinal.SymbolBindings.Single(b => b.SymbolOccurrenceId == uniqueOccurrence).NativeObjectId);
         await File.WriteAllTextAsync(Path.Combine(Path.GetDirectoryName(designPath)!, "sheet-topology-proof.json"), JsonSerializer.Serialize(new
         { instanceId, nativeAdd = true, nativeMove = true, nativeRemove = true, nativeUndoRestoresIdentity = true,
             xmlMove = true, xmlRemove = true, populatedRepeatedMoveBothDirections = true,
@@ -401,6 +456,7 @@ public sealed partial class NativeSessionTests
             xmlRepeatedInsertion = true, xmlRepeatedInsertionUndoRedo = true, repeatedInstancesReloaded = true,
             swappedDefinitionRefusedWithoutMutation = true, nativeRecordOrderPrepared = true,
             undrawnReferencePreserved = true, unknownOrDuplicateReferenceRefused = true, staleReferenceChoiceRefused = true,
+            uniqueSheetAnswerRetained = true, uniqueSheetPublishedTogether = true, uniqueSheetAnswerUndoRedoReload = true,
             nativeVariablePathsPreserved = true, conflictingCompanionEnvironmentIgnored = true,
             fileLocationObservationReadOnly = true, staleFileLocationReadRefused = true,
             detachedFilesPreserved = true, publicSynchronization = true }), token);

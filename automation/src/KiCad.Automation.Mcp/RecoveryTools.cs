@@ -325,7 +325,7 @@ public sealed class RecoveryTools
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativeEditsReachTheOwningBlockByExactIdentity",
          "NativeSessionTests.RepeatedPhysicalSheetRebuildPreservesEveryInstance",
          "SymbolSheetOwnershipTests.OwnershipAnswersOverStdioDeclareExactlyWhatThePersonChose"),
-     Description("Answer the ownership resolution requests (native_ownership_resolution_required, listed by kicad_design_sync_plan as ownershipResolutionRequests) for symbols placed in KiCad since the last synchronization of one explicit instance's recovery record, at its revision token. answers lists, per symbol by the request's NativeObjectId and, for repeated sheets, its NativePath: partId, one of the request's CandidatePartIds (native_part_ambiguous), and componentId (native_unit_owner_ambiguous, native_unit_grouping_ambiguous): an existing component or another new symbol's component from CandidateComponentIds, or the symbol's own ProposedComponentId for a component of its own. Writes the answers into the saved design XML at the absolute designPath (the occurrence bound to each answered symbol, with the component, definition and part it adds) through a guarded write that refuses a file changed meanwhile (design_file_changed), and records that XML as the recovery record's desired XML. Resume the paused automatic synchronization (kicad_design_automatic_sync_resume), or plan and apply, to adopt the symbols exactly as answered; symbols not answered are still decided by exact identities. An answer that is not one of the request's choices (a part not among CandidatePartIds, such as one drawn with another library symbol or one overriding a part exact identities decide) is refused with native_ownership_answer_invalid and nothing is written. Answer every open request in one call: answers that leave a request open are refused with native_ownership_resolution_required and the requests still open. Before writing, the answered XML is planned as the next synchronization plans it from the record; answers it would not adopt exactly as given are refused with its error code and nothing is written, while a conflict it finds elsewhere in the design (hierarchy, properties, placement or connectivity) is returned as synchronizationConflict with the written answer. If the record changes after that check and cannot take the XML in, the result is an error with designFileWritten true and recoveryDesiredUpdated false: the XML holds the answers and resuming the automatic synchronization reads them. Does not contact or change KiCad and advances no synchronization.")]
+     Description("Answer the ownership resolution requests (native_ownership_resolution_required, listed by kicad_design_sync_plan as ownershipResolutionRequests) for symbols placed in KiCad since the last synchronization of one explicit instance's recovery record, at its revision token. answers lists, per symbol by the request's NativeObjectId and, for repeated sheets, its NativePath: partId, one of the request's CandidatePartIds (native_part_ambiguous), and componentId (native_unit_owner_ambiguous, native_unit_grouping_ambiguous): an existing component or another new symbol's component from CandidateComponentIds, or the symbol's own ProposedComponentId for a component of its own. For a newly created sheet file, retains validated answers in the revision-bound recovery record and returns answersRetained with designFileWritten false; the next synchronization publishes the entire new sheet and its symbols together. On existing sheets, writes the answers into the saved design XML at the absolute designPath (the occurrence bound to each answered symbol, with the component, definition and part it adds) through a guarded write that refuses a file changed meanwhile (design_file_changed), and records that XML as the recovery record's desired XML. Resume the paused automatic synchronization (kicad_design_automatic_sync_resume), or plan and apply, to adopt the symbols exactly as answered; symbols not answered are still decided by exact identities. An answer that is not one of the request's choices (a part not among CandidatePartIds, such as one drawn with another library symbol or one overriding a part exact identities decide) is refused with native_ownership_answer_invalid and nothing is written. On existing sheets, answer every open request in one call: answers that leave a request open are refused with native_ownership_resolution_required and the requests still open. Before writing, the answered XML is planned as the next synchronization plans it from the record; answers it would not adopt exactly as given are refused with its error code and nothing is written, while a conflict it finds elsewhere in the design (hierarchy, properties, placement or connectivity) is returned as synchronizationConflict with the written answer. If the record changes after that check and cannot take the XML in, the result is an error with designFileWritten true and recoveryDesiredUpdated false: the XML holds the answers and resuming the automatic synchronization reads them. Does not contact or change KiCad and advances no synchronization.")]
     public Task<CallToolResult> AnswerOwnership(string instanceId, string recoveryPath, string expectedRevisionToken, string designPath,
         SchematicOwnershipAnswer[] answers, CancellationToken cancellationToken) => ExecuteAsync(async () =>
     {
@@ -342,6 +342,34 @@ public sealed class RecoveryTools
         var libraries = state.KnowledgeLibraries;
         if (!DesignRecoveryStore.ReadDesired(state).Schematic.Document.Equals(state.Baseline.Schematic.Document))
             throw new AutomationException("design_file_mismatch", "The XML at designPath belongs to another KiCad design than this recovery record.");
+        var sheetChanges = SchematicNativeSheetChanges.Compare(state.Baseline.Schematic, state.Observed);
+        var originalScreens = state.Baseline.Schematic.Instances.Select(s => s.Metadata.ScreenId.Value).ToHashSet(StringComparer.Ordinal);
+        if (sheetChanges.ErrorCode is null && state.Observed.Instances.Any(s => sheetChanges.Inserted.Contains(SchematicNativeSheetChanges.Key(s))
+                && !originalScreens.Contains(s.Metadata.ScreenId.Value)))
+        {
+            // A newly created sheet cannot be written as a partial declaration:
+            // retain the choice and publish its entire scaffold with normal sync.
+            var explicitAnswers = (answers ?? []).Select(answer =>
+            {
+                if (answer is null)
+                    throw new AutomationException(SchematicNativeAdditionProjection.AnswerInvalid, "Each answer must name a symbol and its explicit choice.");
+                if (answer.NativePath is not null) return answer;
+                var matches = state.Observed.Instances.Where(s => s.Items.Any(i => i.Is(Kiapi.Schematic.Types.SchematicSymbolInstance.Descriptor)
+                    && i.Unpack<Kiapi.Schematic.Types.SchematicSymbolInstance>().Id.Value == answer.NativeObjectId.ToString("D"))).ToArray();
+                if (matches.Length != 1)
+                    throw new AutomationException(SchematicNativeAdditionProjection.AnswerInvalid, "Provide the exact native path for an ambiguous symbol identity.");
+                return answer with { NativePath = matches[0].Metadata.Document.SheetPath.Path.Select(p => Guid.Parse(p.Value)).ToArray() };
+            }).ToArray();
+            var (retained, projected) = await SchematicRepeatedSheetChoices.RetainAsync(store, saved with { State = state },
+                [], explicitAnswers, cancellationToken, allowNewFiles: true);
+            var chosen = JsonSerializer.SerializeToElement(new
+            {
+                instanceId, recoveryRevisionToken = retained.RevisionToken, answersRetained = true,
+                ownershipProjectionComplete = projected.Adoption is not null, ownershipResolutionRequests = projected.Requests,
+                designFileWritten = false, recoveryDesiredUpdated = true, nativeMutationAuthorized = false, synchronizationAdvanced = false
+            }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            return new CallToolResult { Content = [new TextContentBlock { Text = chosen.GetRawText() }], StructuredContent = chosen };
+        }
         var history = await SchematicOwnershipHistoryReader.ReadForAdditionsAsync(store, state, cancellationToken);
         if (history.Count != 0)
         {

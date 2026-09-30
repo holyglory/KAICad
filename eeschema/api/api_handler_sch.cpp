@@ -1066,15 +1066,34 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicItemBatchResult> API_HANDLER_SCH:
                 KIID_PATH from = parent->Path(), to = UnpackSheetPath( target.sheet_path() );
                 from.push_back( sheet->m_Uuid ); to.push_back( sheet->m_Uuid );
                 if( from == to ) continue;
-                if( std::count_if( originalHierarchy.begin(), originalHierarchy.end(),
-                            [&]( const SCH_SHEET_PATH& path ) { return path.LastScreen() == parent->LastScreen(); } ) != 1 )
-                    return reject( "Reparenting a sheet symbol on a shared parent requires all parent instances to be specified" );
-                auto destination = originalHierarchy.GetSheetPathByKIIDPath( UnpackSheetPath( target.sheet_path() ) );
-                if( destination && std::count_if( originalHierarchy.begin(), originalHierarchy.end(),
-                            [&]( const SCH_SHEET_PATH& path ) { return path.LastScreen() == destination->LastScreen(); } ) != 1 )
-                    return reject( "Reparenting into a shared parent requires explicit ownership for its additional instances" );
                 if( !movedPaths.emplace( from, to ).second )
                     return reject( "A sheet instance cannot be moved twice in one batch" );
+            }
+        }
+        // A shared source or destination is admissible only when the batch
+        // explicitly pairs every parent instance. Partial moves remain refused
+        // before any native mutation.
+        for( const auto& [from, to] : movedPaths )
+        {
+            KIID_PATH fromParent( from.begin(), from.end() - 1 );
+            auto sourceParent = originalHierarchy.GetSheetPathByKIIDPath( fromParent );
+            if( !sourceParent ) continue;
+            size_t sourceCount = std::count_if( originalHierarchy.begin(), originalHierarchy.end(),
+                [&]( const SCH_SHEET_PATH& path ) { return path.LastScreen() == sourceParent->LastScreen(); } );
+            size_t sourceMoves = std::count_if( movedPaths.begin(), movedPaths.end(),
+                [&]( const auto& pair ) { return KIID_PATH( pair.first.begin(), pair.first.end() - 1 ) == fromParent; } );
+            if( sourceCount != sourceMoves )
+                return reject( "Reparenting a sheet symbol on a shared parent requires all parent instances to be specified" );
+            KIID_PATH toParent( to.begin(), to.end() - 1 );
+            auto destination = originalHierarchy.GetSheetPathByKIIDPath( toParent );
+            if( destination )
+            {
+                size_t destinationCount = std::count_if( originalHierarchy.begin(), originalHierarchy.end(),
+                    [&]( const SCH_SHEET_PATH& path ) { return path.LastScreen() == destination->LastScreen(); } );
+                size_t destinationMoves = std::count_if( movedPaths.begin(), movedPaths.end(),
+                    [&]( const auto& pair ) { return KIID_PATH( pair.second.begin(), pair.second.end() - 1 ) == toParent; } );
+                if( destinationCount != destinationMoves )
+                    return reject( "Reparenting into a shared parent requires explicit ownership for its additional instances" );
             }
         }
         auto movedPath = [&]( const KIID_PATH& path ) -> std::optional<KIID_PATH>

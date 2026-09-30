@@ -65,7 +65,8 @@ public static class SchematicSynchronizationPlanner
         bool selected = saved.State.OwnershipResolution is not null;
         bool sameOwners = SchematicNetReconciliation.NativeOwners(saved.State.Baseline.Schematic) == SchematicNetReconciliation.NativeOwners(saved.State.Observed);
         if (!selected && (plan.CanPrepare
-            || plan.ErrorCode is not ("electrical_ownership_changed" or SchematicNativeSheetChanges.MoveAmbiguous) || sameOwners))
+            || plan.ErrorCode is not ("electrical_ownership_changed" or SchematicNativeSheetChanges.MoveAmbiguous
+                or SchematicNativeAdditionProjection.ResolutionRequired) || sameOwners))
             return plan;
         try
         {
@@ -158,6 +159,7 @@ public static class SchematicSynchronizationPlanner
             var survivingSymbols = properties.Candidate.Circuit.Symbols.Select(s => s.Id).ToHashSet();
             // Seam 3 (lane 2C): restored and adopted owners bring their sheet bindings along with their symbol bindings.
             var candidate = desired with { Engineering = properties.Candidate,
+                PartSymbols = electrical.Restoration?.BindingCandidate.PartSymbols ?? desired.PartSymbols,
                 Schematic = PreserveEnumeration(hierarchy.Merged!, desired.Schematic),
                 SheetBindings = electrical.Restoration?.BindingCandidate.SheetBindings ?? desired.SheetBindings,
                 SymbolBindings = electrical.Restoration is not null ? electrical.Restoration.BindingCandidate.SymbolBindings

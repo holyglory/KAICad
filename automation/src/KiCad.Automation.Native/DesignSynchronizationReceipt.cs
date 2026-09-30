@@ -23,10 +23,16 @@ public sealed record DesignSynchronizationReceipt(
     [property: JsonRequired] string? PreviousXmlPath,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? PreviousXmlSha256 = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? PreviousSynchronizedXml = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? PreviousSynchronizedXmlSha256 = null)
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? PreviousSynchronizedXmlSha256 = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DesignComponentRebindResolution? CompletedComponentRebind = null)
 {
     internal void Validate()
     {
+        if (CompletedComponentRebind is { } rebind)
+        {
+            if (Version != 3) throw Invalid("Component replacement history requires a verified synchronized predecessor.");
+            SchematicNativeRebinding.Validate(rebind);
+        }
         if (Version is not (1 or 2 or 3) || OperationId == Guid.Empty || InstanceId == Guid.Empty
             || !Path.IsPathFullyQualified(DesignPath) || Path.GetFullPath(DesignPath) != DesignPath
             || !Digest(RequestedRecoveryRevisionToken) || !Digest(DesignFileSha256)

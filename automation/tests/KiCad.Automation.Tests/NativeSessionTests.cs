@@ -113,9 +113,12 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeObserveApplyStress")]
     public Task AgentAndPersonEditingTogetherNeverGetStaleOrPartialEdits() => RunNativeSessions(NativeJourney.ObserveApplyStress);
 
+    [TestMethod, TestCategory("NativeComponentRebind")]
+    public Task NativeComponentReplacementKeepsExactInstructionsAndHistory() => RunNativeSessions(NativeJourney.ComponentRebind);
+
     private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, RecursiveEditor, Simulation, PcbItems,
         PsuCpuSeed, PsuCpuComponentCreation, ConnectedRealization, DiagramCanvas, XmlRebuild, RepeatedSheetRebuild, ProjectRecovery, ProjectRecoveryContainer, OwnershipSync, NativeCrash, NativeCrashRelease,
-        ObserveApplyStress, RepeatedSheetOwnership }
+        ObserveApplyStress, RepeatedSheetOwnership, ComponentRebind }
 
     private async Task RunNativeSessions(NativeJourney journey, string theme = "light")
     {
@@ -135,6 +138,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.TransformSync => "native-transform-sync",
                 NativeJourney.SymbolSheets => "native-symbol-sheet-ownership",
                 NativeJourney.ComponentCreation => "native-xml-component-creation",
+                NativeJourney.ComponentRebind => "native-component-rebind",
                 NativeJourney.RecursiveEditor => Path.Combine("native-recursive-editor", theme),
                 NativeJourney.Simulation => "native-simulation",
                 NativeJourney.PcbItems => "native-pcb-items",
@@ -473,6 +477,22 @@ public sealed partial class NativeSessionTests
                             ":" + displayNumber, evidence, deadline.Token);
                         await VerifySnapshotSchemaVersions(client, opened.Document, deadline.Token);
                         await VerifyParityNetlistCapture(client, opened.Document, electrical, evidence, deadline.Token);
+                    }
+                    else if (journey == NativeJourney.ComponentRebind)
+                    {
+                        try
+                        {
+                            await FocusedSchematicShortcut(client, opened.Document, focusProcessId, ":" + displayNumber, "", deadline.Token);
+                            await VerifySharedScreenConnectedMove(client, opened.Document, hierarchyFixture, focusProcessId,
+                                ":" + displayNumber, evidence, target.Id, target.Id == launched.Last().Id, deadline.Token);
+                            await VerifyNativeComponentRebinding(client, opened.Document, focusProcessId,
+                                ":" + displayNumber, evidence, target.Id, target.Id == launched.Last().Id, deadline.Token);
+                        }
+                        catch (Exception error) when (!deadline.IsCancellationRequested)
+                        {
+                            synchronizationFailures.Add(error);
+                            await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-rebind-failure.txt"), error.ToString(), deadline.Token);
+                        }
                     }
                     else if (journey == NativeJourney.RepeatedSheetRebuild)
                     {

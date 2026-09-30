@@ -20,6 +20,7 @@ internal sealed record SchematicNativeRestorationResult(SchematicDesign BindingC
     public IReadOnlyList<Guid> AddedOccurrences { get; init; } = [];
     public IReadOnlyList<Guid> AddedComponents { get; init; } = [];
     public IReadOnlyList<Guid> AddedParts { get; init; } = [];
+    public IReadOnlyList<Guid> ReboundOccurrences { get; init; } = [];
     public IReadOnlyList<Guid> RemovedOccurrences { get; init; } = [];
     public IReadOnlyList<ComponentReferenceChange> ComponentChanges { get; init; } = [];
     /// <summary>Added occurrences exactly as the saved XML declares them: the person's answers to resolution requests
@@ -231,7 +232,13 @@ internal static class SchematicNativeRestorationProjection
 /// it is a component of its own: answering with it keeps the symbol apart from the candidate components.</summary>
 public sealed record SchematicOwnershipResolutionRequest(string Code, Guid NativeObjectId, string NativePath,
     Guid SheetInstanceId, string Reference, string LibraryId, int Unit, IReadOnlyList<Guid> CandidatePartIds,
-    IReadOnlyList<Guid> CandidateComponentIds, string Reason, Guid ProposedComponentId);
+    IReadOnlyList<Guid> CandidateComponentIds, string Reason, Guid ProposedComponentId)
+{
+    public Guid? FormerComponentId { get; init; }
+    public Guid? FormerPartId { get; init; }
+    public IReadOnlyList<PartPin>? FormerPins { get; init; }
+    public IReadOnlyList<PartPin>? ReplacementPins { get; init; }
+}
 
 /// <summary>A person's answer for one symbol placed in KiCad (kicad_design_ownership_answer, ledger p35cfdc0345e056a5):
 /// <paramref name="PartId"/> is the part the symbol is, one of its request's candidate parts; <paramref name="ComponentId"/>
@@ -242,6 +249,7 @@ public sealed record SchematicOwnershipAnswer(Guid NativeObjectId, Guid? PartId 
 {
     /// <summary>Optional sheet-instance path that disambiguates equal native UUIDs on repeated sheets.</summary>
     public IReadOnlyList<Guid>? NativePath { get; init; }
+    public IReadOnlyList<SchematicPinRebindAnswer>? PinMappings { get; init; }
 }
 
 internal sealed record SchematicNativeAdditionResult(SchematicNativeRestorationResult? Adoption,
@@ -376,30 +384,10 @@ public static class SchematicNativeAdditionProjection
                 var occurrence = circuit.Symbols.Single(s => s.Id == b.SymbolOccurrenceId);
                 return sheetPaths[occurrence.EffectiveSheetInstanceId(components[occurrence.ComponentId])] + "#" + b.NativeObjectId.ToString("D");
             }).ToHashSet(StringComparer.Ordinal);
-            var boundModels = baseline.SymbolBindings.ToDictionary(b =>
-            {
-                var occurrence = circuit.Symbols.Single(s => s.Id == b.SymbolOccurrenceId);
-                return sheetPaths[occurrence.EffectiveSheetInstanceId(components[occurrence.ComponentId])] + "#" + b.NativeObjectId.ToString("D");
-            }, b =>
-            {
-                var occurrence = circuit.Symbols.Single(s => s.Id == b.SymbolOccurrenceId);
-                var component = components[occurrence.ComponentId];
-                var definition = circuit.Sheets.SelectMany(s => s.Components).Single(d => d.Id == component.DefinitionId);
-                var part = circuit.Parts.Single(p => p.Id == definition.PartId);
-                string library = baseline.PartSymbols?.SingleOrDefault(p => p.PartId == part.Id) is { } source
-                    ? LibraryKey(source.LibraryId) : "";
-                return (ComponentId: component.Id, Library: library, Signature: Signature(part.Units, part.Pins));
-            }, StringComparer.Ordinal);
             var added = screens.OrderBy(p => p.Key, StringComparer.Ordinal).SelectMany(pair => pair.Value.Items
                     .Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => (Path: pair.Key, Symbol: i.Unpack<SchematicSymbolInstance>())))
-                .Where(x => !bound.Contains(x.Path + "#" + x.Symbol.Id.Value)
-                    || boundModels.TryGetValue(x.Path + "#" + x.Symbol.Id.Value, out var old)
-                    && (x.Symbol.Definition is null || old.Library != LibraryKey(x.Symbol)
-                        || old.Signature != Signature((int)x.Symbol.Definition.UnitCount, Pins(x.Symbol))))
+                .Where(x => !bound.Contains(x.Path + "#" + x.Symbol.Id.Value))
                 .OrderBy(x => x.Path, StringComparer.Ordinal).ThenBy(x => x.Symbol.Id.Value, StringComparer.Ordinal).ToArray();
-            var reboundKeys = added.Where(x => bound.Contains(x.Path + "#" + x.Symbol.Id.Value))
-                .Select(x => x.Path + "#" + x.Symbol.Id.Value).ToHashSet(StringComparer.Ordinal);
-            var reboundComponents = reboundKeys.ToDictionary(k => k, k => boundModels[k].ComponentId, StringComparer.Ordinal);
             if (added.Length == 0 && inserted.Count == 0)
                 return Failure("electrical_ownership_changed", "Unit changes or changed library pin identities require explicit ownership reconciliation.");
 
@@ -429,8 +417,7 @@ public static class SchematicNativeAdditionProjection
                 string path = Key(screen);
                 for (int i = screen.Items.Count - 1; i >= 0; --i)
                     if (screen.Items[i].Is(SchematicSymbolInstance.Descriptor)
-                            && (!bound.Contains(path + "#" + screen.Items[i].Unpack<SchematicSymbolInstance>().Id.Value)
-                                || reboundKeys.Contains(path + "#" + screen.Items[i].Unpack<SchematicSymbolInstance>().Id.Value)))
+                            && !bound.Contains(path + "#" + screen.Items[i].Unpack<SchematicSymbolInstance>().Id.Value))
                         screen.Items.RemoveAt(i);
             }
             var removal = SchematicNativeRemovalProjection.ProjectExisting(insertedParents.Baseline, withoutAdded, libraries, token,
@@ -599,6 +586,8 @@ public static class SchematicNativeAdditionProjection
             var answerBy = new Dictionary<string, SchematicOwnershipAnswer>(StringComparer.Ordinal);
             foreach (var answer in answers ?? [])
             {
+                if (answer.PinMappings is not null)
+                    return Failure(AnswerInvalid, "Pin replacement mappings require a changed existing component in the current observation.");
                 if (answer.NativePath is { Count: 0 })
                     return Failure(AnswerInvalid, $"Symbol {answer.NativeObjectId:D} has an empty native path; answer the sheet path named by its request.");
                 string? answerPath = answer.NativePath is { Count: > 0 } ? SchematicDesignBindings.PathKey(answer.NativePath) : null;
@@ -625,26 +614,6 @@ public static class SchematicNativeAdditionProjection
                 answerBy.TryGetValue(addition.Key, out var answer);
                 var candidates = PartChoices(addition);
                 Guid derived = addition.DerivedPart;
-                if (reboundKeys.Contains(addition.Key) && answer is null)
-                {
-                    // A changed library signature cannot safely preserve the former component: its
-                    // remaining units would have a different part definition. Offer the proposed
-                    // component unless exact evidence proves the old part is the same replacement.
-                    var componentChoices = new List<Guid> { addition.Proposed };
-                    if (reboundComponents.TryGetValue(addition.Key, out var formerComponent)
-                        && components.TryGetValue(formerComponent, out var formerOwner)
-                        && definitions.TryGetValue(formerOwner.DefinitionId, out var formerDefinition)
-                        && parts.TryGetValue(formerDefinition.PartId, out var formerPart)
-                        && Signature(formerPart.Units, formerPart.Pins) == addition.Signature
-                        && evidence.TryGetValue(formerPart.Id, out var formerLibraries)
-                        && formerLibraries.Contains(addition.Library))
-                        componentChoices.Insert(0, formerComponent);
-                    requests.Add(Request(addition, "native_component_rebind_required",
-                        candidates.Count == 0 ? [derived] : [.. candidates.Order()],
-                        componentChoices,
-                        "KiCad changed the library definition or pin identities of an existing component. Choose the exact replacement part and whether to preserve its component identity; no name, position or pin-number inference is applied."));
-                    continue;
-                }
                 if (answer?.PartId is Guid chosen)
                 {
                     // Only a part the request offers, or the part the symbol would be anyway: an answer never overrides a part

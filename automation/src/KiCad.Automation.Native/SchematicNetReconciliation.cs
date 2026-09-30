@@ -17,6 +17,7 @@ public sealed record SchematicNetReconciliationResult(EngineeringDesign? Candida
     IReadOnlyList<Guid>? RestoredSymbolOccurrences = null, IReadOnlyList<Guid>? RestoredNetIds = null)
 {
     internal SchematicNativeRestorationResult? Restoration { get; init; }
+    internal DesignComponentRebindResolution? ResolvedComponentRebind { get; init; }
     /// <summary>Symbol occurrences and components adopted from symbols placed in KiCad (new identities).</summary>
     public IReadOnlyList<Guid>? AddedSymbolOccurrences { get; init; }
     public IReadOnlyList<Guid>? AddedComponents { get; init; }
@@ -56,6 +57,7 @@ public static class SchematicNetReconciliation
             var (baseline, observed) = SchematicElectricalCheckpoints.Require(state);
             var desiredDocument = SchematicDesignXml.Read(new UTF8Encoding(false, true).GetString(state.DesiredFileBytes), state.KnowledgeLibraries);
             var desired = desiredDocument.Engineering;
+            if (SchematicNativeRebinding.Plan(state, desiredDocument, token, history) is { } rebind) return rebind;
             bool nativeOwnersChanged = NativeOwners(state.Baseline.Schematic) != NativeOwners(state.Observed);
             // XML that binds new occurrences to symbols placed in KiCad answers their resolution requests (ledger
             // p35cfdc0345e056a5); the addition projection checks that the answer is all the XML changes.
@@ -75,15 +77,6 @@ public static class SchematicNetReconciliation
                         state.KnowledgeLibraries, token, historicalChoices);
                 if (removal.BindingCandidate is null)
                 {
-                    if (removal.ErrorCode == "electrical_ownership_changed" && history is null)
-                    {
-                        var addition = SchematicNativeAdditionProjection.Project(state, null, desiredDocument, null, token);
-                        if (addition.Requests.Count != 0)
-                            return new(null, [], [], [], removal.CoverageGaps.Concat(addition.CoverageGaps).Distinct().ToArray(),
-                                addition.ErrorCode, addition.ErrorMessage)
-                            { ResolutionRequests = addition.Requests, SheetComponentResolutionRequests = addition.SheetComponentRequests.Count == 0 ? null : addition.SheetComponentRequests,
-                              SheetResolutionRequests = addition.SheetRequests.Count == 0 ? null : addition.SheetRequests };
-                    }
                     if (removal.ErrorCode is not ("electrical_ownership_changed" or SchematicNativeSheetChanges.MoveAmbiguous) || history is null)
                         return new(null, [], [], [], removal.CoverageGaps, removal.ErrorCode, removal.ErrorMessage)
                             { SheetResolutionRequests = removal.SheetRequests.Count == 0 ? null : removal.SheetRequests };
@@ -366,7 +359,7 @@ public static class SchematicNetReconciliation
     internal static string Key(IEnumerable<PinEndpoint> pins) => JsonSerializer.Serialize(pins
         .OrderBy(p => p.ComponentId).ThenBy(p => p.Pin, StringComparer.Ordinal).Select(p => new { p.ComponentId, p.Pin }));
 
-    private static Guid GeneratedIdentity(Guid origin, Guid circuit, IEnumerable<PinEndpoint> pins)
+    internal static Guid GeneratedIdentity(Guid origin, Guid circuit, IEnumerable<PinEndpoint> pins)
     {
         byte[] bytes = SHA256.HashData(Encoding.UTF8.GetBytes("kicad-net-reconciliation-v1\n" + origin.ToString("D") + "\n" + circuit.ToString("D") + "\n" + Key(pins)));
         bytes[6] = (byte)((bytes[6] & 0x0f) | 0x80); bytes[8] = (byte)((bytes[8] & 0x3f) | 0x80);

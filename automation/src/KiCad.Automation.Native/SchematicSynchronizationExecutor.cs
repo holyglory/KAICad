@@ -146,6 +146,7 @@ internal static class SchematicSynchronizationExecutor
         // This includes native-only changes and engineering-only XML changes.
         // An interrupted publication must have a journal even without a batch.
         saved = store.Save(saved.State with { PendingMutation = batch, PendingNativeState = checkpoint.State.Clone(),
+            ComponentRebindResolution = plan.Electrical?.ResolvedComponentRebind ?? saved.State.ComponentRebindResolution,
             PendingNativeSave = null, PendingCandidateFileBytes = null,
             PendingPublication = DesignPublicationIntent.Create(designPath, original, candidateBytes, operationId, expectedRevisionToken) }, saved.RevisionToken);
         return await ResumeAsync(store, receipts, client, saved, cancellationToken, executionCheckpoint);
@@ -255,7 +256,7 @@ internal static class SchematicSynchronizationExecutor
             final.State.Revision.Epoch, final.State.Revision.Sequence, receipt is not null, true,
             receipt?.ToByteArray(), publication.PreviousPath,
             publication.PreviousPath is null ? null : Hash(intent.ExpectedFileBytes),
-            previousSynchronizedXml, Hash(Encoding.UTF8.GetBytes(previousSynchronizedXml)));
+            previousSynchronizedXml, Hash(Encoding.UTF8.GetBytes(previousSynchronizedXml)), saved.State.ComponentRebindResolution);
         var complete = store.Save(saved.State with
         {
             Baseline = baseline, DesiredFileBytes = intent.CandidateFileBytes,
@@ -264,7 +265,7 @@ internal static class SchematicSynchronizationExecutor
             ObservedElectrical = final.Electrical.Clone(), PendingMutation = null, PendingNativeState = null,
             PendingNativeSave = null, PendingCandidateFileBytes = null, PendingPublication = null, HierarchyResolution = null,
             LastSynchronization = resultReceipt, OwnershipResolution = null, NativeFileLocations = fileLocations,
-            RepeatedSheetResolution = null, SheetMoveResolution = null
+            RepeatedSheetResolution = null, SheetMoveResolution = null, ComponentRebindResolution = null
         }, saved.RevisionToken);
         if (checkpoint is not null) await checkpoint("baseline-committed", CancellationToken.None);
         // A failure here leaves the complete result in the atomic recovery

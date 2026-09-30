@@ -20,7 +20,8 @@ public sealed record DesignRecoveryState(Guid OriginId, Guid InstanceId, NativeR
     DesignOwnershipResolution? OwnershipResolution = null,
     SchematicFileLocations? NativeFileLocations = null,
     DesignRepeatedSheetResolution? RepeatedSheetResolution = null,
-    DesignSheetMoveResolution? SheetMoveResolution = null)
+    DesignSheetMoveResolution? SheetMoveResolution = null,
+    DesignComponentRebindResolution? ComponentRebindResolution = null)
 {
     public bool HasPendingWork => PendingMutation is not null || PendingPublication is not null || PendingLayout is not null;
 }
@@ -62,7 +63,8 @@ public sealed class DesignRecoveryStore(string statePath)
         [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DesignOwnershipResolution? OwnershipResolution = null,
         [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] byte[]? NativeFileLocations = null,
         [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DesignRepeatedSheetResolution? RepeatedSheetResolution = null,
-        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DesignSheetMoveResolution? SheetMoveResolution = null);
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DesignSheetMoveResolution? SheetMoveResolution = null,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DesignComponentRebindResolution? ComponentRebindResolution = null);
     private sealed record ElectricalEnvelope([property: JsonRequired] string Epoch,
         [property: JsonRequired] ulong Sequence, [property: JsonRequired] bool TrackingComplete,
         [property: JsonRequired] string[] NetsXml, [property: JsonRequired] string[] Limitations);
@@ -125,7 +127,7 @@ public sealed class DesignRecoveryStore(string statePath)
                 .Any(p => string.Equals(p, path, comparison) || string.Equals(p, path + ".lock", comparison)))
                 throw Failure("invalid_design_publication", "Design publication and recovery files must remain separate.");
         }
-        var envelope = new Envelope(state.SheetMoveResolution is not null ? 13 : state.RepeatedSheetResolution is not null ? 12 : state.NativeFileLocations is not null ? 11 : state.PendingLayout?.Lane is not null ? 10 : state.OwnershipResolution is not null ? 9 : state.PendingLayout is not null ? 8
+        var envelope = new Envelope(state.ComponentRebindResolution is not null ? 14 : state.SheetMoveResolution is not null ? 13 : state.RepeatedSheetResolution is not null ? 12 : state.NativeFileLocations is not null ? 11 : state.PendingLayout?.Lane is not null ? 10 : state.OwnershipResolution is not null ? 9 : state.PendingLayout is not null ? 8
             : state.LastSynchronization is not null || state.PendingPublication?.RequestedRecoveryRevisionToken is not null ? 7
             : state.PendingPublication is not null ? 6
             : state.PendingNativeSave is not null || state.PendingCandidateFileBytes is not null ? 5
@@ -138,7 +140,7 @@ public sealed class DesignRecoveryStore(string statePath)
             state.PendingMutation?.ToByteArray(), state.HierarchyResolution,
             EncodeElectrical(state.BaselineElectrical, state.Baseline.Schematic), EncodeElectrical(state.ObservedElectrical, state.Observed),
             state.PendingNativeState?.ToByteArray(), state.PendingNativeSave?.ToByteArray(), state.PendingCandidateFileBytes,
-            state.PendingPublication, state.LastSynchronization, state.PendingLayout, state.OwnershipResolution, state.NativeFileLocations?.ToByteArray(), state.RepeatedSheetResolution, state.SheetMoveResolution);
+            state.PendingPublication, state.LastSynchronization, state.PendingLayout, state.OwnershipResolution, state.NativeFileLocations?.ToByteArray(), state.RepeatedSheetResolution, state.SheetMoveResolution, state.ComponentRebindResolution);
         byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(envelope, Json);
         // Verify complete recoverability before touching the previous recovery file.
         var next = Decode(bytes);
@@ -218,7 +220,7 @@ public sealed class DesignRecoveryStore(string statePath)
             var envelope = JsonSerializer.Deserialize<Envelope>(bytes, Json)
                 ?? throw Failure("invalid_design_recovery", "Missing recovery state.");
             bool electrical = envelope.BaselineElectrical is not null || envelope.ObservedElectrical is not null;
-            int requiredVersion = envelope.SheetMoveResolution is not null ? 13 : envelope.RepeatedSheetResolution is not null ? 12 : envelope.NativeFileLocations is not null ? 11 : envelope.PendingLayout?.Lane is not null ? 10 : envelope.OwnershipResolution is not null ? 9 : envelope.PendingLayout is not null ? 8
+            int requiredVersion = envelope.ComponentRebindResolution is not null ? 14 : envelope.SheetMoveResolution is not null ? 13 : envelope.RepeatedSheetResolution is not null ? 12 : envelope.NativeFileLocations is not null ? 11 : envelope.PendingLayout?.Lane is not null ? 10 : envelope.OwnershipResolution is not null ? 9 : envelope.PendingLayout is not null ? 8
                 : envelope.LastSynchronization is not null || envelope.PendingPublication?.RequestedRecoveryRevisionToken is not null ? 7
                 : envelope.PendingPublication is not null ? 6
                 : envelope.PendingNativeSave is not null || envelope.PendingCandidateFileBytes is not null ? 5
@@ -238,7 +240,7 @@ public sealed class DesignRecoveryStore(string statePath)
                 envelope.PendingNativeState is null ? null : DocumentLifecycleState.Parser.ParseFrom(envelope.PendingNativeState),
                 envelope.PendingNativeSave is null ? null : CheckedSaveDocument.Parser.ParseFrom(envelope.PendingNativeSave),
                 envelope.PendingCandidateFileBytes, envelope.PendingPublication, envelope.LastSynchronization, envelope.PendingLayout, envelope.OwnershipResolution,
-                envelope.NativeFileLocations is null ? null : SchematicFileLocations.Parser.ParseFrom(envelope.NativeFileLocations), envelope.RepeatedSheetResolution, envelope.SheetMoveResolution);
+                envelope.NativeFileLocations is null ? null : SchematicFileLocations.Parser.ParseFrom(envelope.NativeFileLocations), envelope.RepeatedSheetResolution, envelope.SheetMoveResolution, envelope.ComponentRebindResolution);
             Validate(state);
             return new(Convert.ToHexStringLower(SHA256.HashData(bytes)), state);
         }
@@ -402,6 +404,7 @@ public sealed class DesignRecoveryStore(string statePath)
         _ = EncodeElectrical(state.BaselineElectrical, state.Baseline.Schematic);
         _ = EncodeElectrical(state.ObservedElectrical, state.Observed);
         if (state.RepeatedSheetResolution is { } repeatedResolution) SchematicRepeatedSheetChoices.Validate(repeatedResolution);
+        if (state.ComponentRebindResolution is { } rebindResolution) SchematicNativeRebinding.Validate(rebindResolution);
         if (state.SheetMoveResolution is { } sheetResolution) SchematicSheetMoveChoices.Validate(sheetResolution);
         if (state.NativeFileLocations is { } fileLocations
             && (fileLocations.Document is null || fileLocations.Revision is null
@@ -548,6 +551,11 @@ public sealed class DesignRecoveryStore(string statePath)
     private static void ValidateTransition(DesignRecoveryState? current, DesignRecoveryState next, bool abandoningRealization = false,
         bool releasingExited = false, DesignPendingResolution? resolving = null)
     {
+        if (current?.HasPendingWork == true && !SchematicNativeRebinding.Same(current.ComponentRebindResolution, next.ComponentRebindResolution)
+            && !(next.ComponentRebindResolution is null && !next.HasPendingWork
+                && next.LastSynchronization is { } rebindCompleted
+                && rebindCompleted.OperationId == (current.PendingPublication?.OperationId ?? current.PendingLayout?.OperationId)))
+            throw Failure("ownership_resolution_pending", "Keep component replacement choices unchanged until synchronization completes.");
         if (current?.HasPendingWork == true && !SchematicSheetMoveChoices.Same(current.SheetMoveResolution, next.SheetMoveResolution)
             && !(next.SheetMoveResolution is null && !next.HasPendingWork
                 && next.LastSynchronization is { } sheetsCompleted
@@ -698,7 +706,8 @@ public sealed class DesignRecoveryStore(string statePath)
                 && (result.PreviousXmlSha256 != Convert.ToHexStringLower(SHA256.HashData(before.ExpectedFileBytes))
                     || (result.PreviousXmlPath != before.StagedPath && result.PreviousXmlPath != before.PreviousPath)))
             || (result.Version >= 3 && result.PreviousSynchronizedXml
-                != SchematicDesignXml.Write(current.Baseline, current.KnowledgeLibraries)))
+                != SchematicDesignXml.Write(current.Baseline, current.KnowledgeLibraries))
+            || !SchematicNativeRebinding.Same(result.CompletedComponentRebind, current.ComponentRebindResolution))
             throw Failure("missing_sync_completion_receipt", "Clear the pending publication only together with its matching completed result.");
     }
 

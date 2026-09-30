@@ -356,9 +356,153 @@ public sealed class SchematicNetReconciliationTests
         Assert.AreEqual("native_ownership_resolution_required", rebind.ErrorCode);
         Assert.IsNotNull(rebind.ResolutionRequests);
         var request = rebind.ResolutionRequests!.Single(r => r.Code == "native_component_rebind_required");
+        Assert.AreEqual(Guid.Parse(decoded.Id.Value), request.NativeObjectId);
+        Assert.HasCount(1, rebind.ResolutionRequests, "An absent optional part declaration does not change the other native symbols.");
         Assert.AreEqual(request.ProposedComponentId, request.CandidateComponentIds.Single());
         Assert.IsTrue(request.CandidatePartIds.Count > 0);
+        Assert.IsNotNull(request.FormerPins); Assert.IsNotNull(request.ReplacementPins);
+        VerifyReplacementAnswerRetention();
+        VerifyMultiUnitReplacementAnswers();
         Assert.ThrowsExactly<OperationCanceledException>(() => SchematicNetReconciliation.Plan(state, new(true)));
+    }
+
+    private static void VerifyReplacementAnswerRetention()
+    {
+        var baseline = SchematicRebuildTests.Placed();
+        var owner = baseline.Engineering.Circuit.Components.Single(c => c.Reference == "R1");
+        var pinNote = new EngineeringStatement(Guid.NewGuid(), owner.Id, EngineeringStatementRole.Intent,
+            GuidanceStrength.Requirement, "Preserve the exact pin instruction.\r\nDo not infer its replacement.",
+            new(new(owner.Id, "2"), new(owner.Id, "1")), [], [new("datasheet", "B", 9, "pins", "source text")]);
+        baseline = baseline with { Engineering = baseline.Engineering with { Structure = baseline.Engineering.Structure with
+            { Statements = [.. baseline.Engineering.Structure.Statements, pinNote] } } };
+        var occurrence = baseline.Engineering.Circuit.Symbols.Single(s => s.ComponentId == owner.Id);
+        var binding = baseline.SymbolBindings.Single(b => b.SymbolOccurrenceId == occurrence.Id);
+        var path = baseline.SheetBindings.Single(s => s.SheetInstanceId == owner.SheetInstanceId).NativePath;
+        var observed = baseline.Schematic.Clone();
+        var screen = observed.Instances.Single(s => SchematicNativeSheetChanges.Key(s) == SchematicDesignBindings.PathKey(path));
+        int index = screen.Items.ToList().FindIndex(i => i.Is(SchematicSymbolInstance.Descriptor)
+            && i.Unpack<SchematicSymbolInstance>().Id.Value == binding.NativeObjectId.ToString("D"));
+        var replacement = screen.Items[index].Unpack<SchematicSymbolInstance>();
+        replacement.LibraryId.EntryName += "Rebound";
+        var library = replacement.LibraryId.Clone();
+        replacement.Definition.Id = library.Clone(); replacement.LibName = "";
+        foreach (var child in replacement.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)))
+        {
+            var pin = child.Item.Unpack<SchematicPin>();
+            if (pin.Number == "2") pin.Number = "3";
+            child.Item = Any.Pack(pin);
+        }
+        screen.Items[index] = Any.Pack(replacement);
+        // The captured placed definition is enough to bind its pins. No unseen cache is fabricated.
+        var state = SchematicRebuildTests.State(baseline, baseline, observed);
+        state = state with { BaselineElectrical = SymbolSheetOwnershipTests.Isolated(baseline.Schematic, state.BaselineElectrical!.Hierarchy.Revision),
+            ObservedElectrical = SymbolSheetOwnershipTests.Isolated(observed, state.ObservedElectrical!.Hierarchy.Revision) };
+        var plan = SchematicSynchronizationPlanner.Plan(state);
+        Assert.AreEqual(SchematicNativeAdditionProjection.ResolutionRequired, plan.ErrorCode);
+        var request = plan.Electrical!.ResolutionRequests!.Single();
+        Assert.AreEqual(owner.Id, request.FormerComponentId);
+        Assert.IsTrue(request.ReplacementPins!.Any(p => p.Number == "3"));
+        string directory = Directory.CreateTempSubdirectory("rebind-contract-").FullName;
+        try
+        {
+            var store = new DesignRecoveryStore(Path.Combine(directory, "recovery.json"));
+            var saved = store.Save(state, null);
+            var answer = new SchematicOwnershipAnswer(binding.NativeObjectId, request.CandidatePartIds.Single(), owner.Id)
+            { NativePath = path, PinMappings = [new("1", "1"), new("2", "3")] };
+            foreach (var invalid in new[] { answer with { PinMappings = [new("1", "1")] },
+                answer with { PinMappings = [new("1", "1"), new("2", "1")] }, answer with { PartId = Guid.NewGuid() } })
+            {
+                Assert.ThrowsExactly<AutomationException>(() => SchematicNativeRebinding.Retain(store, saved, [invalid], default));
+                Assert.AreEqual(saved.RevisionToken, store.Read()!.RevisionToken);
+            }
+            var chosen = SchematicNativeRebinding.Retain(store, saved, [answer], default);
+            CollectionAssert.AreEqual(state.DesiredFileBytes, chosen.State.DesiredFileBytes);
+            Assert.AreEqual(state.Observed, chosen.State.Observed);
+            var reopened = store.Read()!;
+            Assert.IsNotNull(reopened.State.ComponentRebindResolution);
+            var applied = SchematicSynchronizationPlanner.Plan(reopened.State);
+            Assert.IsTrue(applied.CanPrepare, applied.ErrorCode + ": " + applied.ErrorMessage);
+            Assert.IsEmpty(applied.NativeOperations);
+            Assert.AreEqual(owner, applied.Candidate!.Engineering.Circuit.Components.Single(c => c.Id == owner.Id));
+            Assert.AreEqual(occurrence.Id, applied.Candidate.Engineering.Circuit.Symbols.Single(s => s.ComponentId == owner.Id).Id);
+            Assert.AreEqual(answer.PartId, applied.Candidate.Engineering.Circuit.Sheets.SelectMany(s => s.Components)
+                .Single(d => d.Id == owner.DefinitionId).PartId);
+            Assert.AreEqual(System.Text.Json.JsonSerializer.Serialize(pinNote with { Connection = pinNote.Connection! with { First = new(owner.Id, "3") } }),
+                System.Text.Json.JsonSerializer.Serialize(applied.Candidate.Engineering.Structure.Statements.Single(s => s.Id == pinNote.Id)));
+            var unresolvedStore = new DesignRecoveryStore(Path.Combine(directory, "unresolved.json"));
+            var unresolvedInput = unresolvedStore.Save(state, null);
+            var unresolved = SchematicNativeRebinding.Retain(unresolvedStore, unresolvedInput,
+                [answer with { PinMappings = [new("1", "1"), new("2", null)] }], default);
+            var unresolvedPlan = SchematicSynchronizationPlanner.Plan(unresolved.State);
+            Assert.IsTrue(unresolvedPlan.CanPrepare, unresolvedPlan.ErrorCode + ": " + unresolvedPlan.ErrorMessage);
+            Assert.AreEqual(System.Text.Json.JsonSerializer.Serialize(pinNote),
+                System.Text.Json.JsonSerializer.Serialize(unresolvedPlan.Candidate!.Engineering.Structure.Statements.Single(s => s.Id == pinNote.Id)));
+            var retainedPin = unresolvedPlan.Candidate.Engineering.Structure.UnresolvedComponentReferences!
+                .Single(p => p.OwnerId == pinNote.Id);
+            Assert.AreEqual(new ComponentReferenceTarget(owner.Id, "2"), retainedPin.FormerTarget);
+            Assert.IsEmpty(retainedPin.CandidateTargets);
+            var later = state.Observed.Clone(); later.Instances[0].Metadata.TitleBlock = new() { Title = "Later edit" };
+            var laterElectrical = reopened.State.ObservedElectrical!.Clone(); laterElectrical.Hierarchy.Data = later.Clone();
+            var stale = SchematicNetReconciliation.Plan(reopened.State with { Observed = later, ObservedElectrical = laterElectrical });
+            Assert.AreEqual(SchematicNativeAdditionProjection.ResolutionRequired, stale.ErrorCode);
+            var pending = store.Save(reopened.State with { PendingMutation = DesignRecoveryStoreTests.Mutation(reopened.State) }, reopened.RevisionToken);
+            Assert.ThrowsExactly<AutomationException>(() => store.Save(pending.State with { ComponentRebindResolution = null }, pending.RevisionToken));
+            Assert.AreEqual(pending.RevisionToken, store.Read()!.RevisionToken);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    private static void VerifyMultiUnitReplacementAnswers()
+    {
+        var baseline = SchematicRebuildTests.Placed();
+        var units = baseline.Engineering.Circuit.Symbols.GroupBy(s => s.ComponentId).First(g => g.Count() > 1).ToArray();
+        var bindings = baseline.SymbolBindings.ToDictionary(b => b.SymbolOccurrenceId, b => b.NativeObjectId);
+        var owner = baseline.Engineering.Circuit.Components.Single(c => c.Id == units[0].ComponentId);
+        var part = baseline.Engineering.Circuit.Parts.Single(p => p.Id == baseline.Engineering.Circuit.Sheets
+            .SelectMany(s => s.Components).Single(d => d.Id == owner.DefinitionId).PartId);
+        var observed = baseline.Schematic.Clone();
+        DesignRecoveryState State()
+        {
+            var value = SchematicRebuildTests.State(baseline, baseline, observed);
+            return value with { BaselineElectrical = SymbolSheetOwnershipTests.Isolated(baseline.Schematic, value.BaselineElectrical!.Hierarchy.Revision),
+                ObservedElectrical = SymbolSheetOwnershipTests.Isolated(observed, value.ObservedElectrical!.Hierarchy.Revision) };
+        }
+        void Replace(SymbolOccurrence occurrence)
+        {
+            string id = bindings[occurrence.Id].ToString("D");
+            var screen = observed.Instances.Single(s => s.Items.Any(i => i.Is(SchematicSymbolInstance.Descriptor)
+                && i.Unpack<SchematicSymbolInstance>().Id.Value == id));
+            int index = screen.Items.ToList().FindIndex(i => i.Is(SchematicSymbolInstance.Descriptor)
+                && i.Unpack<SchematicSymbolInstance>().Id.Value == id);
+            var symbol = screen.Items[index].Unpack<SchematicSymbolInstance>();
+            symbol.LibraryId.EntryName += "Rebound"; symbol.Definition.Id = symbol.LibraryId.Clone(); symbol.LibName = "";
+            screen.Items[index] = Any.Pack(symbol);
+        }
+        SchematicOwnershipAnswer[] Answers(DesignRecoveryState state) => SchematicNetReconciliation.Plan(state).ResolutionRequests!
+            .Select(r => new SchematicOwnershipAnswer(r.NativeObjectId, r.CandidatePartIds.Single(), r.FormerComponentId)
+            { NativePath = r.NativePath.Split('/').Select(Guid.Parse).ToArray(),
+                PinMappings = part.Pins.Select(p => new SchematicPinRebindAnswer(p.Number, p.Number)).ToArray() }).ToArray();
+        string directory = Directory.CreateTempSubdirectory("multi-unit-rebind-").FullName;
+        try
+        {
+            Replace(units[0]);
+            var partialStore = new DesignRecoveryStore(Path.Combine(directory, "partial.json"));
+            var partial = partialStore.Save(State(), null);
+            Assert.ThrowsExactly<AutomationException>(() => SchematicNativeRebinding.Retain(partialStore, partial, Answers(partial.State), default),
+                "A single unit cannot silently change the part used by its unchanged units.");
+            Assert.AreEqual(partial.RevisionToken, partialStore.Read()!.RevisionToken);
+            foreach (var unit in units.Skip(1)) Replace(unit);
+            var store = new DesignRecoveryStore(Path.Combine(directory, "complete.json"));
+            var saved = store.Save(State(), null);
+            var answers = Answers(saved.State); Assert.HasCount(units.Length, answers);
+            Assert.ThrowsExactly<AutomationException>(() => SchematicNativeRebinding.Retain(store, saved, answers.Take(1).ToArray(), default));
+            var chosen = SchematicNativeRebinding.Retain(store, saved, answers, default);
+            var plan = SchematicSynchronizationPlanner.Plan(chosen.State);
+            Assert.IsTrue(plan.CanPrepare, plan.ErrorCode + ": " + plan.ErrorMessage);
+            Assert.AreEqual(owner, plan.Candidate!.Engineering.Circuit.Components.Single(c => c.Id == owner.Id));
+            CollectionAssert.AreEquivalent(units, plan.Candidate.Engineering.Circuit.Symbols.Where(s => s.ComponentId == owner.Id).ToArray());
+        }
+        finally { Directory.Delete(directory, true); }
     }
 
     [TestMethod]

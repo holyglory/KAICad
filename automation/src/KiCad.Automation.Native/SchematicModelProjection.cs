@@ -41,6 +41,7 @@ public static class SchematicModelProjection
         var beforeReport = SchematicDesignBindings.Inspect(baseline, libraries, cancellationToken);
         var desiredSymbols = desired.Circuit.Symbols.Select(s => s.Id).ToHashSet();
         var afterDesign = baseline with { Engineering = desired, Schematic = observed,
+            PartSymbols = restoration?.BindingCandidate.PartSymbols ?? baseline.PartSymbols,
             SheetBindings = restoration?.BindingCandidate.SheetBindings ?? baseline.SheetBindings,
             SymbolBindings = restoration is not null ? restoration.BindingCandidate.SymbolBindings
                 : allowNativeRemovals ? baseline.SymbolBindings.Where(b => desiredSymbols.Contains(b.SymbolOccurrenceId)).ToArray()

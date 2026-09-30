@@ -1111,13 +1111,30 @@ that file, or publication can converge without replacing it. Recovery verifies
 the retained predecessor against the frozen baseline before advancing. Older
 receipts retain their existing encoding and content-verification rules.
 
-When a native symbol keeps its exact sheet path and UUID but its library identity,
-unit count or pin signature changes, synchronization now treats it as an explicit
-ownership question. The planner offers exact prior component and candidate part
-identities through the existing resolution machinery and performs no name,
-position or pin-number guess. Applying a replacement still requires the
-follow-up component and pin retention and live Change Symbol journey before this
-broader rebinding outcome can close.
+When an existing native symbol changes its library, units or pin identities,
+synchronization compares it with its exact saved native counterpart and returns
+`native_component_rebind_required` in `ownershipResolutionRequests`. The request
+includes its former component, part and pins, replacement pins and candidate
+parts. Use `kicad_design_ownership_answer` with each exact native path, the
+existing component ID, selected part ID and a complete `pinMappings` list.
+Each entry names `FormerPin` and `ReplacementPin`; null keeps the former pin's
+instructions unresolved. Numbers, names and geometry never infer that choice.
+
+Recovery envelope 14 retains those answers for the exact snapshot without
+changing XML or KiCad. Normal synchronization publishes the complete replacement,
+keeps component/occurrence identities and current instructions, and checks actual
+native connections. All units and repeated instances must agree about the
+replacement definition. Completed receipts preserve the mapping and verified
+predecessor so keyboard undo/redo can reverse the explicit choice. Conflicting
+history or stale inputs require a new answer.
+
+Selected native run `t20260930T195217Z-7a159a` passed in two Linux projects,
+including a physical symbol shared by two sheet instances. It covers native
+checked symbol replacement, public MCP answers, incomplete-answer refusal,
+unchanged XML/native state while answering, instruction and identity retention,
+electrical equivalence, keyboard undo/redo, saved reload and repeat publication.
+This is native API and editor-history evidence; it does not claim a manual
+Change Symbol dialog journey or cross-platform qualification.
 
 `kicad_design_recovery_refresh` persists a freshly captured native hierarchy into
 an existing recovery record. It requires an attached instance and the exact

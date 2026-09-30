@@ -1,0 +1,144 @@
+using System.Text;
+using System.Text.Json;
+using Google.Protobuf.WellKnownTypes;
+using Kiapi.Common.Commands;
+using Kiapi.Common.Types;
+using Kiapi.Schematic.Types;
+using KiCad.Automation.Model;
+using KiCad.Automation.Native;
+using KiCad.Automation.Protocol;
+
+namespace KiCad.Automation.Tests;
+
+public sealed partial class NativeSessionTests
+{
+    private static async Task VerifyNativeComponentRebinding(NativeClient client, DocumentSpecifier root, int processId,
+        string display, string evidence, string instanceId, bool shared, CancellationToken token)
+    {
+        string directory = Directory.CreateDirectory(Path.Combine(evidence, instanceId)).FullName;
+        string PathOf(string name) => Path.Combine(directory, name);
+        Task<CheckedSchematicState> Capture() => client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(
+            new() { Document = root.Clone(), ProcessEpoch = client.Epoch }, token);
+        await client.InvokeAsync<SaveDocument, Empty>(new() { Document = root.Clone() }, token);
+        var initial = await Capture();
+        var baseline = RepeatedProbeDesign(initial.Electrical, includeUndrawn: false);
+        var targetSheet = shared ? baseline.SheetBindings.First(s => s.NativePath.Count == 2) : baseline.SheetBindings.Single(s => s.NativePath.Count == 1);
+        var targetDocument = root.Clone(); targetDocument.SheetPath.Path.Clear();
+        targetDocument.SheetPath.Path.Add(targetSheet.NativePath.Select(p => new KIID { Value = p.ToString("D") }));
+        var component = baseline.Engineering.Circuit.Components.First(c => c.SheetInstanceId == targetSheet.SheetInstanceId);
+        var other = baseline.Engineering.Circuit.Components.Single(c => c.SheetInstanceId == targetSheet.SheetInstanceId && c.Id != component.Id);
+        var occurrence = baseline.Engineering.Circuit.Symbols.Single(s => s.ComponentId == component.Id);
+        var binding = baseline.SymbolBindings.Single(b => b.SymbolOccurrenceId == occurrence.Id);
+        var note = new EngineeringStatement(Guid.NewGuid(), component.Id, EngineeringStatementRole.Intent,
+            GuidanceStrength.Requirement, "Keep this component instruction through replacement.", null, [], []);
+        var pinNote = note with { Id = Guid.NewGuid(), Text = "Retain this exact pin connection requirement.",
+            Connection = new(new(component.Id, "1"), new(other.Id, "1")) };
+        baseline = baseline with { Engineering = baseline.Engineering with { Structure = baseline.Engineering.Structure with
+            { Statements = [note, pinNote] } } };
+        string designPath = PathOf("design.xml");
+        byte[] xml = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(baseline, []));
+        await File.WriteAllBytesAsync(designPath, xml, token);
+        var store = new DesignRecoveryStore(PathOf("recovery.json"));
+        store.Save(new(Guid.NewGuid(), Guid.Parse(instanceId), new(initial.State.Revision.Epoch, initial.State.Revision.Sequence),
+            initial.Electrical.Hierarchy.TrackingComplete, baseline, xml, baseline.Schematic.Clone(), [],
+            BaselineElectrical: initial.Electrical.Clone(), ObservedElectrical: initial.Electrical.Clone()), null);
+        await using var host = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.ProductionStartInfo(),
+            PathOf("mcp-state"), PathOf("mcp.log"), token);
+        int step = 0;
+        async Task<JsonElement> Call(string name, object arguments)
+        {
+            var result = await host.Tool(name, arguments);
+            await File.WriteAllTextAsync(PathOf($"{++step:D2}-{name}.json"), RetainedToolEvidence(result), token);
+            return result;
+        }
+        object Recovery() => new { instanceId, recoveryPath = store.StatePath, expectedRevisionToken = store.Read()!.RevisionToken };
+        RequireToolSuccess(await Call("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
+        var screen = initial.Electrical.Hierarchy.Data.Instances.Single(s => s.Metadata.Document.Equals(targetDocument));
+        var symbol = screen.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>())
+            .Single(s => s.Id.Value == binding.NativeObjectId.ToString("D")).Clone();
+        string oldKey = string.IsNullOrEmpty(symbol.LibName) ? SchematicNativeAdditionProjection.LibraryKey(symbol) : symbol.LibName;
+        var cache = screen.CachedSymbols.Single(c => c.CacheKey == oldKey).Clone();
+        var replacementLibrary = symbol.LibraryId.Clone(); replacementLibrary.EntryName += "Replaced";
+        symbol.LibraryId = replacementLibrary.Clone(); symbol.Definition.Id = replacementLibrary.Clone(); symbol.LibName = "";
+        cache.CacheKey = replacementLibrary.LibraryNickname + ":" + replacementLibrary.EntryName;
+        cache.Definition.Id = replacementLibrary.Clone();
+        foreach (var definition in new[] { symbol.Definition, cache.Definition })
+            foreach (var child in definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)))
+            {
+                var pin = child.Item.Unpack<SchematicPin>(); Assert.AreEqual("1", pin.Number); pin.Number = "7";
+                child.Item = Any.Pack(pin);
+            }
+        var replace = new CheckedSchematicBatch { ExpectedState = initial.State.Clone(), Batch = new()
+        { Document = root.Clone(), DocumentEpoch = initial.State.Revision.Epoch, ExpectedRevision = initial.State.Revision.Clone(),
+            OperationId = Guid.NewGuid().ToString("D"), Description = "Replace the bound probe definition and pin" } };
+        replace.Batch.Operations.Add(new SchematicItemOperation { TargetDocument = targetDocument.Clone(), Update = Any.Pack(symbol) });
+        replace.Batch.Operations.Add(new SchematicItemOperation { TargetDocument = targetDocument.Clone(), ReplaceLibraryCache = new()
+        { ScreenId = screen.Metadata.ScreenId.Clone(), Definitions = { screen.CachedSymbols.Select(c => c.Clone()).Append(cache) } } });
+        var result = await client.InvokeAsync<CheckedSchematicBatch, CheckedSchematicBatchReceipt>(replace, token);
+        Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, result.Status, result.ErrorMessage);
+        var replaced = await Capture();
+        RequireToolSuccess(await Call("kicad_design_recovery_refresh", Recovery()));
+        var unanswered = await Call("kicad_design_sync_plan", Recovery());
+        Assert.IsTrue(unanswered.GetProperty("isError").GetBoolean());
+        Assert.AreEqual(SchematicNativeAdditionProjection.ResolutionRequired, unanswered.GetProperty("structuredContent").GetProperty("errorCode").GetString());
+        var requests = SchematicNetReconciliation.Plan(store.Read()!.State, token).ResolutionRequests!;
+        Assert.HasCount(shared ? 2 : 1, requests);
+        var request = requests.Single(r => r.FormerComponentId == component.Id);
+        Assert.AreEqual(component.Id, request.FormerComponentId);
+        Assert.AreEqual(binding.NativeObjectId, request.NativeObjectId);
+        var answers = requests.Select(r => new SchematicOwnershipAnswer(r.NativeObjectId, r.CandidatePartIds.Single(), r.FormerComponentId)
+        { NativePath = r.NativePath.Split('/').Select(Guid.Parse).ToArray(), PinMappings = [new("1", "7")] }).ToArray();
+        object Answer(SchematicOwnershipAnswer[] values) => new { instanceId, recoveryPath = store.StatePath,
+            expectedRevisionToken = store.Read()!.RevisionToken, designPath, answers = values };
+        string unchanged = store.Read()!.RevisionToken;
+        var refused = await Call("kicad_design_ownership_answer", Answer(answers.Select(a => a with { PinMappings = Array.Empty<SchematicPinRebindAnswer>() }).ToArray()));
+        Assert.IsTrue(refused.GetProperty("isError").GetBoolean()); Assert.AreEqual(unchanged, store.Read()!.RevisionToken);
+        if (shared)
+        {
+            var partial = await Call("kicad_design_ownership_answer", Answer(answers.Take(1).ToArray()));
+            Assert.IsTrue(partial.GetProperty("isError").GetBoolean()); Assert.AreEqual(unchanged, store.Read()!.RevisionToken);
+        }
+        var selected = await Call("kicad_design_ownership_answer", Answer(answers)); RequireToolSuccess(selected);
+        Assert.IsFalse(selected.GetProperty("structuredContent").GetProperty("designFileWritten").GetBoolean());
+        CollectionAssert.AreEqual(xml, await File.ReadAllBytesAsync(designPath, token));
+        Assert.AreEqual(replaced.State.StateSha256, (await Capture()).State.StateSha256);
+        async Task<SchematicDesign> Publish(string phase)
+        {
+            RequireToolSuccess(await Call("kicad_design_recovery_refresh", Recovery()));
+            var plan = await Call("kicad_design_sync_plan", Recovery()); RequireToolSuccess(plan);
+            var applied = await Call("kicad_design_sync_apply", new { instanceId, recoveryPath = store.StatePath,
+                expectedRevisionToken = store.Read()!.RevisionToken, designPath, operationId = Guid.NewGuid().ToString("D") });
+            RequireToolSuccess(applied);
+            Assert.IsFalse(applied.GetProperty("structuredContent").GetProperty("nativeMutationCommitted").GetBoolean(), phase);
+            var published = SchematicDesignXml.Read(await File.ReadAllTextAsync(designPath, token), []);
+            var actual = await Capture(); var match = SchematicElectricalComparison.Compare(published, actual.Electrical, [], token);
+            Assert.IsTrue(match.PinBindingsComplete && match.ConnectivityEquivalent, phase);
+            Assert.AreEqual(component, published.Engineering.Circuit.Components.Single(c => c.Id == component.Id));
+            Assert.AreEqual(binding, published.SymbolBindings.Single(b => b.SymbolOccurrenceId == occurrence.Id));
+            foreach (var owner in baseline.Engineering.Circuit.Components)
+                Assert.AreEqual(owner, published.Engineering.Circuit.Components.Single(c => c.Id == owner.Id));
+            Assert.AreEqual(note, published.Engineering.Structure.Statements.Single(s => s.Id == note.Id));
+            return published;
+        }
+        var appliedDesign = await Publish("replacement");
+        Assert.AreEqual("7", appliedDesign.Engineering.Structure.Statements.Single(s => s.Id == pinNote.Id).Connection!.First.Pin);
+        Assert.IsNull(store.Read()!.State.ComponentRebindResolution);
+        foreach (var (key, pin) in new[] { ("z", "1"), ("y", "7") })
+        {
+            await client.InvokeAsync<ActivateSchematicSheet, DocumentSpecifier>(new() { Document = root.Clone() }, token);
+            await FocusedSchematicShortcut(client, root, processId, display, key, token);
+            var restored = await Publish(key);
+            Assert.AreEqual(pin, restored.Engineering.Structure.Statements.Single(s => s.Id == pinNote.Id).Connection!.First.Pin);
+        }
+        await client.InvokeAsync<RevertDocument, Empty>(new() { Document = root.Clone() }, token);
+        var loaded = await Capture();
+        RequireToolSuccess(await Call("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
+            expectedRevisionToken = store.Read()!.RevisionToken, expectedDocumentEpoch = loaded.State.Revision.Epoch }));
+        await Publish("reload");
+        byte[] beforeRepeat = await File.ReadAllBytesAsync(designPath, token); await Publish("repeat");
+        CollectionAssert.AreEqual(beforeRepeat, await File.ReadAllBytesAsync(designPath, token));
+        await File.WriteAllTextAsync(PathOf("rebind-proof.json"), JsonSerializer.Serialize(new { sharedInstances = shared ? 2 : 1, nativeReplacement = true,
+            explicitPinMapping = true, noMutationWhenAnswering = true, unchangedComponentAndOccurrence = true,
+            instructionsPreserved = true, actualConnectivity = true, nativeUndoRedo = true, reload = true, repeatNoOp = true }), token);
+    }
+}

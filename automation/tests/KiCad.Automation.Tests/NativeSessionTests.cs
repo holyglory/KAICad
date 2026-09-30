@@ -176,7 +176,9 @@ public sealed partial class NativeSessionTests
             // Combined parent creation adds two move/history/reload paths. The
             // preceding316ad4 reached XML admission at865.7s across both editors.
             : journey is NativeJourney.RepeatedSheetRebuild ? 1500
-            : journey is NativeJourney.RepeatedSheetOwnership ? 1200
+            // c18fb2 completed the first editor in1020s; both independent
+            // editors and their full history/reload paths share this ceiling.
+            : journey is NativeJourney.RepeatedSheetOwnership ? 2400
             : journey is NativeJourney.XmlRebuild ? 1200
             : journey == NativeJourney.ProjectRecovery ? 2400 : 450;
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(aggregateSeconds));

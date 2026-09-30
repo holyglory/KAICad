@@ -755,7 +755,7 @@ internal static class SchematicNativeCreationProjection
         return result;
     }
 
-    private static void OrderDefinitionPins(SchematicSymbol definition, bool libraryIds)
+    internal static void OrderDefinitionPins(SchematicSymbol definition, bool libraryIds)
     {
         var others = definition.Items.Where(c => !c.Item.Is(SchematicPin.Descriptor)).ToArray();
         var pins = definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)).OrderBy(c =>
@@ -766,7 +766,7 @@ internal static class SchematicNativeCreationProjection
         definition.Items.Clear(); definition.Items.Add(others); definition.Items.Add(pins);
     }
 
-    private static void OrderNativeDefinitionChildren(SchematicSymbol definition)
+    internal static void OrderNativeDefinitionChildren(SchematicSymbol definition)
     {
         // LIB_ITEMS_CONTAINER is MULTIVECTOR<SCH_ITEM, SCH_SHAPE_T, SCH_PIN_T>.
         // Match that pinned type-bucket traversal without changing the order within

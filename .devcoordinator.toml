@@ -3982,6 +3982,6 @@ retained_artifacts=[{name="rebuild-tests",path="automation/artifacts/repeated-re
 name="native-external"
 tier="development"
 requires=["native-build","rebuild-contracts"]
-timeout_seconds=1500
+timeout_seconds=2700
 command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeRepeatedSheetOwnership","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/repeated-ownership-tests","--","MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{name="external-owner-tests",path="automation/artifacts/repeated-ownership-tests",max_bytes=16777216},{name="external-owner-evidence",path="automation/artifacts/native-repeated-ownership/native-session-current",max_bytes=134217728}]

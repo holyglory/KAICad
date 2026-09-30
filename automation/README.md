@@ -3816,6 +3816,39 @@ Topology artifact manifest:
 External-owner artifact manifest:
 `f2ac1738ab677c90a69daffd1223624ea96901618fd3bcefbeb3cc670f1e51e4`.
 
-`pfd3b84bd1d59b91c` remains open for populated new-parent component creation
-under `pa0569df11b611af2`; shared-parent relocation remains separately open under
-`pd6a383227f9d47b8`. No release-wide or newly packaged delivery is claimed.
+At that checkpoint, `pfd3b84bd1d59b91c` remained open for populated new-parent
+component creation under `pa0569df11b611af2`. The later proof below closes that
+gap; shared-parent relocation remains separately open under `pd6a383227f9d47b8`.
+
+### Populated parent creation with existing connections (2026-09-30)
+
+One complete XML candidate can create a unique parent containing a declared
+multi-unit component, move an existing populated child into it, and connect the
+new component to an existing component on another sheet. Private topology and
+declaration checks retain the original native checkpoints; publication still
+requires the complete requested drawing and actual native pin connections to
+agree. Native pin/type-bucket and cache ordering are prepared without changing
+pin payloads, identities or the supplied XML.
+
+Complete `t20260930T132128Z-e0c21c` passed all seven checks with unchanged source
+in 2135.493 seconds. Both external-owner project proofs confirm the four new
+units, real wire and cross-sheet connection to an existing CPU, ownership
+refusal, atomic rollback, exact undo/redo, saved reload and a no-op repeat.
+Both topology regressions also passed. The earlier `c18fb2` completed one project
+but exhausted the aggregate journey ceiling in the second; `9b6e9b` then rejected
+an existing symbol incorrectly supplied as a detached measurement candidate.
+The final fixture reads existing pins from the native obstacle measurements and
+preserves that API's refusal guard. Per-call timings remain in the retained
+evidence; the 2400-second aggregate is a test containment limit, not a product
+response target.
+
+Verified source digest:
+`4d80bd4d1b20703197c423f088a1c73904782598c0183cb8c9432a7c0eb60650`.
+External-owner artifact manifest:
+`6a3ed966c4b1d1b2f3dda4d0bdd361cdae75d6741b3d0c0b7a4b67d8ea1452c5`.
+Topology artifact manifest:
+`5b5d97bc31c66d99ea3b2e663af260b9b9c7304900faf62f113c7b9408e6fb64`.
+Only this evidence description changed after the run. This qualifies
+`pa0569df11b611af2` and the combined unique-parent outcome
+`pfd3b84bd1d59b91c`; shared-parent moves, broader topology work and full product
+acceptance remain open. No new packaged release is claimed.

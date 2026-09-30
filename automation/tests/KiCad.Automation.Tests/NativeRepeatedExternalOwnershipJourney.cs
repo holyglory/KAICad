@@ -25,9 +25,19 @@ public sealed partial class NativeSessionTests
             Path.Combine(directory, "host"), Path.Combine(directory, "host.log"), token);
         async Task<JsonElement> Call(string name, object arguments)
         {
-            var result = await host.Tool(name, arguments);
-            await File.WriteAllTextAsync(Path.Combine(directory, $"{++step:D2}-{name}.json"), RetainedToolEvidence(result), token);
-            return result;
+            int callStep = ++step;
+            var timer = System.Diagnostics.Stopwatch.StartNew();
+            try
+            {
+                var result = await host.Tool(name, arguments);
+                await File.WriteAllTextAsync(Path.Combine(directory, $"{callStep:D2}-{name}.json"), RetainedToolEvidence(result), token);
+                return result;
+            }
+            finally
+            {
+                await File.AppendAllTextAsync(Path.Combine(directory, "operation-times.jsonl"),
+                    JsonSerializer.Serialize(new { step = callStep, tool = name, elapsedMs = timer.ElapsedMilliseconds }) + "\n", CancellationToken.None);
+            }
         }
         object Recovery() => new { instanceId, recoveryPath = store.StatePath, expectedRevisionToken = store.Read()!.RevisionToken };
         RequireToolSuccess(await Call("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
@@ -193,10 +203,156 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(owners[1].Id, final.Engineering.Circuit.Symbols.Single(s => s.Id == xmlOccurrence).ComponentId);
         byte[] stableXml = await File.ReadAllBytesAsync(designPath, token); await Publish();
         CollectionAssert.AreEqual(stableXml, await File.ReadAllBytesAsync(designPath, token));
+        await PopulatedParent();
         await File.WriteAllTextAsync(Path.Combine(directory, "external-owner-proof.json"), JsonSerializer.Serialize(new
         { instanceId, nativeChoice = true, wrongOwnerRefused = true, legacyAnswerRefusedWithoutWriting = true, xmlExternalOwner = true,
             noOwnerClones = true, separateUnitLocations = true, separateConnectionsPreserved = true,
-            undoRedoExact = true, reloadExact = true, repeatNoOp = true }), token);
+            undoRedoExact = true, reloadExact = true, repeatNoOp = true,
+            populatedParentMultiUnit = true, populatedParentConnected = true, populatedParentHistory = true,
+            populatedParentExistingOwnerConnected = true }), token);
+
+        async Task PopulatedParent()
+        {
+            // Capture KiCad's complete label representation in this disposable
+            // fixture, then remove the probe before planning the real edit.
+            var probe = new GlobalLabel { Id = new() { Value = Guid.NewGuid().ToString("D") },
+                Position = new() { XNm = -254000000, YNm = -254000000 },
+                Text = new() { Text_ = "PARENT_LINK_PROBE", Position = new() { XNm = -254000000, YNm = -254000000 },
+                    Attributes = new() { Size = new() { XNm = 1270000, YNm = 1270000 },
+                        HorizontalAlignment = HorizontalAlignment.HaLeft, VerticalAlignment = VerticalAlignment.VaCenter } },
+                Shape = SchematicLabelShape.SlshBidi, SpinStyle = SchematicLabelSpinStyle.SlssRight };
+            await Native(new SchematicItemOperation { TargetDocument = cpu.Clone(), Create = Any.Pack(probe) });
+            var labelTemplate = (await Capture()).Electrical.Hierarchy.Data.Instances.Single(s => s.Metadata.Document.Equals(cpu)).Items
+                .Where(i => i.Is(GlobalLabel.Descriptor)).Select(i => i.Unpack<GlobalLabel>()).Single(l => l.Id.Equals(probe.Id));
+            await Native(new SchematicItemOperation { TargetDocument = cpu.Clone(), Remove = probe.Id.Clone() });
+            await Publish();
+            var previous = store.Read()!.State.Baseline;
+            Guid movedModel = ModelSheet(previous, nativeDocument), parentModel = Guid.NewGuid(), parentDefinition = Guid.NewGuid();
+            var drawing = previous.Schematic.Clone();
+            var rootScreen = drawing.Instances.Single(s => s.Metadata.Document.Equals(root));
+            var originalReference = rootScreen.Items.Single(i => i.Is(SheetSymbol.Descriptor) && i.Unpack<SheetSymbol>().Id.Equals(nativeSheet.Id));
+            var movedReference = originalReference.Unpack<SheetSymbol>(); rootScreen.Items.Remove(originalReference);
+            var parentReference = NewSheet("Populated parent", "93"); parentReference.Id.Value = Guid.NewGuid().ToString("D");
+            parentReference.ChildScreenId.Value = Guid.NewGuid().ToString("D"); parentReference.FilenameField.Text.Text_ = "populated-parent.kicad_sch";
+            var parentDocument = Child(parentReference.Id);
+            var movedDocument = parentDocument.Clone(); movedDocument.SheetPath.Path.Add(nativeSheet.Id.Clone());
+            movedReference.Path = parentDocument.SheetPath.Clone();
+            foreach (var record in movedReference.InstanceRecords.Records)
+                if (record.Path.SequenceEqual(root.SheetPath.Path))
+                { record.Path.Clear(); record.Path.Add(parentDocument.SheetPath.Path.Select(p => p.Clone())); }
+            foreach (var screen in drawing.Instances)
+            {
+                bool movedScreen = screen.Metadata.Document.Equals(nativeDocument);
+                if (movedScreen) screen.Metadata.Document = movedDocument.Clone();
+                for (int i = 0; i < screen.Items.Count; ++i)
+                    if (screen.Items[i].Is(SchematicSymbolInstance.Descriptor))
+                    {
+                        var symbol = screen.Items[i].Unpack<SchematicSymbolInstance>();
+                        if (movedScreen) symbol.Path = movedDocument.SheetPath.Clone();
+                        foreach (var record in symbol.InstanceRecords.Records)
+                            if (record.Path.SequenceEqual(nativeDocument.SheetPath.Path))
+                            { record.Path.Clear(); record.Path.Add(movedDocument.SheetPath.Path.Select(p => p.Clone())); }
+                        var ordered = symbol.InstanceRecords.Records.OrderBy(r => r.Path.Count)
+                            .ThenBy(r => string.Join('/', r.Path.Select(p => p.Value)), StringComparer.Ordinal).ToArray();
+                        symbol.InstanceRecords.Records.Clear(); symbol.InstanceRecords.Records.Add(ordered); screen.Items[i] = Any.Pack(symbol);
+                    }
+            }
+            var parentScreen = new SchematicScreenData { Metadata = rootScreen.Metadata.Clone() };
+            parentScreen.Metadata.Document = parentDocument.Clone(); parentScreen.Metadata.ScreenId = parentReference.ChildScreenId.Clone();
+            parentScreen.Metadata.RootInstance = new(); parentScreen.Metadata.LoadedNativeFormatVersion = 0;
+            parentScreen.Items.Add(Any.Pack(movedReference)); drawing.Instances.Add(parentScreen); rootScreen.Items.Add(Any.Pack(parentReference));
+            var scaffold = previous with { Schematic = drawing, Engineering = previous.Engineering with { Circuit = previous.Engineering.Circuit with
+            { Sheets = [.. previous.Engineering.Circuit.Sheets, new(parentDefinition, "Populated parent", [])],
+                SheetInstances = [.. previous.Engineering.Circuit.SheetInstances.Select(s => s.Id == movedModel ? s with { ParentId = parentModel } : s),
+                    new(parentModel, parentDefinition, ModelSheet(previous, root))] } },
+                SheetBindings = [.. previous.SheetBindings.Select(b => b.SheetInstanceId == movedModel
+                    ? b with { NativePath = movedDocument.SheetPath.Path.Select(p => Guid.Parse(p.Value)).ToArray() } : b),
+                    new(parentModel, parentDocument.SheetPath.Path.Select(p => Guid.Parse(p.Value)).ToArray())] };
+            var populated = SchematicRebuildTests.WithBoundParentComponent(scaffold, parentModel, processor, "U950");
+            var newComponent = populated.Engineering.Circuit.Components.Single(c => c.Reference == "U950");
+            var newSymbols = SchematicModelProjection.NativeSymbols(populated, populated.Schematic);
+            var powerOccurrence = populated.Engineering.Circuit.Symbols.Single(s => s.ComponentId == newComponent.Id && s.Unit == 4);
+            var powerDrawing = newSymbols[powerOccurrence.Id].Clone();
+            powerDrawing.Path = cpu.SheetPath.Clone();
+            powerDrawing.InstanceRecords.Records.Single().Path.Clear(); powerDrawing.InstanceRecords.Records.Single().Path.Add(cpu.SheetPath.Path.Select(p => p.Clone()));
+            var at = await Capture();
+            var existingOccurrence = previous.Engineering.Circuit.Symbols.Single(s => s.ComponentId == processor && s.Unit == 1);
+            var existingDrawing = SchematicModelProjection.NativeSymbols(previous, previous.Schematic)[existingOccurrence.Id];
+            var geometry = await client.InvokeAsync<MeasureSchematicPlacement, SchematicPlacementGeometry>(new()
+                { Document = cpu.Clone(), ExpectedRevision = at.State.Revision.Clone(), Candidates = { powerDrawing } }, token);
+            var pinGeometry = geometry.Candidates[0].SymbolPins;
+            Assert.IsTrue(pinGeometry.Complete);
+            var endpoints = pinGeometry.Pins.Where(p => p.PowerScope == SchematicPinPowerScope.SppsNone)
+                .GroupBy(p => (p.Position.XNm, p.Position.YNm)).Select(g => g.First().Position).ToArray();
+            var wireEnds = endpoints.SelectMany((p, i) => endpoints.Skip(i + 1).Where(q => p.XNm == q.XNm || p.YNm == q.YNm)
+                .Select(q => (First: p, Second: q, Length: Math.Abs(p.XNm - q.XNm) + Math.Abs(p.YNm - q.YNm)))).OrderBy(p => p.Length).First();
+            var pins = pinGeometry.Pins.Where(p => p.Position.Equals(wireEnds.First) || p.Position.Equals(wireEnds.Second))
+                .Select(p => p.Number).Distinct(StringComparer.Ordinal).ToArray();
+            var populatedScreen = populated.Schematic.Instances.Single(s => s.Metadata.Document.Equals(parentDocument));
+            populatedScreen.Items.Add(Any.Pack(new SchematicLine { Id = new() { Value = Guid.NewGuid().ToString("D") },
+                Type = SchematicLineType.SltWire, Start = wireEnds.First.Clone(), End = wireEnds.Second.Clone(), Locked = LockedState.LsUnlocked,
+                Stroke = previous.Schematic.Instances.Single(s => s.Metadata.Document.Equals(power)).Items
+                    .First(i => i.Is(SchematicLine.Descriptor)).Unpack<SchematicLine>().Stroke.Clone() }));
+            // Existing symbols are measured as native obstacles. Candidates are
+            // detached proposals and must have identities absent from the sheet.
+            var oldPins = geometry.Obstacles.Single(o => o.Id.Equals(existingDrawing.Id)).SymbolPins;
+            Assert.IsTrue(oldPins.Complete);
+            var oldGroup = oldPins.Pins.GroupBy(p => (p.Position.XNm, p.Position.YNm))
+                .First(g => g.All(p => p.PowerScope == SchematicPinPowerScope.SppsNone
+                    && !previous.Engineering.Circuit.Nets.SelectMany(n => n.Pins).Contains(new PinEndpoint(processor, p.Number))));
+            GlobalLabel Link(Vector2 position)
+            {
+                var label = labelTemplate.Clone(); label.Id.Value = Guid.NewGuid().ToString("D");
+                long dx = position.XNm - label.Position.XNm, dy = position.YNm - label.Position.YNm;
+                label.Position = position.Clone(); label.Text.Text_ = "PopulatedParentLink";
+                label.Text.Position.XNm += dx; label.Text.Position.YNm += dy;
+                label.IntersheetRefsField.Text.Position.XNm += dx; label.IntersheetRefsField.Text.Position.YNm += dy;
+                return label;
+            }
+            populatedScreen.Items.Add(Any.Pack(Link(wireEnds.First)));
+            populated.Schematic.Instances.Single(s => s.Metadata.Document.Equals(cpu)).Items.Add(Any.Pack(Link(oldGroup.First().Position)));
+            var connectedEndpoints = pins.Select(p => new PinEndpoint(newComponent.Id, p))
+                .Concat(oldGroup.Select(p => new PinEndpoint(processor, p.Number))).Distinct().ToArray();
+            populated = populated with { Engineering = populated.Engineering with { Circuit = populated.Engineering.Circuit with
+                { Nets = [.. populated.Engineering.Circuit.Nets, new(Guid.NewGuid(), "PopulatedParentLink", connectedEndpoints)] } } };
+            var invalid = populated with { Engineering = populated.Engineering with { Circuit = populated.Engineering.Circuit with
+                { Components = populated.Engineering.Circuit.Components.Select(c => c.Id == newComponent.Id ? c with { Reference = "U951" } : c).ToArray() } } };
+            await CommitXml(invalid);
+            var beforeRefusal = await Capture(); var rejected = await Call("kicad_design_sync_plan", Recovery());
+            Assert.IsTrue(rejected.GetProperty("isError").GetBoolean()); Assert.AreEqual(beforeRefusal, await Capture());
+            Assert.AreEqual(SchematicDesignXml.Write(invalid, []), await File.ReadAllTextAsync(designPath, token));
+            await CommitXml(populated);
+            var planned = await Call("kicad_design_sync_plan", Recovery()); RequireToolSuccess(planned);
+            var operations = planned.GetProperty("structuredContent").GetProperty("nativeOperationsJson").EnumerateArray()
+                .Select(p => SchematicJson.Parser.Parse<SchematicItemOperation>(p.GetString()!)).ToArray();
+            var rollback = new CheckedSchematicBatch { ExpectedState = beforeRefusal.State.Clone(), Batch = new()
+            { Document = root.Clone(), DocumentEpoch = beforeRefusal.State.Revision.Epoch, ExpectedRevision = beforeRefusal.State.Revision.Clone(),
+                OperationId = Guid.NewGuid().ToString("D"), Description = "Reject populated-parent move atomically" } };
+            rollback.Batch.Operations.Add(operations); rollback.Batch.Operations.Add(new SchematicItemOperation());
+            var refused = await client.InvokeAsync<CheckedSchematicBatch, CheckedSchematicBatchReceipt>(rollback, token);
+            Assert.AreEqual(CheckedSchematicBatchStatus.CsbsRejected, refused.Status); Assert.AreEqual(beforeRefusal, await Capture());
+            var complete = await Publish();
+            Assert.AreEqual(newComponent, complete.Engineering.Circuit.Components.Single(c => c.Id == newComponent.Id));
+            Assert.HasCount(4, complete.Engineering.Circuit.Symbols.Where(s => s.ComponentId == newComponent.Id));
+            Assert.AreEqual(movedModel, ModelSheet(complete, movedDocument));
+            foreach (var old in previous.Engineering.Circuit.Components) Assert.AreEqual(old, complete.Engineering.Circuit.Components.Single(c => c.Id == old.Id));
+            await History(parentDocument, powerOccurrence.Id);
+            await client.InvokeAsync<RevertDocument, Empty>(new() { Document = root.Clone() }, token);
+            var observed = await Capture();
+            RequireToolSuccess(await Call("kicad_design_recovery_reattach", new { instanceId, recoveryPath = store.StatePath,
+                expectedRevisionToken = store.Read()!.RevisionToken, expectedDocumentEpoch = observed.State.Revision.Epoch }));
+            var reopened = await Publish(); Assert.AreEqual(newComponent, reopened.Engineering.Circuit.Components.Single(c => c.Id == newComponent.Id));
+            byte[] settled = await File.ReadAllBytesAsync(designPath, token); await Publish(); CollectionAssert.AreEqual(settled, await File.ReadAllBytesAsync(designPath, token));
+
+            async Task CommitXml(SchematicDesign candidate)
+            {
+                string text = SchematicDesignXml.Write(candidate, []); await File.WriteAllTextAsync(designPath, text, new UTF8Encoding(false), token);
+                RequireToolSuccess(await Call("kicad_design_candidate_commit", new { instanceId, recoveryPath = store.StatePath,
+                    expectedRevisionToken = store.Read()!.RevisionToken, candidateXml = text,
+                    expectedCandidateSha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(text))),
+                    operationId = Guid.NewGuid().ToString("D") }));
+            }
+        }
 
         bool Connected(SchematicDesign design, Guid owner) => design.Engineering.Circuit.Nets.Any(n =>
             n.Pins.ToHashSet().SetEquals(connectedPins.Select(pin => new PinEndpoint(owner, pin))));

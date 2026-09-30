@@ -362,6 +362,62 @@ public sealed class SchematicRebuildTests
         var conflict = SchematicSynchronizationPlanner.Plan(state with { Observed = changed,
             ObservedElectrical = SymbolSheetOwnershipTests.Isolated(changed, state.ObservedElectrical.Hierarchy.Revision) });
         Assert.AreEqual("ownership_change_with_xml_edits", conflict.ErrorCode, conflict.ErrorMessage); Assert.IsEmpty(conflict.NativeOperations);
+        var populated = WithBoundParentComponent(desired, parentId, PsuCpuIds.Id(0x07, 7), "U900");
+        var populatedXml = SchematicDesignXml.Write(populated, []);
+        var populatedPlan = SchematicSynchronizationPlanner.Plan(state with
+            { DesiredFileBytes = Encoding.UTF8.GetBytes(populatedXml) });
+        Assert.IsTrue(populatedPlan.CanPrepare, populatedPlan.ErrorCode + ": " + populatedPlan.ErrorMessage);
+        Assert.AreEqual(populatedXml, SchematicDesignXml.Write(populated, []), "Native representation preparation must preserve the supplied XML.");
+        var preparedScreen = populatedPlan.Candidate!.Schematic.Instances.Single(s => SchematicNativeSheetChanges.Key(s) == SchematicDesignBindings.PathKey(parentPath));
+        CollectionAssert.AreEqual(preparedScreen.CachedSymbols.Select(c => c.CacheKey).Order(StringComparer.Ordinal).ToArray(),
+            preparedScreen.CachedSymbols.Select(c => c.CacheKey).ToArray());
+        foreach (var symbol in preparedScreen.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>()))
+        {
+            var source = populated.Schematic.Instances.SelectMany(s => s.Items).Where(i => i.Is(SchematicSymbolInstance.Descriptor))
+                .Select(i => i.Unpack<SchematicSymbolInstance>()).Single(s => s.Id.Equals(symbol.Id));
+            var beforePins = source.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)).Select(c => c.Item.ToString()).ToArray();
+            var afterPins = symbol.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)).Select(c => c.Item.ToString()).ToArray();
+            CollectionAssert.AreEquivalent(beforePins, afterPins, "Pin payloads and identities stay exact.");
+            var ids = symbol.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor)).Select(c => c.Item.Unpack<SchematicPin>().Id.Value).ToArray();
+            CollectionAssert.AreEqual(ids.Order(StringComparer.Ordinal).ToArray(), ids);
+        }
+        Assert.HasCount(4, populatedPlan.NativeOperations.Where(o => o.Create?.Is(SchematicSymbolInstance.Descriptor) == true));
+        var newComponent = populated.Engineering.Circuit.Components.Single(c => c.Reference == "U900");
+        Assert.AreEqual(parentId, populatedPlan.Candidate!.Engineering.Circuit.Components.Single(c => c.Id == newComponent.Id).SheetInstanceId);
+        var connected = populated with { Engineering = populated.Engineering with { Circuit = populated.Engineering.Circuit with
+            { Nets = [.. populated.Engineering.Circuit.Nets, new(Guid.NewGuid(), "New parent connection",
+                [new(newComponent.Id, "1"), new(newComponent.Id, "2")])] } } };
+        var connectedPlan = SchematicSynchronizationPlanner.Plan(state with
+            { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(connected, [])) });
+        Assert.IsTrue(connectedPlan.CanPrepare, connectedPlan.ErrorCode + ": " + connectedPlan.ErrorMessage);
+        Assert.AreEqual(CircuitXml.Write(connected.Engineering.Circuit), CircuitXml.Write(connectedPlan.Candidate!.Engineering.Circuit));
+        // The existing journey above is the nearest topology fixture: extend it
+        // with a new connection to an existing owner and an old-sheet label.
+        var linked = connected with { Schematic = connected.Schematic.Clone() };
+        var oldOwner = linked.Engineering.Circuit.Components.First(c => c.Id != newComponent.Id);
+        var oldDefinition = linked.Engineering.Circuit.Sheets.SelectMany(s => s.Components).Single(c => c.Id == oldOwner.DefinitionId);
+        string oldPin = linked.Engineering.Circuit.Parts.Single(p => p.Id == oldDefinition.PartId).Pins
+            .First(p => !linked.Engineering.Circuit.Nets.SelectMany(n => n.Pins).Contains(new PinEndpoint(oldOwner.Id, p.Number))).Number;
+        linked = linked with { Engineering = linked.Engineering with { Circuit = linked.Engineering.Circuit with
+            { Nets = linked.Engineering.Circuit.Nets.Select(n => n.Name == "New parent connection"
+                ? n with { Pins = [.. n.Pins, new(oldOwner.Id, oldPin)] } : n).ToArray() } } };
+        var oldScreen = linked.Schematic.Instances.First(s => !s.Metadata.Document.SheetPath.Path.Select(p => Guid.Parse(p.Value)).SequenceEqual(parentPath));
+        oldScreen.Items.Add(Any.Pack(new GlobalLabel { Id = new() { Value = Guid.NewGuid().ToString("D") },
+            Position = new(), Text = new() { Text_ = "New parent connection", Position = new(), Attributes = new() },
+            Locked = Kiapi.Common.Types.LockedState.LsUnlocked }));
+        var linkedPlan = SchematicSynchronizationPlanner.Plan(state with
+            { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(linked, [])) });
+        Assert.IsTrue(linkedPlan.CanPrepare, linkedPlan.ErrorCode + ": " + linkedPlan.ErrorMessage);
+        Assert.AreEqual(CircuitXml.Write(linked.Engineering.Circuit), CircuitXml.Write(linkedPlan.Candidate!.Engineering.Circuit));
+        Assert.IsTrue(linkedPlan.NativeOperations.Any(o => o.Create?.Is(GlobalLabel.Descriptor) == true));
+        var wrongNative = populated with { Schematic = populated.Schematic.Clone() };
+        var wrongScreen = wrongNative.Schematic.Instances.Single(s => SchematicNativeSheetChanges.Key(s) == SchematicDesignBindings.PathKey(parentPath));
+        int symbolIndex = wrongScreen.Items.Select((item, index) => (item, index)).First(x => x.item.Is(SchematicSymbolInstance.Descriptor)).index;
+        var changedReference = wrongScreen.Items[symbolIndex].Unpack<SchematicSymbolInstance>(); changedReference.ReferenceField.Text.Text_ = "U901";
+        wrongScreen.Items[symbolIndex] = Any.Pack(changedReference);
+        var refusedReference = SchematicSynchronizationPlanner.Plan(state with
+            { DesiredFileBytes = Encoding.UTF8.GetBytes(SchematicDesignXml.Write(wrongNative, [])) });
+        Assert.AreEqual("xml_new_parent_bindings_required", refusedReference.ErrorCode); Assert.IsEmpty(refusedReference.NativeOperations);
         string directory = Directory.CreateTempSubdirectory("combined-sheet-move-").FullName;
         try
         {
@@ -378,6 +434,40 @@ public sealed class SchematicRebuildTests
 
         static void Set(Google.Protobuf.Collections.RepeatedField<KIID> path, IEnumerable<Guid> ids)
         { path.Clear(); path.Add(ids.Select(id => new KIID { Value = id.ToString("D") })); }
+    }
+
+    internal static SchematicDesign WithBoundParentComponent(SchematicDesign desired, Guid sheetId, Guid templateOwner, string reference)
+    {
+        var circuit = desired.Engineering.Circuit;
+        var owner = circuit.Components.Single(c => c.Id == templateOwner);
+        var definition = circuit.Sheets.SelectMany(s => s.Components).Single(d => d.Id == owner.DefinitionId) with { Id = Guid.NewGuid() };
+        var createdOwner = new ComponentInstance(Guid.NewGuid(), definition.Id, sheetId, reference);
+        Guid targetDefinition = circuit.SheetInstances.Single(s => s.Id == sheetId).DefinitionId;
+        var drawing = desired.Schematic.Clone();
+        var targetPath = desired.SheetBindings.Single(b => b.SheetInstanceId == sheetId).NativePath;
+        var target = drawing.Instances.Single(s => SchematicNativeSheetChanges.Key(s) == SchematicDesignBindings.PathKey(targetPath));
+        var natives = SchematicModelProjection.NativeSymbols(desired, desired.Schematic);
+        var occurrences = new List<SymbolOccurrence>(); var bindings = new List<SchematicSymbolBinding>();
+        int ordinal = 0;
+        foreach (var original in circuit.Symbols.Where(s => s.ComponentId == templateOwner).OrderBy(s => s.Unit))
+        {
+            var symbol = SymbolSheetOwnershipTests.PlacedCopy(natives[original.Id], reference,
+                50_800_000L + ordinal++ * 76_200_000L - natives[original.Id].Position.XNm, 50_800_000L - natives[original.Id].Position.YNm);
+            symbol.Path = target.Metadata.Document.SheetPath.Clone();
+            var record = new SymbolSheetRecord { ProjectName = target.Metadata.Document.Project.Name,
+                Reference = reference, Unit = symbol.Unit.Unit, Variants = symbol.Variants?.Clone() ?? new() };
+            record.Path.Add(target.Metadata.Document.SheetPath.Path.Select(p => p.Clone()));
+            symbol.InstanceRecords = new() { Records = { record } };
+            target.Items.Add(Any.Pack(symbol));
+            var occurrence = new SymbolOccurrence(Guid.NewGuid(), createdOwner.Id, symbol.Unit.Unit, SchematicModelProjection.Placement(symbol));
+            occurrences.Add(occurrence); bindings.Add(new(occurrence.Id, Guid.Parse(symbol.Id.Value)));
+        }
+        foreach (var cache in desired.Schematic.Instances.SelectMany(s => s.CachedSymbols).DistinctBy(c => c.CacheKey))
+            if (!target.CachedSymbols.Any(c => c.CacheKey == cache.CacheKey)) target.CachedSymbols.Add(cache.Clone());
+        return desired with { Schematic = drawing, Engineering = desired.Engineering with { Circuit = circuit with
+        { Sheets = circuit.Sheets.Select(s => s.Id == targetDefinition ? s with { Components = [.. s.Components, definition] } : s).ToArray(),
+            Components = [.. circuit.Components, createdOwner], Symbols = [.. circuit.Symbols, .. occurrences] } },
+            SymbolBindings = [.. desired.SymbolBindings, .. bindings] };
     }
 
     [TestMethod]

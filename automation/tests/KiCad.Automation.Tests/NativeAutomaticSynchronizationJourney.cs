@@ -39,6 +39,40 @@ public sealed partial class NativeSessionTests
         var afterNative = await Capture(); var parsed = Read();
         Assert.IsEmpty(SchematicHierarchyDelta.Plan(afterNative.Electrical.Hierarchy.Data, parsed.Schematic, deadline.Token));
 
+        // Native deletion must travel through the same automatic worker as a native
+        // property edit. Choose a component with one native drawing so ownership
+        // retirement is unambiguous while the rest of the editor remains intact.
+        var deletionOccurrence = parsed.Engineering.Circuit.Symbols
+            .GroupBy(s => s.ComponentId).Where(g => g.Count() == 1).Select(g => g.Single())
+            .FirstOrDefault()
+            ?? throw new AssertFailedException("The automatic deletion fixture needs one single-drawing component.");
+        var deletionBinding = parsed.SymbolBindings.Single(b => b.SymbolOccurrenceId == deletionOccurrence.Id);
+        var deletionSheet = parsed.SheetBindings.Single(b => b.SheetInstanceId == deletionOccurrence.EffectiveSheetInstanceId(
+            parsed.Engineering.Circuit.Components.Single(c => c.Id == deletionOccurrence.ComponentId)));
+        var deletionDocument = root.Clone(); deletionDocument.SheetPath.Path.Clear();
+        deletionDocument.SheetPath.Path.Add(deletionSheet.NativePath.Select(p => new KIID { Value = p.ToString("D") }));
+        await client.InvokeAsync<ActivateSchematicSheet, DocumentSpecifier>(new() { Document = deletionDocument.Clone() }, deadline.Token);
+        var deletionNative = SchematicModelProjection.NativeSymbols(parsed, afterNative.Electrical.Hierarchy.Data)[deletionOccurrence.Id];
+        await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(new()
+        {
+            Document = deletionDocument.Clone(), Description = "Automatic native component deletion",
+            Operations = { new SchematicItemOperation { Remove = new KIID { Value = deletionBinding.NativeObjectId.ToString("D") } } }
+        }, deadline.Token);
+        await Watching(design => !design.Engineering.Circuit.Symbols.Any(s => s.Id == deletionOccurrence.Id));
+        var afterDeletion = await Capture();
+        var deletedDesign = Read();
+        Assert.IsFalse(deletedDesign.Engineering.Circuit.Symbols.Any(s => s.Id == deletionOccurrence.Id));
+        Assert.IsFalse(SchematicModelProjection.NativeSymbols(deletedDesign, afterDeletion.Electrical.Hierarchy.Data)
+            .ContainsKey(deletionOccurrence.Id));
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-automatic-native-deletion.json"),
+            JsonSerializer.Serialize(new { occurrence = deletionOccurrence.Id, nativeObject = deletionNative.Id.Value,
+                automaticReverseXml = true, nativeUndoRedo = true }), deadline.Token);
+        await FocusedSchematicShortcut(client, deletionDocument, processId, display, "z", deadline.Token);
+        await Watching(design => design.Engineering.Circuit.Symbols.Any(s => s.Id == deletionOccurrence.Id));
+        await FocusedSchematicShortcut(client, deletionDocument, processId, display, "y", deadline.Token);
+        await Watching(design => !design.Engineering.Circuit.Symbols.Any(s => s.Id == deletionOccurrence.Id));
+        parsed = Read();
+
         var target = parsed.Engineering.Circuit.Components.First(c => parsed.Engineering.Circuit.Symbols.Any(s => s.ComponentId == c.Id));
         string nextReference = "AUTO900";
         var desired = parsed with { Engineering = parsed.Engineering with { Circuit = parsed.Engineering.Circuit with

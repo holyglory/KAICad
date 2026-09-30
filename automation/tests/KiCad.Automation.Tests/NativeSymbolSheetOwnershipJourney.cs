@@ -1184,7 +1184,7 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(applied.SynchronizationCommitted); Assert.IsFalse(applied.NativeMutationCommitted);
             Assert.IsNull(store.Read()!.State.OwnershipResolution);
             var receipt = store.Read()!.State.LastSynchronization!;
-            Assert.AreEqual(2, receipt.Version);
+            Assert.AreEqual(3, receipt.Version);
             string expectedDigest = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(expectedPrevious));
             Assert.AreEqual(expectedDigest, receipt.PreviousXmlSha256);
             Assert.IsTrue(RetainedXmlHistory.Inspect(receipt).ContentVerified);

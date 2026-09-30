@@ -2930,7 +2930,7 @@ name="rendered"
 tier="development"
 requires=["native-build"]
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeSymbolSheetOwnership", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-symbol-sheet-ownership-tests"]
-retained_artifacts=[{ name="native-symbol-sheet-ownership-tests",path="automation/artifacts/native-symbol-sheet-ownership-tests",max_bytes=16777216 },{ name="native-symbol-sheet-ownership-evidence",path="automation/artifacts/native-symbol-sheet-ownership/native-session-current",max_bytes=33554432 }]
+retained_artifacts=[{ name="native-symbol-sheet-ownership-tests",path="automation/artifacts/native-symbol-sheet-ownership-tests",max_bytes=16777216 },{ name="native-symbol-sheet-ownership-evidence",path="automation/artifacts/native-symbol-sheet-ownership/native-session-current",max_bytes=268435456 }]
 
 [test.native-xml-component-creation]
 timeout_seconds=3600

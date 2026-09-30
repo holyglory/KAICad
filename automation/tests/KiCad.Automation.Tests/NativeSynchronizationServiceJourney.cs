@@ -102,7 +102,7 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(SchematicElectricalComparison.Compare(recoveredXml, final.Electrical, [], limit.Token).ConnectivityEquivalent);
             Assert.IsFalse(store.Read()!.State.HasPendingWork);
             var completed = store.Read()!.State.LastSynchronization!;
-            Assert.AreEqual(2, completed.Version);
+            Assert.AreEqual(3, completed.Version);
             if (fileBoundary)
             {
                 Assert.IsNotNull(completed.PreviousXmlPath);

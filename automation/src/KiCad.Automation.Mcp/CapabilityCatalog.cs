@@ -173,7 +173,7 @@ public static class CapabilityCatalog
     private static readonly (string Id, string Scope, string Summary, string[] TrackedBy)[] Unfinished =
     [
         ("pcb-routing-completion", "pcb-routing",
-            "The pcb-routing tools preview, validate, measure and commit explicit Track/Arc/Via candidates with lifecycle-guarded native undo. Layer changes and vias are supported only when present in the candidate; full push-and-shove continuation, differential-pair and tuning modes, failure and cancellation recovery, and DRC, impedance or RF qualification of routed results remain unfinished.",
+            "The pcb-routing tools preview, validate, measure and commit explicit Track/Arc/Via candidates with lifecycle-guarded native undo after a retained exact-payload detached DRC pass. Layer changes and vias are supported only when present in the candidate; full push-and-shove continuation, differential-pair and tuning modes, failure and cancellation recovery, and impedance or RF qualification of routed results remain unfinished.",
             ["p09bc531842a6fe23"]),
         ("simulation-qualification", "simulation",
             "The simulation tools run KiCad's own ngspice on an explicit schematic and are verified on Linux only. Capturing every model and library file a simulation depends on, broader simulation qualification, and qualification on Mac, Windows and through Codex Desktop are unfinished.",

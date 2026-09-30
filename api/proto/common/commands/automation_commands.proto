@@ -79,6 +79,9 @@ message ReadPcbDrcJob {
   kiapi.common.types.DocumentSpecifier document = 1;
   string job_id = 2;
   string process_epoch = 3;
+  // Optional exact ordered copper payload to compare with the retained start
+  // request. A mismatch is rejected; IDs alone cannot prove checked geometry.
+  repeated google.protobuf.Any expected_candidate_items = 4;
 }
 
 message CancelPcbDrcJob {
@@ -166,6 +169,10 @@ message PcbDrcJobState {
   repeated string input_warnings = 17;
   bool candidate_dry_run = 18;
   repeated string candidate_item_ids = 19;
+  // True only for a read that matched nonempty expected_candidate_items to the
+  // complete retained payload. Older peers and ordinary reads leave this false.
+  // This proves payload identity, not freshness or permission to commit.
+  bool candidate_payload_verified = 20;
 }
 
 // Read-only native PNS route preview. The router operates on its in-memory

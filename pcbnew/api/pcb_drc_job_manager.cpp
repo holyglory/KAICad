@@ -949,8 +949,12 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
     result.set_results_fresh( aJob->resultsFresh );
     result.set_cancellation_requested( aJob->reporter->IsCancelled() );
     result.set_worker_finished( aJob->workerFinished );
-    // Project/rule dependency capture is still incomplete (p23deb822a36256a6).
-    result.set_snapshot_complete( false );
+    // Candidate DRC captures a complete detached board/rules/library/drawing
+    // snapshot before the worker starts. Ordinary live-board DRC remains
+    // preliminary until the broader project input qualification is complete;
+    // candidate receipts are safe to use for the exact candidate payload after
+    // the retained job is reread and the live checkpoint still matches.
+    result.set_snapshot_complete( aJob->candidateDryRun );
     result.set_candidate_dry_run( aJob->candidateDryRun );
     for( const KIID& identity : aJob->candidateItemIds )
         result.add_candidate_item_ids( identity.AsStdString() );
@@ -1226,7 +1230,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
         job->progress = terminal == PDRCJS_COMPLETED ? 1.0 : std::max( job->progress, job->reporter->Progress() );
         job->phase = job->reporter->Phase();
         if( terminal == PDRCJS_COMPLETED ) job->findings = std::move( findings );
-        job->resultsFresh = false; // Full project/rule snapshot remains unqualified.
+        job->resultsFresh = terminal == PDRCJS_COMPLETED && job->candidateDryRun;
     } );
     }
     catch( const std::exception& error )
@@ -1249,7 +1253,23 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Read(
     if( aRequest.process_epoch() != aProcessEpoch )
         return tl::unexpected( "The native process epoch changed; reattach before reading this DRC job" );
     if( !SameDocument( job->document, aRequest.document() ) ) return tl::unexpected( "PCB DRC job target mismatch" );
-    return state( job, aBoard, aProcessEpoch, aObserveSchematic, aObserveLibraries );
+    const bool verifyCandidate = aRequest.expected_candidate_items_size() > 0;
+    if( verifyCandidate )
+    {
+        // request is immutable once the job is published. Compare the complete
+        // Any payloads (including unknown fields), not only their object IDs.
+        if( aRequest.expected_candidate_items_size() != job->request.candidate_items_size() )
+            return tl::unexpected( "PCB DRC candidate payload mismatch" );
+        for( int i = 0; i < aRequest.expected_candidate_items_size(); ++i )
+        {
+            if( !google::protobuf::util::MessageDifferencer::Equals(
+                    aRequest.expected_candidate_items( i ), job->request.candidate_items( i ) ) )
+                return tl::unexpected( "PCB DRC candidate payload mismatch" );
+        }
+    }
+    auto result = state( job, aBoard, aProcessEpoch, aObserveSchematic, aObserveLibraries );
+    if( result ) result->set_candidate_payload_verified( verifyCandidate );
+    return result;
 }
 
 tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Cancel(

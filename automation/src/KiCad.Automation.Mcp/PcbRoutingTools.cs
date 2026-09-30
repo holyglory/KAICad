@@ -138,15 +138,35 @@ public sealed class PcbRoutingTools(InstanceRegistry registry, PcbItemTools item
     });
 
     [McpServerTool(Name = "kicad_pcb_route_commit"),
-     Description("Commit a previously validated typed PCB route candidate as one native undoable transaction. requestJson must be the exact CreateItems candidate returned by route preview/guide conversion, and expectedStateJson must be the unchanged lifecycle checkpoint used for validation. The transaction rejects stale boards and native item errors; the returned afterState is the only completion proof. This commits explicit Track/Arc/Via geometry and does not claim differential-pair, impedance, RF or length-tuning qualification."),
+     Description("Request a native undoable commit of explicit Track/Arc/Via candidates. drcJobStateJson supplies only a job locator: KiCad rereads that job and compares the complete ordered candidate payload before accepting its result. Requires fresh, complete, finding-free candidate DRC at the expected board checkpoint; older peers without payload verification are rejected. Native dependency-complete DRC admission and retry-safe route commit remain under qualification; this tool must not be treated as production routing proof."),
      KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "validated candidate, exact lifecycle checkpoint, atomic native commit"),
-     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Commit(string instanceId, string requestJson, string expectedStateJson,
         string drcJobStateJson, CancellationToken cancellationToken) => Execute(async () =>
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var request = BoardJson.Parser.Parse<CreateItems>(requestJson);
         var expected = SchematicJson.Parser.Parse<DocumentLifecycleState>(expectedStateJson);
-        var drc = SchematicJson.Parser.Parse<PcbDrcJobState>(drcJobStateJson);
+        var locator = SchematicJson.Parser.Parse<PcbDrcJobState>(drcJobStateJson);
+        if (request.Header?.Document is null || expected.Document is null
+            || expected.Scope != DocumentLifecycleScope.DlsPcb
+            || !request.Header.Document.Equals(expected.Document) || request.Items.Count == 0
+            || request.Container is not null || request.Header.Container is not null
+            || request.Header.FieldMask is not null
+            || !Guid.TryParseExact(locator.JobId, "D", out var jobId) || jobId == Guid.Empty)
+            throw new AutomationException("invalid_route_commit", "Supply a nonempty board-level copper candidate, its lifecycle checkpoint and a retained native DRC job ID.");
+        DocumentStateTools.ValidateTarget(expected.Document);
+        if (expected.Document.Type != DocumentType.DoctypePcb)
+            throw new AutomationException("invalid_route_commit", "Route commits require a PCB document.");
+        var client = registry.Client(instanceId);
+        if (client.Epoch != expected.ProcessEpoch)
+            throw new AutomationException("pcb_instance_changed", "The candidate belongs to another native process epoch.");
+        var read = new ReadPcbDrcJob { Document = expected.Document, JobId = locator.JobId,
+            ProcessEpoch = expected.ProcessEpoch };
+        read.ExpectedCandidateItems.Add(request.Items);
+        var drc = await client.InvokeAsync<ReadPcbDrcJob, PcbDrcJobState>(read, cancellationToken);
+        if (drc.JobId != locator.JobId || !drc.CandidatePayloadVerified)
+            throw new AutomationException("route_drc_candidate_unverified", "KiCad did not verify this exact candidate against the retained DRC job; no edit was submitted.");
         ValidateDrcAdmission(request, expected, drc);
         return await itemTools.CommitRouteCandidate(instanceId, requestJson, expectedStateJson, cancellationToken);
     });

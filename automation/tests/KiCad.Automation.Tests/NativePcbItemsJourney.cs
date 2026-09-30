@@ -221,7 +221,8 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(svgState, SchematicJson.Formatter.Format(await ObserveLifecycleState(client, board, token)));
             var routeCommit = await mcp.Tool("kicad_pcb_route_commit", new
             {
-                instanceId, requestJson = BoardJson.Formatter.Format(generatedRequest), expectedStateJson = svgState
+                instanceId, requestJson = BoardJson.Formatter.Format(generatedRequest), expectedStateJson = svgState,
+                drcJobStateJson = SchematicJson.Formatter.Format(dryRun)
             });
             Assert.IsFalse(routeCommit.TryGetProperty("isError", out var routeCommitError) && routeCommitError.GetBoolean(), routeCommit.GetRawText());
             var routeCommitData = routeCommit.GetProperty("structuredContent");

@@ -142,7 +142,32 @@ public sealed class PcbRoutingTools(InstanceRegistry registry, PcbItemTools item
      KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "validated candidate, exact lifecycle checkpoint, atomic native commit"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public Task<CallToolResult> Commit(string instanceId, string requestJson, string expectedStateJson,
-        CancellationToken cancellationToken) => itemTools.CommitRouteCandidate(instanceId, requestJson, expectedStateJson, cancellationToken);
+        string drcJobStateJson, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        var request = BoardJson.Parser.Parse<CreateItems>(requestJson);
+        var expected = SchematicJson.Parser.Parse<DocumentLifecycleState>(expectedStateJson);
+        var drc = SchematicJson.Parser.Parse<PcbDrcJobState>(drcJobStateJson);
+        ValidateDrcAdmission(request, expected, drc);
+        return await itemTools.CommitRouteCandidate(instanceId, requestJson, expectedStateJson, cancellationToken);
+    });
+
+    private static void ValidateDrcAdmission(CreateItems request, DocumentLifecycleState expected, PcbDrcJobState drc)
+    {
+        if (request.Header?.Document is null || expected.Document is null || !request.Header.Document.Equals(expected.Document)
+            || drc.Document is null || !drc.Document.Equals(expected.Document)
+            || drc.ProcessEpoch != expected.ProcessEpoch || drc.CheckedRevision is null
+            || expected.Revision is null || !drc.CheckedRevision.Equals(expected.Revision)
+            || drc.Status != PcbDrcJobStatus.PdrcjsCompleted || !drc.ResultsFresh || !drc.SnapshotComplete
+            || drc.Findings.Count != 0 || !drc.CandidateDryRun || !drc.WorkerFinished)
+            throw new AutomationException("route_drc_not_proven", "A route commit requires a completed, fresh, dependency-complete DRC dry-run with no findings at the same board revision.");
+        var ids = request.Items.Select(item => item.Is(Track.Descriptor) ? item.Unpack<Track>().Id.Value
+            : item.Is(Arc.Descriptor) ? item.Unpack<Arc>().Id.Value
+            : item.Is(Via.Descriptor) ? item.Unpack<Via>().Id.Value : "").ToArray();
+        if (ids.Any(string.IsNullOrWhiteSpace) || ids.Distinct(StringComparer.Ordinal).Count() != ids.Length
+            || drc.CandidateItemIds.Count != ids.Length
+            || !ids.Order(StringComparer.Ordinal).SequenceEqual(drc.CandidateItemIds.Order(StringComparer.Ordinal), StringComparer.Ordinal))
+            throw new AutomationException("route_drc_candidate_mismatch", "The DRC dry-run candidate identities do not match the route items being committed.");
+    }
 
     private sealed class RouteGroup(string netName)
     {

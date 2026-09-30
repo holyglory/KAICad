@@ -208,6 +208,7 @@ public sealed class RecoveryTools
             movedSheetInstances = plan.Electrical?.MovedSheetInstances, restoredSheetInstances = plan.Electrical?.RestoredSheetInstances,
             sheetResolutionRequests = plan.Electrical?.SheetResolutionRequests,
             ownershipResolutionRequests = plan.Electrical?.ResolutionRequests,
+            sheetComponentResolutionRequests = plan.Electrical?.SheetComponentResolutionRequests,
             hierarchyConflicts = plan.Hierarchy?.Conflicts.Select(x => new { x.InstancePath, x.Reason }),
             electricalConflicts = plan.Electrical?.Conflicts, netChanges = plan.Electrical?.NetChanges,
             restoredSymbolOccurrences = plan.Electrical?.RestoredSymbolOccurrences, restoredNetIds = plan.Electrical?.RestoredNetIds,
@@ -295,6 +296,28 @@ public sealed class RecoveryTools
         var result = await BlockOwnershipSynchronization.SynchronizeAsync(blockGraphPath, DesignIdentity(designId), saved.State.Baseline,
             BlockOwnershipSynchronization.NativeOrigin("Bind unowned components to the block of their sheet"), expectedBlockGraphSha256, cancellationToken);
         return BlockOwnersResult(saved, result.Plan, result.BlockGraphSha256, result);
+    });
+
+    [McpServerTool(Name = "kicad_design_repeated_sheet_answer", Destructive = false),
+     KiCadCapability("schematic-design", "compiled-mcp", "recovery revision token, exact new sheet and component-definition identities"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.RepeatedPhysicalSheetRebuildPreservesEveryInstance",
+         "NativeSessionTests.RepeatedSheetsResolveUnitsOwnedOnAnotherSheet"),
+     Description("Retain explicit choices for a new native instance of an existing sheet file. Use the current recovery revision token. componentReferences supplies sheetInstanceId, componentDefinitionId and reference from kicad_design_sync_plan sheetComponentResolutionRequests; no reference is inferred for an undrawn component. symbolOwners supplies the existing ownership-answer shape, including each NativePath, to select an external unit owner or ambiguous part. Choices accumulate for the exact saved baseline, desired XML and native observation; edits make them stale. Give missing references before symbol-owner choices. Returns any remaining questions and whether the native ownership projection is complete. Writes only the recovery record after validating the choices; does not contact KiCad, write the design XML, advance synchronization or claim other design conflicts are resolved. Refresh and plan/apply, or resume the paused automatic worker, to publish the complete design. Unknown, duplicate or conflicting choices and pending operations are refused without changing the record.")]
+    public Task<CallToolResult> AnswerRepeatedSheet(string instanceId, string recoveryPath, string expectedRevisionToken,
+        SchematicSheetComponentReference[] componentReferences, SchematicOwnershipAnswer[] symbolOwners,
+        CancellationToken cancellationToken) => ExecuteAsync(async () =>
+    {
+        var (store, saved) = ReadAtRevision(instanceId, recoveryPath, expectedRevisionToken);
+        var (retained, projected) = await SchematicRepeatedSheetChoices.RetainAsync(store, saved,
+            componentReferences ?? [], symbolOwners ?? [], cancellationToken);
+        var data = JsonSerializer.SerializeToElement(new
+        {
+            instanceId, recoveryRevisionToken = retained.RevisionToken, choicesRetained = true,
+            ownershipProjectionComplete = projected.Adoption is not null,
+            sheetComponentResolutionRequests = projected.SheetComponentRequests, ownershipResolutionRequests = projected.Requests,
+            designFileWritten = false, nativeMutationAuthorized = false, synchronizationAdvanced = false
+        }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        return new CallToolResult { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
     });
 
     [McpServerTool(Name = SchematicNativeAdditionProjection.AnswerTool, Destructive = false),

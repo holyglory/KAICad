@@ -57,6 +57,7 @@ public sealed partial class NativeSessionTests
         Assert.IsTrue(binding.IdentitiesResolved, string.Join(", ", binding.Issues.Select(i => i.Code)));
         Assert.IsEmpty(binding.Differences);
         var comparison = SchematicElectricalComparison.Compare(baseline, original.Electrical, []);
+        await File.WriteAllTextAsync(FileName("initial-electrical-comparison.json"), JsonSerializer.Serialize(comparison), token);
         Assert.IsTrue(comparison.PinBindingsComplete && comparison.ConnectivityEquivalent,
             "The expected three separate two-pin nets must match native connectivity before recovery.");
         Assert.HasCount(3, PinPartitions(original.Electrical));
@@ -212,6 +213,9 @@ public sealed partial class NativeSessionTests
             componentDefinitions.Add(group.Key, group.First().Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor))
                 .Select(i => i.Unpack<SchematicSymbolInstance>()).OrderBy(s => s.Id.Value, StringComparer.Ordinal)
                 .Select(s => new ComponentDefinition(Guid.NewGuid(), part, s.ValueField.Text.Text_)).ToArray());
+        string repeatedScreenId = data.Instances.GroupBy(s => s.Metadata.ScreenId.Value).Single(g => g.Count() == 2).Key;
+        var undrawn = new ComponentDefinition(Guid.NewGuid(), part, "Undrawn fixture probe");
+        componentDefinitions[repeatedScreenId] = [.. componentDefinitions[repeatedScreenId], undrawn];
         var components = new List<ComponentInstance>();
         var occurrences = new List<SymbolOccurrence>();
         var bindings = new List<SchematicSymbolBinding>();
@@ -224,6 +228,9 @@ public sealed partial class NativeSessionTests
             var pair = symbols.Select((s, i) => new ComponentInstance(Guid.NewGuid(), componentDefinitions[screen.Metadata.ScreenId.Value][i].Id,
                 instances[RebuildPathKey(screen)], s.ReferenceField.Text.Text_)).ToArray();
             components.AddRange(pair);
+            if (screen.Metadata.ScreenId.Value == repeatedScreenId)
+                components.Add(new(Guid.NewGuid(), undrawn.Id, instances[RebuildPathKey(screen)],
+                    symbols.Any(s => s.ReferenceField.Text.Text_ == "TP101") ? "TP150" : "TP250"));
             foreach (var (symbol, component) in symbols.Zip(pair))
             {
                 var occurrence = new SymbolOccurrence(Guid.NewGuid(), component.Id, 1, SchematicModelProjection.Placement(symbol));
@@ -248,6 +255,7 @@ public sealed partial class NativeSessionTests
         return new(new(circuit, new(Guid.NewGuid(), [], [], [], []), [], []), data.Clone(),
             data.Instances.Select(s => new SchematicSheetBinding(instances[RebuildPathKey(s)],
                 s.Metadata.Document.SheetPath.Path.Select(p => Guid.Parse(p.Value)).ToArray())).ToArray(), bindings,
-            PartSymbols: [new(alternative.Id, cachedProbe.Definition.Id.Clone(), cachedProbe)]);
+            PartSymbols: [new(part, cachedProbe.Definition.Id.Clone(), cachedProbe.Clone()),
+                new(alternative.Id, cachedProbe.Definition.Id.Clone(), cachedProbe)]);
     }
 }

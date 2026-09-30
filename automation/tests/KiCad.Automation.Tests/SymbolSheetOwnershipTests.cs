@@ -294,9 +294,54 @@ public sealed class SymbolSheetOwnershipTests
                 if (sheet.Items[i].Is(SchematicSymbolInstance.Descriptor) && nativeUndrawn.Contains(sheet.Items[i].Unpack<SchematicSymbolInstance>().Id.Value))
                     sheet.Items.RemoveAt(i);
         var undrawnRepeat = SchematicRebuildTests.WithRepeatedSheet(undrawn);
-        var unresolved = SchematicNativeAdditionProjection.Project(Checkpointed(undrawn, undrawnRepeat.Schematic), [], CancellationToken.None);
+        var undrawnState = Checkpointed(undrawn, undrawnRepeat.Schematic);
+        var unresolved = SchematicNativeAdditionProjection.Project(undrawnState, [], CancellationToken.None);
         Assert.IsNull(unresolved.Adoption);
-        Assert.AreEqual("native_repeated_sheet_ownership_unresolved", unresolved.ErrorCode);
+        Assert.AreEqual(SchematicNativeAdditionProjection.ResolutionRequired, unresolved.ErrorCode);
+        var referenceRequest = unresolved.SheetComponentRequests.Single();
+        Assert.AreEqual(undrawnComponent.DefinitionId, referenceRequest.ComponentDefinitionId);
+        var explicitReference = new SchematicSheetComponentReference(referenceRequest.SheetInstanceId,
+            referenceRequest.ComponentDefinitionId, "UNPLACED301");
+        var chosen = undrawnState with { RepeatedSheetResolution = new(SchematicRepeatedSheetChoices.SnapshotToken(undrawnState),
+            [explicitReference], []) };
+        var completeRepeated = SchematicNativeAdditionProjection.Project(chosen, [], CancellationToken.None);
+        Assert.IsNotNull(completeRepeated.Adoption, completeRepeated.ErrorCode + ": " + completeRepeated.ErrorMessage);
+        var referenceOwner = completeRepeated.Adoption.BindingCandidate.Engineering.Circuit.Components.Single(c => c.Id == referenceRequest.ProposedComponentId);
+        Assert.AreEqual(explicitReference.Reference, referenceOwner.Reference);
+        Assert.IsFalse(completeRepeated.Adoption.BindingCandidate.Engineering.Circuit.Symbols.Any(s => s.ComponentId == referenceOwner.Id));
+        var changedReference = chosen with { NativeRevision = chosen.NativeRevision with { Sequence = chosen.NativeRevision.Sequence + 1 } };
+        Assert.IsNull(SchematicRepeatedSheetChoices.Current(changedReference), "Choices bind the complete observed revision.");
+        var duplicateReference = chosen with { RepeatedSheetResolution = chosen.RepeatedSheetResolution! with
+            { ComponentReferences = [explicitReference with { Reference = undrawnComponent.Reference }] } };
+        Assert.IsNull(SchematicNativeAdditionProjection.Project(duplicateReference, [], CancellationToken.None).Adoption,
+            "A repeated component cannot copy the earlier instance's reference.");
+        var unknownReference = chosen with { RepeatedSheetResolution = chosen.RepeatedSheetResolution! with
+            { ComponentReferences = [explicitReference with { ComponentDefinitionId = Guid.NewGuid() }] } };
+        Assert.AreEqual(SchematicRepeatedSheetChoices.Invalid,
+            SchematicNativeAdditionProjection.Project(unknownReference, [], CancellationToken.None).ErrorCode);
+        // A partial answer is useful, but it cannot retain a conflicting assigned
+        // reference just because another undrawn component is still unanswered.
+        var ownerDefinition = undrawn.Engineering.Circuit.SheetInstances.Single(s => s.Id == undrawnComponent.SheetInstanceId).DefinitionId;
+        var otherDefinition = undrawn.Engineering.Circuit.Sheets.SelectMany(s => s.Components)
+            .Single(c => c.Id == undrawnComponent.DefinitionId) with { Id = Guid.NewGuid() };
+        var twoUndrawn = undrawn with { Engineering = undrawn.Engineering with { Circuit = undrawn.Engineering.Circuit with
+        { Sheets = undrawn.Engineering.Circuit.Sheets.Select(s => s.Id == ownerDefinition
+            ? s with { Components = [.. s.Components, otherDefinition] } : s).ToArray(),
+            Components = [.. undrawn.Engineering.Circuit.Components,
+                new(Guid.NewGuid(), otherDefinition.Id, undrawnComponent.SheetInstanceId, "UNPLACED101")] } } };
+        var partialState = Checkpointed(twoUndrawn, undrawnRepeat.Schematic);
+        var partialChoices = new DesignRepeatedSheetResolution(SchematicRepeatedSheetChoices.SnapshotToken(partialState), [explicitReference], []);
+        var partialPlan = SchematicNativeAdditionProjection.Project(partialState with { RepeatedSheetResolution = partialChoices }, [], CancellationToken.None);
+        Assert.AreEqual(SchematicNativeAdditionProjection.ResolutionRequired, partialPlan.ErrorCode);
+        Assert.HasCount(1, partialPlan.SheetComponentRequests);
+        Assert.AreEqual(otherDefinition.Id, partialPlan.SheetComponentRequests.Single().ComponentDefinitionId);
+        Assert.AreEqual("native_addition_conflict", SchematicNativeAdditionProjection.Project(partialState with
+            { RepeatedSheetResolution = partialChoices with { ComponentReferences = [explicitReference with { Reference = "UNPLACED101" }] } },
+            [], CancellationToken.None).ErrorCode);
+        var unannotatedChoices = partialChoices with { ComponentReferences = [explicitReference with { Reference = "R?" },
+            new(explicitReference.SheetInstanceId, otherDefinition.Id, "R?")] };
+        var unannotated = SchematicNativeAdditionProjection.Project(partialState with { RepeatedSheetResolution = unannotatedChoices }, [], CancellationToken.None);
+        Assert.IsNotNull(unannotated.Adoption, "Deliberately unannotated references remain repeatable: " + unannotated.ErrorMessage);
     }
 
     [TestMethod]

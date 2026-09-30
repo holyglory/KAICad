@@ -104,10 +104,29 @@ public static class SchematicElectricalComparison
             stacked.AddRange(StackedEndpoints(symbol, occurrence.Unit, component.Id, part));
         }
         var undrawn = new List<UndrawnComponentPin>();
+        // Inspect above validated each explicit part symbol against its declared
+        // pins. A wholly undrawn component may use that evidence, but it still
+        // has no placed pin identity or native net membership.
+        var declaredSymbols = (design.PartSymbols ?? []).ToDictionary(s => s.PartId);
         foreach (var component in circuit.Components)
         foreach (var pin in parts[definitions[component.DefinitionId].PartId].Pins)
             if (!modelPins.ContainsKey(new(component.Id, pin.Number)))
             {
+                if (!componentSymbols.ContainsKey(component.Id)
+                    && declaredSymbols.TryGetValue(definitions[component.DefinitionId].PartId, out var declared))
+                {
+                    var ids = declared.Symbol.Definition.Items.Where(c => (c.Unit?.Unit ?? 0) == pin.Unit
+                            && (c.BodyStyle?.Style is null or 0 || c.BodyStyle.Style == declared.BodyStyle)
+                            && c.Item.Is(SchematicPin.Descriptor))
+                        .Select(c => c.Item.Unpack<SchematicPin>()).Where(p => p.Number == pin.Number)
+                        .Select(p => p.Id.Value).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+                    if (ids.Length != 0 && ids.All(Id))
+                    {
+                        var endpoint = new PinEndpoint(component.Id, pin.Number);
+                        modelPins.Add(endpoint, []); undrawn.Add(new(endpoint, pin.Unit, ids));
+                        continue;
+                    }
+                }
                 // A known physical pin on a unit which is deliberately not
                 // drawn has no placed UUID/net membership. Account for its
                 // actual library declarations, never fabricate a placement.

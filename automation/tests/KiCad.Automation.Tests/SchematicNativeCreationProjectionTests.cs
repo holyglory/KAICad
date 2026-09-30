@@ -42,8 +42,10 @@ public sealed class SchematicNativeCreationProjectionTests
         foreach (var symbol in created)
         {
             var paths = symbol.InstanceRecords.Records.Select(r => string.Join('/', r.Path.Select(p => p.Value))).ToArray();
-            CollectionAssert.AreEqual(paths.Order(StringComparer.Ordinal).ToArray(), paths,
-                "Native PackSymbol orders placement records by exact sheet path, not model occurrence UUID.");
+            CollectionAssert.AreEqual(symbol.InstanceRecords.Records.OrderBy(r => r.Path.Count)
+                .ThenBy(r => string.Join('/', r.Path.Select(p => p.Value)), StringComparer.Ordinal)
+                .Select(r => string.Join('/', r.Path.Select(p => p.Value))).ToArray(), paths,
+                "Native PackSymbol uses path depth before UUID order, not model occurrence UUID.");
         }
     }
 

@@ -236,13 +236,63 @@ public sealed partial class NativeSessionTests
             creation.Add(new() { TargetDocument = extraDocument.Clone(), Update = Any.Pack(instance) });
         }
         await Native(true, creation.ToArray());
+        RequireToolSuccess(await call("kicad_design_recovery_refresh", Recovery()));
+        var needsReference = await call("kicad_design_sync_plan", Recovery());
+        Assert.IsTrue(needsReference.GetProperty("isError").GetBoolean());
+        var unresolved = needsReference.GetProperty("structuredContent");
+        Assert.AreEqual("native_ownership_resolution_required", unresolved.GetProperty("errorCode").GetString());
+        var question = unresolved.GetProperty("sheetComponentResolutionRequests").EnumerateArray().Single();
+        byte[] unresolvedXml = await File.ReadAllBytesAsync(designPath, token);
+        var unchangedNative = await Capture();
+        string unresolvedToken = store.Read()!.RevisionToken;
+        Guid answerSheet = question.GetProperty("SheetInstanceId").GetGuid(), answerDefinition = question.GetProperty("ComponentDefinitionId").GetGuid();
+        object Choice(Guid definition, string reference, bool duplicate = false) => new { instanceId, recoveryPath = store.StatePath,
+            expectedRevisionToken = store.Read()!.RevisionToken,
+            componentReferences = Enumerable.Repeat(new { sheetInstanceId = answerSheet, componentDefinitionId = definition, reference }, duplicate ? 2 : 1).ToArray(),
+            symbolOwners = Array.Empty<object>() };
+        var previousUndrawn = repeatedOwners.Single(c => !reopened.Engineering.Circuit.Symbols.Any(s => s.ComponentId == c.Id));
+        foreach (var (invalid, code) in new[]
+        {
+            (Choice(Guid.NewGuid(), "TP350"), "native_repeated_sheet_answer_invalid"),
+            (Choice(answerDefinition, "TP350", duplicate: true), "native_repeated_sheet_answer_invalid"),
+            (Choice(answerDefinition, previousUndrawn.Reference), "native_addition_conflict")
+        })
+        {
+            var refusal = await call("kicad_design_repeated_sheet_answer", invalid);
+            Assert.IsTrue(refusal.GetProperty("isError").GetBoolean());
+            Assert.AreEqual(code, refusal.GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            Assert.AreEqual(unresolvedToken, store.Read()!.RevisionToken);
+            CollectionAssert.AreEqual(unresolvedXml, await File.ReadAllBytesAsync(designPath, token));
+            Assert.AreEqual(unchangedNative, await Capture());
+        }
+        var answer = await call("kicad_design_repeated_sheet_answer", Choice(answerDefinition, "TP350"));
+        RequireToolSuccess(answer);
+        CollectionAssert.AreEqual(unresolvedXml, await File.ReadAllBytesAsync(designPath, token), "Retaining a choice does not publish partial XML.");
+        Assert.AreEqual(unchangedNative, await Capture());
+        // Even an edit subsequently undone advances native provenance. The old
+        // choice cannot silently survive a different observed revision.
+        var renamed = Symbol(await Capture(), root, extra.Id).Clone(); renamed.NameField.Text.Text_ += " temporary rename";
+        await Native(true, new SchematicItemOperation { TargetDocument = root.Clone(), Update = Any.Pack(renamed) });
+        await FocusedSchematicShortcut(client, root, processId, display, "z", token);
+        using (var undoDeadline = CancellationTokenSource.CreateLinkedTokenSource(token))
+        {
+            undoDeadline.CancelAfter(TimeSpan.FromSeconds(10));
+            while (Symbol(await Capture(), root, extra.Id).NameField.Text.Text_ != extra.NameField.Text.Text_)
+                await Task.Delay(50, undoDeadline.Token);
+        }
+        RequireToolSuccess(await call("kicad_design_recovery_refresh", Recovery()));
+        var staleChoice = await call("kicad_design_sync_plan", Recovery());
+        Assert.AreEqual("native_ownership_resolution_required", staleChoice.GetProperty("structuredContent").GetProperty("errorCode").GetString());
+        Assert.HasCount(1, staleChoice.GetProperty("structuredContent").GetProperty("sheetComponentResolutionRequests").EnumerateArray());
+        CollectionAssert.AreEqual(unresolvedXml, await File.ReadAllBytesAsync(designPath, token));
+        RequireToolSuccess(await call("kicad_design_repeated_sheet_answer", Choice(answerDefinition, "TP350")));
         var sharedAdded = await Publish("native-add-repeated-sheet");
         Guid extraModel = Binding(sharedAdded, extraDocument).SheetInstanceId;
         Assert.AreEqual(reopened.Engineering.Circuit.SheetInstances.Single(s => s.Id == repeatedModel).DefinitionId,
             sharedAdded.Engineering.Circuit.SheetInstances.Single(s => s.Id == extraModel).DefinitionId);
         var extraOwners = sharedAdded.Engineering.Circuit.Components.Where(c => c.SheetInstanceId == extraModel).ToArray();
-        Assert.HasCount(3, extraOwners);
-        CollectionAssert.AreEquivalent(new[] { "TP301", "TP302", "TP303" }, extraOwners.Select(c => c.Reference).ToArray());
+        Assert.HasCount(4, extraOwners);
+        CollectionAssert.AreEquivalent(new[] { "TP301", "TP302", "TP303", "TP350" }, extraOwners.Select(c => c.Reference).ToArray());
         CollectionAssert.AreEquivalent(repeatedOwners.Select(c => c.DefinitionId).ToArray(), extraOwners.Select(c => c.DefinitionId).ToArray());
         await Publish("native-add-repeated-settled");
         await History("z", extraDocument, false, "native-add-repeated-undo");
@@ -350,6 +400,7 @@ public sealed partial class NativeSessionTests
             nativeRepeatedInsertion = true, nativeRepeatedInsertionUndoRedo = true,
             xmlRepeatedInsertion = true, xmlRepeatedInsertionUndoRedo = true, repeatedInstancesReloaded = true,
             swappedDefinitionRefusedWithoutMutation = true, nativeRecordOrderPrepared = true,
+            undrawnReferencePreserved = true, unknownOrDuplicateReferenceRefused = true, staleReferenceChoiceRefused = true,
             nativeVariablePathsPreserved = true, conflictingCompanionEnvironmentIgnored = true,
             fileLocationObservationReadOnly = true, staleFileLocationReadRefused = true,
             detachedFilesPreserved = true, publicSynchronization = true }), token);

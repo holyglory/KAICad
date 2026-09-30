@@ -105,7 +105,7 @@ internal static class SchematicXmlSheetChanges
                                     && pathMap.TryGetValue(PathKey(record.Path), out var moved)) SetPath(record.Path, moved);
                             // PackSymbol emits records in native path order. A reparent
                             // can change that order without changing any record values.
-                            var ordered = placements.Records.OrderBy(r => PathKey(r.Path), StringComparer.Ordinal).ToArray();
+                            var ordered = placements.Records.OrderBy(r => r.Path.Count).ThenBy(r => PathKey(r.Path), StringComparer.Ordinal).ToArray();
                             placements.Records.Clear(); placements.Records.Add(ordered);
                         }
                         screen.Items[index] = Any.Pack(symbol);
@@ -157,7 +157,7 @@ internal static class SchematicXmlSheetChanges
                         if (owner is not null && after.TryGetValue(owner.Id, out var kept) && kept.ParentId is { } keptParent)
                             SetPath(record.Path, newPaths[keptParent]);
                     }
-                    var ordered = placements.Records.OrderBy(r => PathKey(r.Path), StringComparer.Ordinal).ToArray();
+                    var ordered = placements.Records.OrderBy(r => r.Path.Count).ThenBy(r => PathKey(r.Path), StringComparer.Ordinal).ToArray();
                     placements.Records.Clear(); placements.Records.Add(ordered);
                 }
                 output[parent].Items.Add(Any.Pack(symbol));

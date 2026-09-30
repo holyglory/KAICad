@@ -3686,3 +3686,61 @@ Supporting `t20260930T050911Z-9afcae` passed all three checks and 248 cases,
 including revision-advance recall, unchanged/wrong-session refusal, event-driven
 retry and pending-publication preservation. Product source stayed unchanged
 after that focused pass; later edits affect the harness limits and documentation.
+
+
+### Repeated-sheet ownership choices (2026-09-30)
+
+A new instance of an existing sheet can preserve components which have no drawing
+and units owned on another sheet. `kicad_design_sync_plan` returns
+`sheetComponentResolutionRequests` for missing references and the existing
+`ownershipResolutionRequests` for ambiguous parts or unit owners.
+`kicad_design_repeated_sheet_answer` retains explicit choices in the recovery
+record, without writing partial XML or changing KiCad. References name the exact
+sheet instance and component definition; symbol choices name the full native
+path. Resolve missing references before remaining unit choices, then plan/apply
+or resume synchronization to publish the complete design. The older symbol-only
+answer path refuses newly inserted shared sheets and names the correct tool.
+
+Recovery envelope 12 preserves these choices while keeping older records
+readable. Choices bind the baseline, desired XML, native hierarchy and revision,
+electrical checkpoints, native file provenance and knowledge libraries. New
+observations invalidate old choices; pending operations keep their original
+choices until completion. Unknown, duplicate and conflicting choices are refused.
+Partial reference answers cannot retain assigned duplicates, while intentional
+unannotated references such as `R?` remain valid.
+
+An explicit symbol declaration can prove the pins of a wholly undrawn component.
+They have no placed UUID or native net membership; declaring the symbol does not
+prove a connection. Native redo restores an undrawn component's explicit
+reference and value from content-verified history, retaining the stricter field
+agreement checks for drawn units. XML shared-sheet additions can place a missing
+unit of an existing external owner on the new path and add its real connections,
+without cloning the owner or changing earlier connectivity.
+
+Placement records follow native `KIID_PATH` ordering: path depth first, then
+UUIDs. The retained failing candidate from `t20260930T075117Z-9640df` had U5 at
+depth 3 before U900/U901 at depth 2; native serialization requires the shallower
+paths first. All affected shared-sheet, reparenting and symbol-creation
+preparation now follows that ordering. Exact native/candidate validation stays
+in place, with deterministic failing identifiers and full mismatch capture in
+the regression fixture.
+
+Complete native `t20260930T083225Z-7620c9` passed all seven checks with unchanged
+source. Both reference projects verify explicit undrawn references, unknown and
+duplicate refusals, stale choices after edit/undo, publication, exact history and
+reload. Both external-owner projects verify native choices, invalid-owner and
+legacy-tool refusals without writes, connected XML insertion, separate owners
+and connections, exact undo/redo/reload and no-op replay. Source digest:
+`157a2de89eaf9343e53803403ce9d5fd857d5c56613bb7ff37c652c3c8732603`.
+Retained `native-rebuild/rebuild-evidence` manifest:
+`4f69fceb7ea931a5be78912e6ffd8890ffe037604f152830e8c4e6ba3b02807f`.
+Retained `native-external/external-owner-evidence` manifest:
+`926ba508b256ccbfb7e8c9ce2a09b41237089a64f3224c818e3cc5dd15feb199`.
+The matching isolated focused run `t20260930T083225Z-dcb78d` passed 254 cases.
+The native graph independently runs both journeys under Coordinator capacity,
+with shared build prerequisites and separate fixture/evidence paths. These are
+focused capability proofs, not a complete release acceptance claim.
+
+Moving references through shared parent files remains open under
+`pd6a383227f9d47b8`. Ownership answers for a new unique sheet created in the same
+native change remain under `pd618bdab49c2ad0f`.

@@ -144,10 +144,13 @@ internal static class SchematicNativeRestorationProjection
             SymbolBindings = [.. baseline.SymbolBindings, .. history.Design.SymbolBindings.Where(b => addedSymbols.Contains(b.SymbolOccurrenceId))
                 .OrderBy(b => b.SymbolOccurrenceId)] };
         var native = SchematicModelProjection.NativeSymbols(design, state.Observed);
-        string Field(IEnumerable<SymbolOccurrence> symbols, bool reference)
+        string Field(IEnumerable<SymbolOccurrence> symbols, bool reference, string undrawnValue)
         {
             var values = symbols.Select(s => reference ? native[s.Id].ReferenceField?.Text?.Text_ : native[s.Id].ValueField?.Text?.Text_)
                 .Distinct(StringComparer.Ordinal).ToArray();
+            // A restored component may deliberately have no drawing. Its verified
+            // history supplies the explicit value; there is no native field to read.
+            if (values.Length == 0) return undrawnValue;
             if (values.Length != 1 || values[0] is null)
                 throw Error("inconsistent_restored_properties", "Restored units must agree about their component reference and shared value.");
             return values[0]!;
@@ -157,9 +160,9 @@ internal static class SchematicNativeRestorationProjection
         next = next with
         {
             Components = next.Components.Select(c => restoredIds.Contains(c.Id)
-                ? c with { Reference = Field(next.Symbols.Where(s => s.ComponentId == c.Id), true) } : c).ToArray(),
+                ? c with { Reference = Field(next.Symbols.Where(s => s.ComponentId == c.Id), true, c.Reference) } : c).ToArray(),
             Sheets = next.Sheets.Select(s => s with { Components = s.Components.Select(c => definitions.Contains(c.Id) ? c
-                : c with { Value = Field(next.Symbols.Where(s => owners[s.ComponentId].DefinitionId == c.Id), false) }).ToArray() }).ToArray(),
+                : c with { Value = Field(next.Symbols.Where(s => owners[s.ComponentId].DefinitionId == c.Id), false, c.Value) }).ToArray() }).ToArray(),
             Symbols = next.Symbols.Select(s => addedSymbols.Contains(s.Id) ? s with
                 { Placement = SchematicModelProjection.Placement(native[s.Id]),
                     SheetInstanceId = s.EffectiveSheetInstanceId(owners[s.ComponentId]) == owners[s.ComponentId].SheetInstanceId
@@ -240,6 +243,7 @@ internal sealed record SchematicNativeAdditionResult(SchematicNativeRestorationR
 {
     /// <summary>Sheet moves exact identities cannot decide (<see cref="SchematicNativeSheetChanges.MoveAmbiguous"/>).</summary>
     public IReadOnlyList<SchematicSheetResolutionRequest> SheetRequests { get; init; } = [];
+    public IReadOnlyList<SchematicSheetComponentResolutionRequest> SheetComponentRequests { get; init; } = [];
 }
 
 /// <summary>The saved XML with a person's answers declared (<see cref="SchematicNativeAdditionProjection.Answer"/>), and the
@@ -337,6 +341,8 @@ public static class SchematicNativeAdditionProjection
         try
         {
             var baseline = state.Baseline; var observed = state.Observed; var libraries = state.KnowledgeLibraries;
+            var repeatedChoices = SchematicRepeatedSheetChoices.Current(state);
+            answers ??= repeatedChoices?.SymbolOwners;
             var original = SchematicDesignBindings.Inspect(baseline, libraries, token);
             gaps.AddRange(original.CoverageGaps);
             if (!original.IdentitiesResolved) return Failure("unresolved_design_bindings", "Resolve the saved design's bindings first.", original.Issues);
@@ -449,7 +455,10 @@ public static class SchematicNativeAdditionProjection
                     SheetBindings = [.. kept.SheetBindings, .. addedSheets.Select(s => s.Binding)] };
             }
             var repeated = SchematicRepeatedSheetAdoption.Project(originalKept, kept, observed,
-                addedSheets.Select(s => s.Instance.Id).ToHashSet(), token);
+                addedSheets.Select(s => s.Instance.Id).ToHashSet(), token, repeatedChoices?.ComponentReferences);
+            if (repeated.Requests.Count != 0)
+                return Failure(ResolutionRequired, "Give the missing component references with kicad_design_repeated_sheet_answer before synchronizing this repeated sheet.")
+                    with { SheetComponentRequests = repeated.Requests };
             kept = repeated.Design;
             var repeatedBindings = repeated.NativeKeys.ToHashSet(StringComparer.Ordinal);
             var keptCircuit = kept.Engineering.Circuit;
@@ -689,8 +698,13 @@ public static class SchematicNativeAdditionProjection
                 }
             }
             if (requests.Count != 0)
+            {
+                bool repeatedInsertion = addedSheets.Any(s => originalKept.Engineering.Circuit.Sheets.Any(d => d.Id == s.Definition.Id));
                 return new(null, [.. requests.OrderBy(r => r.NativePath, StringComparer.Ordinal).ThenBy(r => r.NativeObjectId)], [],
-                    gaps.Distinct().ToArray(), ResolutionRequired, ResolutionMessage);
+                    gaps.Distinct().ToArray(), ResolutionRequired, repeatedInsertion
+                        ? "Resolve the new shared sheet's part and unit-owner choices with kicad_design_repeated_sheet_answer, then synchronize the complete design."
+                        : ResolutionMessage);
+            }
 
             // Every decision is exact or answered: create the parts, components and occurrences.
             var sheets = keptCircuit.SheetInstances.ToDictionary(s => s.Id);
@@ -791,6 +805,10 @@ public static class SchematicNativeAdditionProjection
         if (result.Adoption is not { } adoption)
             return new(null, [], result.Requests, result.Issues, result.ErrorCode, result.ErrorMessage);
         var design = adoption.BindingCandidate; var circuit = design.Engineering.Circuit;
+        if (adoption.AddedSheetInstances.Any(id => circuit.SheetInstances.Any(s => s.Id == id
+                && state.Baseline.Engineering.Circuit.Sheets.Any(d => d.Id == s.DefinitionId))))
+            return new(null, [], [], [], AnswerInvalid,
+                "Use kicad_design_repeated_sheet_answer for ownership choices on a newly inserted shared sheet; no XML was written.");
         var components = circuit.Components.ToDictionary(c => c.Id);
         var paths = design.SheetBindings.ToDictionary(b => b.SheetInstanceId, b => SchematicDesignBindings.PathKey(b.NativePath));
         var occurrences = circuit.Symbols.ToDictionary(s => s.Id);

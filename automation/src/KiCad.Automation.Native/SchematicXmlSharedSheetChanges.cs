@@ -30,24 +30,35 @@ internal static class SchematicXmlSharedSheetChanges
             var oldComponents = before.Components.Select(c => c.Id).ToHashSet();
             var oldOccurrences = before.Symbols.Select(s => s.Id).ToHashSet();
             var oldNets = before.Nets.Select(n => n.Id).ToHashSet();
+            var allComponents = after.Components.ToDictionary(c => c.Id);
+            var existingOwners = before.Components.ToDictionary(c => c.Id);
+            var componentDefinitions = before.Sheets.SelectMany(s => s.Components).ToDictionary(c => c.Id);
+            var partsById = before.Parts.ToDictionary(p => p.Id);
+            var newlyDrawnPins = after.Symbols.Where(s => !oldOccurrences.Contains(s.Id) && oldComponents.Contains(s.ComponentId))
+                .SelectMany(s => partsById[componentDefinitions[existingOwners[s.ComponentId].DefinitionId].PartId].Pins
+                    .Where(p => (p.Unit == 0 || p.Unit == s.Unit) && !before.Symbols.Any(old => old.ComponentId == s.ComponentId
+                        && (p.Unit == 0 || p.Unit == old.Unit))).Select(p => new PinEndpoint(s.ComponentId, p.Number))).ToHashSet();
+            bool AddedPin(PinEndpoint pin) => !oldComponents.Contains(pin.ComponentId) || newlyDrawnPins.Contains(pin);
             if (after.Components.Any(c => !oldComponents.Contains(c.Id) && !addedIds.Contains(c.SheetInstanceId))
-                || after.Symbols.Any(s => !oldOccurrences.Contains(s.Id) && oldComponents.Contains(s.ComponentId)))
-                return Failure("xml_shared_sheet_owner_conflict", "New shared-sheet components must belong to the new instances; resolve external unit ownership separately.");
+                || after.Symbols.Any(s => !oldOccurrences.Contains(s.Id)
+                    && !addedIds.Contains(s.EffectiveSheetInstanceId(allComponents[s.ComponentId]))))
+                return Failure("xml_shared_sheet_owner_conflict", "New components must belong to new instances, and every new unit must be drawn on a new instance.");
             var stripped = after with
             {
                 SheetInstances = after.SheetInstances.Where(s => oldSheets.Contains(s.Id)).ToArray(),
                 Components = after.Components.Where(c => oldComponents.Contains(c.Id)).ToArray(),
                 Symbols = after.Symbols.Where(s => oldOccurrences.Contains(s.Id)).ToArray(),
                 Nets = after.Nets.Where(n => oldNets.Contains(n.Id)).Select(n => n with
-                    { Pins = n.Pins.Where(p => oldComponents.Contains(p.ComponentId)).ToArray() }).ToArray()
+                    { Pins = n.Pins.Where(p => !AddedPin(p)).ToArray() }).ToArray()
             };
             if (CircuitXml.Write(stripped) != CircuitXml.Write(before)
-                || after.Nets.Where(n => !oldNets.Contains(n.Id)).Any(n => n.Pins.Any(p => oldComponents.Contains(p.ComponentId))))
+                || after.Nets.Where(n => !oldNets.Contains(n.Id)).Any(n => n.Pins.Any(p => !AddedPin(p))))
                 return Failure("xml_shared_sheet_existing_changed", "Adding a shared instance must preserve existing sheets, components, parts and connections.");
             if (baseline.SheetBindings.Any(b => !desired.SheetBindings.Any(d => d.SheetInstanceId == b.SheetInstanceId && d.NativePath.SequenceEqual(b.NativePath)))
                 || baseline.SymbolBindings.Any(b => !desired.SymbolBindings.Contains(b)))
                 return Failure("xml_shared_sheet_binding_changed", "Keep every existing sheet and symbol binding when adding a shared instance.");
-            // Native PackSymbol/PackSheet emit placement records in path order.
+            // Native PackSymbol/PackSheet use KIID_PATH ordering: depth first,
+            // then UUIDs. Text-only path order differs across hierarchy depths.
             // Prepare that representation before journaling; every record value
             // and the original requested XML bytes still remain independently checked.
             desired = CanonicalPlacements(desired);
@@ -63,15 +74,23 @@ internal static class SchematicXmlSharedSheetChanges
             var physicalScreens = current.Values.Select(s => s.Metadata.ScreenId.Value).ToHashSet(StringComparer.Ordinal);
             if (addedPaths.Any(p => !physicalScreens.Contains(wanted[p].Metadata.ScreenId.Value)))
                 return Failure("xml_shared_sheet_file_changed", "A shared instance must reuse the physical screen of its existing definition.");
-            var oldOwners = before.Components.ToDictionary(c => c.Id);
+            var oldOwners = existingOwners;
             var oldSymbols = before.Symbols.ToDictionary(s => s.Id);
+            var definitionsById = before.Sheets.SelectMany(s => s.Components.Select(c => (Sheet: s.Id, Component: c)))
+                .ToDictionary(p => p.Component.Id);
+            var sheetDefinitions = before.SheetInstances.ToDictionary(s => s.Id, s => s.DefinitionId);
             var oldPaths = baseline.SheetBindings.ToDictionary(b => b.SheetInstanceId, b => SchematicDesignBindings.PathKey(b.NativePath));
             var templateDefinitions = baseline.SymbolBindings.GroupBy(b =>
             {
                 var occurrence = oldSymbols[b.SymbolOccurrenceId];
                 string path = oldPaths[occurrence.EffectiveSheetInstanceId(oldOwners[occurrence.ComponentId])];
                 return current[path].Metadata.ScreenId.Value + "#" + b.NativeObjectId.ToString("D");
-            }).ToDictionary(g => g.Key, g => g.Select(b => oldOwners[oldSymbols[b.SymbolOccurrenceId].ComponentId].DefinitionId).Distinct().ToArray());
+            }).ToDictionary(g => g.Key, g => g.Select(b =>
+            {
+                var occurrence = oldSymbols[b.SymbolOccurrenceId]; var owner = oldOwners[occurrence.ComponentId];
+                return (Definition: owner.DefinitionId,
+                    Local: sheetDefinitions[owner.SheetInstanceId] == sheetDefinitions[occurrence.EffectiveSheetInstanceId(owner)]);
+            }).Distinct().ToArray());
             var newOwners = after.Components.ToDictionary(c => c.Id);
             var newSymbols = after.Symbols.ToDictionary(s => s.Id);
             var allPaths = desired.SheetBindings.ToDictionary(b => b.SheetInstanceId, b => SchematicDesignBindings.PathKey(b.NativePath));
@@ -79,9 +98,14 @@ internal static class SchematicXmlSharedSheetChanges
             {
                 var occurrence = newSymbols[binding.SymbolOccurrenceId]; var owner = newOwners[occurrence.ComponentId];
                 string path = allPaths[occurrence.EffectiveSheetInstanceId(owner)];
-                if (!templateDefinitions.TryGetValue(wanted[path].Metadata.ScreenId.Value + "#" + binding.NativeObjectId.ToString("D"), out var choices)
-                    || choices.Length != 1 || choices[0] != owner.DefinitionId)
-                    return Failure("xml_shared_sheet_definition_mismatch", "Bind each new occurrence to the same component definition as its existing physical symbol.");
+                if (!templateDefinitions.TryGetValue(wanted[path].Metadata.ScreenId.Value + "#" + binding.NativeObjectId.ToString("D"), out var choices))
+                    return Failure("xml_shared_sheet_definition_mismatch", "Every new occurrence needs an existing physical symbol binding.");
+                var local = choices.Where(c => c.Local).Select(c => c.Definition).Distinct().ToArray();
+                bool matches = local.Length != 0 ? local.Length == 1 && local[0] == owner.DefinitionId
+                    : definitionsById.TryGetValue(owner.DefinitionId, out var selected)
+                        && choices.Any(c => definitionsById[c.Definition].Component.PartId == selected.Component.PartId);
+                if (!matches)
+                    return Failure("xml_shared_sheet_definition_mismatch", "Reuse each locally owned definition; an externally owned unit must explicitly select a component of the same part.");
             }
 
             bool RecordsKept<T>(IEnumerable<T> oldRecords, IEnumerable<T> newRecords,
@@ -153,14 +177,16 @@ internal static class SchematicXmlSharedSheetChanges
                 {
                     var symbol = item.Unpack<SchematicSymbolInstance>();
                     if (symbol.InstanceRecords is not { } records) continue;
-                    var ordered = records.Records.OrderBy(r => string.Join('/', r.Path.Select(p => p.Value)), StringComparer.Ordinal).ToArray();
+                    var ordered = records.Records.OrderBy(r => r.Path.Count)
+                        .ThenBy(r => string.Join('/', r.Path.Select(p => p.Value)), StringComparer.Ordinal).ToArray();
                     records.Records.Clear(); records.Records.Add(ordered); screen.Items[i] = Any.Pack(symbol);
                 }
                 else if (item.Is(SheetSymbol.Descriptor))
                 {
                     var sheet = item.Unpack<SheetSymbol>();
                     if (sheet.InstanceRecords is not { } records) continue;
-                    var ordered = records.Records.OrderBy(r => string.Join('/', r.Path.Select(p => p.Value)), StringComparer.Ordinal).ToArray();
+                    var ordered = records.Records.OrderBy(r => r.Path.Count)
+                        .ThenBy(r => string.Join('/', r.Path.Select(p => p.Value)), StringComparer.Ordinal).ToArray();
                     records.Records.Clear(); records.Records.Add(ordered); screen.Items[i] = Any.Pack(sheet);
                 }
             }

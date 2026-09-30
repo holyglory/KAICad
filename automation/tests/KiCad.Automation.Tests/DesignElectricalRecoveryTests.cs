@@ -33,6 +33,14 @@ public sealed class DesignElectricalRecoveryTests
         Assert.AreEqual(state.ObservedElectrical, f.Store.Read()!.State.ObservedElectrical);
         Assert.AreEqual(saved.RevisionToken, f.Store.Save(f.Store.Read()!.State, saved.RevisionToken).RevisionToken);
         CollectionAssert.AreEqual(f.Saved.State.DesiredFileBytes, f.Store.Read()!.State.DesiredFileBytes);
+        var owner = state.Baseline.Engineering.Circuit.Components.First();
+        var resolution = new DesignRepeatedSheetResolution(SchematicRepeatedSheetChoices.SnapshotToken(state),
+            [new(owner.SheetInstanceId, owner.DefinitionId, "CHOICE301")], []);
+        var chosen = f.Store.Save(state with { RepeatedSheetResolution = resolution }, saved.RevisionToken);
+        Assert.IsNotNull(SchematicRepeatedSheetChoices.Current(f.Store.Read()!.State));
+        var changedElectrical = chosen.State.ObservedElectrical!.Clone(); changedElectrical.Limitations.Add("Changed native coverage");
+        Assert.IsNull(SchematicRepeatedSheetChoices.Current(chosen.State with { ObservedElectrical = changedElectrical }));
+        Assert.AreEqual(chosen.RevisionToken, f.Store.Save(f.Store.Read()!.State, chosen.RevisionToken).RevisionToken);
         return Task.CompletedTask;
     });
 

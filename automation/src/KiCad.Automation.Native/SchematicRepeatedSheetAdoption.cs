@@ -5,14 +5,16 @@ using KiCad.Automation.Model;
 namespace KiCad.Automation.Native;
 
 internal sealed record RepeatedSheetAdoption(SchematicDesign Design, IReadOnlyList<Guid> Components,
-    IReadOnlyList<Guid> Occurrences, IReadOnlyList<string> NativeKeys);
+    IReadOnlyList<Guid> Occurrences, IReadOnlyList<string> NativeKeys,
+    IReadOnlyList<SchematicSheetComponentResolutionRequest> Requests);
 
 /// <summary>Reuse physical component definitions when KiCad inserts another instance
 /// of a known sheet. Native UUIDs and existing bindings establish ownership, never names.</summary>
 internal static class SchematicRepeatedSheetAdoption
 {
     internal static RepeatedSheetAdoption Project(SchematicDesign existing, SchematicDesign expanded,
-        SchematicHierarchyData observed, IReadOnlySet<Guid> addedSheets, CancellationToken token)
+        SchematicHierarchyData observed, IReadOnlySet<Guid> addedSheets, CancellationToken token,
+        IReadOnlyList<SchematicSheetComponentReference>? answers = null)
     {
         var circuit = existing.Engineering.Circuit;
         var sheetInstances = circuit.SheetInstances.ToDictionary(s => s.Id);
@@ -32,6 +34,8 @@ internal static class SchematicRepeatedSheetAdoption
         var newOccurrences = new List<SymbolOccurrence>();
         var newBindings = new List<SchematicSymbolBinding>();
         var nativeKeys = new List<string>();
+        var requests = new List<SchematicSheetComponentResolutionRequest>();
+        var supplied = (answers ?? []).ToDictionary(a => (a.SheetInstanceId, a.ComponentDefinitionId));
         foreach (var sheet in expanded.Engineering.Circuit.SheetInstances.Where(s => addedSheets.Contains(s.Id)))
         {
             token.ThrowIfCancellationRequested();
@@ -53,13 +57,19 @@ internal static class SchematicRepeatedSheetAdoption
             }
             foreach (var component in definition.Components)
             {
+                Guid owner = SchematicNativeAdditionProjection.AdoptedIdentity("sheet-component", circuit.Id, path, component.Id);
                 var units = mapped.Where(m => m.Definition == component.Id).Select(m => m.Symbol).ToArray();
                 if (units.Length == 0)
-                    throw Error("The repeated definition includes a component with no native symbol. Its new instance needs an explicit reference; this case is not supported yet and no XML was published.");
+                {
+                    if (supplied.Remove((sheet.Id, component.Id), out var answer))
+                        newComponents.Add(new(owner, component.Id, sheet.Id, answer.Reference));
+                    else requests.Add(new(SchematicRepeatedSheetChoices.ReferenceRequired, sheet.Id, component.Id, owner,
+                        path, component.PartId, "This component has no drawing on its owning sheet. Give the reference for its new instance; then resolve any units drawn on other sheets."));
+                    continue;
+                }
                 var references = units.Select(u => u.ReferenceField?.Text?.Text_).Distinct(StringComparer.Ordinal).ToArray();
                 if (references.Length != 1 || string.IsNullOrWhiteSpace(references[0]))
                     throw Error("Units of one component in the new sheet instance have different native references; resolve them before adoption.");
-                Guid owner = SchematicNativeAdditionProjection.AdoptedIdentity("sheet-component", circuit.Id, path, component.Id);
                 newComponents.Add(new(owner, component.Id, sheet.Id, references[0]!));
                 foreach (var symbol in units)
                 {
@@ -70,10 +80,17 @@ internal static class SchematicRepeatedSheetAdoption
                 }
             }
         }
+        if (supplied.Count != 0)
+            throw new AutomationException(SchematicRepeatedSheetChoices.Invalid,
+                "A supplied reference does not name an undrawn component of a newly inserted repeated sheet.");
+        var assignedReferences = expanded.Engineering.Circuit.Components.Concat(newComponents).Select(c => c.Reference)
+            .Where(reference => !reference.EndsWith("?", StringComparison.Ordinal)).ToArray();
+        if (assignedReferences.Distinct(StringComparer.Ordinal).Count() != assignedReferences.Length)
+            throw new AutomationException("native_addition_conflict", "Assigned component references must be unique, including a partial repeated-sheet answer.");
         return new(expanded with { Engineering = expanded.Engineering with { Circuit = expanded.Engineering.Circuit with
         { Components = [.. expanded.Engineering.Circuit.Components, .. newComponents], Symbols = [.. expanded.Engineering.Circuit.Symbols, .. newOccurrences] } },
             SymbolBindings = [.. expanded.SymbolBindings, .. newBindings] }, newComponents.Select(c => c.Id).ToArray(),
-            newOccurrences.Select(s => s.Id).ToArray(), nativeKeys);
+            newOccurrences.Select(s => s.Id).ToArray(), nativeKeys, requests);
     }
 
     private static AutomationException Error(string message) => new("native_repeated_sheet_ownership_unresolved", message);

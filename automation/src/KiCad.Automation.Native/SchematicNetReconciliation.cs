@@ -23,6 +23,7 @@ public sealed record SchematicNetReconciliationResult(EngineeringDesign? Candida
     public IReadOnlyList<Guid>? AddedParts { get; init; }
     /// <summary>Decisions exact identities cannot take; set with <see cref="SchematicNativeAdditionProjection.ResolutionRequired"/>.</summary>
     public IReadOnlyList<SchematicOwnershipResolutionRequest>? ResolutionRequests { get; init; }
+    public IReadOnlyList<SchematicSheetComponentResolutionRequest>? SheetComponentResolutionRequests { get; init; }
     /// <summary>Sheets KiCad shows that the design did not have, adopted with identities derived from the circuit, the parent
     /// sheet's path and the sheet symbol's UUID (ledger p5f6d5d0ca242d628).</summary>
     public IReadOnlyList<Guid>? AddedSheetInstances { get; init; }
@@ -80,6 +81,7 @@ public static class SchematicNetReconciliation
                             return new(null, [], [], addition.Issues.Select(i => new ElectricalBindingIssue(i.Code, i.NativePath,
                                 i.NativeObjectId?.ToString("D"), i.ModelId)).ToArray(), addition.CoverageGaps, addition.ErrorCode, addition.ErrorMessage)
                                 { ResolutionRequests = addition.Requests.Count == 0 ? null : addition.Requests,
+                                  SheetComponentResolutionRequests = addition.SheetComponentRequests.Count == 0 ? null : addition.SheetComponentRequests,
                                   SheetResolutionRequests = addition.SheetRequests.Count == 0 ? null : addition.SheetRequests };
                         restoration = addition.Adoption;
                     }

@@ -1325,11 +1325,8 @@ timeout_seconds=1500
 tier="development"
 command=["cmake", "--build", "automation/artifacts/native", "--target", "kiapi", "common/CMakeFiles/kicommon.dir/api/api_server.cpp.o", "kicad/CMakeFiles/kicad.dir/kicad.cpp.o", "kicad/CMakeFiles/kicad.dir/kicad_manager_frame.cpp.o"]
 
-# Frozen PSU-CPU acceptance fixture v1 (automation/tests/fixtures/psu-cpu). The managed
-# checks pin every fixture file, model, identity and expected table. The gating native check
-# proves this fork's eeschema still reads the pinned sources to exactly the frozen definition
-# pins (numbers, names, units, body styles and K21 identities) and keeps them on load and save.
-# Byte-for-byte reproduction of lib_symbols.kicad_sexpr is psu-cpu-fixture-writer-drift below.
+# Frozen PSU-CPU v1 (automation/tests/fixtures/psu-cpu): managed checks pin files, model, IDs and tables.
+# Native gating preserves pin numbers/names/units/styles/K21 IDs through load/save; writer drift is non-gating.
 [test.psu-cpu-fixture]
 timeout_seconds=3600
 env={ DOTNET_CLI_TELEMETRY_OPTOUT = "1", DOTNET_NOLOGO = "1", TMPDIR = "/mnt/build-storage/codex/kicad/t" }
@@ -1406,12 +1403,9 @@ timeout_seconds=3000
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeOwnershipSync", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-ownership-sync-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{ name = "native-ownership-sync-tests", path = "automation/artifacts/native-ownership-sync-tests", max_bytes = 16777216 }, { name = "native-ownership-sync-evidence", path = "automation/artifacts/native-ownership-sync/native-session-current", max_bytes = 67108864 }]
 
-# Non-gating symbol-writer drift for PSU-CPU fixture v1; no other graph requires it. It checks
-# that lib_symbols.kicad_sexpr is byte for byte this fork's eeschema output for the pinned
-# sources and a byte-exact load/save fixed point. A failure while psu-cpu-fixture passes means
-# only that the symbol writer changed (for example a schematic file-format bump): the lanes are
-# not blocked, and the parent re-freezes the fixture as version 2 from the replacement retained
-# as psu-cpu-fixture-writer-drift-evidence.
+# Non-gating symbol-writer drift checks byte-exact lib_symbols.kicad_sexpr and load/save stability.
+# With fixture semantics passing, writer-only changes do not block lanes; re-freeze v2 from
+# retained psu-cpu-fixture-writer-drift-evidence.
 
 # PSU/CPU native crash journey (lane 2D, ledger pcb5513dd69eda714): a KiCad dying
 # mid-session keeps the XML, recovery record and instance registry truthful.
@@ -1447,11 +1441,8 @@ timeout_seconds=900
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeCrash", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-crash-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{ name = "native-crash-tests", path = "automation/artifacts/native-crash-tests", max_bytes = 16777216 }, { name = "native-crash-evidence", path = "automation/artifacts/native-crash/native-session-current", max_bytes = 67108864 }, { name = "native-crash-release-evidence", path = "automation/artifacts/native-crash-release/native-session-current", max_bytes = 67108864 }]
 
-# Observe-then-apply stress (lane 2D, ledger p60776bb2239d1087): over MCP STDIO an agent
-# repeatedly takes the rendered view and the checked state together, then applies a checked
-# batch bound to the viewed revision, 50 times in each of two editors, while the harness makes
-# real keyboard edits in the same KiCad window at varying moments, including during the apply.
-# Inconclusive counts as failed.
+# p60776bb2239d1087: 50 real rendered-view/checked-state MCP edits per editor, concurrent with keyboard
+# edits. Every batch binds that observation; Inconclusive fails.
 [test.native-observe-apply-stress]
 timeout_seconds=3600
 env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
@@ -1606,7 +1597,7 @@ command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--disable-build
 [[test.native-owner-restoration.check]]
 name="contracts"
 tier="development"
-command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--configuration", "Debug", "--no-build", "--no-restore", "--filter", "FullyQualifiedName~SchematicRebuildTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignElectricalRecoveryTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignRecoveryReattachmentTests|FullyQualifiedName~DesignRecoveryNativeObserverTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~SymbolSheetOwnershipTests|FullyQualifiedName~AutomaticDesignSynchronizationTests|FullyQualifiedName~SchematicOwnershipResolutionTests|FullyQualifiedName~SchematicNativeRestorationTests|FullyQualifiedName~SchematicNativeRemovalProjectionTests|FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicPropertyProjectionTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicNetReconciliationTests|FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~RetainedXmlHistoryTests|FullyQualifiedName~DesignSynchronizationReceiptTests|FullyQualifiedName~McpProcessTests|FullyQualifiedName~PinPartition", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-owner-restoration"]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--configuration", "Debug", "--no-build", "--no-restore", "--filter", "FullyQualifiedName~SchematicRebuildTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignElectricalRecoveryTests|FullyQualifiedName~SchematicElectricalComparisonTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignRecoveryReattachmentTests|FullyQualifiedName~DesignRecoveryNativeObserverTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~SymbolSheetOwnershipTests|FullyQualifiedName~AutomaticDesignSynchronizationTests|FullyQualifiedName~SchematicOwnershipResolutionTests|FullyQualifiedName~SchematicNativeRestorationTests|FullyQualifiedName~SchematicNativeRemovalProjectionTests|FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicPropertyProjectionTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicNetReconciliationTests|FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~RetainedXmlHistoryTests|FullyQualifiedName~DesignSynchronizationReceiptTests|FullyQualifiedName~McpProcessTests|FullyQualifiedName~PinPartition", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-owner-restoration"]
 retained_artifacts=[{ name = "native-owner-restoration", path = "automation/artifacts/native-owner-restoration", max_bytes = 16777216 }]
 
 [test.native-removal-projection]
@@ -3995,20 +3986,17 @@ retained_artifacts=[{name="delivery-observations",path="automation/artifacts/pre
 [test.repeated-sheet-recovery]
 timeout_seconds=3600
 env={ TMPDIR = "/mnt/build-storage/codex/kicad/t" }
-
 [[test.repeated-sheet-recovery.check]]
 name="restore"
 tier="development"
 role="preflight"
 invalidates=["native-rebuild"]
 command=["dotnet","restore","automation/KiCad.Automation.slnx","--locked-mode"]
-
 [[test.repeated-sheet-recovery.check]]
 name="managed-build"
 tier="development"
 requires=["restore"]
 command=["dotnet","build","automation/KiCad.Automation.slnx","--disable-build-servers","--no-restore","--configuration","Debug"]
-
 [[test.repeated-sheet-recovery.check]]
 name="configure"
 tier="development"
@@ -4028,7 +4016,7 @@ command=["cmake","--build","automation/artifacts/native","--target","api_schema_
 name="rebuild-contracts"
 tier="development"
 requires=["managed-build"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~SchematicRebuildTests|FullyQualifiedName~SchematicHierarchyDeltaTests|FullyQualifiedName~SchematicDesignTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/repeated-rebuild-contracts"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~SchematicRebuildTests|FullyQualifiedName~SchematicNativeCreationProjectionTests|FullyQualifiedName~SchematicHierarchyDeltaTests|FullyQualifiedName~SchematicDesignTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/repeated-rebuild-contracts"]
 retained_artifacts=[{name="rebuild-contracts",path="automation/artifacts/repeated-rebuild-contracts",max_bytes=16777216}]
 
 [[test.repeated-sheet-recovery.check]]
@@ -4037,3 +4025,11 @@ tier="development"
 requires=["native-build","rebuild-contracts"]
 command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeRepeatedSheetRebuild","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/repeated-rebuild-tests","--","MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{name="rebuild-tests",path="automation/artifacts/repeated-rebuild-tests",max_bytes=16777216},{name="rebuild-evidence",path="automation/artifacts/native-repeated-rebuild/native-session-current",max_bytes=67108864}]
+
+[[test.repeated-sheet-recovery.check]]
+name="native-external"
+tier="development"
+requires=["native-build","rebuild-contracts"]
+timeout_seconds=1500
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeRepeatedSheetOwnership","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/repeated-ownership-tests","--","MSTest.MapInconclusiveToFailed=true"]
+retained_artifacts=[{name="external-owner-tests",path="automation/artifacts/repeated-ownership-tests",max_bytes=16777216},{name="external-owner-evidence",path="automation/artifacts/native-repeated-ownership/native-session-current",max_bytes=134217728}]

@@ -93,6 +93,29 @@ public sealed class SchematicElectricalComparisonTests
         { Circuit = f.Design.Engineering.Circuit with { Nets = [] }, Structure = f.Design.Engineering.Structure with
             { Connections = f.Design.Engineering.Structure.Connections.Select(c => c with { NetIds = [] }).ToArray() } } };
         Assert.IsTrue(SchematicElectricalComparison.Compare(noModelConnections, f.State, [f.Library]).ConnectivityEquivalent);
+
+        var placed = SchematicRebuildTests.Placed();
+        var circuit = placed.Engineering.Circuit;
+        var template = circuit.Components.Single(c => c.Reference == "R1");
+        var ownerSheet = circuit.SheetInstances.Single(s => s.Id == template.SheetInstanceId);
+        var partDefinition = circuit.Sheets.SelectMany(s => s.Components).Single(d => d.Id == template.DefinitionId);
+        var addedDefinition = partDefinition with { Id = Guid.NewGuid() };
+        var undrawn = template with { Id = Guid.NewGuid(), DefinitionId = addedDefinition.Id, Reference = "R99" };
+        var withUndrawn = placed with { Engineering = placed.Engineering with { Circuit = circuit with
+        { Sheets = circuit.Sheets.Select(s => s.Id == ownerSheet.DefinitionId
+            ? s with { Components = [.. s.Components, addedDefinition] } : s).ToArray(), Components = [.. circuit.Components, undrawn] } } };
+        var native = SymbolSheetOwnershipTests.Isolated(placed.Schematic, new() { Epoch = "undrawn-fixture", Sequence = 1 });
+        var accounted = SchematicElectricalComparison.Compare(withUndrawn, native, []);
+        Assert.IsTrue(accounted.PinBindingsComplete && accounted.ConnectivityEquivalent);
+        Assert.HasCount(2, accounted.UndrawnPins!.Where(p => p.Pin.ComponentId == undrawn.Id));
+        Assert.IsTrue(accounted.PinPartitions!.Where(p => p.Pins.Any(pin => pin.ComponentId == undrawn.Id))
+            .All(p => p.SnapshotNetIndex is null), "No native membership is invented for an undrawn pin.");
+        var unknown = withUndrawn with { PartSymbols = withUndrawn.PartSymbols!.Where(p => p.PartId != partDefinition.PartId).ToArray() };
+        Assert.IsFalse(SchematicElectricalComparison.Compare(unknown, native, []).PinBindingsComplete);
+        var imaginedConnection = withUndrawn with { Engineering = withUndrawn.Engineering with { Circuit = withUndrawn.Engineering.Circuit with
+        { Nets = [new CircuitNet(Guid.NewGuid(), "undrawn connection", [new(undrawn.Id, "1"), new(template.Id, "1")])] } } };
+        Assert.IsFalse(SchematicElectricalComparison.Compare(imaginedConnection, native, []).ConnectivityEquivalent,
+            "A declared symbol does not prove its undrawn connections exist.");
     }
 
     [TestMethod]

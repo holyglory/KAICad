@@ -496,7 +496,7 @@ public sealed partial class NativeSessionTests
             repeatsNoOp = true, crossPlatformReady = false,
             remaining = new[]
             {
-                "Undrawn or externally owned components in new shared instances and moving through shared parents remain explicit topology gaps; locally owned shared insertion, existing-instance move/removal and native-variable filename resolution are verified in the repeated-sheet journey.",
+                "Moving through shared parents remains an explicit topology gap; shared insertion with explicit undrawn references or external owners, existing-instance move/removal and native-variable filename resolution are verified in the repeated-sheet journeys.",
                 "An answer written by hand in the XML is proven offline only; this journey answers through kicad_design_ownership_answer, which writes the same declaration.",
                 "Part and pin rebinding of an existing component has no explicit resolution request yet.",
                 "A KiCad undo that restores symbols in the same change as new placements is refused (native_restoration_with_additions).",

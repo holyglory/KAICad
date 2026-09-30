@@ -207,7 +207,9 @@ internal static class SchematicNativeCreationProjection
                 created.Add(occurrence.Id);
             }
             var records = new SymbolSheetRecords();
-            foreach (var occurrence in occurrences.OrderBy(s => existingPaths[s.EffectiveSheetInstanceId(newComponents[s.ComponentId])], StringComparer.Ordinal))
+            foreach (var occurrence in occurrences
+                .OrderBy(s => screens[existingPaths[s.EffectiveSheetInstanceId(newComponents[s.ComponentId])]].Metadata.Document.SheetPath.Path.Count)
+                .ThenBy(s => existingPaths[s.EffectiveSheetInstanceId(newComponents[s.ComponentId])], StringComparer.Ordinal))
             {
                 var component = newComponents[occurrence.ComponentId];
                 var path = existingPaths[occurrence.EffectiveSheetInstanceId(component)];

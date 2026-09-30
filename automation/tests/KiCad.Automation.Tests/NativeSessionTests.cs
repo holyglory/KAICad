@@ -85,6 +85,9 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeRepeatedSheetRebuild")]
     public Task RepeatedPhysicalSheetRebuildPreservesEveryInstance() => RunNativeSessions(NativeJourney.RepeatedSheetRebuild);
 
+    [TestMethod, TestCategory("NativeRepeatedSheetOwnership")]
+    public Task RepeatedSheetsResolveUnitsOwnedOnAnotherSheet() => RunNativeSessions(NativeJourney.RepeatedSheetOwnership);
+
     [TestMethod, TestCategory("NativeXmlRebuild")]
     public Task DeletedNativeSheetsRebuildFromXmlWithoutLoss() => RunNativeSessions(NativeJourney.XmlRebuild);
 
@@ -112,7 +115,7 @@ public sealed partial class NativeSessionTests
 
     private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, RecursiveEditor, Simulation, PcbItems,
         PsuCpuSeed, PsuCpuComponentCreation, ConnectedRealization, DiagramCanvas, XmlRebuild, RepeatedSheetRebuild, ProjectRecovery, ProjectRecoveryContainer, OwnershipSync, NativeCrash, NativeCrashRelease,
-        ObserveApplyStress }
+        ObserveApplyStress, RepeatedSheetOwnership }
 
     private async Task RunNativeSessions(NativeJourney journey, string theme = "light")
     {
@@ -141,6 +144,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.DiagramCanvas => Path.Combine("native-diagram-canvas", theme),
                 NativeJourney.XmlRebuild => "native-xml-rebuild",
                 NativeJourney.RepeatedSheetRebuild => "native-repeated-rebuild",
+                NativeJourney.RepeatedSheetOwnership => "native-repeated-ownership",
                 NativeJourney.ProjectRecovery => "native-project-recovery",
                 NativeJourney.ProjectRecoveryContainer => "native-project-recovery-container",
                 NativeJourney.OwnershipSync => "native-ownership-sync",
@@ -170,6 +174,7 @@ public sealed partial class NativeSessionTests
             : journey is NativeJourney.RecursiveEditor or NativeJourney.SymbolSheets or NativeJourney.ComponentCreation or NativeJourney.PsuCpuComponentCreation
                 or NativeJourney.ConnectedRealization ? 900
             : journey is NativeJourney.RepeatedSheetRebuild ? 900
+            : journey is NativeJourney.RepeatedSheetOwnership ? 1200
             : journey is NativeJourney.XmlRebuild ? 1200
             : journey == NativeJourney.ProjectRecovery ? 2400 : 450;
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(aggregateSeconds));
@@ -307,7 +312,7 @@ public sealed partial class NativeSessionTests
                     evidence, target.Id, target.RootId, deadline.Token);
                 if (journey is NativeJourney.PsuCpuSeed or NativeJourney.PsuCpuComponentCreation or NativeJourney.ConnectedRealization or NativeJourney.DiagramCanvas
                     or NativeJourney.XmlRebuild or NativeJourney.ProjectRecovery or NativeJourney.ProjectRecoveryContainer or NativeJourney.OwnershipSync
-                    or NativeJourney.NativeCrash or NativeJourney.NativeCrashRelease)
+                    or NativeJourney.NativeCrash or NativeJourney.NativeCrashRelease or NativeJourney.RepeatedSheetOwnership)
                 {
                     // PSU/CPU journeys seed the shared frozen fixture on this native-created
                     // root instead of the probe fixture. An Inconclusive lane stub ends the
@@ -962,7 +967,7 @@ public sealed partial class NativeSessionTests
         var seed = journey switch
         {
             NativeJourney.PsuCpuComponentCreation or NativeJourney.ConnectedRealization or NativeJourney.OwnershipSync
-                or NativeJourney.NativeCrash or NativeJourney.NativeCrashRelease => PsuCpuSeed.Sheets,
+                or NativeJourney.NativeCrash or NativeJourney.NativeCrashRelease or NativeJourney.RepeatedSheetOwnership => PsuCpuSeed.Sheets,
             NativeJourney.XmlRebuild or NativeJourney.ProjectRecovery or NativeJourney.ProjectRecoveryContainer => PsuCpuSeed.RootOnly,
             NativeJourney.DiagramCanvas => PsuCpuSeed.None,
             _ => throw new ArgumentOutOfRangeException(nameof(journey), journey, "Not a PSU/CPU journey.")
@@ -976,6 +981,7 @@ public sealed partial class NativeSessionTests
             NativeJourney.XmlRebuild => VerifyPsuCpuXmlRebuild(client, context, native.Id, display, evidence, instanceId, token),
             NativeJourney.ProjectRecovery or NativeJourney.ProjectRecoveryContainer => VerifyPsuCpuProjectFileRecovery(registry, client, context, native, display, evidence, instanceId, ownProcess, journey == NativeJourney.ProjectRecovery, token),
             NativeJourney.OwnershipSync => VerifyPsuCpuOwnershipSync(client, context, native.Id, display, evidence, instanceId, token),
+            NativeJourney.RepeatedSheetOwnership => VerifyRepeatedExternalOwners(client, context, native.Id, display, evidence, instanceId, token),
             NativeJourney.NativeCrashRelease => VerifyPsuCpuExitedOperationRelease(client, context, native, native.Id, display, evidence, instanceId, token),
             _ => VerifyPsuCpuNativeCrash(client, context, native, native.Id, display, evidence, instanceId, token)
         });

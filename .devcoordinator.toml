@@ -1605,12 +1605,12 @@ name="build"
 tier="development"
 role="preflight"
 invalidates=["contracts"]
-command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--configuration", "Debug", "--no-restore"]
+command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--disable-build-servers", "--configuration", "Debug", "--no-restore"]
 
 [[test.native-owner-restoration.check]]
 name="contracts"
 tier="development"
-command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--configuration", "Debug", "--no-build", "--no-restore", "--filter", "FullyQualifiedName~AutomaticDesignSynchronizationTests|FullyQualifiedName~SchematicOwnershipResolutionTests|FullyQualifiedName~SchematicNativeRestorationTests|FullyQualifiedName~SchematicNativeRemovalProjectionTests|FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicPropertyProjectionTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicNetReconciliationTests|FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~RetainedXmlHistoryTests|FullyQualifiedName~DesignSynchronizationReceiptTests|FullyQualifiedName~McpProcessTests|FullyQualifiedName~PinPartition", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-owner-restoration"]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--configuration", "Debug", "--no-build", "--no-restore", "--filter", "FullyQualifiedName~SymbolSheetOwnershipTests|FullyQualifiedName~AutomaticDesignSynchronizationTests|FullyQualifiedName~SchematicOwnershipResolutionTests|FullyQualifiedName~SchematicNativeRestorationTests|FullyQualifiedName~SchematicNativeRemovalProjectionTests|FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicPropertyProjectionTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicNetReconciliationTests|FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~RetainedXmlHistoryTests|FullyQualifiedName~DesignSynchronizationReceiptTests|FullyQualifiedName~McpProcessTests|FullyQualifiedName~PinPartition", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-owner-restoration"]
 retained_artifacts=[{ name = "native-owner-restoration", path = "automation/artifacts/native-owner-restoration", max_bytes = 16777216 }]
 
 [test.native-removal-projection]

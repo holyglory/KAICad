@@ -50,7 +50,7 @@ public sealed class SchematicRebuildTests
         return data;
     }
 
-    private static SchematicDesign WithRepeatedSheet(SchematicDesign source)
+    internal static SchematicDesign WithRepeatedSheet(SchematicDesign source)
     {
         var result = source with { Schematic = source.Schematic.Clone() };
         // PSU owns all its placed components locally. CPU_POWER contains a unit owned

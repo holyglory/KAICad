@@ -164,6 +164,8 @@ public sealed partial class NativeSessionTests
             var observation = await client.InvokeAsync<CaptureSchematicObservation, SchematicObservation>(new() { Document = screen.Metadata.Document.Clone() }, token);
             await File.WriteAllBytesAsync(FileName(screen.Metadata.Document.SheetPath.Path[^1].Value + ".png"), observation.Preview.Png.ToByteArray(), token);
         }
+        await VerifyRepeatedNativeAdoption(client, document, fixture, processId, display, instanceId,
+            designPath, store, Call, token);
         await File.WriteAllTextAsync(FileName("proof.json"), JsonSerializer.Serialize(new
         {
             instanceId, sharedPhysicalScreens = 1, sheetInstances = 3, physicalFiles = 2,

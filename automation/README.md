@@ -3499,3 +3499,25 @@ execution. Complete governed run `t20260929T234156Z-ffaf58` passed all eight
 checks, including the graphical two-project DRC journey and native lifecycle
 contracts, with unchanged source. Its retained `native-net-settings-evidence`
 contains `pcb-headless-project-refusal.json`.
+
+
+Repeated-sheet native adoption (2026-09-30): placing a symbol on an existing shared
+physical sheet now publishes one shared component definition and separate,
+path-derived component instances and symbol occurrences. Native references remain
+separate on each instance. Repeated UUID ownership answers require the requested
+sheet path; partial answers stay unresolved and contradictory shared part choices
+are rejected before publication. This does not yet adopt a newly inserted repeated
+sheet instance or resolve unrelated sheet-file replacement.
+
+The existing repeated-screen recovery journey now also places a native symbol,
+publishes through the compiled MCP STDIO tools, verifies TP103/TP203 identities,
+exact recorded publication bytes, unchanged native state and connectivity, no-op
+repeat, real keyboard undo/redo, and saved reload in two projects. Native run
+`t20260930T001458Z-8597d1` passed all six checks with unchanged source; each project's
+`adoption-proof.json` is retained in `native-rebuild/rebuild-evidence`. Exact
+UUID-addressed item comparison permits only native enumeration order; every item
+value, metadata field and binding remains exact. The extended existing ownership
+fixtures cover pathless, partial, conflicting and agreed answers; all 150 focused
+checks passed in `t20260930T002243Z-2b2715`. No product source changed after the native
+pass. The focused ownership build ignores persistent build servers after two
+MSBuild child-node exits in the isolated checkout; it keeps the same tests.

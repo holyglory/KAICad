@@ -497,7 +497,6 @@ public sealed partial class NativeSessionTests
                 "Answers to unit-owner and unit-grouping requests for new units of multi-unit parts are proven offline only (SymbolSheetOwnershipTests); this journey answers a part request.",
                 "An answer written by hand in the XML is proven offline only; this journey answers through kicad_design_ownership_answer, which writes the same declaration.",
                 "Part and pin rebinding of an existing component has no explicit resolution request yet.",
-                "A symbol placed on a sheet shown several times is refused (native_addition_repeated_sheet_unsupported).",
                 "A KiCad undo that restores symbols in the same change as new placements is refused (native_restoration_with_additions).",
                 "A design synchronized without content-verified retained XML keeps refusing new symbols (unverified_native_ownership_history); proven offline only.",
                 "Undo and redo of a symbol adopted by a design's first synchronization are not exercised; undo and redo are proven for later placements and the answered part.",

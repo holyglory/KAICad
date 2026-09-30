@@ -219,6 +219,48 @@ public sealed class SymbolSheetOwnershipTests
         CollectionAssert.AreEqual(result.AddedComponents!.ToArray(), SchematicNetReconciliation.Plan(state, [], CancellationToken.None).AddedComponents!.ToArray());
         // Without history the planner first asks for it; history that restores other owners is not a match either.
         Assert.AreEqual("electrical_ownership_changed", SchematicNetReconciliation.Plan(state).ErrorCode);
+
+        // The native repeated-screen journey covers publication and history. Extend
+        // this exact ownership fixture for ambiguous answers and contradictory parts.
+        var (repeated, placed, _) = PlacedResistor(s => SchematicRebuildTests.WithRepeatedSheet(WithSense(s)));
+        var observed = repeated.Observed.Clone();
+        var firstScreen = observed.Instances.Single(s => s.Items.Any(i => i.Is(SchematicSymbolInstance.Descriptor)
+            && i.Unpack<SchematicSymbolInstance>().Id.Equals(placed.Id)));
+        var sibling = observed.Instances.Single(s => s.Metadata.ScreenId.Equals(firstScreen.Metadata.ScreenId)
+            && !s.Metadata.Document.Equals(firstScreen.Metadata.Document));
+        var paths = new[] { firstScreen, sibling }.Select(s => s.Metadata.Document.SheetPath.Path.Select(p => Guid.Parse(p.Value)).ToArray()).ToArray();
+        foreach (var record in placed.InstanceRecords.Records)
+            record.Reference = record.Path.SequenceEqual(sibling.Metadata.Document.SheetPath.Path) ? "R202" : "R2";
+        for (int i = 0; i < firstScreen.Items.Count; ++i)
+            if (firstScreen.Items[i].Is(SchematicSymbolInstance.Descriptor)
+                && firstScreen.Items[i].Unpack<SchematicSymbolInstance>().Id.Equals(placed.Id)) firstScreen.Items[i] = Any.Pack(placed);
+        var alias = placed.Clone(); alias.Path = sibling.Metadata.Document.SheetPath.Clone(); alias.ReferenceField.Text.Text_ = "R202";
+        sibling.Items.Add(Any.Pack(alias));
+        repeated = Checkpointed(repeated.Baseline, observed);
+        Guid placedId = Guid.Parse(placed.Id.Value);
+        var ambiguous = SchematicNativeAdditionProjection.Project(repeated, [], CancellationToken.None);
+        Assert.AreEqual(SchematicNativeAdditionProjection.ResolutionRequired, ambiguous.ErrorCode);
+        Assert.HasCount(2, ambiguous.Requests);
+        var noPath = SchematicNativeAdditionProjection.Answer(repeated, [], [new(placedId, PartId: SensePart)], CancellationToken.None);
+        Assert.AreEqual(SchematicNativeAdditionProjection.AnswerInvalid, noPath.ErrorCode, "Repeated native UUIDs require a path.");
+        SchematicOwnershipAnswer Choice(int index, Guid partId) => new(placedId, PartId: partId) { NativePath = paths[index] };
+        var partial = SchematicNativeAdditionProjection.Answer(repeated, [], [Choice(0, SensePart)], CancellationToken.None);
+        Assert.IsNull(partial.Answered); Assert.HasCount(1, partial.Requests);
+        var conflicting = SchematicNativeAdditionProjection.Answer(repeated, [],
+            [Choice(0, SensePart), Choice(1, PsuCpuIds.Id(0x03, 3))], CancellationToken.None);
+        Assert.IsNull(conflicting.Answered); Assert.AreEqual(SchematicNativeAdditionProjection.AnswerMismatch, conflicting.ErrorCode);
+        var agreed = SchematicNativeAdditionProjection.Answer(repeated, [], [Choice(0, SensePart), Choice(1, SensePart)], CancellationToken.None);
+        Assert.IsNotNull(agreed.Answered, agreed.ErrorCode + ": " + agreed.ErrorMessage);
+        agreed.Answered.Engineering.Validate([]);
+        var newComponents = agreed.Answered.Engineering.Circuit.Components
+            .Where(c => !repeated.Baseline.Engineering.Circuit.Components.Any(b => b.Id == c.Id)).ToArray();
+        Assert.HasCount(2, newComponents); Assert.HasCount(1, newComponents.Select(c => c.DefinitionId).Distinct());
+        CollectionAssert.AreEquivalent(new[] { "R2", "R202" }, newComponents.Select(c => c.Reference).ToArray());
+        var declaredState = repeated with { DesiredFileBytes = Xml(agreed.Answered) };
+        var declaredResult = SchematicNativeAdditionProjection.Project(declaredState, [], agreed.Answered, null, CancellationToken.None);
+        Assert.IsNotNull(declaredResult.Adoption, declaredResult.ErrorCode + ": " + declaredResult.ErrorMessage);
+        CollectionAssert.AreEquivalent(newComponents, declaredResult.Adoption.BindingCandidate.Engineering.Circuit.Components
+            .Where(c => newComponents.Any(n => n.Id == c.Id)).ToArray());
     }
 
     [TestMethod]

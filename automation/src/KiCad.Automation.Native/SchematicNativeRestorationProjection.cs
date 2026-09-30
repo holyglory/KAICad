@@ -464,10 +464,6 @@ public static class SchematicNativeAdditionProjection
             {
                 token.ThrowIfCancellationRequested();
                 var sheet = kept.SheetBindings.Single(b => SchematicDesignBindings.PathKey(b.NativePath) == path);
-                string screenId = screens[path].Metadata.ScreenId.Value;
-                if (screens.Values.Count(s => s.Metadata.ScreenId.Value == screenId) != 1)
-                    return Failure("native_addition_repeated_sheet_unsupported",
-                        "A symbol placed on a sheet shown several times cannot be adopted yet; synchronize it from the XML instead.");
                 if (!Guid.TryParseExact(symbol.Id?.Value, "D", out Guid nativeId) || nativeId == Guid.Empty
                     || symbol.Definition is null || symbol.Unit is null || symbol.Unit.Unit < 1 || symbol.Unit.Unit > (int)symbol.Definition.UnitCount
                     || string.IsNullOrWhiteSpace(symbol.ReferenceField?.Text?.Text_))
@@ -664,10 +660,16 @@ public static class SchematicNativeAdditionProjection
                 var ofPart = owners.Where(o => o.Part == group.Key).Select(o => o.Id).Distinct().ToArray();
                 foreach (var entry in group)
                 {
+                    // The same physical unit on another instance is another component, not
+                    // a second unit that could join this component. Keep all other grouping
+                    // questions explicit, including different units of a repeated symbol.
+                    var alternatives = group.Where(g => g != entry && !(g.Addition.NativeId == entry.Addition.NativeId
+                        && g.Addition.Unit == entry.Addition.Unit
+                        && screens[g.Addition.Path].Metadata.ScreenId.Equals(screens[entry.Addition.Path].Metadata.ScreenId))).ToArray();
                     var missing = ofPart.Where(c => !(drawn.TryGetValue(c, out var units) && units.Contains(entry.Addition.Unit))).Order().ToArray();
-                    if (missing.Length != 0 || group.Count() > 1)
+                    if (missing.Length != 0 || alternatives.Length > 0)
                         requests.Add(Request(entry.Addition, missing.Length != 0 ? UnitOwnerAmbiguous : UnitGroupingAmbiguous, [group.Key],
-                            missing.Length != 0 ? missing : [.. group.Where(g => g != entry).Select(g => g.Addition.Proposed).Order()],
+                            missing.Length != 0 ? missing : [.. alternatives.Select(g => g.Addition.Proposed).Order()],
                             missing.Length != 0 ? "A component of this part does not draw this unit; choose whether the new unit is one of its units."
                                 : "Several new units of this multi-unit part were placed; choose which of them are one component."));
                 }
@@ -678,11 +680,17 @@ public static class SchematicNativeAdditionProjection
 
             // Every decision is exact or answered: create the parts, components and occurrences.
             var sheets = keptCircuit.SheetInstances.ToDictionary(s => s.Id);
+            var repeatedDefinitions = keptCircuit.SheetInstances.GroupBy(s => s.DefinitionId)
+                .Where(g => g.Count() > 1).Select(g => g.Key).ToHashSet();
             var addedDefinitions = new Dictionary<Guid, List<ComponentDefinition>>();
             void Define(Guid sheetDefinition, ComponentDefinition definition)
             {
                 if (!addedDefinitions.TryGetValue(sheetDefinition, out var list)) addedDefinitions.Add(sheetDefinition, list = []);
-                if (!list.Any(d => d.Id == definition.Id)) list.Add(definition);
+                var previous = list.FirstOrDefault(d => d.Id == definition.Id);
+                if (previous is null) list.Add(definition);
+                else if (previous != definition)
+                    throw new AutomationException(AnswerMismatch,
+                        "Instances of one repeated symbol must use the same component definition, part and value. Nothing was published.");
             }
             var addedComponents = new List<ComponentInstance>(); var addedOccurrences = new List<SymbolOccurrence>();
             var addedBindings = new List<SchematicSymbolBinding>(); var declaredParts = new List<PartDefinition>();
@@ -691,9 +699,15 @@ public static class SchematicNativeAdditionProjection
             foreach (var entry in decided.Where(d => !joins.ContainsKey(d.Addition.Key)))
             {
                 var addition = entry.Addition; var nativePath = PathOf(addition.Path);
-                Guid definition = AdoptedIdentity("definition", keptCircuit.Id, nativePath, addition.NativeId);
+                Guid sheetDefinition = sheets[addition.Sheet].DefinitionId;
+                // A shared drawing defines the component once. Its instances and symbol
+                // occurrences still use their full native paths, including distinct references.
+                // A model definition is stable if another repeated sheet is added or removed.
+                Guid definition = repeatedDefinitions.Contains(sheetDefinition)
+                    ? AdoptedIdentity("shared-definition", keptCircuit.Id, [sheetDefinition], addition.NativeId)
+                    : AdoptedIdentity("definition", keptCircuit.Id, nativePath, addition.NativeId);
                 Guid occurrence = AdoptedIdentity("occurrence", keptCircuit.Id, nativePath, addition.NativeId);
-                Define(sheets[addition.Sheet].DefinitionId, new(definition, entry.Part, addition.Value));
+                Define(sheetDefinition, new(definition, entry.Part, addition.Value));
                 addedComponents.Add(new(addition.Proposed, definition, addition.Sheet, addition.Reference));
                 componentSheets[addition.Proposed] = addition.Sheet;
                 addedOccurrences.Add(new(occurrence, addition.Proposed, addition.Unit, addition.Placement));
@@ -781,6 +795,16 @@ public static class SchematicNativeAdditionProjection
                     && AdoptedIdentity("component", circuit.Id, PathOf(paths[occurrence.EffectiveSheetInstanceId(components[occurrence.ComponentId])]),
                         b.NativeObjectId) == occurrence.ComponentId;
             }).ToArray();
+        // Declaring a new shared component definition also requires its other instances.
+        // These choices have already been resolved above; without this closure a partial
+        // ownership answer would create a definition missing an instance on sibling sheets.
+        var desiredDefinitionIds = desiredCircuit.Sheets.SelectMany(s => s.Components).Select(d => d.Id).ToHashSet();
+        var declaredDefinitionIds = declare.Select(b => components[occurrences[b.SymbolOccurrenceId].ComponentId].DefinitionId)
+            .Where(id => !desiredDefinitionIds.Contains(id)).ToHashSet();
+        declare = design.SymbolBindings.Where(b => !known.Contains(b.SymbolOccurrenceId)
+                && adoption.AddedOccurrences.Contains(b.SymbolOccurrenceId)
+                && (declare.Contains(b) || declaredDefinitionIds.Contains(components[occurrences[b.SymbolOccurrenceId].ComponentId].DefinitionId)))
+            .ToArray();
         var declaredOccurrences = declare.Select(b => occurrences[b.SymbolOccurrenceId]).ToArray();
         var newComponents = declaredOccurrences.Select(o => components[o.ComponentId]).Where(c => !desiredCircuit.Components.Any(d => d.Id == c.Id))
             .DistinctBy(c => c.Id).ToArray();

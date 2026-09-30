@@ -73,6 +73,11 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_pcb_route_candidate_from_guide");
             CollectionAssert.Contains(names, "kicad_pcb_route_candidate_validate");
             CollectionAssert.Contains(names, "kicad_pcb_route_commit");
+            var invalidRouteCommit = await Request(9090, "tools/call", new { name = "kicad_pcb_route_commit", arguments = new
+            {
+                instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}", drcJobStateJson = "{}"
+            } });
+            Assert.IsTrue(invalidRouteCommit.GetProperty("result").GetProperty("isError").GetBoolean());
             CollectionAssert.Contains(names, "kicad_pcb_render_3d");
             CollectionAssert.Contains(names, "kicad_pcb_route_geometry");
             CollectionAssert.Contains(names, "kicad_pcb_route_preview");

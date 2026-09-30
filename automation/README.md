@@ -3779,3 +3779,43 @@ clarifying tool-description sentence changed afterward; execution behavior is
 unchanged. This closes `pd618bdab49c2ad0f` and its broader answer outcome
 `p35cfdc0345e056a5`; shared-parent relocation and combined new-parent moves remain
 separate unfinished topology outcomes.
+
+
+### Combined creation and sheet moves (2026-09-30)
+
+An existing sheet can move into a unique parent created in the same native edit.
+Complete bound XML can likewise create a parent and move a populated subtree
+beneath it. A private comparison view inserts only the new containers before
+reusing the existing move/removal projection; it is never persisted as a native
+or electrical observation. The new parent keeps supplied artwork and the existing
+child keeps its model and native identities. Verified history restores the parent
+and the child's location together on redo.
+
+Known schematic-wide coverage stays in the candidate. Only a native-command
+copy omits matching inherited coverage markers for a newly created screen;
+unknown state remains an explicit refusal. Item enumeration order is ignored only
+when comparing exact UUID-addressed screen contents for unchanged and
+convergent/delete cases. Metadata and item bytes remain exact, and real content
+changes still produce a conflict. The regression reverses baseline item order
+before native undo to prove this distinction.
+
+The earlier completion claim preceded final native acceptance and was withdrawn.
+`4f8388` exposed the fixture note's missing explicit unlocked state; `f5acbd`
+then exposed an item-order-only delete/modify conflict in one project. Provisional
+shared-parent admission commit `71c1770b23` failed to compile and did not establish
+complete instance mappings; `7ab1443f9e` restores its previous guard. Those runs
+and commits remain history, not completion proof.
+
+Fresh complete `t20260930T111443Z-217254` passed all seven checks with unchanged
+source. Both topology proofs confirm native/XML combined moves, populated nested
+paths, parent artwork, failure rollback, exact undo/redo and saved reload. Both
+external-owner regressions passed too. Source digest:
+`6266b2af55d00a230f04bf008d7192e51d327d09b66f18a8b953c29cbc472735`.
+Topology artifact manifest:
+`1b8cb5544e4f93fa22f3b2a1e69a0e843eef227e638f248d382f0c6c4d6c82a7`.
+External-owner artifact manifest:
+`f2ac1738ab677c90a69daffd1223624ea96901618fd3bcefbeb3cc670f1e51e4`.
+
+`pfd3b84bd1d59b91c` remains open for populated new-parent component creation
+under `pa0569df11b611af2`; shared-parent relocation remains separately open under
+`pd6a383227f9d47b8`. No release-wide or newly packaged delivery is claimed.

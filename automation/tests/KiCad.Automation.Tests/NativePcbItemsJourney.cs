@@ -219,17 +219,29 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(dryRun.WorkerFinished, "Detached candidate DRC did not reach a terminal state.");
             Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, dryRun.Status, dryRun.ErrorMessage);
             Assert.AreEqual(svgState, SchematicJson.Formatter.Format(await ObserveLifecycleState(client, board, token)));
+            var routeCommit = await mcp.Tool("kicad_pcb_route_commit", new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(generatedRequest), expectedStateJson = svgState
+            });
+            Assert.IsFalse(routeCommit.TryGetProperty("isError", out var routeCommitError) && routeCommitError.GetBoolean(), routeCommit.GetRawText());
+            var routeCommitData = routeCommit.GetProperty("structuredContent");
+            Assert.IsTrue(routeCommitData.GetProperty("mutationConfirmed").GetBoolean());
+            string committedState = routeCommitData.GetProperty("afterState").GetString()!;
+            var committedTracks = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+            { Header = new() { Document = board }, Types_ = { KiCadObjectType.KotPcbTrace } }, token);
+            Assert.IsTrue(committedTracks.Items.OfType<Any>().Any(item => item.Is(Track.Descriptor)
+                && item.Unpack<Track>().CustomProperties.Any(p => p.Key == "kicad.ai.route_candidate.origin")));
             var previewRequest = new StartPcbRoutePreview
             {
                 Document = board, OperationId = Guid.NewGuid().ToString("D"), ProcessEpoch = client.Epoch,
-                ExpectedRevision = dryRunState.Revision.Clone(), StartItemId = createdTrack.Id.Value,
+                ExpectedRevision = SchematicJson.Parser.Parse<DocumentLifecycleState>(committedState).Revision.Clone(), StartItemId = createdTrack.Id.Value,
                 Start = new() { XNm = 25_000_000, YNm = 10_000_000 }, Layer = BoardLayer.BlFCu,
                 ForceFinish = true
             };
             previewRequest.Waypoints.Add(new Vector2 { XNm = 28_000_000, YNm = 10_000_000 });
             var routePreview = await mcp.Tool("kicad_pcb_route_preview", new
             {
-                instanceId, requestJson = SchematicJson.Formatter.Format(previewRequest), expectedStateJson = svgState
+                instanceId, requestJson = SchematicJson.Formatter.Format(previewRequest), expectedStateJson = committedState
             });
             Assert.IsFalse(routePreview.TryGetProperty("isError", out var routePreviewError) && routePreviewError.GetBoolean(), routePreview.GetRawText());
             var routePreviewData = routePreview.GetProperty("structuredContent");
@@ -238,7 +250,7 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(routePreviewData.GetProperty("drcValidated").GetBoolean());
             var previewCandidate = BoardJson.Parser.Parse<CreateItems>(routePreviewData.GetProperty("candidateRequestJson").GetString()!);
             Assert.IsTrue(previewCandidate.Items.Count > 0);
-            Assert.AreEqual(svgState, SchematicJson.Formatter.Format(await ObserveLifecycleState(client, board, token)));
+            Assert.AreEqual(committedState, SchematicJson.Formatter.Format(await ObserveLifecycleState(client, board, token)));
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-pcb-items.json"), updatedReply.GetRawText(), token);
         }
         finally { Directory.Delete(stateDirectory, true); }

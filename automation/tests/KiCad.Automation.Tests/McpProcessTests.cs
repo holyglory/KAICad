@@ -72,6 +72,7 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_pcb_guide_svg_create");
             CollectionAssert.Contains(names, "kicad_pcb_route_candidate_from_guide");
             CollectionAssert.Contains(names, "kicad_pcb_route_candidate_validate");
+            CollectionAssert.Contains(names, "kicad_pcb_route_commit");
             CollectionAssert.Contains(names, "kicad_pcb_render_3d");
             CollectionAssert.Contains(names, "kicad_pcb_route_geometry");
             CollectionAssert.Contains(names, "kicad_pcb_route_preview");
@@ -214,6 +215,7 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_schematic_transform_connected_symbols");
             CollectionAssert.Contains(names, "kicad_pcb_route_candidate_from_guide");
             CollectionAssert.Contains(names, "kicad_pcb_route_candidate_validate");
+            CollectionAssert.Contains(names, "kicad_pcb_route_commit");
             CollectionAssert.Contains(names, "kicad_schematic_xml_plan");
             JsonElement call = await Request(3, "tools/call", new { name = "kicad_instances_list", arguments = new { } });
             Assert.IsFalse(call.TryGetProperty("error", out _), call.ToString());

@@ -46,6 +46,11 @@ public sealed class PcbItemTools(InstanceRegistry registry)
     public Task<CallToolResult> Update(string instanceId, string requestJson, string expectedStateJson,
         CancellationToken cancellationToken) => Mutate<UpdateItems, UpdateItemsResponse>(instanceId, requestJson, expectedStateJson, cancellationToken);
 
+    /// <summary>Atomic route-candidate commit used by the task-oriented routing tool.</summary>
+    internal Task<CallToolResult> CommitRouteCandidate(string instanceId, string requestJson,
+        string expectedStateJson, CancellationToken cancellationToken) =>
+        Mutate<CreateItems, CreateItemsResponse>(instanceId, requestJson, expectedStateJson, cancellationToken);
+
     [McpServerTool(Name = "kicad_pcb_guide_create"),
      Description("Create a visual PCB routing guide as native non-copper board objects. The request may contain only BoardGraphicShape vector geometry or ReferenceImage objects, and every item must use a non-copper layer. The source SHA-256 and guide ID are attached as custom provenance properties. This never creates Track, Arc or Via copper and does not validate RF, impedance, clearance or length constraints; convert a guide to explicitly net-bound copper candidates separately."),
      KiCadCapability("pcb-guide", "native-board-api", "board lifecycle state, non-copper guide objects, source hash"),

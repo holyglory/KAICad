@@ -14,7 +14,7 @@ using ModelContextProtocol.Server;
 namespace KiCad.Automation.Mcp;
 
 [McpServerToolType]
-public sealed class PcbRoutingTools(InstanceRegistry registry)
+public sealed class PcbRoutingTools(InstanceRegistry registry, PcbItemTools itemTools)
 {
     [McpServerTool(Name = "kicad_pcb_route_preview", ReadOnly = true),
      Description("Run KiCad's native push-and-shove single-track router on an explicit start item and waypoint sequence, then return typed Track/Arc/Via candidates without committing copper. The preview is revision-bound and read-only; use candidate validation and detached DRC before any separate mutation. Active native routing sessions are rejected rather than hijacked."),
@@ -136,6 +136,13 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
         });
         return new CallToolResult { Content = [new TextContentBlock { Text = data.GetRawText() }], StructuredContent = data };
     });
+
+    [McpServerTool(Name = "kicad_pcb_route_commit"),
+     Description("Commit a previously validated typed PCB route candidate as one native undoable transaction. requestJson must be the exact CreateItems candidate returned by route preview/guide conversion, and expectedStateJson must be the unchanged lifecycle checkpoint used for validation. The transaction rejects stale boards and native item errors; the returned afterState is the only completion proof. This commits explicit Track/Arc/Via geometry and does not claim differential-pair, impedance, RF or length-tuning qualification."),
+     KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "validated candidate, exact lifecycle checkpoint, atomic native commit"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
+    public Task<CallToolResult> Commit(string instanceId, string requestJson, string expectedStateJson,
+        CancellationToken cancellationToken) => itemTools.CommitRouteCandidate(instanceId, requestJson, expectedStateJson, cancellationToken);
 
     private sealed class RouteGroup(string netName)
     {

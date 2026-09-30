@@ -173,7 +173,7 @@ public static class CapabilityCatalog
     private static readonly (string Id, string Scope, string Summary, string[] TrackedBy)[] Unfinished =
     [
         ("pcb-routing-completion", "pcb-routing",
-            "The pcb-routing tools preview, propose, validate and measure routes; none of them commits copper, which is added only through the primitive kicad_pcb_items_create edit. Committing a validated candidate with undo and rollback, layer changes and vias, full push-and-shove, differential-pair and tuning modes, failure and cancellation recovery, and DRC, impedance or RF qualification of routed results are unfinished.",
+            "The pcb-routing tools preview, validate, measure and commit explicit Track/Arc/Via candidates with lifecycle-guarded native undo. Layer changes and vias are supported only when present in the candidate; full push-and-shove continuation, differential-pair and tuning modes, failure and cancellation recovery, and DRC, impedance or RF qualification of routed results remain unfinished.",
             ["p09bc531842a6fe23"]),
         ("simulation-qualification", "simulation",
             "The simulation tools run KiCad's own ngspice on an explicit schematic and are verified on Linux only. Capturing every model and library file a simulation depends on, broader simulation qualification, and qualification on Mac, Windows and through Codex Desktop are unfinished.",

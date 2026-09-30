@@ -222,7 +222,7 @@ public sealed partial class NativeSessionTests
             var routeCommit = await mcp.Tool("kicad_pcb_route_commit", new
             {
                 instanceId, requestJson = BoardJson.Formatter.Format(generatedRequest), expectedStateJson = svgState,
-                drcJobStateJson = SchematicJson.Formatter.Format(dryRun)
+                drcJobStateJson = SchematicJson.Formatter.Format(dryRun), operationId = Guid.NewGuid().ToString("D")
             });
             Assert.IsFalse(routeCommit.TryGetProperty("isError", out var routeCommitError) && routeCommitError.GetBoolean(), routeCommit.GetRawText());
             var routeCommitData = routeCommit.GetProperty("structuredContent");

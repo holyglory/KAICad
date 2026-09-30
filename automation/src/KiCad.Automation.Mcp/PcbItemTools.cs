@@ -48,8 +48,71 @@ public sealed class PcbItemTools(InstanceRegistry registry)
 
     /// <summary>Atomic route-candidate commit used by the task-oriented routing tool.</summary>
     internal Task<CallToolResult> CommitRouteCandidate(string instanceId, string requestJson,
-        string expectedStateJson, CancellationToken cancellationToken) =>
-        Mutate<CreateItems, CreateItemsResponse>(instanceId, requestJson, expectedStateJson, cancellationToken);
+        string expectedStateJson, string operationId, CancellationToken cancellationToken) =>
+        Execute(() => CommitRouteCore(instanceId, requestJson, expectedStateJson, operationId, cancellationToken));
+
+    private async Task<CallToolResult> CommitRouteCore(string instanceId, string requestJson,
+        string expectedStateJson, string operationId, CancellationToken cancellationToken)
+    {
+        if (!Guid.TryParseExact(operationId, "D", out var operation) || operation == Guid.Empty)
+            throw new AutomationException("invalid_route_operation", "Route commit requires a canonical operation UUID.");
+        var request = BoardJson.Parser.Parse<CreateItems>(requestJson);
+        ValidateHeader(request.Header, requireItems: true);
+        if (request.Items.Count == 0) throw new AutomationException("invalid_route_commit", "Supply route candidate items.");
+        for (int index = 0; index < request.Items.Count; index++)
+        {
+            var item = request.Items[index];
+            if (item.Is(Track.Descriptor))
+            {
+                var value = item.Unpack<Track>(); AddRouteOperation(value.CustomProperties, operationId);
+                request.Items[index] = Any.Pack(value);
+            }
+            else if (item.Is(Arc.Descriptor))
+            {
+                var value = item.Unpack<Arc>(); AddRouteOperation(value.CustomProperties, operationId);
+                request.Items[index] = Any.Pack(value);
+            }
+            else if (item.Is(Via.Descriptor))
+            {
+                var value = item.Unpack<Via>(); AddRouteOperation(value.CustomProperties, operationId);
+                request.Items[index] = Any.Pack(value);
+            }
+            else throw new AutomationException("invalid_route_commit", "Only Track, Arc and Via candidates may be committed.");
+        }
+        var expected = SchematicJson.Parser.Parse<DocumentLifecycleState>(expectedStateJson);
+        var client = registry.Client(instanceId);
+        var session = await client.HandshakeAsync(cancellationToken);
+        if (expected.ProcessEpoch != session.Epoch) throw new AutomationException("pcb_instance_changed", "The route checkpoint belongs to another process epoch.");
+        var current = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(new() { Document = request.Header.Document }, cancellationToken);
+        if (!current.Equals(expected))
+        {
+            var ids = request.Items.Select(item => item.Is(Track.Descriptor) ? item.Unpack<Track>().Id.Value
+                : item.Is(Arc.Descriptor) ? item.Unpack<Arc>().Id.Value : item.Unpack<Via>().Id.Value).ToArray();
+            var existing = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = request.Header.Document }, Items = { ids.Select(id => new KIID { Value = id }) } }, cancellationToken);
+            if (existing.Items.Count != ids.Length || existing.Items.Any(item => !HasRouteOperation(item, operationId)))
+                throw new AutomationException("pcb_state_changed", "The route checkpoint is stale and no matching committed operation receipt was found.");
+            return Data(new { instanceId, processEpoch = session.Epoch, afterState = SchematicJson.Formatter.Format(current),
+                mutationConfirmed = true, replayed = true, atomicTransaction = true });
+        }
+        return await Mutate<CreateItems, CreateItemsResponse>(instanceId, BoardJson.Formatter.Format(request), expectedStateJson, cancellationToken);
+    }
+
+    private static void AddRouteOperation(Google.Protobuf.Collections.RepeatedField<CustomProperty> properties, string operationId)
+    {
+        var existing = properties.FirstOrDefault(p => p.Key == "kicad.ai.route_commit.operation_id");
+        if (existing is not null && existing.Value != operationId)
+            throw new AutomationException("route_operation_conflict", "The candidate already carries another route operation ID.");
+        if (existing is null) properties.Add(new CustomProperty { Key = "kicad.ai.route_commit.operation_id", Value = operationId });
+    }
+
+    private static bool HasRouteOperation(Any packed, string operationId)
+    {
+        var properties = packed.Is(Track.Descriptor) ? packed.Unpack<Track>().CustomProperties
+            : packed.Is(Arc.Descriptor) ? packed.Unpack<Arc>().CustomProperties
+            : packed.Is(Via.Descriptor) ? packed.Unpack<Via>().CustomProperties : [];
+        return properties.Any(p => p.Key == "kicad.ai.route_commit.operation_id" && p.Value == operationId);
+    }
 
     [McpServerTool(Name = "kicad_pcb_guide_create"),
      Description("Create a visual PCB routing guide as native non-copper board objects. The request may contain only BoardGraphicShape vector geometry or ReferenceImage objects, and every item must use a non-copper layer. The source SHA-256 and guide ID are attached as custom provenance properties. This never creates Track, Arc or Via copper and does not validate RF, impedance, clearance or length constraints; convert a guide to explicitly net-bound copper candidates separately."),

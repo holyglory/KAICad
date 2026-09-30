@@ -142,12 +142,14 @@ public sealed class PcbRoutingTools(InstanceRegistry registry, PcbItemTools item
      KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "validated candidate, exact lifecycle checkpoint, atomic native commit"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Commit(string instanceId, string requestJson, string expectedStateJson,
-        string drcJobStateJson, CancellationToken cancellationToken) => Execute(async () =>
+     string drcJobStateJson, string operationId, CancellationToken cancellationToken) => Execute(async () =>
     {
         cancellationToken.ThrowIfCancellationRequested();
         var request = BoardJson.Parser.Parse<CreateItems>(requestJson);
         var expected = SchematicJson.Parser.Parse<DocumentLifecycleState>(expectedStateJson);
         var locator = SchematicJson.Parser.Parse<PcbDrcJobState>(drcJobStateJson);
+        if (!Guid.TryParseExact(operationId, "D", out var op) || op == Guid.Empty)
+            throw new AutomationException("invalid_route_operation", "Route commit requires a canonical operation UUID.");
         if (request.Header?.Document is null || expected.Document is null
             || expected.Scope != DocumentLifecycleScope.DlsPcb
             || !request.Header.Document.Equals(expected.Document) || request.Items.Count == 0
@@ -161,6 +163,9 @@ public sealed class PcbRoutingTools(InstanceRegistry registry, PcbItemTools item
         var client = registry.Client(instanceId);
         if (client.Epoch != expected.ProcessEpoch)
             throw new AutomationException("pcb_instance_changed", "The candidate belongs to another native process epoch.");
+        var current = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(new() { Document = expected.Document }, cancellationToken);
+        if (!current.Equals(expected))
+            return await itemTools.CommitRouteCandidate(instanceId, requestJson, expectedStateJson, operationId, cancellationToken);
         var read = new ReadPcbDrcJob { Document = expected.Document, JobId = locator.JobId,
             ProcessEpoch = expected.ProcessEpoch };
         read.ExpectedCandidateItems.Add(request.Items);
@@ -168,7 +173,7 @@ public sealed class PcbRoutingTools(InstanceRegistry registry, PcbItemTools item
         if (drc.JobId != locator.JobId || !drc.CandidatePayloadVerified)
             throw new AutomationException("route_drc_candidate_unverified", "KiCad did not verify this exact candidate against the retained DRC job; no edit was submitted.");
         ValidateDrcAdmission(request, expected, drc);
-        return await itemTools.CommitRouteCandidate(instanceId, requestJson, expectedStateJson, cancellationToken);
+        return await itemTools.CommitRouteCandidate(instanceId, requestJson, expectedStateJson, operationId, cancellationToken);
     });
 
     private static void ValidateDrcAdmission(CreateItems request, DocumentLifecycleState expected, PcbDrcJobState drc)

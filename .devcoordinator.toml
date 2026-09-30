@@ -1882,6 +1882,14 @@ command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--
 retained_artifacts=[{ name="native-session-evidence",path="automation/artifacts/native-session-current",max_bytes=67108864 }]
 
 [[test.native-foundation.check]]
+name="native-pcb-items"
+tier="development"
+requires=["native-build"]
+after=["native-session"]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativePcbItems", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-pcb-items"]
+retained_artifacts=[{ name="native-pcb-items",path="automation/artifacts/native-pcb-items",max_bytes=33554432 },{ name="native-pcb-items-evidence",path="automation/artifacts/native-pcb-items/native-session-current",max_bytes=33554432 }]
+
+[[test.native-foundation.check]]
 name="native-erc-exclusion"
 tier="development"
 requires=["native-build"]

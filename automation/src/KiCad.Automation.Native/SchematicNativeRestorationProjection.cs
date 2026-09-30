@@ -244,9 +244,12 @@ internal sealed record SchematicNativeAdditionResult(SchematicNativeRestorationR
 
 /// <summary>The saved XML with a person's answers declared (<see cref="SchematicNativeAdditionProjection.Answer"/>), and the
 /// native symbols it declares.</summary>
-internal sealed record SchematicOwnershipAnswerResult(SchematicDesign? Answered, IReadOnlyList<Guid> DeclaredSymbols,
+internal sealed record SchematicOwnershipAnswerResult(SchematicDesign? Answered, IReadOnlyList<SchematicSymbolBinding> DeclaredBindings,
     IReadOnlyList<SchematicOwnershipResolutionRequest> Requests, IReadOnlyList<SchematicBindingIssue> Issues,
-    string? ErrorCode = null, string? ErrorMessage = null);
+    string? ErrorCode = null, string? ErrorMessage = null)
+{
+    internal IReadOnlyList<Guid> DeclaredSymbols => [.. DeclaredBindings.Select(b => b.NativeObjectId).Order()];
+}
 
 /// <summary>Symbols placed in KiCad since the last synchronization become design components (ledger p74ee7c1da24272d9).
 /// Each new symbol becomes one new component instance on the sheet instance KiCad shows it on, with identities derived
@@ -840,7 +843,7 @@ public static class SchematicNativeAdditionProjection
             },
             SymbolBindings = [.. desired.SymbolBindings, .. declare]
         };
-        return new(answeredDesign, [.. declare.Select(b => b.NativeObjectId).Order()], [], []);
+        return new(answeredDesign, [.. declare.OrderBy(b => b.SymbolOccurrenceId)], [], []);
     }
 
     // The saved XML is the last synchronized design with only the declared answers added: their occurrences and bindings,

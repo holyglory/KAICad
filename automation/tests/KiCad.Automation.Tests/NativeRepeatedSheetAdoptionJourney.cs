@@ -95,11 +95,54 @@ public sealed partial class NativeSessionTests
         var receipt = await client.InvokeAsync<CheckedSchematicBatch, CheckedSchematicBatchReceipt>(batch, token);
         Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, receipt.Status, receipt.ErrorMessage);
         var placed = await Capture();
+        // Both paths share a physical UUID, but the public answer must name and
+        // preserve each occurrence. Conflicting answers must leave both versions alone.
+        RequireToolSuccess(await call("kicad_design_recovery_refresh", Recovery()));
+        var paused = await call("kicad_design_sync_plan", Recovery());
+        var pausedData = paused.GetProperty("structuredContent");
+        Assert.AreEqual(SchematicNativeAdditionProjection.ResolutionRequired, pausedData.GetProperty("errorCode").GetString());
+        var requests = pausedData.GetProperty("ownershipResolutionRequests").EnumerateArray().ToArray();
+        Assert.HasCount(2, requests);
+        Assert.IsTrue(requests.All(r => r.GetProperty("NativeObjectId").GetGuid() == nativeId));
+        Guid selectedPart = baseline.Engineering.Circuit.Parts.Single(p => p.Name == "Alternative fixture probe").Id;
+        Guid otherPart = baseline.Engineering.Circuit.Parts.Single(p => p.Id != selectedPart).Id;
+        var paths = new[] { first, second }.Select(d => d.SheetPath.Path.Select(p => Guid.Parse(p.Value)).ToArray()).ToArray();
+        object Answer(bool conflicting) => new { instanceId, recoveryPath = store.StatePath,
+            expectedRevisionToken = store.Read()!.RevisionToken, designPath,
+            answers = paths.Select((path, i) => new { nativeObjectId = nativeId, nativePath = path,
+                partId = conflicting && i == 1 ? otherPart : selectedPart }).ToArray() };
+        byte[] beforeAnswer = await File.ReadAllBytesAsync(designPath, token);
+        string beforeToken = store.Read()!.RevisionToken;
+        var refused = await call("kicad_design_ownership_answer", Answer(true));
+        Assert.IsTrue(refused.GetProperty("isError").GetBoolean());
+        Assert.AreEqual(SchematicNativeAdditionProjection.AnswerMismatch, refused.GetProperty("structuredContent").GetProperty("errorCode").GetString());
+        CollectionAssert.AreEqual(beforeAnswer, await File.ReadAllBytesAsync(designPath, token));
+        Assert.AreEqual(beforeToken, store.Read()!.RevisionToken);
+        Assert.AreEqual(placed, await Capture());
+        var answered = await call("kicad_design_ownership_answer", Answer(false));
+        byte[] answerBytes = await File.ReadAllBytesAsync(designPath, token);
+        await File.WriteAllTextAsync(Path.Combine(Path.GetDirectoryName(designPath)!, "repeated-answer-state.json"),
+            JsonSerializer.Serialize(new { xmlChanged = !beforeAnswer.SequenceEqual(answerBytes),
+                recoveryMatchesXml = store.Read()!.State.DesiredFileBytes.SequenceEqual(answerBytes),
+                nativeUnchanged = placed.Equals(await Capture()) }), token);
+        RequireToolSuccess(answered);
+        var answeredRows = answered.GetProperty("structuredContent").GetProperty("answeredSymbols").EnumerateArray().ToArray();
+        Assert.HasCount(2, answeredRows);
+        Assert.HasCount(2, answeredRows.Select(r => r.GetProperty("occurrenceId").GetGuid()).Distinct());
+        CollectionAssert.AreEquivalent(paths.Select(SchematicDesignBindings.PathKey).ToArray(), answeredRows
+            .Select(r => SchematicDesignBindings.PathKey(r.GetProperty("nativePath").EnumerateArray().Select(p => p.GetGuid()).ToArray())).ToArray());
+        Assert.HasCount(2, answeredRows.Select(r => r.GetProperty("sheetInstanceId").GetGuid()).Distinct());
+        CollectionAssert.AreEquivalent(new[] { "TP103", "TP203" }, answeredRows.Select(r => r.GetProperty("reference").GetString()).ToArray());
+        Assert.IsTrue(answeredRows.All(r => r.GetProperty("partId").GetGuid() == selectedPart));
+        CollectionAssert.AreEqual(answerBytes, store.Read()!.State.DesiredFileBytes);
+        Assert.AreEqual(placed, await Capture(), "Answering ownership changes no native state.");
         var adopted = await Publish();
         var owners = adopted.Engineering.Circuit.Components.Where(c => !baseline.Engineering.Circuit.Components.Any(b => b.Id == c.Id)).ToArray();
         Assert.HasCount(2, owners);
         CollectionAssert.AreEquivalent(new[] { "TP103", "TP203" }, owners.Select(c => c.Reference).ToArray());
         Assert.HasCount(1, owners.Select(c => c.DefinitionId).Distinct());
+        Assert.IsTrue(owners.All(c => adopted.Engineering.Circuit.Sheets.SelectMany(s => s.Components)
+            .Single(d => d.Id == c.DefinitionId).PartId == selectedPart));
         Assert.HasCount(2, owners.Select(c => c.SheetInstanceId).Distinct());
         var occurrences = adopted.Engineering.Circuit.Symbols.Where(s => owners.Any(c => c.Id == s.ComponentId)).ToArray();
         Assert.HasCount(2, occurrences);
@@ -148,6 +191,7 @@ public sealed partial class NativeSessionTests
         {
             instanceId, nativeId, physicalSymbolsAdded = 1, componentInstancesAdded = 2, sharedDefinition = owners[0].DefinitionId,
             separateReferences = owners.Select(c => c.Reference), publicStdioPublication = true, nativeStatePreserved = true,
+            repeatedOwnershipAnswer = true, conflictingAnswerPreserved = true, answerRecoveryMatchesXml = true,
             repeatNoOp = true, undoRemovesBoth = true, redoRestoresExactIdentities = true, savedReloadPreservesBoth = true
         }), token);
     }

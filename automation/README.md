@@ -3611,3 +3611,36 @@ The final expanded recovery/observer/client/ownership graph
 and no-churn saves, bad-observation preservation, stale provenance, and rejection
 when declared and loaded files differ. Only test coverage/configuration and
 documentation/evidence wording changed after native verification.
+
+
+### Repeated-sheet ownership answer responses (2026-09-30)
+
+`kicad_design_ownership_answer` retains the full occurrence-to-native-symbol
+binding through its pre-publication check and response. One physical symbol UUID
+can appear on several sheet paths; each answered occurrence now returns its own
+`sheetInstanceId` and `nativePath` alongside the existing identity, part, unit and
+reference fields. Response preparation happens before the guarded XML write.
+The existing recovery-save failure response still states that the XML was written
+when the recovery record could not take it in.
+
+The real two-project baseline `t20260930T035956Z-5ca63b` reproduced the old failure:
+both valid answers reached the XML, but looking up a single occurrence by native
+UUID failed before updating the recovery record. Both retained observations show
+`xmlChanged: true`, `recoveryMatchesXml: false`, and `nativeUnchanged: true`.
+The earlier `t20260930T035515Z-597f1e` stopped at a test JSON field-name mismatch;
+it does not establish the product defect.
+
+Complete native run `t20260930T040546Z-5c6430` passed all six checks with unchanged
+source. Its two `adoption-proof.json` files verify conflicting-answer refusal,
+both returned paths and references, matching XML/recovery bytes, public
+synchronization, no-op repeats, exact undo/redo identities and saved reload.
+Source digest: `7ed9dbd6c83964ae38be576e2609c300a64a68937084a5d86d410cd23f1d6c54`.
+The retained `native-rebuild/rebuild-evidence` artifact has manifest
+`83ada158525c27944455aa23f5c0436290a795d06a3bc91b0c001ef3f249f02a`.
+The final ownership graph `t20260930T041731Z-60214c` passed all three checks and
+237 supporting cases, including ordinary answer refusals and a recovery record
+that cannot be written. Only this documentation changed after those passes.
+
+This qualifies repeated-instance part answers. Live multi-unit owner/grouping
+answers remain open under `p35cfdc0345e056a5`; new repeated sheets with undrawn or
+externally owned components remain under `p2d066b3b1abf0c6a`.

@@ -233,13 +233,21 @@ public sealed partial class NativeSessionTests
             nets.Add(new(Guid.NewGuid(), "Probe pair " + screen.Metadata.Document.SheetPath.Path[^1].Value,
                 pair.Select(c => new PinEndpoint(c.Id, "1")).ToArray()));
         }
-        var circuit = new Circuit(Guid.NewGuid(), [new(part, "Fixture probe", 1, [new("1", "1", 1)])],
+        var alternative = new PartDefinition(Guid.NewGuid(), "Alternative fixture probe", 1, [new("1", "1", 1)]);
+        var cachedProbe = data.Instances[0].CachedSymbols.Single().Clone();
+        foreach (var child in cachedProbe.Definition.Items.Where(i => i.Item.Is(SchematicPin.Descriptor)))
+        {
+            var pin = child.Item.Unpack<SchematicPin>();
+            pin.Id = new() { Value = Guid.NewGuid().ToString("D") }; child.Item = Any.Pack(pin);
+        }
+        var circuit = new Circuit(Guid.NewGuid(), [new(part, "Fixture probe", 1, [new("1", "1", 1)]), alternative],
             definitions.Select(d => new SheetDefinition(d.Value, d.Key, componentDefinitions[d.Key])).ToArray(),
             data.Instances.Select(s => new KiCad.Automation.Model.SheetInstance(instances[RebuildPathKey(s)], definitions[s.Metadata.ScreenId.Value],
                 s.Metadata.Document.SheetPath.Path.Count == 1 ? null : instances[RebuildPathKey(s)[..RebuildPathKey(s).LastIndexOf('/')]])).ToArray(),
             components, nets, occurrences);
         return new(new(circuit, new(Guid.NewGuid(), [], [], [], []), [], []), data.Clone(),
             data.Instances.Select(s => new SchematicSheetBinding(instances[RebuildPathKey(s)],
-                s.Metadata.Document.SheetPath.Path.Select(p => Guid.Parse(p.Value)).ToArray())).ToArray(), bindings);
+                s.Metadata.Document.SheetPath.Path.Select(p => Guid.Parse(p.Value)).ToArray())).ToArray(), bindings,
+            PartSymbols: [new(alternative.Id, cachedProbe.Definition.Id.Clone(), cachedProbe)]);
     }
 }

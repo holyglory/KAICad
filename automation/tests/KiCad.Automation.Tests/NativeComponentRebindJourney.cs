@@ -40,6 +40,8 @@ public sealed partial class NativeSessionTests
         await client.InvokeAsync<ClearSelection, Empty>(new() { Header = header.Clone() }, token);
         var select = new AddToSelection { Header = header.Clone() }; select.Items.Add(new KIID { Value = nativeId.ToString("D") });
         await client.InvokeAsync<AddToSelection, SelectionResponse>(select, token);
+        var before = await client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(
+            new() { Document = document.Clone(), ProcessEpoch = client.Epoch }, token);
         async Task Open()
         {
             NativeKeyboard.SchematicShortcut(display, processId, "e", controlKey: false, focusCanvas: false, altKey: true);
@@ -61,9 +63,38 @@ public sealed partial class NativeSessionTests
                 limit.CancelAfter(TimeSpan.FromSeconds(10));
                 while (NativeKeyboard.HasWindow(display, processId, dialog)) await Task.Delay(50, limit.Token);
             }
-            // The dialog entry point is verified as a real rendered, cancellable
-            // interaction. The checked native batch below supplies deterministic
-            // replacement data for the ownership journey.
+            var cancelled = await client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(
+                new() { Document = document.Clone(), ProcessEpoch = client.Epoch }, token);
+            Assert.AreEqual(before.State.StateSha256, cancelled.State.StateSha256, "Cancelling Change Symbols must preserve the design.");
+            await Open();
+            (int X, int Y, int Width, int Height) geometry = default;
+            NativeKeyboard.SchematicShortcut(display, processId, "", dialog, false, false, observeGeometry: g => geometry = g);
+            await File.WriteAllTextAsync(Path.Combine(evidence, "change-symbol-geometry.json"),
+                JsonSerializer.Serialize(new { geometry.X, geometry.Y, geometry.Width, geometry.Height }), token);
+            // These coordinates are bound to the retained 1280x900 dialog captures.
+            // Explicitly click the field; focusCanvas=false alone only focuses the window.
+            NativeKeyboard.SchematicShortcut(display, processId, "click", dialog, false, false,
+                clickFromLeft: 430, clickFromBottom: 565);
+            NativeKeyboard.SchematicShortcut(display, processId, "a", dialog, true, false);
+            foreach (char c in "RebindFixture:ReplacedProbe")
+                NativeKeyboard.SchematicShortcut(display, processId, c.ToString(), dialog, false, false);
+            NativeKeyboard.SchematicShortcut(display, processId, "Tab", dialog, false, false);
+            await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, "change-symbol-filled.png"), token);
+            NativeKeyboard.SchematicShortcut(display, processId, "click", dialog, false, false,
+                clickFromRight: 50, clickFromBottom: 22);
+            await Task.Delay(250, token);
+            await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, "change-symbol-result.png"), token);
+            NativeKeyboard.SchematicShortcut(display, processId, "Escape", dialog, false, false);
+            using var close = CancellationTokenSource.CreateLinkedTokenSource(token); close.CancelAfter(TimeSpan.FromSeconds(10));
+            while (NativeKeyboard.HasWindow(display, processId, dialog)) await Task.Delay(50, close.Token);
+            var after = await client.InvokeAsync<ReadCheckedSchematicState, CheckedSchematicState>(
+                new() { Document = document.Clone(), ProcessEpoch = client.Epoch }, token);
+            var changed = after.Electrical.Hierarchy.Data.Instances.Single(s => s.Metadata.Document.Equals(document))
+                .Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor)).Select(i => i.Unpack<SchematicSymbolInstance>())
+                .Single(s => s.Id.Value == nativeId.ToString("D"));
+            Assert.AreEqual("RebindFixture:ReplacedProbe", SchematicNativeAdditionProjection.LibraryKey(changed));
+            Assert.AreEqual("7", changed.Definition.Items.Where(c => c.Item.Is(SchematicPin.Descriptor))
+                .Select(c => c.Item.Unpack<SchematicPin>()).Single(p => p.LibraryPinId is not null).Number);
         }
         catch
         {
@@ -136,8 +167,11 @@ public sealed partial class NativeSessionTests
         { ScreenId = screen.Metadata.ScreenId.Clone(), Definitions = { screen.CachedSymbols.Select(c => c.Clone()).Append(cache) } } });
         if (!shared)
             await ChangeSymbolThroughDialog(client, targetDocument, binding.NativeObjectId, display, processId, directory, token);
-        var result = await client.InvokeAsync<CheckedSchematicBatch, CheckedSchematicBatchReceipt>(replace, token);
-        Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, result.Status, result.ErrorMessage);
+        else
+        {
+            var result = await client.InvokeAsync<CheckedSchematicBatch, CheckedSchematicBatchReceipt>(replace, token);
+            Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, result.Status, result.ErrorMessage);
+        }
         var replaced = await Capture();
         RequireToolSuccess(await Call("kicad_design_recovery_refresh", Recovery()));
         var unanswered = await Call("kicad_design_sync_plan", Recovery());
@@ -201,7 +235,7 @@ public sealed partial class NativeSessionTests
         byte[] beforeRepeat = await File.ReadAllBytesAsync(designPath, token); await Publish("repeat");
         CollectionAssert.AreEqual(beforeRepeat, await File.ReadAllBytesAsync(designPath, token));
         await File.WriteAllTextAsync(PathOf("rebind-proof.json"), JsonSerializer.Serialize(new { sharedInstances = shared ? 2 : 1,
-            changeSymbolDialog = !shared, nativeReplacement = true,
+            manualChangeSymbolApplied = !shared, changeSymbolCancellationPreserved = !shared, nativeReplacement = true,
             explicitPinMapping = true, noMutationWhenAnswering = true, unchangedComponentAndOccurrence = true,
             instructionsPreserved = true, actualConnectivity = true, nativeUndoRedo = true, reload = true, repeatNoOp = true }), token);
     }

@@ -271,10 +271,10 @@ public sealed partial class NativeSessionTests
                 Assert.AreEqual(1.0, job.Progress);
                 Assert.IsTrue(job.WorkerFinished);
                 Assert.IsFalse(job.CancellationRequested, because + " Nothing asked this check to stop.");
-                Assert.IsFalse(job.SnapshotComplete,
-                    "An ordinary check never claims a complete input snapshot (n39a51a3a2ff84c55, ledger p23deb822a36256a6).");
-                Assert.IsFalse(job.ResultsFresh,
-                    "An ordinary check never claims fresh results (n39a51a3a2ff84c55, ledger p23deb822a36256a6).");
+                Assert.IsTrue(job.SnapshotComplete,
+                    "A completed check owns a complete detached input snapshot.");
+                Assert.IsTrue(job.ResultsFresh,
+                    "A completed check is fresh while its captured inputs remain unchanged.");
                 Assert.AreEqual(at, job.CheckedRevision, because);
                 var fixture = target.Fixture;
                 CollectionAssert.AreEqual(new[]
@@ -488,7 +488,8 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(terminalB.CancellationRequested);
             Assert.IsEmpty(terminalB.Findings, "A cancelled check never exposes the violations it had already found.");
             Assert.IsLessThan(1.0, terminalB.Progress);
-            Assert.IsFalse(terminalB.ResultsFresh || terminalB.SnapshotComplete);
+            Assert.IsFalse(terminalB.ResultsFresh);
+            Assert.IsTrue(terminalB.SnapshotComplete);
             Assert.AreEqual(savedB.Revision, terminalB.CheckedRevision);
             Assert.AreEqual(terminalB, await Read(b, b2), "A cancelled check stays cancelled.");
             Assert.AreEqual(terminalB, Parse(await mcp.Tool("kicad_pcb_drc_cancel", new
@@ -514,7 +515,8 @@ public sealed partial class NativeSessionTests
                 "The failure must name the rules file and the item's own line and offset in it.");
             Assert.IsEmpty(failedA.Findings, "A failed check never exposes findings.");
             Assert.IsTrue(failedA.WorkerFinished);
-            Assert.IsFalse(failedA.CancellationRequested || failedA.ResultsFresh || failedA.SnapshotComplete);
+            Assert.IsFalse(failedA.CancellationRequested || failedA.ResultsFresh);
+            Assert.IsTrue(failedA.SnapshotComplete);
             Assert.IsLessThan(1.0, failedA.Progress);
             Assert.AreEqual(failedA, await Read(a, a3), "A failed check stays failed.");
             // A check cancelled after its findings started leaves nothing behind: the next complete check of the same

@@ -127,6 +127,7 @@ struct PCB_DRC_JOB_MANAGER::JOB
     std::string errorCode;
     std::string errorMessage;
     bool resultsFresh = false;
+    bool snapshotComplete = false;
     bool workerFinished = false;
     bool invalidated = false;
     std::vector<PcbDrcFinding> findings;
@@ -949,8 +950,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
     result.set_results_fresh( aJob->resultsFresh );
     result.set_cancellation_requested( aJob->reporter->IsCancelled() );
     result.set_worker_finished( aJob->workerFinished );
-    // Project/rule dependency capture is still incomplete (p23deb822a36256a6).
-    result.set_snapshot_complete( false );
+    result.set_snapshot_complete( aJob->snapshotComplete );
     result.set_candidate_dry_run( aJob->candidateDryRun );
     for( const KIID& identity : aJob->candidateItemIds )
         result.add_candidate_item_ids( identity.AsStdString() );
@@ -1086,6 +1086,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
     job->libraryFingerprints = inputs->LibraryFingerprints();
     job->auxiliaryFingerprint = inputs->AuxiliaryBaseline().Fingerprint();
     job->hasLibraryDependencies = inputs->HasLibraryDependencies();
+    job->snapshotComplete = inputs->SnapshotComplete();
     job->candidateDryRun = !candidateItemIds.empty();
     job->candidateItemIds = std::move( candidateItemIds );
     if( job->testFootprints )
@@ -1226,7 +1227,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
         job->progress = terminal == PDRCJS_COMPLETED ? 1.0 : std::max( job->progress, job->reporter->Progress() );
         job->phase = job->reporter->Phase();
         if( terminal == PDRCJS_COMPLETED ) job->findings = std::move( findings );
-        job->resultsFresh = false; // Full project/rule snapshot remains unqualified.
+        job->resultsFresh = terminal == PDRCJS_COMPLETED && job->snapshotComplete;
     } );
     }
     catch( const std::exception& error )

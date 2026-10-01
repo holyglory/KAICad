@@ -107,6 +107,9 @@ public:
     const KIID& CapturedDrawingIdentity() const;
     const KIID& SourceDrawingIdentity() const { return m_sourceDrawingIdentity; }
     bool RulesUnchanged() const;
+    // True only after the detached board, project/rule baseline, library
+    // definitions, drawing-sheet model and routing settings were all captured.
+    bool SnapshotComplete() const;
     const PCB_DRC_PROJECT_BASELINE& ProjectBaseline() const { return m_projectBaseline; }
     const PCB_DRC_AUXILIARY_BASELINE& AuxiliaryBaseline() const { return m_auxiliaryBaseline; }
     std::string LibraryFingerprint() const;

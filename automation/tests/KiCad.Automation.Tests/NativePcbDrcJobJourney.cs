@@ -29,8 +29,8 @@ public sealed partial class NativeSessionTests
 
         Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, state.Status, state.ErrorCode + ": " + state.ErrorMessage);
         Assert.AreEqual(1.0, state.Progress);
-        Assert.IsFalse(state.SnapshotComplete, "Ordinary DRC must not claim complete input capture before p23deb822a36256a6.");
-        Assert.IsFalse(state.ResultsFresh, "Results cannot be fresh while the input snapshot is incomplete.");
+        Assert.IsTrue(state.SnapshotComplete, "The detached DRC bundle captures every owned native input before execution.");
+        Assert.IsTrue(state.ResultsFresh, "Completed results remain fresh while all captured inputs are unchanged.");
         Assert.IsFalse(state.CancellationRequested);
         Assert.AreEqual(state.Findings.Count, state.Findings.Select(finding => finding.NativeId).Distinct().Count());
         Assert.AreEqual(before, await ObserveLifecycleState(client, board, token),
@@ -145,8 +145,8 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, third.Status, third.ErrorCode + ": " + third.ErrorMessage);
         Assert.AreEqual(state.Findings.Count, third.Findings.Count,
             "A new check of the reloaded board must report the findings of the saved board.");
-        Assert.IsFalse(third.SnapshotComplete);
-        Assert.IsFalse(third.ResultsFresh);
+        Assert.IsTrue(third.SnapshotComplete);
+        Assert.IsTrue(third.ResultsFresh);
     }
 
     // Window activation is the PCB editor's checkpoint for changes that reach it without any notification. Here the
@@ -295,6 +295,6 @@ public sealed partial class NativeSessionTests
         Assert.IsEmpty(job.Findings, because + " A stale check must not expose its old findings.");
         Assert.IsTrue(job.WorkerFinished, because);
         Assert.IsFalse(job.ResultsFresh, because);
-        Assert.IsFalse(job.SnapshotComplete, because);
+        Assert.IsTrue(job.SnapshotComplete, because);
     }
 }

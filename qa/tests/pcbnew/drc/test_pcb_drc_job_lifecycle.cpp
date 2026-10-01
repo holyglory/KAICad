@@ -995,8 +995,8 @@ BOOST_AUTO_TEST_CASE( StaleAdmissionIsRejectedAndCompletedBoardOnlyResultCannotC
         }
     }
     BOOST_CHECK( foundOutline );
-    BOOST_CHECK( !state->snapshot_complete() );
-    BOOST_CHECK( !state->results_fresh() );
+    BOOST_CHECK( state->snapshot_complete() );
+    BOOST_CHECK( state->results_fresh() );
     board.IncrementTimeStamp();
     auto stale = jobs.Read( query, board, epoch );
     BOOST_REQUIRE( stale );
@@ -1297,7 +1297,7 @@ BOOST_AUTO_TEST_CASE( WorkerFindsActualCopperViolationsWithItsBoardEngineBound )
             ++copperViolations;
     }
     BOOST_CHECK_GT( copperViolations, 0 );
-    BOOST_CHECK( !state->snapshot_complete() && !state->results_fresh() );
+    BOOST_CHECK( state->snapshot_complete() && state->results_fresh() );
     BOOST_CHECK_EQUAL( board.Footprints().size(), 20 );
     BOOST_CHECK_EQUAL( board.GetTimeStamp(), request.expected_revision().sequence() );
 }
@@ -1387,7 +1387,7 @@ BOOST_AUTO_TEST_CASE( WorkerUsesCapturedUnsavedProjectRulesDrawingAndExclusions 
             exclusion |= finding.excluded() && finding.comment() == "reviewed input outline";
     }
     BOOST_CHECK( clearance ); BOOST_CHECK( drawingFound ); BOOST_CHECK( exclusion );
-    BOOST_CHECK( !state->results_fresh() && !state->snapshot_complete() );
+    BOOST_CHECK( state->results_fresh() && state->snapshot_complete() );
     BOOST_CHECK( project->GetProjectFile().CaptureCurrentState() == projectBefore );
     BOOST_CHECK_EQUAL( board.GetTimeStamp(), sequence );
     BOOST_CHECK_EQUAL( board.Markers().size(), 1 );
@@ -1446,7 +1446,7 @@ BOOST_AUTO_TEST_CASE( UncompilableCustomRulesFailTheCheckAndCorrectedRulesComple
                          failed.error_message() );
     BOOST_CHECK_EQUAL( failed.findings_size(), 0 );
     BOOST_CHECK_LT( failed.progress(), 1.0 );
-    BOOST_CHECK( !failed.results_fresh() && !failed.snapshot_complete() && !failed.cancellation_requested() );
+    BOOST_CHECK( !failed.results_fresh() && failed.snapshot_complete() && !failed.cancellation_requested() );
     auto reread = jobs.Read( Query( failed ), board, epoch );
     BOOST_REQUIRE( reread );
     BOOST_CHECK( MessageDifferencer::Equals( *reread, failed ) );
@@ -1464,7 +1464,7 @@ BOOST_AUTO_TEST_CASE( UncompilableCustomRulesFailTheCheckAndCorrectedRulesComple
                                                      + std::to_string( DRC_RULE_FILE_VERSION ) ) != std::string::npos,
                          newer.error_message() );
     BOOST_CHECK_EQUAL( newer.findings_size(), 0 );
-    BOOST_CHECK( !newer.results_fresh() && !newer.snapshot_complete() && !newer.cancellation_requested() );
+    BOOST_CHECK( !newer.results_fresh() && newer.snapshot_complete() && !newer.cancellation_requested() );
 
     { std::ofstream stream( rulesPath ); stream << "(version 1)\n(rule \"kept\" (constraint clearance (min 0.3mm)))\n"; }
     auto corrected = jobs.Start( Request( board, epoch ), board, epoch, context );
@@ -1475,7 +1475,7 @@ BOOST_AUTO_TEST_CASE( UncompilableCustomRulesFailTheCheckAndCorrectedRulesComple
     for( const auto& finding : completed.findings() )
         clearance += finding.marker().error_type() == kiapi::board::DRCET_CLEARANCE;
     BOOST_CHECK_EQUAL( clearance, 1 );
-    BOOST_CHECK( !completed.results_fresh() && !completed.snapshot_complete() );
+    BOOST_CHECK( completed.results_fresh() && completed.snapshot_complete() );
 }
 
 // Isolated rule: every failure message a check reports or compares is copied from the exception
@@ -1589,7 +1589,7 @@ BOOST_AUTO_TEST_CASE( RefillRunsOnThePrivateBoardAndRequiresCapturedRoutingSetti
     }
     BOOST_REQUIRE( state ); BOOST_REQUIRE( state->worker_finished() );
     BOOST_REQUIRE_MESSAGE( state->status() == PDRCJS_COMPLETED, state->error_message() );
-    BOOST_CHECK( !state->results_fresh() && !state->snapshot_complete() );
+    BOOST_CHECK( state->results_fresh() && state->snapshot_complete() );
     BOOST_CHECK_EQUAL( board.GetTimeStamp(), revision );
     BOOST_CHECK_EQUAL( zone->GetFilledPolysList( F_SilkS ) ? zone->GetFilledPolysList( F_SilkS )->TotalVertices() : 0,
                        vertices );
@@ -1641,7 +1641,7 @@ BOOST_AUTO_TEST_CASE( NonConvergingRefillStopsTheJobWithoutPublishingCheckFindin
     BOOST_CHECK( state->status() == PDRCJS_INCOMPLETE );
     BOOST_CHECK_EQUAL( state->error_code(), "refill_not_converged" );
     BOOST_CHECK_EQUAL( state->findings_size(), 0 );
-    BOOST_CHECK( !state->results_fresh() && !state->snapshot_complete() );
+    BOOST_CHECK( !state->results_fresh() && state->snapshot_complete() );
     BOOST_CHECK_EQUAL( board->GetTimeStamp(), request.expected_revision().sequence() );
 }
 
@@ -1714,7 +1714,7 @@ BOOST_AUTO_TEST_CASE( CapturedSchematicRunsParityAndSameRevisionElectricalChange
     BOOST_CHECK( MessageDifferencer::Equals( state->checked_schematic_state(), currentSchematic ) );
     BOOST_REQUIRE_EQUAL( state->input_warnings_size(), 1 );
     BOOST_CHECK_EQUAL( state->input_warnings( 0 ), "fixture intentional duplicate sheet names" );
-    BOOST_CHECK( !state->results_fresh() && !state->snapshot_complete() );
+    BOOST_CHECK( state->results_fresh() && state->snapshot_complete() );
 
     // A recovery checkpoint observes the parity schematic once for all its receipts.
     auto again = request;

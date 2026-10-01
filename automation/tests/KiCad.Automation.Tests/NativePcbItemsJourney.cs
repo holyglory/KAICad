@@ -218,6 +218,8 @@ public sealed partial class NativeSessionTests
             }
             Assert.IsTrue(dryRun.WorkerFinished, "Detached candidate DRC did not reach a terminal state.");
             Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, dryRun.Status, dryRun.ErrorMessage);
+            Assert.IsTrue(dryRun.SnapshotComplete);
+            Assert.IsTrue(dryRun.ResultsFresh);
             Assert.AreEqual(svgState, SchematicJson.Formatter.Format(await ObserveLifecycleState(client, board, token)));
             var previewRequest = new StartPcbRoutePreview
             {

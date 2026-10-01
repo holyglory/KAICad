@@ -270,3 +270,13 @@ bool PCB_DRC_RUN_INPUTS::RulesUnchanged() const
     return m_rulesBaseline.Path().empty()
             || m_rulesBaseline.Check( m_rulesBaseline.Path() ) == FILE_BASELINE_CHECK::UNCHANGED;
 }
+
+bool PCB_DRC_RUN_INPUTS::SnapshotComplete() const
+{
+    // A run is complete only when every owned native input needed by the DRC
+    // engine has a detached representation. Schematic parity is optional and is
+    // captured separately when requested by test_footprints.
+    return m_document != nullptr && m_libraries != nullptr && m_drawing != nullptr
+            && m_proxy != nullptr
+            && ( m_rulesBaseline.Path().empty() || m_rulesBaseline.Known() );
+}

@@ -3339,7 +3339,7 @@ tier="development"
 requires=["native-build"]
 after=["journey-native-synchronization-plan"]
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeSymbolSheetOwnership", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-symbol-sheet-ownership-tests"]
-retained_artifacts=[{ name="native-symbol-sheet-ownership-tests",path="automation/artifacts/native-symbol-sheet-ownership-tests",max_bytes=16777216 },{ name="native-symbol-sheet-ownership-evidence",path="automation/artifacts/native-symbol-sheet-ownership/native-session-current",max_bytes=33554432 }]
+retained_artifacts=[{ name="native-symbol-sheet-ownership-tests",path="automation/artifacts/native-symbol-sheet-ownership-tests",max_bytes=16777216 },{ name="native-symbol-sheet-ownership-evidence",path="automation/artifacts/native-symbol-sheet-ownership/native-session-current",max_bytes=268435456 }]
 
 [[test.native-acceptance.check]]
 name="journey-native-xml-component-creation"
@@ -3347,7 +3347,7 @@ tier="development"
 requires=["native-build"]
 after=["journey-native-symbol-sheet-ownership"]
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeXmlComponentCreation", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-xml-component-creation-tests"]
-retained_artifacts=[{ name="native-xml-component-creation-tests",path="automation/artifacts/native-xml-component-creation-tests",max_bytes=16777216 },{ name="native-xml-component-creation-evidence",path="automation/artifacts/native-xml-component-creation/native-session-current",max_bytes=33554432 }]
+retained_artifacts=[{ name="native-xml-component-creation-tests",path="automation/artifacts/native-xml-component-creation-tests",max_bytes=16777216 },{ name="native-xml-component-creation-evidence",path="automation/artifacts/native-xml-component-creation/native-session-current",max_bytes=268435456 }]
 
 [[test.native-acceptance.check]]
 name="journey-native-transform-sync"
@@ -3379,7 +3379,7 @@ tier="development"
 requires=["native-build"]
 after=["journey-native-offscreen-move"]
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeFieldHistory|TestCategory=NativeRecursiveEditor|TestCategory=NativeSimulation|TestCategory=NativePcbItems", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/field-history-dialog-tests"]
-retained_artifacts=[{ name="dialog-tests",path="automation/artifacts/field-history-dialog-tests",max_bytes=16777216 },{ name="light",path="automation/artifacts/native-field-history/light/native-session-current",max_bytes=16777216 },{ name="dark",path="automation/artifacts/native-field-history/dark/native-session-current",max_bytes=16777216 },{ name="editor-light",path="automation/artifacts/native-recursive-editor/light/native-session-current",max_bytes=67108864 },{ name="editor-dark",path="automation/artifacts/native-recursive-editor/dark/native-session-current",max_bytes=67108864 }]
+retained_artifacts=[{ name="dialog-tests",path="automation/artifacts/field-history-dialog-tests",max_bytes=16777216 },{ name="light",path="automation/artifacts/native-field-history/light/native-session-current",max_bytes=16777216 },{ name="dark",path="automation/artifacts/native-field-history/dark/native-session-current",max_bytes=16777216 },{ name="editor-light",path="automation/artifacts/native-recursive-editor/light/native-session-current",max_bytes=67108864 },{ name="editor-dark",path="automation/artifacts/native-recursive-editor/dark/native-session-current",max_bytes=67108864 },{ name="simulation",path="automation/artifacts/native-simulation/native-session-current",max_bytes=16777216 },{ name="pcb-items",path="automation/artifacts/native-pcb-items/native-session-current",max_bytes=33554432 }]
 
 [[test.native-acceptance.check]]
 name="journey-psu-cpu-creation"
@@ -3397,7 +3397,7 @@ requires=["native-build"]
 after=["journey-psu-cpu-creation"]
 timeout_seconds=1200
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeConnectedRealization", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-connected-realization-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
-retained_artifacts=[{ name="native-connected-realization-tests",path="automation/artifacts/native-connected-realization-tests",max_bytes=16777216 },{ name="native-connected-realization-evidence",path="automation/artifacts/native-connected-realization/native-session-current",max_bytes=67108864 }]
+retained_artifacts=[{ name="native-connected-realization-tests",path="automation/artifacts/native-connected-realization-tests",max_bytes=16777216 },{ name="native-connected-realization-evidence",path="automation/artifacts/native-connected-realization/native-session-current",max_bytes=268435456 }]
 
 [[test.native-acceptance.check]]
 name="journey-psu-cpu-rebuild"
@@ -3406,7 +3406,7 @@ requires=["native-build"]
 after=["journey-psu-cpu-connected"]
 timeout_seconds=1200
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeXmlRebuild", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-xml-rebuild-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
-retained_artifacts=[{ name="native-xml-rebuild-tests",path="automation/artifacts/native-xml-rebuild-tests",max_bytes=16777216 },{ name="native-xml-rebuild-evidence",path="automation/artifacts/native-xml-rebuild/native-session-current",max_bytes=67108864 }]
+retained_artifacts=[{ name="native-xml-rebuild-tests",path="automation/artifacts/native-xml-rebuild-tests",max_bytes=16777216 },{ name="native-xml-rebuild-evidence",path="automation/artifacts/native-xml-rebuild/native-session-current",max_bytes=268435456 }]
 
 [[test.native-acceptance.check]]
 name="journey-repeated-sheet-recovery"
@@ -3414,7 +3414,7 @@ tier="development"
 requires=["native-build"]
 timeout_seconds=1200
 command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeRepeatedSheetRebuild","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/repeated-rebuild-tests","--","MSTest.MapInconclusiveToFailed=true"]
-retained_artifacts=[{name="rebuild-tests",path="automation/artifacts/repeated-rebuild-tests",max_bytes=16777216},{name="rebuild-evidence",path="automation/artifacts/native-repeated-rebuild/native-session-current",max_bytes=67108864}]
+retained_artifacts=[{name="rebuild-tests",path="automation/artifacts/repeated-rebuild-tests",max_bytes=16777216},{name="rebuild-evidence",path="automation/artifacts/native-repeated-rebuild/native-session-current",max_bytes=268435456}]
 
 [[test.native-acceptance.check]]
 name="journey-project-recovery"

@@ -2959,7 +2959,7 @@ name="managed-build"
 tier="development"
 role="preflight"
 invalidates=["input-contracts", "configure", "model-build", "codec", "native-build", "rendered"]
-command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
+command=["dotnet", "build", "--disable-build-servers", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Debug"]
 
 [[test.native-xml-component-creation.check]]
 name="input-contracts"
@@ -3019,7 +3019,7 @@ requires=["native-build"]
 after=["psu-cpu-rendered"]
 timeout_seconds=1200
 command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Debug", "--filter", "TestCategory=NativeConnectedRealization", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/native-connected-realization-tests", "--", "MSTest.MapInconclusiveToFailed=true"]
-retained_artifacts=[{ name="native-connected-realization-tests",path="automation/artifacts/native-connected-realization-tests",max_bytes=16777216 },{ name="native-connected-realization-evidence",path="automation/artifacts/native-connected-realization/native-session-current",max_bytes=67108864 }]
+retained_artifacts=[{ name="native-connected-realization-tests",path="automation/artifacts/native-connected-realization-tests",max_bytes=16777216 },{ name="native-connected-realization-evidence",path="automation/artifacts/native-connected-realization/native-session-current",max_bytes=268435456 }]
 
 [test.native-transform-sync]
 timeout_seconds=3600

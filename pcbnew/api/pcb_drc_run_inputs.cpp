@@ -9,6 +9,7 @@
 #include <api/native_state_digest.h>
 #include <advanced_config.h>
 #include <board_design_settings.h>
+#include <advanced_config.h>
 #include <build_version.h>
 #include <common.h>
 #include <drc/drc_engine.h>
@@ -786,7 +787,21 @@ PCB_DRC_AUXILIARY_BASELINE PCB_DRC_AUXILIARY_BASELINE::Capture(
         { "drawing", drawing.utf8_string() },
         { "allow_empty_drawing", aContext.drawing.VoidListAllowed() },
         { "routing", aContext.routingSettings
-                ? aContext.routingSettings->CaptureCurrentState() : nlohmann::json() }
+                ? aContext.routingSettings->CaptureCurrentState() : nlohmann::json() },
+        { "advanced_drc", {
+            { "extra_clearance", ADVANCED_CFG::GetCfg().m_ExtraClearance },
+            { "enable_creepage_slot", ADVANCED_CFG::GetCfg().m_EnableCreepageSlot },
+            { "realtime_creepage", ADVANCED_CFG::GetCfg().m_RealtimeCreepage },
+            { "drc_epsilon", ADVANCED_CFG::GetCfg().m_DRCEpsilon },
+            { "sliver_width_tolerance", ADVANCED_CFG::GetCfg().m_SliverWidthTolerance },
+            { "sliver_minimum_length", ADVANCED_CFG::GetCfg().m_SliverMinimumLength },
+            { "sliver_angle_tolerance", ADVANCED_CFG::GetCfg().m_SliverAngleTolerance },
+            { "font_error_size", ADVANCED_CFG::GetCfg().m_FontErrorSize },
+            { "triangulate_simplification_level", ADVANCED_CFG::GetCfg().m_TriangulateSimplificationLevel },
+            { "resolve_text_recursion_depth", ADVANCED_CFG::GetCfg().m_ResolveTextRecursionDepth },
+            { "min_parallel_angle", ADVANCED_CFG::GetCfg().m_MinParallelAngle },
+            { "zone_fill_iterative_refill", ADVANCED_CFG::GetCfg().m_ZoneFillIterativeRefill }
+        } }
     };
     return result;
 }

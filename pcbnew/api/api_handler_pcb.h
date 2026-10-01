@@ -56,6 +56,11 @@ public:
     void ObserveNativeDrcInputs( bool aLibraryConfigurationMayHaveChanged );
 
 private:
+    // Direct unit fixtures may invoke an unregistered handler. Production
+    // handlers use the server that registered this handler; the fallback keeps
+    // those fixture calls bound to the established global server.
+    KICAD_API_SERVER& drcApiServer() const;
+
     typedef std::map<std::string, PROPERTY_BASE*> PROTO_PROPERTY_MAP;
 
     HANDLER_RESULT<commands::GetOpenDocumentsResponse> handleGetOpenDocuments(

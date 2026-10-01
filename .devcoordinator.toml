@@ -3691,7 +3691,7 @@ name="xml-rebuild"
 tier="development"
 requires=["native-build"]
 command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeXmlRebuild","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-xml-rebuild-focus","--","MSTest.MapInconclusiveToFailed=true"]
-retained_artifacts=[{name="xml-rebuild-focus-tests",path="automation/artifacts/native-xml-rebuild-focus",max_bytes=16777216},{name="xml-rebuild-focus-evidence",path="automation/artifacts/native-xml-rebuild/native-session-current",max_bytes=67108864}]
+retained_artifacts=[{name="xml-rebuild-focus-tests",path="automation/artifacts/native-xml-rebuild-focus",max_bytes=16777216},{name="xml-rebuild-focus-evidence",path="automation/artifacts/native-xml-rebuild/native-session-current",max_bytes=268435456}]
 
 
 [test.connection-resolution]

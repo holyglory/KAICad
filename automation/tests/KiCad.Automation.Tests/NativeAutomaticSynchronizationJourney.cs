@@ -47,6 +47,11 @@ public sealed partial class NativeSessionTests
             .FirstOrDefault()
             ?? throw new AssertFailedException("The automatic deletion fixture needs one single-drawing component.");
         var deletionBinding = parsed.SymbolBindings.Single(b => b.SymbolOccurrenceId == deletionOccurrence.Id);
+        var deletionComponent = parsed.Engineering.Circuit.Components.Single(c => c.Id == deletionOccurrence.ComponentId);
+        var deletionNetIds = parsed.Engineering.Circuit.Nets
+            .Where(n => n.Pins.Any(p => p.ComponentId == deletionComponent.Id))
+            .Select(n => n.Id).ToArray();
+        Assert.IsNotEmpty(deletionNetIds, "The automatic deletion fixture must exercise connected net retirement.");
         var deletionSheet = parsed.SheetBindings.Single(b => b.SheetInstanceId == deletionOccurrence.EffectiveSheetInstanceId(
             parsed.Engineering.Circuit.Components.Single(c => c.Id == deletionOccurrence.ComponentId)));
         var deletionDocument = root.Clone(); deletionDocument.SheetPath.Path.Clear();
@@ -62,11 +67,14 @@ public sealed partial class NativeSessionTests
         var afterDeletion = await Capture();
         var deletedDesign = Read();
         Assert.IsFalse(deletedDesign.Engineering.Circuit.Symbols.Any(s => s.Id == deletionOccurrence.Id));
+        Assert.IsFalse(deletedDesign.Engineering.Circuit.Components.Any(c => c.Id == deletionComponent.Id));
+        Assert.IsFalse(deletedDesign.Engineering.Circuit.Nets.Any(n => n.Pins.Any(p => p.ComponentId == deletionComponent.Id)));
         Assert.IsFalse(SchematicModelProjection.NativeSymbols(deletedDesign, afterDeletion.Electrical.Hierarchy.Data)
             .ContainsKey(deletionOccurrence.Id));
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-automatic-native-deletion.json"),
-            JsonSerializer.Serialize(new { occurrence = deletionOccurrence.Id, nativeObject = deletionNative.Id.Value,
-                automaticReverseXml = true, nativeUndoRedo = true }), deadline.Token);
+            JsonSerializer.Serialize(new { occurrence = deletionOccurrence.Id, component = deletionComponent.Id,
+                nativeObject = deletionNative.Id.Value, retiredNets = deletionNetIds,
+                automaticReverseXml = true, connectedNetRetirement = true, nativeUndoRedo = true }), deadline.Token);
         await FocusedSchematicShortcut(client, deletionDocument, processId, display, "z", deadline.Token);
         await Watching(design => design.Engineering.Circuit.Symbols.Any(s => s.Id == deletionOccurrence.Id));
         await FocusedSchematicShortcut(client, deletionDocument, processId, display, "y", deadline.Token);

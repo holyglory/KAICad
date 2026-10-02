@@ -187,6 +187,43 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
             });
         });
 
+    [McpServerTool(Name = "kicad_footprint_definition_read", ReadOnly = true),
+     Description("Read one complete footprint definition from the native library or the currently loaded editor. source is persisted_library or editor. The persisted path forces a native library refresh even when size and modification time are unchanged. An editor read is a detached projection; canonicalTargetJson may rename that projection without editing the target library. The response includes the complete nested Footprint, canonical writer hash, provider identity hash, file baseline and explicit limitations; incomplete provider coverage remains incomplete."),
+     KiCadCapability("footprint-library", "compiled-mcp plus native-footprint-api", "forced-refresh complete footprint definition readback and detached editor projection"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> ReadDefinition(string instanceId, string expectedProcessEpoch,
+        string documentJson, string source, CancellationToken cancellationToken, string canonicalTargetJson = "") =>
+        Execute(async () =>
+        {
+            ValidateEpoch(expectedProcessEpoch);
+            DocumentSpecifier document = ParseFootprintDocument(documentJson);
+            NativeFootprintDefinitionSource sourceValue = ParseDefinitionSource(source);
+            LibraryIdentifier? canonicalTarget = ParseCanonicalTarget(canonicalTargetJson, sourceValue);
+            NativeContext context = await Admit(instanceId, expectedProcessEpoch, cancellationToken);
+            NativeCapabilityFootprintReadDefinitionResponse response = await ReadNativeDefinition(
+                context, document, sourceValue, canonicalTarget, cancellationToken);
+            return Data(new
+            {
+                instanceId, processEpoch = context.Session.Epoch, document, source,
+                nativeQuery = true, revisionTracked = false,
+                definitionComplete = response.DefinitionComplete,
+                canonicalSha256 = response.CanonicalSha256,
+                providerSha256 = response.ProviderSha256,
+                footprint = JsonSerializer.Deserialize<JsonElement>(BoardJson.Formatter.Format(response.Footprint)),
+                fileBaseline = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(response.FileBaseline)),
+                limitations = response.Limitations.ToArray(),
+                canonicalTarget = response.CanonicalTarget
+            });
+        });
+
+    [McpServerTool(Name = "kicad_footprint_definition_preview", ReadOnly = true),
+     Description("Preview the complete definition currently loaded in the native footprint editor without navigating, selecting or mutating it. canonicalTargetJson optionally names the detached library identity used for save-copy planning. This is an editor projection and carries the same canonical writer hash and completeness limits as kicad_footprint_definition_read with source editor."),
+     KiCadCapability("footprint-library", "compiled-mcp plus native-footprint-api", "detached complete editor definition projection"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> PreviewDefinition(string instanceId, string expectedProcessEpoch,
+        string documentJson, CancellationToken cancellationToken, string canonicalTargetJson = "") =>
+        ReadDefinition(instanceId, expectedProcessEpoch, documentJson, "editor", cancellationToken, canonicalTargetJson);
+
     [McpServerTool(Name = "kicad_footprint_receipt", ReadOnly = true),
      Description("Read a footprint mutation receipt after a lost reply. The tool first checks the MCP replay cache, then asks the attached native footprint editor for its process-owned save, save-copy, revert or library-delete receipt, so a new MCP process can reconcile an operation while KiCad remains alive; it never resubmits the mutation."),
      KiCadCapability("footprint-library", "compiled-mcp plus native-footprint-api", "operation UUID and process-owned footprint mutation receipt"),
@@ -244,7 +281,7 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_footprint_save"),
-     Description("Save the explicitly identified footprint currently loaded in the attached native footprint editor. documentJson must be a DocumentSpecifier with type footprint and a library identifier; expectedProcessEpoch pins the request; operationId correlates the attempt. The MCP process retains an exact replay receipt and KiCad retains a process-owned receipt that kicad_footprint_receipt can read after an MCP reconnect. The native command has no lifecycle revision snapshot, so a lost reply remains indeterminate until reconciled. A successful reply confirms native command success and that the library lists the entry; saved geometry is not independently verified."),
+     Description("Save the explicitly identified footprint currently loaded in the attached native footprint editor. Before mutation this captures a complete detached editor definition; after native save it forces a persisted library read and compares the full native-writer canonical hash and file baseline. A successful reply therefore proves complete definition persistence for this entry. operationId and the existing native/MCP receipts retain the lost-reply reconciliation behavior."),
      KiCadCapability("footprint-library", "compiled-mcp plus native-footprint-api", "explicit footprint document, process epoch, operation ID, native process receipt; no lifecycle revision token"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Save(string instanceId, string expectedProcessEpoch, string documentJson,
@@ -256,6 +293,9 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
             DocumentSpecifier document = ParseFootprintDocument(documentJson);
             NativeContext context = await Admit(instanceId, expectedProcessEpoch, cancellationToken);
             await EnsureSnapshot(context, document, expectedSnapshotSha256, cancellationToken);
+            NativeCapabilityFootprintReadDefinitionResponse expectedDefinition = await ReadNativeDefinition(
+                context, document, (NativeFootprintDefinitionSource)2, document.LibId, cancellationToken);
+            RequireCompleteDefinition(expectedDefinition, "footprint save");
             try
             {
                 await context.Client.InvokeAsync<SaveDocument, Empty>(new() { Document = document, OperationId = operationId }, cancellationToken);
@@ -267,6 +307,9 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
 
             NativeCapabilityFootprintReadOperationResponse nativeReceipt = await ReadNativeReceipt(context, operationId, cancellationToken);
             string snapshotSha256 = await SnapshotHash(context, document, cancellationToken);
+            NativeCapabilityFootprintReadDefinitionResponse persistedDefinition = await ReadPersistedDefinitionForVerification(
+                context, document, operationId, "footprint save", cancellationToken);
+            VerifyCanonicalPersistence(expectedDefinition, persistedDefinition, "footprint save", operationId);
             LibraryReadback readback = await VerifyLibraryEntry(context, document.LibId.LibraryNickname,
                 document.LibId.EntryName, operationId, "footprint save", cancellationToken);
             return Data(new
@@ -275,8 +318,12 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
                 operation = "save", document, operationOutcome = "completed",
                 operationReceipt = true, nativeReceiptAvailable = nativeReceipt.Found,
                 revisionTracked = false, nativeCommandSucceeded = true,
-                libraryEntryObserved = true, geometryPersistenceVerified = false,
-                persistenceVerified = false, persistenceSource = "native-footprint-library-entry-enumeration",
+                libraryEntryObserved = true, geometryPersistenceVerified = true,
+                persistenceVerified = true, persistenceSource = "native-forced-refresh-definition-readback",
+                canonicalSha256 = persistedDefinition.CanonicalSha256,
+                providerSha256 = persistedDefinition.ProviderSha256,
+                definitionComplete = persistedDefinition.DefinitionComplete,
+                fileBaseline = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(persistedDefinition.FileBaseline)),
                 persistedLibraryNickname = document.LibId.LibraryNickname,
                 persistedFootprintName = document.LibId.EntryName,
                 persistedModifyHash = readback.ModifyHash,
@@ -284,12 +331,12 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
                 replayableWithinProcess = true, receiptScope = nativeReceipt.Found ? "native-process" : "mcp-process",
                 nativeReceipt = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(nativeReceipt)),
                 snapshotSha256, snapshotSource = "native-footprint-items", snapshotAdmission = string.IsNullOrWhiteSpace(expectedSnapshotSha256) ? "not-requested" : "matched",
-                verification = "native-success-plus-library-entry-enumeration"
+                verification = "native-success-plus-forced-refresh-complete-definition-readback"
             });
         }));
 
     [McpServerTool(Name = "kicad_footprint_save_copy"),
-     Description("Save a copy of the explicitly identified footprint to a library entry without opening the copy. path is a footprint name or libNickname:entryName as accepted by KiCad's native footprint handler, not an arbitrary filesystem path; overwrite and includeProject are passed to the native command. expectedProcessEpoch and operationId pin and correlate the request. The MCP process retains an exact replay receipt and KiCad retains a process-owned receipt that kicad_footprint_receipt can read after an MCP reconnect. The native command has no lifecycle revision snapshot, so a lost reply remains indeterminate and must be reconciled before retrying. A successful reply confirms native command success and that the library lists the copied entry; saved geometry is not independently verified."),
+     Description("Save a detached copy of the explicitly identified footprint to a library entry without opening the copy. Before mutation this captures the complete editor definition under the intended destination identity; after native save it forces a persisted read of that destination and compares the full native-writer canonical hash and file baseline. A successful reply proves complete save-copy persistence; operationId and the existing receipts retain lost-reply reconciliation."),
      KiCadCapability("footprint-library", "compiled-mcp plus native-footprint-api", "explicit footprint document, process epoch, operation ID, native process receipt; no lifecycle revision token"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> SaveCopy(string instanceId, string expectedProcessEpoch, string documentJson,
@@ -302,6 +349,11 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
             DocumentSpecifier document = ParseFootprintDocument(documentJson);
             ValidateCopyPath(path);
             NativeContext context = await Admit(instanceId, expectedProcessEpoch, cancellationToken);
+            (string targetLibrary, string targetName) = ResolveCopyTarget(document, path);
+            LibraryIdentifier canonicalTarget = new() { LibraryNickname = targetLibrary, EntryName = targetName };
+            NativeCapabilityFootprintReadDefinitionResponse expectedDefinition = await ReadNativeDefinition(
+                context, document, (NativeFootprintDefinitionSource)2, canonicalTarget, cancellationToken);
+            RequireCompleteDefinition(expectedDefinition, "footprint save-copy");
             try
             {
                 await context.Client.InvokeAsync<SaveCopyOfDocument, Empty>(new()
@@ -318,7 +370,11 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
 
             NativeCapabilityFootprintReadOperationResponse nativeReceipt = await ReadNativeReceipt(context, operationId, cancellationToken);
             string snapshotSha256 = await SnapshotHash(context, document, cancellationToken);
-            (string targetLibrary, string targetName) = ResolveCopyTarget(document, path);
+            DocumentSpecifier persistedDocument = document.Clone();
+            persistedDocument.LibId = canonicalTarget;
+            NativeCapabilityFootprintReadDefinitionResponse persistedDefinition = await ReadPersistedDefinitionForVerification(
+                context, persistedDocument, operationId, "footprint save-copy", cancellationToken);
+            VerifyCanonicalPersistence(expectedDefinition, persistedDefinition, "footprint save-copy", operationId);
             LibraryReadback readback = await VerifyLibraryEntry(context, targetLibrary, targetName, operationId,
                 "footprint save-copy", cancellationToken);
             return Data(new
@@ -328,14 +384,18 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
                 operationOutcome = "completed", operationReceipt = true,
                 nativeReceiptAvailable = nativeReceipt.Found, revisionTracked = false,
                 nativeCommandSucceeded = true, libraryEntryObserved = true,
-                geometryPersistenceVerified = false, persistenceVerified = false,
-                persistenceSource = "native-footprint-library-entry-enumeration",
+                geometryPersistenceVerified = true, persistenceVerified = true,
+                persistenceSource = "native-forced-refresh-definition-readback",
+                canonicalSha256 = persistedDefinition.CanonicalSha256,
+                providerSha256 = persistedDefinition.ProviderSha256,
+                definitionComplete = persistedDefinition.DefinitionComplete,
+                fileBaseline = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(persistedDefinition.FileBaseline)),
                 persistedLibraryNickname = targetLibrary, persistedFootprintName = targetName,
                 persistedModifyHash = readback.ModifyHash,
                 copyOpened = false, transportRetrySafe = false,
                 replayableWithinProcess = true, receiptScope = nativeReceipt.Found ? "native-process" : "mcp-process",
                 nativeReceipt = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(nativeReceipt)), snapshotSha256,
-                verification = "native-success-plus-library-entry-enumeration"
+                verification = "native-success-plus-forced-refresh-complete-definition-readback"
             });
         }));
 
@@ -396,6 +456,110 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
         }, cancellationToken);
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
             BoardJson.Formatter.Format(response))));
+    }
+
+    private static NativeFootprintDefinitionSource ParseDefinitionSource(string source)
+    {
+        return source.Trim().ToLowerInvariant() switch
+        {
+            "persisted" or "persisted_library" or "library" => (NativeFootprintDefinitionSource)1,
+            "editor" or "preview" => (NativeFootprintDefinitionSource)2,
+            _ => throw new AutomationException("invalid_footprint_definition_source",
+                "source must be persisted_library or editor.")
+        };
+    }
+
+    private static LibraryIdentifier? ParseCanonicalTarget(string json,
+        NativeFootprintDefinitionSource source)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        if ((int)source != 2)
+            throw new AutomationException("invalid_footprint_canonical_target",
+                "canonicalTargetJson is only valid for an editor definition projection.");
+        try
+        {
+            LibraryIdentifier target = SchematicJson.Parser.Parse<LibraryIdentifier>(json);
+            if (string.IsNullOrWhiteSpace(target.LibraryNickname) || string.IsNullOrWhiteSpace(target.EntryName))
+                throw new AutomationException("invalid_footprint_canonical_target",
+                    "canonicalTargetJson must contain a library nickname and entry name.");
+            ValidateLibraryId(target.LibraryNickname, target.EntryName);
+            return target;
+        }
+        catch (AutomationException) { throw; }
+        catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException or InvalidOperationException)
+        {
+            throw new AutomationException("invalid_footprint_canonical_target",
+                "canonicalTargetJson is not valid LibraryIdentifier protobuf JSON: " + error.Message);
+        }
+    }
+
+    private static Task<NativeCapabilityFootprintReadDefinitionResponse> ReadNativeDefinition(
+        NativeContext context, DocumentSpecifier document, NativeFootprintDefinitionSource source,
+        LibraryIdentifier? canonicalTarget, CancellationToken cancellationToken)
+    {
+        NativeCapabilityFootprintReadDefinition request = new()
+        {
+            Document = document,
+            Source = source
+        };
+        if (canonicalTarget is not null) request.CanonicalTarget = canonicalTarget;
+        return context.Client.InvokeAsync<NativeCapabilityFootprintReadDefinition,
+            NativeCapabilityFootprintReadDefinitionResponse>(request, cancellationToken);
+    }
+
+    private static void RequireCompleteDefinition(
+        NativeCapabilityFootprintReadDefinitionResponse response, string operation)
+    {
+        if (!response.DefinitionComplete || string.IsNullOrWhiteSpace(response.CanonicalSha256))
+        {
+            string limits = response.Limitations.Count == 0 ? "no native completeness explanation was returned"
+                : string.Join("; ", response.Limitations);
+            throw new AutomationException("footprint_definition_incomplete",
+                $"Cannot perform {operation} until the native footprint definition is complete: {limits}");
+        }
+    }
+
+    private static async Task<NativeCapabilityFootprintReadDefinitionResponse>
+        ReadPersistedDefinitionForVerification(NativeContext context, DocumentSpecifier document,
+            string operationId, string operation, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await ReadNativeDefinition(context, document,
+                (NativeFootprintDefinitionSource)1, null, cancellationToken);
+        }
+        catch (NngException error)
+        {
+            throw new AutomationException("footprint_persistence_unverified",
+                error.RequestDelivered
+                    ? $"KiCad completed {operation} operation {operationId}, but the forced persisted definition read did not answer; inspect the library before retrying."
+                    : $"KiCad completed {operation} operation {operationId}, but the forced persisted definition read was not reached; inspect the library before retrying.");
+        }
+        catch (NativeApiException error)
+        {
+            throw new AutomationException("footprint_persistence_unverified",
+                $"KiCad completed {operation} operation {operationId}, but the forced persisted definition read failed: {error.Message}");
+        }
+    }
+
+    private static void VerifyCanonicalPersistence(
+        NativeCapabilityFootprintReadDefinitionResponse before,
+        NativeCapabilityFootprintReadDefinitionResponse after, string operation, string operationId)
+    {
+        if (!before.DefinitionComplete || !after.DefinitionComplete
+            || string.IsNullOrWhiteSpace(before.ProviderSha256)
+            || !string.Equals(before.ProviderSha256, after.ProviderSha256, StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(after.CanonicalSha256)
+            || !string.Equals(before.CanonicalSha256, after.CanonicalSha256, StringComparison.OrdinalIgnoreCase)
+            || !after.FileBaseline.BaselineKnown || !after.FileBaseline.BaselineExists
+            || !after.FileBaseline.CurrentKnown || !after.FileBaseline.CurrentExists
+            || after.FileBaseline.Status != NativeFileBaselineStatus.NfbsUnchanged)
+        {
+            string limits = after.Limitations.Count == 0 ? "the forced persisted readback did not match the complete editor definition"
+                : string.Join("; ", after.Limitations);
+            throw new AutomationException("footprint_persistence_unverified",
+                $"KiCad completed {operation} operation {operationId}, but complete native definition readback was not verified: {limits}");
+        }
     }
 
     private static async Task EnsureSnapshot(NativeContext context, DocumentSpecifier document,

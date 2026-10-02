@@ -33,13 +33,336 @@
 #include <zone.h>
 #include <footprint_library_adapter.h>
 #include <project_pcb.h>
+#include <pcb_io/pcb_io_mgr.h>
+#include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
+#include <api/native_file_observation.h>
+#include <api/native_state_digest.h>
+#include <file_content_baseline.h>
+#include <string_utils.h>
+#include <wildcards_and_files_ext.h>
+#include <wx/filefn.h>
+#include <wx/filename.h>
 
 #include <api/common/types/base_types.pb.h>
+
+#include <memory>
+#include <wx/file.h>
 
 using namespace kiapi::common::commands;
 using types::CommandStatus;
 using types::DocumentType;
 using types::ItemRequestStatus;
+
+namespace
+{
+constexpr int FOOTPRINT_SOURCE_PERSISTED_LIBRARY = 1;
+constexpr int FOOTPRINT_SOURCE_EDITOR = 2;
+
+struct TEMP_FOOTPRINT_LIBRARY
+{
+    wxString directory;
+
+    ~TEMP_FOOTPRINT_LIBRARY()
+    {
+        if( !directory.IsEmpty() )
+            wxFileName::Rmdir( directory, wxPATH_RMDIR_RECURSIVE );
+    }
+};
+
+struct FOOTPRINT_DEFINITION_CAPTURE
+{
+    kiapi::board::types::FootprintInstance footprint;
+    std::string                             canonicalSha256;
+    bool                                    canonicalComplete = false;
+    std::vector<std::string>                limitations;
+};
+
+std::string DigestText( std::string_view aText )
+{
+    NATIVE_STATE_DIGEST digest;
+    digest.Append( aText );
+    return digest.Hex();
+}
+
+std::string ProviderDigest( FOOTPRINT_LIBRARY_ADAPTER* aAdapter, const LIB_ID& aTarget )
+{
+    std::optional<LIBRARY_TABLE_ROW*> row = aAdapter->GetRow( aTarget.GetLibNickname() );
+
+    if( !row )
+        return {};
+
+    NATIVE_STATE_DIGEST digest;
+    digest.Append( "kicad-footprint-provider-v1" );
+    const auto part = [&]( const std::string& value )
+    {
+        digest.Append( std::to_string( value.size() ) );
+        digest.Append( ":" );
+        digest.Append( value );
+    };
+    part( ( *row )->Nickname().utf8_string() );
+    part( ( *row )->Type().utf8_string() );
+    part( ( *row )->URI().utf8_string() );
+    part( LIBRARY_MANAGER::GetFullURI( *row, true ).utf8_string() );
+    part( ( *row )->Options().utf8_string() );
+    part( std::to_string( static_cast<int>( ( *row )->Scope() ) ) );
+    part( ( *row )->Disabled() ? "disabled" : "enabled" );
+    return digest.Hex();
+}
+
+std::optional<wxString> LibraryUri( FOOTPRINT_LIBRARY_ADAPTER* aAdapter,
+                                    const wxString& aNickname )
+{
+    if( !aAdapter )
+        return std::nullopt;
+
+    return aAdapter->Manager().GetFullURI( LIBRARY_TABLE_TYPE::FOOTPRINT, aNickname, true );
+}
+
+PCB_IO_MGR::PCB_FILE_T LibraryPluginType( FOOTPRINT_LIBRARY_ADAPTER* aAdapter,
+                                           const wxString& aNickname )
+{
+    std::optional<LIBRARY_TABLE_ROW*> row = aAdapter->GetRow( aNickname );
+
+    if( !row || ( *row )->Disabled() )
+        return PCB_IO_MGR::PCB_FILE_UNKNOWN;
+
+    return PCB_IO_MGR::EnumFromStr( ( *row )->Type() );
+}
+
+std::optional<wxString> FootprintFilePath( FOOTPRINT_LIBRARY_ADAPTER* aAdapter,
+                                           const LIB_ID& aTarget )
+{
+    std::optional<wxString> uri = LibraryUri( aAdapter, aTarget.GetLibNickname() );
+
+    if( !uri || LibraryPluginType( aAdapter, aTarget.GetLibNickname() ) != PCB_IO_MGR::KICAD_SEXP )
+        return std::nullopt;
+
+    wxString fileName = aTarget.GetLibItemName();
+    ReplaceIllegalFileNameChars( fileName, '_' );
+    wxFileName result( *uri, fileName, FILEEXT::KiCadFootprintFileExtension );
+    return result.GetFullPath();
+}
+
+void AddLimit( FOOTPRINT_DEFINITION_CAPTURE& aCapture, const std::string& aLimit )
+{
+    if( std::find( aCapture.limitations.begin(), aCapture.limitations.end(), aLimit )
+            == aCapture.limitations.end() )
+    {
+        aCapture.limitations.push_back( aLimit );
+    }
+}
+
+void CopyDefinitionFields( FOOTPRINT& aFootprint,
+                           kiapi::board::types::Footprint& aDefinition )
+{
+    if( const PCB_FIELD* field = aFootprint.GetField( FIELD_T::REFERENCE ) )
+        field->Serialize( *aDefinition.mutable_reference_field() );
+
+    if( const PCB_FIELD* field = aFootprint.GetField( FIELD_T::VALUE ) )
+        field->Serialize( *aDefinition.mutable_value_field() );
+
+    if( const PCB_FIELD* field = aFootprint.GetField( FIELD_T::DATASHEET ) )
+        field->Serialize( *aDefinition.mutable_datasheet_field() );
+
+    if( const PCB_FIELD* field = aFootprint.GetField( FIELD_T::DESCRIPTION ) )
+        field->Serialize( *aDefinition.mutable_description_field() );
+}
+
+FOOTPRINT_DEFINITION_CAPTURE CaptureCanonicalDefinition( const FOOTPRINT& aSource,
+                                                         const LIB_ID& aTarget )
+{
+    FOOTPRINT_DEFINITION_CAPTURE result;
+    std::unique_ptr<FOOTPRINT> detached(
+            static_cast<FOOTPRINT*>( aSource.Clone() ) );
+
+    detached->SetParent( nullptr );
+    detached->SetParentGroup( nullptr );
+    detached->ClearAllNets();
+    detached->SetFPID( aTarget );
+
+    const wxString tempDirectory = wxFileName::GetTempDir() + wxFileName::GetPathSeparator()
+            + wxS( "kicad-footprint-definition-" ) + wxString::FromUTF8( KIID().AsStdString() );
+
+    if( !wxFileName::Mkdir( tempDirectory, 0700, wxPATH_MKDIR_FULL ) )
+    {
+        AddLimit( result, "could not allocate a private native temporary footprint library" );
+        return result;
+    }
+
+    TEMP_FOOTPRINT_LIBRARY temp{ tempDirectory };
+    wxString tempFileName = aTarget.GetUniStringLibItemName();
+    ReplaceIllegalFileNameChars( tempFileName, '_' );
+    const wxString tempPath = wxFileName( temp.directory, tempFileName,
+                                         FILEEXT::KiCadFootprintFileExtension ).GetFullPath();
+
+    try
+    {
+        PCB_IO_KICAD_SEXPR writer;
+        writer.FootprintSave( temp.directory, detached.get(), nullptr );
+
+        std::string nativeBytes;
+        FILE_CONTENT_BASELINE nativeFile = FILE_CONTENT_BASELINE::Read( tempPath, &nativeBytes );
+
+        if( !nativeFile.Known() || !nativeFile.Exists() || nativeBytes.empty() )
+        {
+            AddLimit( result, "native footprint writer did not produce readable canonical bytes" );
+            return result;
+        }
+
+        result.canonicalSha256 = DigestText( nativeBytes );
+
+        wxString importedName;
+        std::unique_ptr<FOOTPRINT> normalized(
+                writer.ImportFootprint( tempPath, importedName, nullptr ) );
+
+        if( !normalized )
+        {
+            AddLimit( result, "native canonical bytes could not be parsed back into a footprint" );
+            return result;
+        }
+
+        normalized->SetParent( nullptr );
+        normalized->SetParentGroup( nullptr );
+        normalized->SetFPID( aTarget );
+
+        google::protobuf::Any packed;
+        normalized->Serialize( packed );
+
+        if( !packed.UnpackTo( &result.footprint ) )
+        {
+            AddLimit( result, "native footprint definition could not be serialized" );
+            return result;
+        }
+
+        kiapi::board::types::Footprint* definition = result.footprint.mutable_definition();
+        CopyDefinitionFields( *normalized, *definition );
+        const std::string description = definition->attributes().description();
+        const std::string keywords = definition->attributes().keywords();
+        *definition->mutable_attributes() = result.footprint.attributes();
+        definition->mutable_attributes()->set_description( description );
+        definition->mutable_attributes()->set_keywords( keywords );
+        *definition->mutable_overrides() = result.footprint.overrides();
+        definition->mutable_anchor()->set_x_nm( 0 );
+        definition->mutable_anchor()->set_y_nm( 0 );
+
+        result.canonicalComplete = definition->has_id() && !definition->id().entry_name().empty()
+                && definition->has_reference_field() && definition->has_value_field()
+                && definition->has_datasheet_field() && definition->has_description_field();
+
+        if( !result.canonicalComplete )
+            AddLimit( result, "canonical definition is missing one or more mandatory fields" );
+
+        const auto unrepresented = [&]( bool present, const char* limitation )
+        {
+            if( present )
+            {
+                result.canonicalComplete = false;
+                AddLimit( result, limitation );
+            }
+        };
+        unrepresented( normalized->HasExtrudedBody(), "extruded 3D body has no footprint transport representation" );
+        unrepresented( !normalized->GetVariants().empty(), "footprint variants have no footprint transport representation" );
+        unrepresented( !normalized->GetUnitInfo().empty(), "unit swapping metadata has no footprint transport representation" );
+        unrepresented( normalized->GetStackupMode() != FOOTPRINT_STACKUP::EXPAND_INNER_LAYERS,
+                       "custom footprint stackup has no footprint transport representation" );
+        unrepresented( normalized->GetAreFontsEmbedded(), "embedded-font policy has no footprint transport representation" );
+        unrepresented( normalized->GetInitialComments() && !normalized->GetInitialComments()->empty(),
+                       "initial library comments have no footprint transport representation" );
+        unrepresented( !normalized->Groups().empty(),
+                       "footprint groups have no detached footprint transport representation" );
+        unrepresented( !normalized->Constraints().empty(),
+                       "footprint constraints have no detached footprint transport representation" );
+
+        // Compare against KiCad's native writer after deserialize as well: a full
+        // writer digest does not by itself prove the transport envelope holds every
+        // property.  Native-only metadata remains an explicit incomplete result.
+        google::protobuf::Any projected;
+        projected.PackFrom( result.footprint );
+        FOOTPRINT roundTrip( nullptr );
+
+        if( !roundTrip.Deserialize( projected ) )
+        {
+            result.canonicalComplete = false;
+            AddLimit( result, "canonical transport definition could not be deserialized" );
+        }
+        else
+        {
+            writer.FootprintSave( temp.directory, &roundTrip, nullptr );
+            const FILE_CONTENT_BASELINE roundTripFile = FILE_CONTENT_BASELINE::Read( tempPath );
+
+            if( !roundTripFile.Known() || !roundTripFile.Exists()
+                || roundTripFile.Sha256() != result.canonicalSha256 )
+            {
+                result.canonicalComplete = false;
+                AddLimit( result, "canonical transport projection does not preserve the complete native writer representation" );
+            }
+        }
+    }
+    catch( const IO_ERROR& error )
+    {
+        AddLimit( result, error.What().ToStdString() );
+    }
+    catch( const std::exception& error )
+    {
+        AddLimit( result, error.what() );
+    }
+
+    return result;
+}
+
+FOOTPRINT_DEFINITION_CAPTURE CaptureCanonicalDefinitionFromBytes( std::string_view aBytes,
+                                                                  const LIB_ID& aTarget )
+{
+    FOOTPRINT_DEFINITION_CAPTURE result;
+    const wxString tempDirectory = wxFileName::GetTempDir() + wxFileName::GetPathSeparator()
+            + wxS( "kicad-footprint-source-" ) + wxString::FromUTF8( KIID().AsStdString() );
+
+    if( !wxFileName::Mkdir( tempDirectory, 0700, wxPATH_MKDIR_FULL ) )
+    {
+        AddLimit( result, "could not allocate a private native source footprint path" );
+        return result;
+    }
+
+    TEMP_FOOTPRINT_LIBRARY temp{ tempDirectory };
+    const wxString sourcePath = wxFileName( temp.directory, wxS( "captured.kicad_mod" ) ).GetFullPath();
+
+    try
+    {
+        wxFile sourceFile;
+
+        if( !sourceFile.Open( sourcePath, wxFile::write )
+            || sourceFile.Write( aBytes.data(), aBytes.size() ) != aBytes.size() )
+        {
+            AddLimit( result, "could not persist the captured native footprint bytes for parsing" );
+            return result;
+        }
+
+        sourceFile.Close();
+        PCB_IO_KICAD_SEXPR parser;
+        wxString importedName;
+        std::unique_ptr<FOOTPRINT> parsed(
+                parser.ImportFootprint( sourcePath, importedName, nullptr ) );
+
+        if( !parsed )
+        {
+            AddLimit( result, "captured native footprint bytes could not be parsed" );
+            return result;
+        }
+
+        return CaptureCanonicalDefinition( *parsed, aTarget );
+    }
+    catch( const IO_ERROR& error )
+    {
+        AddLimit( result, error.What().ToStdString() );
+    }
+    catch( const std::exception& error )
+    {
+        AddLimit( result, error.what() );
+    }
+
+    return result;
+}
+}
 
 
 API_HANDLER_FOOTPRINT::API_HANDLER_FOOTPRINT( FOOTPRINT_EDIT_FRAME* aFrame ) :
@@ -72,6 +395,9 @@ API_HANDLER_FOOTPRINT::API_HANDLER_FOOTPRINT( std::shared_ptr<FOOTPRINT_CONTEXT>
     registerHandler<kiapi::automation::v1::NativeCapabilityFootprintLibraryReadOperation,
                     kiapi::automation::v1::NativeCapabilityFootprintLibraryReadOperationResponse>(
             &API_HANDLER_FOOTPRINT::handleReadLibraryOperation );
+    registerHandler<kiapi::automation::v1::NativeCapabilityFootprintReadDefinition,
+                    kiapi::automation::v1::NativeCapabilityFootprintReadDefinitionResponse>(
+            &API_HANDLER_FOOTPRINT::handleReadDefinition );
 
     registerHandler<GetItems, GetItemsResponse>( &API_HANDLER_FOOTPRINT::handleGetItems );
 }
@@ -307,6 +633,17 @@ HANDLER_RESULT<Empty> API_HANDLER_FOOTPRINT::handleSaveCopyOfDocument(
 
     wxString newName = targetId.GetLibItemName();
 
+    FOOTPRINT_LIBRARY_ADAPTER* adapter = PROJECT_PCB::FootprintLibAdapter( &project() );
+
+    if( !aCtx.Request.options().overwrite() && adapter->FootprintExists( libraryName, newName ) )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( fmt::format( "footprint copy target '{}:{}' already exists and overwrite is false",
+                                          libraryName.ToStdString(), newName.ToStdString() ) );
+        return tl::unexpected( e );
+    }
+
     // Clone the footprint so we don't modify the one being edited
     std::unique_ptr<FOOTPRINT> copy( static_cast<FOOTPRINT*>( ( *footprint )->Clone() ) );
     copy->SetFPID( LIB_ID( libraryName, newName ) );
@@ -515,6 +852,215 @@ API_HANDLER_FOOTPRINT::handleReadLibraryOperation(
     response.set_found( true );
     response.mutable_delete_response()->CopyFrom( found->second );
     return response;
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::NativeCapabilityFootprintReadDefinitionResponse>
+API_HANDLER_FOOTPRINT::handleReadDefinition(
+        const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityFootprintReadDefinition>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    const DocumentSpecifier& document = aCtx.Request.document();
+
+    if( document.type() != DocumentType::DOCTYPE_FOOTPRINT || !document.has_lib_id()
+        || document.lib_id().library_nickname().empty() || document.lib_id().entry_name().empty() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "a footprint document with a library nickname and entry name is required" );
+        return tl::unexpected( e );
+    }
+
+    const int source = static_cast<int>( aCtx.Request.source() );
+
+    if( source != FOOTPRINT_SOURCE_PERSISTED_LIBRARY && source != FOOTPRINT_SOURCE_EDITOR )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "footprint definition source must be persisted_library or editor" );
+        return tl::unexpected( e );
+    }
+
+    if( source == FOOTPRINT_SOURCE_PERSISTED_LIBRARY && aCtx.Request.has_canonical_target() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "canonical_target is only valid for an editor definition projection" );
+        return tl::unexpected( e );
+    }
+
+    FOOTPRINT_LIBRARY_ADAPTER* adapter = PROJECT_PCB::FootprintLibAdapter( &project() );
+    const wxString nickname = wxString::FromUTF8( document.lib_id().library_nickname() );
+    const wxString name = wxString::FromUTF8( document.lib_id().entry_name() );
+    LIB_ID target( nickname, name );
+    LIB_ID sourceTarget( nickname, name );
+    std::unique_ptr<FOOTPRINT> persisted;
+    FOOTPRINT* sourceFootprint = nullptr;
+    std::optional<wxString> baselinePath;
+    FILE_CONTENT_BASELINE capturedBaseline;
+    std::string capturedBytes;
+    bool baselineCaptured = false;
+    std::string targetProviderBefore;
+    std::string sourceProviderBefore;
+    FOOTPRINT_DEFINITION_CAPTURE capture;
+
+    try
+    {
+        if( source == FOOTPRINT_SOURCE_PERSISTED_LIBRARY )
+        {
+            if( !adapter->LoadOne( nickname ) )
+            {
+                ApiResponseStatus e;
+                e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+                e.set_error_message( "the requested footprint library could not be loaded" );
+                return tl::unexpected( e );
+            }
+
+            // Snapshot capture is explicitly forced so equal size/mtime edits cannot be served
+            // from the adapter/plugin cache. Normal browsing keeps the timestamp fast path.
+            adapter->RefreshLibraryIfChanged( nickname, true );
+            targetProviderBefore = ProviderDigest( adapter, target );
+            sourceProviderBefore = targetProviderBefore;
+            baselinePath = FootprintFilePath( adapter, target );
+
+            if( baselinePath )
+            {
+                capturedBaseline = FILE_CONTENT_BASELINE::Read( *baselinePath, &capturedBytes );
+                baselineCaptured = capturedBaseline.Known() && capturedBaseline.Exists()
+                        && !capturedBytes.empty();
+            }
+
+            persisted.reset( adapter->LoadFootprint( nickname, name, true ) );
+
+            if( !persisted )
+            {
+                ApiResponseStatus e;
+                e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+                e.set_error_message( "the requested persisted footprint could not be read" );
+                return tl::unexpected( e );
+            }
+            sourceFootprint = persisted.get();
+
+            if( baselineCaptured )
+                capture = CaptureCanonicalDefinitionFromBytes( capturedBytes, target );
+            else
+                capture = CaptureCanonicalDefinition( *sourceFootprint, target );
+        }
+        else
+        {
+            HANDLER_RESULT<FOOTPRINT*> editor = validateAndGetFootprint( document );
+
+            if( !editor )
+                return tl::unexpected( editor.error() );
+
+            sourceFootprint = *editor;
+            sourceProviderBefore = ProviderDigest( adapter, sourceTarget );
+
+            if( aCtx.Request.has_canonical_target() )
+            {
+                const auto& canonicalTarget = aCtx.Request.canonical_target();
+
+                if( canonicalTarget.library_nickname().empty() || canonicalTarget.entry_name().empty() )
+                {
+                    ApiResponseStatus e;
+                    e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+                    e.set_error_message( "canonical_target requires a library nickname and entry name" );
+                    return tl::unexpected( e );
+                }
+
+                target = LIB_ID( wxString::FromUTF8( canonicalTarget.library_nickname() ),
+                                 wxString::FromUTF8( canonicalTarget.entry_name() ) );
+            }
+
+            targetProviderBefore = ProviderDigest( adapter, target );
+            baselinePath = FootprintFilePath( adapter, sourceTarget );
+
+            if( baselinePath )
+            {
+                capturedBaseline = FILE_CONTENT_BASELINE::Read( *baselinePath, &capturedBytes );
+                baselineCaptured = capturedBaseline.Known() && capturedBaseline.Exists();
+            }
+
+            capture = CaptureCanonicalDefinition( *sourceFootprint, target );
+        }
+
+        const PCB_IO_MGR::PCB_FILE_T pluginType =
+                LibraryPluginType( adapter, target.GetLibNickname() );
+        std::optional<wxString> uri = LibraryUri( adapter, target.GetLibNickname() );
+        const bool providerKnown = uri.has_value() && pluginType == PCB_IO_MGR::KICAD_SEXP;
+        const std::string targetProviderAfter = ProviderDigest( adapter, target );
+        const std::string sourceProviderAfter = ProviderDigest( adapter, sourceTarget );
+
+        if( targetProviderBefore.empty() || targetProviderAfter != targetProviderBefore )
+        {
+            capture.canonicalComplete = false;
+            AddLimit( capture, "the configured target footprint provider changed during capture" );
+        }
+
+        if( sourceProviderBefore.empty() || sourceProviderAfter != sourceProviderBefore )
+        {
+            capture.canonicalComplete = false;
+            AddLimit( capture, "the configured source footprint provider changed during capture" );
+        }
+
+        if( !providerKnown )
+            AddLimit( capture, "the configured footprint provider has no complete KiCad canonical projection" );
+
+        NativeCapabilityFootprintReadDefinitionResponse response;
+        response.mutable_document()->CopyFrom( document );
+        response.set_process_epoch( apiServer().Token() );
+        response.mutable_footprint()->CopyFrom( capture.footprint );
+        response.set_canonical_sha256( capture.canonicalSha256 );
+        response.set_provider_sha256( uri ? targetProviderBefore : "" );
+
+        bool fileBaselineCoherent = true;
+
+        if( baselinePath && baselineCaptured )
+        {
+            *response.mutable_file_baseline() = ObserveNativeFile( *baselinePath, capturedBaseline );
+            fileBaselineCoherent = response.file_baseline().status()
+                    == NativeFileBaselineStatus::NFBS_UNCHANGED;
+
+            if( !fileBaselineCoherent )
+            {
+                capture.canonicalComplete = false;
+                AddLimit( capture, "the native footprint file changed or became unreadable during capture" );
+            }
+        }
+        else
+        {
+            fileBaselineCoherent = source == FOOTPRINT_SOURCE_EDITOR;
+
+            if( !fileBaselineCoherent )
+                AddLimit( capture, "native persisted footprint file baseline is unavailable" );
+            else
+                AddLimit( capture, "native footprint file baseline is unavailable for this editor projection" );
+        }
+
+        std::vector<std::string> limitations = capture.limitations;
+        for( const std::string& limitation : limitations )
+            response.add_limitations( limitation );
+
+        response.set_definition_complete( capture.canonicalComplete && providerKnown
+                && ( source == FOOTPRINT_SOURCE_EDITOR || fileBaselineCoherent ) );
+
+        if( source == FOOTPRINT_SOURCE_EDITOR )
+            response.mutable_canonical_target()->CopyFrom( aCtx.Request.has_canonical_target()
+                    ? aCtx.Request.canonical_target() : document.lib_id() );
+
+        return response;
+    }
+    catch( const IO_ERROR& error )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( error.What().ToStdString() );
+        return tl::unexpected( e );
+    }
 }
 
 

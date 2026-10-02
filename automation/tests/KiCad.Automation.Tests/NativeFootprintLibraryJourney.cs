@@ -25,7 +25,10 @@ public sealed class NativeFootprintLibraryJourney
         string library = Directory.CreateDirectory(Path.Combine(projectDirectory, "Fixture.pretty")).FullName;
         string sourceFootprint = Path.Combine(source.FullName, "qa/data/libraries/Resistor_SMD.pretty/R_0201_0603Metric.kicad_mod");
         string footprintName = "Generated_Test";
-        File.Copy(sourceFootprint, Path.Combine(library, footprintName + ".kicad_mod"));
+        string fixtureFootprint = Path.Combine(library, footprintName + ".kicad_mod");
+        string richDefinition = await File.ReadAllTextAsync(sourceFootprint);
+        richDefinition = richDefinition.Replace("\t(attr smd)\n", "\t(attr smd)\n\t(solder_mask_margin 0.01)\n\t(solder_paste_margin_ratio 0.15)\n\t(property \"FixtureProvenance\" \"rich\"\n\t\t(at 0 0 0)\n\t\t(layer \"F.Fab\")\n\t\t(hide yes)\n\t\t(uuid \"8b80d985-95fd-4c20-9fe8-b2a9e8733e60\")\n\t\t(effects (font (size 1.27 1.27)))\n\t)\n", StringComparison.Ordinal);
+        await File.WriteAllTextAsync(fixtureFootprint, richDefinition);
         await File.WriteAllTextAsync(project, "{\"meta\":{\"version\":3}}");
         await File.WriteAllTextAsync(Path.Combine(projectDirectory, "fp-lib-table"),
             $"(fp_lib_table (version 7) (lib (name \"Fixture\") (type \"KiCad\") (uri \"{library.Replace("\\", "/", StringComparison.Ordinal)}\") (options \"\") (descr \"\")))\n");
@@ -86,6 +89,25 @@ public sealed class NativeFootprintLibraryJourney
             Assert.IsTrue(listed.GetProperty("structuredContent").GetProperty("footprintNames").EnumerateArray().Any(item => item.GetString() == footprintName), listed.GetRawText());
 
             string documentJson = "{\"type\":\"DOCTYPE_FOOTPRINT\",\"libId\":{\"libraryNickname\":\"Fixture\",\"entryName\":\"Generated_Test\"}}";
+            var definitionBeforeRewrite = await mcp.Tool("kicad_footprint_definition_read", new
+            { instanceId, expectedProcessEpoch = epoch, documentJson, source = "persisted_library" });
+            Assert.IsFalse(definitionBeforeRewrite.TryGetProperty("isError", out var definitionBeforeError) && definitionBeforeError.GetBoolean(), definitionBeforeRewrite.GetRawText());
+            var definitionBeforeData = definitionBeforeRewrite.GetProperty("structuredContent");
+            Assert.IsTrue(definitionBeforeData.GetProperty("definitionComplete").GetBoolean(), definitionBeforeRewrite.GetRawText());
+            Assert.AreEqual("NFBS_UNCHANGED", definitionBeforeData.GetProperty("fileBaseline").GetProperty("status").GetString(), definitionBeforeRewrite.GetRawText());
+            Assert.IsTrue(definitionBeforeData.GetProperty("footprint").GetProperty("definition").GetProperty("referenceField").GetProperty("text").GetProperty("text").GetString() is not null, definitionBeforeRewrite.GetRawText());
+            Assert.IsTrue(definitionBeforeData.GetProperty("footprint").GetProperty("definition").GetProperty("items").GetArrayLength() > 0, definitionBeforeRewrite.GetRawText());
+            string originalRichBytes = await File.ReadAllTextAsync(fixtureFootprint);
+            DateTime originalWriteTime = File.GetLastWriteTimeUtc(fixtureFootprint);
+            string rewrittenRichBytes = originalRichBytes.Replace("Resistor SMD 0201", "Resistor SMD 0202", StringComparison.Ordinal);
+            Assert.AreEqual(originalRichBytes.Length, rewrittenRichBytes.Length, "The cache regression must keep the fixture byte size unchanged.");
+            await File.WriteAllTextAsync(fixtureFootprint, rewrittenRichBytes);
+            File.SetLastWriteTimeUtc(fixtureFootprint, originalWriteTime);
+            var definitionAfterRewrite = await mcp.Tool("kicad_footprint_definition_read", new
+            { instanceId, expectedProcessEpoch = epoch, documentJson, source = "persisted_library" });
+            Assert.IsFalse(definitionAfterRewrite.TryGetProperty("isError", out var definitionAfterError) && definitionAfterError.GetBoolean(), definitionAfterRewrite.GetRawText());
+            Assert.AreNotEqual(definitionBeforeData.GetProperty("canonicalSha256").GetString(),
+                definitionAfterRewrite.GetProperty("structuredContent").GetProperty("canonicalSha256").GetString(), definitionAfterRewrite.GetRawText());
             var opened = await mcp.Tool("kicad_footprint_open_library_item", new
             { instanceId, expectedProcessEpoch = epoch, libraryNickname = "Fixture", entryName = footprintName,
                 operationId = Guid.NewGuid().ToString("D") });
@@ -109,9 +131,11 @@ public sealed class NativeFootprintLibraryJourney
             var saveData = saved.GetProperty("structuredContent");
             Assert.IsTrue(saveData.GetProperty("nativeCommandSucceeded").GetBoolean(), saved.GetRawText());
             Assert.IsTrue(saveData.GetProperty("libraryEntryObserved").GetBoolean(), saved.GetRawText());
-            Assert.IsFalse(saveData.GetProperty("geometryPersistenceVerified").GetBoolean(), saved.GetRawText());
-            Assert.IsFalse(saveData.GetProperty("persistenceVerified").GetBoolean(), saved.GetRawText());
-            Assert.AreEqual("native-footprint-library-entry-enumeration", saveData.GetProperty("persistenceSource").GetString(), saved.GetRawText());
+            Assert.IsTrue(saveData.GetProperty("geometryPersistenceVerified").GetBoolean(), saved.GetRawText());
+            Assert.IsTrue(saveData.GetProperty("persistenceVerified").GetBoolean(), saved.GetRawText());
+            Assert.AreEqual("native-forced-refresh-definition-readback", saveData.GetProperty("persistenceSource").GetString(), saved.GetRawText());
+            Assert.IsTrue(saveData.GetProperty("definitionComplete").GetBoolean(), saved.GetRawText());
+            Assert.AreEqual("NFBS_UNCHANGED", saveData.GetProperty("fileBaseline").GetProperty("status").GetString(), saved.GetRawText());
 
             string copyName = "Generated_Test_Copy";
             var copied = await mcp.Tool("kicad_footprint_save_copy", new
@@ -121,11 +145,19 @@ public sealed class NativeFootprintLibraryJourney
             var copyData = copied.GetProperty("structuredContent");
             Assert.IsTrue(copyData.GetProperty("nativeCommandSucceeded").GetBoolean(), copied.GetRawText());
             Assert.IsTrue(copyData.GetProperty("libraryEntryObserved").GetBoolean(), copied.GetRawText());
-            Assert.IsFalse(copyData.GetProperty("geometryPersistenceVerified").GetBoolean(), copied.GetRawText());
-            Assert.IsFalse(copyData.GetProperty("persistenceVerified").GetBoolean(), copied.GetRawText());
-            Assert.AreEqual("native-footprint-library-entry-enumeration", copyData.GetProperty("persistenceSource").GetString(), copied.GetRawText());
+            Assert.IsTrue(copyData.GetProperty("geometryPersistenceVerified").GetBoolean(), copied.GetRawText());
+            Assert.IsTrue(copyData.GetProperty("persistenceVerified").GetBoolean(), copied.GetRawText());
+            Assert.AreEqual("native-forced-refresh-definition-readback", copyData.GetProperty("persistenceSource").GetString(), copied.GetRawText());
+            Assert.IsTrue(copyData.GetProperty("definitionComplete").GetBoolean(), copied.GetRawText());
+            Assert.AreEqual("NFBS_UNCHANGED", copyData.GetProperty("fileBaseline").GetProperty("status").GetString(), copied.GetRawText());
             Assert.AreEqual("Fixture", copyData.GetProperty("persistedLibraryNickname").GetString(), copied.GetRawText());
             Assert.AreEqual(copyName, copyData.GetProperty("persistedFootprintName").GetString(), copied.GetRawText());
+
+            var refusedOverwrite = await mcp.Tool("kicad_footprint_save_copy", new
+            { instanceId, expectedProcessEpoch = epoch, documentJson, path = copyName,
+                operationId = Guid.NewGuid().ToString("D"), overwrite = false, includeProject = false });
+            Assert.IsTrue(refusedOverwrite.TryGetProperty("isError", out var refusedOverwriteError)
+                && refusedOverwriteError.GetBoolean(), refusedOverwrite.GetRawText());
 
             var afterCopy = await mcp.Tool("kicad_footprint_library_list", new { instanceId, expectedProcessEpoch = epoch, libraryNickname = "Fixture" });
             Assert.IsFalse(afterCopy.TryGetProperty("isError", out var afterCopyError) && afterCopyError.GetBoolean(), afterCopy.GetRawText());

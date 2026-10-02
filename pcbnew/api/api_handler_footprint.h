@@ -25,6 +25,7 @@
 #include <api/footprint_context.h>
 #include <api/common/commands/project_commands.pb.h>
 #include <api/common/commands/automation_commands.pb.h>
+#include <api/common/commands/footprint_definition_commands.pb.h>
 #include <map>
 
 
@@ -68,6 +69,10 @@ private:
     HANDLER_RESULT<kiapi::automation::v1::NativeCapabilityFootprintLibraryReadOperationResponse>
             handleReadLibraryOperation(
                     const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityFootprintLibraryReadOperation>& aCtx );
+
+    HANDLER_RESULT<kiapi::automation::v1::NativeCapabilityFootprintReadDefinitionResponse>
+            handleReadDefinition(
+                    const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityFootprintReadDefinition>& aCtx );
 
     HANDLER_RESULT<commands::GetItemsResponse> handleGetItems(
             const HANDLER_CONTEXT<commands::GetItems>& aCtx );

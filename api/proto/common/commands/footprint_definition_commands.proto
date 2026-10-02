@@ -1,0 +1,40 @@
+/* Native footprint-definition capture commands. GPL-3.0-or-later. */
+syntax = "proto3";
+
+package kiapi.automation.v1;
+option csharp_namespace = "KiCad.Automation.Protocol";
+
+import "common/types/base_types.proto";
+import "common/commands/automation_commands.proto";
+import "board/board_types.proto";
+
+// Selects the native source for a complete footprint-definition observation.
+enum NativeFootprintDefinitionSource
+{
+  UNKNOWN = 0;
+  PERSISTED_LIBRARY = 1;
+  EDITOR = 2;
+}
+
+// Reads one complete library definition. EDITOR is a non-mutating detached
+// projection of the currently loaded footprint; canonical_target only renames
+// that projection and never edits the named library entry.
+message NativeCapabilityFootprintReadDefinition
+{
+  kiapi.common.types.DocumentSpecifier document = 1;
+  NativeFootprintDefinitionSource source = 2;
+  optional kiapi.common.types.LibraryIdentifier canonical_target = 3;
+}
+
+message NativeCapabilityFootprintReadDefinitionResponse
+{
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string process_epoch = 2;
+  kiapi.board.types.FootprintInstance footprint = 3;
+  string canonical_sha256 = 4;
+  string provider_sha256 = 5;
+  NativeFileBaselineState file_baseline = 6;
+  bool definition_complete = 7;
+  repeated string limitations = 8;
+  kiapi.common.types.LibraryIdentifier canonical_target = 9;
+}

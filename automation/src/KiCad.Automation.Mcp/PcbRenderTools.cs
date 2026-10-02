@@ -60,7 +60,26 @@ public sealed class PcbRenderTools(InstanceRegistry registry)
                 ? RenderBackgroundStyle.RbsOpaque : request.BackgroundStyle;
             request.Side = request.Side is RenderSide.RsUnknown ? RenderSide.RsTop : request.Side;
             request.JobSettings.OutputPath = outputPath;
-            var result = await client.InvokeAsync<RunBoardJobExportRender, RunJobResponse>(request, cancellationToken);
+            var requestForHash = request.Clone();
+            requestForHash.JobSettings.OutputPath = string.Empty;
+            string requestSha256 = Convert.ToHexStringLower(SHA256.HashData(requestForHash.ToByteArray()));
+            PcbRenderInspectionResponse? inspection = null;
+            var limitations = new List<string>();
+
+            // The dedicated request is advertised by the native handshake. An
+            // older peer is still allowed to produce the compatible PNG, but
+            // its renderer metadata is explicitly unavailable.
+            if (client.LastHandshakeHandles(PcbRenderInspectionRequest.Descriptor.FullName))
+            {
+                inspection = await client.InvokeAsync<PcbRenderInspectionRequest, PcbRenderInspectionResponse>(
+                    new() { RenderRequest = request, ExpectedState = expected }, cancellationToken);
+            }
+            else
+            {
+                limitations.Add("native peer does not implement PcbRenderInspectionRequest; renderer metadata is unavailable");
+            }
+
+            var result = inspection?.Job ?? await client.InvokeAsync<RunBoardJobExportRender, RunJobResponse>(request, cancellationToken);
             if (result.Status != JobStatus.JsSuccess)
                 throw new AutomationException("pcb_render_failed", string.IsNullOrWhiteSpace(result.Message)
                     ? "KiCad did not produce a successful PCB render." : result.Message);
@@ -73,6 +92,12 @@ public sealed class PcbRenderTools(InstanceRegistry registry)
                 new() { Document = document }, cancellationToken);
             if (!after.Equals(expected))
                 throw new AutomationException("pcb_render_state_changed", "The board changed while rendering; the image and state are discarded rather than paired incorrectly.");
+
+            JsonElement metadata = inspection is null
+                ? JsonSerializer.SerializeToElement(new { available = false })
+                : JsonDocument.Parse(JsonFormatter.Default.Format(inspection.Metadata)).RootElement.Clone();
+            if (inspection is not null)
+                limitations.AddRange(inspection.Limitations);
             var structured = JsonSerializer.SerializeToElement(new
             {
                 instanceId, processEpoch = session.Epoch, document,
@@ -82,6 +107,11 @@ public sealed class PcbRenderTools(InstanceRegistry registry)
                     perspective = request.Perspective, zoom = request.Zoom },
                 image = new { mimeType = "image/png", width = request.Width, height = request.Height,
                     bytes = bytes.Length, sha256 = Convert.ToHexStringLower(SHA256.HashData(bytes)) },
+                requestSha256,
+                metadataAvailable = inspection is not null,
+                metadataComplete = inspection?.MetadataComplete ?? false,
+                metadata,
+                limitations,
                 nativeRender = true, boardMutation = false, electricalValidation = false
             });
             return new CallToolResult

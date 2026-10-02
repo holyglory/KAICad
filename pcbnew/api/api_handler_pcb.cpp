@@ -54,6 +54,7 @@
 #include <pad.h>
 #include <pcb_draw_panel_gal.h>
 #include <api/pcb_drc_run_inputs.h>
+#include <api/pcb_drc_document_snapshot.h>
 #include <drc/drc_library_inputs.h>
 #include <drawing_sheet/ds_data_model.h>
 #include <drawing_sheet/ds_proxy_view_item.h>
@@ -223,6 +224,9 @@ API_HANDLER_PCB::API_HANDLER_PCB( std::shared_ptr<PCB_CONTEXT> aContext, PCB_EDI
             &API_HANDLER_PCB::handleRunBoardJobExport3D );
     registerHandler<RunBoardJobExportRender, types::RunJobResponse>(
             &API_HANDLER_PCB::handleRunBoardJobExportRender );
+    registerHandler<kiapi::automation::v1::PcbRenderInspectionRequest,
+                    kiapi::automation::v1::PcbRenderInspectionResponse>(
+            &API_HANDLER_PCB::handlePcbRenderInspection );
     registerHandler<RunBoardJobExportSvg, types::RunJobResponse>(
             &API_HANDLER_PCB::handleRunBoardJobExportSvg );
     registerHandler<RunBoardJobExportDxf, types::RunJobResponse>(
@@ -3581,6 +3585,202 @@ HANDLER_RESULT<types::RunJobResponse> API_HANDLER_PCB::handleRunBoardJobExportRe
     job.m_lightSideElevation = aCtx.Request.light_side_elevation();
 
     return ExecuteBoardJob( pcbContext(), job );
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::PcbRenderInspectionResponse> API_HANDLER_PCB::handlePcbRenderInspection(
+        const HANDLER_CONTEXT<kiapi::automation::v1::PcbRenderInspectionRequest>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    const RunBoardJobExportRender& request = aCtx.Request.render_request();
+    const DocumentLifecycleState& expected = aCtx.Request.expected_state();
+
+    if( !request.has_job_settings() )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( "PCB render inspection requires render job settings" );
+        return tl::unexpected( error );
+    }
+
+    HANDLER_RESULT<bool> documentValidation = validateDocument( request.job_settings().document() );
+
+    if( !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    if( expected.scope() != DocumentLifecycleScope::DLS_PCB
+        || !expected.document().Equals( request.job_settings().document() )
+        || expected.process_epoch() != apiServer().Token()
+        || expected.state_sha256().empty() )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BUSY );
+        error.set_error_message( "The render inspection lifecycle binding is stale" );
+        return tl::unexpected( error );
+    }
+
+    HANDLER_CONTEXT<ReadDocumentLifecycleState> lifecycleContext;
+    lifecycleContext.Request.mutable_document()->CopyFrom( request.job_settings().document() );
+    HANDLER_RESULT<DocumentLifecycleState> before = handleReadLifecycleState( lifecycleContext );
+
+    if( !before )
+        return tl::unexpected( before.error() );
+
+    if( !google::protobuf::util::MessageDifferencer::Equivalent( *before, expected ) )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BUSY );
+        error.set_error_message( "The PCB changed before the render inspection started" );
+        return tl::unexpected( error );
+    }
+
+    // Capture the exact unsaved board into an owned detached document before
+    // handing it to the job dispatcher. The renderer constructs adapters and
+    // may normalize board-derived state; it must never borrow or mutate the
+    // human editor's BOARD while the inspection is running.
+    std::unique_ptr<PCB_DRC_DOCUMENT_SNAPSHOT> inspectionSnapshot;
+
+    try
+    {
+        inspectionSnapshot = PCB_DRC_DOCUMENT_SNAPSHOT::Capture( *board() );
+    }
+    catch( const std::exception& error )
+    {
+        ApiResponseStatus failure;
+        failure.set_status( ApiStatusCode::AS_BUSY );
+        failure.set_error_message( "The PCB could not be captured for an isolated render inspection: "
+                                   + PcbDrcExceptionMessage( error ) );
+        return tl::unexpected( failure );
+    }
+
+    JOB_PCB_RENDER job;
+    job.m_filename = pcbContext()->GetCurrentFileName();
+    job.m_boardSnapshot = &inspectionSnapshot->GetBoard();
+    job.m_hasInspectionMetadata = true;
+    job.m_sourceBoardSnapshotSha256 = expected.state_sha256();
+    job.SetConfiguredOutputPath( wxString::FromUTF8( request.job_settings().output_path() ) );
+    job.m_format = FromProtoEnum<JOB_PCB_RENDER::FORMAT>( request.format() );
+    job.m_quality = FromProtoEnum<JOB_PCB_RENDER::QUALITY>( request.quality() );
+    job.m_bgStyle = FromProtoEnum<JOB_PCB_RENDER::BG_STYLE>( request.background_style() );
+    job.m_width = request.width();
+    job.m_height = request.height();
+    job.m_appearancePreset = request.appearance_preset();
+    job.m_useBoardStackupColors = request.use_board_stackup_colors();
+    job.m_side = FromProtoEnum<JOB_PCB_RENDER::SIDE>( request.side() );
+    job.m_zoom = request.zoom();
+    job.m_perspective = request.perspective();
+    job.m_rotation = UnpackVector3D( request.rotation() );
+    job.m_pan = UnpackVector3D( request.pan() );
+    job.m_pivot = UnpackVector3D( request.pivot() );
+    job.m_proceduralTextures = request.procedural_textures();
+    job.m_floor = request.floor();
+    job.m_antiAlias = request.anti_alias();
+    job.m_postProcess = request.post_process();
+    job.m_lightTopIntensity = UnpackVector3D( request.light_top_intensity() );
+    job.m_lightBottomIntensity = UnpackVector3D( request.light_bottom_intensity() );
+    job.m_lightCameraIntensity = UnpackVector3D( request.light_camera_intensity() );
+    job.m_lightSideIntensity = UnpackVector3D( request.light_side_intensity() );
+    job.m_lightSideElevation = request.light_side_elevation();
+
+    RunBoardJobExportRender normalizedRequest = request;
+    normalizedRequest.mutable_job_settings()->clear_output_path();
+    const std::string normalizedBytes = normalizedRequest.SerializeAsString();
+    NATIVE_STATE_DIGEST requestDigest;
+    requestDigest.Append( normalizedBytes );
+    job.m_effectiveRenderInputSha256 = requestDigest.Hex();
+
+    HANDLER_RESULT<types::RunJobResponse> jobResult = ExecuteBoardJob( pcbContext(), job );
+
+    if( !jobResult )
+        return tl::unexpected( jobResult.error() );
+
+    HANDLER_RESULT<DocumentLifecycleState> after = handleReadLifecycleState( lifecycleContext );
+
+    if( !after )
+        return tl::unexpected( after.error() );
+
+    if( !google::protobuf::util::MessageDifferencer::Equivalent( *after, expected ) )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BUSY );
+        error.set_error_message( "The PCB changed while rendering; the image and metadata were discarded" );
+        return tl::unexpected( error );
+    }
+
+    PcbRenderInspectionResponse response;
+    response.mutable_job()->CopyFrom( *jobResult );
+    response.mutable_document()->CopyFrom( *after );
+    response.set_process_epoch( after->process_epoch() );
+    PcbRenderMetadata& metadata = *response.mutable_metadata();
+    metadata.set_width_pixels( job.m_inspectionMetadata.widthPixels );
+    metadata.set_height_pixels( job.m_inspectionMetadata.heightPixels );
+    for( double value : job.m_inspectionMetadata.viewMatrix ) metadata.add_view_matrix_column_major( value );
+    for( double value : job.m_inspectionMetadata.projectionMatrix ) metadata.add_projection_matrix_column_major( value );
+    for( double value : job.m_inspectionMetadata.boardNanometresToScene ) metadata.add_board_nanometres_to_scene_column_major( value );
+    metadata.set_projection_convention( job.m_inspectionMetadata.projectionConvention );
+    metadata.set_near_clip( job.m_inspectionMetadata.nearClip );
+    metadata.set_far_clip( job.m_inspectionMetadata.farClip );
+    metadata.set_observed_side( job.m_inspectionMetadata.observedSide );
+    metadata.set_observed_perspective( job.m_inspectionMetadata.observedPerspective );
+    metadata.set_observed_zoom( job.m_inspectionMetadata.observedZoom );
+    for( double value : job.m_inspectionMetadata.observedCameraPosition ) metadata.add_observed_camera_position( value );
+    for( double value : job.m_inspectionMetadata.observedLookAt ) metadata.add_observed_look_at( value );
+    metadata.set_source_board_snapshot_sha256( job.m_inspectionMetadata.sourceBoardSnapshotSha256 );
+    metadata.set_effective_render_input_sha256( job.m_inspectionMetadata.effectiveRenderInputSha256 );
+    metadata.set_matrices_finite( job.m_inspectionMetadata.matricesFinite );
+    metadata.set_matrices_invertible( job.m_inspectionMetadata.matricesInvertible );
+
+    bool complete = job.m_inspectionMetadata.matricesFinite && job.m_inspectionMetadata.matricesInvertible;
+
+    for( const JOB_PCB_RENDER::OBJECT_METADATA& object : job.m_inspectionMetadata.objects )
+    {
+        PcbRenderObjectMetadata& output = *metadata.add_objects();
+        output.set_native_uuid( object.nativeUuid );
+        output.set_model_index( object.modelIndex );
+        for( double value : object.sceneTransform ) output.add_scene_transform_column_major( value );
+        for( double value : object.nativeGeometryBounds ) output.add_native_geometry_bounds( value );
+        for( double value : object.projectedConservativeBounds ) output.add_projected_conservative_bounds( value );
+        output.set_projected_bounds_available( object.projectedBoundsAvailable );
+        output.set_exact_visible_pixels( object.exactVisiblePixels );
+        output.set_occlusion_tested( object.occlusionTested );
+        output.set_native_geometry_bounds_available( object.nativeGeometryBoundsAvailable );
+    }
+
+    for( const JOB_PCB_RENDER::MODEL_METADATA& model : job.m_inspectionMetadata.models )
+    {
+        PcbRenderModelMetadata& output = *metadata.add_models();
+        output.set_native_uuid( model.nativeUuid );
+        output.set_model_index( model.modelIndex );
+        output.set_requested_identity( model.requestedIdentity );
+        output.set_resolved_identity( model.resolvedIdentity );
+        output.set_content_sha256( model.contentSha256 );
+        output.set_loaded( model.loaded );
+        output.set_missing( model.missing );
+        output.set_missing_reason( model.missingReason );
+        for( double value : model.sceneTransform ) output.add_scene_transform_column_major( value );
+        for( double value : model.nativeGeometryBounds ) output.add_native_geometry_bounds( value );
+        output.set_native_geometry_bounds_available( model.nativeGeometryBoundsAvailable );
+        output.set_secondary_assets_complete( model.secondaryAssetsComplete );
+        output.set_secondary_asset_limitation( model.secondaryAssetLimitation );
+        complete = complete && model.loaded && !model.missing && !model.contentSha256.empty()
+                && model.nativeGeometryBoundsAvailable && model.secondaryAssetsComplete;
+    }
+
+    for( const std::string& note : job.m_inspectionMetadata.coverageNotes )
+        metadata.add_coverage_notes( note );
+
+    for( const std::string& limitation : job.m_inspectionMetadata.limitations )
+        response.add_limitations( limitation );
+
+    // The response deliberately keeps the partial-coverage signal visible:
+    // projected bounds and transforms are useful, but exact visible pixels or
+    // occlusion depth are not claimed by this renderer hook.
+    response.set_metadata_complete( complete );
+    return response;
 }
 
 

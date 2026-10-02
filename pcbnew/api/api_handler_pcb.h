@@ -33,6 +33,7 @@
 #include <api/common/commands/project_commands.pb.h>
 #include <api/pcb_drc_job_manager.h>
 #include <api/common/commands/automation_commands.pb.h>
+#include <api/common/commands/pcb_render_inspection_commands.pb.h>
 #include <properties/property_mgr.h>
 #include <file_content_baseline.h>
 
@@ -198,6 +199,9 @@ private:
 
     HANDLER_RESULT<types::RunJobResponse> handleRunBoardJobExportRender(
             const HANDLER_CONTEXT<RunBoardJobExportRender>& aCtx );
+
+    HANDLER_RESULT<kiapi::automation::v1::PcbRenderInspectionResponse> handlePcbRenderInspection(
+            const HANDLER_CONTEXT<kiapi::automation::v1::PcbRenderInspectionRequest>& aCtx );
 
     HANDLER_RESULT<types::RunJobResponse> handleRunBoardJobExportSvg(
             const HANDLER_CONTEXT<RunBoardJobExportSvg>& aCtx );

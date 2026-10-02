@@ -25,6 +25,9 @@
 #include <kicommon.h>
 #include "job.h"
 #include <optional>
+#include <array>
+#include <string>
+#include <vector>
 #include <math/vector3.h>
 
 // Defined in wingdi.h
@@ -36,9 +39,66 @@
 #undef OPAQUE
 #endif
 
+class BOARD;
+
 class KICOMMON_API JOB_PCB_RENDER : public JOB
 {
 public:
+    struct MODEL_METADATA
+    {
+        std::string nativeUuid;
+        unsigned int modelIndex = 0;
+        std::string requestedIdentity;
+        std::string resolvedIdentity;
+        std::string contentSha256;
+        bool loaded = false;
+        bool missing = false;
+        std::string missingReason;
+        std::array<double, 16> sceneTransform{};
+        std::array<double, 6> nativeGeometryBounds{};
+        bool nativeGeometryBoundsAvailable = false;
+        bool secondaryAssetsComplete = true;
+        std::string secondaryAssetLimitation;
+    };
+
+    struct OBJECT_METADATA
+    {
+        std::string nativeUuid;
+        unsigned int modelIndex = 0;
+        std::array<double, 16> sceneTransform{};
+        std::array<double, 6> nativeGeometryBounds{};
+        bool nativeGeometryBoundsAvailable = false;
+        std::array<double, 4> projectedConservativeBounds{};
+        bool projectedBoundsAvailable = false;
+        bool exactVisiblePixels = false;
+        bool occlusionTested = false;
+    };
+
+    struct INSPECTION_METADATA
+    {
+        unsigned int widthPixels = 0;
+        unsigned int heightPixels = 0;
+        std::array<double, 16> viewMatrix{};
+        std::array<double, 16> projectionMatrix{};
+        std::array<double, 16> boardNanometresToScene{};
+        std::string projectionConvention;
+        double nearClip = 0.0;
+        double farClip = 0.0;
+        std::string observedSide;
+        bool observedPerspective = false;
+        double observedZoom = 0.0;
+        std::array<double, 3> observedCameraPosition{};
+        std::array<double, 3> observedLookAt{};
+        std::string sourceBoardSnapshotSha256;
+        std::string effectiveRenderInputSha256;
+        std::vector<OBJECT_METADATA> objects;
+        std::vector<MODEL_METADATA> models;
+        std::vector<std::string> coverageNotes;
+        std::vector<std::string> limitations;
+        bool matricesFinite = false;
+        bool matricesInvertible = false;
+    };
+
     enum class FORMAT
     {
         PNG,
@@ -103,6 +163,15 @@ public:
     VECTOR3D    m_lightCameraIntensity;
     VECTOR3D    m_lightSideIntensity = VECTOR3D( 0.5, 0.5, 0.5 );
     int         m_lightSideElevation = 60;
+
+    // Set only by the dedicated native inspection handler. It points at an
+    // owned PCB_DRC_DOCUMENT_SNAPSHOT held by that handler for the synchronous
+    // job; ordinary jobs keep this null and retain their existing source path.
+    BOARD* m_boardSnapshot = nullptr;
+    std::string m_sourceBoardSnapshotSha256;
+    std::string m_effectiveRenderInputSha256;
+    INSPECTION_METADATA m_inspectionMetadata;
+    bool m_hasInspectionMetadata = false;
 };
 
 #endif

@@ -564,8 +564,45 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(renderData.GetProperty("nativeRender").GetBoolean());
             Assert.IsFalse(renderData.GetProperty("boardMutation").GetBoolean());
             Assert.IsTrue(renderData.GetProperty("image").GetProperty("bytes").GetInt32() > 0);
+            Assert.IsTrue(renderData.GetProperty("metadataAvailable").GetBoolean(), renderData.GetRawText());
+            Assert.AreEqual(64, renderData.GetProperty("requestSha256").GetString()!.Length, renderData.GetRawText());
+            var renderMetadata = renderData.GetProperty("metadata");
+            Assert.AreEqual(16, renderMetadata.GetProperty("viewMatrixColumnMajor").GetArrayLength(), renderData.GetRawText());
+            Assert.AreEqual(16, renderMetadata.GetProperty("projectionMatrixColumnMajor").GetArrayLength(), renderData.GetRawText());
+            Assert.AreEqual(16, renderMetadata.GetProperty("boardNanometresToSceneColumnMajor").GetArrayLength(), renderData.GetRawText());
+            Assert.IsTrue(renderMetadata.GetProperty("matricesFinite").GetBoolean(), renderData.GetRawText());
+            Assert.IsTrue(renderMetadata.GetProperty("matricesInvertible").GetBoolean(), renderData.GetRawText());
+            var expectedRenderState = SchematicJson.Parser.Parse<DocumentLifecycleState>(svgState);
+            Assert.AreEqual(expectedRenderState.StateSha256, renderMetadata.GetProperty("sourceBoardSnapshotSha256").GetString(), renderData.GetRawText());
+            Assert.AreEqual(64, renderMetadata.GetProperty("effectiveRenderInputSha256").GetString()!.Length, renderData.GetRawText());
+            Assert.IsTrue(renderMetadata.GetProperty("coverageNotes").GetArrayLength() >= 2, renderData.GetRawText());
+            Assert.IsTrue(renderData.GetProperty("metadataComplete").ValueKind is JsonValueKind.True or JsonValueKind.False,
+                renderData.GetRawText());
+            if (renderMetadata.GetProperty("models").GetArrayLength() == 0)
+                Assert.IsTrue(renderData.GetProperty("metadataComplete").GetBoolean(), renderData.GetRawText());
             var renderAfter = SchematicJson.Parser.Parse<DocumentLifecycleState>(renderData.GetProperty("afterState").GetString()!);
             Assert.AreEqual(svgState, SchematicJson.Formatter.Format(renderAfter));
+
+            foreach ((RenderSide side, bool perspective) in new[]
+            {
+                (RenderSide.RsBottom, false), (RenderSide.RsTop, true)
+            })
+            {
+                var viewRequest = renderRequest.Clone();
+                viewRequest.Side = side;
+                viewRequest.Perspective = perspective;
+                var viewReply = await mcp.Tool("kicad_pcb_render_3d", new
+                {
+                    instanceId, requestJson = JsonFormatter.Default.Format(viewRequest), expectedStateJson = svgState
+                });
+                Assert.IsFalse(viewReply.TryGetProperty("isError", out var viewError) && viewError.GetBoolean(), viewReply.GetRawText());
+                var viewData = viewReply.GetProperty("structuredContent");
+                Assert.IsTrue(viewData.GetProperty("metadataAvailable").GetBoolean(), viewData.GetRawText());
+                Assert.AreEqual(side.ToString(), viewData.GetProperty("view").GetProperty("side").GetString(), viewData.GetRawText());
+                Assert.AreEqual(perspective, viewData.GetProperty("view").GetProperty("perspective").GetBoolean(), viewData.GetRawText());
+                var viewAfter = SchematicJson.Parser.Parse<DocumentLifecycleState>(viewData.GetProperty("afterState").GetString()!);
+                Assert.AreEqual(svgState, SchematicJson.Formatter.Format(viewAfter));
+            }
             var routeGeometry = await mcp.Tool("kicad_pcb_route_geometry", new
             {
                 instanceId, documentJson = SchematicJson.Formatter.Format(board), expectedStateJson = svgState,

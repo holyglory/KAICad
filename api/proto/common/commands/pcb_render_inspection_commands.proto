@@ -1,0 +1,94 @@
+/* Native PCB 3D render inspection. GPL-3.0-or-later. */
+syntax = "proto3";
+
+package kiapi.automation.v1;
+option csharp_namespace = "KiCad.Automation.Protocol";
+
+import "board/board_jobs.proto";
+import "common/commands/automation_commands.proto";
+import "common/types/jobs.proto";
+
+// A separate command is used so peers that only implement the legacy PNG
+// render cannot silently claim renderer-observed metadata they did not capture.
+message PcbRenderInspectionRequest
+{
+  kiapi.board.jobs.RunBoardJobExportRender render_request = 1;
+  DocumentLifecycleState expected_state = 2;
+}
+
+message PcbRenderInspectionResponse
+{
+  kiapi.common.types.RunJobResponse job = 1;
+  PcbRenderMetadata metadata = 2;
+  DocumentLifecycleState document = 3;
+  string process_epoch = 4;
+  bool metadata_complete = 5;
+  repeated string limitations = 6;
+}
+
+// Matrix storage is explicitly column-major, matching glm::mat4 and the
+// native renderer. The mathematical convention is
+// clip = projection * view * board_to_scene * [x_nm,y_nm,z_nm,1]. Pixel origin
+// is the top-left of the returned image.
+message PcbRenderMetadata
+{
+  uint32 width_pixels = 1;
+  uint32 height_pixels = 2;
+  repeated double view_matrix_column_major = 3;
+  repeated double projection_matrix_column_major = 4;
+  repeated double board_nanometres_to_scene_column_major = 5;
+  string projection_convention = 6;
+  double near_clip = 7;
+  double far_clip = 8;
+  string observed_side = 9;
+  bool observed_perspective = 10;
+  double observed_zoom = 11;
+  repeated double observed_camera_position = 12;
+  repeated double observed_look_at = 13;
+  string source_board_snapshot_sha256 = 14;
+  string effective_render_input_sha256 = 15;
+  repeated PcbRenderObjectMetadata objects = 16;
+  repeated PcbRenderModelMetadata models = 17;
+  bool matrices_finite = 18;
+  bool matrices_invertible = 19;
+  // Describes the precision boundary of this renderer hook. These notes do
+  // not by themselves make metadata incomplete.
+  repeated string coverage_notes = 20;
+}
+
+message PcbRenderObjectMetadata
+{
+  string native_uuid = 1;
+  uint32 model_index = 2;
+  repeated double scene_transform_column_major = 3;
+  // Conservative scene-space min/max bounds: [min_x,min_y,min_z,max_x,max_y,max_z].
+  repeated double native_geometry_bounds = 4;
+  // Pixel-space conservative [min_x,min_y,max_x,max_y] bounds. These are not
+  // exact visible pixels and do not imply an occlusion/depth test.
+  repeated double projected_conservative_bounds = 5;
+  bool projected_bounds_available = 6;
+  bool exact_visible_pixels = 7;
+  bool occlusion_tested = 8;
+  bool native_geometry_bounds_available = 9;
+}
+
+message PcbRenderModelMetadata
+{
+  string native_uuid = 1;
+  uint32 model_index = 2;
+  string requested_identity = 3;
+  string resolved_identity = 4;
+  string content_sha256 = 5;
+  bool loaded = 6;
+  bool missing = 7;
+  string missing_reason = 8;
+  repeated double scene_transform_column_major = 9;
+  // Conservative scene-space min/max bounds, when the native mesh was loaded.
+  repeated double native_geometry_bounds = 10;
+  // False means the native importer loaded no inspectable mesh bounds.
+  bool native_geometry_bounds_available = 11;
+  // The current S3DMODEL contract can prove this only when no UV-bearing mesh
+  // is present, because it does not carry external texture asset identities.
+  bool secondary_assets_complete = 12;
+  string secondary_asset_limitation = 13;
+}

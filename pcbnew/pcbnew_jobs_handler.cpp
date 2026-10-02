@@ -132,7 +132,9 @@
 #include <board_stackup_manager/board_stackup_reporter.h>
 #include <api/api_pcb_utils.h>
 #include <api/pcb_drc_document_snapshot.h>
+#include <api/native_state_digest.h>
 #include <api/board/board.pb.h>
+#include <embedded_files.h>
 #include <google/protobuf/util/json_util.h>
 #include <fstream>
 #include <exception>
@@ -143,12 +145,435 @@
 #include <locale_io.h>
 #include <confirm.h>
 
+#include <3d_cache/3d_cache.h>
+#include <plugins/3dapi/c3dmodel.h>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+#include <glm/gtc/matrix_inverse.hpp>
+#include <cmath>
+#include <map>
+#include <limits>
+#include <algorithm>
+#include <utility>
+
 
 #ifdef _WIN32
 #ifdef TRANSPARENT
 #undef TRANSPARENT
 #endif
 #endif
+
+namespace
+{
+wxString inspectionModelBasePath( const BOARD* aBoard, const FOOTPRINT* aFootprint )
+{
+    if( !aBoard || !aBoard->GetProject() || !aFootprint )
+        return {};
+
+    try
+    {
+        const wxString libraryName = aFootprint->GetFPID().GetLibNickname();
+        std::optional<LIBRARY_TABLE_ROW*> row =
+                PROJECT_PCB::FootprintLibAdapter( aBoard->GetProject() )->GetRow( libraryName );
+
+        if( row )
+            return LIBRARY_MANAGER::GetFullURI( *row, true );
+    }
+    catch( ... )
+    {
+    }
+
+    return aBoard->GetProject()->GetProjectPath();
+}
+
+
+wxString inspectionModelPath( const BOARD* aBoard, const FOOTPRINT* aFootprint, const FP_3DMODEL& aModel )
+{
+    if( aBoard && aFootprint && aBoard->GetProject() )
+    {
+        FILENAME_RESOLVER resolver;
+        resolver.SetProject( aBoard->GetProject() );
+        resolver.SetProgramBase( &Pgm() );
+        std::vector<const EMBEDDED_FILES*> embeddedFiles;
+        embeddedFiles.push_back( aFootprint->GetEmbeddedFiles() );
+        embeddedFiles.push_back( aBoard->GetEmbeddedFiles() );
+        const wxString resolved = resolver.ResolvePath( aModel.m_Filename,
+                                                        inspectionModelBasePath( aBoard, aFootprint ),
+                                                        std::move( embeddedFiles ) );
+
+        if( !resolved.IsEmpty() )
+            return resolved;
+    }
+
+    wxFileName path( aModel.m_Filename );
+
+    if( !path.IsAbsolute() && aBoard && aBoard->GetProject() )
+        path.MakeAbsolute( aBoard->GetProject()->GetProjectPath() );
+
+    path.Normalize( wxPATH_NORM_ABSOLUTE | wxPATH_NORM_DOTS );
+    return path.GetFullPath();
+}
+
+
+std::string embeddedModelSha256( const FOOTPRINT* aFootprint, const BOARD* aBoard,
+                                 const FP_3DMODEL& aModel )
+{
+    const wxString name = wxFileName( aModel.m_Filename ).GetFullName();
+    const EMBEDDED_FILES* collections[] = {
+        aFootprint ? aFootprint->GetEmbeddedFiles() : nullptr,
+        aBoard ? aBoard->GetEmbeddedFiles() : nullptr,
+    };
+
+    for( const EMBEDDED_FILES* files : collections )
+    {
+        const EMBEDDED_FILES::EMBEDDED_FILE* entry = files ? files->GetEmbeddedFile( name ) : nullptr;
+
+        if( !entry || !entry->is_valid )
+            continue;
+
+        NATIVE_STATE_DIGEST digest;
+        if( !entry->decompressedData.empty() )
+            digest.Append( std::string_view( entry->decompressedData.data(), entry->decompressedData.size() ) );
+        else
+            digest.Append( std::string_view() );
+        return digest.Hex();
+    }
+
+    return {};
+}
+
+
+std::map<std::string, std::string> inspectionModelInputs( const BOARD* aBoard,
+                                                           const BOARD_ADAPTER* aAdapter = nullptr )
+{
+    std::map<std::string, std::string> result;
+
+    if( !aBoard )
+        return result;
+
+    for( const FOOTPRINT* footprint : aBoard->Footprints() )
+    {
+        if( aAdapter && !aAdapter->IsFootprintShown( footprint ) )
+            continue;
+
+        for( const FP_3DMODEL& model : footprint->Models() )
+        {
+            if( !model.m_Show || model.m_Filename.IsEmpty() )
+                continue;
+
+            const wxString path = inspectionModelPath( aBoard, footprint, model );
+            const FILE_CONTENT_BASELINE baseline = FILE_CONTENT_BASELINE::Read( path );
+            std::string digest = baseline.Known() && baseline.Exists() ? baseline.Sha256() : std::string();
+
+            if( digest.empty() )
+                digest = embeddedModelSha256( footprint, aBoard, model );
+
+            result[ path.ToStdString( wxConvUTF8 ) ] = std::move( digest );
+        }
+    }
+
+    return result;
+}
+
+
+template<typename T, size_t N>
+void copyMatrixColumnMajor( const glm::mat4& aMatrix, std::array<T, N>& aOut )
+{
+    static_assert( N == 16 );
+    const float* values = glm::value_ptr( aMatrix );
+
+    for( size_t index = 0; index < N; ++index )
+        aOut[index] = static_cast<T>( values[index] );
+}
+
+
+glm::mat4 modelSceneMatrix( const BOARD_ADAPTER& aAdapter, const FOOTPRINT& aFootprint,
+                            const FP_3DMODEL& aModel )
+{
+    const float unitScale = static_cast<float>( aAdapter.BiuTo3dUnits() );
+    const VECTOR2I position = aFootprint.GetPosition();
+    glm::mat4 footprintMatrix = glm::translate( glm::mat4( 1.0f ),
+            SFVEC3F( position.x * unitScale, -position.y * unitScale,
+                     aAdapter.GetFootprintZPos( aFootprint.IsFlipped() ) ) );
+
+    if( !aFootprint.GetOrientation().IsZero() )
+    {
+        footprintMatrix = glm::rotate( footprintMatrix,
+                                       static_cast<float>( aFootprint.GetOrientation().AsRadians() ),
+                                       SFVEC3F( 0.0f, 0.0f, 1.0f ) );
+    }
+
+    if( aFootprint.IsFlipped() )
+    {
+        footprintMatrix = glm::rotate( footprintMatrix, glm::pi<float>(), SFVEC3F( 0.0f, 1.0f, 0.0f ) );
+        footprintMatrix = glm::rotate( footprintMatrix, glm::pi<float>(), SFVEC3F( 0.0f, 0.0f, 1.0f ) );
+    }
+
+    const float modelUnitScale = unitScale * pcbIUScale.IU_PER_MM;
+    footprintMatrix = glm::scale( footprintMatrix,
+                                  SFVEC3F( modelUnitScale, modelUnitScale, modelUnitScale ) );
+    footprintMatrix = glm::translate( footprintMatrix,
+                                      SFVEC3F( aModel.m_Offset.x, aModel.m_Offset.y, aModel.m_Offset.z ) );
+    footprintMatrix = glm::rotate( footprintMatrix,
+                                   static_cast<float>( -( aModel.m_Rotation.z / 180.0 ) * glm::pi<double>() ),
+                                   SFVEC3F( 0.0f, 0.0f, 1.0f ) );
+    footprintMatrix = glm::rotate( footprintMatrix,
+                                   static_cast<float>( -( aModel.m_Rotation.y / 180.0 ) * glm::pi<double>() ),
+                                   SFVEC3F( 0.0f, 1.0f, 0.0f ) );
+    footprintMatrix = glm::rotate( footprintMatrix,
+                                   static_cast<float>( -( aModel.m_Rotation.x / 180.0 ) * glm::pi<double>() ),
+                                   SFVEC3F( 1.0f, 0.0f, 0.0f ) );
+    return glm::scale( footprintMatrix, SFVEC3F( aModel.m_Scale.x, aModel.m_Scale.y, aModel.m_Scale.z ) );
+}
+
+
+bool modelBounds( const S3DMODEL* aModel, const glm::mat4& aTransform, std::array<double, 6>& aBounds )
+{
+    if( !aModel || !aModel->m_Meshes || aModel->m_MeshesSize == 0 )
+        return false;
+
+    SFVEC3F minimum( std::numeric_limits<float>::max() );
+    SFVEC3F maximum( std::numeric_limits<float>::lowest() );
+    bool found = false;
+
+    for( unsigned int meshIndex = 0; meshIndex < aModel->m_MeshesSize; ++meshIndex )
+    {
+        const SMESH& mesh = aModel->m_Meshes[meshIndex];
+
+        if( !mesh.m_Positions )
+            continue;
+
+        for( unsigned int vertexIndex = 0; vertexIndex < mesh.m_VertexSize; ++vertexIndex )
+        {
+            const glm::vec4 transformed = aTransform * glm::vec4( mesh.m_Positions[vertexIndex], 1.0f );
+            const SFVEC3F scenePoint( transformed.x, transformed.y, transformed.z );
+            minimum = glm::min( minimum, scenePoint );
+            maximum = glm::max( maximum, scenePoint );
+            found = true;
+        }
+    }
+
+    if( !found )
+        return false;
+
+    aBounds = { minimum.x, minimum.y, minimum.z, maximum.x, maximum.y, maximum.z };
+    return true;
+}
+
+
+void addProjectedBounds( const glm::mat4& aView, const glm::mat4& aProjection,
+                         const std::array<double, 6>& aSceneBounds, unsigned int aWidth,
+                         unsigned int aHeight, std::array<double, 4>& aBounds, bool& aAvailable )
+{
+    const SFVEC3F minimum( static_cast<float>( aSceneBounds[0] ), static_cast<float>( aSceneBounds[1] ),
+                           static_cast<float>( aSceneBounds[2] ) );
+    const SFVEC3F maximum( static_cast<float>( aSceneBounds[3] ), static_cast<float>( aSceneBounds[4] ),
+                           static_cast<float>( aSceneBounds[5] ) );
+    const glm::mat4 transform = aProjection * aView;
+    double minX = std::numeric_limits<double>::max();
+    double minY = std::numeric_limits<double>::max();
+    double maxX = std::numeric_limits<double>::lowest();
+    double maxY = std::numeric_limits<double>::lowest();
+
+    for( int x = 0; x < 2; ++x )
+    {
+        for( int y = 0; y < 2; ++y )
+        {
+            for( int z = 0; z < 2; ++z )
+            {
+                const glm::vec4 clip = transform * glm::vec4(
+                        x ? maximum.x : minimum.x, y ? maximum.y : minimum.y,
+                        z ? maximum.z : minimum.z, 1.0f );
+
+                if( std::abs( clip.w ) < std::numeric_limits<float>::epsilon() )
+                    continue;
+
+                const double ndcX = clip.x / clip.w;
+                const double ndcY = clip.y / clip.w;
+                const double pixelX = ( ndcX + 1.0 ) * 0.5 * aWidth;
+                const double pixelY = ( 1.0 - ndcY ) * 0.5 * aHeight;
+                minX = std::min( minX, pixelX );
+                minY = std::min( minY, pixelY );
+                maxX = std::max( maxX, pixelX );
+                maxY = std::max( maxY, pixelY );
+            }
+        }
+    }
+
+    aAvailable = minX != std::numeric_limits<double>::max();
+
+    if( aAvailable )
+        aBounds = { minX, minY, maxX, maxY };
+}
+
+
+void captureInspectionMetadata( JOB_PCB_RENDER& aJob, BOARD* aBoard, BOARD_ADAPTER& aAdapter,
+                                TRACK_BALL& aCamera, const wxSize& aSize )
+{
+    JOB_PCB_RENDER::INSPECTION_METADATA& metadata = aJob.m_inspectionMetadata;
+    metadata = {};
+    metadata.widthPixels = static_cast<unsigned int>( aSize.x );
+    metadata.heightPixels = static_cast<unsigned int>( aSize.y );
+    copyMatrixColumnMajor( aCamera.GetViewMatrix(), metadata.viewMatrix );
+    copyMatrixColumnMajor( aCamera.GetProjectionMatrix(), metadata.projectionMatrix );
+
+    const double nmToBiu = pcbIUScale.IU_PER_MM / 1'000'000.0;
+    const float sceneScale = static_cast<float>( aAdapter.BiuTo3dUnits() * nmToBiu );
+    glm::mat4 boardToScene( 1.0f );
+    boardToScene[0][0] = sceneScale;
+    boardToScene[1][1] = -sceneScale;
+    boardToScene[2][2] = sceneScale;
+    copyMatrixColumnMajor( boardToScene, metadata.boardNanometresToScene );
+    metadata.projectionConvention =
+            "column-major; clip=projection*view*board_to_scene*[x_nm,y_nm,z_nm,1]; pixel origin top-left";
+    metadata.nearClip = aCamera.GetNear();
+    metadata.farClip = aCamera.GetFar();
+    metadata.observedPerspective = aCamera.GetProjection() == PROJECTION_TYPE::PERSPECTIVE;
+    metadata.observedZoom = aCamera.GetZoom();
+    metadata.observedCameraPosition = { aCamera.GetCameraPos().x, aCamera.GetCameraPos().y,
+                                        aCamera.GetCameraPos().z };
+    metadata.observedLookAt = { aCamera.GetLookAtPos().x, aCamera.GetLookAtPos().y,
+                                aCamera.GetLookAtPos().z };
+    metadata.sourceBoardSnapshotSha256 = aJob.m_sourceBoardSnapshotSha256;
+    metadata.effectiveRenderInputSha256 = aJob.m_effectiveRenderInputSha256;
+
+    static const char* sides[] = { "top", "bottom", "left", "right", "front", "back" };
+    metadata.observedSide = sides[static_cast<int>( aJob.m_side )];
+
+    metadata.matricesFinite = true;
+    for( double value : metadata.viewMatrix ) metadata.matricesFinite = metadata.matricesFinite && std::isfinite( value );
+    for( double value : metadata.projectionMatrix ) metadata.matricesFinite = metadata.matricesFinite && std::isfinite( value );
+    for( double value : metadata.boardNanometresToScene ) metadata.matricesFinite = metadata.matricesFinite && std::isfinite( value );
+    metadata.matricesInvertible = metadata.matricesFinite
+            && std::abs( glm::determinant( aCamera.GetProjectionMatrix() * aCamera.GetViewMatrix() * boardToScene ) )
+                    > std::numeric_limits<float>::epsilon();
+
+    if( !aBoard )
+    {
+        metadata.limitations.emplace_back( "native board was unavailable while capturing inspection metadata" );
+        return;
+    }
+
+    S3D_CACHE* cache = aAdapter.Get3dCacheManager();
+
+    for( const FOOTPRINT* footprint : aBoard->Footprints() )
+    {
+        if( !footprint || !aAdapter.IsFootprintShown( footprint ) )
+            continue;
+
+        const std::string uuid = footprint->m_Uuid.AsStdString();
+        unsigned int modelIndex = 0;
+
+        for( const FP_3DMODEL& model : footprint->Models() )
+        {
+            if( !model.m_Show || model.m_Filename.IsEmpty() )
+            {
+                ++modelIndex;
+                continue;
+            }
+
+            JOB_PCB_RENDER::MODEL_METADATA modelMetadata;
+            modelMetadata.nativeUuid = uuid;
+            modelMetadata.modelIndex = modelIndex;
+            modelMetadata.requestedIdentity = model.m_Filename.ToStdString( wxConvUTF8 );
+            const wxString resolvedPath = inspectionModelPath( aBoard, footprint, model );
+            modelMetadata.resolvedIdentity = resolvedPath.ToStdString( wxConvUTF8 );
+            const FILE_CONTENT_BASELINE baseline = FILE_CONTENT_BASELINE::Read( resolvedPath );
+            modelMetadata.contentSha256 = baseline.Known() && baseline.Exists() ? baseline.Sha256() : std::string();
+
+            if( modelMetadata.contentSha256.empty() )
+                modelMetadata.contentSha256 = embeddedModelSha256( footprint, aBoard, model );
+
+            modelMetadata.missing = false;
+
+            const glm::mat4 transform = modelSceneMatrix( aAdapter, *footprint, model );
+            copyMatrixColumnMajor( transform, modelMetadata.sceneTransform );
+            const S3DMODEL* nativeModel = nullptr;
+
+            if( cache )
+            {
+                std::vector<const EMBEDDED_FILES*> embeddedFiles;
+                embeddedFiles.push_back( footprint->GetEmbeddedFiles() );
+                embeddedFiles.push_back( aBoard->GetEmbeddedFiles() );
+                nativeModel = cache->GetModel( model.m_Filename, inspectionModelBasePath( aBoard, footprint ),
+                                               std::move( embeddedFiles ) );
+
+                if( !nativeModel && baseline.Known() && baseline.Exists() )
+                {
+                    embeddedFiles.clear();
+                    embeddedFiles.push_back( footprint->GetEmbeddedFiles() );
+                    embeddedFiles.push_back( aBoard->GetEmbeddedFiles() );
+                    nativeModel = cache->GetModel( resolvedPath, wxEmptyString, std::move( embeddedFiles ) );
+                }
+            }
+
+            modelMetadata.loaded = nativeModel != nullptr;
+            if( !modelMetadata.loaded )
+            {
+                modelMetadata.missing = true;
+                modelMetadata.missingReason = "native renderer could not load the model input";
+            }
+            else if( modelMetadata.contentSha256.empty() )
+            {
+                modelMetadata.missingReason = "native provider resolved the model, but its content path was not locally hashable";
+                metadata.limitations.emplace_back( "one or more provider-resolved 3D model inputs could not be content-hashed" );
+            }
+
+            if( nativeModel )
+            {
+                bool hasTextureCoordinates = false;
+
+                if( nativeModel->m_Meshes )
+                {
+                    for( unsigned int meshIndex = 0; meshIndex < nativeModel->m_MeshesSize; ++meshIndex )
+                        hasTextureCoordinates = hasTextureCoordinates
+                                || nativeModel->m_Meshes[meshIndex].m_Texcoords != nullptr;
+                }
+
+                if( hasTextureCoordinates )
+                {
+                    // S3DMODEL retains UV coordinates, but its SMATERIAL/SMESH
+                    // contract has no external texture identity or content
+                    // hash. Do not claim secondary asset coverage from UVs.
+                    modelMetadata.secondaryAssetsComplete = false;
+                    modelMetadata.secondaryAssetLimitation =
+                            "native S3DMODEL exposes UV coordinates but no secondary texture asset identities or hashes";
+                    metadata.limitations.push_back( modelMetadata.secondaryAssetLimitation );
+                }
+            }
+
+            modelMetadata.nativeGeometryBoundsAvailable =
+                    modelBounds( nativeModel, transform, modelMetadata.nativeGeometryBounds );
+
+            if( modelMetadata.loaded && !modelMetadata.nativeGeometryBoundsAvailable )
+            {
+                metadata.limitations.emplace_back( "native model geometry bounds were unavailable for one loaded model" );
+            }
+
+            JOB_PCB_RENDER::OBJECT_METADATA object;
+            object.nativeUuid = uuid;
+            object.modelIndex = modelIndex;
+            object.sceneTransform = modelMetadata.sceneTransform;
+            object.nativeGeometryBounds = modelMetadata.nativeGeometryBounds;
+            object.nativeGeometryBoundsAvailable = modelMetadata.nativeGeometryBoundsAvailable;
+
+            if( modelMetadata.nativeGeometryBoundsAvailable )
+            {
+                addProjectedBounds( aCamera.GetViewMatrix(), aCamera.GetProjectionMatrix(),
+                                    object.nativeGeometryBounds, metadata.widthPixels, metadata.heightPixels,
+                                    object.projectedConservativeBounds, object.projectedBoundsAvailable );
+            }
+
+            metadata.objects.push_back( std::move( object ) );
+
+            metadata.models.push_back( std::move( modelMetadata ) );
+            ++modelIndex;
+        }
+    }
+
+    metadata.coverageNotes.emplace_back( "exact visible pixels and occlusion depth are not captured by the native render job" );
+    metadata.coverageNotes.emplace_back( "projected bounds are conservative transformed geometry bounds" );
+}
 
 
 PCBNEW_JOBS_HANDLER::PCBNEW_JOBS_HANDLER( KIWAY* aKiway ) :
@@ -1182,12 +1607,12 @@ int PCBNEW_JOBS_HANDLER::JobExportRender( JOB* aJob )
         return CLI::EXIT_CODES::ERR_ARGS;
     }
 
-    BOARD* brd = getBoard( aRenderJob->m_filename );
+    BOARD* brd = aRenderJob->m_boardSnapshot ? aRenderJob->m_boardSnapshot : getBoard( aRenderJob->m_filename );
 
     if( !brd )
         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
 
-    if( !aRenderJob->m_variant.IsEmpty() )
+    if( !aRenderJob->m_boardSnapshot && !aRenderJob->m_variant.IsEmpty() )
         brd->SetCurrentVariant( aRenderJob->m_variant );
 
     if( aRenderJob->GetConfiguredOutputPath().IsEmpty() )
@@ -1211,7 +1636,9 @@ int PCBNEW_JOBS_HANDLER::JobExportRender( JOB* aJob )
         aRenderJob->SetWorkingOutputPath( fn.GetFullName() );
     }
 
-    wxString outPath = resolveJobOutputPath( aJob, brd );
+    wxString outPath = aRenderJob->m_boardSnapshot
+            ? aRenderJob->GetFullOutputPath( brd->GetProject() )
+            : resolveJobOutputPath( aJob, brd );
 
     if( !PATHS::EnsurePathExists( outPath, true ) )
     {
@@ -1219,6 +1646,9 @@ int PCBNEW_JOBS_HANDLER::JobExportRender( JOB* aJob )
         return CLI::EXIT_CODES::ERR_INVALID_OUTPUT_CONFLICT;
     }
 
+    // Declare the private cache before the adapter and raytrace so its
+    // destruction happens after both consumers have released their pointers.
+    std::unique_ptr<S3D_CACHE> inspectionCache;
     BOARD_ADAPTER boardAdapter;
 
     boardAdapter.SetBoard( brd );
@@ -1341,7 +1771,30 @@ int PCBNEW_JOBS_HANDLER::JobExportRender( JOB* aJob )
         boardAdapter.m_ColorOverrides[LAYER_3D_BACKGROUND_BOTTOM] = COLOR4D( 1.0, 1.0, 1.0, 0.0 );
     }
 
-    boardAdapter.Set3dCacheManager( PROJECT_PCB::Get3DCacheManager( brd->GetProject() ) );
+    // A metadata inspection gets a private cache manager. Its memory entries
+    // are owned by this synchronous job and cannot invalidate a human viewer's
+    // project cache. The resolver and disk-cache directory match the ordinary
+    // project manager, while the fresh cache map hashes every source file
+    // before consulting the content-addressed .3dc entry.
+    if( aRenderJob->m_hasInspectionMetadata )
+    {
+        inspectionCache = std::make_unique<S3D_CACHE>();
+        wxFileName configPath;
+        configPath.AssignDir( PATHS::GetUserSettingsPath() );
+        configPath.AppendDir( wxT( "3d" ) );
+        inspectionCache->SetProgramBase( &Pgm() );
+        inspectionCache->Set3DConfigDir( configPath.GetFullPath() );
+        inspectionCache->SetProject( brd->GetProject() );
+        boardAdapter.Set3dCacheManager( inspectionCache.get() );
+    }
+    else
+    {
+        boardAdapter.Set3dCacheManager( PROJECT_PCB::Get3DCacheManager( brd->GetProject() ) );
+    }
+
+    const std::map<std::string, std::string> modelInputsBefore =
+            aRenderJob->m_hasInspectionMetadata ? inspectionModelInputs( brd, &boardAdapter )
+                                                : std::map<std::string, std::string>();
 
     static std::map<JOB_PCB_RENDER::SIDE, VIEW3D_TYPE> s_viewCmdMap = {
         { JOB_PCB_RENDER::SIDE::TOP, VIEW3D_TYPE::VIEW3D_TOP },
@@ -1396,6 +1849,20 @@ int PCBNEW_JOBS_HANDLER::JobExportRender( JOB* aJob )
     uint8_t* rgbaBuffer = raytrace.GetBuffer();
     wxSize   realSize = raytrace.GetRealBufferSize();
     bool     success = !!rgbaBuffer;
+
+    if( success && aRenderJob->m_hasInspectionMetadata )
+    {
+        const std::map<std::string, std::string> modelInputsAfter = inspectionModelInputs( brd, &boardAdapter );
+
+        if( modelInputsAfter != modelInputsBefore )
+        {
+            m_reporter->Report( _( "A 3D model input changed during rendering; the image and metadata were discarded.\n" ),
+                                RPT_SEVERITY_ERROR );
+            return CLI::EXIT_CODES::ERR_BUSY;
+        }
+
+        captureInspectionMetadata( *aRenderJob, brd, boardAdapter, camera, realSize );
+    }
 
     if( rgbaBuffer )
     {

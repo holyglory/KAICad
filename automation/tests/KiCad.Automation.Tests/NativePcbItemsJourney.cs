@@ -1521,6 +1521,11 @@ public sealed partial class NativeSessionTests
             { instanceId, requestJson = SchematicJson.Formatter.Format(groupedRequest), expectedStateJson = SchematicJson.Formatter.Format(groupedBefore) });
             bool groupedPreviewFailed = positiveGroupedPreview.TryGetProperty("isError", out var groupedPositiveError)
                 && groupedPositiveError.GetBoolean();
+            if (!groupedPreviewFailed && positiveGroupedPreview.TryGetProperty("structuredContent", out var groupedPreviewData)
+                && groupedPreviewData.TryGetProperty("preview", out var groupedPreviewState)
+                && groupedPreviewState.TryGetProperty("completeDeltaVersion", out var groupedDeltaVersion)
+                && groupedDeltaVersion.GetInt32() != 2)
+                groupedPreviewFailed = true;
             if (groupedPreviewFailed)
             {
                 // Direct ordinary-group ownership is still fail-closed when

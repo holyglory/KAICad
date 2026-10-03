@@ -46,7 +46,9 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(hash, trace.GetProperty("sourceSha256").GetString());
         Assert.IsGreaterThan(0, trace.GetProperty("contourCount").GetInt32());
         Assert.IsGreaterThan(0, trace.GetProperty("filledPieceCount").GetInt32());
-        Assert.IsTrue(trace.GetProperty("contours").EnumerateArray().Any(contour => contour.GetProperty("hole").GetBoolean()), first.GetRawText());
+        var contours = trace.GetProperty("contours").EnumerateArray().ToArray();
+        Assert.AreEqual(1, contours.Count(contour => !contour.GetProperty("hole").GetBoolean()), first.GetRawText());
+        Assert.AreEqual(1, contours.Count(contour => contour.GetProperty("hole").GetBoolean()), first.GetRawText());
         Assert.IsFalse(data.GetProperty("nativeDocumentMutated").GetBoolean());
         Assert.IsFalse(data.GetProperty("cadProjectionCommitted").GetBoolean());
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-raster-trace.json"), first.GetRawText(), token);

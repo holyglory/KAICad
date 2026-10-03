@@ -53,7 +53,7 @@ public sealed partial class SharedProtoBandTests
         ["2B"] = (200, ["DiagramCanvas", "DiagramLayout", "DiagramCreate"], ["DCV_", "DLY_"]),
         ["2C"] = (300, ["SchematicTracking", "SchematicRebuild", "NativeOwnership", "SchematicStateGroup", "DesignAutoSync"],
             ["STK_", "SRB_", "NOW_", "DAS_"]),
-        ["2D"] = (400, ["InstanceCapability", "NativeCapability", "CodexRuntime", "NativeCrash", "NativeZoneFillOutcome"], ["ICP_", "NCP_", "CXR_", "NZFO_"]),
+        ["2D"] = (400, ["InstanceCapability", "NativeCapability", "CodexRuntime", "NativeCrash", "NativeZoneFillOutcome", "NativeRouteGroup"], ["ICP_", "NCP_", "CXR_", "NZFO_", "NRGK_"]),
     };
 
     [TestMethod]

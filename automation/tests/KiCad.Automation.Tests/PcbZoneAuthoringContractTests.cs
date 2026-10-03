@@ -101,6 +101,24 @@ public sealed class PcbZoneAuthoringContractTests
             wrongDocument));
     }
 
+    [TestMethod]
+    public void CopperZoneReadbackCanonicalizesRingOrderButRejectsArcTopology()
+    {
+        var expected = Zone("11111111-1111-1111-1111-111111111111");
+        var rotated = expected.Clone();
+        var nodes = rotated.Outline.Polygons[0].Outline.Nodes.Select(node => node.Clone()).ToArray();
+        rotated.Outline.Polygons[0].Outline.Nodes.Clear();
+        rotated.Outline.Polygons[0].Outline.Nodes.Add(nodes.Skip(2).Concat(nodes.Take(2)));
+        rotated.Parent = new KIID { Value = "77777777-7777-7777-7777-777777777777" };
+        PcbZoneAuthoringContract.ValidateReadback(expected, rotated);
+
+        rotated.Outline.Polygons[0].Outline.Nodes[0].Arc = new ArcStartMidEnd
+        {
+            Start = new() { XNm = 0, YNm = 0 }, Mid = new() { XNm = 1, YNm = 1 }, End = new() { XNm = 2, YNm = 0 }
+        };
+        Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateReadback(expected, rotated));
+    }
+
     private static Zone Zone(string id)
     {
         var zone = new Zone

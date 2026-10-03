@@ -61,8 +61,11 @@ internal static class EmbeddedFileCodec
 
     private sealed class ZstdApi
     {
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate nuint CompressBoundDelegate(nuint size);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate nuint CompressDelegate(IntPtr destination, nuint capacity, IntPtr source, nuint size, int level);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate uint IsErrorDelegate(nuint code);
 
         private readonly IntPtr library;

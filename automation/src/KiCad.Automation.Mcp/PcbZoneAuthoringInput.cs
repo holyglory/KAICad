@@ -85,17 +85,25 @@ public sealed class PcbZoneAuthoringInput
         return ring;
     }
 
-    private static BoardLayer ParseLayer(string value) => value switch
+    private static BoardLayer ParseLayer(string value)
     {
-        "F.Cu" or "F_Cu" or "BL_F_Cu" => BoardLayer.BlFCu,
-        "B.Cu" or "B_Cu" or "BL_B_Cu" => BoardLayer.BlBCu,
-        _ when Enum.TryParse<BoardLayer>(value, true, out var parsed) => parsed,
-        _ => throw new AutomationException("invalid_pcb_zone_layers", $"Unknown copper layer '{value}'.")
-    };
+        string compact = string.Concat(value.Where(char.IsLetterOrDigit));
+        string? name = Enum.GetNames<BoardLayer>().FirstOrDefault(candidate =>
+            string.Concat(candidate.Where(char.IsLetterOrDigit)).Equals(compact, StringComparison.OrdinalIgnoreCase));
+        if (name is null || !Enum.TryParse(name, out BoardLayer parsed)
+            || (int)parsed < (int)BoardLayer.BlFCu || (int)parsed > (int)BoardLayer.BlBCu)
+            throw new AutomationException("invalid_pcb_zone_layers", $"Unknown copper layer '{value}'.");
+        return parsed;
+    }
 
-    private static T ParseEnum<T>(string value, string field) where T : struct, Enum =>
-        Enum.TryParse<T>(value, true, out var parsed) && Enum.IsDefined(parsed)
+    private static T ParseEnum<T>(string value, string field) where T : struct, Enum
+    {
+        string compact = string.Concat((value ?? "").Where(char.IsLetterOrDigit));
+        string? name = Enum.GetNames<T>().FirstOrDefault(candidate =>
+            string.Concat(candidate.Where(char.IsLetterOrDigit)).Equals(compact, StringComparison.OrdinalIgnoreCase));
+        return name is not null && Enum.TryParse(name, out T parsed) && Enum.IsDefined(parsed)
             ? parsed : throw new AutomationException("invalid_pcb_zone_settings", $"{field} must be a defined native enum value.");
+    }
 }
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]

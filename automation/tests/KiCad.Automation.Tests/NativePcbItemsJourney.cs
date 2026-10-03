@@ -706,7 +706,10 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(renderData.GetProperty("metadataComplete").ValueKind is JsonValueKind.True or JsonValueKind.False,
                 renderData.GetRawText());
             bool hasMissingModel = renderMetadata.GetProperty("models").EnumerateArray()
-                .Any(row => row.GetProperty("missing").GetBoolean());
+                // Protobuf JSON omits a false scalar by default.  Treat an
+                // omitted `missing` field as its schema default while keeping
+                // malformed or non-boolean values strict when present.
+                .Any(row => row.TryGetProperty("missing", out var missing) && missing.GetBoolean());
             Assert.AreEqual(!hasMissingModel, renderData.GetProperty("metadataComplete").GetBoolean(), renderData.GetRawText());
             var modelRows = renderMetadata.GetProperty("models").EnumerateArray().ToArray();
             Assert.IsTrue(modelRows.Length > 0, renderData.GetRawText());

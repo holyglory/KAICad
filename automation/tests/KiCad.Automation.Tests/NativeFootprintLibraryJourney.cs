@@ -50,6 +50,16 @@ public sealed class NativeFootprintLibraryJourney
         Assert.IsTrue(process.Start());
         using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(3));
         var registry = new InstanceRegistry(new NngTransport(), Path.Combine(scratch, "registry"));
+        var captureFailures = new List<Exception>();
+        async Task Capture(string file)
+        {
+            try { await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, file), deadline.Token); }
+            catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+                captureFailures.Add(error);
+                await File.WriteAllTextAsync(Path.Combine(evidence, file + ".failure.txt"), error.ToString(), deadline.Token);
+            }
+        }
         try
         {
             int backoff = 25;
@@ -70,10 +80,10 @@ public sealed class NativeFootprintLibraryJourney
                 await Task.Delay(backoff, deadline.Token); backoff = Math.Min(backoff * 2, 500);
             }
             Assert.IsTrue(NativeKeyboard.HasWindow(display, process.Id, "KiCad"), "KiCad manager window did not become visible.");
-            await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, "manager-before-footprint-editor.png"), deadline.Token);
+            await Capture("manager-before-footprint-editor.png");
             NativeKeyboard.SchematicShortcut(display, process.Id, "click", "KiCad", false, true,
                 clickFromLeft: 330, clickFromTop: 230);
-            await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, "manager-after-footprint-editor-key.png"), deadline.Token);
+            await Capture("manager-after-footprint-editor-key.png");
             using var editorWait = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
             editorWait.CancelAfter(TimeSpan.FromSeconds(20));
             while (!NativeKeyboard.HasWindow(display, process.Id, "Footprint Editor"))
@@ -211,6 +221,8 @@ public sealed class NativeFootprintLibraryJourney
             Assert.IsFalse(nativeReceiptAfterReconnect.TryGetProperty("isError", out var nativeReceiptError) && nativeReceiptError.GetBoolean(), nativeReceiptAfterReconnect.GetRawText());
             Assert.IsTrue(nativeReceiptAfterReconnect.GetProperty("structuredContent").GetProperty("found").GetBoolean(), nativeReceiptAfterReconnect.GetRawText());
             Assert.AreEqual("native-process", nativeReceiptAfterReconnect.GetProperty("structuredContent").GetProperty("receiptScope").GetString());
+            if (captureFailures.Count > 0)
+                throw new AggregateException("The safe footprint API/persistence observations completed, but required visual captures failed.", captureFailures);
         }
         finally
         {

@@ -9,19 +9,37 @@ internal static class NativeKeyboard
 {
     public static async Task CaptureAsync(string fixtureDisplay, string destination, CancellationToken token)
     {
+        var started = Stopwatch.StartNew();
         var start = new ProcessStartInfo("ffmpeg")
         { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
-        foreach (string arg in new[] { "-nostdin", "-y", "-loglevel", "error", "-f", "x11grab", "-video_size", "1280x900",
-            "-i", fixtureDisplay, "-frames:v", "1", destination }) start.ArgumentList.Add(arg);
+        string[] arguments = { "-nostdin", "-y", "-loglevel", "error", "-f", "x11grab", "-video_size", "1280x900",
+            "-i", fixtureDisplay, "-frames:v", "1", destination };
+        foreach (string arg in arguments) start.ArgumentList.Add(arg);
         using var process = Process.Start(start)!;
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         deadline.CancelAfter(TimeSpan.FromSeconds(5));
         var output = process.StandardOutput.ReadToEndAsync(); var error = process.StandardError.ReadToEndAsync();
+        OperationCanceledException? waitCancellation = null;
         try { await process.WaitForExitAsync(deadline.Token); }
+        catch (OperationCanceledException cancellation) when (!token.IsCancellationRequested)
+        {
+            // Keep the original timeout cause and the ffmpeg diagnostics.  The
+            // old finally block killed the child, then rethrew TaskCanceledException
+            // without preserving stderr, which hid whether X11 capture or ffmpeg
+            // itself was the failing boundary.
+            waitCancellation = cancellation;
+        }
         finally
         {
             if (!process.HasExited) { process.Kill(true); await process.WaitForExitAsync(); }
             await Task.WhenAll(output, error);
+        }
+        if (waitCancellation is not null)
+        {
+            string command = "ffmpeg " + string.Join(" ", arguments.Select(arg => $"\"{arg}\""));
+            throw new InvalidOperationException(
+                $"Fixture screenshot timed out after {started.Elapsed.TotalSeconds:F2}s (pid {process.Id}, display {fixtureDisplay}). "
+                + $"Command: {command}. stderr: {await error}", waitCancellation);
         }
         if (process.ExitCode != 0) throw new InvalidOperationException("Fixture screenshot failed: " + await error);
     }

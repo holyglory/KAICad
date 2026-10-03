@@ -53,7 +53,7 @@ public sealed partial class NativeSessionTests
         Assert.HasCount(1, modelNodes, "The resistor fixture must contain one 3D model declaration.");
         int modelStart = modelNodes[0].Start;
         int modelEnd = modelNodes[0].End;
-        Assert.IsGreaterThan(modelEnd, modelStart, "The resistor model declaration must be complete.");
+        Assert.IsTrue(modelEnd > modelStart, "The resistor model declaration must be complete.");
         string modelBlock = library.Substring(modelStart, modelEnd - modelStart);
         modelBlock = modelBlock.Replace(
             "${KICAD8_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.wrl",

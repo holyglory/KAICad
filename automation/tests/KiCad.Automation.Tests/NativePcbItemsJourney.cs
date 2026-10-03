@@ -1099,7 +1099,7 @@ public sealed partial class NativeSessionTests
             var shoveObstacleItems = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
             { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbTrace } }, token);
             var shoveObstacle = shoveObstacleItems.Items.Select(item => item.Unpack<Track>())
-                .Single(track => track.Net.Name == "POWER_RAIL");
+                .Single(track => track.Net.Name == "POWER_RAIL" && track.Layer == BoardLayer.BlFCu);
             // Keep the property-bearing via as a standalone same-net
             // obstacle.  Ending the foreign track underneath the via makes
             // PNS treat the connected branch as a walkaround candidate rather

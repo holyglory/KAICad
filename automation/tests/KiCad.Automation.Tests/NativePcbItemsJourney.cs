@@ -2269,6 +2269,8 @@ public sealed partial class NativeSessionTests
         string p1 = Guid.NewGuid().ToString("D"), p2 = Guid.NewGuid().ToString("D");
         string f3 = Guid.NewGuid().ToString("D"), f4 = Guid.NewGuid().ToString("D");
         string p3 = Guid.NewGuid().ToString("D"), p4 = Guid.NewGuid().ToString("D");
+        string f5 = Guid.NewGuid().ToString("D"), f6 = Guid.NewGuid().ToString("D");
+        string p5 = Guid.NewGuid().ToString("D"), p6 = Guid.NewGuid().ToString("D");
         string obstacle = Guid.NewGuid().ToString("D");
         string edge = Guid.NewGuid().ToString("D");
         // Keep the candidate deliberately small and deterministic: the native
@@ -2299,6 +2301,12 @@ public sealed partial class NativeSessionTests
   (footprint "DP_N" (layer "F.Cu") (at 40.8 40.8) (uuid "{f4}")
     (attr smd)
     (pad "1" smd circle (at 0 0) (size 0.3 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "USB_D-") (uuid "{p4}")))
+  (footprint "DP_P_TAIL" (layer "F.Cu") (at 43.1 40.1) (uuid "{f5}")
+    (attr smd)
+    (pad "1" smd circle (at 0 0) (size 0.3 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "USB_D+") (uuid "{p5}")))
+  (footprint "DP_P_ROUTE_END" (layer "F.Cu") (at 41.6 44) (uuid "{f6}")
+    (attr smd)
+    (pad "1" smd circle (at 0 0) (size 0.3 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "USB_D+") (uuid "{p6}")))
   (segment (start 39 42) (end 41 42) (width 0.25) (layer "F.Cu") (net 1) (uuid "{obstacle}"))
 )
 """;

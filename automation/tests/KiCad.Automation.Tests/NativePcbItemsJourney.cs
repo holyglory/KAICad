@@ -1160,8 +1160,9 @@ public sealed partial class NativeSessionTests
             };
             shovePreviewRequest.Waypoints.Add(new Vector2 { XNm = 41_600_000, YNm = 44_000_000 });
 
-            // Group membership cannot yet be represented by this copper-only
-            // transaction. A grouped split must return no actionable candidate.
+            // Direct ordinary PCB groups are represented by the version-2
+            // route delta. The detached preview must carry the exact before
+            // and after memberships while leaving the board unchanged.
             var sourceGroup = new Kiapi.Board.Types.Group
             { Id = new() { Value = Guid.NewGuid().ToString("D") }, Name = "Grouped split guard", Items = { splitSource.Id.Clone() } };
             var groupCreate = new CreateItems { Header = new() { Document = cleanBoard }, Items = { Any.Pack(sourceGroup) } };
@@ -1172,8 +1173,28 @@ public sealed partial class NativeSessionTests
             shovePreviewRequest.ExpectedRevision = groupedState.Revision.Clone();
             var groupedPreview = await mcp.Tool("kicad_pcb_route_preview", new
             { instanceId, requestJson = SchematicJson.Formatter.Format(shovePreviewRequest), expectedStateJson = SchematicJson.Formatter.Format(groupedState) });
-            Assert.IsTrue(groupedPreview.TryGetProperty("isError", out var groupedPreviewError) && groupedPreviewError.GetBoolean(), groupedPreview.GetRawText());
-            Assert.AreEqual("route_delta_group_membership_unsupported", groupedPreview.GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            Assert.IsFalse(groupedPreview.TryGetProperty("isError", out var groupedPreviewError) && groupedPreviewError.GetBoolean(), groupedPreview.GetRawText());
+            var initialGroupedData = groupedPreview.GetProperty("structuredContent");
+            var initialGroupedStateData = initialGroupedData.GetProperty("preview");
+            Assert.AreEqual(2, initialGroupedStateData.GetProperty("completeDeltaVersion").GetInt32(), groupedPreview.GetRawText());
+            Assert.IsTrue(initialGroupedStateData.GetProperty("completed").GetBoolean(), groupedPreview.GetRawText());
+            Assert.IsTrue(initialGroupedStateData.GetProperty("previewOnly").GetBoolean(), groupedPreview.GetRawText());
+            string initialGroupedChangesJson = initialGroupedData.GetProperty("groupChangesJson").GetString()!;
+            using var initialGroupedChangesDocument = JsonDocument.Parse(initialGroupedChangesJson);
+            var initialGroupedChanges = initialGroupedChangesDocument.RootElement.EnumerateArray()
+                .Select(element => SchematicJson.Parser.Parse<NativeRouteGroupChange>(element.GetRawText())).ToArray();
+            Assert.AreEqual(1, initialGroupedChanges.Length, groupedPreview.GetRawText());
+            var initialGroupedChange = initialGroupedChanges[0];
+            Assert.AreEqual(sourceGroup.Id, initialGroupedChange.ExpectedBefore.Group.Id, initialGroupedChangesJson);
+            Assert.IsTrue(initialGroupedChange.ExpectedBefore.Group.Items.Select(id => id.Value)
+                .ToHashSet(StringComparer.Ordinal).SetEquals(new[] { splitSource.Id.Value }), initialGroupedChangesJson);
+            Assert.IsFalse(initialGroupedChange.ExpectedAfter.Group.Items.Any(id => id.Value == splitSource.Id.Value), initialGroupedChangesJson);
+            Assert.IsTrue(initialGroupedChange.CreatedSources.All(source => source.SourceItemId.Equals(splitSource.Id)
+                && source.SourceGroupId.Equals(sourceGroup.Id)
+                && initialGroupedChange.ExpectedAfter.Group.Items.Any(id => id.Equals(source.CreatedItemId))), initialGroupedChangesJson);
+            var initialGroupedCandidate = BoardJson.Parser.Parse<CreateItems>(initialGroupedData.GetProperty("candidateRequestJson").GetString()!);
+            var initialGroupedCandidateIds = initialGroupedCandidate.Items.Select(RouteIdentity).ToHashSet(StringComparer.Ordinal);
+            Assert.IsTrue(initialGroupedChange.CreatedSources.All(source => initialGroupedCandidateIds.Contains(source.CreatedItemId.Value)), groupedPreview.GetRawText());
             Assert.AreEqual(groupedState, await ObserveLifecycleState(client, cleanBoard, token));
             var groupRemove = new DeleteItems { Header = new() { Document = cleanBoard }, ItemIds = { sourceGroup.Id.Clone() } };
             var ungrouped = await mcp.Tool("kicad_pcb_items_delete", new

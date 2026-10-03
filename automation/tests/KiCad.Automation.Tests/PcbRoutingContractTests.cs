@@ -345,6 +345,72 @@ public sealed class PcbRoutingContractTests
     }
 
     [TestMethod]
+    public void RoutePreviewContractAcceptsOrdinaryGroupDeltaAndRejectsLegacyVersion()
+    {
+        var (request, source, state) = CleanRoute();
+        var created = source.Clone();
+        created.Id = new() { Value = Guid.NewGuid().ToString("D") };
+        created.Start.XNm += 1000;
+        created.End.XNm += 1000;
+
+        var group = new Group
+        {
+            Id = new() { Value = Guid.NewGuid().ToString("D") }, Name = "route-group",
+            Items = { source.Id.Clone() }
+        };
+        var afterGroup = group.Clone();
+        afterGroup.Items.Clear();
+        afterGroup.Items.Add(created.Id.Clone());
+        var preview = new PcbRoutePreviewState
+        {
+            Document = request.Candidate.Header.Document,
+            OperationId = request.OperationId,
+            ProcessEpoch = state.ProcessEpoch,
+            Completed = true,
+            PreviewOnly = true,
+            CompleteDeltaVersion = 2
+        };
+        preview.RouteItems.Add(Any.Pack(created));
+        preview.RemovedItemIds.Add(source.Id.Clone());
+        preview.GroupChanges.Add(new NativeRouteGroupChange
+        {
+            ExpectedBefore = new NativeRouteGroupState
+            {
+                Group = group,
+                Kind = NativeRouteGroupKind.NrgkOrdinary
+            },
+            ExpectedAfter = new NativeRouteGroupState
+            {
+                Group = afterGroup,
+                Kind = NativeRouteGroupKind.NrgkOrdinary
+            },
+            CreatedSources =
+            {
+                new NativeRouteCreatedSource
+                {
+                    CreatedItemId = created.Id.Clone(),
+                    SourceItemId = source.Id.Clone(),
+                    SourceGroupId = group.Id.Clone()
+                }
+            }
+        });
+
+        CheckedPcbRouteContract.ValidatePreview(preview);
+
+        var legacy = preview.Clone();
+        legacy.CompleteDeltaVersion = 1;
+        var legacyError = Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedPcbRouteContract.ValidatePreview(legacy));
+        Assert.AreEqual("route_preview_contract_unsupported", legacyError.Code);
+
+        var nested = preview.Clone();
+        nested.GroupChanges[0].ExpectedBefore.Kind = NativeRouteGroupKind.NrgkGenerator;
+        var nestedError = Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedPcbRouteContract.ValidatePreview(nested));
+        Assert.AreEqual("invalid_checked_pcb_route", nestedError.Code);
+    }
+
+    [TestMethod]
     public void RoutePreviewReplacementUpdatesRoundTripPreservesDisplacedUuid()
     {
         var document = new DocumentSpecifier

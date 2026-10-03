@@ -82,11 +82,14 @@ message SaveCopyOfDocument
   string path = 2;
 
   SaveOptions options = 3;
+
+  string operation_id = 4;
 }
 
 message RevertDocument
 {
   kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
 }
 
 /*

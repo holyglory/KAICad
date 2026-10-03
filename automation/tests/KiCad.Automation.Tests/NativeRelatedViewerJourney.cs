@@ -24,7 +24,8 @@ public sealed partial class NativeSessionTests
         var before = await ObserveLifecycleState(client, board, token);
         var other = await ObserveLifecycleState(client, schematic, token);
         var files = before.NativeFiles.ToDictionary(path => path,
-            path => (Bytes: File.ReadAllBytes(path), Written: File.GetLastWriteTimeUtc(path)));
+            path => (Exists: File.Exists(path), Bytes: File.Exists(path) ? File.ReadAllBytes(path) : Array.Empty<byte>(),
+                Written: File.Exists(path) ? File.GetLastWriteTimeUtc(path) : DateTime.MinValue));
         NativeKeyboard.SchematicShortcut(display, processId, "3", "PCB Editor", false, true, altKey: true);
         await WaitForViewer(true);
         await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, processId + "-related-3d-viewer.png"), token);
@@ -58,8 +59,12 @@ public sealed partial class NativeSessionTests
         finally { Directory.Delete(statePath, true); }
         foreach (var (path, expected) in files)
         {
-            CollectionAssert.AreEqual(expected.Bytes, File.ReadAllBytes(path));
-            Assert.AreEqual(expected.Written, File.GetLastWriteTimeUtc(path));
+            Assert.AreEqual(expected.Exists, File.Exists(path));
+            if (expected.Exists)
+            {
+                CollectionAssert.AreEqual(expected.Bytes, File.ReadAllBytes(path));
+                Assert.AreEqual(expected.Written, File.GetLastWriteTimeUtc(path));
+            }
         }
         // Explicit user close through the viewer's File menu; never force-close
         // the PCB or kill a process to clear the guard. The next journey proves

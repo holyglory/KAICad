@@ -24,6 +24,8 @@
 #include <api/api_handler_board.h>
 #include <api/footprint_context.h>
 #include <api/common/commands/project_commands.pb.h>
+#include <api/common/commands/automation_commands.pb.h>
+#include <map>
 
 
 class FOOTPRINT;
@@ -51,6 +53,22 @@ private:
     HANDLER_RESULT<Empty> handleRevertDocument(
             const HANDLER_CONTEXT<commands::RevertDocument>& aCtx );
 
+    HANDLER_RESULT<kiapi::automation::v1::NativeCapabilityFootprintReadOperationResponse>
+            handleReadOperation(
+                    const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityFootprintReadOperation>& aCtx );
+
+    HANDLER_RESULT<kiapi::automation::v1::NativeCapabilityFootprintLibraryReadNamesResponse>
+            handleReadLibraryNames(
+                    const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityFootprintLibraryReadNames>& aCtx );
+
+    HANDLER_RESULT<kiapi::automation::v1::NativeCapabilityFootprintLibraryDeleteResponse>
+            handleDeleteLibraryFootprint(
+                    const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityFootprintLibraryDelete>& aCtx );
+
+    HANDLER_RESULT<kiapi::automation::v1::NativeCapabilityFootprintLibraryReadOperationResponse>
+            handleReadLibraryOperation(
+                    const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityFootprintLibraryReadOperation>& aCtx );
+
     HANDLER_RESULT<commands::GetItemsResponse> handleGetItems(
             const HANDLER_CONTEXT<commands::GetItems>& aCtx );
 
@@ -73,6 +91,24 @@ private:
     FOOTPRINT_EDIT_FRAME* frame() const;
 
     HANDLER_RESULT<FOOTPRINT*> validateAndGetFootprint( const DocumentSpecifier& aDocument );
+
+    struct FOOTPRINT_RECEIPT
+    {
+        std::string operation;
+        DocumentSpecifier document;
+        bool completed = false;
+        std::string fingerprint;
+    };
+
+    std::map<std::string, FOOTPRINT_RECEIPT> m_operationReceipts;
+
+    // Process-owned receipts for configured footprint-library entry mutations.
+    // The library lifecycle has no document revision controller yet, so bind
+    // each operation id to the exact protobuf request and retain its response
+    // while this native editor process remains alive.
+    std::map<std::string, std::string> m_libraryOperationFingerprints;
+    std::map<std::string, kiapi::automation::v1::NativeCapabilityFootprintLibraryDeleteResponse>
+            m_libraryDeleteReceipts;
 };
 
 

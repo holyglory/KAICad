@@ -131,9 +131,11 @@
 #include <board_stackup_manager/board_stackup.h>
 #include <board_stackup_manager/board_stackup_reporter.h>
 #include <api/api_pcb_utils.h>
+#include <api/pcb_drc_document_snapshot.h>
 #include <api/board/board.pb.h>
 #include <google/protobuf/util/json_util.h>
 #include <fstream>
+#include <exception>
 #include <paths.h>
 #include <streamwrapper.h>
 #include <tools/zone_filler_tool.h>
@@ -465,15 +467,20 @@ PCBNEW_JOBS_HANDLER::~PCBNEW_JOBS_HANDLER()
 
 void PCBNEW_JOBS_HANDLER::ClearCachedBoard()
 {
-    m_cliBoard.reset();
+    // Tools may retain pointers into either board: destroy them first.
     m_toolManager.reset();
+    m_cliBoard.reset();
+    m_exportSnapshot.reset();
 }
 
 
 TOOL_MANAGER* PCBNEW_JOBS_HANDLER::getToolManager( BOARD* aBrd )
 {
     TOOL_MANAGER* toolManager = nullptr;
-    if( Pgm().IsGUI() )
+    // A detached export snapshot cannot use the editor's tool manager: its
+    // environment is permanently bound to the live board.  Build a private
+    // manager whenever an export snapshot is active, even in GUI mode.
+    if( Pgm().IsGUI() && ( !m_exportSnapshot || &m_exportSnapshot->GetBoard() != aBrd ) )
     {
         // we assume the PCB we are working on here is the one in the frame
         // so use the frame's tool manager
@@ -493,6 +500,41 @@ TOOL_MANAGER* PCBNEW_JOBS_HANDLER::getToolManager( BOARD* aBrd )
         toolManager->SetEnvironment( aBrd, nullptr, nullptr, Kiface().KifaceSettings(), nullptr );
     }
     return toolManager;
+}
+
+
+BOARD* PCBNEW_JOBS_HANDLER::getBoardForExport( const wxString& aPath )
+{
+    // Drop a previous job's private board before resolving the source.  This
+    // keeps ordinary jobs and subsequent exports from accidentally borrowing
+    // stale detached state.
+    m_toolManager.reset();
+    m_exportSnapshot.reset();
+
+    BOARD* source = getBoard( aPath );
+
+    if( !source )
+        return nullptr;
+
+    try
+    {
+        m_exportSnapshot = PCB_DRC_DOCUMENT_SNAPSHOT::Capture( *source );
+        return &m_exportSnapshot->GetBoard();
+    }
+    catch( const std::exception& error )
+    {
+        m_reporter->Report( wxString::Format( _( "Failed to capture board for export: %s\n" ),
+                                               error.what() ),
+                            RPT_SEVERITY_ERROR );
+        m_exportSnapshot.reset();
+        return nullptr;
+    }
+    catch( ... )
+    {
+        m_reporter->Report( _( "Failed to capture board for export.\n" ), RPT_SEVERITY_ERROR );
+        m_exportSnapshot.reset();
+        return nullptr;
+    }
 }
 
 
@@ -1008,7 +1050,10 @@ int PCBNEW_JOBS_HANDLER::JobExportStep( JOB* aJob )
     if( aStepJob == nullptr )
         return CLI::EXIT_CODES::ERR_UNKNOWN;
 
-    BOARD* brd = getBoard( aStepJob->m_filename );
+    // Manufacturing exports must operate on a detached board snapshot. Using
+    // the live editor board here can change its in-memory 3D/model state and
+    // invalidate the lifecycle digest even when no design file is written.
+    BOARD* brd = getBoardForExport( aStepJob->m_filename );
 
     if( !brd )
         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
@@ -1115,6 +1160,9 @@ int PCBNEW_JOBS_HANDLER::JobExportStep( JOB* aJob )
             return CLI::EXIT_CODES::ERR_UNKNOWN;
     }
 
+    // Report the artifact through the job contract so MCP callers can hash and
+    // retain the exact native output just like every other manufacturing job.
+    aStepJob->AddOutput( outPath );
     return CLI::EXIT_CODES::OK;
 }
 
@@ -1405,11 +1453,12 @@ int PCBNEW_JOBS_HANDLER::JobExportSvg( JOB* aJob )
     if( aSvgJob == nullptr )
         return CLI::EXIT_CODES::ERR_UNKNOWN;
 
-    BOARD*        brd = getBoard( aSvgJob->m_filename );
-    TOOL_MANAGER* toolManager = getToolManager( brd );
+    BOARD* brd = getBoardForExport( aSvgJob->m_filename );
 
     if( !brd )
         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+
+    TOOL_MANAGER* toolManager = getToolManager( brd );
 
     if( !aSvgJob->m_variant.IsEmpty() )
         brd->SetCurrentVariant( aSvgJob->m_variant );
@@ -1497,7 +1546,7 @@ int PCBNEW_JOBS_HANDLER::JobExportDxf( JOB* aJob )
     if( aDxfJob == nullptr )
         return CLI::EXIT_CODES::ERR_UNKNOWN;
 
-    BOARD* brd = getBoard( aDxfJob->m_filename );
+    BOARD* brd = getBoardForExport( aDxfJob->m_filename );
 
     if( !brd )
         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
@@ -1592,7 +1641,7 @@ int PCBNEW_JOBS_HANDLER::JobExportPdf( JOB* aJob )
     if( pdfJob == nullptr )
         return CLI::EXIT_CODES::ERR_UNKNOWN;
 
-    BOARD* brd = getBoard( pdfJob->m_filename );
+    BOARD* brd = getBoardForExport( pdfJob->m_filename );
 
     if( !brd )
         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
@@ -1687,7 +1736,7 @@ int PCBNEW_JOBS_HANDLER::JobExportPng( JOB* aJob )
     if( pngJob == nullptr )
         return CLI::EXIT_CODES::ERR_UNKNOWN;
 
-    BOARD* brd = getBoard( pngJob->m_filename );
+    BOARD* brd = getBoardForExport( pngJob->m_filename );
 
     if( !brd )
         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
@@ -1761,7 +1810,7 @@ int PCBNEW_JOBS_HANDLER::JobExportPs( JOB* aJob )
     if( psJob == nullptr )
         return CLI::EXIT_CODES::ERR_UNKNOWN;
 
-    BOARD* brd = getBoard( psJob->m_filename );
+    BOARD* brd = getBoardForExport( psJob->m_filename );
 
     if( !brd )
         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
@@ -1857,7 +1906,7 @@ int PCBNEW_JOBS_HANDLER::JobExportGerbers( JOB* aJob )
     if( aGerberJob == nullptr )
         return CLI::EXIT_CODES::ERR_UNKNOWN;
 
-    BOARD* brd = getBoard( aGerberJob->m_filename );
+    BOARD* brd = getBoardForExport( aGerberJob->m_filename );
 
     if( !brd )
         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
@@ -2026,7 +2075,10 @@ int PCBNEW_JOBS_HANDLER::JobExportGencad( JOB* aJob )
     if( aGencadJob == nullptr )
         return CLI::EXIT_CODES::ERR_UNKNOWN;
 
-    BOARD* brd = getBoard( aGencadJob->m_filename );
+    // GenCAD writes through the exporter while inspecting board geometry.
+    // Use the detached export snapshot so it cannot advance the editor's
+    // lifecycle revision or mutate shared connectivity state.
+    BOARD* brd = getBoardForExport( aGencadJob->m_filename );
 
     if( !brd )
         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
@@ -2082,7 +2134,7 @@ int PCBNEW_JOBS_HANDLER::JobExportStats( JOB* aJob )
     if( statsJob == nullptr )
         return CLI::EXIT_CODES::ERR_UNKNOWN;
 
-    BOARD* brd = getBoard( statsJob->m_filename );
+    BOARD* brd = getBoardForExport( statsJob->m_filename );
 
     if( !brd )
         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
@@ -2269,7 +2321,7 @@ int PCBNEW_JOBS_HANDLER::JobExportGerber( JOB* aJob )
     if( aGerberJob == nullptr )
         return CLI::EXIT_CODES::ERR_UNKNOWN;
 
-    BOARD* brd = getBoard( aGerberJob->m_filename );
+    BOARD* brd = getBoardForExport( aGerberJob->m_filename );
 
     if( !brd )
         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
@@ -2368,7 +2420,10 @@ int PCBNEW_JOBS_HANDLER::JobExportDrill( JOB* aJob )
     if( aDrillJob == nullptr )
         return CLI::EXIT_CODES::ERR_UNKNOWN;
 
-    BOARD* brd = getBoard( aDrillJob->m_filename );
+    // Drill plotting temporarily changes visible-layer/origin state.  Use the
+    // detached export snapshot so the live editor board and its lifecycle digest
+    // remain byte-for-byte unchanged while the job runs.
+    BOARD* brd = getBoardForExport( aDrillJob->m_filename );
 
     if( !brd )
         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
@@ -2520,7 +2575,10 @@ int PCBNEW_JOBS_HANDLER::JobExportPos( JOB* aJob )
     if( aPosJob == nullptr )
         return CLI::EXIT_CODES::ERR_UNKNOWN;
 
-    BOARD* brd = getBoard( aPosJob->m_filename );
+    // Pick-and-place export applies text variables and may synchronize
+    // footprint properties.  Keep that work on the detached export board just
+    // like the Gerber and SVG jobs.
+    BOARD* brd = getBoardForExport( aPosJob->m_filename );
 
     if( !brd )
         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
@@ -3166,7 +3224,7 @@ int PCBNEW_JOBS_HANDLER::JobExportIpc2581( JOB* aJob )
     if( job == nullptr )
         return CLI::EXIT_CODES::ERR_UNKNOWN;
 
-    BOARD* brd = getBoard( job->m_filename );
+    BOARD* brd = getBoardForExport( job->m_filename );
 
     if( !brd )
         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
@@ -3204,7 +3262,7 @@ int PCBNEW_JOBS_HANDLER::JobExportIpcD356( JOB* aJob )
     if( job == nullptr )
         return CLI::EXIT_CODES::ERR_UNKNOWN;
 
-    BOARD* brd = getBoard( job->m_filename );
+    BOARD* brd = getBoardForExport( job->m_filename );
 
     if( !brd )
         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
@@ -3251,7 +3309,7 @@ int PCBNEW_JOBS_HANDLER::JobExportOdb( JOB* aJob )
     if( job == nullptr )
         return CLI::EXIT_CODES::ERR_UNKNOWN;
 
-    BOARD* brd = getBoard( job->m_filename );
+    BOARD* brd = getBoardForExport( job->m_filename );
 
     if( !brd )
         return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;

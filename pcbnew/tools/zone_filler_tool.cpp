@@ -19,6 +19,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 #include <cstdint>
+#include <exception>
 #include <thread>
 #include <zone.h>
 #include <connectivity/connectivity_data.h>
@@ -44,6 +45,78 @@
 #include <core/profile.h>
 #include <pcb_generator.h>
 #include <tools/generator_tool.h>
+#include <scoped_set_reset.h>
+
+namespace
+{
+// BOARD_COMMIT's destructor discards copies without restoring the live board.
+// Keep each phase's transaction owned here and explicitly revert pending edits.
+class FILL_COMMIT_GUARD
+{
+public:
+    FILL_COMMIT_GUARD( BOARD_COMMIT& aCommit, bool& aApplied, bool& aKnown, bool& aRolledBack ) :
+            m_commit( aCommit ), m_applied( aApplied ), m_known( aKnown ), m_rolledBack( aRolledBack )
+    {}
+
+    ~FILL_COMMIT_GUARD() { Revert(); }
+
+    void Push( const wxString& aMessage, int aFlags )
+    {
+        const bool hasChanges = !m_commit.Empty();
+        m_pushStarted = true;
+        m_known = false;
+        m_commit.Push( aMessage, aFlags );
+        m_applied = hasChanges;
+        m_known = true;
+        m_pending = false;
+        m_pushStarted = false;
+    }
+
+    void Revert() noexcept
+    {
+        if( !m_pending )
+            return;
+
+        // A partially executed Push can already have transferred undo copies.
+        // It cannot safely be treated as an unpushed transaction to restore.
+        if( m_pushStarted )
+        {
+            m_known = false;
+            return;
+        }
+
+        try
+        {
+            m_commit.Revert();
+            m_pending = false;
+            m_rolledBack = true;
+        }
+        catch( ... )
+        {
+            m_known = false;
+        }
+    }
+
+private:
+    BOARD_COMMIT& m_commit;
+    bool& m_applied;
+    bool& m_known;
+    bool& m_rolledBack;
+    bool m_pending = true;
+    bool m_pushStarted = false;
+};
+
+std::string fillOutcomeError( ZONE_FILLER::OUTCOME aOutcome )
+{
+    switch( aOutcome )
+    {
+    case ZONE_FILLER::OUTCOME::CANCELLED: return "zone_fill_cancelled";
+    case ZONE_FILLER::OUTCOME::NOT_CONVERGED: return "zone_fill_not_converged";
+    case ZONE_FILLER::OUTCOME::UNCHANGED_OR_DECLINED: return "zone_fill_unchanged_or_declined";
+    default: return "zone_fill_failed";
+    }
+}
+}
 
 ZONE_FILLER_TOOL::ZONE_FILLER_TOOL() :
     PCB_TOOL_BASE( ZONE_FILLER_TOOL_NAME ),
@@ -87,42 +160,94 @@ std::vector<PCB_GENERATOR*> ZONE_FILLER_TOOL::regenerateDirtyGenerators( BOARD_C
 }
 
 
-void ZONE_FILLER_TOOL::refillAroundGenerators( const std::vector<PCB_GENERATOR*>& aRegenerated )
+ZONE_FILL_RESULT ZONE_FILLER_TOOL::refillAroundGenerators(
+        const std::vector<PCB_GENERATOR*>& aRegenerated, PROGRESS_REPORTER* aReporter )
 {
+    ZONE_FILL_RESULT result;
+    result.cleanupFinished = true;
     if( aRegenerated.empty() )
-        return;
+        return result;
 
-    BOARD* brd = board();
-
-    if( !brd )
-        return;
-
-    // Build a list of zones that need refill after wacking the generators
-    // and deduplicate
-    std::set<ZONE*> uniqueZones;
-
-    for( PCB_GENERATOR* gen : aRegenerated )
+    try
     {
-        std::vector<ZONE*> zones = gen->GetZonesNeedingRefillAfterUpdate();
+        BOARD* brd = board();
+        if( !brd )
+        {
+            result.outcome = ZONE_FILLER::OUTCOME::FAILED;
+            result.failureStage = "generator-refill-target";
+            result.errorCode = "zone_fill_target_unavailable";
+            result.errorMessage = "The board disappeared before the generator refill.";
+            return result;
+        }
 
-        for( ZONE* zone : zones )
-            uniqueZones.insert( zone );
+        std::set<ZONE*> uniqueZones;
+        for( PCB_GENERATOR* gen : aRegenerated )
+        {
+            for( ZONE* zone : gen->GetZonesNeedingRefillAfterUpdate() )
+                uniqueZones.insert( zone );
+        }
+        if( uniqueZones.empty() )
+            return result;
+
+        result.generatorRefillRequired = true;
+        result.rollbackCompleted = false;
+        result.failureStage = "generator-refill";
+        brd->IncrementTimeStamp();
+
+        BOARD_COMMIT refillCommit( this );
+        FILL_COMMIT_GUARD transaction( refillCommit, result.generatorRefillCommitApplied,
+                                      result.commitStateKnown, result.rollbackCompleted );
+        ZONE_FILLER refiller( brd, &refillCommit );
+        refiller.SetProgressReporter( aReporter );
+        bool accepted;
+        try
+        {
+            accepted = refiller.Fill( std::vector<ZONE*>( uniqueZones.begin(), uniqueZones.end() ) );
+        }
+        catch( ... )
+        {
+            result.generatorRefillOutcome = refiller.LastOutcome();
+            throw;
+        }
+        result.generatorRefillOutcome = refiller.LastOutcome();
+        result.outcome = result.generatorRefillOutcome;
+        if( accepted )
+        {
+            result.failureStage = "generator-refill-commit";
+            transaction.Push( wxEmptyString, APPEND_UNDO | SKIP_CONNECTIVITY | ZONE_FILL_OP );
+        }
+        else
+        {
+            result.failureStage = "generator-refill-rollback";
+            transaction.Revert();
+        }
+
+        if( result.outcome == ZONE_FILLER::OUTCOME::COMPLETED && result.commitStateKnown )
+            result.failureStage.clear();
+        else
+        {
+            result.errorCode = fillOutcomeError( result.outcome );
+            result.errorMessage = "The fill around regenerated items did not complete successfully.";
+        }
     }
-
-    if( uniqueZones.empty() )
-        return;
-
-    std::vector<ZONE*> toRefill( uniqueZones.begin(), uniqueZones.end() );
-
-    brd->IncrementTimeStamp(); // make the just-pushed children visible to the refill
-
-    BOARD_COMMIT refillCommit( this );
-    ZONE_FILLER  refiller( brd, &refillCommit );
-
-    if( refiller.Fill( toRefill ) )
-        refillCommit.Push( wxEmptyString, APPEND_UNDO | SKIP_CONNECTIVITY | ZONE_FILL_OP );
-    else
-        refillCommit.Revert();
+    catch( const std::exception& error )
+    {
+        result.outcome = ZONE_FILLER::OUTCOME::FAILED;
+        result.errorCode = "zone_fill_failed";
+        result.errorMessage = error.what();
+    }
+    catch( ... )
+    {
+        result.outcome = ZONE_FILLER::OUTCOME::FAILED;
+        result.errorCode = "zone_fill_failed";
+        result.errorMessage = "The fill around regenerated items raised an unknown exception.";
+    }
+    if( !result.commitStateKnown )
+    {
+        result.rollbackCompleted = false;
+        result.errorCode = "zone_fill_commit_state_unknown";
+    }
+    return result;
 }
 
 
@@ -179,88 +304,184 @@ void ZONE_FILLER_TOOL::singleShotRefocus( wxIdleEvent& )
 
 void ZONE_FILLER_TOOL::FillAllZones( wxWindow* aCaller, PROGRESS_REPORTER* aReporter, bool aHeadless )
 {
+    FillAllZonesWithResult( aCaller, aReporter, aHeadless );
+}
+
+
+ZONE_FILL_RESULT ZONE_FILLER_TOOL::FillAllZonesWithResult(
+        wxWindow* aCaller, PROGRESS_REPORTER* aReporter, bool aHeadless )
+{
+    ZONE_FILL_RESULT result;
     if( m_fillInProgress )
-        return;
-
-    m_fillInProgress = true;
-
-    PCB_EDIT_FRAME*                       frame = nullptr;
-    if( !aHeadless )
-        frame = getEditFrame<PCB_EDIT_FRAME>();
-
-    BOARD_COMMIT                          commit( this );
-    std::unique_ptr<WX_PROGRESS_REPORTER> reporter;
-    TEARDROP_MANAGER                      teardropMgr( board(), m_toolMgr );
-    std::vector<ZONE*>                    toFill;
-
-    teardropMgr.UpdateTeardrops( commit, nullptr, nullptr, true /* forceFullUpdate */ );
-
-    board()->IncrementTimeStamp();    // Clear caches
-
-    for( ZONE* zone : board()->Zones() )
-        toFill.push_back( zone );
-
-    m_filler = std::make_unique<ZONE_FILLER>( board(), &commit );
-
-    if( !aHeadless && !board()->GetDesignSettings().m_DRCEngine->RulesValid() )
     {
-        WX_INFOBAR* infobar = frame->GetInfoBar();
-
-        infobar->RemoveAllButtons();
-        infobar->AddLink( _( "Show DRC rules" ),
-                      [frame]( wxHyperlinkEvent& aEvent )
-                      {
-                          frame->ShowBoardSetupDialog( _( "Rules" ) );
-                      } );
-
-        infobar->ShowMessageFor( _( "Zone fills may be inaccurate.  DRC rules contain errors." ), 10000,
-                                 wxICON_WARNING );
+        result.cleanupFinished = true;
+        result.failureStage = "admission";
+        result.errorCode = "zone_fill_busy";
+        result.errorMessage = "A zone fill is already running.";
+        return result;
     }
 
-    if( aReporter )
+    PCB_EDIT_FRAME* editFrame = aHeadless ? nullptr : getEditFrame<PCB_EDIT_FRAME>();
+    if( !board() || ( !aHeadless && !editFrame ) )
     {
-        m_filler->SetProgressReporter( aReporter );
-    }
-    else if( !aHeadless )
-    {
-        reporter = std::make_unique<WX_PROGRESS_REPORTER>( aCaller, _( "Fill All Zones" ), 5, PR_CAN_ABORT );
-        m_filler->SetProgressReporter( reporter.get() );
-    }
-
-    if( m_filler->Fill( toFill ) )
-    {
-        if( m_filler->GetProgressReporter() )
-            m_filler->GetProgressReporter()->AdvancePhase();
-
-        // First pass on allowing generators like via-stitch to update
-        board()->OnZonesFilled( toFill );
-        std::vector<PCB_GENERATOR*> regenerated = regenerateDirtyGenerators( commit );
-
-        commit.Push( _( "Fill Zone(s)" ), SKIP_CONNECTIVITY | ZONE_FILL_OP );
-
-        if( !aHeadless )
-            frame->m_ZoneFillsDirty = false;
-
-        // Refill again as generators like via stitches can cause punch outs
-        refillAroundGenerators( regenerated );
-    }
-    else
-    {
-        commit.Revert();
+        result.cleanupFinished = true;
+        result.failureStage = "target";
+        result.errorCode = "zone_fill_target_unavailable";
+        result.errorMessage = "The zone fill target is unavailable.";
+        return result;
     }
 
-    PostFillRefresh( aHeadless );
+    {
+        SCOPED_SET_RESET<bool> busy( m_fillInProgress, true );
+        std::unique_ptr<WX_PROGRESS_REPORTER> reporter;
+        struct FILLER_CLEANUP
+        {
+            std::unique_ptr<ZONE_FILLER>& filler;
+            ~FILLER_CLEANUP() { filler.reset(); }
+        } fillerCleanup{ m_filler };
 
-    if( !aHeadless && m_filler->IsDebug() )
-        frame->UpdateUserInterface();
+        result.rollbackCompleted = false;
+        bool primaryReverted = false;
+        bool refillReverted = true;
+        try
+        {
+            BOARD_COMMIT commit( this );
+            FILL_COMMIT_GUARD transaction( commit, result.primaryCommitApplied,
+                                          result.commitStateKnown, primaryReverted );
+            result.failureStage = "teardrops";
+            TEARDROP_MANAGER teardropMgr( board(), m_toolMgr );
+            teardropMgr.UpdateTeardrops( commit, nullptr, nullptr, true );
 
-    m_fillInProgress = false;
-    m_filler.reset( nullptr );
+            board()->IncrementTimeStamp();
+            std::vector<ZONE*> toFill( board()->Zones().begin(), board()->Zones().end() );
+            m_filler = std::make_unique<ZONE_FILLER>( board(), &commit );
 
-    if( !aHeadless )
-        // wxWidgets has keyboard focus issues after the progress reporter.  Re-setting the focus
-        // here doesn't work, so we delay it to an idle event.
-        canvas()->Bind( wxEVT_IDLE, &ZONE_FILLER_TOOL::singleShotRefocus, this );
+            if( !aHeadless && !board()->GetDesignSettings().m_DRCEngine->RulesValid() )
+            {
+                WX_INFOBAR* infobar = editFrame->GetInfoBar();
+                infobar->RemoveAllButtons();
+                infobar->AddLink( _( "Show DRC rules" ),
+                        [editFrame]( wxHyperlinkEvent& )
+                        {
+                            editFrame->ShowBoardSetupDialog( _( "Rules" ) );
+                        } );
+                infobar->ShowMessageFor( _( "Zone fills may be inaccurate.  DRC rules contain errors." ),
+                                        10000, wxICON_WARNING );
+            }
+
+            if( aReporter )
+                m_filler->SetProgressReporter( aReporter );
+            else if( !aHeadless )
+            {
+                reporter = std::make_unique<WX_PROGRESS_REPORTER>(
+                        aCaller, _( "Fill All Zones" ), 5, PR_CAN_ABORT );
+                m_filler->SetProgressReporter( reporter.get() );
+            }
+
+            result.failureStage = "primary-fill";
+            bool accepted;
+            try
+            {
+                accepted = m_filler->Fill( toFill );
+            }
+            catch( ... )
+            {
+                result.primaryOutcome = m_filler->LastOutcome();
+                throw;
+            }
+            result.primaryOutcome = m_filler->LastOutcome();
+            result.outcome = result.primaryOutcome;
+            if( accepted )
+            {
+                if( m_filler->GetProgressReporter() )
+                    m_filler->GetProgressReporter()->AdvancePhase();
+
+                result.failureStage = "generators";
+                board()->OnZonesFilled( toFill );
+                std::vector<PCB_GENERATOR*> regenerated = regenerateDirtyGenerators( commit );
+                result.failureStage = "primary-commit";
+                transaction.Push( _( "Fill Zone(s)" ), SKIP_CONNECTIVITY | ZONE_FILL_OP );
+                if( !aHeadless )
+                    editFrame->m_ZoneFillsDirty = false;
+
+                // Keep the generator's changes in the owning first commit. The
+                // second commit remains an independent append-undo transaction.
+                ZONE_FILL_RESULT refill = refillAroundGenerators(
+                        regenerated, m_filler->GetProgressReporter() );
+                result.generatorRefillRequired = refill.generatorRefillRequired;
+                result.generatorRefillOutcome = refill.generatorRefillOutcome;
+                result.generatorRefillCommitApplied = refill.generatorRefillCommitApplied;
+                result.commitStateKnown = result.commitStateKnown && refill.commitStateKnown;
+                refillReverted = refill.rollbackCompleted;
+                if( !refill.errorCode.empty() )
+                {
+                    result.outcome = refill.outcome;
+                    result.failureStage = refill.failureStage;
+                    result.errorCode = refill.errorCode;
+                    result.errorMessage = refill.errorMessage;
+                }
+            }
+            else
+            {
+                result.failureStage = "primary-rollback";
+                transaction.Revert();
+            }
+
+            if( result.outcome != ZONE_FILLER::OUTCOME::COMPLETED && result.errorCode.empty() )
+            {
+                result.errorCode = fillOutcomeError( result.outcome );
+                result.errorMessage = "The primary zone fill did not complete successfully.";
+            }
+        }
+        catch( const std::exception& error )
+        {
+            result.outcome = ZONE_FILLER::OUTCOME::FAILED;
+            result.errorCode = "zone_fill_failed";
+            result.errorMessage = error.what();
+        }
+        catch( ... )
+        {
+            result.outcome = ZONE_FILLER::OUTCOME::FAILED;
+            result.errorCode = "zone_fill_failed";
+            result.errorMessage = "The zone fill raised an unknown exception.";
+        }
+
+        result.rollbackCompleted = result.commitStateKnown && primaryReverted && refillReverted
+                                   && !result.primaryCommitApplied && !result.generatorRefillCommitApplied;
+        if( !result.commitStateKnown )
+        {
+            result.rollbackCompleted = false;
+            result.errorCode = "zone_fill_commit_state_unknown";
+        }
+
+        // Refresh after either commit or rollback, while the result still owns
+        // the exact pass outcomes and before clearing the busy/filler state.
+        const std::string earlierStage = result.failureStage;
+        try
+        {
+            result.failureStage = "cleanup";
+            PostFillRefresh( aHeadless );
+            if( !aHeadless && m_filler && m_filler->IsDebug() )
+                editFrame->UpdateUserInterface();
+            if( !aHeadless )
+                canvas()->Bind( wxEVT_IDLE, &ZONE_FILLER_TOOL::singleShotRefocus, this );
+            result.failureStage = result.errorCode.empty() ? "" : earlierStage;
+        }
+        catch( const std::exception& error )
+        {
+            result.outcome = ZONE_FILLER::OUTCOME::FAILED;
+            result.errorCode = "zone_fill_cleanup_failed";
+            result.errorMessage = error.what();
+        }
+        catch( ... )
+        {
+            result.outcome = ZONE_FILLER::OUTCOME::FAILED;
+            result.errorCode = "zone_fill_cleanup_failed";
+            result.errorMessage = "The zone fill cleanup raised an unknown exception.";
+        }
+    }
+    result.cleanupFinished = true;
+    return result;
 }
 
 
@@ -444,7 +665,16 @@ int ZONE_FILLER_TOOL::ZoneFill( const TOOL_EVENT& aEvent )
 
 int ZONE_FILLER_TOOL::ZoneFillAll( const TOOL_EVENT& aEvent )
 {
-    FillAllZones( frame() );
+    if( !aEvent.HasParameter() )
+    {
+        FillAllZones( frame() );
+        return 0;
+    }
+
+    ZONE_FILL_REQUEST request = aEvent.Parameter<ZONE_FILL_REQUEST>();
+    ZONE_FILL_RESULT result = FillAllZonesWithResult( frame() );
+    if( request.completion )
+        request.completion( result );
     return 0;
 }
 

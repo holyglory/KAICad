@@ -1,0 +1,504 @@
+using System.ComponentModel;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using Google.Protobuf;
+using Google.Protobuf.WellKnownTypes;
+using Kiapi.Common.Types;
+using Kiapi.Schematic.Types;
+using KiCad.Automation.Model;
+using KiCad.Automation.Native;
+using KiCad.Automation.Protocol;
+using ModelContextProtocol.Protocol;
+using ModelContextProtocol.Server;
+
+namespace KiCad.Automation.Mcp;
+
+/// <summary>Typed global symbol-library access through KiCad's native adapter.</summary>
+[McpServerToolType]
+public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
+{
+    private const int MaximumDefinitionBytes = 4 * 1024 * 1024;
+    private const int MaximumItems = 4096;
+    private const int MaximumFields = 512;
+    private const int MaximumPins = 2048;
+    private const int MaximumGraphics = 4096;
+    private const int MaximumTextLength = 16 * 1024;
+
+    [McpServerTool(Name = "kicad_symbol_library_validate", ReadOnly = true),
+     Description("Validate one complete SchematicSymbol protobuf-JSON definition without contacting KiCad. libraryNickname is the explicit library identity and must match definition.id.libraryNickname. The deterministic result reports bounded item/field counts, pin identity/name/number/length/orientation checks, supported graphics Any types, unit/body-style references and a SHA-256 of canonical protobuf JSON. This is a managed read-only check; it does not resolve a library, mutate a file or claim native persistence."),
+     KiCadCapability("symbol-library", "compiled-mcp", "managed SchematicSymbol structure, pins, graphics Any types, units/body styles and canonical content SHA-256"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public CallToolResult Validate(string libraryNickname, string definitionJson,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ValidateLibraryIdentity(libraryNickname);
+            if (string.IsNullOrWhiteSpace(definitionJson))
+                throw new AutomationException("invalid_symbol_definition", "definitionJson is required.");
+            byte[] source = Encoding.UTF8.GetBytes(definitionJson);
+            if (source.Length > MaximumDefinitionBytes)
+                throw new AutomationException("symbol_definition_too_large", $"definitionJson exceeds the {MaximumDefinitionBytes} byte limit.");
+
+            SchematicSymbol definition = ParseDefinition(definitionJson);
+            string canonical = SchematicJson.Formatter.Format(definition);
+            string contentSha256 = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
+            var issues = new List<SymbolValidationIssue>();
+            ValidateDefinition(libraryNickname, definition, issues, cancellationToken);
+            var ordered = issues.OrderBy(issue => issue.Path, StringComparer.Ordinal)
+                .ThenBy(issue => issue.Code, StringComparer.Ordinal)
+                .ThenBy(issue => issue.Message, StringComparer.Ordinal).ToArray();
+            return Data(new
+            {
+                libraryNickname,
+                libraryId = definition.Id is null ? null : new { libraryNickname = definition.Id.LibraryNickname, entryName = definition.Id.EntryName },
+                valid = ordered.Length == 0,
+                issues = ordered,
+                contentSha256,
+                canonicalBytes = Encoding.UTF8.GetByteCount(canonical),
+                itemCount = definition.Items.Count,
+                fieldCount = CountFields(definition),
+                pinCount = definition.Items.Count(child => child.Item?.Is(SchematicPin.Descriptor) == true),
+                graphicCount = definition.Items.Count(child => IsGraphic(child.Item)),
+                nativeContacted = false,
+                nativeMutation = false
+            });
+        }
+        catch (Exception error) when (error is AutomationException or InvalidProtocolBufferException or InvalidJsonException)
+        {
+            string code = error is AutomationException known ? known.Code : "invalid_symbol_definition";
+            return Data(new { errorCode = code, errorMessage = error.Message, valid = false,
+                issues = Array.Empty<SymbolValidationIssue>(), nativeContacted = false, nativeMutation = false }, true);
+        }
+    }
+
+    [McpServerTool(Name = "kicad_symbol_library_clone", ReadOnly = false),
+     Description("Clone one complete symbol definition into an explicitly named project symbol library through the native adapter. definitionJson is the source definition returned by kicad_symbol_library_read or kicad_symbol_library_validate; targetLibraryNickname and targetSymbolName replace only its library identity and entry name. The clone is validated before the native write and keeps the caller operation UUID and native process receipt semantics of kicad_symbol_library_write."),
+     KiCadCapability("symbol-library", "compiled-mcp plus native-symbol-library-adapter", "validated symbol clone, explicit target library/name, operation UUID and native modify hashes"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> Clone(string instanceId, string expectedProcessEpoch, string definitionJson,
+        string targetLibraryNickname, string targetSymbolName, string operationId,
+        CancellationToken cancellationToken, bool overwrite = false) => Execute(async () =>
+    {
+        ValidateEpoch(expectedProcessEpoch);
+        ValidateLibrary(targetLibraryNickname);
+        ValidateName(targetSymbolName, "targetSymbolName");
+        ValidateOperation(operationId);
+        SchematicSymbol source = ParseDefinition(definitionJson);
+        SchematicSymbol clone = source.Clone();
+        clone.Id = new() { LibraryNickname = targetLibraryNickname, EntryName = targetSymbolName };
+        List<SymbolValidationIssue> issues = [];
+        ValidateDefinition(targetLibraryNickname, clone, issues, cancellationToken);
+        if (issues.Count != 0)
+            throw new AutomationException("invalid_symbol_definition", "The cloned definition is invalid: " + string.Join("; ", issues.OrderBy(i => i.Path, StringComparer.Ordinal).Select(i => i.Code)));
+        return await Write(instanceId, expectedProcessEpoch, targetLibraryNickname,
+            SchematicJson.Formatter.Format(clone), operationId, cancellationToken, overwrite);
+    });
+
+    [McpServerTool(Name = "kicad_symbol_library_receipt", ReadOnly = true),
+     Description("Read the process-owned receipt for a symbol-library write or delete operation ID. A found receipt can be returned after a lost reply without resubmitting the mutation; the receipt is retained only while the native process lives.")]
+    [KiCadCapability("symbol-library", "native-symbol-library-adapter", "operation UUID and process-owned write/delete receipt"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativeSymbolLibraryReadbackUsesMcp")]
+    public Task<CallToolResult> Receipt(string instanceId, string expectedProcessEpoch, string operationId,
+        CancellationToken cancellationToken) => Execute(async () =>
+    {
+        ValidateEpoch(expectedProcessEpoch); ValidateOperation(operationId);
+        NativeClient client = registry.Client(instanceId); AutomationSession session = await Handshake(client, expectedProcessEpoch, cancellationToken);
+        var response = await client.InvokeAsync<NativeCapabilitySymbolLibraryReadOperation, NativeCapabilitySymbolLibraryReadOperationResponse>(
+            new() { OperationId = operationId }, cancellationToken);
+        return Data(new { instanceId, processEpoch = session.Epoch, operationId, found = response.Found,
+            writeResponse = response.Found && response.WriteResponse is { Completed: true } ? JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(response.WriteResponse)) : (JsonElement?)null,
+            deleteResponse = response.Found && response.DeleteResponse is { Completed: true } ? JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(response.DeleteResponse)) : (JsonElement?)null,
+            nativeReceipt = response.Found, revisionTracked = false });
+    });
+
+    [McpServerTool(Name = "kicad_symbol_library_list", ReadOnly = true),
+     Description("List symbols in an explicitly named project symbol library through KiCad's native symbol-library adapter. The result includes the adapter modify hash; this is an observation, not a revision admission.")]
+    [KiCadCapability("symbol-library", "native-symbol-library-adapter", "library nickname and native modify hash"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativeSymbolLibraryReadbackUsesMcp")]
+    public Task<CallToolResult> List(string instanceId, string expectedProcessEpoch, string libraryNickname,
+        CancellationToken cancellationToken) => Execute(async () =>
+    {
+        ValidateEpoch(expectedProcessEpoch); ValidateLibrary(libraryNickname);
+        NativeClient client = registry.Client(instanceId); AutomationSession session = await Handshake(client, expectedProcessEpoch, cancellationToken);
+        var response = await client.InvokeAsync<NativeCapabilitySymbolLibraryReadNames, NativeCapabilitySymbolLibraryReadNamesResponse>(
+            new() { LibraryNickname = libraryNickname }, cancellationToken);
+        return Data(new { instanceId, processEpoch = session.Epoch, libraryNickname,
+            symbolNames = response.SymbolNames.ToArray(), modifyHash = response.ModifyHash,
+            revisionTracked = false, nativeReceiptAvailable = false });
+    });
+
+    [McpServerTool(Name = "kicad_symbol_library_read", ReadOnly = true),
+     Description("Read one complete typed symbol definition from an explicitly named project symbol library. The native definition is returned as SchematicSymbol protobuf JSON with the library modify hash.")]
+    [KiCadCapability("symbol-library", "native-symbol-library-adapter", "library nickname, symbol name and native modify hash"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativeSymbolLibraryReadbackUsesMcp")]
+    public Task<CallToolResult> Read(string instanceId, string expectedProcessEpoch, string libraryNickname,
+        string symbolName, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        ValidateEpoch(expectedProcessEpoch); ValidateLibrary(libraryNickname); ValidateName(symbolName, "symbolName");
+        NativeClient client = registry.Client(instanceId); AutomationSession session = await Handshake(client, expectedProcessEpoch, cancellationToken);
+        var response = await client.InvokeAsync<NativeCapabilitySymbolLibraryReadSymbol, NativeCapabilitySymbolLibraryReadSymbolResponse>(
+            new() { LibraryNickname = libraryNickname, SymbolName = symbolName }, cancellationToken);
+        return Data(new { instanceId, processEpoch = session.Epoch, libraryNickname, symbolName,
+            definition = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(response.Definition)),
+            modifyHash = response.ModifyHash, revisionTracked = false, nativeReceiptAvailable = false });
+    });
+
+    [McpServerTool(Name = "kicad_symbol_library_write", ReadOnly = false),
+     Description("Create or replace one complete symbol definition in an explicitly named project symbol library through KiCad's native adapter. When expectedModifyHash is supplied, the write is admitted only if the library's current native modify hash still matches; an already recorded operation ID is replayed before that check. operationId binds the request to a process-owned native receipt, and the completed write is verified by reading the persisted symbol back through the native adapter. The library still has no durable lifecycle revision sequence.")]
+    [KiCadCapability("symbol-library", "native-symbol-library-adapter", "library nickname, complete SchematicSymbol, overwrite flag, operation UUID and native modify hashes"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativeSymbolLibraryReadbackUsesMcp")]
+    public Task<CallToolResult> Write(string instanceId, string expectedProcessEpoch, string libraryNickname,
+        string definitionJson, string operationId, CancellationToken cancellationToken, bool overwrite = true,
+        string expectedModifyHash = "") => Execute(async () =>
+    {
+        ValidateEpoch(expectedProcessEpoch); ValidateLibrary(libraryNickname); ValidateOperation(operationId);
+        SchematicSymbol definition = ParseDefinition(definitionJson);
+        if (definition.Id is null || definition.Id.LibraryNickname != libraryNickname || string.IsNullOrWhiteSpace(definition.Id.EntryName))
+            throw new AutomationException("symbol_library_definition_mismatch", "definitionJson must carry the same library nickname and a nonempty entry name.");
+        NativeClient client = registry.Client(instanceId); AutomationSession session = await Handshake(client, expectedProcessEpoch, cancellationToken);
+        string revisionAdmission = await EnsureModifyHash(client, libraryNickname, operationId, expectedModifyHash, cancellationToken);
+        var response = await client.InvokeAsync<NativeCapabilitySymbolLibraryWriteSymbol, NativeCapabilitySymbolLibraryWriteSymbolResponse>(
+            new() { LibraryNickname = libraryNickname, Definition = definition, Overwrite = overwrite, OperationId = operationId }, cancellationToken);
+        SymbolLibraryWriteReadback readback = response.Completed
+            ? await VerifyWriteReadback(client, libraryNickname, response, cancellationToken)
+            : new(false, null, null);
+        return Data(new { instanceId, processEpoch = session.Epoch, libraryNickname,
+            symbolName = response.SymbolName, operationId, operationOutcome = response.Completed ? "completed" : "skipped",
+            beforeModifyHash = response.BeforeModifyHash, afterModifyHash = response.AfterModifyHash,
+            definition = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(response.Definition)),
+            nativeCommandSucceeded = response.Completed, nativeReceiptAvailable = true,
+            operationReceipt = true, revisionTracked = false, persistenceVerified = readback.Verified,
+            persistedContentSha256 = readback.ContentSha256, persistedModifyHash = readback.ModifyHash,
+            persistenceSource = readback.Verified ? "native-symbol-library-readback" : null, transportRetrySafe = true,
+            expectedModifyHash = string.IsNullOrWhiteSpace(expectedModifyHash) ? null : expectedModifyHash,
+            revisionAdmission });
+    });
+
+    [McpServerTool(Name = "kicad_symbol_library_delete", ReadOnly = false),
+     Description("Delete one named symbol from an explicitly identified project symbol library through KiCad's native adapter. When expectedModifyHash is supplied, deletion is admitted only if the library's current native modify hash still matches; an already recorded operation ID is replayed before that check. operationId binds the request to a process-owned native receipt, and the completed delete is verified by re-enumerating the persisted library through the native adapter. The library still has no durable lifecycle revision sequence.")]
+    [KiCadCapability("symbol-library", "native-symbol-library-adapter", "library nickname, symbol name, operation UUID and native modify hashes"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativeSymbolLibraryReadbackUsesMcp")]
+    public Task<CallToolResult> Delete(string instanceId, string expectedProcessEpoch, string libraryNickname,
+        string symbolName, string operationId, CancellationToken cancellationToken, string expectedModifyHash = "") => Execute(async () =>
+    {
+        ValidateEpoch(expectedProcessEpoch); ValidateLibrary(libraryNickname); ValidateName(symbolName, "symbolName"); ValidateOperation(operationId);
+        NativeClient client = registry.Client(instanceId); AutomationSession session = await Handshake(client, expectedProcessEpoch, cancellationToken);
+        string revisionAdmission = await EnsureModifyHash(client, libraryNickname, operationId, expectedModifyHash, cancellationToken);
+        var response = await client.InvokeAsync<NativeCapabilitySymbolLibraryDeleteSymbol, NativeCapabilitySymbolLibraryDeleteSymbolResponse>(
+            new() { LibraryNickname = libraryNickname, SymbolName = symbolName, OperationId = operationId }, cancellationToken);
+        SymbolLibraryDeleteReadback readback = response.Completed
+            ? await VerifyDeleteReadback(client, libraryNickname, symbolName, response, cancellationToken)
+            : new(false, null);
+        return Data(new { instanceId, processEpoch = session.Epoch, libraryNickname, symbolName, operationId,
+            operationOutcome = response.Completed ? "completed" : "skipped", beforeModifyHash = response.BeforeModifyHash,
+            afterModifyHash = response.AfterModifyHash, nativeCommandSucceeded = response.Completed,
+            nativeReceiptAvailable = true, operationReceipt = true, revisionTracked = false,
+            persistenceVerified = readback.Verified, persistedModifyHash = readback.ModifyHash,
+            persistenceSource = readback.Verified ? "native-symbol-library-readback" : null,
+            transportRetrySafe = true,
+            expectedModifyHash = string.IsNullOrWhiteSpace(expectedModifyHash) ? null : expectedModifyHash,
+            revisionAdmission });
+    });
+
+    private static async Task<SymbolLibraryWriteReadback> VerifyWriteReadback(NativeClient client,
+        string libraryNickname, NativeCapabilitySymbolLibraryWriteSymbolResponse response,
+        CancellationToken cancellationToken)
+    {
+        NativeCapabilitySymbolLibraryReadSymbolResponse persisted = await client.InvokeAsync<
+            NativeCapabilitySymbolLibraryReadSymbol, NativeCapabilitySymbolLibraryReadSymbolResponse>(
+                new() { LibraryNickname = libraryNickname, SymbolName = response.SymbolName }, cancellationToken);
+        string canonical = SchematicJson.Formatter.Format(persisted.Definition);
+        string expectedCanonical = SchematicJson.Formatter.Format(response.Definition);
+        if (!string.Equals(canonical, expectedCanonical, StringComparison.Ordinal))
+            throw new AutomationException("symbol_library_persistence_mismatch",
+                $"KiCad accepted symbol-library write {response.OperationId}, but native readback of {libraryNickname}:{response.SymbolName} differed from the written definition.");
+        if (persisted.ModifyHash != response.AfterModifyHash)
+            throw new AutomationException("symbol_library_persistence_mismatch",
+                $"KiCad accepted symbol-library write {response.OperationId}, but native readback reported modify hash {persisted.ModifyHash} instead of {response.AfterModifyHash}.");
+
+        return new(true,
+            Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))), persisted.ModifyHash);
+    }
+
+    private static async Task<SymbolLibraryDeleteReadback> VerifyDeleteReadback(NativeClient client,
+        string libraryNickname, string symbolName, NativeCapabilitySymbolLibraryDeleteSymbolResponse response,
+        CancellationToken cancellationToken)
+    {
+        NativeCapabilitySymbolLibraryReadNamesResponse persisted = await client.InvokeAsync<
+            NativeCapabilitySymbolLibraryReadNames, NativeCapabilitySymbolLibraryReadNamesResponse>(
+                new() { LibraryNickname = libraryNickname }, cancellationToken);
+        if (persisted.SymbolNames.Contains(symbolName, StringComparer.Ordinal))
+            throw new AutomationException("symbol_library_persistence_mismatch",
+                $"KiCad accepted symbol-library delete {response.OperationId}, but native readback still listed {libraryNickname}:{symbolName}.");
+        if (persisted.ModifyHash != response.AfterModifyHash)
+            throw new AutomationException("symbol_library_persistence_mismatch",
+                $"KiCad accepted symbol-library delete {response.OperationId}, but native readback reported modify hash {persisted.ModifyHash} instead of {response.AfterModifyHash}.");
+
+        return new(true, persisted.ModifyHash);
+    }
+
+    private static async Task<AutomationSession> Handshake(NativeClient client, string expectedEpoch, CancellationToken token)
+    {
+        AutomationSession session = await client.HandshakeAsync(token);
+        if (session.Epoch != expectedEpoch) throw new AutomationException("stale_process_epoch", "The expected process epoch is stale; inspect the instance again.");
+        return session;
+    }
+
+    private static async Task<string> EnsureModifyHash(NativeClient client, string libraryNickname,
+        string operationId, string expectedModifyHash, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(expectedModifyHash)) return "not-requested";
+        if (!ulong.TryParse(expectedModifyHash, System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out ulong expected))
+            throw new AutomationException("invalid_symbol_library_revision", "expectedModifyHash must be an unsigned decimal native modify hash.");
+
+        NativeCapabilitySymbolLibraryReadOperationResponse prior = await client.InvokeAsync<NativeCapabilitySymbolLibraryReadOperation,
+            NativeCapabilitySymbolLibraryReadOperationResponse>(new() { OperationId = operationId }, cancellationToken);
+        // A native receipt proves that this exact operation was previously admitted;
+        // keep the outward result deterministic so replay is byte-for-byte identical.
+        if (prior.Found) return "modify-hash-matched";
+
+        NativeCapabilitySymbolLibraryReadNamesResponse current = await client.InvokeAsync<NativeCapabilitySymbolLibraryReadNames,
+            NativeCapabilitySymbolLibraryReadNamesResponse>(new() { LibraryNickname = libraryNickname }, cancellationToken);
+        if (current.ModifyHash != expected)
+            throw new AutomationException("symbol_library_changed",
+                $"The symbol library modify hash changed from {expectedModifyHash} to {current.ModifyHash}; inspect it and retry with a fresh operation ID.");
+        return "modify-hash-matched";
+    }
+
+    private static SchematicSymbol ParseDefinition(string json)
+    {
+        try { return SchematicJson.Parser.Parse<SchematicSymbol>(json); }
+        catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException)
+        { throw new AutomationException("invalid_symbol_definition", "definitionJson is not a valid SchematicSymbol protobuf JSON: " + error.Message); }
+    }
+
+    private static void ValidateDefinition(string libraryNickname, SchematicSymbol definition,
+        List<SymbolValidationIssue> issues, CancellationToken token)
+    {
+        if (definition.Id is null)
+            Issue(issues, "missing_library_id", "id", "A complete symbol definition requires an explicit library identifier.");
+        else
+        {
+            if (!string.Equals(definition.Id.LibraryNickname, libraryNickname, StringComparison.Ordinal))
+                Issue(issues, "library_id_mismatch", "id.libraryNickname", "The definition library nickname must match the explicit libraryNickname argument.");
+            if (string.IsNullOrWhiteSpace(definition.Id.EntryName) || definition.Id.EntryName.Length > 255
+                || definition.Id.EntryName.Contains(':') || HasControl(definition.Id.EntryName))
+                Issue(issues, "invalid_entry_name", "id.entryName", "entryName must be a bounded, nonempty symbol name without separators or control characters.");
+            if (string.IsNullOrWhiteSpace(definition.Id.LibraryNickname) || definition.Id.LibraryNickname.Length > 255
+                || definition.Id.LibraryNickname.Contains(':') || HasControl(definition.Id.LibraryNickname))
+                Issue(issues, "invalid_library_nickname", "id.libraryNickname", "libraryNickname must be a bounded name without separators or control characters.");
+        }
+
+        if ((int)definition.Type is < (int)SchematicSymbolType.SstNormal or > (int)SchematicSymbolType.SstLocalPower)
+            Issue(issues, "invalid_symbol_type", "type", "type must be a supported schematic symbol type.");
+        if (definition.UnitCount is < 1 or > 64)
+            Issue(issues, "invalid_unit_count", "unitCount", "unitCount must be between 1 and 64.");
+        if (definition.BodyStyle.Count is < 1 or > 16)
+            Issue(issues, "invalid_body_style_count", "bodyStyle", "bodyStyle must contain between 1 and 16 styles.");
+        var bodyStyles = new HashSet<string>(StringComparer.Ordinal);
+        for (int i = 0; i < definition.BodyStyle.Count; i++)
+        {
+            token.ThrowIfCancellationRequested();
+            string path = $"bodyStyle[{i}]";
+            string name = definition.BodyStyle[i].Name;
+            if (string.IsNullOrWhiteSpace(name) || name.Length > 255 || !bodyStyles.Add(name))
+                Issue(issues, "invalid_body_style", path, "Each body style requires a bounded, distinct nonempty name.");
+        }
+        if (definition.DemorganBodyStyles && (definition.BodyStyle.Count < 2
+            || definition.BodyStyle[0].Name != "Standard" || definition.BodyStyle[1].Name != "Alternate"))
+            Issue(issues, "invalid_demorgan_body_styles", "demorganBodyStyles", "De Morgan styles require Standard followed by Alternate.");
+
+        ValidateStandardField(definition.ReferenceField, "Reference", "referenceField", issues);
+        ValidateStandardField(definition.ValueField, "Value", "valueField", issues);
+        ValidateStandardField(definition.FootprintField, "Footprint", "footprintField", issues);
+        ValidateStandardField(definition.DatasheetField, "Datasheet", "datasheetField", issues);
+        ValidateStandardField(definition.DescriptionField, "Description", "descriptionField", issues);
+        int fields = CountFields(definition);
+        if (fields > MaximumFields)
+            Issue(issues, "too_many_fields", "fields", $"The definition contains {fields} fields; the limit is {MaximumFields}.");
+        if (definition.Items.Count > MaximumItems)
+            Issue(issues, "too_many_items", "items", $"The definition contains {definition.Items.Count} items; the limit is {MaximumItems}.");
+
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        var pinIds = new HashSet<string>(StringComparer.Ordinal);
+        var pinNumbers = new HashSet<string>(StringComparer.Ordinal);
+        int pins = 0, graphics = 0;
+        for (int i = 0; i < definition.Items.Count; i++)
+        {
+            token.ThrowIfCancellationRequested();
+            SchematicSymbolChild child = definition.Items[i];
+            string path = $"items[{i}]";
+            int unit = child.Unit?.Unit ?? 0;
+            int style = child.BodyStyle?.Style ?? 0;
+            if (unit < 0 || unit > definition.UnitCount)
+                Issue(issues, "invalid_child_unit", path + ".unit.unit", "Child unit must be zero (all units) or reference an existing unit.");
+            if (style < 0 || style > definition.BodyStyle.Count)
+                Issue(issues, "invalid_child_body_style", path + ".bodyStyle.style", "Child body style must be zero (all styles) or reference an existing body style.");
+            if (child.Item is null || string.IsNullOrWhiteSpace(child.Item.TypeUrl) || child.Item.Value.Length == 0)
+            {
+                Issue(issues, "missing_child_type", path + ".item", "Every child requires a typed, nonempty protobuf Any value.");
+                continue;
+            }
+            if (!IsSupportedChild(child.Item))
+            {
+                Issue(issues, "unsupported_child_type", path + ".item.@type", "Symbol children must use a supported schematic pin, field or graphics Any type.");
+                continue;
+            }
+            string objectId = ChildId(child.Item);
+            if (!string.IsNullOrEmpty(objectId))
+            {
+                if (!Guid.TryParseExact(objectId, "D", out var guid) || guid == Guid.Empty || objectId != guid.ToString("D"))
+                    Issue(issues, "invalid_child_id", path + ".item.id", "Graphic and pin children require canonical nonempty UUID identities.");
+                else if (!ids.Add(objectId))
+                    Issue(issues, "duplicate_child_id", path + ".item.id", "Child UUIDs must be distinct.");
+            }
+            if (child.Item.Is(SchematicPin.Descriptor))
+            {
+                pins++;
+                ValidatePin(child.Item.Unpack<SchematicPin>(), path, definition, pinIds, pinNumbers, issues);
+            }
+            else if (child.Item.Is(SchematicField.Descriptor))
+                ValidateUserField(child.Item.Unpack<SchematicField>(), path, issues);
+            else if (IsGraphic(child.Item))
+            {
+                graphics++;
+                ValidateGraphic(child.Item, path, issues);
+            }
+        }
+        if (pins > MaximumPins)
+            Issue(issues, "too_many_pins", "items", $"The definition contains {pins} pins; the limit is {MaximumPins}.");
+        if (graphics > MaximumGraphics)
+            Issue(issues, "too_many_graphics", "items", $"The definition contains {graphics} graphics; the limit is {MaximumGraphics}.");
+        if (pins == 0)
+            Issue(issues, "missing_pins", "items", "A complete symbol definition requires at least one pin child.");
+
+        for (int i = 0; i < definition.UnitDisplayNames.Count; i++)
+        {
+            var name = definition.UnitDisplayNames[i];
+            if (name.Unit < 1 || name.Unit > definition.UnitCount || string.IsNullOrWhiteSpace(name.Name) || name.Name.Length > 255)
+                Issue(issues, "invalid_unit_display_name", $"unitDisplayNames[{i}]", "Unit display names must reference an existing unit and contain bounded text.");
+        }
+    }
+
+    private static void ValidatePin(SchematicPin pin, string path, SchematicSymbol definition,
+        HashSet<string> pinIds, HashSet<string> pinNumbers, List<SymbolValidationIssue> issues)
+    {
+        if (pin.Id is null || !Guid.TryParseExact(pin.Id.Value, "D", out var id) || id == Guid.Empty || pin.Id.Value != id.ToString("D"))
+            Issue(issues, "invalid_pin_id", path + ".item.id", "Pins require canonical nonempty UUID identities.");
+        else if (!pinIds.Add(pin.Id.Value))
+            Issue(issues, "duplicate_pin_id", path + ".item.id", "Pin UUIDs must be distinct.");
+        if (string.IsNullOrWhiteSpace(pin.Name) || pin.Name.Length > 255 || HasControl(pin.Name) || pin.Name.Contains(' '))
+            Issue(issues, "invalid_pin_name", path + ".item.name", "Pins require bounded names without spaces or control characters.");
+        if (string.IsNullOrWhiteSpace(pin.Number) || pin.Number.Length > 255 || HasControl(pin.Number) || pin.Number.Contains(' '))
+            Issue(issues, "invalid_pin_number", path + ".item.number", "Pins require bounded numbers without spaces or control characters.");
+        if (!string.IsNullOrEmpty(pin.Number) && !pinNumbers.Add(pin.Number))
+            Issue(issues, "duplicate_pin_number", path + ".item.number", "Pin numbers must be unique within a symbol definition.");
+        if (pin.Length is null || pin.Length.ValueNm <= 0)
+            Issue(issues, "invalid_pin_length", path + ".item.length.valueNm", "Pin length must be a positive distance.");
+        if (pin.Position is null)
+            Issue(issues, "missing_pin_position", path + ".item.position", "Pins require an explicit local position.");
+        if (pin.Orientation is SchematicPinOrientation.SpoUnknown or < SchematicPinOrientation.SpoRight or > SchematicPinOrientation.SpoDown)
+            Issue(issues, "invalid_pin_orientation", path + ".item.orientation", "Pin orientation must be Right, Left, Up or Down.");
+        for (int i = 0; i < pin.Alternates.Count; i++)
+        {
+            if (string.IsNullOrWhiteSpace(pin.Alternates[i].Name) || pin.Alternates[i].Name.Length > 255)
+                Issue(issues, "invalid_pin_alternate", $"{path}.item.alternates[{i}]", "Alternate pin names must be bounded and nonempty.");
+        }
+    }
+
+    private static void ValidateStandardField(SchematicField? field, string expectedName, string path, List<SymbolValidationIssue> issues)
+    {
+        if (field is null)
+        {
+            Issue(issues, "missing_standard_field", path, $"The complete symbol requires the {expectedName} field.");
+            return;
+        }
+        if (field.Name != expectedName)
+            Issue(issues, "invalid_standard_field_name", path + ".name", $"The standard field must be named {expectedName}.");
+        ValidateUserField(field, path, issues, checkName: false);
+    }
+
+    private static void ValidateUserField(SchematicField field, string path, List<SymbolValidationIssue> issues, bool checkName = true)
+    {
+        if (checkName && (string.IsNullOrWhiteSpace(field.Name) || field.Name.Length > 255 || HasControl(field.Name)))
+            Issue(issues, "invalid_field_name", path + ".item.name", "Field names must be bounded and nonempty.");
+        if (field.Text is null || field.Text.Text_.Length > MaximumTextLength)
+            Issue(issues, "field_text_too_large", path + ".item.text.text", $"Field text must be at most {MaximumTextLength} characters.");
+        if (field.CustomProperties.Count > 256)
+            Issue(issues, "too_many_field_properties", path + ".item.customProperties", "A field may contain at most 256 custom properties.");
+    }
+
+    private static void ValidateGraphic(Any item, string path, List<SymbolValidationIssue> issues)
+    {
+        if (item.Is(SchematicLine.Descriptor) && item.Unpack<SchematicLine>().Type != SchematicLineType.SltGraphic)
+            Issue(issues, "invalid_symbol_line_type", path + ".item.type", "Symbol line children must be graphic lines, not wires or buses.");
+        if (item.Is(SchematicGraphicShape.Descriptor) && item.Unpack<SchematicGraphicShape>().Shape is null)
+            Issue(issues, "missing_graphic_shape", path + ".item.shape", "Graphic-shape children require a geometry payload.");
+        if (item.Is(SchematicText.Descriptor) && item.Unpack<SchematicText>().Text is null)
+            Issue(issues, "missing_graphic_text", path + ".item.text", "Text children require a text payload.");
+        if (item.Is(SchematicTextBox.Descriptor) && item.Unpack<SchematicTextBox>().Textbox is null)
+            Issue(issues, "missing_graphic_textbox", path + ".item.textbox", "Text-box children require a text-box payload.");
+    }
+
+    private static bool IsSupportedChild(Any item) => item.Is(SchematicPin.Descriptor) || item.Is(SchematicField.Descriptor)
+        || item.Is(SchematicLine.Descriptor) || item.Is(SchematicText.Descriptor) || item.Is(SchematicTextBox.Descriptor)
+        || item.Is(SchematicGraphicShape.Descriptor) || item.Is(SchematicImage.Descriptor);
+
+    private static bool IsGraphic(Any? item) => item is not null && (item.Is(SchematicLine.Descriptor)
+        || item.Is(SchematicText.Descriptor) || item.Is(SchematicTextBox.Descriptor)
+        || item.Is(SchematicGraphicShape.Descriptor) || item.Is(SchematicImage.Descriptor));
+
+    private static string ChildId(Any item) => item.Is(SchematicPin.Descriptor) ? item.Unpack<SchematicPin>().Id?.Value ?? ""
+        : item.Is(SchematicLine.Descriptor) ? item.Unpack<SchematicLine>().Id?.Value ?? ""
+        : item.Is(SchematicText.Descriptor) ? item.Unpack<SchematicText>().Id?.Value ?? ""
+        : item.Is(SchematicTextBox.Descriptor) ? item.Unpack<SchematicTextBox>().Id?.Value ?? ""
+        : item.Is(SchematicGraphicShape.Descriptor) ? item.Unpack<SchematicGraphicShape>().Id?.Value ?? ""
+        : item.Is(SchematicImage.Descriptor) ? item.Unpack<SchematicImage>().Id?.Value ?? "" : "";
+
+    private static int CountFields(SchematicSymbol definition) =>
+        (definition.ReferenceField is null ? 0 : 1) + (definition.ValueField is null ? 0 : 1)
+        + (definition.FootprintField is null ? 0 : 1) + (definition.DatasheetField is null ? 0 : 1)
+        + (definition.DescriptionField is null ? 0 : 1)
+        + definition.Items.Count(child => child.Item?.Is(SchematicField.Descriptor) == true);
+
+    private static void Issue(List<SymbolValidationIssue> issues, string code, string path, string message) =>
+        issues.Add(new(code, path, message));
+
+    private static bool HasControl(string value) => value.Any(char.IsControl);
+    private static void ValidateLibraryIdentity(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 255 || value.Contains(':') || HasControl(value))
+            throw new AutomationException("invalid_symbol_library", "libraryNickname must be a bounded name without separators or control characters.");
+    }
+
+    private sealed record SymbolLibraryWriteReadback(bool Verified, string? ContentSha256, ulong? ModifyHash);
+    private sealed record SymbolLibraryDeleteReadback(bool Verified, ulong? ModifyHash);
+    private sealed record SymbolValidationIssue(string Code, string Path, string Message);
+
+    private static void ValidateEpoch(string value) { if (!Guid.TryParseExact(value, "D", out var id) || id == Guid.Empty) throw new AutomationException("invalid_process_epoch", "Provide a canonical process epoch."); }
+    private static void ValidateOperation(string value) { if (!Guid.TryParseExact(value, "D", out var id) || id == Guid.Empty) throw new AutomationException("invalid_operation_id", "Provide a canonical operation UUID."); }
+    private static void ValidateLibrary(string value) { if (string.IsNullOrWhiteSpace(value) || value.Contains('\0')) throw new AutomationException("invalid_symbol_library", "Provide a nonempty library nickname."); }
+    private static void ValidateName(string value, string name) { if (string.IsNullOrWhiteSpace(value) || value.Contains('\0')) throw new AutomationException("invalid_symbol_name", name + " must be nonempty."); }
+
+    private static CallToolResult Data(object value, bool error = false)
+    {
+        JsonElement structured = JsonSerializer.SerializeToElement(value);
+        return new() { IsError = error, StructuredContent = structured, Content = [new TextContentBlock { Text = structured.GetRawText() }] };
+    }
+
+    private static async Task<CallToolResult> Execute(Func<Task<CallToolResult>> operation)
+    {
+        try { return await operation(); }
+        catch (Exception error) when (error is AutomationException or NativeApiException or NngException
+            or InvalidProtocolBufferException or InvalidJsonException or IOException)
+        {
+            string code = error is AutomationException known ? known.Code : "symbol_library_failed";
+            JsonElement structured = JsonSerializer.SerializeToElement(new { errorCode = code, errorMessage = error.Message });
+            return new() { IsError = true, StructuredContent = structured, Content = [new TextContentBlock { Text = structured.GetRawText() }] };
+        }
+    }
+}

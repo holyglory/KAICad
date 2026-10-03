@@ -415,6 +415,12 @@ public:
     const FILE_CONTENT_BASELINE& FileBaseline() const { return m_fileBaseline; }
     void SetFileBaseline( const FILE_CONTENT_BASELINE& aBaseline ) { m_fileBaseline = aBaseline; }
 
+    const FILE_CONTENT_BASELINE& CustomRulesFileBaseline() const { return m_customRulesFileBaseline; }
+    void SetCustomRulesFileBaseline( const FILE_CONTENT_BASELINE& aBaseline )
+    {
+        m_customRulesFileBaseline = aBaseline;
+    }
+
     /**
      * Return the absolute path to the design rules file for this board.
      *
@@ -1785,6 +1791,7 @@ private:
 
     wxString            m_fileName;
     FILE_CONTENT_BASELINE m_fileBaseline;
+    FILE_CONTENT_BASELINE m_customRulesFileBaseline;
 
     std::map<wxString, KIGFX::COLOR4D> m_netChainColors;
 

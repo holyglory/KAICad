@@ -37,6 +37,8 @@
 #include <api/api_enums.h>
 #include <api/api_sch_utils.h>
 #include <api/api_sch_symbol_definition.h>
+#include <project_sch.h>
+#include <libraries/symbol_library_adapter.h>
 #include <api/api_utils.h>
 #include <api/cross_probe_client.h>
 #include <api/sch_context.h>
@@ -179,6 +181,21 @@ API_HANDLER_SCH::API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext,
             &API_HANDLER_SCH::handleReadParityNetlist );
     registerHandler<kiapi::automation::v1::ReadSchematicScreenData, kiapi::automation::v1::SchematicScreenDataSnapshot>(
             &API_HANDLER_SCH::handleReadScreenData );
+    registerHandler<kiapi::automation::v1::NativeCapabilitySymbolLibraryReadNames,
+                    kiapi::automation::v1::NativeCapabilitySymbolLibraryReadNamesResponse>(
+            &API_HANDLER_SCH::handleReadSymbolLibraryNames );
+    registerHandler<kiapi::automation::v1::NativeCapabilitySymbolLibraryReadSymbol,
+                    kiapi::automation::v1::NativeCapabilitySymbolLibraryReadSymbolResponse>(
+            &API_HANDLER_SCH::handleReadSymbolLibrarySymbol );
+    registerHandler<kiapi::automation::v1::NativeCapabilitySymbolLibraryWriteSymbol,
+                    kiapi::automation::v1::NativeCapabilitySymbolLibraryWriteSymbolResponse>(
+            &API_HANDLER_SCH::handleWriteSymbolLibrarySymbol );
+    registerHandler<kiapi::automation::v1::NativeCapabilitySymbolLibraryDeleteSymbol,
+                    kiapi::automation::v1::NativeCapabilitySymbolLibraryDeleteSymbolResponse>(
+            &API_HANDLER_SCH::handleDeleteSymbolLibrarySymbol );
+    registerHandler<kiapi::automation::v1::NativeCapabilitySymbolLibraryReadOperation,
+                    kiapi::automation::v1::NativeCapabilitySymbolLibraryReadOperationResponse>(
+            &API_HANDLER_SCH::handleReadSymbolLibraryOperation );
     registerHandler<kiapi::automation::v1::ReadSchematicHierarchyData, kiapi::automation::v1::SchematicHierarchyDataSnapshot>(
             &API_HANDLER_SCH::handleReadHierarchyData );
     registerHandler<kiapi::automation::v1::ReadSchematicFileLocations, kiapi::automation::v1::SchematicFileLocations>(
@@ -203,12 +220,17 @@ API_HANDLER_SCH::API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext,
             &API_HANDLER_SCH::handleReadSimulation );
     registerHandler<kiapi::automation::v1::CancelSimulationJob, kiapi::automation::v1::SimulationJobState>(
             &API_HANDLER_SCH::handleCancelSimulation );
+    registerHandler<kiapi::automation::v1::NativeCapabilitySimulationReadDependencies,
+                    kiapi::automation::v1::NativeCapabilitySimulationDependencies>(
+            &API_HANDLER_SCH::handleReadSimulationDependencies );
     registerHandler<kiapi::automation::v1::ActivateSchematicSheet, types::DocumentSpecifier>(
             &API_HANDLER_SCH::handleActivateSheet );
     registerHandler<kiapi::automation::v1::ReadSchematicChangeJournal, kiapi::automation::v1::SchematicChangeJournal>(
             &API_HANDLER_SCH::handleReadChangeJournal );
     registerHandler<kiapi::automation::v1::SchematicTrackingReadErcMarkers,
                     kiapi::automation::v1::SchematicTrackingErcMarkers>( &API_HANDLER_SCH::handleReadErcMarkers );
+    registerHandler<kiapi::automation::v1::NativeCapabilitySchematicRunErc,
+                    kiapi::automation::v1::NativeCapabilitySchematicRunErcResponse>( &API_HANDLER_SCH::handleRunErc );
     registerHandler<SaveDocument, google::protobuf::Empty>(
             &API_HANDLER_SCH::handleSaveDocument );
     registerHandler<SaveCopyOfDocument, google::protobuf::Empty>(
@@ -2894,6 +2916,172 @@ HANDLER_RESULT<kiapi::schematic::types::SchematicScreenData> API_HANDLER_SCH::re
 }
 
 
+HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySymbolLibraryReadNamesResponse> API_HANDLER_SCH::handleReadSymbolLibraryNames(
+        const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySymbolLibraryReadNames>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    const std::string nickname = aCtx.Request.library_nickname();
+    auto reject = []( const std::string& message ) -> HANDLER_RESULT<NativeCapabilitySymbolLibraryReadNamesResponse>
+    {
+        ApiResponseStatus status; status.set_status( ApiStatusCode::AS_BAD_REQUEST ); status.set_error_message( message );
+        return tl::unexpected( status );
+    };
+    if( nickname.empty() || nickname.find( '\0' ) != std::string::npos )
+        return reject( "A nonempty symbol library nickname is required" );
+    try
+    {
+        SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &project() );
+        if( !adapter->LoadOne( wxString::FromUTF8( nickname ) ) )
+            return reject( "The requested symbol library could not be loaded" );
+        NativeCapabilitySymbolLibraryReadNamesResponse response;
+        response.set_library_nickname( nickname );
+        for( const wxString& name : adapter->GetSymbolNames( wxString::FromUTF8( nickname ) ) )
+            response.add_symbol_names( name.ToStdString( wxConvUTF8 ) );
+        response.set_modify_hash( adapter->GetLibraryModifyHash( wxString::FromUTF8( nickname ) ).value_or( 0 ) );
+        return response;
+    }
+    catch( const std::exception& error ) { return reject( error.what() ); }
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySymbolLibraryReadSymbolResponse> API_HANDLER_SCH::handleReadSymbolLibrarySymbol(
+        const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySymbolLibraryReadSymbol>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    const std::string nickname = aCtx.Request.library_nickname();
+    const std::string name = aCtx.Request.symbol_name();
+    auto reject = []( const std::string& message ) -> HANDLER_RESULT<NativeCapabilitySymbolLibraryReadSymbolResponse>
+    {
+        ApiResponseStatus status; status.set_status( ApiStatusCode::AS_BAD_REQUEST ); status.set_error_message( message );
+        return tl::unexpected( status );
+    };
+    if( nickname.empty() || name.empty() || nickname.find( '\0' ) != std::string::npos || name.find( '\0' ) != std::string::npos )
+        return reject( "A library nickname and symbol name are required" );
+    try
+    {
+        SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &project() );
+        if( !adapter->LoadOne( wxString::FromUTF8( nickname ) ) )
+            return reject( "The requested symbol library could not be loaded" );
+        LIB_SYMBOL* symbol = adapter->LoadSymbol( wxString::FromUTF8( nickname ), wxString::FromUTF8( name ) );
+        if( !symbol ) return reject( "The requested symbol was not found" );
+        NativeCapabilitySymbolLibraryReadSymbolResponse response;
+        response.set_library_nickname( nickname ); response.set_symbol_name( name );
+        PackSymbolDefinition( *response.mutable_definition(), *symbol, true );
+        response.set_modify_hash( adapter->GetLibraryModifyHash( wxString::FromUTF8( nickname ) ).value_or( 0 ) );
+        return response;
+    }
+    catch( const std::exception& error ) { return reject( error.what() ); }
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySymbolLibraryWriteSymbolResponse> API_HANDLER_SCH::handleWriteSymbolLibrarySymbol(
+        const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySymbolLibraryWriteSymbol>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    const std::string nickname = aCtx.Request.library_nickname();
+    auto reject = []( const std::string& message ) -> HANDLER_RESULT<NativeCapabilitySymbolLibraryWriteSymbolResponse>
+    {
+        ApiResponseStatus status; status.set_status( ApiStatusCode::AS_BAD_REQUEST ); status.set_error_message( message );
+        return tl::unexpected( status );
+    };
+    if( nickname.empty() || !aCtx.Request.has_definition() || aCtx.Request.operation_id().empty() )
+        return reject( "A library nickname, complete symbol definition and operation ID are required" );
+    const std::string operationId = aCtx.Request.operation_id();
+    const std::string fingerprint = aCtx.Request.SerializeAsString();
+    if( auto receipt = m_symbolLibraryWriteReceipts.find( operationId ); receipt != m_symbolLibraryWriteReceipts.end() )
+    {
+        if( m_symbolLibraryOperationFingerprints[operationId] != fingerprint )
+            return reject( "The operation ID is already bound to a different symbol-library request" );
+        return receipt->second;
+    }
+    std::unique_ptr<LIB_SYMBOL> symbol = UnpackSymbolDefinition( aCtx.Request.definition() );
+    if( !symbol ) return reject( "The symbol definition was rejected by the native decoder" );
+    try
+    {
+        SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &project() );
+        if( !adapter->LoadOne( wxString::FromUTF8( nickname ) ) ) return reject( "The requested symbol library could not be loaded" );
+        const uint64_t before = adapter->GetLibraryModifyHash( wxString::FromUTF8( nickname ) ).value_or( 0 );
+        const wxString symbolName = symbol->GetName();
+        SYMBOL_LIBRARY_ADAPTER::SAVE_T result = adapter->SaveSymbol( wxString::FromUTF8( nickname ), symbol.get(), aCtx.Request.overwrite() );
+        if( result == SYMBOL_LIBRARY_ADAPTER::SAVE_SKIPPED ) return reject( "The symbol already exists and overwrite is disabled" );
+        NativeCapabilitySymbolLibraryWriteSymbolResponse response;
+        response.set_library_nickname( nickname ); response.set_symbol_name( symbolName.ToStdString( wxConvUTF8 ) );
+        response.set_operation_id( operationId ); response.set_before_modify_hash( before ); response.set_completed( true );
+        PackSymbolDefinition( *response.mutable_definition(), *symbol, true );
+        symbol.release();
+        response.set_after_modify_hash( adapter->GetLibraryModifyHash( wxString::FromUTF8( nickname ) ).value_or( before ) );
+        m_symbolLibraryOperationFingerprints[operationId] = fingerprint;
+        m_symbolLibraryWriteReceipts[operationId] = response;
+        return response;
+    }
+    catch( const std::exception& error ) { return reject( error.what() ); }
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySymbolLibraryDeleteSymbolResponse> API_HANDLER_SCH::handleDeleteSymbolLibrarySymbol(
+        const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySymbolLibraryDeleteSymbol>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    const std::string nickname = aCtx.Request.library_nickname();
+    const std::string name = aCtx.Request.symbol_name();
+    auto reject = []( const std::string& message ) -> HANDLER_RESULT<NativeCapabilitySymbolLibraryDeleteSymbolResponse>
+    {
+        ApiResponseStatus status; status.set_status( ApiStatusCode::AS_BAD_REQUEST ); status.set_error_message( message );
+        return tl::unexpected( status );
+    };
+    if( nickname.empty() || name.empty() || aCtx.Request.operation_id().empty() ) return reject( "A library nickname, symbol name and operation ID are required" );
+    const std::string operationId = aCtx.Request.operation_id();
+    const std::string fingerprint = aCtx.Request.SerializeAsString();
+    if( auto receipt = m_symbolLibraryDeleteReceipts.find( operationId ); receipt != m_symbolLibraryDeleteReceipts.end() )
+    {
+        if( m_symbolLibraryOperationFingerprints[operationId] != fingerprint )
+            return reject( "The operation ID is already bound to a different symbol-library request" );
+        return receipt->second;
+    }
+    try
+    {
+        SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &project() );
+        if( !adapter->LoadOne( wxString::FromUTF8( nickname ) ) ) return reject( "The requested symbol library could not be loaded" );
+        const uint64_t before = adapter->GetLibraryModifyHash( wxString::FromUTF8( nickname ) ).value_or( 0 );
+        adapter->DeleteSymbol( wxString::FromUTF8( nickname ), wxString::FromUTF8( name ) );
+        NativeCapabilitySymbolLibraryDeleteSymbolResponse response;
+        response.set_library_nickname( nickname ); response.set_symbol_name( name ); response.set_operation_id( operationId );
+        response.set_before_modify_hash( before ); response.set_after_modify_hash( adapter->GetLibraryModifyHash( wxString::FromUTF8( nickname ) ).value_or( before ) );
+        response.set_completed( true );
+        m_symbolLibraryOperationFingerprints[operationId] = fingerprint;
+        m_symbolLibraryDeleteReceipts[operationId] = response;
+        return response;
+    }
+    catch( const std::exception& error ) { return reject( error.what() ); }
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySymbolLibraryReadOperationResponse>
+API_HANDLER_SCH::handleReadSymbolLibraryOperation(
+        const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySymbolLibraryReadOperation>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    NativeCapabilitySymbolLibraryReadOperationResponse response;
+    response.set_operation_id( aCtx.Request.operation_id() );
+    if( aCtx.Request.operation_id().empty() )
+    {
+        ApiResponseStatus status; status.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        status.set_error_message( "A symbol-library operation ID is required" );
+        return tl::unexpected( status );
+    }
+    if( auto write = m_symbolLibraryWriteReceipts.find( aCtx.Request.operation_id() ); write != m_symbolLibraryWriteReceipts.end() )
+    {
+        response.set_found( true ); response.mutable_write_response()->CopyFrom( write->second ); return response;
+    }
+    if( auto remove = m_symbolLibraryDeleteReceipts.find( aCtx.Request.operation_id() ); remove != m_symbolLibraryDeleteReceipts.end() )
+    {
+        response.set_found( true ); response.mutable_delete_response()->CopyFrom( remove->second ); return response;
+    }
+    response.set_found( false );
+    return response;
+}
+
+
 HANDLER_RESULT<kiapi::automation::v1::SchematicMetadataSnapshot> API_HANDLER_SCH::handleReadMetadata(
         const HANDLER_CONTEXT<kiapi::automation::v1::ReadSchematicMetadata>& aCtx )
 {
@@ -3387,6 +3575,86 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicTrackingErcMarkers> API_HANDLER_S
 }
 
 
+HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySchematicRunErcResponse>
+API_HANDLER_SCH::handleRunErc(
+        const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySchematicRunErc>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    if( auto busy = checkForStableObservation() )
+        return tl::unexpected( *busy );
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+
+    const auto& request = aCtx.Request;
+    if( request.operation_id().empty() || request.process_epoch() != apiServer().Token()
+        || !request.has_expected_revision() )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( "ERC execution requires an operation ID, current process epoch and expected revision" );
+        return tl::unexpected( error );
+    }
+
+    const auto& journal = schematic()->ChangeJournal();
+    if( request.expected_revision().epoch() != journal.Epoch()
+        || request.expected_revision().sequence() != journal.Sequence() )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( "The schematic changed before ERC execution" );
+        return tl::unexpected( error );
+    }
+
+    const std::string fingerprint = request.SerializeAsString();
+    if( auto existing = m_ercReceipts.find( request.operation_id() ); existing != m_ercReceipts.end() )
+    {
+        if( m_ercOperationFingerprints[request.operation_id()] != fingerprint )
+        {
+            ApiResponseStatus error;
+            error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            error.set_error_message( "The operation ID is already bound to a different ERC request" );
+            return tl::unexpected( error );
+        }
+        return existing->second;
+    }
+
+    // ERC symbol/footprint checks require the project symbol libraries to be
+    // loaded, just as the native ERC dialog and schematic ERC job do.
+    if( SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &project() ) )
+    {
+        adapter->AsyncLoad();
+        adapter->BlockUntilLoaded();
+    }
+
+    ERC_TESTER tester( schematic(), request.show_all_errors() );
+    tester.RunTests( nullptr, m_frame, nullptr, &project(), nullptr );
+
+    NativeCapabilitySchematicRunErcResponse response;
+    response.mutable_document()->CopyFrom( request.document() );
+    response.set_operation_id( request.operation_id() );
+    response.set_process_epoch( request.process_epoch() );
+    response.mutable_checked_revision()->CopyFrom( request.expected_revision() );
+    response.mutable_observed_revision()->set_epoch( journal.Epoch() );
+    response.mutable_observed_revision()->set_sequence( journal.Sequence() );
+    response.set_completed( true );
+
+    uint32_t markerCount = 0;
+    std::set<SCH_SCREEN*> seen;
+    for( const SCH_SHEET_PATH& path : schematic()->Hierarchy() )
+    {
+        SCH_SCREEN* screen = path.LastScreen();
+        if( screen && seen.insert( screen ).second )
+            for( SCH_ITEM* marker : screen->Items().OfType( SCH_MARKER_T ) )
+                if( marker )
+                    ++markerCount;
+    }
+    response.set_marker_count( markerCount );
+    m_ercOperationFingerprints[request.operation_id()] = fingerprint;
+    m_ercReceipts[request.operation_id()] = response;
+    return response;
+}
+
+
 HANDLER_RESULT<types::DocumentSpecifier> API_HANDLER_SCH::handleActivateSheet(
         const HANDLER_CONTEXT<kiapi::automation::v1::ActivateSchematicSheet>& aCtx )
 {
@@ -3534,7 +3802,7 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicPreview> API_HANDLER_SCH::handleC
 
 namespace
 {
-HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> SimulationError(
+tl::unexpected<kiapi::common::ApiResponseStatus> SimulationError(
         kiapi::common::ApiStatusCode aCode, const std::string& aMessage )
 {
     kiapi::common::ApiResponseStatus error;
@@ -3710,6 +3978,52 @@ HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> API_HANDLER_SCH::handl
     read.ClientName = aCtx.ClientName; read.Request.mutable_document()->CopyFrom( aCtx.Request.document() );
     read.Request.set_job_id( aCtx.Request.job_id() ); read.Request.set_process_epoch( aCtx.Request.process_epoch() );
     return handleReadSimulation( read );
+}
+
+HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySimulationDependencies>
+API_HANDLER_SCH::handleReadSimulationDependencies(
+        const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySimulationReadDependencies>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+
+    std::lock_guard<std::mutex> lock( m_simulationMutex );
+    if( !m_simulationJob || m_simulationJob->jobId != aCtx.Request.job_id() )
+        return SimulationError( ApiStatusCode::AS_BAD_REQUEST,
+                                "No simulation job matches this schematic document" );
+
+    if( !google::protobuf::util::MessageDifferencer::Equals( m_simulationJob->document,
+                                                              aCtx.Request.document() ) )
+        return SimulationError( ApiStatusCode::AS_BAD_REQUEST,
+                                "The simulation job belongs to another schematic document" );
+
+    // Dependency evidence is process-owned.  An omitted or stale epoch must
+    // never admit a result from a different native editor process.
+    if( aCtx.Request.process_epoch().empty()
+        || aCtx.Request.process_epoch() != m_simulationJob->processEpoch )
+        return SimulationError( ApiStatusCode::AS_BAD_REQUEST,
+                                "The simulation process epoch is stale or missing" );
+
+    NativeCapabilitySimulationDependencies result;
+    result.mutable_document()->CopyFrom( m_simulationJob->document );
+    result.set_job_id( m_simulationJob->jobId );
+    result.set_operation_id( m_simulationJob->operationId );
+    result.set_process_epoch( m_simulationJob->processEpoch );
+
+    // The retained deck is the authoritative byte sequence used for this
+    // process-owned job.  Hash it exactly as received; an empty deck means
+    // KiCad generated it internally and its external dependency set is not
+    // enumerated by this read contract.
+    NATIVE_STATE_DIGEST digest;
+    digest.Append( m_simulationJob->netlist );
+    result.set_generated_deck_sha256( digest.Hex() );
+    result.set_dependency_capture_complete( false );
+    result.add_warnings( m_simulationJob->netlist.empty()
+                                 ? "KiCad generated the simulation deck internally; dependency paths were not enumerated"
+                                 : "Dependency paths in the retained simulation deck were not enumerated" );
+    return result;
 }
 
 

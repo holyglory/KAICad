@@ -193,6 +193,30 @@ public:
     void GetUpdatedItems( std::vector<PNS::ITEM*>& aRemoved, std::vector<PNS::ITEM*>& aAdded,
                           std::vector<PNS::ITEM*>& aHeads );
 
+    // Own the complete prospective delta independently of the live placement
+    // branch. An unfixed leader is inserted into a temporary branch once.
+    bool GetPreviewItems( std::vector<std::unique_ptr<ITEM>>& aRemoved,
+                          std::vector<std::unique_ptr<ITEM>>& aAdded, bool aIncludeLeader );
+
+    // API previews retain the initial board-world snapshot as owned clones.
+    // Normal GUI routing leaves this disabled and follows the existing commit
+    // path.
+    void SetPreviewCapture( bool aEnable )
+    {
+        if( aEnable && !m_previewCapture )
+            capturePreviewBaseline();
+        else if( !aEnable )
+            m_previewBaseline.clear();
+        m_previewCapture = aEnable;
+    }
+    bool PreviewCapture() const { return m_previewCapture; }
+
+    static void PartitionRoutingChanges( std::vector<ITEM*> aRemoved,
+                                         std::vector<ITEM*> aAdded,
+                                         std::vector<ITEM*>& aDeleted,
+                                         std::vector<ITEM*>& aCreated,
+                                         std::vector<ITEM*>& aUpdated );
+
     void StopRouting();
     void ClearViewDecorations();
 
@@ -260,6 +284,8 @@ public:
     bool GetNearestRatnestAnchor( VECTOR2I& aOtherEnd, PNS_LAYER_RANGE& aOtherEndLayers,
                                   ITEM*& aOtherEndItem );
 private:
+    void capturePreviewBaseline();
+
     bool movePlacing( const VECTOR2I& aP, ITEM* aItem );
     bool moveDragging( const VECTOR2I& aP, ITEM* aItem );
 
@@ -282,6 +308,9 @@ private:
     std::unique_ptr<DRAG_ALGO>      m_dragger;
     std::unique_ptr<SHOVE>          m_shove;
     std::vector<PNS::ITEM*>         m_leaderSegments;
+
+    bool                            m_previewCapture = false;
+    std::vector<std::unique_ptr<ITEM>> m_previewBaseline;
 
     ROUTER_IFACE*     m_iface;
 

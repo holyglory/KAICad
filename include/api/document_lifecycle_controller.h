@@ -23,7 +23,8 @@ public:
     static const std::vector<std::string>& RequestTypes();
     static bool Handles( const ApiRequest& aRequest );
     API_RESULT Handle( ApiRequest& aRequest, const std::string& aProcessEpoch, const DISPATCH& aDispatch );
-    void RememberCleanState( const kiapi::automation::v1::DocumentLifecycleState& aState );
+    void RememberCleanState( const kiapi::automation::v1::DocumentLifecycleState& aState,
+                             bool aAllowChangedCustomRules = false );
     void AnnotateCleanState( kiapi::automation::v1::DocumentLifecycleState& aState ) const;
     bool IsCleanCloseActive() const { return m_cleanCloseActive; }
     static bool HasUnchangedFileBaselines( const kiapi::automation::v1::DocumentLifecycleState& aState );

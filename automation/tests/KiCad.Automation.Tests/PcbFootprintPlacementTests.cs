@@ -1,0 +1,97 @@
+using Google.Protobuf.WellKnownTypes;
+using Kiapi.Board.Types;
+using Kiapi.Common.Commands;
+using Kiapi.Common.Types;
+using KiCad.Automation.Model;
+using KiCad.Automation.Mcp;
+using KiCad.Automation.Native;
+using KiCad.Automation.Protocol;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+
+namespace KiCad.Automation.Tests;
+
+[TestClass]
+public sealed class PcbFootprintPlacementTests
+{
+    [TestMethod]
+    public void PlacementPlanEmitsExactAnyPackedFootprintCandidate()
+    {
+        DocumentSpecifier document = Document();
+        DocumentLifecycleState state = State(document);
+        FootprintInstance source = Footprint(BoardLayer.BlBCu, 90.0);
+
+        var first = PcbFootprintPlacementTools.BuildPlan(document, state, source);
+        var second = PcbFootprintPlacementTools.BuildPlan(document, state, source.Clone());
+        Assert.AreEqual(first.PlanId, second.PlanId);
+
+        CreateItems candidate = BoardJson.Parser.Parse<CreateItems>(first.CandidateRequestJson);
+        Assert.AreEqual(document, candidate.Header.Document);
+        FootprintInstance placed = candidate.Items.Single().Unpack<FootprintInstance>();
+        Assert.AreEqual(source, placed);
+        Assert.AreEqual("Generated", placed.Definition.Id.LibraryNickname);
+        Assert.AreEqual("QFN-4", placed.Definition.Id.EntryName);
+        Assert.AreEqual(BoardLayer.BlBCu, placed.Layer);
+        Assert.AreEqual(90.0, placed.Orientation.ValueDegrees);
+    }
+
+    [TestMethod]
+    public void PlacementPlanRejectsNonCopperFootprintLayer()
+    {
+        DocumentSpecifier document = Document();
+        DocumentLifecycleState state = State(document);
+        FootprintInstance source = Footprint(BoardLayer.BlFSilkS, 0);
+
+        AutomationException error = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbFootprintPlacementTools.BuildPlan(document, state, source));
+        Assert.AreEqual("invalid_pcb_footprint_layer", error.Code);
+    }
+
+    [TestMethod]
+    public void PlacementPlanRejectsUnidentifiedLibraryDefinition()
+    {
+        DocumentSpecifier document = Document();
+        DocumentLifecycleState state = State(document);
+        FootprintInstance source = Footprint(BoardLayer.BlFCu, 0);
+        source.Definition.Id.EntryName = "";
+
+        AutomationException error = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbFootprintPlacementTools.BuildPlan(document, state, source));
+        Assert.AreEqual("invalid_pcb_footprint_library_id", error.Code);
+    }
+
+    private static FootprintInstance Footprint(BoardLayer layer, double rotation) => new()
+    {
+        Id = new() { Value = Guid.Parse("8d37b5f9-9b0d-4a64-9d7b-ef9517fe6f42").ToString("D") },
+        Position = new() { XNm = 12_345_000, YNm = 23_456_000 },
+        Orientation = new() { ValueDegrees = rotation },
+        Layer = layer,
+        Locked = LockedState.LsUnlocked,
+        Definition = new()
+        {
+            Id = new() { LibraryNickname = "Generated", EntryName = "QFN-4" },
+            Attributes = new() { MountingStyle = FootprintMountingStyle.FmsSmd },
+            Items = { Any.Pack(new BoardGraphicShape
+            {
+                Id = new() { Value = Guid.Parse("b3b6f554-e8d4-4c02-bb74-cb2f94b1a6aa").ToString("D") },
+                Layer = BoardLayer.BlFSilkS
+            }) }
+        }
+    };
+
+    private static DocumentSpecifier Document() => new()
+    {
+        Type = DocumentType.DoctypePcb,
+        BoardFilename = "placement.kicad_pcb",
+        Project = new() { Name = "placement", Path = "/tmp/kicad-placement" }
+    };
+
+    private static DocumentLifecycleState State(DocumentSpecifier document) => new()
+    {
+        Document = document,
+        Scope = DocumentLifecycleScope.DlsPcb,
+        ProcessEpoch = Guid.NewGuid().ToString("D"),
+        NativeIdentity = Guid.NewGuid().ToString("D"),
+        StateSha256 = new string('a', 64),
+        Revision = new() { Epoch = Guid.NewGuid().ToString("D"), Sequence = 7 }
+    };
+}

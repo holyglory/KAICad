@@ -37,6 +37,7 @@
 class API_HANDLER;
 class DOCUMENT_LIFECYCLE_CONTROLLER;
 class CHECKED_SCHEMATIC_CONTROLLER;
+class CHECKED_PCB_ROUTE_CONTROLLER;
 class KINNG_REQUEST_SERVER;
 class KINNG_PUBLISHER;
 class wxEvtHandler;
@@ -167,6 +168,7 @@ private:
     std::set<API_HANDLER*> m_handlers;
     std::unique_ptr<DOCUMENT_LIFECYCLE_CONTROLLER> m_lifecycle;
     std::unique_ptr<CHECKED_SCHEMATIC_CONTROLLER> m_checkedSchematic;
+    std::unique_ptr<CHECKED_PCB_ROUTE_CONTROLLER> m_checkedPcbRoute;
 
     std::string m_token;
     std::string m_automationInstanceId;

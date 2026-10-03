@@ -1,0 +1,191 @@
+using System.ComponentModel;
+using System.Text;
+using System.Text.Json;
+using Google.Protobuf;
+using Kiapi.Board.Commands;
+using Kiapi.Common.Commands;
+using Kiapi.Common.Types;
+using KiCad.Automation.Model;
+using KiCad.Automation.Native;
+using KiCad.Automation.Protocol;
+using ModelContextProtocol.Protocol;
+using ModelContextProtocol.Server;
+
+namespace KiCad.Automation.Mcp;
+
+/// <summary>Revision-paired board connectivity and rule observations used by agent planners.</summary>
+[McpServerToolType]
+public sealed class PcbBoardTools(InstanceRegistry registry)
+{
+    [McpServerTool(Name = "kicad_pcb_nets", ReadOnly = true),
+     Description("Read the native PCB net inventory at one exact lifecycle checkpoint. requestJson is GetNets protobuf JSON with an explicit PCB board and optional netclass filters; expectedStateJson must be the matching kicad_document_state observation. The response is a typed native net list paired with unchanged before/after board state."),
+     KiCadCapability("pcb-connectivity", "compiled-mcp plus native-board-api", "explicit PCB document, process epoch, lifecycle state"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> Nets(string instanceId, string requestJson, string expectedStateJson, CancellationToken cancellationToken) =>
+        Read<GetNets, NetsResponse>(instanceId, requestJson, expectedStateJson, "nets", request => request.Board, cancellationToken);
+
+    [McpServerTool(Name = "kicad_pcb_items_by_net", ReadOnly = true),
+     Description("Read pads, tracks, vias and zones belonging to explicitly named native PCB nets. requestJson is GetItemsByNet protobuf JSON with an explicit ItemHeader.document and typed net filters; expectedStateJson must be the matching lifecycle observation. Any-packed items and unchanged before/after state are returned; no route or DRC conclusion is inferred."),
+     KiCadCapability("pcb-connectivity", "compiled-mcp plus native-board-api", "explicit PCB document, process epoch, lifecycle state, net filter"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> ItemsByNet(string instanceId, string requestJson, string expectedStateJson, CancellationToken cancellationToken) =>
+        Read<GetItemsByNet, GetItemsResponse>(instanceId, requestJson, expectedStateJson, "items-by-net", request => request.Header?.Document, cancellationToken);
+
+    [McpServerTool(Name = "kicad_pcb_items_by_net_class", ReadOnly = true),
+     Description("Read pads, tracks, vias and zones belonging to explicitly named native PCB netclasses. requestJson is GetItemsByNetClass protobuf JSON with an explicit ItemHeader.document and typed netclass filters; expectedStateJson must be the matching lifecycle observation. Any-packed items and unchanged before/after state are returned."),
+     KiCadCapability("pcb-connectivity", "compiled-mcp plus native-board-api", "explicit PCB document, process epoch, lifecycle state, netclass filter"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> ItemsByNetClass(string instanceId, string requestJson, string expectedStateJson, CancellationToken cancellationToken) =>
+        Read<GetItemsByNetClass, GetItemsResponse>(instanceId, requestJson, expectedStateJson, "items-by-net-class", request => request.Header?.Document, cancellationToken);
+
+    [McpServerTool(Name = "kicad_pcb_connected_items", ReadOnly = true),
+     Description("Read the native copper connectivity closure for explicit PCB item KIIDs at one lifecycle checkpoint. requestJson is GetConnectedItems protobuf JSON with an explicit ItemHeader.document and source IDs; expectedStateJson must be the matching observation. This exposes native connectivity for route planning without claiming DRC cleanliness."),
+     KiCadCapability("pcb-connectivity", "compiled-mcp plus native-board-api", "explicit PCB document, process epoch, lifecycle state, source item IDs"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> ConnectedItems(string instanceId, string requestJson, string expectedStateJson, CancellationToken cancellationToken) =>
+        Read<GetConnectedItems, GetItemsResponse>(instanceId, requestJson, expectedStateJson, "connected-items", request => request.Header?.Document, cancellationToken);
+
+    [McpServerTool(Name = "kicad_pcb_design_rules", ReadOnly = true),
+     Description("Read the native board design rules and custom-rule compilation status at one exact PCB lifecycle checkpoint. requestJson is GetBoardDesignRules protobuf JSON with an explicit board; expectedStateJson must match the same board and process epoch. Rule data is authoritative input for planners, not proof that a proposed route is valid."),
+     KiCadCapability("pcb-rules", "compiled-mcp plus native-board-api", "explicit PCB document, process epoch, lifecycle state, custom-rule status"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> DesignRules(string instanceId, string requestJson, string expectedStateJson, CancellationToken cancellationToken) =>
+        Read<GetBoardDesignRules, BoardDesignRulesResponse>(instanceId, requestJson, expectedStateJson, "design-rules", request => request.Board, cancellationToken);
+
+    [McpServerTool(Name = "kicad_pcb_net_classes", ReadOnly = true),
+     Description("Read effective native netclass properties for explicitly named PCB nets at one exact lifecycle checkpoint. documentJson identifies the board because the native GetNetClassForNets request carries only net values; requestJson is GetNetClassForNets protobuf JSON; expectedStateJson must match the board and process epoch. This is authoritative planning input, not route validation."),
+     KiCadCapability("pcb-rules", "compiled-mcp plus native-board-api", "explicit PCB document, process epoch, lifecycle state, net names"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> NetClasses(string instanceId, string documentJson, string requestJson,
+        string expectedStateJson, CancellationToken cancellationToken) => ReadNetClasses(instanceId, documentJson, requestJson, expectedStateJson, cancellationToken);
+
+    [McpServerTool(Name = "kicad_pcb_enabled_layers", ReadOnly = true),
+     Description("Read the native enabled-layer and copper-layer-count configuration at one exact PCB lifecycle checkpoint. requestJson is GetBoardEnabledLayers protobuf JSON with an explicit board; expectedStateJson must match the same board and process epoch."),
+     KiCadCapability("pcb-rules", "compiled-mcp plus native-board-api", "explicit PCB document, process epoch, lifecycle state, enabled layers"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> EnabledLayers(string instanceId, string requestJson, string expectedStateJson, CancellationToken cancellationToken) =>
+        Read<GetBoardEnabledLayers, BoardEnabledLayersResponse>(instanceId, requestJson, expectedStateJson, "enabled-layers", request => request.Board, cancellationToken);
+
+    [McpServerTool(Name = "kicad_pcb_stackup", ReadOnly = true),
+     Description("Read the complete native PCB stackup at one exact lifecycle checkpoint, including enabled layers, user layer names, copper/dielectric thickness, material, mask and silkscreen properties. requestJson is GetBoardStackup protobuf JSON with an explicit board; expectedStateJson must match the same board and process epoch. This is authoritative planning input for layer changes, impedance and manufacturing; it does not mutate the board or certify a route."),
+     KiCadCapability("pcb-rules", "compiled-mcp plus native-board-api", "explicit PCB document, process epoch, lifecycle state, stackup layers and materials"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> Stackup(string instanceId, string requestJson, string expectedStateJson, CancellationToken cancellationToken) =>
+        Read<GetBoardStackup, BoardStackupResponse>(instanceId, requestJson, expectedStateJson, "stackup", request => request.Board, cancellationToken);
+
+    [McpServerTool(Name = "kicad_pcb_plot_settings", ReadOnly = true),
+     Description("Read native PCB plot settings at one exact lifecycle checkpoint. requestJson is GetBoardPlotSettings protobuf JSON with an explicit board; expectedStateJson must match the same board and process epoch. This is observation only."),
+     KiCadCapability("pcb-rules", "compiled-mcp plus native-board-api", "explicit PCB document, process epoch, lifecycle state, plot settings"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> PlotSettings(string instanceId, string requestJson, string expectedStateJson, CancellationToken cancellationToken) =>
+        Read<GetBoardPlotSettings, BoardPlotSettingsResponse>(instanceId, requestJson, expectedStateJson, "plot-settings", request => request.Board, cancellationToken);
+
+    private async Task<CallToolResult> Read<TRequest, TResponse>(string instanceId, string requestJson,
+        string expectedStateJson, string queryKind, Func<TRequest, DocumentSpecifier?> target,
+        CancellationToken cancellationToken)
+        where TRequest : class, IMessage<TRequest>, new()
+        where TResponse : class, IMessage<TResponse>, new()
+    {
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            TRequest request;
+            try { request = BoardJson.Parser.Parse<TRequest>(requestJson); }
+            catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException or InvalidOperationException)
+            { throw new AutomationException("invalid_pcb_query", $"{queryKind} requestJson is not valid board protobuf JSON: {error.Message}"); }
+            var document = target(request);
+            ValidateBoard(document);
+            var expected = SchematicJson.Parser.Parse<DocumentLifecycleState>(expectedStateJson);
+            if (expected.Scope != DocumentLifecycleScope.DlsPcb || !expected.Document.Equals(document)
+                || string.IsNullOrWhiteSpace(expected.ProcessEpoch))
+                throw new AutomationException("invalid_pcb_query_state", "expectedStateJson must identify the same PCB and native process epoch.");
+
+            var client = registry.Client(instanceId);
+            var session = await client.HandshakeAsync(cancellationToken);
+            if (session.Epoch != expected.ProcessEpoch)
+                throw new AutomationException("pcb_instance_changed", "The native process epoch changed before the query.");
+            var before = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
+                new() { Document = document }, cancellationToken);
+            if (!before.Equals(expected))
+                throw new AutomationException("pcb_state_changed", "The PCB changed before the query; inspect a fresh lifecycle state and retry.");
+            var response = await client.InvokeAsync<TRequest, TResponse>(request, cancellationToken);
+            var after = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
+                new() { Document = document }, cancellationToken);
+            if (!after.Equals(expected))
+                throw new AutomationException("pcb_query_state_changed", "The board changed while reading; discard the query and its result.");
+
+            string responseJson = BoardJson.Formatter.Format(response);
+            if (response is GetItemsResponse items && items.Items.Count > 8192)
+                throw new AutomationException("pcb_query_oversized", "The native query returned more than 8192 typed items; narrow the filter before retrying.");
+            if (Encoding.UTF8.GetByteCount(responseJson) > 32 * 1024 * 1024)
+                throw new AutomationException("pcb_query_oversized", "The native query result exceeds the bounded MCP response budget; narrow the filter before retrying.");
+            using var parsed = JsonDocument.Parse(responseJson);
+            var structured = JsonSerializer.SerializeToElement(new
+            {
+                instanceId, processEpoch = session.Epoch, query = queryKind, document,
+                beforeState = SchematicJson.Formatter.Format(before), afterState = SchematicJson.Formatter.Format(after),
+                response = parsed.RootElement.Clone(), nativeQuery = true, boardMutation = false
+            });
+            return new CallToolResult { StructuredContent = structured,
+                Content = [new TextContentBlock { Text = structured.GetRawText() }] };
+        }
+        catch (Exception error) when (error is AutomationException or NativeApiException or NngException
+            or InvalidProtocolBufferException or InvalidJsonException or InvalidOperationException or ArgumentException)
+        {
+            var structured = JsonSerializer.SerializeToElement(new
+            {
+                errorCode = error is AutomationException known ? known.Code : "pcb_query_failed",
+                errorMessage = error.Message, query = queryKind
+            });
+            return new CallToolResult { IsError = true, StructuredContent = structured,
+                Content = [new TextContentBlock { Text = structured.GetRawText() }] };
+        }
+    }
+
+    private async Task<CallToolResult> ReadNetClasses(string instanceId, string documentJson, string requestJson,
+        string expectedStateJson, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var document = SchematicJson.Parser.Parse<DocumentSpecifier>(documentJson);
+            ValidateBoard(document);
+            var request = BoardJson.Parser.Parse<GetNetClassForNets>(requestJson);
+            var expected = SchematicJson.Parser.Parse<DocumentLifecycleState>(expectedStateJson);
+            if (expected.Scope != DocumentLifecycleScope.DlsPcb || !expected.Document.Equals(document)
+                || string.IsNullOrWhiteSpace(expected.ProcessEpoch))
+                throw new AutomationException("invalid_pcb_query_state", "expectedStateJson must identify the same PCB and native process epoch.");
+            var client = registry.Client(instanceId); var session = await client.HandshakeAsync(cancellationToken);
+            if (session.Epoch != expected.ProcessEpoch)
+                throw new AutomationException("pcb_instance_changed", "The native process epoch changed before the query.");
+            var before = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(new() { Document = document }, cancellationToken);
+            if (!before.Equals(expected))
+                throw new AutomationException("pcb_state_changed", "The PCB changed before the netclass query; inspect it again.");
+            var response = await client.InvokeAsync<GetNetClassForNets, NetClassForNetsResponse>(request, cancellationToken);
+            var after = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(new() { Document = document }, cancellationToken);
+            if (!after.Equals(expected))
+                throw new AutomationException("pcb_query_state_changed", "The board changed while reading netclasses; discard the result.");
+            using var parsed = JsonDocument.Parse(BoardJson.Formatter.Format(response));
+            var structured = JsonSerializer.SerializeToElement(new
+            {
+                instanceId, processEpoch = session.Epoch, query = "net-classes", document,
+                beforeState = SchematicJson.Formatter.Format(before), afterState = SchematicJson.Formatter.Format(after),
+                response = parsed.RootElement.Clone(), nativeQuery = true, boardMutation = false
+            });
+            return new CallToolResult { StructuredContent = structured, Content = [new TextContentBlock { Text = structured.GetRawText() }] };
+        }
+        catch (Exception error) when (error is AutomationException or NativeApiException or NngException
+            or InvalidProtocolBufferException or InvalidJsonException or ArgumentException)
+        {
+            var structured = JsonSerializer.SerializeToElement(new
+            { errorCode = error is AutomationException known ? known.Code : "pcb_query_failed", errorMessage = error.Message, query = "net-classes" });
+            return new CallToolResult { IsError = true, StructuredContent = structured, Content = [new TextContentBlock { Text = structured.GetRawText() }] };
+        }
+    }
+
+    private static void ValidateBoard(DocumentSpecifier? document)
+    {
+        DocumentStateTools.ValidateTarget(document);
+        if (document!.Type != DocumentType.DoctypePcb)
+            throw new AutomationException("invalid_pcb_query_target", "The query target must be an explicit PCB document.");
+    }
+}

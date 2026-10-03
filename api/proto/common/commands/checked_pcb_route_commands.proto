@@ -1,0 +1,60 @@
+/* Checked route commits and retained native receipts. GPL-3.0-or-later. */
+syntax = "proto3";
+package kiapi.automation.v1;
+option csharp_namespace = "KiCad.Automation.Protocol";
+import "common/commands/editor_commands.proto";
+import "common/commands/automation_commands.proto";
+import "common/types/base_types.proto";
+
+message CheckedPcbRouteCommit {
+  kiapi.common.commands.CreateItems candidate = 1;
+  DocumentLifecycleState expected_state = 2;
+  string drc_job_id = 3;
+  string operation_id = 4;
+  uint32 maximum_result_bytes = 5;
+
+  // Existing route items that are replaced in place as part of the same
+  // checked transaction.  Every item must keep the UUID already present on
+  // the board; this is the identity-preserving counterpart to candidate,
+  // which contains newly-created copper.
+  kiapi.common.commands.UpdateItems replacement_updates = 6;
+
+  // Existing copper removed without an identity-preserving replacement.
+  // IDs are disjoint from both candidate and replacement_updates; all three
+  // requests are applied inside the same native undo transaction.
+  kiapi.common.commands.DeleteItems removals = 7;
+}
+
+message ReadCheckedPcbRouteReceipt {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string process_epoch = 2;
+  string operation_id = 3;
+  CheckedPcbRouteCommit expected_request = 4;
+}
+
+message CheckedPcbRouteReceipt {
+  enum State {
+    UNKNOWN = 0;
+    NOT_FOUND = 1;
+    COMPLETED = 2;
+    REJECTED = 3;
+    INDETERMINATE = 4;
+  }
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string process_epoch = 2;
+  string operation_id = 3;
+  State state = 4;
+  kiapi.common.commands.CreateItemsResponse created = 5;
+  DocumentLifecycleState before = 6;
+  DocumentLifecycleState after = 7;
+  string error_code = 8;
+  string error_message = 9;
+  bool request_verified = 10;
+  bool replayed = 11;
+  kiapi.common.commands.UpdateItems updated = 12;
+  // Exact native response for identity-preserving updates. `updated` keeps
+  // the request shape for compatibility; this proves what KiCad stored.
+  kiapi.common.commands.UpdateItemsResponse updated_result = 13;
+  kiapi.common.commands.DeleteItems removals = 14;
+  kiapi.common.commands.DeleteItemsResponse removed_result = 15;
+}

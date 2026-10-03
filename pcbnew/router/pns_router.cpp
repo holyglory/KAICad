@@ -20,6 +20,10 @@
  */
 
 #include <cstdio>
+#include <algorithm>
+#include <set>
+#include <tuple>
+#include <unordered_map>
 #include <memory>
 #include <vector>
 
@@ -31,6 +35,10 @@
 #include <pcb_painter.h>
 #include <pad.h>
 #include <zone.h>
+#include <netinfo.h>
+#include "pns_segment.h"
+#include "pns_arc.h"
+#include "pns_via.h"
 
 #include <geometry/shape.h>
 
@@ -106,6 +114,9 @@ void ROUTER::SyncWorld()
 
 void ROUTER::ClearWorld()
 {
+    m_previewCapture = false;
+    m_previewBaseline.clear();
+
     if( m_world )
     {
         m_world->SetRuleResolver( nullptr );
@@ -114,6 +125,27 @@ void ROUTER::ClearWorld()
     }
 
     m_placer.reset();
+}
+
+
+void ROUTER::capturePreviewBaseline()
+{
+    m_previewBaseline.clear();
+
+    if( !m_world )
+        return;
+
+    NODE::ITEM_VECTOR items;
+    m_world->GetEffectiveItems( items );
+
+    for( ITEM* item : items )
+    {
+        if( item->IsVirtual() || ( item->OfKind( ITEM::HOLE_T ) && item->ParentPadVia() ) )
+            continue;
+
+        if( SEGMENT::ClassOf( item ) || ARC::ClassOf( item ) || VIA::ClassOf( item ) )
+            m_previewBaseline.emplace_back( item->Clone() );
+    }
 }
 
 
@@ -859,54 +891,343 @@ void ROUTER::GetUpdatedItems( std::vector<PNS::ITEM*>& aRemoved, std::vector<PNS
 }
 
 
+bool ROUTER::GetPreviewItems( std::vector<std::unique_ptr<ITEM>>& aRemoved,
+                              std::vector<std::unique_ptr<ITEM>>& aAdded, bool aIncludeLeader )
+{
+    aRemoved.clear();
+    aAdded.clear();
+
+    if( m_state != ROUTE_TRACK || !m_placer )
+        return false;
+
+    NODE* node = m_placer->CurrentNode( true );
+
+    if( aIncludeLeader && !node )
+        return false;
+
+    std::unique_ptr<NODE> prospective;
+    if( aIncludeLeader )
+    {
+        prospective.reset( node->Branch() );
+        ITEM_SET traces = m_placer->Traces();
+        auto addLine = [&]( const LINE& aLine )
+        {
+            LINE line( aLine );
+            line.ClearLinks();
+            prospective->Add( line );
+            if( line.EndsWithVia() )
+                prospective->Add( Clone( line.Via() ) );
+        };
+        for( const ITEM* item : traces.CItems() )
+        {
+            if( LINE::ClassOf( item ) )
+                addLine( *static_cast<const LINE*>( item ) );
+            else if( item->OfKind( ITEM::DIFF_PAIR_T ) )
+            {
+                DIFF_PAIR pair( *static_cast<const DIFF_PAIR*>( item ) );
+                addLine( pair.PLine() );
+                addLine( pair.NLine() );
+            }
+            else
+                return false;
+        }
+        node = prospective.get();
+    }
+
+    // A force-finished placer can leave no current branch.  The router root
+    // is then the effective world containing every committed provisional
+    // waypoint, so it is still a valid source for the board-relative diff.
+    NODE* effectiveNode = node ? node : m_world.get();
+    if( !effectiveNode )
+        return false;
+
+    // Keep unsupported changed primitives visible to ExtractRoutePreviewGeometry,
+    // which rejects them with a precise contract error.  Filtering them here
+    // would turn an unsupported native change into a falsely complete preview.
+    NODE::ITEM_VECTOR rawRemoved, rawAdded;
+    if( node )
+        node->GetUpdatedItems( rawRemoved, rawAdded );
+
+    auto auxiliary = []( ITEM* item )
+    {
+        return item->IsVirtual() || ( item->OfKind( ITEM::HOLE_T ) && item->ParentPadVia() );
+    };
+    auto routeGeometry = []( ITEM* item )
+    {
+        return SEGMENT::ClassOf( item ) || ARC::ClassOf( item ) || VIA::ClassOf( item );
+    };
+
+    for( ITEM* item : rawRemoved )
+    {
+        if( !auxiliary( item ) && !routeGeometry( item ) )
+            aRemoved.emplace_back( item->Clone() );
+    }
+    for( ITEM* item : rawAdded )
+    {
+        if( !auxiliary( item ) && !routeGeometry( item ) )
+            aAdded.emplace_back( item->Clone() );
+    }
+
+    NODE::ITEM_VECTOR effective;
+    effectiveNode->GetEffectiveItems( effective );
+
+    std::unordered_map<BOARD_ITEM*, std::vector<ITEM*>> currentByParent;
+    std::vector<ITEM*> currentUnowned;
+    for( ITEM* item : effective )
+    {
+        if( auxiliary( item ) || !routeGeometry( item ) )
+            continue;
+
+        if( item->Parent() )
+            currentByParent[item->Parent()].push_back( item );
+        else
+            currentUnowned.push_back( item );
+    }
+
+    std::unordered_map<BOARD_ITEM*, std::vector<ITEM*>> baselineByParent;
+    std::vector<ITEM*> baselineUnowned;
+    for( const auto& item : m_previewBaseline )
+    {
+        if( item->Parent() )
+            baselineByParent[item->Parent()].push_back( item.get() );
+        else
+            baselineUnowned.push_back( item.get() );
+    }
+
+    auto sortKey = []( ITEM* item )
+    {
+        std::vector<int64_t> geometry;
+        for( int index = 0; index < item->AnchorCount(); ++index )
+        {
+            VECTOR2I anchor = item->Anchor( index );
+            geometry.push_back( anchor.x );
+            geometry.push_back( anchor.y );
+        }
+        if( ARC::ClassOf( item ) )
+        {
+            const VECTOR2I mid = static_cast<ARC*>( item )->CArc().GetArcMid();
+            geometry.push_back( mid.x );
+            geometry.push_back( mid.y );
+            geometry.push_back( static_cast<ARC*>( item )->Width() );
+        }
+        else if( SEGMENT::ClassOf( item ) )
+        {
+            geometry.push_back( static_cast<SEGMENT*>( item )->Width() );
+        }
+        else if( VIA::ClassOf( item ) )
+        {
+            auto* via = static_cast<VIA*>( item );
+            geometry.push_back( via->Drill() );
+            for( int layer = via->Layers().Start(); layer <= via->Layers().End(); ++layer )
+                geometry.push_back( via->Diameter( layer ) );
+        }
+        return std::make_tuple( item->Kind(), item->Layers().Start(), item->Layers().End(), geometry );
+    };
+
+    auto sameGeometry = []( ITEM* left, ITEM* right )
+    {
+        if( !left || !right || left->Kind() != right->Kind() || left->Layers() != right->Layers()
+            || left->Net() != right->Net() )
+            return false;
+
+        if( SEGMENT::ClassOf( left ) )
+        {
+            const auto* lhs = static_cast<const SEGMENT*>( left );
+            const auto* rhs = static_cast<const SEGMENT*>( right );
+            return lhs->Seg().A == rhs->Seg().A && lhs->Seg().B == rhs->Seg().B
+                && lhs->Width() == rhs->Width();
+        }
+        if( ARC::ClassOf( left ) )
+        {
+            const auto* lhs = static_cast<const ARC*>( left );
+            const auto* rhs = static_cast<const ARC*>( right );
+            return lhs->CArc().GetP0() == rhs->CArc().GetP0()
+                && lhs->CArc().GetArcMid() == rhs->CArc().GetArcMid()
+                && lhs->CArc().GetP1() == rhs->CArc().GetP1()
+                && lhs->Width() == rhs->Width();
+        }
+        if( VIA::ClassOf( left ) )
+        {
+            const auto* lhs = static_cast<const VIA*>( left );
+            const auto* rhs = static_cast<const VIA*>( right );
+            if( lhs->Pos() != rhs->Pos() || lhs->Drill() != rhs->Drill()
+                || lhs->Layers() != rhs->Layers() )
+                return false;
+            for( int layer = lhs->Layers().Start(); layer <= lhs->Layers().End(); ++layer )
+                if( lhs->Diameter( layer ) != rhs->Diameter( layer ) )
+                    return false;
+            return true;
+        }
+        return false;
+    };
+
+    auto composeGroup = [&]( std::vector<ITEM*>& baseline, std::vector<ITEM*>& current )
+    {
+        std::stable_sort( baseline.begin(), baseline.end(), [&]( ITEM* lhs, ITEM* rhs )
+        { return sortKey( lhs ) < sortKey( rhs ); } );
+        std::stable_sort( current.begin(), current.end(), [&]( ITEM* lhs, ITEM* rhs )
+        { return sortKey( lhs ) < sortKey( rhs ); } );
+
+        std::vector<bool> used( current.size(), false );
+        // Preserve an unchanged owner whenever possible.  Any remaining
+        // owner/current pairing is the deterministic update-before-create
+        // choice for a split replacement.
+        for( ITEM* oldItem : baseline )
+        {
+            size_t index = current.size();
+            for( size_t probe = 0; probe < current.size(); ++probe )
+            {
+                if( !used[probe] && sameGeometry( oldItem, current[probe] ) )
+                {
+                    index = probe;
+                    break;
+                }
+            }
+
+            if( index == current.size() )
+            {
+                for( size_t probe = 0; probe < current.size(); ++probe )
+                    if( !used[probe] )
+                    {
+                        index = probe;
+                        break;
+                    }
+            }
+
+            if( index == current.size() )
+            {
+                aRemoved.emplace_back( oldItem->Clone() );
+                continue;
+            }
+
+            used[index] = true;
+            ITEM* replacement = current[index];
+            if( !sameGeometry( oldItem, replacement ) )
+            {
+                aRemoved.emplace_back( oldItem->Clone() );
+                aAdded.emplace_back( replacement->Clone() );
+            }
+        }
+
+        for( size_t index = 0; index < current.size(); ++index )
+            if( !used[index] )
+                aAdded.emplace_back( current[index]->Clone() );
+    };
+
+    for( auto& [parent, baseline] : baselineByParent )
+    {
+        auto current = currentByParent.contains( parent ) ? currentByParent[parent]
+                                                           : std::vector<ITEM*>();
+        composeGroup( baseline, current );
+        currentByParent.erase( parent );
+    }
+    for( auto& [unused, current] : currentByParent )
+    {
+        for( ITEM* item : current )
+            aAdded.emplace_back( item->Clone() );
+    }
+
+    // Unowned route geometry has no native owner identity.  Exact geometry
+    // still lets us retain a pre-existing unowned item without inventing an
+    // update identity; every unmatched item remains a real create/removal.
+    composeGroup( baselineUnowned, currentUnowned );
+
+    return !aRemoved.empty() || !aAdded.empty();
+}
+
+
+void ROUTER::PartitionRoutingChanges( std::vector<ITEM*> aRemoved,
+                                      std::vector<ITEM*> aAdded,
+                                      std::vector<ITEM*>& aDeleted,
+                                      std::vector<ITEM*>& aCreated,
+                                      std::vector<ITEM*>& aUpdated )
+{
+    auto key = []( ITEM* item )
+    {
+        std::vector<int64_t> geometry;
+        for( int index = 0; index < item->AnchorCount(); ++index )
+        {
+            VECTOR2I anchor = item->Anchor( index );
+            geometry.push_back( anchor.x ); geometry.push_back( anchor.y );
+        }
+        if( ARC::ClassOf( item ) )
+        {
+            const VECTOR2I mid = static_cast<ARC*>( item )->CArc().GetArcMid();
+            geometry.push_back( mid.x ); geometry.push_back( mid.y );
+        }
+        if( VIA::ClassOf( item ) )
+        {
+            auto* via = static_cast<VIA*>( item );
+            geometry.push_back( via->Drill() );
+            for( int layer = via->Layers().Start(); layer <= via->Layers().End(); ++layer )
+                geometry.push_back( via->Diameter( layer ) );
+        }
+        else if( SEGMENT::ClassOf( item ) )
+            geometry.push_back( static_cast<SEGMENT*>( item )->Width() );
+        else if( ARC::ClassOf( item ) )
+            geometry.push_back( static_cast<ARC*>( item )->Width() );
+        auto* net = static_cast<NETINFO_ITEM*>( item->Net() );
+        return std::make_tuple( item->Parent() ? item->Parent()->m_Uuid.AsStdString() : std::string(),
+                                item->Kind(), item->Layers().Start(), item->Layers().End(),
+                                net ? net->GetNetname().ToStdString() : std::string(), geometry );
+    };
+    std::stable_sort( aRemoved.begin(), aRemoved.end(), [&]( ITEM* a, ITEM* b ) { return key( a ) < key( b ); } );
+    // Preserve the authoritative update-before-create order supplied by the
+    // preview capture. Native CommitRouting uses this same first compatible
+    // addition rule for same-parent replacements.
+    std::set<BOARD_ITEM*> processedParents;
+    for( ITEM* removed : aRemoved )
+    {
+        if( removed->IsVirtual() )
+            continue;
+        BOARD_ITEM* parent = removed->Parent();
+        if( parent && !processedParents.insert( parent ).second )
+            continue;
+        auto replacement = std::find_if( aAdded.begin(), aAdded.end(), [&]( ITEM* added )
+        {
+            return parent && !added->IsVirtual() && added->Parent() == parent
+                   && added->Kind() == removed->Kind();
+        } );
+        if( replacement != aAdded.end() )
+        {
+            aUpdated.push_back( *replacement );
+            aAdded.erase( replacement );
+        }
+        else
+            aDeleted.push_back( removed );
+    }
+    for( ITEM* added : aAdded )
+        if( !added->IsVirtual() )
+            aCreated.push_back( added );
+}
+
+
 void ROUTER::CommitRouting( NODE* aNode )
 {
     if( m_state == ROUTE_TRACK && !m_placer->HasPlacedAnything() )
         return;
 
-    NODE::ITEM_VECTOR removed;
-    NODE::ITEM_VECTOR added;
-    NODE::ITEM_VECTOR changed;
-
+    NODE::ITEM_VECTOR removed, added, deleted, created, changed;
     aNode->GetUpdatedItems( removed, added );
 
-    for( ITEM* item : removed )
+    if( m_previewCapture )
     {
-        bool is_changed = false;
-
-        // Items in remove/add that share the same parent are just updated versions
-        // We move them to the updated vector to preserve attributes such as UUID and pad data
-        if( item->Parent() )
-        {
-            for( NODE::ITEM_VECTOR::iterator added_it = added.begin();
-                    added_it != added.end(); ++added_it )
-            {
-                if( ( *added_it )->Parent() && ( *added_it )->Parent() == item->Parent() )
-                {
-                    changed.push_back( *added_it );
-                    added.erase( added_it );
-                    is_changed = true;
-                    break;
-                }
-            }
-        }
-
-        if( !is_changed && !item->IsVirtual() )
-            m_iface->RemoveItem( item );
+        // Capture before NODE::Commit releases the branch. Board parent
+        // Keep the PNS world current for subsequent waypoints, while leaving
+        // the native BOARD untouched.  GetPreviewItems composes the final
+        // board-relative delta from the preserved baseline and this effective
+        // world after every commit; no intermediate clone is retained here.
+        m_world->Commit( aNode );
+        return;
     }
 
-    for( ITEM* item : added )
-    {
-        if( !item->IsVirtual() )
-            m_iface->AddItem( item );
-    }
-
+    PartitionRoutingChanges( removed, added, deleted, created, changed );
+    for( ITEM* item : deleted )
+        m_iface->RemoveItem( item );
+    for( ITEM* item : created )
+        m_iface->AddItem( item );
     for( ITEM* item : changed )
-    {
-        if( !item->IsVirtual() )
-            m_iface->UpdateItem( item );
-    }
-
+        m_iface->UpdateItem( item );
     m_iface->Commit();
     m_world->Commit( aNode );
 }

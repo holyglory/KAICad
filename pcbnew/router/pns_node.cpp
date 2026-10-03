@@ -1576,6 +1576,16 @@ void NODE::GetUpdatedItems( ITEM_VECTOR& aRemoved, ITEM_VECTOR& aAdded )
 }
 
 
+void NODE::GetEffectiveItems( ITEM_VECTOR& aItems ) const
+{
+    for( ITEM* item : *m_index )
+    {
+        if( isRoot() || !Overrides( item ) )
+            aItems.push_back( item );
+    }
+}
+
+
 void NODE::releaseChildren()
 {
     // copy the kids as the NODE destructor erases the item from the parent node.

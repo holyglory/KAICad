@@ -226,8 +226,7 @@ public sealed class RecoveryTools
     [McpServerTool(Name = "kicad_project_recovery_create", ReadOnly = false),
      Description("Restore the missing .kicad_pro container for an instance whose registered KiCad process has ended. Requires the exact recovery revision token and settled XML with no pending synchronization. Derives the root and sheet entries from that XML, validates the destination against the instance registry, and creates the file atomically only when absent. Existing project files are preserved. Returns the hash of the observed project file and whether it was created. Next start KiCad, create its missing schematic root and reattach the recovery record before applying the rebuild. This creates the project container only; schematic reconstruction remains a separate operation and board-only settings are not restored."),
      KiCadCapability("schematic-design", "compiled-mcp", "registered stopped instance, recovery revision token"),
-     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.DeletedProjectFileRecoversThroughNativeStart",
-         "SchematicProjectSkeletonTests.ExtractsDerivedProjectEntriesAndCreatesMissingFileWithoutReplacement")]
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.DeletedProjectFileRecoversThroughNativeStart")]
     public Task<CallToolResult> CreateProjectSkeleton(string instanceId, string recoveryPath, string expectedRevisionToken,
         string? expectedProjectFile = null, CancellationToken cancellationToken = default) => ExecuteAsync(async () =>
     {
@@ -246,8 +245,7 @@ public sealed class RecoveryTools
     [McpServerTool(Name = "kicad_project_recovery_start", ReadOnly = false),
      Description("Restore a missing .kicad_pro container and start the exact registered KiCad instance for a settled XML recovery record. Requires the saved instance's process to be proven ended, the exact recovery revision token, and the matching native executable. Existing project files are preserved. The returned instance still needs kicad_schematic_create when the root schematic is missing, followed by kicad_design_recovery_reattach and kicad_design_sync_plan/apply; this operation never overwrites a project or reconstructs schematic files."),
      KiCadCapability("service", "compiled-mcp plus native-process", "registered stopped instance and exact recovery token"),
-     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.DeletedProjectFileRecoversThroughNativeStart",
-         "SchematicProjectSkeletonTests.ExtractsDerivedProjectEntriesAndCreatesMissingFileWithoutReplacement")]
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.DeletedProjectFileRecoversThroughNativeStart")]
     public Task<CallToolResult> StartProjectRecovery(string executable, string instanceId, string recoveryPath,
         string expectedRevisionToken, bool? softwareRendering = null, CancellationToken cancellationToken = default) => ExecuteAsync(async () =>
     {
@@ -300,7 +298,7 @@ public sealed class RecoveryTools
 
     [McpServerTool(Name = "kicad_design_sheet_move_answer", Destructive = false),
      KiCadCapability("schematic-design", "compiled-mcp", "recovery revision token, exact sheet identities and full native paths"),
-     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.RepeatedPhysicalSheetRebuildPreservesEveryInstance"),
+     KiCadVerification(KiCadVerificationLevel.NativeJourney, "NativeSessionTests.RepeatedPhysicalSheetRebuildPreservesEveryInstance"),
      Description("Retain one complete answer to the current sheetResolutionRequests from kicad_design_sync_plan. moves maps a former sheetInstanceId to its resulting full nativePath; retiredSheetInstanceIds explicitly removes former instances; addedNativePaths names newly introduced paths. Descendants follow their most specific path choice. Uses the exact recovery revision token and rejects incomplete, duplicate, conflicting or stale choices without writing. Replaces the saved mapping for this observation; later edits make it stale. Writes only the recovery record: does not contact KiCad, change XML, advance synchronization or resolve other conflicts. Refresh and plan/apply, or resume the paused worker, to publish the full design.")]
     public Task<CallToolResult> AnswerSheetMove(string instanceId, string recoveryPath, string expectedRevisionToken,
         SchematicSheetMoveAnswer[] moves, Guid[] retiredSheetInstanceIds, Guid[][] addedNativePaths,

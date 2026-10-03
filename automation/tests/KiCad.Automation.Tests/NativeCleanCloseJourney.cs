@@ -66,13 +66,14 @@ public sealed partial class NativeSessionTests
                 Assert.AreEqual(current.StateSha256, current.CleanCheckpointSha256);
                 var other = await ObserveLifecycleState(client, otherDocument, token);
                 var files = current.NativeFiles.ToDictionary(path => path,
-                    path => (Bytes: File.ReadAllBytes(path), Written: File.GetLastWriteTimeUtc(path)));
+                    path => (Exists: File.Exists(path), Bytes: File.Exists(path) ? File.ReadAllBytes(path) : Array.Empty<byte>(),
+                        Written: File.Exists(path) ? File.GetLastWriteTimeUtc(path) : DateTime.MinValue));
                 var modes = new Dictionary<string, UnixFileMode>();
                 string[] reopenedTypes = [];
                 if (pass == 1)
                 {
                     if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Linux readonly fixture.");
-                    foreach (string path in current.NativeFiles)
+                    foreach (string path in current.NativeFiles.Where(File.Exists))
                     {
                         var mode = File.GetUnixFileMode(path); modes.Add(path, mode);
                         File.SetUnixFileMode(path, mode & ~(UnixFileMode.UserWrite | UnixFileMode.GroupWrite | UnixFileMode.OtherWrite));
@@ -113,7 +114,7 @@ public sealed partial class NativeSessionTests
                             var failed = Parse(refusedSave);
                             Assert.AreEqual(LifecycleOperationStatus.LosFailed, failed.Status);
                             Assert.AreEqual("file_not_writable", failed.ErrorCode, failed.ErrorMessage);
-                            CollectionAssert.AreEquivalent(current.NativeFiles.ToArray(), failed.BlockedFiles.ToArray(), failed.ErrorMessage);
+                            CollectionAssert.AreEquivalent(current.NativeFiles.Where(File.Exists).ToArray(), failed.BlockedFiles.ToArray(), failed.ErrorMessage);
                             Assert.IsEmpty(failed.WrittenFiles, failed.ErrorMessage);
                             Assert.IsFalse(failed.ErrorMessage.Contains("KiCad refused to save", StringComparison.Ordinal), failed.ErrorMessage);
                             StringAssert.Contains(failed.ErrorMessage, "the file is read-only", failed.ErrorMessage);
@@ -156,8 +157,12 @@ public sealed partial class NativeSessionTests
                     }
                     foreach (var (path, expected) in files)
                     {
-                        CollectionAssert.AreEqual(expected.Bytes, await File.ReadAllBytesAsync(path, token));
-                        Assert.AreEqual(expected.Written, File.GetLastWriteTimeUtc(path), "Clean close must not write design files.");
+                        Assert.AreEqual(expected.Exists, File.Exists(path));
+                        if (expected.Exists)
+                        {
+                            CollectionAssert.AreEqual(expected.Bytes, await File.ReadAllBytesAsync(path, token));
+                            Assert.AreEqual(expected.Written, File.GetLastWriteTimeUtc(path), "Clean close must not write design files.");
+                        }
                     }
                 }
                 finally
@@ -209,7 +214,8 @@ public sealed partial class NativeSessionTests
         var dirty = await ObserveLifecycleState(client, document, token);
         Assert.IsTrue(dirty.NativeContentDirty, $"The {kind} edit must be unsaved work in the editor.");
         var disk = dirty.NativeFiles.ToDictionary(path => path,
-            path => (Bytes: File.ReadAllBytes(path), Written: File.GetLastWriteTimeUtc(path)));
+            path => (Exists: File.Exists(path), Bytes: File.Exists(path) ? File.ReadAllBytes(path) : Array.Empty<byte>(),
+                Written: File.Exists(path) ? File.GetLastWriteTimeUtc(path) : DateTime.MinValue));
         string board = dirty.NativeFiles.Single(path => Path.GetExtension(path) == ".kicad_pcb");
         var reportedCodes = new SortedSet<string>(StringComparer.Ordinal);
 
@@ -222,8 +228,12 @@ public sealed partial class NativeSessionTests
                 new() { Document = document }, token)).Comment9, $"{phase}: the unsaved {kind} edit was lost.");
             foreach (var (path, before) in disk)
             {
-                CollectionAssert.AreEqual(before.Bytes, await File.ReadAllBytesAsync(path, token), $"{phase}: {path} changed on disk.");
-                Assert.AreEqual(before.Written, File.GetLastWriteTimeUtc(path), $"{phase}: {path} was rewritten by a failed save.");
+                Assert.AreEqual(before.Exists, File.Exists(path), $"{phase}: {path} presence changed on disk.");
+                if (before.Exists)
+                {
+                    CollectionAssert.AreEqual(before.Bytes, await File.ReadAllBytesAsync(path, token), $"{phase}: {path} changed on disk.");
+                    Assert.AreEqual(before.Written, File.GetLastWriteTimeUtc(path), $"{phase}: {path} was rewritten by a failed save.");
+                }
             }
             return state;
         }
@@ -251,7 +261,7 @@ public sealed partial class NativeSessionTests
         {
             foreach (string path in dirty.NativeFiles) KeepReadOnly(path, modes);
             var readOnly = await FailedSave("read-only", await Save(dirty));
-            CollectionAssert.AreEquivalent(dirty.NativeFiles.ToArray(), readOnly.BlockedFiles.ToArray(), readOnly.ErrorMessage);
+            CollectionAssert.AreEquivalent(dirty.NativeFiles.Where(File.Exists).ToArray(), readOnly.BlockedFiles.ToArray(), readOnly.ErrorMessage);
             Assert.AreEqual(dirty, readOnly.ObservedState, "The receipt shows the editor after the refusal.");
         }
         finally { RestoreModes(modes); }
@@ -347,7 +357,7 @@ public sealed partial class NativeSessionTests
                 Path.Combine(evidence, instanceId + "-read-only-board-mcp.stderr.log"), token, environment);
             string board = Path.Combine(copy, Path.GetFileName(saved.NativeFiles.Single(path => Path.GetExtension(path) == ".kicad_pcb")));
             string project = Path.Combine(copy, Path.GetFileName(saved.NativeFiles.Single(path => Path.GetExtension(path) == ".kicad_pro")));
-            foreach (string file in saved.NativeFiles) File.Copy(file, Path.Combine(copy, Path.GetFileName(file)));
+            foreach (string file in saved.NativeFiles.Where(File.Exists)) File.Copy(file, Path.Combine(copy, Path.GetFileName(file)));
             KeepReadOnly(project, modes);
             var clock = Stopwatch.StartNew();
             var start = await mcp.Tool("kicad_instance_start", new { executable, projectPath = project });
@@ -367,8 +377,11 @@ public sealed partial class NativeSessionTests
             await editor.InvokeAsync<SetTitleBlockInfo, Empty>(new() { Document = document, TitleBlock = title }, token);
             var dirty = await ObserveLifecycleState(editor, document, token);
             Assert.IsTrue(dirty.NativeContentDirty, "The board edit must be unsaved work in the editor.");
-            CollectionAssert.AreEquivalent(new[] { board, project }, dirty.NativeFiles.ToArray(), "The copied board and project file are the document.");
-            var disk = dirty.NativeFiles.ToDictionary(path => path, path => (Bytes: File.ReadAllBytes(path), Written: File.GetLastWriteTimeUtc(path)));
+            Assert.IsTrue(dirty.NativeFiles.Contains(board));
+            Assert.IsTrue(dirty.NativeFiles.Contains(project));
+            var disk = dirty.NativeFiles.ToDictionary(path => path,
+                path => (Exists: File.Exists(path), Bytes: File.Exists(path) ? File.ReadAllBytes(path) : Array.Empty<byte>(),
+                    Written: File.Exists(path) ? File.GetLastWriteTimeUtc(path) : DateTime.MinValue));
 
             var reply = await mcp.Tool("kicad_document_save", new { instanceId = started,
                 expectedStateJson = SchematicJson.Formatter.Format(dirty), operationId = Guid.NewGuid().ToString("D") });
@@ -392,8 +405,12 @@ public sealed partial class NativeSessionTests
                 new() { Document = document }, token)).Comment9, "The unsaved board edit was lost.");
             foreach (var (path, before) in disk)
             {
-                CollectionAssert.AreEqual(before.Bytes, await File.ReadAllBytesAsync(path, token), path + " changed on disk.");
-                Assert.AreEqual(before.Written, File.GetLastWriteTimeUtc(path), path + " was rewritten by a refused save.");
+                Assert.AreEqual(before.Exists, File.Exists(path), path + " presence changed on disk.");
+                if (before.Exists)
+                {
+                    CollectionAssert.AreEqual(before.Bytes, await File.ReadAllBytesAsync(path, token), path + " changed on disk.");
+                    Assert.AreEqual(before.Written, File.GetLastWriteTimeUtc(path), path + " was rewritten by a refused save.");
+                }
             }
             reportedCodes.Add(result.ErrorCode);
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-pcb-save-read-only-project.json"),
@@ -421,7 +438,9 @@ public sealed partial class NativeSessionTests
         var clean = await ObserveLifecycleState(client, document, token);
         Assert.IsFalse(clean.NativeContentDirty);
         Assert.AreEqual(clean.StateSha256, clean.CleanCheckpointSha256, "A close needs a verified clean checkpoint.");
-        var files = clean.NativeFiles.ToDictionary(path => path, path => (Bytes: File.ReadAllBytes(path), Written: File.GetLastWriteTimeUtc(path)));
+        var files = clean.NativeFiles.ToDictionary(path => path,
+            path => (Exists: File.Exists(path), Bytes: File.Exists(path) ? File.ReadAllBytes(path) : Array.Empty<byte>(),
+                Written: File.Exists(path) ? File.GetLastWriteTimeUtc(path) : DateTime.MinValue));
         string operation = Guid.NewGuid().ToString("D");
         var reply = await CancelWhileKiCadIsStopped(mcp, processId, "kicad_document_close",
             new { instanceId, expectedStateJson = SchematicJson.Formatter.Format(clean), operationId = operation }, token);
@@ -431,8 +450,12 @@ public sealed partial class NativeSessionTests
         CollectionAssert.Contains(open.Documents.ToArray(), document, "The cancelled close must leave the document open.");
         foreach (var (path, before) in files)
         {
-            CollectionAssert.AreEqual(before.Bytes, await File.ReadAllBytesAsync(path, token), path + " changed on disk.");
-            Assert.AreEqual(before.Written, File.GetLastWriteTimeUtc(path), path + " was written by a cancelled close.");
+            Assert.AreEqual(before.Exists, File.Exists(path), path + " presence changed on disk.");
+            if (before.Exists)
+            {
+                CollectionAssert.AreEqual(before.Bytes, await File.ReadAllBytesAsync(path, token), path + " changed on disk.");
+                Assert.AreEqual(before.Written, File.GetLastWriteTimeUtc(path), path + " was written by a cancelled close.");
+            }
         }
         NotReportedAsSuccess(reply, "cancelled close");
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-cancelled-close.json"), SchematicJson.Formatter.Format(clean), token);

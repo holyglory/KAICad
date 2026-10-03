@@ -797,6 +797,8 @@ internal static class CapabilityCatalogAssertions
         foreach (var limitation in limitations)
         {
             string scope = limitation.GetProperty("scope").GetString()!;
+            CollectionAssert.Contains(new[] { "incomplete", "unsupported", "platform-specific" },
+                limitation.GetProperty("availability").GetString(), scope);
             Assert.IsFalse(string.IsNullOrWhiteSpace(limitation.GetProperty("summary").GetString()));
             string[] expected = entries.Where(e => e.GetProperty("scope").ValueKind == JsonValueKind.String && e.GetProperty("scope").GetString() == scope)
                 .Select(e => e.GetProperty("name").GetString()!).ToArray();

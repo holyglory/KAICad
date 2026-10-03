@@ -65,6 +65,9 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativePcbItems")]
     public Task NativePcbItemsAreCreatedAndUpdatedThroughMcp() => RunNativeSessions(NativeJourney.PcbItems);
 
+    [TestMethod, TestCategory("NativeSymbolLibrary")]
+    public Task NativeSymbolLibraryReadbackUsesMcp() => RunNativeSessions(NativeJourney.SymbolLibrary);
+
     // Shared PSU/CPU acceptance journeys (psu-cpu-fixture-and-ownership.md §1.9).
     // Each ends Inconclusive (not passed) until its fixture seed and lane journey
     // land; a category joins native-acceptance only after integration.
@@ -118,7 +121,7 @@ public sealed partial class NativeSessionTests
 
     private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, RecursiveEditor, Simulation, PcbItems,
         PsuCpuSeed, PsuCpuComponentCreation, ConnectedRealization, DiagramCanvas, XmlRebuild, RepeatedSheetRebuild, ProjectRecovery, ProjectRecoveryContainer, OwnershipSync, NativeCrash, NativeCrashRelease,
-        ObserveApplyStress, RepeatedSheetOwnership, ComponentRebind }
+        ObserveApplyStress, RepeatedSheetOwnership, ComponentRebind, SymbolLibrary }
 
     private async Task RunNativeSessions(NativeJourney journey, string theme = "light")
     {
@@ -142,6 +145,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.RecursiveEditor => Path.Combine("native-recursive-editor", theme),
                 NativeJourney.Simulation => "native-simulation",
                 NativeJourney.PcbItems => "native-pcb-items",
+                NativeJourney.SymbolLibrary => "native-symbol-library",
                 NativeJourney.PsuCpuSeed => "native-psu-cpu-seed",
                 NativeJourney.PsuCpuComponentCreation => "native-psu-cpu-creation",
                 NativeJourney.ConnectedRealization => "native-connected-realization",
@@ -225,7 +229,11 @@ public sealed partial class NativeSessionTests
                 if (journey == NativeJourney.NetSettings)
                     projectDirectory = Path.Combine(projectDirectory, "電源");
                 Directory.CreateDirectory(projectDirectory);
+                if (journey == NativeJourney.PcbItems)
+                    PreparePcbImportLibrary(projectDirectory);
                 if (journey == NativeJourney.ComponentRebind)
+                    await PrepareRebindLibrary(projectDirectory, deadline.Token);
+                if (journey == NativeJourney.SymbolLibrary)
                     await PrepareRebindLibrary(projectDirectory, deadline.Token);
                 string project = Path.Combine(projectDirectory, "fixture.kicad_pro");
                 string declaredRootId = (index == 0 ? Guid.NewGuid() : Guid.Empty).ToString("D");
@@ -558,7 +566,9 @@ public sealed partial class NativeSessionTests
                     else if (journey == NativeJourney.Simulation)
                         await VerifyNativeSimulation(client, opened.Document, evidence, target.Id, deadline.Token);
                     else if (journey == NativeJourney.PcbItems)
-                        await VerifyNativePcbItems(client, opened.Document, evidence, target.Id, deadline.Token);
+                        await VerifyNativePcbItems(client, opened.Document, evidence, target.Id, focusProcessId, ":" + displayNumber, deadline.Token);
+                    else if (journey == NativeJourney.SymbolLibrary)
+                        await VerifyNativeSymbolLibrary(client, opened.Document, evidence, target.Id, deadline.Token);
                     else if (journey == NativeJourney.SymbolSheets)
                     {
                         try

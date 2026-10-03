@@ -452,6 +452,13 @@ public:
     void GetUpdatedItems( ITEM_VECTOR& aRemoved, ITEM_VECTOR& aAdded );
 
     /**
+     * Return the items visible from this node, with branch overrides removed.
+     * The returned pointers remain owned by the node hierarchy; callers that
+     * retain them after a branch is committed must clone them.
+     */
+    void GetEffectiveItems( ITEM_VECTOR& aItems ) const;
+
+    /**
      * Apply the changes from a given branch (aNode) to the root branch.
      *
      * Calling on a non-root branch will fail.  Calling commit also kills all children nodes of

@@ -126,6 +126,12 @@ void API_HANDLER_BOARD::pushCurrentCommit( const std::string& aClientName,
 {
     API_HANDLER_EDITOR::pushCurrentCommit( aClientName, aMessage );
 
+    // Headless BOARD_COMMIT does not have an editor frame to call OnModify.
+    // Advance the native revision after every committed API edit so checked
+    // lifecycle observations reject stale requests even without a GUI.
+    if( !m_frame )
+        board()->IncrementTimeStamp();
+
     if( m_frame )
         m_frame->Refresh();
 }
@@ -199,6 +205,13 @@ void API_HANDLER_BOARD::deleteItemsInternal( std::map<KIID, ItemDeletionStatus>&
 {
     BOARD* board = this->board();
     std::vector<BOARD_ITEM*> validatedItems;
+    std::set<BOARD_ITEM*> validatedItemSet;
+
+    auto addValidatedItem = [&]( BOARD_ITEM* aItem )
+    {
+        if( aItem && validatedItemSet.insert( aItem ).second )
+            validatedItems.push_back( aItem );
+    };
 
     for( std::pair<const KIID, ItemDeletionStatus> pair : aItemsToDelete )
     {
@@ -212,7 +225,19 @@ void API_HANDLER_BOARD::deleteItemsInternal( std::map<KIID, ItemDeletionStatus>&
                 continue;
             }
 
-            validatedItems.push_back( item );
+            // Match the native editor's group deletion transaction: remove
+            // members first so their ParentGroup links are cleared before the
+            // group itself is removed. This preserves ungrouped children on
+            // undo/reopen and prevents stale group pointers in later routing
+            // snapshots. The set avoids duplicate removal when a caller also
+            // names one of the group's children explicitly.
+            if( item->Type() == PCB_GROUP_T )
+            {
+                static_cast<PCB_GROUP*>( item )->RunOnChildren(
+                        [&]( BOARD_ITEM* child ) { addValidatedItem( child ); }, RECURSE_MODE::RECURSE );
+            }
+
+            addValidatedItem( item );
             aItemsToDelete[pair.first] = ItemDeletionStatus::IDS_OK;
         }
 
@@ -378,6 +403,22 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_BOARD::handleCreateUpdateItemsInte
             status.set_code( ItemStatusCode::ISC_NONEXISTENT );
             status.set_error_message( fmt::format( "an item with UUID {} does not exist",
                                                    item->m_Uuid.AsStdString() ) );
+            aItemHandler( status, anyItem );
+            continue;
+        }
+
+        // CopyFrom() on a route item is type-specific and deliberately does
+        // nothing when given a different PCB item class.  Reject that case
+        // before opening a checked transaction; otherwise a Track payload
+        // addressed to an Arc/Via UUID could report ISC_OK while leaving the
+        // native geometry unchanged.
+        if( !aCreate && optItem && ( *optItem )->Type() != item->Type() )
+        {
+            status.set_code( ItemStatusCode::ISC_INVALID_TYPE );
+            status.set_error_message( fmt::format( "item UUID {} has native type {} but the update supplied type {}",
+                                                   item->m_Uuid.AsStdString(),
+                                                   static_cast<int>( ( *optItem )->Type() ),
+                                                   static_cast<int>( item->Type() ) ) );
             aItemHandler( status, anyItem );
             continue;
         }

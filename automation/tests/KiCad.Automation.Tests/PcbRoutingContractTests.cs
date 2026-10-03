@@ -1,0 +1,452 @@
+using Google.Protobuf;
+using Google.Protobuf.WellKnownTypes;
+using Kiapi.Board.Types;
+using Kiapi.Common.Commands;
+using Kiapi.Common.Types;
+using KiCad.Automation.Model;
+using KiCad.Automation.Native;
+using KiCad.Automation.Protocol;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+
+namespace KiCad.Automation.Tests;
+
+[TestClass]
+public sealed class PcbRoutingContractTests
+{
+    [TestMethod]
+    public void CheckedRouteRequestRoundTripsAnyPackedGeometry()
+    {
+        string project = "/tmp/kicad-route-contract";
+        var document = new DocumentSpecifier { Type = DocumentType.DoctypePcb, BoardFilename = "route.kicad_pcb",
+            Project = new() { Name = "route", Path = project } };
+        var track = new Track
+        {
+            Id = new() { Value = Guid.NewGuid().ToString("D") },
+            Start = new() { XNm = 1000, YNm = 2000 }, End = new() { XNm = 3000, YNm = 2000 },
+            Width = new() { ValueNm = 200 }, Layer = BoardLayer.BlFCu, Net = new() { Name = "N1" }
+        };
+        var candidate = new CreateItems { Header = new() { Document = document } };
+        candidate.Items.Add(Any.Pack(track));
+        var state = new DocumentLifecycleState { Document = document, ProcessEpoch = Guid.NewGuid().ToString("D"),
+            NativeIdentity = Guid.NewGuid().ToString("D"), Scope = DocumentLifecycleScope.DlsPcb,
+            ProjectSettingsIncluded = true, StateSha256 = new string('a', 64),
+            Revision = new() { Epoch = Guid.NewGuid().ToString("D"), Sequence = 4 } };
+        var request = new CheckedPcbRouteCommit { Candidate = candidate, ExpectedState = state,
+            DrcJobId = Guid.NewGuid().ToString("D"), OperationId = Guid.NewGuid().ToString("D"), MaximumResultBytes = 4096 };
+        var parsed = SchematicJson.Parser.Parse<CheckedPcbRouteCommit>(SchematicJson.Formatter.Format(request));
+        Assert.AreEqual(request, parsed);
+        Assert.AreEqual(track, parsed.Candidate.Items.Single().Unpack<Track>());
+        var receipt = new CheckedPcbRouteReceipt { Document = document, ProcessEpoch = state.ProcessEpoch,
+            OperationId = request.OperationId, State = CheckedPcbRouteReceipt.Types.State.Completed,
+            RequestVerified = true, Before = state, After = state.Clone() };
+        Assert.AreEqual(receipt, SchematicJson.Parser.Parse<CheckedPcbRouteReceipt>(SchematicJson.Formatter.Format(receipt)));
+    }
+
+    [TestMethod]
+    public void FootprintEnvelopeObservationRoundTrips()
+    {
+        var footprint = new FootprintInstance
+        {
+            Id = new() { Value = Guid.NewGuid().ToString("D") },
+            Position = new() { XNm = 100_000, YNm = 200_000 },
+            Definition = new() { Id = new() { LibraryNickname = "Generated", EntryName = "QFN-4" } }
+        };
+        var response = new GetItemsResponse();
+        response.Items.Add(Any.Pack(footprint));
+        var parsed = SchematicJson.Parser.Parse<GetItemsResponse>(SchematicJson.Formatter.Format(response));
+        Assert.AreEqual(footprint, parsed.Items.Single().Unpack<FootprintInstance>());
+
+        var bounds = new GetBoundingBoxResponse();
+        bounds.Items.Add(footprint.Id.Clone());
+        bounds.Boxes.Add(new Kiapi.Common.Types.Box2 { Position = new() { XNm = 90_000, YNm = 190_000 }, Size = new() { XNm = 20_000, YNm = 20_000 } });
+        var boundsParsed = SchematicJson.Parser.Parse<GetBoundingBoxResponse>(SchematicJson.Formatter.Format(bounds));
+        Assert.AreEqual(bounds, boundsParsed);
+    }
+
+    [TestMethod]
+    public void CheckedRouteContractAcceptsCleanCompletedReceiptAndExactGeometry()
+    {
+        var (request, track, state) = CleanRoute();
+        track.CustomProperties.Add(new CustomProperty { Key = "z", Value = "1" });
+        track.CustomProperties.Add(new CustomProperty { Key = "a", Value = "2" });
+        request.Candidate.Items[0] = Any.Pack(track);
+        CheckedPcbRouteContract.ValidateRequest(request, state.ProcessEpoch);
+
+        var after = state.Clone();
+        after.Revision.Sequence++;
+        after.StateSha256 = new string('b', 64);
+        var created = new CreateItemsResponse
+        {
+            Header = new() { Document = request.Candidate.Header.Document },
+            Status = ItemRequestStatus.IrsOk
+        };
+        created.CreatedItems.Add(new ItemCreationResult
+        {
+            Status = new() { Code = ItemStatusCode.IscOk }, Item = Any.Pack(track)
+        });
+        var receipt = new CheckedPcbRouteReceipt
+        {
+            Document = request.Candidate.Header.Document,
+            ProcessEpoch = state.ProcessEpoch,
+            OperationId = request.OperationId,
+            State = CheckedPcbRouteReceipt.Types.State.Completed,
+            RequestVerified = true,
+            Before = state,
+            After = after,
+            Created = created
+        };
+
+        CheckedPcbRouteContract.ValidateResult(request, receipt, inspect: false);
+
+        var normalized = receipt.Clone();
+        var nativeTrack = track.Clone();
+        var sortedProperties = nativeTrack.CustomProperties.OrderBy(property => property.Key, StringComparer.Ordinal).ToArray();
+        nativeTrack.CustomProperties.Clear(); nativeTrack.CustomProperties.Add(sortedProperties);
+        nativeTrack.Parent = new() { Value = Guid.NewGuid().ToString("D") };
+        nativeTrack.Locked = LockedState.LsUnlocked;
+        nativeTrack.Net.Code = new NetCode { Value = 17 };
+        normalized.Created.CreatedItems[0].Item = Any.Pack(nativeTrack);
+        CheckedPcbRouteContract.ValidateResult(request, normalized, inspect: false);
+
+        var via = new Via
+        {
+            Id = new() { Value = Guid.NewGuid().ToString("D") }, Position = new() { XNm = 0, YNm = 20_000 },
+            Type = ViaType.VtThrough, Net = new() { Name = "N1" }, IsFree = false,
+            PadStack = new()
+            {
+                Type = PadStackType.PstNormal, Layers = { BoardLayer.BlFCu, BoardLayer.BlBCu },
+                Drill = new() { Diameter = new() { XNm = 300, YNm = 300 }, StartLayer = BoardLayer.BlFCu,
+                    EndLayer = BoardLayer.BlBCu, Shape = DrillShape.DsCircle },
+                CopperLayers = { new PadStackLayer { Layer = BoardLayer.BlFCu, Shape = PadStackShape.PssCircle,
+                    Size = new() { XNm = 600, YNm = 600 } } }
+            }
+        };
+        var viaRequest = request.Clone(); viaRequest.Candidate.Items[0] = Any.Pack(via);
+        var viaReceipt = receipt.Clone(); viaReceipt.Created.CreatedItems[0].Item = Any.Pack(via);
+        CheckedPcbRouteContract.ValidateResult(viaRequest, viaReceipt, inspect: false);
+        var freeVia = via.Clone(); freeVia.IsFree = true;
+        viaReceipt.Created.CreatedItems[0].Item = Any.Pack(freeVia);
+        Assert.ThrowsExactly<AutomationException>(() => CheckedPcbRouteContract.ValidateResult(viaRequest, viaReceipt, inspect: false));
+
+    }
+
+    [TestMethod]
+    public void CheckedRouteContractAcceptsIdentityPreservingReplacementAndRejectsUuidOverlap()
+    {
+        var (request, track, state) = CleanRoute();
+        var replacement = track.Clone();
+        replacement.Id = new() { Value = Guid.NewGuid().ToString("D") };
+        replacement.Start.XNm += 1000;
+        request.ReplacementUpdates = new UpdateItems { Header = request.Candidate.Header.Clone() };
+        request.ReplacementUpdates.Items.Add(Any.Pack(replacement));
+
+        var removed = new KIID { Value = Guid.NewGuid().ToString("D") };
+        request.Removals = new DeleteItems { Header = request.Candidate.Header.Clone(), ItemIds = { removed } };
+        CheckedPcbRouteContract.ValidateRequest(request, state.ProcessEpoch);
+
+        var after = state.Clone();
+        after.Revision.Sequence++;
+        after.StateSha256 = new string('b', 64);
+        var created = new CreateItemsResponse { Status = ItemRequestStatus.IrsOk };
+        created.CreatedItems.Add(new ItemCreationResult
+        {
+            Status = new() { Code = ItemStatusCode.IscOk }, Item = Any.Pack(track)
+        });
+        var receipt = new CheckedPcbRouteReceipt
+        {
+            Document = request.Candidate.Header.Document,
+            ProcessEpoch = state.ProcessEpoch,
+            OperationId = request.OperationId,
+            State = CheckedPcbRouteReceipt.Types.State.Completed,
+            RequestVerified = true,
+            Before = state,
+            After = after,
+            Created = created,
+            Updated = request.ReplacementUpdates.Clone()
+        };
+        receipt.UpdatedResult = new UpdateItemsResponse { Status = ItemRequestStatus.IrsOk };
+        receipt.UpdatedResult.UpdatedItems.Add(new ItemUpdateResult
+        {
+            Status = new() { Code = ItemStatusCode.IscOk }, Item = Any.Pack(replacement)
+        });
+        receipt.Removals = request.Removals.Clone();
+        receipt.RemovedResult = new DeleteItemsResponse
+        {
+            Status = ItemRequestStatus.IrsOk,
+            DeletedItems = { new ItemDeletionResult { Id = removed.Clone(), Status = ItemDeletionStatus.IdsOk } }
+        };
+        CheckedPcbRouteContract.ValidateResult(request, receipt, inspect: false);
+
+        var replay = receipt.Clone(); replay.Replayed = true;
+        CheckedPcbRouteContract.ValidateResult(request, replay, inspect: false);
+        var forgedRemoval = receipt.Clone();
+        forgedRemoval.RemovedResult.DeletedItems[0].Id = new() { Value = Guid.NewGuid().ToString("D") };
+        Assert.ThrowsExactly<AutomationException>(() => CheckedPcbRouteContract.ValidateResult(request, forgedRemoval, inspect: false));
+
+        var deleteOnly = request.Clone(); deleteOnly.Candidate.Items.Clear(); deleteOnly.ReplacementUpdates = null;
+        CheckedPcbRouteContract.ValidateRequest(deleteOnly, state.ProcessEpoch);
+        var deleteReceipt = receipt.Clone(); deleteReceipt.Created.CreatedItems.Clear();
+        deleteReceipt.Updated = null; deleteReceipt.UpdatedResult = null;
+        CheckedPcbRouteContract.ValidateResult(deleteOnly, deleteReceipt, inspect: false);
+        deleteOnly.Removals.ItemIds.Clear();
+        Assert.ThrowsExactly<AutomationException>(() => CheckedPcbRouteContract.ValidateRequest(deleteOnly, state.ProcessEpoch));
+        deleteOnly.Removals.ItemIds.Add(new KIID { Value = Guid.Empty.ToString("D") });
+        Assert.ThrowsExactly<AutomationException>(() => CheckedPcbRouteContract.ValidateRequest(deleteOnly, state.ProcessEpoch));
+        var overlapRemoval = request.Clone(); overlapRemoval.Removals.ItemIds[0] = replacement.Id.Clone();
+        Assert.ThrowsExactly<AutomationException>(() => CheckedPcbRouteContract.ValidateRequest(overlapRemoval, state.ProcessEpoch));
+
+        var forged = receipt.Clone();
+        forged.UpdatedResult.UpdatedItems[0].Item = Any.Pack(track);
+        Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedPcbRouteContract.ValidateResult(request, forged, inspect: false));
+
+        request.ReplacementUpdates.Items.Clear();
+        request.ReplacementUpdates.Items.Add(Any.Pack(track.Clone()));
+        var error = Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedPcbRouteContract.ValidateRequest(request, state.ProcessEpoch));
+        StringAssert.Contains(error.Message, "unique UUIDs distinct");
+    }
+
+    [TestMethod]
+    public void CheckedRouteContractRejectsForgedCompletedReceipt()
+    {
+        var (request, track, state) = CleanRoute();
+        track.Start.XNm = 0;
+        track.CustomProperties.Add(new CustomProperty { Key = "route-note", Value = "preserve-me" });
+        track.SolderMask = new() { ExposeCopper = true, SolderMaskMargin = new() { ValueNm = 0 } };
+        request.Candidate.Items[0] = Any.Pack(track);
+        var after = state.Clone();
+        after.Revision.Sequence++;
+        after.StateSha256 = new string('b', 64);
+        var created = new CreateItemsResponse { Status = ItemRequestStatus.IrsOk };
+        created.CreatedItems.Add(new ItemCreationResult
+        {
+            Status = new() { Code = ItemStatusCode.IscOk }, Item = Any.Pack(track)
+        });
+        var receipt = new CheckedPcbRouteReceipt
+        {
+            Document = request.Candidate.Header.Document,
+            ProcessEpoch = state.ProcessEpoch,
+            OperationId = request.OperationId,
+            State = CheckedPcbRouteReceipt.Types.State.Completed,
+            RequestVerified = true,
+            Before = state,
+            After = after,
+            Created = created
+        };
+
+        var staleAfter = receipt.Clone();
+        staleAfter.After.Revision.Sequence = state.Revision.Sequence;
+        Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedPcbRouteContract.ValidateResult(request, staleAfter, inspect: false));
+
+        var changedGeometry = receipt.Clone();
+        var changedTrack = track.Clone();
+        changedTrack.End.XNm++;
+        changedGeometry.Created.CreatedItems[0].Item = Any.Pack(changedTrack);
+        Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedPcbRouteContract.ValidateResult(request, changedGeometry, inspect: false));
+
+        void RejectChange(Action<Track> mutate)
+        {
+            var changed = track.Clone(); mutate(changed);
+            var forged = receipt.Clone(); forged.Created.CreatedItems[0].Item = Any.Pack(changed);
+            Assert.ThrowsExactly<AutomationException>(() => CheckedPcbRouteContract.ValidateResult(request, forged, inspect: false));
+        }
+        RejectChange(value => value.Start.XNm = 1);
+        RejectChange(value => value.Net.Name = "N2");
+        RejectChange(value => value.CustomProperties[0].Value = "changed");
+        RejectChange(value => value.CustomProperties.Clear());
+        RejectChange(value => value.CustomProperties.Add(value.CustomProperties[0].Clone()));
+        var duplicateRequest = request.Clone(); var duplicateTrack = track.Clone();
+        duplicateTrack.CustomProperties.Add(duplicateTrack.CustomProperties[0].Clone());
+        duplicateRequest.Candidate.Items[0] = Any.Pack(duplicateTrack);
+        Assert.ThrowsExactly<AutomationException>(() => CheckedPcbRouteContract.ValidateRequest(duplicateRequest, state.ProcessEpoch));
+
+        RejectChange(value => value.SolderMask.ExposeCopper = false);
+        RejectChange(value => value.SolderMask.SolderMaskMargin = null);
+
+        var empty = track.Clone(); empty.CustomProperties.Clear();
+        var emptyRequest = request.Clone(); emptyRequest.Candidate.Items[0] = Any.Pack(empty);
+        var extra = empty.Clone(); extra.CustomProperties.Add(new CustomProperty { Key = "unrequested", Value = "extra" });
+        var extraReceipt = receipt.Clone(); extraReceipt.Created.CreatedItems[0].Item = Any.Pack(extra);
+        Assert.ThrowsExactly<AutomationException>(() => CheckedPcbRouteContract.ValidateResult(emptyRequest, extraReceipt, inspect: false));
+    }
+
+    [TestMethod]
+    public void CheckedRouteContractTreatsMissingAsReadOnlyAndPreservesIndeterminateEvidence()
+    {
+        var (request, _, state) = CleanRoute();
+        var missing = new CheckedPcbRouteReceipt
+        {
+            Document = request.Candidate.Header.Document,
+            ProcessEpoch = state.ProcessEpoch,
+            OperationId = request.OperationId,
+            State = CheckedPcbRouteReceipt.Types.State.NotFound
+        };
+        CheckedPcbRouteContract.ValidateResult(request, missing, inspect: true);
+        Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedPcbRouteContract.ValidateResult(request, missing, inspect: false));
+
+        var uncertain = missing.Clone();
+        uncertain.State = CheckedPcbRouteReceipt.Types.State.Indeterminate;
+        uncertain.RequestVerified = true;
+        uncertain.ErrorCode = "commit_result_unknown";
+        uncertain.Before = state.Clone();
+        CheckedPcbRouteContract.ValidateResult(request, uncertain, inspect: false);
+    }
+
+    [TestMethod]
+    public void CheckedRouteContractRejectsNonCopperGeometryBeforeNativeAdmission()
+    {
+        var (request, _, state) = CleanRoute();
+        request.Candidate.Items.Clear();
+        request.Candidate.Items.Add(Any.Pack(new FootprintInstance
+        {
+            Id = new() { Value = Guid.NewGuid().ToString("D") },
+            Position = new() { XNm = 1000, YNm = 2000 },
+            Definition = new() { Id = new() { LibraryNickname = "Generated", EntryName = "QFN-4" } }
+        }));
+
+        var error = Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedPcbRouteContract.ValidateRequest(request, state.ProcessEpoch));
+        StringAssert.Contains(error.Message, "only board-level Track, Arc or Via");
+    }
+
+    [TestMethod]
+    public void RoutePreviewReplacementUpdatesRoundTripPreservesDisplacedUuid()
+    {
+        var document = new DocumentSpecifier
+        {
+            Type = DocumentType.DoctypePcb,
+            BoardFilename = "route.kicad_pcb",
+            Project = new() { Name = "route", Path = Path.Combine(Path.GetTempPath(), "kicad-route-preview") }
+        };
+        string displacedId = Guid.NewGuid().ToString("D");
+        var replacement = new Track
+        {
+            Id = new() { Value = displacedId },
+            Start = new() { XNm = 10_000, YNm = 20_000 },
+            End = new() { XNm = 30_000, YNm = 20_000 },
+            Width = new() { ValueNm = 200 }, Layer = BoardLayer.BlFCu,
+            Net = new() { Name = "N1" }
+        };
+        var preview = new PcbRoutePreviewState
+        {
+            Document = document,
+            OperationId = Guid.NewGuid().ToString("D"),
+            ProcessEpoch = Guid.NewGuid().ToString("D"),
+            Completed = true,
+            PreviewOnly = true,
+            CompleteDeltaVersion = 1,
+            ReplacementUpdates = new UpdateItems { Header = new() { Document = document } }
+        };
+        preview.RemovedItemIds.Add(new KIID { Value = displacedId });
+        preview.ReplacementUpdates.Items.Add(Any.Pack(replacement));
+
+        var parsed = SchematicJson.Parser.Parse<PcbRoutePreviewState>(SchematicJson.Formatter.Format(preview));
+        Assert.AreEqual(displacedId, parsed.RemovedItemIds.Single().Value);
+        Assert.AreEqual(document, parsed.ReplacementUpdates.Header.Document);
+        Assert.AreEqual(displacedId, parsed.ReplacementUpdates.Items.Single().Unpack<Track>().Id.Value);
+        Assert.IsTrue(parsed.ReplacementUpdates.Items.Single().Is(Track.Descriptor));
+
+        CheckedPcbRouteContract.ValidatePreview(parsed);
+        var legacy = parsed.Clone(); legacy.CompleteDeltaVersion = 0;
+        var legacyError = Assert.ThrowsExactly<AutomationException>(() => CheckedPcbRouteContract.ValidatePreview(legacy));
+        Assert.AreEqual("route_preview_contract_unsupported", legacyError.Code);
+        var cancelled = legacy.Clone(); cancelled.RouteItems.Clear(); cancelled.RemovedItemIds.Clear();
+        cancelled.ReplacementUpdates = null; cancelled.Cancelled = true;
+        CheckedPcbRouteContract.ValidatePreview(cancelled, inspectStateOnly: true);
+        cancelled.Completed = false; cancelled.Cancelled = false; cancelled.ErrorCode = "route_delta_group_membership_unsupported";
+        CheckedPcbRouteContract.ValidatePreview(cancelled, inspectStateOnly: true);
+
+        preview.ReplacementUpdates = null;
+        preview.ReplacementUpdatesError = "displaced_parent_geometry_unsupported";
+        parsed = SchematicJson.Parser.Parse<PcbRoutePreviewState>(SchematicJson.Formatter.Format(preview));
+        Assert.IsNull(parsed.ReplacementUpdates);
+        Assert.AreEqual("displaced_parent_geometry_unsupported", parsed.ReplacementUpdatesError);
+    }
+
+    [TestMethod]
+    public void RoutePreviewRemovedIdsRoundTripAsDeleteCandidate()
+    {
+        var document = new DocumentSpecifier
+        {
+            Type = DocumentType.DoctypePcb,
+            BoardFilename = "route.kicad_pcb",
+            Project = new() { Name = "route", Path = Path.Combine(Path.GetTempPath(), "kicad-route-preview") }
+        };
+        var displaced = new KIID { Value = Guid.NewGuid().ToString("D") };
+        var preview = new PcbRoutePreviewState
+        {
+            Document = document,
+            OperationId = Guid.NewGuid().ToString("D"),
+            ProcessEpoch = Guid.NewGuid().ToString("D"),
+            Completed = true,
+            PreviewOnly = true
+        };
+        preview.RemovedItemIds.Add(displaced);
+
+        var delete = new DeleteItems { Header = new() { Document = document } };
+        delete.ItemIds.Add(preview.RemovedItemIds);
+        var parsed = SchematicJson.Parser.Parse<DeleteItems>(BoardJson.Formatter.Format(delete));
+
+        Assert.AreEqual(document, parsed.Header.Document);
+        Assert.AreEqual(displaced, parsed.ItemIds.Single());
+    }
+
+    private static (CheckedPcbRouteCommit Request, Track Track, DocumentLifecycleState State) CleanRoute()
+    {
+        string projectPath = Path.Combine(Path.GetTempPath(), "kicad-route-contract");
+        var document = new DocumentSpecifier
+        {
+            Type = DocumentType.DoctypePcb,
+            BoardFilename = "route.kicad_pcb",
+            Project = new() { Name = "route", Path = projectPath }
+        };
+        var track = new Track
+        {
+            Id = new() { Value = Guid.NewGuid().ToString("D") },
+            Start = new() { XNm = 1000, YNm = 2000 },
+            End = new() { XNm = 3000, YNm = 2000 },
+            Width = new() { ValueNm = 200 },
+            Layer = BoardLayer.BlFCu,
+            Net = new() { Name = "N1" }
+        };
+        var candidate = new CreateItems { Header = new() { Document = document } };
+        candidate.Items.Add(Any.Pack(track));
+        var nativeIdentity = Guid.NewGuid().ToString("D");
+        string processEpoch = Guid.NewGuid().ToString("D");
+        var state = new DocumentLifecycleState
+        {
+            Document = document,
+            ProcessEpoch = processEpoch,
+            NativeIdentity = nativeIdentity,
+            Scope = DocumentLifecycleScope.DlsPcb,
+            ProjectSettingsIncluded = true,
+            CompleteChangeTracking = false,
+            DiskBaselineChecked = true,
+            StateSha256 = new string('a', 64),
+            Revision = new() { Epoch = nativeIdentity, Sequence = 4 }
+        };
+        string board = Path.Combine(projectPath, document.BoardFilename);
+        string project = Path.Combine(projectPath, "route.kicad_pro");
+        state.NativeFiles.Add(board);
+        state.NativeFiles.Add(project);
+        foreach (string path in new[] { board, project })
+            state.FileBaselines.Add(new NativeFileBaselineState
+            {
+                Path = path, BaselinePath = path, BaselineKnown = true, CurrentKnown = true,
+                BaselineExists = false, CurrentExists = false, Status = NativeFileBaselineStatus.NfbsUnchanged
+            });
+        var request = new CheckedPcbRouteCommit
+        {
+            Candidate = candidate,
+            ExpectedState = state,
+            DrcJobId = Guid.NewGuid().ToString("D"),
+            OperationId = Guid.NewGuid().ToString("D"),
+            MaximumResultBytes = 128 * 1024
+        };
+        return (request, track, state);
+    }
+}

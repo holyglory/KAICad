@@ -35,6 +35,7 @@ class JOB_FP_EXPORT_SVG;
 class TOOL_MANAGER;
 class REPORTER;
 class wxWindow;
+class PCB_DRC_DOCUMENT_SNAPSHOT;
 
 class PCBNEW_JOBS_HANDLER : public JOB_DISPATCHER
 {
@@ -93,6 +94,7 @@ public:
 
 private:
     BOARD* getBoard( const wxString& aPath = wxEmptyString );
+    BOARD* getBoardForExport( const wxString& aPath = wxEmptyString );
     LSEQ convertLayerArg( wxString& aLayerString, BOARD* aBoard ) const;
 
     void populateGerberPlotOptionsFromJob( PCB_PLOT_PARAMS&  aPlotOpts,
@@ -108,6 +110,11 @@ private:
     TOOL_MANAGER* getToolManager( BOARD* aBrd );
 
     std::unique_ptr<BOARD> m_cliBoard;
+    // Plot jobs must never use the editor-owned board.  The native plotter
+    // temporarily adjusts page and auxiliary-origin state (and zone fill can
+    // update connectivity), so retain a detached snapshot for the duration
+    // of the job instead of restoring shared state after the fact.
+    std::unique_ptr<PCB_DRC_DOCUMENT_SNAPSHOT> m_exportSnapshot;
     std::unique_ptr<TOOL_MANAGER> m_toolManager;
 };
 

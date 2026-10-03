@@ -60,6 +60,18 @@ API_HANDLER_FOOTPRINT::API_HANDLER_FOOTPRINT( std::shared_ptr<FOOTPRINT_CONTEXT>
     registerHandler<SaveCopyOfDocument, Empty>(
             &API_HANDLER_FOOTPRINT::handleSaveCopyOfDocument );
     registerHandler<RevertDocument, Empty>( &API_HANDLER_FOOTPRINT::handleRevertDocument );
+    registerHandler<kiapi::automation::v1::NativeCapabilityFootprintReadOperation,
+                    kiapi::automation::v1::NativeCapabilityFootprintReadOperationResponse>(
+            &API_HANDLER_FOOTPRINT::handleReadOperation );
+    registerHandler<kiapi::automation::v1::NativeCapabilityFootprintLibraryReadNames,
+                    kiapi::automation::v1::NativeCapabilityFootprintLibraryReadNamesResponse>(
+            &API_HANDLER_FOOTPRINT::handleReadLibraryNames );
+    registerHandler<kiapi::automation::v1::NativeCapabilityFootprintLibraryDelete,
+                    kiapi::automation::v1::NativeCapabilityFootprintLibraryDeleteResponse>(
+            &API_HANDLER_FOOTPRINT::handleDeleteLibraryFootprint );
+    registerHandler<kiapi::automation::v1::NativeCapabilityFootprintLibraryReadOperation,
+                    kiapi::automation::v1::NativeCapabilityFootprintLibraryReadOperationResponse>(
+            &API_HANDLER_FOOTPRINT::handleReadLibraryOperation );
 
     registerHandler<GetItems, GetItemsResponse>( &API_HANDLER_FOOTPRINT::handleGetItems );
 }
@@ -215,6 +227,21 @@ HANDLER_RESULT<GetOpenDocumentsResponse> API_HANDLER_FOOTPRINT::handleGetOpenDoc
 HANDLER_RESULT<Empty> API_HANDLER_FOOTPRINT::handleSaveDocument(
         const HANDLER_CONTEXT<SaveDocument>& aCtx )
 {
+    const std::string fingerprint = aCtx.Request.SerializeAsString();
+    if( !aCtx.Request.operation_id().empty() )
+    {
+        auto found = m_operationReceipts.find( aCtx.Request.operation_id() );
+        if( found != m_operationReceipts.end() )
+        {
+            if( found->second.operation != "save" || found->second.fingerprint != fingerprint )
+            {
+                ApiResponseStatus e; e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+                e.set_error_message( "footprint operation ID is already bound to different arguments" );
+                return tl::unexpected( e );
+            }
+            return Empty();
+        }
+    }
     HANDLER_RESULT<FOOTPRINT*> footprint = validateAndGetFootprint( aCtx.Request.document() );
 
     if( !footprint )
@@ -228,6 +255,9 @@ HANDLER_RESULT<Empty> API_HANDLER_FOOTPRINT::handleSaveDocument(
         return tl::unexpected( e );
     }
 
+    if( !aCtx.Request.operation_id().empty() )
+        m_operationReceipts[aCtx.Request.operation_id()] = { "save", aCtx.Request.document(), true, fingerprint };
+
     return Empty();
 }
 
@@ -235,6 +265,21 @@ HANDLER_RESULT<Empty> API_HANDLER_FOOTPRINT::handleSaveDocument(
 HANDLER_RESULT<Empty> API_HANDLER_FOOTPRINT::handleSaveCopyOfDocument(
         const HANDLER_CONTEXT<SaveCopyOfDocument>& aCtx )
 {
+    const std::string fingerprint = aCtx.Request.SerializeAsString();
+    if( !aCtx.Request.operation_id().empty() )
+    {
+        auto found = m_operationReceipts.find( aCtx.Request.operation_id() );
+        if( found != m_operationReceipts.end() )
+        {
+            if( found->second.operation != "save-copy" || found->second.fingerprint != fingerprint )
+            {
+                ApiResponseStatus e; e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+                e.set_error_message( "footprint operation ID is already bound to different arguments" );
+                return tl::unexpected( e );
+            }
+            return Empty();
+        }
+    }
     HANDLER_RESULT<FOOTPRINT*> footprint = validateAndGetFootprint( aCtx.Request.document() );
 
     if( !footprint )
@@ -276,6 +321,9 @@ HANDLER_RESULT<Empty> API_HANDLER_FOOTPRINT::handleSaveCopyOfDocument(
         return tl::unexpected( e );
     }
 
+    if( !aCtx.Request.operation_id().empty() )
+        m_operationReceipts[aCtx.Request.operation_id()] = { "save-copy", aCtx.Request.document(), true, fingerprint };
+
     return Empty();
 }
 
@@ -283,6 +331,21 @@ HANDLER_RESULT<Empty> API_HANDLER_FOOTPRINT::handleSaveCopyOfDocument(
 HANDLER_RESULT<Empty> API_HANDLER_FOOTPRINT::handleRevertDocument(
         const HANDLER_CONTEXT<RevertDocument>& aCtx )
 {
+    const std::string fingerprint = aCtx.Request.SerializeAsString();
+    if( !aCtx.Request.operation_id().empty() )
+    {
+        auto found = m_operationReceipts.find( aCtx.Request.operation_id() );
+        if( found != m_operationReceipts.end() )
+        {
+            if( found->second.operation != "revert" || found->second.fingerprint != fingerprint )
+            {
+                ApiResponseStatus e; e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+                e.set_error_message( "footprint operation ID is already bound to different arguments" );
+                return tl::unexpected( e );
+            }
+            return Empty();
+        }
+    }
     if( std::optional<ApiResponseStatus> busy = checkForBusy() )
         return tl::unexpected( *busy );
 
@@ -294,7 +357,164 @@ HANDLER_RESULT<Empty> API_HANDLER_FOOTPRINT::handleRevertDocument(
     frame()->GetScreen()->SetContentModified( false );
     frame()->RevertFootprint(); // dialog is suppressed by ^
 
+    if( !aCtx.Request.operation_id().empty() )
+        m_operationReceipts[aCtx.Request.operation_id()] = { "revert", aCtx.Request.document(), true, fingerprint };
+
     return Empty();
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::NativeCapabilityFootprintReadOperationResponse>
+API_HANDLER_FOOTPRINT::handleReadOperation(
+        const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityFootprintReadOperation>& aCtx )
+{
+    kiapi::automation::v1::NativeCapabilityFootprintReadOperationResponse response;
+    response.set_operation_id( aCtx.Request.operation_id() );
+    auto found = m_operationReceipts.find( aCtx.Request.operation_id() );
+    if( found == m_operationReceipts.end() )
+    {
+        response.set_found( false );
+        return response;
+    }
+    response.set_found( true );
+    response.set_operation( found->second.operation );
+    response.mutable_document()->CopyFrom( found->second.document );
+    response.set_completed( found->second.completed );
+    return response;
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::NativeCapabilityFootprintLibraryReadNamesResponse>
+API_HANDLER_FOOTPRINT::handleReadLibraryNames(
+        const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityFootprintLibraryReadNames>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    const wxString nickname = wxString::FromUTF8( aCtx.Request.library_nickname() );
+    if( nickname.IsEmpty() )
+    {
+        ApiResponseStatus e; e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "A footprint library nickname is required" );
+        return tl::unexpected( e );
+    }
+
+    try
+    {
+        FOOTPRINT_LIBRARY_ADAPTER* adapter = PROJECT_PCB::FootprintLibAdapter( &project() );
+        if( !adapter->LoadOne( nickname ) )
+        {
+            ApiResponseStatus e; e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            e.set_error_message( "The requested footprint library could not be loaded" );
+            return tl::unexpected( e );
+        }
+        NativeCapabilityFootprintLibraryReadNamesResponse response;
+        response.set_library_nickname( aCtx.Request.library_nickname() );
+        for( const wxString& name : adapter->GetFootprintNames( nickname, false ) )
+            response.add_footprint_names( name.ToStdString( wxConvUTF8 ) );
+        response.set_modify_hash( static_cast<uint64_t>( adapter->GenerateTimestamp( &nickname ) ) );
+        return response;
+    }
+    catch( const IO_ERROR& error )
+    {
+        ApiResponseStatus e; e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( error.What().ToStdString() );
+        return tl::unexpected( e );
+    }
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::NativeCapabilityFootprintLibraryDeleteResponse>
+API_HANDLER_FOOTPRINT::handleDeleteLibraryFootprint(
+        const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityFootprintLibraryDelete>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    const wxString nickname = wxString::FromUTF8( aCtx.Request.library_nickname() );
+    const wxString name = wxString::FromUTF8( aCtx.Request.footprint_name() );
+    const std::string operationId = aCtx.Request.operation_id();
+    if( nickname.IsEmpty() || name.IsEmpty() || operationId.empty() )
+    {
+        ApiResponseStatus e; e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "A footprint library, footprint name and operation ID are required" );
+        return tl::unexpected( e );
+    }
+    const std::string fingerprint = aCtx.Request.SerializeAsString();
+    if( auto found = m_libraryDeleteReceipts.find( operationId ); found != m_libraryDeleteReceipts.end() )
+    {
+        if( m_libraryOperationFingerprints[operationId] != fingerprint )
+        {
+            ApiResponseStatus e; e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            e.set_error_message( "The footprint operation ID is already bound to different arguments" );
+            return tl::unexpected( e );
+        }
+        return found->second;
+    }
+
+    try
+    {
+        FOOTPRINT_LIBRARY_ADAPTER* adapter = PROJECT_PCB::FootprintLibAdapter( &project() );
+        if( !adapter->LoadOne( nickname ) || !adapter->IsFootprintLibWritable( nickname ) )
+        {
+            ApiResponseStatus e; e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            e.set_error_message( "The footprint library is unavailable or read-only" );
+            return tl::unexpected( e );
+        }
+        const uint64_t currentHash = static_cast<uint64_t>( adapter->GenerateTimestamp( &nickname ) );
+        if( aCtx.Request.has_expected_modify_hash() && currentHash != aCtx.Request.expected_modify_hash() )
+        {
+            ApiResponseStatus e; e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            e.set_error_message( "The footprint library changed since the observed modify hash" );
+            return tl::unexpected( e );
+        }
+        auto names = adapter->GetFootprintNames( nickname, false );
+        if( std::find( names.begin(), names.end(), name ) == names.end() )
+        {
+            ApiResponseStatus e; e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            e.set_error_message( "The requested footprint does not exist in the library" );
+            return tl::unexpected( e );
+        }
+        const uint64_t beforeHash = currentHash;
+        adapter->DeleteFootprint( nickname, name );
+        auto remaining = adapter->GetFootprintNames( nickname, false );
+        if( std::find( remaining.begin(), remaining.end(), name ) != remaining.end() )
+        {
+            ApiResponseStatus e; e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            e.set_error_message( "The footprint delete was not verified by a native library re-read" );
+            return tl::unexpected( e );
+        }
+        NativeCapabilityFootprintLibraryDeleteResponse response;
+        response.set_library_nickname( aCtx.Request.library_nickname() );
+        response.set_footprint_name( aCtx.Request.footprint_name() );
+        response.set_operation_id( operationId ); response.set_completed( true );
+        response.set_before_modify_hash( beforeHash );
+        response.set_after_modify_hash( static_cast<uint64_t>( adapter->GenerateTimestamp( &nickname ) ) );
+        m_libraryOperationFingerprints[operationId] = fingerprint;
+        m_libraryDeleteReceipts[operationId] = response;
+        return response;
+    }
+    catch( const IO_ERROR& error )
+    {
+        ApiResponseStatus e; e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( error.What().ToStdString() );
+        return tl::unexpected( e );
+    }
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::NativeCapabilityFootprintLibraryReadOperationResponse>
+API_HANDLER_FOOTPRINT::handleReadLibraryOperation(
+        const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityFootprintLibraryReadOperation>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    NativeCapabilityFootprintLibraryReadOperationResponse response;
+    response.set_operation_id( aCtx.Request.operation_id() );
+    auto found = m_libraryDeleteReceipts.find( aCtx.Request.operation_id() );
+    if( found == m_libraryDeleteReceipts.end() )
+    {
+        response.set_found( false );
+        return response;
+    }
+    response.set_found( true );
+    response.mutable_delete_response()->CopyFrom( found->second );
+    return response;
 }
 
 

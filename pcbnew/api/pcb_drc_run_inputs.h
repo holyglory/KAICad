@@ -3,6 +3,7 @@
 #define KICAD_PCB_DRC_RUN_INPUTS_H
 
 #include <file_content_baseline.h>
+#include <api/common/commands/automation_commands.pb.h>
 #include <google/protobuf/any.pb.h>
 #include <google/protobuf/repeated_field.h>
 #include <kiid.h>
@@ -13,6 +14,7 @@
 #include <string>
 #include <tl/expected.hpp>
 #include <vector>
+#include <set>
 namespace PNS { class ROUTING_SETTINGS; }
 namespace kiapi::automation::v1 { class SchematicParityNetlistSnapshot; }
 class BOARD;
@@ -118,6 +120,10 @@ public:
     // DRC snapshot. The live editor board is never changed.
     tl::expected<std::vector<KIID>, std::string> AddCandidateItems(
             const google::protobuf::RepeatedPtrField<google::protobuf::Any>& aItems );
+    // Remove exact existing route objects from this detached snapshot before
+    // replacement candidates are installed. The live editor board is never changed.
+    tl::expected<void, std::string> RemoveRouteItems(
+            const google::protobuf::RepeatedPtrField<kiapi::common::types::KIID>& aItems );
 
     // Mutates only this bundle's detached board. Failure makes the preparation
     // unusable: capture a fresh bundle instead of retrying partially prepared data.

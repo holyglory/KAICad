@@ -320,6 +320,10 @@ message ImportNetlist
   bool update_footprints = 6;
   bool transfer_groups = 7;
   bool override_locks = 8;
+
+  // MCP operation correlation. 400-499 is reserved for the automation
+  // extension lane so older peers continue to ignore this field safely.
+  string operation_id = 400;
 }
 
 message ImportNetlistResponse
@@ -347,6 +351,10 @@ message RefillZones
 
   // A list of zones to refill.  If empty, all zones are refilled.
   repeated kiapi.common.types.KIID zones = 2;
+
+  // MCP operation correlation. 400-499 is reserved for the automation
+  // extension lane so older peers continue to ignore this field safely.
+  string operation_id = 400;
 }
 
 /*

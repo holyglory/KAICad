@@ -1359,7 +1359,14 @@ void DIALOG_DRC_RULE_EDITOR::SaveRulesToFile()
     }
 
     DRC_RULE_SAVER saver;
-    saver.SaveFile( m_frame->GetBoard()->GetDesignRulesPath(), entries, m_currentBoard );
+    const wxString rulesPath = m_frame->GetBoard()->GetDesignRulesPath();
+    if( !saver.SaveFile( rulesPath, entries, m_currentBoard ) )
+    {
+        wxLogError( _( "Cannot save design rules to '%s'" ), rulesPath );
+        return;
+    }
+    m_frame->GetBoard()->SetCustomRulesFileBaseline( FILE_CONTENT_BASELINE::Read( rulesPath ) );
+    m_frame->OnModify();
 
     try
     {

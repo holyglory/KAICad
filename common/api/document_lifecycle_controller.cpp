@@ -14,6 +14,10 @@
 #include <set>
 #include <algorithm>
 #include <cctype>
+#ifdef __UNIX__
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace
 {
@@ -38,6 +42,28 @@ std::string Utf8( const wxString& aText )
 std::string FileName( const std::string& aPath )
 {
     return Utf8( wxFileName( wxString::FromUTF8( aPath ) ).GetFullName() );
+}
+
+// wxFileName's writable probe can report a symlink target as writable when the
+// containing directory has had its write bits removed. Checked saves must make
+// the same decision as the filesystem before a native writer starts replacing
+// any file. Keep the extra probe Unix-only; other platforms retain wx's native
+// permission semantics.
+bool HasWritePermission( const wxString& aPath )
+{
+#ifdef __UNIX__
+    const std::string path = Utf8( aPath );
+    if( access( path.c_str(), W_OK ) != 0 )
+        return false;
+
+    struct stat info;
+    if( stat( path.c_str(), &info ) == 0
+        && ( info.st_mode & ( S_IWUSR | S_IWGRP | S_IWOTH ) ) == 0 )
+        return false;
+#else
+    (void) aPath;
+#endif
+    return true;
 }
 
 // A reason as a clause of a longer sentence: without surrounding space or a final period.
@@ -129,17 +155,23 @@ ApiResponse Pack( const LifecycleOperationResult& aResult )
     return response;
 }
 
-bool FileCoverage( const DocumentLifecycleState& aState )
+bool FileCoverage( const DocumentLifecycleState& aState, bool aAllowChangedCustomRules = false )
 {
     std::set<std::string> paths( aState.native_files().begin(), aState.native_files().end() );
     if( paths.empty() || paths.size() != static_cast<size_t>( aState.native_files_size() )
             || paths.size() != static_cast<size_t>( aState.file_baselines_size() ) ) return false;
     for( const auto& file : aState.file_baselines() )
     {
+        const bool customRules = wxFileName( wxString::FromUTF8( file.path() ) ).GetExt().CmpNoCase( "kicad_dru" ) == 0;
+        const bool statusOkay = file.status() == NFBS_UNCHANGED
+                || ( aAllowChangedCustomRules && customRules && file.status() == NFBS_CHANGED );
         if( !paths.erase( file.path() ) || !wxFileName( wxString::FromUTF8( file.path() ) ).IsAbsolute()
-                || file.status() != NFBS_UNCHANGED || !file.baseline_known() || !file.current_known()
-                || file.baseline_path() != file.path() || file.baseline_exists() != file.current_exists()
-                || file.baseline_sha256() != file.current_sha256() || file.baseline_bytes() != file.current_bytes() )
+                || !statusOkay || !file.baseline_known() || !file.current_known()
+                || file.baseline_path() != file.path()
+                || ( ( !customRules || !aAllowChangedCustomRules )
+                     && ( file.baseline_exists() != file.current_exists()
+                          || file.baseline_sha256() != file.current_sha256()
+                          || file.baseline_bytes() != file.current_bytes() ) ) )
             return false;
         if( file.baseline_exists() ? !Digest( file.baseline_sha256() )
                                   : ( !file.baseline_sha256().empty() || file.baseline_bytes() != 0 ) )
@@ -275,7 +307,7 @@ wxString DOCUMENT_LIFECYCLE_CONTROLLER::WriteBlocker( const wxString& aPath )
 
     if( target.FileExists() )
     {
-        if( !target.IsFileWritable() )
+        if( !target.IsFileWritable() || !HasWritePermission( target.GetFullPath() ) )
         {
             if( target.GetFullPath() == requested.GetFullPath() )
                 return wxS( "the file is read-only" );
@@ -283,7 +315,7 @@ wxString DOCUMENT_LIFECYCLE_CONTROLLER::WriteBlocker( const wxString& aPath )
             return wxString::Format( wxS( "the file it links to, '%s', is read-only" ), target.GetFullPath() );
         }
 
-        if( !wxFileName::IsDirWritable( folder ) )
+        if( !wxFileName::IsDirWritable( folder ) || !HasWritePermission( folder ) )
             return wxString::Format( wxS( "its folder '%s' does not allow KiCad to create or replace files" ), folder );
 
         return wxEmptyString;
@@ -291,7 +323,7 @@ wxString DOCUMENT_LIFECYCLE_CONTROLLER::WriteBlocker( const wxString& aPath )
 
     if( wxDirExists( folder ) )
     {
-        if( !wxFileName::IsDirWritable( folder ) )
+        if( !wxFileName::IsDirWritable( folder ) || !HasWritePermission( folder ) )
             return wxString::Format( wxS( "its folder '%s' does not allow KiCad to create files" ), folder );
 
         return wxEmptyString;
@@ -308,7 +340,7 @@ wxString DOCUMENT_LIFECYCLE_CONTROLLER::WriteBlocker( const wxString& aPath )
     if( !parent.DirExists() )
         return wxString::Format( wxS( "its folder '%s' does not exist and cannot be created" ), folder );
 
-    if( !parent.IsDirWritable() )
+    if( !parent.IsDirWritable() || !HasWritePermission( parent.GetPath() ) )
         return wxString::Format( wxS( "its folder '%s' does not exist and '%s' does not allow creating it" ),
                                  folder, parent.GetPath() );
 
@@ -415,9 +447,10 @@ void DOCUMENT_LIFECYCLE_CONTROLLER::ReportSaveProblem( SAVE_PROBLEM aKind, const
         activeSaveProblems->push_back( { aKind, aPath, aReason } );
 }
 
-void DOCUMENT_LIFECYCLE_CONTROLLER::RememberCleanState( const kiapi::automation::v1::DocumentLifecycleState& state )
+void DOCUMENT_LIFECYCLE_CONTROLLER::RememberCleanState(
+        const kiapi::automation::v1::DocumentLifecycleState& state, bool aAllowChangedCustomRules )
 {
-    if( state.native_content_dirty() || !FileCoverage( state ) || !Digest( state.state_sha256() )
+    if( state.native_content_dirty() || !FileCoverage( state, aAllowChangedCustomRules ) || !Digest( state.state_sha256() )
             || !Uuid( state.native_identity() ) || !Uuid( state.revision().epoch() ) ) return;
     m_cleanByScope[state.scope()] = { state.revision().epoch(), state.native_identity(), state.state_sha256() };
 }
@@ -748,7 +781,8 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
             return fail( LOS_REJECTED, "stale_document_state", "Document or disk state changed; obtain a fresh observation" );
         if( !Uuid( before->native_identity() ) || !before->has_revision() || !Uuid( before->revision().epoch() )
                 || !Digest( before->state_sha256() ) || !before->project_settings_included()
-                || ( before->scope() != DLS_SCHEMATIC_HIERARCHY && before->scope() != DLS_PCB ) || !FileCoverage( *before ) )
+                || ( before->scope() != DLS_SCHEMATIC_HIERARCHY && before->scope() != DLS_PCB )
+                || !FileCoverage( *before, true ) )
             return fail( LOS_REJECTED, "file_baseline_conflict", "Loaded file coverage is incomplete or differs from disk; no save was attempted" );
 
         if( close )
@@ -907,9 +941,9 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
         if( !MessageDifferencer::Equals( request.document(), after->document() )
                 || after->process_epoch() != aProcessEpoch || after->native_identity() != before->native_identity()
                 || after->revision().epoch() != before->revision().epoch()
-                || after->native_content_dirty() || !FileCoverage( *after ) )
+                || after->native_content_dirty() || !FileCoverage( *after, true ) )
             return fail( LOS_INDETERMINATE, "saved_state_not_confirmed", "Native save returned, but clean matching disk state was not confirmed" );
-        RememberCleanState( *after );
+        RememberCleanState( *after, true );
         AnnotateCleanState( *after );
         result.mutable_observed_state()->CopyFrom( *after );
         result.set_status( LOS_SAVED ); result.clear_error_code(); result.clear_error_message();

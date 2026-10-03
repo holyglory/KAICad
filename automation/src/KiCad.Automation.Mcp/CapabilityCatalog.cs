@@ -138,7 +138,7 @@ public sealed record NativeRequestCapability(string Name, string Availability);
 /// the remaining work, so the summary can be traced to its authoritative record.
 /// </summary>
 public sealed record CapabilityLimitation(string Id, string Scope, string Summary, IReadOnlyList<string> RegisteredToolsInScope,
-                                          IReadOnlyList<string> TrackedBy);
+                                          IReadOnlyList<string> TrackedBy, string Availability = "incomplete");
 
 /// <summary>
 /// The native half of the catalogue. Features are the named feature contracts of the handshake's
@@ -164,7 +164,7 @@ public static class CapabilityCatalog
         "nativeFeatures lists the named feature contracts the native process advertises, for example session.info; each is advertised only when the whole feature works in that build. A feature contract is a lower-case dotted name, which no protocol message type is; any other entry of the handshake's capabilities is left out rather than presented as a feature.",
         "nativeRequests lists the request types the native process dispatches to a registered handler at this moment, when nativeRequestCoverage is 'handled-requests'. Opening or closing an editor changes the list, and a handler can still reject a request for its target, its arguments, the editor's state or a mode this process does not support. A KiCad built before this list existed reports nativeRequestCoverage 'unknown' and nativeRequests null: its request support is not known, not empty.",
         "verification.level names the strongest evidence in this build's test suite: mcp-native-journey, native-journey, mcp-process, in-process, or undeclared when a tool declares none.",
-        "limitations name unfinished work that no registered tool provides; they do not withdraw any registered tool. trackedBy cites the KAICad completion-ledger outcomes and recorded decisions behind each one."
+        "limitations name unfinished work that no registered tool provides; availability distinguishes incomplete capability from platform-specific or unsupported capability without withdrawing any registered tool. trackedBy cites the KiCad completion-ledger outcomes and recorded decisions behind each one."
     ];
 
     // Unfinished outcomes that cannot be derived from code. Each names what is missing, never a
@@ -173,10 +173,37 @@ public static class CapabilityCatalog
     private static readonly (string Id, string Scope, string Summary, string[] TrackedBy)[] Unfinished =
     [
         ("pcb-routing-completion", "pcb-routing",
-            "The pcb-routing tools preview, validate, measure and commit explicit Track/Arc/Via candidates with lifecycle-guarded native undo after a retained exact-payload detached DRC pass. Layer changes and vias are supported only when present in the candidate; full push-and-shove continuation, differential-pair and tuning modes, failure and cancellation recovery, and impedance or RF qualification of routed results remain unfinished.",
-            ["p09bc531842a6fe23"]),
+            "The pcb-routing tools preview, validate, measure, constrain, duplicate/zero-length cleanup, explicit-net rip-up candidate generation, safe degree-two collinear corner-optimization planning/apply, deterministic via-span minimization planning, and lifecycle-checked reroute replacement apply/receipt tools plan preliminary single-layer and additive multilayer routes, explicit-corridor serpentine tuning proposals and matched differential-pair geometry. Versioned native route deltas now carry complete create/update/delete identities and properties into a bounded checked commit receipt, with operation-ID replay, stale admission, cleanup outcomes and post-commit state; the Linux native checkpoint for this path is still pending. Via minimization emits only final replacement vias and rejects incompatible drill/padstack profiles; tuning reports physical segment length. Persistent PNS previews retain a detached branch across continue/read/cancel with operation identity, process-epoch and revision checks; cancellation and stale-board reconciliation are terminal and never commit copper. Remaining gaps include custom-property ordering/duplicate-key normalization, partial generator failure and group membership, unsupported split/displaced geometry, complete native failure recovery, corner/via durable receipts, full interactive GUI parity, and production geometry/impedance/RF qualification.",
+            ["p09bc531842a6fe23", "p6c4984d8d18debaf", "pae1ffb62ea2e4c93", "pedd037392746b32b"]),
+        ("pcb-manufacturing-qualification", "pcb-manufacturing",
+            "The PCB manufacturing export tools are registered; a focused Linux MCP journey now qualifies SVG, DXF, PDF, PostScript, native 3D STEP, GenCAD, board-statistics, Gerber X2, Excellon drill, CSV pick-and-place, IPC-2581, IPC-D-356 and ODB++ artifacts with independent hashes and unchanged lifecycle state. Broader production-job qualification remains open, so the full manufacturing surface is not production-ready.",
+            ["p1f3c61ce83c7d797"]),
+        ("pcb-operations-qualification", "pcb-operations",
+            "PCB netlist import, zone refill and GUI cross-probe tools are registered with lifecycle guards. Netlist import and zone refill carry operation IDs into the native handler, replay exact requests and retain native-process receipts readable after an MCP reconnect. New peers expose explicit terminal zone outcomes; the bounded wait tool reports completion only from a matching native Completed=true receipt, while editor responsiveness proves lifecycle settlement only. Older peers without a terminal receipt remain explicitly unconfirmed even after settlement. Native headless success receipts still do not independently prove fill geometry, and headless failure/cancellation handling remains unqualified. The Linux PCB journey qualifies a successful two-footprint netlist import, changed net assignment, save/close/reopen persistence, receipt recovery and lifecycle observation, and exercises explicit pad selection plus net highlighting without board mutation. Native terminal-result qualification across failure/recovery and broader cross-platform qualification remain open.",
+            ["pa512d3c7c739352d"]),
+        ("pcb-placement-authoring", "pcb-placement",
+            "The footprint placement tools validate an explicit board checkpoint, emit deterministic Any-packed placement candidates, provide an undoable apply with MCP-process replay and receipt inspection, and prepare strict SVG-derived footprint graphics with asset provenance. A managed footprint validator checks canonical identities, child types, unique pads, pad-stack layers, positive pad sizes and 3D model filenames/transforms before native contact; the Linux MCP PCB journey qualifies plan/apply/readback for placement. The managed apply still coordinates several IPC calls rather than one retained native authoring transaction. Complete transaction recovery, electrical/DRC qualification, generated-artwork validation and footprint-library lifecycle remain open.",
+            ["p74ccef564f23a805", "pe0d8a4f922a0c00e", "peb739e0453b017ee"]),
+        ("pcb-item-transactions", "pcb",
+            "General PCB item creation, updates and deletion use explicit document and lifecycle observations, but BeginCommit, item changes and EndCommit are separate IPC calls. Complete native atomic authoring transactions, retained exact-operation receipts, rollback and lost-reply recovery are not yet available across every item wrapper.",
+            ["p74ccef564f23a805"]),
+        ("pcb-artwork-authoring", "pcb-artwork",
+            "Non-copper SVG artwork commits retain source archive and SHA-256 provenance with a lifecycle checkpoint and an MCP-process receipt. They still use the general multi-call item transaction boundary; complete native atomic commit/recovery and generated-raster-to-CAD validation remain unfinished.",
+            ["p74ccef564f23a805", "pe0d8a4f922a0c00e"]),
+        ("pcb-layer-rendering", "pcb-rendering",
+            "The PCB rendering tools provide native 3D PNGs, composite/per-layer SVG exports, a revision-bound per-layer object manifest with friendly and canonical layer names, and native object bounding boxes paired with an explicit nanometre-to-pixel transform. Richer layer overlays, generated footprint/symbol CAD conversion and complete 3D metadata remain open.",
+            ["pc840ffe0134ebf34", "pe0d8a4f922a0c00e"]),
+        ("footprint-library-authoring", "footprint-library",
+            "The footprint editor wrappers can open, enumerate, delete, save, save-copy and revert explicitly identified library footprints through native handlers. A focused Linux MCP journey now passes open/save/save-copy/reopen with matching pad and graphic snapshots, delete/replay and native receipt recovery after reconnect. Mutation replies still report library-entry observation only, with geometryPersistenceVerified=false rather than treating name enumeration as independent saved-geometry proof. Complete library revision snapshots, rollback qualification and general persisted-geometry qualification remain unfinished.",
+            ["peb739e0453b017ee"]),
+        ("symbol-library-authoring", "symbol-library",
+            "The native symbol-library adapter now exposes typed list, read, write, clone and delete MCP commands with before/after modify hashes; managed validation and strict SVG symbol-artwork proposals check complete definitions before native contact. Generated artwork carries per-shape preview provenance plus a private field manifest that survives native .kicad_sym write/read, and writes/deletes can require the observed modify hash while preserving exact operation-ID replay. A Linux MCP journey qualifies list/read/write/stale-admission/replay/delete/restore and generated-artwork provenance against a disposable project library. Global symbol-library documents still lack a durable lifecycle revision snapshot, while write/delete replies retain process-owned receipts.",
+            ["peb739e0453b017ee", "p2d3aca18552132fe"]),
+        ("schematic-authoring-completion", "schematic-design",
+            "Typed wire, bus, junction, bus-entry, label and text creation is registered with checked revision admission and its live native qualification segment passes. Embedded schematic library-cache replacement, revision-paired live ERC-marker inspection and operation-replay-safe headless ERC execution are exposed through the native boundary. Hierarchical and repeated/shared sheets, buses, images, title data, variants, embedded files and the remaining authoring families still need complete native persistence, undo/redo and electrical-repair qualification; zero ERC markers do not prove electrical completeness.",
+            ["p78cb4c45bc18af7b"]),
         ("simulation-qualification", "simulation",
-            "The simulation tools run KiCad's own ngspice on an explicit schematic and are verified on Linux only. Capturing every model and library file a simulation depends on, broader simulation qualification, and qualification on Mac, Windows and through Codex Desktop are unfinished.",
+            "The simulation tools run KiCad's own ngspice on an explicit schematic and are verified on Linux only. Caller-supplied decks reject interpreter directives and external file includes; operation IDs are bound to the instance, process epoch, schematic and deck hash, MCP results retain inline deck SHA-256 provenance plus native job/status/vector validation, and generated-deck dependency reads return the actual retained deck hash with explicit incomplete dependency coverage and warnings. Native dependency path enumeration, broader simulation qualification, and qualification on Mac, Windows and through Codex Desktop are unfinished.",
             ["p682f6173a40ec389", "pbf17c124768447fb"]),
         ("agent-client-qualification", "qualification",
             "Operation through an actual agent client is verified only for the Linux Codex fixture. The Mac-local and Mac-to-VPS modes and other agent clients are not qualified.",
@@ -220,7 +247,8 @@ public static class CapabilityCatalog
 
     public static IReadOnlyList<CapabilityLimitation> Limitations(IReadOnlyList<ServiceToolCapability> service) =>
         Unfinished.Select(item => new CapabilityLimitation(item.Id, item.Scope, item.Summary,
-            service.Where(tool => tool.Scope == item.Scope).Select(tool => tool.Name).ToArray(), item.TrackedBy)).ToArray();
+            service.Where(tool => tool.Scope == item.Scope).Select(tool => tool.Name).ToArray(), item.TrackedBy,
+            item.Id == "platform-qualification" ? "platform-specific" : "incomplete")).ToArray();
 
     public static string Level(KiCadVerificationLevel level) => level switch
     {

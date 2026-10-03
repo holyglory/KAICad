@@ -57,7 +57,12 @@ public:
     tl::expected<kiapi::automation::v1::PcbDrcJobState, std::string> Read(
             const kiapi::automation::v1::ReadPcbDrcJob& aRequest, BOARD& aBoard,
             const std::string& aProcessEpoch, const SCHEMATIC_OBSERVER& aObserveSchematic = {},
-            const LIBRARY_OBSERVER& aObserveLibraries = {} );
+            const LIBRARY_OBSERVER& aObserveLibraries = {}, bool aVerifyCandidate = false );
+
+    tl::expected<void, std::string> VerifyDeleteItems(
+            const std::string& aJobId, const std::string& aProcessEpoch,
+            const kiapi::common::types::DocumentSpecifier& aDocument,
+            const google::protobuf::RepeatedPtrField<kiapi::common::types::KIID>& aExpected ) const;
 
     tl::expected<kiapi::automation::v1::PcbDrcJobState, std::string> Cancel(
             const kiapi::automation::v1::CancelPcbDrcJob& aRequest, BOARD& aBoard,

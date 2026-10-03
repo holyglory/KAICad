@@ -2650,98 +2650,131 @@ void PNS_KICAD_IFACE_BASE::UpdateItem( PNS::ITEM* aItem )
 }
 
 
-void PNS_KICAD_IFACE::modifyBoardItem( PNS::ITEM* aItem, BOARD_COMMIT& aCommit )
+bool PNS_KICAD_IFACE::applyRouteGeometry( PNS::ITEM* aItem,
+                                           BOARD_CONNECTED_ITEM* aBoardItem ) const
 {
-    BOARD_ITEM* board_item = aItem->Parent();
-
-    switch( aItem->Kind() )
+    if( PNS::ARC::ClassOf( aItem ) && aBoardItem->Type() == PCB_ARC_T )
     {
-    case PNS::ITEM::ARC_T:
-    {
-        PNS::ARC*        arc = static_cast<PNS::ARC*>( aItem );
-        PCB_ARC*         arc_board = static_cast<PCB_ARC*>( board_item );
-        const SHAPE_ARC* arc_shape = static_cast<const SHAPE_ARC*>( arc->Shape( -1 ) );
-
-        aCommit.Modify( arc_board );
-
-        arc_board->SetStart( VECTOR2I( arc_shape->GetP0() ) );
-        arc_board->SetEnd( VECTOR2I( arc_shape->GetP1() ) );
-        arc_board->SetMid( VECTOR2I( arc_shape->GetArcMid() ) );
-        arc_board->SetWidth( arc->Width() );
-        break;
+        auto* arc = static_cast<PNS::ARC*>( aItem );
+        auto* target = static_cast<PCB_ARC*>( aBoardItem );
+        target->SetStart( VECTOR2I( arc->CArc().GetP0() ) );
+        target->SetMid( VECTOR2I( arc->CArc().GetArcMid() ) );
+        target->SetEnd( VECTOR2I( arc->CArc().GetP1() ) );
+        target->SetWidth( arc->Width() );
+        target->SetLayer( GetBoardLayerFromPNSLayer( arc->Layer() ) );
     }
-
-    case PNS::ITEM::SEGMENT_T:
+    else if( PNS::SEGMENT::ClassOf( aItem ) && aBoardItem->Type() == PCB_TRACE_T )
     {
-        PNS::SEGMENT* seg = static_cast<PNS::SEGMENT*>( aItem );
-        PCB_TRACK*    track = static_cast<PCB_TRACK*>( board_item );
-        const SEG&    s = seg->Seg();
-
-        aCommit.Modify( track );
-
-        track->SetStart( VECTOR2I( s.A.x, s.A.y ) );
-        track->SetEnd( VECTOR2I( s.B.x, s.B.y ) );
-        track->SetWidth( seg->Width() );
-        break;
+        auto* segment = static_cast<PNS::SEGMENT*>( aItem );
+        auto* target = static_cast<PCB_TRACK*>( aBoardItem );
+        target->SetStart( segment->Seg().A );
+        target->SetEnd( segment->Seg().B );
+        target->SetWidth( segment->Width() );
+        target->SetLayer( GetBoardLayerFromPNSLayer( segment->Layer() ) );
     }
-
-    case PNS::ITEM::VIA_T:
+    else if( PNS::VIA::ClassOf( aItem ) && aBoardItem->Type() == PCB_VIA_T )
     {
-        PCB_VIA*  via_board = static_cast<PCB_VIA*>( board_item );
-        PNS::VIA* via = static_cast<PNS::VIA*>( aItem );
-
-        aCommit.Modify( via_board );
-
-        via_board->SetPosition( VECTOR2I( via->Pos().x, via->Pos().y ) );
-        via_board->SetWidth( PADSTACK::TEMP_ALL_LAYERS, via->Diameter( 0 ) );
-        via_board->SetDrill( via->Drill() );
-        via_board->SetNet( static_cast<NETINFO_ITEM*>( via->Net() ) );
-        via_board->SetViaType( via->ViaType() ); // MUST be before SetLayerPair()
-        via_board->Padstack().SetUnconnectedLayerMode( via->UnconnectedLayerMode() );
-        via_board->SetIsFree( via->IsFree() );
-        // A via holds its copper span in the primary drill layers, so this call is the only
-        // writer of both; a write back from the PNS hole layers can only repeat or corrupt it
-        via_board->SetLayerPair( GetBoardLayerFromPNSLayer( via->Layers().Start() ),
-                                 GetBoardLayerFromPNSLayer( via->Layers().End() ) );
-
-        via_board->SetFrontPostMachining( via->HolePostMachining() );
-        via_board->SetSecondaryDrillSize( via->SecondaryDrill() );
-
-        if( std::optional<PNS_LAYER_RANGE> secondaryLayers = via->SecondaryHoleLayers() )
+        auto* via = static_cast<PNS::VIA*>( aItem );
+        auto* target = static_cast<PCB_VIA*>( aBoardItem );
+        target->SetPosition( via->Pos() );
+        // Copy actual physical copper diameters, allowing the padstack's
+        // own mode to map those layers. Unused source layer definitions remain
+        // intact on the clone instead of being overwritten by a front value.
+        for( int layer = via->Layers().Start(); layer <= via->Layers().End(); ++layer )
+            target->SetWidth( GetBoardLayerFromPNSLayer( layer ), via->Diameter( layer ) );
+        target->SetDrill( via->Drill() );
+        target->SetViaType( via->ViaType() );
+        target->Padstack().SetUnconnectedLayerMode( via->UnconnectedLayerMode() );
+        target->SetIsFree( via->IsFree() );
+        target->SetLayerPair( GetBoardLayerFromPNSLayer( via->Layers().Start() ),
+                              GetBoardLayerFromPNSLayer( via->Layers().End() ) );
+        target->SetFrontPostMachining( via->HolePostMachining() );
+        target->SetSecondaryDrillSize( via->SecondaryDrill() );
+        if( auto secondary = via->SecondaryHoleLayers() )
         {
-            via_board->SetSecondaryDrillStartLayer( GetBoardLayerFromPNSLayer( secondaryLayers->Start() ) );
-            via_board->SetSecondaryDrillEndLayer( GetBoardLayerFromPNSLayer( secondaryLayers->End() ) );
+            target->SetSecondaryDrillStartLayer( GetBoardLayerFromPNSLayer( secondary->Start() ) );
+            target->SetSecondaryDrillEndLayer( GetBoardLayerFromPNSLayer( secondary->End() ) );
         }
         else
         {
-            via_board->SetSecondaryDrillStartLayer( UNDEFINED_LAYER );
-            via_board->SetSecondaryDrillEndLayer( UNDEFINED_LAYER );
+            target->SetSecondaryDrillStartLayer( UNDEFINED_LAYER );
+            target->SetSecondaryDrillEndLayer( UNDEFINED_LAYER );
         }
-
-        break;
     }
+    else
+        return false;
 
-    case PNS::ITEM::SOLID_T:
-    {
-        if( aItem->Parent()->Type() == PCB_PAD_T )
-        {
-            PAD*     pad = static_cast<PAD*>( aItem->Parent() );
-            VECTOR2I pos = static_cast<PNS::SOLID*>( aItem )->Pos();
-
-            // Don't add to commit; we'll add the parent footprints when processing the m_fpOffsets
-
-            m_fpOffsets[pad].p_old = pad->GetPosition();
-            m_fpOffsets[pad].p_new = pos;
-        }
-        break;
-    }
-
-    default:
-        aCommit.Modify( aItem->Parent() );
-        break;
-    }
+    auto* net = static_cast<NETINFO_ITEM*>( aItem->Net() );
+    aBoardItem->SetNet( net ? net : NETINFO_LIST::OrphanedItem() );
+    return true;
 }
 
+
+std::unique_ptr<BOARD_CONNECTED_ITEM> PNS_KICAD_IFACE::MaterializeRouteItem(
+        PNS::ITEM* aItem, bool aPreserveIdentity ) const
+{
+    if( !aItem || aItem->IsVirtual() )
+        return nullptr;
+    KICAD_T type;
+    if( PNS::SEGMENT::ClassOf( aItem ) ) type = PCB_TRACE_T;
+    else if( PNS::ARC::ClassOf( aItem ) ) type = PCB_ARC_T;
+    else if( PNS::VIA::ClassOf( aItem ) ) type = PCB_VIA_T;
+    else return nullptr;
+
+    BOARD_ITEM* source = aPreserveIdentity ? aItem->Parent()
+        : ( aItem->Parent() ? aItem->Parent() : aItem->GetSourceItem() );
+    if( aPreserveIdentity && ( !source || source->Type() != type ) )
+        return nullptr;
+
+    std::unique_ptr<BOARD_CONNECTED_ITEM> result;
+    if( source && source->Type() == type )
+        result.reset( static_cast<BOARD_CONNECTED_ITEM*>( source->Clone() ) );
+    else if( type == PCB_TRACE_T )
+        result = std::make_unique<PCB_TRACK>( m_board );
+    else if( type == PCB_ARC_T )
+        result = std::make_unique<PCB_ARC>( m_board );
+    else
+        result = std::make_unique<PCB_VIA>( m_board );
+
+    if( source && source->IsType( { PCB_TRACE_T, PCB_ARC_T, PCB_VIA_T } ) )
+    {
+        result->SetCustomProperties( source->GetCustomProperties() );
+        result->SetLocked( source->IsLocked() );
+        if( source->IsType( { PCB_TRACE_T, PCB_ARC_T } ) && type != PCB_VIA_T )
+        {
+            auto* trackSource = static_cast<PCB_TRACK*>( source );
+            auto* trackResult = static_cast<PCB_TRACK*>( result.get() );
+            trackResult->SetHasSolderMask( trackSource->HasSolderMask() );
+            trackResult->SetLocalSolderMaskMargin( trackSource->GetLocalSolderMaskMargin() );
+        }
+    }
+    if( !aPreserveIdentity )
+        result->ResetUuidDirect();
+    if( aItem->IsLocked() )
+        result->SetLocked( true );
+    if( !applyRouteGeometry( aItem, result.get() ) )
+        return nullptr;
+    return result;
+}
+
+
+void PNS_KICAD_IFACE::modifyBoardItem( PNS::ITEM* aItem, BOARD_COMMIT& aCommit )
+{
+    BOARD_ITEM* original = aItem->Parent();
+    if( auto materialized = MaterializeRouteItem( aItem, true ) )
+    {
+        aCommit.Modify( original );
+        original->CopyFrom( materialized.get() );
+    }
+    else if( aItem->Kind() == PNS::ITEM::SOLID_T && original->Type() == PCB_PAD_T )
+    {
+        auto* pad = static_cast<PAD*>( original );
+        m_fpOffsets[pad].p_old = pad->GetPosition();
+        m_fpOffsets[pad].p_new = static_cast<PNS::SOLID*>( aItem )->Pos();
+    }
+    else
+        aCommit.Modify( original );
+}
 
 void PNS_KICAD_IFACE::UpdateItem( PNS::ITEM* aItem )
 {
@@ -2756,143 +2789,34 @@ void PNS_KICAD_IFACE_BASE::AddItem( PNS::ITEM* aItem )
 
 BOARD_CONNECTED_ITEM* PNS_KICAD_IFACE::createBoardItem( PNS::ITEM* aItem )
 {
-    BOARD_CONNECTED_ITEM* newBoardItem = nullptr;
-    NETINFO_ITEM* net = static_cast<NETINFO_ITEM*>( aItem->Net() );
-
-    if( !net )
-        net = NETINFO_LIST::OrphanedItem();
-
-    switch( aItem->Kind() )
+    if( aItem->Kind() == PNS::ITEM::SOLID_T )
     {
-    case PNS::ITEM::ARC_T:
-    {
-        PNS::ARC* arc = static_cast<PNS::ARC*>( aItem );
-        PCB_ARC*  new_arc = new PCB_ARC( m_board, static_cast<const SHAPE_ARC*>( arc->Shape( -1 ) ) );
-        new_arc->SetWidth( arc->Width() );
-        new_arc->SetLayer( GetBoardLayerFromPNSLayer( arc->Layers().Start() ) );
-        new_arc->SetNet( net );
-
-        if( aItem->GetSourceItem() && aItem->GetSourceItem()->IsType( { PCB_TRACE_T, PCB_ARC_T } ) )
-        {
-            PCB_TRACK* sourceTrack = static_cast<PCB_TRACK*>( aItem->GetSourceItem() );
-            new_arc->SetHasSolderMask( sourceTrack->HasSolderMask() );
-            new_arc->SetLocalSolderMaskMargin( sourceTrack->GetLocalSolderMaskMargin() );
-        }
-
-        newBoardItem = new_arc;
-        break;
-    }
-
-    case PNS::ITEM::SEGMENT_T:
-    {
-        PNS::SEGMENT* seg = static_cast<PNS::SEGMENT*>( aItem );
-        PCB_TRACK*    track = new PCB_TRACK( m_board );
-        const SEG&    s = seg->Seg();
-        track->SetStart( VECTOR2I( s.A.x, s.A.y ) );
-        track->SetEnd( VECTOR2I( s.B.x, s.B.y ) );
-        track->SetWidth( seg->Width() );
-        track->SetLayer( GetBoardLayerFromPNSLayer( seg->Layers().Start() ) );
-        track->SetNet( net );
-
-        if( aItem->GetSourceItem() && aItem->GetSourceItem()->IsType( { PCB_TRACE_T, PCB_ARC_T } ) )
-        {
-            PCB_TRACK* sourceTrack = static_cast<PCB_TRACK*>( aItem->GetSourceItem() );
-            track->SetHasSolderMask( sourceTrack->HasSolderMask() );
-            track->SetLocalSolderMaskMargin( sourceTrack->GetLocalSolderMaskMargin() );
-        }
-
-        newBoardItem = track;
-        break;
-    }
-
-    case PNS::ITEM::VIA_T:
-    {
-        PCB_VIA*  via_board = new PCB_VIA( m_board );
-        PNS::VIA* via = static_cast<PNS::VIA*>( aItem );
-        via_board->SetPosition( VECTOR2I( via->Pos().x, via->Pos().y ) );
-        via_board->SetWidth( PADSTACK::TEMP_ALL_LAYERS, via->Diameter( 0 ) );
-        via_board->SetDrill( via->Drill() );
-        via_board->SetNet( net );
-        via_board->SetViaType( via->ViaType() ); // MUST be before SetLayerPair()
-        via_board->Padstack().SetUnconnectedLayerMode( via->UnconnectedLayerMode() );
-        via_board->SetIsFree( via->IsFree() );
-        // A via holds its copper span in the primary drill layers, so this call is the only
-        // writer of both; a write back from the PNS hole layers can only repeat or corrupt it
-        via_board->SetLayerPair( GetBoardLayerFromPNSLayer( via->Layers().Start() ),
-                                 GetBoardLayerFromPNSLayer( via->Layers().End() ) );
-
-        via_board->SetFrontPostMachining( via->HolePostMachining() );
-        via_board->SetSecondaryDrillSize( via->SecondaryDrill() );
-
-        if( std::optional<PNS_LAYER_RANGE> secondaryLayers = via->SecondaryHoleLayers() )
-        {
-            via_board->SetSecondaryDrillStartLayer( GetBoardLayerFromPNSLayer( secondaryLayers->Start() ) );
-            via_board->SetSecondaryDrillEndLayer( GetBoardLayerFromPNSLayer( secondaryLayers->End() ) );
-        }
-        else
-        {
-            via_board->SetSecondaryDrillStartLayer( UNDEFINED_LAYER );
-            via_board->SetSecondaryDrillEndLayer( UNDEFINED_LAYER );
-        }
-
-        if( aItem->GetSourceItem() && aItem->GetSourceItem()->Type() == PCB_VIA_T )
-        {
-            PCB_VIA* sourceVia = static_cast<PCB_VIA*>( aItem->GetSourceItem() );
-            via_board->SetFrontTentingMode( sourceVia->GetFrontTentingMode() );
-            via_board->SetBackTentingMode( sourceVia->GetBackTentingMode() );
-        }
-
-        newBoardItem = via_board;
-        break;
-    }
-
-    case PNS::ITEM::SOLID_T:
-    {
-        PAD*     pad = static_cast<PAD*>( aItem->Parent() );
-        VECTOR2I pos = static_cast<PNS::SOLID*>( aItem )->Pos();
-
-        m_fpOffsets[pad].p_new = pos;
+        PAD* pad = static_cast<PAD*>( aItem->Parent() );
+        m_fpOffsets[pad].p_new = static_cast<PNS::SOLID*>( aItem )->Pos();
         return nullptr;
     }
-
-    default:
+    auto materialized = MaterializeRouteItem( aItem, false );
+    if( !materialized )
         return nullptr;
-    }
-
-    if( net->GetNetCode() <= 0 )
+    BOARD_CONNECTED_ITEM* newBoardItem = materialized.release();
+    if( newBoardItem->GetNetCode() <= 0 )
     {
-        NETINFO_ITEM* newNetInfo = newBoardItem->GetNet();
-
-        newNetInfo->SetParent( m_board );
-        newNetInfo->SetNetClass( m_board->GetDesignSettings().m_NetSettings->GetDefaultNetclass() );
+        NETINFO_ITEM* net = newBoardItem->GetNet();
+        net->SetParent( m_board );
+        net->SetNetClass( m_board->GetDesignSettings().m_NetSettings->GetDefaultNetclass() );
     }
-
-    if( newBoardItem )
+    if( BOARD_ITEM* source = aItem->GetSourceItem() )
     {
-        if( aItem->IsLocked() )
-            newBoardItem->SetLocked( true );
-
-        if( BOARD_ITEM* src = aItem->GetSourceItem() )
-        {
-            if( !m_itemGroups.contains( src ) )
-            {
-                if( EDA_GROUP* group = src->GetParentGroup() )
-                    m_itemGroups[src] = group;
-            }
-
-            if( m_itemGroups.contains( src ) )
-                m_replacementMap[src].push_back( newBoardItem );
-        }
-        else
-        {
-            // This is a new item, which goes in the entered group (if any)
-            m_replacementMap[ENTERED_GROUP_MAGIC_NUMBER].push_back( newBoardItem );
-        }
+        if( !m_itemGroups.contains( source ) )
+            if( EDA_GROUP* group = source->GetParentGroup() )
+                m_itemGroups[source] = group;
+        if( m_itemGroups.contains( source ) )
+            m_replacementMap[source].push_back( newBoardItem );
     }
-
+    else
+        m_replacementMap[ENTERED_GROUP_MAGIC_NUMBER].push_back( newBoardItem );
     return newBoardItem;
 }
-
 
 void PNS_KICAD_IFACE::AddItem( PNS::ITEM* aItem )
 {

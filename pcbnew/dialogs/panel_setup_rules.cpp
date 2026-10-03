@@ -1141,6 +1141,8 @@ bool PANEL_SETUP_RULES::TransferDataFromWindow()
         return false;
     }
 
+    m_frame->GetBoard()->SetCustomRulesFileBaseline( FILE_CONTENT_BASELINE::Read( rulesFilepath ) );
+
     try
     {
         m_frame->GetBoard()->GetDesignSettings().m_DRCEngine->InitEngine( rulesFilepath );

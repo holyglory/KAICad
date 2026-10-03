@@ -1058,8 +1058,10 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
         watch = watchInputs( aBoard, aCaptureContext );
         inputs = PCB_DRC_RUN_INPUTS::Capture( aBoard, aCaptureContext );
         if( !inputs ) return tl::unexpected( "Native DRC input capture was cancelled" );
-        if( aRequest.candidate_items_size() > 0 )
+        if( aRequest.candidate_items_size() > 0 || aRequest.delete_item_ids_size() > 0 )
         {
+            auto removed = inputs->RemoveRouteItems( aRequest.delete_item_ids() );
+            if( !removed ) return tl::unexpected( removed.error() );
             auto added = inputs->AddCandidateItems( aRequest.candidate_items() );
             if( !added ) return tl::unexpected( added.error() );
             candidateItemIds = std::move( *added );
@@ -1090,7 +1092,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
     job->libraryFingerprints = inputs->LibraryFingerprints();
     job->auxiliaryFingerprint = inputs->AuxiliaryBaseline().Fingerprint();
     job->hasLibraryDependencies = inputs->HasLibraryDependencies();
-    job->candidateDryRun = !candidateItemIds.empty();
+    job->candidateDryRun = aRequest.candidate_items_size() > 0 || aRequest.delete_item_ids_size() > 0;
     job->candidateItemIds = std::move( candidateItemIds );
     if( job->testFootprints )
     {
@@ -1245,7 +1247,8 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
 
 tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Read(
         const ReadPcbDrcJob& aRequest, BOARD& aBoard, const std::string& aProcessEpoch,
-        const SCHEMATIC_OBSERVER& aObserveSchematic, const LIBRARY_OBSERVER& aObserveLibraries )
+        const SCHEMATIC_OBSERVER& aObserveSchematic, const LIBRARY_OBSERVER& aObserveLibraries,
+        bool aVerifyCandidate )
 {
     retireWatches();
     auto job = find( aRequest.job_id() );
@@ -1253,7 +1256,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Read(
     if( aRequest.process_epoch() != aProcessEpoch )
         return tl::unexpected( "The native process epoch changed; reattach before reading this DRC job" );
     if( !SameDocument( job->document, aRequest.document() ) ) return tl::unexpected( "PCB DRC job target mismatch" );
-    const bool verifyCandidate = aRequest.expected_candidate_items_size() > 0;
+    const bool verifyCandidate = aVerifyCandidate || aRequest.expected_candidate_items_size() > 0;
     if( verifyCandidate )
     {
         // request is immutable once the job is published. Compare the complete
@@ -1270,6 +1273,29 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Read(
     auto result = state( job, aBoard, aProcessEpoch, aObserveSchematic, aObserveLibraries );
     if( result ) result->set_candidate_payload_verified( verifyCandidate );
     return result;
+}
+
+
+tl::expected<void, std::string> PCB_DRC_JOB_MANAGER::VerifyDeleteItems(
+        const std::string& aJobId, const std::string& aProcessEpoch,
+        const DocumentSpecifier& aDocument,
+        const google::protobuf::RepeatedPtrField<kiapi::common::types::KIID>& aExpected ) const
+{
+    auto job = find( aJobId );
+    if( !job ) return tl::unexpected( "Unknown PCB DRC job" );
+    if( job->processEpoch != aProcessEpoch )
+        return tl::unexpected( "The native process epoch changed; reattach before reading this DRC job" );
+    if( job->document.SerializeAsString() != aDocument.SerializeAsString() )
+        return tl::unexpected( "PCB DRC job target mismatch" );
+    if( job->request.delete_item_ids_size() != aExpected.size() )
+        return tl::unexpected( "PCB DRC delete-item payload mismatch" );
+    for( int index = 0; index < aExpected.size(); ++index )
+    {
+        if( !google::protobuf::util::MessageDifferencer::Equals( job->request.delete_item_ids( index ),
+                                                                aExpected.Get( index ) ) )
+            return tl::unexpected( "PCB DRC delete-item payload mismatch" );
+    }
+    return {};
 }
 
 tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Cancel(

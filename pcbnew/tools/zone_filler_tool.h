@@ -25,16 +25,50 @@
 
 #include <tools/pcb_tool_base.h>
 #include <zone.h>
+#include <zone_filler.h>
+#include <functional>
+#include <string>
 
 
 class PCB_EDIT_FRAME;
 class PROGRESS_REPORTER;
 class WX_PROGRESS_REPORTER;
-class ZONE_FILLER;
 class PCB_GENERATOR;
 class BOARD_COMMIT;
 
 #define ZONE_FILLER_TOOL_NAME "pcbnew.ZoneFiller"
+
+/** Result of the complete fill, including its separately committed generator refill. */
+struct ZONE_FILL_RESULT
+{
+    ZONE_FILLER::OUTCOME outcome = ZONE_FILLER::OUTCOME::NOT_RUN;
+    ZONE_FILLER::OUTCOME primaryOutcome = ZONE_FILLER::OUTCOME::NOT_RUN;
+    ZONE_FILLER::OUTCOME generatorRefillOutcome = ZONE_FILLER::OUTCOME::NOT_RUN;
+    bool generatorRefillRequired = false;
+    bool primaryCommitApplied = false;
+    bool generatorRefillCommitApplied = false;
+    bool commitStateKnown = true;
+    bool rollbackCompleted = true;
+    bool cleanupFinished = false;
+    std::string failureStage;
+    std::string errorCode;
+    std::string errorMessage;
+
+    bool Completed() const
+    {
+        return cleanupFinished && commitStateKnown && errorCode.empty()
+               && outcome == ZONE_FILLER::OUTCOME::COMPLETED
+               && primaryOutcome == ZONE_FILLER::OUTCOME::COMPLETED
+               && ( !generatorRefillRequired
+                    || generatorRefillOutcome == ZONE_FILLER::OUTCOME::COMPLETED );
+    }
+};
+
+/** Copyable action parameter; ordinary UI zoneFillAll actions have no parameter. */
+struct ZONE_FILL_REQUEST
+{
+    std::function<void( const ZONE_FILL_RESULT& )> completion;
+};
 
 /**
  * Handle actions specific to filling copper zones.
@@ -50,6 +84,8 @@ public:
 
     void CheckAllZones( wxWindow* aCaller, PROGRESS_REPORTER* aReporter = nullptr );
     void FillAllZones( wxWindow* aCaller, PROGRESS_REPORTER* aReporter = nullptr, bool aHeadless = false );
+    ZONE_FILL_RESULT FillAllZonesWithResult( wxWindow* aCaller, PROGRESS_REPORTER* aReporter = nullptr,
+                                           bool aHeadless = false );
 
     /**
      * Run the shared post-fill refresh once a fill commit has been pushed with connectivity
@@ -93,7 +129,8 @@ private:
     /**
      * Triggers refill of zones near the given generators
      */
-    void refillAroundGenerators( const std::vector<PCB_GENERATOR*>& aRegenerated );
+    ZONE_FILL_RESULT refillAroundGenerators( const std::vector<PCB_GENERATOR*>& aRegenerated,
+                                            PROGRESS_REPORTER* aReporter = nullptr );
 
     ///< Set up handlers for various events.
     void setTransitions() override;

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using KiCad.Automation.Model;
 using KiCad.Automation.Mcp;
@@ -65,22 +66,299 @@ public sealed class McpProcessTests
             } });
             Assert.IsTrue(scriptDeck.GetProperty("result").GetProperty("isError").GetBoolean());
             Assert.AreEqual("simulation_deck_rejected", scriptDeck.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            string[] simulationTools = ["kicad_simulation_start", "kicad_simulation_job", "kicad_simulation_wait", "kicad_simulation_cancel"];
+            foreach (string simulationTool in simulationTools)
+            {
+                var descriptor = listed.GetProperty("result").GetProperty("tools").EnumerateArray()
+                    .Single(tool => tool.GetProperty("name").GetString() == simulationTool);
+                var input = descriptor.GetProperty("inputSchema").GetProperty("properties");
+                Assert.IsTrue(input.TryGetProperty("document", out var targetSchema), simulationTool);
+                Assert.IsFalse(input.TryGetProperty("documentJson", out _), "The existing object parameter must remain an object.");
+                Assert.IsTrue(SimulationSchemaType(targetSchema, "object"), targetSchema.GetRawText());
+                var targetProperties = targetSchema.GetProperty("properties");
+                CollectionAssert.Contains(targetProperties.GetProperty("type").GetProperty("enum").EnumerateArray()
+                    .Select(value => value.GetString()).ToArray(), "DOCTYPE_SCHEMATIC");
+                var projectSchema = targetProperties.GetProperty("project");
+                Assert.IsTrue(SimulationSchemaType(projectSchema, "object"));
+                Assert.IsTrue(SimulationSchemaType(projectSchema.GetProperty("properties").GetProperty("name"), "string"));
+                Assert.IsTrue(SimulationSchemaType(projectSchema.GetProperty("properties").GetProperty("path"), "string"));
+                var sheetSchema = targetProperties.GetProperty("sheetPath");
+                Assert.IsTrue(SimulationSchemaType(sheetSchema, "object"));
+                var uuidPathSchema = sheetSchema.GetProperty("properties").GetProperty("path");
+                Assert.IsTrue(SimulationSchemaType(uuidPathSchema, "array"));
+                Assert.IsTrue(SimulationSchemaType(uuidPathSchema.GetProperty("items"), "object"));
+                Assert.IsTrue(SimulationSchemaType(uuidPathSchema.GetProperty("items").GetProperty("properties").GetProperty("value"), "string"));
+            }
+            string simulationRoot = Guid.NewGuid().ToString("D");
+            string simulationChild = Guid.NewGuid().ToString("D");
+            var simulationTarget = JsonSerializer.SerializeToNode(new
+            {
+                type = 1,
+                project = new { name = "simulation-fixture", path = state },
+                sheetPath = new
+                {
+                    path = new[] { new { value = simulationRoot }, new { value = simulationChild } },
+                    pathHumanReadable = "/child"
+                }
+            })!.AsObject();
+            int simulationRequest = 9750;
+            foreach (string simulationTool in simulationTools)
+            {
+                foreach (bool symbolic in new[] { false, true })
+                {
+                    var target = simulationTarget.DeepClone().AsObject();
+                    if (symbolic) target["type"] = "DOCTYPE_SCHEMATIC";
+                    else target["identifierCase"] = 3;
+                    var validBinding = await Request(simulationRequest++, "tools/call", new
+                    { name = simulationTool, arguments = SimulationArguments(simulationTool, target) });
+                    AssertSimulationError(validBinding, "unknown_instance");
+                }
+                var emptySimulationIdentity = SimulationArguments(simulationTool, simulationTarget);
+                emptySimulationIdentity[simulationTool == "kicad_simulation_start" ? "operationId" : "jobId"] = Guid.Empty.ToString("D");
+                var rejectedSimulationIdentity = await Request(simulationRequest++, "tools/call", new
+                { name = simulationTool, arguments = emptySimulationIdentity });
+                AssertSimulationError(rejectedSimulationIdentity, "invalid_simulation_request");
+                foreach (var malformed in new (Action<JsonObject> Change, string Code)[]
+                {
+                    (target => target.Remove("project"), "invalid_document_target"),
+                    (target => target["project"]!["path"] = "relative-project", "invalid_document_target"),
+                    (target => target.Remove("sheetPath"), "invalid_document_target"),
+                    (target => target["sheetPath"]!["path"] = new JsonArray(), "invalid_document_target"),
+                    (target => target["sheetPath"]!["path"]![1]!["value"] = "not-a-uuid", "invalid_document_target"),
+                    (target => target["sheetPath"]!["path"]![1]!["value"] = Guid.Empty.ToString("D"), "invalid_document_target"),
+                    (target => target["sheetPath"]!["path"]![1] = null, "invalid_document_target"),
+                    (target => target["boardFilename"] = "other.kicad_pcb", "invalid_document_target"),
+                    (target => target["libId"] = JsonSerializer.SerializeToNode(new { libraryNickname = "Device", entryName = "R" }), "invalid_document_target"),
+                    (target => target["identifierCase"] = 4, "invalid_document_target"),
+                    (target => target["type"] = 99, "unsupported_document_type"),
+                    (target => { target["type"] = "DOCTYPE_PCB"; target.Remove("sheetPath"); target["boardFilename"] = "board.kicad_pcb"; }, "unsupported_simulation_document")
+                })
+                {
+                    var target = simulationTarget.DeepClone().AsObject();
+                    malformed.Change(target);
+                    var rejectedSimulationTarget = await Request(simulationRequest++, "tools/call", new
+                    { name = simulationTool, arguments = SimulationArguments(simulationTool, target) });
+                    AssertSimulationError(rejectedSimulationTarget, malformed.Code);
+                }
+                string targetJson = simulationTarget.ToJsonString();
+                foreach (string malformedJson in new[]
+                {
+                    targetJson.Replace("\"type\":1", "\"type\":1,\"type\":3", StringComparison.Ordinal),
+                    targetJson.Replace("\"pathHumanReadable\":", "\"unexpectedIdentity\":\"wrong\",\"pathHumanReadable\":", StringComparison.Ordinal),
+                    targetJson.Replace("\"type\":1", "\"type\":\"NO_SUCH_DOCUMENT_TYPE\"", StringComparison.Ordinal)
+                })
+                {
+                    using var malformed = JsonDocument.Parse(malformedJson);
+                    var rejectedBinding = await Request(simulationRequest++, "tools/call", new
+                    { name = simulationTool, arguments = SimulationArguments(simulationTool, malformed.RootElement) });
+                    Assert.IsTrue(rejectedBinding.TryGetProperty("error", out _)
+                        || (rejectedBinding.GetProperty("result").TryGetProperty("isError", out var simulationBindingRejected) && simulationBindingRejected.GetBoolean()),
+                        "Malformed document binding must be refused: " + rejectedBinding.GetRawText());
+                    if (rejectedBinding.TryGetProperty("result", out var rejectedResult)
+                        && rejectedResult.TryGetProperty("structuredContent", out var rejectedData))
+                        Assert.AreNotEqual("unknown_instance", rejectedData.GetProperty("errorCode").GetString(),
+                            "Malformed identity must be rejected before instance lookup.");
+                }
+            }
+            var emptySimulationDependencyIdentity = await Request(simulationRequest++, "tools/call", new
+            {
+                name = "kicad_simulation_dependencies", arguments = new
+                {
+                    instanceId = Guid.NewGuid().ToString("D"), expectedInstanceEpoch = Guid.NewGuid().ToString("D"),
+                    documentJson = simulationTarget.ToJsonString(), jobId = Guid.Empty.ToString("D")
+                }
+            });
+            AssertSimulationError(emptySimulationDependencyIdentity, "invalid_simulation_request");
+
+            static bool SimulationSchemaType(JsonElement schema, string expected)
+                => schema.TryGetProperty("type", out var type)
+                    && (type.ValueKind == JsonValueKind.String ? type.GetString() == expected
+                        : type.ValueKind == JsonValueKind.Array && type.EnumerateArray().Any(value => value.GetString() == expected));
+
+            static Dictionary<string, object> SimulationArguments(string name, object target)
+            {
+                var arguments = new Dictionary<string, object>
+                {
+                    ["instanceId"] = Guid.NewGuid().ToString("D"), ["expectedInstanceEpoch"] = Guid.NewGuid().ToString("D"),
+                    ["document"] = target
+                };
+                if (name == "kicad_simulation_start")
+                {
+                    arguments["netlist"] = "Divider\nV1 in 0 5\nR1 in 0 1k\n.op\n.end\n";
+                    arguments["operationId"] = Guid.NewGuid().ToString("D");
+                }
+                else arguments["jobId"] = Guid.NewGuid().ToString("D");
+                if (name == "kicad_simulation_wait") arguments["afterSequence"] = 0UL;
+                return arguments;
+            }
+
+            static void AssertSimulationError(JsonElement response, string code)
+            {
+                Assert.IsTrue(response.GetProperty("result").GetProperty("isError").GetBoolean(), response.GetRawText());
+                Assert.AreEqual(code, response.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(), response.GetRawText());
+            }
             CollectionAssert.Contains(names, "kicad_pcb_items_read");
             CollectionAssert.Contains(names, "kicad_pcb_items_create");
             CollectionAssert.Contains(names, "kicad_pcb_items_update");
+            CollectionAssert.Contains(names, "kicad_pcb_items_delete");
             CollectionAssert.Contains(names, "kicad_pcb_guide_create");
             CollectionAssert.Contains(names, "kicad_pcb_guide_svg_create");
             CollectionAssert.Contains(names, "kicad_pcb_route_candidate_from_guide");
             CollectionAssert.Contains(names, "kicad_pcb_route_candidate_validate");
             CollectionAssert.Contains(names, "kicad_pcb_route_commit");
+            CollectionAssert.Contains(names, "kicad_pcb_route_plan");
+            CollectionAssert.Contains(names, "kicad_pcb_route_plan_multilayer");
+            CollectionAssert.Contains(names, "kicad_pcb_route_preview_continue");
+            CollectionAssert.Contains(names, "kicad_pcb_route_preview_cancel");
+            CollectionAssert.Contains(names, "kicad_pcb_route_preview_read");
+            CollectionAssert.Contains(names, "kicad_pcb_route_corner_optimize_plan");
+            CollectionAssert.Contains(names, "kicad_pcb_route_corner_optimize_apply");
+            CollectionAssert.Contains(names, "kicad_pcb_route_corner_optimize_receipt");
+            CollectionAssert.Contains(names, "kicad_pcb_route_reroute_apply");
+            CollectionAssert.Contains(names, "kicad_pcb_route_reroute_receipt");
+            CollectionAssert.Contains(names, "kicad_pcb_route_tune_apply");
+            CollectionAssert.Contains(names, "kicad_pcb_route_tune_receipt");
+            CollectionAssert.Contains(names, "kicad_pcb_route_via_minimize_plan");
+            CollectionAssert.Contains(names, "kicad_pcb_footprint_place_plan");
+            CollectionAssert.Contains(names, "kicad_pcb_route_receipt");
+            var invalidRouteReceipt = await Request(9321, "tools/call", new { name = "kicad_pcb_route_receipt", arguments = new
+            {
+                instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", processEpoch = "", operationId = ""
+            } });
+            Assert.IsTrue(invalidRouteReceipt.GetProperty("result").GetProperty("isError").GetBoolean());
             var invalidRouteCommit = await Request(9090, "tools/call", new { name = "kicad_pcb_route_commit", arguments = new
             {
                 instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}", drcJobStateJson = "{}"
             } });
             Assert.IsTrue(invalidRouteCommit.GetProperty("result").GetProperty("isError").GetBoolean());
+            var invalidDelete = await Request(9202, "tools/call", new { name = "kicad_pcb_items_delete", arguments = new
+            {
+                instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}"
+            } });
+            Assert.IsTrue(invalidDelete.GetProperty("result").GetProperty("isError").GetBoolean());
+            Assert.AreEqual("invalid_pcb_item_request", invalidDelete.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
             CollectionAssert.Contains(names, "kicad_pcb_render_3d");
+            CollectionAssert.Contains(names, "kicad_pcb_render_geometry");
+            CollectionAssert.Contains(names, "kicad_pcb_svg_validate");
+            CollectionAssert.Contains(names, "kicad_pcb_svg_artwork_commit");
+            CollectionAssert.Contains(names, "kicad_pcb_svg_artwork_receipt");
+            var invalidSvg = await Request(9344, "tools/call", new { name = "kicad_pcb_svg_validate", arguments = new
+            {
+                svg = "<svg viewBox=\"0 0 1 1\"><line x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"/></svg>",
+                layer = "F.Cu"
+            } });
+            Assert.IsTrue(invalidSvg.GetProperty("result").GetProperty("isError").GetBoolean());
+            Assert.AreEqual("invalid_pcb_svg_guide_layer", invalidSvg.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            await Request(9347, "tools/call", new { name = "kicad_pcb_svg_artwork_commit", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", expectedStateJson = "{}", svg = "", sourceSha256 = "", sourceKind = "imagegen", assetId = Guid.NewGuid().ToString("D"), repositoryRoot = "/tmp", sourceArchivePath = "art.svg", layer = "Dwgs.User", originXNm = "0", originYNm = "0", nanometersPerSvgUnit = "1", operationId = Guid.NewGuid().ToString("D") } });
+            var emptyArtworkReceipt = await Request(9348, "tools/call", new { name = "kicad_pcb_svg_artwork_receipt", arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = Guid.NewGuid().ToString("D"), operationId = Guid.NewGuid().ToString("D") } });
+            Assert.IsFalse(emptyArtworkReceipt.GetProperty("result").GetProperty("structuredContent").GetProperty("found").GetBoolean());
+            foreach (string boardTool in new[]
+            {
+                "kicad_pcb_nets", "kicad_pcb_items_by_net", "kicad_pcb_items_by_net_class",
+                "kicad_pcb_connected_items", "kicad_pcb_design_rules", "kicad_pcb_net_classes", "kicad_pcb_enabled_layers",
+                "kicad_pcb_stackup", "kicad_pcb_plot_settings"
+            })
+                CollectionAssert.Contains(names, boardTool);
+            var invalidStackup = await Request(9349, "tools/call", new { name = "kicad_pcb_stackup",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
+            Assert.IsTrue(invalidStackup.GetProperty("result").GetProperty("isError").GetBoolean());
+            foreach (string operationTool in new[]
+            {
+                "kicad_pcb_import_netlist", "kicad_pcb_refill_zones", "kicad_pcb_operation_receipt",
+                "kicad_pcb_sync_selection", "kicad_pcb_highlight_nets"
+            })
+                CollectionAssert.Contains(names, operationTool);
+            foreach (var (requestId, tool, arguments) in new[]
+            {
+                (9330, "kicad_pcb_import_netlist", (object)new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D") }),
+                (9331, "kicad_pcb_refill_zones", (object)new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D") }),
+                (9332, "kicad_pcb_sync_selection", (object)new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", requestJson = "{}", expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D") }),
+                (9333, "kicad_pcb_highlight_nets", (object)new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", requestJson = "{}", expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D") })
+            })
+            {
+                var refused = (await Request(requestId, "tools/call", new { name = tool, arguments })).GetProperty("result");
+                Assert.IsTrue(refused.GetProperty("isError").GetBoolean(), refused.GetRawText());
+                Assert.IsFalse(refused.GetProperty("structuredContent").GetProperty("mutationSubmitted").GetBoolean(), refused.GetRawText());
+            }
+            // Keep literal tool calls for capability-evidence analysis; the loop above validates
+            // the shared malformed-request contract, while these calls bind each declared tool.
+            await Request(9340, "tools/call", new { name = "kicad_pcb_import_netlist", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D") } });
+            await Request(9341, "tools/call", new { name = "kicad_pcb_refill_zones", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D") } });
+            var emptyPcbOperationReceipt = await Request(9344, "tools/call", new { name = "kicad_pcb_operation_receipt", arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = Guid.NewGuid().ToString("D"), operationId = Guid.NewGuid().ToString("D") } });
+            Assert.IsTrue(emptyPcbOperationReceipt.GetProperty("result").GetProperty("isError").GetBoolean());
+            var unattachedPcbOperationData = emptyPcbOperationReceipt.GetProperty("result").GetProperty("structuredContent");
+            Assert.AreEqual("unknown_instance", unattachedPcbOperationData.GetProperty("errorCode").GetString());
+            Assert.IsFalse(unattachedPcbOperationData.TryGetProperty("found", out _),
+                "An inaccessible native instance must not be reported as a successfully observed missing receipt.");
+            await Request(9342, "tools/call", new { name = "kicad_pcb_sync_selection", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", requestJson = "{}", expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D") } });
+            await Request(9343, "tools/call", new { name = "kicad_pcb_highlight_nets", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", requestJson = "{}", expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D") } });
+            foreach (string exportTool in new[]
+            {
+                "kicad_pcb_export_3d", "kicad_pcb_export_svg", "kicad_pcb_export_dxf", "kicad_pcb_export_pdf", "kicad_pcb_export_ps",
+                "kicad_pcb_export_gerbers", "kicad_pcb_export_drill", "kicad_pcb_export_position",
+                "kicad_pcb_export_gencad", "kicad_pcb_export_ipc2581", "kicad_pcb_export_ipc_d356",
+                "kicad_pcb_export_odb", "kicad_pcb_export_stats"
+            })
+                CollectionAssert.Contains(names, exportTool);
+            var invalidExport = await Request(9091, "tools/call", new { name = "kicad_pcb_export_svg", arguments = new
+            {
+                instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}"
+            } });
+            Assert.IsTrue(invalidExport.GetProperty("result").GetProperty("isError").GetBoolean());
+            Assert.AreEqual("invalid_pcb_export_target", invalidExport.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            await Request(9301, "tools/call", new { name = "kicad_pcb_nets", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
+            await Request(9302, "tools/call", new { name = "kicad_pcb_items_by_net", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
+            await Request(9303, "tools/call", new { name = "kicad_pcb_items_by_net_class", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
+            await Request(9304, "tools/call", new { name = "kicad_pcb_connected_items", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
+            await Request(9305, "tools/call", new { name = "kicad_pcb_design_rules", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
+            await Request(9306, "tools/call", new { name = "kicad_pcb_net_classes", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", requestJson = "{}", expectedStateJson = "{}" } });
+            await Request(9307, "tools/call", new { name = "kicad_pcb_enabled_layers", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
+            await Request(9308, "tools/call", new { name = "kicad_pcb_plot_settings", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
+            await Request(9309, "tools/call", new { name = "kicad_pcb_export_dxf", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
+            await Request(9345, "tools/call", new { name = "kicad_pcb_export_3d", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
+            await Request(9310, "tools/call", new { name = "kicad_pcb_export_pdf", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
+            await Request(9311, "tools/call", new { name = "kicad_pcb_export_ps", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
+            await Request(9312, "tools/call", new { name = "kicad_pcb_export_gerbers", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
+            await Request(9313, "tools/call", new { name = "kicad_pcb_export_drill", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
+            await Request(9314, "tools/call", new { name = "kicad_pcb_export_position", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
+            await Request(9315, "tools/call", new { name = "kicad_pcb_export_gencad", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
+            await Request(9316, "tools/call", new { name = "kicad_pcb_export_ipc2581", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
+            await Request(9317, "tools/call", new { name = "kicad_pcb_export_ipc_d356", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
+            await Request(9318, "tools/call", new { name = "kicad_pcb_export_odb", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
+            await Request(9319, "tools/call", new { name = "kicad_pcb_export_stats", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
+            await Request(9320, "tools/call", new { name = "kicad_pcb_route_plan", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", expectedStateJson = "{}", requestJson = "{}" } });
+            await Request(9321, "tools/call", new { name = "kicad_pcb_route_plan_multilayer", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", expectedStateJson = "{}", requestJson = "{}" } });
+            await Request(9335, "tools/call", new { name = "kicad_pcb_route_corner_optimize_plan", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", expectedStateJson = "{}", candidateRequestJson = "{}", requestJson = "{}" } });
+            await Request(9336, "tools/call", new { name = "kicad_pcb_route_corner_optimize_apply", arguments = new { instanceId = Guid.NewGuid().ToString("D"), deleteRequestJson = "{}", createRequestJson = "{}", expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D") } });
+            var emptyRouteOptimizeReceipt = await Request(9337, "tools/call", new { name = "kicad_pcb_route_corner_optimize_receipt", arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = Guid.NewGuid().ToString("D"), operationId = Guid.NewGuid().ToString("D") } });
+            Assert.IsFalse(emptyRouteOptimizeReceipt.GetProperty("result").GetProperty("structuredContent").GetProperty("found").GetBoolean());
+            await Request(9338, "tools/call", new { name = "kicad_pcb_route_reroute_apply", arguments = new { instanceId = Guid.NewGuid().ToString("D"), deleteRequestJson = "{}", createRequestJson = "{}", expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D") } });
+            var emptyRerouteReceipt = await Request(9339, "tools/call", new { name = "kicad_pcb_route_reroute_receipt", arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = Guid.NewGuid().ToString("D"), operationId = Guid.NewGuid().ToString("D") } });
+            Assert.IsFalse(emptyRerouteReceipt.GetProperty("result").GetProperty("structuredContent").GetProperty("found").GetBoolean());
+            await Request(9350, "tools/call", new { name = "kicad_pcb_route_tune_apply", arguments = new { instanceId = Guid.NewGuid().ToString("D"), deleteRequestJson = "{}", createRequestJson = "{}", expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D") } });
+            var emptyTuneReceipt = await Request(9351, "tools/call", new { name = "kicad_pcb_route_tune_receipt", arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = Guid.NewGuid().ToString("D"), operationId = Guid.NewGuid().ToString("D") } });
+            Assert.IsFalse(emptyTuneReceipt.GetProperty("result").GetProperty("structuredContent").GetProperty("found").GetBoolean());
+            await Request(9346, "tools/call", new { name = "kicad_pcb_route_via_minimize_plan", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", expectedStateJson = "{}", candidateRequestJson = "{}", requestJson = "{}" } });
+            await Request(9325, "tools/call", new { name = "kicad_pcb_footprint_place_plan", arguments = new { documentJson = "{}", expectedStateJson = "{}", footprintJson = "{}" } });
+            await Request(9322, "tools/call", new { name = "kicad_pcb_route_constraints", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", expectedStateJson = "{}", requestJson = "{}" } });
+            await Request(9326, "tools/call", new { name = "kicad_pcb_route_cleanup_plan", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", expectedStateJson = "{}", requestJson = "{}" } });
+            await Request(9327, "tools/call", new { name = "kicad_pcb_route_cleanup_apply", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D") } });
+            var emptyCleanupReceipt = await Request(9329, "tools/call", new { name = "kicad_pcb_route_cleanup_receipt", arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = Guid.NewGuid().ToString("D"), operationId = Guid.NewGuid().ToString("D") } });
+            Assert.IsFalse(emptyCleanupReceipt.GetProperty("result").GetProperty("structuredContent").GetProperty("found").GetBoolean());
+            await Request(9328, "tools/call", new { name = "kicad_pcb_layer_manifest", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", expectedStateJson = "{}", requestJson = "{}" } });
+            var invalidPcbGeometry = await Request(9334, "tools/call", new { name = "kicad_pcb_render_geometry", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", expectedStateJson = "{}", requestJson = "{}" } });
+            Assert.IsTrue(invalidPcbGeometry.GetProperty("result").GetProperty("isError").GetBoolean());
+            Assert.AreEqual("invalid_document_target", invalidPcbGeometry.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            await Request(9323, "tools/call", new { name = "kicad_pcb_route_tune_plan", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", expectedStateJson = "{}", requestJson = "{}" } });
+            await Request(9324, "tools/call", new { name = "kicad_pcb_diff_pair_plan", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", expectedStateJson = "{}", requestJson = "{}" } });
+            await Request(9360, "tools/call", new { name = "kicad_pcb_route_preview_continue", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
+            await Request(9361, "tools/call", new { name = "kicad_pcb_route_preview_cancel", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}" } });
+            await Request(9362, "tools/call", new { name = "kicad_pcb_route_preview_read", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}" } });
             CollectionAssert.Contains(names, "kicad_pcb_route_geometry");
             CollectionAssert.Contains(names, "kicad_pcb_route_preview");
+            CollectionAssert.Contains(names, "kicad_pcb_route_preview_continue");
+            CollectionAssert.Contains(names, "kicad_pcb_route_preview_cancel");
+            CollectionAssert.Contains(names, "kicad_pcb_route_preview_read");
             var unknownCapabilities = await Request(3, "tools/call", new { name = "kicad_instance_capabilities",
                 arguments = new { instanceId = Guid.NewGuid().ToString("D") } });
             Assert.IsTrue(unknownCapabilities.GetProperty("result").GetProperty("isError").GetBoolean());
@@ -102,11 +380,158 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_schematic_create");
             CollectionAssert.Contains(names, "kicad_pcb_open");
             CollectionAssert.Contains(names, "kicad_pcb_create");
+            foreach (string footprintTool in new[]
+            {
+                "kicad_footprint_open_library_item", "kicad_footprint_open_documents",
+                "kicad_footprint_library_list", "kicad_footprint_library_delete",
+                "kicad_footprint_receipt", "kicad_footprint_save", "kicad_footprint_save_copy", "kicad_footprint_revert"
+            })
+                CollectionAssert.Contains(names, footprintTool);
+            foreach (string placementTool in new[]
+            {
+                "kicad_pcb_footprint_place_plan", "kicad_pcb_footprint_place_apply", "kicad_pcb_footprint_place_receipt", "kicad_pcb_footprint_svg_plan", "kicad_pcb_footprint_validate"
+            })
+                CollectionAssert.Contains(names, placementTool);
+            var invalidFootprintDefinition = await Request(9359, "tools/call", new { name = "kicad_pcb_footprint_validate",
+                arguments = new { footprintJson = "{}" } });
+            Assert.IsFalse(invalidFootprintDefinition.GetProperty("result").GetProperty("isError").GetBoolean());
+            Assert.IsFalse(invalidFootprintDefinition.GetProperty("result").GetProperty("structuredContent").GetProperty("valid").GetBoolean());
+            Assert.IsFalse(invalidFootprintDefinition.GetProperty("result").GetProperty("structuredContent").GetProperty("nativeContacted").GetBoolean());
+            var invalidModelDefinition = new Kiapi.Board.Types.FootprintInstance
+            {
+                Id = new() { Value = Guid.NewGuid().ToString("D") },
+                Definition = new() { Id = new() { LibraryNickname = "Fixture", EntryName = "ModelProbe" } }
+            };
+            invalidModelDefinition.Definition.Items.Add(Any.Pack(new Kiapi.Board.Types.Footprint3DModel
+            {
+                Filename = "probe.step", Scale = new() { XNm = 0, YNm = 1, ZNm = 1 },
+                Rotation = new(), Offset = new(), Opacity = 1, Visible = true
+            }));
+            var invalidModel = await Request(9365, "tools/call", new { name = "kicad_pcb_footprint_validate",
+                arguments = new { footprintJson = BoardJson.Formatter.Format(invalidModelDefinition) } });
+            Assert.IsFalse(invalidModel.GetProperty("result").GetProperty("structuredContent").GetProperty("valid").GetBoolean());
+            Assert.IsTrue(invalidModel.GetProperty("result").GetProperty("structuredContent").GetProperty("issues").EnumerateArray()
+                .Any(issue => issue.GetProperty("code").GetString() == "invalid_3d_model_scale"));
+            string footprintDocument = SchematicJson.Formatter.Format(new Kiapi.Common.Types.DocumentSpecifier
+            {
+                Type = Kiapi.Common.Types.DocumentType.DoctypeFootprint,
+                LibId = new Kiapi.Common.Types.LibraryIdentifier { LibraryNickname = "Fixture", EntryName = "QFN-4" }
+            });
+            string validEpoch = Guid.NewGuid().ToString("D");
+            string validOperation = Guid.NewGuid().ToString("D");
+            var invalidPlacementApply = await Request(9356, "tools/call", new { name = "kicad_pcb_footprint_place_apply",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), candidateRequestJson = "{}", expectedStateJson = "{}", operationId = validOperation } });
+            Assert.IsTrue(invalidPlacementApply.GetProperty("result").GetProperty("isError").GetBoolean());
+            Assert.AreEqual("invalid_pcb_footprint_candidate", invalidPlacementApply.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            var emptyPlacementReceipt = await Request(9357, "tools/call", new { name = "kicad_pcb_footprint_place_receipt",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = validEpoch, operationId = Guid.NewGuid().ToString("D") } });
+            Assert.IsFalse(emptyPlacementReceipt.GetProperty("result").GetProperty("structuredContent").GetProperty("found").GetBoolean());
+            await Request(9358, "tools/call", new { name = "kicad_pcb_footprint_svg_plan", arguments = new { documentJson = "{}", expectedStateJson = "{}", footprintJson = "{}", svg = "", sourceSha256 = "", sourceKind = "imagegen", assetId = Guid.NewGuid().ToString("D"), layer = "F.SilkS", originXNm = "0", originYNm = "0", nanometersPerSvgUnit = "1" } });
+            var invalidFootprintEpoch = await Request(9350, "tools/call", new { name = "kicad_footprint_open_documents",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = "invalid" } });
+            Assert.IsTrue(invalidFootprintEpoch.GetProperty("result").GetProperty("isError").GetBoolean());
+            Assert.AreEqual("invalid_process_epoch", invalidFootprintEpoch.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            await Request(9363, "tools/call", new { name = "kicad_footprint_library_list",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = "invalid", libraryNickname = "Fixture" } });
+            await Request(9364, "tools/call", new { name = "kicad_footprint_library_delete",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = "invalid",
+                    libraryNickname = "Fixture", footprintName = "QFN-4", operationId = Guid.NewGuid().ToString("D") } });
+            var emptyFootprintReceipt = await Request(9355, "tools/call", new { name = "kicad_footprint_receipt",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = validEpoch, operationId = Guid.NewGuid().ToString("D") } });
+            Assert.IsFalse(emptyFootprintReceipt.GetProperty("result").GetProperty("structuredContent").GetProperty("found").GetBoolean());
+            var invalidFootprintId = await Request(9351, "tools/call", new { name = "kicad_footprint_open_library_item",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = validEpoch,
+                    libraryNickname = "", entryName = "QFN-4", operationId = validOperation } });
+            Assert.IsTrue(invalidFootprintId.GetProperty("result").GetProperty("isError").GetBoolean());
+            Assert.AreEqual("invalid_footprint_library_id", invalidFootprintId.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            var invalidFootprintSave = await Request(9352, "tools/call", new { name = "kicad_footprint_save",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = validEpoch,
+                    documentJson = "{}", operationId = validOperation } });
+            Assert.IsTrue(invalidFootprintSave.GetProperty("result").GetProperty("isError").GetBoolean());
+            Assert.AreEqual("invalid_footprint_document", invalidFootprintSave.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            var invalidFootprintCopy = await Request(9353, "tools/call", new { name = "kicad_footprint_save_copy",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = validEpoch,
+                    documentJson = footprintDocument, path = "../unsafe", operationId = validOperation } });
+            Assert.IsTrue(invalidFootprintCopy.GetProperty("result").GetProperty("isError").GetBoolean());
+            Assert.AreEqual("invalid_footprint_copy_path", invalidFootprintCopy.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            var invalidFootprintRevert = await Request(9354, "tools/call", new { name = "kicad_footprint_revert",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = validEpoch,
+                    documentJson = "{}", operationId = validOperation } });
+            Assert.IsTrue(invalidFootprintRevert.GetProperty("result").GetProperty("isError").GetBoolean());
+            Assert.AreEqual("invalid_footprint_document", invalidFootprintRevert.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
             CollectionAssert.Contains(names, "kicad_document_state");
             CollectionAssert.Contains(names, "kicad_document_save");
             CollectionAssert.Contains(names, "kicad_schematic_apply_checked_batch");
             CollectionAssert.Contains(names, "kicad_schematic_checked_state");
             CollectionAssert.Contains(names, "kicad_schematic_checked_batch_receipt");
+            CollectionAssert.Contains(names, "kicad_schematic_create_connection_item");
+            CollectionAssert.Contains(names, "kicad_schematic_library_cache_replace");
+            var invalidLibraryCache = await Request(9095, "tools/call", new { name = "kicad_schematic_library_cache_replace",
+                arguments = new
+                {
+                    instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", expectedStateJson = "{}",
+                    screenId = Guid.NewGuid().ToString("D"), definitionsJson = "[]", operationId = Guid.NewGuid().ToString("D")
+                } });
+            Assert.IsTrue(invalidLibraryCache.GetProperty("result").GetProperty("isError").GetBoolean());
+            Assert.AreEqual("invalid_checked_document", invalidLibraryCache.GetProperty("result")
+                .GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            foreach (string symbolLibraryTool in new[]
+            {
+                "kicad_symbol_library_validate", "kicad_symbol_library_clone", "kicad_symbol_svg_plan", "kicad_symbol_library_list", "kicad_symbol_library_read", "kicad_symbol_library_receipt",
+                "kicad_symbol_library_write", "kicad_symbol_library_delete"
+            })
+                CollectionAssert.Contains(names, symbolLibraryTool);
+            var invalidSymbolDefinition = await Request(9093, "tools/call", new { name = "kicad_symbol_library_validate",
+                arguments = new { libraryNickname = "Fixture", definitionJson = "{}" } });
+            Assert.IsFalse(invalidSymbolDefinition.GetProperty("result").GetProperty("isError").GetBoolean());
+            Assert.IsFalse(invalidSymbolDefinition.GetProperty("result").GetProperty("structuredContent").GetProperty("valid").GetBoolean());
+            Assert.IsFalse(invalidSymbolDefinition.GetProperty("result").GetProperty("structuredContent").GetProperty("nativeContacted").GetBoolean());
+            var invalidSymbolArtwork = await Request(9366, "tools/call", new { name = "kicad_symbol_svg_plan",
+                arguments = new { libraryNickname = "Fixture", symbolName = "Probe", svg = "", sourceSha256 = "", sourceKind = "generated", assetId = Guid.NewGuid().ToString("D") } });
+            Assert.IsTrue(invalidSymbolArtwork.GetProperty("result").GetProperty("isError").GetBoolean());
+            const string symbolSvg = "<svg viewBox=\"0 0 10 10\"><line x1=\"1\" y1=\"2\" x2=\"8\" y2=\"2\"/></svg>";
+            string symbolHash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(symbolSvg)));
+            var symbolArtwork = await Request(9367, "tools/call", new { name = "kicad_symbol_svg_plan", arguments = new
+            {
+                libraryNickname = "Fixture", symbolName = "Probe", svg = symbolSvg, sourceSha256 = symbolHash,
+                sourceKind = "generated", assetId = Guid.NewGuid().ToString("D"), originXNm = "0", originYNm = "0",
+                nanometersPerSvgUnit = "100000", strokeWidthNm = 100000
+            } });
+            Assert.IsFalse(symbolArtwork.GetProperty("result").TryGetProperty("isError", out var symbolArtworkError)
+                && symbolArtworkError.GetBoolean(), symbolArtwork.ToString());
+            var symbolArtworkData = symbolArtwork.GetProperty("result").GetProperty("structuredContent");
+            Assert.IsTrue(symbolArtworkData.GetProperty("authoritativeVector").GetBoolean());
+            Assert.IsTrue(symbolArtworkData.GetProperty("proposalOnly").GetBoolean());
+            Assert.AreEqual(1, symbolArtworkData.GetProperty("segmentCount").GetInt32());
+            Assert.IsTrue(symbolArtworkData.GetProperty("definitionJson").GetString()!.Contains("SchematicGraphicShape", StringComparison.Ordinal));
+            var invalidSymbolClone = await Request(9092, "tools/call", new { name = "kicad_symbol_library_clone",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = Guid.NewGuid().ToString("D"), definitionJson = "{}",
+                    targetLibraryNickname = "Fixture", targetSymbolName = "Clone", operationId = Guid.NewGuid().ToString("D") } });
+            Assert.IsTrue(invalidSymbolClone.GetProperty("result").GetProperty("isError").GetBoolean());
+            Assert.AreEqual("invalid_symbol_definition", invalidSymbolClone.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            var invalidSymbolLibrary = await Request(9096, "tools/call", new { name = "kicad_symbol_library_list",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = "invalid", libraryNickname = "Fixture" } });
+            Assert.IsTrue(invalidSymbolLibrary.GetProperty("result").GetProperty("isError").GetBoolean());
+            Assert.AreEqual("invalid_process_epoch", invalidSymbolLibrary.GetProperty("result")
+                .GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            await Request(9097, "tools/call", new { name = "kicad_symbol_library_read",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = "invalid", libraryNickname = "Fixture", symbolName = "R" } });
+            await Request(9098, "tools/call", new { name = "kicad_symbol_library_write",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = "invalid", libraryNickname = "Fixture", definitionJson = "{}", operationId = Guid.NewGuid().ToString("D") } });
+            await Request(9099, "tools/call", new { name = "kicad_symbol_library_delete",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = "invalid", libraryNickname = "Fixture", symbolName = "R", operationId = Guid.NewGuid().ToString("D") } });
+            await Request(9100, "tools/call", new { name = "kicad_symbol_library_receipt",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = "invalid", operationId = Guid.NewGuid().ToString("D") } });
+            var invalidTypedConnection = await Request(9094, "tools/call", new { name = "kicad_schematic_create_connection_item",
+                arguments = new
+                {
+                    instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", expectedStateJson = "{}",
+                    kind = "wire", itemId = Guid.NewGuid().ToString("D"), xNm = 1_000L, yNm = 2_000L,
+                    endXNm = 4_000L, endYNm = 2_000L, operationId = Guid.NewGuid().ToString("D")
+                } });
+            Assert.IsTrue(invalidTypedConnection.GetProperty("result").GetProperty("isError").GetBoolean());
+            Assert.AreEqual("invalid_checked_document", invalidTypedConnection.GetProperty("result")
+                .GetProperty("structuredContent").GetProperty("errorCode").GetString());
             // A checked object batch that is unreadable, carries an object type this server does not know, or names no
             // attached KiCad is refused before anything is sent, and the agent is told why. The LocalLabel written the way
             // the tool description shows is read, so its refusal comes from the instance lookup; the same batch with an
@@ -183,6 +608,8 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_document_close");
             CollectionAssert.Contains(names, "kicad_schematic_preview");
             CollectionAssert.Contains(names, "kicad_schematic_electrical_state");
+            CollectionAssert.Contains(names, "kicad_schematic_erc_markers");
+            CollectionAssert.Contains(names, "kicad_schematic_erc_run");
             CollectionAssert.Contains(names, "kicad_schematic_measure_placement");
             // Flat structural diagrams are discarded, not converted (decision n9af098253fec71da): no flat
             // editor tool and no conversion tool is advertised; the per-level diagram tools remain.
@@ -198,6 +625,12 @@ public sealed class McpProcessTests
             var invalidGeometry = await Request(9088, "tools/call", new { name = "kicad_schematic_measure_placement",
                 arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}" } });
             Assert.IsTrue(invalidGeometry.GetProperty("result").GetProperty("isError").GetBoolean());
+            var invalidErcMarkers = await Request(9087, "tools/call", new { name = "kicad_schematic_erc_markers",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
+            Assert.IsTrue(invalidErcMarkers.GetProperty("result").GetProperty("isError").GetBoolean());
+            var invalidErcRun = await Request(9086, "tools/call", new { name = "kicad_schematic_erc_run",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
+            Assert.IsTrue(invalidErcRun.GetProperty("result").GetProperty("isError").GetBoolean());
             CollectionAssert.Contains(names, "kicad_design_electrical_baseline_initialize");
             CollectionAssert.Contains(names, "kicad_design_connectivity_compare");
             var electricalFixture = SchematicElectricalComparisonTests.Fixture();
@@ -221,6 +654,7 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_pcb_route_candidate_from_guide");
             CollectionAssert.Contains(names, "kicad_pcb_route_candidate_validate");
             CollectionAssert.Contains(names, "kicad_pcb_route_commit");
+            CollectionAssert.Contains(names, "kicad_pcb_route_cleanup_receipt");
             CollectionAssert.Contains(names, "kicad_schematic_xml_plan");
             JsonElement call = await Request(3, "tools/call", new { name = "kicad_instances_list", arguments = new { } });
             Assert.IsFalse(call.TryGetProperty("error", out _), call.ToString());

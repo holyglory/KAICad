@@ -60,14 +60,19 @@ public sealed partial class NativeSessionTests
                 Assert.AreEqual(document, saved.Document);
                 Assert.IsFalse(saved.ObservedState.NativeContentDirty);
                 var persisted = saved.ObservedState.NativeFiles.ToDictionary(path => path,
-                    path => (Bytes: File.ReadAllBytes(path), Written: File.GetLastWriteTimeUtc(path)));
+                    path => (Exists: File.Exists(path), Bytes: File.Exists(path) ? File.ReadAllBytes(path) : Array.Empty<byte>(),
+                        Written: File.Exists(path) ? File.GetLastWriteTimeUtc(path) : DateTime.MinValue));
                 var repeated = await mcp.Tool("kicad_document_save", new
                     { instanceId, expectedStateJson = expectedJson, operationId = operation });
                 Assert.AreEqual(saved, Parse(repeated));
                 foreach (var (path, expected) in persisted)
                 {
-                    CollectionAssert.AreEqual(expected.Bytes, File.ReadAllBytes(path));
-                    Assert.AreEqual(expected.Written, File.GetLastWriteTimeUtc(path), "Replaying a save receipt must not write again.");
+                    Assert.AreEqual(expected.Exists, File.Exists(path), "Replaying a save receipt must preserve absent native baselines.");
+                    if (expected.Exists)
+                    {
+                        CollectionAssert.AreEqual(expected.Bytes, File.ReadAllBytes(path));
+                        Assert.AreEqual(expected.Written, File.GetLastWriteTimeUtc(path), "Replaying a save receipt must not write again.");
+                    }
                 }
                 var mismatched = before.Clone(); mismatched.Revision.Sequence++;
                 var conflict = await mcp.Tool("kicad_document_save", new
@@ -608,6 +613,10 @@ public sealed partial class NativeSessionTests
         string store, Dictionary<string, string> links, string evidence, string instanceId, CancellationToken token)
     {
         string boardPath = Path.ChangeExtension(linkedProject, ".kicad_pcb");
+        // The board lifecycle state may also retain an absent custom-rules sidecar
+        // (`.kicad_dru`) as part of its exact file coverage. Populate the expected
+        // set from the first native observation below instead of assuming only the
+        // board and project paths.
         string[] documentFiles = [boardPath, linkedProject];
         var editor = new NativeClient(new NngTransport(),
             NativeIpcEndpoint.FromSocketPath(Path.Combine(NativeIpcEndpoint.RuntimeDirectory(linkedInstance), "api.sock")));
@@ -639,8 +648,20 @@ public sealed partial class NativeSessionTests
                 var baseline = state.FileBaselines.Single(file => file.Path == path);
                 Assert.AreEqual(NativeFileBaselineStatus.NfbsUnchanged, baseline.Status, $"{phase}: {path}: {state}");
                 Assert.AreEqual(path, baseline.BaselinePath, $"{phase}: the loaded-file version belongs to {path}.");
-                string onDisk = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(links.GetValueOrDefault(path, path))));
-                Assert.AreEqual(onDisk, baseline.BaselineSha256, $"{phase}: the loaded-file version of {path} is the bytes on disk.");
+                string onDiskPath = links.GetValueOrDefault(path, path);
+                if( baseline.BaselineExists )
+                {
+                    Assert.IsTrue(File.Exists(onDiskPath), $"{phase}: {path} has a persisted target.");
+                    string onDisk = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(onDiskPath)));
+                    Assert.AreEqual(onDisk, baseline.BaselineSha256,
+                        $"{phase}: the loaded-file version of {path} is the bytes on disk.");
+                }
+                else
+                {
+                    Assert.IsFalse(File.Exists(onDiskPath), $"{phase}: absent sidecar {path} must remain absent.");
+                    Assert.AreEqual(string.Empty, baseline.BaselineSha256, $"{phase}: absent {path} has no digest.");
+                    Assert.AreEqual(0UL, baseline.BaselineBytes, $"{phase}: absent {path} has no bytes.");
+                }
             }
         }
         // An edit is saved through the links and confirmed.
@@ -678,6 +699,7 @@ public sealed partial class NativeSessionTests
         RequireToolSuccess(firstReply);
         var first = LifecycleResult(firstReply);
         Assert.AreEqual(LifecycleOperationStatus.LosSaved, first.Status, first.ErrorMessage);
+        documentFiles = first.ObservedState.NativeFiles.ToArray();
         CollectionAssert.Contains(first.WrittenFiles.ToArray(), boardPath, "The new board was written.");
         LinksKept("new board");
 
@@ -1128,6 +1150,7 @@ public sealed partial class NativeSessionTests
     private static void KeepReadOnly(string path, Dictionary<string, UnixFileMode> modes)
     {
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Linux file modes.");
+        if (!File.Exists(path) && !Directory.Exists(path)) return;
         var mode = File.GetUnixFileMode(path);
         modes.TryAdd(path, mode);
         File.SetUnixFileMode(path, mode & ~(UnixFileMode.UserWrite | UnixFileMode.GroupWrite | UnixFileMode.OtherWrite));
@@ -1137,6 +1160,7 @@ public sealed partial class NativeSessionTests
     private static void KeepWriteOnly(string path, Dictionary<string, UnixFileMode> modes)
     {
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Linux file modes.");
+        if (!File.Exists(path) && !Directory.Exists(path)) return;
         modes.TryAdd(path, File.GetUnixFileMode(path));
         File.SetUnixFileMode(path, UnixFileMode.UserWrite);
     }

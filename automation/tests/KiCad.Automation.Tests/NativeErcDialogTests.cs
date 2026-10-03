@@ -95,6 +95,37 @@ public sealed class NativeErcDialogTests
                 await client.InvokeAsync<SaveDocument, Empty>(new() { Document = opened.Document }, deadline.Token);
                 var baseline = await client.InvokeAsync<ReadSchematicChangeJournal, SchematicChangeJournal>(
                     new() { Document = opened.Document }, deadline.Token);
+                string ercState = SchematicJson.Formatter.Format(await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
+                    new() { Document = opened.Document }, deadline.Token));
+                string ercMcpState = Directory.CreateTempSubdirectory("kicad-erc-mcp-").FullName;
+                try
+                {
+                    await using var ercMcp = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.ProductionStartInfo(),
+                        ercMcpState, Path.Combine(evidence, $"{index}-erc-mcp.stderr.log"), deadline.Token);
+                    var ercAttach = await ercMcp.Tool("kicad_instance_attach", new
+                    { endpoint = client.Endpoint, expectedInstanceId = instanceId });
+                    Assert.IsFalse(ercAttach.TryGetProperty("isError", out var ercAttachError) && ercAttachError.GetBoolean(), ercAttach.GetRawText());
+                    var ercRequest = new NativeCapabilitySchematicRunErc
+                    {
+                        Document = opened.Document, OperationId = Guid.NewGuid().ToString("D"),
+                        ProcessEpoch = client.Epoch,
+                        ExpectedRevision = SchematicJson.Parser.Parse<DocumentLifecycleState>(ercState).Revision.Clone(),
+                        ShowAllErrors = true
+                    };
+                    var ercRun = await ercMcp.Tool("kicad_schematic_erc_run", new
+                    {
+                        instanceId, requestJson = SchematicJson.Formatter.Format(ercRequest), expectedStateJson = ercState
+                    });
+                    Assert.IsFalse(ercRun.TryGetProperty("isError", out var ercRunError) && ercRunError.GetBoolean(), ercRun.GetRawText());
+                    Assert.IsTrue(ercRun.GetProperty("structuredContent").GetProperty("nativeExecution").GetBoolean(), ercRun.GetRawText());
+                    Assert.IsGreaterThan(0, ercRun.GetProperty("structuredContent").GetProperty("markerCount").GetInt32(), ercRun.GetRawText());
+                    var ercReplay = await ercMcp.Tool("kicad_schematic_erc_run", new
+                    {
+                        instanceId, requestJson = SchematicJson.Formatter.Format(ercRequest), expectedStateJson = ercState
+                    });
+                    Assert.AreEqual(ercRun.GetProperty("structuredContent").GetRawText(), ercReplay.GetProperty("structuredContent").GetRawText());
+                }
+                finally { Directory.Delete(ercMcpState, true); }
                 identities.Add(new(instanceId, client, baseline, process.Id, opened.Document, project));
                 NativeKeyboard.SchematicShortcut(display, process.Id, "F11");
                 using var visible = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);

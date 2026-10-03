@@ -127,4 +127,5 @@ message CloseAllDocuments
 message SaveDocument
 {
   kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
 }

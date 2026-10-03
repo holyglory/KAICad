@@ -6,6 +6,7 @@ syntax = "proto3";
 package kiapi.automation.v1;
 option csharp_namespace = "KiCad.Automation.Protocol";
 import "common/types/base_types.proto";
+import "common/commands/editor_commands.proto";
 import "common/types/embedded_files.proto";
 import "google/protobuf/any.proto";
 import "schematic/schematic_types.proto";
@@ -73,6 +74,11 @@ message StartPcbDrcJob {
   // Optional guide-derived copper candidates. Native DRC applies these only to
   // its detached snapshot; the live board is never mutated by a dry run.
   repeated google.protobuf.Any candidate_items = 10;
+  // -- lane 2D (400-499) --
+  // Exact live route objects to remove from the detached snapshot before adding
+  // candidate_items. This enables DRC of a full rip-up/reroute replacement.
+  repeated kiapi.common.types.KIID delete_item_ids = 400;
+  // -- end lane 2D --
 }
 
 message ReadPcbDrcJob {
@@ -187,6 +193,17 @@ message StartPcbRoutePreview {
   repeated kiapi.common.types.Vector2 waypoints = 7;
   kiapi.board.types.BoardLayer layer = 8;
   bool force_finish = 9;
+  // Use KiCad's native differential-pair push-and-shove placer.
+  bool differential_pair = 10;
+  // -- lane 2D (400-499) --
+  // Keep the detached native router alive after this request so that a later
+  // NativeCapabilityRoutePreviewContinue can add waypoints without rebuilding the route.
+  // The session remains preview-only and never commits to the board.
+  bool persistent_session = 400;
+  // Force the detached PNS snapshot into push-and-shove mode instead of the
+  // user profile's walkaround mode. The preview remains read-only.
+  bool push_and_shove = 407;
+  // -- end lane 2D --
 }
 
 message PcbRoutePreviewState {
@@ -200,6 +217,30 @@ message PcbRoutePreviewState {
   repeated google.protobuf.Any route_items = 8;
   bool preview_only = 9;
   bool native_commit = 10;
+  // -- lane 2D (400-499) --
+  bool session_active = 400;
+  bool cancellation_requested = 401;
+  bool reconciled = 402;
+  DocumentRevision observed_revision = 403;
+  uint32 waypoint_count = 404;
+  bool cancelled = 405;
+  // Exact native board-route parents displaced by push-and-shove. These IDs
+  // are a DeleteItems candidate for a later DRC-gated replacement apply; the
+  // preview itself remains detached and never mutates the live board.
+  repeated kiapi.common.types.KIID removed_item_ids = 406;
+  // Typed identity-preserving updates for displaced route parents. Native
+  // preview sets this only when every removed parent maps unambiguously to
+  // one complete Track/Arc/Via payload with the same UUID.
+  kiapi.common.commands.UpdateItems replacement_updates = 408;
+  // Explicitly explains why replacement_updates could not be emitted.
+  // The preview remains complete and read-only; callers may use the existing
+  // candidate/delete path when this is set.
+  string replacement_updates_error = 409;
+  // Version 1 carries the entire prospective native NODE delta, including
+  // identity-preserving updates and every remaining create/removal. A zero
+  // version is a legacy preview and cannot authorize an actionable delta.
+  uint32 complete_delta_version = 410;
+  // -- end lane 2D --
 }
 
 message ReadSchematicMetadata {
@@ -1179,4 +1220,250 @@ message SchematicWiringDrawingSheet {
 // == end ==
 
 // == lane 2D messages ==
+// Read and mutate project symbol-library entries through the schematic
+// library adapter. These commands are process-scoped; the MCP layer supplies
+// operation IDs and reports that a native receipt is unavailable until the
+// library lifecycle gets a durable revision controller.
+message NativeCapabilitySymbolLibraryReadNames {
+  string library_nickname = 1;
+}
+
+message NativeCapabilitySymbolLibraryReadNamesResponse {
+  string library_nickname = 1;
+  repeated string symbol_names = 2;
+  uint64 modify_hash = 3;
+}
+
+message NativeCapabilitySymbolLibraryReadSymbol {
+  string library_nickname = 1;
+  string symbol_name = 2;
+}
+
+message NativeCapabilitySymbolLibraryReadSymbolResponse {
+  string library_nickname = 1;
+  string symbol_name = 2;
+  kiapi.schematic.types.SchematicSymbol definition = 3;
+  uint64 modify_hash = 4;
+}
+
+message NativeCapabilitySymbolLibraryWriteSymbol {
+  string library_nickname = 1;
+  kiapi.schematic.types.SchematicSymbol definition = 2;
+  bool overwrite = 3;
+  string operation_id = 4;
+}
+
+message NativeCapabilitySymbolLibraryWriteSymbolResponse {
+  string library_nickname = 1;
+  string symbol_name = 2;
+  kiapi.schematic.types.SchematicSymbol definition = 3;
+  uint64 before_modify_hash = 4;
+  uint64 after_modify_hash = 5;
+  bool completed = 6;
+  string operation_id = 7;
+}
+
+message NativeCapabilitySymbolLibraryDeleteSymbol {
+  string library_nickname = 1;
+  string symbol_name = 2;
+  string operation_id = 3;
+}
+
+message NativeCapabilitySymbolLibraryDeleteSymbolResponse {
+  string library_nickname = 1;
+  string symbol_name = 2;
+  uint64 before_modify_hash = 3;
+  uint64 after_modify_hash = 4;
+  bool completed = 5;
+  string operation_id = 6;
+}
+
+message NativeCapabilitySymbolLibraryReadOperation {
+  string operation_id = 1;
+}
+
+message NativeCapabilitySymbolLibraryReadOperationResponse {
+  string operation_id = 1;
+  bool found = 2;
+  NativeCapabilitySymbolLibraryWriteSymbolResponse write_response = 3;
+  NativeCapabilitySymbolLibraryDeleteSymbolResponse delete_response = 4;
+}
+
+// Process-owned footprint editor receipts. The native editor retains these
+// across MCP reconnects while the editor process remains alive.
+message NativeCapabilityFootprintReadOperation {
+  string operation_id = 1;
+}
+
+message NativeCapabilityFootprintReadOperationResponse {
+  string operation_id = 1;
+  bool found = 2;
+  string operation = 3;
+  kiapi.common.types.DocumentSpecifier document = 4;
+  bool completed = 5;
+}
+
+// Footprint-library adapter operations.  These address named library entries
+// through KiCad's configured library table; they never accept filesystem paths.
+message NativeCapabilityFootprintLibraryReadNames {
+  string library_nickname = 1;
+  bool best_efforts = 2;
+}
+
+message NativeCapabilityFootprintLibraryReadNamesResponse {
+  string library_nickname = 1;
+  repeated string footprint_names = 2;
+  uint64 modify_hash = 3;
+}
+
+message NativeCapabilityFootprintLibraryDelete {
+  string library_nickname = 1;
+  string footprint_name = 2;
+  string operation_id = 3;
+  optional uint64 expected_modify_hash = 400;
+}
+
+message NativeCapabilityFootprintLibraryDeleteResponse {
+  string library_nickname = 1;
+  string footprint_name = 2;
+  uint64 before_modify_hash = 3;
+  uint64 after_modify_hash = 4;
+  bool completed = 5;
+  string operation_id = 6;
+}
+
+message NativeCapabilityFootprintLibraryReadOperation {
+  string operation_id = 1;
+}
+
+message NativeCapabilityFootprintLibraryReadOperationResponse {
+  string operation_id = 1;
+  bool found = 2;
+  NativeCapabilityFootprintLibraryDeleteResponse delete_response = 3;
+}
+
+// Persistent, preview-only native PNS route sessions. The operation ID is the
+// session identity and these commands never commit board items.
+message NativeCapabilityRoutePreviewContinue {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  string process_epoch = 3;
+  DocumentRevision expected_revision = 4;
+  repeated kiapi.common.types.Vector2 waypoints = 5;
+  bool force_finish = 6;
+}
+
+message NativeCapabilityRoutePreviewCancel {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  string process_epoch = 3;
+}
+
+message NativeCapabilityRoutePreviewRead {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  string process_epoch = 3;
+}
+
+// Process-owned PCB operation receipts.  These cover synchronous/headless
+// netlist imports and zone fills, and accepted interactive all-zone fills.
+// The native handler compares the complete serialized request on replay, so
+// reusing an operation ID with different arguments is rejected.
+message NativeCapabilityPcbReadOperation {
+  string operation_id = 1;
+}
+
+// Terminal result of the native PCB zone filler. This intentionally mirrors
+// ZONE_FILLER::OUTCOME so managed callers never infer success from editor
+// responsiveness or the legacy completed bit alone.
+enum NativeZoneFillOutcome {
+  NZFO_UNKNOWN = 0;
+  NZFO_NOT_RUN = 1;
+  NZFO_COMPLETED = 2;
+  NZFO_CANCELLED = 3;
+  NZFO_NOT_CONVERGED = 4;
+  NZFO_UNCHANGED_OR_DECLINED = 5;
+  NZFO_FAILED = 6;
+}
+
+message NativeCapabilityPcbReadOperationResponse {
+  string operation_id = 1;
+  bool found = 2;
+  string operation = 3;
+  kiapi.common.types.DocumentSpecifier document = 4;
+  bool completed = 5;
+  // ImportNetlistResponse fields for netlist-import operations. Zone-refill
+  // operations leave these fields at zero/empty because the native command
+  // returns Empty. Direct fields avoid requiring board-command descriptors in
+  // the shared automation Any registry.
+  uint32 error_count = 6;
+  uint32 warning_count = 7;
+  uint32 new_footprint_count = 8;
+  string report = 9;
+  bool terminal = 400;
+  NativeZoneFillOutcome zone_fill_outcome = 401;
+  NativeZoneFillOutcome primary_fill_outcome = 402;
+  NativeZoneFillOutcome generator_refill_outcome = 403;
+  bool generator_refill_required = 404;
+  bool primary_commit_applied = 405;
+  bool generator_refill_commit_applied = 406;
+  bool rollback_completed = 407;
+  string failure_stage = 408;
+  string error_code = 409;
+  string error_message = 410;
+  string process_epoch = 411;
+  bool commit_state_known = 412;
+}
+
+// Run the native ERC checker without opening the GUI dialog. The operation is
+// revision-bound and replayable while the schematic editor process lives.
+message NativeCapabilitySchematicRunErc {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  string process_epoch = 3;
+  DocumentRevision expected_revision = 4;
+  bool show_all_errors = 5;
+}
+
+message NativeCapabilitySchematicRunErcResponse {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  string process_epoch = 3;
+  DocumentRevision checked_revision = 4;
+  DocumentRevision observed_revision = 5;
+  bool completed = 6;
+  uint32 marker_count = 7;
+  string error_code = 8;
+  string error_message = 9;
+}
+
+// Exact DRC read for a checked route replacement. This is a new lane-2D seam
+// because ReadPcbDrcJob's numbered declarations are frozen.
+message NativeCapabilityPcbDrcReplacementJob {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string job_id = 2;
+  string process_epoch = 3;
+  repeated google.protobuf.Any expected_candidate_items = 4;
+  repeated kiapi.common.types.KIID expected_delete_item_ids = 5;
+}
+
+// Read the native simulator's captured generated-deck dependency evidence.
+// The request is read-only and remains bound to one process-owned job.
+message NativeCapabilitySimulationReadDependencies {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string job_id = 2;
+  string process_epoch = 3;
+}
+
+message NativeCapabilitySimulationDependencies {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string job_id = 2;
+  string operation_id = 3;
+  string process_epoch = 4;
+  string generated_deck_sha256 = 5;
+  bool dependency_capture_complete = 6;
+  repeated string dependency_paths = 7;
+  repeated string warnings = 8;
+}
+
 // == end ==

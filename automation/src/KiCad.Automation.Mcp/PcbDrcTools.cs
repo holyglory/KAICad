@@ -1,4 +1,7 @@
 using System.ComponentModel;
+using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Google.Protobuf;
 using Kiapi.Board.Types;
@@ -15,6 +18,7 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class PcbDrcTools(InstanceRegistry registry)
 {
+    private static readonly ConcurrentDictionary<string, CandidateReceipt> CandidateReceipts = new(StringComparer.Ordinal);
     [McpServerTool(Name = "kicad_pcb_drc_start"),
      Description("Start a revision-guarded native PCB DRC job for an explicit PCB document. Requires process epoch, document revision and operation identity; optional schematic parity checks require the exact observed schematic state. candidateRequestJson may contain explicit Track/Arc/Via items for a detached dry-run qualification; those candidates are never added to the live board. Returns a job snapshot and does not claim completion until kicad_pcb_drc_job reports a terminal result."),
      KiCadCapability("pcb", "compiled-mcp plus native-api", "process epoch, document revision, operation ID"),
@@ -22,7 +26,7 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
     public async Task<CallToolResult> Start(string instanceId, string documentJson, string operationId,
         bool refillZones, bool reportAllTrackErrors, bool testFootprints, string expectedRevisionJson,
         string processEpoch, CancellationToken cancellationToken, string? expectedSchematicStateJson = null,
-        bool allowDuplicateSheetNames = false, string? candidateRequestJson = null)
+        bool allowDuplicateSheetNames = false, string? candidateRequestJson = null, string? deleteRequestJson = null)
     {
         PcbDrcJobState? state = null;
         var response = await InstanceToolBoundary.Run(async () =>
@@ -52,8 +56,20 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                 try { candidate = BoardJson.Parser.Parse<CreateItems>(candidateRequestJson); }
                 catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException)
                 { throw new AutomationException("invalid_drc_candidate", "candidateRequestJson is not a valid board CreateItems request: " + error.Message); }
-                ValidateCandidate(candidate, document);
+                ValidateCandidate(candidate, document, allowEmpty: true);
             }
+            DeleteItems? delete = null;
+            if (!string.IsNullOrWhiteSpace(deleteRequestJson))
+            {
+                delete = BoardJson.Parser.Parse<DeleteItems>(deleteRequestJson);
+                if (delete.Header?.Document is null || !delete.Header.Document.Equals(document) || delete.ItemIds.Count == 0
+                    || delete.ItemIds.Any(item => !Guid.TryParseExact(item.Value, "D", out var id) || id == Guid.Empty)
+                    || delete.ItemIds.Select(item => item.Value).Distinct(StringComparer.Ordinal).Count() != delete.ItemIds.Count)
+                    throw new AutomationException("invalid_drc_delete_candidate", "deleteRequestJson must target this PCB with distinct canonical route IDs.");
+                candidate ??= new CreateItems { Header = new() { Document = document } };
+            }
+            if (candidate is not null && candidate.Items.Count == 0 && delete is null)
+                throw new AutomationException("invalid_drc_candidate", "A detached route check requires at least one create, replacement or removal.");
             var request = new StartPcbDrcJob
             {
                 Document = document,
@@ -67,6 +83,7 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                 AllowDuplicateSheetNames = allowDuplicateSheetNames
             };
             if (candidate is not null) request.CandidateItems.Add(candidate.Items);
+            if (delete is not null) request.DeleteItemIds.Add(delete.ItemIds);
             state = await client.InvokeAsync<StartPcbDrcJob, PcbDrcJobState>(request, cancellationToken);
             ValidateJobState(state, document, client.Epoch);
             if (state.OperationId != id || !expected.Equals(state.CheckedRevision))
@@ -76,6 +93,28 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
             if (state.CandidateDryRun != (candidate is not null)
                 || state.CandidateItemIds.Count != (candidate?.Items.Count ?? 0))
                 throw new AutomationException("invalid_drc_job_state", "Native DRC did not preserve the detached candidate identity contract.");
+            if (candidate is not null)
+            {
+                // Starting a detached candidate check records the candidate in
+                // the native job, but the start reply itself is not the native
+                // payload-comparison receipt. Read it back with the complete
+                // ordered Any payload before exposing the state so fast jobs
+                // cannot appear unverified merely because no polling round ran.
+                // The native read handler performs payload comparison from the
+                // expected-candidate field; send the same request through the
+                // typed client rather than trusting IDs or the start snapshot.
+                var verificationRequest = new NativeCapabilityPcbDrcReplacementJob
+                { Document = document, JobId = state.JobId, ProcessEpoch = client.Epoch };
+                verificationRequest.ExpectedCandidateItems.Add(candidate.Items);
+                if (delete is not null)
+                    verificationRequest.ExpectedDeleteItemIds.Add(delete.ItemIds);
+                var verified = await client.InvokeAsync<NativeCapabilityPcbDrcReplacementJob, PcbDrcJobState>(verificationRequest, cancellationToken);
+                ValidateJobState(verified, document, client.Epoch);
+                state = verified;
+                CandidateReceipts[state.JobId] = new CandidateReceipt(
+                    client.Epoch, document, expected.Clone(), CanonicalCandidate(candidate),
+                    delete?.ItemIds.Select(item => item.Value).Order(StringComparer.Ordinal).ToArray() ?? []);
+            }
             return SchematicJson.Formatter.Format(state);
         });
         return WithStructuredState(response, state);
@@ -86,7 +125,8 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
      KiCadCapability("pcb", "compiled-mcp plus native-api", "process epoch, document and job ID"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NetClassesRoundTripThroughXmlAndNativeEdits", "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public async Task<CallToolResult> Job(string instanceId, string documentJson, string jobId,
-        string processEpoch, CancellationToken cancellationToken)
+        string processEpoch, CancellationToken cancellationToken, string? candidateRequestJson = null,
+        string? deleteRequestJson = null)
     {
         PcbDrcJobState? state = null;
         var response = await InstanceToolBoundary.Run(async () =>
@@ -98,8 +138,39 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
             var client = registry.Client(instanceId);
             if (processEpoch != client.Epoch)
                 throw new AutomationException("stale_process_epoch", "The DRC job belongs to another native process epoch.");
-            state = await client.InvokeAsync<ReadPcbDrcJob, PcbDrcJobState>(new()
-                { Document = document, JobId = id, ProcessEpoch = processEpoch }, cancellationToken);
+            CreateItems? candidate = null;
+            DeleteItems? delete = null;
+            ReadPcbDrcJob read = new() { Document = document, JobId = id, ProcessEpoch = processEpoch };
+            if (!string.IsNullOrWhiteSpace(candidateRequestJson))
+            {
+                candidate = BoardJson.Parser.Parse<CreateItems>(candidateRequestJson);
+                ValidateCandidate(candidate, document, allowEmpty: true);
+                read.ExpectedCandidateItems.Add(candidate.Items);
+            }
+            if (!string.IsNullOrWhiteSpace(deleteRequestJson))
+            {
+                delete = BoardJson.Parser.Parse<DeleteItems>(deleteRequestJson);
+                if (delete.Header?.Document is null || !delete.Header.Document.Equals(document)
+                    || delete.ItemIds.Count == 0 || delete.ItemIds.Any(item => !Guid.TryParseExact(item.Value, "D", out _)))
+                    throw new AutomationException("invalid_drc_delete_candidate", "deleteRequestJson must target this PCB with canonical item IDs.");
+                candidate ??= new CreateItems { Header = new() { Document = document } };
+            }
+            if (candidate is not null && candidate.Items.Count == 0 && delete is null)
+                throw new AutomationException("invalid_drc_candidate", "An empty route candidate requires explicit removals.");
+            if (candidate is not null)
+            {
+                var replacementRead = new NativeCapabilityPcbDrcReplacementJob
+                {
+                    Document = document, JobId = id, ProcessEpoch = processEpoch
+                };
+                replacementRead.ExpectedCandidateItems.Add(candidate.Items);
+                if (delete is not null) replacementRead.ExpectedDeleteItemIds.Add(delete.ItemIds);
+                state = await client.InvokeAsync<NativeCapabilityPcbDrcReplacementJob, PcbDrcJobState>(replacementRead, cancellationToken);
+            }
+            else
+            {
+                state = await client.InvokeAsync<ReadPcbDrcJob, PcbDrcJobState>(read, cancellationToken);
+            }
             ValidateJobState(state, document, processEpoch);
             if (state.JobId != id) throw new AutomationException("invalid_drc_job_state", "Native DRC job identity mismatch.");
             return SchematicJson.Formatter.Format(state);
@@ -211,9 +282,11 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
             throw new AutomationException("invalid_drc_job_state", "Native DRC job state did not match its target, identity or terminal-state contract.");
     }
 
-    private static void ValidateCandidate(CreateItems candidate, DocumentSpecifier document)
+    private static void ValidateCandidate(CreateItems candidate, DocumentSpecifier document, bool allowEmpty = false)
     {
-        if (candidate.Header?.Document is null || !candidate.Header.Document.Equals(document) || candidate.Items.Count == 0)
+        if (candidate.Header?.Document is null || !candidate.Header.Document.Equals(document)
+            || candidate.Container is not null || candidate.Header.Container is not null || candidate.Header.FieldMask is not null
+            || (!allowEmpty && candidate.Items.Count == 0))
             throw new AutomationException("invalid_drc_candidate", "A dry-run candidate must target the exact PCB document and contain at least one item.");
         var ids = new HashSet<string>(StringComparer.Ordinal);
         foreach (var packed in candidate.Items)
@@ -244,6 +317,24 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                 throw new AutomationException("invalid_drc_candidate", "Tracks and arcs must use copper layers.");
         }
     }
+
+    internal static bool TryGetCandidateReceipt(string jobId, out string processEpoch,
+        out DocumentSpecifier document, out KiCad.Automation.Protocol.DocumentRevision revision,
+        out string candidateHash, out IReadOnlyList<string> deleteItemIds)
+    {
+        if (CandidateReceipts.TryGetValue(jobId, out CandidateReceipt? receipt))
+        {
+            processEpoch = receipt.ProcessEpoch; document = receipt.Document; revision = receipt.Revision.Clone();
+            candidateHash = receipt.CandidateHash; deleteItemIds = receipt.DeleteItemIds; return true;
+        }
+        processEpoch = ""; document = new(); revision = new(); candidateHash = ""; deleteItemIds = []; return false;
+    }
+
+    internal static string CanonicalCandidate(CreateItems candidate)
+        => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(BoardJson.Formatter.Format(candidate))));
+
+    private sealed record CandidateReceipt(string ProcessEpoch, DocumentSpecifier Document,
+        KiCad.Automation.Protocol.DocumentRevision Revision, string CandidateHash, IReadOnlyList<string> DeleteItemIds);
 
     private static void ValidateSchematicState(DocumentLifecycleState source, DocumentSpecifier board, string epoch)
     {

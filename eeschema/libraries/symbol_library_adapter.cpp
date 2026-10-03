@@ -338,7 +338,19 @@ SYMBOL_LIBRARY_ADAPTER::SAVE_T SYMBOL_LIBRARY_ADAPTER::SaveSymbol( const wxStrin
 
 void SYMBOL_LIBRARY_ADAPTER::DeleteSymbol( const wxString& aNickname, const wxString& aSymbolName )
 {
-    wxCHECK_MSG( false, /* void */, "Unimplemented!" );
+    LIBRARY_RESULT<LIB_DATA*> libResult = loadIfNeeded( aNickname );
+
+    if( !libResult.has_value() || !*libResult )
+        THROW_IO_ERROR( wxString::Format( wxS( "Unable to load symbol library '%s'" ), aNickname ) );
+
+    LIB_DATA* lib = *libResult;
+    SCH_IO* plugin = schplugin( lib );
+
+    if( !plugin )
+        THROW_IO_ERROR( wxString::Format( wxS( "Symbol library '%s' has no schematic plugin" ), aNickname ) );
+
+    std::map<std::string, UTF8> options = lib->row->GetOptionsMap();
+    plugin->DeleteSymbol( getUri( lib->row ), aSymbolName, &options );
 }
 
 

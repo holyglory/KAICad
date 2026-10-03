@@ -21,15 +21,32 @@ namespace KiCad.Automation.Mcp;
 public sealed class PcbItemTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_pcb_items_read", ReadOnly = true),
-     Description("Read explicitly typed native PCB items through KiCad's board API. requestJson is GetItems protobuf JSON and may select footprints, pads, tracks, arcs, vias, zones or graphics. Any-packed board fields are preserved; this does not infer routing or claim DRC freshness."),
-     KiCadCapability("pcb", "native-board-api", "explicit board document"),
+     Description("Read explicitly typed native PCB items through KiCad's board API at one exact lifecycle checkpoint. requestJson is GetItems protobuf JSON and may select footprints, pads, tracks, arcs, vias, zones or graphics; expectedStateJson must be the matching kicad_document_state observation. Any-packed board fields are preserved; this does not infer routing or claim DRC freshness."),
+     KiCadCapability("pcb", "native-board-api", "explicit board document, process epoch, lifecycle state"),
      KiCadVerification(KiCadVerificationLevel.NativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
-    public Task<CallToolResult> Read(string instanceId, string requestJson, CancellationToken cancellationToken) => Execute(async () =>
+    public Task<CallToolResult> Read(string instanceId, string requestJson, string expectedStateJson, CancellationToken cancellationToken) => Execute(async () =>
     {
         var request = BoardJson.Parser.Parse<GetItems>(requestJson);
         ValidateHeader(request.Header, requireItems: false);
-        var result = await registry.Client(instanceId).InvokeAsync<GetItems, GetItemsResponse>(request, cancellationToken);
-        return Data(new { instanceId, status = result.Status.ToString(), response = JsonDocument.Parse(BoardJson.Formatter.Format(result)).RootElement.Clone() });
+        var expected = SchematicJson.Parser.Parse<DocumentLifecycleState>(expectedStateJson);
+        if (expected.Scope != DocumentLifecycleScope.DlsPcb || !expected.Document.Equals(request.Header.Document)
+            || string.IsNullOrWhiteSpace(expected.ProcessEpoch))
+            throw new AutomationException("invalid_pcb_state", "The expected state must identify the same PCB and native process epoch.");
+        var client = registry.Client(instanceId); var session = await client.HandshakeAsync(cancellationToken);
+        if (session.Epoch != expected.ProcessEpoch)
+            throw new AutomationException("pcb_instance_changed", "The expected PCB state belongs to another native process epoch.");
+        var before = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
+            new() { Document = request.Header.Document }, cancellationToken);
+        if (!before.Equals(expected))
+            throw new AutomationException("pcb_state_changed", "The PCB changed before the item read; inspect it again.");
+        var result = await client.InvokeAsync<GetItems, GetItemsResponse>(request, cancellationToken);
+        var after = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
+            new() { Document = request.Header.Document }, cancellationToken);
+        if (!after.Equals(expected))
+            throw new AutomationException("pcb_items_state_changed", "The board changed while reading; discard the item snapshot.");
+        return Data(new { instanceId, processEpoch = session.Epoch, status = result.Status.ToString(),
+            beforeState = SchematicJson.Formatter.Format(before), afterState = SchematicJson.Formatter.Format(after),
+            response = JsonDocument.Parse(BoardJson.Formatter.Format(result)).RootElement.Clone(), boardMutation = false });
     });
 
     [McpServerTool(Name = "kicad_pcb_items_create"),
@@ -46,72 +63,60 @@ public sealed class PcbItemTools(InstanceRegistry registry)
     public Task<CallToolResult> Update(string instanceId, string requestJson, string expectedStateJson,
         CancellationToken cancellationToken) => Mutate<UpdateItems, UpdateItemsResponse>(instanceId, requestJson, expectedStateJson, cancellationToken);
 
-    /// <summary>Atomic route-candidate commit used by the task-oriented routing tool.</summary>
-    internal Task<CallToolResult> CommitRouteCandidate(string instanceId, string requestJson,
-        string expectedStateJson, string operationId, CancellationToken cancellationToken) =>
-        Execute(() => CommitRouteCore(instanceId, requestJson, expectedStateJson, operationId, cancellationToken));
+    [McpServerTool(Name = "kicad_pcb_items_delete"),
+     Description("Delete explicitly identified native PCB items in one undoable lifecycle-guarded transaction. requestJson is DeleteItems protobuf JSON with an explicit PCB ItemHeader and KIID item_ids; expectedStateJson is the matching kicad_document_state observation. Every deletion must be acknowledged by KiCad before the transaction commits; stale state, nonexistent items or transport loss never reports success."),
+     KiCadCapability("pcb", "native-board-api", "board lifecycle state, typed item IDs, native undo transaction"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> Delete(string instanceId, string requestJson, string expectedStateJson,
+        CancellationToken cancellationToken) => Execute(() => DeleteCore(instanceId, requestJson, expectedStateJson, cancellationToken));
 
-    private async Task<CallToolResult> CommitRouteCore(string instanceId, string requestJson,
-        string expectedStateJson, string operationId, CancellationToken cancellationToken)
+    private async Task<CallToolResult> DeleteCore(string instanceId, string requestJson, string expectedStateJson,
+        CancellationToken cancellationToken)
     {
-        if (!Guid.TryParseExact(operationId, "D", out var operation) || operation == Guid.Empty)
-            throw new AutomationException("invalid_route_operation", "Route commit requires a canonical operation UUID.");
-        var request = BoardJson.Parser.Parse<CreateItems>(requestJson);
+        var request = BoardJson.Parser.Parse<DeleteItems>(requestJson);
         ValidateHeader(request.Header, requireItems: true);
-        if (request.Items.Count == 0) throw new AutomationException("invalid_route_commit", "Supply route candidate items.");
-        for (int index = 0; index < request.Items.Count; index++)
-        {
-            var item = request.Items[index];
-            if (item.Is(Track.Descriptor))
-            {
-                var value = item.Unpack<Track>(); AddRouteOperation(value.CustomProperties, operationId);
-                request.Items[index] = Any.Pack(value);
-            }
-            else if (item.Is(Arc.Descriptor))
-            {
-                var value = item.Unpack<Arc>(); AddRouteOperation(value.CustomProperties, operationId);
-                request.Items[index] = Any.Pack(value);
-            }
-            else if (item.Is(Via.Descriptor))
-            {
-                var value = item.Unpack<Via>(); AddRouteOperation(value.CustomProperties, operationId);
-                request.Items[index] = Any.Pack(value);
-            }
-            else throw new AutomationException("invalid_route_commit", "Only Track, Arc and Via candidates may be committed.");
-        }
+        if (request.ItemIds.Count == 0 || request.ItemIds.Any(id => !Guid.TryParseExact(id.Value, "D", out var value) || value == Guid.Empty))
+            throw new AutomationException("invalid_pcb_item_request", "Supply one or more canonical PCB item KIIDs to delete.");
         var expected = SchematicJson.Parser.Parse<DocumentLifecycleState>(expectedStateJson);
-        var client = registry.Client(instanceId);
-        var session = await client.HandshakeAsync(cancellationToken);
-        if (expected.ProcessEpoch != session.Epoch) throw new AutomationException("pcb_instance_changed", "The route checkpoint belongs to another process epoch.");
-        var current = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(new() { Document = request.Header.Document }, cancellationToken);
-        if (!current.Equals(expected))
+        if (expected.Scope != DocumentLifecycleScope.DlsPcb)
+            throw new AutomationException("invalid_pcb_state", "The expected state must be a PCB lifecycle observation.");
+        var client = registry.Client(instanceId); var session = await client.HandshakeAsync(cancellationToken);
+        if (expected.ProcessEpoch != session.Epoch)
+            throw new AutomationException("pcb_instance_changed", "The expected PCB state belongs to another native process epoch.");
+        var admission = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
+            new() { Document = request.Header.Document }, cancellationToken);
+        if (!admission.Equals(expected))
+            throw new AutomationException("pcb_state_changed", "The board changed before the delete transaction could be admitted; inspect it again.");
+        var begin = await client.InvokeAsync<BeginCommit, BeginCommitResponse>(new() { Header = request.Header }, cancellationToken);
+        bool committed = false;
+        try
         {
-            var ids = request.Items.Select(item => item.Is(Track.Descriptor) ? item.Unpack<Track>().Id.Value
-                : item.Is(Arc.Descriptor) ? item.Unpack<Arc>().Id.Value : item.Unpack<Via>().Id.Value).ToArray();
-            var existing = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
-            { Header = new() { Document = request.Header.Document }, Items = { ids.Select(id => new KIID { Value = id }) } }, cancellationToken);
-            if (existing.Items.Count != ids.Length || existing.Items.Any(item => !HasRouteOperation(item, operationId)))
-                throw new AutomationException("pcb_state_changed", "The route checkpoint is stale and no matching committed operation receipt was found.");
-            return Data(new { instanceId, processEpoch = session.Epoch, afterState = SchematicJson.Formatter.Format(current),
-                mutationConfirmed = true, replayed = true, atomicTransaction = true });
+            var before = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
+                new() { Document = request.Header.Document }, cancellationToken);
+            if (!before.Equals(expected))
+                throw new AutomationException("pcb_state_changed", "The board changed before the delete transaction was admitted; inspect it again.");
+            var result = await client.InvokeAsync<DeleteItems, DeleteItemsResponse>(request, cancellationToken);
+            if (result.DeletedItems.Any(item => item.Status != ItemDeletionStatus.IdsOk))
+                throw new AutomationException("pcb_item_transaction_rejected", "The native board rejected one or more deletions; the staged transaction was dropped.");
+            await client.InvokeAsync<EndCommit, EndCommitResponse>(new()
+            { Id = begin.Id, Action = CommitAction.CmaCommit, Header = request.Header, Message = "MCP PCB item deletion" }, cancellationToken);
+            committed = true;
+            var after = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
+                new() { Document = request.Header.Document }, cancellationToken);
+            return Data(new { instanceId, processEpoch = session.Epoch,
+                beforeState = SchematicJson.Formatter.Format(before), afterState = SchematicJson.Formatter.Format(after),
+                response = JsonDocument.Parse(BoardJson.Formatter.Format(result)).RootElement.Clone(),
+                mutationConfirmed = true, atomicTransaction = true });
         }
-        return await Mutate<CreateItems, CreateItemsResponse>(instanceId, BoardJson.Formatter.Format(request), expectedStateJson, cancellationToken);
-    }
-
-    private static void AddRouteOperation(Google.Protobuf.Collections.RepeatedField<CustomProperty> properties, string operationId)
-    {
-        var existing = properties.FirstOrDefault(p => p.Key == "kicad.ai.route_commit.operation_id");
-        if (existing is not null && existing.Value != operationId)
-            throw new AutomationException("route_operation_conflict", "The candidate already carries another route operation ID.");
-        if (existing is null) properties.Add(new CustomProperty { Key = "kicad.ai.route_commit.operation_id", Value = operationId });
-    }
-
-    private static bool HasRouteOperation(Any packed, string operationId)
-    {
-        var properties = packed.Is(Track.Descriptor) ? packed.Unpack<Track>().CustomProperties
-            : packed.Is(Arc.Descriptor) ? packed.Unpack<Arc>().CustomProperties
-            : packed.Is(Via.Descriptor) ? packed.Unpack<Via>().CustomProperties : [];
-        return properties.Any(p => p.Key == "kicad.ai.route_commit.operation_id" && p.Value == operationId);
+        finally
+        {
+            if (!committed)
+            {
+                try { await client.InvokeAsync<EndCommit, EndCommitResponse>(new()
+                    { Id = begin.Id, Action = CommitAction.CmaDrop, Header = request.Header }, CancellationToken.None); }
+                catch { /* Preserve the original failure; native state must be inspected. */ }
+            }
+        }
     }
 
     [McpServerTool(Name = "kicad_pcb_guide_create"),
@@ -202,7 +207,7 @@ public sealed class PcbItemTools(InstanceRegistry registry)
             return await Mutate<CreateItems, CreateItemsResponse>(instanceId, BoardJson.Formatter.Format(request), expectedStateJson, cancellationToken);
         }
         catch (Exception error) when (error is AutomationException or NativeApiException or NngException or IOException
-            or UnauthorizedAccessException or ArgumentException or InvalidProtocolBufferException or InvalidJsonException)
+            or UnauthorizedAccessException or ArgumentException or InvalidProtocolBufferException or InvalidJsonException or InvalidOperationException)
         { return Data(new { errorCode = error is AutomationException known ? known.Code : "pcb_svg_guide_failed", errorMessage = error.Message }, true); }
     }
 
@@ -543,7 +548,7 @@ public sealed class PcbItemTools(InstanceRegistry registry)
     {
         try { return await action(); }
         catch (Exception error) when (error is AutomationException or NativeApiException or NngException or IOException
-            or UnauthorizedAccessException or ArgumentException or InvalidProtocolBufferException or InvalidJsonException)
+            or UnauthorizedAccessException or ArgumentException or InvalidProtocolBufferException or InvalidJsonException or InvalidOperationException)
         { return Data(new { errorCode = error is AutomationException known ? known.Code : "pcb_item_operation_failed", errorMessage = error.Message }, true); }
     }
 }

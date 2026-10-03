@@ -19,7 +19,11 @@
  */
 
 #include <magic_enum.hpp>
+#include <map>
 #include <memory>
+#include <optional>
+#include <set>
+#include <unordered_map>
 #include <properties/property.h>
 
 #include <common.h>
@@ -32,11 +36,13 @@
 #include <api/native_state_digest.h>
 #include <google/protobuf/util/message_differencer.h>
 #include <api/native_file_observation.h>
+#include <api/document_lifecycle_controller.h>
 #include <project/project_file.h>
 #include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
 #include <json_common.h>
 #include <api/cross_probe_client.h>
 #include <wx/log.h>
+#include <wx/weakref.h>
 #include <base_screen.h>
 #include <board_commit.h>
 #include <board_connected_item.h>
@@ -62,6 +68,7 @@
 #include <pcb_track.h>
 #include <pcbnew_id.h>
 #include <pcbnew_settings.h>
+#include <pcb_project_editor_state.h>
 #include <pcb_marker.h>
 #include <pcb_point.h>
 #include <kiway.h>
@@ -98,6 +105,7 @@
 #include <router/pns_segment.h>
 #include <router/pns_arc.h>
 #include <router/pns_via.h>
+#include <router/pns_diff_pair.h>
 #include <router/pns_line.h>
 #include <router/pns_routing_settings.h>
 #include <pcbnew_settings.h>
@@ -132,6 +140,7 @@ API_HANDLER_PCB::API_HANDLER_PCB( std::shared_ptr<PCB_CONTEXT> aContext, PCB_EDI
         API_HANDLER_BOARD( std::move( aContext ), aFrame ),
         m_drcJobs( [this]( BOARD& source ) { return observeDrcAuxiliary( source ); } )
 {
+    refreshCustomRulesBaseline();
     // Only the editor frame detaches before it replaces or destroys its board.
     if( aFrame )
     {
@@ -154,10 +163,18 @@ API_HANDLER_PCB::API_HANDLER_PCB( std::shared_ptr<PCB_CONTEXT> aContext, PCB_EDI
             &API_HANDLER_PCB::handleStartDrcJob );
     registerHandler<kiapi::automation::v1::ReadPcbDrcJob, kiapi::automation::v1::PcbDrcJobState>(
             &API_HANDLER_PCB::handleReadDrcJob );
+    registerHandler<kiapi::automation::v1::NativeCapabilityPcbDrcReplacementJob, kiapi::automation::v1::PcbDrcJobState>(
+            &API_HANDLER_PCB::handleReadDrcReplacementJob );
     registerHandler<kiapi::automation::v1::CancelPcbDrcJob, kiapi::automation::v1::PcbDrcJobState>(
             &API_HANDLER_PCB::handleCancelDrcJob );
     registerHandler<kiapi::automation::v1::StartPcbRoutePreview, kiapi::automation::v1::PcbRoutePreviewState>(
             &API_HANDLER_PCB::handleRoutePreview );
+    registerHandler<kiapi::automation::v1::NativeCapabilityRoutePreviewContinue, kiapi::automation::v1::PcbRoutePreviewState>(
+            &API_HANDLER_PCB::handleContinueRoutePreview );
+    registerHandler<kiapi::automation::v1::NativeCapabilityRoutePreviewCancel, kiapi::automation::v1::PcbRoutePreviewState>(
+            &API_HANDLER_PCB::handleCancelRoutePreview );
+    registerHandler<kiapi::automation::v1::NativeCapabilityRoutePreviewRead, kiapi::automation::v1::PcbRoutePreviewState>(
+            &API_HANDLER_PCB::handleReadRoutePreview );
     registerHandler<SaveCopyOfDocument, Empty>( &API_HANDLER_PCB::handleSaveCopyOfDocument );
     registerHandler<RevertDocument, Empty>( &API_HANDLER_PCB::handleRevertDocument );
 
@@ -184,6 +201,9 @@ API_HANDLER_PCB::API_HANDLER_PCB( std::shared_ptr<PCB_CONTEXT> aContext, PCB_EDI
             &API_HANDLER_PCB::handleGetNetClassForNets );
     registerHandler<RefillZones, Empty>( &API_HANDLER_PCB::handleRefillZones );
     registerHandler<ImportNetlist, ImportNetlistResponse>( &API_HANDLER_PCB::handleImportNetlist );
+    registerHandler<kiapi::automation::v1::NativeCapabilityPcbReadOperation,
+                    kiapi::automation::v1::NativeCapabilityPcbReadOperationResponse>(
+            &API_HANDLER_PCB::handleReadPcbOperation );
 
     registerHandler<GetBoardEditorAppearanceSettings, BoardEditorAppearanceSettings>(
             &API_HANDLER_PCB::handleGetBoardEditorAppearanceSettings );
@@ -229,6 +249,67 @@ API_HANDLER_PCB::API_HANDLER_PCB( std::shared_ptr<PCB_CONTEXT> aContext, PCB_EDI
     registerHandler<CrossProbeAnnounce, CrossProbeAnnounceResponse>( &API_HANDLER_PCB::handleCrossProbeAnnounce );
     registerHandler<SyncSelection, SyncSelectionResponse>( &API_HANDLER_PCB::handleSyncSelection );
     registerHandler<HighlightNets, HighlightNetsResponse>( &API_HANDLER_PCB::handleHighlightNets );
+}
+
+
+struct API_HANDLER_PCB::ROUTE_PREVIEW_SESSION
+{
+    std::string operationId;
+    kiapi::common::types::DocumentSpecifier document;
+    kiapi::automation::v1::DocumentRevision expectedRevision;
+    std::string processEpoch;
+    std::unique_ptr<TOOL_MANAGER> manager;
+    GENERATOR_TOOL* generator = nullptr; // owned by manager
+    kiapi::automation::v1::PcbRoutePreviewState lastState;
+    bool active = false;
+    bool terminal = false;
+    bool cancelled = false;
+    uint32_t waypointCount = 0;
+};
+
+
+API_HANDLER_PCB::~API_HANDLER_PCB()
+{
+    clearRoutePreviewSessions();
+}
+
+
+void API_HANDLER_PCB::clearRoutePreviewSessions()
+{
+    for( auto& [unused, session] : m_routePreviewSessions )
+    {
+        if( session && session->generator && session->generator->Router()
+            && session->generator->Router()->RoutingInProgress() )
+            session->generator->Router()->StopRouting();
+
+        if( session )
+        {
+            if( session->active )
+            {
+                session->lastState.set_session_active( false );
+                session->lastState.set_reconciled( true );
+                session->lastState.set_error_code( "route_preview_stale" );
+                session->lastState.set_error_message( "The PCB changed while the native route preview session was active" );
+            }
+            session->active = false;
+            session->terminal = true;
+        }
+    }
+}
+
+
+void API_HANDLER_PCB::refreshCustomRulesBaseline()
+{
+    BOARD* current = board();
+    const wxString path = current ? current->GetDesignRulesPath() : wxString();
+
+    if( current && FILE_CONTENT_BASELINE::SamePath( path, current->CustomRulesFileBaseline().Path() )
+        && current->CustomRulesFileBaseline().Known() )
+        return;
+
+    const FILE_CONTENT_BASELINE baseline = path.empty() ? FILE_CONTENT_BASELINE{} : FILE_CONTENT_BASELINE::Read( path );
+    if( current )
+        current->SetCustomRulesFileBaseline( baseline );
 }
 
 
@@ -290,18 +371,46 @@ HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> API_HANDLER_PCB::h
         PCB_IO_KICAD_SEXPR writer;
         writer.FormatBoardToFormatter( &content, board(), nullptr, false );
         digest.Add( "board", content );
-        settings.Append( ( frame() ? frame()->CaptureProjectEditorState()
-                                  : project().GetProjectFile().CaptureCurrentState() ).dump() );
+        const nlohmann::json projectState = frame()
+                ? frame()->CaptureProjectEditorState()
+                : PCB_PROJECT_EDITOR_STATE::Capture( *board(), project().GetProjectFile(),
+                                                     project().GetProjectFile().m_LayerPresets,
+                                                     project().GetProjectFile().m_Viewports );
+        settings.Append( projectState.dump() );
+        refreshCustomRulesBaseline();
+        const wxString rulesPath = board()->GetDesignRulesPath();
+        if( !rulesPath.empty() )
+        {
+            const FILE_CONTENT_BASELINE currentRules = FILE_CONTENT_BASELINE::Read( rulesPath );
+            const FILE_CONTENT_BASELINE& trustedRules = board()->CustomRulesFileBaseline();
+            if( !trustedRules.Known() || !currentRules.Known() )
+                throw std::runtime_error( "Cannot observe PCB custom rules" );
+            NATIVE_STATE_DIGEST ruleContent;
+            // Keep the sidecar in the same lifecycle file set as the board and
+            // project settings.  The digest prevents stale admission while the
+            // explicit baseline lets save/route checks explain an external edit.
+            const wxString observedRulesPath = currentRules.Path();
+            ruleContent.Append( observedRulesPath.ToStdString( wxConvUTF8 ) );
+            ruleContent.Append( currentRules.Exists() ? "present" : "absent" );
+            ruleContent.Append( currentRules.Sha256() );
+            digest.Add( "custom-rules", ruleContent );
+            result.add_native_files( observedRulesPath.ToStdString( wxConvUTF8 ) );
+            result.add_file_baselines()->CopyFrom( ObserveNativeFile( observedRulesPath, trustedRules ) );
+        }
         digest.Add( "project-settings", settings );
         result.set_project_settings_included( true );
-        result.set_complete_change_tracking( false );
-        result.set_disk_baseline_checked( false );
         result.add_native_files( project().AbsolutePath( board()->GetFileName() ).ToStdString( wxConvUTF8 ) );
         result.add_native_files( project().GetProjectFullName().ToStdString( wxConvUTF8 ) );
         result.add_file_baselines()->CopyFrom( ObserveNativeFile(
                 project().AbsolutePath( board()->GetFileName() ), board()->FileBaseline() ) );
         result.add_file_baselines()->CopyFrom( ObserveNativeFile(
                 project().GetProjectFullName(), project().GetProjectFile().FileBaseline() ) );
+        // The serialized projection and retained sidecar baselines are exposed
+        // for checked route admission. The numeric BOARD timestamp remains a
+        // cache invalidation cursor; it is not universal mutation tracking.
+        const bool baselineChecked = DOCUMENT_LIFECYCLE_CONTROLLER::HasUnchangedFileBaselines( result );
+        result.set_disk_baseline_checked( baselineChecked );
+        result.set_complete_change_tracking( false );
         result.set_state_sha256( digest.Hex() );
         if( result.native_identity() != board()->m_Uuid.AsStdString() || sequence != board()->GetTimeStamp() )
         {
@@ -537,6 +646,42 @@ HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleRea
     return *read;
 }
 
+
+HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleReadDrcReplacementJob(
+        const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityPcbDrcReplacementJob>& aCtx )
+{
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+
+    kiapi::automation::v1::ReadPcbDrcJob base;
+    base.mutable_document()->CopyFrom( aCtx.Request.document() );
+    base.set_job_id( aCtx.Request.job_id() );
+    base.set_process_epoch( aCtx.Request.process_epoch() );
+    base.mutable_expected_candidate_items()->CopyFrom( aCtx.Request.expected_candidate_items() );
+    auto read = m_drcJobs.Read( base, *board(), apiServer().Token(),
+            [this]( const auto& document ) { return observeDrcSchematic( document ); },
+            [this]( BOARD& source ) { return observeDrcLibraries( source ); }, true );
+    if( !read )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( read.error() );
+        return tl::unexpected( error );
+    }
+    auto deletes = m_drcJobs.VerifyDeleteItems( aCtx.Request.job_id(), apiServer().Token(),
+                                                 aCtx.Request.document(),
+                                                 aCtx.Request.expected_delete_item_ids() );
+    if( !deletes )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( deletes.error() );
+        return tl::unexpected( error );
+    }
+    read->set_candidate_payload_verified( true );
+    return *read;
+}
+
 HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleCancelDrcJob(
         const HANDLER_CONTEXT<kiapi::automation::v1::CancelPcbDrcJob>& aCtx )
 {
@@ -566,6 +711,152 @@ ApiResponseStatus RoutePreviewError( const std::string& aMessage,
     error.set_error_message( aMessage );
     return error;
 }
+
+
+kiapi::automation::v1::DocumentRevision CurrentRoutePreviewRevision( const BOARD& aBoard )
+{
+    kiapi::automation::v1::DocumentRevision revision;
+    revision.set_epoch( aBoard.m_Uuid.AsStdString() );
+    revision.set_sequence( static_cast<uint64_t>( aBoard.GetTimeStamp() ) );
+    return revision;
+}
+
+
+bool RoutePreviewRevisionMatches( const BOARD& aBoard,
+                                  const kiapi::automation::v1::DocumentRevision& aExpected )
+{
+    return aExpected.epoch() == aBoard.m_Uuid.AsStdString()
+        && aExpected.sequence() == static_cast<uint64_t>( aBoard.GetTimeStamp() );
+}
+}
+
+
+
+
+static HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> ExtractRoutePreviewGeometry(
+        const std::string& operationId, PNS_KICAD_IFACE* iface,
+        const std::vector<std::unique_ptr<PNS::ITEM>>& removedSnapshot,
+        const std::vector<std::unique_ptr<PNS::ITEM>>& addedSnapshot,
+        kiapi::automation::v1::PcbRoutePreviewState response )
+{
+    response.set_operation_id( operationId );
+    auto reject = [&]( const char* code, const std::string& message )
+            -> HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState>
+    {
+        response.clear_route_items(); response.clear_replacement_updates(); response.clear_removed_item_ids();
+        response.set_completed( false ); response.set_error_code( code ); response.set_error_message( message );
+        return response;
+    };
+    std::vector<PNS::ITEM*> removed, added, deleted, created, updated;
+    auto auxiliary = []( PNS::ITEM* item )
+    {
+        return item->IsVirtual() || ( item->OfKind( PNS::ITEM::HOLE_T ) && item->ParentPadVia() );
+    };
+    std::set<std::string> displacedIds;
+    for( const auto& item : removedSnapshot )
+    {
+        if( auxiliary( item.get() ) || !item->Parent() )
+            continue;
+        BOARD_ITEM* parent = item->Parent();
+        if( parent->m_Uuid == niluuid || !parent->IsType( { PCB_TRACE_T, PCB_ARC_T, PCB_VIA_T } ) )
+            return reject( "route_delta_removed_geometry_unsupported", "The complete native route delta removes unsupported board geometry" );
+        displacedIds.insert( parent->m_Uuid.AsStdString() );
+        removed.push_back( item.get() );
+    }
+    for( const auto& item : addedSnapshot )
+        if( !auxiliary( item.get() ) )
+            added.push_back( item.get() );
+
+    PNS::ROUTER::PartitionRoutingChanges( removed, added, deleted, created, updated );
+    response.set_operation_id( operationId );
+    for( const auto& id : displacedIds )
+        response.add_removed_item_ids()->set_value( id );
+
+    auto geometry = [&]( PNS::ITEM* item, bool preserveIdentity )
+            -> std::unique_ptr<BOARD_CONNECTED_ITEM>
+    {
+        if( !item || item->Layers().Start() < 0 || item->Layers().End() < item->Layers().Start()
+            || iface->GetNetCode( item->Net() ) <= 0
+            || !IsCopperLayer( iface->GetBoardLayerFromPNSLayer( item->Layers().Start() ) )
+            || !IsCopperLayer( iface->GetBoardLayerFromPNSLayer( item->Layers().End() ) ) )
+            return nullptr;
+        if( PNS::VIA::ClassOf( item ) )
+        {
+            auto* via = static_cast<PNS::VIA*>( item );
+            if( via->Drill() <= 0 || via->Diameter( via->Layers().Start() ) <= via->Drill() )
+                return nullptr;
+        }
+        else if( PNS::SEGMENT::ClassOf( item ) )
+        {
+            if( static_cast<PNS::SEGMENT*>( item )->Width() <= 0 )
+                return nullptr;
+        }
+        else if( PNS::ARC::ClassOf( item ) )
+        {
+            if( static_cast<PNS::ARC*>( item )->Width() <= 0 )
+                return nullptr;
+        }
+        else
+            return nullptr;
+        return iface->MaterializeRouteItem( item, preserveIdentity );
+    };
+    kiapi::common::commands::UpdateItems updates;
+    updates.mutable_header()->mutable_document()->CopyFrom( response.document() );
+    std::set<std::string> updatedIds;
+    for( PNS::ITEM* item : updated )
+    {
+        auto value = geometry( item, true );
+        if( !value || !updatedIds.insert( value->m_Uuid.AsStdString() ).second )
+            return reject( "route_delta_replacement_invalid", "The complete native route delta cannot preserve a replacement identity" );
+        value->Serialize( *updates.add_items() );
+    }
+    if( updates.items_size() )
+        response.mutable_replacement_updates()->CopyFrom( updates );
+
+    // Canonical geometry order makes the operation-derived create identities
+    // stable. The retained response is reused by session reads and never
+    // reconstructs IDs from a volatile leader or an unordered NODE index.
+    std::vector<std::pair<std::string, google::protobuf::Any>> creates;
+    for( PNS::ITEM* item : created )
+    {
+        BOARD_ITEM* source = item->Parent() ? item->Parent() : item->GetSourceItem();
+        if( source && source->GetParentGroup() )
+            return reject( "route_delta_group_membership_unsupported",
+                           "The route delta creates grouped-source copper whose membership cannot yet be preserved" );
+        auto value = geometry( item, false );
+        if( !value )
+            return reject( "route_delta_added_geometry_unsupported", "The complete native route delta contains unsupported added or unassigned geometry" );
+        value->SetUuidDirect( niluuid );
+        google::protobuf::Any serialized;
+        value->Serialize( serialized );
+        creates.emplace_back( serialized.SerializeAsString(), std::move( serialized ) );
+    }
+    std::sort( creates.begin(), creates.end(), []( const auto& a, const auto& b ) { return a.first < b.first; } );
+    for( size_t index = 0; index < creates.size(); ++index )
+    {
+        const std::string id = KIID::FromName( operationId + "-preview-create-" + std::to_string( index ) ).AsStdString();
+        google::protobuf::Any& value = creates[index].second;
+        if( value.Is<kiapi::board::types::Track>() )
+        {
+            kiapi::board::types::Track track;
+            value.UnpackTo( &track ); track.mutable_id()->set_value( id ); value.PackFrom( track );
+        }
+        else if( value.Is<kiapi::board::types::Arc>() )
+        {
+            kiapi::board::types::Arc arc;
+            value.UnpackTo( &arc ); arc.mutable_id()->set_value( id ); value.PackFrom( arc );
+        }
+        else
+        {
+            kiapi::board::types::Via via;
+            value.UnpackTo( &via ); via.mutable_id()->set_value( id ); value.PackFrom( via );
+        }
+        response.add_route_items()->CopyFrom( value );
+    }
+    if( creates.empty() && updates.items_size() == 0 && deleted.empty() )
+        return reject( "route_delta_empty", "The native router produced no actionable complete delta" );
+    response.set_complete_delta_version( 1 );
+    return response;
 }
 
 
@@ -601,12 +892,75 @@ HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> API_HANDLER_PCB::han
     if( !startBoardItem || !startBoardItem->IsConnected() )
         return tl::unexpected( RoutePreviewError( "The route preview start item is not a connected board object" ) );
 
+    if( request.persistent_session() )
+    {
+        if( request.differential_pair() )
+            return tl::unexpected( RoutePreviewError(
+                    "Persistent differential-pair preview sessions are unavailable; use the bounded preview" ,
+                    ApiStatusCode::AS_UNIMPLEMENTED ) );
+        if( m_routePreviewSessions.contains( request.operation_id() ) )
+            return tl::unexpected( RoutePreviewError( "The route preview operation ID already identifies a session" ) );
+        if( m_routePreviewSessions.size() >= 256 )
+            return tl::unexpected( RoutePreviewError( "The native route preview session limit has been reached" ) );
+
+        PCBNEW_SETTINGS* settings = frame() ? frame()->GetPcbNewSettings() : nullptr;
+        if( !settings || !settings->m_PnsSettings )
+            return tl::unexpected( RoutePreviewError( "Native routing settings are unavailable",
+                                                       ApiStatusCode::AS_UNIMPLEMENTED ) );
+
+        auto session = std::make_unique<ROUTE_PREVIEW_SESSION>();
+        session->operationId = request.operation_id();
+        session->document.CopyFrom( request.document() );
+        session->expectedRevision.CopyFrom( request.expected_revision() );
+        session->processEpoch = request.process_epoch();
+        session->manager = std::make_unique<TOOL_MANAGER>();
+        session->manager->SetEnvironment( target, nullptr, nullptr, nullptr, nullptr );
+        auto snapshot = std::make_unique<PNS::ROUTING_SETTINGS>( nullptr,
+                                                                  settings->m_PnsSettings->GetPath() );
+        settings->m_PnsSettings->CopyCurrentStateTo( *snapshot );
+        if( request.push_and_shove() )
+            snapshot->SetMode( PNS::RM_Shove );
+        session->generator = new GENERATOR_TOOL( false );
+        session->manager->RegisterTool( session->generator );
+        try
+        {
+            session->generator->InitializeSnapshot( std::move( snapshot ) );
+        }
+        catch( const std::exception& error )
+        {
+            return tl::unexpected( RoutePreviewError( error.what() ) );
+        }
+
+        PNS::ROUTER* router = session->generator->Router();
+        PNS_KICAD_IFACE* iface = session->generator->GetInterface();
+        router->SetPreviewCapture( true );
+        PNS::ITEM* startItem = router->GetWorld()->FindItemByParent( startBoardItem );
+        if( !startItem )
+            return tl::unexpected( RoutePreviewError( "The start item is not available in the native router world" ) );
+        const VECTOR2I start( request.start().x_nm(), request.start().y_nm() );
+        const int pnsLayer = iface->GetPNSLayerFromBoardLayer( boardLayer );
+        PNS::SIZES_SETTINGS sizes( router->Sizes() );
+        if( !iface->ImportSizes( sizes, startItem, nullptr, start ) )
+            return tl::unexpected( RoutePreviewError( "The native router could not resolve track and via sizes" ) );
+        router->UpdateSizes( sizes );
+        router->SetMode( PNS::PNS_MODE_ROUTE_SINGLE );
+        if( !router->StartRouting( start, startItem, pnsLayer ) )
+            return tl::unexpected( RoutePreviewError( router->FailureReason().ToStdString() ) );
+
+        session->active = true;
+        auto* sessionPtr = session.get();
+        m_routePreviewSessions.emplace( request.operation_id(), std::move( session ) );
+        return advanceRoutePreviewSession( *sessionPtr, request.waypoints(), request.force_finish() );
+    }
+
     PCBNEW_SETTINGS* pcbSettings = frame() ? frame()->GetPcbNewSettings() : nullptr;
     if( !pcbSettings || !pcbSettings->m_PnsSettings )
         return tl::unexpected( RoutePreviewError( "Native routing settings are unavailable", ApiStatusCode::AS_UNIMPLEMENTED ) );
     auto snapshotSettings = std::make_unique<PNS::ROUTING_SETTINGS>( nullptr,
                                                                        pcbSettings->m_PnsSettings->GetPath() );
     pcbSettings->m_PnsSettings->CopyCurrentStateTo( *snapshotSettings );
+    if( request.push_and_shove() )
+        snapshotSettings->SetMode( PNS::RM_Shove );
     TOOL_MANAGER previewManager;
     previewManager.SetEnvironment( target, nullptr, nullptr, nullptr, nullptr );
     auto* generatorTool = new GENERATOR_TOOL( false );
@@ -616,6 +970,7 @@ HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> API_HANDLER_PCB::han
     { return tl::unexpected( RoutePreviewError( error.what() ) ); }
     PNS::ROUTER* router = generatorTool->Router();
     PNS_KICAD_IFACE* iface = generatorTool->GetInterface();
+    router->SetPreviewCapture( true );
     PNS::ITEM* startItem = router->GetWorld()->FindItemByParent( startBoardItem );
     if( !startItem )
         return tl::unexpected( RoutePreviewError( "The start item is not available in the native router world" ) );
@@ -625,11 +980,15 @@ HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> API_HANDLER_PCB::han
     if( !iface->ImportSizes( sizes, startItem, nullptr, start ) )
         return tl::unexpected( RoutePreviewError( "The native router could not resolve track and via sizes" ) );
     router->UpdateSizes( sizes );
-    router->SetMode( PNS::PNS_MODE_ROUTE_SINGLE );
+    router->SetMode( request.differential_pair() ? PNS::PNS_MODE_ROUTE_DIFF_PAIR : PNS::PNS_MODE_ROUTE_SINGLE );
     if( !router->StartRouting( start, startItem, pnsLayer ) )
         return tl::unexpected( RoutePreviewError( router->FailureReason().ToStdString() ) );
 
     std::string failure;
+    // Differential-pair FixRoute commits the temporary pair into the router's
+    // branch and clears its active node. Capture the heads before that cleanup
+    // so an open-ended preview can still return both P/N geometries. Single
+    // route behavior remains on the existing post-fix extraction path.
     for( int index = 0; index < request.waypoints_size(); ++index )
     {
         const VECTOR2I point( request.waypoints( index ).x_nm(), request.waypoints( index ).y_nm() );
@@ -639,7 +998,9 @@ HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> API_HANDLER_PCB::han
             break;
         }
         const bool last = index == request.waypoints_size() - 1;
-        if( last && !router->FixRoute( point, nullptr, request.force_finish(), false ) )
+        if( last && !request.force_finish() )
+            continue;
+        if( last && !router->FixRoute( point, nullptr, true, false ) )
         {
             failure = router->FailureReason().ToStdString();
             break;
@@ -647,11 +1008,14 @@ HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> API_HANDLER_PCB::han
         if( !last ) router->FixRoute( point, nullptr, false, false );
     }
 
-    std::vector<PNS::ITEM*> removed, added, heads;
-    if( failure.empty() ) router->GetUpdatedItems( removed, added, heads );
-    router->StopRouting();
-    if( !failure.empty() ) return tl::unexpected( RoutePreviewError( failure ) );
-    if( heads.empty() ) return tl::unexpected( RoutePreviewError( "The native router produced no preview geometry" ) );
+    std::vector<std::unique_ptr<PNS::ITEM>> removed, added;
+    if( failure.empty() && !router->GetPreviewItems( removed, added, !request.force_finish() ) )
+        failure = "The native router could not capture the complete prospective route delta";
+    if( !failure.empty() )
+    {
+        router->StopRouting();
+        return tl::unexpected( RoutePreviewError( failure ) );
+    }
 
     PcbRoutePreviewState response;
     response.mutable_document()->CopyFrom( request.document() );
@@ -661,83 +1025,236 @@ HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> API_HANDLER_PCB::han
     response.set_completed( true );
     response.set_preview_only( true );
     response.set_native_commit( false );
-    int index = 0;
-    for( PNS::ITEM* item : heads )
+    auto extracted = ExtractRoutePreviewGeometry( request.operation_id(), iface, removed, added,
+                                                  std::move( response ) );
+    router->StopRouting();
+    if( !extracted ) return tl::unexpected( extracted.error() );
+    return *extracted;
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> API_HANDLER_PCB::advanceRoutePreviewSession(
+        ROUTE_PREVIEW_SESSION& session,
+        const google::protobuf::RepeatedPtrField<kiapi::common::types::Vector2>& waypoints,
+        bool forceFinish )
+{
+    using namespace kiapi::automation::v1;
+
+    if( !session.active || !session.generator || !session.generator->Router() )
+        return session.lastState;
+
+    BOARD* target = board();
+    PNS::ROUTER* router = session.generator->Router();
+    if( !RoutePreviewRevisionMatches( *target, session.expectedRevision ) )
     {
-        const std::string netName = iface->GetNetName( item->Net() ).ToStdString();
-        auto addSegment = [&]( const VECTOR2I& start, const VECTOR2I& end, int width, int pnsLayer )
-        {
-            kiapi::board::types::Track track;
-            track.mutable_id()->set_value( KIID::FromName( request.operation_id() + "-preview-" + std::to_string( index++ ) ).AsStdString() );
-            track.mutable_start()->set_x_nm( start.x ); track.mutable_start()->set_y_nm( start.y );
-            track.mutable_end()->set_x_nm( end.x ); track.mutable_end()->set_y_nm( end.y );
-            track.mutable_width()->set_value_nm( width );
-            track.set_layer( ToProtoEnum<PCB_LAYER_ID, BoardLayer>( iface->GetBoardLayerFromPNSLayer( pnsLayer ) ) );
-            track.mutable_net()->set_name( netName );
-            response.add_route_items()->PackFrom( track );
-        };
-        auto addArc = [&]( const SHAPE_ARC& arc, int width, int pnsLayer )
-        {
-            kiapi::board::types::Arc value;
-            value.mutable_id()->set_value( KIID::FromName( request.operation_id() + "-preview-" + std::to_string( index++ ) ).AsStdString() );
-            value.mutable_start()->set_x_nm( arc.GetP0().x ); value.mutable_start()->set_y_nm( arc.GetP0().y );
-            value.mutable_mid()->set_x_nm( arc.GetArcMid().x ); value.mutable_mid()->set_y_nm( arc.GetArcMid().y );
-            value.mutable_end()->set_x_nm( arc.GetP1().x ); value.mutable_end()->set_y_nm( arc.GetP1().y );
-            value.mutable_width()->set_value_nm( width );
-            value.set_layer( ToProtoEnum<PCB_LAYER_ID, BoardLayer>( iface->GetBoardLayerFromPNSLayer( pnsLayer ) ) );
-            value.mutable_net()->set_name( netName );
-            response.add_route_items()->PackFrom( value );
-        };
-        auto addVia = [&]( const PNS::VIA& via )
-        {
-            kiapi::board::types::Via value;
-            value.mutable_id()->set_value( KIID::FromName( request.operation_id() + "-preview-" + std::to_string( index++ ) ).AsStdString() );
-            value.mutable_position()->set_x_nm( via.Pos().x ); value.mutable_position()->set_y_nm( via.Pos().y );
-            value.mutable_net()->set_name( netName );
-            value.set_type( ToProtoEnum<VIATYPE, kiapi::board::types::ViaType>( via.ViaType() ) );
-            auto* padStack = value.mutable_pad_stack();
-            padStack->set_type( kiapi::board::types::PST_NORMAL );
-            for( int layer = via.Layers().Start(); layer <= via.Layers().End(); ++layer )
-                padStack->add_layers( ToProtoEnum<PCB_LAYER_ID, BoardLayer>( iface->GetBoardLayerFromPNSLayer( layer ) ) );
-            padStack->mutable_drill()->mutable_diameter()->set_x_nm( via.Drill() );
-            padStack->mutable_drill()->mutable_diameter()->set_y_nm( via.Drill() );
-            response.add_route_items()->PackFrom( value );
-        };
-        if( PNS::LINE::ClassOf( item ) )
-        {
-            auto* line = static_cast<PNS::LINE*>( item );
-            const SHAPE_LINE_CHAIN& chain = line->CLine();
-            std::set<size_t> emittedArcs;
-            for( size_t segment = 0; segment < chain.SegmentCount(); ++segment )
-            {
-                if( chain.IsArcSegment( segment ) )
-                {
-                    const size_t arcIndex = static_cast<size_t>( chain.ArcIndex( segment ) );
-                    if( emittedArcs.insert( arcIndex ).second ) addArc( chain.Arc( arcIndex ), line->Width(), line->Layers().Start() );
-                }
-                else
-                    addSegment( chain.CSegment( segment ).A, chain.CSegment( segment ).B, line->Width(), line->Layers().Start() );
-            }
-            if( line->EndsWithVia() ) addVia( line->Via() );
-        }
-        else if( PNS::SEGMENT::ClassOf( item ) )
-        {
-            auto* segment = static_cast<PNS::SEGMENT*>( item );
-            addSegment( segment->Seg().A, segment->Seg().B, segment->Width(), segment->Layer() );
-        }
-        else if( PNS::ARC::ClassOf( item ) )
-        {
-            auto* arc = static_cast<PNS::ARC*>( item );
-            addArc( arc->CArc(), arc->Width(), arc->Layer() );
-        }
-        else if( PNS::VIA::ClassOf( item ) )
-        {
-            addVia( *static_cast<PNS::VIA*>( item ) );
-        }
+        router->StopRouting();
+        session.active = false;
+        session.terminal = true;
+        session.lastState.Clear();
+        session.lastState.mutable_document()->CopyFrom( session.document );
+        session.lastState.set_operation_id( session.operationId );
+        session.lastState.mutable_checked_revision()->CopyFrom( session.expectedRevision );
+        session.lastState.set_process_epoch( session.processEpoch );
+        session.lastState.set_completed( true );
+        session.lastState.set_preview_only( true );
+        session.lastState.set_reconciled( true );
+        session.lastState.set_session_active( false );
+        session.lastState.set_error_code( "route_preview_stale" );
+        session.lastState.set_error_message( "The PCB changed while the native route preview session was active" );
+        session.lastState.mutable_observed_revision()->CopyFrom( CurrentRoutePreviewRevision( *target ) );
+        session.lastState.set_waypoint_count( session.waypointCount );
+        return session.lastState;
     }
-    if( response.route_items_size() == 0 )
-        return tl::unexpected( RoutePreviewError( "The native router returned unsupported preview geometry" ) );
-    return response;
+
+    if( waypoints.empty() || waypoints.size() > 256 )
+        return tl::unexpected( RoutePreviewError( "A route continuation requires one to 256 waypoints" ) );
+
+    PNS_KICAD_IFACE* iface = session.generator->GetInterface();
+    std::string failure;
+    // An open-ended FixRoute leaves the active leader in the router's current
+    // branch rather than publishing it through GetUpdatedItems. Capture the
+    // heads before that transition so continuation can return a truthful
+    // candidate while retaining the branch for the next call.
+    for( int index = 0; index < waypoints.size(); ++index )
+    {
+        const VECTOR2I point( waypoints.Get( index ).x_nm(), waypoints.Get( index ).y_nm() );
+        if( !router->Move( point, nullptr ) )
+        {
+            failure = router->FailureReason().ToStdString();
+            break;
+        }
+        const bool last = index == waypoints.size() - 1;
+        if( last && !forceFinish )
+            continue;
+        if( last && !router->FixRoute( point, nullptr, true, false ) )
+        {
+            failure = router->FailureReason().ToStdString();
+            break;
+        }
+        if( !last ) router->FixRoute( point, nullptr, false, false );
+    }
+
+    std::vector<std::unique_ptr<PNS::ITEM>> removed, added;
+    if( failure.empty() && !router->GetPreviewItems( removed, added, !forceFinish ) )
+        failure = "The native router could not capture the complete prospective route delta";
+    if( !failure.empty() )
+    {
+        router->StopRouting();
+        session.active = false;
+        session.terminal = true;
+        return tl::unexpected( RoutePreviewError( failure ) );
+    }
+
+    PcbRoutePreviewState response;
+    response.mutable_document()->CopyFrom( session.document );
+    response.mutable_checked_revision()->CopyFrom( session.expectedRevision );
+    response.set_process_epoch( session.processEpoch );
+    response.set_completed( true );
+    response.set_preview_only( true );
+    response.set_native_commit( false );
+    auto extracted = ExtractRoutePreviewGeometry( session.operationId, iface, removed, added,
+                                                  std::move( response ) );
+    if( !extracted )
+    {
+        router->StopRouting();
+        session.active = false;
+        session.terminal = true;
+        return tl::unexpected( extracted.error() );
+    }
+
+    if( !extracted->completed() )
+    {
+        router->StopRouting(); session.active = false; session.terminal = true;
+        session.lastState = *extracted; session.lastState.set_session_active( false );
+        return session.lastState;
+    }
+    session.waypointCount += static_cast<uint32_t>( waypoints.size() );
+    if( forceFinish )
+    {
+        // ExtractRoutePreviewGeometry has copied the branch into protobufs; the
+        // detached native branch can now be discarded without a board commit.
+        router->StopRouting();
+        session.active = false;
+        session.terminal = true;
+    }
+
+    extracted->set_session_active( session.active );
+    extracted->set_waypoint_count( session.waypointCount );
+    extracted->set_reconciled( false );
+    extracted->set_cancelled( false );
+    extracted->mutable_observed_revision()->CopyFrom( CurrentRoutePreviewRevision( *target ) );
+    session.lastState = *extracted;
+    return *extracted;
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> API_HANDLER_PCB::handleContinueRoutePreview(
+        const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityRoutePreviewContinue>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    if( auto busy = checkForBusy() ) return tl::unexpected( *busy );
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+    const auto& request = aCtx.Request;
+    if( request.operation_id().empty() || request.process_epoch() != apiServer().Token()
+        || !request.has_expected_revision() || request.waypoints_size() == 0
+        || request.waypoints_size() > 256 )
+        return tl::unexpected( RoutePreviewError( "A route continuation requires a session ID, process epoch, revision and one to 256 waypoints" ) );
+    auto found = m_routePreviewSessions.find( request.operation_id() );
+    if( found == m_routePreviewSessions.end() )
+        return tl::unexpected( RoutePreviewError( "The native route preview session was not found" ) );
+    ROUTE_PREVIEW_SESSION& session = *found->second;
+    if( !google::protobuf::util::MessageDifferencer::Equals( session.document, request.document() )
+        || session.processEpoch != request.process_epoch()
+        || !google::protobuf::util::MessageDifferencer::Equals( session.expectedRevision,
+                                                                 request.expected_revision() ) )
+        return tl::unexpected( RoutePreviewError( "The route continuation does not match its native session identity" ) );
+    if( session.terminal ) return session.lastState;
+    return advanceRoutePreviewSession( session, request.waypoints(), request.force_finish() );
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> API_HANDLER_PCB::handleCancelRoutePreview(
+        const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityRoutePreviewCancel>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    if( auto busy = checkForBusy() ) return tl::unexpected( *busy );
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+    const auto& request = aCtx.Request;
+    if( request.operation_id().empty() || request.process_epoch() != apiServer().Token() )
+        return tl::unexpected( RoutePreviewError( "A route cancellation requires a session ID and current process epoch" ) );
+    auto found = m_routePreviewSessions.find( request.operation_id() );
+    if( found == m_routePreviewSessions.end() )
+        return tl::unexpected( RoutePreviewError( "The native route preview session was not found" ) );
+    ROUTE_PREVIEW_SESSION& session = *found->second;
+    if( !google::protobuf::util::MessageDifferencer::Equals( session.document, request.document() )
+        || session.processEpoch != request.process_epoch() )
+        return tl::unexpected( RoutePreviewError( "The route cancellation does not match its native session identity" ) );
+    if( session.active && session.generator && session.generator->Router() )
+        session.generator->Router()->StopRouting();
+    session.active = false;
+    session.terminal = true;
+    session.cancelled = true;
+    session.lastState.Clear();
+    session.lastState.mutable_document()->CopyFrom( session.document );
+    session.lastState.set_operation_id( session.operationId );
+    session.lastState.mutable_checked_revision()->CopyFrom( session.expectedRevision );
+    session.lastState.set_process_epoch( session.processEpoch );
+    session.lastState.set_completed( true );
+    session.lastState.set_preview_only( true );
+    session.lastState.set_cancellation_requested( true );
+    session.lastState.set_cancelled( true );
+    session.lastState.set_reconciled( true );
+    session.lastState.mutable_observed_revision()->CopyFrom( CurrentRoutePreviewRevision( *board() ) );
+    session.lastState.set_waypoint_count( session.waypointCount );
+    return session.lastState;
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> API_HANDLER_PCB::handleReadRoutePreview(
+        const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityRoutePreviewRead>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+    const auto& request = aCtx.Request;
+    if( request.operation_id().empty() || request.process_epoch() != apiServer().Token() )
+        return tl::unexpected( RoutePreviewError( "A route reconciliation requires a session ID and current process epoch" ) );
+    auto found = m_routePreviewSessions.find( request.operation_id() );
+    if( found == m_routePreviewSessions.end() )
+        return tl::unexpected( RoutePreviewError( "The native route preview session was not found" ) );
+    ROUTE_PREVIEW_SESSION& session = *found->second;
+    if( !google::protobuf::util::MessageDifferencer::Equals( session.document, request.document() )
+        || session.processEpoch != request.process_epoch() )
+        return tl::unexpected( RoutePreviewError( "The route reconciliation does not match its native session identity" ) );
+    if( session.active && RoutePreviewRevisionMatches( *board(), session.expectedRevision ) )
+    {
+        session.lastState.set_session_active( true );
+        session.lastState.mutable_observed_revision()->CopyFrom( CurrentRoutePreviewRevision( *board() ) );
+        return session.lastState;
+    }
+    if( session.active && session.generator && session.generator->Router() )
+        session.generator->Router()->StopRouting();
+    if( session.active )
+    {
+        session.active = false;
+        session.terminal = true;
+        session.lastState.Clear();
+        session.lastState.mutable_document()->CopyFrom( session.document );
+        session.lastState.set_operation_id( session.operationId );
+        session.lastState.mutable_checked_revision()->CopyFrom( session.expectedRevision );
+        session.lastState.set_process_epoch( session.processEpoch );
+        session.lastState.set_completed( true );
+        session.lastState.set_preview_only( true );
+        session.lastState.set_reconciled( true );
+        session.lastState.set_session_active( false );
+        session.lastState.set_error_code( "route_preview_stale" );
+        session.lastState.set_error_message( "The PCB changed while the native route preview session was active" );
+        session.lastState.mutable_observed_revision()->CopyFrom( CurrentRoutePreviewRevision( *board() ) );
+        session.lastState.set_waypoint_count( session.waypointCount );
+    }
+    return session.lastState;
 }
 
 HANDLER_RESULT<Empty> API_HANDLER_PCB::handleSaveDocument(
@@ -1196,9 +1713,11 @@ HANDLER_RESULT<BoardEnabledLayersResponse> API_HANDLER_PCB::handleSetBoardEnable
         if( enabled != previousEnabled )
             frame()->UpdateUserInterface();
 
-        if( modified )
+        if( modified || enabled != previousEnabled )
             frame()->OnModify();
     }
+    else if( enabled != previousEnabled || modified )
+        onModified();
 
     BoardEnabledLayersResponse response;
 
@@ -1600,6 +2119,8 @@ HANDLER_RESULT<BoardDesignRulesResponse> API_HANDLER_PCB::handleSetBoardDesignRu
         frame()->OnModify();
         frame()->UpdateUserInterface();
     }
+    else
+        onModified();
 
     HANDLER_CONTEXT<GetBoardDesignRules> getCtx = { aCtx.ClientName, GetBoardDesignRules() };
     *getCtx.Request.mutable_board() = aCtx.Request.board();
@@ -1725,6 +2246,9 @@ HANDLER_RESULT<CustomRulesResponse> API_HANDLER_PCB::handleSetCustomDesignRules(
 
         CustomRulesResponse response;
         response.set_status( CRS_NONE );
+        refreshCustomRulesBaseline();
+        board()->SetCustomRulesFileBaseline( FILE_CONTENT_BASELINE::Read( rulesPath ) );
+        onModified();
         return response;
     }
 
@@ -1788,6 +2312,9 @@ HANDLER_RESULT<CustomRulesResponse> API_HANDLER_PCB::handleSetCustomDesignRules(
     }
 
     file.Close();
+    refreshCustomRulesBaseline();
+    board()->SetCustomRulesFileBaseline( FILE_CONTENT_BASELINE::Read( rulesPath ) );
+    onModified();
 
     HANDLER_CONTEXT<GetCustomDesignRules> getCtx = { aCtx.ClientName, GetCustomDesignRules() };
     *getCtx.Request.mutable_board() = aCtx.Request.board();
@@ -1904,6 +2431,9 @@ HANDLER_RESULT<Empty> API_HANDLER_PCB::handleSetBoardOrigin(
     }
     }
 
+    if( !frame() )
+        onModified();
+
     return Empty();
 }
 
@@ -1986,6 +2516,13 @@ void API_HANDLER_PCB::onModified()
         frame()->Refresh();
         frame()->OnModify();
         frame()->UpdateUserInterface();
+    }
+    else if( board() )
+    {
+        // Headless settings, title-block, embedded-file and rules-file handlers
+        // have no frame OnModify callback. Keep their persisted state revisions
+        // in the same checked admission stream as item commits.
+        board()->IncrementTimeStamp();
     }
 }
 
@@ -2263,41 +2800,130 @@ HANDLER_RESULT<Empty> API_HANDLER_PCB::handleRefillZones( const HANDLER_CONTEXT<
         return tl::unexpected( *busy );
 
     HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.board() );
-
     if( !documentValidation )
         return tl::unexpected( documentValidation.error() );
 
-    TOOL_MANAGER* mgr = toolManager();
+    const std::string operationId = aCtx.Request.operation_id();
+    const std::string fingerprint = aCtx.Request.SerializeAsString();
+    if( !operationId.empty() )
+    {
+        auto existing = m_operationReceipts.find( operationId );
+        if( existing != m_operationReceipts.end() )
+        {
+            if( existing->second->fingerprint != fingerprint )
+            {
+                ApiResponseStatus e;
+                e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+                e.set_error_message( "The operation ID is already bound to a different PCB operation" );
+                return tl::unexpected( e );
+            }
+            return Empty();
+        }
+    }
 
-    // A frame's tool manager always carries the zone filler tool; headless sessions start with a
-    // bare tool manager and register it on first use, like the CLI jobs do.
+    auto receipt = std::make_shared<PCB_OPERATION_RECEIPT>();
+    receipt->operation = "zone-refill";
+    receipt->fingerprint = fingerprint;
+    receipt->document.CopyFrom( aCtx.Request.board() );
+    receipt->request = fingerprint;
+    receipt->processEpoch = apiServer().Token();
+
+    auto mapOutcome = []( ZONE_FILLER::OUTCOME aOutcome )
+    {
+        switch( aOutcome )
+        {
+        case ZONE_FILLER::OUTCOME::NOT_RUN: return kiapi::automation::v1::NZFO_NOT_RUN;
+        case ZONE_FILLER::OUTCOME::COMPLETED: return kiapi::automation::v1::NZFO_COMPLETED;
+        case ZONE_FILLER::OUTCOME::CANCELLED: return kiapi::automation::v1::NZFO_CANCELLED;
+        case ZONE_FILLER::OUTCOME::NOT_CONVERGED: return kiapi::automation::v1::NZFO_NOT_CONVERGED;
+        case ZONE_FILLER::OUTCOME::UNCHANGED_OR_DECLINED:
+            return kiapi::automation::v1::NZFO_UNCHANGED_OR_DECLINED;
+        case ZONE_FILLER::OUTCOME::FAILED: return kiapi::automation::v1::NZFO_FAILED;
+        }
+        return kiapi::automation::v1::NZFO_UNKNOWN;
+    };
+
+    auto applyResult = [receipt, mapOutcome]( const ZONE_FILL_RESULT& aResult )
+    {
+        std::lock_guard lock( receipt->mutex );
+        receipt->terminal = true;
+        receipt->zoneFillOutcome = mapOutcome( aResult.outcome );
+        receipt->primaryFillOutcome = mapOutcome( aResult.primaryOutcome );
+        receipt->generatorRefillOutcome = mapOutcome( aResult.generatorRefillOutcome );
+        receipt->generatorRefillRequired = aResult.generatorRefillRequired;
+        receipt->primaryCommitApplied = aResult.primaryCommitApplied;
+        receipt->generatorRefillCommitApplied = aResult.generatorRefillCommitApplied;
+        receipt->rollbackCompleted = aResult.rollbackCompleted;
+        receipt->failureStage = aResult.failureStage;
+        receipt->errorCode = aResult.errorCode;
+        receipt->errorMessage = aResult.errorMessage;
+        receipt->commitStateKnown = aResult.commitStateKnown;
+        receipt->completed = aResult.Completed();
+    };
+
+    TOOL_MANAGER* mgr = toolManager();
     if( !mgr->FindTool( ZONE_FILLER_TOOL_NAME ) )
         mgr->RegisterTool( new ZONE_FILLER_TOOL );
 
     if( aCtx.Request.zones().empty() )
     {
-        if( frame() )
+        if( !operationId.empty() )
+            m_operationReceipts.emplace( operationId, receipt );
+
+        if( PCB_EDIT_FRAME* currentFrame = frame() )
         {
-            frame()->CallAfter( [mgr]()
-                                {
-                                    mgr->RunAction( PCB_ACTIONS::zoneFillAll );
-                                } );
+            wxWeakRef<PCB_EDIT_FRAME> weakFrame( currentFrame );
+            KIID boardIdentity = board()->m_Uuid;
+            auto completion = applyResult;
+            currentFrame->CallAfter(
+                    [weakFrame, boardIdentity, completion]() mutable
+                    {
+                        ZONE_FILL_RESULT failed;
+                        failed.cleanupFinished = true;
+                        failed.commitStateKnown = false;
+                        failed.failureStage = "queued-dispatch";
+                        failed.errorCode = "zone_fill_target_unavailable";
+
+                        PCB_EDIT_FRAME* liveFrame = weakFrame.get();
+                        if( !liveFrame || !liveFrame->GetBoard()
+                            || liveFrame->GetBoard()->m_Uuid != boardIdentity )
+                        {
+                            failed.errorMessage = "The queued zone fill target was closed or replaced.";
+                            completion( failed );
+                            return;
+                        }
+
+                        TOOL_MANAGER* liveManager = liveFrame->GetToolManager();
+                        if( !liveManager )
+                        {
+                            failed.errorMessage = "The queued zone fill tool manager is unavailable.";
+                            completion( failed );
+                            return;
+                        }
+
+                        ZONE_FILL_REQUEST request;
+                        request.completion = completion;
+                        if( !liveManager->RunAction( PCB_ACTIONS::zoneFillAll, request ) )
+                        {
+                            failed.errorMessage = "The queued zone fill action was not accepted.";
+                            completion( failed );
+                        }
+                    } );
         }
         else
         {
-            // Headless sessions have no event loop to defer to; fill synchronously through the
-            // same tool the CLI jobs use.
-            mgr->GetTool<ZONE_FILLER_TOOL>()->FillAllZones( nullptr, nullptr, true );
+            ZONE_FILL_RESULT result = mgr->GetTool<ZONE_FILLER_TOOL>()->FillAllZonesWithResult(
+                    nullptr, nullptr, true );
+            applyResult( result );
+            onModified();
         }
     }
     else
     {
         std::vector<ZONE*> toFill;
-
         for( const types::KIID& id : aCtx.Request.zones() )
         {
             std::optional<BOARD_ITEM*> item = getItemById( KIID( id.value() ) );
-
             if( !item || ( *item )->Type() != PCB_ZONE_T )
             {
                 ApiResponseStatus e;
@@ -2307,8 +2933,6 @@ HANDLER_RESULT<Empty> API_HANDLER_PCB::handleRefillZones( const HANDLER_CONTEXT<
             }
 
             ZONE* zone = static_cast<ZONE*>( *item );
-
-            // The filler silently skips rule areas, which would turn this into a false success
             if( zone->GetIsRuleArea() )
             {
                 ApiResponseStatus e;
@@ -2318,28 +2942,81 @@ HANDLER_RESULT<Empty> API_HANDLER_PCB::handleRefillZones( const HANDLER_CONTEXT<
                 return tl::unexpected( e );
             }
 
-            // A repeated id would enqueue concurrent fill tasks for the same zone
             if( !alg::contains( toFill, zone ) )
                 toFill.push_back( zone );
         }
 
+        if( !operationId.empty() )
+            m_operationReceipts.emplace( operationId, receipt );
+
+        ZONE_FILL_RESULT result;
+        result.generatorRefillOutcome = ZONE_FILLER::OUTCOME::NOT_RUN;
         std::unique_ptr<COMMIT> commit = createCommit();
-        ZONE_FILLER             filler( board(), commit.get() );
-
-        if( !filler.Fill( toFill ) )
+        bool pushStarted = false;
+        bool commitApplied = false;
+        try
         {
-            commit->Revert();
-
-            ApiResponseStatus e;
-            e.set_status( ApiStatusCode::AS_UNKNOWN );
-            e.set_error_message( "zone fill failed" );
-            return tl::unexpected( e );
+            ZONE_FILLER filler( board(), commit.get() );
+            bool accepted = filler.Fill( toFill );
+            result.primaryOutcome = filler.LastOutcome();
+            result.outcome = result.primaryOutcome;
+            result.generatorRefillRequired = false;
+            if( accepted )
+            {
+                pushStarted = true;
+                result.primaryCommitApplied = !commit->Empty();
+                commit->Push( _( "Fill Zone(s)" ), SKIP_CONNECTIVITY | ZONE_FILL_OP );
+                pushStarted = false;
+                commitApplied = result.primaryCommitApplied;
+            }
+            else
+            {
+                commit->Revert();
+                result.rollbackCompleted = true;
+            }
+            result.commitStateKnown = true;
+            result.cleanupFinished = true;
+            if( result.outcome != ZONE_FILLER::OUTCOME::COMPLETED )
+            {
+                result.errorCode = result.outcome == ZONE_FILLER::OUTCOME::CANCELLED
+                        ? "zone_fill_cancelled" : "zone_fill_failed";
+                result.errorMessage = "The selected zone fill did not complete successfully.";
+            }
+            mgr->GetTool<ZONE_FILLER_TOOL>()->PostFillRefresh( frame() == nullptr );
+            onModified();
         }
-
-        commit->Push( _( "Fill Zone(s)" ), SKIP_CONNECTIVITY | ZONE_FILL_OP );
-
-        // Push skipped connectivity, so run the same post-fill refresh as the interactive fill
-        mgr->GetTool<ZONE_FILLER_TOOL>()->PostFillRefresh( frame() == nullptr );
+        catch( const std::exception& error )
+        {
+            result.outcome = ZONE_FILLER::OUTCOME::FAILED;
+            result.errorCode = "zone_fill_failed";
+            result.errorMessage = error.what();
+            if( pushStarted || commitApplied )
+            {
+                result.commitStateKnown = !pushStarted;
+                result.rollbackCompleted = false;
+            }
+            else
+            {
+                try { commit->Revert(); result.rollbackCompleted = true; }
+                catch( ... ) { result.commitStateKnown = false; result.rollbackCompleted = false; }
+            }
+            result.cleanupFinished = true;
+        }
+        catch( ... )
+        {
+            result.outcome = ZONE_FILLER::OUTCOME::FAILED;
+            result.errorCode = "zone_fill_failed";
+            result.errorMessage = "The selected zone fill raised an unknown exception.";
+            result.commitStateKnown = !pushStarted;
+            result.rollbackCompleted = false;
+            if( !pushStarted && !commitApplied )
+            {
+                try { commit->Revert(); result.rollbackCompleted = true; }
+                catch( ... ) { result.commitStateKnown = false; }
+            }
+            result.cleanupFinished = true;
+        }
+        applyResult( result );
     }
 
     return Empty();
@@ -2355,6 +3032,24 @@ HANDLER_RESULT<ImportNetlistResponse> API_HANDLER_PCB::handleImportNetlist( cons
 
     if( !documentValidation )
         return tl::unexpected( documentValidation.error() );
+
+    const std::string operationId = aCtx.Request.operation_id();
+    const std::string fingerprint = aCtx.Request.SerializeAsString();
+    if( !operationId.empty() )
+    {
+        auto existing = m_operationReceipts.find( operationId );
+        if( existing != m_operationReceipts.end() )
+        {
+            if( existing->second->fingerprint != fingerprint || !existing->second->importResponse )
+            {
+                ApiResponseStatus e;
+                e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+                e.set_error_message( "The operation ID is already bound to a different PCB operation" );
+                return tl::unexpected( e );
+            }
+            return *existing->second->importResponse;
+        }
+    }
 
     wxFileName netlistPath( project().AbsolutePath( wxString::FromUTF8( aCtx.Request.netlist_path() ) ) );
 
@@ -2400,13 +3095,82 @@ HANDLER_RESULT<ImportNetlistResponse> API_HANDLER_PCB::handleImportNetlist( cons
     const bool success = updater->UpdateNetlist( netlist );
 
     if( !aCtx.Request.dry_run() && success )
+    {
         ctx->OnNetlistChanged( *updater );
+        onModified();
+    }
 
     ImportNetlistResponse response;
     response.set_report( reporter.GetMessages().ToUTF8() );
     response.set_error_count( updater->GetErrorCount() );
     response.set_warning_count( updater->GetWarningCount() );
     response.set_new_footprint_count( updater->GetNewFootprintCount() );
+    if( !operationId.empty() )
+    {
+        auto receipt = std::make_shared<PCB_OPERATION_RECEIPT>();
+        receipt->operation = "netlist-import";
+        receipt->fingerprint = fingerprint;
+        receipt->document.CopyFrom( aCtx.Request.board() );
+        receipt->request = fingerprint;
+        receipt->completed = true;
+        receipt->importResponse = response;
+        receipt->processEpoch = apiServer().Token();
+        m_operationReceipts.emplace( operationId, std::move( receipt ) );
+    }
+    return response;
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::NativeCapabilityPcbReadOperationResponse>
+API_HANDLER_PCB::handleReadPcbOperation(
+        const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityPcbReadOperation>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    NativeCapabilityPcbReadOperationResponse response;
+    response.set_operation_id( aCtx.Request.operation_id() );
+    if( aCtx.Request.operation_id().empty() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "A PCB operation ID is required" );
+        return tl::unexpected( e );
+    }
+
+    auto found = m_operationReceipts.find( aCtx.Request.operation_id() );
+    if( found == m_operationReceipts.end() )
+    {
+        response.set_found( false );
+        return response;
+    }
+
+    response.set_found( true );
+    std::lock_guard receiptLock( found->second->mutex );
+    response.set_operation( found->second->operation );
+    response.mutable_document()->CopyFrom( found->second->document );
+    response.set_completed( found->second->completed );
+    response.set_process_epoch( found->second->processEpoch );
+    if( found->second->terminal )
+    {
+        response.set_terminal( true );
+        response.set_zone_fill_outcome( found->second->zoneFillOutcome );
+        response.set_primary_fill_outcome( found->second->primaryFillOutcome );
+        response.set_generator_refill_outcome( found->second->generatorRefillOutcome );
+        response.set_generator_refill_required( found->second->generatorRefillRequired );
+        response.set_primary_commit_applied( found->second->primaryCommitApplied );
+        response.set_generator_refill_commit_applied( found->second->generatorRefillCommitApplied );
+        response.set_rollback_completed( found->second->rollbackCompleted );
+        response.set_failure_stage( found->second->failureStage );
+        response.set_error_code( found->second->errorCode );
+        response.set_error_message( found->second->errorMessage );
+        response.set_commit_state_known( found->second->commitStateKnown );
+    }
+    if( found->second->importResponse )
+    {
+        response.set_error_count( found->second->importResponse->error_count() );
+        response.set_warning_count( found->second->importResponse->warning_count() );
+        response.set_new_footprint_count( found->second->importResponse->new_footprint_count() );
+        response.set_report( found->second->importResponse->report() );
+    }
     return response;
 }
 
@@ -2571,6 +3335,8 @@ HANDLER_RESULT<Empty> API_HANDLER_PCB::handleSetBoardPlotSettings( const HANDLER
 
     if( frame() )
         frame()->OnModify();
+    else
+        onModified();
 
     return Empty();
 }
@@ -2611,6 +3377,8 @@ HANDLER_RESULT<InjectDrcErrorResponse> API_HANDLER_PCB::handleInjectDrcError(
     COMMIT* commit = getCurrentCommit( aCtx.ClientName );
     commit->Add( marker );
     commit->Push( wxS( "API injected DRC marker" ) );
+    if( !frame() )
+        onModified();
 
     InjectDrcErrorResponse response;
     response.mutable_marker()->set_value( marker->GetUUID().AsStdString() );

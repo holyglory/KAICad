@@ -21,6 +21,11 @@
 #ifndef KICAD_API_HANDLER_PCB_H
 #define KICAD_API_HANDLER_PCB_H
 
+#include <map>
+#include <memory>
+#include <mutex>
+#include <optional>
+
 #include <api/api_handler_board.h>
 #include <api/pcb_context.h>
 #include <api/board/board_jobs.pb.h>
@@ -29,6 +34,7 @@
 #include <api/pcb_drc_job_manager.h>
 #include <api/common/commands/automation_commands.pb.h>
 #include <properties/property_mgr.h>
+#include <file_content_baseline.h>
 
 using namespace kiapi::board::jobs;
 
@@ -36,6 +42,8 @@ using namespace kiapi::board::jobs;
 class PCB_EDIT_FRAME;
 class PCB_TRACK;
 class PROPERTY_BASE;
+class GENERATOR_TOOL;
+class TOOL_MANAGER;
 
 
 class API_HANDLER_PCB : public API_HANDLER_BOARD
@@ -43,11 +51,23 @@ class API_HANDLER_PCB : public API_HANDLER_BOARD
 public:
     API_HANDLER_PCB( PCB_EDIT_FRAME* aFrame );
     API_HANDLER_PCB( std::shared_ptr<PCB_CONTEXT> aContext, PCB_EDIT_FRAME* aFrame = nullptr );
+    ~API_HANDLER_PCB() override;
 
     // Native editor boundaries for PCB DRC jobs; the owning frame calls these on
     // its UI thread. A handler without a frame never subscribes to board events.
-    void DetachDrcBoard( const BOARD* aBoard ) { m_drcJobs.DetachBoard( aBoard ); }
-    void DrcBoardChanged( const BOARD* aBoard ) { m_drcJobs.BoardChanged( aBoard ); }
+    void DetachDrcBoard( const BOARD* aBoard )
+    {
+        clearRoutePreviewSessions();
+        m_drcJobs.DetachBoard( aBoard );
+    }
+    void DrcBoardChanged( const BOARD* aBoard )
+    {
+        // A GUI edit invalidates every detached router branch before DRC
+        // observes the new board revision. The branch is preview-only, so
+        // invalidation never creates an undo item or board mutation.
+        clearRoutePreviewSessions();
+        m_drcJobs.BoardChanged( aBoard );
+    }
     // Recovery checkpoint after activation or a settings notification. A settings
     // notification passes true: it may have changed library configuration in memory
     // (path variables, library rows) without a file notification, so library content
@@ -70,6 +90,8 @@ private:
             const HANDLER_CONTEXT<kiapi::automation::v1::StartPcbDrcJob>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> handleReadDrcJob(
             const HANDLER_CONTEXT<kiapi::automation::v1::ReadPcbDrcJob>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> handleReadDrcReplacementJob(
+            const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityPcbDrcReplacementJob>& aCtx );
     tl::expected<kiapi::automation::v1::DocumentLifecycleState, std::string> observeDrcSchematic(
             const kiapi::common::types::DocumentSpecifier& aDocument );
     tl::expected<std::string, std::string> observeDrcLibraries( BOARD& aBoard );
@@ -78,6 +100,12 @@ private:
             const HANDLER_CONTEXT<kiapi::automation::v1::CancelPcbDrcJob>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> handleRoutePreview(
             const HANDLER_CONTEXT<kiapi::automation::v1::StartPcbRoutePreview>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> handleContinueRoutePreview(
+            const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityRoutePreviewContinue>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> handleCancelRoutePreview(
+            const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityRoutePreviewCancel>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> handleReadRoutePreview(
+            const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityRoutePreviewRead>& aCtx );
 
     HANDLER_RESULT<Empty> handleSaveCopyOfDocument(
             const HANDLER_CONTEXT<commands::SaveCopyOfDocument>& aCtx );
@@ -141,6 +169,10 @@ private:
 
     HANDLER_RESULT<ImportNetlistResponse> handleImportNetlist(
             const HANDLER_CONTEXT<ImportNetlist>& aCtx );
+
+    HANDLER_RESULT<kiapi::automation::v1::NativeCapabilityPcbReadOperationResponse>
+    handleReadPcbOperation(
+            const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityPcbReadOperation>& aCtx );
 
     HANDLER_RESULT<BoardEditorAppearanceSettings> handleGetBoardEditorAppearanceSettings(
             const HANDLER_CONTEXT<GetBoardEditorAppearanceSettings>& aCtx );
@@ -228,11 +260,51 @@ protected:
     void onModified() override;
 
 private:
+    struct ROUTE_PREVIEW_SESSION;
+
+    void clearRoutePreviewSessions();
+    HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> advanceRoutePreviewSession(
+            ROUTE_PREVIEW_SESSION& aSession,
+            const google::protobuf::RepeatedPtrField<kiapi::common::types::Vector2>& aWaypoints,
+            bool aForceFinish );
+
     PCB_CONTEXT* pcbContext() const { return static_cast<PCB_CONTEXT*>( context() ); }
+
+    // The custom-rules sidecar is not owned by BOARD::FileBaseline(). Keep one
+    // baseline for the open board so an external edit after a lifecycle read is
+    // rejected instead of being adopted as a new admission baseline.
+    void refreshCustomRulesBaseline();
 
     PCB_EDIT_FRAME* frame() const;
 
     PCB_DRC_JOB_MANAGER m_drcJobs;
+    std::map<std::string, std::unique_ptr<ROUTE_PREVIEW_SESSION>> m_routePreviewSessions;
+
+    struct PCB_OPERATION_RECEIPT
+    {
+        mutable std::mutex mutex;
+        std::string operation;
+        std::string fingerprint;
+        DocumentSpecifier document;
+        std::string request;
+        bool completed = false;
+        bool terminal = false;
+        kiapi::automation::v1::NativeZoneFillOutcome zoneFillOutcome = kiapi::automation::v1::NZFO_UNKNOWN;
+        kiapi::automation::v1::NativeZoneFillOutcome primaryFillOutcome = kiapi::automation::v1::NZFO_UNKNOWN;
+        kiapi::automation::v1::NativeZoneFillOutcome generatorRefillOutcome = kiapi::automation::v1::NZFO_UNKNOWN;
+        bool generatorRefillRequired = false;
+        bool primaryCommitApplied = false;
+        bool generatorRefillCommitApplied = false;
+        bool rollbackCompleted = false;
+        std::string failureStage;
+        std::string errorCode;
+        std::string errorMessage;
+        std::string processEpoch;
+        bool commitStateKnown = false;
+        std::optional<ImportNetlistResponse> importResponse;
+    };
+
+    std::map<std::string, std::shared_ptr<PCB_OPERATION_RECEIPT>> m_operationReceipts;
 };
 
 #endif //KICAD_API_HANDLER_PCB_H

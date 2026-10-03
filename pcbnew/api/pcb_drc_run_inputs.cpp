@@ -259,6 +259,25 @@ tl::expected<std::vector<KIID>, std::string> PCB_DRC_RUN_INPUTS::AddCandidateIte
     return identities;
 }
 
+tl::expected<void, std::string> PCB_DRC_RUN_INPUTS::RemoveRouteItems(
+        const google::protobuf::RepeatedPtrField<kiapi::common::types::KIID>& aItems )
+{
+    if( aItems.empty() ) return {};
+    BOARD& source = GetBoard();
+    std::set<KIID> seen;
+    for( const auto& encoded : aItems )
+    {
+        KIID id( encoded.value() );
+        if( id == niluuid || !seen.insert( id ).second )
+            return tl::unexpected( "DRC route replacement requires distinct nonempty item identities" );
+        BOARD_ITEM* item = source.ResolveItem( id, true );
+        if( !item || ( item->Type() != PCB_TRACE_T && item->Type() != PCB_ARC_T && item->Type() != PCB_VIA_T ) )
+            return tl::unexpected( "DRC route replacement can remove only existing Track, Arc or Via items" );
+        source.Remove( item );
+    }
+    return {};
+}
+
 bool PCB_DRC_RUN_INPUTS::HasLibraryDependencies() const
 {
     return m_libraries->Size() != 0;

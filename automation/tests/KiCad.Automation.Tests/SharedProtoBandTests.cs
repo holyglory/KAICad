@@ -52,7 +52,7 @@ public sealed partial class SharedProtoBandTests
         ["2B"] = (200, ["DiagramCanvas", "DiagramLayout", "DiagramCreate"], ["DCV_", "DLY_"]),
         ["2C"] = (300, ["SchematicTracking", "SchematicRebuild", "NativeOwnership", "SchematicStateGroup", "DesignAutoSync"],
             ["STK_", "SRB_", "NOW_", "DAS_"]),
-        ["2D"] = (400, ["InstanceCapability", "NativeCapability", "CodexRuntime", "NativeCrash"], ["ICP_", "NCP_", "CXR_"]),
+        ["2D"] = (400, ["InstanceCapability", "NativeCapability", "CodexRuntime", "NativeCrash", "NativeZoneFillOutcome"], ["ICP_", "NCP_", "CXR_", "NZFO_"]),
     };
 
     [TestMethod]
@@ -481,8 +481,8 @@ public sealed partial class SharedProtoBandTests
         SchematicParityNetlistSnapshot 5 254fb1f4ce04b765
         PcbDrcFinding 4 14b0ab93da6d9a49
         PcbDrcState 7 3e1392e4e13709c3
-        StartPcbDrcJob 10 6d65396d64014d20
-        ReadPcbDrcJob 3 9b2dfa8bab97d6e1
+        StartPcbDrcJob 10 6d65396d64014d20 2D
+        ReadPcbDrcJob 4 7a210ee92542c4a6
         CancelPcbDrcJob 3 9b2dfa8bab97d6e1
         StartSimulationJob 4 34d05ca45fb5e16a
         ReadSimulationJob 3 9b2dfa8bab97d6e1
@@ -491,9 +491,9 @@ public sealed partial class SharedProtoBandTests
         SimulationVector 3 11faae2a2dc4c896
         SimulationJobState 13 c3fbc16ca7c805ee
         PcbDrcJobStatus 7 9c4536abc6265877
-        PcbDrcJobState 19 faeb6234e48abcbe
-        StartPcbRoutePreview 9 58ed2613b2471bb8
-        PcbRoutePreviewState 10 0534cbcdbc9748ef
+        PcbDrcJobState 20 43c8b8ca10b1e5b1
+        StartPcbRoutePreview 10 d993a697f518dad1 2D
+        PcbRoutePreviewState 10 0534cbcdbc9748ef 2D
         ReadSchematicMetadata 2 c15c833c8e673520
         ReadSchematicSaveState 1 8483e6b336825e83
         ReadDocumentLifecycleState 1 8483e6b336825e83
@@ -512,6 +512,11 @@ public sealed partial class SharedProtoBandTests
         SchematicScreenDataSnapshot 3 d32efe34d214b4d8
         ReadSchematicHierarchyData 2 c15c833c8e673520
         SchematicHierarchyDataSnapshot 3 d32efe34d214b4d8 2C
+        ReadSchematicFileLocations 2 a6b83cd656cafbb2
+        SchematicFileLocation 7 c97769fb2474b0df
+        SchematicFileLocations 4 f26656d3cfc89a0a
+        SchematicSheetInstanceMove 2 62e002ff3901dee9
+        SchematicSheetInstancePaths 7 dd6836d6302c06a6
         ReadSchematicElectricalState 3 c350168734e91b48
         SchematicElectricalState 3 6ea4180e1016dc15 2C
         CaptureSchematicObservation 2 c15c833c8e673520
@@ -556,7 +561,7 @@ public sealed partial class SharedProtoBandTests
         CheckedSchematicBatchStatus 4 c684f62e4a24be94
         CheckedSchematicBatchReceipt 10 c5c5707b42631b85 2C 2D
         SchematicItemOperation 8 8c5c85d0688e975b
-        SchematicItemOperation.operation 27 cd1d9f4a6d236192 2A 2C
+        SchematicItemOperation.operation 28 e109c1a0bb43f484 2A 2C
         SchematicConnectedSymbolMove 2 de775889c555492e
         SchematicConnectedTransformKind 4 e4a1065e5a558baf
         SchematicConnectedSymbolTransform 3 f0af41b6d3194f83

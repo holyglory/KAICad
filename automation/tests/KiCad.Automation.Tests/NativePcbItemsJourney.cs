@@ -1,7 +1,9 @@
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Kiapi.Board.Commands;
 using Kiapi.Board.Jobs;
 using Kiapi.Board.Types;
@@ -14,12 +16,54 @@ namespace KiCad.Automation.Tests;
 
 public sealed partial class NativeSessionTests
 {
+    private static void PreparePcbImportLibrary(string projectDirectory)
+    {
+        string library = Directory.CreateDirectory(Path.Combine(projectDirectory, "Resistor_SMD.pretty")).FullName;
+        string source = Path.Combine(RepositoryRoot(), "qa", "data", "libraries", "Resistor_SMD.pretty", "R_0603_1608Metric.kicad_mod");
+        File.Copy(source, Path.Combine(library, "R_0603_1608Metric.kicad_mod"), true);
+        File.WriteAllText(Path.Combine(projectDirectory, "fp-lib-table"),
+            "(fp_lib_table (version 7) (lib (name \"Resistor_SMD\") (type \"KiCad\") (uri \"${KIPRJMOD}/Resistor_SMD.pretty\") (options \"\") (descr \"\")))\n");
+    }
+
     private static async Task VerifyNativePcbItems(NativeClient client, DocumentSpecifier schematic,
-        string evidence, string instanceId, CancellationToken token)
+        string evidence, string instanceId, int focusProcessId, string display, CancellationToken token)
     {
         string boardPath = Path.Combine(schematic.Project.Path, schematic.Project.Name + ".kicad_pcb");
+        // The isolated native fixture has no global fp-lib-table.  Install one
+        // project-local resistor library from the repository so this positive
+        // import remains independent of host-installed KiCad libraries.  This
+        // must happen before opening the board because KiCad caches the project
+        // footprint table when the document is created.
+        string resistorLibrary = Directory.CreateDirectory(Path.Combine(schematic.Project.Path, "Resistor_SMD.pretty")).FullName;
+        string sourceResistor = Path.Combine(RepositoryRoot(), "qa", "data", "libraries", "Resistor_SMD.pretty", "R_0603_1608Metric.kicad_mod");
+        File.Copy(sourceResistor, Path.Combine(resistorLibrary, "R_0603_1608Metric.kicad_mod"), true);
+        await File.WriteAllTextAsync(Path.Combine(schematic.Project.Path, "fp-lib-table"),
+            "(fp_lib_table (version 7) (lib (name \"Resistor_SMD\") (type \"KiCad\") (uri \"${KIPRJMOD}/Resistor_SMD.pretty\") (options \"\") (descr \"\")))\n", token);
         var boardOpen = await CreateRootThroughMcp(client.Endpoint, instanceId, boardPath, evidence, token, toolName: "kicad_pcb_create");
         var board = boardOpen.Document;
+        string netlistPath = Path.Combine(board.Project.Path, "receipt-import.net");
+        // Keep the fixture deliberately small while exercising new footprint
+        // creation and net assignment. Both components use the checked-in
+        // project library above, so import succeeds on a clean machine.
+        const string importNetlist = """
+            (export (version "E")
+              (design (source "fixture.kicad_sch") (date "2026-01-01") (tool "MCP fixture")
+                (sheet (number "1") (name "/") (tstamps "/")))
+              (components
+                (comp (ref "R1") (value "1k") (footprint "Resistor_SMD:R_0603_1608Metric")
+                  (sheetpath (names "/") (tstamps "/")) (tstamps "11111111-1111-4111-8111-111111111111"))
+                (comp (ref "R2") (value "2k") (footprint "Resistor_SMD:R_0603_1608Metric")
+                  (sheetpath (names "/") (tstamps "/")) (tstamps "22222222-2222-4222-8222-222222222222")))
+              (nets
+                (net (code "1") (name "MCP_IMPORTED")
+                  (node (ref "R1") (pin "1") (pintype "passive"))
+                  (node (ref "R2") (pin "1") (pintype "passive")))
+                (net (code "2") (name "MCP_RETURN")
+                  (node (ref "R1") (pin "2") (pintype "passive"))
+                  (node (ref "R2") (pin "2") (pintype "passive")))))
+            """;
+        await File.WriteAllTextAsync(netlistPath, importNetlist, token);
+        DocumentSpecifier finalBoard = board;
         await SaveCheckedThroughMcp(client, board, evidence, token, verifyReconnect: false);
         var before = await ObserveLifecycleState(client, board, token);
         var track = new Track
@@ -39,6 +83,269 @@ public sealed partial class NativeSessionTests
                 stateDirectory, Path.Combine(evidence, instanceId + "-pcb-items-mcp.stderr.log"), token);
             var attached = await mcp.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId });
             Assert.IsFalse(attached.TryGetProperty("isError", out var attachError) && attachError.GetBoolean());
+            var seededRoutes = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+            {
+                Header = new() { Document = board },
+                Types_ = { KiCadObjectType.KotPcbTrace, KiCadObjectType.KotPcbArc, KiCadObjectType.KotPcbVia }
+            }, token);
+            if (seededRoutes.Items.Count > 0)
+            {
+                var removeSeededRoutes = new DeleteItems { Header = new() { Document = board } };
+                removeSeededRoutes.ItemIds.Add(seededRoutes.Items.Select(item =>
+                    item.Is(Track.Descriptor) ? item.Unpack<Track>().Id
+                    : item.Is(Arc.Descriptor) ? item.Unpack<Arc>().Id
+                    : item.Unpack<Via>().Id));
+                var removeSeededReply = await mcp.Tool("kicad_pcb_items_delete", new
+                {
+                    instanceId, requestJson = BoardJson.Formatter.Format(removeSeededRoutes),
+                    expectedStateJson = SchematicJson.Formatter.Format(before)
+                });
+                Assert.IsFalse(removeSeededReply.TryGetProperty("isError", out var removeSeededError) && removeSeededError.GetBoolean(), removeSeededReply.GetRawText());
+                before = SchematicJson.Parser.Parse<DocumentLifecycleState>(removeSeededReply.GetProperty("structuredContent").GetProperty("afterState").GetString()!);
+            }
+            var existingBoardGraphics = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+            { Header = new() { Document = board }, Types_ = { KiCadObjectType.KotPcbShape } }, token);
+            var temporaryOutlineIds = new List<KIID>();
+            if (!existingBoardGraphics.Items.Select(item => item.Unpack<BoardGraphicShape>())
+                .Any(shape => shape.Layer == BoardLayer.BlEdgeCuts))
+            {
+                var createOutline = new CreateItems { Header = new() { Document = board } };
+                foreach ((long x1, long y1, long x2, long y2) in new[]
+                {
+                    (0L, 0L, 30_000_000L, 0L), (30_000_000L, 0L, 30_000_000L, 30_000_000L),
+                    (30_000_000L, 30_000_000L, 0L, 30_000_000L), (0L, 30_000_000L, 0L, 0L)
+                })
+                {
+                    var id = new KIID { Value = Guid.NewGuid().ToString("D") };
+                    temporaryOutlineIds.Add(id);
+                    createOutline.Items.Add(Any.Pack(new BoardGraphicShape
+                    {
+                        Id = id, Layer = BoardLayer.BlEdgeCuts,
+                        Shape = new GraphicShape
+                        {
+                            Attributes = new() { Stroke = new() { Width = new() { ValueNm = 100_000 } } },
+                            Segment = new GraphicSegmentAttributes
+                            {
+                                Start = new() { XNm = x1, YNm = y1 }, End = new() { XNm = x2, YNm = y2 }
+                            }
+                        }
+                    }));
+                }
+                var createOutlineReply = await mcp.Tool("kicad_pcb_items_create", new
+                {
+                    instanceId, requestJson = BoardJson.Formatter.Format(createOutline),
+                    expectedStateJson = SchematicJson.Formatter.Format(before)
+                });
+                Assert.IsFalse(createOutlineReply.TryGetProperty("isError", out var createOutlineError) && createOutlineError.GetBoolean(), createOutlineReply.GetRawText());
+                before = SchematicJson.Parser.Parse<DocumentLifecycleState>(createOutlineReply.GetProperty("structuredContent").GetProperty("afterState").GetString()!);
+            }
+            // Add a real copper zone through the same MCP object boundary before
+            // refilling. This keeps the fill/readback assertion meaningful while
+            // preserving the existing route fixture and its lifecycle checkpoint.
+            string zoneId = Guid.NewGuid().ToString("D");
+            var zone = new Zone
+            {
+                Id = new() { Value = zoneId },
+                Type = ZoneType.ZtCopper,
+                Outline = new PolySet
+                {
+                    Polygons =
+                    {
+                        new PolygonWithHoles
+                        {
+                            Outline = new PolyLine
+                            {
+                                Closed = true,
+                                Nodes =
+                                {
+                                    new PolyLineNode { Point = new() { XNm = 5_000_000, YNm = 5_000_000 } },
+                                    new PolyLineNode { Point = new() { XNm = 25_000_000, YNm = 5_000_000 } },
+                                    new PolyLineNode { Point = new() { XNm = 25_000_000, YNm = 25_000_000 } },
+                                    new PolyLineNode { Point = new() { XNm = 5_000_000, YNm = 25_000_000 } }
+                                }
+                            }
+                        }
+                    }
+                },
+                CopperSettings = new CopperZoneSettings
+                {
+                    Connection = new() { ZoneConnection = ZoneConnectionStyle.ZcsFull },
+                    Clearance = new() { ValueNm = 200_000 },
+                    MinThickness = new() { ValueNm = 200_000 },
+                    IslandMode = IslandRemovalMode.IrmNever,
+                    FillMode = ZoneFillMode.ZfmSolid,
+                    Net = new()
+                },
+                Border = new() { Style = ZoneBorderStyle.ZbsSolid, Pitch = new() { ValueNm = 1_000_000 } }
+            };
+            zone.Layers.Add(BoardLayer.BlFCu);
+            var createZone = new CreateItems { Header = new() { Document = board } };
+            createZone.Items.Add(Any.Pack(zone));
+            var zoneCreateReply = await mcp.Tool("kicad_pcb_items_create", new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(createZone),
+                expectedStateJson = SchematicJson.Formatter.Format(before)
+            });
+            Assert.IsFalse(zoneCreateReply.TryGetProperty("isError", out var zoneCreateError) && zoneCreateError.GetBoolean(), zoneCreateReply.GetRawText());
+            before = SchematicJson.Parser.Parse<DocumentLifecycleState>(zoneCreateReply.GetProperty("structuredContent").GetProperty("afterState").GetString()!);
+
+            string refillOperation = Guid.NewGuid().ToString("D");
+            var refillRequest = new RefillZones { Board = board, OperationId = refillOperation };
+            var refillReply = await mcp.Tool("kicad_pcb_refill_zones", new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(refillRequest),
+                expectedStateJson = SchematicJson.Formatter.Format(before), operationId = refillOperation
+            });
+            Assert.IsFalse(refillReply.TryGetProperty("isError", out var refillError) && refillError.GetBoolean(), refillReply.GetRawText());
+            var refillData = refillReply.GetProperty("structuredContent");
+            Assert.IsTrue(refillData.GetProperty("nativeReceiptAvailable").GetBoolean(), refillReply.GetRawText());
+            Assert.IsTrue(refillData.TryGetProperty("terminal", out var initialTerminal) == false
+                || initialTerminal.ValueKind is JsonValueKind.False or JsonValueKind.True, refillReply.GetRawText());
+
+            // The editor may finish the CallAfter before this first read. Accept
+            // either race, then require an explicit terminal outcome before claiming
+            // a successful fill.
+            var refillWait = await mcp.Tool("kicad_pcb_operation_wait", new
+            {
+                instanceId, expectedProcessEpoch = client.Epoch,
+                documentJson = SchematicJson.Formatter.Format(board),
+                operationId = refillOperation, timeoutMs = 5000
+            });
+            Assert.IsFalse(refillWait.TryGetProperty("isError", out var refillWaitError) && refillWaitError.GetBoolean(), refillWait.GetRawText());
+            var refillWaitData = refillWait.GetProperty("structuredContent");
+            Assert.IsTrue(refillWaitData.GetProperty("lifecycleSettled").GetBoolean(), refillWait.GetRawText());
+            Assert.IsTrue(refillWaitData.GetProperty("terminal").GetBoolean(), refillWait.GetRawText());
+            Assert.AreEqual("completed", refillWaitData.GetProperty("zoneFillOutcome").GetString(), refillWait.GetRawText());
+            Assert.IsTrue(refillWaitData.GetProperty("completionConfirmed").GetBoolean(), refillWait.GetRawText());
+            Assert.IsTrue(refillWaitData.GetProperty("commitStateKnown").GetBoolean(), refillWait.GetRawText());
+            Assert.AreEqual("", refillWaitData.GetProperty("errorCode").GetString(), refillWait.GetRawText());
+            var filledZones = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+            { Header = new() { Document = board }, Types_ = { KiCadObjectType.KotPcbZone } }, token);
+            var filledZone = filledZones.Items.Select(item => item.Unpack<Zone>()).Single(item => item.Id.Value == zoneId);
+            Assert.IsTrue(filledZone.Filled || filledZone.FilledPolygons.Count > 0,
+                "The terminal successful receipt must correspond to filled zone geometry.");
+            var sameProcessReceipt = await mcp.Tool("kicad_pcb_operation_receipt", new
+            { instanceId, expectedProcessEpoch = client.Epoch, operationId = refillOperation });
+            Assert.IsFalse(sameProcessReceipt.TryGetProperty("isError", out var sameReceiptError) && sameReceiptError.GetBoolean(), sameProcessReceipt.GetRawText());
+            var sameProcessReceiptData = sameProcessReceipt.GetProperty("structuredContent");
+            Assert.IsTrue(sameProcessReceiptData.GetProperty("found").GetBoolean(), sameProcessReceipt.GetRawText());
+            Assert.AreEqual("native-process", sameProcessReceiptData.GetProperty("receiptScope").GetString(), sameProcessReceipt.GetRawText());
+            var sameNativeReceipt = sameProcessReceiptData.GetProperty("nativeReceipt");
+            Assert.IsTrue(sameNativeReceipt.GetProperty("terminal").GetBoolean(), sameProcessReceipt.GetRawText());
+            Assert.AreEqual("NZFO_COMPLETED", sameNativeReceipt.GetProperty("zoneFillOutcome").GetString(), sameProcessReceipt.GetRawText());
+            Assert.IsTrue(sameNativeReceipt.GetProperty("commitStateKnown").GetBoolean(), sameProcessReceipt.GetRawText());
+
+            string zoneReceiptStateDirectory = Directory.CreateTempSubdirectory("kicad-pcb-zone-receipt-mcp-").FullName;
+            try
+            {
+                await using var zoneReceiptMcp = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.ProductionStartInfo(),
+                    zoneReceiptStateDirectory, Path.Combine(evidence, instanceId + "-pcb-zone-receipt-mcp.stderr.log"), token);
+                var zoneReceiptAttached = await zoneReceiptMcp.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId });
+                Assert.IsFalse(zoneReceiptAttached.TryGetProperty("isError", out var zoneReceiptAttachError) && zoneReceiptAttachError.GetBoolean());
+                var reconnectedZoneReceipt = await zoneReceiptMcp.Tool("kicad_pcb_operation_receipt", new
+                { instanceId, expectedProcessEpoch = client.Epoch, operationId = refillOperation });
+                Assert.IsFalse(reconnectedZoneReceipt.TryGetProperty("isError", out var reconnectedZoneReceiptError) && reconnectedZoneReceiptError.GetBoolean(), reconnectedZoneReceipt.GetRawText());
+                var reconnectedZoneData = reconnectedZoneReceipt.GetProperty("structuredContent");
+                Assert.IsTrue(reconnectedZoneData.GetProperty("found").GetBoolean(), reconnectedZoneReceipt.GetRawText());
+                Assert.AreEqual("native-process", reconnectedZoneData.GetProperty("receiptScope").GetString(), reconnectedZoneReceipt.GetRawText());
+                var reconnectedZoneNative = reconnectedZoneData.GetProperty("nativeReceipt");
+                Assert.IsTrue(reconnectedZoneNative.GetProperty("terminal").GetBoolean(), reconnectedZoneReceipt.GetRawText());
+                Assert.AreEqual("NZFO_COMPLETED", reconnectedZoneNative.GetProperty("zoneFillOutcome").GetString(), reconnectedZoneReceipt.GetRawText());
+                Assert.AreEqual(client.Epoch, reconnectedZoneNative.GetProperty("processEpoch").GetString(), reconnectedZoneReceipt.GetRawText());
+            }
+            finally { Directory.Delete(zoneReceiptStateDirectory, true); }
+
+            var removeZone = new DeleteItems { Header = new() { Document = board } };
+            removeZone.ItemIds.Add(new KIID { Value = zoneId });
+            var removeZoneReply = await mcp.Tool("kicad_pcb_items_delete", new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(removeZone),
+                expectedStateJson = SchematicJson.Formatter.Format(await ObserveLifecycleState(client, board, token))
+            });
+            Assert.IsFalse(removeZoneReply.TryGetProperty("isError", out var removeZoneError) && removeZoneError.GetBoolean(), removeZoneReply.GetRawText());
+            before = SchematicJson.Parser.Parse<DocumentLifecycleState>(removeZoneReply.GetProperty("structuredContent").GetProperty("afterState").GetString()!);
+            if (temporaryOutlineIds.Count > 0)
+            {
+                var removeOutline = new DeleteItems { Header = new() { Document = board } };
+                removeOutline.ItemIds.Add(temporaryOutlineIds);
+                var removeOutlineReply = await mcp.Tool("kicad_pcb_items_delete", new
+                {
+                    instanceId, requestJson = BoardJson.Formatter.Format(removeOutline),
+                    expectedStateJson = SchematicJson.Formatter.Format(before)
+                });
+                Assert.IsFalse(removeOutlineReply.TryGetProperty("isError", out var removeOutlineError) && removeOutlineError.GetBoolean(), removeOutlineReply.GetRawText());
+                before = SchematicJson.Parser.Parse<DocumentLifecycleState>(removeOutlineReply.GetProperty("structuredContent").GetProperty("afterState").GetString()!);
+            }
+
+            string importOperation = Guid.NewGuid().ToString("D");
+            var importRequest = new ImportNetlist
+            {
+                Board = board, NetlistPath = Path.GetFileName(netlistPath), DryRun = false,
+                MatchMode = NetlistMatchMode.NmmReference, OperationId = importOperation
+            };
+            var importReply = await mcp.Tool("kicad_pcb_import_netlist", new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(importRequest),
+                expectedStateJson = SchematicJson.Formatter.Format(await ObserveLifecycleState(client, board, token)), operationId = importOperation
+            });
+            Assert.IsFalse(importReply.TryGetProperty("isError", out var importError) && importError.GetBoolean(), importReply.GetRawText());
+            var importData = importReply.GetProperty("structuredContent");
+            Assert.IsTrue(importData.TryGetProperty("response", out var importResponse), importData.GetRawText());
+            // Protobuf JSON omits default-valued response counters on success.
+            Assert.IsTrue(!importResponse.TryGetProperty("errorCount", out var importErrors)
+                || importErrors.GetInt32() == 0, importReply.GetRawText());
+            Assert.IsTrue(!importResponse.TryGetProperty("newFootprintCount", out var newFootprints)
+                || newFootprints.GetInt32() == 2, importReply.GetRawText());
+            Assert.IsTrue(importData.GetProperty("boardMutation").GetBoolean(), importReply.GetRawText());
+            Assert.IsTrue(importData.GetProperty("mutationConfirmed").GetBoolean(), importReply.GetRawText());
+            Assert.IsTrue(importData.GetProperty("nativeReceiptAvailable").GetBoolean(), importReply.GetRawText());
+            var importedFootprints = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+            { Header = new() { Document = board }, Types_ = { KiCadObjectType.KotPcbFootprint } }, token);
+            Assert.AreEqual(2, importedFootprints.Items.Count,
+                "The valid netlist fixture must create both project-library footprints.");
+            var importedPads = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+            { Header = new() { Document = board }, Types_ = { KiCadObjectType.KotPcbPad } }, token);
+            Assert.IsTrue(importedPads.Items.Select(item => item.Unpack<Pad>()).Any(pad => pad.Net.Name == "MCP_IMPORTED"),
+                "The import must transfer the changed schematic net onto board pads.");
+            string receiptStateDirectory = Directory.CreateTempSubdirectory("kicad-pcb-receipt-mcp-").FullName;
+            try
+            {
+                await using var receiptMcp = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.ProductionStartInfo(),
+                    receiptStateDirectory, Path.Combine(evidence, instanceId + "-pcb-receipt-mcp.stderr.log"), token);
+                var receiptAttached = await receiptMcp.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId });
+                Assert.IsFalse(receiptAttached.TryGetProperty("isError", out var receiptAttachError) && receiptAttachError.GetBoolean());
+                var receiptReply = await receiptMcp.Tool("kicad_pcb_operation_receipt", new
+                { instanceId, expectedProcessEpoch = client.Epoch, operationId = refillOperation });
+                Assert.IsFalse(receiptReply.TryGetProperty("isError", out var nativeReceiptError) && nativeReceiptError.GetBoolean(), receiptReply.GetRawText());
+                var receiptData = receiptReply.GetProperty("structuredContent");
+                Assert.IsTrue(receiptData.GetProperty("found").GetBoolean(), receiptReply.GetRawText());
+                Assert.AreEqual("native-process", receiptData.GetProperty("receiptScope").GetString(), receiptReply.GetRawText());
+                var reconnectedNativeReceipt = receiptData.GetProperty("nativeReceipt");
+                Assert.IsTrue(reconnectedNativeReceipt.GetProperty("terminal").GetBoolean(), receiptReply.GetRawText());
+                Assert.AreEqual("NZFO_COMPLETED", reconnectedNativeReceipt.GetProperty("zoneFillOutcome").GetString(), receiptReply.GetRawText());
+                Assert.AreEqual(client.Epoch, reconnectedNativeReceipt.GetProperty("processEpoch").GetString(), receiptReply.GetRawText());
+                Assert.IsTrue(reconnectedNativeReceipt.GetProperty("commitStateKnown").GetBoolean(), receiptReply.GetRawText());
+                var importReceiptReply = await receiptMcp.Tool("kicad_pcb_operation_receipt", new
+                { instanceId, expectedProcessEpoch = client.Epoch, operationId = importOperation });
+                Assert.IsFalse(importReceiptReply.TryGetProperty("isError", out var importReceiptError) && importReceiptError.GetBoolean(), importReceiptReply.GetRawText());
+                Assert.IsTrue(importReceiptReply.GetProperty("structuredContent").GetProperty("found").GetBoolean(), importReceiptReply.GetRawText());
+                Assert.AreEqual("native-process", importReceiptReply.GetProperty("structuredContent").GetProperty("receiptScope").GetString(), importReceiptReply.GetRawText());
+            }
+            finally { Directory.Delete(receiptStateDirectory, true); }
+            var importedSave = await mcp.Tool("kicad_document_save", new
+            { instanceId, expectedStateJson = importData.GetProperty("afterState").GetString(), operationId = Guid.NewGuid().ToString("D") });
+            Assert.IsFalse(importedSave.TryGetProperty("isError", out var importedSaveError) && importedSaveError.GetBoolean(), importedSave.GetRawText());
+            var importedClose = await mcp.Tool("kicad_document_close", new
+            { instanceId, expectedStateJson = importedSave.GetProperty("structuredContent").GetProperty("observedState").GetRawText(), operationId = Guid.NewGuid().ToString("D") });
+            Assert.IsFalse(importedClose.TryGetProperty("isError", out var importedCloseError) && importedCloseError.GetBoolean(), importedClose.GetRawText());
+            var importedReopen = await CreateRootThroughMcp(client.Endpoint, instanceId, boardPath, evidence, token, toolName: "kicad_pcb_open");
+            board = importedReopen.Document;
+            finalBoard = board;
+            var persistedPads = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+            { Header = new() { Document = board }, Types_ = { KiCadObjectType.KotPcbPad } }, token);
+            Assert.IsTrue(persistedPads.Items.Select(item => item.Unpack<Pad>()).Any(pad => pad.Net.Name == "MCP_IMPORTED"),
+                "The imported net assignment must survive save, close and reopen.");
+            before = await ObserveLifecycleState(client, board, token);
             var createdReply = await mcp.Tool("kicad_pcb_items_create", new
             {
                 instanceId, requestJson = BoardJson.Formatter.Format(create),
@@ -52,6 +359,10 @@ public sealed partial class NativeSessionTests
             var createdTrack = createdResponse.CreatedItems.Single().Item.Unpack<Track>();
             Assert.AreEqual(track.Id, createdTrack.Id);
             string afterCreate = createdData.GetProperty("afterState").GetString()!;
+            var beforeState = SchematicJson.Parser.Parse<DocumentLifecycleState>(SchematicJson.Formatter.Format(before));
+            var afterCreateState = SchematicJson.Parser.Parse<DocumentLifecycleState>(afterCreate);
+            Assert.IsGreaterThan(beforeState.Revision.Sequence, afterCreateState.Revision.Sequence,
+                "A headless PCB item commit must advance the native revision cursor.");
             var stale = await mcp.Tool("kicad_pcb_items_create", new
             {
                 instanceId, requestJson = BoardJson.Formatter.Format(create),
@@ -67,6 +378,9 @@ public sealed partial class NativeSessionTests
             });
             Assert.IsFalse(updatedReply.TryGetProperty("isError", out var updateError) && updateError.GetBoolean(), updatedReply.GetRawText());
             Assert.IsTrue(updatedReply.GetProperty("structuredContent").GetProperty("atomicTransaction").GetBoolean());
+            var afterUpdateState = SchematicJson.Parser.Parse<DocumentLifecycleState>(updatedReply.GetProperty("structuredContent").GetProperty("afterState").GetString()!);
+            Assert.IsGreaterThan(afterCreateState.Revision.Sequence, afterUpdateState.Revision.Sequence,
+                "A headless PCB item update must advance the native revision cursor.");
             var actual = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
             { Header = new() { Document = board }, Items = { createdTrack.Id } }, token);
             var actualTrack = actual.Items.Single().Unpack<Track>();
@@ -139,9 +453,102 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(svgReply.TryGetProperty("isError", out var svgError) && svgError.GetBoolean(), svgReply.GetRawText());
             Assert.AreEqual(svg, await File.ReadAllTextAsync(Path.Combine(board.Project.Path, "guides/rf.svg"), token));
             string svgState = svgReply.GetProperty("structuredContent").GetProperty("afterState").GetString()!;
+            string artworkId = Guid.NewGuid().ToString("D"), artworkOperation = Guid.NewGuid().ToString("D");
+            var artworkReply = await mcp.Tool("kicad_pcb_svg_artwork_commit", new
+            {
+                instanceId, documentJson = SchematicJson.Formatter.Format(board), expectedStateJson = svgState,
+                svg, sourceSha256 = svgHash, sourceKind = "imagegen", assetId = artworkId,
+                repositoryRoot = board.Project.Path, sourceArchivePath = "artwork/imagegen.svg", layer = "F.SilkS",
+                originXNm = "30000000", originYNm = "30000000", nanometersPerSvgUnit = "100000",
+                operationId = artworkOperation, strokeWidthNm = 100000
+            });
+            Assert.IsFalse(artworkReply.TryGetProperty("isError", out var artworkError) && artworkError.GetBoolean(), artworkReply.GetRawText());
+            var artworkData = artworkReply.GetProperty("structuredContent");
+            Assert.IsTrue(artworkData.GetProperty("authoritativeVector").GetBoolean());
+            Assert.AreEqual(artworkId, artworkData.GetProperty("assetId").GetString());
+            Assert.AreEqual(svg, await File.ReadAllTextAsync(Path.Combine(board.Project.Path, "artwork/imagegen.svg"), token));
+            svgState = artworkData.GetProperty("nativeResult").GetProperty("afterState").GetString()!;
+            var artworkReceipt = await mcp.Tool("kicad_pcb_svg_artwork_receipt", new
+            { instanceId, expectedProcessEpoch = client.Epoch, operationId = artworkOperation });
+            Assert.IsTrue(artworkReceipt.GetProperty("structuredContent").GetProperty("found").GetBoolean());
             var svgShapes = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
             { Header = new() { Document = board }, Types_ = { KiCadObjectType.KotPcbShape } }, token);
             Assert.IsTrue(svgShapes.Items.Any(item => item.Unpack<BoardGraphicShape>().CustomProperties.Any(p => p.Key == "kicad.ai.guide.source_format" && p.Value == "svg")));
+            var layerManifest = await mcp.Tool("kicad_pcb_layer_manifest", new
+            {
+                instanceId,
+                documentJson = SchematicJson.Formatter.Format(board),
+                expectedStateJson = svgState,
+                requestJson = JsonSerializer.Serialize(new
+                {
+                    layers = new[] { "F.Cu", "F.SilkS", "Dwgs.User", "F.Paste", "F.Mask" }, includeEmpty = false
+                })
+            });
+            Assert.IsFalse(layerManifest.TryGetProperty("isError", out var layerManifestError) && layerManifestError.GetBoolean(), layerManifest.GetRawText());
+            var layerManifestData = layerManifest.GetProperty("structuredContent");
+            Assert.IsTrue(layerManifestData.GetProperty("nativeQuery").GetBoolean(), layerManifest.GetRawText());
+            Assert.IsFalse(layerManifestData.GetProperty("boardMutation").GetBoolean(), layerManifest.GetRawText());
+            Assert.IsFalse(layerManifestData.GetProperty("drcValidated").GetBoolean(), layerManifest.GetRawText());
+            Assert.IsFalse(layerManifestData.GetProperty("vectorGeometry").GetBoolean(), layerManifest.GetRawText());
+            Assert.AreEqual(svgState, layerManifestData.GetProperty("beforeState").GetString(), layerManifest.GetRawText());
+            Assert.AreEqual(svgState, layerManifestData.GetProperty("afterState").GetString(), layerManifest.GetRawText());
+            var layerRows = layerManifestData.GetProperty("layers").EnumerateArray().ToDictionary(
+                row => row.GetProperty("layer").GetString()!, StringComparer.Ordinal);
+            BoardLayer[] requestedLayers = [BoardLayer.BlFCu, BoardLayer.BlFSilkS, BoardLayer.BlDwgsUser,
+                BoardLayer.BlFPaste, BoardLayer.BlFMask];
+            CollectionAssert.AreEquivalent(requestedLayers.Select(layer => layer.ToString()).ToArray(), layerRows.Keys.ToArray());
+            Assert.IsTrue(layerRows[nameof(BoardLayer.BlFCu)].GetProperty("objectCounts").GetProperty("track").GetInt32() > 0, layerManifest.GetRawText());
+            Assert.AreEqual("copper", layerRows[nameof(BoardLayer.BlFCu)].GetProperty("kind").GetString(), layerManifest.GetRawText());
+            Assert.AreEqual("technical", layerRows[nameof(BoardLayer.BlFSilkS)].GetProperty("kind").GetString(), layerManifest.GetRawText());
+            Assert.AreEqual("user", layerRows[nameof(BoardLayer.BlDwgsUser)].GetProperty("kind").GetString(), layerManifest.GetRawText());
+            foreach (BoardLayer layer in new[] { BoardLayer.BlFSilkS, BoardLayer.BlDwgsUser })
+            {
+                int expectedShapes = svgShapes.Items.Select(item => item.Unpack<BoardGraphicShape>()).Count(shape => shape.Layer == layer);
+                Assert.IsTrue(expectedShapes > 0, "The live fixture must contain non-copper graphics on " + layer);
+                Assert.AreEqual(expectedShapes, layerRows[layer.ToString()].GetProperty("objectCounts").GetProperty("shape").GetInt32(), layerManifest.GetRawText());
+            }
+            foreach (BoardLayer layer in new[] { BoardLayer.BlFCu, BoardLayer.BlFPaste, BoardLayer.BlFMask })
+            {
+                int expectedPads = persistedPads.Items.Select(item => item.Unpack<Pad>()).Count(pad => pad.PadStack.Layers.Contains(layer));
+                Assert.IsTrue(expectedPads > 0, "The live fixture must contain pad membership on " + layer);
+                Assert.AreEqual(expectedPads, layerRows[layer.ToString()].GetProperty("objectCounts").GetProperty("pad").GetInt32(), layerManifest.GetRawText());
+            }
+            Assert.IsTrue(layerRows.Values.All(row => row.GetProperty("membershipCount").GetInt32() > 0
+                && row.GetProperty("distinctObjectCount").GetInt32() > 0), layerManifest.GetRawText());
+            Assert.IsTrue(layerManifestData.GetProperty("compositeObjects").GetProperty("byType")
+                .GetProperty("pad").GetInt32() > 0, layerManifest.GetRawText());
+            var canonicalLayerManifest = await mcp.Tool("kicad_pcb_layer_manifest", new
+            {
+                instanceId, documentJson = SchematicJson.Formatter.Format(board), expectedStateJson = svgState,
+                requestJson = JsonSerializer.Serialize(new
+                {
+                    layers = requestedLayers.Select(layer => layer.ToString()).ToArray(), includeEmpty = false
+                })
+            });
+            Assert.IsFalse(canonicalLayerManifest.TryGetProperty("isError", out var canonicalLayerError) && canonicalLayerError.GetBoolean(), canonicalLayerManifest.GetRawText());
+            Assert.AreEqual(layerManifestData.GetRawText(), canonicalLayerManifest.GetProperty("structuredContent").GetRawText(),
+                "Friendly names and canonical enum names must return the same real layer memberships.");
+            var protoLayerManifest = await mcp.Tool("kicad_pcb_layer_manifest", new
+            {
+                instanceId, documentJson = SchematicJson.Formatter.Format(board), expectedStateJson = svgState,
+                requestJson = JsonSerializer.Serialize(new
+                {
+                    layers = new[] { "BL_F_Cu", "BL_F_SilkS", "BL_Dwgs_User", "BL_F_Paste", "BL_F_Mask" }, includeEmpty = false
+                })
+            });
+            Assert.IsFalse(protoLayerManifest.TryGetProperty("isError", out var protoLayerError) && protoLayerError.GetBoolean(), protoLayerManifest.GetRawText());
+            Assert.AreEqual(layerManifestData.GetRawText(), protoLayerManifest.GetProperty("structuredContent").GetRawText(),
+                "Protobuf enum names must return the same real layer memberships.");
+            var unknownLayerManifest = await mcp.Tool("kicad_pcb_layer_manifest", new
+            {
+                instanceId, documentJson = SchematicJson.Formatter.Format(board), expectedStateJson = svgState,
+                requestJson = "{\"layers\":[\"F.NotARealLayer\"]}"
+            });
+            Assert.IsTrue(unknownLayerManifest.TryGetProperty("isError", out var unknownLayerError) && unknownLayerError.GetBoolean(), unknownLayerManifest.GetRawText());
+            Assert.AreEqual("invalid_pcb_layer_manifest", unknownLayerManifest.GetProperty("structuredContent").GetProperty("errorCode").GetString(), unknownLayerManifest.GetRawText());
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-layer-manifest.json"),
+                JsonSerializer.Serialize(new { friendly = layerManifest, canonical = canonicalLayerManifest,
+                    protobuf = protoLayerManifest, unknown = unknownLayerManifest }), token);
             var renderRequest = new RunBoardJobExportRender
             {
                 JobSettings = new() { Document = board }, Format = RenderFormat.RfPng,
@@ -169,6 +576,20 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(routeGeometryData.GetProperty("measuredGeometry").GetBoolean());
             Assert.IsFalse(routeGeometryData.GetProperty("drcValidated").GetBoolean());
             Assert.AreEqual(15_000_000, routeGeometryData.GetProperty("nets").EnumerateArray().Single().GetProperty("trackLengthNm").GetInt64());
+            var routeConstraints = await mcp.Tool("kicad_pcb_route_constraints", new
+            {
+                instanceId, documentJson = SchematicJson.Formatter.Format(board), expectedStateJson = svgState,
+                requestJson = JsonSerializer.Serialize(new
+                {
+                    nets = new[] { "POWER_RAIL" }, targetLengthNm = 15_000_000L,
+                    maxSkewNm = 0L, toleranceNm = 1L
+                })
+            });
+            Assert.IsFalse(routeConstraints.TryGetProperty("isError", out var constraintError) && constraintError.GetBoolean(), routeConstraints.GetRawText());
+            var constraintData = routeConstraints.GetProperty("structuredContent");
+            Assert.IsTrue(constraintData.GetProperty("compliant").GetBoolean());
+            Assert.IsFalse(constraintData.GetProperty("tuningRequired").GetBoolean());
+            Assert.IsFalse(constraintData.GetProperty("drcValidated").GetBoolean());
             var generatedCandidate = await mcp.Tool("kicad_pcb_route_candidate_from_guide", new
             {
                 instanceId, expectedInstanceEpoch = client.Epoch, documentJson = SchematicJson.Formatter.Format(board),
@@ -218,20 +639,28 @@ public sealed partial class NativeSessionTests
             }
             Assert.IsTrue(dryRun.WorkerFinished, "Detached candidate DRC did not reach a terminal state.");
             Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, dryRun.Status, dryRun.ErrorMessage);
+            Assert.IsTrue(dryRun.SnapshotComplete, "Detached candidate DRC must capture complete inputs before route commit.");
+            Assert.IsTrue(dryRun.ResultsFresh, "Detached candidate DRC must be fresh at its checked revision.");
+            Assert.IsGreaterThan(0, dryRun.Findings.Count, "The fixture candidate must demonstrate the DRC rejection gate before route commit can be enabled.");
             Assert.AreEqual(svgState, SchematicJson.Formatter.Format(await ObserveLifecycleState(client, board, token)));
             var routeCommit = await mcp.Tool("kicad_pcb_route_commit", new
             {
                 instanceId, requestJson = BoardJson.Formatter.Format(generatedRequest), expectedStateJson = svgState,
                 drcJobStateJson = SchematicJson.Formatter.Format(dryRun), operationId = Guid.NewGuid().ToString("D")
             });
-            Assert.IsFalse(routeCommit.TryGetProperty("isError", out var routeCommitError) && routeCommitError.GetBoolean(), routeCommit.GetRawText());
-            var routeCommitData = routeCommit.GetProperty("structuredContent");
-            Assert.IsTrue(routeCommitData.GetProperty("mutationConfirmed").GetBoolean());
-            string committedState = routeCommitData.GetProperty("afterState").GetString()!;
-            var committedTracks = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
-            { Header = new() { Document = board }, Types_ = { KiCadObjectType.KotPcbTrace } }, token);
-            Assert.IsTrue(committedTracks.Items.OfType<Any>().Any(item => item.Is(Track.Descriptor)
-                && item.Unpack<Track>().CustomProperties.Any(p => p.Key == "kicad.ai.route_candidate.origin")));
+            string committedState = svgState;
+            if (routeCommit.TryGetProperty("isError", out var routeCommitError) && routeCommitError.GetBoolean())
+            {
+                string code = routeCommit.GetProperty("structuredContent").GetProperty("errorCode").GetString()!;
+                Assert.IsTrue(code is "route_drc_not_proven" or "pcb_tracking_incomplete", routeCommit.GetRawText());
+            }
+            else
+            {
+                var routeCommitData = routeCommit.GetProperty("structuredContent");
+                Assert.IsTrue(routeCommitData.GetProperty("mutationConfirmed").GetBoolean());
+                committedState = routeCommitData.GetProperty("afterState").GetString()!;
+            }
+
             var previewRequest = new StartPcbRoutePreview
             {
                 Document = board, OperationId = Guid.NewGuid().ToString("D"), ProcessEpoch = client.Epoch,
@@ -252,9 +681,994 @@ public sealed partial class NativeSessionTests
             var previewCandidate = BoardJson.Parser.Parse<CreateItems>(routePreviewData.GetProperty("candidateRequestJson").GetString()!);
             Assert.IsTrue(previewCandidate.Items.Count > 0);
             Assert.AreEqual(committedState, SchematicJson.Formatter.Format(await ObserveLifecycleState(client, board, token)));
+
+            // Persistent native PNS sessions retain the detached router branch between MCP
+            // calls. Read verifies the operation identity before continuation, and continuation
+            // with forceFinish terminalizes the preview without changing the board.
+            string persistentOperation = Guid.NewGuid().ToString("D");
+            var persistentStart = new StartPcbRoutePreview
+            {
+                Document = board, OperationId = persistentOperation, ProcessEpoch = client.Epoch,
+                ExpectedRevision = SchematicJson.Parser.Parse<DocumentLifecycleState>(committedState).Revision.Clone(),
+                StartItemId = createdTrack.Id.Value, Start = new() { XNm = 25_000_000, YNm = 10_000_000 },
+                Layer = BoardLayer.BlFCu, ForceFinish = false, PersistentSession = true
+            };
+            persistentStart.Waypoints.Add(new Vector2 { XNm = 27_000_000, YNm = 10_000_000 });
+            var persistentPreview = await mcp.Tool("kicad_pcb_route_preview", new
+            {
+                instanceId, requestJson = SchematicJson.Formatter.Format(persistentStart), expectedStateJson = committedState
+            });
+            Assert.IsFalse(persistentPreview.TryGetProperty("isError", out var persistentError) && persistentError.GetBoolean(), persistentPreview.GetRawText());
+            Assert.IsTrue(persistentPreview.GetProperty("structuredContent").GetProperty("sessionActive").GetBoolean());
+
+            var persistentRead = await mcp.Tool("kicad_pcb_route_preview_read", new
+            {
+                instanceId, requestJson = SchematicJson.Formatter.Format(new NativeCapabilityRoutePreviewRead
+                { Document = board, OperationId = persistentOperation, ProcessEpoch = client.Epoch })
+            });
+            Assert.IsFalse(persistentRead.TryGetProperty("isError", out var persistentReadError) && persistentReadError.GetBoolean(), persistentRead.GetRawText());
+            Assert.IsTrue(persistentRead.GetProperty("structuredContent").GetProperty("sessionActive").GetBoolean());
+
+            var persistentContinueRequest = new NativeCapabilityRoutePreviewContinue
+            {
+                Document = board, OperationId = persistentOperation, ProcessEpoch = client.Epoch,
+                ExpectedRevision = SchematicJson.Parser.Parse<DocumentLifecycleState>(committedState).Revision.Clone(),
+                ForceFinish = true
+            };
+            persistentContinueRequest.Waypoints.Add(new Vector2 { XNm = 29_000_000, YNm = 10_000_000 });
+            var persistentContinue = await mcp.Tool("kicad_pcb_route_preview_continue", new
+            {
+                instanceId, requestJson = SchematicJson.Formatter.Format(persistentContinueRequest), expectedStateJson = committedState
+            });
+            Assert.IsFalse(persistentContinue.TryGetProperty("isError", out var persistentContinueError) && persistentContinueError.GetBoolean(), persistentContinue.GetRawText());
+            Assert.IsFalse(persistentContinue.GetProperty("structuredContent").GetProperty("sessionActive").GetBoolean());
+            Assert.AreEqual(committedState, SchematicJson.Formatter.Format(await ObserveLifecycleState(client, board, token)));
+
+            string cancelledOperation = Guid.NewGuid().ToString("D");
+            var cancellableStart = persistentStart.Clone();
+            cancellableStart.OperationId = cancelledOperation;
+            cancellableStart.Waypoints.Clear();
+            cancellableStart.Waypoints.Add(new Vector2 { XNm = 27_000_000, YNm = 10_000_000 });
+            var cancellablePreview = await mcp.Tool("kicad_pcb_route_preview", new
+            {
+                instanceId, requestJson = SchematicJson.Formatter.Format(cancellableStart), expectedStateJson = committedState
+            });
+            Assert.IsFalse(cancellablePreview.TryGetProperty("isError", out var cancellableError) && cancellableError.GetBoolean(), cancellablePreview.GetRawText());
+            var cancelled = await mcp.Tool("kicad_pcb_route_preview_cancel", new
+            {
+                instanceId, requestJson = SchematicJson.Formatter.Format(new NativeCapabilityRoutePreviewCancel
+                { Document = board, OperationId = cancelledOperation, ProcessEpoch = client.Epoch })
+            });
+            Assert.IsFalse(cancelled.TryGetProperty("isError", out var cancelledError) && cancelledError.GetBoolean(), cancelled.GetRawText());
+            Assert.IsTrue(cancelled.GetProperty("structuredContent").GetProperty("cancelled").GetBoolean());
+            var cancelledRead = await mcp.Tool("kicad_pcb_route_preview_read", new
+            {
+                instanceId, requestJson = SchematicJson.Formatter.Format(new NativeCapabilityRoutePreviewRead
+                { Document = board, OperationId = cancelledOperation, ProcessEpoch = client.Epoch })
+            });
+            Assert.IsFalse(cancelledRead.TryGetProperty("isError", out var cancelledReadError) && cancelledReadError.GetBoolean(), cancelledRead.GetRawText());
+            Assert.IsTrue(cancelledRead.GetProperty("structuredContent").GetProperty("cancelled").GetBoolean());
+            Assert.AreEqual(committedState, SchematicJson.Formatter.Format(await ObserveLifecycleState(client, board, token)));
+
+            // A separate valid board proves the positive checked-commit path. The earlier
+            // fixture intentionally contains dangling guide-derived copper and must remain a
+            // negative DRC case; do not weaken the native DRC gate to make it pass.
+            var cleanSave = await mcp.Tool("kicad_document_save", new { instanceId, expectedStateJson = committedState, operationId = Guid.NewGuid().ToString("D") });
+            Assert.IsFalse(cleanSave.TryGetProperty("isError", out var cleanSaveError) && cleanSaveError.GetBoolean(), cleanSave.GetRawText());
+            var cleanClose = await mcp.Tool("kicad_document_close", new { instanceId, expectedStateJson = cleanSave.GetProperty("structuredContent").GetProperty("observedState").GetRawText(), operationId = Guid.NewGuid().ToString("D") });
+            Assert.IsFalse(cleanClose.TryGetProperty("isError", out var cleanCloseError) && cleanCloseError.GetBoolean(), cleanClose.GetRawText());
+            string cleanPath = Path.Combine(board.Project.Path, board.BoardFilename);
+            await File.WriteAllTextAsync(cleanPath, CleanRouteBoard(), token);
+            var cleanOpen = await CreateRootThroughMcp(client.Endpoint, instanceId, cleanPath, evidence, token, toolName: "kicad_pcb_open");
+            var cleanBoard = cleanOpen.Document;
+            finalBoard = cleanBoard;
+            var cleanState = await ObserveLifecycleState(client, cleanBoard, token);
+
+            var pairPads = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbPad } }, token);
+            var positivePad = pairPads.Items.Select(item => item.Unpack<Pad>())
+                .Single(pad => pad.Net.Name == "USB_D+");
+            var differentialPreviewRequest = new StartPcbRoutePreview
+            {
+                Document = cleanBoard, OperationId = Guid.NewGuid().ToString("D"),
+                ProcessEpoch = client.Epoch, ExpectedRevision = cleanState.Revision.Clone(),
+                StartItemId = positivePad.Id.Value,
+                Start = new() { XNm = 40_100_000, YNm = 40_100_000 },
+                Layer = BoardLayer.BlFCu, ForceFinish = true, DifferentialPair = true
+            };
+            differentialPreviewRequest.Waypoints.Add(new Vector2 { XNm = 45_000_000, YNm = 40_450_000 });
+            var differentialPreview = await mcp.Tool("kicad_pcb_route_preview", new
+            {
+                instanceId, requestJson = SchematicJson.Formatter.Format(differentialPreviewRequest),
+                expectedStateJson = SchematicJson.Formatter.Format(cleanState)
+            });
+            Assert.IsFalse(differentialPreview.TryGetProperty("isError", out var differentialError)
+                && differentialError.GetBoolean(), differentialPreview.GetRawText());
+            var differentialData = differentialPreview.GetProperty("structuredContent");
+            Assert.IsTrue(differentialData.GetProperty("nativeRouter").GetBoolean());
+            Assert.IsFalse(differentialData.GetProperty("nativeCommit").GetBoolean());
+            Assert.IsFalse(differentialData.GetProperty("drcValidated").GetBoolean());
+            var differentialCandidate = BoardJson.Parser.Parse<CreateItems>(
+                differentialData.GetProperty("candidateRequestJson").GetString()!);
+            var differentialNets = differentialCandidate.Items
+                .Select(item => item.Unpack<Track>().Net.Name).ToHashSet(StringComparer.Ordinal);
+            Assert.IsTrue(differentialNets.Contains("USB_D+"), differentialData.GetRawText());
+            Assert.IsTrue(differentialNets.Contains("USB_D-"), differentialData.GetRawText());
+            Assert.IsGreaterThanOrEqualTo(2, differentialCandidate.Items.Count);
+            Assert.AreEqual(SchematicJson.Formatter.Format(cleanState), SchematicJson.Formatter.Format(
+                await ObserveLifecycleState(client, cleanBoard, token)));
+
+            // Differential-pair placement commits each fixed waypoint inside
+            // the native placer. The preview must retain all committed pieces
+            // and the final simplified pair, even after its live node is gone.
+            var multiWaypointPair = differentialPreviewRequest.Clone();
+            multiWaypointPair.OperationId = Guid.NewGuid().ToString("D");
+            multiWaypointPair.Waypoints.Clear();
+            multiWaypointPair.Waypoints.Add(new Vector2 { XNm = 42_000_000, YNm = 40_450_000 });
+            multiWaypointPair.Waypoints.Add(new Vector2 { XNm = 45_000_000, YNm = 40_450_000 });
+            var multiWaypointPreview = await mcp.Tool("kicad_pcb_route_preview", new
+            {
+                instanceId, requestJson = SchematicJson.Formatter.Format(multiWaypointPair),
+                expectedStateJson = SchematicJson.Formatter.Format(cleanState)
+            });
+            Assert.IsFalse(multiWaypointPreview.TryGetProperty("isError", out var multiError)
+                && multiError.GetBoolean(), multiWaypointPreview.GetRawText());
+            var multiData = multiWaypointPreview.GetProperty("structuredContent");
+            Assert.AreEqual(1, multiData.GetProperty("preview").GetProperty("completeDeltaVersion").GetInt32());
+            var multiCandidate = BoardJson.Parser.Parse<CreateItems>(multiData.GetProperty("candidateRequestJson").GetString()!);
+            Assert.IsGreaterThanOrEqualTo(4, multiCandidate.Items.Count, multiData.GetRawText());
+            Assert.IsTrue(multiCandidate.Items.Select(item => item.Unpack<Track>().Net.Name).Contains("USB_D+"));
+            Assert.IsTrue(multiCandidate.Items.Select(item => item.Unpack<Track>().Net.Name).Contains("USB_D-"));
+            Assert.AreEqual(multiCandidate.Items.Count,
+                multiCandidate.Items.Select(RouteShape).Distinct(StringComparer.Ordinal).Count(),
+                "Committed intermediate differential-pair geometry must not be duplicated.");
+            Assert.AreEqual(SchematicJson.Formatter.Format(cleanState), SchematicJson.Formatter.Format(
+                await ObserveLifecycleState(client, cleanBoard, token)));
+
+            var openPair = multiWaypointPair.Clone();
+            openPair.OperationId = Guid.NewGuid().ToString("D");
+            openPair.ForceFinish = false;
+            var openPreview = await mcp.Tool("kicad_pcb_route_preview", new
+            {
+                instanceId, requestJson = SchematicJson.Formatter.Format(openPair),
+                expectedStateJson = SchematicJson.Formatter.Format(cleanState)
+            });
+            Assert.IsFalse(openPreview.TryGetProperty("isError", out var openError) && openError.GetBoolean(), openPreview.GetRawText());
+            var openData = openPreview.GetProperty("structuredContent");
+            var openCandidate = BoardJson.Parser.Parse<CreateItems>(openData.GetProperty("candidateRequestJson").GetString()!);
+            Assert.IsGreaterThanOrEqualTo(2, openCandidate.Items.Count, openData.GetRawText());
+            Assert.IsTrue(openCandidate.Items.Select(item => item.Unpack<Track>().Net.Name).Contains("USB_D+"));
+            Assert.IsTrue(openCandidate.Items.Select(item => item.Unpack<Track>().Net.Name).Contains("USB_D-"));
+            Assert.AreEqual(SchematicJson.Formatter.Format(cleanState), SchematicJson.Formatter.Format(
+                await ObserveLifecycleState(client, cleanBoard, token)));
+
+            // One real native plan combines a midpoint split, new copper,
+            // displaced foreign copper and a property-bearing moved via.
+            var shoveObstacleItems = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbTrace } }, token);
+            var shoveObstacle = shoveObstacleItems.Items.Select(item => item.Unpack<Track>())
+                .Single(track => track.Net.Name == "POWER_RAIL");
+            shoveObstacle.End = new() { XNm = 41_600_000, YNm = 42_000_000 };
+            shoveObstacle.SolderMask = new() { ExposeCopper = true, SolderMaskMargin = new() { ValueNm = 35_000 } };
+            shoveObstacle.CustomProperties.Add(new CustomProperty { Key = "shove-source", Value = "keep-mask-and-properties" });
+            var obstacleUpdate = new UpdateItems { Header = new() { Document = cleanBoard }, Items = { Any.Pack(shoveObstacle) } };
+            var obstacleUpdated = await mcp.Tool("kicad_pcb_items_update", new
+            { instanceId, requestJson = BoardJson.Formatter.Format(obstacleUpdate), expectedStateJson = SchematicJson.Formatter.Format(cleanState) });
+            Assert.IsFalse(obstacleUpdated.TryGetProperty("isError", out var obstacleUpdateError) && obstacleUpdateError.GetBoolean(), obstacleUpdated.GetRawText());
+            cleanState = await ObserveLifecycleState(client, cleanBoard, token);
+            var splitSource = new Track
+            {
+                Id = new() { Value = Guid.NewGuid().ToString("D") }, Start = positivePad.Position.Clone(),
+                End = new() { XNm = 43_100_000, YNm = 40_100_000 }, Width = new() { ValueNm = 250_000 },
+                Layer = BoardLayer.BlFCu, Net = positivePad.Net.Clone(), Locked = LockedState.LsUnlocked,
+                SolderMask = new() { ExposeCopper = true, SolderMaskMargin = new() { ValueNm = 0 } },
+                CustomProperties = { new CustomProperty { Key = "z-split-source", Value = "wire-order-is-not-state" },
+                    new CustomProperty { Key = "split-source", Value = "keep-original-identity" } }
+            };
+            var shovedVia = new Via
+            {
+                Id = new() { Value = Guid.NewGuid().ToString("D") }, Position = shoveObstacle.End.Clone(),
+                Net = shoveObstacle.Net.Clone(), Type = ViaType.VtThrough, IsFree = true,
+                CustomProperties = { new CustomProperty { Key = "z-via-source", Value = "wire-order-is-not-state" },
+                    new CustomProperty { Key = "via-source", Value = "keep-full-padstack" } },
+                PadStack = new()
+                {
+                    Type = PadStackType.PstNormal, Layers = { BoardLayer.BlFCu, BoardLayer.BlBCu },
+                    Drill = new() { Diameter = new() { XNm = 300_000, YNm = 300_000 },
+                        StartLayer = BoardLayer.BlFCu, EndLayer = BoardLayer.BlBCu, Shape = DrillShape.DsCircle },
+                    CopperLayers = { new PadStackLayer { Layer = BoardLayer.BlFCu, Shape = PadStackShape.PssCircle,
+                        Size = new() { XNm = 700_000, YNm = 700_000 } } },
+                    FrontOuterLayers = new() { SolderMaskMode = SolderMaskMode.SmmMasked },
+                    BackOuterLayers = new() { SolderMaskMode = SolderMaskMode.SmmUnmasked }
+                }
+            };
+            var powerConnection = new Track
+            {
+                Id = new() { Value = Guid.NewGuid().ToString("D") }, Start = new() { XNm = 30_100_000, YNm = 30_100_000 },
+                End = new() { XNm = 30_500_000, YNm = 30_500_000 }, Width = new() { ValueNm = 250_000 },
+                Layer = BoardLayer.BlFCu, Net = shoveObstacle.Net.Clone()
+            };
+            var powerLead = powerConnection.Clone(); powerLead.Id = new() { Value = Guid.NewGuid().ToString("D") };
+            powerLead.Start = powerConnection.End.Clone(); powerLead.End = shoveObstacle.Start.Clone();
+            var fixtureCreate = new CreateItems { Header = new() { Document = cleanBoard } };
+            fixtureCreate.Items.Add(new[] { Any.Pack(splitSource), Any.Pack(shovedVia), Any.Pack(powerConnection), Any.Pack(powerLead) });
+            var fixtureCreated = await mcp.Tool("kicad_pcb_items_create", new
+            { instanceId, requestJson = BoardJson.Formatter.Format(fixtureCreate), expectedStateJson = SchematicJson.Formatter.Format(cleanState) });
+            Assert.IsFalse(fixtureCreated.TryGetProperty("isError", out var fixtureCreateError) && fixtureCreateError.GetBoolean(), fixtureCreated.GetRawText());
+            var sourceRead = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Items = { splitSource.Id, shovedVia.Id } }, token);
+            splitSource = sourceRead.Items.Single(item => item.Is(Track.Descriptor)).Unpack<Track>();
+            shovedVia = sourceRead.Items.Single(item => item.Is(Via.Descriptor)).Unpack<Via>();
+            cleanState = await ObserveLifecycleState(client, cleanBoard, token);
+            var shovePreviewRequest = new StartPcbRoutePreview
+            {
+                Document = cleanBoard, OperationId = Guid.NewGuid().ToString("D"),
+                ProcessEpoch = client.Epoch, ExpectedRevision = cleanState.Revision.Clone(),
+                StartItemId = splitSource.Id.Value, Start = new() { XNm = 41_600_000, YNm = 40_100_000 },
+                Layer = BoardLayer.BlFCu, ForceFinish = true, PushAndShove = true
+            };
+            shovePreviewRequest.Waypoints.Add(new Vector2 { XNm = 41_600_000, YNm = 44_000_000 });
+
+            // Group membership cannot yet be represented by this copper-only
+            // transaction. A grouped split must return no actionable candidate.
+            var sourceGroup = new Kiapi.Board.Types.Group
+            { Id = new() { Value = Guid.NewGuid().ToString("D") }, Name = "Grouped split guard", Items = { splitSource.Id.Clone() } };
+            var groupCreate = new CreateItems { Header = new() { Document = cleanBoard }, Items = { Any.Pack(sourceGroup) } };
+            var grouped = await mcp.Tool("kicad_pcb_items_create", new
+            { instanceId, requestJson = BoardJson.Formatter.Format(groupCreate), expectedStateJson = SchematicJson.Formatter.Format(cleanState) });
+            Assert.IsFalse(grouped.TryGetProperty("isError", out var groupError) && groupError.GetBoolean(), grouped.GetRawText());
+            var groupedState = await ObserveLifecycleState(client, cleanBoard, token);
+            shovePreviewRequest.ExpectedRevision = groupedState.Revision.Clone();
+            var groupedPreview = await mcp.Tool("kicad_pcb_route_preview", new
+            { instanceId, requestJson = SchematicJson.Formatter.Format(shovePreviewRequest), expectedStateJson = SchematicJson.Formatter.Format(groupedState) });
+            Assert.IsTrue(groupedPreview.TryGetProperty("isError", out var groupedPreviewError) && groupedPreviewError.GetBoolean(), groupedPreview.GetRawText());
+            Assert.AreEqual("route_delta_group_membership_unsupported", groupedPreview.GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            Assert.AreEqual(groupedState, await ObserveLifecycleState(client, cleanBoard, token));
+            var groupRemove = new DeleteItems { Header = new() { Document = cleanBoard }, ItemIds = { sourceGroup.Id.Clone() } };
+            var ungrouped = await mcp.Tool("kicad_pcb_items_delete", new
+            { instanceId, requestJson = BoardJson.Formatter.Format(groupRemove), expectedStateJson = SchematicJson.Formatter.Format(groupedState) });
+            Assert.IsFalse(ungrouped.TryGetProperty("isError", out var ungroupError) && ungroupError.GetBoolean(), ungrouped.GetRawText());
+            cleanState = await ObserveLifecycleState(client, cleanBoard, token);
+
+            async Task<GetItemsResponse> ReadGroupAndCopper()
+            {
+                return await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+                {
+                    Header = new() { Document = cleanBoard },
+                    Types_ = { KiCadObjectType.KotPcbTrace, KiCadObjectType.KotPcbArc,
+                        KiCadObjectType.KotPcbVia, KiCadObjectType.KotPcbGroup }
+                }, token);
+            }
+
+            static string PcbItemIdentity(Any item) => item.Is(Track.Descriptor) ? item.Unpack<Track>().Id.Value
+                : item.Is(Arc.Descriptor) ? item.Unpack<Arc>().Id.Value
+                : item.Is(Via.Descriptor) ? item.Unpack<Via>().Id.Value
+                : item.Unpack<Kiapi.Board.Types.Group>().Id.Value;
+
+            var afterGroupDelete = await ReadGroupAndCopper();
+            var afterGroupDeleteIds = afterGroupDelete.Items.Select(PcbItemIdentity).ToHashSet(StringComparer.Ordinal);
+            Assert.IsFalse(afterGroupDeleteIds.Contains(sourceGroup.Id.Value), "Deleting a populated group must remove the group itself.");
+            Assert.IsFalse(afterGroupDeleteIds.Contains(splitSource.Id.Value), "Deleting a populated group must remove its member.");
+            Assert.IsTrue(afterGroupDeleteIds.Contains(powerConnection.Id.Value), "Unrelated copper must survive group deletion.");
+            Assert.IsTrue(afterGroupDeleteIds.Contains(shoveObstacle.Id.Value), "Unrelated obstacle copper must survive group deletion.");
+
+            // The API deletion is one native undo entry. Verify both the
+            // recursive membership removal and the native history boundary,
+            // then redo the exact deletion before continuing the route case.
+            NativeKeyboard.SchematicShortcut(display, focusProcessId, "z", "PCB Editor", true, true,
+                clickFromLeft: 500, clickFromTop: 500);
+            GetItemsResponse afterGroupUndo = null!;
+            using (var undoDeadline = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                undoDeadline.CancelAfter(TimeSpan.FromSeconds(8));
+                while (true)
+                {
+                    afterGroupUndo = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+                    {
+                        Header = new() { Document = cleanBoard },
+                        Types_ = { KiCadObjectType.KotPcbTrace, KiCadObjectType.KotPcbArc,
+                            KiCadObjectType.KotPcbVia, KiCadObjectType.KotPcbGroup }
+                    }, undoDeadline.Token);
+                    var restoredGroup = afterGroupUndo.Items.Where(item => item.Is(Kiapi.Board.Types.Group.Descriptor))
+                        .Select(item => item.Unpack<Kiapi.Board.Types.Group>())
+                        .SingleOrDefault(group => group.Id.Equals(sourceGroup.Id));
+                    if (restoredGroup is not null
+                        && restoredGroup.Items.Any(item => item.Equals(splitSource.Id))
+                        && afterGroupUndo.Items.Any(item => PcbItemIdentity(item) == splitSource.Id.Value))
+                        break;
+                    await Task.Delay(100, undoDeadline.Token);
+                }
+            }
+            Assert.IsTrue(afterGroupUndo.Items.Any(item => PcbItemIdentity(item) == powerConnection.Id.Value));
+            Assert.IsTrue(afterGroupUndo.Items.Any(item => PcbItemIdentity(item) == shoveObstacle.Id.Value));
+
+            NativeKeyboard.SchematicShortcut(display, focusProcessId, "y", "PCB Editor", true, true,
+                clickFromLeft: 500, clickFromTop: 500);
+            using (var redoDeadline = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                redoDeadline.CancelAfter(TimeSpan.FromSeconds(8));
+                while (true)
+                {
+                    var afterGroupRedo = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+                    {
+                        Header = new() { Document = cleanBoard },
+                        Types_ = { KiCadObjectType.KotPcbTrace, KiCadObjectType.KotPcbArc,
+                            KiCadObjectType.KotPcbVia, KiCadObjectType.KotPcbGroup }
+                    }, redoDeadline.Token);
+                    var groupPresent = afterGroupRedo.Items.Any(item => item.Is(Kiapi.Board.Types.Group.Descriptor)
+                        && item.Unpack<Kiapi.Board.Types.Group>().Id.Equals(sourceGroup.Id));
+                    var memberPresent = afterGroupRedo.Items.Any(item => PcbItemIdentity(item) == splitSource.Id.Value);
+                    if (!groupPresent && !memberPresent)
+                        break;
+                    await Task.Delay(100, redoDeadline.Token);
+                }
+            }
+            cleanState = await ObserveLifecycleState(client, cleanBoard, token);
+
+            // Deleting a populated group removes its members, matching the
+            // native editor's recursive delete transaction. Ungrouping is a
+            // separate operation, so recreate this route source explicitly
+            // before the positive shove-delta case.
+            splitSource = splitSource.Clone();
+            splitSource.Id = new() { Value = Guid.NewGuid().ToString("D") };
+            var recreatedSplit = new CreateItems { Header = new() { Document = cleanBoard }, Items = { Any.Pack(splitSource) } };
+            var recreatedSplitReply = await mcp.Tool("kicad_pcb_items_create", new
+            { instanceId, requestJson = BoardJson.Formatter.Format(recreatedSplit), expectedStateJson = SchematicJson.Formatter.Format(cleanState) });
+            Assert.IsFalse(recreatedSplitReply.TryGetProperty("isError", out var recreatedSplitError)
+                && recreatedSplitError.GetBoolean(), recreatedSplitReply.GetRawText());
+            cleanState = await ObserveLifecycleState(client, cleanBoard, token);
+
+            shovePreviewRequest.OperationId = Guid.NewGuid().ToString("D");
+            shovePreviewRequest.StartItemId = splitSource.Id.Value;
+            shovePreviewRequest.ExpectedRevision = cleanState.Revision.Clone();
+            var beforeShoveItems = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbTrace, KiCadObjectType.KotPcbArc, KiCadObjectType.KotPcbVia } }, token);
+            var shovePreview = await mcp.Tool("kicad_pcb_route_preview", new
+            { instanceId, requestJson = SchematicJson.Formatter.Format(shovePreviewRequest), expectedStateJson = SchematicJson.Formatter.Format(cleanState) });
+            Assert.IsFalse(shovePreview.TryGetProperty("isError", out var shoveError) && shoveError.GetBoolean(), shovePreview.GetRawText());
+            var shoveData = shovePreview.GetProperty("structuredContent");
+            var shoveCreate = BoardJson.Parser.Parse<CreateItems>(shoveData.GetProperty("candidateRequestJson").GetString()!);
+            var shoveUpdate = BoardJson.Parser.Parse<UpdateItems>(shoveData.GetProperty("replacementUpdatesJson").GetString()!);
+            string? shoveRemovalJson = shoveData.GetProperty("candidateDeleteRequestJson").GetString();
+            var shoveRemovals = shoveRemovalJson is null ? null : BoardJson.Parser.Parse<DeleteItems>(shoveRemovalJson);
+            var retainedSplit = shoveUpdate.Items.Single(item => item.Is(Track.Descriptor) && item.Unpack<Track>().Id.Equals(splitSource.Id)).Unpack<Track>();
+            var retainedVia = shoveUpdate.Items.Single(item => item.Is(Via.Descriptor) && item.Unpack<Via>().Id.Equals(shovedVia.Id)).Unpack<Via>();
+            Assert.AreEqual(splitSource.CustomProperties, retainedSplit.CustomProperties);
+            Assert.AreEqual(splitSource.SolderMask, retainedSplit.SolderMask);
+            Assert.AreEqual(shovedVia.PadStack, retainedVia.PadStack);
+            Assert.AreEqual(shovedVia.CustomProperties, retainedVia.CustomProperties);
+            Assert.AreEqual(shovedVia.Teardrop, retainedVia.Teardrop);
+            Assert.IsTrue(retainedVia.IsFree);
+            Assert.AreNotEqual(shovedVia.Position, retainedVia.Position, "The fixture must move its property-bearing via.");
+            Assert.IsTrue(shoveCreate.Items.Any(item => item.Is(Track.Descriptor)
+                && item.Unpack<Track>().CustomProperties.Any(property => property.Key == "split-source")), "The second split segment must remain a creation.");
+            Assert.AreEqual(cleanState, await ObserveLifecycleState(client, cleanBoard, token));
+            var expectedCreates = shoveCreate.Items.Select(RouteIdentity).ToHashSet(StringComparer.Ordinal);
+            var expectedUpdates = shoveUpdate.Items.Select(RouteIdentity).ToHashSet(StringComparer.Ordinal);
+            var expectedRemovals = shoveRemovals?.ItemIds.Select(id => id.Value).ToHashSet(StringComparer.Ordinal) ?? [];
+            Assert.IsFalse(expectedCreates.Overlaps(expectedUpdates) || expectedCreates.Overlaps(expectedRemovals) || expectedUpdates.Overlaps(expectedRemovals));
+
+            async Task<PcbDrcJobState> RouteDrc(string candidateJson, string? deleteJson, DocumentLifecycleState checkpoint)
+            {
+                var reply = await mcp.Tool("kicad_pcb_drc_start", new
+                {
+                    instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard), operationId = Guid.NewGuid().ToString("D"),
+                    refillZones = false, reportAllTrackErrors = true, testFootprints = false,
+                    expectedRevisionJson = SchematicJson.Formatter.Format(checkpoint.Revision), processEpoch = client.Epoch,
+                    candidateRequestJson = candidateJson, deleteRequestJson = deleteJson
+                });
+                Assert.IsFalse(reply.TryGetProperty("isError", out var error) && error.GetBoolean(), reply.GetRawText());
+                var job = SchematicJson.Parser.Parse<PcbDrcJobState>(reply.GetProperty("content")[0].GetProperty("text").GetString()!);
+                for (int attempt = 0; attempt < 120 && !job.WorkerFinished; ++attempt)
+                {
+                    await Task.Delay(100, token);
+                    reply = await mcp.Tool("kicad_pcb_drc_job", new
+                    { instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard), jobId = job.JobId, processEpoch = client.Epoch,
+                        candidateRequestJson = candidateJson, deleteRequestJson = deleteJson });
+                    Assert.IsFalse(reply.TryGetProperty("isError", out error) && error.GetBoolean(), reply.GetRawText());
+                    job = SchematicJson.Parser.Parse<PcbDrcJobState>(reply.GetProperty("content")[0].GetProperty("text").GetString()!);
+                }
+                Assert.IsTrue(job.WorkerFinished, "The complete route DRC must finish.");
+                Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, job.Status, job.ErrorMessage);
+                Assert.IsTrue(job.CandidatePayloadVerified && job.CandidateDryRun && job.SnapshotComplete && job.ResultsFresh);
+                Assert.IsEmpty(job.Findings, SchematicJson.Formatter.Format(job));
+                return job;
+            }
+            var shoveDrc = await RouteDrc(shoveData.GetProperty("drcCandidateRequestJson").GetString()!,
+                shoveData.GetProperty("drcDeleteRequestJson").GetString(), cleanState);
+            string shoveCommitId = Guid.NewGuid().ToString("D");
+            var shoveCommitArguments = new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(shoveCreate), replacementUpdatesJson = BoardJson.Formatter.Format(shoveUpdate),
+                removalsJson = shoveRemovalJson ?? "", expectedStateJson = SchematicJson.Formatter.Format(cleanState),
+                drcJobStateJson = SchematicJson.Formatter.Format(shoveDrc), operationId = shoveCommitId
+            };
+            var shoveCommit = await mcp.Tool("kicad_pcb_route_commit", shoveCommitArguments);
+            Assert.IsFalse(shoveCommit.TryGetProperty("isError", out var shoveCommitError) && shoveCommitError.GetBoolean(), shoveCommit.GetRawText());
+            var shoveCommittedState = await ObserveLifecycleState(client, cleanBoard, token);
+            var shoveReplay = await mcp.Tool("kicad_pcb_route_commit", shoveCommitArguments);
+            Assert.IsFalse(shoveReplay.TryGetProperty("isError", out var shoveReplayError) && shoveReplayError.GetBoolean(), shoveReplay.GetRawText());
+            Assert.IsTrue(shoveReplay.GetProperty("structuredContent").GetProperty("receipt").GetProperty("replayed").GetBoolean());
+            Assert.AreEqual(shoveCommittedState, await ObserveLifecycleState(client, cleanBoard, token));
+            var afterShoveItems = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbTrace, KiCadObjectType.KotPcbArc, KiCadObjectType.KotPcbVia } }, token);
+            var afterIds = afterShoveItems.Items.Select(RouteIdentity).ToHashSet(StringComparer.Ordinal);
+            Assert.IsTrue(expectedCreates.IsSubsetOf(afterIds) && expectedUpdates.IsSubsetOf(afterIds));
+            Assert.IsFalse(expectedRemovals.Overlaps(afterIds));
+            Assert.AreEqual(afterIds.Count, afterShoveItems.Items.Count, "The plan must create each copper identity once.");
+            Assert.AreEqual(afterShoveItems.Items.Count, afterShoveItems.Items.Select(RouteShape).Distinct(StringComparer.Ordinal).Count(), "No replacement may also be created as duplicate copper.");
+
+            async Task KeyboardRoute(string key, GetItemsResponse expected)
+            {
+                NativeKeyboard.SchematicShortcut(display, focusProcessId, key, "PCB Editor", true, true, clickFromLeft: 500, clickFromTop: 500);
+                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token); deadline.CancelAfter(TimeSpan.FromSeconds(8));
+                while (true)
+                {
+                    var actual = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+                    { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbTrace, KiCadObjectType.KotPcbArc, KiCadObjectType.KotPcbVia } }, deadline.Token);
+                    if (actual.Items.OrderBy(RouteIdentity).SequenceEqual(expected.Items.OrderBy(RouteIdentity))) return;
+                    await Task.Delay(100, deadline.Token);
+                }
+            }
+            await KeyboardRoute("z", beforeShoveItems);
+            await KeyboardRoute("y", afterShoveItems);
+            var shoveSave = await mcp.Tool("kicad_document_save", new
+            { instanceId, expectedStateJson = SchematicJson.Formatter.Format(await ObserveLifecycleState(client, cleanBoard, token)), operationId = Guid.NewGuid().ToString("D") });
+            Assert.IsFalse(shoveSave.TryGetProperty("isError", out var shoveSaveError) && shoveSaveError.GetBoolean(), shoveSave.GetRawText());
+            var shoveClose = await mcp.Tool("kicad_document_close", new
+            { instanceId, expectedStateJson = shoveSave.GetProperty("structuredContent").GetProperty("observedState").GetRawText(), operationId = Guid.NewGuid().ToString("D") });
+            Assert.IsFalse(shoveClose.TryGetProperty("isError", out var shoveCloseError) && shoveCloseError.GetBoolean(), shoveClose.GetRawText());
+            var shoveReopen = await CreateRootThroughMcp(client.Endpoint, instanceId, cleanPath, evidence, token, toolName: "kicad_pcb_open");
+            cleanBoard = shoveReopen.Document; finalBoard = cleanBoard;
+            var persistedShove = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Items = { splitSource.Id, shovedVia.Id } }, token);
+            Assert.AreEqual(retainedSplit.CustomProperties, persistedShove.Items.Single(item => item.Is(Track.Descriptor)).Unpack<Track>().CustomProperties);
+            Assert.AreEqual(retainedVia.PadStack, persistedShove.Items.Single(item => item.Is(Via.Descriptor)).Unpack<Via>().PadStack);
+
+            // A true-removal-only cleanup has an explicitly empty candidate;
+            // its retained DRC receipt must verify that exact empty payload.
+            var cleanupRows = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbTrace, KiCadObjectType.KotPcbArc, KiCadObjectType.KotPcbVia } }, token);
+            var cleanup = new DeleteItems { Header = new() { Document = cleanBoard } };
+            cleanup.ItemIds.Add(cleanupRows.Items.Where(item => RouteIdentity(item) != powerConnection.Id.Value)
+                .Select(item => new KIID { Value = RouteIdentity(item) }).OrderBy(id => id.Value));
+            var noCreates = new CreateItems { Header = new() { Document = cleanBoard } };
+            cleanState = await ObserveLifecycleState(client, cleanBoard, token);
+            var cleanupDrc = await RouteDrc(BoardJson.Formatter.Format(noCreates), BoardJson.Formatter.Format(cleanup), cleanState);
+            var cleanupReply = await mcp.Tool("kicad_pcb_route_commit", new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(noCreates), removalsJson = BoardJson.Formatter.Format(cleanup),
+                expectedStateJson = SchematicJson.Formatter.Format(cleanState), drcJobStateJson = SchematicJson.Formatter.Format(cleanupDrc), operationId = Guid.NewGuid().ToString("D")
+            });
+            Assert.IsFalse(cleanupReply.TryGetProperty("isError", out var cleanupError) && cleanupError.GetBoolean(), cleanupReply.GetRawText());
+            var cleanupRead = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbTrace, KiCadObjectType.KotPcbArc, KiCadObjectType.KotPcbVia } }, token);
+            Assert.AreEqual(powerConnection.Id.Value, cleanupRead.Items.Single().Unpack<Track>().Id.Value);
+            var removePower = new DeleteItems { Header = new() { Document = cleanBoard }, ItemIds = { powerConnection.Id.Clone() } };
+            var powerRemoved = await mcp.Tool("kicad_pcb_items_delete", new
+            { instanceId, requestJson = BoardJson.Formatter.Format(removePower), expectedStateJson = SchematicJson.Formatter.Format(await ObserveLifecycleState(client, cleanBoard, token)) });
+            Assert.IsFalse(powerRemoved.TryGetProperty("isError", out var powerRemoveError) && powerRemoveError.GetBoolean(), powerRemoved.GetRawText());
+            cleanState = await ObserveLifecycleState(client, cleanBoard, token);
+
+            var selectionReply = await mcp.Tool("kicad_pcb_sync_selection", new
+            {
+                instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard),
+                requestJson = SchematicJson.Formatter.Format(new SyncSelection
+                {
+                    Items = { new SelectionSpec { Pad = new PadSelectionSpec { Reference = "DP_P", Number = positivePad.Number } } },
+                    Mode = SyncSelectionMode.SsmItemsAndNets,
+                    Context = SyncSelectionContext.SscExplicit
+                }),
+                expectedStateJson = SchematicJson.Formatter.Format(cleanState),
+                operationId = Guid.NewGuid().ToString("D")
+            });
+            Assert.IsFalse(selectionReply.TryGetProperty("isError", out var selectionError)
+                && selectionError.GetBoolean(), selectionReply.GetRawText());
+            var selectionData = selectionReply.GetProperty("structuredContent");
+            Assert.IsTrue(selectionData.GetProperty("nativeGuiOnly").GetBoolean(), selectionReply.GetRawText());
+            Assert.IsTrue(selectionData.GetProperty("selectionChanged").GetBoolean(), selectionReply.GetRawText());
+            Assert.IsFalse(selectionData.GetProperty("boardMutation").GetBoolean());
+            Assert.AreEqual(SchematicJson.Formatter.Format(cleanState), SchematicJson.Formatter.Format(
+                await ObserveLifecycleState(client, cleanBoard, token)));
+
+            var highlightReply = await mcp.Tool("kicad_pcb_highlight_nets", new
+            {
+                instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard),
+                requestJson = SchematicJson.Formatter.Format(new HighlightNets { NetName = { "POWER_RAIL" } }),
+                expectedStateJson = SchematicJson.Formatter.Format(cleanState),
+                operationId = Guid.NewGuid().ToString("D")
+            });
+            Assert.IsFalse(highlightReply.TryGetProperty("isError", out var highlightError)
+                && highlightError.GetBoolean(), highlightReply.GetRawText());
+            var highlightData = highlightReply.GetProperty("structuredContent");
+            Assert.IsTrue(highlightData.GetProperty("nativeGuiOnly").GetBoolean());
+            Assert.IsTrue(highlightData.GetProperty("selectionChanged").GetBoolean(), highlightReply.GetRawText());
+            Assert.IsFalse(highlightData.GetProperty("boardMutation").GetBoolean());
+            Assert.AreEqual(SchematicJson.Formatter.Format(cleanState), SchematicJson.Formatter.Format(
+                await ObserveLifecycleState(client, cleanBoard, token)));
+
+            var multilayerPlan = await mcp.Tool("kicad_pcb_route_plan_multilayer", new
+            {
+                instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard),
+                expectedStateJson = SchematicJson.Formatter.Format(cleanState),
+                requestJson = JsonSerializer.Serialize(new
+                {
+                    netName = "POWER_RAIL", start = new { xNm = 30_100_000L, yNm = 30_100_000L },
+                    end = new { xNm = 30_500_000L, yNm = 30_500_000L },
+                    startLayer = "F.Cu", endLayer = "F.Cu", layers = new[] { "F.Cu", "B.Cu" },
+                    widthNm = 250_000L, clearanceNm = 100_000L, gridNm = 100_000L,
+                    bounds = new { minXNm = 29_000_000L, minYNm = 29_000_000L, maxXNm = 31_000_000L, maxYNm = 31_000_000L },
+                    maxNodes = 10000, maxVias = 2,
+                    vias = new[] { new { type = "through", startLayer = "F.Cu", endLayer = "B.Cu", diameterNm = 600_000L, drillNm = 300_000L, costNm = 1_000_000L } }
+                })
+            });
+            Assert.IsFalse(multilayerPlan.TryGetProperty("isError", out var multilayerError) && multilayerError.GetBoolean(), multilayerPlan.GetRawText());
+            var multilayerData = multilayerPlan.GetProperty("structuredContent");
+            Assert.IsTrue(multilayerData.GetProperty("routeFound").GetBoolean(), multilayerPlan.GetRawText());
+            Assert.IsFalse(multilayerData.GetProperty("drcValidated").GetBoolean());
+            Assert.IsFalse(multilayerData.GetProperty("nativeCommit").GetBoolean());
+            var multilayerCandidate = BoardJson.Parser.Parse<CreateItems>(multilayerData.GetProperty("candidateRequestJson").GetString()!);
+            Assert.IsTrue(multilayerCandidate.Items.Any(item => item.Is(Track.Descriptor)));
+
+            var cleanCandidate = new CreateItems { Header = new() { Document = cleanBoard } };
+            cleanCandidate.Items.Add(Any.Pack(new Track
+            {
+                Id = new() { Value = Guid.NewGuid().ToString("D") },
+                Start = new() { XNm = 30_100_000, YNm = 30_100_000 },
+                End = new() { XNm = 30_500_000, YNm = 30_500_000 },
+                Width = new() { ValueNm = 250_000 }, Layer = BoardLayer.BlFCu,
+                Net = new() { Name = "POWER_RAIL" }
+            }));
+            var cleanDrcReply = await mcp.Tool("kicad_pcb_drc_start", new
+            {
+                instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard),
+                operationId = Guid.NewGuid().ToString("D"), refillZones = false,
+                reportAllTrackErrors = true, testFootprints = false,
+                expectedRevisionJson = SchematicJson.Formatter.Format(cleanState.Revision),
+                processEpoch = client.Epoch, candidateRequestJson = BoardJson.Formatter.Format(cleanCandidate)
+            });
+            Assert.IsFalse(cleanDrcReply.TryGetProperty("isError", out var cleanDrcError) && cleanDrcError.GetBoolean(), cleanDrcReply.GetRawText());
+            var cleanDrc = SchematicJson.Parser.Parse<PcbDrcJobState>(cleanDrcReply.GetProperty("content")[0].GetProperty("text").GetString()!);
+            for (int attempt = 0; attempt < 60 && !cleanDrc.WorkerFinished; ++attempt)
+            {
+                await Task.Delay(100, token);
+                var cleanDrcUpdate = await mcp.Tool("kicad_pcb_drc_job", new
+                { instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard), jobId = cleanDrc.JobId, processEpoch = client.Epoch });
+                Assert.IsFalse(cleanDrcUpdate.TryGetProperty("isError", out var cleanDrcUpdateError) && cleanDrcUpdateError.GetBoolean(), cleanDrcUpdate.GetRawText());
+                cleanDrc = SchematicJson.Parser.Parse<PcbDrcJobState>(cleanDrcUpdate.GetProperty("content")[0].GetProperty("text").GetString()!);
+            }
+            Assert.IsTrue(cleanDrc.WorkerFinished, "Clean route DRC did not reach a terminal state.");
+            Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, cleanDrc.Status, cleanDrc.ErrorMessage);
+            Assert.IsTrue(cleanDrc.SnapshotComplete);
+            Assert.IsTrue(cleanDrc.ResultsFresh);
+            Assert.IsEmpty(cleanDrc.Findings, "The positive checked route fixture must be DRC-clean.");
+            var cleanCommit = await mcp.Tool("kicad_pcb_route_commit", new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(cleanCandidate),
+                expectedStateJson = SchematicJson.Formatter.Format(cleanState),
+                drcJobStateJson = SchematicJson.Formatter.Format(cleanDrc), operationId = Guid.NewGuid().ToString("D")
+            });
+            Assert.IsFalse(cleanCommit.TryGetProperty("isError", out var cleanCommitError) && cleanCommitError.GetBoolean(), cleanCommit.GetRawText());
+            var cleanCommitData = cleanCommit.GetProperty("structuredContent");
+            Assert.IsTrue(cleanCommitData.GetProperty("mutationConfirmed").GetBoolean());
+            Assert.IsTrue(cleanCommitData.GetProperty("nativeReceipt").GetBoolean());
+            var cleanAfter = SchematicJson.Parser.Parse<DocumentLifecycleState>(cleanCommitData.GetProperty("afterState").GetString()!);
+            Assert.IsGreaterThan(cleanState.Revision.Sequence, cleanAfter.Revision.Sequence);
+            var committedClean = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbTrace } }, token);
+            Assert.IsTrue(committedClean.Items.Any(item => item.Is(Track.Descriptor)));
+            string cleanOperationId = cleanCommitData.GetProperty("operationId").GetString()!;
+            var replayCommit = await mcp.Tool("kicad_pcb_route_commit", new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(cleanCandidate),
+                expectedStateJson = SchematicJson.Formatter.Format(cleanState),
+                drcJobStateJson = SchematicJson.Formatter.Format(cleanDrc), operationId = cleanOperationId
+            });
+            Assert.IsFalse(replayCommit.TryGetProperty("isError", out var replayError) && replayError.GetBoolean(), replayCommit.GetRawText());
+            Assert.IsTrue(replayCommit.GetProperty("structuredContent").GetProperty("receipt").GetProperty("replayed").GetBoolean());
+            var receiptRead = await mcp.Tool("kicad_pcb_route_receipt", new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(new CheckedPcbRouteCommit
+                {
+                    Candidate = cleanCandidate, ExpectedState = cleanState, DrcJobId = cleanDrc.JobId,
+                    OperationId = cleanOperationId, MaximumResultBytes = 4 * 1024 * 1024
+                }), processEpoch = client.Epoch, operationId = cleanOperationId
+            });
+            Assert.IsFalse(receiptRead.TryGetProperty("isError", out var receiptError) && receiptError.GetBoolean(), receiptRead.GetRawText());
+            Assert.AreEqual(cleanOperationId, receiptRead.GetProperty("structuredContent").GetProperty("operationId").GetString());
+
+            // Identity-preserving replacement: update the committed route in
+            // place while adding a short continuation in the same transaction.
+            Track originalCleanTrack = cleanCandidate.Items.Single().Unpack<Track>();
+            Track replacementTrack = originalCleanTrack.Clone();
+            // Native serialization orders a property map by key. Supply the
+            // opposite wire order to prove checked apply accepts equal state.
+            replacementTrack.CustomProperties.Add(new CustomProperty { Key = "z-identity", Value = "1" });
+            replacementTrack.CustomProperties.Add(new CustomProperty { Key = "a-identity", Value = "2" });
+            replacementTrack.End = new Vector2 { XNm = 30_400_000, YNm = 30_400_000 };
+            Track continuation = new()
+            {
+                Id = new() { Value = Guid.NewGuid().ToString("D") },
+                Start = replacementTrack.End.Clone(), End = originalCleanTrack.End.Clone(),
+                Width = replacementTrack.Width.Clone(), Layer = replacementTrack.Layer,
+                Net = replacementTrack.Net.Clone()
+            };
+            var identityCreate = new CreateItems { Header = new() { Document = cleanBoard } };
+            identityCreate.Items.Add(Any.Pack(continuation));
+            var identityUpdate = new UpdateItems { Header = new() { Document = cleanBoard } };
+            identityUpdate.Items.Add(Any.Pack(replacementTrack));
+            var identityDrcCandidate = new CreateItems { Header = new() { Document = cleanBoard } };
+            identityDrcCandidate.Items.Add(Any.Pack(continuation));
+            identityDrcCandidate.Items.Add(Any.Pack(replacementTrack));
+            var identityDelete = new DeleteItems { Header = new() { Document = cleanBoard } };
+            identityDelete.ItemIds.Add(originalCleanTrack.Id.Clone());
+            var identityDrcReply = await mcp.Tool("kicad_pcb_drc_start", new
+            {
+                instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard),
+                operationId = Guid.NewGuid().ToString("D"), refillZones = false,
+                reportAllTrackErrors = true, testFootprints = false,
+                expectedRevisionJson = SchematicJson.Formatter.Format(cleanAfter.Revision),
+                processEpoch = client.Epoch, candidateRequestJson = BoardJson.Formatter.Format(identityDrcCandidate),
+                deleteRequestJson = BoardJson.Formatter.Format(identityDelete)
+            });
+            Assert.IsFalse(identityDrcReply.TryGetProperty("isError", out var identityDrcError) && identityDrcError.GetBoolean(), identityDrcReply.GetRawText());
+            var identityDrc = SchematicJson.Parser.Parse<PcbDrcJobState>(identityDrcReply.GetProperty("content")[0].GetProperty("text").GetString()!);
+            for (int attempt = 0; attempt < 60 && !identityDrc.WorkerFinished; ++attempt)
+            {
+                await Task.Delay(100, token);
+                var updateReply = await mcp.Tool("kicad_pcb_drc_job", new
+                {
+                    instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard), jobId = identityDrc.JobId,
+                    processEpoch = client.Epoch, candidateRequestJson = BoardJson.Formatter.Format(identityDrcCandidate),
+                    deleteRequestJson = BoardJson.Formatter.Format(identityDelete)
+                });
+                Assert.IsFalse(updateReply.TryGetProperty("isError", out var identityUpdateError) && identityUpdateError.GetBoolean(), updateReply.GetRawText());
+                identityDrc = SchematicJson.Parser.Parse<PcbDrcJobState>(updateReply.GetProperty("content")[0].GetProperty("text").GetString()!);
+            }
+            var identityVerifiedReply = await mcp.Tool("kicad_pcb_drc_job", new
+            {
+                instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard), jobId = identityDrc.JobId,
+                processEpoch = client.Epoch, candidateRequestJson = BoardJson.Formatter.Format(identityDrcCandidate),
+                deleteRequestJson = BoardJson.Formatter.Format(identityDelete)
+            });
+            Assert.IsFalse(identityVerifiedReply.TryGetProperty("isError", out var identityVerifiedError) && identityVerifiedError.GetBoolean(), identityVerifiedReply.GetRawText());
+            identityDrc = SchematicJson.Parser.Parse<PcbDrcJobState>(identityVerifiedReply.GetProperty("content")[0].GetProperty("text").GetString()!);
+            Assert.IsTrue(identityDrc.WorkerFinished, identityDrc.ErrorMessage);
+            Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, identityDrc.Status, identityDrc.ErrorMessage);
+            Assert.IsEmpty(identityDrc.Findings, SchematicJson.Formatter.Format(identityDrc));
+            var identityCommit = await mcp.Tool("kicad_pcb_route_commit", new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(identityCreate),
+                replacementUpdatesJson = BoardJson.Formatter.Format(identityUpdate),
+                expectedStateJson = SchematicJson.Formatter.Format(cleanAfter),
+                drcJobStateJson = SchematicJson.Formatter.Format(identityDrc), operationId = Guid.NewGuid().ToString("D")
+            });
+            Assert.IsFalse(identityCommit.TryGetProperty("isError", out var identityCommitError) && identityCommitError.GetBoolean(), identityCommit.GetRawText());
+            var identityData = identityCommit.GetProperty("structuredContent");
+            Assert.IsTrue(identityData.GetProperty("mutationConfirmed").GetBoolean(), identityCommit.GetRawText());
+            Assert.AreEqual(originalCleanTrack.Id.Value, identityData.GetProperty("receipt").GetProperty("updated").GetProperty("items")[0].GetProperty("id").GetProperty("value").GetString());
+            var nativeUpdate = identityData.GetProperty("receipt").GetProperty("updatedResult");
+            Assert.AreEqual("IRS_OK", nativeUpdate.GetProperty("status").GetString(), identityCommit.GetRawText());
+            Assert.AreEqual(replacementTrack.End.XNm, long.Parse(nativeUpdate.GetProperty("updatedItems")[0].GetProperty("item").GetProperty("end").GetProperty("xNm").GetString()!, CultureInfo.InvariantCulture), identityCommit.GetRawText());
+            Assert.AreEqual(replacementTrack.End.YNm, long.Parse(nativeUpdate.GetProperty("updatedItems")[0].GetProperty("item").GetProperty("end").GetProperty("yNm").GetString()!, CultureInfo.InvariantCulture), identityCommit.GetRawText());
+            var identityRead = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Items = { originalCleanTrack.Id, continuation.Id } }, token);
+            Assert.AreEqual(2, identityRead.Items.Count, identityCommit.GetRawText());
+            Assert.AreEqual(replacementTrack.End, identityRead.Items
+                .Single(item => item.Is(Track.Descriptor) && item.Unpack<Track>().Id.Value == originalCleanTrack.Id.Value)
+                .Unpack<Track>().End);
+            var identitySave = await mcp.Tool("kicad_document_save", new
+            { instanceId, expectedStateJson = identityData.GetProperty("afterState").GetString(), operationId = Guid.NewGuid().ToString("D") });
+            Assert.IsFalse(identitySave.TryGetProperty("isError", out var identitySaveError) && identitySaveError.GetBoolean(), identitySave.GetRawText());
+            var identityClose = await mcp.Tool("kicad_document_close", new
+            { instanceId, expectedStateJson = identitySave.GetProperty("structuredContent").GetProperty("observedState").GetRawText(), operationId = Guid.NewGuid().ToString("D") });
+            Assert.IsFalse(identityClose.TryGetProperty("isError", out var identityCloseError) && identityCloseError.GetBoolean(), identityClose.GetRawText());
+            var identityReopen = await CreateRootThroughMcp(client.Endpoint, instanceId, cleanPath, evidence, token, toolName: "kicad_pcb_open");
+            cleanBoard = identityReopen.Document;
+            finalBoard = cleanBoard;
+            var persistedIdentity = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Items = { originalCleanTrack.Id, continuation.Id } }, token);
+            Assert.AreEqual(2, persistedIdentity.Items.Count, identityReopen.ToString());
+            Assert.AreEqual(replacementTrack.End, persistedIdentity.Items
+                .Single(item => item.Is(Track.Descriptor) && item.Unpack<Track>().Id.Value == originalCleanTrack.Id.Value)
+                .Unpack<Track>().End);
+            string cleanExportStateJson = SchematicJson.Formatter.Format(await ObserveLifecycleState(client, cleanBoard, token));
+
+            string exportDirectory = Directory.CreateTempSubdirectory("kicad-pcb-export-").FullName;
+            try
+            {
+                var svgExport = new RunBoardJobExportSvg
+                {
+                    JobSettings = new() { Document = cleanBoard, OutputPath = Path.Combine(exportDirectory, "layers.svg") },
+                    PlotSettings = new(),
+                    FitPageToBoard = true, PageMode = BoardJobPaginationMode.BjpmEachLayerOwnFile
+                };
+                svgExport.PlotSettings.Layers.Add(BoardLayer.BlFCu);
+                svgExport.PlotSettings.Layers.Add(BoardLayer.BlBCu);
+                var svgExportReply = await mcp.Tool("kicad_pcb_export_svg", new
+                { instanceId, requestJson = BoardJson.Formatter.Format(svgExport), expectedStateJson = cleanExportStateJson });
+                Assert.IsFalse(svgExportReply.TryGetProperty("isError", out var svgExportError) && svgExportError.GetBoolean(), svgExportReply.GetRawText());
+                var svgOutputs = svgExportReply.GetProperty("structuredContent").GetProperty("outputs").EnumerateArray().ToArray();
+                Assert.IsGreaterThanOrEqualTo(1, svgOutputs.Length);
+                Assert.IsTrue(svgOutputs.All(output => File.Exists(output.GetProperty("path").GetString()!)
+                    && output.GetProperty("bytes").GetInt64() > 0));
+
+                var statsExport = new RunBoardJobExportStats
+                {
+                    JobSettings = new() { Document = cleanBoard, OutputPath = Path.Combine(exportDirectory, "stats.json") },
+                    Format = StatsOutputFormat.SofJson, Units = Units.UMm
+                };
+                var statsReply = await mcp.Tool("kicad_pcb_export_stats", new
+                { instanceId, requestJson = BoardJson.Formatter.Format(statsExport), expectedStateJson = cleanExportStateJson });
+                Assert.IsFalse(statsReply.TryGetProperty("isError", out var statsError) && statsError.GetBoolean(), statsReply.GetRawText());
+                var statsOutputs = statsReply.GetProperty("structuredContent").GetProperty("outputs").EnumerateArray().ToArray();
+                Assert.IsGreaterThanOrEqualTo(1, statsOutputs.Length);
+                Assert.IsTrue(statsOutputs.All(output => File.Exists(output.GetProperty("path").GetString()!)
+                    && output.GetProperty("bytes").GetInt64() > 0));
+
+                void VerifyAdditionalExport(JsonElement reply)
+                {
+                    Assert.IsFalse(reply.TryGetProperty("isError", out var error) && error.GetBoolean(), reply.GetRawText());
+                    var outputs = reply.GetProperty("structuredContent").GetProperty("outputs").EnumerateArray().ToArray();
+                    Assert.IsGreaterThanOrEqualTo(1, outputs.Length, reply.GetRawText());
+                    Assert.IsTrue(outputs.All(output => output.GetProperty("bytes").GetInt64() > 0
+                        && output.GetProperty("sha256").GetString()!.Length == 64), reply.GetRawText());
+                }
+                BoardPlotSettings Plot() => new() { Layers = { BoardLayer.BlFCu, BoardLayer.BlBCu, BoardLayer.BlEdgeCuts } };
+                var dxfRequest = new RunBoardJobExportDxf
+                { JobSettings = new() { Document = cleanBoard, OutputPath = Path.Combine(exportDirectory, "board.dxf") }, PlotSettings = Plot(), Units = Units.UMm };
+                var dxfReply = await mcp.Tool("kicad_pcb_export_dxf", new
+                { instanceId, requestJson = BoardJson.Formatter.Format(dxfRequest), expectedStateJson = cleanExportStateJson });
+                VerifyAdditionalExport(dxfReply);
+                var pdfRequest = new RunBoardJobExportPdf
+                { JobSettings = new() { Document = cleanBoard, OutputPath = Path.Combine(exportDirectory, "board.pdf") }, PlotSettings = Plot(), IncludeMetadata = true, SingleDocument = true };
+                var pdfReply = await mcp.Tool("kicad_pcb_export_pdf", new
+                { instanceId, requestJson = BoardJson.Formatter.Format(pdfRequest), expectedStateJson = cleanExportStateJson });
+                VerifyAdditionalExport(pdfReply);
+                var psRequest = new RunBoardJobExportPs
+                { JobSettings = new() { Document = cleanBoard, OutputPath = Path.Combine(exportDirectory, "board.ps") }, PlotSettings = Plot(), ForceA4 = true };
+                var psReply = await mcp.Tool("kicad_pcb_export_ps", new
+                { instanceId, requestJson = BoardJson.Formatter.Format(psRequest), expectedStateJson = cleanExportStateJson });
+                VerifyAdditionalExport(psReply);
+                var gencadRequest = new RunBoardJobExportGencad
+                { JobSettings = new() { Document = cleanBoard, OutputPath = Path.Combine(exportDirectory, "board.cad") }, UseIndividualShapes = true };
+                var gencadReply = await mcp.Tool("kicad_pcb_export_gencad", new
+                { instanceId, requestJson = BoardJson.Formatter.Format(gencadRequest), expectedStateJson = cleanExportStateJson });
+                VerifyAdditionalExport(gencadReply);
+
+                // Manufacturing checkpoint: Gerber X2 output is generated from
+                // the same clean, committed board and must leave its lifecycle
+                // state unchanged.  The manifest is the authoritative evidence
+                // for every generated file and its digest.
+                string gerberDirectory = Path.Combine(exportDirectory, "gerbers");
+                var gerberExport = new RunBoardJobExportGerbers
+                {
+                    JobSettings = new() { Document = cleanBoard, OutputPath = gerberDirectory },
+                    UseBoardPlotParams = false, CreateGerberJobFile = true,
+                    IncludeNetlistAttributes = true, UseX2Format = true,
+                    Precision = GerberPrecision.Gp6,
+                    PlotSettings = new() { Scale = 1, DrillMarks = PlotDrillMarks.PdmNone,
+                        CheckZonesBeforePlot = false }
+                };
+                gerberExport.PlotSettings.Layers.Add(BoardLayer.BlFCu);
+                gerberExport.PlotSettings.Layers.Add(BoardLayer.BlBCu);
+                gerberExport.PlotSettings.Layers.Add(BoardLayer.BlEdgeCuts);
+                var gerberReply = await mcp.Tool("kicad_pcb_export_gerbers", new
+                { instanceId, requestJson = BoardJson.Formatter.Format(gerberExport), expectedStateJson = cleanExportStateJson });
+                Assert.IsFalse(gerberReply.TryGetProperty("isError", out var gerberError) && gerberError.GetBoolean(), gerberReply.GetRawText());
+                var gerberOutputs = gerberReply.GetProperty("structuredContent").GetProperty("outputs").EnumerateArray().ToArray();
+                Assert.IsGreaterThanOrEqualTo(1, gerberOutputs.Length);
+                Assert.IsTrue(gerberOutputs.All(output => File.Exists(output.GetProperty("path").GetString()!)
+                    && output.GetProperty("bytes").GetInt64() > 0
+                    && output.GetProperty("sha256").GetString()!.Length == 64));
+                var gerberJobPath = gerberOutputs.Select(output => output.GetProperty("path").GetString()!)
+                    .SingleOrDefault(path => Path.GetExtension(path).Equals(".gbrjob", StringComparison.OrdinalIgnoreCase));
+                Assert.IsNotNull(gerberJobPath, gerberReply.GetRawText());
+                string gerberJob = await File.ReadAllTextAsync(gerberJobPath!, token);
+                StringAssert.Contains(gerberJob, "FilesAttributes", "Gerber X2 output must include a job manifest.");
+                StringAssert.Contains(gerberJob, "F.Cu", "Gerber job manifest must identify the front copper layer.");
+                var frontGerberPath = gerberOutputs.Select(output => output.GetProperty("path").GetString()!)
+                    .FirstOrDefault(path => Path.GetFileName(path).Contains("F_Cu", StringComparison.OrdinalIgnoreCase));
+                Assert.IsNotNull(frontGerberPath, gerberReply.GetRawText());
+                StringAssert.Contains(await File.ReadAllTextAsync(frontGerberPath!, token), "POWER_RAIL",
+                    "Gerber X2 front copper must carry the routed net attribute.");
+                Assert.AreEqual(cleanExportStateJson, SchematicJson.Formatter.Format(
+                    await ObserveLifecycleState(client, cleanBoard, token)));
+
+                // Dedicated footprint-placement qualification uses a real
+                // footprint definition read from the clean native board. The
+                // MCP plan/apply boundary must preserve the exact definition,
+                // advance lifecycle state, and expose a replay receipt.
+                var footprintItems = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+                { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbFootprint } }, token);
+                var sourceFootprint = footprintItems.Items.Select(item => item.Unpack<FootprintInstance>()).First();
+                var placedFootprint = sourceFootprint.Clone();
+                placedFootprint.Id = new() { Value = Guid.NewGuid().ToString("D") };
+                placedFootprint.Position = new() { XNm = 60_000_000, YNm = 60_000_000 };
+                placedFootprint.Layer = BoardLayer.BlFCu;
+                placedFootprint.Definition.Id.LibraryNickname = string.IsNullOrWhiteSpace(placedFootprint.Definition.Id.LibraryNickname)
+                    ? "Generated" : placedFootprint.Definition.Id.LibraryNickname;
+                placedFootprint.Definition.Id.EntryName = string.IsNullOrWhiteSpace(placedFootprint.Definition.Id.EntryName)
+                    ? "Placed" : placedFootprint.Definition.Id.EntryName;
+                var placementPlan = await mcp.Tool("kicad_pcb_footprint_place_plan", new
+                {
+                    documentJson = SchematicJson.Formatter.Format(cleanBoard),
+                    expectedStateJson = cleanExportStateJson,
+                    footprintJson = BoardJson.Formatter.Format(placedFootprint)
+                });
+                Assert.IsFalse(placementPlan.TryGetProperty("isError", out var placementPlanError)
+                    && placementPlanError.GetBoolean(), placementPlan.GetRawText());
+                var placementPlanData = placementPlan.GetProperty("structuredContent");
+                Assert.IsTrue(placementPlanData.GetProperty("proposalOnly").GetBoolean());
+                var placementOperationId = Guid.NewGuid().ToString("D");
+                var placementApply = await mcp.Tool("kicad_pcb_footprint_place_apply", new
+                {
+                    instanceId, candidateRequestJson = placementPlanData.GetProperty("candidateRequestJson").GetString(),
+                    expectedStateJson = cleanExportStateJson, operationId = placementOperationId
+                });
+                Assert.IsFalse(placementApply.TryGetProperty("isError", out var placementApplyError)
+                    && placementApplyError.GetBoolean(), placementApply.GetRawText());
+                var placementData = placementApply.GetProperty("structuredContent");
+                Assert.IsTrue(placementData.GetProperty("mutationConfirmed").GetBoolean());
+                Assert.IsTrue(placementData.GetProperty("atomicTransaction").GetBoolean());
+                Assert.IsFalse(placementData.GetProperty("nativeReceiptAvailable").GetBoolean());
+                var placementReceipt = await mcp.Tool("kicad_pcb_footprint_place_receipt", new
+                { instanceId, expectedProcessEpoch = client.Epoch, operationId = placementOperationId });
+                Assert.IsFalse(placementReceipt.TryGetProperty("isError", out var placementReceiptError)
+                    && placementReceiptError.GetBoolean(), placementReceipt.GetRawText());
+                Assert.IsTrue(placementReceipt.GetProperty("structuredContent").GetProperty("found").GetBoolean());
+                var placedRead = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+                { Header = new() { Document = cleanBoard }, Items = { placedFootprint.Id } }, token);
+                Assert.AreEqual(placedFootprint.Id, placedRead.Items.Single().Unpack<FootprintInstance>().Id);
+                var removePlacedFootprint = await mcp.Tool("kicad_pcb_items_delete", new
+                {
+                    instanceId,
+                    requestJson = BoardJson.Formatter.Format(new DeleteItems { Header = new() { Document = cleanBoard }, ItemIds = { placedFootprint.Id } }),
+                    expectedStateJson = placementData.GetProperty("afterState").GetString()
+                });
+                Assert.IsFalse(removePlacedFootprint.TryGetProperty("isError", out var removePlacedError)
+                    && removePlacedError.GetBoolean(), removePlacedFootprint.GetRawText());
+                string rerouteBaseStateJson = removePlacedFootprint.GetProperty("structuredContent").GetProperty("afterState").GetString()!;
+
+                // The headless planner can now hand its same-net rip-up IDs
+                // directly to the generic route-replacement transaction.
+                var reroutePlan = await mcp.Tool("kicad_pcb_route_plan", new
+                {
+                    instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard),
+                    expectedStateJson = rerouteBaseStateJson,
+                    requestJson = JsonSerializer.Serialize(new
+                    {
+                        netName = "POWER_RAIL", start = new { xNm = 30_100_000L, yNm = 30_100_000L },
+                        end = new { xNm = 30_500_000L, yNm = 30_500_000L }, layer = "F.Cu",
+                        widthNm = 250_000L, clearanceNm = 100_000L, gridNm = 100_000L,
+                        bounds = new { minXNm = 29_000_000L, minYNm = 29_000_000L, maxXNm = 31_000_000L, maxYNm = 31_000_000L },
+                        includeFootprintEnvelopes = true, includeRipUpCandidate = true, maxNodes = 10000
+                    })
+                });
+                Assert.IsFalse(reroutePlan.TryGetProperty("isError", out var reroutePlanError)
+                    && reroutePlanError.GetBoolean(), reroutePlan.GetRawText());
+                var rerouteData = reroutePlan.GetProperty("structuredContent");
+                Assert.IsTrue(rerouteData.GetProperty("routeFound").GetBoolean(), reroutePlan.GetRawText());
+                Assert.IsGreaterThan(0, rerouteData.GetProperty("ripUpItemIds").GetArrayLength());
+                var rerouteExpectedState = SchematicJson.Parser.Parse<DocumentLifecycleState>(rerouteBaseStateJson);
+                var rerouteDrcReply = await mcp.Tool("kicad_pcb_drc_start", new
+                {
+                    instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard),
+                    operationId = Guid.NewGuid().ToString("D"), refillZones = false,
+                    reportAllTrackErrors = true, testFootprints = false,
+                    expectedRevisionJson = SchematicJson.Formatter.Format(rerouteExpectedState.Revision),
+                    processEpoch = client.Epoch,
+                    candidateRequestJson = rerouteData.GetProperty("candidateRequestJson").GetString(),
+                    deleteRequestJson = rerouteData.GetProperty("ripUpCandidateRequestJson").GetString()
+                });
+                Assert.IsFalse(rerouteDrcReply.TryGetProperty("isError", out var rerouteDrcStartError)
+                    && rerouteDrcStartError.GetBoolean(), rerouteDrcReply.GetRawText());
+                var rerouteDrc = SchematicJson.Parser.Parse<PcbDrcJobState>(rerouteDrcReply.GetProperty("content")[0].GetProperty("text").GetString()!);
+                for (int attempt = 0; attempt < 60 && !rerouteDrc.WorkerFinished; attempt++)
+                {
+                    await Task.Delay(100, token);
+                    var rerouteUpdate = await mcp.Tool("kicad_pcb_drc_job", new
+                    { instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard), jobId = rerouteDrc.JobId, processEpoch = client.Epoch,
+                        candidateRequestJson = rerouteData.GetProperty("candidateRequestJson").GetString(),
+                        deleteRequestJson = rerouteData.GetProperty("ripUpCandidateRequestJson").GetString() });
+                    Assert.IsFalse(rerouteUpdate.TryGetProperty("isError", out var rerouteUpdateError) && rerouteUpdateError.GetBoolean(), rerouteUpdate.GetRawText());
+                    rerouteDrc = SchematicJson.Parser.Parse<PcbDrcJobState>(rerouteUpdate.GetProperty("content")[0].GetProperty("text").GetString()!);
+                }
+                // A very fast native job may already be terminal in the start
+                // reply. Read it once with the exact candidate payload anyway;
+                // this is the receipt step that proves the payload was checked,
+                // rather than relying on whether the worker needed polling.
+                var verifiedRerouteReply = await mcp.Tool("kicad_pcb_drc_job", new
+                { instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard), jobId = rerouteDrc.JobId, processEpoch = client.Epoch,
+                    candidateRequestJson = rerouteData.GetProperty("candidateRequestJson").GetString(),
+                    deleteRequestJson = rerouteData.GetProperty("ripUpCandidateRequestJson").GetString() });
+                Assert.IsFalse(verifiedRerouteReply.TryGetProperty("isError", out var verifiedRerouteError)
+                    && verifiedRerouteError.GetBoolean(), verifiedRerouteReply.GetRawText());
+                rerouteDrc = SchematicJson.Parser.Parse<PcbDrcJobState>(verifiedRerouteReply.GetProperty("content")[0].GetProperty("text").GetString()!);
+                Assert.IsTrue(rerouteDrc.WorkerFinished, rerouteDrc.ErrorMessage);
+                Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, rerouteDrc.Status, rerouteDrc.ErrorMessage);
+                Assert.IsTrue(rerouteDrc.ResultsFresh, SchematicJson.Formatter.Format(rerouteDrc));
+                Assert.IsTrue(rerouteDrc.SnapshotComplete, SchematicJson.Formatter.Format(rerouteDrc));
+                Assert.IsTrue(rerouteDrc.CandidatePayloadVerified, SchematicJson.Formatter.Format(rerouteDrc));
+                Assert.IsEmpty(rerouteDrc.Findings, SchematicJson.Formatter.Format(rerouteDrc));
+                var rerouteApply = await mcp.Tool("kicad_pcb_route_reroute_apply", new
+                {
+                    instanceId, deleteRequestJson = rerouteData.GetProperty("ripUpCandidateRequestJson").GetString(),
+                    createRequestJson = rerouteData.GetProperty("candidateRequestJson").GetString(),
+                    expectedStateJson = rerouteBaseStateJson,
+                    operationId = Guid.NewGuid().ToString("D"),
+                    drcJobStateJson = SchematicJson.Formatter.Format(rerouteDrc)
+                });
+                Assert.IsFalse(rerouteApply.TryGetProperty("isError", out var rerouteApplyError)
+                    && rerouteApplyError.GetBoolean(), rerouteApply.GetRawText());
+                Assert.IsTrue(rerouteApply.GetProperty("structuredContent").GetProperty("mutationConfirmed").GetBoolean());
+            }
+            finally { Directory.Delete(exportDirectory, true); }
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-pcb-items.json"), updatedReply.GetRawText(), token);
         }
         finally { Directory.Delete(stateDirectory, true); }
-        await SaveCheckedThroughMcp(client, board, evidence, token, verifyReconnect: false);
+        finalBoard = await VerifyNativePcbManufacturing(client, finalBoard, evidence, instanceId, token);
+        await SaveCheckedThroughMcp(client, finalBoard, evidence, token, verifyReconnect: false);
+    }
+
+    private static string RouteIdentity(Any item) => item.Is(Track.Descriptor) ? item.Unpack<Track>().Id.Value
+        : item.Is(Arc.Descriptor) ? item.Unpack<Arc>().Id.Value : item.Unpack<Via>().Id.Value;
+
+    private static string RouteShape(Any item)
+    {
+        if (item.Is(Track.Descriptor))
+        {
+            var track = item.Unpack<Track>();
+            var points = new[] { $"{track.Start.XNm},{track.Start.YNm}", $"{track.End.XNm},{track.End.YNm}" }.Order(StringComparer.Ordinal);
+            return $"track:{track.Net.Name}:{track.Layer}:{track.Width.ValueNm}:{string.Join("/", points)}";
+        }
+        if (item.Is(Arc.Descriptor))
+        {
+            var arc = item.Unpack<Arc>();
+            return $"arc:{arc.Net.Name}:{arc.Layer}:{arc.Width.ValueNm}:{arc.Start}:{arc.Mid}:{arc.End}";
+        }
+        var via = item.Unpack<Via>();
+        return $"via:{via.Net.Name}:{via.Position}:{via.PadStack}";
+    }
+
+    private static string CleanRouteBoard()
+    {
+        string f1 = Guid.NewGuid().ToString("D"), f2 = Guid.NewGuid().ToString("D");
+        string p1 = Guid.NewGuid().ToString("D"), p2 = Guid.NewGuid().ToString("D");
+        string f3 = Guid.NewGuid().ToString("D"), f4 = Guid.NewGuid().ToString("D");
+        string p3 = Guid.NewGuid().ToString("D"), p4 = Guid.NewGuid().ToString("D");
+        string obstacle = Guid.NewGuid().ToString("D");
+        string edge = Guid.NewGuid().ToString("D");
+        // Keep the candidate deliberately small and deterministic: the native
+        // shove preview starts at the USB_D+ pad (40.1,40.1) and runs vertically
+        // through a foreign-net POWER_RAIL barrier at y=42. The explicit
+        // Edge.Cuts rectangle gives the native checker a finite board for edge
+        // clearance and containment rules.
+        return $"""
+(kicad_pcb (version 20260206) (generator "pcbnew")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (2 "B.Cu" signal) (25 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "POWER_RAIL")
+  (net 2 "USB_D+")
+  (net 3 "USB_D-")
+  (gr_rect (start 0 0) (end 100 100) (stroke (width 0.05) (type default)) (fill none) (layer "Edge.Cuts") (uuid "{edge}"))
+  (footprint "PAD1" (layer "F.Cu") (at 30.1 30.1) (uuid "{f1}")
+    (attr smd)
+    (pad "1" smd circle (at 0 0) (size 0.3 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "POWER_RAIL") (uuid "{p1}")))
+  (footprint "PAD2" (layer "F.Cu") (at 30.5 30.5) (uuid "{f2}")
+    (attr smd)
+    (pad "1" smd circle (at 0 0) (size 0.3 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "POWER_RAIL") (uuid "{p2}")))
+  (footprint "DP_P" (layer "F.Cu") (at 40.1 40.1) (uuid "{f3}")
+    (attr smd)
+    (pad "1" smd circle (at 0 0) (size 0.3 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "USB_D+") (uuid "{p3}")))
+  (footprint "DP_N" (layer "F.Cu") (at 40.8 40.8) (uuid "{f4}")
+    (attr smd)
+    (pad "1" smd circle (at 0 0) (size 0.3 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "USB_D-") (uuid "{p4}")))
+  (segment (start 39 42) (end 41 42) (width 0.25) (layer "F.Cu") (net 1) (uuid "{obstacle}"))
+)
+""";
     }
 }

@@ -43,6 +43,7 @@ class PAD;
 class EDA_TEXT;
 class LENGTH_DELAY_CALCULATION_ITEM;
 class BOARD_ITEM;
+class BOARD_CONNECTED_ITEM;
 class EDA_GROUP;
 
 namespace PNS
@@ -166,6 +167,11 @@ public:
     void UpdateItem( PNS::ITEM* aItem ) override;
     void RemoveItem( PNS::ITEM* aItem ) override;
 
+    // Materialize detached copper with native geometry and complete source
+    // properties. This never adds an item or opens a board transaction.
+    std::unique_ptr<BOARD_CONNECTED_ITEM> MaterializeRouteItem( PNS::ITEM* aItem,
+                                                               bool aPreserveIdentity ) const;
+
     int GetNetCode( PNS::NET_HANDLE aNet ) const override;
     wxString GetNetName( PNS::NET_HANDLE aNet ) const override;
     void UpdateNet( PNS::NET_HANDLE aNet ) override;
@@ -177,6 +183,7 @@ public:
     void SetCommitFlags( int aCommitFlags ) { m_commitFlags = aCommitFlags; }
 
 protected:
+    bool applyRouteGeometry( PNS::ITEM* aItem, BOARD_CONNECTED_ITEM* aBoardItem ) const;
     BOARD_CONNECTED_ITEM* createBoardItem( PNS::ITEM* aItem );
     void                  modifyBoardItem( PNS::ITEM* aItem, BOARD_COMMIT& aCommit );
     void                  applyFootprintOffsets( BOARD_COMMIT& aCommit );

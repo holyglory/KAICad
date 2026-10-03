@@ -40,6 +40,7 @@ set( KIAPI_PROTO_SRCS
     common/commands/diagram_canvas_commands.proto
     common/commands/schematic_tracking_commands.proto
     common/commands/capability_commands.proto
+    common/commands/checked_pcb_route_commands.proto
 
     board/board.proto
     board/board_commands.proto
@@ -64,17 +65,52 @@ foreach( PROTO_SRC ${KIAPI_PROTO_SRCS} )
     set( KIAPI_PROTO_SRC_FULLPATHS ${KIAPI_PROTO_SRC_FULLPATHS} ${CMAKE_CURRENT_SOURCE_DIR}/proto/${PROTO_SRC} )
 endforeach ()
 
-add_custom_command( COMMAND ${CMAKE_COMMAND} -E make_directory ${KIAPI_CPP_BASEPATH}
-    COMMAND ${Protobuf_PROTOC_EXECUTABLE}
-    --cpp_out=dllexport_decl=KIAPI_IMPORTEXPORT:${KIAPI_CPP_BASEPATH}
-    --proto_path=${CMAKE_CURRENT_SOURCE_DIR}/proto
-    --experimental_allow_proto3_optional
-    ${KIAPI_PROTO_SRCS}
-    COMMENT "Generating API protobuf source files from proto definitions..."
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    DEPENDS ${KIAPI_PROTO_SRC_FULLPATHS}
-    OUTPUT ${KIAPI_CPP_SRCS} ${KIAPI_CPP_HEADERS}
+if( CMAKE_GENERATOR MATCHES "Ninja" )
+    # Keep one protoc invocation so imported schemas cannot race or diverge.
+    # The witness is newer than every input after a successful publication;
+    # generated files are byproducts so unchanged copies do not retrigger the
+    # rule while Ninja still regenerates a missing byproduct.
+    set( KIAPI_CPP_STAGING_BASEPATH
+         ${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/cpp/api-staging )
+    set( KIAPI_CPP_GENERATION_STAMP
+         ${CMAKE_CURRENT_BINARY_DIR}/${KICMAKE_CFG_INTDIR}/cpp/api/.kiapi-protobuf.stamp )
+    set( KIAPI_PROTO_GENERATOR ${KICAD_CMAKE_MODULE_PATH}/BuildSteps/GenerateProtobuf.cmake )
+
+    add_custom_command(
+        OUTPUT ${KIAPI_CPP_GENERATION_STAMP}
+        BYPRODUCTS ${KIAPI_CPP_SRCS} ${KIAPI_CPP_HEADERS}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${KIAPI_CPP_BASEPATH}
+        COMMAND ${CMAKE_COMMAND}
+                -DPROTOC=${Protobuf_PROTOC_EXECUTABLE}
+                -DPROTO_ROOT=${CMAKE_CURRENT_SOURCE_DIR}/proto
+                "-DPROTO_FILES=${KIAPI_PROTO_SRCS}"
+                -DSTAGING_ROOT=${KIAPI_CPP_STAGING_BASEPATH}
+                -DDEST_ROOT=${KIAPI_CPP_BASEPATH}
+                -P ${KIAPI_PROTO_GENERATOR}
+        COMMAND ${CMAKE_COMMAND} -E touch ${KIAPI_CPP_GENERATION_STAMP}
+        COMMENT "Generating API protobuf source files from proto definitions..."
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        DEPENDS ${KIAPI_PROTO_SRC_FULLPATHS} ${KIAPI_PROTO_GENERATOR}
+                ${Protobuf_PROTOC_EXECUTABLE}
+        VERBATIM
     )
+    add_custom_target( kiapi_protobuf_codegen DEPENDS ${KIAPI_CPP_GENERATION_STAMP} )
+    set( KIAPI_PROTO_GENERATION_TARGET kiapi_protobuf_codegen )
+else()
+    add_custom_command(
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${KIAPI_CPP_BASEPATH}
+        COMMAND ${Protobuf_PROTOC_EXECUTABLE}
+                --cpp_out=dllexport_decl=KIAPI_IMPORTEXPORT:${KIAPI_CPP_BASEPATH}
+                --proto_path=${CMAKE_CURRENT_SOURCE_DIR}/proto
+                --experimental_allow_proto3_optional
+                ${KIAPI_PROTO_SRCS}
+        COMMENT "Generating API protobuf source files from proto definitions..."
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        DEPENDS ${KIAPI_PROTO_SRC_FULLPATHS} ${Protobuf_PROTOC_EXECUTABLE}
+        OUTPUT ${KIAPI_CPP_SRCS} ${KIAPI_CPP_HEADERS}
+        VERBATIM
+    )
+endif()
 
 # kiapi must be a shared DLL because the protobuf messages can only be initialized once
 add_library( kiapi SHARED
@@ -82,6 +118,10 @@ add_library( kiapi SHARED
     ${KIAPI_CPP_SRCS}
     ${KIAPI_CPP_HEADERS}
     )
+
+if( DEFINED KIAPI_PROTO_GENERATION_TARGET )
+    add_dependencies( kiapi ${KIAPI_PROTO_GENERATION_TARGET} )
+endif()
 
 target_compile_definitions( kiapi PRIVATE KIAPI_IMPORTEXPORT=APIEXPORT )
 target_compile_definitions( kiapi INTERFACE KIAPI_IMPORTEXPORT=APIIMPORT )

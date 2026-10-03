@@ -83,7 +83,7 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(current.Revision, combined.Electrical.Hierarchy.Revision);
         Assert.AreEqual(document, combined.Electrical.Hierarchy.Data.Document);
         var standaloneElectrical = await client.InvokeAsync<ReadSchematicElectricalState, SchematicElectricalState>(
-            new() { Document = document.Clone(), SchemaVersion = 9 }, token);
+            new() { Document = document.Clone(), SchemaVersion = 10 }, token);
         Assert.AreEqual(standaloneElectrical, combined.Electrical,
             "Combined capture must preserve the same current-schema project metadata as the normal electrical reader.");
         var checkedRequest = Request(current, "Accepted exact-state edit");
@@ -416,6 +416,59 @@ public sealed partial class NativeSessionTests
             changed, none);
         Assert.AreEqual(initial.State.StateSha256, deletedState.State.StateSha256,
             "Deleting every created object and the field restores exactly the saved form the sheet started with.");
+
+        // The task-oriented typed constructor uses the same checked native admission as the generic
+        // batch, but the agent supplies geometry and kind instead of manufacturing a protobuf Any.
+        // Keep this small qualification after the CRUD cycle so it cannot alter the earlier exact
+        // undo/redo assertions or leave fixture objects behind.
+        var typedObserved = await Observe();
+        string typedItemId = Guid.NewGuid().ToString("D");
+        string typedOperationId = Guid.NewGuid().ToString("D");
+        var typedRequestArguments = new
+        {
+            instanceId,
+            documentJson,
+            expectedStateJson = SchematicJson.Formatter.Format(typedObserved.State),
+            kind = "wire",
+            itemId = typedItemId,
+            xNm = At(40, 140).XNm,
+            yNm = At(40, 140).YNm,
+            endXNm = At(55, 140).XNm,
+            endYNm = At(55, 140).YNm,
+            operationId = typedOperationId
+        };
+        var typedReply = await mcp.Tool("kicad_schematic_create_connection_item", typedRequestArguments);
+        RequireToolSuccess(typedReply);
+        var typedReceipt = SchematicJson.Parser.Parse<CheckedSchematicBatchReceipt>(
+            typedReply.GetProperty("structuredContent").GetProperty("receipt").GetRawText());
+        Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, typedReceipt.Status);
+        var typedLine = typedReceipt.Result.Items.Single().Unpack<SchematicLine>();
+        Assert.AreEqual(typedItemId, typedLine.Id.Value);
+        Assert.AreEqual(At(40, 140), typedLine.Start);
+        Assert.AreEqual(At(55, 140), typedLine.End);
+        var typedDuplicate = await mcp.Tool("kicad_schematic_create_connection_item", typedRequestArguments);
+        RequireToolSuccess(typedDuplicate);
+        Assert.AreEqual(typedReceipt, SchematicJson.Parser.Parse<CheckedSchematicBatchReceipt>(
+            typedDuplicate.GetProperty("structuredContent").GetProperty("receipt").GetRawText()));
+        var typedAfter = await Observe();
+        Assert.IsTrue(ItemsByUuid(typedAfter.Electrical.Hierarchy.Data.Instances
+            .Single(screen => Equals(screen.Metadata.Document?.SheetPath, document.SheetPath)).Items).ContainsKey(typedItemId));
+
+        var typedCleanup = new CheckedSchematicBatch
+        {
+            Batch = new ApplySchematicItemBatch
+            {
+                Document = document.Clone(), ExpectedRevision = typedAfter.State.Revision.Clone(),
+                DocumentEpoch = typedAfter.State.Revision.Epoch, OperationId = Guid.NewGuid().ToString("D"),
+                Description = "Remove typed schematic qualification wire"
+            },
+            ExpectedState = typedAfter.State.Clone()
+        };
+        typedCleanup.Batch.Operations.Add(new SchematicItemOperation { Remove = new KIID { Value = typedItemId } });
+        var typedCleanupReceipt = await Send(typedCleanup);
+        Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, typedCleanupReceipt.Status);
+        Assert.AreEqual(deletedState.State.StateSha256, typedCleanupReceipt.ObservedAfter.StateSha256,
+            "The typed qualification leaves the schematic at the same saved state.");
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-crud-requests.json"),
             "[" + string.Join(",\n", requests.Select(request => SchematicJson.Formatter.Format(request))) + "]", token);
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-crud-receipts.json"),

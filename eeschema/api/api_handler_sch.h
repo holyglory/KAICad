@@ -33,8 +33,10 @@
 #include <api/schematic/schematic_jobs.pb.h>
 #include <kiid.h>
 #include <sim/spice_simulator.h>
+#include <erc/erc.h>
 
 #include <mutex>
+#include <map>
 #include <optional>
 
 using namespace kiapi;
@@ -116,6 +118,18 @@ protected:
 
     HANDLER_RESULT<kiapi::automation::v1::SchematicMetadataSnapshot> handleReadMetadata(
             const HANDLER_CONTEXT<kiapi::automation::v1::ReadSchematicMetadata>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySymbolLibraryReadNamesResponse> handleReadSymbolLibraryNames(
+            const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySymbolLibraryReadNames>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySymbolLibraryReadSymbolResponse> handleReadSymbolLibrarySymbol(
+            const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySymbolLibraryReadSymbol>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySymbolLibraryWriteSymbolResponse> handleWriteSymbolLibrarySymbol(
+            const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySymbolLibraryWriteSymbol>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySymbolLibraryDeleteSymbolResponse> handleDeleteSymbolLibrarySymbol(
+            const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySymbolLibraryDeleteSymbol>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySymbolLibraryReadOperationResponse> handleReadSymbolLibraryOperation(
+            const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySymbolLibraryReadOperation>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySchematicRunErcResponse> handleRunErc(
+            const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySchematicRunErc>& aCtx );
 
 private:
     static std::optional<kiapi::common::ApiResponseStatus> validateSnapshotSchema( uint32_t aVersion );
@@ -185,6 +199,9 @@ private:
             const HANDLER_CONTEXT<kiapi::automation::v1::ReadSimulationJob>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> handleCancelSimulation(
             const HANDLER_CONTEXT<kiapi::automation::v1::CancelSimulationJob>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySimulationDependencies>
+    handleReadSimulationDependencies(
+            const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySimulationReadDependencies>& aCtx );
     HANDLER_RESULT<types::DocumentSpecifier> handleActivateSheet(
             const HANDLER_CONTEXT<kiapi::automation::v1::ActivateSchematicSheet>& aCtx );
 
@@ -217,6 +234,19 @@ private:
     std::mutex m_simulationMutex;
     std::shared_ptr<SPICE_SIMULATOR> m_automationSimulator;
     std::optional<SIMULATION_JOB> m_simulationJob;
+
+    // Process-owned retry receipts for global symbol-library mutations. The
+    // document lifecycle controller does not yet cover library files, so bind
+    // each operation ID to its exact protobuf request and retained response.
+    std::map<std::string, std::string> m_symbolLibraryOperationFingerprints;
+    std::map<std::string, kiapi::automation::v1::NativeCapabilitySymbolLibraryWriteSymbolResponse>
+            m_symbolLibraryWriteReceipts;
+    std::map<std::string, kiapi::automation::v1::NativeCapabilitySymbolLibraryDeleteSymbolResponse>
+            m_symbolLibraryDeleteReceipts;
+
+    std::map<std::string, std::string> m_ercOperationFingerprints;
+    std::map<std::string, kiapi::automation::v1::NativeCapabilitySchematicRunErcResponse>
+            m_ercReceipts;
 
     HANDLER_RESULT<commands::GetOpenDocumentsResponse>
     handleGetOpenDocuments( const HANDLER_CONTEXT<commands::GetOpenDocuments>& aCtx );

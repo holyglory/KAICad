@@ -51,9 +51,32 @@ public sealed partial class NativeSessionTests
         // allocate a cache alias before this journey began.
         var fixtureSymbol = originalFixture.Data.Items.Where(i => i.Is(SchematicSymbolInstance.Descriptor))
             .Select(i => i.Unpack<SchematicSymbolInstance>()).OrderBy(s => s.Id.Value, StringComparer.Ordinal).First();
+        var libraryId = fixtureSymbol.LibraryId ?? fixtureSymbol.Definition.Id;
+        Assert.IsNotNull(libraryId);
+        string symbolLibraryMcpState = Path.Combine(evidence, instanceId + "-symbol-library-mcp");
+        await using var symbolLibraryMcp = await StdioMcpFixture.StartAsync(
+            SyncHarnessProcessTests.ProductionStartInfo(), symbolLibraryMcpState,
+            Path.Combine(evidence, instanceId + "-symbol-library-mcp.stderr.log"), token);
+        RequireToolSuccess(await symbolLibraryMcp.Tool("kicad_instance_attach",
+            new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
+        var symbolLibraryList = await symbolLibraryMcp.Tool("kicad_symbol_library_list", new
+        {
+            instanceId, expectedProcessEpoch = client.Epoch,
+            libraryNickname = libraryId!.LibraryNickname
+        });
+        RequireToolSuccess(symbolLibraryList);
+        Assert.IsTrue(symbolLibraryList.GetProperty("structuredContent").GetProperty("symbolNames")
+            .EnumerateArray().Any(name => name.GetString() == libraryId.EntryName), symbolLibraryList.GetRawText());
+        var symbolLibraryRead = await symbolLibraryMcp.Tool("kicad_symbol_library_read", new
+        {
+            instanceId, expectedProcessEpoch = client.Epoch,
+            libraryNickname = libraryId.LibraryNickname, symbolName = libraryId.EntryName
+        });
+        RequireToolSuccess(symbolLibraryRead);
+        Assert.AreEqual(libraryId.EntryName, symbolLibraryRead.GetProperty("structuredContent")
+            .GetProperty("definition").GetProperty("id").GetProperty("entryName").GetString());
         string existingKey = fixtureSymbol.LibName.Length != 0 ? fixtureSymbol.LibName
-            : (fixtureSymbol.LibraryId ?? fixtureSymbol.Definition.Id).LibraryNickname + ":"
-                + (fixtureSymbol.LibraryId ?? fixtureSymbol.Definition.Id).EntryName;
+            : libraryId.LibraryNickname + ":" + libraryId.EntryName;
         var localCache = originalFixture.Data.CachedSymbols.Single(c => c.CacheKey == existingKey).Clone();
         localCache.CacheKey = "AutomationCache:LocallyEdited";
         localCache.Definition.Id = new() { LibraryNickname = "AutomationCache", EntryName = "LocallyEdited" };

@@ -7,6 +7,8 @@
 #include <settings/settings_manager.h>
 #include <zone.h>
 #include <zone_filler.h>
+#include <tools/zone_filler_tool.h>
+#include <tool/tool_manager.h>
 #include <atomic>
 
 BOOST_AUTO_TEST_SUITE( ZoneFillOutcome )
@@ -51,6 +53,17 @@ BOOST_AUTO_TEST_CASE( CompletionCancellationAndFailureAreDistinctAndRecoverable 
     BOOST_REQUIRE( filler.Fill( { zone } ) );
     BOOST_CHECK( filler.LastOutcome() == ZONE_FILLER::OUTCOME::COMPLETED );
     BOOST_CHECK_GT( zone->GetFilledPolysList( F_SilkS )->TotalVertices(), 0 );
+
+    TOOL_MANAGER toolMgr;
+    toolMgr.SetEnvironment( &board, nullptr, nullptr, nullptr, nullptr );
+    toolMgr.RegisterTool( new ZONE_FILLER_TOOL );
+    reporter.cancelled = true;
+    ZONE_FILL_RESULT cancelled = toolMgr.GetTool<ZONE_FILLER_TOOL>()->FillAllZonesWithResult(
+            nullptr, &reporter, true );
+    BOOST_CHECK( cancelled.primaryOutcome == ZONE_FILLER::OUTCOME::CANCELLED );
+    BOOST_CHECK( cancelled.outcome == ZONE_FILLER::OUTCOME::CANCELLED );
+    BOOST_CHECK( cancelled.cleanupFinished );
+    BOOST_CHECK( !cancelled.Completed() );
 }
 
 BOOST_AUTO_TEST_CASE( IterationLimitIsNotACompletedVerificationFill )
@@ -73,6 +86,16 @@ BOOST_AUTO_TEST_CASE( IterationLimitIsNotACompletedVerificationFill )
     // additionally inspect the explicit non-converged outcome.
     BOOST_CHECK( filler.Fill( zones ) );
     BOOST_CHECK( filler.LastOutcome() == ZONE_FILLER::OUTCOME::NOT_CONVERGED );
+
+    TOOL_MANAGER toolMgr;
+    toolMgr.SetEnvironment( board.get(), nullptr, nullptr, nullptr, nullptr );
+    toolMgr.RegisterTool( new ZONE_FILLER_TOOL );
+    ZONE_FILL_RESULT result = toolMgr.GetTool<ZONE_FILLER_TOOL>()->FillAllZonesWithResult(
+            nullptr, nullptr, true );
+    BOOST_CHECK( result.primaryOutcome == ZONE_FILLER::OUTCOME::NOT_CONVERGED );
+    BOOST_CHECK( result.outcome == ZONE_FILLER::OUTCOME::NOT_CONVERGED );
+    BOOST_CHECK( result.cleanupFinished );
+    BOOST_CHECK( !result.Completed() );
 }
 
 BOOST_AUTO_TEST_SUITE_END()

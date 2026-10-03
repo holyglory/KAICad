@@ -3318,7 +3318,10 @@ void PCB_IO_IPC2581::generateProfile( wxXmlNode* aStepNode )
 {
     SHAPE_POLY_SET board_outline;
 
-    if( !m_board->GetBoardPolygonOutlines( board_outline, false ) || board_outline.OutlineCount() == 0 )
+    // A board loaded for a manufacturing job may not have its cached outline
+    // polygon built yet.  The Edge.Cuts geometry is authoritative; allow the
+    // native outline helper to infer and chain it before rejecting IPC-2581.
+    if( !m_board->GetBoardPolygonOutlines( board_outline, true ) || board_outline.OutlineCount() == 0 )
     {
         Report( _( "Board outline is invalid or missing.  Please run DRC." ), RPT_SEVERITY_ERROR );
         return;

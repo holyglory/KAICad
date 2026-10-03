@@ -48,9 +48,8 @@ public sealed class DocumentLifecycleInput : NativeDocumentInputObject
             || !Guid.TryParseExact(input.ProcessEpoch, "D", out var process) || process == Guid.Empty)
             throw Invalid("A complete lifecycle observation with a process epoch and revision is required.");
         DocumentSpecifier document = NativeDocumentInput.ToNative(input.Document);
-        if (!Guid.TryParseExact(input.Revision.Epoch, "D", out var revisionEpoch) || revisionEpoch == Guid.Empty
-            || !string.Equals(input.Revision.Epoch, input.ProcessEpoch, StringComparison.Ordinal))
-            throw Invalid("The lifecycle revision epoch must equal the native process epoch.");
+        if (!Guid.TryParseExact(input.Revision.Epoch, "D", out var revisionEpoch) || revisionEpoch == Guid.Empty)
+            throw Invalid("The lifecycle revision must carry a nonempty native document epoch.");
         if (!Guid.TryParseExact(input.NativeIdentity, "D", out var identity) || identity == Guid.Empty)
             throw Invalid("A nonempty native identity UUID is required.");
         ValidateDigest(input.StateSha256, "stateSha256", required: true);
@@ -93,7 +92,7 @@ public sealed class DocumentLifecycleInput : NativeDocumentInputObject
     private static void ValidateDigest(string? value, string name, bool required)
     {
         if (string.IsNullOrEmpty(value) && !required) return;
-        if (value is null || value.Length != 64 || value.Any(c => !char.IsAsciiLower(c) && !char.IsAsciiDigit(c)))
+        if (value is null || value.Length != 64 || value.Any(c => !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))))
             throw Invalid($"{name} must be a lowercase SHA-256 digest.");
     }
 
@@ -147,9 +146,12 @@ public sealed class NativeFileBaselineInput : NativeDocumentInputObject
     internal static NativeFileBaselineState ToNative(NativeFileBaselineInput? input)
     {
         if (input is null || string.IsNullOrWhiteSpace(input.Path) || !Path.IsPathFullyQualified(input.Path)
-            || string.IsNullOrWhiteSpace(input.BaselinePath) || !Path.IsPathFullyQualified(input.BaselinePath)
             || !Enum.IsDefined(input.Status))
             throw new AutomationException("invalid_lifecycle_state", "Every file baseline requires absolute paths and a defined status.");
+        if (!string.IsNullOrEmpty(input.BaselinePath) && !Path.IsPathFullyQualified(input.BaselinePath))
+            throw new AutomationException("invalid_lifecycle_state", "A supplied baseline path must be absolute.");
+        ValidateOptionalDigest(input.BaselineSha256, "baselineSha256");
+        ValidateOptionalDigest(input.CurrentSha256, "currentSha256");
         return new NativeFileBaselineState
         {
             Path = input.Path,
@@ -164,6 +166,13 @@ public sealed class NativeFileBaselineInput : NativeDocumentInputObject
             CurrentBytes = input.CurrentBytes,
             Status = (NativeFileBaselineStatus)input.Status
         };
+    }
+
+    private static void ValidateOptionalDigest(string? value, string name)
+    {
+        if (string.IsNullOrEmpty(value)) return;
+        if (value.Length != 64 || value.Any(c => !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))))
+            throw new AutomationException("invalid_lifecycle_state", $"{name} must be a lowercase SHA-256 digest when supplied.");
     }
 }
 

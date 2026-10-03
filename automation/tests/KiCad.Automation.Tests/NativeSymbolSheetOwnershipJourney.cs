@@ -1062,6 +1062,8 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(changed, await Capture());
         await File.WriteAllBytesAsync(Path.Combine(evidence, instanceId + "-symbol-sheets-visible.png"), afterView.Preview.Png.ToByteArray(), token);
 
+        await VerifyAutomaticSharedUnitDeletion();
+
         // Removing the shared second-unit drawing does not remove either
         // physical component or invent a placed pin for its undrawn unit.
         var remove = new ApplySchematicItemBatch { Document = first.Clone(), Description = "Undrawn symbol unit fixture" };
@@ -1240,6 +1242,72 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(store.Read()!.State.HasPendingWork); Assert.IsNull(store.Read()!.State.OwnershipResolution);
             restorationStops.Add(new { stage, operationId, actualServiceProcessTerminated = true,
                 nativeEpochAndRevisionPreserved = true, selectedMappingConsumedOnce = true });
+        }
+
+        async Task VerifyAutomaticSharedUnitDeletion()
+        {
+            var original = store.Read()!.State.Baseline;
+            var removedUnits = occurrences.Where(o => o.Unit == 2).Select(o => o.Id).ToHashSet();
+            var missingPins = components.Select(c => new PinEndpoint(c, "2")).ToHashSet();
+            var initialElectrical = SchematicElectricalComparison.Compare(original, (await Capture()).Electrical, [], token);
+            Assert.IsTrue(initialElectrical.PinBindingsComplete && initialElectrical.ConnectivityEquivalent);
+            Assert.IsTrue(initialElectrical.PinPartitions!.Any(g => g.Pins.Count > 1 && missingPins.All(g.Pins.Contains)),
+                "Both second units must be connected before the deletion test starts.");
+            await using var automatic = await AutomaticDesignSynchronization.StartAsync(store, client, designPath,
+                store.Read()!.RevisionToken, token);
+            await Settled(deleted: false);
+            var deletion = new ApplySchematicItemBatch { Document = first.Clone(), Description = "Delete shared connected unit automatically" };
+            deletion.Operations.Add(new SchematicItemOperation { Remove = new() { Value = nativeIds[2] } });
+            await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(deletion, token);
+            await Settled(deleted: true);
+            foreach (var (key, deleted) in new[] { ("z", false), ("y", true), ("z", false) })
+            {
+                await client.InvokeAsync<ActivateSchematicSheet, DocumentSpecifier>(new() { Document = first.Clone() }, token);
+                await FocusedSchematicShortcut(client, first, processId, display, key, token);
+                await Settled(deleted);
+            }
+            await automatic.DisposeAsync();
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-automatic-native-unit-deletion.json"),
+                JsonSerializer.Serialize(new { components, occurrences = removedUnits, nativeObject = nativeIds[2],
+                    automaticReverseXml = true, sharedInstances = 2, initiallyConnected = true,
+                    physicalComponentsPreserved = true, instructionsPreserved = true, undrawnPinsExplicit = true,
+                    nativePartitionsMatched = true, nativeUndoRedo = true, originalRestored = true }), token);
+
+            async Task Settled(bool deleted)
+            {
+                using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
+                limit.CancelAfter(TimeSpan.FromSeconds(60));
+                var status = automatic.Inspect();
+                while (true)
+                {
+                    var record = store.Read()!;
+                    if (status.Phase == AutomaticDesignPhase.Watching && !record.State.HasPendingWork
+                        && removedUnits.All(id => record.State.Baseline.Engineering.Circuit.Symbols.Any(s => s.Id == id) != deleted)) break;
+                    Assert.IsFalse(status.Phase is AutomaticDesignPhase.Paused or AutomaticDesignPhase.Stopped or AutomaticDesignPhase.InvalidDesign,
+                        status.ErrorCode + ": " + status.ErrorMessage);
+                    status = await automatic.WaitAsync(status.Sequence, limit.Token);
+                }
+                var published = SchematicDesignXml.Read(await File.ReadAllTextAsync(designPath, limit.Token), []);
+                CollectionAssert.AreEquivalent(original.Engineering.Circuit.Components.ToArray(), published.Engineering.Circuit.Components.ToArray());
+                CollectionAssert.AreEquivalent(original.Engineering.Structure.Statements.ToArray(), published.Engineering.Structure.Statements.ToArray());
+                var live = await Capture();
+                var electrical = SchematicElectricalComparison.Compare(published, live.Electrical, [], limit.Token);
+                Assert.IsTrue(electrical.PinBindingsComplete && electrical.ConnectivityEquivalent);
+                Assert.IsEmpty(SchematicHierarchyDelta.Plan(live.Electrical.Hierarchy.Data, published.Schematic, limit.Token));
+                if (deleted)
+                    Assert.IsFalse(store.Read()!.State.LastSynchronization!.NativeMutationCommitted,
+                        "The worker publishes the native change without adding an edit of its own.");
+                if (deleted)
+                {
+                    Assert.IsTrue(removedUnits.All(id => !published.SymbolBindings.Any(b => b.SymbolOccurrenceId == id)));
+                    Assert.IsNotNull(electrical.UndrawnPins);
+                }
+                else
+                {
+                    Assert.AreEqual(CircuitXml.Write(original.Engineering.Circuit), CircuitXml.Write(published.Engineering.Circuit));
+                    Assert.AreEqual(SchematicNetReconciliation.Bindings(original), SchematicNetReconciliation.Bindings(published));
+                }
+            }
         }
 
         async Task NativeHistory(string key)

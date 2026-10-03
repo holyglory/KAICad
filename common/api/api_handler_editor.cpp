@@ -23,9 +23,13 @@
 #include <api/api_enums.h>
 #include <api/api_utils.h>
 #include <api/api_request_target.h>
+#include <api/api_server.h>
 #include <eda_base_frame.h>
 #include <eda_item.h>
+#include <pgm_base.h>
+#include <project.h>
 #include <title_block.h>
+#include <wx/filename.h>
 #include <wx/wx.h>
 
 using namespace kiapi::common::commands;
@@ -39,8 +43,6 @@ ApiResponseStatus StagedTransactionBusy()
     error.set_error_message( "A staged transaction owns this document; finish or cancel it first" );
     return error;
 }
-
-
 }
 
 
@@ -56,6 +58,106 @@ API_HANDLER_EDITOR::API_HANDLER_EDITOR( EDA_BASE_FRAME* aFrame ) :
     registerHandler<HitTest, HitTestResponse>( &API_HANDLER_EDITOR::handleHitTest );
     registerHandler<GetTitleBlockInfo, types::TitleBlockInfo>( &API_HANDLER_EDITOR::handleGetTitleBlockInfo );
     registerHandler<SetTitleBlockInfo, google::protobuf::Empty>( &API_HANDLER_EDITOR::handleSetTitleBlockInfo );
+}
+
+
+const PROJECT* API_HANDLER_EDITOR::requestProject() const
+{
+    return m_frame ? &m_frame->Prj() : nullptr;
+}
+
+
+// Two KiCad instances can each have a board of the same name open in their own project, and a
+// headless API server (kicad-cli api-server) has no frame. The PCB editor compares the project a
+// board request names with the project its handler serves here, and only here, so the editor and
+// the headless server refuse another project's board naming both projects, and a closed board of
+// this instance's own project is only ever reported as not open (ledger p98cb405e55270a80 and
+// p3865669bf8f25214).
+std::optional<API_HANDLER_EDITOR::PROJECT_MISMATCH>
+API_HANDLER_EDITOR::boardProjectMismatch( const DocumentSpecifier& aDocument ) const
+{
+    // An automation instance serves one project, so every board request must name it. Any other
+    // KiCad accepts a request that names no project.
+    if( !aDocument.has_project() )
+    {
+        if( Pgm().ApiServerOrNull() && Pgm().GetApiServer().IsAutomation() )
+            return PROJECT_MISMATCH::UNNAMED;
+
+        return std::nullopt;
+    }
+
+    const std::string& path = aDocument.project().path();
+    wxFileName         requested = wxFileName::DirName( wxString::FromUTF8( path ) );
+
+    // A project is accepted only by its absolute folder, so a relative folder is refused for that
+    // reason, even when it would lead to this instance's own project.
+    if( !requested.IsAbsolute() )
+        return PROJECT_MISMATCH::NOT_ABSOLUTE;
+
+    const PROJECT* open = requestProject();
+
+    if( !open )
+        return PROJECT_MISMATCH::OTHER_PROJECT;
+
+    wxFileName current = wxFileName::DirName( open->GetProjectPath() );
+    requested.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+    current.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+
+    if( requested != current || path.find( '\0' ) != std::string::npos
+            || aDocument.project().name() != open->GetProjectName().ToStdString( wxConvUTF8 ) )
+    {
+        return PROJECT_MISMATCH::OTHER_PROJECT;
+    }
+
+    return std::nullopt;
+}
+
+
+ApiResponseStatus API_HANDLER_EDITOR::boardProjectRefusal( const DocumentSpecifier& aDocument,
+                                                           PROJECT_MISMATCH aReason ) const
+{
+    const std::string& name = aDocument.project().name();
+    const std::string& path = aDocument.project().path();
+    const PROJECT*     open = requestProject();
+    const bool         noProject = !open || open->IsNullProject();
+
+    const std::string document = aDocument.board_filename().empty()
+            ? std::string( "the requested document" )
+            : fmt::format( "the requested document {}", aDocument.board_filename() );
+
+    const std::string openProject = noProject
+            ? std::string( "no project open" )
+            : fmt::format( "project '{}' at '{}' open",
+                           open->GetProjectName().ToStdString( wxConvUTF8 ),
+                           open->GetProjectPath().ToStdString( wxConvUTF8 ) );
+
+    ApiResponseStatus e;
+    e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+
+    switch( aReason )
+    {
+    case PROJECT_MISMATCH::UNNAMED:
+        e.set_error_message( fmt::format( "{} names no project; this KiCad instance has {} and accepts "
+                                          "a board request only with its project named by its absolute "
+                                          "folder path",
+                                          document, openProject ) );
+        break;
+
+    case PROJECT_MISMATCH::NOT_ABSOLUTE:
+        e.set_error_message( fmt::format( "{} names project '{}' by the folder '{}', which is not an "
+                                          "absolute path; name the project by its absolute folder path",
+                                          document, name, path ) );
+        break;
+
+    case PROJECT_MISMATCH::OTHER_PROJECT:
+        e.set_error_message( fmt::format( "{} of project '{}' at '{}' is not open in this KiCad instance, "
+                                          "which has {}; send the request to the KiCad instance that "
+                                          "has that project open",
+                                          document, name, path, openProject ) );
+        break;
+    }
+
+    return e;
 }
 
 
@@ -205,17 +307,23 @@ void API_HANDLER_EDITOR::pushCurrentCommit( const std::string& aClientName,
 
 HANDLER_RESULT<bool> API_HANDLER_EDITOR::validateDocument( const DocumentSpecifier& aDocument )
 {
-    tl::expected<bool, ApiResponseStatus> valid = validateDocumentInternal( aDocument );
-    if( valid ) return true;
+    if( validateDocumentInternal( aDocument ) )
+        return true;
 
-    ApiResponseStatus e = valid.error();
-    if( thisDocumentType() == types::DOCTYPE_PCB )
-        return tl::unexpected( e );
+    // When the PCB editor's validateDocumentInternal refused this board for the project it names
+    // (boardProjectMismatch, the one comparison both use), report that reason, naming both
+    // projects. Every other refusal, and every schematic and footprint refusal, keeps its text.
+    if( thisDocumentType() == types::DOCTYPE_PCB && aDocument.type() == types::DOCTYPE_PCB )
+    {
+        if( std::optional<PROJECT_MISMATCH> mismatch = boardProjectMismatch( aDocument ) )
+            return tl::unexpected( boardProjectRefusal( aDocument, *mismatch ) );
+    }
 
-    ApiResponseStatus generic;
-    generic.set_status( ApiStatusCode::AS_BAD_REQUEST );
-    generic.set_error_message( fmt::format( "the requested document {} is not open", aDocument.board_filename() ) );
-    return tl::unexpected( generic );
+    ApiResponseStatus e;
+    e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+    e.set_error_message( fmt::format( "the requested document {} is not open",
+                                      aDocument.board_filename() ) );
+    return tl::unexpected( e );
 }
 
 

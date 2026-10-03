@@ -11,6 +11,7 @@
 #include <exception>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <tl/expected.hpp>
 #include <vector>
@@ -46,6 +47,14 @@ struct PCB_DRC_CAPTURE_CONTEXT
     const kiapi::automation::v1::SchematicParityNetlistSnapshot* schematic = nullptr;
 };
 
+// An input the check could not capture exactly. A check with any such gap never
+// reports a complete snapshot or fresh results; the code and explanation say why.
+struct PCB_DRC_INPUT_GAP
+{
+    std::string code;
+    std::string message;
+};
+
 struct PCB_DRC_COPPER_PREPARATION
 {
     enum class STATUS { NOT_RUN, COMPLETED, CANCELLED, NOT_CONVERGED, FAILED };
@@ -55,16 +64,24 @@ struct PCB_DRC_COPPER_PREPARATION
 };
 
 // The live project inputs a project baseline is compared with: the project and
-// board settings, and the content of the board's custom rules file as it is now.
+// board settings, the date or version-control revision the board's text shows, and
+// the content of the board's custom rules file as it is now.
 struct PCB_DRC_PROJECT_OBSERVATION
 {
     nlohmann::json settings;
     wxString rulesPath;
     FILE_CONTENT_BASELINE rules; // Read only when the board has a rules path.
+    // The content of a font file as it is now, read at most once per observation, when
+    // a baseline that depends on it is compared.
+    const FILE_CONTENT_BASELINE& Font( const wxString& aPath ) const;
+
+private:
+    mutable std::map<wxString, FILE_CONTENT_BASELINE> m_fonts;
 };
 
 // Lightweight, immutable receipt data; never borrows the live project or the
-// worker's private board. This covers project/settings/rules, not every input.
+// worker's private board. This covers the project settings, the custom rules and
+// the font files the board's text uses, not every input.
 class PCB_DRC_PROJECT_BASELINE
 {
 public:
@@ -73,13 +90,18 @@ public:
     // one checkpoint can compare many baselines of the same board. Throws when the
     // settings cannot be represented; that is never evidence of freshness.
     static PCB_DRC_PROJECT_OBSERVATION Observe( const BOARD& aBoard );
-    // Compares with an observation without reading anything again.
+    // Compares with an observation; reads only the font files this baseline captured
+    // that the observation has not read yet.
     bool Unchanged( const PCB_DRC_PROJECT_OBSERVATION& aObserved ) const;
 
 private:
     friend class PCB_DRC_RUN_INPUTS;
     FILE_CONTENT_BASELINE m_rules;
     nlohmann::json m_settings;
+    // Outline font files the check's texts are laid out with, other than fonts embedded
+    // in the board: KiCad reads a font file's glyphs lazily, so a file rewritten in place
+    // changes what a check reads.
+    std::map<wxString, FILE_CONTENT_BASELINE> m_fonts;
 };
 
 // Retained native presentation/router state, without any live editor pointers.
@@ -130,6 +152,20 @@ public:
     // Call after installing and initializing the board's owned DRC engine.
     const PCB_DRC_COPPER_PREPARATION& PrepareCopper( PROGRESS_REPORTER* aReporter = nullptr );
 
+    // Inputs this bundle did not capture exactly, known at capture.
+    std::vector<PCB_DRC_INPUT_GAP> Gaps() const;
+    // After a completed PrepareCopper: record, for each object the preparation generated
+    // in the private board, the object of the open board it stands for: the tuning
+    // pattern (generator) that regenerated it, or the teardrop of the open board with
+    // the same layer, net, kind and outline.
+    void MapGeneratedItems();
+    // Replace an identity a finding names in the private board by the identity of the
+    // object it stands for: an object of the open board, the open drawing sheet, a
+    // candidate item of the request or, for a generated object, its generating source.
+    // False when it names nothing a person or agent can find in the open board or in
+    // the request.
+    bool ResolveFindingItem( KIID& aIdentity ) const;
+
 private:
     PCB_DRC_RUN_INPUTS() = default;
     std::unique_ptr<PCB_DRC_DOCUMENT_SNAPSHOT> m_document;
@@ -144,5 +180,19 @@ private:
     KIID m_sourceDrawingIdentity;
     std::unique_ptr<PNS::ROUTING_SETTINGS> m_routingSettings;
     PCB_DRC_COPPER_PREPARATION m_copperPreparation;
+    std::set<KIID> m_candidates;
+    // Generated object of the private board -> the open board's object it stands for.
+    std::map<KIID, KIID> m_generated;
+    // The time-of-day text variables the board's text can show; no captured value.
+    std::vector<std::string> m_timeOfDayText;
+    // The functions the @{...} expressions of the board's text call, as KiCad resolves the
+    // text, whose value the check cannot capture (now(), random(), vcs...() or an unknown
+    // function).
+    std::vector<std::string> m_volatileExpressions;
+    // What the @{...} expressions the drawing sheet's text evaluates read from outside the
+    // design: a function other than a pure one, or a live text variable; no captured value.
+    std::vector<std::string> m_drawingSheetExpressions;
+    // Font files the board's text uses that the check could not read.
+    std::vector<wxString> m_unreadableFonts;
 };
 #endif

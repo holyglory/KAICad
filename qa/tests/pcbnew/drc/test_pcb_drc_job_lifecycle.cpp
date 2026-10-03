@@ -26,6 +26,10 @@
 #include <drc/drc_library_inputs.h>
 #include <drc/drc_rule_parser.h>
 #include <pcb_marker.h>
+#include <pcb_table.h>
+#include <pcb_tablecell.h>
+#include <pcb_text.h>
+#include <title_block.h>
 #include <pgm_base.h>
 #include <pcbnew_utils/board_test_utils.h>
 #include <project.h>
@@ -35,8 +39,20 @@
 #include <json_common.h>
 #include <ki_exception.h>
 #include <router/pns_routing_settings.h>
+#include <teardrop/teardrop.h>
+#include <api/board/board_types.pb.h>
 #include <zone.h>
+#include <filesystem>
 #include <fstream>
+#include <functional>
+#include <optional>
+#include <git2.h>
+#include <git/git_backend.h>
+#include <git/libgit_backend.h>
+#include <font/font.h>
+#include <font/outline_font.h>
+#include <qa_utils/wx_utils/unit_test_utils.h>
+#include <text_eval/text_eval_wrapper.h>
 #include <google/protobuf/util/message_differencer.h>
 #include <chrono>
 #include <thread>
@@ -131,21 +147,54 @@ struct DRC_CAPTURE_FIXTURE
         return query;
     }
 
+    // Every unfinished check reports this gap: its findings are matched to objects of the
+    // open board only once it has finished.
+    static constexpr const char* PENDING_IDENTITY = "snapshot_incomplete: finding_identity_pending: ";
+
+    // The input warnings of a job state other than that pending gap, after checking that the
+    // state carries the gap exactly while its worker runs, and that an unfinished check then
+    // claims neither a complete snapshot nor fresh results.
+    static std::vector<std::string> Notes( const PcbDrcJobState& aState )
+    {
+        std::vector<std::string> notes;
+        int pending = 0;
+        for( const auto& warning : aState.input_warnings() )
+        {
+            if( warning.rfind( PENDING_IDENTITY, 0 ) == 0 ) ++pending;
+            else notes.push_back( warning );
+        }
+        BOOST_CHECK_EQUAL( pending, aState.worker_finished() ? 0 : 1 );
+        if( !aState.worker_finished() )
+            BOOST_CHECK( !aState.snapshot_complete() && !aState.results_fresh() );
+        return notes;
+    }
+
     static PcbDrcJobState Wait( PCB_DRC_JOB_MANAGER& jobs, BOARD& board, const PcbDrcJobState& start,
                               const PCB_DRC_JOB_MANAGER::LIBRARY_OBSERVER& observer = {} )
     {
         const auto query = Query( start );
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds( 30 );
+        Notes( start );
         auto current = jobs.Read( query, board, start.process_epoch(), {}, observer );
         while( current && !current->worker_finished() && std::chrono::steady_clock::now() < deadline )
         {
             BOOST_CHECK_EQUAL( current->findings_size(), 0 );
+            Notes( *current );
             std::this_thread::sleep_for( std::chrono::milliseconds( 5 ) );
             current = jobs.Read( query, board, start.process_epoch(), {}, observer );
         }
         BOOST_REQUIRE_MESSAGE( current.has_value(), ( current ? "" : current.error() ) );
         BOOST_REQUIRE( current->worker_finished() );
+        Notes( *current );
         return *current;
+    }
+
+    // Replaces the job manager's observation of the live project inputs, as a read or
+    // checkpoint makes it.
+    static void ObserveProjectAs( PCB_DRC_JOB_MANAGER& jobs,
+                                  std::function<PCB_DRC_PROJECT_OBSERVATION( const BOARD& )> observe )
+    {
+        jobs.m_observeProject = std::move( observe );
     }
 
     static void DispatchFiles( wxEventLoopBase& loop )
@@ -159,6 +208,28 @@ struct DRC_CAPTURE_FIXTURE
             wxTheApp->ProcessPendingEvents();
         }
     }
+};
+
+// PGM_BASE keeps its API server protected; a derived class may name that member for any
+// program. The scope gives this test process the API server identity that every native request
+// handler reads, and takes it away again however the test ends.
+struct TEST_API_SERVER_SCOPE
+{
+    struct ACCESS : PGM_BASE
+    {
+        static std::unique_ptr<KICAD_API_SERVER>& Of( PGM_BASE& aProgram )
+        {
+            return aProgram.*( &ACCESS::m_api_server );
+        }
+    };
+
+    TEST_API_SERVER_SCOPE()
+    {
+        BOOST_REQUIRE( !ACCESS::Of( Pgm() ) );
+        ACCESS::Of( Pgm() ) = std::make_unique<KICAD_API_SERVER>( false );
+    }
+
+    ~TEST_API_SERVER_SCOPE() { ACCESS::Of( Pgm() ).reset(); }
 };
 
 BOOST_FIXTURE_TEST_SUITE( PcbDrcJobLifecycle, DRC_CAPTURE_FIXTURE )
@@ -384,7 +455,7 @@ BOOST_AUTO_TEST_CASE( NativeLibraryEventsInvalidateAndReadsRejectChangesBeforeEv
     auto request = Request( board, epoch );
     auto start = jobs.Start( request, board, epoch, context );
     BOOST_REQUIRE_MESSAGE( start.has_value(), ( start ? "" : start.error() ) );
-    BOOST_CHECK_EQUAL( start->input_warnings_size(), 0 );
+    BOOST_CHECK( Notes( *start ).empty() );
     BOOST_REQUIRE( Wait( jobs, board, *start, observer ).status() == PDRCJS_COMPLETED );
     libraryReads = 0;
     for( int i = 0; i < 10; ++i )
@@ -436,7 +507,7 @@ BOOST_AUTO_TEST_CASE( NativeLibraryEventsInvalidateAndReadsRejectChangesBeforeEv
     request = Request( board, epoch );
     start = jobs.Start( request, board, epoch, context );
     BOOST_REQUIRE( start );
-    BOOST_CHECK_EQUAL( start->input_warnings_size(), 0 );
+    BOOST_CHECK( Notes( *start ).empty() );
     BOOST_REQUIRE( Wait( jobs, board, *start, observer ).status() == PDRCJS_COMPLETED );
     // A changed OtherLibrary definition reaches the receipt through its own notification.
     otherPart.SetLibDescription( "changed other library" ); io.FootprintSave( otherUri, &otherPart );
@@ -454,10 +525,47 @@ BOOST_AUTO_TEST_CASE( NativeLibraryEventsInvalidateAndReadsRejectChangesBeforeEv
     BOOST_REQUIRE( start );
     BOOST_REQUIRE( Wait( jobs, board, *start, observer ).status() == PDRCJS_COMPLETED );
 
+    BOOST_CHECK( jobs.Read( Query( *start ), board, epoch, {}, observer )->results_fresh() );
     const auto file = libPath / "Part.kicad_mod";
     const auto timestamp = std::filesystem::last_write_time( file );
-    original.SetLibDescription( "changed native content" ); io.FootprintSave( uri, &original );
-    std::filesystem::last_write_time( file, timestamp );
+    const auto bytes = std::filesystem::file_size( file );
+    // Same size and modification time: only the content says the library changed. The
+    // footprint's own layer changes in place, from aFrom to aTo.
+    auto editInPlace = [&]( const std::string& aFrom, const std::string& aTo )
+    {
+        std::string content;
+        {
+            std::ifstream in( file, std::ios::binary );
+            content.assign( std::istreambuf_iterator<char>( in ), std::istreambuf_iterator<char>() );
+        }
+        const auto layer = content.find( aFrom );
+        BOOST_REQUIRE( layer != std::string::npos );
+        content.replace( layer, aFrom.size(), aTo );
+        { std::ofstream out( file, std::ios::binary | std::ios::trunc ); out << content; }
+        std::filesystem::last_write_time( file, timestamp );
+        BOOST_REQUIRE_EQUAL( std::filesystem::file_size( file ), bytes );
+        BOOST_REQUIRE( std::filesystem::last_write_time( file ) == timestamp );
+    };
+    const std::string front = "(layer \"F.Cu\")", back = "(layer \"B.Cu\")";
+    // A read right after the edit, before KiCad has delivered its notification: only the
+    // read's own comparison of the library content can see it (n456d6b796cd7a9a3).
+    editInPlace( front, back );
+    auto unnotified = jobs.Read( Query( *start ), board, epoch, {}, observer );
+    BOOST_REQUIRE( unnotified );
+    BOOST_CHECK( unnotified->status() == PDRCJS_STALE );
+    BOOST_CHECK_EQUAL( unnotified->error_code(), "library_inputs_changed" );
+    BOOST_CHECK_EQUAL( unnotified->findings_size(), 0 );
+    BOOST_CHECK( unnotified->snapshot_complete() && !unnotified->results_fresh() );
+    // Put back the same way; a new check of it is fresh. Then the same edit again, now
+    // delivered by its notification before any read.
+    editInPlace( back, front );
+    DispatchFiles( loop );
+    request = Request( board, epoch );
+    start = jobs.Start( request, board, epoch, context );
+    BOOST_REQUIRE( start );
+    BOOST_REQUIRE( Wait( jobs, board, *start, observer ).status() == PDRCJS_COMPLETED );
+    BOOST_CHECK( jobs.Read( Query( *start ), board, epoch, {}, observer )->results_fresh() );
+    editInPlace( front, back );
     DispatchFiles( loop ); // No Start/Read/Cancel call between the edit and delivery.
     auxiliaryReads = 0;
     auto stale = jobs.Read( Query( *start ), board, epoch, {}, observer );
@@ -465,6 +573,7 @@ BOOST_AUTO_TEST_CASE( NativeLibraryEventsInvalidateAndReadsRejectChangesBeforeEv
     BOOST_CHECK( stale->status() == PDRCJS_STALE );
     BOOST_CHECK_EQUAL( stale->error_code(), "library_inputs_changed" );
     BOOST_CHECK_EQUAL( stale->findings_size(), 0 );
+    BOOST_CHECK( stale->snapshot_complete() && !stale->results_fresh() );
     BOOST_CHECK_EQUAL( auxiliaryReads, 0 );
     original.SetLibDescription( "" ); io.FootprintSave( uri, &original );
     DispatchFiles( loop );
@@ -489,11 +598,11 @@ BOOST_AUTO_TEST_CASE( NativeLibraryEventsInvalidateAndReadsRejectChangesBeforeEv
     // library configuration is unchanged.
     auto covered = jobs.Start( Request( board, epoch ), board, epoch, context );
     BOOST_REQUIRE( covered );
-    BOOST_CHECK_EQUAL( covered->input_warnings_size(), 0 );
+    BOOST_CHECK( Notes( *covered ).empty() );
     BOOST_REQUIRE( Wait( jobs, board, *covered, observer ).status() == PDRCJS_COMPLETED );
     auto alsoCovered = jobs.Start( Request( board, epoch ), board, epoch, context );
     BOOST_REQUIRE( alsoCovered );
-    BOOST_CHECK_EQUAL( alsoCovered->input_warnings_size(), 0 );
+    BOOST_CHECK( Notes( *alsoCovered ).empty() );
     BOOST_REQUIRE( Wait( jobs, board, *alsoCovered, observer ).status() == PDRCJS_COMPLETED );
     BOOST_CHECK_EQUAL( WatchCount( jobs ), 2 );
     libraryReads = 0; auxiliaryReads = 0; libraryResolutions = 0; projectObservations = 0;
@@ -583,7 +692,7 @@ BOOST_AUTO_TEST_CASE( NativeLibraryEventsInvalidateAndReadsRejectChangesBeforeEv
     {
         auto receipt = jobs.Start( Request( board, epoch ), board, epoch, context );
         BOOST_REQUIRE( receipt );
-        BOOST_CHECK_EQUAL( receipt->input_warnings_size(), 0 );
+        BOOST_CHECK( Notes( *receipt ).empty() );
         BOOST_REQUIRE( Wait( jobs, board, *receipt, observer ).status() == PDRCJS_COMPLETED );
         change();
         libraryReads = 0; libraryResolutions = 0;
@@ -675,11 +784,11 @@ BOOST_AUTO_TEST_CASE( LostNativeNotificationsStaleEveryReceiptOfTheSharedWatcher
     const auto epoch = KIID().AsStdString();
     auto rules = jobs.Start( Request( rulesBoard, epoch ), rulesBoard, epoch, context );
     BOOST_REQUIRE_MESSAGE( rules.has_value(), ( rules ? "" : rules.error() ) );
-    BOOST_CHECK_EQUAL( rules->input_warnings_size(), 0 );
+    BOOST_CHECK( Notes( *rules ).empty() );
     BOOST_REQUIRE( Wait( jobs, rulesBoard, *rules, observer ).status() == PDRCJS_COMPLETED );
     auto library = jobs.Start( Request( libraryBoard, epoch ), libraryBoard, epoch, context );
     BOOST_REQUIRE_MESSAGE( library.has_value(), ( library ? "" : library.error() ) );
-    BOOST_CHECK_EQUAL( library->input_warnings_size(), 0 );
+    BOOST_CHECK( Notes( *library ).empty() );
     BOOST_REQUIRE( Wait( jobs, libraryBoard, *library, observer ).status() == PDRCJS_COMPLETED );
     // One native watcher serves both receipts: the folder both depend on is one
     // native watch that both receipts reference.
@@ -711,7 +820,7 @@ BOOST_AUTO_TEST_CASE( LostNativeNotificationsStaleEveryReceiptOfTheSharedWatcher
     // A new check subscribes again, through a fresh native subscription.
     auto fresh = jobs.Start( Request( rulesBoard, epoch ), rulesBoard, epoch, context );
     BOOST_REQUIRE_MESSAGE( fresh.has_value(), ( fresh ? "" : fresh.error() ) );
-    BOOST_CHECK_EQUAL( fresh->input_warnings_size(), 0 );
+    BOOST_CHECK( Notes( *fresh ).empty() );
     BOOST_REQUIRE( Wait( jobs, rulesBoard, *fresh ).status() == PDRCJS_COMPLETED );
     BOOST_CHECK_EQUAL( WatchCount( jobs ), 1 );
     BOOST_CHECK_EQUAL( FileSubscribers( jobs, scratch.GetPath() ), 1 );
@@ -733,7 +842,7 @@ BOOST_AUTO_TEST_CASE( LostNativeNotificationsStaleEveryReceiptOfTheSharedWatcher
     // The replaced watcher still reports a real rules change to the next check.
     auto later = jobs.Start( Request( rulesBoard, epoch ), rulesBoard, epoch, context );
     BOOST_REQUIRE_MESSAGE( later.has_value(), ( later ? "" : later.error() ) );
-    BOOST_CHECK_EQUAL( later->input_warnings_size(), 0 );
+    BOOST_CHECK( Notes( *later ).empty() );
     BOOST_REQUIRE( Wait( jobs, rulesBoard, *later ).status() == PDRCJS_COMPLETED );
     BOOST_CHECK_EQUAL( FileSubscribers( jobs, scratch.GetPath() ), 1 );
     BOOST_CHECK_EQUAL( NativeWatches( jobs ), 1 );
@@ -776,7 +885,7 @@ BOOST_AUTO_TEST_CASE( RuleFileNotificationsAndMissedEventRecoveryUseFreshContent
     const auto request = Request( board, epoch );
     auto start = jobs.Start( request, board, epoch, context );
     BOOST_REQUIRE_MESSAGE( start.has_value(), ( start ? "" : start.error() ) );
-    BOOST_CHECK_EQUAL( start->input_warnings_size(), 0 );
+    BOOST_CHECK( Notes( *start ).empty() );
     BOOST_REQUIRE( Wait( jobs, board, *start ).status() == PDRCJS_COMPLETED );
     { std::ofstream file( rulesPath ); file << changed; }
     // Do not dispatch any wx event between the file edit and this status read.
@@ -795,6 +904,7 @@ BOOST_AUTO_TEST_CASE( RuleFileNotificationsAndMissedEventRecoveryUseFreshContent
     BOOST_REQUIRE( Wait( jobs, board, *start ).status() == PDRCJS_COMPLETED );
     Observe( jobs, board, epoch ); // An unchanged recovery checkpoint preserves the receipt.
     BOOST_CHECK( jobs.Read( Query( *start ), board, epoch )->status() == PDRCJS_COMPLETED );
+    BOOST_CHECK( jobs.Read( Query( *start ), board, epoch )->results_fresh() );
     const auto timestamp = std::filesystem::last_write_time( rulesPath );
     { std::ofstream file( rulesPath ); file << changed; }
     std::filesystem::last_write_time( rulesPath, timestamp );
@@ -807,11 +917,13 @@ BOOST_AUTO_TEST_CASE( RuleFileNotificationsAndMissedEventRecoveryUseFreshContent
     BOOST_CHECK_EQUAL( stale->error_code(), "project_inputs_changed" );
     BOOST_CHECK_EQUAL( observations, 0 );
     BOOST_CHECK_EQUAL( stale->findings_size(), 0 );
+    BOOST_CHECK( stale->snapshot_complete() && !stale->results_fresh() );
     { std::ofstream file( rulesPath ); file << original; }
     DispatchFiles( loop );
     auto fresh = jobs.Start( Request( board, epoch ), board, epoch, context );
     BOOST_REQUIRE( fresh );
     BOOST_REQUIRE( Wait( jobs, board, *fresh ).status() == PDRCJS_COMPLETED );
+    BOOST_CHECK( jobs.Read( Query( *fresh ), board, epoch )->results_fresh() );
 
     // A save rewrites the project file on disk. The check used the in-memory
     // project settings, which every read compares, and they did not change.
@@ -834,6 +946,7 @@ BOOST_AUTO_TEST_CASE( RuleFileNotificationsAndMissedEventRecoveryUseFreshContent
     BOOST_REQUIRE( recovered );
     BOOST_CHECK( recovered->status() == PDRCJS_STALE );
     BOOST_CHECK_EQUAL( recovered->findings_size(), 0 );
+    BOOST_CHECK( !recovered->results_fresh() );
     BOOST_CHECK_EQUAL( observations, 0 );
     auto replay = jobs.ReadOperation( request, board, epoch );
     BOOST_REQUIRE( replay ); BOOST_REQUIRE( replay->has_value() );
@@ -912,6 +1025,7 @@ BOOST_AUTO_TEST_CASE( CancellationWaitsForWorkerExitAndReplayBindsEveryArgument 
     BOOST_REQUIRE( acknowledgement );
     BOOST_CHECK( acknowledgement->cancellation_requested() );
     BOOST_CHECK( !acknowledgement->results_fresh() );
+    Notes( *acknowledgement ); // Not yet stopped: no complete snapshot, and it says why.
     if( !acknowledgement->worker_finished() )
         BOOST_CHECK( acknowledgement->status() == PDRCJS_QUEUED || acknowledgement->status() == PDRCJS_RUNNING );
 
@@ -935,7 +1049,11 @@ BOOST_AUTO_TEST_CASE( CancellationWaitsForWorkerExitAndReplayBindsEveryArgument 
     auto terminal = wait();
     BOOST_CHECK( terminal.status() == PDRCJS_CANCELLED );
     BOOST_CHECK_EQUAL( terminal.findings_size(), 0 );
+    // The capture was complete; a cancelled check still has no results to be fresh, and with no
+    // findings it no longer waits for their identities.
+    BOOST_CHECK( terminal.snapshot_complete() );
     BOOST_CHECK( !terminal.results_fresh() );
+    BOOST_CHECK( Notes( terminal ).empty() );
     BOOST_CHECK_EQUAL( board.GetTimeStamp(), request.expected_revision().sequence() );
     BOOST_CHECK_EQUAL( board.Tracks().size(), 4000 );
 
@@ -954,7 +1072,10 @@ BOOST_AUTO_TEST_CASE( CancellationWaitsForWorkerExitAndReplayBindsEveryArgument 
     BOOST_CHECK( MessageDifferencer::Equals( *jobs.Cancel( cancel, board, epoch ), terminal ) );
 }
 
-BOOST_AUTO_TEST_CASE( StaleAdmissionIsRejectedAndCompletedBoardOnlyResultCannotClaimFreshness )
+// One rule for every check (p23deb822a36256a6): a board whose every input was captured exactly
+// has a complete snapshot, and its completed check is fresh until the board changes. A stale check
+// keeps its complete snapshot but never fresh results.
+BOOST_AUTO_TEST_CASE( StaleAdmissionIsRejectedAndACompletedCheckIsFreshUntilTheBoardChanges )
 {
     BOARD board;
     board.SetFileName( "worker-fixture.kicad_pcb" );
@@ -995,13 +1116,18 @@ BOOST_AUTO_TEST_CASE( StaleAdmissionIsRejectedAndCompletedBoardOnlyResultCannotC
         }
     }
     BOOST_CHECK( foundOutline );
-    BOOST_CHECK( !state->snapshot_complete() );
-    BOOST_CHECK( !state->results_fresh() );
+    BOOST_CHECK( state->snapshot_complete() );
+    BOOST_CHECK( state->results_fresh() );
+    BOOST_CHECK( Notes( *state ).empty() );
+    auto again = jobs.Read( query, board, epoch );
+    BOOST_REQUIRE( again );
+    BOOST_CHECK( MessageDifferencer::Equals( *state, *again ) );
     board.IncrementTimeStamp();
     auto stale = jobs.Read( query, board, epoch );
     BOOST_REQUIRE( stale );
     BOOST_CHECK( stale->status() == PDRCJS_STALE );
     BOOST_CHECK( stale->worker_finished() );
+    BOOST_CHECK( stale->snapshot_complete() );
     BOOST_CHECK( !stale->results_fresh() );
     BOOST_CHECK_EQUAL( stale->findings_size(), 0 );
 }
@@ -1050,6 +1176,13 @@ BOOST_AUTO_TEST_CASE( ProjectBaselineOwnsSettingsAndDetectsContentChangesWithout
     marker->SetExcluded( true, "changed explanation" );
     BOOST_CHECK( !absent.Unchanged( board ) );
     marker->SetExcluded( true, "retained explanation" );
+    BOOST_CHECK( absent.Unchanged( board ) );
+    // The editor's current variant lives only in memory; switching it is no board edit.
+    board.AddVariant( "Assembly" );
+    BOOST_CHECK( absent.Unchanged( board ) );
+    board.SetCurrentVariant( "Assembly" );
+    BOOST_CHECK( !absent.Unchanged( board ) );
+    board.SetCurrentVariant( wxEmptyString );
     BOOST_CHECK( absent.Unchanged( board ) );
 
     const std::string first = "(version 1)\n(rule \"limit\" (constraint clearance (min 0.4mm)))\n";
@@ -1162,6 +1295,7 @@ BOOST_AUTO_TEST_CASE( DrawingAndRouterChangesInvalidateCompletedJobsAndCannotRev
         BOOST_REQUIRE( current ); BOOST_REQUIRE( current->worker_finished() );
         BOOST_REQUIRE_MESSAGE( current->status() == PDRCJS_COMPLETED, current->error_message() );
         BOOST_CHECK_GT( current->findings_size(), 0 );
+        BOOST_CHECK( current->snapshot_complete() && current->results_fresh() );
         if( change == 0 ) text->m_TextBase = "Changed";
         else if( change == 1 ) routing.SetShoveVias( !initialShove );
         else available = false;
@@ -1170,7 +1304,7 @@ BOOST_AUTO_TEST_CASE( DrawingAndRouterChangesInvalidateCompletedJobsAndCannotRev
         BOOST_CHECK( stale->status() == PDRCJS_STALE );
         BOOST_CHECK_EQUAL( stale->error_code(), "auxiliary_inputs_changed" );
         BOOST_CHECK_EQUAL( stale->findings_size(), 0 );
-        BOOST_CHECK( !stale->results_fresh() );
+        BOOST_CHECK( stale->snapshot_complete() && !stale->results_fresh() );
         text->m_TextBase = "Original"; routing.SetShoveVias( initialShove ); available = true;
         auto replay = jobs.ReadOperation( request, board, epoch );
         BOOST_REQUIRE( replay ); BOOST_REQUIRE( replay->has_value() );
@@ -1203,8 +1337,12 @@ BOOST_AUTO_TEST_CASE( ProjectChangesClearCompletedFindingsAndOldOperationCannotR
     request.set_process_epoch( epoch );
     request.mutable_expected_revision()->set_epoch( board.m_Uuid.AsStdString() );
     request.mutable_expected_revision()->set_sequence( sequence );
-    for( bool ruleChange : { false, true } )
+    board.AddVariant( "Assembly" );
+    // A project text variable, the custom rules file, and the board's current variant, which
+    // lives only in memory: none of them is a board edit.
+    for( int change = 0; change < 3; ++change )
     {
+        const bool ruleChange = change == 1;
         request.set_operation_id( KIID().AsStdString() );
         auto started = jobs.Start( request, board, epoch, context );
         BOOST_REQUIRE_MESSAGE( started.has_value(), ( started ? "" : started.error() ) );
@@ -1221,18 +1359,21 @@ BOOST_AUTO_TEST_CASE( ProjectChangesClearCompletedFindingsAndOldOperationCannotR
         BOOST_REQUIRE( current ); BOOST_REQUIRE( current->worker_finished() );
         BOOST_REQUIRE_MESSAGE( current->status() == PDRCJS_COMPLETED, current->error_message() );
         BOOST_CHECK_GT( current->findings_size(), 0 );
+        BOOST_CHECK( current->snapshot_complete() && current->results_fresh() );
         auto unchanged = jobs.Read( query, board, epoch );
         BOOST_REQUIRE( unchanged );
         BOOST_CHECK( MessageDifferencer::Equals( *current, *unchanged ) );
         if( ruleChange ) { std::ofstream file( rulesPath ); file << "(version 1)"; }
+        else if( change == 2 ) board.SetCurrentVariant( "Assembly" );
         else project->GetTextVars()["CHECK_VALUE"] = "changed without a board edit";
         auto stale = jobs.Read( query, board, epoch );
         BOOST_REQUIRE( stale );
         BOOST_CHECK( stale->status() == PDRCJS_STALE );
         BOOST_CHECK_EQUAL( stale->error_code(), "project_inputs_changed" );
         BOOST_CHECK_EQUAL( stale->findings_size(), 0 );
-        BOOST_CHECK( !stale->results_fresh() && stale->worker_finished() );
+        BOOST_CHECK( !stale->results_fresh() && stale->worker_finished() && stale->snapshot_complete() );
         if( ruleChange ) BOOST_REQUIRE( std::filesystem::remove( rulesPath ) );
+        else if( change == 2 ) board.SetCurrentVariant( wxEmptyString );
         else project->GetTextVars().erase( "CHECK_VALUE" );
         auto replay = jobs.ReadOperation( request, board, epoch );
         BOOST_REQUIRE( replay ); BOOST_REQUIRE( replay->has_value() );
@@ -1297,7 +1438,11 @@ BOOST_AUTO_TEST_CASE( WorkerFindsActualCopperViolationsWithItsBoardEngineBound )
             ++copperViolations;
     }
     BOOST_CHECK_GT( copperViolations, 0 );
-    BOOST_CHECK( !state->snapshot_complete() && !state->results_fresh() );
+    BOOST_CHECK( state->snapshot_complete() && state->results_fresh() );
+    // Every finding names objects of the open board, never an identity private to the check.
+    for( const auto& finding : state->findings() )
+        for( const auto& id : finding.marker().items() )
+            BOOST_CHECK_MESSAGE( board.ResolveItem( KIID( id.value() ), true ), "Private identity " << id.value() );
     BOOST_CHECK_EQUAL( board.Footprints().size(), 20 );
     BOOST_CHECK_EQUAL( board.GetTimeStamp(), request.expected_revision().sequence() );
 }
@@ -1387,7 +1532,7 @@ BOOST_AUTO_TEST_CASE( WorkerUsesCapturedUnsavedProjectRulesDrawingAndExclusions 
             exclusion |= finding.excluded() && finding.comment() == "reviewed input outline";
     }
     BOOST_CHECK( clearance ); BOOST_CHECK( drawingFound ); BOOST_CHECK( exclusion );
-    BOOST_CHECK( !state->results_fresh() && !state->snapshot_complete() );
+    BOOST_CHECK( state->results_fresh() && state->snapshot_complete() );
     BOOST_CHECK( project->GetProjectFile().CaptureCurrentState() == projectBefore );
     BOOST_CHECK_EQUAL( board.GetTimeStamp(), sequence );
     BOOST_CHECK_EQUAL( board.Markers().size(), 1 );
@@ -1446,7 +1591,8 @@ BOOST_AUTO_TEST_CASE( UncompilableCustomRulesFailTheCheckAndCorrectedRulesComple
                          failed.error_message() );
     BOOST_CHECK_EQUAL( failed.findings_size(), 0 );
     BOOST_CHECK_LT( failed.progress(), 1.0 );
-    BOOST_CHECK( !failed.results_fresh() && !failed.snapshot_complete() && !failed.cancellation_requested() );
+    // The rules text was captured exactly; a failed check has no results to be fresh.
+    BOOST_CHECK( !failed.results_fresh() && failed.snapshot_complete() && !failed.cancellation_requested() );
     auto reread = jobs.Read( Query( failed ), board, epoch );
     BOOST_REQUIRE( reread );
     BOOST_CHECK( MessageDifferencer::Equals( *reread, failed ) );
@@ -1464,7 +1610,7 @@ BOOST_AUTO_TEST_CASE( UncompilableCustomRulesFailTheCheckAndCorrectedRulesComple
                                                      + std::to_string( DRC_RULE_FILE_VERSION ) ) != std::string::npos,
                          newer.error_message() );
     BOOST_CHECK_EQUAL( newer.findings_size(), 0 );
-    BOOST_CHECK( !newer.results_fresh() && !newer.snapshot_complete() && !newer.cancellation_requested() );
+    BOOST_CHECK( !newer.results_fresh() && newer.snapshot_complete() && !newer.cancellation_requested() );
 
     { std::ofstream stream( rulesPath ); stream << "(version 1)\n(rule \"kept\" (constraint clearance (min 0.3mm)))\n"; }
     auto corrected = jobs.Start( Request( board, epoch ), board, epoch, context );
@@ -1475,7 +1621,7 @@ BOOST_AUTO_TEST_CASE( UncompilableCustomRulesFailTheCheckAndCorrectedRulesComple
     for( const auto& finding : completed.findings() )
         clearance += finding.marker().error_type() == kiapi::board::DRCET_CLEARANCE;
     BOOST_CHECK_EQUAL( clearance, 1 );
-    BOOST_CHECK( !completed.results_fresh() && !completed.snapshot_complete() );
+    BOOST_CHECK( completed.results_fresh() && completed.snapshot_complete() );
 }
 
 // Isolated rule: every failure message a check reports or compares is copied from the exception
@@ -1535,15 +1681,142 @@ BOOST_AUTO_TEST_CASE( NativeExceptionMessagesAreCopiedFromTheExceptionItself )
     BOOST_REQUIRE( request.mutable_message()->PackFrom( read ) );
     API_RESULT result = [&]
     {
-        KICAD_API_SERVER server( false );
-        server.RegisterHandler( &handler );
-        API_RESULT reply = server.DispatchToHandlers( request );
-        server.DeregisterHandler( &handler );
-        return reply;
+        TEST_API_SERVER_SCOPE server;
+        return handler.Handle( request );
     }();
     BOOST_REQUIRE_MESSAGE( !result.has_value(), "A board KiCad cannot write must not report a document state." );
     BOOST_CHECK_EQUAL( result.error().status(), kiapi::common::ApiStatusCode::AS_BAD_REQUEST );
     BOOST_CHECK_EQUAL( result.error().error_message(), "Native state could not be observed: " + problem );
+}
+
+// Ledger p3865669bf8f25214. A headless API server (kicad-cli api-server) builds its PCB handler without a
+// frame (pcbnew.cpp, HandleApiOpenDocument), as here. That handler compares the project a request names
+// with its own once, refuses a board of another project naming both projects, as the PCB editor does, and
+// reports a closed board of its own project only as not open. NativePcbDrcTwoProjectJourney proves this
+// through the rendered editors and a real kicad-cli api-server; this test adds each reason of the shared
+// comparison, including the unnamed project an automation instance refuses, which no journey can send
+// because MCP always names the project.
+BOOST_AUTO_TEST_CASE( HeadlessServerRefusesAnotherProjectsBoardNamingBothProjects )
+{
+    KI_TEST::TEMPORARY_DIRECTORY scratch( "pcb_headless_refusal_" + KIID().AsStdString(), "" );
+    const std::filesystem::path ownFolder = scratch.GetPath() / "own";
+    const std::filesystem::path otherFolder = scratch.GetPath() / "other";
+    std::filesystem::create_directories( ownFolder );
+    std::filesystem::create_directories( otherFolder );
+    const auto projectPath = ownFolder / "fixture.kicad_pro";
+    { std::ofstream file( projectPath ); file << R"({"meta":{"version":3}})"; }
+    SETTINGS_MANAGER manager;
+    const wxString projectName = wxString::FromUTF8( projectPath.string() );
+    BOOST_REQUIRE( manager.LoadProject( projectName, false ) );
+    PROJECT* project = manager.GetProject( projectName );
+    BOOST_REQUIRE( project );
+    auto owned = std::make_unique<BOARD>();
+    owned->SetProject( project );
+    owned->SetFileName( wxString::FromUTF8( ( ownFolder / "fixture.kicad_pcb" ).string() ) );
+    owned->GetDesignSettings().SetGridOrigin( VECTOR2I( 12000000, 34000000 ) );
+    auto headless = std::make_shared<HEADLESS_PCB_CONTEXT>( std::move( owned ), project, nullptr );
+    API_HANDLER_PCB handler( headless );
+
+    const std::string ownPath = project->GetProjectPath().ToStdString( wxConvUTF8 );
+    const std::string otherPath = otherFolder.string() + "/";
+    BOOST_REQUIRE_EQUAL( project->GetProjectName().ToStdString( wxConvUTF8 ), "fixture" );
+    BOOST_REQUIRE_NE( ownPath, otherPath );
+
+    auto board = []( const std::string& aFile, std::optional<std::pair<std::string, std::string>> aProject )
+    {
+        kiapi::common::types::DocumentSpecifier document;
+        document.set_type( kiapi::common::types::DOCTYPE_PCB );
+        document.set_board_filename( aFile );
+        if( aProject )
+        {
+            document.mutable_project()->set_name( aProject->first );
+            document.mutable_project()->set_path( aProject->second );
+        }
+        return document;
+    };
+    auto send = [&]( const google::protobuf::Message& aMessage )
+    {
+        kiapi::common::ApiRequest request;
+        request.mutable_header()->set_client_name( "kicad.qa" );
+        BOOST_REQUIRE( request.mutable_message()->PackFrom( aMessage ) );
+        return handler.Handle( request );
+    };
+    auto origin = [&]( const kiapi::common::types::DocumentSpecifier& aBoard )
+    {
+        kiapi::board::commands::GetBoardOrigin read;
+        read.mutable_board()->CopyFrom( aBoard );
+        read.set_type( kiapi::board::commands::BOT_GRID );
+        return read;
+    };
+    auto refused = [&]( const google::protobuf::Message& aMessage, const std::string& aExpected )
+    {
+        API_RESULT result = send( aMessage );
+        BOOST_REQUIRE_MESSAGE( !result.has_value(), "The headless server must refuse: " << aExpected );
+        BOOST_CHECK_EQUAL( result.error().status(), kiapi::common::ApiStatusCode::AS_BAD_REQUEST );
+        BOOST_CHECK_EQUAL( result.error().error_message(), aExpected );
+    };
+    auto served = [&]( const kiapi::common::types::DocumentSpecifier& aBoard )
+    {
+        API_RESULT result = send( origin( aBoard ) );
+        BOOST_REQUIRE_MESSAGE( result.has_value(), ( result ? "" : result.error().error_message() ) );
+        kiapi::common::types::Vector2 value;
+        BOOST_REQUIRE( result->message().UnpackTo( &value ) );
+        BOOST_CHECK_EQUAL( value.x_nm(), 12000000 );
+        BOOST_CHECK_EQUAL( value.y_nm(), 34000000 );
+    };
+
+    const auto own = board( "fixture.kicad_pcb", std::pair( std::string( "fixture" ), ownPath ) );
+    const auto other = board( "fixture.kicad_pcb", std::pair( std::string( "fixture" ), otherPath ) );
+    const std::string wrongProject =
+            "the requested document fixture.kicad_pcb of project 'fixture' at '" + otherPath
+            + "' is not open in this KiCad instance, which has project 'fixture' at '" + ownPath
+            + "' open; send the request to the KiCad instance that has that project open";
+
+    // Like kicad-cli api-server, this program has no API server of its own: nothing here names one.
+    BOOST_REQUIRE( !Pgm().ApiServerOrNull() );
+    served( own );
+
+    // The board of the same name in another project's folder: every PCB request names both projects.
+    StartPcbDrcJob start;
+    start.mutable_document()->CopyFrom( other );
+    start.set_operation_id( KIID().AsStdString() );
+    start.set_process_epoch( KIID().AsStdString() );
+    start.mutable_expected_revision()->set_epoch( KIID().AsStdString() );
+    start.mutable_expected_revision()->set_sequence( 1 );
+    refused( start, wrongProject );
+    ReadDocumentLifecycleState read;
+    read.mutable_document()->CopyFrom( other );
+    refused( read, wrongProject );
+    refused( origin( other ), wrongProject );
+
+    // Another project in this project's folder, by its name.
+    refused( origin( board( "fixture.kicad_pcb", std::pair( std::string( "renamed" ), ownPath ) ) ),
+             "the requested document fixture.kicad_pcb of project 'renamed' at '" + ownPath
+             + "' is not open in this KiCad instance, which has project 'fixture' at '" + ownPath
+             + "' open; send the request to the KiCad instance that has that project open" );
+
+    // A closed board of this server's own project is not open here; it belongs to no other instance.
+    read.mutable_document()->CopyFrom( board( "closed.kicad_pcb", std::pair( std::string( "fixture" ), ownPath ) ) );
+    refused( read, "the requested document closed.kicad_pcb is not open" );
+
+    // A project named by a relative folder is refused for that reason.
+    refused( origin( board( "fixture.kicad_pcb", std::pair( std::string( "fixture" ), std::string( "own" ) ) ) ),
+             "the requested document fixture.kicad_pcb names project 'fixture' by the folder 'own', which is "
+             "not an absolute path; name the project by its absolute folder path" );
+
+    // Without an automation instance, a request that names no project keeps being served by its board name.
+    served( board( "fixture.kicad_pcb", std::nullopt ) );
+    refused( origin( board( "closed.kicad_pcb", std::nullopt ) ), "the requested document closed.kicad_pcb is not open" );
+
+    // An automation instance serves one project, and refuses a request that names none for that reason.
+    TEST_API_SERVER_SCOPE server;
+    Pgm().GetApiServer().ConfigureAutomation( KIID().AsStdString(), projectPath.string() );
+    refused( origin( board( "fixture.kicad_pcb", std::nullopt ) ),
+             "the requested document fixture.kicad_pcb names no project; this KiCad instance has project "
+             "'fixture' at '" + ownPath + "' open and accepts a board request only with its project named by "
+             "its absolute folder path" );
+    refused( origin( other ), wrongProject );
+    served( own );
 }
 
 BOOST_AUTO_TEST_CASE( RefillRunsOnThePrivateBoardAndRequiresCapturedRoutingSettings )
@@ -1589,7 +1862,7 @@ BOOST_AUTO_TEST_CASE( RefillRunsOnThePrivateBoardAndRequiresCapturedRoutingSetti
     }
     BOOST_REQUIRE( state ); BOOST_REQUIRE( state->worker_finished() );
     BOOST_REQUIRE_MESSAGE( state->status() == PDRCJS_COMPLETED, state->error_message() );
-    BOOST_CHECK( !state->results_fresh() && !state->snapshot_complete() );
+    BOOST_CHECK( state->results_fresh() && state->snapshot_complete() );
     BOOST_CHECK_EQUAL( board.GetTimeStamp(), revision );
     BOOST_CHECK_EQUAL( zone->GetFilledPolysList( F_SilkS ) ? zone->GetFilledPolysList( F_SilkS )->TotalVertices() : 0,
                        vertices );
@@ -1641,7 +1914,10 @@ BOOST_AUTO_TEST_CASE( NonConvergingRefillStopsTheJobWithoutPublishingCheckFindin
     BOOST_CHECK( state->status() == PDRCJS_INCOMPLETE );
     BOOST_CHECK_EQUAL( state->error_code(), "refill_not_converged" );
     BOOST_CHECK_EQUAL( state->findings_size(), 0 );
-    BOOST_CHECK( !state->results_fresh() && !state->snapshot_complete() );
+    // A real board file keeps every object identity in the copy; an incomplete fill has no results.
+    BOOST_CHECK_MESSAGE( state->snapshot_complete(),
+                         ( state->input_warnings_size() ? state->input_warnings( 0 ) : std::string() ) );
+    BOOST_CHECK( !state->results_fresh() );
     BOOST_CHECK_EQUAL( board->GetTimeStamp(), request.expected_revision().sequence() );
 }
 
@@ -1714,7 +1990,7 @@ BOOST_AUTO_TEST_CASE( CapturedSchematicRunsParityAndSameRevisionElectricalChange
     BOOST_CHECK( MessageDifferencer::Equals( state->checked_schematic_state(), currentSchematic ) );
     BOOST_REQUIRE_EQUAL( state->input_warnings_size(), 1 );
     BOOST_CHECK_EQUAL( state->input_warnings( 0 ), "fixture intentional duplicate sheet names" );
-    BOOST_CHECK( !state->results_fresh() && !state->snapshot_complete() );
+    BOOST_CHECK( state->results_fresh() && state->snapshot_complete() );
 
     // A recovery checkpoint observes the parity schematic once for all its receipts.
     auto again = request;
@@ -1753,6 +2029,7 @@ BOOST_AUTO_TEST_CASE( CapturedSchematicRunsParityAndSameRevisionElectricalChange
     BOOST_CHECK( stale->status() == PDRCJS_STALE );
     BOOST_CHECK_EQUAL( stale->error_code(), "schematic_changed" );
     BOOST_CHECK_EQUAL( stale->findings_size(), 0 );
+    BOOST_CHECK( stale->snapshot_complete() && !stale->results_fresh() );
     currentSchematic = request.expected_schematic_state();
     BOOST_CHECK( jobs.Read( query, board, epoch, observer )->status() == PDRCJS_STALE );
     auto replay = jobs.ReadOperation( request, board, epoch, observer );
@@ -1762,6 +2039,811 @@ BOOST_AUTO_TEST_CASE( CapturedSchematicRunsParityAndSameRevisionElectricalChange
     auto changedRequest = request; changedRequest.set_allow_duplicate_sheet_names( true );
     BOOST_CHECK( !jobs.ReadOperation( changedRequest, board, epoch, observer ) );
     BOOST_CHECK_EQUAL( board.GetTimeStamp(), request.expected_revision().sequence() );
+}
+
+// An object identity the check's copy cannot keep (here two tracks of the open board share one)
+// leaves the snapshot incomplete and says why; a completed check then never claims fresh results.
+BOOST_AUTO_TEST_CASE( AnIdentityTheCopyCannotKeepLeavesTheSnapshotIncompleteWithItsReason )
+{
+    BOARD board;
+    board.SetFileName( "shared-identity.kicad_pcb" );
+    AddTracks( board, 2 );
+    board.Tracks().back()->SetUuidDirect( board.Tracks().front()->m_Uuid );
+    PCB_DRC_JOB_MANAGER jobs( auxiliaryObserver() );
+    const std::string epoch = KIID().AsStdString();
+    auto started = jobs.Start( Request( board, epoch ), board, epoch, context );
+    BOOST_REQUIRE_MESSAGE( started.has_value(), ( started ? "" : started.error() ) );
+    BOOST_CHECK( !started->snapshot_complete() );
+    const PcbDrcJobState done = Wait( jobs, board, *started );
+    BOOST_REQUIRE_MESSAGE( done.status() == PDRCJS_COMPLETED, done.error_code() + ": " + done.error_message() );
+    BOOST_CHECK( !done.snapshot_complete() );
+    BOOST_CHECK( !done.results_fresh() );
+    int explained = 0;
+    for( const auto& warning : done.input_warnings() )
+        explained += warning.rfind( "snapshot_incomplete: item_identity: ", 0 ) == 0;
+    BOOST_CHECK_EQUAL( explained, 1 );
+}
+
+// A candidate check follows the same rule as an ordinary one: its snapshot is complete, a finding
+// about the candidate names the candidate's own identity, and its completed results are fresh
+// until the board changes. The candidate never reaches the open board.
+BOOST_AUTO_TEST_CASE( CandidateChecksFollowTheSameCompletenessAndFreshnessRule )
+{
+    BOARD board;
+    board.SetFileName( "candidate.kicad_pcb" );
+    board.SetCopperLayerCount( 2 );
+    auto* net = new NETINFO_ITEM( &board, "SIGNAL", 1 );
+    board.Add( net );
+    // A candidate names an existing net; the board file keeps only nets that an object uses.
+    auto* anchor = new PCB_TRACK( &board );
+    anchor->SetStart( { 10000000, 10000000 } ); anchor->SetEnd( { 12000000, 10000000 } );
+    anchor->SetWidth( 200000 ); anchor->SetLayer( F_Cu ); anchor->SetNet( net );
+    board.Add( anchor );
+    const std::string epoch = KIID().AsStdString();
+    auto request = Request( board, epoch );
+    const KIID candidateId;
+    kiapi::board::types::Track candidate;
+    candidate.mutable_id()->set_value( candidateId.AsStdString() );
+    candidate.mutable_start()->set_x_nm( 1000000 ); candidate.mutable_start()->set_y_nm( 1000000 );
+    candidate.mutable_end()->set_x_nm( 3000000 ); candidate.mutable_end()->set_y_nm( 1000000 );
+    candidate.mutable_width()->set_value_nm( 200000 );
+    candidate.set_layer( kiapi::board::types::BL_F_Cu );
+    candidate.mutable_net()->set_name( "SIGNAL" );
+    request.add_candidate_items()->PackFrom( candidate );
+    PCB_DRC_JOB_MANAGER jobs( auxiliaryObserver() );
+    auto started = jobs.Start( request, board, epoch, context );
+    BOOST_REQUIRE_MESSAGE( started.has_value(), ( started ? "" : started.error() ) );
+    BOOST_CHECK( started->candidate_dry_run() );
+    const PcbDrcJobState done = Wait( jobs, board, *started );
+    BOOST_REQUIRE_MESSAGE( done.status() == PDRCJS_COMPLETED, done.error_code() + ": " + done.error_message() );
+    bool namesCandidate = false;
+    for( const auto& finding : done.findings() )
+        for( const auto& id : finding.marker().items() )
+        {
+            namesCandidate |= id.value() == candidateId.AsStdString();
+            BOOST_CHECK_MESSAGE( id.value() == candidateId.AsStdString() || board.ResolveItem( KIID( id.value() ), true ),
+                                 "Private identity " << id.value() );
+        }
+    BOOST_CHECK( namesCandidate );
+    BOOST_CHECK( done.snapshot_complete() && done.results_fresh() );
+    BOOST_CHECK_EQUAL( done.input_warnings_size(), 0 );
+    BOOST_CHECK_EQUAL( board.Tracks().size(), 1 );
+    board.IncrementTimeStamp();
+    auto stale = jobs.Read( Query( done ), board, epoch );
+    BOOST_REQUIRE( stale );
+    BOOST_CHECK( stale->status() == PDRCJS_STALE );
+    BOOST_CHECK( stale->snapshot_complete() && !stale->results_fresh() );
+}
+
+// KiCad's version-control text (${VCSHASH}, vcs...()) reads the project's repository through the
+// git backend KiCad installs at startup. This test process installs the same backend.
+struct GIT_BACKEND_SCOPE
+{
+    LIBGIT_BACKEND backend;
+    GIT_BACKEND_SCOPE() { backend.Init(); SetGitBackend( &backend ); }
+    ~GIT_BACKEND_SCOPE() { SetGitBackend( nullptr ); backend.Shutdown(); }
+};
+
+// A git repository in a scratch directory; each Commit() writes a file and commits it on top of
+// HEAD, and returns the new commit's identifier.
+struct SCRATCH_REPOSITORY
+{
+    std::filesystem::path directory;
+    git_repository* repository = nullptr;
+
+    explicit SCRATCH_REPOSITORY( const std::filesystem::path& aDirectory ) : directory( aDirectory )
+    {
+        BOOST_REQUIRE_EQUAL( git_repository_init( &repository, aDirectory.string().c_str(), 0 ), 0 );
+    }
+
+    ~SCRATCH_REPOSITORY() { git_repository_free( repository ); }
+
+    std::string Commit( const std::string& aFile, const std::string& aContent )
+    {
+        { std::ofstream stream( directory / aFile, std::ios::binary ); stream << aContent; }
+        git_index* index = nullptr;
+        BOOST_REQUIRE_EQUAL( git_repository_index( &index, repository ), 0 );
+        BOOST_REQUIRE_EQUAL( git_index_add_bypath( index, aFile.c_str() ), 0 );
+        BOOST_REQUIRE_EQUAL( git_index_write( index ), 0 );
+        git_oid treeId;
+        const int treeError = git_index_write_tree( &treeId, index );
+        git_index_free( index );
+        BOOST_REQUIRE_EQUAL( treeError, 0 );
+        git_tree* tree = nullptr;
+        BOOST_REQUIRE_EQUAL( git_tree_lookup( &tree, repository, &treeId ), 0 );
+        git_signature* signature = nullptr;
+        BOOST_REQUIRE_EQUAL( git_signature_now( &signature, "DRC test", "drc-test@kicad.example" ), 0 );
+        git_oid head;
+        git_commit* parent = nullptr;
+        const bool hasParent = git_reference_name_to_id( &head, repository, "HEAD" ) == 0
+                               && git_commit_lookup( &parent, repository, &head ) == 0;
+        const git_commit* parents[] = { parent };
+        git_oid commit;
+        const int error = git_commit_create( &commit, repository, "HEAD", signature, signature, nullptr,
+                                             ( "DRC test: " + aFile ).c_str(), tree, hasParent ? 1 : 0, parents );
+        git_commit_free( parent );
+        git_signature_free( signature );
+        git_tree_free( tree );
+        BOOST_REQUIRE_EQUAL( error, 0 );
+        char text[GIT_OID_HEXSZ + 1];
+        git_oid_tostr( text, sizeof text, &commit );
+        return text;
+    }
+};
+
+// The reasons an incomplete snapshot gives, each "snapshot_incomplete: <code>: <explanation>".
+static std::vector<std::string> IncompleteReasons( const PcbDrcJobState& aState )
+{
+    std::vector<std::string> reasons;
+    for( const auto& warning : aState.input_warnings() )
+        if( warning.rfind( "snapshot_incomplete: ", 0 ) == 0 ) reasons.push_back( warning );
+    return reasons;
+}
+
+// A text can show values that come from outside the design. A check lays out the board's texts,
+// so it reads them. The date and the project's version-control revision are captured with the
+// check and every read compares them again: a completed check goes stale when the date it read
+// is no longer the date, or when a new commit changes the revision, and a new check is fresh. The
+// time of day changes while the check runs, so a board whose text can show it leaves the snapshot
+// incomplete with its reason. A text reaches them directly or through a variable's definition. A
+// board whose texts show none of them does not depend on the clock at all, so its checks do not
+// go stale at midnight.
+BOOST_AUTO_TEST_CASE( TextShowingTheDateIsCapturedAndTheTimeOfDayLeavesTheSnapshotIncomplete )
+{
+    GIT_BACKEND_SCOPE git;
+    KI_TEST::TEMPORARY_DIRECTORY scratch( "drc_live_text_" + KIID().AsStdString(), "" );
+    const auto projectPath = scratch.GetPath() / "fixture.kicad_pro";
+    { std::ofstream stream( projectPath ); stream << R"({"meta":{"filename":"fixture.kicad_pro","version":3}})"; }
+    const wxString projectName = wxString::FromUTF8( projectPath.string() );
+    SETTINGS_MANAGER manager;
+    BOOST_REQUIRE( manager.LoadProject( projectName, false ) );
+    PROJECT* project = manager.GetProject( projectName );
+    BOARD board;
+    board.SetProject( project );
+    board.SetFileName( wxString::FromUTF8( ( scratch.GetPath() / "fixture.kicad_pcb" ).string() ) );
+    auto* text = new PCB_TEXT( &board );
+    text->SetText( wxS( "Checked ${STAMP}" ) );
+    text->SetLayer( F_SilkS );
+    text->SetPosition( { 10000000, 10000000 } );
+    board.Add( text );
+    auto live = [&]
+    {
+        const nlohmann::json settings = PCB_DRC_PROJECT_BASELINE::Observe( board ).settings;
+        return settings.contains( "live_text" ) ? settings.at( "live_text" ) : nlohmann::json();
+    };
+    // The text refers to a variable no definition gives the clock: nothing live is read.
+    BOOST_CHECK( live().is_null() );
+
+    // Through the project's variable, the text shows the date: it is captured.
+    project->GetTextVars()[wxS( "STAMP" )] = wxS( "${CURRENT_DATE}" );
+    const std::string before = TITLE_BLOCK::GetCurrentDate().utf8_string();
+    const nlohmann::json observed = live();
+    const std::string after = TITLE_BLOCK::GetCurrentDate().utf8_string();
+    BOOST_REQUIRE( observed.is_object() && observed.size() == 1 && observed.contains( "CURRENT_DATE" ) );
+    BOOST_CHECK( observed.at( "CURRENT_DATE" ) == before || observed.at( "CURRENT_DATE" ) == after );
+    PCB_DRC_JOB_MANAGER jobs( auxiliaryObserver() );
+    const std::string epoch = KIID().AsStdString();
+    auto check = [&]
+    {
+        auto started = jobs.Start( Request( board, epoch ), board, epoch, context );
+        BOOST_REQUIRE_MESSAGE( started.has_value(), ( started ? "" : started.error() ) );
+        const PcbDrcJobState done = Wait( jobs, board, *started );
+        BOOST_REQUIRE_MESSAGE( done.status() == PDRCJS_COMPLETED, done.error_code() + ": " + done.error_message() );
+        return done;
+    };
+    const PcbDrcJobState dated = check();
+    BOOST_CHECK( dated.snapshot_complete() && dated.results_fresh() );
+    BOOST_CHECK_EQUAL( dated.input_warnings_size(), 0 );
+    // A read on a later day sees another date: the check read a date that is no longer current.
+    ObserveProjectAs( jobs, []( const BOARD& aBoard )
+    {
+        PCB_DRC_PROJECT_OBSERVATION later = PCB_DRC_PROJECT_BASELINE::Observe( aBoard );
+        later.settings["live_text"]["CURRENT_DATE"] = "1999-12-31";
+        return later;
+    } );
+    auto nextDay = jobs.Read( Query( dated ), board, epoch );
+    BOOST_REQUIRE_MESSAGE( nextDay.has_value(), ( nextDay ? "" : nextDay.error() ) );
+    BOOST_CHECK( nextDay->status() == PDRCJS_STALE );
+    BOOST_CHECK_EQUAL( nextDay->error_code(), "project_inputs_changed" );
+    BOOST_CHECK_EQUAL( nextDay->findings_size(), 0 );
+    BOOST_CHECK( nextDay->snapshot_complete() && !nextDay->results_fresh() );
+    ObserveProjectAs( jobs, []( const BOARD& aBoard ) { return PCB_DRC_PROJECT_BASELINE::Observe( aBoard ); } );
+    BOOST_CHECK( jobs.Read( Query( dated ), board, epoch )->status() == PDRCJS_STALE );
+    const PcbDrcJobState redated = check();
+    BOOST_CHECK( redated.snapshot_complete() && redated.results_fresh() );
+
+    // The project's version-control revision is captured the same way, as the text resolves it.
+    // The scratch project is a git repository: its revision is a real commit, and a new commit
+    // makes a completed check stale.
+    SCRATCH_REPOSITORY repository( scratch.GetPath() );
+    const std::string first = repository.Commit( "notes.txt", "first\n" );
+    project->GetTextVars()[wxS( "STAMP" )] = wxS( "${VCSSHORTHASH}" );
+    auto revision = [&]
+    {
+        wxString token = wxS( "VCSSHORTHASH" );
+        BOOST_REQUIRE( project->TextVarResolver( &token ) );
+        return token.utf8_string();
+    };
+    BOOST_REQUIRE_EQUAL( revision(), first.substr( 0, 8 ) );
+    const nlohmann::json versioned = live();
+    BOOST_CHECK( versioned.is_object() && versioned.size() == 1 && versioned.contains( "VCSSHORTHASH" )
+                 && versioned.at( "VCSSHORTHASH" ) == first.substr( 0, 8 ) );
+    BOOST_CHECK( jobs.Read( Query( redated ), board, epoch )->status() == PDRCJS_STALE );
+    const PcbDrcJobState committed = check();
+    BOOST_CHECK( committed.snapshot_complete() && committed.results_fresh() );
+    BOOST_CHECK_EQUAL( committed.input_warnings_size(), 0 );
+    BOOST_CHECK( jobs.Read( Query( committed ), board, epoch )->results_fresh() );
+    const std::string second = repository.Commit( "notes.txt", "second\n" );
+    BOOST_REQUIRE_NE( first, second );
+    BOOST_REQUIRE_EQUAL( revision(), second.substr( 0, 8 ) );
+    auto recommitted = jobs.Read( Query( committed ), board, epoch );
+    BOOST_REQUIRE_MESSAGE( recommitted.has_value(), ( recommitted ? "" : recommitted.error() ) );
+    BOOST_CHECK( recommitted->status() == PDRCJS_STALE );
+    BOOST_CHECK_EQUAL( recommitted->error_code(), "project_inputs_changed" );
+    BOOST_CHECK_EQUAL( recommitted->findings_size(), 0 );
+    BOOST_CHECK( recommitted->snapshot_complete() && !recommitted->results_fresh() );
+    const PcbDrcJobState atSecond = check();
+    BOOST_CHECK( atSecond.snapshot_complete() && atSecond.results_fresh() );
+    BOOST_CHECK( live().at( "VCSSHORTHASH" ) == second.substr( 0, 8 ) );
+
+    // The time of day, shown directly: no captured value can hold it.
+    project->GetTextVars().erase( wxS( "STAMP" ) );
+    text->SetText( wxS( "Checked at ${CURRENT_TIME_HH_MM_SS}" ) );
+    board.IncrementTimeStamp();
+    BOOST_CHECK( live().is_null() );
+    const PcbDrcJobState timed = check();
+    BOOST_CHECK( !timed.snapshot_complete() && !timed.results_fresh() );
+    const std::vector<std::string> reasons = IncompleteReasons( timed );
+    BOOST_REQUIRE_EQUAL( reasons.size(), 1 );
+    BOOST_CHECK_MESSAGE( reasons.front().rfind( "snapshot_incomplete: current_time_text: ", 0 ) == 0
+                         && reasons.front().find( "${CURRENT_TIME_HH_MM_SS}" ) != std::string::npos, reasons.front() );
+
+    // Nothing that shows the clock: a check does not depend on it.
+    text->SetText( wxS( "Checked" ) );
+    board.IncrementTimeStamp();
+    BOOST_CHECK( live().is_null() );
+    const PcbDrcJobState plain = check();
+    BOOST_CHECK( plain.snapshot_complete() && plain.results_fresh() );
+    BOOST_CHECK_EQUAL( plain.input_warnings_size(), 0 );
+}
+
+// Board text also evaluates @{...} expressions. A check lays the result out, so what an expression
+// reads from outside the design is an input of the check. today() gives the day, which the check
+// captures and compares like ${CURRENT_DATE}, including through formatting functions. now() and
+// random() give another value each time they are evaluated, the vcs...() functions read the
+// project's version-control repository while the check runs, and a function KiCad does not know
+// as one of the design alone may do either: each leaves the snapshot incomplete with the stable
+// reason volatile_text_expression, never fresh. The check resolves each text as KiCad lays it out,
+// with the item's own variables first, and looks for calls before each evaluation: a text reaches
+// an expression directly, through a project variable, a board property or a title-block field,
+// through a variable substituted into an expression or into its name, or through an expression
+// that builds another; whitespace KiCad skips hides no call. The drawing sheet's expressions
+// count too. Expressions of the design alone, parentheses in quoted strings, plain text that only
+// looks like a call, and escaped expressions leave the check complete.
+BOOST_AUTO_TEST_CASE( TextExpressionsAreCapturedOrLeaveTheSnapshotIncomplete )
+{
+    GIT_BACKEND_SCOPE git;
+    KI_TEST::TEMPORARY_DIRECTORY scratch( "drc_text_expressions_" + KIID().AsStdString(), "" );
+    const auto projectPath = scratch.GetPath() / "fixture.kicad_pro";
+    { std::ofstream stream( projectPath ); stream << R"({"meta":{"filename":"fixture.kicad_pro","version":3}})"; }
+    SCRATCH_REPOSITORY repository( scratch.GetPath() );
+    repository.Commit( "fixture.kicad_pro", R"({"meta":{"filename":"fixture.kicad_pro","version":3}})" );
+    const wxString projectName = wxString::FromUTF8( projectPath.string() );
+    SETTINGS_MANAGER manager;
+    BOOST_REQUIRE( manager.LoadProject( projectName, false ) );
+    PROJECT* project = manager.GetProject( projectName );
+    BOARD board;
+    board.SetProject( project );
+    board.SetFileName( wxString::FromUTF8( ( scratch.GetPath() / "fixture.kicad_pcb" ).string() ) );
+    auto* text = new PCB_TEXT( &board );
+    text->SetLayer( F_SilkS );
+    text->SetPosition( { 10000000, 10000000 } );
+    board.Add( text );
+    auto live = [&]
+    {
+        const nlohmann::json settings = PCB_DRC_PROJECT_BASELINE::Observe( board ).settings;
+        return settings.contains( "live_text" ) ? settings.at( "live_text" ) : nlohmann::json();
+    };
+    PCB_DRC_JOB_MANAGER jobs( auxiliaryObserver() );
+    const std::string epoch = KIID().AsStdString();
+    auto check = [&]( const std::string& aCase )
+    {
+        board.IncrementTimeStamp();
+        auto started = jobs.Start( Request( board, epoch ), board, epoch, context );
+        BOOST_REQUIRE_MESSAGE( started.has_value(), aCase << ": " << ( started ? "" : started.error() ) );
+        const PcbDrcJobState done = Wait( jobs, board, *started );
+        BOOST_REQUIRE_MESSAGE( done.status() == PDRCJS_COMPLETED,
+                               aCase << ": " << done.error_code() << ": " << done.error_message() );
+        return done;
+    };
+    auto complete = [&]( const std::string& aCase )
+    {
+        const PcbDrcJobState done = check( aCase );
+        BOOST_CHECK_MESSAGE( done.snapshot_complete() && done.results_fresh(), aCase );
+        BOOST_CHECK_MESSAGE( done.input_warnings_size() == 0,
+                             aCase << ": " << ( done.input_warnings_size() ? done.input_warnings( 0 ) : "" ) );
+        return done;
+    };
+    // The check is incomplete with exactly one reason, volatile_text_expression, naming aCall.
+    auto incomplete = [&]( const std::string& aCase, const std::string& aCall, const std::string& aWhere )
+    {
+        const PcbDrcJobState done = check( aCase );
+        BOOST_CHECK_MESSAGE( !done.snapshot_complete() && !done.results_fresh(), aCase );
+        const std::vector<std::string> reasons = IncompleteReasons( done );
+        BOOST_REQUIRE_MESSAGE( reasons.size() == 1, aCase << ": " << reasons.size() << " reasons" );
+        BOOST_CHECK_MESSAGE( reasons.front().rfind( "snapshot_incomplete: volatile_text_expression: " + aWhere, 0 ) == 0
+                             && reasons.front().find( aCall ) != std::string::npos,
+                             aCase << ": " << reasons.front() );
+        // A read gives the same incomplete state: the reason is part of the snapshot.
+        const auto again = jobs.Read( Query( done ), board, epoch );
+        BOOST_REQUIRE( again );
+        BOOST_CHECK_MESSAGE( again->status() == PDRCJS_COMPLETED && !again->snapshot_complete()
+                             && !again->results_fresh() && IncompleteReasons( *again ) == reasons, aCase );
+        return done;
+    };
+    const std::string board_text = "The board's text";
+    const std::string sheet_text = "The drawing sheet's text";
+
+    // Expressions of the design alone, text that only looks like a call, and an escaped expression.
+    text->SetText( wxS( "@{upper(\"checked\")} @{format(2.5, 1)} @{dateformat(datestring(\"2026-01-02\"))} "
+                        "@{weekdayname(datestring(\"2026-01-02\"))} @{timeformat(0)}" ) );
+    BOOST_CHECK( live().is_null() );
+    complete( "pure expressions" );
+    text->SetText( wxS( "Order now() at random() from vcsbranch()" ) );
+    BOOST_CHECK( live().is_null() );
+    complete( "plain text" );
+    text->SetText( wxS( "\\@{now()} \\@{random()}" ) );
+    complete( "escaped expressions" );
+
+    // today() and date formatting over it, written in the text: the day is captured. A read on
+    // a later day sees another day, and the completed check goes stale; a new check is fresh.
+    text->SetText( wxS( "Made @{dateformat(today(), \"ISO\")}" ) );
+    const nlohmann::json today = live();
+    BOOST_REQUIRE( today.is_object() && today.size() == 1 && today.contains( "today()" ) );
+    const std::string day = EXPRESSION_EVALUATOR().Evaluate( wxS( "@{today()}" ) ).utf8_string();
+    BOOST_CHECK_MESSAGE( today.at( "today()" ) == day, today.dump() << " " << day );
+    const PcbDrcJobState dated = complete( "today() in the text" );
+    ObserveProjectAs( jobs, []( const BOARD& aBoard )
+    {
+        PCB_DRC_PROJECT_OBSERVATION later = PCB_DRC_PROJECT_BASELINE::Observe( aBoard );
+        later.settings["live_text"]["today()"] = "0";
+        return later;
+    } );
+    auto nextDay = jobs.Read( Query( dated ), board, epoch );
+    BOOST_REQUIRE( nextDay );
+    BOOST_CHECK( nextDay->status() == PDRCJS_STALE );
+    BOOST_CHECK_EQUAL( nextDay->error_code(), "project_inputs_changed" );
+    BOOST_CHECK_EQUAL( nextDay->findings_size(), 0 );
+    BOOST_CHECK( nextDay->snapshot_complete() && !nextDay->results_fresh() );
+    ObserveProjectAs( jobs, []( const BOARD& aBoard ) { return PCB_DRC_PROJECT_BASELINE::Observe( aBoard ); } );
+    BOOST_CHECK( jobs.Read( Query( dated ), board, epoch )->status() == PDRCJS_STALE );
+    // The same day through a project variable, a board property and a title-block field.
+    text->SetText( wxS( "Made ${STAMP}" ) );
+    project->GetTextVars()[wxS( "STAMP" )] = wxS( "@{weekdayname(today())}" );
+    BOOST_CHECK( live().contains( "today()" ) );
+    complete( "today() through a project variable" );
+    project->GetTextVars().erase( wxS( "STAMP" ) );
+    board.SetProperties( { { wxS( "BUILT" ), wxS( "@{dateformat(today())}" ) } } );
+    text->SetText( wxS( "Made ${BUILT}" ) );
+    BOOST_CHECK( live().contains( "today()" ) );
+    complete( "today() through a board property" );
+    board.SetProperties( {} );
+    board.GetTitleBlock().SetComment( 1, wxS( "@{today()}" ) );
+    text->SetText( wxS( "Made ${COMMENT2}" ) );
+    BOOST_CHECK( live().contains( "today()" ) );
+    complete( "today() through a title-block field" );
+    board.GetTitleBlock().SetComment( 1, wxEmptyString );
+    // A definition no text refers to is no input.
+    project->GetTextVars()[wxS( "UNUSED" )] = wxS( "@{now()} ${CURRENT_TIME_HH_MM_SS}" );
+    text->SetText( wxS( "Made ${ANOTHER}" ) );
+    BOOST_CHECK( live().is_null() );
+    complete( "an unreferenced definition" );
+    project->GetTextVars().erase( wxS( "UNUSED" ) );
+
+    // The clock: now(), directly and through a project variable, also under formatting.
+    text->SetText( wxS( "At @{now()}" ) );
+    BOOST_CHECK( live().is_null() );
+    incomplete( "now() in the text", "now()", board_text );
+    text->SetText( wxS( "At ${STAMP}" ) );
+    project->GetTextVars()[wxS( "STAMP" )] = wxS( "@{timeformat(now(), \"HH:mm\")}" );
+    incomplete( "now() through a project variable", "now()", board_text );
+
+    // Chance: random(), directly and through a project variable.
+    text->SetText( wxS( "Lot @{random()}" ) );
+    incomplete( "random() in the text", "random()", board_text );
+    text->SetText( wxS( "Lot ${STAMP}" ) );
+    project->GetTextVars()[wxS( "STAMP" )] = wxS( "@{round(random() * 100)}" );
+    incomplete( "random() through a project variable", "random()", board_text );
+
+    // The version-control repository: every vcs...() function, directly and through a variable.
+    for( const char* call : { "vcsbranch()", "vcsidentifier(8)", "vcsdirty()", "vcsdirtysuffix()", "vcscommitdate()",
+                              "vcsnearestlabel()", "vcslabeldistance()", "vcsauthor()", "vcscommitter()",
+                              "vcsfileidentifier(\"fixture.kicad_pro\")", "vcsfileauthor(\"fixture.kicad_pro\")",
+                              "vcsfilecommitdate(\"fixture.kicad_pro\")" } )
+    {
+        const std::string expression = call;
+        const std::string name = expression.substr( 0, expression.find( '(' ) ) + "()";
+        text->SetText( wxString::FromUTF8( "Revision @{" + expression + "}" ) );
+        incomplete( name + " in the text", name, board_text );
+    }
+    text->SetText( wxS( "Revision ${STAMP}" ) );
+    project->GetTextVars()[wxS( "STAMP" )] = wxS( "@{concat(vcsbranch(), vcsdirtysuffix())}" );
+    incomplete( "vcs...() through a project variable", "vcsbranch()", board_text );
+
+    // A function the check does not know as one of the design alone.
+    text->SetText( wxS( "@{nosuchfunction(1)}" ) );
+    incomplete( "an unknown function", "nosuchfunction()", board_text );
+
+    // A variable substituted into an expression becomes part of it.
+    text->SetText( wxS( "@{${EXPR} + 1}" ) );
+    project->GetTextVars()[wxS( "EXPR" )] = wxS( "now()" );
+    incomplete( "now() substituted into an expression", "now()", board_text );
+    project->GetTextVars()[wxS( "EXPR" )] = wxS( "2" );
+    complete( "a number substituted into an expression" );
+    project->GetTextVars().erase( wxS( "EXPR" ) );
+    project->GetTextVars().erase( wxS( "STAMP" ) );
+
+    // KiCad's reader skips any whitespace between a function's name and its '(': a line break,
+    // a vertical tab or a no-break space too.
+    text->SetText( wxS( "At @{now\n()}" ) );
+    incomplete( "now() across a line break", "now()", board_text );
+    text->SetText( wxString::FromUTF8( "Lot @{random\v\xC2\xA0()}" ) );
+    incomplete( "random() across a vertical tab and a no-break space", "random()", board_text );
+
+    // A call split between the text and a variable is resolved as KiCad expands it before it
+    // evaluates: the function's name in a variable, the call's close in a variable, or the
+    // expression's opening in a variable.
+    project->GetTextVars()[wxS( "PART" )] = wxS( "now" );
+    text->SetText( wxS( "At @{${PART}()}" ) );
+    incomplete( "a function's name from a variable", "now()", board_text );
+    project->GetTextVars()[wxS( "PART" )] = wxS( "()}" );
+    text->SetText( wxS( "At @{now${PART}" ) );
+    incomplete( "a call closed by a variable", "now()", board_text );
+    project->GetTextVars()[wxS( "PART" )] = wxS( "@{" );
+    text->SetText( wxS( "At ${PART}now()}" ) );
+    incomplete( "an expression opened by a variable", "now()", board_text );
+    project->GetTextVars().erase( wxS( "PART" ) );
+
+    // An expression that builds another: KiCad evaluates a text again while it still holds an
+    // expression, so the expression built is evaluated too.
+    text->SetText( wxS( "At @{concat(\"@{n\", \"ow\", \"()}\")}" ) );
+    incomplete( "an expression built with concat()", "now()", board_text );
+    text->SetText( wxS( "Lot @{\"@\" + \"{rand\" + \"om()}\"}" ) );
+    incomplete( "an expression built by adding strings", "random()", board_text );
+    text->SetText( wxS( "Revision @{concat(\"@{\", lower(\"VCSBRANCH\"), \"()}\")}" ) );
+    incomplete( "an expression built with a function's name in capitals", "vcsbranch()", board_text );
+    // An empty result joins "$" and "{LATER}" into a variable, whose value KiCad resolves and then
+    // evaluates in the next rounds.
+    project->GetTextVars()[wxS( "LATER" )] = wxS( "@{now()}" );
+    text->SetText( wxS( "$@{\"\"}{LATER}" ) );
+    incomplete( "a variable an expression's result completes", "now()", board_text );
+    project->GetTextVars().erase( wxS( "LATER" ) );
+
+    // Parentheses in a quoted string are no call.
+    text->SetText( wxS( "@{upper(\"Rev (A)\")}" ) );
+    complete( "parentheses in a quoted string" );
+    project->GetTextVars()[wxS( "QTY" )] = wxS( "2" );
+    text->SetText( wxS( "@{if(${QTY} > 1, \"Pads (x2)\", \"Pad\")}" ) );
+    complete( "parentheses in the quoted strings of if()" );
+    project->GetTextVars().erase( wxS( "QTY" ) );
+
+    // A variable whose name an expression builds: KiCad evaluates the name's expression before it
+    // looks the variable up, and then reads the variable like any other.
+    board.GetTitleBlock().SetRevision( wxS( "B" ) );
+    text->SetText( wxS( "Rev ${@{upper(\"revision\")}}" ) );
+    BOOST_CHECK( live().is_null() );
+    complete( "a variable's name built by a pure expression" );
+    text->SetText( wxS( "Made ${@{concat(\"CURRENT_\", \"DATE\")}}" ) );
+    BOOST_CHECK( live().contains( "CURRENT_DATE" ) );
+    complete( "the date through a variable's name an expression builds" );
+    text->SetText( wxS( "At ${STAMP@{now()}}" ) );
+    incomplete( "now() in a variable's name", "now()", board_text );
+    board.GetTitleBlock().SetRevision( wxEmptyString );
+
+    // Each text's variables resolve as KiCad resolves them for that item, before the board's and
+    // the project's: the text's layer, its footprint's fields, another footprint's field and a
+    // table cell's position. A project variable of the same name is not read.
+    BOOST_REQUIRE( board.SetLayerName( F_SilkS, wxS( "now" ) ) );
+    text->SetText( wxS( "At @{${LAYER}()}" ) );
+    incomplete( "the name of the text's layer called", "now()", board_text );
+    board.SetLayerName( F_SilkS, wxEmptyString );
+    project->GetTextVars()[wxS( "LAYER" )] = wxS( "now()" );
+    text->SetText( wxS( "On @{upper(\"${LAYER}\")}" ) );
+    complete( "the text's layer, not the project variable of that name" );
+    project->GetTextVars().erase( wxS( "LAYER" ) );
+    auto* part = new FOOTPRINT( &board );
+    part->SetReference( wxS( "U7" ) );
+    part->SetValue( wxS( "random" ) );
+    part->SetPosition( { 30000000, 10000000 } );
+    board.Add( part );
+    auto* partText = new PCB_TEXT( part );
+    partText->SetLayer( F_SilkS );
+    partText->SetPosition( part->GetPosition() );
+    partText->SetText( wxS( "@{${VALUE}()}" ) );
+    part->Add( partText );
+    text->SetText( wxS( "Plain" ) );
+    incomplete( "a footprint's value called in its own text", "random()", board_text );
+    partText->SetText( wxS( "Part" ) );
+    text->SetText( wxS( "Lot @{${U7:VALUE}()}" ) );
+    incomplete( "another footprint's value called", "random()", board_text );
+    board.Remove( part );
+    delete part;
+    auto* table = new PCB_TABLE( &board, pcbIUScale.mmToIU( 0.1 ) );
+    table->SetLayer( F_SilkS );
+    table->SetColCount( 1 );
+    table->SetColWidth( 0, pcbIUScale.mmToIU( 40 ) );
+    table->SetRowHeight( 0, pcbIUScale.mmToIU( 5 ) );
+    auto* cell = new PCB_TABLECELL( &board );
+    cell->SetStart( { 0, 0 } );
+    cell->SetEnd( { pcbIUScale.mmToIU( 40 ), pcbIUScale.mmToIU( 5 ) } );
+    cell->SetText( wxS( "Row @{${ROW} + 1}" ) );
+    table->AddCell( cell );
+    table->Normalize();
+    board.Add( table );
+    project->GetTextVars()[wxS( "ROW" )] = wxS( "random()" );
+    text->SetText( wxS( "Plain" ) );
+    complete( "a table cell's row, not the project variable of that name" );
+    project->GetTextVars().erase( wxS( "ROW" ) );
+    board.Remove( table );
+    delete table;
+
+    // The drawing sheet: the check resolves its texts to report unresolved variables, and an
+    // expression there can decide that from the clock. Plain variables always resolve there.
+    text->SetText( wxS( "Plain" ) );
+    auto* sheet = new DS_DATA_ITEM_TEXT( wxS( "Printed ${CURRENT_DATE} ${CURRENT_TIME_HH_MM_SS}" ) );
+    drawing.Append( sheet );
+    complete( "plain date and time in the drawing sheet" );
+    sheet->m_TextBase = wxS( "@{upper(\"sheet\")}" );
+    complete( "a pure expression in the drawing sheet" );
+    sheet->m_TextBase = wxS( "@{if(now() > 0, \"${MISSING}\", \"\")}" );
+    incomplete( "now() in the drawing sheet", "now()", sheet_text );
+    sheet->m_TextBase = wxS( "Day ${COMMENT3}" );
+    board.GetTitleBlock().SetComment( 2, wxS( "@{dateformat(today())}" ) );
+    incomplete( "today() through the drawing sheet's title block", "today()", sheet_text );
+    board.GetTitleBlock().SetComment( 2, wxEmptyString );
+    // The check lays the sheet out under its own sheet name: a project variable of that name is
+    // not read. And the sheet evaluates its text once, so an expression that its expression
+    // builds stays text.
+    project->GetTextVars()[wxS( "SHEETNAME" )] = wxS( "now()" );
+    sheet->m_TextBase = wxS( "@{upper(\"${SHEETNAME}\")}" );
+    complete( "the drawing sheet's own sheet name, not the project variable of that name" );
+    project->GetTextVars().erase( wxS( "SHEETNAME" ) );
+    sheet->m_TextBase = wxS( "@{concat(\"@{n\", \"ow()}\")}" );
+    complete( "an expression built in the drawing sheet, which it does not evaluate" );
+    sheet->m_TextBase = wxS( "Sheet" );
+
+    // Nothing reads outside the design any more: a new check is complete and fresh.
+    BOOST_CHECK( live().is_null() );
+    complete( "no expression" );
+}
+
+// A text laid out with an outline font reads its glyphs from the font file, which KiCad opens once
+// and reads lazily. A check captures the content of each font file its texts use (a font embedded
+// in the board is part of the board) and every read compares it again: rewriting the file in place
+// with the same size and modification time makes a completed check stale, and putting it back does
+// not revive it. A font file the check cannot read leaves the snapshot incomplete with its reason.
+BOOST_AUTO_TEST_CASE( FontFilesOfTheBoardTextAreCapturedAndCompared )
+{
+    KI_TEST::TEMPORARY_DIRECTORY scratch( "drc_fonts_" + KIID().AsStdString(), "" );
+    wxFileName source( wxString::FromUTF8( KI_TEST::GetTestDataRootDir() ) );
+    source.RemoveLastDir();
+    source.AppendDir( wxS( "resources" ) );
+    source.AppendDir( wxS( "fonts" ) );
+    source.SetFullName( wxS( "NotoSans-Regular.ttf" ) );
+    BOOST_REQUIRE( source.FileExists() );
+    const auto fontPath = scratch.GetPath() / "NotoSans-Regular.ttf";
+    std::filesystem::copy_file( std::filesystem::path( source.GetFullPath().utf8_string() ), fontPath );
+    std::vector<wxString> fontFiles{ wxString::FromUTF8( fontPath.string() ) };
+    KIFONT::FONT* font = KIFONT::FONT::GetFont( wxS( "Noto Sans" ), false, false, &fontFiles );
+    BOOST_REQUIRE( font && font->IsOutline() );
+    const wxString loaded = static_cast<KIFONT::OUTLINE_FONT*>( font )->GetFileName();
+    BOOST_REQUIRE_MESSAGE( std::filesystem::equivalent( std::filesystem::path( loaded.utf8_string() ), fontPath ),
+                           loaded.utf8_string() );
+
+    BOARD board;
+    board.SetFileName( wxString::FromUTF8( ( scratch.GetPath() / "fonts.kicad_pcb" ).string() ) );
+    auto* text = new PCB_TEXT( &board );
+    text->SetText( wxS( "Outline" ) );
+    text->SetLayer( F_SilkS );
+    text->SetPosition( { 10000000, 10000000 } );
+    text->SetFont( font );
+    board.Add( text );
+    PCB_DRC_JOB_MANAGER jobs( auxiliaryObserver() );
+    const std::string epoch = KIID().AsStdString();
+    auto check = [&]
+    {
+        board.IncrementTimeStamp();
+        auto started = jobs.Start( Request( board, epoch ), board, epoch, context );
+        BOOST_REQUIRE_MESSAGE( started.has_value(), ( started ? "" : started.error() ) );
+        const PcbDrcJobState done = Wait( jobs, board, *started );
+        BOOST_REQUIRE_MESSAGE( done.status() == PDRCJS_COMPLETED, done.error_code() + ": " + done.error_message() );
+        return done;
+    };
+    const PcbDrcJobState captured = check();
+    BOOST_CHECK( captured.snapshot_complete() && captured.results_fresh() );
+    BOOST_CHECK_EQUAL( captured.input_warnings_size(), 0 );
+    BOOST_CHECK( jobs.Read( Query( captured ), board, epoch )->results_fresh() );
+
+    // Rewrite one byte of the font file in place, keeping its size and modification time.
+    const auto modified = std::filesystem::last_write_time( fontPath );
+    const auto size = std::filesystem::file_size( fontPath );
+    auto rewriteLastByte = [&]( char aXor )
+    {
+        std::fstream stream( fontPath, std::ios::in | std::ios::out | std::ios::binary );
+        stream.seekg( static_cast<std::streamoff>( size - 1 ) );
+        char last = 0;
+        stream.get( last );
+        stream.seekp( static_cast<std::streamoff>( size - 1 ) );
+        stream.put( static_cast<char>( last ^ aXor ) );
+        stream.close();
+        std::filesystem::last_write_time( fontPath, modified );
+        BOOST_REQUIRE_EQUAL( std::filesystem::file_size( fontPath ), size );
+        BOOST_REQUIRE( std::filesystem::last_write_time( fontPath ) == modified );
+    };
+    rewriteLastByte( 0x01 );
+    auto rewritten = jobs.Read( Query( captured ), board, epoch );
+    BOOST_REQUIRE_MESSAGE( rewritten.has_value(), ( rewritten ? "" : rewritten.error() ) );
+    BOOST_CHECK( rewritten->status() == PDRCJS_STALE );
+    BOOST_CHECK_EQUAL( rewritten->error_code(), "project_inputs_changed" );
+    BOOST_CHECK_EQUAL( rewritten->findings_size(), 0 );
+    BOOST_CHECK( rewritten->snapshot_complete() && !rewritten->results_fresh() );
+    rewriteLastByte( 0x01 ); // The original bytes again.
+    BOOST_CHECK( jobs.Read( Query( captured ), board, epoch )->status() == PDRCJS_STALE );
+    const PcbDrcJobState restored = check();
+    BOOST_CHECK( restored.snapshot_complete() && restored.results_fresh() );
+
+    // The stroke font reads no file: another font file changing is no input then.
+    text->SetFont( nullptr );
+    const PcbDrcJobState stroked = check();
+    BOOST_CHECK( stroked.snapshot_complete() && stroked.results_fresh() );
+    rewriteLastByte( 0x01 );
+    BOOST_CHECK( jobs.Read( Query( stroked ), board, epoch )->results_fresh() );
+    rewriteLastByte( 0x01 );
+
+    // A font file the check cannot read: KiCad still holds the font it opened, but the check
+    // cannot compare the file with what it laid out.
+    text->SetFont( font );
+    std::vector<char> bytes( size );
+    { std::ifstream stream( fontPath, std::ios::binary ); stream.read( bytes.data(), static_cast<std::streamsize>( size ) ); }
+    std::filesystem::remove( fontPath );
+    const PcbDrcJobState unreadable = check();
+    BOOST_CHECK( !unreadable.snapshot_complete() && !unreadable.results_fresh() );
+    const std::vector<std::string> reasons = IncompleteReasons( unreadable );
+    BOOST_REQUIRE_EQUAL( reasons.size(), 1 );
+    BOOST_CHECK_MESSAGE( reasons.front().rfind( "snapshot_incomplete: font_file: ", 0 ) == 0
+                         && reasons.front().find( "NotoSans-Regular.ttf" ) != std::string::npos, reasons.front() );
+    { std::ofstream stream( fontPath, std::ios::binary ); stream.write( bytes.data(), static_cast<std::streamsize>( size ) ); }
+    const PcbDrcJobState readable = check();
+    BOOST_CHECK( readable.snapshot_complete() && readable.results_fresh() );
+}
+
+// Refilling zones rebuilds teardrops inside the check. A finding about a rebuilt teardrop names the
+// open board's teardrop when the open board holds the same one, whether under the identity KiCad
+// derives for it or under the one it received when the board was loaded. A teardrop the open board
+// does not hold leaves the snapshot incomplete with its reason, instead of presenting an identity
+// private to the check as an object of the open board.
+BOOST_AUTO_TEST_CASE( RefilledTeardropsNameTheOpenBoardTeardropOrLeaveTheSnapshotIncomplete )
+{
+    KI_TEST::TEMPORARY_DIRECTORY scratch( "drc_teardrops_" + KIID().AsStdString(), "" );
+    const auto projectPath = scratch.GetPath() / "fixture.kicad_pro";
+    { std::ofstream stream( projectPath ); stream << R"({"meta":{"filename":"fixture.kicad_pro","version":3}})"; }
+    // Rules match a teardrop as a track, so every track and teardrop fails this assertion and gets a
+    // finding that names it.
+    { std::ofstream stream( scratch.GetPath() / "fixture.kicad_dru" );
+      stream << "(version 1)\n(rule \"every_track\" (condition \"A.Type == 'Track'\") "
+                "(constraint assertion \"A.Type != 'Track'\"))\n"; }
+    const wxString projectName = wxString::FromUTF8( projectPath.string() );
+    SETTINGS_MANAGER manager;
+    BOOST_REQUIRE( manager.LoadProject( projectName, false ) );
+    BOARD board;
+    board.SetProject( manager.GetProject( projectName ) );
+    board.SetFileName( wxString::FromUTF8( ( scratch.GetPath() / "fixture.kicad_pcb" ).string() ) );
+    board.SetCopperLayerCount( 2 );
+    auto* net = new NETINFO_ITEM( &board, "SIGNAL", 1 );
+    board.Add( net );
+    auto* via = new PCB_VIA( &board );
+    via->SetPadstackMode( PADSTACK::MODE::NORMAL );
+    via->SetViaType( VIATYPE::THROUGH );
+    via->SetLayerPair( F_Cu, B_Cu );
+    via->SetPosition( { 10000000, 10000000 } );
+    via->SetWidth( PADSTACK::ALL_LAYERS, 800000 );
+    via->SetDrill( 400000 );
+    via->SetNet( net );
+    via->GetTeardropParams().m_Enabled = true;
+    board.Add( via );
+    auto* track = new PCB_TRACK( &board );
+    track->SetStart( { 10000000, 10000000 } ); track->SetEnd( { 14000000, 10000000 } );
+    track->SetWidth( 200000 ); track->SetLayer( F_Cu ); track->SetNet( net );
+    board.Add( track );
+    PNS::ROUTING_SETTINGS routing( nullptr, "tools.pns" );
+    context.routingSettings = &routing;
+    PCB_DRC_JOB_MANAGER jobs( auxiliaryObserver() );
+    const std::string epoch = KIID().AsStdString();
+    // The state the check was started with, and its completed state.
+    auto refillFrom = [&]
+    {
+        auto request = Request( board, epoch );
+        request.set_refill_zones( true );
+        auto started = jobs.Start( request, board, epoch, context );
+        BOOST_REQUIRE_MESSAGE( started.has_value(), ( started ? "" : started.error() ) );
+        const PcbDrcJobState done = Wait( jobs, board, *started );
+        BOOST_REQUIRE_MESSAGE( done.status() == PDRCJS_COMPLETED, done.error_code() + ": " + done.error_message() );
+        return std::pair<PcbDrcJobState, PcbDrcJobState>( *started, done );
+    };
+    auto refill = [&] { return refillFrom().second; };
+    // Every finding, for the failure message.
+    auto describe = []( const PcbDrcJobState& state )
+    {
+        std::string text = std::to_string( state.findings_size() ) + " findings:";
+        for( const auto& finding : state.findings() )
+        {
+            text += " [" + kiapi::board::DrcErrorType_Name( finding.marker().error_type() );
+            for( const auto& id : finding.marker().items() ) text += " " + id.value();
+            text += "]";
+        }
+        for( const auto& warning : state.input_warnings() ) text += " warning: " + warning;
+        return text;
+    };
+    // The identities the assertion findings name, other than the track's own.
+    auto teardropFindings = [&]( const PcbDrcJobState& state )
+    {
+        std::vector<std::string> named;
+        for( const auto& finding : state.findings() )
+            if( finding.marker().error_type() == kiapi::board::DRCET_ASSERTION_FAILURE )
+                for( const auto& id : finding.marker().items() )
+                    if( id.value() != track->m_Uuid.AsStdString() ) named.push_back( id.value() );
+        return named;
+    };
+
+    // The open board has no teardrop: the check's rebuilt teardrop is no object of it. The check
+    // never claims a complete snapshot, neither when it starts nor while it runs (Wait checks
+    // each running state) nor when it completes.
+    const auto [missingStart, missing] = refillFrom();
+    BOOST_CHECK( !missingStart.snapshot_complete() && !missingStart.results_fresh() );
+    BOOST_CHECK( missingStart.worker_finished() || Notes( missingStart ).empty() );
+    const auto rebuilt = teardropFindings( missing );
+    BOOST_CHECK_MESSAGE( rebuilt.size() == 1, describe( missing ) );
+    BOOST_CHECK( rebuilt.empty() || !board.ResolveItem( KIID( rebuilt.front() ), true ) );
+    BOOST_CHECK( !missing.snapshot_complete() && !missing.results_fresh() );
+    int explained = 0;
+    for( const auto& warning : missing.input_warnings() )
+        explained += warning.rfind( "snapshot_incomplete: generated_item_identity: 1 finding names", 0 ) == 0;
+    BOOST_CHECK_EQUAL( explained, 1 );
+    BOOST_CHECK_EQUAL( board.Zones().size(), 0 );
+
+    // KiCad's own teardrop update gives the open board the same teardrop under its derived identity.
+    {
+        TOOL_MANAGER tools;
+        tools.SetEnvironment( &board, nullptr, nullptr, nullptr, nullptr );
+        tools.RegisterTool( new KI_TEST::DUMMY_TOOL );
+        BOARD_COMMIT commit( &tools, true, false );
+        board.BuildConnectivity();
+        TEARDROP_MANAGER teardrops( &board, &tools );
+        teardrops.UpdateTeardrops( commit, nullptr, nullptr, true );
+        commit.Push( wxEmptyString, SKIP_UNDO | SKIP_SET_DIRTY | SKIP_TEARDROPS );
+    }
+    BOOST_REQUIRE_EQUAL( board.Zones().size(), 1 );
+    ZONE* live = board.Zones().front();
+    BOOST_REQUIRE( live->IsTeardropArea() );
+    BOOST_CHECK( rebuilt.size() == 1 && live->m_Uuid.AsStdString() == rebuilt.front() );
+    const PcbDrcJobState derived = refill();
+    BOOST_CHECK_MESSAGE( teardropFindings( derived ) == std::vector<std::string>{ live->m_Uuid.AsStdString() },
+                         describe( derived ) );
+    BOOST_CHECK( derived.snapshot_complete() && derived.results_fresh() );
+    BOOST_CHECK_EQUAL( derived.input_warnings_size(), 0 );
+
+    // A board loaded from its file gives each teardrop a new identity. The rebuilt teardrop is the
+    // same one, so its finding names the open board's teardrop under that identity.
+    live->SetUuid( KIID() );
+    board.IncrementTimeStamp();
+    const PcbDrcJobState loaded = refill();
+    BOOST_CHECK_MESSAGE( teardropFindings( loaded ) == std::vector<std::string>{ live->m_Uuid.AsStdString() },
+                         describe( loaded ) );
+    BOOST_CHECK( loaded.snapshot_complete() && loaded.results_fresh() );
+    for( const auto& finding : loaded.findings() )
+        for( const auto& id : finding.marker().items() )
+            BOOST_CHECK_MESSAGE( board.ResolveItem( KIID( id.value() ), true ), "Private identity " << id.value() );
+    BOOST_CHECK_EQUAL( board.Zones().size(), 1 );
 }
 
 BOOST_AUTO_TEST_SUITE_END()

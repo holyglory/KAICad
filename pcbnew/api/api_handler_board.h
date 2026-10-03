@@ -79,6 +79,8 @@ protected:
 
     PROJECT& project() const { return context()->Prj(); }
 
+    const PROJECT* requestProject() const override { return &project(); }
+
     TOOL_MANAGER* toolManager() const { return context()->GetToolManager(); }
 
     std::optional<BOARD_ITEM*> getItemById( const KIID& aId ) const;

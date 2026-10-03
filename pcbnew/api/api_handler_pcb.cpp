@@ -125,6 +125,11 @@
 #include <wx/ffile.h>
 
 using namespace kiapi::common::commands;
+
+KICAD_API_SERVER& API_HANDLER_PCB::drcApiServer() const
+{
+    return apiServerOrNull() ? apiServer() : Pgm().GetApiServer();
+}
 using types::CommandStatus;
 using types::DocumentType;
 using types::ItemRequestStatus;
@@ -359,7 +364,7 @@ HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> API_HANDLER_PCB::h
         kiapi::automation::v1::DocumentLifecycleState result;
         result.mutable_document()->CopyFrom( aCtx.Request.document() );
         result.set_native_identity( board()->m_Uuid.AsStdString() );
-        result.set_process_epoch( apiServer().Token() );
+        result.set_process_epoch( drcApiServer().Token() );
         result.mutable_revision()->set_epoch( result.native_identity() );
         const int sequence = board()->GetTimeStamp();
         if( sequence < 0 ) throw std::runtime_error( "Board observation counter requires a new document epoch" );
@@ -440,7 +445,7 @@ HANDLER_RESULT<kiapi::automation::v1::PcbDrcState> API_HANDLER_PCB::handleReadDr
         return tl::unexpected( valid.error() );
     kiapi::automation::v1::PcbDrcState result;
     result.mutable_document()->CopyFrom( aCtx.Request.document() );
-    result.set_process_epoch( apiServer().Token() );
+    result.set_process_epoch( drcApiServer().Token() );
     result.mutable_revision()->set_epoch( board()->m_Uuid.AsStdString() );
     const int sequence = board()->GetTimeStamp();
     if( sequence < 0 )
@@ -515,7 +520,7 @@ HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleSta
     if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
         return tl::unexpected( valid.error() );
 
-    auto replay = m_drcJobs.ReadOperation( aCtx.Request, *board(), apiServer().Token(),
+    auto replay = m_drcJobs.ReadOperation( aCtx.Request, *board(), drcApiServer().Token(),
             [this]( const auto& document ) { return observeDrcSchematic( document ); },
             [this]( BOARD& source ) { return observeDrcLibraries( source ); } );
     if( !replay )
@@ -542,7 +547,7 @@ HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleSta
     {
         const auto& expected = aCtx.Request.expected_schematic_state();
         if( !aCtx.Request.has_expected_schematic_state()
-            || expected.process_epoch() != apiServer().Token()
+            || expected.process_epoch() != drcApiServer().Token()
             || !google::protobuf::util::MessageDifferencer::Equals(
                     expected.document().project(), aCtx.Request.document().project() ) )
         {
@@ -558,7 +563,7 @@ HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleSta
         query.set_allow_duplicate_sheet_names( aCtx.Request.allow_duplicate_sheet_names() );
         ApiRequest envelope;
         envelope.mutable_message()->PackFrom( query );
-        auto response = apiServer().DispatchToHandlers( envelope );
+        auto response = drcApiServer().DispatchToHandlers( envelope );
         if( !response ) return tl::unexpected( response.error() );
         if( response->status().status() != ApiStatusCode::AS_OK ) return tl::unexpected( response->status() );
         if( !response->message().UnpackTo( &schematic ) )
@@ -570,7 +575,7 @@ HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleSta
         }
         capture.schematic = &schematic;
     }
-    auto started = m_drcJobs.Start( aCtx.Request, *board(), apiServer().Token(), capture );
+    auto started = m_drcJobs.Start( aCtx.Request, *board(), drcApiServer().Token(), capture );
     if( !started )
     {
         ApiResponseStatus error;
@@ -588,7 +593,7 @@ tl::expected<kiapi::automation::v1::DocumentLifecycleState, std::string> API_HAN
     query.mutable_document()->CopyFrom( document );
     ApiRequest envelope;
     envelope.mutable_message()->PackFrom( query );
-    auto response = apiServer().DispatchToHandlers( envelope );
+    auto response = drcApiServer().DispatchToHandlers( envelope );
     if( !response ) return tl::unexpected( response.error().error_message() );
     if( response->status().status() != ApiStatusCode::AS_OK )
         return tl::unexpected( response->status().error_message() );
@@ -609,8 +614,8 @@ tl::expected<std::string, std::string> API_HANDLER_PCB::observeDrcLibraries( BOA
 
 void API_HANDLER_PCB::ObserveNativeDrcInputs( bool aLibraryConfigurationMayHaveChanged )
 {
-    if( !board() || !apiServerOrNull() ) return;
-    m_drcJobs.ObserveInputs( *board(), apiServer().Token(),
+    if( !board() ) return;
+    m_drcJobs.ObserveInputs( *board(), drcApiServer().Token(),
             [this]( const auto& document ) { return observeDrcSchematic( document ); },
             [this]( BOARD& source ) { return observeDrcLibraries( source ); },
             aLibraryConfigurationMayHaveChanged );
@@ -633,7 +638,7 @@ HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleRea
     if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
         return tl::unexpected( valid.error() );
 
-    auto read = m_drcJobs.Read( aCtx.Request, *board(), apiServer().Token(),
+    auto read = m_drcJobs.Read( aCtx.Request, *board(), drcApiServer().Token(),
             [this]( const auto& document ) { return observeDrcSchematic( document ); },
             [this]( BOARD& source ) { return observeDrcLibraries( source ); } );
     if( !read )
@@ -688,7 +693,7 @@ HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleCan
     if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
         return tl::unexpected( valid.error() );
 
-    auto cancelled = m_drcJobs.Cancel( aCtx.Request, *board(), apiServer().Token(),
+    auto cancelled = m_drcJobs.Cancel( aCtx.Request, *board(), drcApiServer().Token(),
             [this]( const auto& document ) { return observeDrcSchematic( document ); },
             [this]( BOARD& source ) { return observeDrcLibraries( source ); } );
     if( !cancelled )
@@ -874,7 +879,7 @@ HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> API_HANDLER_PCB::han
     BOARD* target = board();
     if( request.operation_id().empty() || request.operation_id() == niluuid.AsStdString() )
         return tl::unexpected( RoutePreviewError( "A route preview requires a nonempty operation ID" ) );
-    if( request.process_epoch() != apiServer().Token() )
+    if( request.process_epoch() != drcApiServer().Token() )
         return tl::unexpected( RoutePreviewError( "The route preview process epoch is stale" ) );
     if( !request.has_expected_revision()
         || request.expected_revision().epoch() != target->m_Uuid.AsStdString()
@@ -1386,54 +1391,6 @@ HANDLER_RESULT<Empty> API_HANDLER_PCB::handleRevertDocument(
 }
 
 
-namespace
-{
-std::optional<ApiResponseStatus> BoardProjectRefusal( const DocumentSpecifier& aDocument,
-                                                      const PROJECT& aOpen, bool aAutomation )
-{
-    const std::string& name = aDocument.project().name();
-    const std::string& path = aDocument.project().path();
-    const std::string document = aDocument.board_filename().empty()
-            ? std::string( "the requested document" )
-            : fmt::format( "the requested document {}", aDocument.board_filename() );
-    const std::string openProject = aOpen.IsNullProject()
-            ? std::string( "no project open" )
-            : fmt::format( "project '{}' at '{}' open", aOpen.GetProjectName().ToStdString( wxConvUTF8 ),
-                           aOpen.GetProjectPath().ToStdString( wxConvUTF8 ) );
-    auto refusal = []( const std::string& message )
-    {
-        ApiResponseStatus error;
-        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
-        error.set_error_message( message );
-        return error;
-    };
-
-    if( !aDocument.has_project() )
-    {
-        if( !aAutomation )
-            return std::nullopt;
-        return refusal( fmt::format( "{} names no project; this KiCad instance has {} and accepts a board request only with its project named by its absolute folder path",
-                                     document, openProject ) );
-    }
-
-    wxFileName requested = wxFileName::DirName( wxString::FromUTF8( path ) );
-    if( !requested.IsAbsolute() )
-        return refusal( fmt::format( "{} names project '{}' by the folder '{}', which is not an absolute path; name the project by its absolute folder path",
-                                     document, name, path ) );
-
-    wxFileName current = wxFileName::DirName( aOpen.GetProjectPath() );
-    requested.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
-    current.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
-    if( requested == current && path.find( '\0' ) == std::string::npos
-            && name == aOpen.GetProjectName().ToStdString( wxConvUTF8 ) )
-        return std::nullopt;
-
-    return refusal( fmt::format( "{} of project '{}' at '{}' is not open in this KiCad instance, which has {}; send the request to the KiCad instance that has that project open",
-                                 document, name, path, openProject ) );
-}
-}
-
-
 tl::expected<bool, ApiResponseStatus> API_HANDLER_PCB::validateDocumentInternal( const DocumentSpecifier& aDocument ) const
 {
     if( aDocument.type() != DocumentType::DOCTYPE_PCB )
@@ -1444,9 +1401,11 @@ tl::expected<bool, ApiResponseStatus> API_HANDLER_PCB::validateDocumentInternal(
         return tl::unexpected( e );
     }
 
-    if( std::optional<ApiResponseStatus> refusal = BoardProjectRefusal(
-                aDocument, project(), apiServerOrNull() && apiServer().IsAutomation() ) )
-        return tl::unexpected( *refusal );
+    // The one comparison of the named project with this handler's project, shared with
+    // API_HANDLER_EDITOR::validateDocument; its refusal names both projects, in the editor and in
+    // a headless API server alike.
+    if( std::optional<PROJECT_MISMATCH> mismatch = boardProjectMismatch( aDocument ) )
+        return tl::unexpected( boardProjectRefusal( aDocument, *mismatch ) );
 
     wxFileName fn( pcbContext()->GetCurrentFileName() );
 

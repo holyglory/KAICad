@@ -4426,7 +4426,8 @@ HANDLER_RESULT<kiapi::automation::v1::PcbRenderInspectionResponse> API_HANDLER_P
         return tl::unexpected( documentValidation.error() );
 
     if( expected.scope() != DocumentLifecycleScope::DLS_PCB
-        || !expected.document().Equals( request.job_settings().document() )
+        || !google::protobuf::util::MessageDifferencer::Equivalent(
+                expected.document(), request.job_settings().document() )
         || expected.process_epoch() != apiServer().Token()
         || expected.state_sha256().empty() )
     {

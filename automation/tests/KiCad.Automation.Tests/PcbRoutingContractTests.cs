@@ -490,7 +490,6 @@ public sealed class PcbRoutingContractTests
         Assert.AreEqual(document, parsed.ReplacementUpdates.Header.Document);
         var parsedTrack = parsed.ReplacementUpdates.Items.Single(item => item.Is(Track.Descriptor)).Unpack<Track>();
         Assert.AreEqual(displacedId, parsedTrack.Id.Value);
-        Assert.IsTrue(parsed.ReplacementUpdates.Items.Any(item => item.Is(Track.Descriptor)));
         var parsedVia = parsed.ReplacementUpdates.Items.Single(item => item.Is(Via.Descriptor)).Unpack<Via>();
         Assert.AreEqual(replacementVia, parsedVia);
         Assert.AreEqual(displacedViaId, parsed.RemovedItemIds.Single(id => id.Value == displacedViaId).Value);

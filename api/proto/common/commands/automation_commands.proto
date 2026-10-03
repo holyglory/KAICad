@@ -92,9 +92,11 @@ message ReadPcbDrcJob {
   // Optional exact ordered copper payload to compare with the retained start
   // request. A mismatch is rejected; IDs alone cannot prove checked geometry.
   repeated google.protobuf.Any expected_candidate_items = 4;
+  // -- lane 2D (400-499) --
   // Full grouped-route payload must match the retained start request before a
   // read can prove the detached candidate.
-  repeated NativeRouteGroupChange expected_group_changes = 401;
+  repeated NativeRouteGroupChange expected_group_changes = 400;
+  // -- end lane 2D --
 }
 
 message CancelPcbDrcJob {

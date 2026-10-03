@@ -53,7 +53,7 @@ public sealed partial class SharedProtoBandTests
         ["2B"] = (200, ["DiagramCanvas", "DiagramLayout", "DiagramCreate"], ["DCV_", "DLY_"]),
         ["2C"] = (300, ["SchematicTracking", "SchematicRebuild", "NativeOwnership", "SchematicStateGroup", "DesignAutoSync"],
             ["STK_", "SRB_", "NOW_", "DAS_"]),
-        ["2D"] = (400, ["InstanceCapability", "NativeCapability", "CodexRuntime", "NativeCrash", "NativeZoneFillOutcome", "NativeRouteGroup"], ["ICP_", "NCP_", "CXR_", "NZFO_", "NRGK_"]),
+        ["2D"] = (400, ["InstanceCapability", "NativeCapability", "CodexRuntime", "NativeCrash", "NativeZoneFillOutcome", "NativeRouteGroup", "NativeRouteCreatedSource"], ["ICP_", "NCP_", "CXR_", "NZFO_", "NRGK_"]),
     };
 
     [TestMethod]
@@ -483,7 +483,7 @@ public sealed partial class SharedProtoBandTests
         PcbDrcFinding 4 14b0ab93da6d9a49
         PcbDrcState 7 3e1392e4e13709c3
         StartPcbDrcJob 10 6d65396d64014d20 2D
-        ReadPcbDrcJob 4 7a210ee92542c4a6
+        ReadPcbDrcJob 4 7a210ee92542c4a6 2D
         CancelPcbDrcJob 3 9b2dfa8bab97d6e1
         StartSimulationJob 4 34d05ca45fb5e16a
         ReadSimulationJob 3 9b2dfa8bab97d6e1
@@ -492,7 +492,7 @@ public sealed partial class SharedProtoBandTests
         SimulationVector 3 11faae2a2dc4c896
         SimulationJobState 13 c3fbc16ca7c805ee
         PcbDrcJobStatus 7 9c4536abc6265877
-        PcbDrcJobState 20 43c8b8ca10b1e5b1
+        PcbDrcJobState 20 43c8b8ca10b1e5b1 2D
         StartPcbRoutePreview 10 d993a697f518dad1 2D
         PcbRoutePreviewState 10 0534cbcdbc9748ef 2D
         ReadSchematicMetadata 2 c15c833c8e673520

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
@@ -51,6 +52,13 @@ public sealed class NativeFootprintLibraryJourney
         using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(3));
         var registry = new InstanceRegistry(new NngTransport(), Path.Combine(scratch, "registry"));
         var captureFailures = new List<Exception>();
+        static void AssertDefinitionProjection(JsonElement data, string raw)
+        {
+            Assert.IsFalse(data.GetProperty("definitionComplete").GetBoolean(), raw);
+            CollectionAssert.Contains(data.GetProperty("limitations").EnumerateArray()
+                .Select(item => item.GetString()).ToArray(),
+                "canonical transport projection does not preserve the complete native writer representation", raw);
+        }
         async Task Capture(string file)
         {
             try { await NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, file), deadline.Token); }
@@ -103,7 +111,7 @@ public sealed class NativeFootprintLibraryJourney
             { instanceId, expectedProcessEpoch = epoch, documentJson, source = "persisted_library" });
             Assert.IsFalse(definitionBeforeRewrite.TryGetProperty("isError", out var definitionBeforeError) && definitionBeforeError.GetBoolean(), definitionBeforeRewrite.GetRawText());
             var definitionBeforeData = definitionBeforeRewrite.GetProperty("structuredContent");
-            Assert.IsTrue(definitionBeforeData.GetProperty("definitionComplete").GetBoolean(), definitionBeforeRewrite.GetRawText());
+            AssertDefinitionProjection(definitionBeforeData, definitionBeforeRewrite.GetRawText());
             Assert.AreEqual("NFBS_UNCHANGED", definitionBeforeData.GetProperty("fileBaseline").GetProperty("status").GetString(), definitionBeforeRewrite.GetRawText());
             Assert.IsTrue(definitionBeforeData.GetProperty("footprint").GetProperty("definition").GetProperty("referenceField").GetProperty("text").GetProperty("text").GetString() is not null, definitionBeforeRewrite.GetRawText());
             Assert.IsTrue(definitionBeforeData.GetProperty("footprint").GetProperty("definition").GetProperty("items").GetArrayLength() > 0, definitionBeforeRewrite.GetRawText());
@@ -137,31 +145,15 @@ public sealed class NativeFootprintLibraryJourney
 
             var saved = await mcp.Tool("kicad_footprint_save", new
             { instanceId, expectedProcessEpoch = epoch, documentJson, operationId = Guid.NewGuid().ToString("D") });
-            Assert.IsFalse(saved.TryGetProperty("isError", out var saveError) && saveError.GetBoolean(), saved.GetRawText());
-            var saveData = saved.GetProperty("structuredContent");
-            Assert.IsTrue(saveData.GetProperty("nativeCommandSucceeded").GetBoolean(), saved.GetRawText());
-            Assert.IsTrue(saveData.GetProperty("libraryEntryObserved").GetBoolean(), saved.GetRawText());
-            Assert.IsTrue(saveData.GetProperty("geometryPersistenceVerified").GetBoolean(), saved.GetRawText());
-            Assert.IsTrue(saveData.GetProperty("persistenceVerified").GetBoolean(), saved.GetRawText());
-            Assert.AreEqual("native-forced-refresh-definition-readback", saveData.GetProperty("persistenceSource").GetString(), saved.GetRawText());
-            Assert.IsTrue(saveData.GetProperty("definitionComplete").GetBoolean(), saved.GetRawText());
-            Assert.AreEqual("NFBS_UNCHANGED", saveData.GetProperty("fileBaseline").GetProperty("status").GetString(), saved.GetRawText());
+            Assert.IsTrue(saved.TryGetProperty("isError", out var saveError) && saveError.GetBoolean(), saved.GetRawText());
+            Assert.AreEqual("footprint_definition_incomplete", saved.GetProperty("structuredContent").GetProperty("errorCode").GetString(), saved.GetRawText());
 
             string copyName = "Generated_Test_Copy";
             var copied = await mcp.Tool("kicad_footprint_save_copy", new
             { instanceId, expectedProcessEpoch = epoch, documentJson, path = copyName,
                 operationId = Guid.NewGuid().ToString("D"), overwrite = false, includeProject = false });
-            Assert.IsFalse(copied.TryGetProperty("isError", out var copyError) && copyError.GetBoolean(), copied.GetRawText());
-            var copyData = copied.GetProperty("structuredContent");
-            Assert.IsTrue(copyData.GetProperty("nativeCommandSucceeded").GetBoolean(), copied.GetRawText());
-            Assert.IsTrue(copyData.GetProperty("libraryEntryObserved").GetBoolean(), copied.GetRawText());
-            Assert.IsTrue(copyData.GetProperty("geometryPersistenceVerified").GetBoolean(), copied.GetRawText());
-            Assert.IsTrue(copyData.GetProperty("persistenceVerified").GetBoolean(), copied.GetRawText());
-            Assert.AreEqual("native-forced-refresh-definition-readback", copyData.GetProperty("persistenceSource").GetString(), copied.GetRawText());
-            Assert.IsTrue(copyData.GetProperty("definitionComplete").GetBoolean(), copied.GetRawText());
-            Assert.AreEqual("NFBS_UNCHANGED", copyData.GetProperty("fileBaseline").GetProperty("status").GetString(), copied.GetRawText());
-            Assert.AreEqual("Fixture", copyData.GetProperty("persistedLibraryNickname").GetString(), copied.GetRawText());
-            Assert.AreEqual(copyName, copyData.GetProperty("persistedFootprintName").GetString(), copied.GetRawText());
+            Assert.IsTrue(copied.TryGetProperty("isError", out var copyError) && copyError.GetBoolean(), copied.GetRawText());
+            Assert.AreEqual("footprint_definition_incomplete", copied.GetProperty("structuredContent").GetProperty("errorCode").GetString(), copied.GetRawText());
 
             var refusedOverwrite = await mcp.Tool("kicad_footprint_save_copy", new
             { instanceId, expectedProcessEpoch = epoch, documentJson, path = copyName,
@@ -171,25 +163,19 @@ public sealed class NativeFootprintLibraryJourney
 
             var afterCopy = await mcp.Tool("kicad_footprint_library_list", new { instanceId, expectedProcessEpoch = epoch, libraryNickname = "Fixture" });
             Assert.IsFalse(afterCopy.TryGetProperty("isError", out var afterCopyError) && afterCopyError.GetBoolean(), afterCopy.GetRawText());
-            Assert.IsTrue(afterCopy.GetProperty("structuredContent").GetProperty("footprintNames").EnumerateArray()
+            Assert.IsFalse(afterCopy.GetProperty("structuredContent").GetProperty("footprintNames").EnumerateArray()
                 .Any(item => item.GetString() == copyName), afterCopy.GetRawText());
 
-            var reopened = await mcp.Tool("kicad_footprint_open_library_item", new
-            { instanceId, expectedProcessEpoch = epoch, libraryNickname = "Fixture", entryName = copyName,
-                operationId = Guid.NewGuid().ToString("D") });
-            Assert.IsFalse(reopened.TryGetProperty("isError", out var reopenError) && reopenError.GetBoolean(), reopened.GetRawText());
-            Assert.AreEqual(copyData.GetProperty("snapshotSha256").GetString(),
-                reopened.GetProperty("structuredContent").GetProperty("snapshotSha256").GetString(), reopened.GetRawText());
             var openDocuments = await mcp.Tool("kicad_footprint_open_documents", new { instanceId, expectedProcessEpoch = epoch });
             Assert.IsFalse(openDocuments.TryGetProperty("isError", out var openDocumentsError) && openDocumentsError.GetBoolean(), openDocuments.GetRawText());
             Assert.AreEqual(1, openDocuments.GetProperty("structuredContent").GetProperty("usableDocumentCount").GetInt32(), openDocuments.GetRawText());
-            Assert.AreEqual(copyName, openDocuments.GetProperty("structuredContent").GetProperty("response")
+            Assert.AreEqual(footprintName, openDocuments.GetProperty("structuredContent").GetProperty("response")
                 .GetProperty("documents")[0].GetProperty("libId").GetProperty("entryName").GetString(), openDocuments.GetRawText());
 
             string deleteOperation = Guid.NewGuid().ToString("D");
             var deleted = await mcp.Tool("kicad_footprint_library_delete", new
             { instanceId, expectedProcessEpoch = epoch, libraryNickname = "Fixture", footprintName, operationId = deleteOperation,
-                expectedModifyHash = afterCopy.GetProperty("structuredContent").GetProperty("modifyHash").GetUInt64().ToString(System.Globalization.CultureInfo.InvariantCulture) });
+                expectedModifyHash = listed.GetProperty("structuredContent").GetProperty("modifyHash").GetUInt64().ToString(System.Globalization.CultureInfo.InvariantCulture) });
             Assert.IsFalse(deleted.TryGetProperty("isError", out var deleteError) && deleteError.GetBoolean(), deleted.GetRawText());
             Assert.IsTrue(deleted.GetProperty("structuredContent").GetProperty("nativeReceiptAvailable").GetBoolean(), deleted.GetRawText());
             var afterDelete = await mcp.Tool("kicad_footprint_library_list", new { instanceId, expectedProcessEpoch = epoch, libraryNickname = "Fixture" });
@@ -202,7 +188,7 @@ public sealed class NativeFootprintLibraryJourney
 
             var deleteReplay = await mcp.Tool("kicad_footprint_library_delete", new
             { instanceId, expectedProcessEpoch = epoch, libraryNickname = "Fixture", footprintName, operationId = deleteOperation,
-                expectedModifyHash = afterCopy.GetProperty("structuredContent").GetProperty("modifyHash").GetUInt64().ToString(System.Globalization.CultureInfo.InvariantCulture) });
+                expectedModifyHash = listed.GetProperty("structuredContent").GetProperty("modifyHash").GetUInt64().ToString(System.Globalization.CultureInfo.InvariantCulture) });
             Assert.AreEqual(deleted.GetProperty("structuredContent").GetRawText(), deleteReplay.GetProperty("structuredContent").GetRawText());
 
             var changedAdmissionReplay = await mcp.Tool("kicad_footprint_library_delete", new

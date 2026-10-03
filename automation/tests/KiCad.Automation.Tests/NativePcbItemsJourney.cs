@@ -605,7 +605,29 @@ public sealed partial class NativeSessionTests
             // immediately before render admission so the request is paired
             // with the exact live board state, rather than masking a real
             // stale-state refusal as a render defect.
-            svgState = SchematicJson.Formatter.Format(await ObserveLifecycleState(client, board, token));
+            var renderStateBefore = await ObserveLifecycleState(client, board, token);
+            var renderStateConfirm = await ObserveLifecycleState(client, board, token);
+            static object RenderStateProbe(DocumentLifecycleState state) => new
+            {
+                revision = state.Revision,
+                nativeIdentity = state.NativeIdentity,
+                stateSha256 = state.StateSha256,
+                saveStableStateSha256 = state.SaveStableStateSha256,
+                processEpoch = state.ProcessEpoch,
+                nativeFiles = state.NativeFiles.ToArray(),
+                fileBaselines = state.FileBaselines.Select(file => new
+                {
+                    file.Path, file.BaselinePath, file.BaselineKnown, file.BaselineExists,
+                    file.BaselineSha256, file.CurrentKnown, file.CurrentExists, file.CurrentSha256,
+                    file.Status
+                }).ToArray()
+            };
+            if (SchematicJson.Formatter.Format(renderStateBefore) != SchematicJson.Formatter.Format(renderStateConfirm))
+            {
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-render-state-drift.json"),
+                    JsonSerializer.Serialize(new { first = RenderStateProbe(renderStateBefore), second = RenderStateProbe(renderStateConfirm) }), token);
+            }
+            svgState = SchematicJson.Formatter.Format(renderStateConfirm);
             string modelHashBefore = Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(renderModelPath, token)));
             DateTime modelTimestamp = File.GetLastWriteTimeUtc(renderModelPath);
             var renderRequest = new RunBoardJobExportRender

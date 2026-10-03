@@ -623,6 +623,38 @@ BOOST_FIXTURE_TEST_CASE( PNSViaBackdrillRetention, PNS_TEST_FIXTURE )
 }
 
 
+BOOST_FIXTURE_TEST_CASE( PNSRoutePartitionRetainsViaSourceIdentity, PNS_TEST_FIXTURE )
+{
+    BOARD board;
+    PCB_VIA nativeVia( &board );
+
+    PNS::VIA removed( VECTOR2I( 1000000, 1000000 ), PNS_LAYER_RANGE( F_Cu, B_Cu ), 700000,
+                      300000, nullptr, VIATYPE::THROUGH );
+    removed.SetParent( &nativeVia );
+
+    // A branch clone may retain only its source board item after it is detached
+    // from the direct parent slot.  The route delta must still classify it as
+    // the identity-preserving replacement of the original via.
+    PNS::VIA replacement( VECTOR2I( 1000000, 1600000 ), PNS_LAYER_RANGE( F_Cu, B_Cu ), 700000,
+                          300000, nullptr, VIATYPE::THROUGH );
+    replacement.SetSourceItem( &nativeVia );
+
+    std::vector<PNS::ITEM*> removedItems{ &removed };
+    std::vector<PNS::ITEM*> addedItems{ &replacement };
+    std::vector<PNS::ITEM*> deleted;
+    std::vector<PNS::ITEM*> created;
+    std::vector<PNS::ITEM*> updated;
+
+    PNS::ROUTER::PartitionRoutingChanges( std::move( removedItems ), std::move( addedItems ),
+                                          deleted, created, updated );
+
+    BOOST_REQUIRE_EQUAL( updated.size(), 1 );
+    BOOST_CHECK_EQUAL( updated.front(), &replacement );
+    BOOST_CHECK( deleted.empty() );
+    BOOST_CHECK( created.empty() );
+}
+
+
 BOOST_AUTO_TEST_CASE( PCBViaBackdrillCloneRetainsData )
 {
     BOARD board;

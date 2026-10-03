@@ -36,6 +36,7 @@ struct BITMAP_TRACE_FILLED_PIECE
     std::vector<std::string> sourceContourIds;
     std::vector<BITMAP_TRACE_POINT> points;
     BITMAP_TRACE_BOUNDS bounds;
+    bool sourceContoursAreWholeTrace = true;
 };
 
 struct BITMAP_TRACE_RASTER
@@ -68,6 +69,13 @@ struct BITMAP_TRACE_RESULT
     BITMAP_TRACE_BOUNDS bounds;
     std::string geometrySha256;
     uint32_t vertexCount = 0;
+    uint32_t rasterWidth = 0;
+    uint32_t rasterHeight = 0;
+    uint32_t turdSize = 0;
+    int64_t curveToleranceNm = 0;
+    double potraceOptTolerancePx = 0.2;
+    uint32_t maxContours = 0;
+    uint32_t maxVertices = 0;
 };
 
 // The input raster is already decoded and bounded by the native request

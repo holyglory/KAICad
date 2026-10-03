@@ -96,6 +96,8 @@ void CopyTraceResult( const BITMAP_TRACE_RESULT& aTrace,
     aResult.set_contour_count( static_cast<uint32_t>( aTrace.contours.size() ) );
     aResult.set_vertex_count( aTrace.vertexCount );
     aResult.set_filled_piece_count( static_cast<uint32_t>( aTrace.filledPieces.size() ) );
+    aResult.set_potrace_opt_tolerance_px( aTrace.potraceOptTolerancePx );
+    aResult.set_contributor_semantics( "filled pieces report whole-trace contour provenance; exact contributors are deferred to target projection" );
     if( !aTrace.contours.empty() ) *aResult.mutable_bounds() = ToProtoBounds( aTrace.bounds );
     for( const auto& contour : aTrace.contours )
     {
@@ -112,6 +114,7 @@ void CopyTraceResult( const BITMAP_TRACE_RESULT& aTrace,
     {
         auto* output = aResult.add_filled_pieces();
         output->set_id( piece.id ); *output->mutable_bounds() = ToProtoBounds( piece.bounds );
+        output->set_source_contours_are_whole_trace( piece.sourceContoursAreWholeTrace );
         for( const std::string& source : piece.sourceContourIds ) output->add_source_contour_ids( source );
         for( const auto& point : piece.points )
         {

@@ -47,6 +47,9 @@ message RasterTraceFilledPiece {
   repeated string source_contour_ids = 2;
   repeated RasterTracePoint points = 3;
   RasterTraceBounds bounds = 4;
+  // True means this piece retains the complete trace provenance set because
+  // the boolean fracture operation does not expose exact source contributors.
+  bool source_contours_are_whole_trace = 5;
 }
 
 message RasterTraceResult {
@@ -82,4 +85,6 @@ message RasterTraceResult {
   bool cad_projection_committed = 30;
   bool electrical_validated = 31;
   bool manufacturing_validated = 32;
+  double potrace_opt_tolerance_px = 33;
+  string contributor_semantics = 34;
 }

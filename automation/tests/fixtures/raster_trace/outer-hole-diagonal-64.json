@@ -1,11 +1,12 @@
 {
-  "sourceSha256": "0f80242e277737fc37707a9158598dc33c4374b672cc2c893e295bd8612847f9",
+  "sourceSha256": "0837b533060887d38b4685c505aa34622ca175cfb28741d5643729e42506fe10",
   "width": 64,
   "height": 64,
   "physicalWidthNm": 64000000,
   "expectedTopology": {
-    "roots": 1,
-    "holes": 1
+    "roots": 2,
+    "holes": 1,
+    "nestedIsland": 1
   },
-  "description": "64x64 deterministic grayscale PNG: filled outer rectangle with one white hole and diagonal white notch at the outer boundary."
+  "description": "64x64 deterministic grayscale PNG: outer region with a hole and nested island, disconnected component, and diagonal white notch."
 }

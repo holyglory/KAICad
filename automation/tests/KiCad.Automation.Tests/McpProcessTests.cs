@@ -101,6 +101,19 @@ public sealed class McpProcessTests
             } });
             Assert.IsTrue(invalidRasterProjection.GetProperty("result").GetProperty("isError").GetBoolean(), invalidRasterProjection.GetRawText());
             Assert.AreEqual("invalid_raster_projection_source", invalidRasterProjection.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            string projectionFixture = Path.Combine(FindAutomationRoot(), "tests", "fixtures", "raster_trace", "outer-hole-diagonal-64.png");
+            string projectionHash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(projectionFixture)));
+            var malformedProjection = await Request(9082, "tools/call", new { name = "kicad_artwork_raster_project", arguments = new
+            {
+                instanceId = Guid.NewGuid().ToString("D"), input = new
+                {
+                    operationId = Guid.NewGuid().ToString("D"), targetKind = "BOARD", sourcePath = projectionFixture,
+                    sourceKind = "generated", proposal = new { accepted = true, sourceSha256 = projectionHash, sourceBytes = 123L },
+                    board = new { repositoryRoot = state, sourceArchivePath = "raster-trace/source.png" }
+                }
+            } });
+            Assert.IsTrue(malformedProjection.GetProperty("result").GetProperty("isError").GetBoolean(), malformedProjection.GetRawText());
+            Assert.AreEqual("invalid_raster_trace_proposal", malformedProjection.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
             string[] simulationTools = ["kicad_simulation_start", "kicad_simulation_job", "kicad_simulation_wait", "kicad_simulation_cancel"];
             foreach (string simulationTool in simulationTools)
             {

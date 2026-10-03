@@ -1,7 +1,14 @@
+using System.Text.Json;
+using Google.Protobuf;
+using Google.Protobuf.WellKnownTypes;
+using Kiapi.Common;
+using Kiapi.Common.Types;
 using Kiapi.Schematic.Types;
 using KiCad.Automation.Mcp;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
+using KiCad.Automation.Protocol;
+using ModelContextProtocol.Protocol;
 
 namespace KiCad.Automation.Tests;
 
@@ -53,5 +60,332 @@ public sealed class SchematicTypedMutationTests
         var badId = Assert.ThrowsExactly<AutomationException>(() => SchematicTypedMutationTools.BuildItem(
             SchematicConnectionItemKind.Junction, "not-a-uuid", 1_000, 2_000, null, null, null));
         Assert.AreEqual("invalid_identity", badId.Code);
+    }
+
+    [TestMethod]
+    public async Task CompleteReadSnapshotRoundTripsAndKeepsLabelPropertiesForUpdate()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var label = new LocalLabel
+        {
+            Id = new() { Value = Id }, Position = new() { XNm = 1_000, YNm = 2_000 },
+            Text = new() { Text_ = "DATA" }, SpinStyle = SchematicLabelSpinStyle.SlssRight,
+            Locked = LockedState.LsUnlocked, FieldsAutoplaced = true
+        };
+        label.Fields.Add(new SchematicField { Name = "field", Text = new() { Text_ = "kept" } });
+        label.CustomProperties.Add(new CustomProperty { Key = "owner", Value = "agent" });
+        fixture.Items.Add(Any.Pack(label));
+        string expected = fixture.ExpectedJson;
+
+        var read = await fixture.Tools.ReadConnectionItem(fixture.InstanceId, fixture.DocumentJson,
+            Id, expected, default, SchematicConnectionItemKind.LocalLabel);
+        Assert.IsFalse(read.IsError ?? false, Data(read).GetRawText());
+        string json = Data(read).GetProperty("item").GetRawText();
+        Any parsed = SchematicJson.Parser.Parse<Any>(json);
+        Assert.IsTrue(parsed.Is(LocalLabel.Descriptor), json);
+        var retained = parsed.Unpack<LocalLabel>();
+        Assert.AreEqual(Id, retained.Id.Value);
+        Assert.AreEqual("DATA", retained.Text.Text_);
+        Assert.AreEqual("kept", retained.Fields.Single(f => f.Name == "field").Text.Text_);
+        Assert.AreEqual("agent", retained.CustomProperties.Single(p => p.Key == "owner").Value);
+
+        Assert.AreEqual(fixture.State.State.Document,
+            SchematicJson.Parser.Parse<DocumentSpecifier>(Data(read).GetProperty("document").GetRawText()));
+        Assert.AreEqual(fixture.TargetDocument,
+            SchematicJson.Parser.Parse<DocumentSpecifier>(Data(read).GetProperty("targetDocument").GetRawText()));
+        Assert.AreEqual(0, fixture.Batches.Count);
+
+        string operation = Guid.NewGuid().ToString("D");
+        var changed = await fixture.Tools.UpdateConnectionItem(fixture.InstanceId, fixture.DocumentJson,
+            Id, expected, operation, default, xNm: 3_000, yNm: 4_000, text: "DATA_OUT",
+            expectedKind: SchematicConnectionItemKind.LocalLabel);
+        Assert.IsFalse(changed.IsError ?? false, Data(changed).GetRawText());
+        Assert.AreEqual(1, fixture.Batches.Count);
+        var sent = fixture.Batches.Single().Batch.Operations.Single();
+        Assert.AreEqual(fixture.TargetDocument, sent.TargetDocument);
+        var update = sent.Update.Unpack<LocalLabel>();
+        Assert.AreEqual("DATA_OUT", update.Text.Text_);
+        Assert.AreEqual(new Vector2 { XNm = 3_000, YNm = 4_000 }, update.Position);
+        update.Position = label.Position.Clone(); update.Text.Text_ = label.Text.Text_;
+        Assert.AreEqual(label, update, "The typed patch must preserve every unedited native field.");
+        Assert.AreEqual("DATA", retained.Text.Text_, "Reading and patching never mutate the client's old snapshot.");
+        Assert.IsFalse(Data(changed).GetProperty("designFilesSaved").GetBoolean());
+
+        int captures = fixture.Captures;
+        var replay = await fixture.Tools.UpdateConnectionItem(fixture.InstanceId, fixture.DocumentJson,
+            Id, expected, operation, default, xNm: 3_000, yNm: 4_000, text: "DATA_OUT",
+            expectedKind: SchematicConnectionItemKind.LocalLabel);
+        Assert.IsFalse(replay.IsError ?? false, Data(replay).GetRawText());
+        Assert.IsTrue(Data(replay).GetProperty("replayed").GetBoolean());
+        Assert.IsFalse(Data(replay).GetProperty("mutationSubmitted").GetBoolean());
+        Assert.AreEqual(Data(changed).GetProperty("receipt").GetRawText(), Data(replay).GetProperty("receipt").GetRawText());
+        Assert.AreEqual(captures, fixture.Captures, "An exact replay must inspect its receipt before recapturing the now changed state.");
+        Assert.AreEqual(1, fixture.Batches.Count);
+
+        var rebound = await fixture.Tools.UpdateConnectionItem(fixture.InstanceId, fixture.DocumentJson,
+            Id, expected, operation, default, text: "DIFFERENT");
+        AssertError(rebound, "native_status_3");
+        Assert.AreEqual(1, fixture.Batches.Count, "A reused operation ID cannot be rebound to a different patch.");
+
+        string deleteExpected = fixture.ExpectedJson;
+        string deleteOperation = Guid.NewGuid().ToString("D");
+        var deleted = await fixture.Tools.DeleteConnectionItem(fixture.InstanceId, fixture.DocumentJson,
+            Id, deleteExpected, deleteOperation, default);
+        Assert.IsFalse(deleted.IsError ?? false, Data(deleted).GetRawText());
+        Assert.AreEqual(2, fixture.Batches.Count);
+        Assert.AreEqual(Id, fixture.Batches[^1].Batch.Operations.Single().Remove.Value);
+        Assert.IsEmpty(fixture.Items);
+        captures = fixture.Captures;
+        var deleteReplay = await fixture.Tools.DeleteConnectionItem(fixture.InstanceId, fixture.DocumentJson,
+            Id, deleteExpected, deleteOperation, default);
+        Assert.IsFalse(deleteReplay.IsError ?? false, Data(deleteReplay).GetRawText());
+        Assert.IsTrue(Data(deleteReplay).GetProperty("replayed").GetBoolean());
+        Assert.AreEqual(captures, fixture.Captures);
+        Assert.AreEqual(2, fixture.Batches.Count, "A delete replay must work after the original item is gone.");
+    }
+
+    [TestMethod]
+    public async Task TypedConnectionSnapshotRejectsUnsupportedGraphicsAndKeepsCanonicalIdentity()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var graphic = Any.Pack(new SchematicLine
+        {
+            Id = new() { Value = Id }, Start = new() { XNm = 1_000, YNm = 2_000 },
+            End = new() { XNm = 2_000, YNm = 2_000 }, Type = SchematicLineType.SltGraphic
+        });
+        string json = SchematicJson.Formatter.Format(graphic);
+        Any parsed = SchematicJson.Parser.Parse<Any>(json);
+        Assert.IsTrue(parsed.Is(SchematicLine.Descriptor));
+        Assert.AreEqual(SchematicLineType.SltGraphic, parsed.Unpack<SchematicLine>().Type);
+        Assert.AreEqual(Id, parsed.Unpack<SchematicLine>().Id.Value);
+        fixture.Items.Add(parsed);
+        AssertError(await fixture.Tools.ReadConnectionItem(fixture.InstanceId, fixture.DocumentJson,
+            Id, fixture.ExpectedJson, default), "connection_item_not_found");
+        AssertError(await fixture.Tools.UpdateConnectionItem(fixture.InstanceId, fixture.DocumentJson,
+            Id, fixture.ExpectedJson, Guid.NewGuid().ToString("D"), default, xNm: 3_000, yNm: 4_000), "connection_item_not_found");
+        AssertError(await fixture.Tools.DeleteConnectionItem(fixture.InstanceId, fixture.DocumentJson,
+            Id, fixture.ExpectedJson, Guid.NewGuid().ToString("D"), default), "connection_item_not_found");
+        Assert.IsEmpty(fixture.Batches);
+        Assert.AreEqual(0, fixture.Captures);
+    }
+
+    [TestMethod]
+    public async Task ReadUpdateAndDeleteRefuseChangedCheckedStateBeforeMutation()
+    {
+        var changes = new Action<CheckedSchematicState>[]
+        {
+            state => { state.State.Revision.Sequence++; state.Electrical.Hierarchy.Revision.Sequence++; },
+            state => state.State.StateSha256 = new string('c', 64),
+            state => state.State.NativeIdentity = Guid.NewGuid().ToString("D"),
+            state => state.State.FileBaselines[0].CurrentSha256 = new string('c', 64),
+            state => state.Electrical.Hierarchy.Data.Instances[0].Items.Add(Any.Pack(new Junction
+                { Id = new() { Value = Guid.NewGuid().ToString("D") }, Position = new() { XNm = 8_000, YNm = 9_000 } }))
+        };
+        foreach (var change in changes)
+            foreach (string action in new[] { "read", "update", "delete" })
+            {
+                using var fixture = await Fixture.CreateAsync(); fixture.AddWire();
+                string expected = fixture.ExpectedJson;
+                change(fixture.State);
+                AssertError(await fixture.Call(action, expected), "stale_document_state");
+                Assert.AreEqual(1, fixture.Captures, action);
+                Assert.IsEmpty(fixture.Batches, action);
+            }
+    }
+
+    [TestMethod]
+    public async Task ReadUpdateAndDeleteRejectOldEpochAndRecycledPeer()
+    {
+        foreach (string action in new[] { "read", "update", "delete" })
+        {
+            using var fixture = await Fixture.CreateAsync(); fixture.AddWire();
+            var old = fixture.State.Clone(); old.State.ProcessEpoch = Guid.NewGuid().ToString("D");
+            AssertError(await fixture.Call(action, SchematicJson.Formatter.Format(old)), "stale_process_epoch");
+            Assert.AreEqual(0, fixture.Captures); Assert.AreEqual(0, fixture.Inspections);
+            Assert.IsEmpty(fixture.Batches);
+
+            fixture.Session.Epoch = Guid.NewGuid().ToString("D");
+            AssertError(await fixture.Call(action, fixture.ExpectedJson), "instance_changed");
+            Assert.AreEqual(0, fixture.Captures); Assert.AreEqual(0, fixture.Inspections);
+            Assert.IsEmpty(fixture.Batches);
+        }
+    }
+
+    [TestMethod]
+    public async Task RejectedAndIndeterminateReceiptsRemainErrorsOnExactReplay()
+    {
+        foreach (var status in new[] { CheckedSchematicBatchStatus.CsbsRejected, CheckedSchematicBatchStatus.CsbsIndeterminate })
+            foreach (string action in new[] { "update", "delete" })
+            {
+                using var fixture = await Fixture.CreateAsync(); fixture.AddWire(); fixture.Status = status;
+                string expected = fixture.ExpectedJson;
+                string operation = Guid.NewGuid().ToString("D");
+                var first = await fixture.Call(action, expected, operation);
+                Assert.IsTrue(first.IsError, Data(first).GetRawText());
+                Assert.AreEqual(status, Receipt(first).Status);
+                var replay = await fixture.Call(action, expected, operation);
+                Assert.IsTrue(replay.IsError, Data(replay).GetRawText());
+                Assert.AreEqual(status, Receipt(replay).Status);
+                Assert.IsTrue(Data(replay).GetProperty("replayed").GetBoolean());
+                Assert.AreEqual(1, fixture.Batches.Count); Assert.AreEqual(1, fixture.Captures);
+                Assert.AreEqual(expected, fixture.ExpectedJson, "A refused or indeterminate receipt does not establish a new native state.");
+            }
+    }
+
+    [TestMethod]
+    public async Task InvalidPatchesAndMalformedNotFoundReceiptsNeverSubmitMutation()
+    {
+        using var fixture = await Fixture.CreateAsync(); fixture.AddWire();
+        string expected = fixture.ExpectedJson;
+        foreach (var patch in new (long? X, long? Y, long? EndX, long? EndY, string? Text, string Code)[]
+        {
+            (3_000, null, null, null, null, "invalid_connection_patch"),
+            (null, null, 4_000, null, null, "invalid_connection_patch"),
+            (3_001, 4_000, null, null, null, "invalid_coordinate"),
+            (null, null, null, null, null, "empty_connection_patch"),
+            (null, null, null, null, "", "invalid_connection_text"),
+            (null, null, null, null, "wire text", "invalid_connection_patch")
+        })
+            AssertError(await fixture.Tools.UpdateConnectionItem(fixture.InstanceId, fixture.DocumentJson,
+                Id, expected, Guid.NewGuid().ToString("D"), default,
+                patch.X, patch.Y, patch.EndX, patch.EndY, patch.Text), patch.Code);
+        Assert.IsEmpty(fixture.Batches); Assert.AreEqual(0, fixture.Captures); Assert.AreEqual(0, fixture.Inspections);
+
+        fixture.BadNotFoundReceipt = true;
+        AssertError(await fixture.Call("update", expected), "invalid_checked_batch");
+        Assert.IsEmpty(fixture.Batches); Assert.AreEqual(0, fixture.Captures);
+    }
+
+    private static JsonElement Data(CallToolResult result) => JsonSerializer.SerializeToElement(result.StructuredContent);
+    private static CheckedSchematicBatchReceipt Receipt(CallToolResult result) =>
+        SchematicJson.Parser.Parse<CheckedSchematicBatchReceipt>(Data(result).GetProperty("receipt").GetRawText());
+    private static void AssertError(CallToolResult result, string code)
+    {
+        Assert.IsTrue(result.IsError, Data(result).GetRawText());
+        Assert.AreEqual(code, Data(result).GetProperty("errorCode").GetString(), Data(result).GetRawText());
+        Assert.IsFalse(Data(result).GetProperty("mutationSubmitted").GetBoolean());
+    }
+
+    // Explicit protocol fixture: this exercises the compiled tool boundary, not a running native KiCad.
+    private sealed class Fixture : INativeTransport, IDisposable
+    {
+        private readonly string root = Directory.CreateTempSubdirectory("schematic-typed-tool-").FullName;
+        private readonly Dictionary<string, (CheckedSchematicBatch Request, CheckedSchematicBatchReceipt Receipt)> receipts = [];
+        internal NativeClientTests.FixtureTransport Session { get; } = new() { Epoch = Guid.NewGuid().ToString("D") };
+        internal CheckedSchematicState State { get; }
+        internal DocumentSpecifier TargetDocument => State.Electrical.Hierarchy.Data.Instances[0].Metadata.Document;
+        internal Google.Protobuf.Collections.RepeatedField<Any> Items => State.Electrical.Hierarchy.Data.Instances[0].Items;
+        internal SchematicTypedMutationTools Tools { get; }
+        internal string InstanceId => Session.InstanceId;
+        internal string DocumentJson => SchematicJson.Formatter.Format(State.State.Document);
+        internal string ExpectedJson => SchematicJson.Formatter.Format(State);
+        internal List<CheckedSchematicBatch> Batches { get; } = [];
+        internal int Captures { get; private set; }
+        internal int Inspections { get; private set; }
+        internal CheckedSchematicBatchStatus Status { get; set; } = CheckedSchematicBatchStatus.CsbsCompleted;
+        internal bool BadNotFoundReceipt { get; set; }
+        private InstanceRegistry Registry { get; }
+
+        private Fixture()
+        {
+            Session.ProjectPath = Path.Combine(root, "fixture.kicad_pro");
+            Registry = new(this, root); Tools = new(Registry);
+            var checkedRequest = CheckedSchematicToolTests.Request(root, Session.Epoch);
+            State = new() { State = checkedRequest.ExpectedState.Clone(), Electrical = new()
+                { Hierarchy = new() { Data = new() { Document = checkedRequest.Batch.Document.Clone() },
+                    Revision = checkedRequest.Batch.ExpectedRevision.Clone() } } };
+            var child = State.State.Document.Clone(); child.SheetPath.Path.Add(new KIID { Value = Guid.NewGuid().ToString("D") });
+            State.Electrical.Hierarchy.Data.Instances.Add(new SchematicScreenData { Metadata = new() { Document = child } });
+        }
+
+        internal static async Task<Fixture> CreateAsync()
+        {
+            var fixture = new Fixture();
+            try
+            {
+                await fixture.Registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(fixture.root, "native.sock")), fixture.InstanceId);
+                return fixture;
+            }
+            catch { fixture.Dispose(); throw; }
+        }
+
+        internal void AddWire() => Items.Add(Any.Pack(SchematicTypedMutationTools.BuildItem(
+            SchematicConnectionItemKind.Wire, Id, 1_000, 2_000, 4_000, 2_000, null)));
+
+        internal Task<CallToolResult> Call(string action, string expected, string? operation = null) => action switch
+        {
+            "read" => Tools.ReadConnectionItem(InstanceId, DocumentJson, Id, expected, default),
+            "update" => Tools.UpdateConnectionItem(InstanceId, DocumentJson, Id, expected,
+                operation ?? Guid.NewGuid().ToString("D"), default, xNm: 3_000, yNm: 4_000),
+            "delete" => Tools.DeleteConnectionItem(InstanceId, DocumentJson, Id, expected,
+                operation ?? Guid.NewGuid().ToString("D"), default),
+            _ => throw new ArgumentException("Unknown fixture action", nameof(action))
+        };
+
+        public Task<byte[]> ExchangeAsync(string endpoint, byte[] requestBytes, TimeSpan timeout, CancellationToken cancellationToken = default)
+        {
+            var request = ApiRequest.Parser.ParseFrom(requestBytes);
+            IMessage payload;
+            if (request.Message.Is(ReadCheckedSchematicState.Descriptor))
+            {
+                Captures++;
+                var query = request.Message.Unpack<ReadCheckedSchematicState>();
+                Assert.AreEqual(State.State.Document, query.Document); Assert.AreEqual(Session.Epoch, query.ProcessEpoch);
+                payload = State.Clone();
+            }
+            else if (request.Message.Is(ReadCheckedSchematicBatchReceipt.Descriptor))
+            {
+                Inspections++;
+                var query = request.Message.Unpack<ReadCheckedSchematicBatchReceipt>();
+                Assert.AreEqual(Session.Epoch, query.ProcessEpoch);
+                if (receipts.TryGetValue(query.OperationId, out var saved))
+                {
+                    if (!saved.Request.Equals(query.ExpectedRequest))
+                        return Reply(new CheckedSchematicBatchReceipt(), 3, "operation_reused");
+                    payload = saved.Receipt.Clone();
+                }
+                else payload = new CheckedSchematicBatchReceipt
+                {
+                    Document = query.Document.Clone(), OperationId = query.OperationId,
+                    ProcessEpoch = BadNotFoundReceipt ? Guid.NewGuid().ToString("D") : Session.Epoch,
+                    Status = CheckedSchematicBatchStatus.CsbsNotFound
+                };
+            }
+            else if (request.Message.Is(CheckedSchematicBatch.Descriptor))
+            {
+                var batch = request.Message.Unpack<CheckedSchematicBatch>(); Batches.Add(batch.Clone());
+                CheckedSchematicContract.ValidateRequest(batch, Session.Epoch);
+                var result = new CheckedSchematicBatchReceipt
+                {
+                    Document = batch.Batch.Document.Clone(), OperationId = batch.Batch.OperationId,
+                    ProcessEpoch = Session.Epoch, ExpectedRequestVerified = true, Status = Status,
+                    ObservedBefore = State.State.Clone()
+                };
+                Assert.AreEqual(batch.ExpectedState, State.State);
+                if (Status == CheckedSchematicBatchStatus.CsbsCompleted)
+                {
+                    var operation = batch.Batch.Operations.Single(); Assert.AreEqual(TargetDocument, operation.TargetDocument);
+                    if (operation.Update is not null) Items[0] = operation.Update.Clone();
+                    else { Assert.AreEqual(Id, operation.Remove.Value); Items.Clear(); }
+                    State.State.Revision.Sequence++; State.Electrical.Hierarchy.Revision = State.State.Revision.Clone();
+                    State.State.StateSha256 = new string('d', 64);
+                    result.ObservedAfter = State.State.Clone(); result.Result = new() { Revision = State.State.Revision.Clone() };
+                    if (operation.Update is not null) result.Result.Items.Add(operation.Update.Clone());
+                    else result.Result.Removed.Add(operation.Remove.Clone());
+                }
+                else { result.ErrorCode = "fixture_failure"; result.ObservedAfter = State.State.Clone(); }
+                receipts[batch.Batch.OperationId] = (batch.Clone(), result.Clone()); payload = result;
+            }
+            else return Session.ExchangeAsync(endpoint, requestBytes, timeout, cancellationToken);
+            return Reply(payload);
+        }
+
+        private Task<byte[]> Reply(IMessage payload, int status = 1, string error = "") => Task.FromResult(new ApiResponse
+        {
+            Header = new() { KicadToken = Session.Epoch }, Status = new() { Status = (ApiStatusCode)status, ErrorMessage = error },
+            Message = Any.Pack(payload)
+        }.ToByteArray());
+
+        public void Dispose() => Directory.Delete(root, true);
     }
 }

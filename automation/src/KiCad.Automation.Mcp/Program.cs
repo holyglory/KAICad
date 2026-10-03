@@ -110,6 +110,7 @@ builder.Services.AddMcpServer(options =>
     .WithTools<AutomaticDesignTools>()
     .WithTools<SimulationTools>()
     .WithTools<PcbItemTools>()
+    .WithTools<PcbConnectivityTools>()
     .WithTools<PcbZoneAuthoringTools>()
     .WithTools<PcbFootprintPlacementTools>()
     .WithTools<PcbFootprintValidationTools>()

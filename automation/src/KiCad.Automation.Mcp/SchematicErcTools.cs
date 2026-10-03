@@ -58,7 +58,7 @@ public sealed class SchematicErcTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_schematic_erc_run"),
-     Description("Run KiCad's native ERC checker without opening the ERC dialog. requestJson is NativeCapabilitySchematicRunErc with an explicit operation ID, process epoch and expected revision; expectedStateJson must be the matching lifecycle checkpoint. The native operation is replayable while the editor lives and returns marker counts plus a revision-paired live marker snapshot. Zero markers is not proof of electrical completeness; this tool reports the checker result and diagnostics only."),
+     Description("Run KiCad's native ERC checker without opening the ERC dialog. requestJson is the legacy NativeCapabilitySchematicRunErc shape with an explicit operation ID, process epoch and expected revision; expectedStateJson is the matching lifecycle checkpoint. New native peers route this wrapper through the retained typed operation and return an immutable marker snapshot paired with before/after lifecycle state; older peers expose an explicitly non-retained fallback. Zero markers is not proof of electrical completeness."),
      KiCadCapability("schematic-design", "compiled-mcp plus native-schematic-api", "revision-checked native ERC execution, operation replay and live marker result"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Run(string instanceId, string requestJson,

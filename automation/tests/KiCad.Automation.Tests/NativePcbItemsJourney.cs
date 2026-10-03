@@ -1512,7 +1512,7 @@ public sealed partial class NativeSessionTests
                 Document = cleanBoard, OperationId = Guid.NewGuid().ToString("D"),
                 ProcessEpoch = client.Epoch, ExpectedRevision = groupedBefore.Revision.Clone(),
                 StartItemId = splitSource.Id.Value,
-                Start = new() { XNm = 41_600_000, YNm = 40_100_000 },
+                Start = new() { XNm = 43_100_000, YNm = 40_100_000 },
                 Layer = BoardLayer.BlFCu, ForceFinish = true
             };
             groupedRequest.Waypoints.Add(new Vector2 { XNm = 41_600_000, YNm = 44_000_000 });

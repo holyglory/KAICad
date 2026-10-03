@@ -622,11 +622,11 @@ public sealed partial class NativeSessionTests
                     file.Status
                 }).ToArray()
             };
-            if (SchematicJson.Formatter.Format(renderStateBefore) != SchematicJson.Formatter.Format(renderStateConfirm))
-            {
-                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-render-state-drift.json"),
-                    JsonSerializer.Serialize(new { first = RenderStateProbe(renderStateBefore), second = RenderStateProbe(renderStateConfirm) }), token);
-            }
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-render-state-probe.json"),
+                JsonSerializer.Serialize(new
+                {
+                    first = RenderStateProbe(renderStateBefore), second = RenderStateProbe(renderStateConfirm)
+                }), token);
             svgState = SchematicJson.Formatter.Format(renderStateConfirm);
             string modelHashBefore = Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(renderModelPath, token)));
             DateTime modelTimestamp = File.GetLastWriteTimeUtc(renderModelPath);

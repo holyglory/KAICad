@@ -113,7 +113,10 @@ public sealed class NativeFootprintLibraryJourney
             var definitionBeforeData = definitionBeforeRewrite.GetProperty("structuredContent");
             AssertDefinitionProjection(definitionBeforeData, definitionBeforeRewrite.GetRawText());
             Assert.AreEqual("NFBS_UNCHANGED", definitionBeforeData.GetProperty("fileBaseline").GetProperty("status").GetString(), definitionBeforeRewrite.GetRawText());
-            Assert.IsTrue(definitionBeforeData.GetProperty("footprint").GetProperty("definition").GetProperty("referenceField").GetProperty("text").GetProperty("text").GetString() is not null, definitionBeforeRewrite.GetRawText());
+            var referenceText = definitionBeforeData.GetProperty("footprint").GetProperty("definition")
+                .GetProperty("referenceField").GetProperty("text");
+            Assert.AreEqual(JsonValueKind.Object, referenceText.GetProperty("text").ValueKind, definitionBeforeRewrite.GetRawText());
+            Assert.IsTrue(referenceText.GetProperty("text").GetProperty("text").GetString() is not null, definitionBeforeRewrite.GetRawText());
             Assert.IsTrue(definitionBeforeData.GetProperty("footprint").GetProperty("definition").GetProperty("items").GetArrayLength() > 0, definitionBeforeRewrite.GetRawText());
             string originalRichBytes = await File.ReadAllTextAsync(fixtureFootprint);
             DateTime originalWriteTime = File.GetLastWriteTimeUtc(fixtureFootprint);

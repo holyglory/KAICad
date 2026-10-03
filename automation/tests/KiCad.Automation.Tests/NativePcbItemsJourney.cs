@@ -1655,7 +1655,7 @@ public sealed partial class NativeSessionTests
             var removeUsbFootprints = new DeleteItems { Header = new() { Document = cleanBoard } };
             removeUsbFootprints.ItemIds.Add(usbFootprints.Items
                 .Select(item => item.Unpack<FootprintInstance>())
-                .Where(footprint => footprint.ReferenceField?.Text?.Text?.Text_ is "DP_P" or "DP_N" or "DP_P_TAIL" or "DP_P_ROUTE_END")
+                .Where(footprint => footprint.Definition?.Id?.EntryName is "DP_P" or "DP_N" or "DP_P_TAIL" or "DP_P_ROUTE_END" or "POWER_RAIL_B_SUPPORT")
                 .Select(footprint => footprint.Id.Clone()));
             if (removeUsbFootprints.ItemIds.Count > 0)
             {

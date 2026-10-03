@@ -79,16 +79,6 @@ public sealed class SchematicErcTools(InstanceRegistry registry)
         if (session.Epoch != expected.ProcessEpoch)
             throw new AutomationException("schematic_instance_changed", "The expected schematic state belongs to another native process epoch.");
 
-        NativeErcOperationReceipt? retained =
-            await TryReadNativeReceipt(client, request.Document, request.ProcessEpoch, request.OperationId,
-                cancellationToken, tolerateUnsupported: true);
-        if (retained is not null)
-            return DescribeRun(instanceId, session.Epoch, request.Document, retained);
-
-        DocumentLifecycleState before = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
-            new() { Document = request.Document }, cancellationToken);
-        if (!before.Equals(expected))
-            throw new AutomationException("schematic_state_changed", "The schematic changed before ERC execution; inspect a fresh lifecycle state.");
         try
         {
             NativeErcOperationReceipt result = await client.InvokeAsync<NativeCapabilitySchematicExecuteErc,
@@ -103,6 +93,10 @@ public sealed class SchematicErcTools(InstanceRegistry registry)
         catch (NativeApiException error) when (error.Status == (int)Kiapi.Common.ApiStatusCode.AsUnhandled
             || error.Status == (int)Kiapi.Common.ApiStatusCode.AsUnimplemented)
         {
+            DocumentLifecycleState before = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
+                new() { Document = request.Document }, cancellationToken);
+            if (!before.Equals(expected))
+                throw new AutomationException("schematic_state_changed", "The schematic changed before legacy ERC execution; inspect a fresh lifecycle state.");
             // Older native peers have only the revision-bound command. Pair its
             // immediate marker read with before/after lifecycle states and make
             // the absence of a retained native receipt explicit.
@@ -142,16 +136,18 @@ public sealed class SchematicErcTools(InstanceRegistry registry)
             ExpectedState = expected,
             ShowAllErrors = input.ShowAllErrors
         };
-        NativeErcOperationReceipt? retained = await TryReadNativeReceipt(
-            client, expected.Document, expected.ProcessEpoch, request.OperationId, cancellationToken, tolerateUnsupported: false);
-        if (retained is not null)
-            return DescribeRun(instanceId, session.Epoch, expected.Document, retained);
-        DocumentLifecycleState before = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
-            new() { Document = expected.Document }, cancellationToken);
-        if (!before.Equals(expected))
-            throw new AutomationException("schematic_state_changed", "The schematic changed before typed ERC execution; inspect a fresh lifecycle state.");
-        NativeErcOperationReceipt result = await client.InvokeAsync<NativeCapabilitySchematicExecuteErc,
+        NativeErcOperationReceipt result;
+        try
+        {
+            result = await client.InvokeAsync<NativeCapabilitySchematicExecuteErc,
             NativeErcOperationReceipt>(request, cancellationToken);
+        }
+        catch (NativeApiException error) when (error.Status == (int)Kiapi.Common.ApiStatusCode.AsUnhandled
+            || error.Status == (int)Kiapi.Common.ApiStatusCode.AsUnimplemented)
+        {
+            throw new AutomationException("native_erc_receipt_unavailable",
+                "The connected KiCad peer does not provide typed retained ERC execution.");
+        }
         if (!result.MarkersCaptured || result.CapturedMarkers is null)
         {
             if (result.LegacyResult is { ErrorCode.Length: > 0 })

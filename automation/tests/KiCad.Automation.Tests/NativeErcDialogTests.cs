@@ -124,6 +124,104 @@ public sealed class NativeErcDialogTests
                         instanceId, requestJson = SchematicJson.Formatter.Format(ercRequest), expectedStateJson = ercState
                     });
                     Assert.AreEqual(ercRun.GetProperty("structuredContent").GetRawText(), ercReplay.GetProperty("structuredContent").GetRawText());
+
+                    // The typed seam binds a writable lifecycle DTO to the same native receipt.
+                    // Its marker snapshot is copied by KiCad, rather than read again from the
+                    // live editor after the operation.
+                    using var typedStateDocument = JsonDocument.Parse(ercState);
+                    JsonElement typedState = typedStateDocument.RootElement.Clone();
+                    JsonElement typedDocument = typedState.GetProperty("document").Clone();
+                    string typedOperation = Guid.NewGuid().ToString("D");
+                    var typedRun = await ercMcp.Tool("kicad_schematic_erc_execute", new
+                    {
+                        instanceId,
+                        input = new { operationId = typedOperation, expectedState = typedState, showAllErrors = true }
+                    });
+                    Assert.IsFalse(typedRun.TryGetProperty("isError", out var typedRunError) && typedRunError.GetBoolean(), typedRun.GetRawText());
+                    var typedData = typedRun.GetProperty("structuredContent");
+                    Assert.IsTrue(typedData.GetProperty("markersCaptured").GetBoolean(), typedRun.GetRawText());
+                    Assert.IsGreaterThan(0, typedData.GetProperty("markerCount").GetInt32(), typedRun.GetRawText());
+
+                    // A later schematic edit cannot invalidate exact replay. The native receipt
+                    // is read before the new-request state gate and still returns the old markers.
+                    var typedBeforeEdit = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
+                        new() { Document = opened.Document }, deadline.Token);
+                    var typedTitle = await client.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(
+                        new() { Document = opened.Document }, deadline.Token);
+                    var typedEdit = new ApplySchematicItemBatch
+                    {
+                        Document = opened.Document, DocumentEpoch = typedBeforeEdit.Revision.Epoch,
+                        OperationId = Guid.NewGuid().ToString("D"), ExpectedRevision = typedBeforeEdit.Revision.Clone()
+                    };
+                    typedEdit.Operations.Add(new SchematicItemOperation { SetTitleBlock = new() { Title = "erc-retained-revision" } });
+                    await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(typedEdit, deadline.Token);
+                    var typedAfterEdit = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
+                        new() { Document = opened.Document }, deadline.Token);
+                    Assert.IsGreaterThan(typedBeforeEdit.Revision.Sequence, typedAfterEdit.Revision.Sequence);
+                    var typedReplayAfterEdit = await ercMcp.Tool("kicad_schematic_erc_execute", new
+                    {
+                        instanceId,
+                        input = new { operationId = typedOperation, expectedState = typedState, showAllErrors = true }
+                    });
+                    Assert.AreEqual(typedData.GetRawText(), typedReplayAfterEdit.GetProperty("structuredContent").GetRawText());
+
+                    // Reusing the ID with a changed payload is refused, as is a new operation
+                    // admitted against the stale pre-edit lifecycle state.
+                    var conflicting = await ercMcp.Tool("kicad_schematic_erc_execute", new
+                    {
+                        instanceId,
+                        input = new { operationId = typedOperation, expectedState = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(typedAfterEdit)), showAllErrors = true }
+                    });
+                    Assert.IsTrue(conflicting.TryGetProperty("isError", out var conflictingError) && conflictingError.GetBoolean(), conflicting.GetRawText());
+                    var staleNew = await ercMcp.Tool("kicad_schematic_erc_execute", new
+                    {
+                        instanceId,
+                        input = new { operationId = Guid.NewGuid().ToString("D"), expectedState = typedState, showAllErrors = true }
+                    });
+                    Assert.IsTrue(staleNew.TryGetProperty("isError", out var staleError) && staleError.GetBoolean(), staleNew.GetRawText());
+
+                    var operationReceipt = await ercMcp.Tool("kicad_schematic_erc_operation", new
+                    {
+                        instanceId, document = typedDocument, expectedProcessEpoch = client.Epoch, operationId = typedOperation
+                    });
+                    Assert.IsFalse(operationReceipt.TryGetProperty("isError", out var operationError) && operationError.GetBoolean(), operationReceipt.GetRawText());
+                    Assert.IsTrue(operationReceipt.GetProperty("structuredContent").GetProperty("found").GetBoolean(), operationReceipt.GetRawText());
+                    Assert.AreEqual(typedData.GetProperty("markers").GetRawText(),
+                        operationReceipt.GetProperty("structuredContent").GetProperty("markers").GetRawText());
+
+                    string reconnectState = Directory.CreateTempSubdirectory("kicad-erc-reconnect-").FullName;
+                    try
+                    {
+                        await using var reconnectMcp = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.ProductionStartInfo(),
+                            reconnectState, Path.Combine(evidence, $"{index}-erc-reconnect.stderr.log"), deadline.Token);
+                        var reconnectAttach = await reconnectMcp.Tool("kicad_instance_attach", new
+                        { endpoint = client.Endpoint, expectedInstanceId = instanceId });
+                        Assert.IsFalse(reconnectAttach.TryGetProperty("isError", out var reconnectError) && reconnectError.GetBoolean(), reconnectAttach.GetRawText());
+                        var reconnectReceipt = await reconnectMcp.Tool("kicad_schematic_erc_operation", new
+                        {
+                            instanceId, document = typedDocument, expectedProcessEpoch = client.Epoch, operationId = typedOperation
+                        });
+                        Assert.IsTrue(reconnectReceipt.GetProperty("structuredContent").GetProperty("found").GetBoolean(), reconnectReceipt.GetRawText());
+                        Assert.AreEqual(typedData.GetProperty("markers").GetRawText(),
+                            reconnectReceipt.GetProperty("structuredContent").GetProperty("markers").GetRawText());
+                    }
+                    finally { Directory.Delete(reconnectState, true); }
+
+                    var wrongEpochReceipt = await ercMcp.Tool("kicad_schematic_erc_operation", new
+                    {
+                        instanceId, document = typedDocument, expectedProcessEpoch = Guid.NewGuid().ToString("D"), operationId = typedOperation
+                    });
+                    Assert.IsTrue(wrongEpochReceipt.TryGetProperty("isError", out var wrongEpochError) && wrongEpochError.GetBoolean(), wrongEpochReceipt.GetRawText());
+
+                    var restoreTitle = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
+                        new() { Document = opened.Document }, deadline.Token);
+                    var restoreEdit = new ApplySchematicItemBatch
+                    {
+                        Document = opened.Document, DocumentEpoch = restoreTitle.Revision.Epoch,
+                        OperationId = Guid.NewGuid().ToString("D"), ExpectedRevision = restoreTitle.Revision.Clone()
+                    };
+                    restoreEdit.Operations.Add(new SchematicItemOperation { SetTitleBlock = typedTitle });
+                    await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(restoreEdit, deadline.Token);
                 }
                 finally { Directory.Delete(ercMcpState, true); }
                 identities.Add(new(instanceId, client, baseline, process.Id, opened.Document, project));

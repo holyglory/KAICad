@@ -113,6 +113,7 @@ public sealed class NativeDocumentRevisionInput : NativeDocumentInputObject
     private string? epoch;
     private ulong sequence;
     public string? Epoch { get => epoch; set => epoch = BindOnce(value); }
+    [JsonNumberHandling(JsonNumberHandling.AllowReadingFromString)]
     public ulong Sequence { get => sequence; set => sequence = BindOnce(value); }
 }
 
@@ -136,10 +137,12 @@ public sealed class NativeFileBaselineInput : NativeDocumentInputObject
     public bool BaselineKnown { get => baselineKnown; set => baselineKnown = BindOnce(value); }
     public bool BaselineExists { get => baselineExists; set => baselineExists = BindOnce(value); }
     public string? BaselineSha256 { get => baselineSha256; set => baselineSha256 = BindOnce(value); }
+    [JsonNumberHandling(JsonNumberHandling.AllowReadingFromString)]
     public ulong BaselineBytes { get => baselineBytes; set => baselineBytes = BindOnce(value); }
     public bool CurrentKnown { get => currentKnown; set => currentKnown = BindOnce(value); }
     public bool CurrentExists { get => currentExists; set => currentExists = BindOnce(value); }
     public string? CurrentSha256 { get => currentSha256; set => currentSha256 = BindOnce(value); }
+    [JsonNumberHandling(JsonNumberHandling.AllowReadingFromString)]
     public ulong CurrentBytes { get => currentBytes; set => currentBytes = BindOnce(value); }
     public NativeFileBaselineStatusInput Status { get => status; set => status = BindOnce(value); }
 

@@ -612,6 +612,13 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_schematic_erc_run");
             CollectionAssert.Contains(names, "kicad_schematic_erc_execute");
             CollectionAssert.Contains(names, "kicad_schematic_erc_operation");
+            var typedErcSchema = listed.GetProperty("result").GetProperty("tools").EnumerateArray()
+                .Single(tool => tool.GetProperty("name").GetString() == "kicad_schematic_erc_execute")
+                .GetProperty("inputSchema").GetProperty("properties").GetProperty("input");
+            Assert.IsTrue(SimulationSchemaType(typedErcSchema, "object"));
+            var typedErcProperties = typedErcSchema.GetProperty("properties");
+            Assert.IsTrue(SimulationSchemaType(typedErcProperties.GetProperty("expectedState").GetProperty("properties").GetProperty("nativeFiles"), "array"));
+            Assert.IsTrue(SimulationSchemaType(typedErcProperties.GetProperty("expectedState").GetProperty("properties").GetProperty("fileBaselines"), "array"));
             CollectionAssert.Contains(names, "kicad_schematic_measure_placement");
             // Flat structural diagrams are discarded, not converted (decision n9af098253fec71da): no flat
             // editor tool and no conversion tool is advertised; the per-level diagram tools remain.
@@ -639,6 +646,31 @@ public sealed class McpProcessTests
             var invalidErcOperation = await Request(9084, "tools/call", new { name = "kicad_schematic_erc_operation",
                 arguments = new { instanceId = Guid.NewGuid().ToString("D"), document = new { }, expectedProcessEpoch = "", operationId = "" } });
             Assert.IsTrue(invalidErcOperation.GetProperty("result").GetProperty("isError").GetBoolean());
+            var malformedTypedState = await Request(9083, "tools/call", new { name = "kicad_schematic_erc_execute", arguments = new
+            {
+                instanceId = Guid.NewGuid().ToString("D"), input = new
+                {
+                    operationId = Guid.NewGuid().ToString("D"), showAllErrors = true,
+                    expectedState = new
+                    {
+                        document = simulationTarget,
+                        revision = new { epoch = Guid.NewGuid().ToString("D"), sequence = "42" },
+                        nativeIdentity = Guid.NewGuid().ToString("D"), stateSha256 = "not-a-lowercase-sha256",
+                        scope = "DLS_SCHEMATIC_HIERARCHY", nativeContentDirty = false,
+                        projectSettingsIncluded = true, completeChangeTracking = false, diskBaselineChecked = false,
+                        nativeFiles = new[] { Path.Combine(state, "fixture.kicad_sch") },
+                        fileBaselines = new[] { new
+                        {
+                            path = Path.Combine(state, "fixture.kicad_sch"), baselinePath = "", baselineKnown = false,
+                            baselineExists = false, baselineSha256 = "", baselineBytes = "0", currentKnown = false,
+                            currentExists = false, currentSha256 = "", currentBytes = "0", status = "NFBS_UNKNOWN"
+                        } },
+                        processEpoch = Guid.NewGuid().ToString("D"), cleanCheckpointSha256 = "", saveStableStateSha256 = ""
+                    }
+                }
+            } });
+            Assert.IsTrue(malformedTypedState.GetProperty("result").GetProperty("isError").GetBoolean(), malformedTypedState.GetRawText());
+            Assert.AreEqual("invalid_lifecycle_state", malformedTypedState.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
             CollectionAssert.Contains(names, "kicad_design_electrical_baseline_initialize");
             CollectionAssert.Contains(names, "kicad_design_connectivity_compare");
             var electricalFixture = SchematicElectricalComparisonTests.Fixture();

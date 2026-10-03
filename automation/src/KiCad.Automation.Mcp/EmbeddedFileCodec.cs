@@ -36,7 +36,10 @@ internal static class EmbeddedFileCodec
 
     private static byte[] CompressNative(byte[] source)
     {
-        ZstdApi api = ZstdApi.Instance;
+        ZstdApi api;
+        try { api = ZstdApi.Instance.Value; }
+        catch (Exception error) when (error is AutomationException or DllNotFoundException or EntryPointNotFoundException or TypeInitializationException)
+        { throw new AutomationException("raster_trace_embedded_codec_unavailable", "The native zstd library is unavailable for exact embedded-source encoding."); }
         nuint bound = api.CompressBound((nuint)source.Length);
         if (bound == 0 || bound > int.MaxValue)
             throw new AutomationException("raster_trace_embedded_codec_failed", "Native zstd returned an invalid compression bound.");
@@ -87,7 +90,7 @@ internal static class EmbeddedFileCodec
             isError = Load<IsErrorDelegate>("ZSTD_isError");
         }
 
-        internal static ZstdApi Instance { get; } = new();
+        internal static Lazy<ZstdApi> Instance { get; } = new();
         internal nuint CompressBound(nuint size) => compressBound(size);
         internal nuint Compress(IntPtr destination, nuint capacity, IntPtr source, nuint size, int level)
             => compress(destination, capacity, source, size, level);

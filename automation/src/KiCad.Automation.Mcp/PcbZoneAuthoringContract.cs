@@ -32,8 +32,11 @@ internal static class PcbZoneAuthoringContract
         if (expected is null || expected.Scope != DocumentLifecycleScope.DlsPcb
             || expected.Document is null || !expected.Document.Equals(document)
             || string.IsNullOrWhiteSpace(expected.ProcessEpoch)
+            || !Guid.TryParseExact(expected.ProcessEpoch, "D", out var processEpoch) || processEpoch == Guid.Empty
+            || string.IsNullOrWhiteSpace(expected.NativeIdentity)
+            || !Guid.TryParseExact(expected.NativeIdentity, "D", out var nativeIdentity) || nativeIdentity == Guid.Empty
             || expected.Revision is null
-            || !Guid.TryParseExact(expected.Revision.Epoch, "D", out _)
+            || !Guid.TryParseExact(expected.Revision.Epoch, "D", out var revisionEpoch) || revisionEpoch == Guid.Empty
             || expected.StateSha256.Length != 64 || !expected.StateSha256.All(char.IsAsciiHexDigitLower))
             throw new AutomationException("invalid_pcb_zone_state",
                 "expectedStateJson must identify the same PCB with a complete native lifecycle revision and digest.");
@@ -94,8 +97,15 @@ internal static class PcbZoneAuthoringContract
             throw new AutomationException("invalid_pcb_zone_settings", "A copper zone needs CopperSettings.");
         if (zone.CopperSettings.Net is null)
             throw new AutomationException("invalid_pcb_zone_net", "CopperSettings must include a net object; use an empty name only for an intentional unconnected zone.");
-        if (zone.CopperSettings.FillMode == ZoneFillMode.ZfmUnknown)
+        if (!Enum.IsDefined(zone.CopperSettings.FillMode) || zone.CopperSettings.FillMode == ZoneFillMode.ZfmUnknown)
             throw new AutomationException("invalid_pcb_zone_settings", "CopperSettings.FillMode must be explicit.");
+        if (!Enum.IsDefined(zone.CopperSettings.Connection?.ZoneConnection ?? ZoneConnectionStyle.ZcsUnknown)
+            || !Enum.IsDefined(zone.CopperSettings.IslandMode)
+            || (zone.Border is not null && !Enum.IsDefined(zone.Border.Style)))
+            throw new AutomationException("invalid_pcb_zone_settings", "Zone settings contain an unknown native enum value.");
+        ValidateDistance(zone.CopperSettings.Clearance, "clearance");
+        ValidateDistance(zone.CopperSettings.MinThickness, "minThickness");
+        ValidateDistance(zone.Border?.Pitch, "borderPitch");
         var properties = new HashSet<string>(StringComparer.Ordinal);
         foreach (CustomProperty property in zone.CustomProperties)
         {
@@ -117,6 +127,8 @@ internal static class PcbZoneAuthoringContract
         {
             if (node.GeometryCase != PolyLineNode.GeometryOneofCase.Point || node.Point is null)
                 throw new AutomationException("unsupported_pcb_zone_outline", "Arc and empty outline nodes are unsupported; provide point-only polygon rings.");
+            ValidateCoordinate(node.Point.XNm, "xNm");
+            ValidateCoordinate(node.Point.YNm, "yNm");
             points.Add(node.Point);
         }
         for (int index = 1; index < points.Count; ++index)
@@ -136,5 +148,64 @@ internal static class PcbZoneAuthoringContract
         }
         if (area == 0)
             throw new AutomationException("invalid_pcb_zone_outline", $"Each zone {role} polygon must enclose a non-zero area.");
+    }
+
+    private static void ValidateCoordinate(long value, string field)
+    {
+        if (value < int.MinValue || value > int.MaxValue)
+            throw new AutomationException("invalid_pcb_zone_coordinate", $"{field} exceeds KiCad's native 32-bit geometry range.");
+    }
+
+    private static void ValidateDistance(Distance? value, string field)
+    {
+        if (value is not null && (value.ValueNm < 0 || value.ValueNm > int.MaxValue))
+            throw new AutomationException("invalid_pcb_zone_distance", $"{field} exceeds KiCad's native non-negative 32-bit distance range.");
+    }
+
+    internal static void ValidateReadback(Zone expected, Zone actual)
+    {
+        ValidateCreate(expected);
+        if (actual.Id is null || actual.Id.Value != expected.Id.Value || actual.Type != ZoneType.ZtCopper)
+            throw new AutomationException("pcb_zone_readback_mismatch", "Native readback returned a different zone identity or type.");
+        if (!expected.Layers.OrderBy(layer => (int)layer).SequenceEqual(actual.Layers.OrderBy(layer => (int)layer)))
+            throw new AutomationException("pcb_zone_readback_mismatch", "Native readback changed the zone copper layers.");
+        if (expected.Name != actual.Name || expected.Priority != actual.Priority)
+            throw new AutomationException("pcb_zone_readback_mismatch", "Native readback changed the zone name or priority.");
+        if (!CanonicalPolySet(expected.Outline).SequenceEqual(CanonicalPolySet(actual.Outline), StringComparer.Ordinal))
+            throw new AutomationException("pcb_zone_readback_mismatch", "Native readback changed the zone outline geometry.");
+        var expectedSettings = expected.CopperSettings!;
+        var actualSettings = actual.CopperSettings;
+        if (actualSettings is null || expectedSettings.Net?.Name != actualSettings.Net?.Name
+            || expectedSettings.FillMode != actualSettings.FillMode
+            || expectedSettings.Connection.ZoneConnection != actualSettings.Connection.ZoneConnection
+            || expectedSettings.IslandMode != actualSettings.IslandMode
+            || expectedSettings.Clearance?.ValueNm != actualSettings.Clearance?.ValueNm
+            || expectedSettings.MinThickness?.ValueNm != actualSettings.MinThickness?.ValueNm)
+            throw new AutomationException("pcb_zone_readback_mismatch", "Native readback changed the zone copper settings.");
+        if (expected.Border is not null && (actual.Border is null || expected.Border.Style != actual.Border.Style
+            || expected.Border.Pitch?.ValueNm != actual.Border.Pitch?.ValueNm))
+            throw new AutomationException("pcb_zone_readback_mismatch", "Native readback changed the zone border settings.");
+        var expectedProperties = expected.CustomProperties.OrderBy(property => property.Key, StringComparer.Ordinal)
+            .ThenBy(property => property.Value, StringComparer.Ordinal).Select(property => property.Key + "\0" + property.Value);
+        var actualProperties = actual.CustomProperties.OrderBy(property => property.Key, StringComparer.Ordinal)
+            .ThenBy(property => property.Value, StringComparer.Ordinal).Select(property => property.Key + "\0" + property.Value);
+        if (!expectedProperties.SequenceEqual(actualProperties, StringComparer.Ordinal))
+            throw new AutomationException("pcb_zone_readback_mismatch", "Native readback changed zone custom properties.");
+    }
+
+    private static IReadOnlyList<string> CanonicalPolySet(PolySet? polySet) => (polySet?.Polygons ?? [])
+        .Select(polygon => CanonicalRing(polygon.Outline) + "|" + string.Join(";", polygon.Holes.Select(CanonicalRing).Order(StringComparer.Ordinal)))
+        .Order(StringComparer.Ordinal).ToArray();
+
+    private static string CanonicalRing(PolyLine? ring)
+    {
+        if (ring is null) return "";
+        var points = ring.Nodes.Where(node => node.GeometryCase == PolyLineNode.GeometryOneofCase.Point)
+            .Select(node => $"{node.Point.XNm},{node.Point.YNm}").ToArray();
+        if (points.Length == 0) return "";
+        var rotations = Enumerable.Range(0, points.Length).Select(offset => string.Join(";", points.Skip(offset).Concat(points.Take(offset))));
+        var reversed = points.Reverse().ToArray();
+        rotations = rotations.Concat(Enumerable.Range(0, reversed.Length).Select(offset => string.Join(";", reversed.Skip(offset).Concat(reversed.Take(offset)))));
+        return rotations.Order(StringComparer.Ordinal).First();
     }
 }

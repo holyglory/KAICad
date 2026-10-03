@@ -16,6 +16,18 @@ public sealed class PcbZoneAuthoringContractTests
         var zone = Zone("11111111-1111-1111-1111-111111111111");
         PcbZoneAuthoringContract.ValidateCreate(zone);
         PcbZoneAuthoringContract.ValidateOperationId("22222222-2222-2222-2222-222222222222");
+
+        var input = new PcbZoneAuthoringInput
+        {
+            Id = zone.Id.Value, Layers = ["F.Cu"], NetName = "GND",
+            Polygons = [new PcbZonePolygonInput
+            {
+                Outline =
+                [new() { XNm = 0, YNm = 0 }, new() { XNm = 20_000, YNm = 0 },
+                 new() { XNm = 20_000, YNm = 20_000 }, new() { XNm = 0, YNm = 20_000 }]
+            }]
+        };
+        PcbZoneAuthoringContract.ValidateCreate(input.ToNative());
     }
 
     [TestMethod]
@@ -52,6 +64,15 @@ public sealed class PcbZoneAuthoringContractTests
         var line = Zone("11111111-1111-1111-1111-111111111111");
         line.Outline.Polygons[0].Outline.Nodes[2].Point = new() { XNm = 20_000, YNm = 0 };
         Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateCreate(line));
+
+        var outOfRange = Zone("11111111-1111-1111-1111-111111111111");
+        outOfRange.Outline.Polygons[0].Outline.Nodes[0].Point.XNm = (long)int.MaxValue + 1;
+        var rangeError = Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateCreate(outOfRange));
+        Assert.AreEqual("invalid_pcb_zone_coordinate", rangeError.Code);
+
+        var unknownFill = Zone("11111111-1111-1111-1111-111111111111");
+        unknownFill.CopperSettings.FillMode = (ZoneFillMode)999;
+        Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateCreate(unknownFill));
     }
 
     [TestMethod]
@@ -90,8 +111,11 @@ public sealed class PcbZoneAuthoringContractTests
                 FillMode = ZoneFillMode.ZfmSolid,
                 Net = new() { Name = "GND" },
                 Clearance = new() { ValueNm = 200 },
-                MinThickness = new() { ValueNm = 200 }
-            }
+                MinThickness = new() { ValueNm = 200 },
+                Connection = new() { ZoneConnection = ZoneConnectionStyle.ZcsInherited },
+                IslandMode = IslandRemovalMode.IrmAlways
+            },
+            Border = new() { Style = ZoneBorderStyle.ZbsSolid, Pitch = new() { ValueNm = 0 } }
         };
         zone.Layers.Add(BoardLayer.BlFCu);
         zone.Outline = new PolySet

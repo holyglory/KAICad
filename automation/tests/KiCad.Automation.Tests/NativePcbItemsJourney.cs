@@ -1501,9 +1501,20 @@ public sealed partial class NativeSessionTests
                 legacyGrouped.GetRawText());
             Assert.AreEqual(groupedBefore, await ObserveLifecycleState(client, cleanBoard, token));
 
-            var groupedRequest = shovePreviewRequest.Clone();
-            groupedRequest.OperationId = Guid.NewGuid().ToString("D");
-            groupedRequest.ExpectedRevision = groupedBefore.Revision.Clone();
+            // Keep this positive ordinary-group probe independent from the
+            // push-and-shove fixture above.  Starting in the middle of the
+            // grouped USB_D+ source and finishing on a short open segment
+            // gives the native router a deterministic single-ended split
+            // delta without involving the displaced via/foreign obstacle.
+            var groupedRequest = new StartPcbRoutePreview
+            {
+                Document = cleanBoard, OperationId = Guid.NewGuid().ToString("D"),
+                ProcessEpoch = client.Epoch, ExpectedRevision = groupedBefore.Revision.Clone(),
+                StartItemId = splitSource.Id.Value,
+                Start = new() { XNm = 41_600_000, YNm = 40_100_000 },
+                Layer = BoardLayer.BlFCu, ForceFinish = true
+            };
+            groupedRequest.Waypoints.Add(new Vector2 { XNm = 41_600_000, YNm = 41_000_000 });
             groupedRequest.MaximumCompleteDeltaVersion = 2;
             var positiveGroupedPreview = await mcp.Tool("kicad_pcb_route_preview", new
             { instanceId, requestJson = SchematicJson.Formatter.Format(groupedRequest), expectedStateJson = SchematicJson.Formatter.Format(groupedBefore) });

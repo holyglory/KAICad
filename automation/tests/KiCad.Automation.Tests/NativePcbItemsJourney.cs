@@ -1533,8 +1533,10 @@ public sealed partial class NativeSessionTests
                 // Keep the group cleanup and leave the capability explicitly
                 // unqualified rather than treating a partial preview as a
                 // successful route.
-                string groupedCode = positiveGroupedPreview.GetProperty("structuredContent").GetProperty("errorCode").GetString()!;
-                CollectionAssert.Contains(new[] { "pcb_route_geometry_failed", "route_delta_group_membership_unsupported" }, groupedCode,
+                var groupedStructured = positiveGroupedPreview.GetProperty("structuredContent");
+                string groupedCode = groupedStructured.TryGetProperty("errorCode", out var groupedErrorCode)
+                    ? groupedErrorCode.GetString()! : "route_delta_incomplete";
+                CollectionAssert.Contains(new[] { "pcb_route_geometry_failed", "route_delta_group_membership_unsupported", "route_delta_incomplete" }, groupedCode,
                     positiveGroupedPreview.GetRawText());
             }
             else

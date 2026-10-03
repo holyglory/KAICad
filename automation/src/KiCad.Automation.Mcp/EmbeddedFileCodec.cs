@@ -28,7 +28,10 @@ internal static class EmbeddedFileCodec
             Name = name,
             Type = EmbeddedFileType.EftOther,
             Data = ByteString.CopyFrom(Convert.ToBase64String(CompressNative(bytes)), System.Text.Encoding.UTF8),
-            DataHash = Convert.ToHexString(SHA256.HashData(bytes))
+            // KiCad's native reader compares legacy SHA-256 checksums as the
+            // exact lowercase hex string produced by picosha2. Keep the
+            // managed envelope byte-for-byte compatible with that decoder.
+            DataHash = Convert.ToHexStringLower(SHA256.HashData(bytes))
         };
     }
 

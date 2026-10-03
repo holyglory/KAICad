@@ -36,7 +36,7 @@ public sealed class RasterTraceContractTests
 
         Assert.AreEqual("source.png", file.Name);
         Assert.AreEqual(EmbeddedFileType.EftOther, file.Type);
-        Assert.AreEqual(Convert.ToHexString(SHA256.HashData(source)), file.DataHash);
+        Assert.AreEqual(Convert.ToHexStringLower(SHA256.HashData(source)), file.DataHash);
 
         byte[] compressed = Convert.FromBase64String(file.Data.ToStringUtf8());
         Assert.IsGreaterThan(4, compressed.Length);

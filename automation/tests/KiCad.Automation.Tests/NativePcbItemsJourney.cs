@@ -1119,7 +1119,11 @@ public sealed partial class NativeSessionTests
             var shovedVia = new Via
             {
                 Id = new() { Value = Guid.NewGuid().ToString("D") }, Position = shoveObstacle.End.Clone(),
-                Net = shoveObstacle.Net.Clone(), Type = ViaType.VtThrough, IsFree = true,
+                // This via is part of the POWER_RAIL obstacle path.  A free via
+                // is intentionally ignored by PNS connectivity and can be
+                // walked around, so mark the fixture as connected to require
+                // the native shove delta to move and preserve it.
+                Net = shoveObstacle.Net.Clone(), Type = ViaType.VtThrough, IsFree = false,
                 CustomProperties = { new CustomProperty { Key = "z-via-source", Value = "wire-order-is-not-state" },
                     new CustomProperty { Key = "via-source", Value = "keep-full-padstack" } },
                 PadStack = new()
@@ -1353,7 +1357,7 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(shovedVia.PadStack, retainedVia.PadStack);
             Assert.AreEqual(shovedVia.CustomProperties, retainedVia.CustomProperties);
             Assert.AreEqual(shovedVia.Teardrop, retainedVia.Teardrop);
-            Assert.IsTrue(retainedVia.IsFree);
+            Assert.IsFalse(retainedVia.IsFree, "The obstacle via is connected to POWER_RAIL and must remain connected after shove.");
             Assert.AreNotEqual(shovedVia.Position, retainedVia.Position, "The fixture must move its property-bearing via.");
             Assert.IsTrue(shoveCreate.Items.Any(item => item.Is(Track.Descriptor)
                 && item.Unpack<Track>().CustomProperties.Any(property => property.Key == "split-source")), "The second split segment must remain a creation.");

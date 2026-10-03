@@ -1647,6 +1647,24 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(groupedDeleteReply.TryGetProperty("isError", out var groupedDeleteError) && groupedDeleteError.GetBoolean(), groupedDeleteReply.GetRawText());
             cleanState = await ObserveLifecycleState(client, cleanBoard, token);
 
+            // The endpoint pads are only route fixtures. Remove their
+            // footprints before the true route-only cleanup so the final DRC
+            // snapshot does not report intentionally orphaned USB pads.
+            var usbFootprints = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbFootprint } }, token);
+            var removeUsbFootprints = new DeleteItems { Header = new() { Document = cleanBoard } };
+            removeUsbFootprints.ItemIds.Add(usbFootprints.Items
+                .Select(item => item.Unpack<FootprintInstance>())
+                .Where(footprint => footprint.ReferenceField?.Text?.Text?.Text_ is "DP_P" or "DP_N" or "DP_P_TAIL" or "DP_P_ROUTE_END")
+                .Select(footprint => footprint.Id.Clone()));
+            if (removeUsbFootprints.ItemIds.Count > 0)
+            {
+                var removedUsbFootprints = await mcp.Tool("kicad_pcb_items_delete", new
+                { instanceId, requestJson = BoardJson.Formatter.Format(removeUsbFootprints), expectedStateJson = SchematicJson.Formatter.Format(cleanState) });
+                Assert.IsFalse(removedUsbFootprints.TryGetProperty("isError", out var removedUsbError) && removedUsbError.GetBoolean(), removedUsbFootprints.GetRawText());
+                cleanState = await ObserveLifecycleState(client, cleanBoard, token);
+            }
+
             // A true-removal-only cleanup has an explicitly empty candidate;
             // its retained DRC receipt must verify that exact empty payload.
             var cleanupRows = await client.InvokeAsync<GetItems, GetItemsResponse>(new()

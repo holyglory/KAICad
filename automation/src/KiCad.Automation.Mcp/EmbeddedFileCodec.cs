@@ -1,4 +1,4 @@
-using System.Buffers.Binary;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using Google.Protobuf;
 using Kiapi.Common.Types;
@@ -6,14 +6,14 @@ using KiCad.Automation.Model;
 
 namespace KiCad.Automation.Mcp;
 
-// Builds the same base64-encoded Zstandard payload accepted by KiCad's
-// EmbeddedFiles loader. Raw Zstd blocks keep this dependency-free and bounded;
-// KiCad recompresses the payload on its next save. The SHA-256 checksum is a
-// supported legacy checksum form and is normalized by the native reader.
+// Uses the same libzstd entry point and compression level as KiCad's native
+// EMBEDDED_FILES::CompressAndEncode (ZSTD_compress(..., 15)). The SHA-256
+// checksum is a supported legacy checksum form and is normalized by the
+// native reader. Keeping compression in the native zstd library avoids a
+// second managed implementation whose bytes could differ on save/reload.
 internal static class EmbeddedFileCodec
 {
     private const int MaximumSourceBytes = 32 * 1024 * 1024;
-    private const int MaximumBlockBytes = 128 * 1024;
 
     internal static EmbeddedFile FromBytes(string name, byte[] bytes)
     {
@@ -27,37 +27,73 @@ internal static class EmbeddedFileCodec
         {
             Name = name,
             Type = EmbeddedFileType.EftOther,
-            Data = ByteString.CopyFrom(Convert.ToBase64String(EncodeRawZstd(bytes)), System.Text.Encoding.UTF8),
+            Data = ByteString.CopyFrom(Convert.ToBase64String(CompressNative(bytes)), System.Text.Encoding.UTF8),
             DataHash = Convert.ToHexString(SHA256.HashData(bytes))
         };
     }
 
     internal static string Name(string sourceSha256) => "raster_trace_" + sourceSha256 + ".png";
 
-    private static byte[] EncodeRawZstd(byte[] source)
+    private static byte[] CompressNative(byte[] source)
     {
-        int blockCount = (source.Length + MaximumBlockBytes - 1) / MaximumBlockBytes;
-        int capacity = 4 + 1 + sizeof(ulong) + source.Length + blockCount * 3;
-        byte[] output = new byte[capacity];
-        int offset = 0;
-        output[offset++] = 0x28; output[offset++] = 0xB5; output[offset++] = 0x2F; output[offset++] = 0xFD;
-        // FCS flag 3 (8-byte content size), single segment, no checksum/dictionary.
-        output[offset++] = 0xE0;
-        BinaryPrimitives.WriteUInt64LittleEndian(output.AsSpan(offset, sizeof(ulong)), (ulong)source.Length);
-        offset += sizeof(ulong);
-        int sourceOffset = 0;
-        while (sourceOffset < source.Length)
+        ZstdApi api = ZstdApi.Instance;
+        nuint bound = api.CompressBound((nuint)source.Length);
+        if (bound == 0 || bound > int.MaxValue)
+            throw new AutomationException("raster_trace_embedded_codec_failed", "Native zstd returned an invalid compression bound.");
+        IntPtr sourcePtr = Marshal.AllocHGlobal(source.Length);
+        IntPtr destinationPtr = Marshal.AllocHGlobal((int)bound);
+        try
         {
-            int count = Math.Min(MaximumBlockBytes, source.Length - sourceOffset);
-            bool last = sourceOffset + count == source.Length;
-            uint header = ((uint)count << 3) | (last ? 1u : 0u);
-            output[offset++] = (byte)header;
-            output[offset++] = (byte)(header >> 8);
-            output[offset++] = (byte)(header >> 16);
-            source.AsSpan(sourceOffset, count).CopyTo(output.AsSpan(offset));
-            sourceOffset += count;
-            offset += count;
+            Marshal.Copy(source, 0, sourcePtr, source.Length);
+            nuint compressed = api.Compress(destinationPtr, bound, sourcePtr, (nuint)source.Length, 15);
+            if (api.IsError(compressed) || compressed > bound || compressed > int.MaxValue)
+                throw new AutomationException("raster_trace_embedded_codec_failed", "Native zstd could not compress the exact source bytes.");
+            byte[] output = new byte[(int)compressed];
+            Marshal.Copy(destinationPtr, output, 0, output.Length);
+            return output;
         }
-        return output.AsSpan(0, offset).ToArray();
+        finally
+        {
+            Marshal.FreeHGlobal(sourcePtr);
+            Marshal.FreeHGlobal(destinationPtr);
+        }
+    }
+
+    private sealed class ZstdApi
+    {
+        private delegate nuint CompressBoundDelegate(nuint size);
+        private delegate nuint CompressDelegate(IntPtr destination, nuint capacity, IntPtr source, nuint size, int level);
+        private delegate uint IsErrorDelegate(nuint code);
+
+        private readonly IntPtr library;
+        private readonly CompressBoundDelegate compressBound;
+        private readonly CompressDelegate compress;
+        private readonly IsErrorDelegate isError;
+
+        private ZstdApi()
+        {
+            string[] names = OperatingSystem.IsWindows() ? ["libzstd.dll", "zstd.dll"]
+                : OperatingSystem.IsMacOS() ? ["libzstd.dylib", "libzstd.1.dylib"]
+                : ["libzstd.so.1", "libzstd.so"];
+            foreach (string name in names)
+                if (NativeLibrary.TryLoad(name, out library)) break;
+            if (library == IntPtr.Zero)
+                throw new AutomationException("raster_trace_embedded_codec_unavailable", "The native zstd library is unavailable for exact embedded-source encoding.");
+            compressBound = Load<CompressBoundDelegate>("ZSTD_compressBound");
+            compress = Load<CompressDelegate>("ZSTD_compress");
+            isError = Load<IsErrorDelegate>("ZSTD_isError");
+        }
+
+        internal static ZstdApi Instance { get; } = new();
+        internal nuint CompressBound(nuint size) => compressBound(size);
+        internal nuint Compress(IntPtr destination, nuint capacity, IntPtr source, nuint size, int level)
+            => compress(destination, capacity, source, size, level);
+        internal bool IsError(nuint code) => isError(code) != 0;
+
+        private T Load<T>(string name) where T : Delegate
+        {
+            IntPtr symbol = NativeLibrary.GetExport(library, name);
+            return Marshal.GetDelegateForFunctionPointer<T>(symbol);
+        }
     }
 }

@@ -175,7 +175,7 @@ SHAPE_LINE_CHAIN ToChain( const BITMAP_TRACE_CONTOUR& aContour )
     return chain;
 }
 
-void AppendPathTree( const potrace_path_t* aPath, const std::string& aParent,
+void AppendPathTree( const potrace_path_t* aPath, std::string aParent,
                      int64_t aScaleNumerator, uint32_t aScaleDenominator, int64_t aTolerance,
                      uint32_t aMaxContours, uint32_t aMaxVertices, size_t& aEmittedVertices,
                      std::vector<BITMAP_TRACE_CONTOUR>& aContours )
@@ -349,11 +349,17 @@ BITMAP_TRACE_RESULT TraceBitmap( const BITMAP_TRACE_RASTER& aRaster, const BITMA
         SHAPE_POLY_SET combined;
         for( const auto& contour : result.contours )
         {
+            SHAPE_LINE_CHAIN chain = ToChain( contour );
+            if( chain.SelfIntersecting() )
+                throw std::runtime_error( "trace contour is self-intersecting after quantization" );
             SHAPE_POLY_SET poly;
-            poly.AddOutline( ToChain( contour ) );
+            poly.AddOutline( chain );
             if( contour.hole ) combined.BooleanSubtract( poly );
             else combined.BooleanAdd( poly );
         }
+        // NormalizeAreaOutlines() returns an outline count, not a validity
+        // predicate. Validate each quantized contour and the simplified
+        // boolean result explicitly before fracturing legitimate holes.
         combined.Simplify();
         if( combined.OutlineCount() <= 0 || combined.IsSelfIntersecting() )
             throw std::runtime_error( "trace geometry is self-intersecting or degenerate" );

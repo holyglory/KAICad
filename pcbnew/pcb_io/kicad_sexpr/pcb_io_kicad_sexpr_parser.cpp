@@ -8643,9 +8643,16 @@ PCB_VIA* PCB_IO_KICAD_SEXPR_PARSER::parsePCB_VIA()
             parsePostMachining( via->Padstack().BackPostMachining() );
             break;
 
+        case T_custom_property:
+            // Vias carry route provenance and agent-owned metadata.  The
+            // clipboard parser is also used by detached DRC snapshots, so
+            // preserve these properties instead of rejecting the whole via.
+            parseCustomProperty( via.get() );
+            break;
+
         default:
             Expecting( "blind, micro, at, size, drill, layers, net, free, tstamp, uuid, status, "
-                       "teardrops, backdrill, tertiary_drill, front_post_machining, or back_post_machining" );
+                       "custom_property, teardrops, backdrill, tertiary_drill, front_post_machining, or back_post_machining" );
         }
     }
 

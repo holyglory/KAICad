@@ -1,8 +1,10 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text;
 using System.Security.Cryptography;
 using KiCad.Automation.Mcp;
 using KiCad.Automation.Protocol;
+using Kiapi.Common.Types;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace KiCad.Automation.Tests;
@@ -24,6 +26,21 @@ public sealed class RasterTraceContractTests
         });
         Assert.IsFalse(rejected.GetProperty("accepted").GetBoolean());
         Assert.AreEqual("trace_complexity", rejected.GetProperty("rejectionCode").GetString());
+    }
+
+    [TestMethod]
+    public void EmbeddedSourceCodecCreatesNativeZstdEnvelope()
+    {
+        byte[] source = Encoding.UTF8.GetBytes("raster-trace-embedded-source");
+        EmbeddedFile file = EmbeddedFileCodec.FromBytes("source.png", source);
+
+        Assert.AreEqual("source.png", file.Name);
+        Assert.AreEqual(EmbeddedFileType.EftOther, file.Type);
+        Assert.AreEqual(Convert.ToHexString(SHA256.HashData(source)), file.DataHash);
+
+        byte[] compressed = Convert.FromBase64String(file.Data.ToStringUtf8());
+        Assert.IsGreaterThan(4, compressed.Length);
+        CollectionAssert.AreEqual(new byte[] { 0x28, 0xB5, 0x2F, 0xFD }, compressed[..4]);
     }
 
     [TestMethod]

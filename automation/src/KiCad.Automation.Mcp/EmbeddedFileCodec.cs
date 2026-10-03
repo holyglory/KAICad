@@ -90,7 +90,7 @@ internal static class EmbeddedFileCodec
             isError = Load<IsErrorDelegate>("ZSTD_isError");
         }
 
-        internal static Lazy<ZstdApi> Instance { get; } = new();
+        internal static Lazy<ZstdApi> Instance { get; } = new(() => new ZstdApi());
         internal nuint CompressBound(nuint size) => compressBound(size);
         internal nuint Compress(IntPtr destination, nuint capacity, IntPtr source, nuint size, int level)
             => compress(destination, capacity, source, size, level);

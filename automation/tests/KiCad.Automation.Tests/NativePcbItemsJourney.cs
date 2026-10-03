@@ -1099,7 +1099,12 @@ public sealed partial class NativeSessionTests
             { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbTrace } }, token);
             var shoveObstacle = shoveObstacleItems.Items.Select(item => item.Unpack<Track>())
                 .Single(track => track.Net.Name == "POWER_RAIL");
-            shoveObstacle.End = new() { XNm = 41_600_000, YNm = 42_000_000 };
+            // Keep the property-bearing via as a standalone same-net
+            // obstacle.  Ending the foreign track underneath the via makes
+            // PNS treat the connected branch as a walkaround candidate rather
+            // than a movable via owner; the standalone via exercises the
+            // complete identity-preserving shove delta directly.
+            shoveObstacle.End = new() { XNm = 41_000_000, YNm = 42_000_000 };
             shoveObstacle.SolderMask = new() { ExposeCopper = true, SolderMaskMargin = new() { ValueNm = 35_000 } };
             shoveObstacle.CustomProperties.Add(new CustomProperty { Key = "shove-source", Value = "keep-mask-and-properties" });
             var obstacleUpdate = new UpdateItems { Header = new() { Document = cleanBoard }, Items = { Any.Pack(shoveObstacle) } };

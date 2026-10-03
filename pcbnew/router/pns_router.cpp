@@ -115,6 +115,7 @@ void ROUTER::SyncWorld()
 void ROUTER::ClearWorld()
 {
     m_previewCapture = false;
+    m_previewUnsupportedChange = false;
     m_previewBaseline.clear();
 
     if( m_world )
@@ -130,6 +131,7 @@ void ROUTER::ClearWorld()
 
 void ROUTER::capturePreviewBaseline()
 {
+    m_previewUnsupportedChange = false;
     m_previewBaseline.clear();
 
     if( !m_world )
@@ -897,7 +899,7 @@ bool ROUTER::GetPreviewItems( std::vector<std::unique_ptr<ITEM>>& aRemoved,
     aRemoved.clear();
     aAdded.clear();
 
-    if( m_state != ROUTE_TRACK || !m_placer )
+    if( !m_previewCapture || m_previewUnsupportedChange || m_state != ROUTE_TRACK || !m_placer )
         return false;
 
     NODE* node = m_placer->CurrentNode( true );
@@ -1051,7 +1053,12 @@ bool ROUTER::GetPreviewItems( std::vector<std::unique_ptr<ITEM>>& aRemoved,
             const auto* lhs = static_cast<const VIA*>( left );
             const auto* rhs = static_cast<const VIA*>( right );
             if( lhs->Pos() != rhs->Pos() || lhs->Drill() != rhs->Drill()
-                || lhs->Layers() != rhs->Layers() )
+                || lhs->Layers() != rhs->Layers() || lhs->ViaType() != rhs->ViaType()
+                || lhs->IsFree() != rhs->IsFree()
+                || lhs->UnconnectedLayerMode() != rhs->UnconnectedLayerMode()
+                || lhs->HolePostMachining() != rhs->HolePostMachining()
+                || lhs->SecondaryDrill() != rhs->SecondaryDrill()
+                || lhs->SecondaryHoleLayers() != rhs->SecondaryHoleLayers() )
                 return false;
             for( int layer = lhs->Layers().Start(); layer <= lhs->Layers().End(); ++layer )
                 if( lhs->Diameter( layer ) != rhs->Diameter( layer ) )
@@ -1212,7 +1219,18 @@ void ROUTER::CommitRouting( NODE* aNode )
 
     if( m_previewCapture )
     {
-        // Capture before NODE::Commit releases the branch. Board parent
+        // A committed unsupported primitive no longer appears in a branch
+        // delta after Commit() changes the root. Retain rejection before that
+        // cleanup so it cannot silently disappear from a later preview.
+        auto unsupported = []( ITEM* item )
+        {
+            return !item->IsVirtual() && !( item->OfKind( ITEM::HOLE_T ) && item->ParentPadVia() )
+                && !SEGMENT::ClassOf( item ) && !ARC::ClassOf( item ) && !VIA::ClassOf( item );
+        };
+        if( std::any_of( removed.begin(), removed.end(), unsupported )
+            || std::any_of( added.begin(), added.end(), unsupported ) )
+            m_previewUnsupportedChange = true;
+
         // Keep the PNS world current for subsequent waypoints, while leaving
         // the native BOARD untouched.  GetPreviewItems composes the final
         // board-relative delta from the preserved baseline and this effective

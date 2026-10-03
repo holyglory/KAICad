@@ -1579,9 +1579,15 @@ void NODE::GetUpdatedItems( ITEM_VECTOR& aRemoved, ITEM_VECTOR& aAdded )
 void NODE::GetEffectiveItems( ITEM_VECTOR& aItems ) const
 {
     for( ITEM* item : *m_index )
+        aItems.push_back( item );
+
+    if( !isRoot() )
     {
-        if( isRoot() || !Overrides( item ) )
-            aItems.push_back( item );
+        for( ITEM* item : *m_root->m_index )
+        {
+            if( !Overrides( item ) )
+                aItems.push_back( item );
+        }
     }
 }
 

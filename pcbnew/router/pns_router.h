@@ -310,6 +310,7 @@ private:
     std::vector<PNS::ITEM*>         m_leaderSegments;
 
     bool                            m_previewCapture = false;
+    bool                            m_previewUnsupportedChange = false;
     std::vector<std::unique_ptr<ITEM>> m_previewBaseline;
 
     ROUTER_IFACE*     m_iface;

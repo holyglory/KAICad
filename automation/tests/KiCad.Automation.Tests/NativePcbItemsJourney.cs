@@ -1138,9 +1138,10 @@ public sealed partial class NativeSessionTests
                     Drill = new() { Diameter = new() { XNm = 300_000, YNm = 300_000 },
                         StartLayer = BoardLayer.BlFCu, EndLayer = BoardLayer.BlBCu, Shape = DrillShape.DsCircle },
                     // The native custom-via file format persists per-layer
-                    // dimensions, not arbitrary shape tags; use KiCad's
-                    // canonical rectangle shape so save/reopen preserves the
-                    // complete padstack instead of silently canonicalizing it.
+                    // dimensions and reconstructs each anchor as a rectangle.
+                    // Keep that canonical anchor while retaining circular
+                    // copper geometry so strict padstack identity survives
+                    // save/reopen without hiding the supported shape.
                     CopperLayers = { new PadStackLayer { Layer = BoardLayer.BlFCu, Shape = PadStackShape.PssCircle,
                         CustomAnchorShape = PadStackShape.PssRectangle,
                         Size = new() { XNm = 700_000, YNm = 700_000 } },

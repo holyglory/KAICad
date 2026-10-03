@@ -208,7 +208,8 @@ std::string GeometryDigest( const BITMAP_TRACE_RESULT& aResult )
     stream << std::setprecision( 17 ) << "bitmap-trace-v2|" << aResult.rasterWidth << 'x'
            << aResult.rasterHeight << '|' << aResult.physicalHeightNm << '|'
            << aResult.scaleNumerator << '/' << aResult.scaleDenominator << '|'
-           << aResult.turdSize << '|' << aResult.curveToleranceNm << '|'
+           << aResult.threshold << ':' << aResult.invert << '|' << aResult.turdSize << '|'
+           << aResult.curveToleranceNm << '|'
            << aResult.potraceOptTolerancePx << '|' << aResult.maxContours << ':' << aResult.maxVertices
            << "|image_x_right_y_down|nearest_integer|";
     for( const auto& contour : aResult.contours )
@@ -320,6 +321,8 @@ BITMAP_TRACE_RESULT TraceBitmap( const BITMAP_TRACE_RASTER& aRaster, const BITMA
     result.rasterWidth = aRaster.width;
     result.rasterHeight = aRaster.height;
     result.turdSize = aSettings.turdSize;
+    result.threshold = aSettings.threshold;
+    result.invert = aSettings.invert;
     result.curveToleranceNm = aSettings.curveToleranceNm;
     result.maxContours = aSettings.maxContours;
     result.maxVertices = aSettings.maxVertices;

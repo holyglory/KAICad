@@ -219,7 +219,8 @@ HANDLER_RESULT<kiapi::automation::v1::RasterTraceResult> API_HANDLER_COMMON::han
         bool foreground = alpha && alpha[i] == 0 ? false : luma <= request.threshold();
         raster.foreground[i] = request.invert() ? !foreground : foreground;
     }
-    BITMAP_TRACE_SETTINGS settings{ request.physical_width_nm(), request.turd_size(), request.curve_tolerance_nm(), request.max_contours(), request.max_vertices() };
+    BITMAP_TRACE_SETTINGS settings{ request.physical_width_nm(), request.threshold(), request.invert(), request.turd_size(),
+                                    request.curve_tolerance_nm(), request.max_contours(), request.max_vertices() };
     BITMAP_TRACE_RESULT trace = TraceBitmap( raster, settings );
     RasterTraceResult result;
     result.set_source_sha256( actualHash ); result.set_source_bytes( bytes.size() );

@@ -428,6 +428,48 @@ public sealed class PcbRoutingContractTests
             Width = new() { ValueNm = 200 }, Layer = BoardLayer.BlFCu,
             Net = new() { Name = "N1" }
         };
+        var displacedViaId = Guid.NewGuid().ToString("D");
+        var replacementVia = new Via
+        {
+            Id = new() { Value = displacedViaId },
+            Position = new() { XNm = 40_000, YNm = 50_000 },
+            Type = ViaType.VtThrough,
+            IsFree = true,
+            Net = new() { Name = "N1" },
+            CustomProperties = { new CustomProperty { Key = "via-source", Value = "preserve" } },
+            Teardrop = new PadTeardropSettings
+            {
+                Mode = PadTeardropMode.PtmEnabled,
+                AllowMultipleTrackSegments = true,
+                PreferZoneConnection = true,
+                MaxLength = new() { ValueNm = 900_000 },
+                MaxWidth = new() { ValueNm = 1_100_000 },
+                BestLengthRatio = 0.6,
+                BestWidthRatio = 0.8,
+                MaxTrackWidthRatio = 0.7
+            },
+            PadStack = new PadStack
+            {
+                Type = PadStackType.PstNormal,
+                Layers = { BoardLayer.BlFCu, BoardLayer.BlBCu },
+                Drill = new DrillProperties
+                {
+                    Diameter = new() { XNm = 300, YNm = 300 },
+                    StartLayer = BoardLayer.BlFCu,
+                    EndLayer = BoardLayer.BlBCu,
+                    Shape = DrillShape.DsCircle
+                },
+                CopperLayers =
+                {
+                    new PadStackLayer
+                    {
+                        Layer = BoardLayer.BlFCu,
+                        Shape = PadStackShape.PssCircle,
+                        Size = new() { XNm = 700, YNm = 700 }
+                    }
+                }
+            }
+        };
         var preview = new PcbRoutePreviewState
         {
             Document = document,
@@ -439,13 +481,19 @@ public sealed class PcbRoutingContractTests
             ReplacementUpdates = new UpdateItems { Header = new() { Document = document } }
         };
         preview.RemovedItemIds.Add(new KIID { Value = displacedId });
+        preview.RemovedItemIds.Add(new KIID { Value = displacedViaId });
         preview.ReplacementUpdates.Items.Add(Any.Pack(replacement));
+        preview.ReplacementUpdates.Items.Add(Any.Pack(replacementVia));
 
         var parsed = SchematicJson.Parser.Parse<PcbRoutePreviewState>(SchematicJson.Formatter.Format(preview));
-        Assert.AreEqual(displacedId, parsed.RemovedItemIds.Single().Value);
+        Assert.AreEqual(displacedId, parsed.RemovedItemIds.Single(id => id.Value == displacedId).Value);
         Assert.AreEqual(document, parsed.ReplacementUpdates.Header.Document);
-        Assert.AreEqual(displacedId, parsed.ReplacementUpdates.Items.Single().Unpack<Track>().Id.Value);
-        Assert.IsTrue(parsed.ReplacementUpdates.Items.Single().Is(Track.Descriptor));
+        var parsedTrack = parsed.ReplacementUpdates.Items.Single(item => item.Is(Track.Descriptor)).Unpack<Track>();
+        Assert.AreEqual(displacedId, parsedTrack.Id.Value);
+        Assert.IsTrue(parsed.ReplacementUpdates.Items.Any(item => item.Is(Track.Descriptor)));
+        var parsedVia = parsed.ReplacementUpdates.Items.Single(item => item.Is(Via.Descriptor)).Unpack<Via>();
+        Assert.AreEqual(replacementVia, parsedVia);
+        Assert.AreEqual(displacedViaId, parsed.RemovedItemIds.Single(id => id.Value == displacedViaId).Value);
 
         CheckedPcbRouteContract.ValidatePreview(parsed);
         var legacy = parsed.Clone(); legacy.CompleteDeltaVersion = 0;

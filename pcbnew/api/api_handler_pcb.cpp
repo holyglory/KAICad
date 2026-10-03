@@ -1374,7 +1374,13 @@ HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> API_HANDLER_PCB::han
                                                                   settings->m_PnsSettings->GetPath() );
         settings->m_PnsSettings->CopyCurrentStateTo( *snapshot );
         if( request.push_and_shove() )
+        {
             snapshot->SetMode( PNS::RM_Shove );
+            // The API flag is an explicit push-and-shove request.  Do not let
+            // a persisted editor preference silently turn it into a
+            // walkaround preview when a neighbouring via is encountered.
+            snapshot->SetShoveVias( true );
+        }
         session->generator = new GENERATOR_TOOL( false );
         session->manager->RegisterTool( session->generator );
         try
@@ -1415,7 +1421,13 @@ HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> API_HANDLER_PCB::han
                                                                        pcbSettings->m_PnsSettings->GetPath() );
     pcbSettings->m_PnsSettings->CopyCurrentStateTo( *snapshotSettings );
     if( request.push_and_shove() )
+    {
         snapshotSettings->SetMode( PNS::RM_Shove );
+        // Keep one-shot previews deterministic across editor profiles.  A
+        // push-and-shove request must be able to include displaced vias in
+        // the complete identity-preserving route delta.
+        snapshotSettings->SetShoveVias( true );
+    }
     TOOL_MANAGER previewManager;
     previewManager.SetEnvironment( target, nullptr, nullptr, nullptr, nullptr );
     auto* generatorTool = new GENERATOR_TOOL( false );

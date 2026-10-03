@@ -1183,6 +1183,13 @@ static HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> ExtractRouteP
         if( !auxiliary( item.get() ) )
             added.push_back( item.get() );
 
+    // Reject legacy grouped previews before geometry materialization.  A
+    // malformed or incomplete route item must not mask the more specific
+    // contract error that the caller requested version 1 for a grouped delta.
+    if( maximumVersion < 2 && !groupChanges.empty() )
+        return reject( "route_delta_group_membership_unsupported",
+                       "Grouped route deltas require complete route-delta version 2" );
+
     PNS::ROUTER::PartitionRoutingChanges( removed, added, deleted, created, updated );
     response.set_operation_id( operationId );
     for( const auto& id : displacedIds )

@@ -223,7 +223,7 @@ bool ValidatePayloadMetadata( const RunPcbManufacturingExport& aRequest, std::st
 
     switch( aRequest.job_case() )
     {
-    case RunPcbManufacturingExport::kExport3d: return check( aRequest.export_3d() );
+    case RunPcbManufacturingExport::kExport3D: return check( aRequest.export_3d() );
     case RunPcbManufacturingExport::kExportRender: return check( aRequest.export_render() );
     case RunPcbManufacturingExport::kExportSvg: return check( aRequest.export_svg() );
     case RunPcbManufacturingExport::kExportDxf: return check( aRequest.export_dxf() );
@@ -279,7 +279,7 @@ std::string ManufacturingJobKind( const RunPcbManufacturingExport& aRequest )
 {
     switch( aRequest.job_case() )
     {
-    case RunPcbManufacturingExport::kExport3d: return "3d";
+    case RunPcbManufacturingExport::kExport3D: return "3d";
     case RunPcbManufacturingExport::kExportRender: return "render";
     case RunPcbManufacturingExport::kExportSvg: return "svg";
     case RunPcbManufacturingExport::kExportDxf: return "dxf";
@@ -318,7 +318,7 @@ std::string ManufacturingOutputExtension( const RunPcbManufacturingExport& aRequ
 {
     switch( aRequest.job_case() )
     {
-    case RunPcbManufacturingExport::kExport3d:
+    case RunPcbManufacturingExport::kExport3D:
         switch( aRequest.export_3d().format() )
         {
         case kiapi::board::jobs::Board3DFormat::B3D_STEP: return "step";
@@ -3638,7 +3638,7 @@ API_HANDLER_PCB::handleRunPcbManufacturingExport(
     {
     switch( request.job_case() )
     {
-    case RunPcbManufacturingExport::kExport3d:
+    case RunPcbManufacturingExport::kExport3D:
     {
         HANDLER_CONTEXT<RunBoardJobExport3D> child;
         child.Request.CopyFrom( request.export_3d() );

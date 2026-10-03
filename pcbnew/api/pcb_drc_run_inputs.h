@@ -146,6 +146,15 @@ public:
     // replacement candidates are installed. The live editor board is never changed.
     tl::expected<void, std::string> RemoveRouteItems(
             const google::protobuf::RepeatedPtrField<kiapi::common::types::KIID>& aItems );
+    // Validate exact direct ordinary-group ownership before route objects are
+    // removed from the detached snapshot.
+    tl::expected<void, std::string> ValidateRouteGroupChanges(
+            const google::protobuf::RepeatedPtrField<kiapi::automation::v1::NativeRouteGroupChange>& aChanges ) const;
+    // Apply the requested after-membership to the detached board only after
+    // candidate additions/removals are present, returning native readback.
+    tl::expected<std::vector<kiapi::automation::v1::NativeRouteGroupState>, std::string>
+    ApplyRouteGroupChanges(
+            const google::protobuf::RepeatedPtrField<kiapi::automation::v1::NativeRouteGroupChange>& aChanges );
 
     // Mutates only this bundle's detached board. Failure makes the preparation
     // unusable: capture a fresh bundle instead of retrying partially prepared data.

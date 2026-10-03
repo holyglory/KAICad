@@ -78,6 +78,10 @@ message StartPcbDrcJob {
   // Exact live route objects to remove from the detached snapshot before adding
   // candidate_items. This enables DRC of a full rip-up/reroute replacement.
   repeated kiapi.common.types.KIID delete_item_ids = 400;
+  // Exact direct PCB_GROUP membership changes paired with a complete route
+  // replacement.  Older peers leave this empty and cannot prove grouped
+  // route ownership.
+  repeated NativeRouteGroupChange group_changes = 401;
   // -- end lane 2D --
 }
 
@@ -88,6 +92,9 @@ message ReadPcbDrcJob {
   // Optional exact ordered copper payload to compare with the retained start
   // request. A mismatch is rejected; IDs alone cannot prove checked geometry.
   repeated google.protobuf.Any expected_candidate_items = 4;
+  // Full grouped-route payload must match the retained start request before a
+  // read can prove the detached candidate.
+  repeated NativeRouteGroupChange expected_group_changes = 401;
 }
 
 message CancelPcbDrcJob {
@@ -179,6 +186,13 @@ message PcbDrcJobState {
   // complete retained payload. Older peers and ordinary reads leave this false.
   // This proves payload identity, not freshness or permission to commit.
   bool candidate_payload_verified = 20;
+  // -- lane 2D (400-499) --
+  // True only when the retained detached DRC snapshot applied and verified
+  // the complete direct-group membership payload.
+  bool group_payload_verified = 400;
+  repeated NativeRouteGroupChange verified_group_changes = 401;
+  repeated NativeRouteGroupState after_group_states = 402;
+  // -- end lane 2D --
 }
 
 // Read-only native PNS route preview. The router operates on its in-memory
@@ -203,6 +217,9 @@ message StartPcbRoutePreview {
   // Force the detached PNS snapshot into push-and-shove mode instead of the
   // user profile's walkaround mode. The preview remains read-only.
   bool push_and_shove = 407;
+  // Maximum complete route-delta version the caller can consume.  Zero is
+  // the legacy version-1 default; version 2 carries exact group ownership.
+  uint32 maximum_complete_delta_version = 408;
   // -- end lane 2D --
 }
 
@@ -240,6 +257,8 @@ message PcbRoutePreviewState {
   // identity-preserving updates and every remaining create/removal. A zero
   // version is a legacy preview and cannot authorize an actionable delta.
   uint32 complete_delta_version = 410;
+  // Exact direct group ownership changes for a version-2 route delta.
+  repeated NativeRouteGroupChange group_changes = 411;
   // -- end lane 2D --
 }
 
@@ -1445,6 +1464,35 @@ message NativeCapabilityPcbDrcReplacementJob {
   string process_epoch = 3;
   repeated google.protobuf.Any expected_candidate_items = 4;
   repeated kiapi.common.types.KIID expected_delete_item_ids = 5;
+  repeated NativeRouteGroupChange expected_group_changes = 400;
+}
+
+// Exact ownership facts for the narrow checked-route group seam.  The
+// embedded board Group keeps the native name, lock state, parent container,
+// design-block link and custom properties; only its direct member IDs may
+// change between the two snapshots.
+enum NativeRouteGroupKind {
+  NRGK_UNKNOWN = 0;
+  NRGK_ORDINARY = 1;
+  NRGK_GENERATOR = 2;
+}
+
+message NativeRouteGroupState {
+  kiapi.board.types.Group group = 1;
+  NativeRouteGroupKind kind = 2;
+  kiapi.common.types.KIID parent_group_id = 3;
+}
+
+message NativeRouteCreatedSource {
+  kiapi.common.types.KIID created_item_id = 1;
+  kiapi.common.types.KIID source_item_id = 2;
+  kiapi.common.types.KIID source_group_id = 3;
+}
+
+message NativeRouteGroupChange {
+  NativeRouteGroupState expected_before = 1;
+  NativeRouteGroupState expected_after = 2;
+  repeated NativeRouteCreatedSource created_sources = 3;
 }
 
 // Read the native simulator's captured generated-deck dependency evidence.

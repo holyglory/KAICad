@@ -22,7 +22,8 @@ public static class CheckedPcbRouteContract
     private const int MinimumResultBytes = 64 * 1024;
 
     public static bool HasPreviewDelta(PcbRoutePreviewState preview) => preview.RouteItems.Count != 0
-        || (preview.ReplacementUpdates?.Items.Count ?? 0) != 0 || preview.RemovedItemIds.Count != 0;
+        || (preview.ReplacementUpdates?.Items.Count ?? 0) != 0 || preview.RemovedItemIds.Count != 0
+        || preview.GroupChanges.Count != 0;
 
     public static void ValidatePreview(PcbRoutePreviewState preview, bool inspectStateOnly = false)
     {
@@ -30,9 +31,13 @@ public static class CheckedPcbRouteContract
             throw Invalid("A routing preview must remain detached and cannot report a native commit.");
         bool hasDelta = HasPreviewDelta(preview);
         if (inspectStateOnly && !hasDelta) return;
-        if (preview.CompleteDeltaVersion != 1)
+        if (preview.CompleteDeltaVersion is not (1 or 2))
             throw new AutomationException("route_preview_contract_unsupported",
-                "This native preview does not provide the version 1 complete create/update/remove contract; update the native editor before using its routing candidates.");
+                "This native preview does not provide a supported complete route-delta contract; update the native editor before using its routing candidates.");
+        if (preview.GroupChanges.Count != 0 && preview.CompleteDeltaVersion != 2)
+            throw new AutomationException("route_preview_contract_unsupported",
+                "Grouped route candidates require complete route-delta version 2.");
+        ValidateGroupChanges(preview.GroupChanges, preview.RouteItems, preview.ReplacementUpdates, preview.RemovedItemIds);
         if (!preview.Completed || preview.ErrorCode.Length != 0 || preview.Cancelled || preview.Reconciled || !hasDelta)
             throw Invalid("Only a successful, current complete native route delta can expose actionable candidates.");
     }
@@ -97,6 +102,9 @@ public static class CheckedPcbRouteContract
                     throw Invalid("Route creates, updates and removals require distinct UUIDs.");
         }
 
+        ValidateGroupChanges(request.GroupChanges, candidate.Items,
+            request.ReplacementUpdates, request.Removals?.ItemIds);
+
         if (expected.Scope != DocumentLifecycleScope.DlsPcb || !expected.ProjectSettingsIncluded
             || expected.Document is null || !expected.Document.Equals(document)
             || expected.Revision is null || !Uuid(expected.NativeIdentity)
@@ -137,6 +145,8 @@ public static class CheckedPcbRouteContract
             throw Invalid("The native receipt contains removals from another request.");
         if (result.RemovedResult is not null && result.Removals is null)
             throw Invalid("A native deletion result must identify its exact removal request.");
+        if (!result.GroupChanges.Equals(request.GroupChanges))
+            throw Invalid("The native receipt contains grouped-route changes from another request.");
 
         // Inspection may read a NOT_FOUND receipt for a partially observed
         // board.  Any receipt that claims the native operation was admitted
@@ -227,6 +237,22 @@ public static class CheckedPcbRouteContract
         else if (result.Removals is not null || result.RemovedResult is not null)
             throw Invalid("A completed additive route must not claim unrequested removals.");
 
+        if (request.GroupChanges.Count != 0)
+        {
+            if (result.GroupChanges.Count != request.GroupChanges.Count
+                || result.AfterGroupStates.Count != request.GroupChanges.Count)
+                throw Invalid("A completed grouped route must report its exact group request and native after-state.");
+            for (int index = 0; index < request.GroupChanges.Count; index++)
+            {
+                var change = request.GroupChanges[index];
+                if (!result.GroupChanges[index].Equals(change)
+                    || !result.AfterGroupStates[index].Equals(change.ExpectedAfter))
+                    throw Invalid("A completed grouped route returned an unexpected native group membership state.");
+            }
+        }
+        else if (result.GroupChanges.Count != 0 || result.AfterGroupStates.Count != 0)
+            throw Invalid("An ungrouped route must not claim grouped-route state.");
+
         for (int index = 0; index < request.Candidate.Items.Count; index++)
         {
             var item = created.CreatedItems[index];
@@ -306,6 +332,62 @@ public static class CheckedPcbRouteContract
             return false;
         }
     }
+
+    private static void ValidateGroupChanges(
+        IEnumerable<NativeRouteGroupChange> changes,
+        IEnumerable<Any> candidates,
+        UpdateItems? updates,
+        IEnumerable<KIID>? removals)
+    {
+        var candidateIds = candidates.Select(RouteItemId).ToHashSet(StringComparer.Ordinal);
+        var updateIds = updates?.Items.Select(RouteItemId).ToHashSet(StringComparer.Ordinal)
+            ?? new HashSet<string>(StringComparer.Ordinal);
+        var removedIds = removals?.Select(id => id.Value).ToHashSet(StringComparer.Ordinal)
+            ?? new HashSet<string>(StringComparer.Ordinal);
+        var groupIds = new HashSet<string>(StringComparer.Ordinal);
+        var createdIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var change in changes)
+        {
+            if (change.ExpectedBefore is null || change.ExpectedAfter is null
+                || change.ExpectedBefore.Group is null || change.ExpectedAfter.Group is null
+                || change.ExpectedBefore.Kind != NativeRouteGroupKind.NrgkOrdinary
+                || change.ExpectedAfter.Kind != NativeRouteGroupKind.NrgkOrdinary
+                || change.ExpectedBefore.ParentGroupId is not null || change.ExpectedAfter.ParentGroupId is not null)
+                throw Invalid("Grouped route changes support only direct ordinary PCB groups.");
+            var before = change.ExpectedBefore.Group;
+            var after = change.ExpectedAfter.Group;
+            if (!Kiid(before.Id) || !Kiid(after.Id) || before.Id.Value != after.Id.Value
+                || !groupIds.Add(before.Id.Value) || before.LibId is not null || after.LibId is not null)
+                throw Invalid("Grouped route changes require distinct ordinary groups with stable identities.");
+            if (!GroupMetadataEqual(before, after))
+                throw Invalid("Grouped route changes may change direct members only; group metadata must remain exact.");
+            var beforeMembers = before.Items.Select(RouteId).ToArray();
+            var afterMembers = after.Items.Select(RouteId).ToArray();
+            if (beforeMembers.Any(string.IsNullOrEmpty) || afterMembers.Any(string.IsNullOrEmpty)
+                || beforeMembers.Distinct(StringComparer.Ordinal).Count() != beforeMembers.Length
+                || afterMembers.Distinct(StringComparer.Ordinal).Count() != afterMembers.Length)
+                throw Invalid("Grouped route membership must contain distinct canonical item identities.");
+            foreach (var source in change.CreatedSources)
+            {
+                if (!Kiid(source.CreatedItemId) || !Kiid(source.SourceItemId) || !Kiid(source.SourceGroupId)
+                    || source.SourceGroupId.Value != before.Id.Value
+                    || !createdIds.Add(source.CreatedItemId.Value)
+                    || !candidateIds.Contains(source.CreatedItemId.Value)
+                    || !afterMembers.Contains(source.CreatedItemId.Value, StringComparer.Ordinal)
+                    || (!removedIds.Contains(source.SourceItemId.Value) && !updateIds.Contains(source.SourceItemId.Value)))
+                    throw Invalid("Every grouped route child must identify one requested source and ordinary source group.");
+            }
+        }
+    }
+
+    private static bool GroupMetadataEqual(Group left, Group right)
+    {
+        left = left.Clone(); right = right.Clone();
+        left.Items.Clear(); right.Items.Clear();
+        return left.Equals(right);
+    }
+
+    private static string RouteId(KIID id) => id?.Value ?? string.Empty;
 
     private static bool RouteItemEqual(Any expected, Any actual)
     {

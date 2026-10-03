@@ -23,6 +23,7 @@ message CheckedPcbRouteCommit {
   // IDs are disjoint from both candidate and replacement_updates; all three
   // requests are applied inside the same native undo transaction.
   kiapi.common.commands.DeleteItems removals = 7;
+  repeated NativeRouteGroupChange group_changes = 8;
 }
 
 message ReadCheckedPcbRouteReceipt {
@@ -57,4 +58,6 @@ message CheckedPcbRouteReceipt {
   kiapi.common.commands.UpdateItemsResponse updated_result = 13;
   kiapi.common.commands.DeleteItems removals = 14;
   kiapi.common.commands.DeleteItemsResponse removed_result = 15;
+  repeated NativeRouteGroupChange group_changes = 16;
+  repeated NativeRouteGroupState after_group_states = 17;
 }

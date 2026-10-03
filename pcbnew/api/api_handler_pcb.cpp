@@ -67,6 +67,7 @@
 #include <pcb_edit_frame.h>
 #include <pgm_base.h>
 #include <pcb_group.h>
+#include <pcb_generator.h>
 #include <pcb_reference_image.h>
 #include <pcb_shape.h>
 #include <pcb_text.h>
@@ -596,6 +597,7 @@ struct API_HANDLER_PCB::ROUTE_PREVIEW_SESSION
     bool terminal = false;
     bool cancelled = false;
     uint32_t waypointCount = 0;
+    uint32_t maximumCompleteDeltaVersion = 1;
 };
 
 
@@ -989,6 +991,7 @@ HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleRea
     base.set_job_id( aCtx.Request.job_id() );
     base.set_process_epoch( aCtx.Request.process_epoch() );
     base.mutable_expected_candidate_items()->CopyFrom( aCtx.Request.expected_candidate_items() );
+    base.mutable_expected_group_changes()->CopyFrom( aCtx.Request.expected_group_changes() );
     auto read = m_drcJobs.Read( base, *board(), apiServer().Token(),
             [this]( const auto& document ) { return observeDrcSchematic( document ); },
             [this]( BOARD& source ) { return observeDrcLibraries( source ); }, true );
@@ -1089,7 +1092,7 @@ bool RoutePreviewRevisionMatches( const BOARD& aBoard,
 
 
 static HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> ExtractRoutePreviewGeometry(
-        const std::string& operationId, PNS_KICAD_IFACE* iface,
+        const std::string& operationId, PNS_KICAD_IFACE* iface, uint32_t maximumVersion,
         const std::vector<std::unique_ptr<PNS::ITEM>>& removedSnapshot,
         const std::vector<std::unique_ptr<PNS::ITEM>>& addedSnapshot,
         kiapi::automation::v1::PcbRoutePreviewState response )
@@ -1099,8 +1102,58 @@ static HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> ExtractRouteP
             -> HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState>
     {
         response.clear_route_items(); response.clear_replacement_updates(); response.clear_removed_item_ids();
+        response.clear_group_changes();
         response.set_completed( false ); response.set_error_code( code ); response.set_error_message( message );
         return response;
+    };
+    if( maximumVersion == 0 ) maximumVersion = 1;
+    if( maximumVersion > 2 )
+        return reject( "route_delta_version_unsupported", "The requested complete route-delta version is unsupported" );
+    std::map<std::string, kiapi::automation::v1::NativeRouteGroupChange> groupChanges;
+    auto canonicalGroup = []( const kiapi::board::types::Group& source )
+    {
+        kiapi::board::types::Group result = source;
+        std::vector<std::string> ids;
+        for( const auto& id : result.items() ) ids.push_back( id.value() );
+        std::sort( ids.begin(), ids.end() );
+        result.clear_items();
+        for( const std::string& id : ids ) result.add_items()->set_value( id );
+        return result;
+    };
+    auto ensureGroup = [&]( BOARD_ITEM* source ) -> kiapi::automation::v1::NativeRouteGroupChange*
+    {
+        EDA_GROUP* parent = source ? source->GetParentGroup() : nullptr;
+        auto* group = dynamic_cast<PCB_GROUP*>( parent );
+        if( !group || group->Type() == PCB_GENERATOR_T || group->GetParentGroup()
+            || group->GetParentFootprint() || group->GetParent() != iface->GetBoard()
+            || group->HasDesignBlockLink() || group->IsLocked() )
+            return nullptr;
+        google::protobuf::Any encoded;
+        group->Serialize( encoded );
+        kiapi::board::types::Group nativeGroup;
+        if( !encoded.UnpackTo( &nativeGroup ) ) return nullptr;
+        const std::string id = nativeGroup.id().value();
+        if( id.empty() || !KIID::SniffTest( wxString::FromUTF8( id ) ) ) return nullptr;
+        auto [it, inserted] = groupChanges.try_emplace( id );
+        auto* change = &it->second;
+        if( inserted )
+        {
+            auto canonical = canonicalGroup( nativeGroup );
+            change->mutable_expected_before()->mutable_group()->CopyFrom( canonical );
+            change->mutable_expected_before()->set_kind( kiapi::automation::v1::NRGK_ORDINARY );
+            change->mutable_expected_after()->CopyFrom( change->expected_before() );
+        }
+        return change;
+    };
+    auto removeGroupMember = [&]( kiapi::automation::v1::NativeRouteGroupChange& change,
+                                  const std::string& id )
+    {
+        auto* group = change.mutable_expected_after()->mutable_group();
+        std::vector<std::string> members;
+        for( const auto& member : group->items() )
+            if( member.value() != id ) members.push_back( member.value() );
+        group->clear_items();
+        for( const std::string& member : members ) group->add_items()->set_value( member );
     };
     std::vector<PNS::ITEM*> removed, added, deleted, created, updated;
     auto auxiliary = []( PNS::ITEM* item )
@@ -1116,6 +1169,14 @@ static HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> ExtractRouteP
         if( parent->m_Uuid == niluuid || !parent->IsType( { PCB_TRACE_T, PCB_ARC_T, PCB_VIA_T } ) )
             return reject( "route_delta_removed_geometry_unsupported", "The complete native route delta removes unsupported board geometry" );
         displacedIds.insert( parent->m_Uuid.AsStdString() );
+        if( parent->GetParentGroup() )
+        {
+            auto* change = ensureGroup( parent );
+            if( !change )
+                return reject( "route_delta_group_membership_unsupported",
+                               "The route delta touches a group whose ownership cannot be preserved" );
+            removeGroupMember( *change, parent->m_Uuid.AsStdString() );
+        }
         removed.push_back( item.get() );
     }
     for( const auto& item : addedSnapshot )
@@ -1171,26 +1232,32 @@ static HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> ExtractRouteP
     // Canonical geometry order makes the operation-derived create identities
     // stable. The retained response is reused by session reads and never
     // reconstructs IDs from a volatile leader or an unordered NODE index.
-    std::vector<std::pair<std::string, google::protobuf::Any>> creates;
+    struct PENDING_CREATE
+    {
+        std::string key;
+        google::protobuf::Any value;
+        BOARD_ITEM* source = nullptr;
+    };
+    std::vector<PENDING_CREATE> creates;
     for( PNS::ITEM* item : created )
     {
         BOARD_ITEM* source = item->Parent() ? item->Parent() : item->GetSourceItem();
-        if( source && source->GetParentGroup() )
+        if( source && source->GetParentGroup() && !ensureGroup( source ) )
             return reject( "route_delta_group_membership_unsupported",
-                           "The route delta creates grouped-source copper whose membership cannot yet be preserved" );
+                           "The route delta creates grouped-source copper whose ownership cannot be preserved" );
         auto value = geometry( item, false );
         if( !value )
             return reject( "route_delta_added_geometry_unsupported", "The complete native route delta contains unsupported added or unassigned geometry" );
         value->SetUuidDirect( niluuid );
         google::protobuf::Any serialized;
         value->Serialize( serialized );
-        creates.emplace_back( serialized.SerializeAsString(), std::move( serialized ) );
+        creates.push_back( { serialized.SerializeAsString(), std::move( serialized ), source } );
     }
-    std::sort( creates.begin(), creates.end(), []( const auto& a, const auto& b ) { return a.first < b.first; } );
+    std::sort( creates.begin(), creates.end(), []( const auto& a, const auto& b ) { return a.key < b.key; } );
     for( size_t index = 0; index < creates.size(); ++index )
     {
         const std::string id = KIID::FromName( operationId + "-preview-create-" + std::to_string( index ) ).AsStdString();
-        google::protobuf::Any& value = creates[index].second;
+        google::protobuf::Any& value = creates[index].value;
         if( value.Is<kiapi::board::types::Track>() )
         {
             kiapi::board::types::Track track;
@@ -1207,10 +1274,39 @@ static HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> ExtractRouteP
             value.UnpackTo( &via ); via.mutable_id()->set_value( id ); value.PackFrom( via );
         }
         response.add_route_items()->CopyFrom( value );
+        if( creates[index].source && creates[index].source->GetParentGroup() )
+        {
+            auto* change = ensureGroup( creates[index].source );
+            if( !change )
+                return reject( "route_delta_group_membership_unsupported",
+                               "The route delta creates grouped-source copper whose ownership cannot be preserved" );
+            auto* source = change->add_created_sources();
+            source->mutable_created_item_id()->set_value( id );
+            source->mutable_source_item_id()->set_value( creates[index].source->m_Uuid.AsStdString() );
+            source->mutable_source_group_id()->CopyFrom( change->expected_before().group().id() );
+            auto* after = change->mutable_expected_after()->mutable_group();
+            bool present = std::any_of( after->items().begin(), after->items().end(), [&]( const auto& member )
+            { return member.value() == id; } );
+            if( !present ) after->add_items()->set_value( id );
+        }
     }
     if( creates.empty() && updates.items_size() == 0 && deleted.empty() )
         return reject( "route_delta_empty", "The native router produced no actionable complete delta" );
-    response.set_complete_delta_version( 1 );
+    if( !groupChanges.empty() )
+    {
+        if( maximumVersion < 2 )
+            return reject( "route_delta_group_membership_unsupported",
+                           "Grouped route deltas require complete route-delta version 2" );
+        for( auto& [unused, change] : groupChanges )
+        {
+            auto* after = change.mutable_expected_after()->mutable_group();
+            *after = canonicalGroup( *after );
+            response.add_group_changes()->CopyFrom( change );
+        }
+        response.set_complete_delta_version( 2 );
+    }
+    else
+        response.set_complete_delta_version( 1 );
     return response;
 }
 
@@ -1268,6 +1364,10 @@ HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> API_HANDLER_PCB::han
         session->document.CopyFrom( request.document() );
         session->expectedRevision.CopyFrom( request.expected_revision() );
         session->processEpoch = request.process_epoch();
+        session->maximumCompleteDeltaVersion = request.maximum_complete_delta_version() == 0
+                ? 1 : request.maximum_complete_delta_version();
+        if( session->maximumCompleteDeltaVersion > 2 )
+            return tl::unexpected( RoutePreviewError( "The requested complete route-delta version is unsupported" ) );
         session->manager = std::make_unique<TOOL_MANAGER>();
         session->manager->SetEnvironment( target, nullptr, nullptr, nullptr, nullptr );
         auto snapshot = std::make_unique<PNS::ROUTING_SETTINGS>( nullptr,
@@ -1380,7 +1480,8 @@ HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> API_HANDLER_PCB::han
     response.set_completed( true );
     response.set_preview_only( true );
     response.set_native_commit( false );
-    auto extracted = ExtractRoutePreviewGeometry( request.operation_id(), iface, removed, added,
+    auto extracted = ExtractRoutePreviewGeometry( request.operation_id(), iface,
+                                                  request.maximum_complete_delta_version(), removed, added,
                                                   std::move( response ) );
     router->StopRouting();
     if( !extracted ) return tl::unexpected( extracted.error() );
@@ -1467,7 +1568,8 @@ HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> API_HANDLER_PCB::adv
     response.set_completed( true );
     response.set_preview_only( true );
     response.set_native_commit( false );
-    auto extracted = ExtractRoutePreviewGeometry( session.operationId, iface, removed, added,
+    auto extracted = ExtractRoutePreviewGeometry( session.operationId, iface,
+                                                  session.maximumCompleteDeltaVersion, removed, added,
                                                   std::move( response ) );
     if( !extracted )
     {

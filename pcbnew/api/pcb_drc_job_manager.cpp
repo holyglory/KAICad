@@ -119,6 +119,9 @@ struct PCB_DRC_JOB_MANAGER::JOB
     std::string auxiliaryFingerprint;
     bool hasLibraryDependencies = false;
     bool candidateDryRun = false;
+    bool groupPayloadVerified = false;
+    google::protobuf::RepeatedPtrField<NativeRouteGroupChange> verifiedGroupChanges;
+    std::vector<NativeRouteGroupState> afterGroupStates;
     std::vector<KIID> candidateItemIds;
     std::vector<std::string> inputWarnings;
     // Inputs the check did not capture exactly (PCB_DRC_RUN_INPUTS::Gaps), and findings
@@ -981,6 +984,9 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::state(
     result.set_worker_finished( aJob->workerFinished );
 
     result.set_candidate_dry_run( aJob->candidateDryRun );
+    result.set_group_payload_verified( aJob->groupPayloadVerified );
+    result.mutable_verified_group_changes()->CopyFrom( aJob->verifiedGroupChanges );
+    result.mutable_after_group_states()->Assign( aJob->afterGroupStates.begin(), aJob->afterGroupStates.end() );
     for( const KIID& identity : aJob->candidateItemIds )
         result.add_candidate_item_ids( identity.AsStdString() );
     if( aJob->testFootprints ) result.mutable_checked_schematic_state()->CopyFrom( aJob->schematicState );
@@ -1081,6 +1087,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
     std::unique_ptr<INPUT_WATCHER> watch;
     std::unique_ptr<PCB_DRC_RUN_INPUTS> inputs;
     std::vector<KIID> candidateItemIds;
+    std::vector<NativeRouteGroupState> afterGroupStates;
     try
     {
         // Subscribe before capture so no change falls between the snapshot and
@@ -1088,13 +1095,22 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
         watch = watchInputs( aBoard, aCaptureContext );
         inputs = PCB_DRC_RUN_INPUTS::Capture( aBoard, aCaptureContext );
         if( !inputs ) return tl::unexpected( "Native DRC input capture was cancelled" );
-        if( aRequest.candidate_items_size() > 0 || aRequest.delete_item_ids_size() > 0 )
+        if( aRequest.group_changes_size() > 0 )
+        {
+            auto groups = inputs->ValidateRouteGroupChanges( aRequest.group_changes() );
+            if( !groups ) return tl::unexpected( groups.error() );
+        }
+        if( aRequest.candidate_items_size() > 0 || aRequest.delete_item_ids_size() > 0
+            || aRequest.group_changes_size() > 0 )
         {
             auto removed = inputs->RemoveRouteItems( aRequest.delete_item_ids() );
             if( !removed ) return tl::unexpected( removed.error() );
             auto added = inputs->AddCandidateItems( aRequest.candidate_items() );
             if( !added ) return tl::unexpected( added.error() );
             candidateItemIds = std::move( *added );
+            auto appliedGroups = inputs->ApplyRouteGroupChanges( aRequest.group_changes() );
+            if( !appliedGroups ) return tl::unexpected( appliedGroups.error() );
+            afterGroupStates = std::move( *appliedGroups );
         }
         if( aRequest.test_footprints() )
             inputs->SetSchematicInput( PCB_DRC_SCHEMATIC_INPUT::Capture( *aCaptureContext.schematic,
@@ -1123,8 +1139,12 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
     job->auxiliaryFingerprint = inputs->AuxiliaryBaseline().Fingerprint();
     job->hasLibraryDependencies = inputs->HasLibraryDependencies();
     job->incomplete = inputs->Gaps();
-    job->candidateDryRun = aRequest.candidate_items_size() > 0 || aRequest.delete_item_ids_size() > 0;
+    job->candidateDryRun = aRequest.candidate_items_size() > 0 || aRequest.delete_item_ids_size() > 0
+                           || aRequest.group_changes_size() > 0;
     job->candidateItemIds = std::move( candidateItemIds );
+    job->groupPayloadVerified = aRequest.group_changes_size() > 0;
+    job->verifiedGroupChanges.CopyFrom( aRequest.group_changes() );
+    job->afterGroupStates = std::move( afterGroupStates );
     if( job->testFootprints )
     {
         job->schematicState = aCaptureContext.schematic->source_state();
@@ -1304,6 +1324,7 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Read(
         return tl::unexpected( "The native process epoch changed; reattach before reading this DRC job" );
     if( !SameDocument( job->document, aRequest.document() ) ) return tl::unexpected( "PCB DRC job target mismatch" );
     const bool verifyCandidate = aVerifyCandidate || aRequest.expected_candidate_items_size() > 0;
+    const bool verifyGroups = aRequest.expected_group_changes_size() > 0;
     if( verifyCandidate )
     {
         // request is immutable once the job is published. Compare the complete
@@ -1317,8 +1338,18 @@ tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Read(
                 return tl::unexpected( "PCB DRC candidate payload mismatch" );
         }
     }
+    if( verifyGroups )
+    {
+        if( aRequest.expected_group_changes_size() != job->request.group_changes_size() )
+            return tl::unexpected( "PCB DRC grouped-route payload mismatch" );
+        for( int index = 0; index < aRequest.expected_group_changes_size(); ++index )
+            if( !google::protobuf::util::MessageDifferencer::Equals(
+                    aRequest.expected_group_changes( index ), job->request.group_changes( index ) ) )
+                return tl::unexpected( "PCB DRC grouped-route payload mismatch" );
+    }
     auto result = state( job, aBoard, aProcessEpoch, aObserveSchematic, aObserveLibraries );
-    if( result ) result->set_candidate_payload_verified( verifyCandidate );
+    if( result ) result->set_candidate_payload_verified( verifyCandidate
+        && ( job->request.group_changes_size() == 0 || verifyGroups ) );
     return result;
 }
 

@@ -34,6 +34,8 @@
 #include <pcb_barcode.h>
 #include <pcb_field.h>
 #include <pcb_tablecell.h>
+#include <pcb_group.h>
+#include <pcb_generator.h>
 #include <pgm_base.h>
 #include <string_utils.h>
 #include <title_block.h>
@@ -41,6 +43,7 @@
 #include <pcb_marker.h>
 #include <zone.h>
 #include <fmt/format.h>
+#include <google/protobuf/util/message_differencer.h>
 #include <algorithm>
 #include <functional>
 #include <map>
@@ -954,6 +957,132 @@ tl::expected<void, std::string> PCB_DRC_RUN_INPUTS::RemoveRouteItems(
         source.Remove( item );
     }
     return {};
+}
+
+namespace
+{
+kiapi::board::types::Group CanonicalRouteGroup( const kiapi::board::types::Group& source )
+{
+    kiapi::board::types::Group result = source;
+    std::vector<std::string> ids;
+    for( const auto& id : result.items() ) ids.push_back( id.value() );
+    std::sort( ids.begin(), ids.end() );
+    result.clear_items();
+    for( const std::string& id : ids ) result.add_items()->set_value( id );
+    return result;
+}
+
+bool RouteGroupMetadataEqual( const kiapi::board::types::Group& left,
+                              const kiapi::board::types::Group& right )
+{
+    auto a = left;
+    auto b = right;
+    a.clear_items();
+    b.clear_items();
+    return google::protobuf::util::MessageDifferencer::Equals( a, b );
+}
+
+bool RouteGroupMembersValid( const kiapi::board::types::Group& group )
+{
+    std::set<std::string> ids;
+    for( const auto& id : group.items() )
+        if( id.value().empty() || KIID( id.value() ) == niluuid || !ids.insert( id.value() ).second ) return false;
+    return true;
+}
+}
+
+tl::expected<void, std::string> PCB_DRC_RUN_INPUTS::ValidateRouteGroupChanges(
+        const google::protobuf::RepeatedPtrField<kiapi::automation::v1::NativeRouteGroupChange>& aChanges ) const
+{
+    if( aChanges.empty() ) return {};
+    BOARD& board = GetBoard();
+    std::set<KIID> groups;
+    for( const auto& change : aChanges )
+    {
+        if( !change.has_expected_before() || !change.has_expected_after()
+            || !change.expected_before().has_group() || !change.expected_after().has_group()
+            || change.expected_before().kind() != kiapi::automation::v1::NRGK_ORDINARY
+            || change.expected_after().kind() != kiapi::automation::v1::NRGK_ORDINARY
+            || change.expected_before().has_parent_group_id()
+            || change.expected_after().has_parent_group_id() )
+            return tl::unexpected( "DRC grouped routes support only direct ordinary PCB groups" );
+        const auto& before = change.expected_before().group();
+        const auto& after = change.expected_after().group();
+        KIID id( before.id().value() );
+        if( id == niluuid || KIID( after.id().value() ) != id || !groups.insert( id ).second
+            || !RouteGroupMembersValid( before ) || !RouteGroupMembersValid( after )
+            || !RouteGroupMetadataEqual( before, after ) || before.has_lib_id() || after.has_lib_id() )
+            return tl::unexpected( "DRC grouped route state has invalid or changing group metadata" );
+        BOARD_ITEM* boardItem = board.ResolveItem( id, true );
+        auto* group = dynamic_cast<PCB_GROUP*>( boardItem );
+        if( !group || boardItem->Type() == PCB_GENERATOR_T || group->GetParentGroup()
+            || group->GetParentFootprint() || group->GetParent() != &board
+            || group->HasDesignBlockLink() || group->IsLocked() )
+            return tl::unexpected( "DRC grouped routes require an existing direct ordinary unlocked board group" );
+        google::protobuf::Any encoded;
+        group->Serialize( encoded );
+        kiapi::board::types::Group actual;
+        if( !encoded.UnpackTo( &actual )
+            || !google::protobuf::util::MessageDifferencer::Equals( CanonicalRouteGroup( actual ),
+                                                                     CanonicalRouteGroup( before ) ) )
+            return tl::unexpected( "DRC grouped route before-state does not match the detached board" );
+        for( const auto& source : change.created_sources() )
+        {
+            if( KIID( source.created_item_id().value() ) == niluuid
+                || KIID( source.source_item_id().value() ) == niluuid
+                || KIID( source.source_group_id().value() ) != id )
+                return tl::unexpected( "DRC grouped route child source identity is invalid" );
+        }
+    }
+    return {};
+}
+
+tl::expected<std::vector<kiapi::automation::v1::NativeRouteGroupState>, std::string>
+PCB_DRC_RUN_INPUTS::ApplyRouteGroupChanges(
+        const google::protobuf::RepeatedPtrField<kiapi::automation::v1::NativeRouteGroupChange>& aChanges )
+{
+    std::vector<kiapi::automation::v1::NativeRouteGroupState> result;
+    if( aChanges.empty() ) return result;
+    BOARD& board = GetBoard();
+    std::vector<std::pair<PCB_GROUP*, const kiapi::automation::v1::NativeRouteGroupChange*>> groups;
+    for( const auto& change : aChanges )
+    {
+        const auto& expected = change.expected_after();
+        BOARD_ITEM* boardItem = board.ResolveItem( KIID( expected.group().id().value() ), true );
+        auto* group = dynamic_cast<PCB_GROUP*>( boardItem );
+        if( !group || boardItem->Type() == PCB_GENERATOR_T || group->GetParentGroup()
+            || group->GetParentFootprint() || group->GetParent() != &board
+            || group->HasDesignBlockLink() || group->IsLocked() )
+            return tl::unexpected( "DRC grouped route after-state targets unsupported group ownership" );
+        for( const auto& member : expected.group().items() )
+        {
+            BOARD_ITEM* item = board.ResolveItem( KIID( member.value() ), true );
+            if( !item || ( item->GetParentGroup() && item->GetParentGroup() != group ) )
+                return tl::unexpected( "DRC grouped route after-state names missing or multiply-owned items" );
+        }
+        groups.emplace_back( group, &change );
+    }
+    for( const auto& [group, unused] : groups )
+    {
+        std::vector<EDA_ITEM*> current( group->GetItems().begin(), group->GetItems().end() );
+        for( EDA_ITEM* item : current ) group->RemoveItem( item );
+    }
+    for( const auto& [group, change] : groups )
+    {
+        for( const auto& member : change->expected_after().group().items() )
+            group->AddItem( board.ResolveItem( KIID( member.value() ), true ) );
+        google::protobuf::Any encoded;
+        group->Serialize( encoded );
+        kiapi::board::types::Group actual;
+        if( !encoded.UnpackTo( &actual )
+            || !google::protobuf::util::MessageDifferencer::Equals(
+                    CanonicalRouteGroup( actual ), CanonicalRouteGroup( change->expected_after().group() ) ) )
+            return tl::unexpected( "DRC grouped route after-state readback mismatch" );
+        auto& state = result.emplace_back();
+        state.CopyFrom( change->expected_after() );
+        state.mutable_group()->CopyFrom( CanonicalRouteGroup( actual ) );
+    }
+    return result;
 }
 
 std::vector<PCB_DRC_INPUT_GAP> PCB_DRC_RUN_INPUTS::Gaps() const

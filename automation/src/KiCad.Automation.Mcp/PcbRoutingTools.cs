@@ -25,6 +25,7 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
         CancellationToken cancellationToken) => Execute(async () =>
     {
         var request = SchematicJson.Parser.Parse<StartPcbRoutePreview>(requestJson);
+        if (request.MaximumCompleteDeltaVersion == 0) request.MaximumCompleteDeltaVersion = 2;
         if (request.Document is null || request.Document.Type != DocumentType.DoctypePcb
             || request.ExpectedRevision is null || string.IsNullOrWhiteSpace(request.ProcessEpoch))
             throw new AutomationException("invalid_route_preview", "Supply an explicit PCB, process epoch and expected revision.");
@@ -54,6 +55,7 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
             drcCandidateRequestJson = BoardJson.Formatter.Format(DrcCandidate(candidate, result)),
             drcDeleteRequestJson = DrcDeletes(request.Document, result),
             replacementUpdatesJson = ReplacementUpdatesJson(result),
+            groupChangesJson = GroupChangesJson(result),
             replacementUpdatesUnavailable = ReplacementUpdatesUnavailable(result),
             removedItemIds = result.RemovedItemIds.Select(item => item.Value).ToArray(),
             beforeState = SchematicJson.Formatter.Format(expected), afterState = SchematicJson.Formatter.Format(after),
@@ -102,6 +104,7 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
             drcCandidateRequestJson = BoardJson.Formatter.Format(DrcCandidate(candidate, result)),
             drcDeleteRequestJson = DrcDeletes(request.Document, result),
             replacementUpdatesJson = ReplacementUpdatesJson(result),
+            groupChangesJson = GroupChangesJson(result),
             replacementUpdatesUnavailable = ReplacementUpdatesUnavailable(result),
             removedItemIds = result.RemovedItemIds.Select(item => item.Value).ToArray(),
             beforeState = SchematicJson.Formatter.Format(expected), afterState = SchematicJson.Formatter.Format(after),
@@ -148,10 +151,10 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
             || result.ProcessEpoch != request.ProcessEpoch || result.OperationId != request.OperationId)
             throw new AutomationException("invalid_route_preview_read", "Native preview inspection returned another session or a non-preview state.");
         bool actionable = result.Completed && result.ErrorCode.Length == 0 && !result.Cancelled && !result.Reconciled
-            && CheckedPcbRouteContract.HasPreviewDelta(result) && result.CompleteDeltaVersion == 1;
+            && CheckedPcbRouteContract.HasPreviewDelta(result) && (result.CompleteDeltaVersion is 1 or 2);
         if (!actionable && CheckedPcbRouteContract.HasPreviewDelta(result))
         {
-            result = result.Clone(); result.RouteItems.Clear(); result.RemovedItemIds.Clear(); result.ReplacementUpdates = null;
+            result = result.Clone(); result.RouteItems.Clear(); result.RemovedItemIds.Clear(); result.ReplacementUpdates = null; result.GroupChanges.Clear();
             if (result.ErrorCode.Length == 0)
             {
                 result.ErrorCode = "route_preview_contract_unsupported";
@@ -170,6 +173,7 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
             drcCandidateRequestJson = actionable ? BoardJson.Formatter.Format(DrcCandidate(candidate, result)) : null,
             drcDeleteRequestJson = actionable ? DrcDeletes(request.Document, result) : null,
             replacementUpdatesJson = ReplacementUpdatesJson(result),
+            groupChangesJson = GroupChangesJson(result),
             replacementUpdatesUnavailable = ReplacementUpdatesUnavailable(result),
             removedItemIds = result.RemovedItemIds.Select(item => item.Value).ToArray(),
             sessionActive = result.SessionActive, reconciled = result.Reconciled, cancelled = result.Cancelled,
@@ -269,7 +273,7 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public async Task<CallToolResult> Commit(string instanceId, string requestJson, string expectedStateJson,
      string drcJobStateJson, string operationId, string replacementUpdatesJson = "", string removalsJson = "",
-     CancellationToken cancellationToken = default)
+     string groupChangesJson = "", CancellationToken cancellationToken = default)
     {
         try
         {
@@ -281,6 +285,7 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
                 ? null : BoardJson.Parser.Parse<UpdateItems>(replacementUpdatesJson);
             DeleteItems? removals = string.IsNullOrWhiteSpace(removalsJson)
                 ? null : BoardJson.Parser.Parse<DeleteItems>(removalsJson);
+            var groupChanges = ParseGroupChanges(groupChangesJson);
             if (!Guid.TryParseExact(operationId, "D", out var op) || op == Guid.Empty)
                 throw new AutomationException("invalid_route_operation", "Route commit requires a canonical operation UUID.");
             if (request.Header?.Document is null || expected.Document is null || expected.Scope != DocumentLifecycleScope.DlsPcb
@@ -306,6 +311,7 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
                 ReplacementUpdates = replacementUpdates,
                 Removals = removals
             };
+            checkedRequest.GroupChanges.Add(groupChanges);
             // Reject malformed geometry before contacting the native editor.  The
             // native checked controller repeats this admission check, but doing it
             // here gives callers a deterministic typed error and avoids spending a
@@ -414,7 +420,7 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
         if (!result.Completed || result.ErrorCode.Length != 0)
             throw new AutomationException(result.ErrorCode.Length == 0 ? "route_preview_failed" : result.ErrorCode,
                 result.ErrorMessage.Length == 0 ? "The native routing preview did not complete." : result.ErrorMessage);
-        if (result.CompleteDeltaVersion != 1 && cleanupUnsupportedSession)
+        if (result.CompleteDeltaVersion is not (1 or 2) && cleanupUnsupportedSession)
         {
             try
             {
@@ -434,6 +440,28 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
         if (result.Document is null || !result.Document.Equals(document) || result.OperationId != operationId || result.ProcessEpoch != processEpoch)
             throw new AutomationException("invalid_route_preview", "Native routing returned a delta for another session or document.");
         CheckedPcbRouteContract.ValidatePreview(result);
+    }
+
+    private static string? GroupChangesJson(PcbRoutePreviewState result)
+    {
+        if (result.GroupChanges.Count == 0) return null;
+        return "[" + string.Join(",", result.GroupChanges.Select(change => SchematicJson.Formatter.Format(change))) + "]";
+    }
+
+    private static List<NativeRouteGroupChange> ParseGroupChanges(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return [];
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind != JsonValueKind.Array)
+                throw new InvalidOperationException("groupChangesJson must be a JSON array.");
+            return document.RootElement.EnumerateArray()
+                .Select(element => SchematicJson.Parser.Parse<NativeRouteGroupChange>(element.GetRawText())).ToList();
+        }
+        catch (Exception error) when (error is JsonException or InvalidProtocolBufferException
+            or InvalidJsonException or InvalidOperationException)
+        { throw new AutomationException("invalid_route_group_changes", "groupChangesJson is not a valid typed grouped-route payload: " + error.Message); }
     }
 
     private static string? ReplacementUpdatesJson(PcbRoutePreviewState result)

@@ -36,6 +36,7 @@
 #include <pcb_base_edit_frame.h>
 #include <pcb_field.h>
 #include <pcb_group.h>
+#include <pcb_generator.h>
 #include <pcb_track.h>
 #include <pcb_table.h>
 #include <pcb_tablecell.h>
@@ -476,6 +477,24 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_BOARD::handleCreateUpdateItemsInte
         else
         {
             BOARD_ITEM* boardItem = *optItem;
+
+            // Checked route group changes are limited to direct, ordinary,
+            // unlocked board groups. Generator-owned, nested, footprint and
+            // design-block groups have ownership semantics that this generic
+            // UpdateItems transaction cannot preserve.
+            if( anyItem.Is<board::types::Group>() )
+            {
+                auto* group = dynamic_cast<PCB_GROUP*>( boardItem );
+                if( !group || boardItem->Type() == PCB_GENERATOR_T || group->GetParentGroup()
+                    || group->GetParentFootprint() || group->GetParent() != board
+                    || group->HasDesignBlockLink() || group->IsLocked() )
+                {
+                    status.set_code( ItemStatusCode::ISC_INVALID_TYPE );
+                    status.set_error_message( "Only direct ordinary unlocked board groups can be updated by checked routing" );
+                    aItemHandler( status, anyItem );
+                    continue;
+                }
+            }
 
             // Footprints can't be modified by CopyFrom at the moment because the commit system
             // doesn't currently know what to do with a footprint that has had its children

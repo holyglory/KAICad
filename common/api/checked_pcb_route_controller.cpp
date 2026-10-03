@@ -190,6 +190,130 @@ bool RouteItemEquivalent( const google::protobuf::Any& expected,
     return false;
 }
 
+bool GroupIdentity( const kiapi::board::types::Group& group )
+{
+    return Uuid( group.id().value() );
+}
+
+kiapi::board::types::Group CanonicalGroup( const kiapi::board::types::Group& source )
+{
+    kiapi::board::types::Group result = source;
+    std::vector<std::string> ids;
+    for( const auto& id : result.items() ) ids.push_back( id.value() );
+    std::sort( ids.begin(), ids.end() );
+    result.clear_items();
+    for( const std::string& id : ids ) result.add_items()->set_value( id );
+    return result;
+}
+
+bool GroupMetadataEquivalent( const kiapi::board::types::Group& left,
+                              const kiapi::board::types::Group& right )
+{
+    kiapi::board::types::Group a = left;
+    kiapi::board::types::Group b = right;
+    a.clear_items();
+    b.clear_items();
+    return MessageDifferencer::Equals( a, b );
+}
+
+bool GroupMembersValid( const kiapi::board::types::Group& group )
+{
+    std::set<std::string> ids;
+    for( const auto& id : group.items() )
+        if( !Uuid( id.value() ) || !ids.insert( id.value() ).second ) return false;
+    return true;
+}
+
+bool GroupChangeValid( const NativeRouteGroupChange& change,
+                       const std::set<std::string>& candidateIds,
+                       const std::set<std::string>& updateIds,
+                       const std::set<std::string>& removedIds )
+{
+    if( !change.has_expected_before() || !change.has_expected_after()
+        || !change.expected_before().has_group() || !change.expected_after().has_group()
+        || change.expected_before().kind() != NRGK_ORDINARY
+        || change.expected_after().kind() != NRGK_ORDINARY
+        || change.expected_before().has_parent_group_id()
+        || change.expected_after().has_parent_group_id() )
+        return false;
+    const auto& before = change.expected_before().group();
+    const auto& after = change.expected_after().group();
+    if( !GroupIdentity( before ) || !GroupIdentity( after )
+        || before.id().value() != after.id().value()
+        || !GroupMetadataEquivalent( before, after )
+        || !GroupMembersValid( before ) || !GroupMembersValid( after ) )
+        return false;
+    std::set<std::string> created;
+    for( const auto& source : change.created_sources() )
+    {
+        if( !Uuid( source.created_item_id().value() ) || !Uuid( source.source_item_id().value() )
+            || !Uuid( source.source_group_id().value() )
+            || source.source_group_id().value() != before.id().value()
+            || !candidateIds.contains( source.created_item_id().value() )
+            || !std::any_of( after.items().begin(), after.items().end(), [&]( const auto& id )
+            { return id.value() == source.created_item_id().value(); } )
+            || !created.insert( source.created_item_id().value() ).second
+            || ( !removedIds.contains( source.source_item_id().value() )
+                 && !updateIds.contains( source.source_item_id().value() ) ) )
+            return false;
+    }
+    return true;
+}
+
+bool GroupChangesEquivalent( const google::protobuf::RepeatedPtrField<NativeRouteGroupChange>& left,
+                              const google::protobuf::RepeatedPtrField<NativeRouteGroupChange>& right )
+{
+    if( left.size() != right.size() ) return false;
+    for( int index = 0; index < left.size(); ++index )
+        if( !MessageDifferencer::Equals( left.Get( index ), right.Get( index ) ) ) return false;
+    return true;
+}
+
+bool GroupChangesValid( const CheckedPcbRouteCommit& request )
+{
+    std::set<std::string> candidateIds, updateIds, removedIds, groupIds;
+    for( const auto& item : request.candidate().items() ) candidateIds.insert( RouteItemId( item ) );
+    for( const auto& item : request.replacement_updates().items() ) updateIds.insert( RouteItemId( item ) );
+    for( const auto& id : request.removals().item_ids() ) removedIds.insert( id.value() );
+    for( const auto& change : request.group_changes() )
+    {
+        if( !GroupChangeValid( change, candidateIds, updateIds, removedIds )
+            || !groupIds.insert( change.expected_before().group().id().value() ).second )
+            return false;
+    }
+    return true;
+}
+
+google::protobuf::Any PackGroup( const kiapi::board::types::Group& group )
+{
+    google::protobuf::Any result;
+    result.PackFrom( group );
+    return result;
+}
+
+kiapi::board::types::Group UnpackGroup( const google::protobuf::Any& value )
+{
+    kiapi::board::types::Group result;
+    if( !value.UnpackTo( &result ) ) result.Clear();
+    return result;
+}
+
+bool GroupResponseExact( const UpdateItemsResponse& response,
+                         const kiapi::common::commands::UpdateItems& request )
+{
+    if( response.status() != IRS_OK || response.updated_items_size() != request.items_size() ) return false;
+    for( int index = 0; index < request.items_size(); ++index )
+    {
+        const auto& item = response.updated_items( index );
+        if( !item.has_status() || item.status().code() != ISC_OK || !item.has_item()
+            || !item.item().Is<kiapi::board::types::Group>() ) return false;
+        if( !MessageDifferencer::Equals( CanonicalGroup( UnpackGroup( item.item() ) ),
+                                         CanonicalGroup( UnpackGroup( request.items( index ) ) ) ) )
+            return false;
+    }
+    return true;
+}
+
 
 bool Valid( const CheckedPcbRouteCommit& request, const std::string& epoch,
             bool requireFileCoverage = true, bool requireCompleteTracking = true )
@@ -249,6 +373,7 @@ bool Valid( const CheckedPcbRouteCommit& request, const std::string& epoch,
                 || createdIds.contains( item.value() ) || updatedIds.contains( item.value() ) ) return false;
     }
 
+    if( !GroupChangesValid( request ) ) return false;
     return true;
 }
 }
@@ -322,6 +447,9 @@ API_RESULT CHECKED_PCB_ROUTE_CONTROLLER::Handle( ApiRequest& envelope, const std
     result.set_state( CheckedPcbRouteReceipt::INDETERMINATE ); result.set_request_verified( true );
     result.set_error_code( "operation_in_progress" ); m_receipts.emplace( request.operation_id(), receipt );
     auto& stored = m_receipts.at( request.operation_id() ).result;
+    stored.mutable_group_changes()->CopyFrom( request.group_changes() );
+    for( const auto& change : request.group_changes() )
+        stored.add_after_group_states()->CopyFrom( change.expected_after() );
 
     auto call = [&]( const google::protobuf::Message& message ) -> API_RESULT
     {
@@ -342,6 +470,43 @@ API_RESULT CHECKED_PCB_ROUTE_CONTROLLER::Handle( ApiRequest& envelope, const std
     if( !beforeReply->message().UnpackTo( &before ) || !MessageDifferencer::Equals( before, request.expected_state() ) )
         return fail( CheckedPcbRouteReceipt::REJECTED, "stale_document_state", "The PCB changed since the checked route state" );
     stored.mutable_before()->CopyFrom( before );
+
+    std::map<std::string, kiapi::board::types::Group> groupReadback;
+    auto readGroups = [&]( bool beforeState ) -> bool
+    {
+        if( request.group_changes_size() == 0 ) return true;
+        GetItemsById groups;
+        groups.mutable_header()->CopyFrom( request.candidate().header() );
+        for( const auto& change : request.group_changes() )
+            groups.add_items()->CopyFrom( change.expected_before().group().id() );
+        auto reply = call( groups );
+        GetItemsResponse response;
+        if( !reply || reply->status().status() != ApiStatusCode::AS_OK
+            || !reply->message().UnpackTo( &response ) || response.status() != IRS_OK
+            || response.items_size() != request.group_changes_size() )
+            return false;
+        std::map<std::string, kiapi::board::types::Group> actual;
+        for( const auto& encoded : response.items() )
+        {
+            if( !encoded.Is<kiapi::board::types::Group>() ) return false;
+            auto group = UnpackGroup( encoded );
+            if( !GroupIdentity( group ) || !actual.emplace( group.id().value(), std::move( group ) ).second )
+                return false;
+        }
+        for( const auto& change : request.group_changes() )
+        {
+            const auto& expected = beforeState ? change.expected_before().group() : change.expected_after().group();
+            auto found = actual.find( expected.id().value() );
+            if( found == actual.end()
+                || !MessageDifferencer::Equals( CanonicalGroup( found->second ), CanonicalGroup( expected ) ) )
+                return false;
+        }
+        if( !beforeState ) groupReadback = std::move( actual );
+        return true;
+    };
+    if( !readGroups( true ) )
+        return fail( CheckedPcbRouteReceipt::REJECTED, "route_group_before_mismatch",
+                     "The checked route group membership does not match the observed board" );
 
     // Explicit removals may never address footprints, graphics or nonexistent
     // objects. Verify every existing target before opening the transaction.
@@ -389,6 +554,7 @@ API_RESULT CHECKED_PCB_ROUTE_CONTROLLER::Handle( ApiRequest& envelope, const std
     }
     for( const auto& id : request.removals().item_ids() )
         replacementRead.add_expected_delete_item_ids()->CopyFrom( id );
+    replacementRead.mutable_expected_group_changes()->CopyFrom( request.group_changes() );
     drcRequestEnvelope.mutable_message()->PackFrom( replacementRead );
     auto drcReply = dispatch( drcRequestEnvelope );
     if( !drcReply || drcReply->status().status() != ApiStatusCode::AS_OK )
@@ -397,8 +563,15 @@ API_RESULT CHECKED_PCB_ROUTE_CONTROLLER::Handle( ApiRequest& envelope, const std
     if( !drcReply->message().UnpackTo( &drc ) || drc.status() != PDRCJS_COMPLETED || !drc.results_fresh()
         || !drc.snapshot_complete() || !drc.candidate_dry_run() || !drc.worker_finished()
         || drc.findings_size() != 0 || !drc.candidate_payload_verified()
+        || ( request.group_changes_size() != 0
+             && ( !drc.group_payload_verified()
+                  || !GroupChangesEquivalent( drc.verified_group_changes(), request.group_changes() )
+                  || drc.after_group_states_size() != request.group_changes_size() ) )
         || !MessageDifferencer::Equals( drc.checked_revision(), before.revision() ) )
         return fail( CheckedPcbRouteReceipt::REJECTED, "route_drc_not_proven", "The retained DRC receipt is not a complete, fresh, finding-free exact candidate check" );
+    for( int index = 0; index < request.group_changes_size(); ++index )
+        if( !MessageDifferencer::Equals( drc.after_group_states( index ), request.group_changes( index ).expected_after() ) )
+            return fail( CheckedPcbRouteReceipt::REJECTED, "route_drc_group_not_proven", "The retained DRC receipt did not prove exact grouped-route after-state" );
 
     BeginCommit begin; begin.mutable_header()->CopyFrom( request.candidate().header() );
     auto beginReply = call( begin );
@@ -413,6 +586,31 @@ API_RESULT CHECKED_PCB_ROUTE_CONTROLLER::Handle( ApiRequest& envelope, const std
         return fail( CheckedPcbRouteReceipt::INDETERMINATE, "commit_begin_result_unknown", "Native commit admission was not parseable; inspect the route receipt" );
     }
     beginId = beginState.id();
+
+    if( request.group_changes_size() > 0 )
+    {
+        // Stage an exact no-op group update first.  BOARD_COMMIT captures the
+        // group image before any route child is removed, so undo can restore
+        // the original direct membership without relying on geometry.
+        UpdateItems prepareGroups;
+        prepareGroups.mutable_header()->CopyFrom( request.candidate().header() );
+        for( const auto& change : request.group_changes() )
+            prepareGroups.add_items()->PackFrom( change.expected_before().group() );
+        auto groupReply = call( prepareGroups );
+        UpdateItemsResponse groups;
+        if( !groupReply || groupReply->status().status() != ApiStatusCode::AS_OK
+            || !groupReply->message().UnpackTo( &groups ) || !GroupResponseExact( groups, prepareGroups ) )
+        {
+            EndCommit drop; drop.mutable_header()->CopyFrom( request.candidate().header() );
+            drop.mutable_id()->CopyFrom( beginState.id() ); drop.set_action( CMA_DROP );
+            auto dropped = call( drop );
+            if( !dropped || dropped->status().status() != ApiStatusCode::AS_OK )
+                return fail( CheckedPcbRouteReceipt::INDETERMINATE, "drop_result_unknown",
+                             "Native PCB rejected the checked route group admission and cleanup was not confirmed" );
+            return fail( CheckedPcbRouteReceipt::REJECTED, "route_group_before_rejected",
+                         "Native PCB did not preserve the exact checked route group before-state" );
+        }
+    }
 
     if( request.has_replacement_updates() )
     {
@@ -524,6 +722,27 @@ API_RESULT CHECKED_PCB_ROUTE_CONTROLLER::Handle( ApiRequest& envelope, const std
             return fail( CheckedPcbRouteReceipt::REJECTED, "route_geometry_mismatch", "Native PCB returned different route geometry or route type; transaction was dropped" );
         }
     }
+    if( request.group_changes_size() > 0 )
+    {
+        UpdateItems applyGroups;
+        applyGroups.mutable_header()->CopyFrom( request.candidate().header() );
+        for( const auto& change : request.group_changes() )
+            applyGroups.add_items()->PackFrom( change.expected_after().group() );
+        auto groupReply = call( applyGroups );
+        UpdateItemsResponse groups;
+        if( !groupReply || groupReply->status().status() != ApiStatusCode::AS_OK
+            || !groupReply->message().UnpackTo( &groups ) || !GroupResponseExact( groups, applyGroups ) )
+        {
+            EndCommit drop; drop.mutable_header()->CopyFrom( request.candidate().header() );
+            drop.mutable_id()->CopyFrom( beginState.id() ); drop.set_action( CMA_DROP );
+            auto dropped = call( drop );
+            if( !dropped || dropped->status().status() != ApiStatusCode::AS_OK )
+                return fail( CheckedPcbRouteReceipt::INDETERMINATE, "drop_result_unknown",
+                             "Native PCB rejected the checked route group after-state and cleanup was not confirmed" );
+            return fail( CheckedPcbRouteReceipt::REJECTED, "route_group_after_rejected",
+                         "Native PCB did not accept the exact checked route group after-state" );
+        }
+    }
     EndCommit commit; commit.mutable_header()->CopyFrom( request.candidate().header() ); commit.mutable_id()->CopyFrom( beginState.id() ); commit.set_action( CMA_COMMIT );
     auto commitReply = call( commit );
     if( !commitReply || commitReply->status().status() != ApiStatusCode::AS_OK ) return fail( CheckedPcbRouteReceipt::INDETERMINATE, "commit_result_unknown", "Native route commit may have been applied; inspect its receipt" );
@@ -537,6 +756,18 @@ API_RESULT CHECKED_PCB_ROUTE_CONTROLLER::Handle( ApiRequest& envelope, const std
         || !stored.after().project_settings_included() || !Digest( stored.after().state_sha256() )
         || !DOCUMENT_LIFECYCLE_CONTROLLER::HasUnchangedFileBaselines( stored.after() ) )
         return fail( CheckedPcbRouteReceipt::INDETERMINATE, "post_state_mismatch", "Route commit result did not advance the expected board state" );
+    if( !readGroups( false ) )
+        return fail( CheckedPcbRouteReceipt::INDETERMINATE, "route_group_readback_failed",
+                     "Route committed but exact group membership could not be read back" );
+    for( int index = 0; index < request.group_changes_size(); ++index )
+    {
+        auto* state = stored.mutable_after_group_states( index );
+        auto found = groupReadback.find( state->group().id().value() );
+        if( found == groupReadback.end() )
+            return fail( CheckedPcbRouteReceipt::INDETERMINATE, "route_group_readback_failed",
+                         "Route committed but a checked group identity disappeared" );
+        state->mutable_group()->CopyFrom( CanonicalGroup( found->second ) );
+    }
     if( stored.ByteSizeLong() > resultBudget )
         return fail( CheckedPcbRouteReceipt::INDETERMINATE, "route_receipt_too_large", "Native route receipt exceeded its bounded result allowance" );
     stored.set_state( CheckedPcbRouteReceipt::COMPLETED ); stored.clear_error_code(); stored.clear_error_message();

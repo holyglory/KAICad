@@ -26,7 +26,8 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
     public async Task<CallToolResult> Start(string instanceId, string documentJson, string operationId,
         bool refillZones, bool reportAllTrackErrors, bool testFootprints, string expectedRevisionJson,
         string processEpoch, CancellationToken cancellationToken, string? expectedSchematicStateJson = null,
-        bool allowDuplicateSheetNames = false, string? candidateRequestJson = null, string? deleteRequestJson = null)
+        bool allowDuplicateSheetNames = false, string? candidateRequestJson = null, string? deleteRequestJson = null,
+        string? groupChangesJson = null)
     {
         PcbDrcJobState? state = null;
         var response = await InstanceToolBoundary.Run(async () =>
@@ -68,6 +69,9 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                     throw new AutomationException("invalid_drc_delete_candidate", "deleteRequestJson must target this PCB with distinct canonical route IDs.");
                 candidate ??= new CreateItems { Header = new() { Document = document } };
             }
+            var groupChanges = ParseGroupChanges(groupChangesJson, "invalid_drc_group_changes");
+            if (groupChanges.Count != 0 && candidate is null)
+                throw new AutomationException("invalid_drc_group_changes", "Grouped route DRC requires the exact route candidate and removal payload.");
             if (candidate is not null && candidate.Items.Count == 0 && delete is null)
                 throw new AutomationException("invalid_drc_candidate", "A detached route check requires at least one create, replacement or removal.");
             var request = new StartPcbDrcJob
@@ -84,6 +88,7 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
             };
             if (candidate is not null) request.CandidateItems.Add(candidate.Items);
             if (delete is not null) request.DeleteItemIds.Add(delete.ItemIds);
+            request.GroupChanges.Add(groupChanges);
             state = await client.InvokeAsync<StartPcbDrcJob, PcbDrcJobState>(request, cancellationToken);
             ValidateJobState(state, document, client.Epoch);
             if (state.OperationId != id || !expected.Equals(state.CheckedRevision))
@@ -108,6 +113,7 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                 verificationRequest.ExpectedCandidateItems.Add(candidate.Items);
                 if (delete is not null)
                     verificationRequest.ExpectedDeleteItemIds.Add(delete.ItemIds);
+                verificationRequest.ExpectedGroupChanges.Add(groupChanges);
                 var verified = await client.InvokeAsync<NativeCapabilityPcbDrcReplacementJob, PcbDrcJobState>(verificationRequest, cancellationToken);
                 ValidateJobState(verified, document, client.Epoch);
                 state = verified;
@@ -126,7 +132,7 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NetClassesRoundTripThroughXmlAndNativeEdits", "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public async Task<CallToolResult> Job(string instanceId, string documentJson, string jobId,
         string processEpoch, CancellationToken cancellationToken, string? candidateRequestJson = null,
-        string? deleteRequestJson = null)
+        string? deleteRequestJson = null, string? groupChangesJson = null)
     {
         PcbDrcJobState? state = null;
         var response = await InstanceToolBoundary.Run(async () =>
@@ -141,6 +147,8 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
             CreateItems? candidate = null;
             DeleteItems? delete = null;
             ReadPcbDrcJob read = new() { Document = document, JobId = id, ProcessEpoch = processEpoch };
+            var groupChanges = ParseGroupChanges(groupChangesJson, "invalid_drc_group_changes");
+            read.ExpectedGroupChanges.Add(groupChanges);
             if (!string.IsNullOrWhiteSpace(candidateRequestJson))
             {
                 candidate = BoardJson.Parser.Parse<CreateItems>(candidateRequestJson);
@@ -165,6 +173,7 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                 };
                 replacementRead.ExpectedCandidateItems.Add(candidate.Items);
                 if (delete is not null) replacementRead.ExpectedDeleteItemIds.Add(delete.ItemIds);
+                replacementRead.ExpectedGroupChanges.Add(groupChanges);
                 state = await client.InvokeAsync<NativeCapabilityPcbDrcReplacementJob, PcbDrcJobState>(replacementRead, cancellationToken);
             }
             else
@@ -241,6 +250,24 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
         { throw new AutomationException("invalid_document_target", "Provide a valid PCB document descriptor: " + error.Message); }
     }
 
+    private static List<NativeRouteGroupChange> ParseGroupChanges(string? json, string code)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return [];
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind != JsonValueKind.Array)
+                throw new InvalidOperationException("groupChangesJson must be a JSON array.");
+            var result = new List<NativeRouteGroupChange>();
+            foreach (var element in document.RootElement.EnumerateArray())
+                result.Add(SchematicJson.Parser.Parse<NativeRouteGroupChange>(element.GetRawText()));
+            return result;
+        }
+        catch (Exception error) when (error is JsonException or InvalidProtocolBufferException
+            or InvalidJsonException or InvalidOperationException)
+        { throw new AutomationException(code, "groupChangesJson is not a valid typed grouped-route payload: " + error.Message); }
+    }
+
     private static void ValidatePcb(DocumentSpecifier document)
     {
         DocumentStateTools.ValidateTarget(document);
@@ -282,6 +309,9 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
             || state.SnapshotComplete == state.InputWarnings.Any(warning => warning.StartsWith(IncompleteSnapshot, StringComparison.Ordinal))
             || (!state.CandidateDryRun && state.CandidateItemIds.Count != 0)
             || state.CandidateItemIds.Any(id => !Guid.TryParseExact(id, "D", out _) || id == Guid.Empty.ToString("D"))
+            || (!state.GroupPayloadVerified && (state.VerifiedGroupChanges.Count != 0 || state.AfterGroupStates.Count != 0))
+            || (state.GroupPayloadVerified && (state.VerifiedGroupChanges.Count == 0
+                || state.AfterGroupStates.Count != state.VerifiedGroupChanges.Count))
             || ((int)state.Status == 4 && !state.CancellationRequested)
             || state.Findings.Any(finding => !Guid.TryParseExact(finding.NativeId, "D", out _)
             || finding.Marker is null)

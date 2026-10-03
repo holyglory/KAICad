@@ -253,6 +253,12 @@ public sealed class NativeErcDialogTests
                     };
                     restoreEdit.Operations.Add(new SchematicItemOperation { SetTitleBlock = typedTitle });
                     await client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(restoreEdit, deadline.Token);
+                    // The title bytes are restored, but the journal cursor advanced twice.
+                    // Save the restored content and recapture the downstream journey baseline;
+                    // later stale/undo assertions must start from this fresh cursor.
+                    await client.InvokeAsync<SaveDocument, Empty>(new() { Document = opened.Document }, deadline.Token);
+                    baseline = await client.InvokeAsync<ReadSchematicChangeJournal, SchematicChangeJournal>(
+                        new() { Document = opened.Document }, deadline.Token);
                 }
                 finally { Directory.Delete(ercMcpState, true); }
                 identities.Add(new(instanceId, client, baseline, process.Id, opened.Document, project));

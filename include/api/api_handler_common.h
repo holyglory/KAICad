@@ -28,6 +28,7 @@
 #include <api/api_handler.h>
 #include <api/common/commands/base_commands.pb.h>
 #include <api/common/commands/project_commands.pb.h>
+#include <api/common/commands/raster_trace_commands.pb.h>
 
 using namespace kiapi::common;
 using google::protobuf::Empty;
@@ -100,6 +101,9 @@ private:
 
     HANDLER_RESULT<Empty> handleCloseAllDocuments(
         const HANDLER_CONTEXT<commands::CloseAllDocuments>& aCtx );
+
+    HANDLER_RESULT<kiapi::automation::v1::RasterTraceResult> handleRasterTrace(
+        const HANDLER_CONTEXT<kiapi::automation::v1::RasterTraceRequest>& aCtx );
 
 private:
     OPEN_DOCUMENT_HANDLER m_openDocumentHandler;

@@ -817,6 +817,7 @@ set( COMMON_SRCS
     base_screen.cpp
     bin_mod.cpp
     bitmap_base.cpp
+    bitmap_trace.cpp
     board_printout.cpp
     clipboard.cpp
     column_formatter.cpp
@@ -988,6 +989,7 @@ target_link_libraries( common
     tinyspline_lib
     nlohmann_json
     compoundfilereader
+    potrace
     Boost::headers
     # Database support needs these two
     nanodbc # for now; maybe hoist out of common
@@ -1009,6 +1011,7 @@ target_include_directories( common
     PUBLIC
         .
         ${CMAKE_BINARY_DIR}
+        ${CMAKE_SOURCE_DIR}/thirdparty/potrace/include
         $<TARGET_PROPERTY:argparse::argparse,INTERFACE_INCLUDE_DIRECTORIES>
         $<TARGET_PROPERTY:kiapi,INTERFACE_INCLUDE_DIRECTORIES>
     )

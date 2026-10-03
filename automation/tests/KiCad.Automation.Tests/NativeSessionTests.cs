@@ -68,6 +68,9 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeSymbolLibrary")]
     public Task NativeSymbolLibraryReadbackUsesMcp() => RunNativeSessions(NativeJourney.SymbolLibrary);
 
+    [TestMethod, TestCategory("NativeRasterTrace")]
+    public Task NativeRasterTracePreservesDeterministicContourTopology() => RunNativeSessions(NativeJourney.RasterTrace);
+
     // Shared PSU/CPU acceptance journeys (psu-cpu-fixture-and-ownership.md §1.9).
     // Each ends Inconclusive (not passed) until its fixture seed and lane journey
     // land; a category joins native-acceptance only after integration.
@@ -121,7 +124,7 @@ public sealed partial class NativeSessionTests
 
     private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, RecursiveEditor, Simulation, PcbItems,
         PsuCpuSeed, PsuCpuComponentCreation, ConnectedRealization, DiagramCanvas, XmlRebuild, RepeatedSheetRebuild, ProjectRecovery, ProjectRecoveryContainer, OwnershipSync, NativeCrash, NativeCrashRelease,
-        ObserveApplyStress, RepeatedSheetOwnership, ComponentRebind, SymbolLibrary }
+        ObserveApplyStress, RepeatedSheetOwnership, ComponentRebind, SymbolLibrary, RasterTrace }
 
     private async Task RunNativeSessions(NativeJourney journey, string theme = "light")
     {
@@ -146,6 +149,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.Simulation => "native-simulation",
                 NativeJourney.PcbItems => "native-pcb-items",
                 NativeJourney.SymbolLibrary => "native-symbol-library",
+                NativeJourney.RasterTrace => "native-raster-trace",
                 NativeJourney.PsuCpuSeed => "native-psu-cpu-seed",
                 NativeJourney.PsuCpuComponentCreation => "native-psu-cpu-creation",
                 NativeJourney.ConnectedRealization => "native-connected-realization",
@@ -572,6 +576,8 @@ public sealed partial class NativeSessionTests
                         await VerifyNativePcbItems(client, opened.Document, evidence, target.Id, focusProcessId, ":" + displayNumber, deadline.Token);
                     else if (journey == NativeJourney.SymbolLibrary)
                         await VerifyNativeSymbolLibrary(client, opened.Document, evidence, target.Id, deadline.Token);
+                    else if (journey == NativeJourney.RasterTrace)
+                        await VerifyNativeRasterTrace(client, evidence, target.Id, deadline.Token);
                     else if (journey == NativeJourney.SymbolSheets)
                     {
                         try

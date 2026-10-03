@@ -22,6 +22,7 @@
 #include <tuple>
 
 #include <api/api_handler_common.h>
+#include <bitmap_trace.h>
 #include <build_version.h>
 #include <eda_shape.h>
 #include <eda_text.h>
@@ -36,10 +37,89 @@
 #include <project/project_file.h>
 #include <settings/settings_manager.h>
 #include <wx/string.h>
+#include <wx/image.h>
+#include <wx/mstream.h>
+#include <wx/filename.h>
+#include <api/native_state_digest.h>
+#include <array>
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
 
 using namespace kiapi::common::commands;
 using namespace kiapi::common::types;
 using google::protobuf::Empty;
+
+namespace
+{
+constexpr uint64_t MAX_SOURCE_BYTES = 32 * 1024 * 1024;
+constexpr uint32_t MAX_PIXELS = 4'194'304;
+
+bool IsSha256( const std::string& aValue )
+{
+    return aValue.size() == 64 && std::all_of( aValue.begin(), aValue.end(), []( char c )
+            { return ( c >= '0' && c <= '9' ) || ( c >= 'a' && c <= 'f' ); } );
+}
+
+uint32_t BigEndian32( const unsigned char* aBytes )
+{
+    return ( static_cast<uint32_t>( aBytes[0] ) << 24 ) | ( static_cast<uint32_t>( aBytes[1] ) << 16 )
+           | ( static_cast<uint32_t>( aBytes[2] ) << 8 ) | static_cast<uint32_t>( aBytes[3] );
+}
+
+void Fail( ApiResponseStatus& aError, const char* aCode, const std::string& aMessage )
+{
+    aError.set_status( ApiStatusCode::AS_BAD_REQUEST );
+    aError.set_error_message( std::string( aCode ) + ": " + aMessage );
+}
+
+kiapi::automation::v1::RasterTraceBounds ToProtoBounds( const BITMAP_TRACE_BOUNDS& aBounds )
+{
+    kiapi::automation::v1::RasterTraceBounds result;
+    result.set_min_x_nm( aBounds.minX ); result.set_min_y_nm( aBounds.minY );
+    result.set_max_x_nm( aBounds.maxX ); result.set_max_y_nm( aBounds.maxY );
+    return result;
+}
+
+void CopyTraceResult( const BITMAP_TRACE_RESULT& aTrace,
+                      kiapi::automation::v1::RasterTraceResult& aResult )
+{
+    aResult.set_accepted( aTrace.accepted );
+    aResult.set_rejection_code( aTrace.rejectionCode );
+    for( const std::string& diagnostic : aTrace.diagnostics ) aResult.add_diagnostics( diagnostic );
+    aResult.set_physical_height_nm( aTrace.physicalHeightNm );
+    aResult.set_scale_numerator( aTrace.scaleNumerator );
+    aResult.set_scale_denominator( aTrace.scaleDenominator );
+    aResult.set_coordinate_orientation( "image_x_right_y_down" );
+    aResult.set_rounding( "nearest_integer" );
+    aResult.set_geometry_sha256( aTrace.geometrySha256 );
+    aResult.set_contour_count( static_cast<uint32_t>( aTrace.contours.size() ) );
+    aResult.set_vertex_count( aTrace.vertexCount );
+    aResult.set_filled_piece_count( static_cast<uint32_t>( aTrace.filledPieces.size() ) );
+    if( !aTrace.contours.empty() ) *aResult.mutable_bounds() = ToProtoBounds( aTrace.bounds );
+    for( const auto& contour : aTrace.contours )
+    {
+        auto* output = aResult.add_contours();
+        output->set_id( contour.id ); output->set_parent_id( contour.parentId );
+        output->set_hole( contour.hole ); output->set_orientation( contour.orientation );
+        *output->mutable_bounds() = ToProtoBounds( contour.bounds );
+        for( const auto& point : contour.points )
+        {
+            auto* target = output->add_points(); target->set_x_nm( point.x ); target->set_y_nm( point.y );
+        }
+    }
+    for( const auto& piece : aTrace.filledPieces )
+    {
+        auto* output = aResult.add_filled_pieces();
+        output->set_id( piece.id ); *output->mutable_bounds() = ToProtoBounds( piece.bounds );
+        for( const std::string& source : piece.sourceContourIds ) output->add_source_contour_ids( source );
+        for( const auto& point : piece.points )
+        {
+            auto* target = output->add_points(); target->set_x_nm( point.x ); target->set_y_nm( point.y );
+        }
+    }
+}
+}
 
 
 API_HANDLER_COMMON::API_HANDLER_COMMON() :
@@ -62,9 +142,93 @@ API_HANDLER_COMMON::API_HANDLER_COMMON() :
             &API_HANDLER_COMMON::handleGetTextVariables );
     registerHandler<SetTextVariables, Empty>(
             &API_HANDLER_COMMON::handleSetTextVariables );
+    registerHandler<kiapi::automation::v1::RasterTraceRequest,
+                    kiapi::automation::v1::RasterTraceResult>( &API_HANDLER_COMMON::handleRasterTrace );
 
     // OpenDocument, CloseDocument and CloseAllDocuments are registered by their setters, only
     // while the KiCad mode that serves them has set their callbacks.
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::RasterTraceResult> API_HANDLER_COMMON::handleRasterTrace(
+        const HANDLER_CONTEXT<kiapi::automation::v1::RasterTraceRequest>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    const auto& request = aCtx.Request;
+    ApiResponseStatus error;
+    wxFileName file( wxString::FromUTF8( request.source_path() ) );
+    if( !file.IsAbsolute() || request.source_path().find( '\0' ) != std::string::npos )
+    {
+        Fail( error, "invalid_source_path", "source_path must be an absolute NUL-free path" );
+        return tl::unexpected( error );
+    }
+    if( !IsSha256( request.expected_source_sha256() ) || request.physical_width_nm() <= 0
+        || request.threshold() > 255 || request.turd_size() > 1'000'000 || request.curve_tolerance_nm() <= 0
+        || request.max_contours() == 0 || request.max_contours() > 4096
+        || request.max_vertices() < 3 || request.max_vertices() > 1'000'000 )
+    {
+        Fail( error, "invalid_trace_settings", "source hash, physical width, threshold, tolerance and limits are invalid" );
+        return tl::unexpected( error );
+    }
+
+    std::ifstream input( std::filesystem::path( request.source_path() ), std::ios::binary );
+    if( !input ) { Fail( error, "source_unreadable", "the source file could not be opened" ); return tl::unexpected( error ); }
+    std::vector<unsigned char> bytes;
+    std::array<char, 64 * 1024> buffer;
+    while( input )
+    {
+        input.read( buffer.data(), buffer.size() );
+        std::streamsize count = input.gcount();
+        if( count > 0 )
+        {
+            if( bytes.size() > MAX_SOURCE_BYTES - static_cast<size_t>( count ) )
+            { Fail( error, "source_too_large", "source bytes exceed the bounded 32 MiB limit" ); return tl::unexpected( error ); }
+            bytes.insert( bytes.end(), buffer.data(), buffer.data() + count );
+        }
+    }
+    if( input.bad() ) { Fail( error, "source_unreadable", "the source file could not be read" ); return tl::unexpected( error ); }
+    NATIVE_STATE_DIGEST sourceHash; sourceHash.Append( std::string_view( reinterpret_cast<const char*>( bytes.data() ), bytes.size() ) );
+    const std::string actualHash = sourceHash.Hex();
+    if( actualHash != request.expected_source_sha256() )
+    { Fail( error, "source_hash_mismatch", "the exact bytes read do not match expected_source_sha256" ); return tl::unexpected( error ); }
+
+    // PNG-first boundary: inspect IHDR before wxImage allocates decoded pixels.
+    if( bytes.size() < 33 || !std::equal( bytes.begin(), bytes.begin() + 8,
+            std::array<unsigned char, 8>{ 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a }.begin() )
+        || BigEndian32( bytes.data() + 8 ) != 13 || std::string( reinterpret_cast<char*>( bytes.data() + 12 ), 4 ) != "IHDR" )
+    { Fail( error, "unsupported_raster_format", "only PNG sources are supported by this bounded proposal" ); return tl::unexpected( error ); }
+    const uint32_t width = BigEndian32( bytes.data() + 16 ), height = BigEndian32( bytes.data() + 20 );
+    if( width == 0 || height == 0 || width > 4096 || height > 4096
+        || static_cast<uint64_t>( width ) * height > MAX_PIXELS )
+    { Fail( error, "raster_too_large", "PNG dimensions exceed the bounded pixel limit" ); return tl::unexpected( error ); }
+
+    wxMemoryInputStream stream( bytes.data(), bytes.size() );
+    wxImage image;
+    if( !image.LoadFile( stream, wxBITMAP_TYPE_PNG ) || image.GetWidth() != static_cast<int>( width )
+        || image.GetHeight() != static_cast<int>( height ) )
+    { Fail( error, "decode_failed", "the PNG could not be decoded consistently" ); return tl::unexpected( error ); }
+    const unsigned char* rgb = image.GetData(); const unsigned char* alpha = image.HasAlpha() ? image.GetAlpha() : nullptr;
+    if( !rgb ) { Fail( error, "decode_failed", "decoded PNG has no pixel buffer" ); return tl::unexpected( error ); }
+    BITMAP_TRACE_RASTER raster{ width, height, std::vector<uint8_t>( static_cast<size_t>( width ) * height ) };
+    for( size_t i = 0; i < raster.foreground.size(); ++i )
+    {
+        const unsigned char luma = static_cast<unsigned char>( ( 299 * rgb[i * 3] + 587 * rgb[i * 3 + 1] + 114 * rgb[i * 3 + 2] ) / 1000 );
+        bool foreground = alpha && alpha[i] == 0 ? false : luma <= request.threshold();
+        raster.foreground[i] = request.invert() ? !foreground : foreground;
+    }
+    BITMAP_TRACE_SETTINGS settings{ request.physical_width_nm(), request.turd_size(), request.curve_tolerance_nm(), request.max_contours(), request.max_vertices() };
+    BITMAP_TRACE_RESULT trace = TraceBitmap( raster, settings );
+    RasterTraceResult result;
+    result.set_source_sha256( actualHash ); result.set_source_bytes( bytes.size() );
+    result.set_decoded_width( width ); result.set_decoded_height( height ); result.set_decoded_format( "png" );
+    result.set_physical_width_nm( request.physical_width_nm() ); result.set_threshold( request.threshold() );
+    result.set_invert( request.invert() ); result.set_turd_size( request.turd_size() );
+    result.set_curve_tolerance_nm( request.curve_tolerance_nm() ); result.set_max_contours( request.max_contours() );
+    result.set_max_vertices( request.max_vertices() ); result.set_proposal_only( true );
+    result.set_native_document_mutated( false ); result.set_cad_projection_committed( false );
+    result.set_electrical_validated( false ); result.set_manufacturing_validated( false );
+    CopyTraceResult( trace, result );
+    return result;
 }
 
 

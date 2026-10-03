@@ -1,0 +1,11 @@
+{
+  "sourceSha256": "bfa66bd19971f5a8ca08423c7b6ab7ff3db1824275ebcbc28aa9739016d01ca9",
+  "width": 64,
+  "height": 64,
+  "physicalWidthNm": 64000000,
+  "expectedTopology": {
+    "roots": 1,
+    "holes": 1
+  },
+  "description": "64x64 deterministic grayscale PNG: filled outer rectangle, one white hole, and diagonal black boundary."
+}

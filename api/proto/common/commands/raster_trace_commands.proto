@@ -1,0 +1,85 @@
+/* Deterministic raster trace proposals. GPL-3.0-or-later. */
+syntax = "proto3";
+
+package kiapi.automation.v1;
+option csharp_namespace = "KiCad.Automation.Protocol";
+
+message RasterTraceRequest {
+  // The native peer reads this exact regular file once and hashes those bytes.
+  string source_path = 1;
+  string expected_source_sha256 = 2;
+  int64 physical_width_nm = 3;
+  uint32 threshold = 4;
+  bool invert = 5;
+  uint32 turd_size = 6;
+  int64 curve_tolerance_nm = 7;
+  uint32 max_contours = 8;
+  uint32 max_vertices = 9;
+}
+
+message RasterTracePoint {
+  int64 x_nm = 1;
+  int64 y_nm = 2;
+}
+
+message RasterTraceBounds {
+  int64 min_x_nm = 1;
+  int64 min_y_nm = 2;
+  int64 max_x_nm = 3;
+  int64 max_y_nm = 4;
+}
+
+// Contours preserve Potrace's signed tree before fracture. parent_id is empty
+// only for a root contour; hole=true identifies a negative child contour.
+message RasterTraceContour {
+  string id = 1;
+  string parent_id = 2;
+  bool hole = 3;
+  int32 orientation = 4;
+  repeated RasterTracePoint points = 5;
+  RasterTraceBounds bounds = 6;
+}
+
+// Filled pieces are hole-free polygons suitable for a later target projection.
+// They are proposals only and do not represent saved CAD objects.
+message RasterTraceFilledPiece {
+  string id = 1;
+  repeated string source_contour_ids = 2;
+  repeated RasterTracePoint points = 3;
+  RasterTraceBounds bounds = 4;
+}
+
+message RasterTraceResult {
+  bool accepted = 1;
+  string rejection_code = 2;
+  repeated string diagnostics = 3;
+  string source_sha256 = 4;
+  uint64 source_bytes = 5;
+  uint32 decoded_width = 6;
+  uint32 decoded_height = 7;
+  string decoded_format = 8;
+  int64 physical_width_nm = 9;
+  int64 physical_height_nm = 10;
+  int64 scale_numerator = 11;
+  int64 scale_denominator = 12;
+  string coordinate_orientation = 13;
+  string rounding = 14;
+  uint32 threshold = 15;
+  bool invert = 16;
+  uint32 turd_size = 17;
+  int64 curve_tolerance_nm = 18;
+  uint32 max_contours = 19;
+  uint32 max_vertices = 20;
+  repeated RasterTraceContour contours = 21;
+  repeated RasterTraceFilledPiece filled_pieces = 22;
+  RasterTraceBounds bounds = 23;
+  string geometry_sha256 = 24;
+  uint32 contour_count = 25;
+  uint32 vertex_count = 26;
+  uint32 filled_piece_count = 27;
+  bool proposal_only = 28;
+  bool native_document_mutated = 29;
+  bool cad_projection_committed = 30;
+  bool electrical_validated = 31;
+  bool manufacturing_validated = 32;
+}

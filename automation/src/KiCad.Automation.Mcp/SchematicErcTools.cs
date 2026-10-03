@@ -225,6 +225,7 @@ public sealed class SchematicErcTools(InstanceRegistry registry)
             processEpoch,
             document,
             operationId = legacy.OperationId,
+            found = true,
             beforeState = result.BeforeState is null ? null : SchematicJson.Formatter.Format(result.BeforeState),
             afterState = result.AfterState is null ? null : SchematicJson.Formatter.Format(result.AfterState),
             result = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(legacy)),

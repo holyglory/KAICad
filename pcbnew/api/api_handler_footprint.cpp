@@ -19,6 +19,7 @@
  */
 
 #include <api/api_handler_footprint.h>
+#include <api/api_server.h>
 #include <api/api_pcb_utils.h>
 #include <api/api_enums.h>
 #include <api/api_utils.h>

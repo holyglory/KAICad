@@ -71,7 +71,7 @@ public sealed class DocumentLifecycleInput : NativeDocumentInputObject
         var result = new DocumentLifecycleState
         {
             Document = document,
-            Revision = new DocumentRevision { Epoch = input.Revision.Epoch, Sequence = input.Revision.Sequence },
+            Revision = new KiCad.Automation.Protocol.DocumentRevision { Epoch = input.Revision.Epoch, Sequence = input.Revision.Sequence },
             NativeIdentity = input.NativeIdentity,
             StateSha256 = input.StateSha256,
             Scope = (DocumentLifecycleScope)input.Scope,
@@ -145,16 +145,19 @@ public sealed class NativeFileBaselineInput : NativeDocumentInputObject
 
     internal static NativeFileBaselineState ToNative(NativeFileBaselineInput? input)
     {
-        if (input is null || string.IsNullOrWhiteSpace(input.Path) || !Path.IsPathFullyQualified(input.Path)
+        if (input is null || string.IsNullOrWhiteSpace(input.Path)
             || !Enum.IsDefined(input.Status))
             throw new AutomationException("invalid_lifecycle_state", "Every file baseline requires absolute paths and a defined status.");
-        if (!string.IsNullOrEmpty(input.BaselinePath) && !Path.IsPathFullyQualified(input.BaselinePath))
+        string filePath = input.Path!;
+        if (!System.IO.Path.IsPathFullyQualified(filePath))
+            throw new AutomationException("invalid_lifecycle_state", "Every file baseline path must be absolute.");
+        if (!string.IsNullOrEmpty(input.BaselinePath) && !System.IO.Path.IsPathFullyQualified(input.BaselinePath))
             throw new AutomationException("invalid_lifecycle_state", "A supplied baseline path must be absolute.");
         ValidateOptionalDigest(input.BaselineSha256, "baselineSha256");
         ValidateOptionalDigest(input.CurrentSha256, "currentSha256");
         return new NativeFileBaselineState
         {
-            Path = input.Path,
+            Path = filePath,
             BaselinePath = input.BaselinePath,
             BaselineKnown = input.BaselineKnown,
             BaselineExists = input.BaselineExists,

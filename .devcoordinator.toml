@@ -3367,7 +3367,7 @@ retained_artifacts=[{name="slice-managed-contracts",path="automation/artifacts/s
 name="native-build"
 tier="development"
 requires=["managed-contracts"]
-command=["cmake","--build","automation/artifacts/native","--target","api_schema_build_copy","bitmap_archive_build","kiapi","kicad","kicad-cli","eeschema","eeschema_kiface","pcbnew","pcbnew_kiface","cvpcb_kiface","schema_build_copy","qa_pcbnew","--","-k","0"]
+command=["cmake","--build","automation/artifacts/native","--target","api_schema_build_copy","bitmap_archive_build","kiapi","kicad","kicad-cli","eeschema","eeschema_kiface","pcbnew","pcbnew_kiface","s3d_plugin_vrml","cvpcb_kiface","schema_build_copy","qa_pcbnew","--","-k","0"]
 [[test.slice-verification.check]]
 name="native-pcb-simulation"
 tier="development"

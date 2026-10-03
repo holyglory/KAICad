@@ -1242,14 +1242,15 @@ public sealed partial class NativeSessionTests
             var expectedRemovals = shoveRemovals?.ItemIds.Select(id => id.Value).ToHashSet(StringComparer.Ordinal) ?? [];
             Assert.IsFalse(expectedCreates.Overlaps(expectedUpdates) || expectedCreates.Overlaps(expectedRemovals) || expectedUpdates.Overlaps(expectedRemovals));
 
-            async Task<PcbDrcJobState> RouteDrc(string candidateJson, string? deleteJson, DocumentLifecycleState checkpoint)
+            async Task<PcbDrcJobState> RouteDrc(string candidateJson, string? deleteJson,
+                DocumentLifecycleState checkpoint, string? groupJson = null)
             {
                 var reply = await mcp.Tool("kicad_pcb_drc_start", new
                 {
                     instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard), operationId = Guid.NewGuid().ToString("D"),
                     refillZones = false, reportAllTrackErrors = true, testFootprints = false,
                     expectedRevisionJson = SchematicJson.Formatter.Format(checkpoint.Revision), processEpoch = client.Epoch,
-                    candidateRequestJson = candidateJson, deleteRequestJson = deleteJson
+                    candidateRequestJson = candidateJson, deleteRequestJson = deleteJson, groupChangesJson = groupJson ?? ""
                 });
                 Assert.IsFalse(reply.TryGetProperty("isError", out var error) && error.GetBoolean(), reply.GetRawText());
                 var job = SchematicJson.Parser.Parse<PcbDrcJobState>(reply.GetProperty("content")[0].GetProperty("text").GetString()!);
@@ -1258,13 +1259,19 @@ public sealed partial class NativeSessionTests
                     await Task.Delay(100, token);
                     reply = await mcp.Tool("kicad_pcb_drc_job", new
                     { instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard), jobId = job.JobId, processEpoch = client.Epoch,
-                        candidateRequestJson = candidateJson, deleteRequestJson = deleteJson });
+                        candidateRequestJson = candidateJson, deleteRequestJson = deleteJson, groupChangesJson = groupJson ?? "" });
                     Assert.IsFalse(reply.TryGetProperty("isError", out error) && error.GetBoolean(), reply.GetRawText());
                     job = SchematicJson.Parser.Parse<PcbDrcJobState>(reply.GetProperty("content")[0].GetProperty("text").GetString()!);
                 }
                 Assert.IsTrue(job.WorkerFinished, "The complete route DRC must finish.");
                 Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, job.Status, job.ErrorMessage);
                 Assert.IsTrue(job.CandidatePayloadVerified && job.CandidateDryRun && job.SnapshotComplete && job.ResultsFresh);
+                if (groupJson is not null)
+                {
+                    Assert.IsTrue(job.GroupPayloadVerified, SchematicJson.Formatter.Format(job));
+                    Assert.IsGreaterThan(0, job.VerifiedGroupChanges.Count, SchematicJson.Formatter.Format(job));
+                    Assert.AreEqual(job.VerifiedGroupChanges.Count, job.AfterGroupStates.Count, SchematicJson.Formatter.Format(job));
+                }
                 Assert.IsEmpty(job.Findings, SchematicJson.Formatter.Format(job));
                 return job;
             }
@@ -1318,6 +1325,150 @@ public sealed partial class NativeSessionTests
             { Header = new() { Document = cleanBoard }, Items = { splitSource.Id, shovedVia.Id } }, token);
             Assert.AreEqual(retainedSplit.CustomProperties, persistedShove.Items.Single(item => item.Is(Track.Descriptor)).Unpack<Track>().CustomProperties);
             Assert.AreEqual(retainedVia.PadStack, persistedShove.Items.Single(item => item.Is(Via.Descriptor)).Unpack<Via>().PadStack);
+
+            // Positive grouped-route ownership: the ordinary direct group keeps
+            // an unrelated peer while PNS replaces the source with split child
+            // identities. Version 1 remains a deliberate fail-closed probe.
+            var groupPeer = new Track
+            {
+                Id = new() { Value = Guid.NewGuid().ToString("D") },
+                Start = new() { XNm = 32_000_000, YNm = 32_000_000 },
+                End = new() { XNm = 32_800_000, YNm = 32_000_000 }, Width = new() { ValueNm = 250_000 },
+                Layer = BoardLayer.BlFCu, Net = shoveObstacle.Net.Clone()
+            };
+            var peerCreate = new CreateItems { Header = new() { Document = cleanBoard }, Items = { Any.Pack(groupPeer) } };
+            var peerReply = await mcp.Tool("kicad_pcb_items_create", new
+            { instanceId, requestJson = BoardJson.Formatter.Format(peerCreate), expectedStateJson = SchematicJson.Formatter.Format(await ObserveLifecycleState(client, cleanBoard, token)) });
+            Assert.IsFalse(peerReply.TryGetProperty("isError", out var peerError) && peerError.GetBoolean(), peerReply.GetRawText());
+            var groupedBefore = await ObserveLifecycleState(client, cleanBoard, token);
+            var positiveGroup = new Kiapi.Board.Types.Group
+            { Id = new() { Value = Guid.NewGuid().ToString("D") }, Name = "Grouped route positive", Items = { splitSource.Id.Clone(), groupPeer.Id.Clone() } };
+            var positiveGroupCreate = new CreateItems { Header = new() { Document = cleanBoard }, Items = { Any.Pack(positiveGroup) } };
+            var positiveGroupReply = await mcp.Tool("kicad_pcb_items_create", new
+            { instanceId, requestJson = BoardJson.Formatter.Format(positiveGroupCreate), expectedStateJson = SchematicJson.Formatter.Format(groupedBefore) });
+            Assert.IsFalse(positiveGroupReply.TryGetProperty("isError", out var positiveGroupError) && positiveGroupError.GetBoolean(), positiveGroupReply.GetRawText());
+            groupedBefore = await ObserveLifecycleState(client, cleanBoard, token);
+
+            var legacyGroupedRequest = shovePreviewRequest.Clone();
+            legacyGroupedRequest.OperationId = Guid.NewGuid().ToString("D");
+            legacyGroupedRequest.ExpectedRevision = groupedBefore.Revision.Clone();
+            legacyGroupedRequest.MaximumCompleteDeltaVersion = 1;
+            var legacyGrouped = await mcp.Tool("kicad_pcb_route_preview", new
+            { instanceId, requestJson = SchematicJson.Formatter.Format(legacyGroupedRequest), expectedStateJson = SchematicJson.Formatter.Format(groupedBefore) });
+            Assert.IsTrue(legacyGrouped.TryGetProperty("isError", out var legacyGroupedError) && legacyGroupedError.GetBoolean(), legacyGrouped.GetRawText());
+            Assert.AreEqual("route_delta_group_membership_unsupported", legacyGrouped.GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            Assert.AreEqual(groupedBefore, await ObserveLifecycleState(client, cleanBoard, token));
+
+            var groupedRequest = shovePreviewRequest.Clone();
+            groupedRequest.OperationId = Guid.NewGuid().ToString("D");
+            groupedRequest.ExpectedRevision = groupedBefore.Revision.Clone();
+            groupedRequest.MaximumCompleteDeltaVersion = 2;
+            var positiveGroupedPreview = await mcp.Tool("kicad_pcb_route_preview", new
+            { instanceId, requestJson = SchematicJson.Formatter.Format(groupedRequest), expectedStateJson = SchematicJson.Formatter.Format(groupedBefore) });
+            Assert.IsFalse(positiveGroupedPreview.TryGetProperty("isError", out var groupedPositiveError) && groupedPositiveError.GetBoolean(), positiveGroupedPreview.GetRawText());
+            var groupedData = positiveGroupedPreview.GetProperty("structuredContent");
+            Assert.AreEqual(2, groupedData.GetProperty("preview").GetProperty("completeDeltaVersion").GetInt32(), positiveGroupedPreview.GetRawText());
+            string groupedChangesJson = groupedData.GetProperty("groupChangesJson").GetString()!;
+            using var groupedChangesDocument = JsonDocument.Parse(groupedChangesJson);
+            var groupedChanges = groupedChangesDocument.RootElement.EnumerateArray()
+                .Select(element => SchematicJson.Parser.Parse<NativeRouteGroupChange>(element.GetRawText())).ToArray();
+            Assert.AreEqual(1, groupedChanges.Length, positiveGroupedPreview.GetRawText());
+            var groupedChange = groupedChanges[0];
+            var groupedBeforeMembers = groupedChange.ExpectedBefore.Group.Items.Select(id => id.Value).ToHashSet(StringComparer.Ordinal);
+            var groupedAfterMembers = groupedChange.ExpectedAfter.Group.Items.Select(id => id.Value).ToHashSet(StringComparer.Ordinal);
+            Assert.IsTrue(groupedBeforeMembers.SetEquals(new[] { splitSource.Id.Value, groupPeer.Id.Value }), groupedChangesJson);
+            Assert.IsTrue(groupedAfterMembers.Contains(groupPeer.Id.Value), groupedChangesJson);
+            var groupedNewMembers = groupedAfterMembers.Except(groupedBeforeMembers).ToHashSet(StringComparer.Ordinal);
+            Assert.AreEqual(groupedNewMembers.Count, groupedChange.CreatedSources.Count, groupedChangesJson);
+            Assert.IsTrue(groupedChange.CreatedSources.All(source => source.SourceItemId.Value == splitSource.Id.Value
+                && source.SourceGroupId.Value == positiveGroup.Id.Value
+                && groupedNewMembers.Contains(source.CreatedItemId.Value)), groupedChangesJson);
+
+            var groupedCreate = BoardJson.Parser.Parse<CreateItems>(groupedData.GetProperty("candidateRequestJson").GetString()!);
+            var groupedUpdate = BoardJson.Parser.Parse<UpdateItems>(groupedData.GetProperty("replacementUpdatesJson").GetString()!);
+            string? groupedRemovalJson = groupedData.GetProperty("candidateDeleteRequestJson").GetString();
+            string groupedDrcCandidateJson = groupedData.GetProperty("drcCandidateRequestJson").GetString()!;
+            string? groupedDrcDeleteJson = groupedData.GetProperty("drcDeleteRequestJson").GetString();
+            var groupedDrc = await RouteDrc(groupedDrcCandidateJson, groupedDrcDeleteJson, groupedBefore, groupedChangesJson);
+            string groupedOperationId = Guid.NewGuid().ToString("D");
+            var groupedCommitArgs = new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(groupedCreate),
+                replacementUpdatesJson = BoardJson.Formatter.Format(groupedUpdate), removalsJson = groupedRemovalJson ?? "",
+                groupChangesJson = groupedChangesJson, expectedStateJson = SchematicJson.Formatter.Format(groupedBefore),
+                drcJobStateJson = SchematicJson.Formatter.Format(groupedDrc), operationId = groupedOperationId
+            };
+            var groupedCommit = await mcp.Tool("kicad_pcb_route_commit", groupedCommitArgs);
+            Assert.IsFalse(groupedCommit.TryGetProperty("isError", out var groupedCommitError) && groupedCommitError.GetBoolean(), groupedCommit.GetRawText());
+            var groupedReceipt = groupedCommit.GetProperty("structuredContent").GetProperty("receipt");
+            Assert.AreEqual(1, groupedReceipt.GetProperty("groupChanges").GetArrayLength(), groupedCommit.GetRawText());
+            Assert.AreEqual(1, groupedReceipt.GetProperty("afterGroupStates").GetArrayLength(), groupedCommit.GetRawText());
+            var groupedAfter = await ObserveLifecycleState(client, cleanBoard, token);
+            var groupedRows = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Items = { positiveGroup.Id.Clone() } }, token);
+            var groupedNativeAfter = groupedRows.Items.Single().Unpack<Kiapi.Board.Types.Group>();
+            Assert.IsTrue(groupedNativeAfter.Items.Any(id => id.Value == groupPeer.Id.Value), groupedCommit.GetRawText());
+            Assert.IsTrue(groupedNewMembers.All(id => groupedNativeAfter.Items.Any(member => member.Value == id)), groupedCommit.GetRawText());
+            Assert.IsFalse(groupedNativeAfter.Items.Any(id => id.Value == splitSource.Id.Value), groupedCommit.GetRawText());
+            var groupedReplay = await mcp.Tool("kicad_pcb_route_commit", groupedCommitArgs);
+            Assert.IsFalse(groupedReplay.TryGetProperty("isError", out var groupedReplayError) && groupedReplayError.GetBoolean(), groupedReplay.GetRawText());
+            Assert.IsTrue(groupedReplay.GetProperty("structuredContent").GetProperty("receipt").GetProperty("replayed").GetBoolean());
+            var changedGroup = groupedChange.Clone();
+            changedGroup.ExpectedAfter.Group.Items.Remove(groupPeer.Id);
+            string changedGroupJson = "[" + SchematicJson.Formatter.Format(changedGroup) + "]";
+            var changedGroupCommit = await mcp.Tool("kicad_pcb_route_commit", new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(groupedCreate),
+                replacementUpdatesJson = BoardJson.Formatter.Format(groupedUpdate), removalsJson = groupedRemovalJson ?? "",
+                groupChangesJson = changedGroupJson, expectedStateJson = SchematicJson.Formatter.Format(groupedBefore),
+                drcJobStateJson = SchematicJson.Formatter.Format(groupedDrc), operationId = groupedOperationId
+            });
+            Assert.IsTrue(changedGroupCommit.TryGetProperty("isError", out var changedGroupError) && changedGroupError.GetBoolean(), changedGroupCommit.GetRawText());
+
+            var groupedSave = await mcp.Tool("kicad_document_save", new
+            { instanceId, expectedStateJson = SchematicJson.Formatter.Format(groupedAfter), operationId = Guid.NewGuid().ToString("D") });
+            Assert.IsFalse(groupedSave.TryGetProperty("isError", out var groupedSaveError) && groupedSaveError.GetBoolean(), groupedSave.GetRawText());
+            var groupedClose = await mcp.Tool("kicad_document_close", new
+            { instanceId, expectedStateJson = groupedSave.GetProperty("structuredContent").GetProperty("observedState").GetRawText(), operationId = Guid.NewGuid().ToString("D") });
+            Assert.IsFalse(groupedClose.TryGetProperty("isError", out var groupedCloseError) && groupedCloseError.GetBoolean(), groupedClose.GetRawText());
+            var groupedReopen = await CreateRootThroughMcp(client.Endpoint, instanceId, cleanPath, evidence, token, toolName: "kicad_pcb_open");
+            cleanBoard = groupedReopen.Document;
+            var groupedReopened = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Items = { positiveGroup.Id.Clone() } }, token);
+            Assert.IsTrue(groupedReopened.Items.Single().Unpack<Kiapi.Board.Types.Group>().Items.Any(id => id.Value == groupPeer.Id.Value));
+            NativeKeyboard.SchematicShortcut(display, focusProcessId, "z", "PCB Editor", true, true, clickFromLeft: 500, clickFromTop: 500);
+            using (var groupedUndoDeadline = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                groupedUndoDeadline.CancelAfter(TimeSpan.FromSeconds(8));
+                while (true)
+                {
+                    var rows = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+                    { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbTrace, KiCadObjectType.KotPcbGroup } }, groupedUndoDeadline.Token);
+                    var group = rows.Items.Where(item => item.Is(Kiapi.Board.Types.Group.Descriptor)).Select(item => item.Unpack<Kiapi.Board.Types.Group>()).SingleOrDefault(item => item.Id.Equals(positiveGroup.Id));
+                    if (group is not null && group.Items.Any(id => id.Value == splitSource.Id.Value)
+                        && !groupedNewMembers.Any(id => rows.Items.Any(item => RouteIdentity(item) == id))) break;
+                    await Task.Delay(100, groupedUndoDeadline.Token);
+                }
+            }
+            NativeKeyboard.SchematicShortcut(display, focusProcessId, "y", "PCB Editor", true, true, clickFromLeft: 500, clickFromTop: 500);
+            using (var groupedRedoDeadline = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                groupedRedoDeadline.CancelAfter(TimeSpan.FromSeconds(8));
+                while (true)
+                {
+                    var rows = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+                    { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbTrace, KiCadObjectType.KotPcbGroup } }, groupedRedoDeadline.Token);
+                    var group = rows.Items.Where(item => item.Is(Kiapi.Board.Types.Group.Descriptor)).Select(item => item.Unpack<Kiapi.Board.Types.Group>()).SingleOrDefault(item => item.Id.Equals(positiveGroup.Id));
+                    if (group is not null && group.Items.Any(id => id.Value == groupPeer.Id.Value)
+                        && groupedNewMembers.All(id => group.Items.Any(member => member.Value == id))) break;
+                    await Task.Delay(100, groupedRedoDeadline.Token);
+                }
+            }
+            var groupedDelete = new DeleteItems { Header = new() { Document = cleanBoard }, ItemIds = { positiveGroup.Id.Clone() } };
+            var groupedDeleteReply = await mcp.Tool("kicad_pcb_items_delete", new
+            { instanceId, requestJson = BoardJson.Formatter.Format(groupedDelete), expectedStateJson = SchematicJson.Formatter.Format(await ObserveLifecycleState(client, cleanBoard, token)) });
+            Assert.IsFalse(groupedDeleteReply.TryGetProperty("isError", out var groupedDeleteError) && groupedDeleteError.GetBoolean(), groupedDeleteReply.GetRawText());
+            cleanState = await ObserveLifecycleState(client, cleanBoard, token);
 
             // A true-removal-only cleanup has an explicitly empty candidate;
             // its retained DRC receipt must verify that exact empty payload.

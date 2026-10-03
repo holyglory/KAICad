@@ -243,21 +243,26 @@ bool GroupChangeValid( const NativeRouteGroupChange& change,
         || !GroupMetadataEquivalent( before, after )
         || !GroupMembersValid( before ) || !GroupMembersValid( after ) )
         return false;
-    std::set<std::string> created;
+    std::set<std::string> beforeIds, afterIds, addedIds, created;
+    for( const auto& id : before.items() ) beforeIds.insert( id.value() );
+    for( const auto& id : after.items() ) afterIds.insert( id.value() );
+    for( const std::string& id : afterIds )
+        if( !beforeIds.contains( id ) ) addedIds.insert( id );
     for( const auto& source : change.created_sources() )
     {
-        if( !Uuid( source.created_item_id().value() ) || !Uuid( source.source_item_id().value() )
-            || !Uuid( source.source_group_id().value() )
+        const std::string createdId = source.created_item_id().value();
+        const std::string sourceId = source.source_item_id().value();
+        if( !Uuid( createdId ) || !Uuid( sourceId ) || !Uuid( source.source_group_id().value() )
             || source.source_group_id().value() != before.id().value()
-            || !candidateIds.contains( source.created_item_id().value() )
-            || !std::any_of( after.items().begin(), after.items().end(), [&]( const auto& id )
-            { return id.value() == source.created_item_id().value(); } )
-            || !created.insert( source.created_item_id().value() ).second
-            || ( !removedIds.contains( source.source_item_id().value() )
-                 && !updateIds.contains( source.source_item_id().value() ) ) )
+            || !candidateIds.contains( createdId ) || !addedIds.contains( createdId )
+            || !beforeIds.contains( sourceId )
+            || !created.insert( createdId ).second
+            || ( !removedIds.contains( sourceId ) && !updateIds.contains( sourceId ) ) )
             return false;
     }
-    return true;
+    // Every new direct member must carry exactly one native source identity;
+    // unchanged members and removed source members may not be mislabeled.
+    return created == addedIds;
 }
 
 bool GroupChangesEquivalent( const google::protobuf::RepeatedPtrField<NativeRouteGroupChange>& left,

@@ -47,9 +47,11 @@ public sealed partial class NativeSessionTests
         Assert.IsGreaterThan(0, trace.GetProperty("contourCount").GetInt32());
         Assert.IsGreaterThan(0, trace.GetProperty("filledPieceCount").GetInt32());
         var contours = trace.GetProperty("contours").EnumerateArray().ToArray();
-        Assert.AreEqual(2, contours.Count(contour => !contour.GetProperty("hole").GetBoolean()), first.GetRawText());
+        Assert.AreEqual(4, contours.Length, first.GetRawText());
+        Assert.AreEqual(2, contours.Count(contour => !contour.GetProperty("hole").GetBoolean()
+            && string.IsNullOrEmpty(contour.GetProperty("parentId").GetString())), first.GetRawText());
         Assert.AreEqual(1, contours.Count(contour => contour.GetProperty("hole").GetBoolean()), first.GetRawText());
-        Assert.IsTrue(contours.Any(contour => !contour.GetProperty("hole").GetBoolean()
+        Assert.AreEqual(1, contours.Count(contour => !contour.GetProperty("hole").GetBoolean()
             && contour.GetProperty("parentId").GetString() is { Length: > 0 }), first.GetRawText());
         Assert.IsFalse(data.GetProperty("nativeDocumentMutated").GetBoolean());
         Assert.IsFalse(data.GetProperty("cadProjectionCommitted").GetBoolean());

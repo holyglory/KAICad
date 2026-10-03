@@ -635,6 +635,7 @@ public sealed class RasterTraceProposalInput
     public RasterTraceBoundsInput? Bounds { get; set; }
     public string? GeometrySha256 { get; set; }
     public uint ContourCount { get; set; }
+    public uint VertexCount { get; set; }
     public uint FilledPieceCount { get; set; }
     public double PotraceOptTolerancePx { get; set; }
     public string? ContributorSemantics { get; set; }
@@ -654,7 +655,7 @@ public sealed class RasterTraceProposalInput
             CoordinateOrientation = CoordinateOrientation ?? "", Rounding = Rounding ?? "", Threshold = Threshold,
             Invert = Invert, TurdSize = TurdSize, CurveToleranceNm = CurveToleranceNm,
             MaxContours = MaxContours, MaxVertices = MaxVertices, GeometrySha256 = GeometrySha256 ?? "",
-            ContourCount = ContourCount, FilledPieceCount = FilledPieceCount,
+            ContourCount = ContourCount, VertexCount = VertexCount, FilledPieceCount = FilledPieceCount,
             PotraceOptTolerancePx = PotraceOptTolerancePx, ContributorSemantics = ContributorSemantics ?? ""
         };
         foreach (RasterTraceContourInput? contour in Contours ?? [])

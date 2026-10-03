@@ -1,0 +1,124 @@
+/* Typed PCB manufacturing exports and process-owned receipts. GPL-3.0-or-later. */
+syntax = "proto3";
+
+package kiapi.automation.v1;
+option csharp_namespace = "KiCad.Automation.Protocol";
+
+import "board/board_jobs.proto";
+import "common/commands/automation_commands.proto";
+import "common/types/base_types.proto";
+
+// Runs one existing native PCB board-job exporter into a new, owned output
+// directory. The concrete job payloads remain the existing board-job messages;
+// this envelope adds lifecycle admission, operation identity and publication.
+message RunPcbManufacturingExport
+{
+  string operation_id = 1;
+  string process_epoch = 2;
+  kiapi.common.types.DocumentSpecifier document = 3;
+  DocumentLifecycleState expected_state = 4;
+  // Must be absolute and must not exist before admission. The native handler
+  // stages into a sibling directory and publishes this directory atomically.
+  string output_directory = 5;
+
+  oneof job
+  {
+    kiapi.board.jobs.RunBoardJobExport3D export_3d = 20;
+    kiapi.board.jobs.RunBoardJobExportRender export_render = 21;
+    kiapi.board.jobs.RunBoardJobExportSvg export_svg = 22;
+    kiapi.board.jobs.RunBoardJobExportDxf export_dxf = 23;
+    kiapi.board.jobs.RunBoardJobExportPdf export_pdf = 24;
+    kiapi.board.jobs.RunBoardJobExportPs export_ps = 25;
+    kiapi.board.jobs.RunBoardJobExportGerbers export_gerbers = 26;
+    kiapi.board.jobs.RunBoardJobExportDrill export_drill = 27;
+    kiapi.board.jobs.RunBoardJobExportPosition export_position = 28;
+    kiapi.board.jobs.RunBoardJobExportGencad export_gencad = 29;
+    kiapi.board.jobs.RunBoardJobExportIpc2581 export_ipc2581 = 30;
+    kiapi.board.jobs.RunBoardJobExportIpcD356 export_ipc_d356 = 31;
+    kiapi.board.jobs.RunBoardJobExportODB export_odb = 32;
+    kiapi.board.jobs.RunBoardJobExportStats export_stats = 33;
+  }
+}
+
+message ReadPcbManufacturingExport
+{
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  string process_epoch = 3;
+}
+
+enum PcbManufacturingExportStatus
+{
+  PCB_MFG_EXPORT_STATUS_UNSPECIFIED = 0;
+  PCB_MFG_EXPORT_ADMITTED = 1;
+  PCB_MFG_EXPORT_RUNNING = 2;
+  PCB_MFG_EXPORT_COMPLETED = 3;
+  PCB_MFG_EXPORT_FAILED = 4;
+  PCB_MFG_EXPORT_INDETERMINATE = 5;
+  PCB_MFG_EXPORT_UNSUBMITTED = 6;
+}
+
+enum PcbManufacturingDispatchStage
+{
+  PCB_MFG_DISPATCH_UNSPECIFIED = 0;
+  PCB_MFG_DISPATCH_ADMITTED = 1;
+  PCB_MFG_DISPATCH_SUBMITTED = 2;
+  PCB_MFG_DISPATCH_TERMINAL = 3;
+  PCB_MFG_DISPATCH_PUBLICATION = 4;
+  PCB_MFG_DISPATCH_PUBLICATION_FAILED = 5;
+}
+
+enum PcbManufacturingArtifactOwnership
+{
+  PCB_MFG_ARTIFACT_OWNERSHIP_UNSPECIFIED = 0;
+  PCB_MFG_ARTIFACT_CREATED = 1;
+  PCB_MFG_ARTIFACT_REPLACED = 2;
+  PCB_MFG_ARTIFACT_UNCHANGED = 3;
+}
+
+enum PcbManufacturingPublicationState
+{
+  PCB_MFG_PUBLICATION_UNSPECIFIED = 0;
+  PCB_MFG_PUBLICATION_STAGED = 1;
+  PCB_MFG_PUBLICATION_PUBLISHED = 2;
+  PCB_MFG_PUBLICATION_FAILED = 3;
+}
+
+message PcbManufacturingArtifact
+{
+  string path = 1;
+  string relative_path = 2;
+  uint64 bytes = 3;
+  string sha256 = 4;
+  PcbManufacturingArtifactOwnership ownership = 5;
+}
+
+message PcbManufacturingExportReceipt
+{
+  string operation_id = 1;
+  string process_epoch = 2;
+  kiapi.common.types.DocumentSpecifier document = 3;
+  string request_fingerprint_sha256 = 4;
+  string job_kind = 5;
+  PcbManufacturingExportStatus status = 6;
+  PcbManufacturingDispatchStage dispatch_stage = 7;
+  bool native_dispatch = 8;
+  bool terminal = 9;
+  string error_code = 10;
+  string error_message = 11;
+  DocumentLifecycleState expected_state = 12;
+  DocumentLifecycleState observed_before = 13;
+  DocumentLifecycleState observed_after = 14;
+  string output_directory = 15;
+  string staging_directory = 16;
+  repeated PcbManufacturingArtifact artifacts = 17;
+  bool output_manifest_complete = 18;
+  string output_manifest_sha256 = 19;
+  PcbManufacturingPublicationState publication_state = 20;
+}
+
+message PcbManufacturingExportReceiptResponse
+{
+  bool found = 1;
+  PcbManufacturingExportReceipt receipt = 2;
+}

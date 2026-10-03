@@ -19,6 +19,11 @@
  */
 
 #include <magic_enum.hpp>
+#include <cerrno>
+#include <cmath>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <optional>
@@ -125,6 +130,13 @@
 #include <trace_helpers.h>
 #include <wx/ffile.h>
 
+#if defined( __linux__ )
+#include <fcntl.h>
+#include <linux/fs.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
+
 using namespace kiapi::common::commands;
 
 KICAD_API_SERVER& API_HANDLER_PCB::drcApiServer() const
@@ -134,6 +146,310 @@ KICAD_API_SERVER& API_HANDLER_PCB::drcApiServer() const
 using types::CommandStatus;
 using types::DocumentType;
 using types::ItemRequestStatus;
+
+
+namespace
+{
+namespace fs = std::filesystem;
+using namespace kiapi::automation::v1;
+
+
+ApiResponseStatus ManufacturingError( const std::string& aMessage,
+                                       ApiStatusCode aStatus = ApiStatusCode::AS_BAD_REQUEST )
+{
+    ApiResponseStatus error;
+    error.set_status( aStatus );
+    error.set_error_message( aMessage );
+    return error;
+}
+
+
+bool IsOperationId( const std::string& aOperationId )
+{
+    return aOperationId.size() == 36
+        && KIID::SniffTest( wxString::FromUTF8( aOperationId ) );
+}
+
+
+wxString WxPath( const fs::path& aPath )
+{
+    return wxString::FromUTF8( aPath.generic_string() );
+}
+
+
+bool ExistingPath( const fs::path& aPath, std::string& aReason )
+{
+    std::error_code error;
+    const fs::file_status status = fs::symlink_status( aPath, error );
+    if( error )
+    {
+        if( error == std::errc::no_such_file_or_directory )
+            return false;
+        aReason = error.message();
+        return true;
+    }
+
+    if( status.type() != fs::file_type::not_found )
+    {
+        aReason = "the output or staging path already exists";
+        return true;
+    }
+
+    return false;
+}
+
+
+bool ValidatePayloadMetadata( const RunPcbManufacturingExport& aRequest, std::string& aReason )
+{
+    auto check = [&]( const auto& aPayload )
+    {
+        if( aPayload.has_job_settings() )
+        {
+            if( !aPayload.job_settings().output_path().empty() )
+            {
+                aReason = "concrete job output_path must be empty; outputDirectory owns publication";
+                return false;
+            }
+            if( aPayload.job_settings().has_document()
+                && !google::protobuf::util::MessageDifferencer::Equivalent(
+                        aPayload.job_settings().document(), aRequest.document() ) )
+            {
+                aReason = "concrete job document contradicts the envelope document";
+                return false;
+            }
+        }
+        return true;
+    };
+
+    switch( aRequest.job_case() )
+    {
+    case RunPcbManufacturingExport::kExport3d: return check( aRequest.export_3d() );
+    case RunPcbManufacturingExport::kExportRender: return check( aRequest.export_render() );
+    case RunPcbManufacturingExport::kExportSvg: return check( aRequest.export_svg() );
+    case RunPcbManufacturingExport::kExportDxf: return check( aRequest.export_dxf() );
+    case RunPcbManufacturingExport::kExportPdf: return check( aRequest.export_pdf() );
+    case RunPcbManufacturingExport::kExportPs: return check( aRequest.export_ps() );
+    case RunPcbManufacturingExport::kExportGerbers: return check( aRequest.export_gerbers() );
+    case RunPcbManufacturingExport::kExportDrill: return check( aRequest.export_drill() );
+    case RunPcbManufacturingExport::kExportPosition: return check( aRequest.export_position() );
+    case RunPcbManufacturingExport::kExportGencad: return check( aRequest.export_gencad() );
+    case RunPcbManufacturingExport::kExportIpc2581: return check( aRequest.export_ipc2581() );
+    case RunPcbManufacturingExport::kExportIpcD356: return check( aRequest.export_ipc_d356() );
+    case RunPcbManufacturingExport::kExportOdb: return check( aRequest.export_odb() );
+    case RunPcbManufacturingExport::kExportStats: return check( aRequest.export_stats() );
+    case RunPcbManufacturingExport::JOB_NOT_SET: break;
+    }
+    aReason = "exactly one concrete job is required";
+    return false;
+}
+
+
+bool AtomicPublishNoReplaceDirectory( const fs::path& aStaging, const fs::path& aOutput,
+                                      std::string& aReason )
+{
+#if defined( __linux__ ) && defined( SYS_renameat2 ) && defined( RENAME_NOREPLACE )
+    if( ::syscall( SYS_renameat2, AT_FDCWD, aStaging.c_str(), AT_FDCWD, aOutput.c_str(),
+                   RENAME_NOREPLACE ) == 0 )
+    {
+        return true;
+    }
+
+    aReason = std::strerror( errno );
+    return false;
+#else
+    (void) aStaging;
+    (void) aOutput;
+    aReason = "atomic no-replace directory publication is unavailable on this platform";
+    return false;
+#endif
+}
+
+
+bool NativeManufacturingPublicationAvailable()
+{
+#if defined( __linux__ ) && defined( SYS_renameat2 ) && defined( RENAME_NOREPLACE )
+    return true;
+#else
+    return false;
+#endif
+}
+
+
+std::string ManufacturingJobKind( const RunPcbManufacturingExport& aRequest )
+{
+    switch( aRequest.job_case() )
+    {
+    case RunPcbManufacturingExport::kExport3d: return "3d";
+    case RunPcbManufacturingExport::kExportRender: return "render";
+    case RunPcbManufacturingExport::kExportSvg: return "svg";
+    case RunPcbManufacturingExport::kExportDxf: return "dxf";
+    case RunPcbManufacturingExport::kExportPdf: return "pdf";
+    case RunPcbManufacturingExport::kExportPs: return "ps";
+    case RunPcbManufacturingExport::kExportGerbers: return "gerbers";
+    case RunPcbManufacturingExport::kExportDrill: return "drill";
+    case RunPcbManufacturingExport::kExportPosition: return "position";
+    case RunPcbManufacturingExport::kExportGencad: return "gencad";
+    case RunPcbManufacturingExport::kExportIpc2581: return "ipc2581";
+    case RunPcbManufacturingExport::kExportIpcD356: return "ipc-d356";
+    case RunPcbManufacturingExport::kExportOdb: return "odb";
+    case RunPcbManufacturingExport::kExportStats: return "stats";
+    case RunPcbManufacturingExport::JOB_NOT_SET: return {};
+    }
+    return {};
+}
+
+
+bool ManufacturingOutputIsDirectory( const RunPcbManufacturingExport& aRequest )
+{
+    switch( aRequest.job_case() )
+    {
+    case RunPcbManufacturingExport::kExportGerbers:
+    case RunPcbManufacturingExport::kExportDrill:
+        return true;
+    case RunPcbManufacturingExport::kExportOdb:
+        return aRequest.export_odb().compression() == kiapi::board::jobs::OdbCompression::ODBC_NONE;
+    default:
+        return false;
+    }
+}
+
+
+std::string ManufacturingOutputExtension( const RunPcbManufacturingExport& aRequest )
+{
+    switch( aRequest.job_case() )
+    {
+    case RunPcbManufacturingExport::kExport3d:
+        switch( aRequest.export_3d().format() )
+        {
+        case kiapi::board::jobs::Board3DFormat::B3D_STEP: return "step";
+        case kiapi::board::jobs::Board3DFormat::B3D_STEPZ: return "stpz";
+        case kiapi::board::jobs::Board3DFormat::B3D_BREP: return "brep";
+        case kiapi::board::jobs::Board3DFormat::B3D_XAO: return "xao";
+        case kiapi::board::jobs::Board3DFormat::B3D_GLB: return "glb";
+        case kiapi::board::jobs::Board3DFormat::B3D_VRML: return "wrl";
+        case kiapi::board::jobs::Board3DFormat::B3D_PLY: return "ply";
+        case kiapi::board::jobs::Board3DFormat::B3D_STL: return "stl";
+        case kiapi::board::jobs::Board3DFormat::B3D_U3D: return "u3d";
+        case kiapi::board::jobs::Board3DFormat::B3D_PDF: return "pdf";
+        default: return "out";
+        }
+    case RunPcbManufacturingExport::kExportRender:
+        return aRequest.export_render().format() == kiapi::board::jobs::RenderFormat::RF_JPEG ? "jpg" : "png";
+    case RunPcbManufacturingExport::kExportSvg: return "svg";
+    case RunPcbManufacturingExport::kExportDxf: return "dxf";
+    case RunPcbManufacturingExport::kExportPdf: return "pdf";
+    case RunPcbManufacturingExport::kExportPs: return "ps";
+    case RunPcbManufacturingExport::kExportPosition:
+        switch( aRequest.export_position().format() )
+        {
+        case kiapi::board::jobs::PositionFormat::PF_CSV: return "csv";
+        case kiapi::board::jobs::PositionFormat::PF_GERBER: return "gbr";
+        default: return "pos";
+        }
+    case RunPcbManufacturingExport::kExportGencad: return "cad";
+    case RunPcbManufacturingExport::kExportIpc2581: return "xml";
+    case RunPcbManufacturingExport::kExportIpcD356: return "d356";
+    case RunPcbManufacturingExport::kExportOdb:
+        switch( aRequest.export_odb().compression() )
+        {
+        case kiapi::board::jobs::OdbCompression::ODBC_TGZ: return "tgz";
+        case kiapi::board::jobs::OdbCompression::ODBC_NONE: return {};
+        default: return "zip";
+        }
+    case RunPcbManufacturingExport::kExportStats:
+        return aRequest.export_stats().format() == kiapi::board::jobs::StatsOutputFormat::SOF_JSON ? "json" : "rpt";
+    default: return "out";
+    }
+}
+
+
+bool InventoryManufacturingArtifacts( const fs::path& aRoot,
+                                      PcbManufacturingExportReceipt& aReceipt,
+                                      std::string& aReason )
+{
+    std::error_code error;
+    std::vector<fs::path> files;
+    fs::recursive_directory_iterator it( aRoot, error );
+    if( error )
+    {
+        aReason = error.message();
+        return false;
+    }
+    for( fs::recursive_directory_iterator end; it != end; it.increment( error ) )
+    {
+        if( error )
+        {
+            aReason = error.message();
+            return false;
+        }
+
+        const fs::file_status status = it->symlink_status( error );
+        if( error || status.type() == fs::file_type::symlink )
+        {
+            aReason = "staged output contains an unreadable or symlinked path";
+            return false;
+        }
+        if( status.type() == fs::file_type::regular ) files.push_back( it->path() );
+        else if( status.type() != fs::file_type::directory )
+        {
+            aReason = "staged output contains a non-regular file";
+            return false;
+        }
+    }
+    if( error )
+    {
+        aReason = error.message();
+        return false;
+    }
+
+    std::sort( files.begin(), files.end(), []( const fs::path& aLeft, const fs::path& aRight )
+    {
+        return aLeft.generic_string() < aRight.generic_string();
+    } );
+    if( files.empty() || files.size() > 4096 )
+    {
+        aReason = "the export produced no files or too many files";
+        return false;
+    }
+
+    NATIVE_STATE_DIGEST manifest;
+    uint64_t totalBytes = 0;
+    for( const fs::path& file : files )
+    {
+        const fs::path relative = file.lexically_relative( aRoot );
+        const std::string relativeText = relative.generic_string();
+        if( relative.empty() || relative.is_absolute()
+            || ( relativeText.size() >= 2 && relativeText.compare( 0, 2, ".." ) == 0 ) )
+        {
+            aReason = "staged output escaped its owned directory";
+            return false;
+        }
+        const FILE_CONTENT_BASELINE baseline = FILE_CONTENT_BASELINE::Read( WxPath( file ) );
+        if( !baseline.Known() || !baseline.Exists() )
+        {
+            aReason = "staged output could not be hashed";
+            return false;
+        }
+        totalBytes += baseline.Bytes();
+        if( baseline.Bytes() > 512ULL * 1024 * 1024 || totalBytes > 2ULL * 1024 * 1024 * 1024 )
+        {
+            aReason = "staged output exceeds the native artifact budget";
+            return false;
+        }
+        manifest.Append( relative.generic_string() );
+        manifest.Append( baseline.Sha256() );
+        PcbManufacturingArtifact* artifact = aReceipt.add_artifacts();
+        artifact->set_path( WxPath( file ).ToStdString() );
+        artifact->set_relative_path( relative.generic_string() );
+        artifact->set_bytes( baseline.Bytes() );
+        artifact->set_sha256( baseline.Sha256() );
+        artifact->set_ownership( PcbManufacturingArtifactOwnership::PCB_MFG_ARTIFACT_CREATED );
+    }
+    aReceipt.set_output_manifest_complete( true );
+    aReceipt.set_output_manifest_sha256( manifest.Hex() );
+    return true;
+}
+}
 
 
 API_HANDLER_PCB::API_HANDLER_PCB( PCB_EDIT_FRAME* aFrame ) :
@@ -210,6 +526,12 @@ API_HANDLER_PCB::API_HANDLER_PCB( std::shared_ptr<PCB_CONTEXT> aContext, PCB_EDI
     registerHandler<kiapi::automation::v1::NativeCapabilityPcbReadOperation,
                     kiapi::automation::v1::NativeCapabilityPcbReadOperationResponse>(
             &API_HANDLER_PCB::handleReadPcbOperation );
+    registerHandler<kiapi::automation::v1::RunPcbManufacturingExport,
+                    kiapi::automation::v1::PcbManufacturingExportReceipt>(
+            &API_HANDLER_PCB::handleRunPcbManufacturingExport );
+    registerHandler<kiapi::automation::v1::ReadPcbManufacturingExport,
+                    kiapi::automation::v1::PcbManufacturingExportReceiptResponse>(
+            &API_HANDLER_PCB::handleReadPcbManufacturingExport );
 
     registerHandler<GetBoardEditorAppearanceSettings, BoardEditorAppearanceSettings>(
             &API_HANDLER_PCB::handleGetBoardEditorAppearanceSettings );
@@ -3108,6 +3430,13 @@ API_HANDLER_PCB::handleReadPcbOperation(
 
     response.set_found( true );
     std::lock_guard receiptLock( found->second->mutex );
+    if( found->second->manufacturingExport )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_UNIMPLEMENTED );
+        error.set_error_message( "This operation ID is a PCB manufacturing export; read it with ReadPcbManufacturingExport" );
+        return tl::unexpected( error );
+    }
     response.set_operation( found->second->operation );
     response.mutable_document()->CopyFrom( found->second->document );
     response.set_completed( found->second->completed );
@@ -3134,6 +3463,501 @@ API_HANDLER_PCB::handleReadPcbOperation(
         response.set_new_footprint_count( found->second->importResponse->new_footprint_count() );
         response.set_report( found->second->importResponse->report() );
     }
+    return response;
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::PcbManufacturingExportReceipt>
+API_HANDLER_PCB::handleRunPcbManufacturingExport(
+        const HANDLER_CONTEXT<kiapi::automation::v1::RunPcbManufacturingExport>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    const RunPcbManufacturingExport& request = aCtx.Request;
+
+    if( !IsOperationId( request.operation_id() ) )
+        return tl::unexpected( ManufacturingError( "A canonical operation UUID is required for a PCB manufacturing export" ) );
+
+    std::string payloadReason;
+    if( !ValidatePayloadMetadata( request, payloadReason ) )
+        return tl::unexpected( ManufacturingError( payloadReason ) );
+
+    const std::string normalizedBytes = request.SerializeAsString();
+    NATIVE_STATE_DIGEST requestDigest;
+    requestDigest.Append( normalizedBytes );
+
+    auto existing = m_operationReceipts.find( request.operation_id() );
+    if( existing != m_operationReceipts.end() )
+    {
+        std::lock_guard lock( existing->second->mutex );
+        if( !existing->second->manufacturingExport
+            || existing->second->fingerprint != normalizedBytes )
+        {
+            return tl::unexpected( ManufacturingError(
+                    "The operation ID is already bound to a different PCB operation" ) );
+        }
+
+        return *existing->second->manufacturingExport;
+    }
+
+    if( request.job_case() == RunPcbManufacturingExport::JOB_NOT_SET )
+        return tl::unexpected( ManufacturingError( "Exactly one PCB manufacturing job is required" ) );
+    if( request.document().type() != DocumentType::DOCTYPE_PCB
+        || request.expected_state().scope() != DocumentLifecycleScope::DLS_PCB
+        || !google::protobuf::util::MessageDifferencer::Equivalent(
+                request.expected_state().document(), request.document() )
+        || request.expected_state().process_epoch() != request.process_epoch()
+        || request.process_epoch() != apiServer().Token()
+        || request.expected_state().state_sha256().empty() )
+    {
+        return tl::unexpected( ManufacturingError( "The manufacturing export must bind one explicit PCB, process epoch and lifecycle state" ) );
+    }
+
+    if( !NativeManufacturingPublicationAvailable() )
+        return tl::unexpected( ManufacturingError(
+                "Atomic no-replace directory publication is unavailable on this platform",
+                ApiStatusCode::AS_UNIMPLEMENTED ) );
+
+    if( auto valid = validateDocument( request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+
+    const fs::path requestedOutputDirectory = fs::u8path( request.output_directory() );
+    if( request.output_directory().empty() || !requestedOutputDirectory.is_absolute() )
+        return tl::unexpected( ManufacturingError( "outputDirectory must be an absolute path" ) );
+    const fs::path outputDirectory = requestedOutputDirectory.lexically_normal();
+
+    std::string pathReason;
+    if( ExistingPath( outputDirectory, pathReason ) )
+        return tl::unexpected( ManufacturingError( "The output directory must be new: " + pathReason ) );
+
+    const fs::path parent = outputDirectory.parent_path();
+    std::error_code parentError;
+    if( parent.empty() || !fs::is_directory( fs::symlink_status( parent, parentError ) ) || parentError )
+        return tl::unexpected( ManufacturingError( "The output directory parent must already be an accessible directory" ) );
+
+    const fs::path stagingDirectory = parent
+            / ( outputDirectory.filename().string() + ".kicad-staging-" + request.operation_id() );
+    if( ExistingPath( stagingDirectory, pathReason ) )
+        return tl::unexpected( ManufacturingError( "The operation's staging directory already exists: " + pathReason ) );
+
+    HANDLER_CONTEXT<kiapi::automation::v1::ReadDocumentLifecycleState> lifecycleContext;
+    lifecycleContext.Request.mutable_document()->CopyFrom( request.document() );
+    HANDLER_RESULT<DocumentLifecycleState> before = handleReadLifecycleState( lifecycleContext );
+    if( !before )
+        return tl::unexpected( before.error() );
+    if( !google::protobuf::util::MessageDifferencer::Equivalent( *before, request.expected_state() ) )
+        return tl::unexpected( ManufacturingError(
+                "The PCB changed before the manufacturing export started", ApiStatusCode::AS_BUSY ) );
+
+    auto receipt = std::make_shared<PCB_OPERATION_RECEIPT>();
+    receipt->operation = "pcb-manufacturing-export";
+    receipt->fingerprint = normalizedBytes;
+    receipt->document.CopyFrom( request.document() );
+    receipt->request = normalizedBytes;
+    receipt->processEpoch = apiServer().Token();
+    receipt->manufacturingExport.emplace();
+    PcbManufacturingExportReceipt& retained = *receipt->manufacturingExport;
+    retained.set_operation_id( request.operation_id() );
+    retained.set_process_epoch( apiServer().Token() );
+    retained.mutable_document()->CopyFrom( request.document() );
+    retained.set_request_fingerprint_sha256( requestDigest.Hex() );
+    retained.set_job_kind( ManufacturingJobKind( request ) );
+    retained.set_status( PCB_MFG_EXPORT_ADMITTED );
+    retained.set_dispatch_stage( PCB_MFG_DISPATCH_ADMITTED );
+    retained.set_native_dispatch( false );
+    retained.set_terminal( false );
+    retained.mutable_expected_state()->CopyFrom( request.expected_state() );
+    retained.mutable_observed_before()->CopyFrom( *before );
+    retained.set_output_directory( WxPath( outputDirectory ).ToStdString() );
+    retained.set_staging_directory( WxPath( stagingDirectory ).ToStdString() );
+    retained.set_publication_state( PCB_MFG_PUBLICATION_STAGED );
+    // Reserve the bounded manifest capacity before native dispatch. Inventory
+    // still fails closed if the byte budget or file count is exceeded.
+    retained.mutable_artifacts()->Reserve( 4096 );
+    m_operationReceipts.emplace( request.operation_id(), receipt );
+
+    std::error_code createError;
+    if( !fs::create_directory( stagingDirectory, createError ) || createError )
+    {
+        std::lock_guard lock( receipt->mutex );
+        retained.set_status( PCB_MFG_EXPORT_UNSUBMITTED );
+        retained.set_dispatch_stage( PCB_MFG_DISPATCH_ADMITTED );
+        retained.set_terminal( true );
+        retained.set_error_code( "export_staging_failed" );
+        retained.set_error_message( "The owned export staging directory could not be created: "
+                                     + createError.message() );
+        return retained;
+    }
+
+    const bool outputIsDirectory = ManufacturingOutputIsDirectory( request );
+    fs::path stagedOutput = stagingDirectory;
+    if( !outputIsDirectory )
+    {
+        const std::string extension = ManufacturingOutputExtension( request );
+        stagedOutput /= extension.empty() ? "export" : "export." + extension;
+    }
+    const wxString stagedOutputPath = WxPath( stagedOutput );
+
+    if( request.job_case() == RunPcbManufacturingExport::kExportRender )
+    {
+        const RunBoardJobExportRender& render = request.export_render();
+        if( render.width() < 64 || render.width() > 2048
+            || render.height() < 64 || render.height() > 2048
+            || static_cast<uint64_t>( render.width() ) * static_cast<uint64_t>( render.height() ) > 8'388'608ULL )
+        {
+            std::lock_guard lock( receipt->mutex );
+            retained.set_status( PCB_MFG_EXPORT_UNSUBMITTED );
+            retained.set_dispatch_stage( PCB_MFG_DISPATCH_ADMITTED );
+            retained.set_terminal( true );
+            retained.set_error_code( "invalid_render_dimensions" );
+            retained.set_error_message( "Render dimensions must be 64..2048 pixels with at most 8,388,608 pixels" );
+            return retained;
+        }
+        if( render.format() != kiapi::board::jobs::RenderFormat::RF_UNKNOWN
+            && render.format() != kiapi::board::jobs::RenderFormat::RF_PNG )
+        {
+            std::lock_guard lock( receipt->mutex );
+            retained.set_status( PCB_MFG_EXPORT_UNSUBMITTED );
+            retained.set_dispatch_stage( PCB_MFG_DISPATCH_ADMITTED );
+            retained.set_terminal( true );
+            retained.set_error_code( "unsupported_render_format" );
+            retained.set_error_message( "Typed PCB render exports currently require PNG output" );
+            return retained;
+        }
+        if( !std::isfinite( render.zoom() ) || render.zoom() <= 0.0 )
+        {
+            std::lock_guard lock( receipt->mutex );
+            retained.set_status( PCB_MFG_EXPORT_UNSUBMITTED );
+            retained.set_dispatch_stage( PCB_MFG_DISPATCH_ADMITTED );
+            retained.set_terminal( true );
+            retained.set_error_code( "invalid_render_zoom" );
+            retained.set_error_message( "Render zoom must be finite and greater than zero" );
+            return retained;
+        }
+    }
+
+    {
+        std::lock_guard lock( receipt->mutex );
+        retained.set_status( PCB_MFG_EXPORT_RUNNING );
+        retained.set_dispatch_stage( PCB_MFG_DISPATCH_SUBMITTED );
+        retained.set_native_dispatch( true );
+    }
+
+    HANDLER_RESULT<types::RunJobResponse> jobResult = tl::unexpected(
+            ManufacturingError( "The native manufacturing job did not return a terminal response" ) );
+
+    try
+    {
+    switch( request.job_case() )
+    {
+    case RunPcbManufacturingExport::kExport3d:
+    {
+        HANDLER_CONTEXT<RunBoardJobExport3D> child;
+        child.Request.CopyFrom( request.export_3d() );
+        child.Request.mutable_job_settings()->mutable_document()->CopyFrom( request.document() );
+        child.Request.mutable_job_settings()->set_output_path( stagedOutputPath.ToStdString() );
+        jobResult = handleRunBoardJobExport3D( child );
+        break;
+    }
+    case RunPcbManufacturingExport::kExportRender:
+    {
+        HANDLER_CONTEXT<RunBoardJobExportRender> child;
+        child.Request.CopyFrom( request.export_render() );
+        child.Request.mutable_job_settings()->mutable_document()->CopyFrom( request.document() );
+        child.Request.mutable_job_settings()->set_output_path( stagedOutputPath.ToStdString() );
+        jobResult = handleRunBoardJobExportRender( child );
+        break;
+    }
+    case RunPcbManufacturingExport::kExportSvg:
+    {
+        HANDLER_CONTEXT<RunBoardJobExportSvg> child;
+        child.Request.CopyFrom( request.export_svg() );
+        child.Request.mutable_job_settings()->mutable_document()->CopyFrom( request.document() );
+        child.Request.mutable_job_settings()->set_output_path( stagedOutputPath.ToStdString() );
+        jobResult = handleRunBoardJobExportSvg( child );
+        break;
+    }
+    case RunPcbManufacturingExport::kExportDxf:
+    {
+        HANDLER_CONTEXT<RunBoardJobExportDxf> child;
+        child.Request.CopyFrom( request.export_dxf() );
+        child.Request.mutable_job_settings()->mutable_document()->CopyFrom( request.document() );
+        child.Request.mutable_job_settings()->set_output_path( stagedOutputPath.ToStdString() );
+        jobResult = handleRunBoardJobExportDxf( child );
+        break;
+    }
+    case RunPcbManufacturingExport::kExportPdf:
+    {
+        HANDLER_CONTEXT<RunBoardJobExportPdf> child;
+        child.Request.CopyFrom( request.export_pdf() );
+        child.Request.mutable_job_settings()->mutable_document()->CopyFrom( request.document() );
+        child.Request.mutable_job_settings()->set_output_path( stagedOutputPath.ToStdString() );
+        jobResult = handleRunBoardJobExportPdf( child );
+        break;
+    }
+    case RunPcbManufacturingExport::kExportPs:
+    {
+        HANDLER_CONTEXT<RunBoardJobExportPs> child;
+        child.Request.CopyFrom( request.export_ps() );
+        child.Request.mutable_job_settings()->mutable_document()->CopyFrom( request.document() );
+        child.Request.mutable_job_settings()->set_output_path( stagedOutputPath.ToStdString() );
+        jobResult = handleRunBoardJobExportPs( child );
+        break;
+    }
+    case RunPcbManufacturingExport::kExportGerbers:
+    {
+        HANDLER_CONTEXT<RunBoardJobExportGerbers> child;
+        child.Request.CopyFrom( request.export_gerbers() );
+        child.Request.mutable_job_settings()->mutable_document()->CopyFrom( request.document() );
+        child.Request.mutable_job_settings()->set_output_path( stagedOutputPath.ToStdString() );
+        jobResult = handleRunBoardJobExportGerbers( child );
+        break;
+    }
+    case RunPcbManufacturingExport::kExportDrill:
+    {
+        HANDLER_CONTEXT<RunBoardJobExportDrill> child;
+        child.Request.CopyFrom( request.export_drill() );
+        child.Request.mutable_job_settings()->mutable_document()->CopyFrom( request.document() );
+        child.Request.mutable_job_settings()->set_output_path( stagedOutputPath.ToStdString() );
+        jobResult = handleRunBoardJobExportDrill( child );
+        break;
+    }
+    case RunPcbManufacturingExport::kExportPosition:
+    {
+        HANDLER_CONTEXT<RunBoardJobExportPosition> child;
+        child.Request.CopyFrom( request.export_position() );
+        child.Request.mutable_job_settings()->mutable_document()->CopyFrom( request.document() );
+        child.Request.mutable_job_settings()->set_output_path( stagedOutputPath.ToStdString() );
+        jobResult = handleRunBoardJobExportPosition( child );
+        break;
+    }
+    case RunPcbManufacturingExport::kExportGencad:
+    {
+        HANDLER_CONTEXT<RunBoardJobExportGencad> child;
+        child.Request.CopyFrom( request.export_gencad() );
+        child.Request.mutable_job_settings()->mutable_document()->CopyFrom( request.document() );
+        child.Request.mutable_job_settings()->set_output_path( stagedOutputPath.ToStdString() );
+        jobResult = handleRunBoardJobExportGencad( child );
+        break;
+    }
+    case RunPcbManufacturingExport::kExportIpc2581:
+    {
+        HANDLER_CONTEXT<RunBoardJobExportIpc2581> child;
+        child.Request.CopyFrom( request.export_ipc2581() );
+        child.Request.mutable_job_settings()->mutable_document()->CopyFrom( request.document() );
+        child.Request.mutable_job_settings()->set_output_path( stagedOutputPath.ToStdString() );
+        jobResult = handleRunBoardJobExportIpc2581( child );
+        break;
+    }
+    case RunPcbManufacturingExport::kExportIpcD356:
+    {
+        HANDLER_CONTEXT<RunBoardJobExportIpcD356> child;
+        child.Request.CopyFrom( request.export_ipc_d356() );
+        child.Request.mutable_job_settings()->mutable_document()->CopyFrom( request.document() );
+        child.Request.mutable_job_settings()->set_output_path( stagedOutputPath.ToStdString() );
+        jobResult = handleRunBoardJobExportIpcD356( child );
+        break;
+    }
+    case RunPcbManufacturingExport::kExportOdb:
+    {
+        HANDLER_CONTEXT<RunBoardJobExportODB> child;
+        child.Request.CopyFrom( request.export_odb() );
+        child.Request.mutable_job_settings()->mutable_document()->CopyFrom( request.document() );
+        child.Request.mutable_job_settings()->set_output_path( stagedOutputPath.ToStdString() );
+        jobResult = handleRunBoardJobExportODB( child );
+        break;
+    }
+    case RunPcbManufacturingExport::kExportStats:
+    {
+        HANDLER_CONTEXT<RunBoardJobExportStats> child;
+        child.Request.CopyFrom( request.export_stats() );
+        child.Request.mutable_job_settings()->mutable_document()->CopyFrom( request.document() );
+        child.Request.mutable_job_settings()->set_output_path( stagedOutputPath.ToStdString() );
+        jobResult = handleRunBoardJobExportStats( child );
+        break;
+    }
+    case RunPcbManufacturingExport::JOB_NOT_SET:
+        break;
+    }
+    }
+    catch( const std::exception& error )
+    {
+        std::lock_guard lock( receipt->mutex );
+        retained.set_status( PCB_MFG_EXPORT_INDETERMINATE );
+        retained.set_dispatch_stage( PCB_MFG_DISPATCH_TERMINAL );
+        retained.set_terminal( true );
+        retained.set_error_code( "native_export_exception" );
+        retained.set_error_message( error.what() );
+        return retained;
+    }
+    catch( ... )
+    {
+        std::lock_guard lock( receipt->mutex );
+        retained.set_status( PCB_MFG_EXPORT_INDETERMINATE );
+        retained.set_dispatch_stage( PCB_MFG_DISPATCH_TERMINAL );
+        retained.set_terminal( true );
+        retained.set_error_code( "native_export_exception" );
+        retained.set_error_message( "The native manufacturing exporter raised an unknown exception" );
+        return retained;
+    }
+
+    auto setReceipt = [&]( auto&& aUpdate )
+    {
+        std::lock_guard lock( receipt->mutex );
+        aUpdate( *receipt->manufacturingExport );
+    };
+
+    if( !jobResult )
+    {
+        setReceipt( [&]( PcbManufacturingExportReceipt& value )
+        {
+            value.set_status( PCB_MFG_EXPORT_INDETERMINATE );
+            value.set_dispatch_stage( PCB_MFG_DISPATCH_TERMINAL );
+            value.set_terminal( true );
+            value.set_error_code( "native_export_error" );
+            value.set_error_message( jobResult.error().error_message() );
+        } );
+        return *receipt->manufacturingExport;
+    }
+
+    if( jobResult->status() != types::JobStatus::JS_SUCCESS )
+    {
+        std::string manifestReason;
+        setReceipt( [&]( PcbManufacturingExportReceipt& value )
+        {
+            value.set_status( PCB_MFG_EXPORT_INDETERMINATE );
+            value.set_dispatch_stage( PCB_MFG_DISPATCH_TERMINAL );
+            value.set_terminal( true );
+            value.set_error_code( "native_export_failed" );
+            value.set_error_message( jobResult->message() );
+            InventoryManufacturingArtifacts( stagingDirectory, value, manifestReason );
+        } );
+        return *receipt->manufacturingExport;
+    }
+
+    for( const std::string& output : jobResult->output_path() )
+    {
+        const fs::path outputPath = fs::u8path( output );
+        std::error_code outputError;
+        const fs::path canonicalOutput = fs::weakly_canonical( outputPath, outputError );
+        const fs::path canonicalStage = fs::weakly_canonical( stagingDirectory, outputError );
+        const fs::path relative = canonicalOutput.lexically_relative( canonicalStage );
+        if( outputError || relative.empty() || relative.is_absolute()
+            || ( relative.generic_string().size() >= 2
+                 && relative.generic_string().compare( 0, 2, ".." ) == 0 ) )
+        {
+            setReceipt( [&]( PcbManufacturingExportReceipt& value )
+            {
+                value.set_status( PCB_MFG_EXPORT_INDETERMINATE );
+                value.set_dispatch_stage( PCB_MFG_DISPATCH_TERMINAL );
+                value.set_terminal( true );
+                value.set_error_code( "native_export_output_escape" );
+                value.set_error_message( "The native exporter reported an output outside its owned staging directory" );
+            } );
+            return *receipt->manufacturingExport;
+        }
+    }
+
+    HANDLER_RESULT<DocumentLifecycleState> after = handleReadLifecycleState( lifecycleContext );
+    if( !after || !google::protobuf::util::MessageDifferencer::Equivalent( *after, request.expected_state() ) )
+    {
+        setReceipt( [&]( PcbManufacturingExportReceipt& value )
+        {
+            value.set_status( PCB_MFG_EXPORT_INDETERMINATE );
+            value.set_dispatch_stage( PCB_MFG_DISPATCH_TERMINAL );
+            value.set_terminal( true );
+            value.set_error_code( "pcb_export_state_changed" );
+            value.set_error_message( "The PCB changed while exporting; the staged result was retained and not published" );
+        } );
+        return *receipt->manufacturingExport;
+    }
+
+    std::string manifestReason;
+    setReceipt( [&]( PcbManufacturingExportReceipt& value )
+    {
+        value.mutable_observed_after()->CopyFrom( *after );
+        InventoryManufacturingArtifacts( stagingDirectory, value, manifestReason );
+    } );
+    if( !manifestReason.empty() )
+    {
+        setReceipt( [&]( PcbManufacturingExportReceipt& value )
+        {
+            value.set_status( PCB_MFG_EXPORT_INDETERMINATE );
+            value.set_dispatch_stage( PCB_MFG_DISPATCH_PUBLICATION_FAILED );
+            value.set_terminal( true );
+            value.set_error_code( "export_manifest_failed" );
+            value.set_error_message( manifestReason );
+            value.set_publication_state( PCB_MFG_PUBLICATION_FAILED );
+        } );
+        return *receipt->manufacturingExport;
+    }
+
+    PcbManufacturingExportReceipt finalReceipt;
+    {
+        std::lock_guard lock( receipt->mutex );
+        finalReceipt.CopyFrom( retained );
+        for( int index = 0; index < finalReceipt.artifacts_size(); ++index )
+        {
+            PcbManufacturingArtifact* artifact = finalReceipt.mutable_artifacts( index );
+            artifact->set_path( ( outputDirectory / fs::u8path( artifact->relative_path() ) ).generic_string() );
+        }
+        finalReceipt.set_status( PCB_MFG_EXPORT_COMPLETED );
+        finalReceipt.set_dispatch_stage( PCB_MFG_DISPATCH_TERMINAL );
+        finalReceipt.set_terminal( true );
+        finalReceipt.set_publication_state( PCB_MFG_PUBLICATION_PUBLISHED );
+    }
+
+    std::string publicationReason;
+    if( !AtomicPublishNoReplaceDirectory( stagingDirectory, outputDirectory, publicationReason ) )
+    {
+        setReceipt( [&]( PcbManufacturingExportReceipt& value )
+        {
+            value.set_status( PCB_MFG_EXPORT_INDETERMINATE );
+            value.set_dispatch_stage( PCB_MFG_DISPATCH_PUBLICATION_FAILED );
+            value.set_terminal( true );
+            value.set_error_code( "export_publication_failed" );
+            value.set_error_message( publicationReason );
+            value.set_publication_state( PCB_MFG_PUBLICATION_FAILED );
+        } );
+        return *receipt->manufacturingExport;
+    }
+
+    {
+        std::lock_guard lock( receipt->mutex );
+        retained.Swap( &finalReceipt );
+    }
+    return *receipt->manufacturingExport;
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::PcbManufacturingExportReceiptResponse>
+API_HANDLER_PCB::handleReadPcbManufacturingExport(
+        const HANDLER_CONTEXT<kiapi::automation::v1::ReadPcbManufacturingExport>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    PcbManufacturingExportReceiptResponse response;
+    if( !IsOperationId( aCtx.Request.operation_id() )
+        || aCtx.Request.document().type() != DocumentType::DOCTYPE_PCB
+        || aCtx.Request.process_epoch() != apiServer().Token() )
+    {
+        return tl::unexpected( ManufacturingError( "The manufacturing receipt read requires the exact PCB and process epoch" ) );
+    }
+    auto found = m_operationReceipts.find( aCtx.Request.operation_id() );
+    if( found == m_operationReceipts.end() )
+    {
+        response.set_found( false );
+        return response;
+    }
+    std::lock_guard lock( found->second->mutex );
+    if( !found->second->manufacturingExport )
+        return tl::unexpected( ManufacturingError( "The operation ID belongs to a different PCB operation" ) );
+    if( !google::protobuf::util::MessageDifferencer::Equivalent(
+            found->second->document, aCtx.Request.document() ) )
+        return tl::unexpected( ManufacturingError( "The manufacturing receipt belongs to a different PCB document" ) );
+    if( found->second->processEpoch != aCtx.Request.process_epoch() )
+        return tl::unexpected( ManufacturingError( "The manufacturing receipt belongs to a different native process epoch",
+                                                   ApiStatusCode::AS_BUSY ) );
+    response.set_found( true );
+    response.mutable_receipt()->CopyFrom( *found->second->manufacturingExport );
     return response;
 }
 

@@ -34,6 +34,7 @@
 #include <api/pcb_drc_job_manager.h>
 #include <api/common/commands/automation_commands.pb.h>
 #include <api/common/commands/pcb_render_inspection_commands.pb.h>
+#include <api/common/commands/pcb_manufacturing_commands.pb.h>
 #include <properties/property_mgr.h>
 #include <file_content_baseline.h>
 
@@ -180,6 +181,14 @@ private:
     handleReadPcbOperation(
             const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityPcbReadOperation>& aCtx );
 
+    HANDLER_RESULT<kiapi::automation::v1::PcbManufacturingExportReceipt>
+    handleRunPcbManufacturingExport(
+            const HANDLER_CONTEXT<kiapi::automation::v1::RunPcbManufacturingExport>& aCtx );
+
+    HANDLER_RESULT<kiapi::automation::v1::PcbManufacturingExportReceiptResponse>
+    handleReadPcbManufacturingExport(
+            const HANDLER_CONTEXT<kiapi::automation::v1::ReadPcbManufacturingExport>& aCtx );
+
     HANDLER_RESULT<BoardEditorAppearanceSettings> handleGetBoardEditorAppearanceSettings(
             const HANDLER_CONTEXT<GetBoardEditorAppearanceSettings>& aCtx );
 
@@ -311,6 +320,7 @@ private:
         std::string processEpoch;
         bool commitStateKnown = false;
         std::optional<ImportNetlistResponse> importResponse;
+        std::optional<kiapi::automation::v1::PcbManufacturingExportReceipt> manufacturingExport;
     };
 
     std::map<std::string, std::shared_ptr<PCB_OPERATION_RECEIPT>> m_operationReceipts;

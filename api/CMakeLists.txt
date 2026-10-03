@@ -44,6 +44,7 @@ set( KIAPI_PROTO_SRCS
     common/commands/checked_pcb_route_commands.proto
     common/commands/footprint_definition_commands.proto
     common/commands/pcb_render_inspection_commands.proto
+    common/commands/pcb_manufacturing_commands.proto
 
     board/board.proto
     board/board_commands.proto

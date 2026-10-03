@@ -182,6 +182,100 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(export3dFiles.Any(file => Path.GetExtension(file).Equals(".step", StringComparison.OrdinalIgnoreCase)
                 || Path.GetExtension(file).Equals(".stp", StringComparison.OrdinalIgnoreCase)), export3dReply.GetRawText());
 
+            // The typed task-oriented export owns a new directory and keeps a
+            // native receipt that can be replayed after an MCP reconnect.
+            string typedOutputDirectory = Path.Combine(exportDirectory, "typed-step");
+            string typedOperationId = Guid.NewGuid().ToString("D");
+            var typedDocument = new
+            {
+                type = "DOCTYPE_PCB",
+                project = new { name = board.Project.Name, path = board.Project.Path },
+                boardFilename = board.BoardFilename
+            };
+            JsonElement typedExpectedState = JsonDocument.Parse(expectedStateJson).RootElement.Clone();
+            object typedInput = new
+            {
+                operationId = typedOperationId,
+                document = typedDocument,
+                expectedState = typedExpectedState,
+                outputDirectory = typedOutputDirectory,
+                job = new
+                {
+                    export3D = new
+                    {
+                        format = "B3D_STEP",
+                        includeUnspecified = true,
+                        includeDnp = true,
+                        exportBoardBody = true,
+                        exportComponents = true,
+                        exportPads = true,
+                        exportTracksAndVias = true,
+                        exportSilkscreen = true,
+                        exportSoldermask = true
+                    }
+                }
+            };
+            var typedReply = await mcp.Tool("kicad_pcb_export", new { instanceId, input = typedInput });
+            Assert.IsFalse(typedReply.TryGetProperty("isError", out var typedError) && typedError.GetBoolean(), typedReply.GetRawText());
+            var typedData = typedReply.GetProperty("structuredContent");
+            Assert.AreEqual("PcbMfgExportCompleted", typedData.GetProperty("status").GetString(), typedReply.GetRawText());
+            Assert.IsTrue(typedData.GetProperty("outputManifestComplete").GetBoolean(), typedReply.GetRawText());
+            Assert.IsTrue(Directory.Exists(typedOutputDirectory), typedReply.GetRawText());
+            Assert.IsTrue(typedData.GetProperty("artifacts").GetArrayLength() > 0, typedReply.GetRawText());
+
+            var replayReply = await mcp.Tool("kicad_pcb_export", new { instanceId, input = typedInput });
+            Assert.IsFalse(replayReply.TryGetProperty("isError", out var replayError) && replayError.GetBoolean(), replayReply.GetRawText());
+            Assert.AreEqual(typedData.GetRawText(), replayReply.GetProperty("structuredContent").GetRawText(),
+                "Replaying an exact manufacturing request must return its retained native receipt.");
+
+            string reconnectStateDirectory = Directory.CreateTempSubdirectory("kicad-pcb-manufacturing-reconnect-").FullName;
+            try
+            {
+                await using var reconnectMcp = await StdioMcpFixture.StartAsync(
+                    SyncHarnessProcessTests.ProductionStartInfo(), reconnectStateDirectory,
+                    Path.Combine(evidence, instanceId + "-manufacturing-reconnect.stderr.log"), token);
+                var reconnect = await reconnectMcp.Tool("kicad_instance_attach",
+                    new { endpoint = client.Endpoint, expectedInstanceId = instanceId });
+                Assert.IsFalse(reconnect.TryGetProperty("isError", out var reconnectError) && reconnectError.GetBoolean(),
+                    reconnect.GetRawText());
+                var receiptReply = await reconnectMcp.Tool("kicad_pcb_export_receipt", new
+                {
+                    instanceId, document = typedDocument, processEpoch = before.ProcessEpoch, operationId = typedOperationId
+                });
+                Assert.IsFalse(receiptReply.TryGetProperty("isError", out var receiptError) && receiptError.GetBoolean(), receiptReply.GetRawText());
+                Assert.IsTrue(receiptReply.GetProperty("structuredContent").GetProperty("found").GetBoolean(), receiptReply.GetRawText());
+            }
+            finally { Directory.Delete(reconnectStateDirectory, true); }
+
+            var destinationRefusal = await mcp.Tool("kicad_pcb_export", new
+            {
+                instanceId,
+                input = new
+                {
+                    operationId = Guid.NewGuid().ToString("D"), document = typedDocument,
+                    expectedState = typedExpectedState, outputDirectory = typedOutputDirectory,
+                    job = new { export3D = new { format = "B3D_STEP" } }
+                }
+            });
+            Assert.IsTrue(destinationRefusal.TryGetProperty("isError", out var destinationError) && destinationError.GetBoolean(),
+                destinationRefusal.GetRawText());
+
+            var malformedRender = await mcp.Tool("kicad_pcb_export", new
+            {
+                instanceId,
+                input = new
+                {
+                    operationId = Guid.NewGuid().ToString("D"), document = typedDocument,
+                    expectedState = typedExpectedState, outputDirectory = Path.Combine(exportDirectory, "bad-render"),
+                    job = new { exportRender = new { width = 32, height = 240, format = "RF_PNG" } }
+                }
+            });
+            Assert.IsTrue(malformedRender.TryGetProperty("isError", out var malformedRenderError)
+                && malformedRenderError.GetBoolean(), malformedRender.GetRawText());
+            Assert.AreEqual("invalid_render_dimensions",
+                malformedRender.GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+                malformedRender.GetRawText());
+
             var after = await ObserveLifecycleState(client, board, token);
             Assert.AreEqual(before, after, "Manufacturing jobs must leave the live board and lifecycle state unchanged.");
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-manufacturing.json"),

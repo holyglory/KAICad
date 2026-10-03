@@ -21,91 +21,200 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class PcbJobTools(InstanceRegistry registry)
 {
-    [McpServerTool(Name = "kicad_pcb_export_3d", ReadOnly = true),
+    [McpServerTool(Name = "kicad_pcb_export", ReadOnly = false),
+     Description("Run exactly one typed native PCB manufacturing export into a new absolute outputDirectory. Supply an explicit operationId, typed document and complete lifecycle observation, plus exactly one concrete job setting (3D, render, SVG, DXF, PDF, PostScript, Gerbers, drill, position, GenCAD, IPC-2581, IPC-D-356, ODB++ or board statistics). KiCad stages and atomically publishes the directory without replacing existing files. Reuse the same operationId after a lost reply; cancellation never claims native cancellation."),
+     KiCadCapability("pcb-manufacturing", "compiled-mcp plus native-task-export", "typed operation ID, explicit document, complete lifecycle state, owned output directory, native receipt"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> ExportTyped(string instanceId, PcbManufacturingExportInput input,
+        CancellationToken cancellationToken) => Execute(async () =>
+    {
+        if (input is null)
+            throw new AutomationException("invalid_pcb_export_input", "A typed PCB manufacturing export input is required.");
+        ValidateOperationId(input.OperationId);
+        if (string.IsNullOrWhiteSpace(instanceId))
+            throw new AutomationException("invalid_instance_id", "instanceId is required for a PCB manufacturing export.");
+        if (string.IsNullOrWhiteSpace(input.OutputDirectory) || !Path.IsPathFullyQualified(input.OutputDirectory))
+            throw new AutomationException("invalid_pcb_export_path", "outputDirectory must be an absolute path.");
+
+        DocumentSpecifier document = NativeDocumentInput.ToNative(input.Document);
+        DocumentLifecycleState expected = DocumentLifecycleInput.ToNative(input.ExpectedState);
+        DocumentStateTools.ValidateTarget(document);
+        if (document.Type != DocumentType.DoctypePcb || !expected.Document.Equals(document)
+            || expected.Scope != DocumentLifecycleScope.DlsPcb || string.IsNullOrWhiteSpace(expected.ProcessEpoch))
+            throw new AutomationException("invalid_pcb_export_state", "The typed document and lifecycle observation must identify the same PCB.");
+
+        RunPcbManufacturingExport request = new()
+        {
+            OperationId = input.OperationId,
+            ProcessEpoch = expected.ProcessEpoch,
+            Document = document.Clone(),
+            ExpectedState = expected,
+            OutputDirectory = Path.GetFullPath(input.OutputDirectory)
+        };
+        if (input.Job is null)
+            throw new AutomationException("invalid_pcb_export_job", "Exactly one concrete PCB manufacturing job setting is required.");
+        input.Job.ApplyTo(request, document);
+
+        NativeClient client = registry.Client(instanceId);
+        AutomationSession session = await client.HandshakeAsync(cancellationToken);
+        if (session.Epoch != expected.ProcessEpoch)
+            throw new AutomationException("stale_process_epoch", "The lifecycle observation belongs to another native process epoch.");
+        PcbManufacturingExportReceipt receipt = await client.InvokeAsync<RunPcbManufacturingExport,
+            PcbManufacturingExportReceipt>(request, cancellationToken);
+        return Data(new
+        {
+            instanceId,
+            processEpoch = session.Epoch,
+            operationId = receipt.OperationId,
+            job = receipt.JobKind,
+            status = receipt.Status.ToString(),
+            dispatchStage = receipt.DispatchStage.ToString(),
+            nativeDispatch = receipt.NativeDispatch,
+            terminal = receipt.Terminal,
+            errorCode = receipt.ErrorCode,
+            errorMessage = receipt.ErrorMessage,
+            outputDirectory = receipt.OutputDirectory,
+            stagingDirectory = receipt.StagingDirectory,
+            publicationState = receipt.PublicationState.ToString(),
+            artifacts = receipt.Artifacts.Select(artifact => new
+            {
+                path = artifact.Path,
+                relativePath = artifact.RelativePath,
+                bytes = artifact.Bytes,
+                sha256 = artifact.Sha256,
+                ownership = artifact.Ownership.ToString()
+            }).ToArray(),
+            outputManifestComplete = receipt.OutputManifestComplete,
+            outputManifestSha256 = receipt.OutputManifestSha256,
+            beforeState = SchematicJson.Formatter.Format(receipt.ObservedBefore),
+            afterState = receipt.ObservedAfter.ProcessEpoch.Length == 0 ? "" : SchematicJson.Formatter.Format(receipt.ObservedAfter)
+        }, receipt.Status is not (PcbManufacturingExportStatus.PcbMfgExportCompleted),
+            receipt.ErrorCode.Length == 0 ? null : receipt.ErrorCode,
+            receipt.ErrorMessage.Length == 0 ? null : receipt.ErrorMessage);
+    }, input?.OperationId, input?.ExpectedState?.ProcessEpoch);
+
+    [McpServerTool(Name = "kicad_pcb_export_receipt", ReadOnly = true),
+     Description("Read the native receipt for one typed PCB manufacturing export after MCP reconnect or a lost reply. Supply the exact PCB document, native process epoch and operationId. A missing receipt is reported as found=false; a different epoch or document is an error. This read never retries or republishes an export."),
+     KiCadCapability("pcb-manufacturing", "compiled-mcp plus native-task-export", "typed document, process epoch, operation ID, native receipt"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> ExportReceipt(string instanceId, NativeDocumentInput documentInput,
+        string processEpoch, string operationId, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        ValidateOperationId(operationId);
+        ValidateEpoch(processEpoch);
+        DocumentSpecifier document = NativeDocumentInput.ToNative(documentInput);
+        DocumentStateTools.ValidateTarget(document);
+        if (document.Type != DocumentType.DoctypePcb)
+            throw new AutomationException("invalid_pcb_export_target", "The receipt target must be an explicit PCB document.");
+        NativeClient client = registry.Client(instanceId);
+        AutomationSession session = await client.HandshakeAsync(cancellationToken);
+        if (session.Epoch != processEpoch)
+            throw new AutomationException("stale_process_epoch", "The requested receipt belongs to another native process epoch.");
+        PcbManufacturingExportReceiptResponse response = await client.InvokeAsync<ReadPcbManufacturingExport,
+            PcbManufacturingExportReceiptResponse>(new()
+            {
+                Document = document,
+                OperationId = operationId,
+                ProcessEpoch = processEpoch
+            }, cancellationToken);
+        JsonElement? receiptJson = response.Found
+            ? JsonDocument.Parse(SchematicJson.Formatter.Format(response.Receipt)).RootElement.Clone()
+            : null;
+        return Data(new
+        {
+            instanceId,
+            processEpoch = session.Epoch,
+            operationId,
+            found = response.Found,
+            receipt = receiptJson
+        });
+    }, operationId, processEpoch);
+
+    [McpServerTool(Name = "kicad_pcb_export_3d", ReadOnly = false),
      Description("Export an explicitly identified PCB as a native 3D model through KiCad's board job. requestJson is RunBoardJobExport3D protobuf JSON with an absolute output path, explicit PCB document and format such as STEP, VRML, GLB or STL; expectedStateJson is the lifecycle observation used for admission and post-export verification. Returns bounded output hashes and never changes the board."),
      KiCadCapability("pcb-manufacturing", "compiled-mcp plus native-board-job", "explicit PCB document, process epoch, lifecycle state, native 3D export format"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Export3D(string instanceId, string requestJson, string expectedStateJson, CancellationToken cancellationToken) =>
         Export<RunBoardJobExport3D>(instanceId, requestJson, expectedStateJson, "3d", request => request.JobSettings, cancellationToken);
 
-    [McpServerTool(Name = "kicad_pcb_export_svg", ReadOnly = true),
+    [McpServerTool(Name = "kicad_pcb_export_svg", ReadOnly = false),
      Description("Export an explicitly identified PCB to SVG through KiCad's native board job. requestJson is RunBoardJobExportSvg protobuf JSON with an absolute output path and explicit PCB document; expectedStateJson is the lifecycle observation used for admission and post-export verification. Supports one composite SVG or one file per selected layer. Returns every native output path, byte count and SHA-256; the board is never changed."),
      KiCadCapability("pcb-manufacturing", "compiled-mcp plus native-board-job", "explicit PCB document, process epoch, lifecycle state"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public Task<CallToolResult> ExportSvg(string instanceId, string requestJson, string expectedStateJson, CancellationToken cancellationToken) =>
         Export<RunBoardJobExportSvg>(instanceId, requestJson, expectedStateJson, "svg", request => request.JobSettings, cancellationToken);
 
-    [McpServerTool(Name = "kicad_pcb_export_dxf", ReadOnly = true),
+    [McpServerTool(Name = "kicad_pcb_export_dxf", ReadOnly = false),
      Description("Export an explicitly identified PCB to DXF through KiCad's native board job. requestJson is RunBoardJobExportDxf protobuf JSON with an absolute output path and explicit PCB document; expectedStateJson is the lifecycle observation used for admission and post-export verification. Returns bounded output hashes and never changes the board."),
      KiCadCapability("pcb-manufacturing", "compiled-mcp plus native-board-job", "explicit PCB document, process epoch, lifecycle state"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public Task<CallToolResult> ExportDxf(string instanceId, string requestJson, string expectedStateJson, CancellationToken cancellationToken) =>
         Export<RunBoardJobExportDxf>(instanceId, requestJson, expectedStateJson, "dxf", request => request.JobSettings, cancellationToken);
 
-    [McpServerTool(Name = "kicad_pcb_export_pdf", ReadOnly = true),
+    [McpServerTool(Name = "kicad_pcb_export_pdf", ReadOnly = false),
      Description("Export an explicitly identified PCB to PDF through KiCad's native board job. requestJson is RunBoardJobExportPdf protobuf JSON with an absolute output path and explicit PCB document; expectedStateJson is the lifecycle observation used for admission and post-export verification. Returns bounded output hashes and never changes the board."),
      KiCadCapability("pcb-manufacturing", "compiled-mcp plus native-board-job", "explicit PCB document, process epoch, lifecycle state"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public Task<CallToolResult> ExportPdf(string instanceId, string requestJson, string expectedStateJson, CancellationToken cancellationToken) =>
         Export<RunBoardJobExportPdf>(instanceId, requestJson, expectedStateJson, "pdf", request => request.JobSettings, cancellationToken);
 
-    [McpServerTool(Name = "kicad_pcb_export_ps", ReadOnly = true),
+    [McpServerTool(Name = "kicad_pcb_export_ps", ReadOnly = false),
      Description("Export an explicitly identified PCB to PostScript through KiCad's native board job. requestJson is RunBoardJobExportPs protobuf JSON with an absolute output path and explicit PCB document; expectedStateJson is the lifecycle observation used for admission and post-export verification. Returns bounded output hashes and never changes the board."),
      KiCadCapability("pcb-manufacturing", "compiled-mcp plus native-board-job", "explicit PCB document, process epoch, lifecycle state"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public Task<CallToolResult> ExportPs(string instanceId, string requestJson, string expectedStateJson, CancellationToken cancellationToken) =>
         Export<RunBoardJobExportPs>(instanceId, requestJson, expectedStateJson, "ps", request => request.JobSettings, cancellationToken);
 
-    [McpServerTool(Name = "kicad_pcb_export_gerbers", ReadOnly = true),
+    [McpServerTool(Name = "kicad_pcb_export_gerbers", ReadOnly = false),
      Description("Export an explicitly identified PCB's Gerbers through KiCad's native board job. requestJson is RunBoardJobExportGerbers protobuf JSON with an absolute output directory and explicit PCB document; expectedStateJson is the lifecycle observation used for admission and post-export verification. Returns a bounded manifest with hashes for every generated file and never changes the board."),
      KiCadCapability("pcb-manufacturing", "compiled-mcp plus native-board-job", "explicit PCB document, process epoch, lifecycle state"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public Task<CallToolResult> ExportGerbers(string instanceId, string requestJson, string expectedStateJson, CancellationToken cancellationToken) =>
         Export<RunBoardJobExportGerbers>(instanceId, requestJson, expectedStateJson, "gerbers", request => request.JobSettings, cancellationToken);
 
-    [McpServerTool(Name = "kicad_pcb_export_drill", ReadOnly = true),
+    [McpServerTool(Name = "kicad_pcb_export_drill", ReadOnly = false),
      Description("Export an explicitly identified PCB's drill files through KiCad's native board job. requestJson is RunBoardJobExportDrill protobuf JSON with an absolute output path or directory and explicit PCB document; expectedStateJson is the lifecycle observation used for admission and post-export verification. Returns bounded output hashes and never changes the board."),
      KiCadCapability("pcb-manufacturing", "compiled-mcp plus native-board-job", "explicit PCB document, process epoch, lifecycle state"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public Task<CallToolResult> ExportDrill(string instanceId, string requestJson, string expectedStateJson, CancellationToken cancellationToken) =>
         Export<RunBoardJobExportDrill>(instanceId, requestJson, expectedStateJson, "drill", request => request.JobSettings, cancellationToken);
 
-    [McpServerTool(Name = "kicad_pcb_export_position", ReadOnly = true),
+    [McpServerTool(Name = "kicad_pcb_export_position", ReadOnly = false),
      Description("Export an explicitly identified PCB's pick-and-place position files through KiCad's native board job. requestJson is RunBoardJobExportPosition protobuf JSON with an absolute output path or directory and explicit PCB document; expectedStateJson is the lifecycle observation used for admission and post-export verification. Returns bounded output hashes and never changes the board."),
      KiCadCapability("pcb-manufacturing", "compiled-mcp plus native-board-job", "explicit PCB document, process epoch, lifecycle state"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public Task<CallToolResult> ExportPosition(string instanceId, string requestJson, string expectedStateJson, CancellationToken cancellationToken) =>
         Export<RunBoardJobExportPosition>(instanceId, requestJson, expectedStateJson, "position", request => request.JobSettings, cancellationToken);
 
-    [McpServerTool(Name = "kicad_pcb_export_gencad", ReadOnly = true),
+    [McpServerTool(Name = "kicad_pcb_export_gencad", ReadOnly = false),
      Description("Export an explicitly identified PCB to GenCAD through KiCad's native board job. requestJson is RunBoardJobExportGencad protobuf JSON with an absolute output path and explicit PCB document; expectedStateJson is the lifecycle observation used for admission and post-export verification. Returns bounded output hashes and never changes the board."),
      KiCadCapability("pcb-manufacturing", "compiled-mcp plus native-board-job", "explicit PCB document, process epoch, lifecycle state"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public Task<CallToolResult> ExportGencad(string instanceId, string requestJson, string expectedStateJson, CancellationToken cancellationToken) =>
         Export<RunBoardJobExportGencad>(instanceId, requestJson, expectedStateJson, "gencad", request => request.JobSettings, cancellationToken);
 
-    [McpServerTool(Name = "kicad_pcb_export_ipc2581", ReadOnly = true),
+    [McpServerTool(Name = "kicad_pcb_export_ipc2581", ReadOnly = false),
      Description("Export an explicitly identified PCB to IPC-2581 through KiCad's native board job. requestJson is RunBoardJobExportIpc2581 protobuf JSON with an absolute output path and explicit PCB document; expectedStateJson is the lifecycle observation used for admission and post-export verification. Returns bounded output hashes and never changes the board."),
      KiCadCapability("pcb-manufacturing", "compiled-mcp plus native-board-job", "explicit PCB document, process epoch, lifecycle state"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public Task<CallToolResult> ExportIpc2581(string instanceId, string requestJson, string expectedStateJson, CancellationToken cancellationToken) =>
         Export<RunBoardJobExportIpc2581>(instanceId, requestJson, expectedStateJson, "ipc2581", request => request.JobSettings, cancellationToken);
 
-    [McpServerTool(Name = "kicad_pcb_export_ipc_d356", ReadOnly = true),
+    [McpServerTool(Name = "kicad_pcb_export_ipc_d356", ReadOnly = false),
      Description("Export an explicitly identified PCB netlist to IPC-D-356 through KiCad's native board job. requestJson is RunBoardJobExportIpcD356 protobuf JSON with an absolute output path and explicit PCB document; expectedStateJson is the lifecycle observation used for admission and post-export verification. Returns bounded output hashes and never changes the board."),
      KiCadCapability("pcb-manufacturing", "compiled-mcp plus native-board-job", "explicit PCB document, process epoch, lifecycle state"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public Task<CallToolResult> ExportIpcD356(string instanceId, string requestJson, string expectedStateJson, CancellationToken cancellationToken) =>
         Export<RunBoardJobExportIpcD356>(instanceId, requestJson, expectedStateJson, "ipc-d356", request => request.JobSettings, cancellationToken);
 
-    [McpServerTool(Name = "kicad_pcb_export_odb", ReadOnly = true),
+    [McpServerTool(Name = "kicad_pcb_export_odb", ReadOnly = false),
      Description("Export an explicitly identified PCB to ODB++ through KiCad's native board job. requestJson is RunBoardJobExportODB protobuf JSON with an absolute output path or directory and explicit PCB document; expectedStateJson is the lifecycle observation used for admission and post-export verification. Returns a bounded manifest with hashes for every generated file and never changes the board."),
      KiCadCapability("pcb-manufacturing", "compiled-mcp plus native-board-job", "explicit PCB document, process epoch, lifecycle state"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public Task<CallToolResult> ExportOdb(string instanceId, string requestJson, string expectedStateJson, CancellationToken cancellationToken) =>
         Export<RunBoardJobExportODB>(instanceId, requestJson, expectedStateJson, "odb", request => request.JobSettings, cancellationToken);
 
-    [McpServerTool(Name = "kicad_pcb_export_stats", ReadOnly = true),
+    [McpServerTool(Name = "kicad_pcb_export_stats", ReadOnly = false),
      Description("Export machine-readable or human-readable board statistics through KiCad's native board job. requestJson is RunBoardJobExportStats protobuf JSON with an absolute output path and explicit PCB document; expectedStateJson is the lifecycle observation used for admission and post-export verification. Returns bounded output hashes and never changes the board."),
      KiCadCapability("pcb-manufacturing", "compiled-mcp plus native-board-job", "explicit PCB document, process epoch, lifecycle state"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
@@ -117,6 +226,7 @@ public sealed class PcbJobTools(InstanceRegistry registry)
         CancellationToken cancellationToken)
         where TRequest : class, IMessage<TRequest>, new()
     {
+        bool nativeDispatchStarted = false;
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -148,6 +258,7 @@ public sealed class PcbJobTools(InstanceRegistry registry)
             if (!before.Equals(expected))
                 throw new AutomationException("pcb_state_changed", "The PCB changed before export; inspect a fresh lifecycle state and retry.");
 
+            nativeDispatchStarted = true;
             var result = await InvokeJob<TRequest>(client, request, cancellationToken);
             if (result.Status != JobStatus.JsSuccess)
                 throw new AutomationException("pcb_export_failed", string.IsNullOrWhiteSpace(result.Message)
@@ -182,7 +293,10 @@ public sealed class PcbJobTools(InstanceRegistry registry)
             var structured = JsonSerializer.SerializeToElement(new
             {
                 errorCode = error is AutomationException known ? known.Code : "pcb_export_failed",
-                errorMessage = error.Message, job = jobKind, mutationSubmitted = false
+                errorMessage = error.Message, job = jobKind,
+                nativeDispatch = nativeDispatchStarted,
+                dispatchOutcome = nativeDispatchStarted ? "indeterminate" : "unsubmitted",
+                mutationSubmitted = nativeDispatchStarted
             });
             return new CallToolResult { IsError = true, Content = [new TextContentBlock { Text = structured.GetRawText() }], StructuredContent = structured };
         }
@@ -223,5 +337,82 @@ public sealed class PcbJobTools(InstanceRegistry registry)
             manifest.Add(new { path = file, bytes = info.Length, sha256 = Convert.ToHexStringLower(hash) });
         }
         return manifest;
+    }
+
+    private static void ValidateOperationId(string operationId)
+    {
+        if (!Guid.TryParseExact(operationId, "D", out var id) || id == Guid.Empty)
+            throw new AutomationException("invalid_operation_id", "Provide a nonempty operation UUID in canonical D format.");
+    }
+
+    private static void ValidateEpoch(string processEpoch)
+    {
+        if (!Guid.TryParseExact(processEpoch, "D", out var id) || id == Guid.Empty)
+            throw new AutomationException("invalid_process_epoch", "Provide the canonical native process epoch.");
+    }
+
+    private static CallToolResult Data(object value, bool error = false, string? errorCode = null,
+        string? errorMessage = null)
+    {
+        JsonElement structured = JsonSerializer.SerializeToElement(value, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        if (errorCode is null)
+            return new() { IsError = error, StructuredContent = structured,
+                Content = [new TextContentBlock { Text = structured.GetRawText() }] };
+
+        using JsonDocument parsed = JsonDocument.Parse(structured.GetRawText());
+        var map = parsed.RootElement.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.Clone());
+        map["errorCode"] = JsonSerializer.SerializeToElement(errorCode);
+        map["errorMessage"] = JsonSerializer.SerializeToElement(errorMessage
+            ?? "The native export reported an unsuccessful result; inspect the retained receipt and staged artifacts.");
+        JsonElement withError = JsonSerializer.SerializeToElement(map);
+        return new() { IsError = error, StructuredContent = withError,
+            Content = [new TextContentBlock { Text = withError.GetRawText() }] };
+    }
+
+    private static async Task<CallToolResult> Execute(Func<Task<CallToolResult>> operation,
+        string? operationId = null, string? processEpoch = null)
+    {
+        try { return await operation(); }
+        catch (NngException error)
+        {
+            var structured = JsonSerializer.SerializeToElement(new
+            {
+                operationId, processEpoch,
+                errorCode = error.RequestDelivered ? "operation_outcome_unknown" : "native_not_reached",
+                errorMessage = error.Message,
+                nativeDispatch = error.RequestDelivered,
+                dispatchOutcome = error.RequestDelivered ? "indeterminate" : "unsubmitted"
+            });
+            return new CallToolResult { IsError = true,
+                Content = [new TextContentBlock { Text = structured.GetRawText() }], StructuredContent = structured };
+        }
+        catch (OperationCanceledException)
+        {
+            var structured = JsonSerializer.SerializeToElement(new
+            {
+                operationId, processEpoch,
+                errorCode = "operation_outcome_unknown",
+                errorMessage = "The MCP request was cancelled before its native outcome was confirmed; read the retained export receipt with the same operationId.",
+                nativeDispatch = (bool?)null,
+                dispatchOutcome = "indeterminate",
+                cancellationRequested = true
+            });
+            return new CallToolResult { IsError = true,
+                Content = [new TextContentBlock { Text = structured.GetRawText() }], StructuredContent = structured };
+        }
+        catch (Exception error) when (error is AutomationException or NativeApiException
+            or InvalidProtocolBufferException or InvalidJsonException or InvalidOperationException
+            or ArgumentException or IOException or JsonException)
+        {
+            var structured = JsonSerializer.SerializeToElement(new
+            {
+                operationId, processEpoch,
+                errorCode = error is AutomationException known ? known.Code : "pcb_export_failed",
+                errorMessage = error.Message,
+                dispatchOutcome = "unknown"
+            });
+            return new CallToolResult { IsError = true,
+                Content = [new TextContentBlock { Text = structured.GetRawText() }], StructuredContent = structured };
+        }
     }
 }

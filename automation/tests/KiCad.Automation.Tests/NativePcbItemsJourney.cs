@@ -1304,7 +1304,50 @@ public sealed partial class NativeSessionTests
             string? shoveRemovalJson = shoveData.GetProperty("candidateDeleteRequestJson").GetString();
             var shoveRemovals = shoveRemovalJson is null ? null : BoardJson.Parser.Parse<DeleteItems>(shoveRemovalJson);
             var retainedSplit = shoveUpdate.Items.Single(item => item.Is(Track.Descriptor) && item.Unpack<Track>().Id.Equals(splitSource.Id)).Unpack<Track>();
-            var retainedVia = shoveUpdate.Items.Single(item => item.Is(Via.Descriptor) && item.Unpack<Via>().Id.Equals(shovedVia.Id)).Unpack<Via>();
+            var retainedViaAny = shoveUpdate.Items.SingleOrDefault(item => item.Is(Via.Descriptor) && item.Unpack<Via>().Id.Equals(shovedVia.Id));
+            if (retainedViaAny is null)
+            {
+                var shoveDiagnostic = new
+                {
+                    request = SchematicJson.Formatter.Format(shovePreviewRequest),
+                    settings = new
+                    {
+                        pushAndShove = shovePreviewRequest.PushAndShove,
+                        forceFinish = shovePreviewRequest.ForceFinish,
+                        differentialPair = shovePreviewRequest.DifferentialPair,
+                        layer = shovePreviewRequest.Layer.ToString(),
+                        startItemId = shovePreviewRequest.StartItemId,
+                        start = $"{shovePreviewRequest.Start.XNm},{shovePreviewRequest.Start.YNm}",
+                        waypoints = shovePreviewRequest.Waypoints.Select(point => $"{point.XNm},{point.YNm}").ToArray()
+                    },
+                    boardSource = new
+                    {
+                        split = DescribeRouteItem(Any.Pack(splitSource)),
+                        via = DescribeRouteItem(Any.Pack(shovedVia)),
+                        obstacle = DescribeRouteItem(Any.Pack(shoveObstacle))
+                    },
+                    before = beforeShoveItems.Items.Select(DescribeRouteItem).ToArray(),
+                    delta = new
+                    {
+                        creates = shoveCreate.Items.Select(DescribeRouteItem).ToArray(),
+                        updates = shoveUpdate.Items.Select(DescribeRouteItem).ToArray(),
+                        removals = shoveRemovals?.ItemIds.Select(id => id.Value).ToArray() ?? [],
+                        candidateRequestJson = shoveData.GetProperty("candidateRequestJson").GetString(),
+                        replacementUpdatesJson = shoveData.GetProperty("replacementUpdatesJson").GetString(),
+                        candidateDeleteRequestJson = shoveRemovalJson,
+                        replacementUpdatesError = shoveData.TryGetProperty("replacementUpdatesError", out var replacementError)
+                            ? replacementError.GetString() : null,
+                        completeDeltaVersion = shoveData.GetProperty("preview").GetProperty("completeDeltaVersion").GetInt32()
+                    }
+                };
+                string diagnosticPath = Path.Combine(evidence, instanceId + "-shove-delta-diagnostic.json");
+                await File.WriteAllTextAsync(diagnosticPath,
+                    JsonSerializer.Serialize(shoveDiagnostic, new JsonSerializerOptions { WriteIndented = true }), token);
+                Assert.Fail($"Push-and-shove preview omitted the property-bearing via {shovedVia.Id.Value} from replacement updates; "
+                    + $"diagnostic={diagnosticPath}; creates={shoveCreate.Items.Count}, updates={shoveUpdate.Items.Count}, "
+                    + $"removals={shoveRemovals?.ItemIds.Count ?? 0}, via={DescribeRouteItem(Any.Pack(shovedVia))}");
+            }
+            var retainedVia = retainedViaAny.Unpack<Via>();
             Assert.AreEqual(splitSource.CustomProperties, retainedSplit.CustomProperties);
             Assert.AreEqual(splitSource.SolderMask, retainedSplit.SolderMask);
             Assert.AreEqual(shovedVia.PadStack, retainedVia.PadStack);
@@ -2132,6 +2175,42 @@ public sealed partial class NativeSessionTests
 
     private static string RouteIdentity(Any item) => item.Is(Track.Descriptor) ? item.Unpack<Track>().Id.Value
         : item.Is(Arc.Descriptor) ? item.Unpack<Arc>().Id.Value : item.Unpack<Via>().Id.Value;
+
+    private static object DescribeRouteItem(Any item)
+    {
+        if (item.Is(Track.Descriptor))
+        {
+            var track = item.Unpack<Track>();
+            return new
+            {
+                kind = "track", id = track.Id?.Value ?? "", net = track.Net?.Name ?? "", layer = track.Layer.ToString(),
+                start = track.Start is null ? "" : $"{track.Start.XNm},{track.Start.YNm}",
+                end = track.End is null ? "" : $"{track.End.XNm},{track.End.YNm}",
+                widthNm = track.Width?.ValueNm ?? 0,
+                customProperties = track.CustomProperties.Select(property => $"{property.Key}={property.Value}").ToArray(),
+                solderMask = track.SolderMask?.ToString() ?? ""
+            };
+        }
+        if (item.Is(Arc.Descriptor))
+        {
+            var arc = item.Unpack<Arc>();
+            return new
+            {
+                kind = "arc", id = arc.Id?.Value ?? "", net = arc.Net?.Name ?? "", layer = arc.Layer.ToString(),
+                start = arc.Start.ToString(), mid = arc.Mid.ToString(), end = arc.End.ToString(), widthNm = arc.Width.ValueNm
+            };
+        }
+        var via = item.Unpack<Via>();
+        return new
+        {
+            kind = "via", id = via.Id?.Value ?? "", net = via.Net?.Name ?? "", position = via.Position is null ? "" : $"{via.Position.XNm},{via.Position.YNm}",
+            type = via.Type.ToString(), isFree = via.IsFree,
+            startLayer = via.PadStack?.Drill?.StartLayer.ToString() ?? "", endLayer = via.PadStack?.Drill?.EndLayer.ToString() ?? "",
+            drill = via.PadStack?.Drill?.Diameter is null ? "" : $"{via.PadStack.Drill.Diameter.XNm},{via.PadStack.Drill.Diameter.YNm}",
+            customProperties = via.CustomProperties.Select(property => $"{property.Key}={property.Value}").ToArray(),
+            padStack = via.PadStack?.ToString() ?? "", teardrop = via.Teardrop?.ToString() ?? ""
+        };
+    }
 
     private static string RouteShape(Any item)
     {

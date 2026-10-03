@@ -2721,8 +2721,10 @@ std::unique_ptr<BOARD_CONNECTED_ITEM> PNS_KICAD_IFACE::MaterializeRouteItem(
     else if( PNS::VIA::ClassOf( aItem ) ) type = PCB_VIA_T;
     else return nullptr;
 
-    BOARD_ITEM* source = aPreserveIdentity ? aItem->Parent()
-        : ( aItem->Parent() ? aItem->Parent() : aItem->GetSourceItem() );
+    // Preview branch clones can detach the direct parent while retaining the
+    // original board object as their source item. Preserve that native UUID
+    // for replacement updates instead of rejecting an otherwise valid via.
+    BOARD_ITEM* source = aItem->Parent() ? aItem->Parent() : aItem->GetSourceItem();
     if( aPreserveIdentity && ( !source || source->Type() != type ) )
         return nullptr;
 

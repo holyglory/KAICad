@@ -381,6 +381,20 @@ public sealed class McpProcessTests
             Assert.IsTrue(invalidConnectivityQuery.GetProperty("result").GetProperty("isError").GetBoolean(), invalidConnectivityQuery.GetRawText());
             Assert.AreEqual("invalid_document_target",
                 invalidConnectivityQuery.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            var emptyConnectivityNet = await Request(9363, "tools/call", new
+            {
+                name = "kicad_pcb_connectivity_query",
+                arguments = new
+                {
+                    instanceId = Guid.NewGuid().ToString("D"),
+                    documentJson = "{\"type\":\"DOCTYPE_PCB\",\"project\":{\"name\":\"empty-net-contract\",\"path\":\"/tmp\"},\"boardFilename\":\"board.kicad_pcb\"}",
+                    netName = "",
+                    expectedStateJson = "{}"
+                }
+            });
+            Assert.IsTrue(emptyConnectivityNet.GetProperty("result").GetProperty("isError").GetBoolean(), emptyConnectivityNet.GetRawText());
+            Assert.AreEqual("invalid_pcb_connectivity_net",
+                emptyConnectivityNet.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
             var invalidStackup = await Request(9349, "tools/call", new { name = "kicad_pcb_stackup",
                 arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
             Assert.IsTrue(invalidStackup.GetProperty("result").GetProperty("isError").GetBoolean());

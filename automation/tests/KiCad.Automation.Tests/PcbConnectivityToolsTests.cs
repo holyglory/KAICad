@@ -47,4 +47,12 @@ public sealed class PcbConnectivityToolsTests
         ]));
         Assert.AreEqual("unsupported_pcb_connectivity_item", unknown.Code);
     }
+
+    [TestMethod]
+    public void NormalizeEmptyNativeResponseReturnsDeterministicEmptyResult()
+    {
+        var result = PcbConnectivityTools.Normalize([]);
+
+        Assert.AreEqual(0, result.Length);
+    }
 }

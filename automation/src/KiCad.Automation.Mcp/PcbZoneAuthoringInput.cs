@@ -89,7 +89,12 @@ public sealed class PcbZoneAuthoringInput
     {
         string compact = string.Concat(value.Where(char.IsLetterOrDigit));
         string? name = Enum.GetNames<BoardLayer>().FirstOrDefault(candidate =>
-            string.Concat(candidate.Where(char.IsLetterOrDigit)).Equals(compact, StringComparison.OrdinalIgnoreCase));
+        {
+            string candidateCompact = string.Concat(candidate.Where(char.IsLetterOrDigit));
+            return candidateCompact.Equals(compact, StringComparison.OrdinalIgnoreCase)
+                || (candidateCompact.StartsWith("Bl", StringComparison.Ordinal)
+                    && candidateCompact[2..].Equals(compact, StringComparison.OrdinalIgnoreCase));
+        });
         if (name is null || !Enum.TryParse(name, out BoardLayer parsed)
             || (int)parsed < (int)BoardLayer.BlFCu || (int)parsed > (int)BoardLayer.BlBCu)
             throw new AutomationException("invalid_pcb_zone_layers", $"Unknown copper layer '{value}'.");

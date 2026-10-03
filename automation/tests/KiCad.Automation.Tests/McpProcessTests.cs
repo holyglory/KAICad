@@ -57,8 +57,70 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_simulation_job");
             CollectionAssert.Contains(names, "kicad_simulation_wait");
             CollectionAssert.Contains(names, "kicad_simulation_cancel");
-             CollectionAssert.Contains(names, "kicad_artwork_raster_trace");
+            CollectionAssert.Contains(names, "kicad_artwork_raster_trace");
             CollectionAssert.Contains(names, "kicad_artwork_raster_project");
+            CollectionAssert.Contains(names, "kicad_pcb_zone_read");
+            CollectionAssert.Contains(names, "kicad_pcb_zone_create");
+            CollectionAssert.Contains(names, "kicad_pcb_zone_update");
+            CollectionAssert.Contains(names, "kicad_pcb_zone_delete");
+            foreach (string zoneTool in new[] { "kicad_pcb_zone_create", "kicad_pcb_zone_update" })
+            {
+                var zoneSchema = listed.GetProperty("result").GetProperty("tools").EnumerateArray()
+                    .Single(tool => tool.GetProperty("name").GetString() == zoneTool)
+                    .GetProperty("inputSchema").GetProperty("properties").GetProperty("zone");
+                Assert.IsTrue(SimulationSchemaType(zoneSchema, "object"), zoneSchema.GetRawText());
+                var zoneProperties = zoneSchema.GetProperty("properties");
+                foreach (string property in new[]
+                {
+                    "id", "layers", "polygons", "name", "priority", "netName", "clearanceNm",
+                    "minThicknessNm", "fillMode", "connection", "islandMode", "borderStyle", "borderPitchNm"
+                })
+                    Assert.IsTrue(zoneProperties.TryGetProperty(property, out _), $"{zoneTool} zone schema is missing {property}.");
+                Assert.IsTrue(SimulationSchemaType(zoneProperties.GetProperty("layers"), "array"));
+                Assert.IsTrue(SimulationSchemaType(zoneProperties.GetProperty("polygons"), "array"));
+                Assert.IsTrue(SimulationSchemaType(zoneProperties.GetProperty("polygons").GetProperty("items"), "object"));
+            }
+            string unknownInstance = Guid.NewGuid().ToString("D");
+            string unknownOperation = Guid.NewGuid().ToString("D");
+            var typedZone = new
+            {
+                id = unknownInstance,
+                layers = new[] { "F.Cu" },
+                polygons = new[]
+                {
+                    new
+                    {
+                        outline = new[]
+                        {
+                            new { xNm = 0L, yNm = 0L }, new { xNm = 20_000L, yNm = 0L },
+                            new { xNm = 0L, yNm = 20_000L }
+                        },
+                        holes = Array.Empty<object>()
+                    }
+                },
+                name = "", priority = 0U, netName = "", clearanceNm = 0L, minThicknessNm = 0L,
+                fillMode = "ZFM_SOLID", connection = "ZCS_INHERITED", islandMode = "IRM_ALWAYS",
+                borderStyle = "ZBS_SOLID", borderPitchNm = 0L
+            };
+            foreach (var zoneInvocation in new[]
+            {
+                new { Name = "kicad_pcb_zone_read", Arguments = (object)new { instanceId = unknownInstance, documentJson = "{}", zoneId = unknownInstance, expectedStateJson = "{}" } },
+                new { Name = "kicad_pcb_zone_create", Arguments = (object)new { instanceId = unknownInstance, documentJson = "{}", zone = typedZone, expectedStateJson = "{}", operationId = unknownOperation } },
+                new { Name = "kicad_pcb_zone_update", Arguments = (object)new { instanceId = unknownInstance, documentJson = "{}", zone = typedZone, expectedStateJson = "{}", operationId = unknownOperation } },
+                new { Name = "kicad_pcb_zone_delete", Arguments = (object)new { instanceId = unknownInstance, documentJson = "{}", zoneId = unknownInstance, expectedStateJson = "{}", operationId = unknownOperation } }
+            })
+            {
+                JsonElement zoneCall = await Request(9070 + Array.IndexOf(new[] { "kicad_pcb_zone_read", "kicad_pcb_zone_create", "kicad_pcb_zone_update", "kicad_pcb_zone_delete" }, zoneInvocation.Name), "tools/call", new
+                { name = zoneInvocation.Name, arguments = zoneInvocation.Arguments });
+                Assert.IsTrue(zoneCall.GetProperty("result").GetProperty("isError").GetBoolean(), zoneCall.GetRawText());
+            }
+            // Keep one literal call site for each declared MCP-process evidence row. The loop
+            // above exercises the same malformed-input matrix, while these calls make the
+            // evidence checker bind each tool to this compiled STDIO journey.
+            await Request(9074, "tools/call", new { name = "kicad_pcb_zone_read", arguments = new { instanceId = unknownInstance, documentJson = "{}", zoneId = unknownInstance, expectedStateJson = "{}" } });
+            await Request(9075, "tools/call", new { name = "kicad_pcb_zone_create", arguments = new { instanceId = unknownInstance, documentJson = "{}", zone = typedZone, expectedStateJson = "{}", operationId = unknownOperation } });
+            await Request(9076, "tools/call", new { name = "kicad_pcb_zone_update", arguments = new { instanceId = unknownInstance, documentJson = "{}", zone = typedZone, expectedStateJson = "{}", operationId = unknownOperation } });
+            await Request(9077, "tools/call", new { name = "kicad_pcb_zone_delete", arguments = new { instanceId = unknownInstance, documentJson = "{}", zoneId = unknownInstance, expectedStateJson = "{}", operationId = unknownOperation } });
             var rasterTraceSchema = listed.GetProperty("result").GetProperty("tools").EnumerateArray()
                 .Single(tool => tool.GetProperty("name").GetString() == "kicad_artwork_raster_trace")
                 .GetProperty("inputSchema").GetProperty("properties").GetProperty("input");
@@ -316,7 +378,7 @@ public sealed class McpProcessTests
                 "kicad_pcb_sync_selection", "kicad_pcb_highlight_nets"
             })
                 CollectionAssert.Contains(names, operationTool);
-            foreach (var (requestId, tool, arguments) in new[]
+            foreach (var (requestId, tool, arguments) in new (int RequestId, string Tool, object Arguments)[]
             {
                 (9330, "kicad_pcb_import_netlist", (object)new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D") }),
                 (9331, "kicad_pcb_refill_zones", (object)new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D") }),
@@ -514,6 +576,9 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_schematic_checked_state");
             CollectionAssert.Contains(names, "kicad_schematic_checked_batch_receipt");
             CollectionAssert.Contains(names, "kicad_schematic_create_connection_item");
+            CollectionAssert.Contains(names, "kicad_schematic_read_connection_item");
+            CollectionAssert.Contains(names, "kicad_schematic_update_connection_item");
+            CollectionAssert.Contains(names, "kicad_schematic_delete_connection_item");
             CollectionAssert.Contains(names, "kicad_schematic_library_cache_replace");
             var invalidLibraryCache = await Request(9095, "tools/call", new { name = "kicad_schematic_library_cache_replace",
                 arguments = new
@@ -581,6 +646,21 @@ public sealed class McpProcessTests
             Assert.IsTrue(invalidTypedConnection.GetProperty("result").GetProperty("isError").GetBoolean());
             Assert.AreEqual("invalid_checked_document", invalidTypedConnection.GetProperty("result")
                 .GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            foreach (var (requestId, tool, arguments) in new (int RequestId, string Tool, object Arguments)[]
+            {
+                (90941, "kicad_schematic_read_connection_item", new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", itemId = Guid.NewGuid().ToString("D"), expectedStateJson = "{}" }),
+                (90942, "kicad_schematic_update_connection_item", new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", itemId = Guid.NewGuid().ToString("D"), expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D") }),
+                (90943, "kicad_schematic_delete_connection_item", new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", itemId = Guid.NewGuid().ToString("D"), expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D") })
+            })
+            {
+                var refused = await Request(requestId, "tools/call", new { name = tool, arguments });
+                Assert.IsTrue(refused.GetProperty("result").GetProperty("isError").GetBoolean(), refused.ToString());
+                Assert.AreEqual("invalid_checked_document", refused.GetProperty("result").GetProperty("structuredContent")
+                    .GetProperty("errorCode").GetString(), refused.ToString());
+            }
+            await Request(90944, "tools/call", new { name = "kicad_schematic_read_connection_item", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", itemId = Guid.NewGuid().ToString("D"), expectedStateJson = "{}" } });
+            await Request(90945, "tools/call", new { name = "kicad_schematic_update_connection_item", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", itemId = Guid.NewGuid().ToString("D"), expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D"), xNm = 1_000L, yNm = 2_000L } });
+            await Request(90946, "tools/call", new { name = "kicad_schematic_delete_connection_item", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", itemId = Guid.NewGuid().ToString("D"), expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D") } });
             // A checked object batch that is unreadable, carries an object type this server does not know, or names no
             // attached KiCad is refused before anything is sent, and the agent is told why. The LocalLabel written the way
             // the tool description shows is read, so its refusal comes from the instance lookup; the same batch with an

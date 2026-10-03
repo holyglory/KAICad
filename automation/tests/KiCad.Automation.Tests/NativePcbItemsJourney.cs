@@ -17,6 +17,57 @@ namespace KiCad.Automation.Tests;
 
 public sealed partial class NativeSessionTests
 {
+    [TestMethod, TestCategory("NativePcbItemsFixture")]
+    public void PcbRenderFixtureUsesSupportedIndexedFaceSetAndDeterministicMutation()
+    {
+        string fixture = PcbRenderFixtureText();
+        Assert.IsTrue(fixture.StartsWith("#VRML V2.0 utf8", StringComparison.Ordinal), fixture);
+        Assert.AreEqual(1, Regex.Matches(fixture, @"\bIndexedFaceSet\b", RegexOptions.CultureInvariant).Count, fixture);
+        Assert.AreEqual(1, Regex.Matches(fixture, @"\bscale 8 4 2\b", RegexOptions.CultureInvariant).Count, fixture);
+        Assert.IsFalse(fixture.Contains("geometry Box", StringComparison.Ordinal), fixture);
+        string changed = fixture.Replace("scale 8 4 2", "scale 9 3 2", StringComparison.Ordinal);
+        Assert.AreEqual(fixture.Length, changed.Length, "The render mutation must preserve fixture byte length.");
+        Assert.AreNotEqual(fixture, changed, "The render mutation must change model geometry input.");
+    }
+
+    private static string PcbRenderFixtureText() =>
+        """
+            #VRML V2.0 utf8
+            Transform {
+              translation 0 0 0
+              scale 8 4 2
+              children [
+                Shape {
+                  appearance Appearance {
+                    material Material { diffuseColor 0.8 0.2 0.1 }
+                  }
+                  geometry IndexedFaceSet {
+                    coord Coordinate {
+                      point [
+                        -0.5 -0.5 0,
+                         0.5 -0.5 0,
+                         0.5  0.5 0,
+                        -0.5  0.5 0,
+                        -0.5 -0.5 1,
+                         0.5 -0.5 1,
+                         0.5  0.5 1,
+                        -0.5  0.5 1
+                      ]
+                    }
+                    coordIndex [
+                      0, 1, 2, 3, -1,
+                      4, 7, 6, 5, -1,
+                      0, 4, 5, 1, -1,
+                      1, 5, 6, 2, -1,
+                      2, 6, 7, 3, -1,
+                      4, 0, 3, 7, -1
+                    ]
+                  }
+                }
+              ]
+            }
+            """;
+
     private static void PreparePcbImportLibrary(string projectDirectory)
     {
         string library = Directory.CreateDirectory(Path.Combine(projectDirectory, "Resistor_SMD.pretty")).FullName;
@@ -30,18 +81,7 @@ public sealed partial class NativeSessionTests
 
     private static string PreparePcbRenderModel(string projectDirectory, string libraryFile)
     {
-        const string model = """
-            #VRML V2.0 utf8
-            Transform {
-              translation 0 0 0
-              children [
-                Shape {
-                  appearance Appearance { material Material { diffuseColor 0.8 0.2 0.1 } }
-                  geometry Box { size 8 4 2 }
-                }
-              ]
-            }
-            """;
+        string model = PcbRenderFixtureText();
         string modelPath = Path.Combine(projectDirectory, "render-fixture.wrl");
         File.WriteAllText(modelPath, model);
 
@@ -727,9 +767,9 @@ public sealed partial class NativeSessionTests
             }
 
             string modelText = await File.ReadAllTextAsync(renderModelPath, token);
-            Assert.IsTrue(modelText.Contains("size 8 4 2", StringComparison.Ordinal), modelText);
+            Assert.IsTrue(modelText.Contains("scale 8 4 2", StringComparison.Ordinal), modelText);
             long modelBytesBefore = new FileInfo(renderModelPath).Length;
-            File.WriteAllText(renderModelPath, modelText.Replace("size 8 4 2", "size 9 3 2", StringComparison.Ordinal));
+            File.WriteAllText(renderModelPath, modelText.Replace("scale 8 4 2", "scale 9 3 2", StringComparison.Ordinal));
             File.SetLastWriteTimeUtc(renderModelPath, modelTimestamp);
             Assert.AreEqual(modelBytesBefore, new FileInfo(renderModelPath).Length, "The model replacement must preserve its byte length.");
             Assert.AreEqual(modelTimestamp, File.GetLastWriteTimeUtc(renderModelPath), "The model replacement must preserve its timestamp.");

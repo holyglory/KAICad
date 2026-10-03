@@ -409,6 +409,8 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
         properties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.source_sha256", Value = context.SourceSha256 });
         properties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.geometry_sha256", Value = context.Proposal.GeometrySha256 });
         properties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.source_kind", Value = context.SourceKind });
+        if (!string.IsNullOrWhiteSpace(context.SourceOrigin))
+            properties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.source_origin", Value = context.SourceOrigin });
         properties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.role", Value = "filled-vector-projection" });
         properties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.contributor_semantics", Value = context.Proposal.ContributorSemantics });
     }

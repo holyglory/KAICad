@@ -201,17 +201,20 @@ public sealed partial class NativeSessionTests
                 outputDirectory = typedOutputDirectory,
                 job = new
                 {
-                    export3D = new
+                    exportSvg = new
                     {
-                        format = "B3D_STEP",
-                        includeUnspecified = true,
-                        includeDnp = true,
-                        exportBoardBody = true,
-                        exportComponents = true,
-                        exportPads = true,
-                        exportTracksAndVias = true,
-                        exportSilkscreen = true,
-                        exportSoldermask = true
+                        plotSettings = new
+                        {
+                            layers = new[] { "BL_F_Cu", "BL_F_SilkS" },
+                            commonLayers = new[] { "BL_Edge_Cuts" },
+                            plotFootprintValues = true,
+                            plotReferenceDesignators = true,
+                            drillMarks = "PDM_FULL",
+                            checkZonesBeforePlot = false
+                        },
+                        fitPageToBoard = true,
+                        precision = 6,
+                        pageMode = "BJPM_ALL_LAYERS_ONE_PAGE"
                     }
                 }
             };
@@ -254,7 +257,7 @@ public sealed partial class NativeSessionTests
                 {
                     operationId = Guid.NewGuid().ToString("D"), document = typedDocument,
                     expectedState = typedExpectedState, outputDirectory = typedOutputDirectory,
-                    job = new { export3D = new { format = "B3D_STEP" } }
+                    job = new { exportSvg = new { plotSettings = new { layers = new[] { "BL_F_Cu" } } } }
                 }
             });
             Assert.IsTrue(destinationRefusal.TryGetProperty("isError", out var destinationError) && destinationError.GetBoolean(),

@@ -53,7 +53,7 @@ public sealed class PcbJobTools(InstanceRegistry registry)
         };
         if (input.Job is null)
             throw new AutomationException("invalid_pcb_export_job", "Exactly one concrete PCB manufacturing job setting is required.");
-        input.Job.ApplyTo(request, document);
+        input.Job.ApplyTo(request);
 
         NativeClient client = registry.Client(instanceId);
         AutomationSession session = await client.HandshakeAsync(cancellationToken);
@@ -87,7 +87,8 @@ public sealed class PcbJobTools(InstanceRegistry registry)
             outputManifestComplete = receipt.OutputManifestComplete,
             outputManifestSha256 = receipt.OutputManifestSha256,
             beforeState = SchematicJson.Formatter.Format(receipt.ObservedBefore),
-            afterState = receipt.ObservedAfter.ProcessEpoch.Length == 0 ? "" : SchematicJson.Formatter.Format(receipt.ObservedAfter)
+            afterState = receipt.ObservedAfter is null || receipt.ObservedAfter.ProcessEpoch.Length == 0
+                ? "" : SchematicJson.Formatter.Format(receipt.ObservedAfter)
         }, receipt.Status is not (PcbManufacturingExportStatus.PcbMfgExportCompleted),
             receipt.ErrorCode.Length == 0 ? null : receipt.ErrorCode,
             receipt.ErrorMessage.Length == 0 ? null : receipt.ErrorMessage);

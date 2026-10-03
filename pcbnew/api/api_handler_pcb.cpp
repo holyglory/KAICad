@@ -3612,17 +3612,6 @@ API_HANDLER_PCB::handleRunPcbManufacturingExport(
             retained.set_error_message( "Render dimensions must be 64..2048 pixels with at most 8,388,608 pixels" );
             return retained;
         }
-        if( render.format() != kiapi::board::jobs::RenderFormat::RF_UNKNOWN
-            && render.format() != kiapi::board::jobs::RenderFormat::RF_PNG )
-        {
-            std::lock_guard lock( receipt->mutex );
-            retained.set_status( PCB_MFG_EXPORT_UNSUBMITTED );
-            retained.set_dispatch_stage( PCB_MFG_DISPATCH_ADMITTED );
-            retained.set_terminal( true );
-            retained.set_error_code( "unsupported_render_format" );
-            retained.set_error_message( "Typed PCB render exports currently require PNG output" );
-            return retained;
-        }
         if( !std::isfinite( render.zoom() ) || render.zoom() <= 0.0 )
         {
             std::lock_guard lock( receipt->mutex );

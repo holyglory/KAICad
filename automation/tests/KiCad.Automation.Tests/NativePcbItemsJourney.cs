@@ -57,7 +57,7 @@ public sealed partial class NativeSessionTests
         string modelBlock = library.Substring(modelStart, modelEnd - modelStart);
         modelBlock = modelBlock.Replace(
             "${KICAD8_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.wrl",
-            "${KIPRJMOD}/render-fixture.wrl", StringComparison.Ordinal);
+            modelPath.Replace('\\', '/'), StringComparison.Ordinal);
         modelBlock = Regex.Replace(modelBlock, @"\(offset\s+\(xyz [^)]+\)\s+\)",
             "(offset\n\t\t\t(xyz 1.5 0.5 0.2)\n\t\t)", RegexOptions.CultureInvariant);
         modelBlock = Regex.Replace(modelBlock, @"\(scale\s+\(xyz [^)]+\)\s+\)",
@@ -600,6 +600,12 @@ public sealed partial class NativeSessionTests
                 .Single(footprint => footprint.ReferenceField.Text.Text.Text_ == "R1");
             Assert.IsTrue(renderFootprint.Definition.Items.Count > 0,
                 "The render fixture footprint must retain its imported definition payload.");
+            // Native footprint/library refresh can advance the board's
+            // lifecycle cursor after the earlier artwork receipt. Re-observe
+            // immediately before render admission so the request is paired
+            // with the exact live board state, rather than masking a real
+            // stale-state refusal as a render defect.
+            svgState = SchematicJson.Formatter.Format(await ObserveLifecycleState(client, board, token));
             string modelHashBefore = Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(renderModelPath, token)));
             DateTime modelTimestamp = File.GetLastWriteTimeUtc(renderModelPath);
             var renderRequest = new RunBoardJobExportRender

@@ -14,7 +14,7 @@ public sealed partial class NativeSessionTests
             "outer-hole-diagonal-64.png");
         byte[] bytes = await File.ReadAllBytesAsync(source, token);
         string hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
-        Assert.AreEqual("bfa66bd19971f5a8ca08423c7b6ab7ff3db1824275ebcbc28aa9739016d01ca9", hash);
+        Assert.AreEqual("0f80242e277737fc37707a9158598dc33c4374b672cc2c893e295bd8612847f9", hash);
 
         string stateDirectory = Path.Combine(evidence, instanceId + "-raster-trace-mcp");
         await using var mcp = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.ProductionStartInfo(),

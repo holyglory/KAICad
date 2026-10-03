@@ -1,5 +1,5 @@
 {
-  "sourceSha256": "bfa66bd19971f5a8ca08423c7b6ab7ff3db1824275ebcbc28aa9739016d01ca9",
+  "sourceSha256": "0f80242e277737fc37707a9158598dc33c4374b672cc2c893e295bd8612847f9",
   "width": 64,
   "height": 64,
   "physicalWidthNm": 64000000,
@@ -7,5 +7,5 @@
     "roots": 1,
     "holes": 1
   },
-  "description": "64x64 deterministic grayscale PNG: filled outer rectangle, one white hole, and diagonal black boundary."
+  "description": "64x64 deterministic grayscale PNG: filled outer rectangle with one white hole and diagonal white notch at the outer boundary."
 }

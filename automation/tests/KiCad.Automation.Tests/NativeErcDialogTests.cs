@@ -126,6 +126,21 @@ public sealed class NativeErcDialogTests
                     });
                     Assert.AreEqual(ercRun.GetProperty("structuredContent").GetRawText(), ercReplay.GetProperty("structuredContent").GetRawText());
 
+                    // A receipt created through the original native RunErc seam
+                    // must replay through the new typed executor without a second
+                    // checker run or an admission_verified upgrade.
+                    var directLegacyRequest = ercRequest.Clone();
+                    directLegacyRequest.OperationId = Guid.NewGuid().ToString("D");
+                    var directLegacy = await client.InvokeAsync<NativeCapabilitySchematicRunErc,
+                        NativeCapabilitySchematicRunErcResponse>(directLegacyRequest, deadline.Token);
+                    Assert.IsTrue(directLegacy.Completed, directLegacy.ToString());
+                    var crossEntryReplay = await ercMcp.Tool("kicad_schematic_erc_run", new
+                    {
+                        instanceId, requestJson = SchematicJson.Formatter.Format(directLegacyRequest), expectedStateJson = ercState
+                    });
+                    Assert.IsFalse(crossEntryReplay.TryGetProperty("isError", out var crossEntryError) && crossEntryError.GetBoolean(), crossEntryReplay.GetRawText());
+                    Assert.IsFalse(crossEntryReplay.GetProperty("structuredContent").GetProperty("admissionVerified").GetBoolean(), crossEntryReplay.GetRawText());
+
                     // The typed seam binds a writable lifecycle DTO to the same native receipt.
                     // Its marker snapshot is copied by KiCad, rather than read again from the
                     // live editor after the operation.

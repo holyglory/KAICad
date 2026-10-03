@@ -260,6 +260,7 @@ private:
     struct ERC_RECEIPT
     {
         std::string request;
+        std::string semantic;
         kiapi::automation::v1::NativeErcOperationReceipt result;
         size_t reservation = 0;
     };

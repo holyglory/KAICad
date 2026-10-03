@@ -147,6 +147,23 @@ bool ErcDigest( const std::string& value )
                             { return ( c >= '0' && c <= '9' ) || ( c >= 'a' && c <= 'f' ); } );
 }
 
+std::string CanonicalErcSemantic( const kiapi::common::types::DocumentSpecifier& aDocument,
+                                  const std::string& aOperationId, const std::string& aProcessEpoch,
+                                  const kiapi::automation::v1::DocumentRevision& aExpectedRevision,
+                                  bool aShowAllErrors )
+{
+    std::string key = aDocument.SerializeAsString();
+    key.push_back( '\0' );
+    key += aOperationId;
+    key.push_back( '\0' );
+    key += aProcessEpoch;
+    key.push_back( '\0' );
+    key += aExpectedRevision.SerializeAsString();
+    key.push_back( '\0' );
+    key.push_back( aShowAllErrors ? '1' : '0' );
+    return key;
+}
+
 SchematicTrackingErcMarkers CaptureErcMarkers( SCHEMATIC* aSchematic )
 {
     std::vector<std::pair<std::string, SchematicTrackingErcMarker>> markers;
@@ -3694,10 +3711,18 @@ HANDLER_RESULT<kiapi::automation::v1::NativeErcOperationReceipt> API_HANDLER_SCH
 
     // Replay is resolved before any current revision, document or dirty-state
     // admission. The retained result belongs to the exact original request.
+    const std::string semantic = CanonicalErcSemantic( aDocument, aOperationId, aProcessEpoch,
+                                                       aExpectedRevision, aShowAllErrors );
     if( auto existing = m_ercReceipts.find( aOperationId ); existing != m_ercReceipts.end() )
     {
-        if( existing->second.request != aFingerprint )
+        if( existing->second.semantic != semantic )
             return reject( "The operation ID is already bound to a different ERC request" );
+        // A typed replay may carry the full lifecycle state. Compare it to the
+        // receipt's immutable before-state, but never upgrade a legacy receipt's
+        // admission_verified flag merely because the retry supplied more detail.
+        if( aExpectedState
+            && !MessageDifferencer::Equals( *aExpectedState, existing->second.result.before_state() ) )
+            return reject( "The operation ID is already bound to a different ERC lifecycle state" );
         return existing->second.result;
     }
 
@@ -3739,6 +3764,7 @@ HANDLER_RESULT<kiapi::automation::v1::NativeErcOperationReceipt> API_HANDLER_SCH
 
     ERC_RECEIPT retained;
     retained.request = aFingerprint;
+    retained.semantic = semantic;
     retained.reservation = reservation;
     retained.result.mutable_legacy_result()->mutable_document()->CopyFrom( aDocument );
     retained.result.mutable_legacy_result()->set_operation_id( aOperationId );

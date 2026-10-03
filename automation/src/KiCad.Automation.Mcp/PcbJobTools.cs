@@ -24,7 +24,7 @@ public sealed class PcbJobTools(InstanceRegistry registry)
     [McpServerTool(Name = "kicad_pcb_export", ReadOnly = false),
      Description("Run exactly one typed native PCB manufacturing export into a new absolute outputDirectory. Supply an explicit operationId, typed document and complete lifecycle observation, plus exactly one concrete job setting (3D, render, SVG, DXF, PDF, PostScript, Gerbers, drill, position, GenCAD, IPC-2581, IPC-D-356, ODB++ or board statistics). KiCad stages and atomically publishes the directory without replacing existing files. Reuse the same operationId after a lost reply; cancellation never claims native cancellation."),
      KiCadCapability("pcb-manufacturing", "compiled-mcp plus native-task-export", "typed operation ID, explicit document, complete lifecycle state, owned output directory, native receipt"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public Task<CallToolResult> ExportTyped(string instanceId, PcbManufacturingExportInput input,
         CancellationToken cancellationToken) => Execute(async () =>
     {
@@ -97,7 +97,7 @@ public sealed class PcbJobTools(InstanceRegistry registry)
     [McpServerTool(Name = "kicad_pcb_export_receipt", ReadOnly = true),
      Description("Read the native receipt for one typed PCB manufacturing export after MCP reconnect or a lost reply. Supply the exact PCB document, native process epoch and operationId. A missing receipt is reported as found=false; a different epoch or document is an error. This read never retries or republishes an export."),
      KiCadCapability("pcb-manufacturing", "compiled-mcp plus native-task-export", "typed document, process epoch, operation ID, native receipt"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public Task<CallToolResult> ExportReceipt(string instanceId, NativeDocumentInput documentInput,
         string processEpoch, string operationId, CancellationToken cancellationToken) => Execute(async () =>
     {

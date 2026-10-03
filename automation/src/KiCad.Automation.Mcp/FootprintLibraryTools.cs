@@ -190,7 +190,7 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
     [McpServerTool(Name = "kicad_footprint_definition_read", ReadOnly = true),
      Description("Read one complete footprint definition from the native library or the currently loaded editor. source is persisted_library or editor. The persisted path forces a native library refresh even when size and modification time are unchanged. An editor read is a detached projection; canonicalTargetJson may rename that projection without editing the target library. The response includes the complete nested Footprint, canonical writer hash, provider identity hash, file baseline and explicit limitations; incomplete provider coverage remains incomplete."),
      KiCadCapability("footprint-library", "compiled-mcp plus native-footprint-api", "forced-refresh complete footprint definition readback and detached editor projection"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "NativeFootprintLibraryJourney.FootprintLibraryListDeleteUsesLiveEditorAndNativeReceipts")]
     public Task<CallToolResult> ReadDefinition(string instanceId, string expectedProcessEpoch,
         string documentJson, string source, CancellationToken cancellationToken, string canonicalTargetJson = "") =>
         Execute(async () =>
@@ -219,7 +219,7 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
     [McpServerTool(Name = "kicad_footprint_definition_preview", ReadOnly = true),
      Description("Preview the complete definition currently loaded in the native footprint editor without navigating, selecting or mutating it. canonicalTargetJson optionally names the detached library identity used for save-copy planning. This is an editor projection and carries the same canonical writer hash and completeness limits as kicad_footprint_definition_read with source editor."),
      KiCadCapability("footprint-library", "compiled-mcp plus native-footprint-api", "detached complete editor definition projection"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+     KiCadVerification(KiCadVerificationLevel.InProcess, "CapabilityCatalogTests.CompiledServerAdvertisesExactlyItsRegisteredTools")]
     public Task<CallToolResult> PreviewDefinition(string instanceId, string expectedProcessEpoch,
         string documentJson, CancellationToken cancellationToken, string canonicalTargetJson = "") =>
         ReadDefinition(instanceId, expectedProcessEpoch, documentJson, "editor", cancellationToken, canonicalTargetJson);

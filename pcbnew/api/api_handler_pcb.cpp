@@ -1034,6 +1034,30 @@ HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleCan
 
 namespace
 {
+HANDLER_RESULT<kiapi::automation::v1::DocumentLifecycleState> ReadPcbLifecycle(
+        KICAD_API_SERVER& aServer, const DocumentSpecifier& aDocument )
+{
+    kiapi::automation::v1::ReadDocumentLifecycleState query;
+    query.mutable_document()->CopyFrom( aDocument );
+    ApiRequest envelope;
+    envelope.mutable_message()->PackFrom( query );
+    auto reply = aServer.DispatchToHandlers( envelope );
+    if( !reply )
+        return tl::unexpected( reply.error() );
+    if( reply->status().status() != ApiStatusCode::AS_OK )
+        return tl::unexpected( reply->status() );
+
+    kiapi::automation::v1::DocumentLifecycleState state;
+    if( !reply->message().UnpackTo( &state ) )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_NOT_READY );
+        error.set_error_message( "Native PCB lifecycle state could not be decoded" );
+        return tl::unexpected( error );
+    }
+    return state;
+}
+
 ApiResponseStatus RoutePreviewError( const std::string& aMessage,
                                      ApiStatusCode aStatus = ApiStatusCode::AS_BAD_REQUEST )
 {
@@ -3539,9 +3563,10 @@ API_HANDLER_PCB::handleRunPcbManufacturingExport(
     if( ExistingPath( stagingDirectory, pathReason ) )
         return tl::unexpected( ManufacturingError( "The operation's staging directory already exists: " + pathReason ) );
 
-    HANDLER_CONTEXT<kiapi::automation::v1::ReadDocumentLifecycleState> lifecycleContext;
-    lifecycleContext.Request.mutable_document()->CopyFrom( request.document() );
-    HANDLER_RESULT<DocumentLifecycleState> before = handleReadLifecycleState( lifecycleContext );
+    // Use the registering server's public observation path so clean-checkpoint
+    // annotation and instance identity match the caller's lifecycle receipt.
+    // Standing correction: kicad-public-lifecycle-observation-path-20260914.
+    HANDLER_RESULT<DocumentLifecycleState> before = ReadPcbLifecycle( apiServer(), request.document() );
     if( !before )
         return tl::unexpected( before.error() );
     if( !google::protobuf::util::MessageDifferencer::Equivalent( *before, request.expected_state() ) )
@@ -3846,7 +3871,7 @@ API_HANDLER_PCB::handleRunPcbManufacturingExport(
         }
     }
 
-    HANDLER_RESULT<DocumentLifecycleState> after = handleReadLifecycleState( lifecycleContext );
+    HANDLER_RESULT<DocumentLifecycleState> after = ReadPcbLifecycle( apiServer(), request.document() );
     if( !after || !google::protobuf::util::MessageDifferencer::Equivalent( *after, request.expected_state() ) )
     {
         setReceipt( [&]( PcbManufacturingExportReceipt& value )
@@ -4437,9 +4462,8 @@ HANDLER_RESULT<kiapi::automation::v1::PcbRenderInspectionResponse> API_HANDLER_P
         return tl::unexpected( error );
     }
 
-    HANDLER_CONTEXT<ReadDocumentLifecycleState> lifecycleContext;
-    lifecycleContext.Request.mutable_document()->CopyFrom( request.job_settings().document() );
-    HANDLER_RESULT<DocumentLifecycleState> before = handleReadLifecycleState( lifecycleContext );
+    // Direct handler calls omit server-owned clean-checkpoint annotation.
+    HANDLER_RESULT<DocumentLifecycleState> before = ReadPcbLifecycle( apiServer(), request.job_settings().document() );
 
     if( !before )
         return tl::unexpected( before.error() );
@@ -4512,7 +4536,7 @@ HANDLER_RESULT<kiapi::automation::v1::PcbRenderInspectionResponse> API_HANDLER_P
     if( !jobResult )
         return tl::unexpected( jobResult.error() );
 
-    HANDLER_RESULT<DocumentLifecycleState> after = handleReadLifecycleState( lifecycleContext );
+    HANDLER_RESULT<DocumentLifecycleState> after = ReadPcbLifecycle( apiServer(), request.job_settings().document() );
 
     if( !after )
         return tl::unexpected( after.error() );

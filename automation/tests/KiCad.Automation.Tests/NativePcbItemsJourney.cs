@@ -600,13 +600,12 @@ public sealed partial class NativeSessionTests
                 .Single(footprint => footprint.ReferenceField.Text.Text.Text_ == "R1");
             Assert.IsTrue(renderFootprint.Definition.Items.Count > 0,
                 "The render fixture footprint must retain its imported definition payload.");
-            // Native footprint/library refresh can advance the board's
-            // lifecycle cursor after the earlier artwork receipt. Re-observe
-            // immediately before render admission so the request is paired
-            // with the exact live board state, rather than masking a real
-            // stale-state refusal as a render defect.
+            // Use the same public lifecycle observation as the native render
+            // admission, including the server-owned clean checkpoint.
             var renderStateBefore = await ObserveLifecycleState(client, board, token);
             var renderStateConfirm = await ObserveLifecycleState(client, board, token);
+            Assert.IsFalse(string.IsNullOrEmpty(renderStateConfirm.CleanCheckpointSha256),
+                "The render admission regression requires a saved clean checkpoint.");
             static object RenderStateProbe(DocumentLifecycleState state) => new
             {
                 revision = state.Revision,

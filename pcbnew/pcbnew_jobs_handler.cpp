@@ -596,6 +596,8 @@ void captureInspectionMetadata( JOB_PCB_RENDER& aJob, BOARD* aBoard, BOARD_ADAPT
     metadata.coverageNotes.emplace_back( "projected bounds are conservative transformed geometry bounds" );
 }
 
+}
+
 
 PCBNEW_JOBS_HANDLER::PCBNEW_JOBS_HANDLER( KIWAY* aKiway ) :
         JOB_DISPATCHER( aKiway ),
@@ -1879,7 +1881,7 @@ int PCBNEW_JOBS_HANDLER::JobExportRender( JOB* aJob )
         {
             m_reporter->Report( _( "A 3D model input changed during rendering; the image and metadata were discarded.\n" ),
                                 RPT_SEVERITY_ERROR );
-            return CLI::EXIT_CODES::ERR_BUSY;
+            return CLI::EXIT_CODES::ERR_UNKNOWN;
         }
 
         captureInspectionMetadata( *aRenderJob, brd, boardAdapter, camera, realSize );

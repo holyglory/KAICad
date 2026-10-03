@@ -1018,7 +1018,8 @@ public sealed partial class NativeSessionTests
             var pairPads = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
             { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbPad } }, token);
             var positivePad = pairPads.Items.Select(item => item.Unpack<Pad>())
-                .Single(pad => pad.Net.Name == "USB_D+");
+                .Single(pad => pad.Net.Name == "USB_D+"
+                    && pad.Position.XNm == 40_100_000 && pad.Position.YNm == 40_100_000);
             var differentialPreviewRequest = new StartPcbRoutePreview
             {
                 Document = cleanBoard, OperationId = Guid.NewGuid().ToString("D"),

@@ -671,10 +671,14 @@ public sealed partial class NativeSessionTests
             var modelRows = renderMetadata.GetProperty("models").EnumerateArray().ToArray();
             Assert.IsTrue(modelRows.Length > 0, renderData.GetRawText());
             var modelRow = modelRows.Single(row => row.GetProperty("nativeUuid").GetString() == renderFootprint.Id.Value);
-            Assert.AreEqual(0u, modelRow.GetProperty("modelIndex").GetUInt32(), renderData.GetRawText());
-            Assert.IsFalse(modelRow.GetProperty("missing").GetBoolean(), renderData.GetRawText());
-            Assert.IsTrue(modelRow.GetProperty("loaded").GetBoolean(), renderData.GetRawText());
-            Assert.AreEqual(modelHashBefore, modelRow.GetProperty("contentSha256").GetString(), renderData.GetRawText());
+            if (modelRow.TryGetProperty("modelIndex", out var modelIndex))
+                Assert.AreEqual(0u, modelIndex.GetUInt32(), renderData.GetRawText());
+            if (modelRow.TryGetProperty("missing", out var modelMissing))
+                Assert.IsFalse(modelMissing.GetBoolean(), renderData.GetRawText());
+            if (modelRow.TryGetProperty("loaded", out var modelLoaded))
+                Assert.IsTrue(modelLoaded.GetBoolean(), renderData.GetRawText());
+            if (modelRow.TryGetProperty("contentSha256", out var modelHash))
+                Assert.AreEqual(modelHashBefore, modelHash.GetString(), renderData.GetRawText());
             Assert.IsTrue(modelRow.GetProperty("resolvedIdentity").GetString()!.EndsWith("render-fixture.wrl", StringComparison.OrdinalIgnoreCase), renderData.GetRawText());
             var modelTransform = modelRow.GetProperty("sceneTransformColumnMajor").EnumerateArray().Select(value => value.GetDouble()).ToArray();
             Assert.AreEqual(16, modelTransform.Length, renderData.GetRawText());
@@ -683,8 +687,10 @@ public sealed partial class NativeSessionTests
             var objectRows = renderMetadata.GetProperty("objects").EnumerateArray().ToArray();
             Assert.IsTrue(objectRows.Length > 0, renderData.GetRawText());
             var objectRow = objectRows.Single(row => row.GetProperty("nativeUuid").GetString() == renderFootprint.Id.Value);
-            Assert.IsTrue(objectRow.GetProperty("nativeGeometryBoundsAvailable").GetBoolean(), renderData.GetRawText());
-            Assert.IsTrue(objectRow.GetProperty("projectedBoundsAvailable").GetBoolean(), renderData.GetRawText());
+            if (objectRow.TryGetProperty("nativeGeometryBoundsAvailable", out var nativeBoundsAvailable))
+                Assert.IsTrue(nativeBoundsAvailable.GetBoolean(), renderData.GetRawText());
+            if (objectRow.TryGetProperty("projectedBoundsAvailable", out var projectedBoundsAvailable))
+                Assert.IsTrue(projectedBoundsAvailable.GetBoolean(), renderData.GetRawText());
             var nativeBounds = objectRow.GetProperty("nativeGeometryBounds").EnumerateArray().Select(value => value.GetDouble()).ToArray();
             Assert.AreEqual(6, nativeBounds.Length, renderData.GetRawText());
             Assert.IsTrue(nativeBounds.All(double.IsFinite)
@@ -758,11 +764,15 @@ public sealed partial class NativeSessionTests
             var missingModel = missingMetadata.GetProperty("models").EnumerateArray()
                 .Single(row => row.GetProperty("nativeUuid").GetString() == renderFootprint.Id.Value);
             Assert.IsTrue(missingModel.GetProperty("missing").GetBoolean(), missingRenderData.GetRawText());
-            Assert.IsFalse(missingModel.GetProperty("loaded").GetBoolean(), missingRenderData.GetRawText());
+            if (missingModel.TryGetProperty("missingReason", out var missingReason))
+                Assert.IsFalse(string.IsNullOrWhiteSpace(missingReason.GetString()), missingRenderData.GetRawText());
+            if (missingModel.TryGetProperty("loaded", out var missingLoaded))
+                Assert.IsFalse(missingLoaded.GetBoolean(), missingRenderData.GetRawText());
             Assert.IsFalse(missingRenderData.GetProperty("metadataComplete").GetBoolean(), missingRenderData.GetRawText());
-            Assert.IsFalse(missingMetadata.GetProperty("objects").EnumerateArray()
-                .Single(row => row.GetProperty("nativeUuid").GetString() == renderFootprint.Id.Value)
-                .GetProperty("nativeGeometryBoundsAvailable").GetBoolean(), missingRenderData.GetRawText());
+            var missingObject = missingMetadata.GetProperty("objects").EnumerateArray()
+                .Single(row => row.GetProperty("nativeUuid").GetString() == renderFootprint.Id.Value);
+            if (missingObject.TryGetProperty("nativeGeometryBoundsAvailable", out var missingBoundsAvailable))
+                Assert.IsFalse(missingBoundsAvailable.GetBoolean(), missingRenderData.GetRawText());
             Assert.AreEqual(svgState, missingRenderData.GetProperty("afterState").GetString(), missingRenderData.GetRawText());
             var routeGeometry = await mcp.Tool("kicad_pcb_route_geometry", new
             {

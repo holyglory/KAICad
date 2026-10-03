@@ -1880,11 +1880,106 @@ public sealed partial class NativeSessionTests
                 var placedRead = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
                 { Header = new() { Document = cleanBoard }, Items = { placedFootprint.Id } }, token);
                 Assert.AreEqual(placedFootprint.Id, placedRead.Items.Single().Unpack<FootprintInstance>().Id);
+                // Reuse the real raster proposal through the typed projection adapters. The board
+                // path keeps source bytes in the explicit archive and reports provenanceAtomic=false;
+                // the footprint path embeds the exact bytes in its complete FootprintInstance.
+                string rasterSource = Path.Combine(RepositoryRoot(), "automation", "tests", "fixtures", "raster_trace",
+                    "outer-hole-diagonal-64.png");
+                byte[] rasterBytes = await File.ReadAllBytesAsync(rasterSource, token);
+                string rasterSha = Convert.ToHexStringLower(SHA256.HashData(rasterBytes));
+                var rasterTrace = await mcp.Tool("kicad_artwork_raster_trace", new
+                {
+                    instanceId,
+                    input = new
+                    {
+                        sourcePath = rasterSource, expectedSourceSha256 = rasterSha, physicalWidthNm = 64_000_000L,
+                        threshold = 128, invert = false, turdSize = 0, curveToleranceNm = 1_000L,
+                        maxContours = 4096, maxVertices = 1_000_000, sourceOrigin = "deterministic-fixture",
+                        hostReceipt = "pcb-projection"
+                    }
+                });
+                RequireToolSuccess(rasterTrace);
+                string projectionStateJson = placementData.GetProperty("afterState").GetString()!;
+                JsonElement projectionState = JsonDocument.Parse(projectionStateJson).RootElement.Clone();
+                JsonElement projectionDocument = JsonDocument.Parse(SchematicJson.Formatter.Format(cleanBoard)).RootElement.Clone();
+                string boardProjectionArchive = "raster-trace/projection.png";
+                var boardProjection = await mcp.Tool("kicad_artwork_raster_project", new
+                {
+                    instanceId,
+                    input = new
+                    {
+                        operationId = Guid.NewGuid().ToString("D"), targetKind = "BOARD", expectedProcessEpoch = client.Epoch,
+                        sourcePath = rasterSource, sourceKind = "generated", sourceOrigin = "deterministic-fixture",
+                        proposal = rasterTrace.GetProperty("structuredContent").GetProperty("trace"),
+                        board = new
+                        {
+                            document = projectionDocument, expectedState = projectionState, layer = "F.SilkS",
+                            originXNm = 30_000_000L, originYNm = 30_000_000L,
+                            repositoryRoot = cleanBoard.Project.Path, sourceArchivePath = boardProjectionArchive
+                        }
+                    }
+                });
+                RequireToolSuccess(boardProjection);
+                var boardProjectionData = boardProjection.GetProperty("structuredContent");
+                Assert.IsTrue(boardProjectionData.GetProperty("accepted").GetBoolean(), boardProjection.GetRawText());
+                Assert.IsFalse(boardProjectionData.GetProperty("provenanceAtomic").GetBoolean(), boardProjection.GetRawText());
+                Assert.IsTrue(File.Exists(Path.Combine(cleanBoard.Project.Path, boardProjectionArchive)), boardProjection.GetRawText());
+                string boardProjectionAfter = boardProjectionData.GetProperty("nativeResult").GetProperty("afterState").GetString()!;
+                string[] boardProjectionIds = boardProjectionData.GetProperty("createdIds").EnumerateArray().Select(item => item.GetString()!).ToArray();
+                var projectedShapes = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+                { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbShape } }, token);
+                Assert.IsTrue(projectedShapes.Items.Where(item => boardProjectionIds.Contains(item.Unpack<BoardGraphicShape>().Id.Value))
+                    .All(item => item.Unpack<BoardGraphicShape>().Shape.GeometryCase == GraphicShape.GeometryOneofCase.Polygon
+                        && item.Unpack<BoardGraphicShape>().CustomProperties.Any(property => property.Key == "kicad.ai.raster_trace.geometry_sha256")), boardProjection.GetRawText());
+                var removeRasterBoard = await mcp.Tool("kicad_pcb_items_delete", new
+                {
+                    instanceId,
+                    requestJson = BoardJson.Formatter.Format(new DeleteItems { Header = new() { Document = cleanBoard }, ItemIds = { boardProjectionIds.Select(id => new KIID { Value = id }) } }),
+                    expectedStateJson = boardProjectionAfter
+                });
+                Assert.IsFalse(removeRasterBoard.TryGetProperty("isError", out var removeRasterBoardError) && removeRasterBoardError.GetBoolean(), removeRasterBoard.GetRawText());
+                string footprintProjectionState = removeRasterBoard.GetProperty("structuredContent").GetProperty("afterState").GetString()!;
+                JsonElement footprintProjectionExpected = JsonDocument.Parse(footprintProjectionState).RootElement.Clone();
+                string projectedFootprintId = Guid.NewGuid().ToString("D");
+                var footprintProjection = await mcp.Tool("kicad_artwork_raster_project", new
+                {
+                    instanceId,
+                    input = new
+                    {
+                        operationId = Guid.NewGuid().ToString("D"), targetKind = "FOOTPRINT", expectedProcessEpoch = client.Epoch,
+                        sourcePath = rasterSource, sourceKind = "generated", sourceOrigin = "deterministic-fixture",
+                        proposal = rasterTrace.GetProperty("structuredContent").GetProperty("trace"),
+                        footprint = new
+                        {
+                            document = projectionDocument, expectedState = footprintProjectionExpected,
+                            sourceFootprintId = sourceFootprint.Id.Value, targetFootprintId = projectedFootprintId,
+                            originXNm = 70_000_000L, originYNm = 70_000_000L, orientationDegrees = 0.0,
+                            layer = "F.Cu", artworkLayer = "F.SilkS"
+                        }
+                    }
+                });
+                RequireToolSuccess(footprintProjection);
+                var footprintProjectionData = footprintProjection.GetProperty("structuredContent");
+                Assert.IsTrue(footprintProjectionData.GetProperty("accepted").GetBoolean(), footprintProjection.GetRawText());
+                Assert.IsTrue(footprintProjectionData.GetProperty("embeddedSourceVerified").GetBoolean(), footprintProjection.GetRawText());
+                var projectedFootprint = (await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+                { Header = new() { Document = cleanBoard }, Items = { new KIID { Value = projectedFootprintId } } }, token)).Items.Single().Unpack<FootprintInstance>();
+                Assert.IsTrue(projectedFootprint.Definition.Items.Any(item => item.Is(BoardGraphicShape.Descriptor)
+                    && item.Unpack<BoardGraphicShape>().Shape.GeometryCase == GraphicShape.GeometryOneofCase.Polygon), footprintProjection.GetRawText());
+                Assert.IsTrue(projectedFootprint.EmbeddedFiles.Files.Count > 0, footprintProjection.GetRawText());
+                string footprintProjectionAfter = footprintProjectionData.GetProperty("nativeResult").GetProperty("afterState").GetString()!;
+                var removeRasterFootprint = await mcp.Tool("kicad_pcb_items_delete", new
+                {
+                    instanceId,
+                    requestJson = BoardJson.Formatter.Format(new DeleteItems { Header = new() { Document = cleanBoard }, ItemIds = { new KIID { Value = projectedFootprintId } } }),
+                    expectedStateJson = footprintProjectionAfter
+                });
+                Assert.IsFalse(removeRasterFootprint.TryGetProperty("isError", out var removeRasterFootprintError) && removeRasterFootprintError.GetBoolean(), removeRasterFootprint.GetRawText());
                 var removePlacedFootprint = await mcp.Tool("kicad_pcb_items_delete", new
                 {
                     instanceId,
                     requestJson = BoardJson.Formatter.Format(new DeleteItems { Header = new() { Document = cleanBoard }, ItemIds = { placedFootprint.Id } }),
-                    expectedStateJson = placementData.GetProperty("afterState").GetString()
+                    expectedStateJson = removeRasterFootprint.GetProperty("structuredContent").GetProperty("afterState").GetString()
                 });
                 Assert.IsFalse(removePlacedFootprint.TryGetProperty("isError", out var removePlacedError)
                     && removePlacedError.GetBoolean(), removePlacedFootprint.GetRawText());

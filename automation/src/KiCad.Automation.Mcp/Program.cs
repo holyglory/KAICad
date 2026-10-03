@@ -91,6 +91,8 @@ builder.Services.AddMcpServer(options =>
     .WithTools<SchematicSymbolLibraryTools>()
     .WithTools<SchematicErcTools>()
     .WithTools<SchematicSymbolArtworkTools>()
+     .WithTools<RasterTraceTools>()
+     .WithTools<RasterTraceProjectionTools>()
     .WithTools<CheckedSchematicTools>()
     .WithTools<SchematicXmlTools>()
     .WithTools<DocumentTools>()

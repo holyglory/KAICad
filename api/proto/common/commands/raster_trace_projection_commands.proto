@@ -1,0 +1,94 @@
+/* Typed proposal-to-target raster artwork projections. */
+syntax = "proto3";
+
+package kiapi.automation.v1;
+option csharp_namespace = "KiCad.Automation.Protocol";
+
+import "common/commands/automation_commands.proto";
+import "common/commands/raster_trace_commands.proto";
+import "common/types/base_types.proto";
+import "board/board_types.proto";
+import "schematic/schematic_types.proto";
+
+// Caller attribution and the exact source bytes retained by the projection.
+// source_kind/source_origin are declarations; no ImageGen provider proof is implied.
+message RasterTraceProjectionProvenance {
+  string source_sha256 = 1;
+  uint64 source_bytes = 2;
+  string source_kind = 3;
+  string source_origin = 4;
+  string embedded_file_name = 5;
+  string source_archive = 6;
+  bool provenance_atomic = 7;
+}
+
+message RasterTraceSymbolTarget {
+  string library_nickname = 1;
+  string symbol_name = 2;
+  string expected_modify_hash = 3;
+  kiapi.schematic.types.SchematicSymbol definition = 4;
+}
+
+message RasterTraceFootprintTarget {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  kiapi.automation.v1.DocumentLifecycleState expected_state = 2;
+  string source_footprint_id = 3;
+  string target_footprint_id = 4;
+  kiapi.common.types.Vector2 position = 5;
+  kiapi.common.types.Angle orientation = 6;
+  kiapi.board.types.BoardLayer layer = 7;
+  kiapi.board.types.FootprintInstance footprint = 8;
+}
+
+message RasterTraceBoardTarget {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  kiapi.automation.v1.DocumentLifecycleState expected_state = 2;
+  kiapi.board.types.BoardLayer layer = 3;
+  kiapi.common.types.Vector2 origin = 4;
+  string repository_root = 5;
+  string source_archive_path = 6;
+}
+
+message RasterTraceSchematicTarget {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  kiapi.automation.v1.DocumentLifecycleState expected_state = 2;
+  kiapi.common.types.Vector2 origin = 3;
+  string manifest_group_id = 4;
+}
+
+message RasterTraceProjectionRequest {
+  string operation_id = 1;
+  RasterTraceResult proposal = 2;
+  RasterTraceProjectionProvenance provenance = 3;
+  oneof target {
+    RasterTraceSymbolTarget symbol = 10;
+    RasterTraceFootprintTarget footprint = 11;
+    RasterTraceBoardTarget board = 12;
+    RasterTraceSchematicTarget schematic = 13;
+  }
+}
+
+message RasterTraceProjectionResult {
+  bool accepted = 1;
+  string rejection_code = 2;
+  repeated string diagnostics = 3;
+  string operation_id = 4;
+  string geometry_sha256 = 5;
+  string source_sha256 = 6;
+  string target_kind = 7;
+  repeated string created_ids = 8;
+  bool native_mutation_confirmed = 9;
+  bool persistence_verified = 10;
+  bool provenance_atomic = 11;
+  bool electrical_validated = 12;
+  bool manufacturing_validated = 13;
+  bool transport_retry_safe = 14;
+  string limitation = 15;
+  string before_state_json = 16;
+  string after_state_json = 17;
+  uint64 before_modify_hash = 18;
+  uint64 after_modify_hash = 19;
+  string receipt_scope = 20;
+  bool embedded_source_verified = 21;
+  string source_archive = 22;
+}

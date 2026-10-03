@@ -57,6 +57,21 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_simulation_job");
             CollectionAssert.Contains(names, "kicad_simulation_wait");
             CollectionAssert.Contains(names, "kicad_simulation_cancel");
+             CollectionAssert.Contains(names, "kicad_artwork_raster_trace");
+            CollectionAssert.Contains(names, "kicad_artwork_raster_project");
+            var rasterTraceSchema = listed.GetProperty("result").GetProperty("tools").EnumerateArray()
+                .Single(tool => tool.GetProperty("name").GetString() == "kicad_artwork_raster_trace")
+                .GetProperty("inputSchema").GetProperty("properties").GetProperty("input");
+            Assert.IsTrue(SimulationSchemaType(rasterTraceSchema, "object"));
+            CollectionAssert.Contains(rasterTraceSchema.GetProperty("properties").EnumerateObject().Select(p => p.Name).ToArray(), "sourcePath");
+            CollectionAssert.Contains(rasterTraceSchema.GetProperty("properties").EnumerateObject().Select(p => p.Name).ToArray(), "expectedSourceSha256");
+            var rasterProjectionSchema = listed.GetProperty("result").GetProperty("tools").EnumerateArray()
+                .Single(tool => tool.GetProperty("name").GetString() == "kicad_artwork_raster_project")
+                .GetProperty("inputSchema").GetProperty("properties").GetProperty("input");
+            Assert.IsTrue(SimulationSchemaType(rasterProjectionSchema, "object"));
+            CollectionAssert.Contains(rasterProjectionSchema.GetProperty("properties").EnumerateObject().Select(p => p.Name).ToArray(), "proposal");
+            CollectionAssert.Contains(rasterProjectionSchema.GetProperty("properties").EnumerateObject().Select(p => p.Name).ToArray(), "targetKind");
+             CollectionAssert.Contains(rasterProjectionSchema.GetProperty("properties").EnumerateObject().Select(p => p.Name).ToArray(), "operationId");
             // Deck admission runs before any instance lookup, so a script deck is refused
             // even when no native editor could ever receive it.
             var scriptDeck = await Request(9089, "tools/call", new { name = "kicad_simulation_start", arguments = new
@@ -66,6 +81,26 @@ public sealed class McpProcessTests
             } });
             Assert.IsTrue(scriptDeck.GetProperty("result").GetProperty("isError").GetBoolean());
             Assert.AreEqual("simulation_deck_rejected", scriptDeck.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            var invalidRaster = await Request(9080, "tools/call", new { name = "kicad_artwork_raster_trace", arguments = new
+            {
+                instanceId = Guid.NewGuid().ToString("D"), input = new
+                {
+                    sourcePath = "relative.png", expectedSourceSha256 = "bad", physicalWidthNm = 1000000,
+                    threshold = 128, curveToleranceNm = 1000, maxContours = 10, maxVertices = 100
+                }
+            } });
+            Assert.IsTrue(invalidRaster.GetProperty("result").GetProperty("isError").GetBoolean(), invalidRaster.GetRawText());
+            Assert.AreEqual("invalid_raster_trace_source", invalidRaster.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            var invalidRasterProjection = await Request(9081, "tools/call", new { name = "kicad_artwork_raster_project", arguments = new
+            {
+                instanceId = Guid.NewGuid().ToString("D"), input = new
+                {
+                    operationId = Guid.NewGuid().ToString("D"), targetKind = "BOARD",
+                    sourcePath = "relative.png", sourceKind = "generated", proposal = new { accepted = true }
+                }
+            } });
+            Assert.IsTrue(invalidRasterProjection.GetProperty("result").GetProperty("isError").GetBoolean(), invalidRasterProjection.GetRawText());
+            Assert.AreEqual("invalid_raster_projection_source", invalidRasterProjection.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
             string[] simulationTools = ["kicad_simulation_start", "kicad_simulation_job", "kicad_simulation_wait", "kicad_simulation_cancel"];
             foreach (string simulationTool in simulationTools)
             {

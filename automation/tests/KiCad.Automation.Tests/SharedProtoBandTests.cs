@@ -42,6 +42,8 @@ public sealed partial class SharedProtoBandTests
         ("api/proto/common/commands/diagram_canvas_commands.proto", "kiapi.automation.diagrams.v1", "KiCad.Automation.Protocol.Diagrams"),
         ("api/proto/common/commands/schematic_tracking_commands.proto", "kiapi.automation.v1", "KiCad.Automation.Protocol"),
         ("api/proto/common/commands/schematic_erc_execution_commands.proto", "kiapi.automation.v1", "KiCad.Automation.Protocol"),
+         ("api/proto/common/commands/raster_trace_commands.proto", "kiapi.automation.v1", "KiCad.Automation.Protocol"),
+         ("api/proto/common/commands/raster_trace_projection_commands.proto", "kiapi.automation.v1", "KiCad.Automation.Protocol"),
         ("api/proto/common/commands/capability_commands.proto", "kiapi.automation.v1", "KiCad.Automation.Protocol"),
     ];
 

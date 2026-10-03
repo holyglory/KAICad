@@ -1,4 +1,5 @@
 using Google.Protobuf.WellKnownTypes;
+using System.Security.Cryptography;
 using Kiapi.Common.Types;
 using Kiapi.Schematic.Types;
 using KiCad.Automation.Native;
@@ -83,6 +84,42 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(64, artworkWrite.GetProperty("structuredContent").GetProperty("persistedContentSha256").GetString()!.Length);
         Assert.AreEqual(artworkWrite.GetProperty("structuredContent").GetProperty("afterModifyHash").GetUInt64(),
             artworkWrite.GetProperty("structuredContent").GetProperty("persistedModifyHash").GetUInt64());
+        string rasterSource = Path.Combine(RepositoryRoot(), "automation", "tests", "fixtures", "raster_trace",
+            "outer-hole-diagonal-64.png");
+        byte[] rasterBytes = await File.ReadAllBytesAsync(rasterSource, token);
+        string rasterSha = Convert.ToHexStringLower(SHA256.HashData(rasterBytes));
+        var rasterTrace = await mcp.Tool("kicad_artwork_raster_trace", new
+        {
+            instanceId,
+            input = new
+            {
+                sourcePath = rasterSource, expectedSourceSha256 = rasterSha, physicalWidthNm = 64_000_000L,
+                threshold = 128, invert = false, turdSize = 0, curveToleranceNm = 1_000L,
+                maxContours = 4096, maxVertices = 1_000_000, sourceOrigin = "deterministic-fixture",
+                hostReceipt = "symbol-library-projection"
+            }
+        });
+        RequireToolSuccess(rasterTrace);
+        var rasterProjection = await mcp.Tool("kicad_artwork_raster_project", new
+        {
+            instanceId,
+            input = new
+            {
+                operationId = Guid.NewGuid().ToString("D"), targetKind = "SYMBOL", expectedProcessEpoch = client.Epoch,
+                sourcePath = rasterSource, sourceKind = "generated", sourceOrigin = "deterministic-fixture",
+                proposal = rasterTrace.GetProperty("structuredContent").GetProperty("trace"),
+                symbol = new
+                {
+                    libraryNickname, symbolName = "GeneratedArtworkProbe",
+                    expectedModifyHash = artworkWrite.GetProperty("structuredContent").GetProperty("afterModifyHash").GetUInt64().ToString()
+                }
+            }
+        });
+        RequireToolSuccess(rasterProjection);
+        Assert.IsTrue(rasterProjection.GetProperty("structuredContent").GetProperty("accepted").GetBoolean(), rasterProjection.GetRawText());
+        Assert.IsTrue(rasterProjection.GetProperty("structuredContent").GetProperty("embeddedSourceVerified").GetBoolean(), rasterProjection.GetRawText());
+        string artworkAfterModifyHash = rasterProjection.GetProperty("structuredContent").GetProperty("nativeResult")
+            .GetProperty("afterModifyHash").GetUInt64().ToString();
         var artworkRead = await mcp.Tool("kicad_symbol_library_read", new
         { instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName = "GeneratedArtworkProbe" });
         RequireToolSuccess(artworkRead);
@@ -94,7 +131,7 @@ public sealed partial class NativeSessionTests
         var artworkDelete = await mcp.Tool("kicad_symbol_library_delete", new
         {
             instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName = "GeneratedArtworkProbe",
-            operationId = Guid.NewGuid().ToString("D"), expectedModifyHash = artworkWrite.GetProperty("structuredContent").GetProperty("afterModifyHash").GetUInt64().ToString(System.Globalization.CultureInfo.InvariantCulture)
+            operationId = Guid.NewGuid().ToString("D"), expectedModifyHash = artworkAfterModifyHash
         });
         RequireToolSuccess(artworkDelete);
         Assert.IsTrue(artworkDelete.GetProperty("structuredContent").GetProperty("persistenceVerified").GetBoolean(), artworkDelete.GetRawText());

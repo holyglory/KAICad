@@ -1128,11 +1128,13 @@ public sealed partial class NativeSessionTests
                     new CustomProperty { Key = "via-source", Value = "keep-full-padstack" } },
                 PadStack = new()
                 {
-                    Type = PadStackType.PstNormal, Layers = { BoardLayer.BlFCu, BoardLayer.BlBCu },
+                    Type = PadStackType.PstCustom, Layers = { BoardLayer.BlFCu, BoardLayer.BlBCu },
                     Drill = new() { Diameter = new() { XNm = 300_000, YNm = 300_000 },
                         StartLayer = BoardLayer.BlFCu, EndLayer = BoardLayer.BlBCu, Shape = DrillShape.DsCircle },
                     CopperLayers = { new PadStackLayer { Layer = BoardLayer.BlFCu, Shape = PadStackShape.PssCircle,
-                        Size = new() { XNm = 700_000, YNm = 700_000 } } },
+                        Size = new() { XNm = 700_000, YNm = 700_000 } },
+                        new PadStackLayer { Layer = BoardLayer.BlBCu, Shape = PadStackShape.PssCircle,
+                            Size = new() { XNm = 700_000, YNm = 700_000 } } },
                     FrontOuterLayers = new() { SolderMaskMode = SolderMaskMode.SmmMasked },
                     BackOuterLayers = new() { SolderMaskMode = SolderMaskMode.SmmUnmasked }
                 }

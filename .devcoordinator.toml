@@ -3452,6 +3452,7 @@ env={TMPDIR="/tmp"}
 name="managed-build"
 tier="development"
 role="preflight"
+invalidates=["pcb","footprint"]
 command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--configuration","Debug"]
 [[test.fixture-retry.check]]
 name="pcb"

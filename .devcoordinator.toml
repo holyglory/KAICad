@@ -3457,12 +3457,12 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.fixture-retry.check]]
 name="pcb"
 tier="development"
-requires=["managed-build"]
+after=["managed-build"]
 command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativePcbItems","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/fixture-retry/pcb"]
 retained_artifacts=[{name="pcb-tests",path="automation/artifacts/fixture-retry/pcb",max_bytes=16777216},{name="pcb-evidence",path="automation/artifacts/native-pcb-items/native-session-current",max_bytes=67108864}]
 [[test.fixture-retry.check]]
 name="footprint"
 tier="development"
-requires=["managed-build"]
+after=["managed-build"]
 command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeFootprintLibrary","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/fixture-retry/footprint"]
 retained_artifacts=[{name="fp-tests",path="automation/artifacts/fixture-retry/footprint",max_bytes=16777216},{name="fp-evidence",path="automation/artifacts/native-footprint-library/native-session-current",max_bytes=67108864}]

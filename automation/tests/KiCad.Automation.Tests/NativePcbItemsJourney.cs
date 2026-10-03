@@ -2346,7 +2346,7 @@ public sealed partial class NativeSessionTests
 (kicad_pcb (version 20260206) (generator "pcbnew")
   (general (thickness 1.6))
   (paper "A4")
-  (layers (0 "F.Cu" signal) (2 "B.Cu" signal) (25 "Edge.Cuts" user))
+  (layers (0 "F.Cu" signal) (2 "B.Cu" signal) (36 "B.SilkS" user "b.silkscreen") (37 "F.SilkS" user "f.silkscreen") (25 "Edge.Cuts" user))
   (setup (pad_to_mask_clearance 0))
   (net 0 "")
   (net 1 "POWER_RAIL")

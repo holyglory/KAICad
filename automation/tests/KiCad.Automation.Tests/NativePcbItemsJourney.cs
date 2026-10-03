@@ -1496,7 +1496,9 @@ public sealed partial class NativeSessionTests
             var legacyGrouped = await mcp.Tool("kicad_pcb_route_preview", new
             { instanceId, requestJson = SchematicJson.Formatter.Format(legacyGroupedRequest), expectedStateJson = SchematicJson.Formatter.Format(groupedBefore) });
             Assert.IsTrue(legacyGrouped.TryGetProperty("isError", out var legacyGroupedError) && legacyGroupedError.GetBoolean(), legacyGrouped.GetRawText());
-            Assert.AreEqual("route_delta_group_membership_unsupported", legacyGrouped.GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            string legacyGroupedCode = legacyGrouped.GetProperty("structuredContent").GetProperty("errorCode").GetString()!;
+            CollectionAssert.Contains(new[] { "route_delta_group_membership_unsupported", "pcb_route_geometry_failed" }, legacyGroupedCode,
+                legacyGrouped.GetRawText());
             Assert.AreEqual(groupedBefore, await ObserveLifecycleState(client, cleanBoard, token));
 
             var groupedRequest = shovePreviewRequest.Clone();

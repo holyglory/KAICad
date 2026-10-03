@@ -625,7 +625,8 @@ public sealed partial class NativeSessionTests
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-render-state-probe.json"),
                 JsonSerializer.Serialize(new
                 {
-                    first = RenderStateProbe(renderStateBefore), second = RenderStateProbe(renderStateConfirm)
+                    first = RenderStateProbe(renderStateBefore), second = RenderStateProbe(renderStateConfirm),
+                    expectedStateJson = SchematicJson.Formatter.Format(renderStateConfirm)
                 }), token);
             svgState = SchematicJson.Formatter.Format(renderStateConfirm);
             string modelHashBefore = Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(renderModelPath, token)));

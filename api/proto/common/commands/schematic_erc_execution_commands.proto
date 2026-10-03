@@ -1,0 +1,50 @@
+/* Retained native schematic ERC execution. GPL-3.0-or-later. */
+syntax = "proto3";
+
+package kiapi.automation.v1;
+option csharp_namespace = "KiCad.Automation.Protocol";
+
+import "common/commands/automation_commands.proto";
+import "common/commands/schematic_tracking_commands.proto";
+import "common/types/base_types.proto";
+
+// New task-oriented ERC execution. The complete expected lifecycle state
+// carries the exact document, process epoch and native revision; no duplicate
+// identity fields are accepted at this boundary.
+message NativeCapabilitySchematicExecuteErc {
+  string operation_id = 1;
+  DocumentLifecycleState expected_state = 2;
+  bool show_all_errors = 3;
+}
+
+enum NativeErcOperationState {
+  NEOS_UNKNOWN = 0;
+  NEOS_ADMITTED = 1;
+  NEOS_COMPLETED = 2;
+  NEOS_FAILED = 3;
+  NEOS_INDETERMINATE = 4;
+}
+
+// Immutable process-owned receipt. legacy_result preserves the original
+// NativeCapabilitySchematicRunErcResponse wire contract for old callers.
+message NativeErcOperationReceipt {
+  NativeCapabilitySchematicRunErcResponse legacy_result = 1;
+  DocumentLifecycleState before_state = 2;
+  DocumentLifecycleState after_state = 3;
+  SchematicTrackingErcMarkers captured_markers = 4;
+  NativeErcOperationState state = 5;
+  bool admission_verified = 6;
+  bool execution_started = 7;
+  bool markers_captured = 8;
+}
+
+message NativeCapabilitySchematicReadErcOperation {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  string process_epoch = 3;
+}
+
+message NativeCapabilitySchematicReadErcOperationResponse {
+  bool found = 1;
+  NativeErcOperationReceipt receipt = 2;
+}

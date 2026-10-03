@@ -610,6 +610,8 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_schematic_electrical_state");
             CollectionAssert.Contains(names, "kicad_schematic_erc_markers");
             CollectionAssert.Contains(names, "kicad_schematic_erc_run");
+            CollectionAssert.Contains(names, "kicad_schematic_erc_execute");
+            CollectionAssert.Contains(names, "kicad_schematic_erc_operation");
             CollectionAssert.Contains(names, "kicad_schematic_measure_placement");
             // Flat structural diagrams are discarded, not converted (decision n9af098253fec71da): no flat
             // editor tool and no conversion tool is advertised; the per-level diagram tools remain.
@@ -631,6 +633,12 @@ public sealed class McpProcessTests
             var invalidErcRun = await Request(9086, "tools/call", new { name = "kicad_schematic_erc_run",
                 arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
             Assert.IsTrue(invalidErcRun.GetProperty("result").GetProperty("isError").GetBoolean());
+            var invalidErcExecute = await Request(9085, "tools/call", new { name = "kicad_schematic_erc_execute",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), input = new { operationId = "", expectedState = new { } } } });
+            Assert.IsTrue(invalidErcExecute.GetProperty("result").GetProperty("isError").GetBoolean());
+            var invalidErcOperation = await Request(9084, "tools/call", new { name = "kicad_schematic_erc_operation",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), document = new { }, expectedProcessEpoch = "", operationId = "" } });
+            Assert.IsTrue(invalidErcOperation.GetProperty("result").GetProperty("isError").GetBoolean());
             CollectionAssert.Contains(names, "kicad_design_electrical_baseline_initialize");
             CollectionAssert.Contains(names, "kicad_design_connectivity_compare");
             var electricalFixture = SchematicElectricalComparisonTests.Fixture();

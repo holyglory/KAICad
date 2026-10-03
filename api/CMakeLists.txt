@@ -39,6 +39,7 @@ set( KIAPI_PROTO_SRCS
     common/commands/schematic_realization_commands.proto
     common/commands/diagram_canvas_commands.proto
     common/commands/schematic_tracking_commands.proto
+    common/commands/schematic_erc_execution_commands.proto
     common/commands/capability_commands.proto
     common/commands/checked_pcb_route_commands.proto
     common/commands/footprint_definition_commands.proto

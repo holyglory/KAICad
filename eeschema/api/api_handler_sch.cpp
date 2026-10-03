@@ -100,6 +100,8 @@
 #include <drawing_sheet/ds_proxy_undo_item.h>
 #include <drawing_sheet/ds_data_model.h>
 #include <undo_redo_container.h>
+#include <algorithm>
+#include <exception>
 
 #include <api/common/types/base_types.pb.h>
 #include <trace_helpers.h>
@@ -108,6 +110,95 @@ using namespace kiapi::common::commands;
 using kiapi::common::types::CommandStatus;
 using kiapi::common::types::DocumentType;
 using kiapi::common::types::ItemRequestStatus;
+
+namespace
+{
+using google::protobuf::util::MessageDifferencer;
+using kiapi::automation::v1::DocumentLifecycleState;
+using kiapi::automation::v1::ReadDocumentLifecycleState;
+using kiapi::automation::v1::SchematicTrackingErcMarker;
+using kiapi::automation::v1::SchematicTrackingErcMarkers;
+using kiapi::common::types::DocumentSpecifier;
+
+bool ErcUuid( const std::string& value )
+{
+    if( value.size() != 36 ) return false;
+    bool nonzero = false;
+    for( size_t i = 0; i < value.size(); ++i )
+    {
+        const char c = value[i];
+        if( i == 8 || i == 13 || i == 18 || i == 23 )
+        {
+            if( c != '-' ) return false;
+        }
+        else
+        {
+            if( !( ( c >= '0' && c <= '9' ) || ( c >= 'a' && c <= 'f' ) ) ) return false;
+            nonzero |= c != '0';
+        }
+    }
+    return nonzero;
+}
+
+bool ErcDigest( const std::string& value )
+{
+    return value.size() == 64
+            && std::all_of( value.begin(), value.end(), []( char c )
+                            { return ( c >= '0' && c <= '9' ) || ( c >= 'a' && c <= 'f' ); } );
+}
+
+SchematicTrackingErcMarkers CaptureErcMarkers( SCHEMATIC* aSchematic )
+{
+    std::vector<std::pair<std::string, SchematicTrackingErcMarker>> markers;
+    std::set<SCH_SCREEN*> seen;
+
+    for( const SCH_SHEET_PATH& path : aSchematic->Hierarchy() )
+    {
+        SCH_SCREEN* screen = path.LastScreen();
+        if( !screen || !seen.insert( screen ).second ) continue;
+
+        for( SCH_ITEM* item : screen->Items().OfType( SCH_MARKER_T ) )
+        {
+            const auto* marker = static_cast<SCH_MARKER*>( item );
+            SchematicTrackingErcMarker entry;
+            entry.mutable_id()->set_value( marker->m_Uuid.AsStdString() );
+            *entry.mutable_marker() = ERC_EXCLUSION::FromMarker( *marker ).ToProto().marker();
+            entry.set_excluded( marker->IsExcluded() );
+            entry.set_comment( marker->GetComment().ToUTF8() );
+            entry.set_severity( ToProtoEnum<SEVERITY, types::RuleSeverity>( marker->GetSeverity() ) );
+            kiapi::common::PackSheetPath( *entry.mutable_sheet(), path.Path() );
+            markers.emplace_back( entry.marker().SerializeAsString() + entry.id().value(), std::move( entry ) );
+        }
+    }
+
+    std::sort( markers.begin(), markers.end(),
+               []( const auto& a, const auto& b ) { return a.first < b.first; } );
+    SchematicTrackingErcMarkers result;
+    for( auto& [key, entry] : markers ) result.add_markers()->Swap( &entry );
+    return result;
+}
+
+std::optional<ApiResponseStatus> ReadErcLifecycle( KICAD_API_SERVER& aServer,
+                                                   const DocumentSpecifier& aDocument,
+                                                   DocumentLifecycleState& aState )
+{
+    ReadDocumentLifecycleState query;
+    query.mutable_document()->CopyFrom( aDocument );
+    ApiRequest envelope;
+    envelope.mutable_message()->PackFrom( query );
+    auto reply = aServer.DispatchToHandlers( envelope );
+    if( !reply ) return reply.error();
+    if( reply->status().status() != ApiStatusCode::AS_OK ) return reply->status();
+    if( !reply->message().UnpackTo( &aState ) )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_NOT_READY );
+        error.set_error_message( "Native schematic lifecycle state could not be decoded" );
+        return error;
+    }
+    return std::nullopt;
+}
+}
 
 
 std::set<KICAD_T> API_HANDLER_SCH::s_allowedTypes = {
@@ -231,6 +322,11 @@ API_HANDLER_SCH::API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext,
                     kiapi::automation::v1::SchematicTrackingErcMarkers>( &API_HANDLER_SCH::handleReadErcMarkers );
     registerHandler<kiapi::automation::v1::NativeCapabilitySchematicRunErc,
                     kiapi::automation::v1::NativeCapabilitySchematicRunErcResponse>( &API_HANDLER_SCH::handleRunErc );
+    registerHandler<kiapi::automation::v1::NativeCapabilitySchematicReadErcOperation,
+                    kiapi::automation::v1::NativeCapabilitySchematicReadErcOperationResponse>(
+            &API_HANDLER_SCH::handleReadErcOperation );
+    registerHandler<kiapi::automation::v1::NativeCapabilitySchematicExecuteErc,
+                    kiapi::automation::v1::NativeErcOperationReceipt>( &API_HANDLER_SCH::handleExecuteErc );
     registerHandler<SaveDocument, google::protobuf::Empty>(
             &API_HANDLER_SCH::handleSaveDocument );
     registerHandler<SaveCopyOfDocument, google::protobuf::Empty>(
@@ -3575,82 +3671,238 @@ HANDLER_RESULT<kiapi::automation::v1::SchematicTrackingErcMarkers> API_HANDLER_S
 }
 
 
+HANDLER_RESULT<kiapi::automation::v1::NativeErcOperationReceipt> API_HANDLER_SCH::executeErc(
+        const kiapi::common::types::DocumentSpecifier& aDocument,
+        const std::string& aOperationId, const std::string& aProcessEpoch,
+        const kiapi::automation::v1::DocumentRevision& aExpectedRevision,
+        const kiapi::automation::v1::DocumentLifecycleState* aExpectedState,
+        bool aShowAllErrors, const std::string& aFingerprint )
+{
+    using namespace kiapi::automation::v1;
+    auto reject = []( const std::string& message )
+            -> HANDLER_RESULT<NativeErcOperationReceipt>
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( message );
+        return tl::unexpected( error );
+    };
+
+    if( !ErcUuid( aOperationId ) || aProcessEpoch != apiServer().Token() || !ErcUuid( aProcessEpoch )
+        || !ErcUuid( aExpectedRevision.epoch() ) )
+        return reject( "ERC execution requires a nonempty operation UUID, current process epoch and expected revision" );
+
+    // Replay is resolved before any current revision, document or dirty-state
+    // admission. The retained result belongs to the exact original request.
+    if( auto existing = m_ercReceipts.find( aOperationId ); existing != m_ercReceipts.end() )
+    {
+        if( existing->second.request != aFingerprint )
+            return reject( "The operation ID is already bound to a different ERC request" );
+        return existing->second.result;
+    }
+
+    if( auto busy = checkForStableObservation() )
+        return tl::unexpected( *busy );
+    if( auto valid = validateDocument( aDocument ); !valid )
+        return tl::unexpected( valid.error() );
+
+    const bool admissionRequested = aExpectedState != nullptr;
+    if( admissionRequested )
+    {
+        const auto& expected = *aExpectedState;
+        if( expected.scope() != DLS_SCHEMATIC_HIERARCHY || !ErcUuid( expected.native_identity() )
+            || !ErcDigest( expected.state_sha256() ) || expected.process_epoch() != aProcessEpoch
+            || !MessageDifferencer::Equals( expected.document(), aDocument )
+            || !MessageDifferencer::Equals( expected.revision(), aExpectedRevision ) )
+            return reject( "ERC expected_state must be a complete schematic lifecycle observation for the exact request target" );
+    }
+
+    DocumentLifecycleState before;
+    if( auto error = ReadErcLifecycle( apiServer(), aDocument, before ) )
+        return tl::unexpected( *error );
+    if( admissionRequested )
+    {
+        if( !MessageDifferencer::Equals( before, *aExpectedState ) )
+            return reject( "The schematic lifecycle state changed before ERC execution; inspect a fresh state" );
+    }
+    else if( !MessageDifferencer::Equals( before.revision(), aExpectedRevision ) )
+        return reject( "The schematic changed before ERC execution" );
+
+    constexpr size_t receiptBudget = 16 * 1024 * 1024;
+    constexpr size_t receiptLimit = 4 * 1024 * 1024;
+    constexpr size_t receiptCount = 4096;
+    const size_t requestBytes = aFingerprint.size();
+    const size_t reservation = std::max<size_t>( requestBytes * 3 + 16384, 64 * 1024 );
+    if( requestBytes > receiptLimit || m_ercReceipts.size() >= receiptCount
+        || reservation > receiptLimit || m_ercReceiptBytes > receiptBudget - reservation )
+        return reject( "ERC receipt capacity exhausted; no execution was attempted" );
+
+    ERC_RECEIPT retained;
+    retained.request = aFingerprint;
+    retained.reservation = reservation;
+    retained.result.mutable_legacy_result()->mutable_document()->CopyFrom( aDocument );
+    retained.result.mutable_legacy_result()->set_operation_id( aOperationId );
+    retained.result.mutable_legacy_result()->set_process_epoch( aProcessEpoch );
+    retained.result.mutable_legacy_result()->mutable_checked_revision()->CopyFrom( before.revision() );
+    retained.result.mutable_before_state()->CopyFrom( before );
+    retained.result.set_state( NEOS_ADMITTED );
+    retained.result.set_admission_verified( admissionRequested );
+    retained.result.set_execution_started( false );
+    retained.result.set_markers_captured( false );
+    auto inserted = m_ercReceipts.emplace( aOperationId, std::move( retained ) );
+    m_ercReceiptBytes += reservation;
+    NativeErcOperationReceipt& response = inserted.first->second.result;
+    NativeCapabilitySchematicRunErcResponse& legacy = *response.mutable_legacy_result();
+
+    auto fail = [&]( NativeErcOperationState state, const char* code, const std::string& message )
+    {
+        response.set_state( state );
+        legacy.set_completed( false );
+        legacy.set_error_code( code );
+        legacy.set_error_message( message.substr( 0, 2048 ) );
+    };
+
+    try
+    {
+        // ERC symbol/footprint checks require the project symbol libraries to be
+        // loaded, just as the native ERC dialog and schematic ERC job do.
+        SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &project() );
+        if( !adapter )
+        {
+            fail( NEOS_FAILED, "erc_library_unavailable", "The schematic symbol library adapter is unavailable" );
+            return response;
+        }
+        adapter->AsyncLoad();
+        adapter->BlockUntilLoaded();
+
+        response.set_execution_started( true );
+        ERC_TESTER tester( schematic(), aShowAllErrors );
+        tester.RunTests( nullptr, m_frame, nullptr, &project(), nullptr );
+
+        SchematicTrackingErcMarkers markers = CaptureErcMarkers( schematic() );
+        DocumentLifecycleState after;
+        if( auto error = ReadErcLifecycle( apiServer(), aDocument, after ) )
+        {
+            fail( NEOS_INDETERMINATE, "erc_state_observation_failed",
+                  "ERC completed but its after-state could not be observed: " + error->error_message() );
+            return response;
+        }
+
+        response.mutable_after_state()->CopyFrom( after );
+        legacy.mutable_observed_revision()->CopyFrom( after.revision() );
+        response.mutable_captured_markers()->CopyFrom( markers );
+        legacy.set_marker_count( static_cast<uint32_t>( markers.markers_size() ) );
+        response.set_markers_captured( true );
+
+        if( !MessageDifferencer::Equals( before, after ) )
+        {
+            fail( NEOS_INDETERMINATE, "erc_state_changed_during_execution",
+                  "ERC changed the lifecycle state while it ran; the captured diagnostics are retained as indeterminate" );
+        }
+        else
+        {
+            legacy.set_completed( true );
+            response.set_state( NEOS_COMPLETED );
+            legacy.clear_error_code();
+            legacy.clear_error_message();
+        }
+
+        if( response.ByteSizeLong() > inserted.first->second.reservation )
+        {
+            response.clear_captured_markers();
+            response.set_markers_captured( false );
+            fail( NEOS_INDETERMINATE, "erc_receipt_capacity_exhausted",
+                  "ERC ran but its immutable result exceeded the native receipt bound" );
+        }
+    }
+    catch( const std::exception& error )
+    {
+        fail( response.execution_started() ? NEOS_INDETERMINATE : NEOS_FAILED,
+              response.execution_started() ? "erc_execution_indeterminate" : "erc_execution_failed", error.what() );
+    }
+    catch( ... )
+    {
+        fail( response.execution_started() ? NEOS_INDETERMINATE : NEOS_FAILED,
+              response.execution_started() ? "erc_execution_indeterminate" : "erc_execution_failed",
+              "Native ERC failed without a diagnostic exception" );
+    }
+
+    return response;
+}
+
+
 HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySchematicRunErcResponse>
 API_HANDLER_SCH::handleRunErc(
         const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySchematicRunErc>& aCtx )
 {
     using namespace kiapi::automation::v1;
-    if( auto busy = checkForStableObservation() )
-        return tl::unexpected( *busy );
-    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
-        return tl::unexpected( valid.error() );
-
     const auto& request = aCtx.Request;
-    if( request.operation_id().empty() || request.process_epoch() != apiServer().Token()
-        || !request.has_expected_revision() )
+    if( !request.has_expected_revision() )
     {
         ApiResponseStatus error;
         error.set_status( ApiStatusCode::AS_BAD_REQUEST );
         error.set_error_message( "ERC execution requires an operation ID, current process epoch and expected revision" );
         return tl::unexpected( error );
     }
+    auto receipt = executeErc( request.document(), request.operation_id(), request.process_epoch(),
+                               request.expected_revision(), nullptr, request.show_all_errors(),
+                               "legacy:" + request.SerializeAsString() );
+    if( !receipt ) return tl::unexpected( receipt.error() );
+    return receipt->legacy_result();
+}
 
-    const auto& journal = schematic()->ChangeJournal();
-    if( request.expected_revision().epoch() != journal.Epoch()
-        || request.expected_revision().sequence() != journal.Sequence() )
+
+HANDLER_RESULT<kiapi::automation::v1::NativeErcOperationReceipt>
+API_HANDLER_SCH::handleExecuteErc(
+        const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySchematicExecuteErc>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    const auto& request = aCtx.Request;
+    if( !request.has_expected_state() || !ErcUuid( request.operation_id() ) )
     {
         ApiResponseStatus error;
         error.set_status( ApiStatusCode::AS_BAD_REQUEST );
-        error.set_error_message( "The schematic changed before ERC execution" );
+        error.set_error_message( "Typed ERC execution requires an operation ID and complete expected lifecycle state" );
         return tl::unexpected( error );
     }
+    const auto& state = request.expected_state();
+    auto receipt = executeErc( state.document(), request.operation_id(), state.process_epoch(), state.revision(),
+                               &state, request.show_all_errors(), "typed:" + request.SerializeAsString() );
+    if( !receipt ) return tl::unexpected( receipt.error() );
+    return *receipt;
+}
 
-    const std::string fingerprint = request.SerializeAsString();
-    if( auto existing = m_ercReceipts.find( request.operation_id() ); existing != m_ercReceipts.end() )
+
+HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySchematicReadErcOperationResponse>
+API_HANDLER_SCH::handleReadErcOperation(
+        const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySchematicReadErcOperation>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    auto reject = []( const std::string& message )
+            -> HANDLER_RESULT<NativeCapabilitySchematicReadErcOperationResponse>
     {
-        if( m_ercOperationFingerprints[request.operation_id()] != fingerprint )
-        {
-            ApiResponseStatus error;
-            error.set_status( ApiStatusCode::AS_BAD_REQUEST );
-            error.set_error_message( "The operation ID is already bound to a different ERC request" );
-            return tl::unexpected( error );
-        }
-        return existing->second;
-    }
-
-    // ERC symbol/footprint checks require the project symbol libraries to be
-    // loaded, just as the native ERC dialog and schematic ERC job do.
-    if( SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &project() ) )
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( message );
+        return tl::unexpected( error );
+    };
+    const auto& request = aCtx.Request;
+    if( !ErcUuid( request.operation_id() ) || request.process_epoch() != apiServer().Token()
+        || !ErcUuid( request.process_epoch() ) )
+        return reject( "ERC receipt lookup requires a native operation UUID and current process epoch" );
+    NativeCapabilitySchematicReadErcOperationResponse response;
+    auto found = m_ercReceipts.find( request.operation_id() );
+    if( found == m_ercReceipts.end() )
     {
-        adapter->AsyncLoad();
-        adapter->BlockUntilLoaded();
+        response.set_found( false );
+        return response;
     }
-
-    ERC_TESTER tester( schematic(), request.show_all_errors() );
-    tester.RunTests( nullptr, m_frame, nullptr, &project(), nullptr );
-
-    NativeCapabilitySchematicRunErcResponse response;
-    response.mutable_document()->CopyFrom( request.document() );
-    response.set_operation_id( request.operation_id() );
-    response.set_process_epoch( request.process_epoch() );
-    response.mutable_checked_revision()->CopyFrom( request.expected_revision() );
-    response.mutable_observed_revision()->set_epoch( journal.Epoch() );
-    response.mutable_observed_revision()->set_sequence( journal.Sequence() );
-    response.set_completed( true );
-
-    uint32_t markerCount = 0;
-    std::set<SCH_SCREEN*> seen;
-    for( const SCH_SHEET_PATH& path : schematic()->Hierarchy() )
-    {
-        SCH_SCREEN* screen = path.LastScreen();
-        if( screen && seen.insert( screen ).second )
-            for( SCH_ITEM* marker : screen->Items().OfType( SCH_MARKER_T ) )
-                if( marker )
-                    ++markerCount;
-    }
-    response.set_marker_count( markerCount );
-    m_ercOperationFingerprints[request.operation_id()] = fingerprint;
-    m_ercReceipts[request.operation_id()] = response;
+    const auto& legacy = found->second.result.legacy_result();
+    if( legacy.process_epoch() != request.process_epoch()
+        || !MessageDifferencer::Equals( legacy.document(), request.document() ) )
+        return reject( "The ERC receipt belongs to another document or native process epoch" );
+    response.set_found( true );
+    response.mutable_receipt()->CopyFrom( found->second.result );
     return response;
 }
 

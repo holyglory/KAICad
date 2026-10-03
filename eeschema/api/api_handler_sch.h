@@ -23,6 +23,7 @@
 
 #include <api/api_handler_editor.h>
 #include <api/common/commands/automation_commands.pb.h>
+#include <api/common/commands/schematic_erc_execution_commands.pb.h>
 #include <api/common/commands/schematic_tracking_commands.pb.h>
 #include <api/sch_context.h>
 #include <api/common/commands/cross_probe_commands.pb.h>
@@ -130,8 +131,20 @@ protected:
             const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySymbolLibraryReadOperation>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySchematicRunErcResponse> handleRunErc(
             const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySchematicRunErc>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySchematicReadErcOperationResponse>
+    handleReadErcOperation(
+            const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySchematicReadErcOperation>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::NativeErcOperationReceipt> handleExecuteErc(
+            const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySchematicExecuteErc>& aCtx );
 
 private:
+    HANDLER_RESULT<kiapi::automation::v1::NativeErcOperationReceipt> executeErc(
+            const kiapi::common::types::DocumentSpecifier& aDocument,
+            const std::string& aOperationId, const std::string& aProcessEpoch,
+            const kiapi::automation::v1::DocumentRevision& aExpectedRevision,
+            const kiapi::automation::v1::DocumentLifecycleState* aExpectedState,
+            bool aShowAllErrors, const std::string& aFingerprint );
+
     static std::optional<kiapi::common::ApiResponseStatus> validateSnapshotSchema( uint32_t aVersion );
     static void projectSnapshotSchema( kiapi::schematic::types::SchematicMetadata& aMetadata,
                                        uint32_t aVersion );
@@ -244,9 +257,17 @@ private:
     std::map<std::string, kiapi::automation::v1::NativeCapabilitySymbolLibraryDeleteSymbolResponse>
             m_symbolLibraryDeleteReceipts;
 
-    std::map<std::string, std::string> m_ercOperationFingerprints;
-    std::map<std::string, kiapi::automation::v1::NativeCapabilitySchematicRunErcResponse>
-            m_ercReceipts;
+    struct ERC_RECEIPT
+    {
+        std::string request;
+        kiapi::automation::v1::NativeErcOperationReceipt result;
+        size_t reservation = 0;
+    };
+
+    // Native ERC receipts are process-owned and never evicted: an old retry
+    // must never execute a second check after the editor has changed.
+    std::map<std::string, ERC_RECEIPT> m_ercReceipts;
+    size_t m_ercReceiptBytes = 0;
 
     HANDLER_RESULT<commands::GetOpenDocumentsResponse>
     handleGetOpenDocuments( const HANDLER_CONTEXT<commands::GetOpenDocuments>& aCtx );

@@ -1446,7 +1446,8 @@ public sealed partial class NativeSessionTests
                     { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbTrace, KiCadObjectType.KotPcbGroup } }, groupedUndoDeadline.Token);
                     var group = rows.Items.Where(item => item.Is(Kiapi.Board.Types.Group.Descriptor)).Select(item => item.Unpack<Kiapi.Board.Types.Group>()).SingleOrDefault(item => item.Id.Equals(positiveGroup.Id));
                     if (group is not null && group.Items.Any(id => id.Value == splitSource.Id.Value)
-                        && !groupedNewMembers.Any(id => rows.Items.Any(item => RouteIdentity(item) == id))) break;
+                        && !groupedNewMembers.Any(id => rows.Items.Where(item => item.Is(Track.Descriptor)
+                            || item.Is(Arc.Descriptor) || item.Is(Via.Descriptor)).Any(item => RouteIdentity(item) == id))) break;
                     await Task.Delay(100, groupedUndoDeadline.Token);
                 }
             }

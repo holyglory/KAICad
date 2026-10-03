@@ -444,9 +444,28 @@ void captureInspectionMetadata( JOB_PCB_RENDER& aJob, BOARD* aBoard, BOARD_ADAPT
     for( double value : metadata.viewMatrix ) metadata.matricesFinite = metadata.matricesFinite && std::isfinite( value );
     for( double value : metadata.projectionMatrix ) metadata.matricesFinite = metadata.matricesFinite && std::isfinite( value );
     for( double value : metadata.boardNanometresToScene ) metadata.matricesFinite = metadata.matricesFinite && std::isfinite( value );
-    metadata.matricesInvertible = metadata.matricesFinite
-            && std::abs( glm::determinant( aCamera.GetProjectionMatrix() * aCamera.GetViewMatrix() * boardToScene ) )
-                    > std::numeric_limits<float>::epsilon();
+    // The board-to-scene matrix deliberately converts nanometres to the 3D
+    // viewer's unit system.  Its determinant therefore carries sceneScale^3
+    // and can be far below float epsilon even though the transform is valid.
+    // Check that scale separately, then use a relative determinant test for
+    // the camera transform in double precision so the singularity check is
+    // independent of the chosen scene units.
+    const glm::dmat4 cameraTransform = glm::dmat4( aCamera.GetProjectionMatrix() )
+            * glm::dmat4( aCamera.GetViewMatrix() );
+    double cameraScale = 0.0;
+    for( int column = 0; column < 4; ++column )
+    {
+        for( int row = 0; row < 4; ++row )
+            cameraScale = std::max( cameraScale, std::abs( cameraTransform[column][row] ) );
+    }
+
+    const double normalizedCameraDeterminant = cameraScale > 0.0
+            ? std::abs( glm::determinant( cameraTransform ) ) / std::pow( cameraScale, 4 )
+            : 0.0;
+    const bool boardScaleInvertible = std::isfinite( sceneScale ) && sceneScale != 0.0f;
+    metadata.matricesInvertible = metadata.matricesFinite && boardScaleInvertible
+            && cameraScale > 0.0 && std::isfinite( normalizedCameraDeterminant )
+            && normalizedCameraDeterminant > 16.0 * std::numeric_limits<double>::epsilon();
 
     if( !aBoard )
     {
@@ -571,6 +590,8 @@ void captureInspectionMetadata( JOB_PCB_RENDER& aJob, BOARD* aBoard, BOARD_ADAPT
         }
     }
 
+    metadata.coverageNotes.emplace_back(
+            "object metadata covers visible footprints' shown 3D model instances only; PCB copper, pads, tracks, vias, zones, board outlines and other board geometry are not enumerated" );
     metadata.coverageNotes.emplace_back( "exact visible pixels and occlusion depth are not captured by the native render job" );
     metadata.coverageNotes.emplace_back( "projected bounds are conservative transformed geometry bounds" );
 }

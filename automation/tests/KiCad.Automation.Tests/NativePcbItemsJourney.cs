@@ -576,6 +576,9 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(expectedRenderState.StateSha256, renderMetadata.GetProperty("sourceBoardSnapshotSha256").GetString(), renderData.GetRawText());
             Assert.AreEqual(64, renderMetadata.GetProperty("effectiveRenderInputSha256").GetString()!.Length, renderData.GetRawText());
             Assert.IsTrue(renderMetadata.GetProperty("coverageNotes").GetArrayLength() >= 2, renderData.GetRawText());
+            Assert.IsTrue(renderMetadata.GetProperty("coverageNotes").EnumerateArray()
+                    .Any(note => note.GetString()?.Contains("footprints' shown 3D model instances", StringComparison.Ordinal) == true),
+                renderData.GetRawText());
             Assert.IsTrue(renderData.GetProperty("metadataComplete").ValueKind is JsonValueKind.True or JsonValueKind.False,
                 renderData.GetRawText());
             if (renderMetadata.GetProperty("models").GetArrayLength() == 0)

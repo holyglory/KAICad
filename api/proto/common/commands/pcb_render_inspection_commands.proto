@@ -22,6 +22,11 @@ message PcbRenderInspectionResponse
   PcbRenderMetadata metadata = 2;
   DocumentLifecycleState document = 3;
   string process_epoch = 4;
+  // True means the captured renderer metadata is complete for the covered
+  // footprint 3D model instances and their declared assets. It does not
+  // claim complete mapping of PCB copper, pads, tracks, vias, zones, board
+  // outlines, or other board geometry; metadata.coverage_notes states those
+  // coverage limits explicitly.
   bool metadata_complete = 5;
   repeated string limitations = 6;
 }

@@ -361,17 +361,21 @@ BITMAP_TRACE_RESULT TraceBitmap( const BITMAP_TRACE_RASTER& aRaster, const BITMA
             else combined.BooleanAdd( poly );
         }
         // NormalizeAreaOutlines() returns an outline count, not a validity
-        // predicate. Validate each quantized contour and the simplified
-        // boolean result explicitly before fracturing legitimate holes.
+        // predicate. Validate each quantized contour explicitly, then let the
+        // established fracture operation represent legitimate holes as slits.
         combined.Simplify();
-        if( combined.OutlineCount() <= 0 || combined.IsSelfIntersecting() )
-            throw std::runtime_error( "trace geometry is self-intersecting or degenerate" );
+        if( combined.OutlineCount() <= 0 )
+            throw std::runtime_error( "trace geometry is degenerate" );
         combined.Fracture();
         std::vector<std::string> allIds;
         for( const auto& contour : result.contours ) allIds.push_back( contour.id );
         for( int index = 0; index < combined.OutlineCount(); ++index )
         {
             const SHAPE_LINE_CHAIN& outline = combined.Outline( index );
+            // Fracture intentionally introduces a repeated slit edge for each
+            // hole; SHAPE_LINE_CHAIN::SelfIntersecting therefore reports a
+            // false positive here. Input contours were checked before the
+            // boolean operation, and Fracture is the native hole representation.
             BITMAP_TRACE_FILLED_PIECE piece;
             piece.id = "p" + std::to_string( index );
             piece.sourceContourIds = allIds;

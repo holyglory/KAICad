@@ -13,6 +13,9 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class RasterTraceTools(InstanceRegistry registry)
 {
+    private static readonly JsonFormatter TraceFormatter =
+        new(JsonFormatter.Settings.Default.WithFormatDefaultValues(true));
+
     [McpServerTool(Name = "kicad_artwork_raster_trace", ReadOnly = true),
      Description("Trace one exact local PNG into a deterministic vector proposal using KiCad's existing Potrace boundary. The native peer reads and hashes the exact bytes once, checks PNG dimensions before decoding, preserves signed contour parent/hole topology, returns integer-nanometre contours and hole-free filled pieces, and never mutates a document or commits CAD. Source origin and host receipt are caller declarations only; ImageGen provenance is never inferred."),
      KiCadCapability("generated-artwork-cad", "compiled-mcp plus native-potrace", "typed PNG source, exact SHA-256, bounded trace settings, contour topology and filled proposal"),
@@ -25,7 +28,7 @@ public sealed class RasterTraceTools(InstanceRegistry registry)
         var client = registry.Client(instanceId);
         var request = input.ToNative();
         RasterTraceResult result = await client.InvokeAsync<RasterTraceRequest, RasterTraceResult>(request, cancellationToken);
-        JsonElement trace = JsonSerializer.Deserialize<JsonElement>(JsonFormatter.Default.Format(result));
+        JsonElement trace = FormatTraceResult(result);
         return Data(new
         {
             instanceId,
@@ -41,6 +44,13 @@ public sealed class RasterTraceTools(InstanceRegistry registry)
             manufacturingValidated = result.ManufacturingValidated
         });
     });
+
+    // Raster proposals carry an explicit acceptance decision. Keep that
+    // decision and the rejection code in the MCP JSON even when protobuf
+    // defaults would otherwise be omitted, so callers can distinguish a
+    // rejected proposal from a malformed response.
+    internal static JsonElement FormatTraceResult(RasterTraceResult result) =>
+        JsonSerializer.Deserialize<JsonElement>(TraceFormatter.Format(result));
 
     private static CallToolResult Data(object value, bool error = false)
     {

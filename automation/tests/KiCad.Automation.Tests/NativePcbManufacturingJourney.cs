@@ -225,6 +225,13 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(typedData.GetProperty("outputManifestComplete").GetBoolean(), typedReply.GetRawText());
             Assert.IsTrue(Directory.Exists(typedOutputDirectory), typedReply.GetRawText());
             Assert.IsTrue(typedData.GetProperty("artifacts").GetArrayLength() > 0, typedReply.GetRawText());
+            string typedSvg = typedData.GetProperty("artifacts").EnumerateArray()
+                .Select(artifact => artifact.GetProperty("path").GetString()!)
+                .Single(path => Path.GetExtension(path).Equals(".svg", StringComparison.OrdinalIgnoreCase));
+            string typedSvgText = await File.ReadAllTextAsync(typedSvg, token);
+            StringAssert.Contains(typedSvgText, "F.Cu", "The selected copper layer must reach the native SVG output.");
+            StringAssert.Contains(typedSvgText, "F.Silkscreen", "The selected silk layer must reach the native SVG output.");
+            StringAssert.Contains(typedSvgText, "R1", "Nested plot reference settings must reach the native SVG output.");
 
             var replayReply = await mcp.Tool("kicad_pcb_export", new { instanceId, input = typedInput });
             Assert.IsFalse(replayReply.TryGetProperty("isError", out var replayError) && replayError.GetBoolean(), replayReply.GetRawText());

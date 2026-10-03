@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Kiapi.Board.Commands;
 using Kiapi.Board.Jobs;
 using Kiapi.Board.Types;
@@ -25,6 +26,43 @@ public sealed partial class NativeSessionTests
             "(fp_lib_table (version 7) (lib (name \"Resistor_SMD\") (type \"KiCad\") (uri \"${KIPRJMOD}/Resistor_SMD.pretty\") (options \"\") (descr \"\")))\n");
     }
 
+    private static string PreparePcbRenderModel(string projectDirectory, string libraryFile)
+    {
+        const string model = """
+            #VRML V2.0 utf8
+            Transform {
+              translation 0 0 0
+              children [
+                Shape {
+                  appearance Appearance { material Material { diffuseColor 0.8 0.2 0.1 } }
+                  geometry Box { size 8 4 2 }
+                }
+              ]
+            }
+            """;
+        string modelPath = Path.Combine(projectDirectory, "render-fixture.wrl");
+        File.WriteAllText(modelPath, model);
+
+        string library = File.ReadAllText(libraryFile);
+        const string modelMarker = "\t(model ";
+        int modelStart = library.IndexOf(modelMarker, StringComparison.Ordinal);
+        Assert.IsGreaterThanOrEqualTo(0, modelStart, "The resistor fixture must contain one 3D model declaration.");
+        int modelEnd = library.IndexOf("\n\t)", modelStart, StringComparison.Ordinal);
+        Assert.IsGreaterThan(modelEnd, modelStart, "The resistor model declaration must be complete.");
+        string modelBlock = library.Substring(modelStart, modelEnd - modelStart);
+        modelBlock = modelBlock.Replace(
+            "${KICAD8_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0603_1608Metric.wrl",
+            "${KIPRJMOD}/render-fixture.wrl", StringComparison.Ordinal);
+        modelBlock = Regex.Replace(modelBlock, @"\(offset\s+\(xyz [^)]+\)\s+\)",
+            "(offset\n\t\t\t(xyz 1.5 0.5 0.2)\n\t\t)", RegexOptions.CultureInvariant);
+        modelBlock = Regex.Replace(modelBlock, @"\(scale\s+\(xyz [^)]+\)\s+\)",
+            "(scale\n\t\t\t(xyz 1.2 0.8 1.1)\n\t\t)", RegexOptions.CultureInvariant);
+        modelBlock = Regex.Replace(modelBlock, @"\(rotate\s+\(xyz [^)]+\)\s+\)",
+            "(rotate\n\t\t\t(xyz 10 20 30)\n\t\t)", RegexOptions.CultureInvariant);
+        File.WriteAllText(libraryFile, library[..modelStart] + modelBlock + library[modelEnd..]);
+        return modelPath;
+    }
+
     private static async Task VerifyNativePcbItems(NativeClient client, DocumentSpecifier schematic,
         string evidence, string instanceId, int focusProcessId, string display, CancellationToken token)
     {
@@ -36,7 +74,9 @@ public sealed partial class NativeSessionTests
         // footprint table when the document is created.
         string resistorLibrary = Directory.CreateDirectory(Path.Combine(schematic.Project.Path, "Resistor_SMD.pretty")).FullName;
         string sourceResistor = Path.Combine(RepositoryRoot(), "qa", "data", "libraries", "Resistor_SMD.pretty", "R_0603_1608Metric.kicad_mod");
-        File.Copy(sourceResistor, Path.Combine(resistorLibrary, "R_0603_1608Metric.kicad_mod"), true);
+        string resistorLibraryFile = Path.Combine(resistorLibrary, "R_0603_1608Metric.kicad_mod");
+        File.Copy(sourceResistor, resistorLibraryFile, true);
+        string renderModelPath = PreparePcbRenderModel(schematic.Project.Path, resistorLibraryFile);
         await File.WriteAllTextAsync(Path.Combine(schematic.Project.Path, "fp-lib-table"),
             "(fp_lib_table (version 7) (lib (name \"Resistor_SMD\") (type \"KiCad\") (uri \"${KIPRJMOD}/Resistor_SMD.pretty\") (options \"\") (descr \"\")))\n", token);
         var boardOpen = await CreateRootThroughMcp(client.Endpoint, instanceId, boardPath, evidence, token, toolName: "kicad_pcb_create");
@@ -549,6 +589,14 @@ public sealed partial class NativeSessionTests
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-layer-manifest.json"),
                 JsonSerializer.Serialize(new { friendly = layerManifest, canonical = canonicalLayerManifest,
                     protobuf = protoLayerManifest, unknown = unknownLayerManifest }), token);
+            var renderFootprints = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+            { Header = new() { Document = board }, Types_ = { KiCadObjectType.KotPcbFootprint } }, token);
+            var renderFootprint = renderFootprints.Items.Select(item => item.Unpack<FootprintInstance>())
+                .Single(footprint => footprint.ReferenceField.Text.Text.Text_ == "R1");
+            Assert.IsTrue(renderFootprint.Definition.Items.Count > 0,
+                "The render fixture footprint must retain its imported definition payload.");
+            string modelHashBefore = Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(renderModelPath, token)));
+            DateTime modelTimestamp = File.GetLastWriteTimeUtc(renderModelPath);
             var renderRequest = new RunBoardJobExportRender
             {
                 JobSettings = new() { Document = board }, Format = RenderFormat.RfPng,
@@ -561,6 +609,7 @@ public sealed partial class NativeSessionTests
             });
             Assert.IsFalse(renderReply.TryGetProperty("isError", out var renderError) && renderError.GetBoolean(), renderReply.GetRawText());
             var renderData = renderReply.GetProperty("structuredContent");
+            byte[] initialRenderPng = RenderPng(renderReply);
             Assert.IsTrue(renderData.GetProperty("nativeRender").GetBoolean());
             Assert.IsFalse(renderData.GetProperty("boardMutation").GetBoolean());
             Assert.IsTrue(renderData.GetProperty("image").GetProperty("bytes").GetInt32() > 0);
@@ -581,8 +630,35 @@ public sealed partial class NativeSessionTests
                 renderData.GetRawText());
             Assert.IsTrue(renderData.GetProperty("metadataComplete").ValueKind is JsonValueKind.True or JsonValueKind.False,
                 renderData.GetRawText());
-            if (renderMetadata.GetProperty("models").GetArrayLength() == 0)
-                Assert.IsTrue(renderData.GetProperty("metadataComplete").GetBoolean(), renderData.GetRawText());
+            Assert.IsTrue(renderData.GetProperty("metadataComplete").GetBoolean(), renderData.GetRawText());
+            var modelRows = renderMetadata.GetProperty("models").EnumerateArray().ToArray();
+            Assert.IsTrue(modelRows.Length > 0, renderData.GetRawText());
+            var modelRow = modelRows.Single(row => row.GetProperty("nativeUuid").GetString() == renderFootprint.Id.Value);
+            Assert.AreEqual(0u, modelRow.GetProperty("modelIndex").GetUInt32(), renderData.GetRawText());
+            Assert.IsFalse(modelRow.GetProperty("missing").GetBoolean(), renderData.GetRawText());
+            Assert.IsTrue(modelRow.GetProperty("loaded").GetBoolean(), renderData.GetRawText());
+            Assert.AreEqual(modelHashBefore, modelRow.GetProperty("contentSha256").GetString(), renderData.GetRawText());
+            Assert.IsTrue(modelRow.GetProperty("resolvedIdentity").GetString()!.EndsWith("render-fixture.wrl", StringComparison.OrdinalIgnoreCase), renderData.GetRawText());
+            var modelTransform = modelRow.GetProperty("sceneTransformColumnMajor").EnumerateArray().Select(value => value.GetDouble()).ToArray();
+            Assert.AreEqual(16, modelTransform.Length, renderData.GetRawText());
+            Assert.IsTrue(modelTransform.All(double.IsFinite), renderData.GetRawText());
+            Assert.IsTrue(modelTransform.Any(value => Math.Abs(value) > 1.0001 && Math.Abs(value) < 1_000_000), renderData.GetRawText());
+            var objectRows = renderMetadata.GetProperty("objects").EnumerateArray().ToArray();
+            Assert.IsTrue(objectRows.Length > 0, renderData.GetRawText());
+            var objectRow = objectRows.Single(row => row.GetProperty("nativeUuid").GetString() == renderFootprint.Id.Value);
+            Assert.IsTrue(objectRow.GetProperty("nativeGeometryBoundsAvailable").GetBoolean(), renderData.GetRawText());
+            Assert.IsTrue(objectRow.GetProperty("projectedBoundsAvailable").GetBoolean(), renderData.GetRawText());
+            var nativeBounds = objectRow.GetProperty("nativeGeometryBounds").EnumerateArray().Select(value => value.GetDouble()).ToArray();
+            Assert.AreEqual(6, nativeBounds.Length, renderData.GetRawText());
+            Assert.IsTrue(nativeBounds.All(double.IsFinite)
+                && nativeBounds[3] > nativeBounds[0] && nativeBounds[4] > nativeBounds[1] && nativeBounds[5] > nativeBounds[2], renderData.GetRawText());
+            var projectedBounds = objectRow.GetProperty("projectedConservativeBounds").EnumerateArray().Select(value => value.GetDouble()).ToArray();
+            Assert.AreEqual(4, projectedBounds.Length, renderData.GetRawText());
+            Assert.IsTrue(projectedBounds.All(double.IsFinite)
+                && projectedBounds[2] > projectedBounds[0] && projectedBounds[3] > projectedBounds[1], renderData.GetRawText());
+            string imageHashBefore = renderData.GetProperty("image").GetProperty("sha256").GetString()!;
+            string renderInputHashBefore = renderMetadata.GetProperty("effectiveRenderInputSha256").GetString()!;
+            var nativeBoundsBefore = nativeBounds.ToArray();
             var renderAfter = SchematicJson.Parser.Parse<DocumentLifecycleState>(renderData.GetProperty("afterState").GetString()!);
             Assert.AreEqual(svgState, SchematicJson.Formatter.Format(renderAfter));
 
@@ -606,6 +682,51 @@ public sealed partial class NativeSessionTests
                 var viewAfter = SchematicJson.Parser.Parse<DocumentLifecycleState>(viewData.GetProperty("afterState").GetString()!);
                 Assert.AreEqual(svgState, SchematicJson.Formatter.Format(viewAfter));
             }
+
+            string modelText = await File.ReadAllTextAsync(renderModelPath, token);
+            Assert.IsTrue(modelText.Contains("size 8 4 2", StringComparison.Ordinal), modelText);
+            long modelBytesBefore = new FileInfo(renderModelPath).Length;
+            File.WriteAllText(renderModelPath, modelText.Replace("size 8 4 2", "size 9 3 2", StringComparison.Ordinal));
+            File.SetLastWriteTimeUtc(renderModelPath, modelTimestamp);
+            Assert.AreEqual(modelBytesBefore, new FileInfo(renderModelPath).Length, "The model replacement must preserve its byte length.");
+            Assert.AreEqual(modelTimestamp, File.GetLastWriteTimeUtc(renderModelPath), "The model replacement must preserve its timestamp.");
+            var changedRenderReply = await mcp.Tool("kicad_pcb_render_3d", new
+            { instanceId, requestJson = JsonFormatter.Default.Format(renderRequest), expectedStateJson = svgState });
+            Assert.IsFalse(changedRenderReply.TryGetProperty("isError", out var changedRenderError) && changedRenderError.GetBoolean(), changedRenderReply.GetRawText());
+            var changedRenderData = changedRenderReply.GetProperty("structuredContent");
+            byte[] changedRenderPng = RenderPng(changedRenderReply);
+            var changedMetadata = changedRenderData.GetProperty("metadata");
+            var changedModel = changedMetadata.GetProperty("models").EnumerateArray()
+                .Single(row => row.GetProperty("nativeUuid").GetString() == renderFootprint.Id.Value);
+            Assert.AreNotEqual(modelHashBefore, changedModel.GetProperty("contentSha256").GetString(), changedRenderData.GetRawText());
+            Assert.AreNotEqual(imageHashBefore, changedRenderData.GetProperty("image").GetProperty("sha256").GetString(), changedRenderData.GetRawText());
+            Assert.AreEqual(renderInputHashBefore, changedMetadata.GetProperty("effectiveRenderInputSha256").GetString(), changedRenderData.GetRawText());
+            var changedBounds = changedMetadata.GetProperty("objects").EnumerateArray()
+                .Single(row => row.GetProperty("nativeUuid").GetString() == renderFootprint.Id.Value)
+                .GetProperty("nativeGeometryBounds").EnumerateArray().Select(value => value.GetDouble()).ToArray();
+            Assert.IsTrue(changedBounds.Zip(nativeBoundsBefore, (afterValue, beforeValue) => afterValue != beforeValue).Any(), changedRenderData.GetRawText());
+            var pixelChanges = PngDiffBounds(initialRenderPng, changedRenderPng);
+            Assert.IsTrue(pixelChanges.Width > 0 && pixelChanges.Height > 0, changedRenderData.GetRawText());
+            Assert.IsTrue(pixelChanges.Left <= projectedBounds[2] && pixelChanges.Right >= projectedBounds[0]
+                && pixelChanges.Top <= projectedBounds[3] && pixelChanges.Bottom >= projectedBounds[1],
+                $"Changed rendered pixels {pixelChanges} must overlap reported projected bounds [{string.Join(",", projectedBounds)}].");
+            Assert.AreEqual(svgState, changedRenderData.GetProperty("afterState").GetString(), changedRenderData.GetRawText());
+
+            File.Delete(renderModelPath);
+            var missingRenderReply = await mcp.Tool("kicad_pcb_render_3d", new
+            { instanceId, requestJson = JsonFormatter.Default.Format(renderRequest), expectedStateJson = svgState });
+            Assert.IsFalse(missingRenderReply.TryGetProperty("isError", out var missingRenderError) && missingRenderError.GetBoolean(), missingRenderReply.GetRawText());
+            var missingRenderData = missingRenderReply.GetProperty("structuredContent");
+            var missingMetadata = missingRenderData.GetProperty("metadata");
+            var missingModel = missingMetadata.GetProperty("models").EnumerateArray()
+                .Single(row => row.GetProperty("nativeUuid").GetString() == renderFootprint.Id.Value);
+            Assert.IsTrue(missingModel.GetProperty("missing").GetBoolean(), missingRenderData.GetRawText());
+            Assert.IsFalse(missingModel.GetProperty("loaded").GetBoolean(), missingRenderData.GetRawText());
+            Assert.IsFalse(missingRenderData.GetProperty("metadataComplete").GetBoolean(), missingRenderData.GetRawText());
+            Assert.IsFalse(missingMetadata.GetProperty("objects").EnumerateArray()
+                .Single(row => row.GetProperty("nativeUuid").GetString() == renderFootprint.Id.Value)
+                .GetProperty("nativeGeometryBoundsAvailable").GetBoolean(), missingRenderData.GetRawText());
+            Assert.AreEqual(svgState, missingRenderData.GetProperty("afterState").GetString(), missingRenderData.GetRawText());
             var routeGeometry = await mcp.Tool("kicad_pcb_route_geometry", new
             {
                 instanceId, documentJson = SchematicJson.Formatter.Format(board), expectedStateJson = svgState,
@@ -1669,6 +1790,29 @@ public sealed partial class NativeSessionTests
         }
         var via = item.Unpack<Via>();
         return $"via:{via.Net.Name}:{via.Position}:{via.PadStack}";
+    }
+
+    private static byte[] RenderPng(JsonElement reply) => Convert.FromBase64String(reply.GetProperty("content")
+        .EnumerateArray().Single(block => block.GetProperty("type").GetString() == "image")
+        .GetProperty("data").GetString()!);
+
+    private static (int Left, int Top, int Right, int Bottom, int Width, int Height) PngDiffBounds(
+        byte[] firstPng, byte[] secondPng)
+    {
+        var first = NativePresentationRaster.Decode(firstPng);
+        var second = NativePresentationRaster.Decode(secondPng);
+        Assert.AreEqual(first.Width, second.Width, "Model-content render comparison width changed unexpectedly.");
+        Assert.AreEqual(first.Height, second.Height, "Model-content render comparison height changed unexpectedly.");
+        int left = first.Width, top = first.Height, right = -1, bottom = -1;
+        for (int y = 0; y < first.Height; ++y)
+        for (int x = 0; x < first.Width; ++x)
+        {
+            var a = first.At(x, y);
+            var b = second.At(x, y);
+            if (Math.Abs(a.R - b.R) + Math.Abs(a.G - b.G) + Math.Abs(a.B - b.B) < 12) continue;
+            left = Math.Min(left, x); top = Math.Min(top, y); right = Math.Max(right, x); bottom = Math.Max(bottom, y);
+        }
+        return right < 0 ? (0, 0, 0, 0, 0, 0) : (left, top, right, bottom, right - left + 1, bottom - top + 1);
     }
 
     private static string CleanRouteBoard()

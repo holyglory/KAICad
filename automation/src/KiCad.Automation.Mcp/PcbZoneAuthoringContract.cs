@@ -199,13 +199,44 @@ internal static class PcbZoneAuthoringContract
 
     private static string CanonicalRing(PolyLine? ring)
     {
-        if (ring is null) return "";
-        var points = ring.Nodes.Where(node => node.GeometryCase == PolyLineNode.GeometryOneofCase.Point)
-            .Select(node => $"{node.Point.XNm},{node.Point.YNm}").ToArray();
-        if (points.Length == 0) return "";
-        var rotations = Enumerable.Range(0, points.Length).Select(offset => string.Join(";", points.Skip(offset).Concat(points.Take(offset))));
-        var reversed = points.Reverse().ToArray();
-        rotations = rotations.Concat(Enumerable.Range(0, reversed.Length).Select(offset => string.Join(";", reversed.Skip(offset).Concat(reversed.Take(offset)))));
-        return rotations.Order(StringComparer.Ordinal).First();
+        if (ring is null || !ring.Closed || ring.Nodes.Count < 3
+            || ring.Nodes.Any(node => node.GeometryCase != PolyLineNode.GeometryOneofCase.Point || node.Point is null))
+            throw new AutomationException("pcb_zone_readback_mismatch", "Native readback returned an open or non-point zone ring.");
+        var points = ring.Nodes.Select(node => $"{node.Point.XNm},{node.Point.YNm}").ToArray();
+        string forward = Rotate(points, MinimalRotation(points));
+        string[] reversed = points.Reverse().ToArray();
+        string backward = Rotate(reversed, MinimalRotation(reversed));
+        return StringComparer.Ordinal.Compare(forward, backward) <= 0 ? forward : backward;
+    }
+
+    // Booth's algorithm keeps ring canonicalization linear in the number of vertices.
+    private static int MinimalRotation(string[] values)
+    {
+        int length = values.Length, first = 0, second = 1, offset = 0;
+        while (first < length && second < length && offset < length)
+        {
+            int comparison = StringComparer.Ordinal.Compare(values[(first + offset) % length], values[(second + offset) % length]);
+            if (comparison == 0) { ++offset; continue; }
+            if (comparison > 0)
+            {
+                first += offset + 1;
+                if (first <= second) first = second + 1;
+            }
+            else
+            {
+                second += offset + 1;
+                if (second <= first) second = first + 1;
+            }
+            offset = 0;
+        }
+        return Math.Min(first, second) % length;
+    }
+
+    private static string Rotate(string[] values, int start)
+    {
+        var rotated = new string[values.Length];
+        for (int index = 0; index < values.Length; ++index)
+            rotated[index] = values[(start + index) % values.Length];
+        return string.Join(";", rotated);
     }
 }

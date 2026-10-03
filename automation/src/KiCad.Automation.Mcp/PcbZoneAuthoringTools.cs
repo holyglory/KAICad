@@ -96,6 +96,7 @@ public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
         var session = await client.HandshakeAsync(cancellationToken);
         RequireEpoch(session.Epoch, expected.ProcessEpoch);
         Zone? zone = null;
+        Zone? existing = null;
         string targetId;
         CreateItems? create = null;
         UpdateItems? update = null;
@@ -128,12 +129,22 @@ public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
         var admission = await ReadState(client, document, cancellationToken);
         RequireState(admission, expected, "The PCB changed before the zone transaction could be admitted; inspect it again.");
         if (mutation != ZoneMutation.Create)
-            _ = await ReadExistingZone(client, document, targetId, cancellationToken);
+        {
+            existing = await ReadExistingZone(client, document, targetId, cancellationToken);
+            if (mutation == ZoneMutation.Update)
+            {
+                zone = MergeUpdate(existing, zone!);
+                update!.Items[0] = Any.Pack(zone);
+            }
+        }
 
         BeginCommitResponse? begin = null;
+        bool beginDispatched = false;
+        bool commitDispatched = false;
         bool committed = false;
         try
         {
+            beginDispatched = true;
             begin = await client.InvokeAsync<BeginCommit, BeginCommitResponse>(new()
             {
                 Header = new() { Document = document }
@@ -160,6 +171,7 @@ public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
                 response = JsonDocument.Parse(BoardJson.Formatter.Format(result)).RootElement.Clone();
             }
 
+            commitDispatched = true;
             await client.InvokeAsync<EndCommit, EndCommitResponse>(new()
             {
                 Id = begin.Id, Action = CommitAction.CmaCommit, Header = new() { Document = document },
@@ -190,9 +202,11 @@ public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
         catch (Exception error) when (error is AutomationException or NativeApiException or NngException or OperationCanceledException
             or InvalidProtocolBufferException or InvalidJsonException or ArgumentException or InvalidOperationException)
         {
-            string settlement = committed ? "committed" : "not_submitted";
+            string settlement = committed ? "committed" : begin is null ? "indeterminate" : "not_submitted";
             string rollbackStatus = "not_attempted";
             string? rollbackError = null;
+            if (begin is null && beginDispatched)
+                rollbackStatus = "unavailable";
             if (begin is not null && !committed)
             {
                 try
@@ -202,7 +216,10 @@ public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
                         Id = begin.Id, Action = CommitAction.CmaDrop, Header = new() { Document = document }
                     }, CancellationToken.None);
                     rollbackStatus = "confirmed";
-                    settlement = "rolled_back";
+                    settlement = commitDispatched
+                        ? await ConfirmUncommitted(client, document, expected, mutation, targetId, existing, cancellationToken)
+                        : "rolled_back";
+                    if (settlement == "committed") rollbackStatus = "unconfirmed";
                 }
                 catch (Exception dropError) when (dropError is NativeApiException or NngException
                     or InvalidProtocolBufferException or InvalidJsonException or InvalidOperationException)
@@ -266,6 +283,53 @@ public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
             Header = new() { Document = document }, Items = { new KIID { Value = zoneId } }
         }, cancellationToken);
         return RequireSingleZone(response, zoneId);
+    }
+
+    private static Zone MergeUpdate(Zone existing, Zone requested)
+    {
+        // The task DTO intentionally exposes only the safe authoring subset. Preserve
+        // native-owned metadata and settings that the DTO cannot represent before sending
+        // the typed replacement back through UpdateItems.
+        var merged = requested.Clone();
+        merged.Locked = existing.Locked;
+        merged.LayerProperties.Clear();
+        merged.LayerProperties.Add(existing.LayerProperties.Select(property => property.Clone()));
+        merged.CustomProperties.Clear();
+        merged.CustomProperties.Add(existing.CustomProperties.Select(property => property.Clone()));
+        if (existing.CopperSettings is { } source && merged.CopperSettings is { } target)
+        {
+            target.Teardrop = source.Teardrop?.Clone();
+            target.ThievingSettings = source.ThievingSettings?.Clone();
+            target.HatchSettings = source.HatchSettings?.Clone();
+            target.CornerSmoothing = source.CornerSmoothing;
+            target.CornerRadius = source.CornerRadius?.Clone();
+            if (source.Connection is { } sourceConnection && target.Connection is { } targetConnection)
+                targetConnection.ThermalSpokes = sourceConnection.ThermalSpokes?.Clone();
+        }
+        return merged;
+    }
+
+    private static async Task<string> ConfirmUncommitted(NativeClient client, DocumentSpecifier document,
+        DocumentLifecycleState expected, ZoneMutation mutation, string zoneId, Zone? existing,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var state = await ReadState(client, document, cancellationToken);
+            if (!state.Equals(expected)) return "indeterminate";
+            if (mutation == ZoneMutation.Create)
+            {
+                try { _ = await ReadExistingZone(client, document, zoneId, cancellationToken); return "indeterminate"; }
+                catch (NativeApiException error) when (error.Status == 3) { return "rolled_back"; }
+            }
+            if (existing is null) return "indeterminate";
+            var current = await ReadExistingZone(client, document, zoneId, cancellationToken);
+            // Native state digest equality is the primary proof. This read confirms the target
+            // still exists and remains a zone; exact metadata is native-owned during rollback.
+            return current.Id.Value == existing.Id.Value && current.Type == existing.Type ? "rolled_back" : "indeterminate";
+        }
+        catch (Exception error) when (error is AutomationException or NativeApiException or NngException)
+        { return "indeterminate"; }
     }
 
     private static async Task<bool> ConfirmDeleted(NativeClient client, DocumentSpecifier document,

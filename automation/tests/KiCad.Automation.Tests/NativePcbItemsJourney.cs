@@ -1142,8 +1142,10 @@ public sealed partial class NativeSessionTests
                     // canonical rectangle shape so save/reopen preserves the
                     // complete padstack instead of silently canonicalizing it.
                     CopperLayers = { new PadStackLayer { Layer = BoardLayer.BlFCu, Shape = PadStackShape.PssRectangle,
+                        CustomAnchorShape = PadStackShape.PssRectangle,
                         Size = new() { XNm = 700_000, YNm = 700_000 } },
                         new PadStackLayer { Layer = BoardLayer.BlBCu, Shape = PadStackShape.PssRectangle,
+                            CustomAnchorShape = PadStackShape.PssRectangle,
                             Size = new() { XNm = 700_000, YNm = 700_000 } } },
                     FrontOuterLayers = new() { SolderMaskMode = SolderMaskMode.SmmMasked },
                     BackOuterLayers = new() { SolderMaskMode = SolderMaskMode.SmmUnmasked }

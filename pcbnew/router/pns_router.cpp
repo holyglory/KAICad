@@ -1149,6 +1149,14 @@ void ROUTER::PartitionRoutingChanges( std::vector<ITEM*> aRemoved,
                                       std::vector<ITEM*>& aCreated,
                                       std::vector<ITEM*>& aUpdated )
 {
+    // A PNS clone can lose its direct Parent() while retaining the native
+    // board object through GetSourceItem().  Route replacement identity must
+    // follow that stable source owner, otherwise a moved via is split into a
+    // delete/create pair and the MCP cannot preserve its UUID and properties.
+    auto owner = []( ITEM* item ) -> BOARD_ITEM*
+    {
+        return item ? ( item->Parent() ? item->Parent() : item->GetSourceItem() ) : nullptr;
+    };
     auto key = []( ITEM* item )
     {
         std::vector<int64_t> geometry;
@@ -1174,7 +1182,8 @@ void ROUTER::PartitionRoutingChanges( std::vector<ITEM*> aRemoved,
         else if( ARC::ClassOf( item ) )
             geometry.push_back( static_cast<ARC*>( item )->Width() );
         auto* net = static_cast<NETINFO_ITEM*>( item->Net() );
-        return std::make_tuple( item->Parent() ? item->Parent()->m_Uuid.AsStdString() : std::string(),
+        BOARD_ITEM* source = item ? ( item->Parent() ? item->Parent() : item->GetSourceItem() ) : nullptr;
+        return std::make_tuple( source ? source->m_Uuid.AsStdString() : std::string(),
                                 item->Kind(), item->Layers().Start(), item->Layers().End(),
                                 net ? net->GetNetname().ToStdString() : std::string(), geometry );
     };
@@ -1182,17 +1191,17 @@ void ROUTER::PartitionRoutingChanges( std::vector<ITEM*> aRemoved,
     // Preserve the authoritative update-before-create order supplied by the
     // preview capture. Native CommitRouting uses this same first compatible
     // addition rule for same-parent replacements.
-    std::set<BOARD_ITEM*> processedParents;
+    std::set<BOARD_ITEM*> processedOwners;
     for( ITEM* removed : aRemoved )
     {
         if( removed->IsVirtual() )
             continue;
-        BOARD_ITEM* parent = removed->Parent();
-        if( parent && !processedParents.insert( parent ).second )
+        BOARD_ITEM* parent = owner( removed );
+        if( parent && !processedOwners.insert( parent ).second )
             continue;
         auto replacement = std::find_if( aAdded.begin(), aAdded.end(), [&]( ITEM* added )
         {
-            return parent && !added->IsVirtual() && added->Parent() == parent
+            return parent && !added->IsVirtual() && owner( added ) == parent
                    && added->Kind() == removed->Kind();
         } );
         if( replacement != aAdded.end() )

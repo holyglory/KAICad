@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Google.Protobuf.WellKnownTypes;
 using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
@@ -188,6 +189,21 @@ public sealed class NativeErcDialogTests
                     Assert.IsTrue(operationReceipt.GetProperty("structuredContent").GetProperty("found").GetBoolean(), operationReceipt.GetRawText());
                     Assert.AreEqual(typedData.GetProperty("markers").GetRawText(),
                         operationReceipt.GetProperty("structuredContent").GetProperty("markers").GetRawText());
+
+                    var absentReceipt = await ercMcp.Tool("kicad_schematic_erc_operation", new
+                    {
+                        instanceId, document = typedDocument, expectedProcessEpoch = client.Epoch,
+                        operationId = Guid.NewGuid().ToString("D")
+                    });
+                    Assert.IsFalse(absentReceipt.TryGetProperty("isError", out var absentError) && absentError.GetBoolean(), absentReceipt.GetRawText());
+                    Assert.IsFalse(absentReceipt.GetProperty("structuredContent").GetProperty("found").GetBoolean(), absentReceipt.GetRawText());
+                    var wrongDocument = JsonNode.Parse(typedDocument.GetRawText())!.AsObject();
+                    wrongDocument["project"]!["name"] = "different-project";
+                    var wrongDocumentReceipt = await ercMcp.Tool("kicad_schematic_erc_operation", new
+                    {
+                        instanceId, document = wrongDocument, expectedProcessEpoch = client.Epoch, operationId = typedOperation
+                    });
+                    Assert.IsTrue(wrongDocumentReceipt.TryGetProperty("isError", out var wrongDocumentError) && wrongDocumentError.GetBoolean(), wrongDocumentReceipt.GetRawText());
 
                     string reconnectState = Directory.CreateTempSubdirectory("kicad-erc-reconnect-").FullName;
                     try

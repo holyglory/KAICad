@@ -314,6 +314,37 @@ public sealed class PcbRoutingContractTests
     }
 
     [TestMethod]
+    public void CheckedRouteContractRejectsGeneratorNestedAndDesignBlockGroups()
+    {
+        var (request, track, state) = CleanRoute();
+        var group = new Group
+        {
+            Id = new() { Value = Guid.NewGuid().ToString("D") }, Name = "route-group",
+            Items = { track.Id.Clone() }
+        };
+        var change = new NativeRouteGroupChange
+        {
+            ExpectedBefore = new NativeRouteGroupState { Group = group.Clone(), Kind = NativeRouteGroupKind.NrgkOrdinary },
+            ExpectedAfter = new NativeRouteGroupState { Group = group.Clone(), Kind = NativeRouteGroupKind.NrgkOrdinary }
+        };
+        request.GroupChanges.Add(change);
+        CheckedPcbRouteContract.ValidateRequest(request, state.ProcessEpoch);
+
+        var generator = request.Clone();
+        generator.GroupChanges[0].ExpectedBefore.Kind = NativeRouteGroupKind.NrgkGenerator;
+        Assert.ThrowsExactly<AutomationException>(() => CheckedPcbRouteContract.ValidateRequest(generator, state.ProcessEpoch));
+
+        var nested = request.Clone();
+        nested.GroupChanges[0].ExpectedBefore.ParentGroupId = new() { Value = Guid.NewGuid().ToString("D") };
+        Assert.ThrowsExactly<AutomationException>(() => CheckedPcbRouteContract.ValidateRequest(nested, state.ProcessEpoch));
+
+        var designBlock = request.Clone();
+        designBlock.GroupChanges[0].ExpectedBefore.Group.LibId = new() { LibraryNickname = "blocks", EntryName = "route" };
+        designBlock.GroupChanges[0].ExpectedAfter.Group.LibId = designBlock.GroupChanges[0].ExpectedBefore.Group.LibId.Clone();
+        Assert.ThrowsExactly<AutomationException>(() => CheckedPcbRouteContract.ValidateRequest(designBlock, state.ProcessEpoch));
+    }
+
+    [TestMethod]
     public void RoutePreviewReplacementUpdatesRoundTripPreservesDisplacedUuid()
     {
         var document = new DocumentSpecifier

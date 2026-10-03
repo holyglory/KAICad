@@ -1,0 +1,119 @@
+using Kiapi.Board.Types;
+using Kiapi.Common.Types;
+using KiCad.Automation.Mcp;
+using KiCad.Automation.Model;
+using KiCad.Automation.Protocol;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+
+namespace KiCad.Automation.Tests;
+
+[TestClass]
+public sealed class PcbZoneAuthoringContractTests
+{
+    [TestMethod]
+    public void CopperZoneContractAcceptsBoundedPointPolygon()
+    {
+        var zone = Zone("11111111-1111-1111-1111-111111111111");
+        PcbZoneAuthoringContract.ValidateCreate(zone);
+        PcbZoneAuthoringContract.ValidateOperationId("22222222-2222-2222-2222-222222222222");
+    }
+
+    [TestMethod]
+    public void CopperZoneContractRejectsUnsupportedTypeAndDerivedState()
+    {
+        var graphical = Zone("11111111-1111-1111-1111-111111111111");
+        graphical.Type = ZoneType.ZtGraphical;
+        Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateCreate(graphical));
+
+        var filled = Zone("11111111-1111-1111-1111-111111111111");
+        filled.Filled = true;
+        Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateCreate(filled));
+
+        var parented = Zone("11111111-1111-1111-1111-111111111111");
+        parented.Parent = new KIID { Value = "33333333-3333-3333-3333-333333333333" };
+        Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateCreate(parented));
+    }
+
+    [TestMethod]
+    public void CopperZoneContractRejectsArcsDuplicatesAndZeroArea()
+    {
+        var arc = Zone("11111111-1111-1111-1111-111111111111");
+        arc.Outline.Polygons[0].Outline.Nodes[1].Arc = new ArcStartMidEnd
+        {
+            Start = new() { XNm = 10_000, YNm = 0 }, Mid = new() { XNm = 15_000, YNm = 5_000 },
+            End = new() { XNm = 20_000, YNm = 0 }
+        };
+        Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateCreate(arc));
+
+        var duplicate = Zone("11111111-1111-1111-1111-111111111111");
+        duplicate.Outline.Polygons[0].Outline.Nodes[2].Point = duplicate.Outline.Polygons[0].Outline.Nodes[1].Point.Clone();
+        Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateCreate(duplicate));
+
+        var line = Zone("11111111-1111-1111-1111-111111111111");
+        line.Outline.Polygons[0].Outline.Nodes[2].Point = new() { XNm = 20_000, YNm = 0 };
+        Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateCreate(line));
+    }
+
+    [TestMethod]
+    public void CopperZoneContractRequiresPcbLifecycleIdentity()
+    {
+        var document = new DocumentSpecifier
+        {
+            Type = DocumentType.DoctypePcb,
+            BoardFilename = "board.kicad_pcb",
+            Project = new() { Name = "project", Path = "/tmp/project" }
+        };
+        var state = new DocumentLifecycleState
+        {
+            Document = document,
+            Scope = DocumentLifecycleScope.DlsPcb,
+            ProcessEpoch = "44444444-4444-4444-4444-444444444444",
+            NativeIdentity = "55555555-5555-5555-5555-555555555555",
+            StateSha256 = new string('a', 64),
+            Revision = new() { Epoch = "66666666-6666-6666-6666-666666666666", Sequence = 4 }
+        };
+        PcbZoneAuthoringContract.ValidateDocument(document);
+        PcbZoneAuthoringContract.ValidateState(document, state);
+        var wrongDocument = state.Clone();
+        wrongDocument.Document.BoardFilename = "other.kicad_pcb";
+        Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateState(document,
+            wrongDocument));
+    }
+
+    private static Zone Zone(string id)
+    {
+        var zone = new Zone
+        {
+            Id = new() { Value = id }, Type = ZoneType.ZtCopper,
+            CopperSettings = new CopperZoneSettings
+            {
+                FillMode = ZoneFillMode.ZfmSolid,
+                Net = new() { Name = "GND" },
+                Clearance = new() { ValueNm = 200 },
+                MinThickness = new() { ValueNm = 200 }
+            }
+        };
+        zone.Layers.Add(BoardLayer.BlFCu);
+        zone.Outline = new PolySet
+        {
+            Polygons =
+            {
+                new PolygonWithHoles
+                {
+                    Outline = new PolyLine
+                    {
+                        Closed = true,
+                        Nodes =
+                        {
+                            new PolyLineNode { Point = new() { XNm = 0, YNm = 0 } },
+                            new PolyLineNode { Point = new() { XNm = 20_000, YNm = 0 } },
+                            new PolyLineNode { Point = new() { XNm = 20_000, YNm = 20_000 } },
+                            new PolyLineNode { Point = new() { XNm = 0, YNm = 20_000 } }
+                        }
+                    }
+                }
+            }
+        };
+        return zone;
+    }
+}

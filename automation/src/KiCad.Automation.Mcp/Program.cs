@@ -68,6 +68,7 @@ builder.Services.AddSingleton<INativeTransport, NngTransport>();
 builder.Services.AddSingleton<FileIntakeRegistry>();
 builder.Services.AddSingleton<NativeIntakeRegistry>();
 builder.Services.AddSingleton<PcbItemTools>();
+builder.Services.AddSingleton<PcbZoneAuthoringTools>();
 builder.Services.AddSingleton<AutomaticDesignRegistry>();
 builder.Services.AddSingleton(provider => new InstanceRegistry(provider.GetRequiredService<INativeTransport>(), stateDirectory));
 // The synchronization preview classifies with the handshake each instance gave when it was
@@ -109,6 +110,7 @@ builder.Services.AddMcpServer(options =>
     .WithTools<AutomaticDesignTools>()
     .WithTools<SimulationTools>()
     .WithTools<PcbItemTools>()
+    .WithTools<PcbZoneAuthoringTools>()
     .WithTools<PcbFootprintPlacementTools>()
     .WithTools<PcbFootprintValidationTools>()
     .WithTools<PcbFootprintArtworkTools>()

@@ -21,7 +21,9 @@ public sealed partial class NativeSessionTests
     {
         string library = Directory.CreateDirectory(Path.Combine(projectDirectory, "Resistor_SMD.pretty")).FullName;
         string source = Path.Combine(RepositoryRoot(), "qa", "data", "libraries", "Resistor_SMD.pretty", "R_0603_1608Metric.kicad_mod");
-        File.Copy(source, Path.Combine(library, "R_0603_1608Metric.kicad_mod"), true);
+        string libraryFile = Path.Combine(library, "R_0603_1608Metric.kicad_mod");
+        File.Copy(source, libraryFile, true);
+        PreparePcbRenderModel(projectDirectory, libraryFile);
         File.WriteAllText(Path.Combine(projectDirectory, "fp-lib-table"),
             "(fp_lib_table (version 7) (lib (name \"Resistor_SMD\") (type \"KiCad\") (uri \"${KIPRJMOD}/Resistor_SMD.pretty\") (options \"\") (descr \"\")))\n");
     }
@@ -83,7 +85,7 @@ public sealed partial class NativeSessionTests
         File.Copy(sourceResistor, resistorLibraryFile, true);
         string renderModelPath = PreparePcbRenderModel(schematic.Project.Path, resistorLibraryFile);
         await File.WriteAllTextAsync(Path.Combine(schematic.Project.Path, "fp-lib-table"),
-            "(fp_lib_table (version 7) (lib (name \"RenderFixture\") (type \"KiCad\") (uri \"${KIPRJMOD}/Resistor_SMD.pretty\") (options \"\") (descr \"\")))\n", token);
+            "(fp_lib_table (version 7) (lib (name \"Resistor_SMD\") (type \"KiCad\") (uri \"${KIPRJMOD}/Resistor_SMD.pretty\") (options \"\") (descr \"\")))\n", token);
         var boardOpen = await CreateRootThroughMcp(client.Endpoint, instanceId, boardPath, evidence, token, toolName: "kicad_pcb_create");
         var board = boardOpen.Document;
         string netlistPath = Path.Combine(board.Project.Path, "receipt-import.net");
@@ -95,9 +97,9 @@ public sealed partial class NativeSessionTests
               (design (source "fixture.kicad_sch") (date "2026-01-01") (tool "MCP fixture")
                 (sheet (number "1") (name "/") (tstamps "/")))
               (components
-                (comp (ref "R1") (value "1k") (footprint "RenderFixture:R_0603_1608Metric")
+                (comp (ref "R1") (value "1k") (footprint "Resistor_SMD:R_0603_1608Metric")
                   (sheetpath (names "/") (tstamps "/")) (tstamps "11111111-1111-4111-8111-111111111111"))
-                (comp (ref "R2") (value "2k") (footprint "RenderFixture:R_0603_1608Metric")
+                (comp (ref "R2") (value "2k") (footprint "Resistor_SMD:R_0603_1608Metric")
                   (sheetpath (names "/") (tstamps "/")) (tstamps "22222222-2222-4222-8222-222222222222")))
               (nets
                 (net (code "1") (name "MCP_IMPORTED")

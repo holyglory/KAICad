@@ -1137,9 +1137,13 @@ public sealed partial class NativeSessionTests
                     Type = PadStackType.PstCustom, Layers = { BoardLayer.BlFCu, BoardLayer.BlBCu },
                     Drill = new() { Diameter = new() { XNm = 300_000, YNm = 300_000 },
                         StartLayer = BoardLayer.BlFCu, EndLayer = BoardLayer.BlBCu, Shape = DrillShape.DsCircle },
-                    CopperLayers = { new PadStackLayer { Layer = BoardLayer.BlFCu, Shape = PadStackShape.PssCircle,
+                    // The native custom-via file format persists per-layer
+                    // dimensions, not arbitrary shape tags; use KiCad's
+                    // canonical rectangle shape so save/reopen preserves the
+                    // complete padstack instead of silently canonicalizing it.
+                    CopperLayers = { new PadStackLayer { Layer = BoardLayer.BlFCu, Shape = PadStackShape.PssRectangle,
                         Size = new() { XNm = 700_000, YNm = 700_000 } },
-                        new PadStackLayer { Layer = BoardLayer.BlBCu, Shape = PadStackShape.PssCircle,
+                        new PadStackLayer { Layer = BoardLayer.BlBCu, Shape = PadStackShape.PssRectangle,
                             Size = new() { XNm = 700_000, YNm = 700_000 } } },
                     FrontOuterLayers = new() { SolderMaskMode = SolderMaskMode.SmmMasked },
                     BackOuterLayers = new() { SolderMaskMode = SolderMaskMode.SmmUnmasked }

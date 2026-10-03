@@ -55,9 +55,25 @@ public sealed class RasterTraceTools(InstanceRegistry registry)
         catch (Exception error) when (error is AutomationException or NativeApiException or NngException
             or IOException or InvalidProtocolBufferException or InvalidOperationException)
         {
-            return Data(new { errorCode = error is AutomationException known ? known.Code : "raster_trace_failed",
+            return Data(new { errorCode = ErrorCode(error),
                 errorMessage = error.Message, proposalOnly = true, nativeDocumentMutated = false }, true);
         }
+    }
+
+    private static string ErrorCode(Exception error)
+    {
+        if (error is AutomationException known) return known.Code;
+        if (error is NativeApiException native)
+        {
+            int separator = native.Message.IndexOf(':');
+            if (separator > 0)
+            {
+                string code = native.Message[..separator];
+                if (code.All(c => c is >= 'a' and <= 'z' or >= '0' and <= '9' or '_')) return code;
+            }
+            return "native_status_" + native.Status;
+        }
+        return "raster_trace_failed";
     }
 }
 

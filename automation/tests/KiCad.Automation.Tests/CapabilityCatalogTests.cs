@@ -49,6 +49,16 @@ public sealed class CapabilityCatalogTests
                 foreach (var row in ServiceCapabilities.Registered)
                     CollectionAssert.Contains(names, row.Name, "A transitional capability row names a tool this server does not register.");
                 var entries = structured.GetProperty("serviceCapabilities").EnumerateArray().ToDictionary(e => e.GetProperty("name").GetString()!);
+                // Document-kind claims come from the declared capability scope, never from a
+                // tool name. Check representative native document, library, job and simulation
+                // boundaries so adding a tool cannot silently make the catalogue overclaim.
+                AssertKinds(entries["kicad_document_state"], "schematic", "pcb");
+                AssertKinds(entries["kicad_document_save"], "schematic", "pcb");
+                AssertKinds(entries["kicad_symbol_library_write"], "library");
+                AssertKinds(entries["kicad_footprint_library_delete"], "library");
+                AssertKinds(entries["kicad_pcb_export_3d"], "pcb", "job");
+                AssertKinds(entries["kicad_simulation_start"], "schematic", "simulation");
+                AssertKinds(entries["kicad_instances_list"]);
                 foreach (string name in DeclaredToolNames())
                 {
                     Assert.AreEqual("attribute", entries[name].GetProperty("declaration").GetString(), name);
@@ -77,6 +87,14 @@ public sealed class CapabilityCatalogTests
                 File.Copy(log, retained, true); TestContext.AddResultFile(retained);
             }
             Directory.Delete(root, true);
+        }
+
+        static void AssertKinds(JsonElement entry, params string[] expected)
+        {
+            string[] actual = entry.GetProperty("documentKinds").EnumerateArray().Select(kind => kind.GetString()!).ToArray();
+            CollectionAssert.AreEqual(expected, actual, entry.GetProperty("name").GetString());
+            CollectionAssert.AreEqual(actual.Distinct(StringComparer.Ordinal).ToArray(), actual,
+                entry.GetProperty("name").GetString() + " must expose duplicate-free document kinds.");
         }
     }
 
@@ -785,6 +803,10 @@ internal static class CapabilityCatalogAssertions
             string name = entry.GetProperty("name").GetString()!;
             Assert.AreEqual("registered", entry.GetProperty("availability").GetString(), name);
             CollectionAssert.Contains(new[] { "attribute", "legacy-service-list", "undeclared" }, entry.GetProperty("declaration").GetString(), name);
+            string[] documentKinds = entry.GetProperty("documentKinds").EnumerateArray().Select(kind => kind.GetString()!).ToArray();
+            CollectionAssert.IsSubsetOf(documentKinds, new[] { "schematic", "pcb", "library", "job", "simulation" }, name);
+            CollectionAssert.AreEqual(documentKinds.Distinct(StringComparer.Ordinal).ToArray(), documentKinds,
+                name + " must expose duplicate-free document kinds.");
             var readOnly = entry.GetProperty("readOnly");
             Assert.AreEqual(hints[name], readOnly.ValueKind == JsonValueKind.Null ? (bool?)null : readOnly.GetBoolean(), name);
             var verification = entry.GetProperty("verification");

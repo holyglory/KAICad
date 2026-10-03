@@ -123,10 +123,12 @@ public sealed record ToolVerification(string Level, IReadOnlyList<string> Eviden
 /// this process and can be called; its revision contract still applies. Declaration says where the
 /// scope, source and contract come from: the tool's [KiCadCapability] attribute, the transitional
 /// hand-kept service list, or nowhere (they are then null rather than guessed).
+/// DocumentKinds names the native document or job boundaries of the declared scope; an empty list
+/// is deliberately unknown or not document-scoped.
 /// </summary>
 public sealed record ServiceToolCapability(string Name, string Availability, string Declaration, string? Scope,
                                            string? Source, string? RevisionContract, bool? ReadOnly,
-                                           ToolVerification Verification);
+                                           ToolVerification Verification, IReadOnlyList<string> DocumentKinds);
 
 /// <summary>One request type that the native handshake lists as dispatched to a registered handler.</summary>
 public sealed record NativeRequestCapability(string Name, string Availability);
@@ -156,13 +158,14 @@ public sealed record NativeCapabilityCatalog(IReadOnlyList<string> Features, str
 /// </summary>
 public static class CapabilityCatalog
 {
-    public const int SchemaVersion = 2;
+    public const int SchemaVersion = 3;
 
     public static IReadOnlyList<string> Notes { get; } =
     [
         "serviceCapabilities lists every tool registered in this MCP server process, derived from the server's tool collection; availability 'registered' means the tool can be called, subject to its revision contract.",
         "nativeFeatures lists the named feature contracts the native process advertises, for example session.info; each is advertised only when the whole feature works in that build. A feature contract is a lower-case dotted name, which no protocol message type is; any other entry of the handshake's capabilities is left out rather than presented as a feature.",
         "nativeRequests lists the request types the native process dispatches to a registered handler at this moment, when nativeRequestCoverage is 'handled-requests'. Opening or closing an editor changes the list, and a handler can still reject a request for its target, its arguments, the editor's state or a mode this process does not support. A KiCad built before this list existed reports nativeRequestCoverage 'unknown' and nativeRequests null: its request support is not known, not empty.",
+        "documentKinds on a service capability names the native document or job kinds its declared scope targets: schematic, pcb, library, job or simulation. An empty list means this scope does not make a document-kind claim; it is never inferred from a tool name or a limitation.",
         "verification.level names the strongest evidence in this build's test suite: mcp-native-journey, native-journey, mcp-process, in-process, or undeclared when a tool declares none.",
         "limitations name unfinished work that no registered tool provides; availability distinguishes incomplete capability from platform-specific or unsupported capability without withdrawing any registered tool. trackedBy cites the KiCad completion-ledger outcomes and recorded decisions behind each one."
     ];
@@ -190,6 +193,9 @@ public static class CapabilityCatalog
         ("pcb-item-transactions", "pcb",
             "General PCB item creation, updates and deletion use explicit document and lifecycle observations, but BeginCommit, item changes and EndCommit are separate IPC calls. Complete native atomic authoring transactions, retained exact-operation receipts, rollback and lost-reply recovery are not yet available across every item wrapper.",
             ["p74ccef564f23a805"]),
+        ("pcb-zone-authoring", "pcb-zones",
+            "Typed copper-zone read/create/update/delete tools are lifecycle-guarded and use one undoable native transaction, with canonical zone identities, explicit copper layers and bounded point-only polygon validation. Operation IDs are correlation-only because the existing native item API has no retained zone receipt or replay primitive; fill geometry is native-derived and must be produced by the separate refill operation. Graphical, rule-area and teardrop zones, arc outlines, stale filled snapshots, native save/reload and broader cross-platform qualification remain fail-closed or unfinished.",
+            ["p74ccef564f23a805", "p16f42b1cbade388b"]),
         ("pcb-artwork-authoring", "pcb-artwork",
             "Non-copper SVG artwork commits retain source archive and SHA-256 provenance with a lifecycle checkpoint and an MCP-process receipt. They still use the general multi-call item transaction boundary; complete native atomic commit/recovery and generated-raster-to-CAD validation remain unfinished.",
             ["p74ccef564f23a805", "pe0d8a4f922a0c00e"]),
@@ -276,9 +282,36 @@ public static class CapabilityCatalog
             ? new ToolVerification(Level(verified.Level), verified.Evidence)
             : new ToolVerification("undeclared", []);
         if (tool.Metadata.OfType<KiCadCapabilityAttribute>().SingleOrDefault() is { } declared)
-            return new(name, "registered", "attribute", declared.Scope, declared.Source, declared.RevisionContract, readOnly, verification);
+            return new(name, "registered", "attribute", declared.Scope, declared.Source, declared.RevisionContract, readOnly,
+                verification, DocumentKinds(declared.Scope));
         if (legacy.TryGetValue(name, out var row))
-            return new(name, "registered", "legacy-service-list", row.Scope, row.Source, row.RevisionContract, readOnly, verification);
-        return new(name, "registered", "undeclared", null, null, null, readOnly, verification);
+            return new(name, "registered", "legacy-service-list", row.Scope, row.Source, row.RevisionContract, readOnly,
+                verification, DocumentKinds(row.Scope));
+        return new(name, "registered", "undeclared", null, null, null, readOnly, verification, []);
     }
+
+    // Scope names are the existing capability contract. Keep the mapping here rather than
+    // guessing from tool names: a new scope has no document-kind claim until its owner declares
+    // one. The values describe the target boundary, not a promise that every operation in that
+    // boundary is qualified or that an unsupported native request will be accepted.
+    private static IReadOnlyList<string> DocumentKinds(string? scope) => scope switch
+    {
+        // The document scope contains both the mixed open-document query (including library
+        // entries) and schematic/PCB open/create operations. It therefore makes no single
+        // document-kind claim until those methods carry explicit metadata.
+        "document" => [],
+        "document-lifecycle" => ["schematic", "pcb"],
+        "schematic-design" => ["schematic"],
+        "symbol-library" or "footprint-library" => ["library"],
+        "simulation" => ["schematic", "simulation"],
+        "pcb-manufacturing" => ["pcb", "job"],
+        // Artwork projection accepts several target kinds under one scope, so do not turn its
+        // mixed target enum into a false per-tool claim.
+        "generated-artwork-cad" => [],
+        "pcb" => ["pcb"],
+        "pcb-artwork" or "pcb-connectivity" or "pcb-guide" or "pcb-observation"
+            or "pcb-operations" or "pcb-placement" or "pcb-rendering" or "pcb-routing" or "pcb-rules"
+            or "pcb-zones" => ["pcb"],
+        _ => []
+    };
 }

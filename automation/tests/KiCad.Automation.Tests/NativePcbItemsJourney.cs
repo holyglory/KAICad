@@ -44,10 +44,15 @@ public sealed partial class NativeSessionTests
         File.WriteAllText(modelPath, model);
 
         string library = File.ReadAllText(libraryFile);
-        const string modelMarker = "\t(model ";
-        int modelStart = library.IndexOf(modelMarker, StringComparison.Ordinal);
-        Assert.IsGreaterThanOrEqualTo(0, modelStart, "The resistor fixture must contain one 3D model declaration.");
-        int modelEnd = library.IndexOf("\n\t)", modelStart, StringComparison.Ordinal);
+        // Use the shared balanced KiCad S-expression parser so this fixture
+        // does not depend on indentation or line-ending details in the
+        // checked-in footprint.  The old delimiter search could select a
+        // nested close or miss a valid model block after a formatter rewrite.
+        var parsedLibrary = PsuCpuSexpr.Parse(library);
+        var modelNodes = parsedLibrary.Children("model").ToArray();
+        Assert.HasCount(1, modelNodes, "The resistor fixture must contain one 3D model declaration.");
+        int modelStart = modelNodes[0].Start;
+        int modelEnd = modelNodes[0].End;
         Assert.IsGreaterThan(modelEnd, modelStart, "The resistor model declaration must be complete.");
         string modelBlock = library.Substring(modelStart, modelEnd - modelStart);
         modelBlock = modelBlock.Replace(

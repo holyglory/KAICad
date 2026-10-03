@@ -1556,7 +1556,7 @@ retained_artifacts=[{name="recovery-model-results",path="automation/artifacts/re
 [[test.native-foundation.check]]
 name="native-build"
 tier="development"
-command=["cmake","--build","automation/artifacts/native","--target","kicad","kicad-cli","eeschema_kiface","pcbnew_kiface","cvpcb_kiface","schema_build_copy","api_schema_build_copy","bitmap_archive_build","qa_document_change_journal","qa_symbol_graphic_identity"]
+command=["cmake","--build","automation/artifacts/native","--target","kicad","kicad-cli","eeschema_kiface","pcbnew_kiface","cvpcb_kiface","s3d_plugin_vrml","schema_build_copy","api_schema_build_copy","bitmap_archive_build","qa_document_change_journal","qa_symbol_graphic_identity"]
 [[test.native-foundation.check]]
 name="native-journal"
 tier="development"

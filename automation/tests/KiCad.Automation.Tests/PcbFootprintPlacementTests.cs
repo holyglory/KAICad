@@ -1,7 +1,9 @@
 using Google.Protobuf.WellKnownTypes;
+using System.Text.Json;
 using Kiapi.Board.Types;
 using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
+using Kiapi.Schematic.Types;
 using KiCad.Automation.Model;
 using KiCad.Automation.Mcp;
 using KiCad.Automation.Native;
@@ -59,6 +61,48 @@ public sealed class PcbFootprintPlacementTests
         Assert.AreEqual("invalid_pcb_footprint_library_id", error.Code);
     }
 
+    [TestMethod]
+    public void AssignmentValidationMatchesTypedSymbolFieldToFootprintIdentity()
+    {
+        var symbol = new SchematicSymbolInstance
+        {
+            Id = new() { Value = Guid.NewGuid().ToString("D") },
+            FootprintField = new() { Name = "Footprint", Text = new() { Text_ = "Generated:QFN-4" } }
+        };
+        FootprintInstance footprint = Footprint(BoardLayer.BlBCu, 0);
+        footprint.Definition.Items.Clear();
+        var result = new PcbFootprintValidationTools().ValidateAssignment(
+            SchematicJson.Formatter.Format(symbol), BoardJson.Formatter.Format(footprint));
+        Assert.IsFalse(result.IsError ?? false, Text(result));
+        JsonElement data = JsonSerializer.SerializeToElement(result.StructuredContent);
+        Assert.IsTrue(data.GetProperty("valid").GetBoolean(), Text(result));
+        Assert.IsTrue(data.GetProperty("assignmentMatched").GetBoolean(), Text(result));
+        Assert.AreEqual("Generated:QFN-4", data.GetProperty("assignment").GetString());
+        Assert.IsFalse(data.GetProperty("nativeContacted").GetBoolean(), Text(result));
+        Assert.IsFalse(data.GetProperty("pinMappingChecked").GetBoolean(), Text(result));
+    }
+
+    [TestMethod]
+    public void AssignmentValidationReportsExactMismatchWithoutInferringAReplacement()
+    {
+        var symbol = new SchematicSymbolInstance
+        {
+            Id = new() { Value = Guid.NewGuid().ToString("D") },
+            FootprintField = new() { Name = "Footprint", Text = new() { Text_ = "Generated:SOIC-8" } }
+        };
+        FootprintInstance footprint = Footprint(BoardLayer.BlFCu, 0);
+        footprint.Definition.Items.Clear();
+        var result = new PcbFootprintValidationTools().ValidateAssignment(
+            SchematicJson.Formatter.Format(symbol), BoardJson.Formatter.Format(footprint));
+        Assert.IsFalse(result.IsError ?? false, Text(result));
+        JsonElement data = JsonSerializer.SerializeToElement(result.StructuredContent);
+        Assert.IsFalse(data.GetProperty("valid").GetBoolean(), Text(result));
+        Assert.IsFalse(data.GetProperty("assignmentMatched").GetBoolean(), Text(result));
+        Assert.IsTrue(data.GetProperty("issues").EnumerateArray()
+            .Any(issue => issue.GetProperty("code").GetString() == "footprint_assignment_mismatch"), Text(result));
+        Assert.AreEqual("Generated:SOIC-8", data.GetProperty("assignment").GetString());
+    }
+
     private static FootprintInstance Footprint(BoardLayer layer, double rotation) => new()
     {
         Id = new() { Value = Guid.Parse("8d37b5f9-9b0d-4a64-9d7b-ef9517fe6f42").ToString("D") },
@@ -77,6 +121,9 @@ public sealed class PcbFootprintPlacementTests
             }) }
         }
     };
+
+    private static string Text(ModelContextProtocol.Protocol.CallToolResult result) =>
+        result.Content.OfType<ModelContextProtocol.Protocol.TextContentBlock>().FirstOrDefault()?.Text ?? "<no tool content>";
 
     private static DocumentSpecifier Document() => new()
     {

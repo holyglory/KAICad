@@ -6,6 +6,7 @@ using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using Kiapi.Board.Types;
 using Kiapi.Common.Types;
+using Kiapi.Schematic.Types;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
@@ -57,6 +58,77 @@ public sealed class PcbFootprintValidationTools
             string code = error is AutomationException known ? known.Code : "invalid_pcb_footprint";
             return Data(new { errorCode = code, errorMessage = error.Message, valid = false,
                 issues = Array.Empty<ValidationIssue>(), nativeContacted = false, nativeMutation = false }, true);
+        }
+    }
+
+    [McpServerTool(Name = "kicad_schematic_footprint_assignment_validate", ReadOnly = true),
+     Description("Validate one typed schematic-to-PCB footprint assignment without contacting KiCad. symbolJson is a complete SchematicSymbolInstance carrying its Footprint field; footprintJson is a complete FootprintInstance carrying its library identity and optional symbol path. The check compares the exact library:name assignment, verifies shared sheet-path identity when both sides declare it, and includes the footprint structural issues from kicad_pcb_footprint_validate. It does not resolve library aliases, infer assignments, compare electrical pin maps, run board DRC, mutate either document or prove persistence."),
+     KiCadCapability("pcb-placement", "compiled-mcp", "typed schematic Footprint field, PCB footprint library identity and shared sheet-path assignment validation"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public CallToolResult ValidateAssignment(string symbolJson, string footprintJson,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (string.IsNullOrWhiteSpace(symbolJson) || string.IsNullOrWhiteSpace(footprintJson))
+                throw new AutomationException("invalid_footprint_assignment", "symbolJson and footprintJson are required.");
+            if (Encoding.UTF8.GetByteCount(symbolJson) > MaximumPayloadBytes
+                || Encoding.UTF8.GetByteCount(footprintJson) > MaximumPayloadBytes)
+                throw new AutomationException("footprint_assignment_too_large", $"symbolJson and footprintJson must each stay within {MaximumPayloadBytes} bytes.");
+
+            SchematicSymbolInstance symbol = ParseSymbol(symbolJson);
+            FootprintInstance footprint = Parse(footprintJson);
+            var issues = new List<ValidationIssue>();
+            if (!Canonical(symbol.Id?.Value))
+                Issue(issues, "missing_symbol_instance_id", "symbol.id", "The schematic symbol instance needs a canonical UUID.");
+
+            string assignment = symbol.FootprintField?.Text?.Text_?.Trim() ?? "";
+            LibraryIdentifier? footprintId = footprint.Definition?.Id;
+            if (string.IsNullOrWhiteSpace(assignment))
+                Issue(issues, "missing_footprint_assignment", "symbol.footprintField", "The schematic symbol has no explicit library:name footprint assignment.");
+            if (footprintId is null || string.IsNullOrWhiteSpace(footprintId.LibraryNickname)
+                || string.IsNullOrWhiteSpace(footprintId.EntryName)
+                || footprintId.LibraryNickname.Contains('\0') || footprintId.EntryName.Contains('\0'))
+                Issue(issues, "missing_footprint_identity", "footprint.definition.id", "The PCB footprint needs an explicit library nickname and entry name.");
+            else if (!string.Equals(assignment,
+                         footprintId.LibraryNickname + ":" + footprintId.EntryName, StringComparison.Ordinal))
+                Issue(issues, "footprint_assignment_mismatch", "symbol.footprintField",
+                    $"The schematic assignment '{assignment}' does not equal the PCB footprint identity '{footprintId.LibraryNickname}:{footprintId.EntryName}'.");
+
+            if (HasPath(symbol.Path) && HasPath(footprint.SymbolPath)
+                && !symbol.Path.Equals(footprint.SymbolPath))
+                Issue(issues, "footprint_assignment_path_mismatch", "footprint.symbolPath",
+                    "The schematic symbol and PCB footprint declare different hierarchical sheet paths.");
+
+            ValidateFootprint(footprint, issues, cancellationToken);
+            ValidationIssue[] ordered = issues.OrderBy(issue => issue.Path, StringComparer.Ordinal)
+                .ThenBy(issue => issue.Code, StringComparer.Ordinal).ThenBy(issue => issue.Message, StringComparer.Ordinal).ToArray();
+            string? footprintIdentity = footprintId is null ? null : footprintId.LibraryNickname + ":" + footprintId.EntryName;
+            return Data(new
+            {
+                valid = ordered.Length == 0,
+                issues = ordered,
+                symbolInstanceId = symbol.Id?.Value,
+                assignment,
+                footprintIdentity,
+                assignmentMatched = ordered.All(issue => issue.Code is not "missing_footprint_assignment"
+                    and not "missing_footprint_identity" and not "footprint_assignment_mismatch"
+                    and not "footprint_assignment_path_mismatch"),
+                footprintContentSha256 = Convert.ToHexStringLower(SHA256.HashData(
+                    Encoding.UTF8.GetBytes(BoardJson.Formatter.Format(footprint)))),
+                nativeContacted = false,
+                nativeMutation = false,
+                pinMappingChecked = false,
+                persistenceVerified = false
+            });
+        }
+        catch (Exception error) when (error is AutomationException or InvalidProtocolBufferException or InvalidJsonException)
+        {
+            string code = error is AutomationException known ? known.Code : "invalid_footprint_assignment";
+            return Data(new { errorCode = code, errorMessage = error.Message, valid = false,
+                assignmentMatched = false, nativeContacted = false, nativeMutation = false,
+                pinMappingChecked = false, persistenceVerified = false }, true);
         }
     }
 
@@ -135,7 +207,7 @@ public sealed class PcbFootprintValidationTools
 
     private static bool Supported(Any item) => item.Is(Pad.Descriptor) || item.Is(BoardGraphicShape.Descriptor)
         || item.Is(BoardText.Descriptor) || item.Is(BoardTextBox.Descriptor) || item.Is(Barcode.Descriptor)
-        || item.Is(Dimension.Descriptor) || item.Is(Group.Descriptor) || item.Is(ReferenceImage.Descriptor)
+        || item.Is(Dimension.Descriptor) || item.Is(Kiapi.Board.Types.Group.Descriptor) || item.Is(ReferenceImage.Descriptor)
         || item.Is(Table.Descriptor) || item.Is(Constraint.Descriptor) || item.Is(Footprint3DModel.Descriptor);
 
     private static string? ChildId(Any item) => item.Is(Pad.Descriptor) ? item.Unpack<Pad>().Id?.Value
@@ -144,12 +216,13 @@ public sealed class PcbFootprintValidationTools
         : item.Is(BoardTextBox.Descriptor) ? item.Unpack<BoardTextBox>().Id?.Value
         : item.Is(Barcode.Descriptor) ? item.Unpack<Barcode>().Id?.Value
         : item.Is(Dimension.Descriptor) ? item.Unpack<Dimension>().Id?.Value
-        : item.Is(Group.Descriptor) ? item.Unpack<Group>().Id?.Value
+        : item.Is(Kiapi.Board.Types.Group.Descriptor) ? item.Unpack<Kiapi.Board.Types.Group>().Id?.Value
         : item.Is(ReferenceImage.Descriptor) ? item.Unpack<ReferenceImage>().Id?.Value
         : item.Is(Table.Descriptor) ? item.Unpack<Table>().Id?.Value
         : item.Is(Constraint.Descriptor) ? item.Unpack<Constraint>().Id?.Value : null;
 
     private static bool Finite(double value) => double.IsFinite(value);
+    private static bool HasPath(SheetPath? path) => path is not null && path.Path.Count > 0;
     private static bool Canonical(string? value) => value is not null && Guid.TryParseExact(value, "D", out Guid id)
         && id != Guid.Empty && value == id.ToString("D");
     private static void Issue(List<ValidationIssue> issues, string code, string path, string message) => issues.Add(new(code, path, message));
@@ -158,6 +231,12 @@ public sealed class PcbFootprintValidationTools
         try { return BoardJson.Parser.Parse<FootprintInstance>(json); }
         catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException or InvalidOperationException)
         { throw new AutomationException("invalid_pcb_footprint", "footprintJson is not valid FootprintInstance protobuf JSON: " + error.Message); }
+    }
+    private static SchematicSymbolInstance ParseSymbol(string json)
+    {
+        try { return SchematicJson.Parser.Parse<SchematicSymbolInstance>(json); }
+        catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException or InvalidOperationException)
+        { throw new AutomationException("invalid_footprint_assignment", "symbolJson is not valid SchematicSymbolInstance protobuf JSON: " + error.Message); }
     }
     private static CallToolResult Data(object value, bool error = false)
     {

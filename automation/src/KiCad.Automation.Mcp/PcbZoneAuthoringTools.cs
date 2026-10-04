@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
 using System.ComponentModel;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
@@ -194,7 +196,7 @@ public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
         if (mutation == ZoneMutation.Update)
         {
             checkedRequests[CacheKey(instanceId, operationId)] = new CachedCheckedRequest(
-                mutation, targetId, requestedZone!.Clone(), callerExpected, checkedRequest.Clone());
+                mutation, targetId, Fingerprint(callerExpected), Fingerprint(requestedZone!), checkedRequest.Clone());
         }
         var outcome = await PcbCheckedItemDispatch.ApplyAsync(registry, instanceId, checkedRequest, cancellationToken);
         return ZoneMutationData(outcome, mutation, targetId,
@@ -207,19 +209,30 @@ public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
     {
         request = null!;
         if (requestedZone is null
-            || !checkedRequests.TryGetValue(CacheKey(instanceId, operationId), out var cached)
-            || cached.Mutation != ZoneMutation.Update
-            || cached.TargetId != targetId
-            || !cached.CallerExpected.Equals(callerExpected)
-            || !cached.RequestedZone.Equals(requestedZone)
-            || cached.Request.ProcessEpoch != callerExpected.ProcessEpoch)
+            || !checkedRequests.TryGetValue(CacheKey(instanceId, operationId), out var cached))
             return false;
+
+        if (cached.Mutation != ZoneMutation.Update
+            || cached.TargetId != targetId
+            || cached.CallerExpectedFingerprint != Fingerprint(callerExpected)
+            || cached.RequestedZoneFingerprint != Fingerprint(requestedZone)
+            || cached.Request.ProcessEpoch != callerExpected.ProcessEpoch)
+            throw new AutomationException("invalid_operation_replay",
+                "operationId is already bound to a different PCB zone request or lifecycle checkpoint.");
 
         request = cached.Request.Clone();
         return true;
     }
 
     private static string CacheKey(string instanceId, string operationId) => instanceId + "\0" + operationId;
+
+    private static string Fingerprint(DocumentLifecycleState state) =>
+        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+            SchematicJson.Formatter.Format(state))));
+
+    private static string Fingerprint(Zone zone) =>
+        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+            BoardJson.Formatter.Format(zone))));
 
     private static CheckedPcbItemTransaction CheckedRequest(DocumentLifecycleState expected,
         string processEpoch, PcbItemOperation operation, string operationId)
@@ -504,7 +517,7 @@ public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
     private sealed record CachedCheckedRequest(
         ZoneMutation Mutation,
         string TargetId,
-        Zone RequestedZone,
-        DocumentLifecycleState CallerExpected,
+        string CallerExpectedFingerprint,
+        string RequestedZoneFingerprint,
         CheckedPcbItemTransaction Request);
 }

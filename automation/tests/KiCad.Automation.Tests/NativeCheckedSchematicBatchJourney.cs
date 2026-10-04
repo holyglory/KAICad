@@ -469,6 +469,9 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, typedCleanupReceipt.Status);
         Assert.AreEqual(deletedState.State.StateSha256, typedCleanupReceipt.ObservedAfter.StateSha256,
             "The typed qualification leaves the schematic at the same saved state.");
+
+        await VerifyTypedSymbolMutations(mcp, client, document, evidence, instanceId, token);
+
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-crud-requests.json"),
             "[" + string.Join(",\n", requests.Select(request => SchematicJson.Formatter.Format(request))) + "]", token);
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-crud-receipts.json"),

@@ -381,6 +381,7 @@ public sealed class McpProcessTests
                 "kicad_pcb_stackup", "kicad_pcb_plot_settings"
             })
                 CollectionAssert.Contains(names, boardTool);
+            CollectionAssert.Contains(names, "kicad_project_net_classes");
             var invalidConnectivityQuery = await Request(9362, "tools/call", new
             {
                 name = "kicad_pcb_connectivity_query",
@@ -410,6 +411,16 @@ public sealed class McpProcessTests
             var invalidStackup = await Request(9349, "tools/call", new { name = "kicad_pcb_stackup",
                 arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
             Assert.IsTrue(invalidStackup.GetProperty("result").GetProperty("isError").GetBoolean());
+            var invalidProjectNetClasses = await Request(9352, "tools/call", new
+            {
+                name = "kicad_project_net_classes",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", expectedStateJson = "{}" }
+            });
+            Assert.IsTrue(invalidProjectNetClasses.GetProperty("result").GetProperty("isError").GetBoolean(),
+                invalidProjectNetClasses.GetRawText());
+            Assert.AreEqual("invalid_document_target",
+                invalidProjectNetClasses.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+                invalidProjectNetClasses.GetRawText());
             foreach (string operationTool in new[]
             {
                 "kicad_pcb_import_netlist", "kicad_pcb_refill_zones", "kicad_pcb_operation_receipt",
@@ -485,6 +496,7 @@ public sealed class McpProcessTests
             await Request(9304, "tools/call", new { name = "kicad_pcb_connected_items", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
             await Request(9305, "tools/call", new { name = "kicad_pcb_design_rules", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
             await Request(9306, "tools/call", new { name = "kicad_pcb_net_classes", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", requestJson = "{}", expectedStateJson = "{}" } });
+            await Request(9353, "tools/call", new { name = "kicad_project_net_classes", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", expectedStateJson = "{}" } });
             await Request(9307, "tools/call", new { name = "kicad_pcb_enabled_layers", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
             await Request(9308, "tools/call", new { name = "kicad_pcb_plot_settings", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
             await Request(9309, "tools/call", new { name = "kicad_pcb_export_dxf", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });

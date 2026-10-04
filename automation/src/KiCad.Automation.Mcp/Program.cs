@@ -100,6 +100,7 @@ builder.Services.AddMcpServer(options =>
     .WithTools<SchematicXmlTools>()
     .WithTools<DocumentTools>()
     .WithTools<DocumentStateTools>()
+    .WithTools<ProjectSettingsTools>()
     .WithTools<DocumentLifecycleTools>()
     .WithTools<FootprintLibraryTools>()
     .WithTools<PcbDrcTools>()

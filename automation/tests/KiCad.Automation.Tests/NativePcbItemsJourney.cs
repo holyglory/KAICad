@@ -453,25 +453,31 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(expectedConnectivityState, connectivityData.GetProperty("beforeState").GetString(), connectivityReply.GetRawText());
             Assert.AreEqual(expectedConnectivityState, connectivityData.GetProperty("afterState").GetString(), connectivityReply.GetRawText());
             var connectivityItems = connectivityData.GetProperty("items").EnumerateArray().ToArray();
-            Assert.AreEqual(2, connectivityData.GetProperty("itemCount").GetInt32(), connectivityReply.GetRawText());
-            Assert.HasCount(2, connectivityItems, connectivityReply.GetRawText());
-            Assert.IsTrue(connectivityItems.All(item => item.GetProperty("kind").GetString() == "pad"
-                && item.GetProperty("netName").GetString() == "MCP_IMPORTED"
-                && Guid.TryParseExact(item.GetProperty("id").GetString(), "D", out _)
-                && item.GetProperty("padNumber").GetString() == "1"), connectivityReply.GetRawText());
-
-            var staleConnectivityState = before.Clone();
-            staleConnectivityState.Revision.Sequence++;
-            var staleConnectivityReply = await mcp.Tool("kicad_pcb_connectivity_query", new
+            var expectedImportedPads = persistedPads.Items.Select(item => item.Unpack<Pad>())
+                .Where(pad => pad.Net.Name == "MCP_IMPORTED")
+                .OrderBy(pad => Guid.ParseExact(pad.Id.Value, "D").ToString("D"), StringComparer.Ordinal)
+                .ToArray();
+            Assert.AreEqual(expectedImportedPads.Length, connectivityData.GetProperty("itemCount").GetInt32(), connectivityReply.GetRawText());
+            Assert.HasCount(expectedImportedPads.Length, connectivityItems, connectivityReply.GetRawText());
+            foreach ((Pad expectedPad, JsonElement actualItem) in expectedImportedPads.Zip(
+                connectivityItems.OrderBy(item => item.GetProperty("id").GetString(), StringComparer.Ordinal)))
             {
-                instanceId, documentJson = connectivityDocumentJson, netName = "MCP_IMPORTED",
-                expectedStateJson = SchematicJson.Formatter.Format(staleConnectivityState)
-            });
-            Assert.IsTrue(staleConnectivityReply.TryGetProperty("isError", out var staleConnectivityError)
-                && staleConnectivityError.GetBoolean(), staleConnectivityReply.GetRawText());
-            Assert.AreEqual("pcb_connectivity_state_changed",
-                staleConnectivityReply.GetProperty("structuredContent").GetProperty("errorCode").GetString(),
-                staleConnectivityReply.GetRawText());
+                Assert.AreEqual("pad", actualItem.GetProperty("kind").GetString(), connectivityReply.GetRawText());
+                Assert.AreEqual(Guid.ParseExact(expectedPad.Id.Value, "D").ToString("D"), actualItem.GetProperty("id").GetString(), connectivityReply.GetRawText());
+                string? expectedParent = string.IsNullOrWhiteSpace(expectedPad.Parent?.Value)
+                    ? null : Guid.ParseExact(expectedPad.Parent.Value, "D").ToString("D");
+                if (expectedParent is null)
+                    Assert.AreEqual(JsonValueKind.Null, actualItem.GetProperty("parentId").ValueKind, connectivityReply.GetRawText());
+                else
+                    Assert.AreEqual(expectedParent, actualItem.GetProperty("parentId").GetString(), connectivityReply.GetRawText());
+                Assert.AreEqual("MCP_IMPORTED", actualItem.GetProperty("netName").GetString(), connectivityReply.GetRawText());
+                Assert.AreEqual(expectedPad.Number, actualItem.GetProperty("padNumber").GetString(), connectivityReply.GetRawText());
+                // Pad summaries intentionally have no single layer or via-style layer list;
+                // retain the complete native pad-stack layers as the comparison source.
+                Assert.AreEqual(JsonValueKind.Null, actualItem.GetProperty("layer").ValueKind, connectivityReply.GetRawText());
+                Assert.AreEqual(JsonValueKind.Null, actualItem.GetProperty("layers").ValueKind, connectivityReply.GetRawText());
+                Assert.IsGreaterThan(0, expectedPad.PadStack.Layers.Count, connectivityReply.GetRawText());
+            }
 
             var connectivitySibling = await SiblingInstance(client, token);
             var connectivitySiblingAttach = await mcp.Tool("kicad_instance_attach", new
@@ -488,6 +494,11 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual("pcb_instance_changed",
                 siblingConnectivityReply.GetProperty("structuredContent").GetProperty("errorCode").GetString(),
                 siblingConnectivityReply.GetRawText());
+            // The failed cross-instance read is read-only and must leave the
+            // original board at the exact lifecycle checkpoint used by the
+            // following mutation.
+            Assert.AreEqual(before, await ObserveLifecycleState(client, board, token),
+                "A sibling-instance refusal must not mutate the original board lifecycle state.");
 
             var createdReply = await mcp.Tool("kicad_pcb_items_create", new
             {
@@ -506,6 +517,18 @@ public sealed partial class NativeSessionTests
             var afterCreateState = SchematicJson.Parser.Parse<DocumentLifecycleState>(afterCreate);
             Assert.IsGreaterThan(beforeState.Revision.Sequence, afterCreateState.Revision.Sequence,
                 "A headless PCB item commit must advance the native revision cursor.");
+            var staleConnectivityReply = await mcp.Tool("kicad_pcb_connectivity_query", new
+            {
+                instanceId, documentJson = connectivityDocumentJson, netName = "MCP_IMPORTED",
+                expectedStateJson = connectivityStateJson
+            });
+            Assert.IsTrue(staleConnectivityReply.TryGetProperty("isError", out var staleConnectivityError)
+                && staleConnectivityError.GetBoolean(), staleConnectivityReply.GetRawText());
+            Assert.AreEqual("pcb_connectivity_state_changed",
+                staleConnectivityReply.GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+                staleConnectivityReply.GetRawText());
+            Assert.AreEqual(afterCreateState, await ObserveLifecycleState(client, board, token),
+                "A stale read refusal must not mutate the board lifecycle state.");
             var stale = await mcp.Tool("kicad_pcb_items_create", new
             {
                 instanceId, requestJson = BoardJson.Formatter.Format(create),

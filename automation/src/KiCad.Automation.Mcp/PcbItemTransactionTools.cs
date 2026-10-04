@@ -57,8 +57,7 @@ public sealed class PcbItemTransactionTools(InstanceRegistry registry)
         {
             CheckedPcbItemContract.ValidateResult(request, receipt, inspect: false);
         }
-        catch (AutomationException error) when (receipt.State != CheckedPcbItemTransactionState.CpbtsUnknown
-                                                 && receipt.RequestVerified)
+        catch (AutomationException error)
         {
             // A native flag is evidence about the reply, not proof that the
             // reply satisfies this managed contract. Keep malformed native
@@ -101,8 +100,7 @@ public sealed class PcbItemTransactionTools(InstanceRegistry registry)
             CheckedPcbItemContract.ValidateResult(request, receipt, inspect: true);
             return ReceiptData(instanceId, receipt, error: false, readOnly: true);
         }
-        catch (AutomationException error) when (receipt.State != CheckedPcbItemTransactionState.CpbtsUnknown
-                                                 && receipt.RequestVerified)
+        catch (AutomationException error)
         {
             return ReceiptData(instanceId, receipt, error: true, readOnly: true,
                 validationErrorCode: "invalid_checked_pcb_receipt",

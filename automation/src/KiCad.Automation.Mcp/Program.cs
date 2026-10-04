@@ -90,6 +90,7 @@ builder.Services.AddMcpServer(options =>
     .WithTools<RecursiveEditorTools>()
     .WithTools<SchematicMutationTools>()
     .WithTools<SchematicTypedMutationTools>()
+    .WithTools<SchematicSymbolMutationTools>()
     .WithTools<SchematicLibraryCacheTools>()
     .WithTools<SchematicSymbolLibraryTools>()
     .WithTools<SchematicErcTools>()

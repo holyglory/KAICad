@@ -1,7 +1,9 @@
 using System.Text.Json;
+using System.Reflection;
 using Kiapi.Board.Jobs;
 using Kiapi.Board.Types;
 using KiCad.Automation.Mcp;
+using KiCad.Automation.Model;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace KiCad.Automation.Tests;
@@ -36,8 +38,54 @@ public sealed class PcbManufacturingMcpProcessTests
         CollectionAssert.AreEqual(new[] { BoardLayer.BlFCu }, input.Job.ExportSvg.PlotSettings.CommonLayers);
         Assert.IsNotNull(input.Job.ExportSvg.ToNative().PlotSettings);
 
-        const string invalid = "{\"job\":{\"exportSvg\":{\"plotSettings\":{\"layers\":[\"BL_NotALayer\"]}}}}";
-        Assert.ThrowsExactly<JsonException>(() => JsonSerializer.Deserialize<PcbManufacturingExportInput>(invalid, options));
+        foreach (string spelling in new[] { "BlFCu", "BL_F_Cu", "3" })
+        {
+            string layerJson = spelling == "3"
+                ? "{\"job\":{\"exportSvg\":{\"plotSettings\":{\"layers\":[3]}}}}"
+                : $"{{\"job\":{{\"exportSvg\":{{\"plotSettings\":{{\"layers\":[\"{spelling}\"]}}}}}}}}";
+            PcbManufacturingExportInput named = JsonSerializer.Deserialize<PcbManufacturingExportInput>(layerJson, options)!;
+            CollectionAssert.AreEqual(new[] { BoardLayer.BlFCu }, named.Job!.ExportSvg!.PlotSettings!.Layers, spelling);
+        }
+
+        foreach (string invalid in new[]
+        {
+            "{\"job\":{\"exportSvg\":{\"plotSettings\":{\"layers\":[\"BL_NotALayer\"]}}}}",
+            "{\"job\":{\"exportSvg\":{\"plotSettings\":{\"layers\":[2147483647]}}}}"
+        })
+            Assert.ThrowsExactly<JsonException>(() => JsonSerializer.Deserialize<PcbManufacturingExportInput>(invalid, options));
+    }
+
+    [TestMethod]
+    public void EveryTypedManufacturingEnumPropertyAcceptsClrProtobufAndNumericNamesAndRejectsUnknownValues()
+    {
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        Type[] dtoTypes = typeof(PcbManufacturingExportInput).Assembly.GetTypes()
+            .Where(type => type.IsClass && !type.IsAbstract
+                && (type.Name.StartsWith("RunBoardJobExport", StringComparison.Ordinal)
+                    || type == typeof(BoardPlotSettingsInput)))
+            .ToArray();
+        var enumProperties = dtoTypes.SelectMany(type => type.GetProperties(BindingFlags.Instance | BindingFlags.Public)
+                .Where(property => property.PropertyType.IsEnum)
+                .Select(property => (Type: type, Property: property)))
+            .ToArray();
+        Assert.IsTrue(enumProperties.Length > 0, "The typed manufacturing DTOs must expose enum properties.");
+
+        foreach ((Type type, PropertyInfo property) in enumProperties)
+        {
+            object expected = Enum.GetValues(property.PropertyType).Cast<object>()
+                .First(value => Convert.ToInt32(value) != 0);
+            string clrName = Enum.GetName(property.PropertyType, expected)!;
+            string jsonName = JsonNamingPolicy.CamelCase.ConvertName(property.Name);
+            foreach (object spelling in new object[] { clrName, Convert.ToInt32(expected) })
+            {
+                string token = spelling is string text ? JsonSerializer.Serialize(text) : spelling.ToString()!;
+                object parsed = JsonSerializer.Deserialize($"{{\"{jsonName}\":{token}}}", type, options)!;
+                Assert.AreEqual(expected, property.GetValue(parsed), $"{type.Name}.{property.Name} rejected {spelling}.");
+            }
+
+            Assert.ThrowsExactly<JsonException>(() => JsonSerializer.Deserialize(
+                $"{{\"{jsonName}\":\"__UNKNOWN_MANUFACTURING_ENUM__\"}}", type, options));
+        }
     }
 
     [TestMethod]
@@ -56,10 +104,11 @@ public sealed class PcbManufacturingMcpProcessTests
                 + spelling + "\"},\"pageMode\":\"BJPM_ALL_LAYERS_ONE_PAGE\"}}}";
             PcbManufacturingExportInput input = JsonSerializer.Deserialize<PcbManufacturingExportInput>(json, options)!;
             BoardPlotSettingsInput plotSettings = input.Job!.ExportSvg!.PlotSettings!;
-            Assert.AreEqual(expected, plotSettings.DrillMarks, spelling);
+            Assert.AreEqual((PlotDrillMarksInput)expected, plotSettings.DrillMarks, spelling);
             Assert.AreEqual(expected, plotSettings.ToNative().DrillMarks, spelling);
-            Assert.AreEqual(BoardJobPaginationMode.BjpmAllLayersOnePage, input.Job.ExportSvg.PageMode, spelling);
-            Assert.AreEqual(BoardJobPaginationMode.BjpmAllLayersOnePage, input.Job.ExportSvg.ToNative().PageMode, spelling);
+            Assert.AreEqual(BoardJobPaginationModeInput.BjpmAllLayersOnePage, input.Job.ExportSvg.PageMode, spelling);
+            Assert.AreEqual((int)BoardJobPaginationMode.BjpmAllLayersOnePage,
+                (int)input.Job.ExportSvg.ToNative().PageMode, spelling);
         }
 
         const string invalid = "{\"job\":{\"exportSvg\":{\"plotSettings\":{\"drillMarks\":\"PDM_NOT_A_MARK\"}}}}";
@@ -67,6 +116,10 @@ public sealed class PcbManufacturingMcpProcessTests
 
         const string invalidPageMode = "{\"job\":{\"exportSvg\":{\"pageMode\":\"BJPM_NOT_A_MODE\"}}}";
         Assert.ThrowsExactly<JsonException>(() => JsonSerializer.Deserialize<PcbManufacturingExportInput>(invalidPageMode, options));
+
+        const string invalidNumeric = "{\"job\":{\"exportSvg\":{\"plotSettings\":{\"drillMarks\":2147483647},\"pageMode\":2147483647}}}";
+        PcbManufacturingExportInput invalidNumericInput = JsonSerializer.Deserialize<PcbManufacturingExportInput>(invalidNumeric, options)!;
+        Assert.ThrowsExactly<AutomationException>(() => invalidNumericInput.Job!.ExportSvg!.ToNative());
     }
 
     [TestMethod]
@@ -102,6 +155,23 @@ public sealed class PcbManufacturingMcpProcessTests
             })
                 Assert.IsTrue(jobProperties.TryGetProperty(property, out _),
                     $"The typed manufacturing job schema is missing {property}.");
+
+            JsonElement svg = jobProperties.GetProperty("exportSvg");
+            AssertObject(svg, "SVG manufacturing job schema");
+            JsonElement svgProperties = svg.GetProperty("properties");
+            foreach (string property in new[] { "plotSettings", "pageMode" })
+                Assert.IsTrue(svgProperties.TryGetProperty(property, out _),
+                    $"The typed SVG job schema is missing {property}.");
+            JsonElement plotSettings = svgProperties.GetProperty("plotSettings");
+            AssertObject(plotSettings, "SVG plot-settings schema");
+            JsonElement plotProperties = plotSettings.GetProperty("properties");
+            foreach (string property in new[] { "layers", "commonLayers", "drillMarks" })
+                Assert.IsTrue(plotProperties.TryGetProperty(property, out _),
+                    $"The typed SVG plot-settings schema is missing {property}.");
+            AssertSchemaType(plotProperties.GetProperty("layers"), "array");
+            AssertSchemaType(plotProperties.GetProperty("commonLayers"), "array");
+            AssertSchemaType(plotProperties.GetProperty("drillMarks"), "integer", "string");
+            AssertSchemaType(svgProperties.GetProperty("pageMode"), "integer", "string");
 
             string processEpoch = Guid.NewGuid().ToString("D");
             string boardPath = Path.Combine(root, "typed.kicad_pcb");
@@ -147,9 +217,12 @@ public sealed class PcbManufacturingMcpProcessTests
                         {
                             plotSettings = new
                             {
-                                layers = new[] { "BL_F_Cu" },
+                                layers = new[] { "BL_F_Cu", "BL_F_SilkS" },
                                 commonLayers = new[] { "BL_Edge_Cuts" },
-                                drillMarks = "PDM_FULL"
+                                plotFootprintValues = true,
+                                plotReferenceDesignators = true,
+                                drillMarks = "PDM_FULL",
+                                checkZonesBeforePlot = false
                             },
                             fitPageToBoard = true,
                             precision = 6U,
@@ -191,5 +264,18 @@ public sealed class PcbManufacturingMcpProcessTests
                     && type.EnumerateArray().Any(value => value.ValueKind == JsonValueKind.String
                         && value.GetString() == "object"))),
             $"{label} must expose an object schema: {element.GetRawText()}");
+    }
+
+    private static void AssertSchemaType(JsonElement element, params string[] expected)
+    {
+        Assert.IsTrue((element.TryGetProperty("type", out JsonElement type)
+            && (type.ValueKind == JsonValueKind.String
+                ? expected.Contains(type.GetString(), StringComparer.Ordinal)
+                : type.ValueKind == JsonValueKind.Array
+                    && type.EnumerateArray().Any(value => value.ValueKind == JsonValueKind.String
+                        && expected.Contains(value.GetString(), StringComparer.Ordinal))))
+            || (element.TryGetProperty("enum", out JsonElement values)
+                && values.ValueKind == JsonValueKind.Array && values.GetArrayLength() > 0),
+            $"Schema type does not include [{string.Join(", ", expected)}]: {element.GetRawText()}");
     }
 }

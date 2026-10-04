@@ -316,6 +316,21 @@ bool DeleteResultOk( const DeleteItems& request, const DeleteItemsResponse& resp
                                return result.status() == IDS_OK && result.has_id();
                            } );
 }
+
+// BeginCommit/EndCommit may advance the lifecycle sequence even when the
+// staged PCB is dropped. The content digest, document identity and complete
+// file baselines are the rollback proof; revision sequence is an observation
+// counter and is deliberately ignored here.
+bool RollbackEquivalent( const DocumentLifecycleState& left,
+                         const DocumentLifecycleState& right )
+{
+    if( left.revision().epoch() != right.revision().epoch() ) return false;
+    DocumentLifecycleState normalizedLeft = left;
+    DocumentLifecycleState normalizedRight = right;
+    normalizedLeft.mutable_revision()->set_sequence( 0 );
+    normalizedRight.mutable_revision()->set_sequence( 0 );
+    return MessageDifferencer::Equals( normalizedLeft, normalizedRight );
+}
 } // namespace
 
 const std::vector<std::string>& CHECKED_PCB_ITEM_CONTROLLER::RequestTypes()
@@ -488,8 +503,7 @@ API_RESULT CHECKED_PCB_ITEM_CONTROLLER::Handle( ApiRequest& envelope,
 
         if( afterRollback ) stored.mutable_observed_rollback()->CopyFrom( *afterRollback );
 
-        const bool unchanged = afterRollback
-                && MessageDifferencer::Equals( *before, *afterRollback );
+        const bool unchanged = afterRollback && RollbackEquivalent( *before, *afterRollback );
 
         if( dropOk && unchanged )
         {

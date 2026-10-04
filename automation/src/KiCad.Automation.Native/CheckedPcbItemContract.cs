@@ -163,7 +163,7 @@ public static class CheckedPcbItemContract
             || result.RollbackState != CheckedPcbItemRollbackState.CpbrsConfirmed
             || result.PostCommitState != CheckedPcbItemPostCommitState.CpbpsNotAttempted
             || result.ObservedBefore is null || result.ObservedRollback is null
-            || !result.ObservedRollback.Equals(result.ObservedBefore)
+            || !RollbackEquivalent(result.ObservedRollback, result.ObservedBefore)
             || result.ObservedAfter is not null)
             throw Invalid("A rolled-back checked PCB item transaction must prove that native state returned to its before checkpoint.");
     }
@@ -291,6 +291,21 @@ public static class CheckedPcbItemContract
             && state.ProjectSettingsIncluded && Uuid(state.NativeIdentity)
             && state.Revision is not null && state.Revision.Epoch == expected.Revision?.Epoch
             && Digest(state.StateSha256) && CheckedSchematicContract.FileCoverage(state);
+    }
+
+    private static bool RollbackEquivalent(DocumentLifecycleState actual, DocumentLifecycleState expected)
+    {
+        return actual.Document is not null && actual.Document.Equals(expected.Document)
+            && actual.ProcessEpoch == expected.ProcessEpoch
+            && actual.NativeIdentity == expected.NativeIdentity
+            && actual.StateSha256 == expected.StateSha256
+            && actual.ProjectSettingsIncluded == expected.ProjectSettingsIncluded
+            && actual.Revision is not null && expected.Revision is not null
+            && actual.Revision.Epoch == expected.Revision.Epoch
+            && CheckedSchematicContract.FileCoverage(actual)
+            && CheckedSchematicContract.FileCoverage(expected)
+            && actual.NativeFiles.SequenceEqual(expected.NativeFiles)
+            && actual.FileBaselines.SequenceEqual(expected.FileBaselines);
     }
 
     private static void ValidateHeader(ItemHeader? header, DocumentSpecifier document)

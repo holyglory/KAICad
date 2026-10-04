@@ -96,8 +96,12 @@ public sealed class PcbRenderTools(InstanceRegistry registry)
             JsonElement metadata = inspection is null
                 ? JsonSerializer.SerializeToElement(new { available = false })
                 : JsonDocument.Parse(JsonFormatter.Default.Format(inspection.Metadata)).RootElement.Clone();
+            PcbRenderMetadataValidation metadataValidation = inspection is null
+                ? PcbRenderMetadataValidation.Unavailable
+                : PcbRenderMetadataContract.Validate(inspection.Metadata, request, expected.StateSha256, requestSha256);
             if (inspection is not null)
                 limitations.AddRange(inspection.Limitations);
+            limitations.AddRange(metadataValidation.Failures.Select(failure => "renderer metadata contract: " + failure));
             var structured = JsonSerializer.SerializeToElement(new
             {
                 instanceId, processEpoch = session.Epoch, document,
@@ -109,7 +113,8 @@ public sealed class PcbRenderTools(InstanceRegistry registry)
                     bytes = bytes.Length, sha256 = Convert.ToHexStringLower(SHA256.HashData(bytes)) },
                 requestSha256,
                 metadataAvailable = inspection is not null,
-                metadataComplete = inspection?.MetadataComplete ?? false,
+                metadataValidated = metadataValidation.IsValid,
+                metadataComplete = inspection?.MetadataComplete == true && metadataValidation.IsValid,
                 metadata,
                 limitations,
                 nativeRender = true, boardMutation = false, electricalValidation = false
@@ -139,5 +144,176 @@ public sealed class PcbRenderTools(InstanceRegistry registry)
             });
             return new CallToolResult { IsError = true, Content = [new TextContentBlock { Text = structured.GetRawText() }], StructuredContent = structured };
         }
+    }
+}
+
+internal readonly record struct PcbRenderMetadataValidation(bool IsValid, IReadOnlyList<string> Failures)
+{
+    internal static PcbRenderMetadataValidation Unavailable => new(false, ["renderer metadata is unavailable"]);
+}
+
+internal static class PcbRenderMetadataContract
+{
+    private const string ProjectionConvention =
+        "column-major; clip=projection*view*board_to_scene*[x_nm,y_nm,z_nm,1]; pixel origin top-left";
+
+    internal static PcbRenderMetadataValidation Validate(PcbRenderMetadata metadata,
+        RunBoardJobExportRender request, string expectedStateSha256, string requestSha256)
+    {
+        var failures = new List<string>();
+
+        if (metadata.WidthPixels != request.Width || metadata.HeightPixels != request.Height)
+            failures.Add("camera metadata dimensions do not match the requested image");
+
+        if (metadata.ViewMatrixColumnMajor.Count != 16
+            || metadata.ProjectionMatrixColumnMajor.Count != 16
+            || metadata.BoardNanometresToSceneColumnMajor.Count != 16)
+            failures.Add("camera metadata must contain exactly three 4x4 column-major matrices");
+
+        if (!metadata.ViewMatrixColumnMajor.All(double.IsFinite)
+            || !metadata.ProjectionMatrixColumnMajor.All(double.IsFinite)
+            || !metadata.BoardNanometresToSceneColumnMajor.All(double.IsFinite)
+            || !metadata.MatricesFinite || !metadata.MatricesInvertible
+            || !Invertible(metadata.ViewMatrixColumnMajor)
+            || !Invertible(metadata.ProjectionMatrixColumnMajor)
+            || !Invertible(metadata.BoardNanometresToSceneColumnMajor))
+            failures.Add("camera matrices must be finite and invertible");
+
+        if (!string.Equals(metadata.ProjectionConvention, ProjectionConvention, StringComparison.Ordinal))
+            failures.Add("camera projection convention is missing or unsupported");
+
+        if (!double.IsFinite(metadata.NearClip) || !double.IsFinite(metadata.FarClip)
+            || metadata.NearClip <= 0 || metadata.FarClip <= metadata.NearClip)
+            failures.Add("camera clip planes must be finite, positive, and ordered");
+
+        if (metadata.ObservedCameraPosition.Count != 3 || metadata.ObservedLookAt.Count != 3
+            || !metadata.ObservedCameraPosition.All(double.IsFinite)
+            || !metadata.ObservedLookAt.All(double.IsFinite))
+            failures.Add("camera position and look-at metadata must contain three finite values each");
+
+        string expectedSide = request.Side switch
+        {
+            RenderSide.RsTop => "top",
+            RenderSide.RsBottom => "bottom",
+            RenderSide.RsLeft => "left",
+            RenderSide.RsRight => "right",
+            RenderSide.RsFront => "front",
+            RenderSide.RsBack => "back",
+            _ => string.Empty
+        };
+        if (string.IsNullOrEmpty(expectedSide) || !string.Equals(metadata.ObservedSide, expectedSide, StringComparison.Ordinal))
+            failures.Add("observed camera side does not match the typed render request");
+        if (metadata.ObservedPerspective != request.Perspective)
+            failures.Add("observed camera perspective does not match the typed render request");
+        if (!double.IsFinite(metadata.ObservedZoom) || metadata.ObservedZoom <= 0)
+            failures.Add("observed camera zoom must be finite and positive");
+
+        if (!ValidSha256(expectedStateSha256)
+            || !string.Equals(metadata.SourceBoardSnapshotSha256, expectedStateSha256, StringComparison.OrdinalIgnoreCase))
+            failures.Add("camera metadata is not bound to the expected board snapshot");
+        if (!ValidSha256(requestSha256)
+            || !string.Equals(metadata.EffectiveRenderInputSha256, requestSha256, StringComparison.OrdinalIgnoreCase))
+            failures.Add("camera metadata is not bound to the effective render input");
+
+        var modelKeys = new HashSet<string>(StringComparer.Ordinal);
+        foreach (PcbRenderModelMetadata model in metadata.Models)
+        {
+            string key = GeometryKey(model.NativeUuid, model.ModelIndex);
+            if (string.IsNullOrWhiteSpace(model.NativeUuid) || !modelKeys.Add(key))
+                failures.Add("model metadata must identify each native model exactly once");
+            if (string.IsNullOrWhiteSpace(model.RequestedIdentity) || string.IsNullOrWhiteSpace(model.ResolvedIdentity))
+                failures.Add("model metadata must include requested and resolved asset identities");
+            if (!model.Loaded || model.Missing || !ValidSha256(model.ContentSha256))
+                failures.Add("model asset metadata must prove a loaded, hashed, non-missing native asset");
+            ValidateTransform(model.SceneTransformColumnMajor, "model", failures);
+            ValidateBounds(model.NativeGeometryBounds, model.NativeGeometryBoundsAvailable, 6, "model native geometry", failures);
+            if (!model.SecondaryAssetsComplete)
+                failures.Add("model metadata cannot claim complete secondary assets");
+        }
+
+        var objectKeys = new HashSet<string>(StringComparer.Ordinal);
+        foreach (PcbRenderObjectMetadata item in metadata.Objects)
+        {
+            string key = GeometryKey(item.NativeUuid, item.ModelIndex);
+            if (string.IsNullOrWhiteSpace(item.NativeUuid) || !objectKeys.Add(key) || !modelKeys.Contains(key))
+                failures.Add("object metadata must map one-to-one to a declared native model");
+            ValidateTransform(item.SceneTransformColumnMajor, "object", failures);
+            ValidateBounds(item.NativeGeometryBounds, item.NativeGeometryBoundsAvailable, 6, "object native geometry", failures);
+            if (item.ProjectedBoundsAvailable)
+                ValidateBounds(item.ProjectedConservativeBounds, true, 4, "object projected geometry", failures);
+            if (item.ExactVisiblePixels || item.OcclusionTested)
+                failures.Add("object metadata cannot claim exact pixels or occlusion testing");
+        }
+
+        if (objectKeys.Count != modelKeys.Count)
+            failures.Add("every declared native model must have one corresponding object geometry row");
+
+        return new(failures.Count == 0, failures);
+    }
+
+    private static string GeometryKey(string nativeUuid, uint modelIndex) => nativeUuid + "\u001f" + modelIndex;
+
+    private static void ValidateTransform(IReadOnlyList<double> values, string kind, List<string> failures)
+    {
+        if (values.Count != 16 || !values.All(double.IsFinite))
+            failures.Add($"{kind} transforms must contain exactly 16 finite values");
+    }
+
+    private static void ValidateBounds(IReadOnlyList<double> values, bool available, int expectedCount,
+        string kind, List<string> failures)
+    {
+        if (!available || values.Count != expectedCount || !values.All(double.IsFinite))
+        {
+            failures.Add($"{kind} bounds must be available with {expectedCount} finite values");
+            return;
+        }
+
+        int half = expectedCount / 2;
+        for (int index = 0; index < half; index++)
+        {
+            if (values[index + half] < values[index])
+            {
+                failures.Add($"{kind} bounds must have ordered min/max values on every axis");
+                break;
+            }
+        }
+    }
+
+    private static bool ValidSha256(string value)
+    {
+        if (value.Length != 64)
+            return false;
+        return value.All(Uri.IsHexDigit);
+    }
+
+    // Pivot each column separately so a valid nanometres-to-scene scale is
+    // not rejected merely because its determinant is very small.
+    private static bool Invertible(IReadOnlyList<double> values)
+    {
+        if (values.Count != 16 || !values.All(double.IsFinite))
+            return false;
+        var matrix = new double[4, 4];
+        for (int row = 0; row < 4; row++)
+            for (int column = 0; column < 4; column++)
+                matrix[row, column] = values[column * 4 + row];
+
+        for (int column = 0; column < 4; column++)
+        {
+            int pivot = column;
+            for (int row = column + 1; row < 4; row++)
+                if (Math.Abs(matrix[row, column]) > Math.Abs(matrix[pivot, column]))
+                    pivot = row;
+            if (matrix[pivot, column] == 0)
+                return false;
+            for (int index = column; index < 4; index++)
+                (matrix[column, index], matrix[pivot, index]) = (matrix[pivot, index], matrix[column, index]);
+            for (int row = column + 1; row < 4; row++)
+            {
+                double factor = matrix[row, column] / matrix[column, column];
+                for (int index = column + 1; index < 4; index++)
+                    matrix[row, index] -= factor * matrix[column, index];
+            }
+        }
+        return true;
     }
 }

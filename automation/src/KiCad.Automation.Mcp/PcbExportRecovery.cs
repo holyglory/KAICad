@@ -277,6 +277,9 @@ internal sealed class PcbExportRecoveryStore(string stateDirectory)
     {
         return Update(operationId, prior =>
         {
+            // A replay of an already terminal native receipt cannot make that
+            // earlier outcome unknown. The second caller only lost its reply.
+            if (prior.ReceiptJson is not null) return prior;
             bool outputExists = Directory.Exists(prior.OutputDirectory);
             bool stagingExists = Directory.Exists(prior.StagingDirectory);
             bool known = nativeDispatch.HasValue;

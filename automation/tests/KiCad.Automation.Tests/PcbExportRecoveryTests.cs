@@ -88,6 +88,47 @@ public sealed class PcbExportRecoveryTests
         finally { Directory.Delete(root, true); }
     }
 
+    [TestMethod]
+    public void LostReplayReplyDoesNotInvalidateCompletedReceipt()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-pcb-export-replay-").FullName;
+        try
+        {
+            var record = Record(PcbExportRecoveryPolicy.Completed, nativeDispatchKnown: true,
+                nativeDispatch: true, root: root);
+            Directory.CreateDirectory(record.OutputDirectory);
+            string artifactPath = Path.Combine(record.OutputDirectory, "export.svg");
+            File.WriteAllText(artifactPath, "svg");
+            byte[] artifactBytes = File.ReadAllBytes(artifactPath);
+            var receipt = new PcbManufacturingExportReceipt
+            {
+                OperationId = record.OperationId,
+                ProcessEpoch = record.ProcessEpoch,
+                Status = PcbManufacturingExportStatus.PcbMfgExportCompleted,
+                PublicationState = PcbManufacturingPublicationState.PcbMfgPublicationPublished,
+                OutputDirectory = record.OutputDirectory,
+                OutputManifestComplete = true,
+                OutputManifestSha256 = new string('a', 64)
+            };
+            receipt.Artifacts.Add(new PcbManufacturingArtifact
+            {
+                Path = artifactPath,
+                RelativePath = "export.svg",
+                Bytes = (ulong)artifactBytes.Length,
+                Sha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(artifactBytes)),
+                Ownership = PcbManufacturingArtifactOwnership.PcbMfgArtifactCreated
+            });
+            var store = new PcbExportRecoveryStore(root);
+            store.Begin(record.InstanceId, record.OperationId, record.ProcessEpoch, record.DocumentJson,
+                record.RequestFingerprintSha256, record.OutputDirectory);
+            store.MarkReceipt(record.OperationId, receipt, outputExists: true,
+                outputVerified: true, stagingExists: false);
+            var after = store.MarkUnknown(record.OperationId, nativeDispatch: true);
+            Assert.AreEqual(PcbExportRecoveryPolicy.Completed, after.Status);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
     private static PcbExportRecoveryRecord Record(string status, bool nativeDispatchKnown,
         bool nativeDispatch, string? root = null)
     {

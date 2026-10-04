@@ -250,7 +250,7 @@ public sealed partial class NativeSessionTests
                     reconnect.GetRawText());
                 var receiptReply = await reconnectMcp.Tool("kicad_pcb_export_receipt", new
                 {
-                    instanceId, document = typedDocument, processEpoch = before.ProcessEpoch, operationId = typedOperationId
+                    instanceId, documentInput = typedDocument, processEpoch = before.ProcessEpoch, operationId = typedOperationId
                 });
                 Assert.IsFalse(receiptReply.TryGetProperty("isError", out var receiptError) && receiptError.GetBoolean(), receiptReply.GetRawText());
                 Assert.IsTrue(receiptReply.GetProperty("structuredContent").GetProperty("found").GetBoolean(), receiptReply.GetRawText());

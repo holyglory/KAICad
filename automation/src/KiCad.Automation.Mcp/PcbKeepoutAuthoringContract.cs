@@ -55,7 +55,7 @@ internal static class PcbKeepoutAuthoringContract
     /// may populate Parent during readback; this method still rejects foreign
     /// item types, derived fill state and placement-owned rule areas.
     /// </summary>
-    internal static void ValidateExisting(Zone zone, string nativeIdentity) => ValidateZone(zone, requireIdentity: true, allowNativeParent: true, nativeIdentity);
+    internal static void ValidateExisting(Zone zone, string nativeIdentity) => ValidateZone(zone, requireIdentity: true, allowNativeParent: true, nativeIdentity, allowDerivedFill: true);
 
     internal static void ValidateDeleteId(string keepoutId)
     {
@@ -63,7 +63,7 @@ internal static class PcbKeepoutAuthoringContract
             throw new AutomationException("invalid_pcb_keepout_identity", "Supply one canonical keepout UUID.");
     }
 
-    private static void ValidateZone(Zone? zone, bool requireIdentity, bool allowNativeParent, string? nativeIdentity)
+    private static void ValidateZone(Zone? zone, bool requireIdentity, bool allowNativeParent, string? nativeIdentity, bool allowDerivedFill = false)
     {
         if (zone is null)
             throw new AutomationException("invalid_pcb_keepout", "Supply one typed PCB keepout.");
@@ -94,7 +94,7 @@ internal static class PcbKeepoutAuthoringContract
                 ValidateRing(hole, "hole", ref totalNodes);
         }
 
-        if (zone.Filled || zone.FilledPolygons.Count != 0)
+        if (!allowDerivedFill && (zone.Filled || zone.FilledPolygons.Count != 0))
             throw new AutomationException("unsupported_pcb_keepout_fill", "Filled polygons are native-derived state; omit them from keepout authoring.");
         if (zone.Parent is not null && !string.IsNullOrWhiteSpace(zone.Parent.Value))
         {

@@ -153,7 +153,7 @@ public sealed class PcbDifferentialPairTools(InstanceRegistry registry)
             instanceId, processEpoch = session.Epoch, document,
             beforeState = SchematicJson.Formatter.Format(before), afterState = SchematicJson.Formatter.Format(after),
             positiveNet = positive.Name, negativeNet = negative.Name,
-            supportedScope = summary.SupportedScope,
+            supportedScope = summary.SupportedScope ? "single_straight_track_per_net" : "unsupported",
             validationStatus = summary.SupportedScope ? "complete" : "incomplete",
             widthNm = request.WidthNm, minimumGapNm = request.MinimumGapNm, targetGapNm = request.TargetGapNm,
             requiredMinimumCenterlineSpacingNm = checked(request.WidthNm + request.MinimumGapNm),
@@ -161,14 +161,14 @@ public sealed class PcbDifferentialPairTools(InstanceRegistry registry)
             parallelTolerance = request.ParallelTolerance,
             positive = new
             {
-                itemCount = summary.Positive.ItemCount, trackArcCount = summary.Positive.TrackArcCount,
+                itemCount = summary.Positive.ItemCount, trackCount = summary.Positive.TrackCount, arcCount = summary.Positive.ArcCount,
                 viaCount = summary.Positive.ViaCount, lengthNm = summary.Positive.LengthNm is { } length ? Round(length) : (double?)null,
                 partialStraightLengthNm = summary.Positive.PartialStraightLengthNm is { } partial ? Round(partial) : (double?)null,
                 layers = summary.Positive.Layers
             },
             negative = new
             {
-                itemCount = summary.Negative.ItemCount, trackArcCount = summary.Negative.TrackArcCount,
+                itemCount = summary.Negative.ItemCount, trackCount = summary.Negative.TrackCount, arcCount = summary.Negative.ArcCount,
                 viaCount = summary.Negative.ViaCount, lengthNm = summary.Negative.LengthNm is { } negativeLength ? Round(negativeLength) : (double?)null,
                 partialStraightLengthNm = summary.Negative.PartialStraightLengthNm is { } negativePartial ? Round(negativePartial) : (double?)null,
                 layers = summary.Negative.Layers
@@ -233,7 +233,7 @@ public sealed class PcbDifferentialPairTools(InstanceRegistry registry)
     }
 
     internal sealed record PairValidationIssue(string Code, string Message, string? PositiveItemId = null, string? NegativeItemId = null);
-    internal sealed record PairRouteSummary(string NetName, int ItemCount, int TrackArcCount, int ViaCount,
+    internal sealed record PairRouteSummary(string NetName, int ItemCount, int TrackCount, int ArcCount, int ViaCount,
         double? LengthNm, double? PartialStraightLengthNm, string[] Layers);
     internal sealed record PairValidationSummary(PairRouteSummary Positive, PairRouteSummary Negative,
         int MatchedSegmentCount, double? SkewNm, double? PartialStraightSkewNm, double? CenterlineSpacingNm,
@@ -378,7 +378,7 @@ public sealed class PcbDifferentialPairTools(InstanceRegistry registry)
 
         bool supported = orderedPositive.Length == 1 && orderedNegative.Length == 1
             && positiveArcs == 0 && negativeArcs == 0 && positiveVias == 0 && negativeVias == 0 && unknownItems == 0;
-        int matched = supported ? 1 : Math.Min(orderedPositive.Length, orderedNegative.Length);
+        int matched = supported ? 1 : 0;
         double? centerlineSpacing = null, copperEdgeGap = null, longitudinalOverlap = null, longitudinalEndpointDelta = null;
         double maximumParallelError = 0;
         if (supported)
@@ -418,10 +418,10 @@ public sealed class PcbDifferentialPairTools(InstanceRegistry registry)
         }
 
         PairRouteSummary positiveSummary = new(request.PositiveNet, orderedPositive.Length + positiveVias + positiveArcs,
-            orderedPositive.Length, positiveVias, positiveLength, positivePartialLength,
+            orderedPositive.Length, positiveArcs, positiveVias, positiveLength, positivePartialLength,
             orderedPositive.Select(segment => segment.Layer).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray());
         PairRouteSummary negativeSummary = new(request.NegativeNet, orderedNegative.Length + negativeVias + negativeArcs,
-            orderedNegative.Length, negativeVias, negativeLength, negativePartialLength,
+            orderedNegative.Length, negativeArcs, negativeVias, negativeLength, negativePartialLength,
             orderedNegative.Select(segment => segment.Layer).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray());
         PairValidationIssue[] violations = issues
             .DistinctBy(issue => (issue.Code, issue.PositiveItemId, issue.NegativeItemId), EqualityComparer<(string Code, string? PositiveItemId, string? NegativeItemId)>.Default)

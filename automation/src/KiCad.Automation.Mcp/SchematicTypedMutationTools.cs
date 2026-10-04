@@ -384,6 +384,22 @@ public sealed class SchematicTypedMutationTools(InstanceRegistry registry)
             StructuredContent = structured, Content = [new TextContentBlock { Text = structured.GetRawText() }] };
     }
 
+    private static CallToolResult CreateReply(string instanceId, string processEpoch,
+        DocumentSpecifier document, SchematicConnectionItemKind kind, string itemId,
+        string operationId, CheckedSchematicBatchReceipt receipt, bool submitted, bool replayed)
+    {
+        JsonElement receiptJson = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(receipt));
+        var structured = JsonSerializer.SerializeToElement(new
+        {
+            instanceId, processEpoch, document = ProtobufJson(document), operation = "create",
+            itemId, kind = kind.ToString(), operationId, receipt = receiptJson,
+            mutationSubmitted = submitted, nativeReceiptAvailable = true, replayed,
+            designFilesSaved = false
+        });
+        return new() { IsError = receipt.Status != CheckedSchematicBatchStatus.CsbsCompleted,
+            StructuredContent = structured, Content = [new TextContentBlock { Text = structured.GetRawText() }] };
+    }
+
     private static JsonElement ProtobufJson(IMessage message) =>
         JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(message));
 
@@ -478,11 +494,11 @@ public sealed class SchematicTypedMutationTools(InstanceRegistry registry)
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            DocumentSpecifier document = Parse<DocumentSpecifier>(documentJson, "invalid_checked_document");
-            try { DocumentStateTools.ValidateTarget(document); }
-            catch (AutomationException error)
-            { throw new AutomationException("invalid_checked_document", error.Message); }
-            DocumentLifecycleState expected = Parse<DocumentLifecycleState>(expectedStateJson, "invalid_checked_state");
+            // Creation uses the same root/checkpoint admission as the existing-item tools. A
+            // lifecycle-only state or a child-sheet target can otherwise manufacture a batch
+            // whose revision is not paired with the electrical checkpoint returned to the caller.
+            DocumentSpecifier document = ParseRootDocument(documentJson);
+            ExpectedObservation expected = ParseExpectedObservation(expectedStateJson, document);
             ValidateIdentity(itemId, "itemId");
             ValidateIdentity(operationId, "operationId");
             ValidateCoordinate(xNm, nameof(xNm));
@@ -500,32 +516,42 @@ public sealed class SchematicTypedMutationTools(InstanceRegistry registry)
                     throw new AutomationException("invalid_connection_text", "Labels and text require 1..4096 characters.");
 
             IMessage item = BuildItem(kind, itemId, xNm, yNm, endXNm, endYNm, text);
+            var client = registry.Client(instanceId);
+            var session = await client.HandshakeAsync(cancellationToken);
+            ValidateExpectedState(document, expected, session.Epoch);
             var batch = new ApplySchematicItemBatch
             {
                 Document = document.Clone(),
                 OperationId = operationId,
-                DocumentEpoch = expected.Revision?.Epoch ?? string.Empty,
-                ExpectedRevision = expected.Revision?.Clone() ?? new(),
+                DocumentEpoch = expected.State.Revision.Epoch,
+                ExpectedRevision = expected.State.Revision.Clone(),
                 Description = "Create typed schematic " + kind.ToString().ToLowerInvariant()
             };
             batch.Operations.Add(new SchematicItemOperation { Create = Any.Pack(item) });
-            request = new CheckedSchematicBatch { Batch = batch, ExpectedState = expected.Clone() };
+            request = new CheckedSchematicBatch { Batch = batch, ExpectedState = expected.State.Clone() };
 
-            var client = registry.Client(instanceId);
-            CheckedSchematicTools.ValidateRequest(request, client.Epoch);
+            CheckedSchematicTools.ValidateRequest(request, session.Epoch);
+            // Resolve an exact retry before asking KiCad for a fresh checkpoint. A completed
+            // create advances the revision, so replaying the original checked request must still
+            // return its process-owned receipt without submitting a second item.
+            var prior = await client.InvokeAsync<ReadCheckedSchematicBatchReceipt, CheckedSchematicBatchReceipt>(
+                new()
+                {
+                    Document = batch.Document.Clone(), ProcessEpoch = session.Epoch,
+                    OperationId = operationId, ExpectedRequest = request.Clone()
+                }, cancellationToken);
+            CheckedSchematicTools.ValidateResult(request, prior, inspect: true);
+            if (prior.Status != CheckedSchematicBatchStatus.CsbsNotFound)
+                return CreateReply(instanceId, session.Epoch, document, kind, itemId, operationId,
+                    prior, submitted: false, replayed: true);
+
+            await ObserveExpected(client, document, expected, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             submitted = true;
             var receipt = await client.InvokeAsync<CheckedSchematicBatch, CheckedSchematicBatchReceipt>(request, cancellationToken);
             CheckedSchematicTools.ValidateResult(request, receipt, inspect: false);
-            string json = SchematicJson.Formatter.Format(receipt);
-            var structured = System.Text.Json.JsonSerializer.SerializeToElement(new
-            {
-                instanceId, kind = kind.ToString(), itemId, operationId,
-                receipt = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(json),
-                mutationSubmitted = submitted, designFilesSaved = false
-            });
-            return new() { IsError = receipt.Status != CheckedSchematicBatchStatus.CsbsCompleted,
-                StructuredContent = structured, Content = [new TextContentBlock { Text = structured.GetRawText() }] };
+            return CreateReply(instanceId, session.Epoch, document, kind, itemId, operationId,
+                receipt, submitted: true, replayed: false);
         }
         catch (Exception error) when (error is AutomationException or NativeApiException
             or InvalidProtocolBufferException or InvalidJsonException or NngException)

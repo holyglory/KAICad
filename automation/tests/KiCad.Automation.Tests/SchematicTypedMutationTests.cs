@@ -63,6 +63,43 @@ public sealed class SchematicTypedMutationTests
     }
 
     [TestMethod]
+    public async Task CreateRequiresRootCheckedObservationAndRetainsExactOperationReplay()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        string expected = fixture.ExpectedJson;
+        string operation = Guid.NewGuid().ToString("D");
+        var created = await fixture.Tools.CreateConnectionItem(fixture.InstanceId, fixture.DocumentJson,
+            expected, SchematicConnectionItemKind.LocalLabel, Id,
+            1_000, 2_000, operation, default, text: "DATA");
+        Assert.IsFalse(created.IsError ?? false, Data(created).GetRawText());
+        Assert.AreEqual(1, fixture.Batches.Count);
+        var create = fixture.Batches.Single().Batch.Operations.Single().Create.Unpack<LocalLabel>();
+        Assert.AreEqual(Id, create.Id.Value);
+        Assert.AreEqual("DATA", create.Text.Text_);
+        Assert.AreEqual(1, fixture.Items.Count);
+
+        var replay = await fixture.Tools.CreateConnectionItem(fixture.InstanceId, fixture.DocumentJson,
+            expected, SchematicConnectionItemKind.LocalLabel, Id,
+            1_000, 2_000, operation, default, text: "DATA");
+        Assert.IsFalse(replay.IsError ?? false, Data(replay).GetRawText());
+        Assert.AreEqual(1, fixture.Batches.Count, "The native operation receipt must make an exact retry idempotent.");
+        Assert.AreEqual(1, fixture.Items.Count);
+
+        var child = fixture.State.State.Document.Clone();
+        child.SheetPath.Path.Add(new KIID { Value = Guid.NewGuid().ToString("D") });
+        AssertError(await fixture.Tools.CreateConnectionItem(fixture.InstanceId,
+            SchematicJson.Formatter.Format(child), fixture.ExpectedJson,
+            SchematicConnectionItemKind.Wire, Guid.NewGuid().ToString("D"),
+            1_000, 2_000, Guid.NewGuid().ToString("D"), default, endXNm: 4_000, endYNm: 2_000),
+            "invalid_checked_document");
+
+        AssertError(await fixture.Tools.CreateConnectionItem(fixture.InstanceId, fixture.DocumentJson,
+            SchematicJson.Formatter.Format(fixture.State.State), SchematicConnectionItemKind.Wire,
+            Guid.NewGuid().ToString("D"), 1_000, 2_000, Guid.NewGuid().ToString("D"), default,
+            endXNm: 4_000, endYNm: 2_000), "invalid_checked_state");
+    }
+
+    [TestMethod]
     public async Task CompleteReadSnapshotRoundTripsAndKeepsLabelPropertiesForUpdate()
     {
         using var fixture = await Fixture.CreateAsync();
@@ -353,7 +390,13 @@ public sealed class SchematicTypedMutationTests
             }
             else if (request.Message.Is(CheckedSchematicBatch.Descriptor))
             {
-                var batch = request.Message.Unpack<CheckedSchematicBatch>(); Batches.Add(batch.Clone());
+                var batch = request.Message.Unpack<CheckedSchematicBatch>();
+                if (receipts.TryGetValue(batch.Batch.OperationId, out var replay))
+                {
+                    Assert.AreEqual(replay.Request, batch, "A reused operation ID must remain bound to the exact request.");
+                    return Reply(replay.Receipt.Clone());
+                }
+                Batches.Add(batch.Clone());
                 CheckedSchematicContract.ValidateRequest(batch, Session.Epoch);
                 var result = new CheckedSchematicBatchReceipt
                 {
@@ -364,13 +407,17 @@ public sealed class SchematicTypedMutationTests
                 Assert.AreEqual(batch.ExpectedState, State.State);
                 if (Status == CheckedSchematicBatchStatus.CsbsCompleted)
                 {
-                    var operation = batch.Batch.Operations.Single(); Assert.AreEqual(TargetDocument, operation.TargetDocument);
-                    if (operation.Update is not null) Items[0] = operation.Update.Clone();
+                    var operation = batch.Batch.Operations.Single();
+                    if (operation.TargetDocument is { } targetDocument)
+                        Assert.AreEqual(TargetDocument, targetDocument);
+                    if (operation.Create is not null) Items.Add(operation.Create.Clone());
+                    else if (operation.Update is not null) Items[0] = operation.Update.Clone();
                     else { Assert.AreEqual(Id, operation.Remove.Value); Items.Clear(); }
                     State.State.Revision.Sequence++; State.Electrical.Hierarchy.Revision = State.State.Revision.Clone();
                     State.State.StateSha256 = new string('d', 64);
                     result.ObservedAfter = State.State.Clone(); result.Result = new() { Revision = State.State.Revision.Clone() };
-                    if (operation.Update is not null) result.Result.Items.Add(operation.Update.Clone());
+                    if (operation.Create is not null) result.Result.Items.Add(operation.Create.Clone());
+                    else if (operation.Update is not null) result.Result.Items.Add(operation.Update.Clone());
                     else result.Result.Removed.Add(operation.Remove.Clone());
                 }
                 else { result.ErrorCode = "fixture_failure"; result.ObservedAfter = State.State.Clone(); }

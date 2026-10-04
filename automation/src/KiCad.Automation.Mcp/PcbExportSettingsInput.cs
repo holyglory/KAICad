@@ -57,7 +57,8 @@ internal static class PcbExportDtoValidation
         PlotDrillMarksInput.PdmSmall or PlotDrillMarksInput.PdmSmallProtobuf
             or PlotDrillMarksInput.Small or PlotDrillMarksInput.SmallDrillShape => PlotDrillMarks.PdmSmall,
         PlotDrillMarksInput.PdmFull or PlotDrillMarksInput.PdmFullProtobuf
-            or PlotDrillMarksInput.Full or PlotDrillMarksInput.FullDrillShape => PlotDrillMarks.PdmFull,
+            or PlotDrillMarksInput.Full or PlotDrillMarksInput.FullDrillShape or PlotDrillMarksInput.FullLower
+            => PlotDrillMarks.PdmFull,
         _ => throw new AutomationException("invalid_pcb_export_enum", $"{name} is not a defined value.")
     };
 

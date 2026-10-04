@@ -421,6 +421,32 @@ public sealed class McpProcessTests
             Assert.AreEqual("invalid_document_target",
                 invalidProjectNetClasses.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(),
                 invalidProjectNetClasses.GetRawText());
+            string projectSettingsDocument = "{\"type\":\"DOCTYPE_PCB\",\"project\":{\"name\":\"project-settings-contract\",\"path\":\"/tmp\"},\"boardFilename\":\"board.kicad_pcb\"}";
+            var missingProjectSettingsState = await Request(9354, "tools/call", new
+            {
+                name = "kicad_project_net_classes",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = projectSettingsDocument, expectedStateJson = "{}" }
+            });
+            Assert.IsTrue(missingProjectSettingsState.GetProperty("result").GetProperty("isError").GetBoolean(),
+                missingProjectSettingsState.GetRawText());
+            Assert.AreEqual("invalid_project_net_classes_state",
+                missingProjectSettingsState.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+                missingProjectSettingsState.GetRawText());
+            CollectionAssert.Contains(names, "kicad_pcb_diff_pair_validate");
+            var invalidDiffPairValidation = await Request(9369, "tools/call", new
+            {
+                name = "kicad_pcb_diff_pair_validate",
+                arguments = new
+                {
+                    instanceId = Guid.NewGuid().ToString("D"),
+                    documentJson = "{\"type\":\"DOCTYPE_PCB\",\"project\":{\"name\":\"diff-pair-contract\",\"path\":\"/tmp\"},\"boardFilename\":\"board.kicad_pcb\"}",
+                    expectedStateJson = "{}", requestJson = "{}"
+                }
+            });
+            Assert.IsTrue(invalidDiffPairValidation.GetProperty("result").GetProperty("isError").GetBoolean(), invalidDiffPairValidation.GetRawText());
+            Assert.AreEqual("invalid_diff_pair_validation_state",
+                invalidDiffPairValidation.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+                invalidDiffPairValidation.GetRawText());
             foreach (string operationTool in new[]
             {
                 "kicad_pcb_import_netlist", "kicad_pcb_refill_zones", "kicad_pcb_operation_receipt",
@@ -574,7 +600,8 @@ public sealed class McpProcessTests
                 CollectionAssert.Contains(names, footprintTool);
             foreach (string placementTool in new[]
             {
-                "kicad_pcb_footprint_place_plan", "kicad_pcb_footprint_place_apply", "kicad_pcb_footprint_place_receipt", "kicad_pcb_footprint_svg_plan", "kicad_pcb_footprint_validate"
+                "kicad_pcb_footprint_place_plan", "kicad_pcb_footprint_place_apply", "kicad_pcb_footprint_place_receipt", "kicad_pcb_footprint_svg_plan", "kicad_pcb_footprint_validate",
+                "kicad_schematic_footprint_assignment_validate"
             })
                 CollectionAssert.Contains(names, placementTool);
             var invalidFootprintDefinition = await Request(9359, "tools/call", new { name = "kicad_pcb_footprint_validate",
@@ -608,6 +635,27 @@ public sealed class McpProcessTests
                 arguments = new { instanceId = Guid.NewGuid().ToString("D"), candidateRequestJson = "{}", expectedStateJson = "{}", operationId = validOperation } });
             Assert.IsTrue(invalidPlacementApply.GetProperty("result").GetProperty("isError").GetBoolean());
             Assert.AreEqual("invalid_pcb_footprint_candidate", invalidPlacementApply.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            string assignmentId = Guid.NewGuid().ToString("D");
+            string assignmentSymbol = $"{{\"id\":{{\"value\":\"{assignmentId}\"}},\"footprintField\":{{\"name\":\"Footprint\",\"text\":{{\"text\":\"Generated:QFN-4\"}}}}}}";
+            string assignmentFootprint = $"{{\"id\":{{\"value\":\"{Guid.NewGuid():D}\"}},\"definition\":{{\"id\":{{\"libraryNickname\":\"Generated\",\"entryName\":\"QFN-4\"}},\"items\":[]}}}}";
+            var assignmentSuccess = await Request(9367, "tools/call", new
+            {
+                name = "kicad_schematic_footprint_assignment_validate",
+                arguments = new { symbolJson = assignmentSymbol, footprintJson = assignmentFootprint }
+            });
+            Assert.IsFalse(assignmentSuccess.GetProperty("result").GetProperty("isError").GetBoolean(), assignmentSuccess.GetRawText());
+            Assert.IsTrue(assignmentSuccess.GetProperty("result").GetProperty("structuredContent").GetProperty("valid").GetBoolean(), assignmentSuccess.GetRawText());
+            Assert.IsTrue(assignmentSuccess.GetProperty("result").GetProperty("structuredContent").GetProperty("assignmentMatched").GetBoolean(), assignmentSuccess.GetRawText());
+            var assignmentMismatch = await Request(9368, "tools/call", new
+            {
+                name = "kicad_schematic_footprint_assignment_validate",
+                arguments = new { symbolJson = assignmentSymbol.Replace("Generated:QFN-4", "Generated:SOIC-8", StringComparison.Ordinal), footprintJson = assignmentFootprint }
+            });
+            Assert.IsFalse(assignmentMismatch.GetProperty("result").GetProperty("isError").GetBoolean(), assignmentMismatch.GetRawText());
+            Assert.IsFalse(assignmentMismatch.GetProperty("result").GetProperty("structuredContent").GetProperty("valid").GetBoolean(), assignmentMismatch.GetRawText());
+            Assert.IsFalse(assignmentMismatch.GetProperty("result").GetProperty("structuredContent").GetProperty("assignmentMatched").GetBoolean(), assignmentMismatch.GetRawText());
+            Assert.IsTrue(assignmentMismatch.GetProperty("result").GetProperty("structuredContent").GetProperty("issues").EnumerateArray()
+                .Any(issue => issue.GetProperty("code").GetString() == "footprint_assignment_mismatch"), assignmentMismatch.GetRawText());
             var emptyPlacementReceipt = await Request(9357, "tools/call", new { name = "kicad_pcb_footprint_place_receipt",
                 arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = validEpoch, operationId = Guid.NewGuid().ToString("D") } });
             Assert.IsFalse(emptyPlacementReceipt.GetProperty("result").GetProperty("structuredContent").GetProperty("found").GetBoolean());

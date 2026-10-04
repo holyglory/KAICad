@@ -111,7 +111,7 @@ public sealed class ProjectSettingsTools(InstanceRegistry registry)
 
     private static void ValidateExpected(DocumentSpecifier document, DocumentLifecycleState expected)
     {
-        if (!expected.Document.Equals(document) || string.IsNullOrWhiteSpace(expected.ProcessEpoch)
+        if (expected.Document is null || !expected.Document.Equals(document) || string.IsNullOrWhiteSpace(expected.ProcessEpoch)
             || expected.Scope != Scope(document))
             throw new AutomationException("invalid_project_net_classes_state",
                 "expectedStateJson must identify the same project document and native process epoch.");
@@ -122,7 +122,7 @@ public sealed class ProjectSettingsTools(InstanceRegistry registry)
 
     private static void ValidateObserved(DocumentSpecifier document, DocumentLifecycleState state)
     {
-        if (!state.Document.Equals(document) || state.Scope != Scope(document)
+        if (state.Document is null || !state.Document.Equals(document) || state.Scope != Scope(document)
             || string.IsNullOrWhiteSpace(state.ProcessEpoch) || !state.ProjectSettingsIncluded
             || state.StateSha256.Length != 64 || !state.StateSha256.All(char.IsAsciiHexDigitLower)
             || !Guid.TryParseExact(state.NativeIdentity, "D", out _)

@@ -210,6 +210,16 @@ public static class CheckedPcbItemContract
             {
                 var operation = request.Operations[index];
                 var operationResult = result.Results[index];
+                // The native controller reserves the result slot before it
+                // dispatches the operation. A failed or unparseable reply can
+                // therefore leave one empty final slot; retain it as bounded
+                // uncertainty while rejecting holes in earlier operations.
+                if (operationResult.ResultCase == PcbItemOperationResult.ResultOneofCase.None)
+                {
+                    if (index != result.Results.Count - 1)
+                        throw Invalid("The failed PCB receipt contains an empty non-terminal operation response.");
+                    continue;
+                }
                 bool kindMatches = operation.ActionCase switch
                 {
                     PcbItemOperation.ActionOneofCase.Create => operationResult.ResultCase == PcbItemOperationResult.ResultOneofCase.Create,

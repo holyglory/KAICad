@@ -112,7 +112,7 @@ public sealed class CheckedPcbItemContractTests
         indeterminate.Phase = CheckedPcbItemTransactionPhase.CpbtpRollbackRequested;
         indeterminate.RollbackState = CheckedPcbItemRollbackState.CpbrsUnconfirmed;
         indeterminate.Results.Clear();
-        indeterminate.Results.Add(new PcbItemOperationResult { Create = new CreateItemsResponse() });
+        indeterminate.Results.Add(new PcbItemOperationResult());
         indeterminate.ObservedRollback.StateSha256 = new string('c', 64);
         indeterminate.ErrorCode = "rollback_unconfirmed";
         CheckedPcbItemContract.ValidateResult(request, indeterminate, inspect: true);

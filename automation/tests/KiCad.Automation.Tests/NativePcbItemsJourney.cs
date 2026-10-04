@@ -590,6 +590,7 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(rollbackReceipt.ObservedBefore.NativeIdentity, rollbackReceipt.ObservedRollback.NativeIdentity);
             Assert.AreEqual(rollbackReceipt.ObservedBefore.Document, rollbackReceipt.ObservedRollback.Document);
             string rollbackStateJson = SchematicJson.Formatter.Format(rollbackReceipt.ObservedRollback);
+            guideState = rollbackStateJson;
             var missingRollbackShape = await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
                 client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
                 { Header = new() { Document = board }, Items = { rollbackShape.Id } }, token));

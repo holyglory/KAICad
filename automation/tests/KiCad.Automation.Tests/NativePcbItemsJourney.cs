@@ -595,6 +595,18 @@ public sealed partial class NativeSessionTests
                 client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
                 { Header = new() { Document = board }, Items = { rollbackShape.Id } }, token));
             Assert.AreEqual(3, missingRollbackShape.Status, "A rolled-back create must be absent from the native board.");
+            // The checked transaction deliberately deleted the original guide
+            // to exercise a real delete response. Recreate that provenance
+            // owner before the later guide-backed candidate checks and refresh
+            // the lifecycle checkpoint they must use.
+            var restoredGuide = await mcp.Tool("kicad_pcb_guide_create", new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(guideCreate),
+                expectedStateJson = rollbackStateJson, guideId, sourceSha256 = new string('a', 64)
+            });
+            Assert.IsFalse(restoredGuide.TryGetProperty("isError", out var restoredGuideError) && restoredGuideError.GetBoolean(), restoredGuide.GetRawText());
+            rollbackStateJson = restoredGuide.GetProperty("structuredContent").GetProperty("afterState").GetString()!;
+            guideState = rollbackStateJson;
             var candidateTrack = track.Clone(); candidateTrack.Id = new() { Value = Guid.NewGuid().ToString("D") };
             var candidateRequest = new CreateItems { Header = new() { Document = board } }; candidateRequest.Items.Add(Any.Pack(candidateTrack));
             var candidateReply = await mcp.Tool("kicad_pcb_route_candidate_validate", new

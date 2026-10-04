@@ -174,6 +174,24 @@ public sealed class PcbZoneAuthoringContractTests
         Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateReadback(expected, rotated));
     }
 
+    [TestMethod]
+    public void CopperZoneReadbackRejectsChangedOutlineAndSettings()
+    {
+        var expected = Zone("11111111-1111-1111-1111-111111111111");
+
+        var changedOutline = expected.Clone();
+        changedOutline.Outline.Polygons[0].Outline.Nodes[1].Point.XNm++;
+        var outlineError = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbZoneAuthoringContract.ValidateReadback(expected, changedOutline));
+        Assert.AreEqual("pcb_zone_readback_mismatch", outlineError.Code);
+
+        var changedSettings = expected.Clone();
+        changedSettings.CopperSettings.Clearance.ValueNm++;
+        var settingsError = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbZoneAuthoringContract.ValidateReadback(expected, changedSettings));
+        Assert.AreEqual("pcb_zone_readback_mismatch", settingsError.Code);
+    }
+
     private static Zone Zone(string id)
     {
         var zone = new Zone

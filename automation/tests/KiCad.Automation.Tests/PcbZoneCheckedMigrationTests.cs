@@ -38,6 +38,9 @@ public sealed class PcbZoneCheckedMigrationTests
             Assert.IsTrue(createdData.GetProperty("nativeReceiptAvailable").GetBoolean(), Text(created));
             Assert.IsTrue(createdData.GetProperty("replaySafe").GetBoolean(), Text(created));
             Assert.IsTrue(createdData.GetProperty("mutationConfirmed").GetBoolean(), Text(created));
+            Assert.IsTrue(createdData.GetProperty("authoredReadbackVerified").GetBoolean(), Text(created));
+            Assert.IsTrue(createdData.GetProperty("postCommitVerified").GetBoolean(), Text(created));
+            Assert.IsTrue(createdData.GetProperty("refillRequired").GetBoolean(), Text(created));
             Assert.AreEqual(CheckedPcbItemTransactionState.CpbtsCompleted.ToString(), createdData.GetProperty("state").GetString());
 
             var replay = await tools.Create(transport.InstanceId, document, input, expected, operationId, default);
@@ -117,6 +120,11 @@ public sealed class PcbZoneCheckedMigrationTests
             Assert.IsFalse(updateReplay.IsError ?? false, Text(updateReplay));
             Assert.IsTrue(JsonSerializer.SerializeToElement(updateReplay.StructuredContent).GetProperty("replayed").GetBoolean(), Text(updateReplay));
 
+            JsonElement updateData = JsonSerializer.SerializeToElement(updated.StructuredContent);
+            Assert.IsTrue(updateData.GetProperty("authoredReadbackVerified").GetBoolean(), Text(updated));
+            Assert.IsTrue(updateData.GetProperty("postCommitVerified").GetBoolean(), Text(updated));
+            Assert.IsTrue(updateData.GetProperty("refillRequired").GetBoolean(), Text(updated));
+
             // A delete has the same target preflight requirement. Its first
             // call reads the copper zone; the exact operation ID then settles
             // from the receipt even after that live read is unavailable.
@@ -131,6 +139,33 @@ public sealed class PcbZoneCheckedMigrationTests
             Assert.AreEqual(2, transport.ItemReads, "Only the first update and delete may read the live target.");
             Assert.AreEqual(2, transport.CheckedMutations, "Receipt replays must not resubmit checked mutations.");
             Assert.AreEqual(0, transport.LegacyMutations);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public async Task CommittedReceiptWithAlteredZoneReadbackIsRejectedWithoutPostCommitClaim()
+    {
+        string root = Directory.CreateTempSubdirectory("pcb-zone-readback-mismatch-").FullName;
+        try
+        {
+            var transport = new ZoneTransport { CorruptReadback = true };
+            var registry = new InstanceRegistry(transport, root);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(root, "native.sock")), transport.InstanceId);
+            var tools = new PcbZoneAuthoringTools(registry);
+            var state = State(root, transport.Epoch, sequence: 5, digest: 'a');
+            var input = Input(Guid.NewGuid().ToString("D"));
+            var reply = await tools.Create(transport.InstanceId,
+                SchematicJson.Formatter.Format(state.Document), input,
+                SchematicJson.Formatter.Format(state), Guid.NewGuid().ToString("D"), default);
+
+            Assert.IsTrue(reply.IsError ?? false, Text(reply));
+            JsonElement data = JsonSerializer.SerializeToElement(reply.StructuredContent);
+            Assert.AreEqual("pcb_zone_readback_mismatch", data.GetProperty("errorCode").GetString(), Text(reply));
+            Assert.IsTrue(data.GetProperty("mutationConfirmed").GetBoolean(), Text(reply));
+            Assert.IsFalse(data.GetProperty("authoredReadbackVerified").GetBoolean(), Text(reply));
+            Assert.IsFalse(data.GetProperty("postCommitVerified").GetBoolean(), Text(reply));
+            Assert.IsTrue(data.GetProperty("refillRequired").GetBoolean(), Text(reply));
         }
         finally { Directory.Delete(root, true); }
     }
@@ -191,6 +226,7 @@ public sealed class PcbZoneCheckedMigrationTests
         internal string Epoch { get; } = Guid.NewGuid().ToString("D");
         internal string InstanceId { get; } = Guid.NewGuid().ToString("D");
         internal bool RejectUpdates { get; init; }
+        internal bool CorruptReadback { get; init; }
         internal bool LiveBoardChanged { get; set; }
         internal DocumentLifecycleState? LifecycleState { get; set; }
         internal Zone? Existing { get; set; }
@@ -271,25 +307,43 @@ public sealed class PcbZoneCheckedMigrationTests
             return Reply(receipt);
         }
 
-        private static CheckedPcbItemTransactionReceipt CompletedCreate(CheckedPcbItemTransaction request) =>
-            Completed(request, new PcbItemOperationResult
+        private CheckedPcbItemTransactionReceipt CompletedCreate(CheckedPcbItemTransaction request)
+        {
+            Any item = request.Operations[0].Create.Items[0].Clone();
+            if (CorruptReadback)
+            {
+                Zone corrupted = item.Unpack<Zone>();
+                corrupted.Name = "receipt changed";
+                item = Any.Pack(corrupted);
+            }
+            return Completed(request, new PcbItemOperationResult
             {
                 Create = new CreateItemsResponse
                 {
                     Status = ItemRequestStatus.IrsOk,
-                    CreatedItems = { new ItemCreationResult { Status = new() { Code = ItemStatusCode.IscOk }, Item = request.Operations[0].Create.Items[0].Clone() } }
+                    CreatedItems = { new ItemCreationResult { Status = new() { Code = ItemStatusCode.IscOk }, Item = item } }
                 }
             });
+        }
 
-        private static CheckedPcbItemTransactionReceipt CompletedUpdate(CheckedPcbItemTransaction request) =>
-            Completed(request, new PcbItemOperationResult
+        private CheckedPcbItemTransactionReceipt CompletedUpdate(CheckedPcbItemTransaction request)
+        {
+            Any item = request.Operations[0].Update.Items[0].Clone();
+            if (CorruptReadback)
+            {
+                Zone corrupted = item.Unpack<Zone>();
+                corrupted.CopperSettings.Clearance.ValueNm++;
+                item = Any.Pack(corrupted);
+            }
+            return Completed(request, new PcbItemOperationResult
             {
                 Update = new UpdateItemsResponse
                 {
                     Status = ItemRequestStatus.IrsOk,
-                    UpdatedItems = { new ItemUpdateResult { Status = new() { Code = ItemStatusCode.IscOk }, Item = request.Operations[0].Update.Items[0].Clone() } }
+                    UpdatedItems = { new ItemUpdateResult { Status = new() { Code = ItemStatusCode.IscOk }, Item = item } }
                 }
             });
+        }
 
         private static CheckedPcbItemTransactionReceipt CompletedDelete(CheckedPcbItemTransaction request) =>
             Completed(request, new PcbItemOperationResult

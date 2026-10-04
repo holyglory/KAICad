@@ -46,7 +46,7 @@ public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
             ZoneMutation.Create, cancellationToken));
 
     [McpServerTool(Name = "kicad_pcb_zone_update"),
-     Description("Update one existing typed copper zone through KiCad's native board API. zone is task-oriented input and must retain the existing canonical UUID; the target must already be a native copper Zone and the board must still equal expectedStateJson. The checked native operation is lifecycle-guarded and retains a receipt for exact operationId replay. Native-derived fill polygons and parent links are preserved instead of silently overwritten."),
+     Description("Update one existing typed copper zone through KiCad's native board API. zone is task-oriented input and must retain the existing canonical UUID; the target must already be a native copper Zone and the board must still equal expectedStateJson. The checked native operation is lifecycle-guarded and retains a receipt for exact operationId replay. Native-owned metadata that is outside the authoring input is preserved where safe; derived fill polygons are discarded and refillRequired remains true until the separate native refill operation completes."),
      KiCadCapability("pcb-zones", "compiled-mcp plus-native-board-api", "outcome:p16f42b1cbade388b; explicit PCB document, typed zone input and KIID, process epoch, lifecycle revision and digest, operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Update(string instanceId, string documentJson, PcbZoneAuthoringInput zone,
@@ -156,10 +156,12 @@ public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
         if (inspected.Receipt is { State: not CheckedPcbItemTransactionState.CpbtsNotFound })
         {
             inspected.Receipt.Replayed = true;
-            return ZoneMutationData(inspected, mutation, targetId);
+            return ZoneMutationData(inspected, mutation, targetId,
+                AuthoredZone(rawRequest, mutation));
         }
         if (inspected.ErrorCode is not null)
-            return ZoneMutationData(inspected, mutation, targetId);
+            return ZoneMutationData(inspected, mutation, targetId,
+                AuthoredZone(rawRequest, mutation));
 
         // The checked native controller performs authoritative lifecycle
         // admission immediately after this managed target preflight.
@@ -195,7 +197,8 @@ public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
                 mutation, targetId, requestedZone!.Clone(), callerExpected, checkedRequest.Clone());
         }
         var outcome = await PcbCheckedItemDispatch.ApplyAsync(registry, instanceId, checkedRequest, cancellationToken);
-        return ZoneMutationData(outcome, mutation, targetId);
+        return ZoneMutationData(outcome, mutation, targetId,
+            AuthoredZone(checkedRequest, mutation));
     }
 
     private bool TryCachedUpdate(string instanceId, string operationId, string targetId,
@@ -242,8 +245,45 @@ public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
         && CheckedSchematicContract.FileCoverage(expected)
         && CheckedSchematicContract.FileCoverage(actual);
 
+    private static Zone? AuthoredZone(CheckedPcbItemTransaction request, ZoneMutation mutation)
+    {
+        if (mutation == ZoneMutation.Delete || request.Operations.Count == 0)
+            return null;
+
+        PcbItemOperation operation = request.Operations[0];
+        Any? item = operation.ActionCase switch
+        {
+            PcbItemOperation.ActionOneofCase.Create when operation.Create.Items.Count == 1
+                => operation.Create.Items[0],
+            PcbItemOperation.ActionOneofCase.Update when operation.Update.Items.Count == 1
+                => operation.Update.Items[0],
+            _ => null
+        };
+        return item is not null && item.Is(Zone.Descriptor) ? item.Unpack<Zone>() : null;
+    }
+
+    private static Zone? CommittedZone(CheckedPcbItemTransactionReceipt receipt,
+        ZoneMutation mutation)
+    {
+        if (receipt.Results.Count == 0)
+            return null;
+
+        PcbItemOperationResult result = receipt.Results[0];
+        Any? item = mutation switch
+        {
+            ZoneMutation.Create when result.ResultCase == PcbItemOperationResult.ResultOneofCase.Create
+                && result.Create.CreatedItems.Count == 1
+                => result.Create.CreatedItems[0].Item,
+            ZoneMutation.Update when result.ResultCase == PcbItemOperationResult.ResultOneofCase.Update
+                && result.Update.UpdatedItems.Count == 1
+                => result.Update.UpdatedItems[0].Item,
+            _ => null
+        };
+        return item is not null && item.Is(Zone.Descriptor) ? item.Unpack<Zone>() : null;
+    }
+
     private static CallToolResult ZoneMutationData(PcbCheckedItemDispatch.Outcome outcome,
-        ZoneMutation mutation, string targetId)
+        ZoneMutation mutation, string targetId, Zone? authoredZone)
     {
         CheckedPcbItemTransactionReceipt? receipt = outcome.Receipt;
         JsonElement? receiptJson = receipt is null || outcome.UntrustedReceipt
@@ -269,6 +309,32 @@ public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
         }
 
         bool success = outcome.Completed;
+        bool authoredReadbackVerified = false;
+        AutomationException? readbackError = null;
+        if (success && authoredZone is not null && receipt is not null && !outcome.UntrustedReceipt)
+        {
+            try
+            {
+                Zone? committedZone = CommittedZone(receipt, mutation);
+                if (committedZone is null)
+                    throw new AutomationException("pcb_zone_readback_mismatch",
+                        "The checked native receipt did not return the committed copper zone.");
+                PcbZoneAuthoringContract.ValidateReadback(authoredZone, committedZone);
+                authoredReadbackVerified = true;
+            }
+            catch (AutomationException error)
+            {
+                readbackError = error;
+            }
+        }
+        // A zone create/update receipt is only post-commit verified when the
+        // receipt also carries the authored geometry and settings that passed
+        // the task-oriented readback contract. Lifecycle settlement alone does
+        // not prove that KiCad committed the requested zone content.
+        bool postCommitVerified = success
+            && receipt?.PostCommitState == CheckedPcbItemPostCommitState.CpbpsConfirmed
+            && (authoredZone is null || authoredReadbackVerified);
+        bool resultAccepted = success && (authoredZone is null || authoredReadbackVerified);
         string settlement = receipt?.State switch
         {
             CheckedPcbItemTransactionState.CpbtsCompleted => "committed",
@@ -298,7 +364,9 @@ public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
             afterState = after,
             response,
             mutationConfirmed = success,
-            postCommitVerified = success && receipt?.PostCommitState == CheckedPcbItemPostCommitState.CpbpsConfirmed,
+            authoredReadbackVerified,
+            postCommitVerified,
+            refillRequired = success && (mutation is ZoneMutation.Create or ZoneMutation.Update),
             undoableTransaction = outcome.NativeReceiptAvailable,
             atomicTransaction = true,
             transactionBoundary = "native checked PCB item transaction",
@@ -307,12 +375,12 @@ public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
             transportRetrySafe = outcome.NativeReceiptAvailable,
             operationIdCorrelationOnly = false,
             settlement,
-            errorCode = success ? null : outcome.ErrorCode,
-            errorMessage = success ? null : outcome.ErrorMessage
+            errorCode = readbackError?.Code ?? (success ? null : outcome.ErrorCode),
+            errorMessage = readbackError?.Message ?? (success ? null : outcome.ErrorMessage)
         });
         return new CallToolResult
         {
-            IsError = !success,
+            IsError = !resultAccepted,
             StructuredContent = data,
             Content = [new TextContentBlock { Text = data.GetRawText() }]
         };

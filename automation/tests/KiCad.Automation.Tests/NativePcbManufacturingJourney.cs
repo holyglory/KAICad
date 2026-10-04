@@ -277,7 +277,7 @@ public sealed partial class NativeSessionTests
                 {
                     operationId = Guid.NewGuid().ToString("D"), document = typedDocument,
                     expectedState = typedExpectedState, outputDirectory = Path.Combine(exportDirectory, "bad-render"),
-                    job = new { exportRender = new { width = 32, height = 240, format = "RF_PNG" } }
+                    job = new { exportRender = new { width = 32, height = 240, format = "RfPng" } }
                 }
             });
             Assert.IsTrue(malformedRender.TryGetProperty("isError", out var malformedRenderError)

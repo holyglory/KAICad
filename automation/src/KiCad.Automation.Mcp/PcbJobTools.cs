@@ -54,6 +54,7 @@ public sealed class PcbJobTools(InstanceRegistry registry)
         if (input.Job is null)
             throw new AutomationException("invalid_pcb_export_job", "Exactly one concrete PCB manufacturing job setting is required.");
         input.Job.ApplyTo(request);
+        PcbManufacturingContract.ValidateRequest(request);
 
         NativeClient client = registry.Client(instanceId);
         AutomationSession session = await client.HandshakeAsync(cancellationToken);
@@ -61,6 +62,7 @@ public sealed class PcbJobTools(InstanceRegistry registry)
             throw new AutomationException("stale_process_epoch", "The lifecycle observation belongs to another native process epoch.");
         PcbManufacturingExportReceipt receipt = await client.InvokeAsync<RunPcbManufacturingExport,
             PcbManufacturingExportReceipt>(request, cancellationToken);
+        PcbManufacturingContract.ValidateReceipt(receipt, document, expected, input.OperationId, expected.ProcessEpoch);
         return Data(new
         {
             instanceId,
@@ -118,6 +120,8 @@ public sealed class PcbJobTools(InstanceRegistry registry)
                 OperationId = operationId,
                 ProcessEpoch = processEpoch
             }, cancellationToken);
+        if (response.Found)
+            PcbManufacturingContract.ValidateReceipt(response.Receipt, document, null, operationId, processEpoch);
         JsonElement? receiptJson = response.Found
             ? JsonDocument.Parse(SchematicJson.Formatter.Format(response.Receipt)).RootElement.Clone()
             : null;

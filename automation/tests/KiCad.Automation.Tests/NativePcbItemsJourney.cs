@@ -1896,16 +1896,43 @@ public sealed partial class NativeSessionTests
                 Assert.IsFalse(cleanDrcUpdate.TryGetProperty("isError", out var cleanDrcUpdateError) && cleanDrcUpdateError.GetBoolean(), cleanDrcUpdate.GetRawText());
                 cleanDrc = SchematicJson.Parser.Parse<PcbDrcJobState>(cleanDrcUpdate.GetProperty("content")[0].GetProperty("text").GetString()!);
             }
+            // A terminal worker result is not enough for a checked commit: read
+            // it once with the exact ordered candidate so the retained native
+            // snapshot proves payload identity as well as freshness.
+            var verifiedCleanDrcReply = await mcp.Tool("kicad_pcb_drc_job", new
+            {
+                instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard), jobId = cleanDrc.JobId,
+                processEpoch = client.Epoch, candidateRequestJson = BoardJson.Formatter.Format(cleanCandidate)
+            });
+            Assert.IsFalse(verifiedCleanDrcReply.TryGetProperty("isError", out var verifiedCleanDrcError)
+                && verifiedCleanDrcError.GetBoolean(), verifiedCleanDrcReply.GetRawText());
+            cleanDrc = SchematicJson.Parser.Parse<PcbDrcJobState>(verifiedCleanDrcReply.GetProperty("content")[0].GetProperty("text").GetString()!);
             Assert.IsTrue(cleanDrc.WorkerFinished, "Clean route DRC did not reach a terminal state.");
             Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, cleanDrc.Status, cleanDrc.ErrorMessage);
+            Assert.AreEqual(cleanBoard, cleanDrc.Document);
+            Assert.AreEqual(client.Epoch, cleanDrc.ProcessEpoch);
+            Assert.AreEqual(cleanState.Revision, cleanDrc.CheckedRevision);
             Assert.IsTrue(cleanDrc.SnapshotComplete);
             Assert.IsTrue(cleanDrc.ResultsFresh);
+            Assert.IsTrue(cleanDrc.CandidateDryRun);
+            Assert.IsTrue(cleanDrc.CandidatePayloadVerified);
+            CollectionAssert.AreEqual(cleanCandidate.Items.Select(RouteIdentity).ToArray(), cleanDrc.CandidateItemIds.ToArray());
             Assert.IsEmpty(cleanDrc.Findings, "The positive checked route fixture must be DRC-clean.");
+            Assert.IsFalse(cleanState.CompleteChangeTracking,
+                "Checked PCB route admission uses the exact lifecycle digest and file baselines; generic complete tracking remains unqualified.");
+            Assert.IsTrue(cleanState.DiskBaselineChecked);
+            Assert.IsTrue(CheckedSchematicContract.FileCoverage(cleanState));
+            string cleanOperationId = Guid.NewGuid().ToString("D");
+            var cleanRequest = new CheckedPcbRouteCommit
+            {
+                Candidate = cleanCandidate, ExpectedState = cleanState, DrcJobId = cleanDrc.JobId,
+                OperationId = cleanOperationId, MaximumResultBytes = 4 * 1024 * 1024
+            };
             var cleanCommit = await mcp.Tool("kicad_pcb_route_commit", new
             {
                 instanceId, requestJson = BoardJson.Formatter.Format(cleanCandidate),
                 expectedStateJson = SchematicJson.Formatter.Format(cleanState),
-                drcJobStateJson = SchematicJson.Formatter.Format(cleanDrc), operationId = Guid.NewGuid().ToString("D")
+                drcJobStateJson = SchematicJson.Formatter.Format(cleanDrc), operationId = cleanOperationId
             });
             Assert.IsFalse(cleanCommit.TryGetProperty("isError", out var cleanCommitError) && cleanCommitError.GetBoolean(), cleanCommit.GetRawText());
             var cleanCommitData = cleanCommit.GetProperty("structuredContent");
@@ -1913,10 +1940,13 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(cleanCommitData.GetProperty("nativeReceipt").GetBoolean());
             var cleanAfter = SchematicJson.Parser.Parse<DocumentLifecycleState>(cleanCommitData.GetProperty("afterState").GetString()!);
             Assert.IsGreaterThan(cleanState.Revision.Sequence, cleanAfter.Revision.Sequence);
+            Assert.IsFalse(cleanAfter.CompleteChangeTracking);
+            Assert.IsTrue(cleanAfter.DiskBaselineChecked);
+            Assert.IsTrue(CheckedSchematicContract.FileCoverage(cleanAfter));
             var committedClean = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
             { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbTrace } }, token);
             Assert.IsTrue(committedClean.Items.Any(item => item.Is(Track.Descriptor)));
-            string cleanOperationId = cleanCommitData.GetProperty("operationId").GetString()!;
+            Assert.AreEqual(cleanOperationId, cleanCommitData.GetProperty("operationId").GetString());
             var replayCommit = await mcp.Tool("kicad_pcb_route_commit", new
             {
                 instanceId, requestJson = BoardJson.Formatter.Format(cleanCandidate),
@@ -1935,6 +1965,33 @@ public sealed partial class NativeSessionTests
             });
             Assert.IsFalse(receiptRead.TryGetProperty("isError", out var receiptError) && receiptError.GetBoolean(), receiptRead.GetRawText());
             Assert.AreEqual(cleanOperationId, receiptRead.GetProperty("structuredContent").GetProperty("operationId").GetString());
+            var cleanReceipt = SchematicJson.Parser.Parse<CheckedPcbRouteReceipt>(
+                receiptRead.GetProperty("structuredContent").GetProperty("receipt").GetRawText());
+            Assert.AreEqual(CheckedPcbRouteReceipt.Types.State.Completed, cleanReceipt.State);
+            Assert.IsTrue(cleanReceipt.RequestVerified);
+            Assert.AreEqual(cleanBoard, cleanReceipt.Document);
+            Assert.AreEqual(client.Epoch, cleanReceipt.ProcessEpoch);
+            Assert.AreEqual(cleanOperationId, cleanReceipt.OperationId);
+            Assert.AreEqual(cleanState, cleanReceipt.Before);
+            Assert.AreEqual(cleanAfter, cleanReceipt.After);
+            Assert.AreEqual(1, cleanReceipt.Created.CreatedItems.Count);
+            Assert.AreEqual(RouteShape(cleanCandidate.Items.Single()), RouteShape(cleanReceipt.Created.CreatedItems.Single().Item));
+            CheckedPcbRouteContract.ValidateResult(cleanRequest, cleanReceipt, inspect: false);
+
+            // Native receipts belong to their KiCad process.  A live sibling
+            // instance must not be able to inspect this operation, even while
+            // both editors are running under the same MCP host.
+            var sibling = await SiblingInstance(client, token);
+            var siblingAttach = await mcp.Tool("kicad_instance_attach", new
+            { endpoint = sibling.Endpoint, expectedInstanceId = sibling.InstanceId });
+            Assert.IsFalse(siblingAttach.TryGetProperty("isError", out var siblingAttachError) && siblingAttachError.GetBoolean(), siblingAttach.GetRawText());
+            var siblingReceipt = await mcp.Tool("kicad_pcb_route_receipt", new
+            {
+                instanceId = sibling.InstanceId, requestJson = SchematicJson.Formatter.Format(cleanRequest),
+                processEpoch = client.Epoch, operationId = cleanOperationId
+            });
+            Assert.IsTrue(siblingReceipt.TryGetProperty("isError", out var siblingReceiptError) && siblingReceiptError.GetBoolean(), siblingReceipt.GetRawText());
+            Assert.AreEqual("route_receipt_failed", siblingReceipt.GetProperty("structuredContent").GetProperty("errorCode").GetString(), siblingReceipt.GetRawText());
 
             // Identity-preserving replacement: update the committed route in
             // place while adding a short continuation in the same transaction.
@@ -1994,6 +2051,12 @@ public sealed partial class NativeSessionTests
             identityDrc = SchematicJson.Parser.Parse<PcbDrcJobState>(identityVerifiedReply.GetProperty("content")[0].GetProperty("text").GetString()!);
             Assert.IsTrue(identityDrc.WorkerFinished, identityDrc.ErrorMessage);
             Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, identityDrc.Status, identityDrc.ErrorMessage);
+            Assert.AreEqual(cleanBoard, identityDrc.Document);
+            Assert.AreEqual(client.Epoch, identityDrc.ProcessEpoch);
+            Assert.AreEqual(cleanAfter.Revision, identityDrc.CheckedRevision);
+            Assert.IsTrue(identityDrc.CandidateDryRun);
+            Assert.IsTrue(identityDrc.CandidatePayloadVerified);
+            CollectionAssert.AreEqual(identityDrcCandidate.Items.Select(RouteIdentity).ToArray(), identityDrc.CandidateItemIds.ToArray());
             Assert.IsEmpty(identityDrc.Findings, SchematicJson.Formatter.Format(identityDrc));
             var identityCommit = await mcp.Tool("kicad_pcb_route_commit", new
             {
@@ -2016,8 +2079,53 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(replacementTrack.End, identityRead.Items
                 .Single(item => item.Is(Track.Descriptor) && item.Unpack<Track>().Id.Value == originalCleanTrack.Id.Value)
                 .Unpack<Track>().End);
+
+            // The checked route transaction is one native undo entry.  Undo
+            // must restore the original Track and remove the continuation;
+            // redo must restore both persisted geometries before save/reload.
+            NativeKeyboard.SchematicShortcut(display, focusProcessId, "z", "PCB Editor", true, true,
+                clickFromLeft: 500, clickFromTop: 500);
+            GetItemsResponse identityUndo = null!;
+            using (var identityUndoDeadline = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                identityUndoDeadline.CancelAfter(TimeSpan.FromSeconds(8));
+                while (true)
+                {
+                    identityUndo = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+                    { Header = new() { Document = cleanBoard }, Items = { originalCleanTrack.Id, continuation.Id } }, identityUndoDeadline.Token);
+                    if (identityUndo.Items.Count == 1
+                        && identityUndo.Items.Single().Is(Track.Descriptor)
+                        && identityUndo.Items.Single().Unpack<Track>().End.Equals(originalCleanTrack.End))
+                        break;
+                    await Task.Delay(100, identityUndoDeadline.Token);
+                }
+            }
+            Assert.AreEqual(originalCleanTrack.End, identityUndo.Items.Single().Unpack<Track>().End);
+
+            NativeKeyboard.SchematicShortcut(display, focusProcessId, "y", "PCB Editor", true, true,
+                clickFromLeft: 500, clickFromTop: 500);
+            GetItemsResponse identityRedo = null!;
+            using (var identityRedoDeadline = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                identityRedoDeadline.CancelAfter(TimeSpan.FromSeconds(8));
+                while (true)
+                {
+                    identityRedo = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+                    { Header = new() { Document = cleanBoard }, Items = { originalCleanTrack.Id, continuation.Id } }, identityRedoDeadline.Token);
+                    if (identityRedo.Items.Count == 2
+                        && identityRedo.Items.Single(item => item.Is(Track.Descriptor)
+                            && item.Unpack<Track>().Id.Value == originalCleanTrack.Id.Value).Unpack<Track>().End.Equals(replacementTrack.End))
+                        break;
+                    await Task.Delay(100, identityRedoDeadline.Token);
+                }
+            }
+            Assert.AreEqual(replacementTrack.End, identityRedo.Items
+                .Single(item => item.Is(Track.Descriptor) && item.Unpack<Track>().Id.Value == originalCleanTrack.Id.Value)
+                .Unpack<Track>().End);
+            var identityRedoState = await ObserveLifecycleState(client, cleanBoard, token);
+            Assert.IsGreaterThan(cleanAfter.Revision.Sequence, identityRedoState.Revision.Sequence);
             var identitySave = await mcp.Tool("kicad_document_save", new
-            { instanceId, expectedStateJson = identityData.GetProperty("afterState").GetString(), operationId = Guid.NewGuid().ToString("D") });
+            { instanceId, expectedStateJson = SchematicJson.Formatter.Format(identityRedoState), operationId = Guid.NewGuid().ToString("D") });
             Assert.IsFalse(identitySave.TryGetProperty("isError", out var identitySaveError) && identitySaveError.GetBoolean(), identitySave.GetRawText());
             var identityClose = await mcp.Tool("kicad_document_close", new
             { instanceId, expectedStateJson = identitySave.GetProperty("structuredContent").GetProperty("observedState").GetRawText(), operationId = Guid.NewGuid().ToString("D") });
@@ -2031,6 +2139,79 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(replacementTrack.End, persistedIdentity.Items
                 .Single(item => item.Is(Track.Descriptor) && item.Unpack<Track>().Id.Value == originalCleanTrack.Id.Value)
                 .Unpack<Track>().End);
+            // A checked route DRC is tied to one exact lifecycle checkpoint.
+            // Advance that checkpoint with an ordinary create, then prove the
+            // old checked request is rejected before native route mutation.
+            var staleState = await ObserveLifecycleState(client, cleanBoard, token);
+            var staleTrack = originalCleanTrack.Clone();
+            staleTrack.Id = new() { Value = Guid.NewGuid().ToString("D") };
+            staleTrack.Start = new Vector2 { XNm = 10_000_000, YNm = 10_000_000 };
+            staleTrack.End = new Vector2 { XNm = 10_500_000, YNm = 10_000_000 };
+            var staleCandidate = new CreateItems { Header = new() { Document = cleanBoard } };
+            staleCandidate.Items.Add(Any.Pack(staleTrack));
+            var staleDrcReply = await mcp.Tool("kicad_pcb_drc_start", new
+            {
+                instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard),
+                operationId = Guid.NewGuid().ToString("D"), refillZones = false,
+                reportAllTrackErrors = true, testFootprints = false,
+                expectedRevisionJson = SchematicJson.Formatter.Format(staleState.Revision),
+                processEpoch = client.Epoch, candidateRequestJson = BoardJson.Formatter.Format(staleCandidate)
+            });
+            Assert.IsFalse(staleDrcReply.TryGetProperty("isError", out var staleDrcStartError) && staleDrcStartError.GetBoolean(), staleDrcReply.GetRawText());
+            var staleDrc = SchematicJson.Parser.Parse<PcbDrcJobState>(staleDrcReply.GetProperty("content")[0].GetProperty("text").GetString()!);
+            for (int attempt = 0; attempt < 60 && !staleDrc.WorkerFinished; ++attempt)
+            {
+                await Task.Delay(100, token);
+                var staleDrcUpdate = await mcp.Tool("kicad_pcb_drc_job", new
+                {
+                    instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard), jobId = staleDrc.JobId,
+                    processEpoch = client.Epoch, candidateRequestJson = BoardJson.Formatter.Format(staleCandidate)
+                });
+                Assert.IsFalse(staleDrcUpdate.TryGetProperty("isError", out var staleDrcUpdateError) && staleDrcUpdateError.GetBoolean(), staleDrcUpdate.GetRawText());
+                staleDrc = SchematicJson.Parser.Parse<PcbDrcJobState>(staleDrcUpdate.GetProperty("content")[0].GetProperty("text").GetString()!);
+            }
+            var staleDrcVerifiedReply = await mcp.Tool("kicad_pcb_drc_job", new
+            {
+                instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard), jobId = staleDrc.JobId,
+                processEpoch = client.Epoch, candidateRequestJson = BoardJson.Formatter.Format(staleCandidate)
+            });
+            Assert.IsFalse(staleDrcVerifiedReply.TryGetProperty("isError", out var staleDrcVerifiedError) && staleDrcVerifiedError.GetBoolean(), staleDrcVerifiedReply.GetRawText());
+            staleDrc = SchematicJson.Parser.Parse<PcbDrcJobState>(staleDrcVerifiedReply.GetProperty("content")[0].GetProperty("text").GetString()!);
+            Assert.IsTrue(staleDrc.WorkerFinished, staleDrc.ErrorMessage);
+            Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, staleDrc.Status, staleDrc.ErrorMessage);
+            Assert.IsTrue(staleDrc.CandidateDryRun && staleDrc.CandidatePayloadVerified, SchematicJson.Formatter.Format(staleDrc));
+            Assert.AreEqual(staleState.Revision, staleDrc.CheckedRevision);
+            CollectionAssert.AreEqual(staleCandidate.Items.Select(RouteIdentity).ToArray(), staleDrc.CandidateItemIds.ToArray());
+
+            var staleCreate = await mcp.Tool("kicad_pcb_items_create", new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(staleCandidate),
+                expectedStateJson = SchematicJson.Formatter.Format(staleState)
+            });
+            Assert.IsFalse(staleCreate.TryGetProperty("isError", out var staleCreateError) && staleCreateError.GetBoolean(), staleCreate.GetRawText());
+            string staleCreatedStateJson = staleCreate.GetProperty("structuredContent").GetProperty("afterState").GetString()!;
+            var staleCreatedState = SchematicJson.Parser.Parse<DocumentLifecycleState>(staleCreatedStateJson);
+            var staleCommit = await mcp.Tool("kicad_pcb_route_commit", new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(staleCandidate),
+                expectedStateJson = SchematicJson.Formatter.Format(staleState),
+                drcJobStateJson = SchematicJson.Formatter.Format(staleDrc), operationId = Guid.NewGuid().ToString("D")
+            });
+            Assert.IsTrue(staleCommit.TryGetProperty("isError", out var staleCommitError) && staleCommitError.GetBoolean(), staleCommit.GetRawText());
+            Assert.AreEqual("stale_document_state", staleCommit.GetProperty("structuredContent").GetProperty("errorCode").GetString(), staleCommit.GetRawText());
+            var staleRead = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Items = { staleTrack.Id } }, token);
+            Assert.AreEqual(1, staleRead.Items.Count, staleCommit.GetRawText());
+            Assert.AreEqual(staleTrack.End, staleRead.Items.Single().Unpack<Track>().End,
+                "A stale checked route must not duplicate or rewrite the already-created Track.");
+            Assert.AreEqual(staleCreatedState, await ObserveLifecycleState(client, cleanBoard, token));
+            var staleDelete = new DeleteItems { Header = new() { Document = cleanBoard }, ItemIds = { staleTrack.Id.Clone() } };
+            var staleDeleteReply = await mcp.Tool("kicad_pcb_items_delete", new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(staleDelete),
+                expectedStateJson = SchematicJson.Formatter.Format(staleCreatedState)
+            });
+            Assert.IsFalse(staleDeleteReply.TryGetProperty("isError", out var staleDeleteError) && staleDeleteError.GetBoolean(), staleDeleteReply.GetRawText());
             string cleanExportStateJson = SchematicJson.Formatter.Format(await ObserveLifecycleState(client, cleanBoard, token));
 
             string exportDirectory = Directory.CreateTempSubdirectory("kicad-pcb-export-").FullName;

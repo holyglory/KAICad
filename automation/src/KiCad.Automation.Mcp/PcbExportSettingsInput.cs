@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Kiapi.Board.Jobs;
 using Kiapi.Board.Types;
@@ -7,7 +8,82 @@ using KiCad.Automation.Protocol;
 
 namespace KiCad.Automation.Mcp;
 
-internal static class PcbExportDtoValidation { public static void Enum<T>(T value, string name) where T : struct, System.Enum { if (!System.Enum.IsDefined(value)) throw new AutomationException("invalid_pcb_export_enum", $"{name} is not a defined value."); } }
+internal static class PcbExportDtoValidation
+{
+    public static void Enum<T>(T value, string name) where T : struct, System.Enum
+    {
+        if (!System.Enum.IsDefined(value))
+            throw new AutomationException("invalid_pcb_export_enum", $"{name} is not a defined value.");
+    }
+
+    public static BoardLayer Layer(string value, string name)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            throw new AutomationException("invalid_pcb_export_enum", $"{name} contains an empty board layer.");
+
+        string compact = string.Concat(value.Where(char.IsLetterOrDigit));
+        string enumName = compact.StartsWith("BL", StringComparison.OrdinalIgnoreCase)
+            ? "Bl" + compact[2..]
+            : "Bl" + compact;
+        if (!System.Enum.TryParse(enumName, ignoreCase: true, out BoardLayer layer)
+            || !System.Enum.IsDefined(layer))
+            throw new AutomationException("invalid_pcb_export_enum", $"{name} contains unknown board layer '{value}'.");
+        return layer;
+    }
+}
+
+/// <summary>
+/// The public board protobuf uses names such as <c>BL_F_Cu</c>, while the
+/// generated CLR enum is named <c>BlFCu</c>. MCP clients commonly send the
+/// protobuf spelling, so accept that spelling alongside KiCad names and the
+/// existing numeric enum representation without weakening enum validation.
+/// </summary>
+internal sealed class BoardLayerListJsonConverter : JsonConverter<List<BoardLayer>>
+{
+    public override List<BoardLayer> Read(ref Utf8JsonReader reader, Type typeToConvert,
+        JsonSerializerOptions options)
+    {
+        if (reader.TokenType != JsonTokenType.StartArray)
+            throw new JsonException("Board layer selections must be an array.");
+
+        var result = new List<BoardLayer>();
+        while (reader.Read())
+        {
+            if (reader.TokenType == JsonTokenType.EndArray)
+                return result;
+
+            BoardLayer layer;
+            if (reader.TokenType == JsonTokenType.String)
+            {
+                try { layer = PcbExportDtoValidation.Layer(reader.GetString()!, "Board layer selection"); }
+                catch (AutomationException error) { throw new JsonException(error.Message, error); }
+            }
+            else if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt32(out int value))
+            {
+                layer = (BoardLayer)value;
+                if (!System.Enum.IsDefined(layer))
+                    throw new JsonException($"Board layer enum value {value} is not defined.");
+            }
+            else
+            {
+                throw new JsonException("Board layer selections must contain a protobuf name or defined enum value.");
+            }
+
+            result.Add(layer);
+        }
+
+        throw new JsonException("Board layer selections must be a complete array.");
+    }
+
+    public override void Write(Utf8JsonWriter writer, List<BoardLayer> value,
+        JsonSerializerOptions options)
+    {
+        writer.WriteStartArray();
+        foreach (BoardLayer layer in value)
+            writer.WriteNumberValue((int)layer);
+        writer.WriteEndArray();
+    }
+}
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed class RunBoardJobExport3DInput
@@ -464,7 +540,9 @@ public sealed class RunBoardJobExportStatsInput
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed class BoardPlotSettingsInput
 {
+    [JsonConverter(typeof(BoardLayerListJsonConverter))]
     public List<BoardLayer> Layers { get; set; } = [];
+    [JsonConverter(typeof(BoardLayerListJsonConverter))]
     public List<BoardLayer> CommonLayers { get; set; } = [];
     public string ColorTheme { get; set; } = "";
     public string DrawingSheet { get; set; } = "";

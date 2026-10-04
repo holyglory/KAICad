@@ -1,4 +1,6 @@
 using System.Text.Json;
+using Kiapi.Board.Types;
+using KiCad.Automation.Mcp;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace KiCad.Automation.Tests;
@@ -10,6 +12,33 @@ namespace KiCad.Automation.Tests;
 [TestClass]
 public sealed class PcbManufacturingMcpProcessTests
 {
+    [TestMethod]
+    public void TypedManufacturingInputAcceptsProtobufBoardLayerNamesAndRejectsUnknownLayers()
+    {
+        const string json = """
+            {
+              "job": {
+                "exportSvg": {
+                  "plotSettings": {
+                    "layers": ["BL_F_Cu", "BL_F_SilkS", "BL_Edge_Cuts"],
+                    "commonLayers": ["F.Cu"]
+                  }
+                }
+              }
+            }
+            """;
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        PcbManufacturingExportInput input = JsonSerializer.Deserialize<PcbManufacturingExportInput>(json, options)!;
+        Assert.IsNotNull(input.Job?.ExportSvg?.PlotSettings);
+        CollectionAssert.AreEqual(new[] { BoardLayer.BlFCu, BoardLayer.BlFSilkS, BoardLayer.BlEdgeCuts },
+            input.Job.ExportSvg.PlotSettings.Layers);
+        CollectionAssert.AreEqual(new[] { BoardLayer.BlFCu }, input.Job.ExportSvg.PlotSettings.CommonLayers);
+        Assert.IsNotNull(input.Job.ExportSvg.ToNative().PlotSettings);
+
+        const string invalid = "{\"job\":{\"exportSvg\":{\"plotSettings\":{\"layers\":[\"BL_NotALayer\"]}}}}";
+        Assert.ThrowsExactly<JsonException>(() => JsonSerializer.Deserialize<PcbManufacturingExportInput>(invalid, options));
+    }
+
     [TestMethod]
     public async Task TypedManufacturingToolPublishesJobSchemaAndRejectsMalformedIdentity()
     {

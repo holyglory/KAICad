@@ -416,6 +416,29 @@ public sealed class McpProcessTests
                 Assert.IsTrue(refused.GetProperty("isError").GetBoolean(), refused.GetRawText());
                 Assert.IsFalse(refused.GetProperty("structuredContent").GetProperty("mutationSubmitted").GetBoolean(), refused.GetRawText());
             }
+            string crossProbeDocument = "{\"type\":\"DOCTYPE_PCB\",\"project\":{\"name\":\"cross-probe-contract\",\"path\":\"/tmp\"},\"boardFilename\":\"board.kicad_pcb\"}";
+            foreach (var (requestId, tool, requestJson) in new (int RequestId, string Tool, string RequestJson)[]
+            {
+                (9364, "kicad_pcb_sync_selection", "{\"context\":\"SSC_EXPLICIT\",\"mode\":\"SSM_UNKNOWN\"}"),
+                (9365, "kicad_pcb_sync_selection", "{\"context\":\"SSC_EXPLICIT\",\"mode\":\"SSM_ITEMS_ONLY\",\"items\":[{}]}"),
+                (9366, "kicad_pcb_sync_selection", "{\"context\":\"SSC_EXPLICIT\",\"mode\":\"SSM_ITEMS_ONLY\",\"items\":[{\"pad\":{\"reference\":\"U1\",\"number\":\"\"}}]}"),
+                (9367, "kicad_pcb_highlight_nets", "{\"netName\":[\"\"]}")
+            })
+            {
+                var crossProbeRejected = (await Request(requestId, "tools/call", new
+                {
+                    name = tool,
+                    arguments = new
+                    {
+                        instanceId = Guid.NewGuid().ToString("D"), documentJson = crossProbeDocument,
+                        requestJson, expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D")
+                    }
+                })).GetProperty("result");
+                Assert.IsTrue(crossProbeRejected.GetProperty("isError").GetBoolean(), crossProbeRejected.GetRawText());
+                Assert.AreEqual("invalid_pcb_cross_probe_request",
+                    crossProbeRejected.GetProperty("structuredContent").GetProperty("errorCode").GetString(), crossProbeRejected.GetRawText());
+                Assert.IsFalse(crossProbeRejected.GetProperty("structuredContent").GetProperty("mutationSubmitted").GetBoolean(), crossProbeRejected.GetRawText());
+            }
             // Keep literal tool calls for capability-evidence analysis; the loop above validates
             // the shared malformed-request contract, while these calls bind each declared tool.
             await Request(9340, "tools/call", new { name = "kicad_pcb_import_netlist", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D") } });

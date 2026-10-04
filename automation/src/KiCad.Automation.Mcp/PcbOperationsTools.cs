@@ -365,6 +365,7 @@ public sealed class PcbOperationsTools(InstanceRegistry registry)
         DocumentSpecifier document = Parse<DocumentSpecifier>(documentJson, "invalid_pcb_cross_probe_target");
         ValidateBoard(document, "invalid_pcb_cross_probe_target");
         TRequest request = Parse<TRequest>(requestJson, "invalid_pcb_cross_probe_request");
+        ValidateCrossProbeRequest(request);
         var (client, session, before) = await Admit(instanceId, document, expectedStateJson, operation, cancellationToken);
         TResponse response;
         try
@@ -393,6 +394,55 @@ public sealed class PcbOperationsTools(InstanceRegistry registry)
             nativeGuiOnly = true, boardMutation = false, selectionChanged = ok, nativeReceiptAvailable = false,
             operationOutcome = ok ? "completed" : "rejected", transportRetrySafe = false
         }, !ok, ok ? null : "pcb_cross_probe_rejected");
+    }
+
+    private static void ValidateCrossProbeRequest<TRequest>(TRequest request)
+        where TRequest : class, IMessage<TRequest>, new()
+    {
+        switch (request)
+        {
+            case SyncSelection selection:
+                if (selection.Context is not (SyncSelectionContext.SscImplicit or SyncSelectionContext.SscExplicit))
+                    throw new AutomationException("invalid_pcb_cross_probe_request",
+                        "SyncSelection.context must be SSC_IMPLICIT or SSC_EXPLICIT.");
+                if (selection.Mode is not (SyncSelectionMode.SsmItemsOnly or SyncSelectionMode.SsmItemsAndNets))
+                    throw new AutomationException("invalid_pcb_cross_probe_request",
+                        "SyncSelection.mode must be SSM_ITEMS_ONLY or SSM_ITEMS_AND_NETS.");
+                if (selection.Items.Count > 4096)
+                    throw new AutomationException("invalid_pcb_cross_probe_request",
+                        "SyncSelection.items must contain at most 4096 selection specs.");
+                if (selection.FocusItem is not null)
+                    ValidateSelectionSpec(selection.FocusItem, "focusItem");
+                for (int index = 0; index < selection.Items.Count; index++)
+                    ValidateSelectionSpec(selection.Items[index], $"items[{index}]");
+                break;
+
+            case HighlightNets highlight:
+                if (highlight.NetName.Count > 4096 || highlight.NetName.Any(string.IsNullOrWhiteSpace))
+                    throw new AutomationException("invalid_pcb_cross_probe_request",
+                        "HighlightNets.netName must contain at most 4096 nonempty net names.");
+                break;
+        }
+    }
+
+    private static void ValidateSelectionSpec(SelectionSpec? spec, string field)
+    {
+        if (spec is null)
+            throw new AutomationException("invalid_pcb_cross_probe_request", $"{field} must name a footprint, pad or sheet path.");
+
+        switch (spec.SpecCase)
+        {
+            case SelectionSpec.SpecOneofCase.Footprint when !string.IsNullOrWhiteSpace(spec.Footprint.Reference):
+            case SelectionSpec.SpecOneofCase.Pad when !string.IsNullOrWhiteSpace(spec.Pad.Reference)
+                && !string.IsNullOrWhiteSpace(spec.Pad.Number):
+                return;
+            case SelectionSpec.SpecOneofCase.SheetPath when spec.SheetPath.Path.Count > 0
+                && spec.SheetPath.Path.All(id => CanonicalUuid(id.Value)):
+                return;
+            default:
+                throw new AutomationException("invalid_pcb_cross_probe_request",
+                    $"{field} must name a footprint, pad or sheet path with complete identity fields.");
+        }
     }
 
     private async Task<(NativeClient Client, AutomationSession Session, DocumentLifecycleState Before)> Admit(

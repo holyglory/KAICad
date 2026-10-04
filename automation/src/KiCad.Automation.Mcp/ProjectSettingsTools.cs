@@ -18,7 +18,7 @@ public sealed class ProjectSettingsTools(InstanceRegistry registry)
     [McpServerTool(Name = "kicad_project_net_classes", ReadOnly = true),
      Description("Read the native project netclass definitions at one exact lifecycle checkpoint. documentJson identifies an open schematic or PCB in the project; expectedStateJson must be the matching kicad_document_state observation with project-settings coverage and process epoch. The common native API is project-wide, so the returned definitions are paired with the requested document only as an identity and revision guard. This never changes design data. If the connected native peer cannot expose project netclasses, the result says supported=false instead of fabricating a snapshot."),
      KiCadCapability("project-settings", "compiled-mcp plus native-common-api", "explicit project document, process epoch, lifecycle revision and project-settings coverage"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NetClassesRoundTripThroughXmlAndNativeEdits")]
     public Task<CallToolResult> NetClasses(string instanceId, string documentJson,
         string expectedStateJson, CancellationToken cancellationToken) => Execute(async () =>
     {

@@ -1,5 +1,6 @@
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
+using System.Text.Json;
 using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
 using Kiapi.Schematic.Types;
@@ -19,6 +20,46 @@ public sealed partial class NativeSessionTests
             new() { Document = document }, token);
         Task<SchematicItemBatchResult> Apply(ApplySchematicItemBatch batch) =>
             client.InvokeAsync<ApplySchematicItemBatch, SchematicItemBatchResult>(batch, token);
+        async Task<JsonElement> ReadProjectNetClasses(DocumentLifecycleState expected, string phase)
+        {
+            string stateDirectory = Directory.CreateTempSubdirectory("kicad-project-netclasses-mcp-").FullName;
+            try
+            {
+                await using var mcp = await StdioMcpFixture.StartAsync(
+                    stateDirectory, Path.Combine(evidence, processId + "-project-netclasses-mcp-" + phase + ".stderr.log"), token);
+                var session = await client.HandshakeAsync(token);
+                RequireToolSuccess(await mcp.Tool("kicad_instance_attach", new
+                { endpoint = client.Endpoint, expectedInstanceId = session.InstanceId }));
+                return await mcp.Tool("kicad_project_net_classes", new
+                {
+                    instanceId = session.InstanceId,
+                    documentJson = SchematicJson.Formatter.Format(document),
+                    expectedStateJson = SchematicJson.Formatter.Format(expected)
+                });
+            }
+            finally
+            {
+                if (Directory.Exists(stateDirectory)) Directory.Delete(stateDirectory, true);
+            }
+        }
+        static void AssertProjectNetClasses(JsonElement reply, DocumentLifecycleState expected, string phase)
+        {
+            RequireToolSuccess(reply);
+            var structured = reply.GetProperty("structuredContent");
+            Assert.IsTrue(structured.GetProperty("supported").GetBoolean(), $"{phase}: native netclass support is required.");
+            Assert.IsTrue(structured.GetProperty("nativeQuery").GetBoolean(), $"{phase}: the result must come from KiCad.");
+            Assert.IsFalse(structured.GetProperty("boardMutation").GetBoolean(), $"{phase}: reading netclasses must not mutate the board.");
+            Assert.AreEqual(SchematicJson.Formatter.Format(expected), structured.GetProperty("beforeState").GetString(),
+                $"{phase}: netclass read must use the supplied lifecycle checkpoint.");
+            Assert.AreEqual(structured.GetProperty("beforeState").GetString(), structured.GetProperty("afterState").GetString(),
+                $"{phase}: a read must leave the lifecycle checkpoint unchanged.");
+            var classes = structured.GetProperty("response").GetProperty("netClasses").EnumerateArray().ToArray();
+            Assert.IsNotEmpty(classes, $"{phase}: KiCad must return at least the Default netclass.");
+            var names = classes.Select(netClass => netClass.GetProperty("name").GetString()).ToArray();
+            Assert.AreEqual(names.Length, names.Distinct(StringComparer.Ordinal).Count(),
+                $"{phase}: native netclass names must be unique.");
+            CollectionAssert.Contains(names!, "Default", $"{phase}: KiCad must return its Default netclass.");
+        }
         ApplySchematicItemBatch Batch(SchematicScreenDataSnapshot before, SchematicNetSettings settings)
         {
             var value = settings.Clone(); value.LabelAssignments.Clear();
@@ -99,6 +140,8 @@ public sealed partial class NativeSessionTests
         await client.InvokeAsync<RevertDocument, Empty>(new() { Document = document }, token);
         var original = await Read();
         Assert.IsNotNull(original.Data.Metadata.NetSettings);
+        var originalLifecycle = await ObserveLifecycleState(client, document, token);
+        AssertProjectNetClasses(await ReadProjectNetClasses(originalLifecycle, "initial"), originalLifecycle, "initial");
         var desired = original.Data.Clone(); var settings = desired.Metadata.NetSettings;
         settings.DefaultClass.Schematic.WireWidth = new() { ValueNm = 50800 };
         settings.DefaultClass.Board.TrackWidth = new() { ValueNm = 450000 };
@@ -137,6 +180,14 @@ public sealed partial class NativeSessionTests
         var result = await Apply(batch); Assert.IsTrue(result.NetSettingsChanged);
         var applied = await Read(); Assert.AreEqual(original.Revision.Sequence + 1, applied.Revision.Sequence);
         await Same(desired, applied.Data, "applied");
+        var staleProjectNetClasses = await ReadProjectNetClasses(originalLifecycle, "stale");
+        Assert.IsTrue(staleProjectNetClasses.GetProperty("isError").GetBoolean(),
+            "A project netclass read with a pre-mutation lifecycle state must be refused.");
+        Assert.AreEqual("project_settings_state_changed",
+            staleProjectNetClasses.GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+            staleProjectNetClasses.GetRawText());
+        var appliedLifecycle = await ObserveLifecycleState(client, document, token);
+        AssertProjectNetClasses(await ReadProjectNetClasses(appliedLifecycle, "after-settings-change"), appliedLifecycle, "after-settings-change");
         Assert.AreEqual(result, await Apply(batch));
         var stale = batch.Clone(); stale.OperationId = Guid.NewGuid().ToString("D");
         await Assert.ThrowsExactlyAsync<NativeApiException>(() => Apply(stale));

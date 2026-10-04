@@ -43,6 +43,23 @@ public sealed class PcbExportRecoveryTests
     }
 
     [TestMethod]
+    public void KnownUnsubmittedCancellationIsRetryable()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-pcb-export-cancel-").FullName;
+        try
+        {
+            var record = Record(PcbExportRecoveryPolicy.Pending, nativeDispatchKnown: false,
+                nativeDispatch: false, root: root);
+            var store = new PcbExportRecoveryStore(root);
+            store.Begin(record.InstanceId, record.OperationId, record.ProcessEpoch, record.DocumentJson,
+                record.RequestFingerprintSha256, record.OutputDirectory);
+            var after = store.MarkUnknown(record.OperationId, nativeDispatch: false);
+            Assert.AreEqual(PcbExportRecoveryPolicy.Retryable, after.Status);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
     public void PublishedReceiptRequiresVerifiedOutput()
     {
         var prior = Record(PcbExportRecoveryPolicy.Pending, nativeDispatchKnown: true, nativeDispatch: true);

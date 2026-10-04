@@ -67,17 +67,18 @@ public sealed class PcbJobTools(InstanceRegistry registry)
         recovery.Begin(instanceId, input.OperationId, expected.ProcessEpoch, documentJson,
             requestFingerprint, request.OutputDirectory);
 
+        // A cancellation before the request is handed to NNG is known to be
+        // unsubmitted. Once InvokeAsync starts, cancellation is deliberately
+        // indeterminate because the native exporter may still be running.
+        if (cancellationToken.IsCancellationRequested)
+        {
+            recovery.MarkUnknown(input.OperationId, false);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
         PcbManufacturingExportReceipt receipt;
         try
         {
-            // A cancellation before the request is handed to NNG is known to be
-            // unsubmitted. Once InvokeAsync starts, cancellation is deliberately
-            // indeterminate because the native exporter may still be running.
-            if (cancellationToken.IsCancellationRequested)
-            {
-                recovery.MarkUnknown(input.OperationId, false);
-                cancellationToken.ThrowIfCancellationRequested();
-            }
             receipt = await client.InvokeAsync<RunPcbManufacturingExport,
                 PcbManufacturingExportReceipt>(request, cancellationToken);
             PcbManufacturingContract.ValidateReceipt(receipt, document, expected,

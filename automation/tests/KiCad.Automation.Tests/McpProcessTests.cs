@@ -463,6 +463,7 @@ public sealed class McpProcessTests
                 "An inaccessible native instance must not be reported as a successfully observed missing receipt.");
             await Request(9342, "tools/call", new { name = "kicad_pcb_sync_selection", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", requestJson = "{}", expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D") } });
             await Request(9343, "tools/call", new { name = "kicad_pcb_highlight_nets", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", requestJson = "{}", expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D") } });
+            await Request(9346, "tools/call", new { name = "kicad_pcb_export_reconcile", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentInput = new { }, operationId = Guid.NewGuid().ToString("D") } });
             foreach (string exportTool in new[]
             {
                 "kicad_pcb_export", "kicad_pcb_export_receipt", "kicad_pcb_export_reconcile",

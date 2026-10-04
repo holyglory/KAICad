@@ -1224,7 +1224,20 @@ public sealed partial class NativeSessionTests
                 RequireToolSuccess(state);
                 text.AppendLine(state.GetRawText());
                 foreach (string file in LifecycleResultState(state).NativeFiles)
-                    text.Append(file).Append(' ').AppendLine(Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(file, token))));
+                {
+                    // KiCad's complete native-file inventory can retain an
+                    // expected-but-absent sidecar (for example .kicad_dru).
+                    // Preserve that fact in the sibling snapshot instead of
+                    // turning an honest missing file into a harness crash.
+                    if (!File.Exists(file))
+                    {
+                        text.Append(file).AppendLine(" <missing>");
+                        continue;
+                    }
+
+                    text.Append(file).Append(' ').AppendLine(
+                        Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(file, token))));
+                }
             }
         }
         Console.WriteLine($"Other KiCad instance {sibling.InstanceId} observed: {string.Join(", ", observed)}; "

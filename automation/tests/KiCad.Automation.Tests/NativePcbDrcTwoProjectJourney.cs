@@ -337,6 +337,45 @@ public sealed partial class NativeSessionTests
                 Console.WriteLine($"Two-project PCB checks: {target.Name} edited and saved after {after} at {clock.Elapsed.TotalSeconds:F1}s.");
                 return result.ObservedState;
             }
+            async Task RefuseEditWithChangedRules(TwoProjectDrcTarget target, string after)
+            {
+                var track = await Edited(target);
+                long width = track.Width.ValueNm == 200_000 ? 220_000 : 200_000;
+                var changed = track.Clone(); changed.Width.ValueNm = width;
+                var update = new UpdateItems { Header = new() { Document = target.Board } };
+                update.Items.Add(Any.Pack(changed));
+                var before = await State(target);
+                var rules = before.FileBaselines.Single(file =>
+                    Path.GetExtension(file.Path).Equals(".kicad_dru", StringComparison.OrdinalIgnoreCase));
+                Assert.AreEqual(NativeFileBaselineStatus.NfbsChanged, rules.Status,
+                    $"After {after}, project {target.Name}'s external rules edit must be visible in lifecycle state.");
+                Assert.IsFalse(before.DiskBaselineChecked,
+                    $"After {after}, project {target.Name}'s changed rules must fail disk-baseline coverage.");
+                var refused = await mcp.Tool("kicad_pcb_items_update", new
+                    { instanceId = target.InstanceId, requestJson = BoardJson.Formatter.Format(update), expectedStateJson = Json(before) });
+                Assert.IsTrue(Failed(refused), $"After {after}, project {target.Name}'s checked edit must refuse changed rules.");
+                var detail = refused.GetProperty("structuredContent");
+                Assert.AreEqual("invalid_pcb_item_request", detail.GetProperty("errorCode").GetString());
+                StringAssert.Contains(detail.GetProperty("errorMessage").GetString()!,
+                    "complete unchanged file-baseline coverage");
+                Assert.AreEqual(before, await State(target),
+                    $"After {after}, the refused edit must leave project {target.Name}'s board unchanged.");
+            }
+            async Task<DocumentLifecycleState> RestoreRulesBaseline(TwoProjectDrcTarget target, string after)
+            {
+                // This journey intentionally creates the sidecar externally. Restore the exact
+                // original absent file before the next checked edit; deleting it returns the
+                // native baseline to the saved fixture without adopting untrusted bytes.
+                File.Delete(target.RulesPath);
+                var restored = await State(target);
+                var rules = restored.FileBaselines.Single(file =>
+                    Path.GetExtension(file.Path).Equals(".kicad_dru", StringComparison.OrdinalIgnoreCase));
+                Assert.AreEqual(NativeFileBaselineStatus.NfbsUnchanged, rules.Status,
+                    $"After {after}, project {target.Name}'s original absent rules baseline must be restored.");
+                Assert.IsTrue(restored.DiskBaselineChecked,
+                    $"After {after}, project {target.Name}'s restored rules baseline must admit checked edits.");
+                return restored;
+            }
             // Everything an agent can observe about both boards, and the bytes of their files.
             async Task<(DocumentLifecycleState A, DocumentLifecycleState B, byte[] FileA, byte[] FileB)> Untouched() =>
                 (await State(a!), await State(b!), await File.ReadAllBytesAsync(a!.BoardPath, token), await File.ReadAllBytesAsync(b!.BoardPath, token));
@@ -480,7 +519,8 @@ public sealed partial class NativeSessionTests
 
             // 4. Project A's custom rules do not compile: its check fails with a code that says so and names the file, the
             //    item and its exact line, while project B's first check after its cancellation completes with its first
-            //    findings. Project A's editor still takes an edit and a save with the broken rules in place.
+            //    findings. The external rules edit is refused by checked admission, then the fixture restores its original
+            //    absent sidecar so the failed DRC still leaves the editor editable.
             rulesWritten = true;
             await File.WriteAllTextAsync(a.RulesPath, PcbDrcBrokenRules, token);
             var (a3, b3) = await StartBoth("failure", savedA.Revision, savedB.Revision);
@@ -503,6 +543,8 @@ public sealed partial class NativeSessionTests
             CheckedCopper(b, failure[1], savedB.Revision, "Project B's first check after its cancellation");
             CollectionAssert.AreEqual(baselineB, Findings(failure[1]),
                 "After the cancellation, a complete check of project B must report exactly its first findings (n87c71e6665971bd2).");
+            await RefuseEditWithChangedRules(a, "a failed check with externally changed rules");
+            await RestoreRulesBaseline(a, "a failed check with externally changed rules");
             savedA = await EditAndSave(a, "a failed check");
 
             // 5. The person corrects the rules by removing the broken item and keeps the rule that matches nothing, and
@@ -514,7 +556,14 @@ public sealed partial class NativeSessionTests
             await Evidence("A-recovered", recovered[0]);
             CheckedCopper(a, recovered[0], savedA.Revision, "Project A's check after its failure");
             CollectionAssert.AreEqual(baselineA, Findings(recovered[0]), "After recovery, project A's findings must be its first findings.");
+            await RestoreRulesBaseline(a, "a recovered check with externally changed rules");
             savedA = await EditAndSave(a, "a recovered check");
+            // Keep the intentionally authored sidecar present for the sibling
+            // snapshot during clean-close. The checked edit above was admitted
+            // only after the original absent-file baseline was restored; this
+            // harmless rules file is added after all mutations and is removed
+            // by the journey cleanup.
+            await File.WriteAllTextAsync(a.RulesPath, PcbDrcHarmlessRules, token);
             Assert.AreEqual(savedB, await State(b), "Project A's failure and recovery must not change project B's board.");
 
             // 6. A person at project B's rendered PCB editor undoes and redoes the agent's last edit with the keyboard, and

@@ -4,7 +4,9 @@ using KiCad.Automation.Mcp;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
 using Kiapi.Board.Types;
+using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
+using KiCad.Automation.Model;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace KiCad.Automation.Tests;
@@ -185,11 +187,11 @@ public sealed partial class NativeSessionTests
 
             // Keep the updated shape in the board before exercising KiCad's own
             // undo/redo stack.  A single typed update is one native undo step.
-            await FocusKeepoutEditor(client, board, nativeProcess.Id, display, "z", afterUpdate, deadline.Token);
+            await FocusKeepoutEditor(client, board, nativeProcess.Id, display, "z", afterUpdate, keepoutId, expectedCreated, deadline.Token);
             DocumentLifecycleState undone = await ObserveLifecycleState(client, board, deadline.Token);
             Zone undoneZone = await ReadKeepout(mcp, instanceId, boardJson, keepoutId, undone);
             PcbKeepoutAuthoringContract.ValidateReadback(expectedCreated, undoneZone, undone.NativeIdentity);
-            await FocusKeepoutEditor(client, board, nativeProcess.Id, display, "y", undone, deadline.Token);
+            await FocusKeepoutEditor(client, board, nativeProcess.Id, display, "y", undone, keepoutId, expectedUpdated, deadline.Token);
             DocumentLifecycleState redone = await ObserveLifecycleState(client, board, deadline.Token);
             PcbKeepoutAuthoringContract.ValidateReadback(expectedUpdated,
                 await ReadKeepout(mcp, instanceId, boardJson, keepoutId, redone), redone.NativeIdentity);
@@ -293,7 +295,8 @@ public sealed partial class NativeSessionTests
     }
 
     private static async Task FocusKeepoutEditor(NativeClient client, DocumentSpecifier board,
-        int processId, string display, string key, DocumentLifecycleState before, CancellationToken token)
+        int processId, string display, string key, DocumentLifecycleState before,
+        string keepoutId, Zone expectedZone, CancellationToken token)
     {
         using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
         limit.CancelAfter(TimeSpan.FromSeconds(30));
@@ -308,7 +311,18 @@ public sealed partial class NativeSessionTests
         while (true)
         {
             DocumentLifecycleState after = await ObserveLifecycleState(client, board, limit.Token);
-            if (!after.Equals(before)) return;
+            var items = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = board }, Items = { new KIID { Value = keepoutId } } }, limit.Token);
+            if (items.Items.Count == 1 && items.Items[0].Is(Zone.Descriptor))
+            {
+                var actual = items.Items[0].Unpack<Zone>();
+                try
+                {
+                    PcbKeepoutAuthoringContract.ValidateReadback(expectedZone, actual, after.NativeIdentity);
+                    if (!after.Equals(before)) return;
+                }
+                catch (AutomationException) { }
+            }
             await Task.Delay(delay, limit.Token);
             delay = Math.Min(delay * 2, 250);
         }

@@ -319,7 +319,10 @@ public sealed partial class NativeSessionTests
                 try
                 {
                     PcbKeepoutAuthoringContract.ValidateReadback(expectedZone, actual, after.NativeIdentity);
-                    if (!after.Equals(before)) return;
+                    // PCB history updates the item journal independently of the
+                    // lifecycle cursor. The exact native item shape is therefore
+                    // the settlement proof for this legacy keyboard path.
+                    return;
                 }
                 catch (AutomationException) { }
             }

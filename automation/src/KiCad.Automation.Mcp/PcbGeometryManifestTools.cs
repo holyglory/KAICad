@@ -216,7 +216,7 @@ public sealed class PcbGeometryManifestTools(InstanceRegistry registry)
         point = new(); return false;
     }
 
-    private static object Geometry(Any packed)
+    internal static object Geometry(Any packed)
     {
         if (packed.Is(Track.Descriptor))
         {
@@ -228,16 +228,96 @@ public sealed class PcbGeometryManifestTools(InstanceRegistry registry)
             Arc item = packed.Unpack<Arc>();
             return new { kind = "arc", start = Point(item.Start), mid = Point(item.Mid), end = Point(item.End) };
         }
-        if (packed.Is(Via.Descriptor)) return new { kind = "point", position = Point(packed.Unpack<Via>().Position) };
-        if (packed.Is(FootprintInstance.Descriptor)) return new { kind = "point", position = Point(packed.Unpack<FootprintInstance>().Position) };
-        if (packed.Is(Pad.Descriptor)) return new { kind = "parent-relative-point", position = Point(packed.Unpack<Pad>().Position) };
+        if (packed.Is(Via.Descriptor))
+        {
+            Via item = packed.Unpack<Via>();
+            return new { kind = "via", position = Point(item.Position), padStack = PadStackGeometry(item.PadStack) };
+        }
+        if (packed.Is(FootprintInstance.Descriptor))
+        {
+            FootprintInstance item = packed.Unpack<FootprintInstance>();
+            return new { kind = "footprint-origin", position = Point(item.Position), layer = item.Layer.ToString(), childCount = item.Definition?.Items.Count ?? 0 };
+        }
+        if (packed.Is(Pad.Descriptor))
+        {
+            Pad item = packed.Unpack<Pad>();
+            return new { kind = "pad", position = Point(item.Position), number = item.Number,
+                parent = item.Parent?.Value, padStack = PadStackGeometry(item.PadStack) };
+        }
         if (packed.Is(BoardGraphicShape.Descriptor))
-            return new { kind = "graphic-shape", geometry = packed.Unpack<BoardGraphicShape>().Shape?.GeometryCase.ToString() ?? "None" };
-        return new { kind = "polygon", polygonCount = packed.Unpack<Zone>().Outline?.Polygons.Count ?? 0 };
+        {
+            BoardGraphicShape item = packed.Unpack<BoardGraphicShape>();
+            return new { kind = "graphic-shape", layer = item.Layer.ToString(), geometry = GraphicGeometry(item.Shape) };
+        }
+        Zone zone = packed.Unpack<Zone>();
+        return new { kind = "zone", type = zone.Type.ToString(), layers = zone.Layers.Select(layer => layer.ToString()).ToArray(),
+            outline = PolySetGeometry(zone.Outline), filledPolygonCount = zone.FilledPolygons.Count };
+    }
+
+    private static object? PadStackGeometry(PadStack? stack)
+    {
+        if (stack is null) return null;
+        return new
+        {
+            type = stack.Type.ToString(), angle = stack.Angle?.ValueDegrees,
+            layers = stack.Layers.Select(layer => layer.ToString()).ToArray(),
+            drill = DrillGeometry(stack.Drill),
+            copperLayers = stack.CopperLayers.Select(layer => new
+            {
+                layer = layer.Layer.ToString(), shape = layer.Shape.ToString(),
+                size = Point(layer.Size), offset = Point(layer.Offset),
+                cornerRoundingRatio = layer.CornerRoundingRatio, chamferRatio = layer.ChamferRatio
+            }).ToArray()
+        };
+    }
+
+    private static object? DrillGeometry(DrillProperties? drill) => drill is null ? null : new
+    {
+        startLayer = drill.StartLayer.ToString(), endLayer = drill.EndLayer.ToString(),
+        diameter = Point(drill.Diameter), shape = drill.Shape.ToString()
+    };
+
+    private static object PolySetGeometry(PolySet? set) => new
+    {
+        polygons = (set?.Polygons ?? []).Select(polygon => new
+        {
+            outline = PolyLineGeometry(polygon.Outline),
+            holes = polygon.Holes.Select(PolyLineGeometry).ToArray()
+        }).ToArray()
+    };
+
+    private static object PolyLineGeometry(PolyLine? line) => new
+    {
+        closed = line?.Closed ?? false,
+        nodes = (line?.Nodes ?? []).Select(NodeGeometry).ToArray()
+    };
+
+    private static object NodeGeometry(PolyLineNode node) => node.GeometryCase switch
+    {
+        PolyLineNode.GeometryOneofCase.Point => new { kind = "point", point = Point(node.Point) },
+        PolyLineNode.GeometryOneofCase.Arc => new { kind = "arc", start = Point(node.Arc.Start), mid = Point(node.Arc.Mid), end = Point(node.Arc.End) },
+        _ => new { kind = "unknown", point = (object?)null }
+    };
+
+    private static object? GraphicGeometry(GraphicShape? shape)
+    {
+        if (shape is null) return null;
+        return shape.GeometryCase switch
+        {
+            GraphicShape.GeometryOneofCase.Segment => new { kind = "segment", start = Point(shape.Segment.Start), end = Point(shape.Segment.End) },
+            GraphicShape.GeometryOneofCase.Rectangle => new { kind = "rectangle", topLeft = Point(shape.Rectangle.TopLeft), bottomRight = Point(shape.Rectangle.BottomRight), cornerRadiusNm = shape.Rectangle.CornerRadius?.ValueNm },
+            GraphicShape.GeometryOneofCase.Arc => new { kind = "arc", start = Point(shape.Arc.Start), mid = Point(shape.Arc.Mid), end = Point(shape.Arc.End) },
+            GraphicShape.GeometryOneofCase.Circle => new { kind = "circle", center = Point(shape.Circle.Center), radiusPoint = Point(shape.Circle.RadiusPoint) },
+            GraphicShape.GeometryOneofCase.Polygon => new { kind = "polygon", geometry = PolySetGeometry(shape.Polygon) },
+            GraphicShape.GeometryOneofCase.Bezier => new { kind = "bezier", start = Point(shape.Bezier.Start), control1 = Point(shape.Bezier.Control1), control2 = Point(shape.Bezier.Control2), end = Point(shape.Bezier.End) },
+            GraphicShape.GeometryOneofCase.Ellipse => new { kind = "ellipse", center = Point(shape.Ellipse.Center), majorRadiusNm = shape.Ellipse.MajorRadius?.ValueNm, minorRadiusNm = shape.Ellipse.MinorRadius?.ValueNm, rotationDegrees = shape.Ellipse.Rotation?.ValueDegrees },
+            GraphicShape.GeometryOneofCase.EllipseArc => new { kind = "ellipse-arc", center = Point(shape.EllipseArc.Center), majorRadiusNm = shape.EllipseArc.MajorRadius?.ValueNm, minorRadiusNm = shape.EllipseArc.MinorRadius?.ValueNm, rotationDegrees = shape.EllipseArc.Rotation?.ValueDegrees, startAngleDegrees = shape.EllipseArc.StartAngle?.ValueDegrees, endAngleDegrees = shape.EllipseArc.EndAngle?.ValueDegrees },
+            _ => new { kind = "none" }
+        };
     }
 
     private static object SegmentGeometry(Vector2 start, Vector2 end) => new { kind = "segment", start = Point(start), end = Point(end) };
-    private static object Point(Vector2 value) => new { xNm = value.XNm, yNm = value.YNm };
+    private static object? Point(Vector2? value) => value is null ? null : new { xNm = value.XNm, yNm = value.YNm };
 
     private static (long MinX, long MinY, long MaxX, long MaxY) Normalize(Box2 box)
     {

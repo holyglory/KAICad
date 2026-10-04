@@ -1,5 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Reflection;
+using Google.Protobuf.Reflection;
 using Kiapi.Board.Jobs;
 using Kiapi.Board.Types;
 using Kiapi.Common.Types;
@@ -29,6 +31,23 @@ internal static class PcbExportDtoValidation
             || !System.Enum.IsDefined(layer))
             throw new AutomationException("invalid_pcb_export_enum", $"{name} contains unknown board layer '{value}'.");
         return layer;
+    }
+
+    public static PlotDrillMarks DrillMarks(string value, string name)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            throw new AutomationException("invalid_pcb_export_enum", $"{name} contains an empty drill-mark setting.");
+
+        string compact = string.Concat(value.Where(char.IsLetterOrDigit));
+        return compact.ToUpperInvariant() switch
+        {
+            "PDMUNKNOWN" or "UNKNOWN" => PlotDrillMarks.PdmUnknown,
+            "PDMNONE" or "NONE" or "NODRILLSHAPE" => PlotDrillMarks.PdmNone,
+            "PDMSMALL" or "SMALL" or "SMALLDRILLSHAPE" => PlotDrillMarks.PdmSmall,
+            "PDMFULL" or "FULL" or "FULLDRILLSHAPE" => PlotDrillMarks.PdmFull,
+            _ => throw new AutomationException("invalid_pcb_export_enum",
+                $"{name} contains unknown drill-mark setting '{value}'.")
+        };
     }
 }
 
@@ -85,10 +104,125 @@ internal sealed class BoardLayerListJsonConverter : JsonConverter<List<BoardLaye
     }
 }
 
+/// <summary>
+/// Accept the protobuf (PDM_FULL), KiCad job (full/FULL_DRILL_SHAPE), and
+/// generated CLR (PdmFull) spellings of the drill-mark enum while rejecting
+/// values outside that compatibility set.
+/// </summary>
+internal sealed class PlotDrillMarksJsonConverter : JsonConverter<PlotDrillMarks>
+{
+    public override PlotDrillMarks Read(ref Utf8JsonReader reader, Type typeToConvert,
+        JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.String)
+        {
+            try
+            {
+                return PcbExportDtoValidation.DrillMarks(reader.GetString()!, "Drill marks");
+            }
+            catch (AutomationException error)
+            {
+                throw new JsonException(error.Message, error);
+            }
+        }
+
+        if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt32(out int value))
+        {
+            var parsed = (PlotDrillMarks)value;
+            if (System.Enum.IsDefined(parsed))
+                return parsed;
+            throw new JsonException($"Drill marks enum value {value} is not defined.");
+        }
+
+        throw new JsonException("Drill marks must be a protobuf, KiCad, CLR, or defined enum value.");
+    }
+
+    public override void Write(Utf8JsonWriter writer, PlotDrillMarks value,
+        JsonSerializerOptions options)
+    {
+        writer.WriteNumberValue((int)value);
+    }
+}
+
+/// <summary>
+/// Protobuf enum JSON uses an upper-case OriginalName such as
+/// <c>BJPM_ALL_LAYERS_ONE_PAGE</c>, while generated CLR values use names such
+/// as <c>BjpmAllLayersOnePage</c>.  KiCad job JSON commonly omits the enum
+/// prefix (for example, <c>all_layers_one_page</c>), so accept that spelling
+/// too.  Numeric JSON remains valid only for defined enum values.
+/// </summary>
+internal sealed class ProtobufEnumJsonConverter<TEnum> : JsonConverter<TEnum>
+    where TEnum : struct, System.Enum
+{
+    private static readonly IReadOnlyDictionary<string, TEnum> Names = BuildNames();
+
+    public override TEnum Read(ref Utf8JsonReader reader, Type typeToConvert,
+        JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.String)
+        {
+            string value = reader.GetString() ?? "";
+            string normalized = Normalize(value);
+            if (Names.TryGetValue(normalized, out TEnum parsed))
+                return parsed;
+            throw new JsonException($"{typeof(TEnum).Name} value '{value}' is not defined.");
+        }
+
+        if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt32(out int numericValue))
+        {
+            TEnum parsed = (TEnum)(object)numericValue;
+            if (System.Enum.IsDefined(parsed))
+                return parsed;
+            throw new JsonException($"{typeof(TEnum).Name} enum value {numericValue} is not defined.");
+        }
+
+        throw new JsonException($"{typeof(TEnum).Name} must be a protobuf, KiCad, CLR, or defined enum value.");
+    }
+
+    public override void Write(Utf8JsonWriter writer, TEnum value,
+        JsonSerializerOptions options)
+    {
+        writer.WriteNumberValue(Convert.ToInt32(value));
+    }
+
+    private static IReadOnlyDictionary<string, TEnum> BuildNames()
+    {
+        var result = new Dictionary<string, TEnum>(StringComparer.OrdinalIgnoreCase);
+        foreach (TEnum value in System.Enum.GetValues<TEnum>())
+        {
+            string? clrName = System.Enum.GetName(value);
+            if (clrName is null)
+                continue;
+            Add(result, clrName, value);
+
+            FieldInfo? field = typeof(TEnum).GetField(clrName);
+            OriginalNameAttribute? original = field?.GetCustomAttribute<OriginalNameAttribute>();
+            if (original is null)
+                continue;
+            Add(result, original.Name, value);
+
+            int separator = original.Name.IndexOf('_');
+            if (separator >= 0 && separator + 1 < original.Name.Length)
+                Add(result, original.Name[(separator + 1)..], value);
+        }
+        return result;
+    }
+
+    private static void Add(Dictionary<string, TEnum> values, string name, TEnum value)
+    {
+        string normalized = Normalize(name);
+        if (normalized.Length > 0)
+            values[normalized] = value;
+    }
+
+    private static string Normalize(string value) => string.Concat(value.Where(char.IsLetterOrDigit));
+}
+
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed class RunBoardJobExport3DInput
 {
     public string Variant { get; set; } = "";
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<Board3DFormat>))]
     public Board3DFormat Format { get; set; }
     public string NetFilter { get; set; } = "";
     public string ComponentFilter { get; set; } = "";
@@ -117,6 +251,7 @@ public sealed class RunBoardJobExport3DInput
     public bool FillAllVias { get; set; }
     public bool OptimizeStep { get; set; }
     public bool ExtraPadThickness { get; set; }
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<Units>))]
     public Units VrmlUnits { get; set; }
     public string VrmlModelDir { get; set; } = "";
     public bool VrmlRelativePaths { get; set; }
@@ -165,13 +300,17 @@ public sealed class RunBoardJobExport3DInput
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed class RunBoardJobExportRenderInput
 {
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<RenderFormat>))]
     public RenderFormat Format { get; set; }
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<RenderQuality>))]
     public RenderQuality Quality { get; set; }
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<RenderBackgroundStyle>))]
     public RenderBackgroundStyle BackgroundStyle { get; set; }
     public int Width { get; set; }
     public int Height { get; set; }
     public string AppearancePreset { get; set; } = "";
     public bool UseBoardStackupColors { get; set; }
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<RenderSide>))]
     public RenderSide Side { get; set; }
     public double Zoom { get; set; }
     public bool Perspective { get; set; }
@@ -227,6 +366,7 @@ public sealed class RunBoardJobExportSvgInput
     public BoardPlotSettingsInput? PlotSettings { get; set; } = null;
     public bool FitPageToBoard { get; set; }
     public uint Precision { get; set; }
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<BoardJobPaginationMode>))]
     public BoardJobPaginationMode PageMode { get; set; }
 
     internal RunBoardJobExportSvg ToNative()
@@ -247,7 +387,9 @@ public sealed class RunBoardJobExportDxfInput
     public BoardPlotSettingsInput? PlotSettings { get; set; } = null;
     public bool PlotGraphicItemsUsingContours { get; set; }
     public bool PolygonMode { get; set; }
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<Units>))]
     public Units Units { get; set; }
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<BoardJobPaginationMode>))]
     public BoardJobPaginationMode PageMode { get; set; }
 
     internal RunBoardJobExportDxf ToNative()
@@ -272,6 +414,7 @@ public sealed class RunBoardJobExportPdfInput
     public bool BackFootprintPropertyPopups { get; set; }
     public bool IncludeMetadata { get; set; }
     public bool SingleDocument { get; set; }
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<BoardJobPaginationMode>))]
     public BoardJobPaginationMode PageMode { get; set; }
     public string BackgroundColor { get; set; } = "";
 
@@ -294,6 +437,7 @@ public sealed class RunBoardJobExportPdfInput
 public sealed class RunBoardJobExportPsInput
 {
     public BoardPlotSettingsInput? PlotSettings { get; set; } = null;
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<BoardJobPaginationMode>))]
     public BoardJobPaginationMode PageMode { get; set; }
     public double TrackWidthCorrection { get; set; }
     public double XScaleAdjust { get; set; }
@@ -326,6 +470,7 @@ public sealed class RunBoardJobExportGerbersInput
     public bool UseX2Format { get; set; }
     public bool DisableApertureMacros { get; set; }
     public bool UseProtelFileExtensions { get; set; }
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<GerberPrecision>))]
     public GerberPrecision Precision { get; set; }
 
     internal RunBoardJobExportGerbers ToNative()
@@ -347,14 +492,21 @@ public sealed class RunBoardJobExportGerbersInput
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed class RunBoardJobExportDrillInput
 {
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<DrillFormat>))]
     public DrillFormat Format { get; set; }
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<Units>))]
     public Units Units { get; set; }
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<DrillOrigin>))]
     public DrillOrigin Origin { get; set; }
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<DrillZerosFormat>))]
     public DrillZerosFormat ZerosFormat { get; set; }
     public ExcellonFormatOptionsInput? Excellon { get; set; } = null;
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<DrillMapFormat>))]
     public DrillMapFormat MapFormat { get; set; }
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<DrillGerberPrecision>))]
     public DrillGerberPrecision GerberPrecision { get; set; }
     public bool? GerberGenerateTenting { get; set; } = null;
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<DrillReportFormat>))]
     public DrillReportFormat ReportFormat { get; set; }
     public string? ReportFilename { get; set; } = null;
 
@@ -393,8 +545,11 @@ public sealed class RunBoardJobExportPositionInput
     public bool NegateBottomX { get; set; }
     public bool SingleFile { get; set; }
     public bool NakedFilename { get; set; }
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<PositionSide>))]
     public PositionSide Side { get; set; }
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<Units>))]
     public Units Units { get; set; }
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<PositionFormat>))]
     public PositionFormat Format { get; set; }
     public bool? IncludeBoardEdgeForGerber { get; set; } = null;
     public string Variant { get; set; } = "";
@@ -448,7 +603,9 @@ public sealed class RunBoardJobExportIpc2581Input
 {
     public string DrawingSheet { get; set; } = "";
     public string Variant { get; set; } = "";
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<Units>))]
     public Units Units { get; set; }
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<Ipc2581Version>))]
     public Ipc2581Version Version { get; set; }
     public int? Precision { get; set; } = null;
     public bool Compress { get; set; }
@@ -496,8 +653,10 @@ public sealed class RunBoardJobExportODBInput
 {
     public string DrawingSheet { get; set; } = "";
     public string Variant { get; set; } = "";
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<Units>))]
     public Units Units { get; set; }
     public int? Precision { get; set; } = null;
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<OdbCompression>))]
     public OdbCompression Compression { get; set; }
 
     internal RunBoardJobExportODB ToNative()
@@ -517,7 +676,9 @@ public sealed class RunBoardJobExportODBInput
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed class RunBoardJobExportStatsInput
 {
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<StatsOutputFormat>))]
     public StatsOutputFormat Format { get; set; }
+    [JsonConverter(typeof(ProtobufEnumJsonConverter<Units>))]
     public Units Units { get; set; }
     public bool ExcludeFootprintsWithoutPads { get; set; }
     public bool SubtractHolesFromBoardArea { get; set; }
@@ -560,6 +721,7 @@ public sealed class BoardPlotSettingsInput
     public bool PlotDrawingSheet { get; set; }
     public bool SubtractSolderMaskFromSilk { get; set; }
     public bool PlotPadNumbers { get; set; }
+    [JsonConverter(typeof(PlotDrillMarksJsonConverter))]
     public PlotDrillMarks DrillMarks { get; set; }
     public bool UseDrillOrigin { get; set; }
     public bool CheckZonesBeforePlot { get; set; }

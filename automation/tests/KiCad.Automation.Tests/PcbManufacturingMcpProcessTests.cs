@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Kiapi.Board.Jobs;
 using Kiapi.Board.Types;
 using KiCad.Automation.Mcp;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
@@ -40,6 +41,35 @@ public sealed class PcbManufacturingMcpProcessTests
     }
 
     [TestMethod]
+    public void TypedManufacturingInputAcceptsPlotDrillMarkCompatibilityNamesAndRejectsUnknownValues()
+    {
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        foreach ((string spelling, PlotDrillMarks expected) in new[]
+        {
+            ("PDM_FULL", PlotDrillMarks.PdmFull),
+            ("PdmSmall", PlotDrillMarks.PdmSmall),
+            ("full", PlotDrillMarks.PdmFull),
+            ("FULL_DRILL_SHAPE", PlotDrillMarks.PdmFull)
+        })
+        {
+            string json = "{\"job\":{\"exportSvg\":{\"plotSettings\":{\"layers\":[\"BL_F_Cu\"],\"commonLayers\":[\"BL_Edge_Cuts\"],\"drillMarks\":\""
+                + spelling + "\"},\"pageMode\":\"BJPM_ALL_LAYERS_ONE_PAGE\"}}}";
+            PcbManufacturingExportInput input = JsonSerializer.Deserialize<PcbManufacturingExportInput>(json, options)!;
+            BoardPlotSettingsInput plotSettings = input.Job!.ExportSvg!.PlotSettings!;
+            Assert.AreEqual(expected, plotSettings.DrillMarks, spelling);
+            Assert.AreEqual(expected, plotSettings.ToNative().DrillMarks, spelling);
+            Assert.AreEqual(BoardJobPaginationMode.BjpmAllLayersOnePage, input.Job.ExportSvg.PageMode, spelling);
+            Assert.AreEqual(BoardJobPaginationMode.BjpmAllLayersOnePage, input.Job.ExportSvg.ToNative().PageMode, spelling);
+        }
+
+        const string invalid = "{\"job\":{\"exportSvg\":{\"plotSettings\":{\"drillMarks\":\"PDM_NOT_A_MARK\"}}}}";
+        Assert.ThrowsExactly<JsonException>(() => JsonSerializer.Deserialize<PcbManufacturingExportInput>(invalid, options));
+
+        const string invalidPageMode = "{\"job\":{\"exportSvg\":{\"pageMode\":\"BJPM_NOT_A_MODE\"}}}";
+        Assert.ThrowsExactly<JsonException>(() => JsonSerializer.Deserialize<PcbManufacturingExportInput>(invalidPageMode, options));
+    }
+
+    [TestMethod]
     public async Task TypedManufacturingToolPublishesJobSchemaAndRejectsMalformedIdentity()
     {
         string root = Directory.CreateTempSubdirectory("kicad-pcb-manufacturing-mcp-schema-").FullName;
@@ -72,6 +102,66 @@ public sealed class PcbManufacturingMcpProcessTests
             })
                 Assert.IsTrue(jobProperties.TryGetProperty(property, out _),
                     $"The typed manufacturing job schema is missing {property}.");
+
+            string processEpoch = Guid.NewGuid().ToString("D");
+            string boardPath = Path.Combine(root, "typed.kicad_pcb");
+            JsonElement bound = await mcp.Tool("kicad_pcb_export", new
+            {
+                instanceId = Guid.NewGuid().ToString("D"),
+                input = new
+                {
+                    operationId = Guid.NewGuid().ToString("D"),
+                    document = new
+                    {
+                        type = "DOCTYPE_PCB",
+                        project = new { name = "typed", path = root },
+                        boardFilename = "typed.kicad_pcb"
+                    },
+                    expectedState = new
+                    {
+                        document = new
+                        {
+                            type = "DOCTYPE_PCB",
+                            project = new { name = "typed", path = root },
+                            boardFilename = "typed.kicad_pcb"
+                        },
+                        revision = new { epoch = processEpoch, sequence = 1UL },
+                        nativeIdentity = Guid.NewGuid().ToString("D"),
+                        stateSha256 = new string('0', 64),
+                        scope = "DLS_PCB",
+                        nativeFiles = new[] { boardPath },
+                        fileBaselines = new[]
+                        {
+                            new
+                            {
+                                path = boardPath, baselinePath = boardPath, baselineSha256 = "",
+                                currentSha256 = "", status = "NFBS_UNCHANGED"
+                            }
+                        },
+                        processEpoch
+                    },
+                    outputDirectory = Path.Combine(root, "typed-output"),
+                    job = new
+                    {
+                        exportSvg = new
+                        {
+                            plotSettings = new
+                            {
+                                layers = new[] { "BL_F_Cu" },
+                                commonLayers = new[] { "BL_Edge_Cuts" },
+                                drillMarks = "PDM_FULL"
+                            },
+                            fitPageToBoard = true,
+                            precision = 6U,
+                            pageMode = "BJPM_ALL_LAYERS_ONE_PAGE"
+                        }
+                    }
+                }
+            });
+            Assert.IsTrue(bound.GetProperty("isError").GetBoolean(), bound.GetRawText());
+            Assert.AreEqual("unknown_instance",
+                bound.GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+                bound.GetRawText());
 
             JsonElement malformed = await mcp.Tool("kicad_pcb_export", new
             {

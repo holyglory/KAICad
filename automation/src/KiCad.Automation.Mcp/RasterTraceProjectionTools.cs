@@ -122,7 +122,6 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
         BoardLayer targetLayer = ParseLayer(target.Layer!);
         BoardLayer artworkLayer = ParseLayer(target.ArtworkLayer);
         ValidateArtworkLayer(artworkLayer);
-        RequireSchematicQuantum(context.Proposal, target.OriginXNm, target.OriginYNm, require: false);
         NativeClient client = registry.Client(instanceId);
         AutomationSession session = await client.HandshakeAsync(token);
         if (session.Epoch != expected.ProcessEpoch)
@@ -235,7 +234,7 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
         if (document.Type != DocumentType.DoctypeSchematic || !document.Equals(expected.Document)
             || expected.Scope != DocumentLifecycleScope.DlsSchematicHierarchy || string.IsNullOrWhiteSpace(expected.ProcessEpoch))
             throw new AutomationException("invalid_raster_projection_state", "Schematic target state must identify the same schematic and process epoch.");
-        RequireSchematicQuantum(context.Proposal, target.OriginXNm, target.OriginYNm, require: true);
+        RequireSchematicQuantum(context.Proposal, target.OriginXNm, target.OriginYNm);
         ValidateUuid(target.ManifestGroupId, "ManifestGroupId");
         NativeClient client = registry.Client(instanceId);
         AutomationSession session = await client.HandshakeAsync(token);
@@ -453,9 +452,8 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
             throw new AutomationException("invalid_raster_projection_identity", name + " must be a canonical nonempty UUID.");
     }
 
-    private static void RequireSchematicQuantum(ProtocolRasterTraceResult proposal, long originX, long originY, bool require)
+    private static void RequireSchematicQuantum(ProtocolRasterTraceResult proposal, long originX, long originY)
     {
-        if (!require && originX == 0 && originY == 0) return;
         if (originX % 100 != 0 || originY % 100 != 0
             || proposal.FilledPieces.Any(piece => piece.Points.Any(point => point.XNm % 100 != 0 || point.YNm % 100 != 0)))
             throw new AutomationException("raster_trace_schematic_quantum", "Schematic projection requires every coordinate to be on the native 100 nm grid.");

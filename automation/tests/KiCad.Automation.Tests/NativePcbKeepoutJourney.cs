@@ -299,7 +299,11 @@ public sealed partial class NativeSessionTests
         limit.CancelAfter(TimeSpan.FromSeconds(30));
         while (!NativeKeyboard.HasWindow(display, processId, "PCB Editor"))
             await Task.Delay(100, limit.Token);
-        NativeKeyboard.SchematicShortcut(display, processId, key, titleMatch: "PCB Editor", focusCanvas: true);
+        // The PCB canvas can open Page Settings when the generic lower-right
+        // focus click lands on the drawing-sheet border after a keepout
+        // geometry change. The editor already owns keyboard focus after the
+        // window raise, so send undo/redo without that synthetic click.
+        NativeKeyboard.SchematicShortcut(display, processId, key, titleMatch: "PCB Editor", focusCanvas: false);
         int delay = 25;
         while (true)
         {

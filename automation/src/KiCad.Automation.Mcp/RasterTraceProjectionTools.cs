@@ -117,6 +117,7 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
         ValidateUuid(target.TargetFootprintId, "TargetFootprintId");
         if (target.SourceFootprintId == target.TargetFootprintId)
             throw new AutomationException("invalid_raster_projection_identity", "A footprint projection clone requires distinct source and target identities.");
+        ValidateFootprintLibraryIdentity(target.LibraryNickname, target.FootprintName);
         if (target.Layer is not ("F.Cu" or "B.Cu"))
             throw new AutomationException("invalid_raster_projection_layer", "Footprint instances must use F.Cu or B.Cu.");
         BoardLayer targetLayer = ParseLayer(target.Layer!);
@@ -138,6 +139,17 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
         FootprintInstance source = response.Items[0].Unpack<FootprintInstance>();
         FootprintInstance clone = source.Clone();
         clone.Id = new() { Value = target.TargetFootprintId };
+        // Board readback may omit the library identifier for an inline or
+        // imported footprint.  The projection target must supply the
+        // authoritative identity explicitly; never invent one from the
+        // source instance or silently pass an incomplete definition to the
+        // placement planner.
+        clone.Definition ??= new();
+        clone.Definition.Id = new()
+        {
+            LibraryNickname = target.LibraryNickname!,
+            EntryName = target.FootprintName!
+        };
         clone.Position = new() { XNm = target.OriginXNm, YNm = target.OriginYNm };
         clone.Orientation = new() { ValueDegrees = target.OrientationDegrees };
         clone.Layer = targetLayer;
@@ -446,6 +458,14 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
             throw new AutomationException("invalid_raster_projection_state", "ExpectedModifyHash must be a decimal native library modify hash.");
     }
 
+    private static void ValidateFootprintLibraryIdentity(string? libraryNickname, string? footprintName)
+    {
+        if (string.IsNullOrWhiteSpace(libraryNickname) || string.IsNullOrWhiteSpace(footprintName)
+            || libraryNickname.Contains('\0') || footprintName.Contains('\0'))
+            throw new AutomationException("invalid_raster_projection_identity",
+                "Footprint projection requires a library nickname and footprint name without NUL characters.");
+    }
+
     private static void ValidateUuid(string? value, string name)
     {
         if (!Guid.TryParseExact(value, "D", out Guid id) || id == Guid.Empty || value != id.ToString("D"))
@@ -733,6 +753,8 @@ public sealed class RasterTraceFootprintTargetInput
     public DocumentLifecycleInput? ExpectedState { get; set; }
     public string? SourceFootprintId { get; set; }
     public string? TargetFootprintId { get; set; }
+    public string? LibraryNickname { get; set; }
+    public string? FootprintName { get; set; }
     public long OriginXNm { get; set; }
     public long OriginYNm { get; set; }
     public double OrientationDegrees { get; set; }

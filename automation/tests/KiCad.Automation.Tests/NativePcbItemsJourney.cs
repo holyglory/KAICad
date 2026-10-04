@@ -2133,6 +2133,7 @@ public sealed partial class NativeSessionTests
                         {
                             document = projectionDocument, expectedState = footprintProjectionExpected,
                             sourceFootprintId = sourceFootprint.Id.Value, targetFootprintId = projectedFootprintId,
+                            libraryNickname = "Generated", footprintName = "RasterProjected",
                             originXNm = 70_000_000L, originYNm = 70_000_000L, orientationDegrees = 0.0,
                             layer = "F.Cu", artworkLayer = "F.SilkS"
                         }

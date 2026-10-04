@@ -184,6 +184,15 @@ internal static class PcbExportRecoveryPolicy
         }
         return true;
     }
+
+    internal static void ValidateReceiptBinding(PcbExportRecoveryRecord record,
+        string instanceId, string processEpoch, string documentJson)
+    {
+        if (record.InstanceId != instanceId || record.ProcessEpoch != processEpoch
+            || record.DocumentJson != documentJson)
+            throw new AutomationException("export_recovery_identity_mismatch",
+                "The durable export record belongs to another instance, process epoch or PCB document.");
+    }
 }
 
 /// <summary>Atomic, process-reconnectable MCP state for typed manufacturing exports.</summary>

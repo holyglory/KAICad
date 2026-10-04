@@ -177,6 +177,44 @@ public sealed class PcbExportRecoveryTests
         finally { Directory.Delete(root, true); }
     }
 
+    [TestMethod]
+    public void ReceiptBindingRejectsDifferentInstanceEpochOrDocument()
+    {
+        var record = Record(PcbExportRecoveryPolicy.Pending, nativeDispatchKnown: false,
+            nativeDispatch: false);
+        string document = record.DocumentJson;
+
+        foreach (string instance in new[]
+        {
+            "44444444-4444-4444-4444-444444444444",
+            record.InstanceId
+        })
+        {
+            foreach (string epoch in new[]
+            {
+                record.ProcessEpoch,
+                "55555555-5555-5555-5555-555555555555"
+            })
+            {
+                foreach (string target in new[] { document, document + " " })
+                {
+                    bool matches = instance == record.InstanceId
+                        && epoch == record.ProcessEpoch
+                        && target == document;
+                    if (matches)
+                    {
+                        PcbExportRecoveryPolicy.ValidateReceiptBinding(record, instance, epoch, target);
+                        continue;
+                    }
+
+                    var error = Assert.ThrowsExactly<AutomationException>(() =>
+                        PcbExportRecoveryPolicy.ValidateReceiptBinding(record, instance, epoch, target));
+                    Assert.AreEqual("export_recovery_identity_mismatch", error.Code);
+                }
+            }
+        }
+    }
+
     private static PcbExportRecoveryRecord Record(string status, bool nativeDispatchKnown,
         bool nativeDispatch, string? root = null)
     {

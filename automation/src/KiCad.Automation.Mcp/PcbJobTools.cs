@@ -164,10 +164,10 @@ public sealed class PcbJobTools(InstanceRegistry registry)
         {
             PcbManufacturingContract.ValidateReceipt(response.Receipt, document, null, operationId, processEpoch);
             var recovery = new PcbExportRecoveryStore(registry.StateDirectory);
-            if (recovery.Read(operationId) is { } record
-                && record.InstanceId == instanceId
-                && record.DocumentJson == SchematicJson.Formatter.Format(document))
+            if (recovery.Read(operationId) is { } record)
             {
+                PcbExportRecoveryPolicy.ValidateReceiptBinding(record, instanceId, processEpoch,
+                    SchematicJson.Formatter.Format(document));
                 if (!string.Equals(record.RequestFingerprintSha256,
                         response.Receipt.RequestFingerprintSha256, StringComparison.Ordinal))
                     throw new AutomationException("export_recovery_identity_mismatch",

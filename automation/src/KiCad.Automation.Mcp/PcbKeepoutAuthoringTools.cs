@@ -175,6 +175,15 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
                 throw new AutomationException("pcb_keepout_not_found", $"Native keepout {targetId} was not found; no mutation was attempted.");
             }
             PcbKeepoutAuthoringContract.ValidateExisting(existing, expected.NativeIdentity);
+            // Reading a native rule area may materialize derived fill/rules and
+            // advance KiCad's observation cursor without changing design
+            // content. Admit the checked mutation against that refreshed
+            // checkpoint only when document/process/native identity, digest,
+            // project settings and file baselines remain semantically equal.
+            var refreshed = await ReadState(client, document, cancellationToken);
+            if (!SemanticStateEqual(expected, refreshed))
+                throw new AutomationException("pcb_state_changed", "The PCB changed while reading the keepout; inspect a fresh lifecycle state and retry.");
+            expected = refreshed;
             if (mutation == KeepoutMutation.Update)
             {
                 zone = MergeUpdate(existing, zone!);
@@ -201,6 +210,15 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
         request.Operations.Add(operation.Clone());
         return request;
     }
+
+    private static bool SemanticStateEqual(DocumentLifecycleState expected, DocumentLifecycleState actual) =>
+        expected.Document.Equals(actual.Document)
+        && expected.ProcessEpoch == actual.ProcessEpoch
+        && expected.NativeIdentity == actual.NativeIdentity
+        && expected.StateSha256 == actual.StateSha256
+        && expected.ProjectSettingsIncluded == actual.ProjectSettingsIncluded
+        && CheckedSchematicContract.FileCoverage(expected)
+        && CheckedSchematicContract.FileCoverage(actual);
 
     private static CallToolResult KeepoutMutationData(PcbCheckedItemDispatch.Outcome outcome,
         KeepoutMutation mutation, string targetId)

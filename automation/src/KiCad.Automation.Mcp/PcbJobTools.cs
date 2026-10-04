@@ -168,6 +168,10 @@ public sealed class PcbJobTools(InstanceRegistry registry)
                 && record.InstanceId == instanceId
                 && record.DocumentJson == SchematicJson.Formatter.Format(document))
             {
+                if (!string.Equals(record.RequestFingerprintSha256,
+                        response.Receipt.RequestFingerprintSha256, StringComparison.Ordinal))
+                    throw new AutomationException("export_recovery_identity_mismatch",
+                        "The native receipt fingerprint does not match the durable export request.");
                 recovery.MarkReceipt(operationId, response.Receipt,
                     Directory.Exists(response.Receipt.OutputDirectory),
                     PcbExportRecoveryPolicy.OutputMatches(response.Receipt),
@@ -241,6 +245,10 @@ public sealed class PcbJobTools(InstanceRegistry registry)
                 {
                     PcbManufacturingContract.ValidateReceipt(response.Receipt, document, null,
                         operationId, record.ProcessEpoch);
+                    if (!string.Equals(record.RequestFingerprintSha256,
+                            response.Receipt.RequestFingerprintSha256, StringComparison.Ordinal))
+                        throw new AutomationException("export_recovery_identity_mismatch",
+                            "The native receipt fingerprint does not match the durable export request.");
                     receipt = response.Receipt;
                     nativeReceiptFound = true;
                     outputExists = Directory.Exists(receipt.OutputDirectory);

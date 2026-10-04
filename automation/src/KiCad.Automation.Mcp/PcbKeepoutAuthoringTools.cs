@@ -73,7 +73,15 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
             Header = new() { Document = document },
             Items = { new KIID { Value = keepoutId } }
         }, cancellationToken);
-        Zone zone = RequireSingleKeepout(response, keepoutId);
+        Zone zone;
+        try
+        {
+            zone = RequireSingleKeepout(response, keepoutId);
+        }
+        catch (NativeApiException error) when (error.Status == 3)
+        {
+            throw new AutomationException("pcb_keepout_not_found", $"Native keepout {keepoutId} was not found.");
+        }
         PcbKeepoutAuthoringContract.ValidateExisting(zone, expected.NativeIdentity);
         var after = await ReadState(client, document, cancellationToken);
         RequireState(after, expected, "The PCB changed while reading the keepout; discard this snapshot.");

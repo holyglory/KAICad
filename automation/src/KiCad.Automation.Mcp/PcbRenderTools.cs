@@ -255,8 +255,8 @@ internal static class PcbRenderMetadataContract
 
     private static void ValidateTransform(IReadOnlyList<double> values, string kind, List<string> failures)
     {
-        if (values.Count != 16 || !values.All(double.IsFinite))
-            failures.Add($"{kind} transforms must contain exactly 16 finite values");
+        if (values.Count != 16 || !values.All(double.IsFinite) || !Invertible(values))
+            failures.Add($"{kind} transforms must contain exactly 16 finite and invertible values");
     }
 
     private static void ValidateBounds(IReadOnlyList<double> values, bool available, int expectedCount,

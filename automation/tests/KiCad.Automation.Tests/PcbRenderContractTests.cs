@@ -62,6 +62,37 @@ public sealed class PcbRenderContractTests
     }
 
     [TestMethod]
+    public void SingularModelTransformCannotSupportLoadedAssetProvenance()
+    {
+        const string stateHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const string inputHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        PcbRenderMetadata metadata = CameraMetadata(stateHash, inputHash);
+        metadata.Models.Add(new PcbRenderModelMetadata
+        {
+            NativeUuid = "footprint-1", ModelIndex = 0,
+            RequestedIdentity = "${KICAD6_3DMODEL_DIR}/resistor.wrl",
+            ResolvedIdentity = "/models/resistor.wrl", ContentSha256 = new string('c', 64),
+            Loaded = true, SecondaryAssetsComplete = true, NativeGeometryBoundsAvailable = true,
+            // A loaded, hashed asset still cannot support a geometry claim when
+            // its scene transform collapses an axis.
+            SceneTransformColumnMajor = { 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 },
+            NativeGeometryBounds = { 0, 0, 0, 1, 1, 1 }
+        });
+        metadata.Objects.Add(new PcbRenderObjectMetadata
+        {
+            NativeUuid = "footprint-1", ModelIndex = 0, NativeGeometryBoundsAvailable = true,
+            SceneTransformColumnMajor = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 },
+            NativeGeometryBounds = { 0, 0, 0, 1, 1, 1 }
+        });
+
+        PcbRenderMetadataValidation validation = PcbRenderMetadataContract.Validate(
+            metadata, RenderRequest(), stateHash, inputHash);
+
+        Assert.IsFalse(validation.IsValid);
+        StringAssert.Contains(string.Join("; ", validation.Failures), "model transforms");
+    }
+
+    [TestMethod]
     public void NativeFiniteFlagsCannotHideSingularCameraMatricesOrChangedInput()
     {
         const string stateHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

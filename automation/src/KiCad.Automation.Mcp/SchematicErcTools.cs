@@ -88,6 +88,13 @@ public sealed class SchematicErcTools(InstanceRegistry registry)
                     ExpectedState = expected,
                     ShowAllErrors = request.ShowAllErrors
                 }, cancellationToken);
+            SchematicErcExecutionContract.ValidateReceipt(new NativeCapabilitySchematicExecuteErc
+            {
+                OperationId = request.OperationId,
+                ExpectedState = expected,
+                ShowAllErrors = request.ShowAllErrors
+            }, result);
+            SchematicErcExecutionContract.RequireSuccessful(result);
             return DescribeRun(instanceId, session.Epoch, request.Document, result);
         }
         catch (NativeApiException error) when (error.Status == (int)Kiapi.Common.ApiStatusCode.AsUnhandled
@@ -108,6 +115,11 @@ public sealed class SchematicErcTools(InstanceRegistry registry)
                 new() { Document = request.Document }, cancellationToken);
             if (!after.Equals(expected))
                 throw new AutomationException("schematic_erc_state_changed", "The schematic changed while legacy ERC was paired; discard the result.");
+            if (!legacy.Completed)
+                throw new AutomationException("erc_execution_failed",
+                    string.IsNullOrWhiteSpace(legacy.ErrorMessage)
+                        ? "The native ERC checker did not complete successfully."
+                        : legacy.ErrorMessage);
             return DescribeLegacyRun(instanceId, session.Epoch, request.Document, legacy, before, after, markers);
         }
     });
@@ -148,12 +160,8 @@ public sealed class SchematicErcTools(InstanceRegistry registry)
             throw new AutomationException("native_erc_receipt_unavailable",
                 "The connected KiCad peer does not provide typed retained ERC execution.");
         }
-        if (!result.MarkersCaptured || result.CapturedMarkers is null)
-        {
-            if (result.LegacyResult is { ErrorCode.Length: > 0 })
-                return DescribeRun(instanceId, session.Epoch, expected.Document, result);
-            throw new AutomationException("native_erc_receipt_unavailable", "KiCad did not return an immutable ERC marker receipt for this execution.");
-        }
+        SchematicErcExecutionContract.ValidateReceipt(request, result);
+        SchematicErcExecutionContract.RequireSuccessful(result);
         return DescribeRun(instanceId, session.Epoch, expected.Document, result);
     });
 
@@ -179,6 +187,8 @@ public sealed class SchematicErcTools(InstanceRegistry registry)
         if (receipt is null)
             return Data(new { instanceId, processEpoch = session.Epoch, document = target, operationId, found = false,
                 receiptScope = "native-process", nativeReceiptAvailable = true });
+        SchematicErcExecutionContract.ValidateReceipt(receipt, target, expectedState: null,
+            operationId: operationId, processEpoch: expectedProcessEpoch);
         return DescribeRun(instanceId, session.Epoch, target, receipt);
     });
 

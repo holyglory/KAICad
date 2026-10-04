@@ -1,0 +1,166 @@
+using Kiapi.Common.Types;
+using KiCad.Automation.Model;
+using KiCad.Automation.Protocol;
+
+namespace KiCad.Automation.Mcp;
+
+/// <summary>Validates the identity and terminal evidence of retained schematic ERC work.</summary>
+internal static class SchematicErcExecutionContract
+{
+    public static void ValidateRequest(NativeCapabilitySchematicExecuteErc request)
+    {
+        if (request is null)
+            throw Invalid("A typed schematic ERC request is required.");
+
+        CanonicalUuid(request.OperationId, "operation ID");
+        if (request.ExpectedState is null || request.ExpectedState.Document is null)
+            throw InvalidState("A complete schematic lifecycle observation is required.");
+
+        DocumentStateTools.ValidateTarget(request.ExpectedState.Document);
+        ValidateLifecycleState(request.ExpectedState, request.ExpectedState.Document,
+            request.ExpectedState.ProcessEpoch);
+    }
+
+    public static void ValidateReceipt(NativeCapabilitySchematicExecuteErc request,
+        NativeErcOperationReceipt receipt)
+    {
+        ValidateRequest(request);
+        ValidateReceipt(receipt, request.ExpectedState!.Document, request.ExpectedState,
+            request.OperationId, request.ExpectedState.ProcessEpoch);
+        if (!receipt.AdmissionVerified)
+            throw Invalid("A typed schematic ERC receipt must confirm lifecycle admission.");
+    }
+
+    public static void ValidateReceipt(NativeErcOperationReceipt receipt,
+        DocumentSpecifier document, DocumentLifecycleState? expectedState,
+        string operationId, string processEpoch)
+    {
+        if (receipt is null)
+            throw Invalid("The native schematic ERC receipt is missing.");
+
+        CanonicalUuid(operationId, "operation ID");
+        CanonicalUuid(processEpoch, "process epoch");
+        if (document is null || document.Type != DocumentType.DoctypeSchematic)
+            throw Invalid("A schematic document is required for an ERC receipt.");
+        DocumentStateTools.ValidateTarget(document);
+
+        NativeCapabilitySchematicRunErcResponse? legacy = receipt.LegacyResult;
+        if (legacy is null || !legacy.Document.Equals(document)
+            || legacy.OperationId != operationId || legacy.ProcessEpoch != processEpoch)
+            throw Invalid("The native schematic ERC receipt does not match the requested document, process epoch or operation.");
+
+        if (receipt.BeforeState is null)
+            throw Invalid("The native schematic ERC receipt lacks its admitted lifecycle state.");
+        ValidateLifecycleState(receipt.BeforeState, document, processEpoch);
+        if (expectedState is not null && !receipt.BeforeState.Equals(expectedState))
+            throw Invalid("The native schematic ERC receipt belongs to a different lifecycle revision.");
+        if (legacy.CheckedRevision is null || !legacy.CheckedRevision.Equals(receipt.BeforeState.Revision))
+            throw Invalid("The native schematic ERC receipt does not retain the admitted document revision.");
+
+        if (receipt.AfterState is not null)
+        {
+            ValidateLifecycleState(receipt.AfterState, document, processEpoch);
+            if (legacy.ObservedRevision is null || !legacy.ObservedRevision.Equals(receipt.AfterState.Revision))
+                throw Invalid("The native schematic ERC receipt does not retain its observed document revision.");
+        }
+
+        if (receipt.MarkersCaptured != (receipt.CapturedMarkers is not null))
+            throw Invalid("The native schematic ERC marker-capture flag does not match its payload.");
+        if (receipt.MarkersCaptured && legacy.MarkerCount != receipt.CapturedMarkers!.Markers.Count)
+            throw Invalid("The native schematic ERC marker count does not match its captured marker snapshot.");
+
+        if (!Enum.IsDefined(receipt.State) || receipt.State == NativeErcOperationState.NeosUnknown)
+            throw Invalid("The native schematic ERC receipt has an unknown lifecycle state.");
+
+        switch (receipt.State)
+        {
+            case NativeErcOperationState.NeosAdmitted:
+                if (legacy.Completed || receipt.ExecutionStarted || receipt.MarkersCaptured
+                    || !string.IsNullOrWhiteSpace(legacy.ErrorCode)
+                    || !string.IsNullOrWhiteSpace(legacy.ErrorMessage))
+                    throw Invalid("An admitted schematic ERC receipt cannot claim execution or a terminal error.");
+                break;
+
+            case NativeErcOperationState.NeosCompleted:
+                if (!legacy.Completed || !receipt.ExecutionStarted || !receipt.MarkersCaptured
+                    || receipt.AfterState is null || !receipt.BeforeState.Equals(receipt.AfterState)
+                    || !string.IsNullOrWhiteSpace(legacy.ErrorCode)
+                    || !string.IsNullOrWhiteSpace(legacy.ErrorMessage))
+                    throw Invalid("A completed schematic ERC receipt must retain a stable state and captured markers.");
+                break;
+
+            case NativeErcOperationState.NeosFailed:
+                if (legacy.Completed || receipt.ExecutionStarted || receipt.MarkersCaptured
+                    || string.IsNullOrWhiteSpace(legacy.ErrorCode)
+                    || string.IsNullOrWhiteSpace(legacy.ErrorMessage))
+                    throw Invalid("A failed schematic ERC receipt must retain its pre-execution error.");
+                break;
+
+            case NativeErcOperationState.NeosIndeterminate:
+                if (legacy.Completed || !receipt.ExecutionStarted
+                    || string.IsNullOrWhiteSpace(legacy.ErrorCode)
+                    || string.IsNullOrWhiteSpace(legacy.ErrorMessage))
+                    throw Invalid("An indeterminate schematic ERC receipt must retain its uncertainty and error.");
+                break;
+
+            default:
+                throw Invalid("The native schematic ERC receipt has an unsupported lifecycle state.");
+        }
+    }
+
+    /// <summary>Rejects an admitted, failed or indeterminate result at the execution boundary.</summary>
+    public static void RequireSuccessful(NativeErcOperationReceipt receipt)
+    {
+        if (receipt is null)
+            throw Invalid("The native schematic ERC receipt is missing.");
+
+        switch (receipt.State)
+        {
+            case NativeErcOperationState.NeosCompleted:
+                return;
+            case NativeErcOperationState.NeosFailed:
+                throw new AutomationException("erc_execution_failed", ErrorMessage(receipt));
+            case NativeErcOperationState.NeosIndeterminate:
+                throw new AutomationException("erc_execution_indeterminate", ErrorMessage(receipt));
+            case NativeErcOperationState.NeosAdmitted:
+                throw new AutomationException("erc_execution_incomplete", "Native ERC remains admitted but has no terminal result.");
+            default:
+                throw Invalid("The native schematic ERC receipt has an unknown lifecycle state.");
+        }
+    }
+
+    private static void ValidateLifecycleState(DocumentLifecycleState state,
+        DocumentSpecifier document, string processEpoch)
+    {
+        if (state.Scope != DocumentLifecycleScope.DlsSchematicHierarchy
+            || state.Document is null || !state.Document.Equals(document)
+            || state.ProcessEpoch != processEpoch
+            || string.IsNullOrWhiteSpace(state.NativeIdentity)
+            || !Guid.TryParseExact(state.NativeIdentity, "D", out var nativeIdentity)
+            || nativeIdentity == Guid.Empty || state.Revision is null
+            || !Guid.TryParseExact(state.Revision.Epoch, "D", out var revisionEpoch)
+            || revisionEpoch == Guid.Empty || state.StateSha256.Length != 64
+            || !state.StateSha256.All(char.IsAsciiHexDigitLower))
+            throw InvalidState("The native schematic ERC lifecycle state is incomplete or targets another revision.");
+    }
+
+    private static string ErrorMessage(NativeErcOperationReceipt receipt)
+    {
+        NativeCapabilitySchematicRunErcResponse? legacy = receipt.LegacyResult;
+        return string.IsNullOrWhiteSpace(legacy?.ErrorMessage)
+            ? "Native ERC did not produce a successful terminal result."
+            : legacy.ErrorMessage;
+    }
+
+    private static void CanonicalUuid(string value, string label)
+    {
+        if (!Guid.TryParseExact(value, "D", out var id) || id == Guid.Empty)
+            throw Invalid($"A nonempty canonical {label} is required.");
+    }
+
+    private static AutomationException Invalid(string message) =>
+        new("invalid_schematic_erc_receipt", message);
+
+    private static AutomationException InvalidState(string message) =>
+        new("invalid_schematic_erc_state", message);
+}

@@ -62,6 +62,7 @@ public sealed class PcbKeepoutCheckedMigrationTests
             await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(root, "native.sock")), transport.InstanceId);
             var tools = new PcbKeepoutAuthoringTools(registry);
             var state = State(root, transport.Epoch, sequence: 7, digest: 'c');
+            transport.LifecycleState = state;
             var input = Input(Guid.NewGuid().ToString("D"));
             transport.Existing = input.ToNative();
             var reply = await tools.Update(transport.InstanceId, SchematicJson.Formatter.Format(state.Document), input,
@@ -88,14 +89,27 @@ public sealed class PcbKeepoutCheckedMigrationTests
             await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(root, "native.sock")), transport.InstanceId);
             var tools = new PcbKeepoutAuthoringTools(registry);
             var state = State(root, transport.Epoch, sequence: 9, digest: 'd');
+            transport.LifecycleState = state;
             var input = Input(Guid.NewGuid().ToString("D"));
             transport.Existing = input.ToNative();
+            transport.Existing.Locked = LockedState.LsLocked;
+            transport.Existing.Priority = 17;
+            transport.Existing.CustomProperties.Add(new CustomProperty
+            {
+                Key = "native.keepout.metadata", Value = "preserve-on-update"
+            });
             string document = SchematicJson.Formatter.Format(state.Document);
             string expected = SchematicJson.Formatter.Format(state);
             string updateOperation = Guid.NewGuid().ToString("D");
 
             var updated = await tools.Update(transport.InstanceId, document, input, expected, updateOperation, default);
             Assert.IsFalse(updated.IsError ?? false, Text(updated));
+            var updatedResponse = BoardJson.Parser.Parse<UpdateItemsResponse>(
+                JsonSerializer.SerializeToElement(updated.StructuredContent).GetProperty("response").GetRawText());
+            var appliedUpdate = updatedResponse.UpdatedItems.Single().Item.Unpack<Zone>();
+            Assert.AreEqual(LockedState.LsLocked, appliedUpdate.Locked);
+            Assert.AreEqual(17u, appliedUpdate.Priority);
+            Assert.AreEqual("preserve-on-update", appliedUpdate.CustomProperties.Single().Value);
             transport.LiveBoardChanged = true;
             var updateReplay = await tools.Update(transport.InstanceId, document, input, expected, updateOperation, default);
             Assert.IsFalse(updateReplay.IsError ?? false, Text(updateReplay));
@@ -169,10 +183,12 @@ public sealed class PcbKeepoutCheckedMigrationTests
     private sealed class KeepoutTransport : INativeTransport
     {
         private readonly Dictionary<string, CheckedPcbItemTransactionReceipt> receipts = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, CheckedPcbItemTransaction> requests = new(StringComparer.Ordinal);
         internal string Epoch { get; } = Guid.NewGuid().ToString("D");
         internal string InstanceId { get; } = Guid.NewGuid().ToString("D");
         internal bool RejectUpdates { get; init; }
         internal bool LiveBoardChanged { get; set; }
+        internal DocumentLifecycleState? LifecycleState { get; set; }
         internal Zone? Existing { get; set; }
         internal int CheckedMutations { get; private set; }
         internal int LegacyMutations { get; private set; }
@@ -185,6 +201,12 @@ public sealed class PcbKeepoutCheckedMigrationTests
             if (request.Message.Is(GetAutomationSession.Descriptor))
                 return Reply(new AutomationSession { ProtocolVersion = 1, InstanceId = InstanceId,
                     ProjectPath = "/fixture/fixture.kicad_pro", Epoch = Epoch });
+            if (request.Message.Is(ReadDocumentLifecycleState.Descriptor))
+            {
+                if (LifecycleState is null)
+                    return Error("lifecycle state was not configured");
+                return Reply(LifecycleState.Clone());
+            }
             if (request.Message.Is(GetItemsById.Descriptor))
             {
                 ItemReads++;
@@ -197,7 +219,12 @@ public sealed class PcbKeepoutCheckedMigrationTests
             {
                 var query = request.Message.Unpack<ReadCheckedPcbItemTransactionReceipt>();
                 if (receipts.TryGetValue(query.OperationId, out var retained))
+                {
+                    if (!requests.TryGetValue(query.OperationId, out var stored)
+                        || !stored.Equals(query.ExpectedRequest))
+                        return Error("checked receipt inspection used a different request");
                     return Reply(retained.Clone());
+                }
                 return Reply(new CheckedPcbItemTransactionReceipt
                 {
                     Document = query.Document.Clone(), ProcessEpoch = Epoch,
@@ -221,6 +248,8 @@ public sealed class PcbKeepoutCheckedMigrationTests
             var checkedRequest = request.Message.Unpack<CheckedPcbItemTransaction>();
             if (receipts.TryGetValue(checkedRequest.OperationId, out var previous))
             {
+                if (!requests[checkedRequest.OperationId].Equals(checkedRequest))
+                    return Error("checked operation replay used a different request");
                 var replay = previous.Clone();
                 replay.Replayed = true;
                 return Reply(replay);
@@ -233,6 +262,7 @@ public sealed class PcbKeepoutCheckedMigrationTests
                 PcbItemOperation.ActionOneofCase.Delete => CompletedDelete(checkedRequest),
                 _ => throw new AssertFailedException("unsupported keepout fixture operation")
             };
+            requests.Add(checkedRequest.OperationId, checkedRequest.Clone());
             receipts.Add(checkedRequest.OperationId, receipt.Clone());
             return Reply(receipt);
         }

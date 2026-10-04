@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Text.Json;
 using Google.Protobuf;
@@ -22,6 +23,13 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
 {
+    // Update requests contain native-owned metadata copied from the existing
+    // rule area. Keep the exact checked request that was sent so receipt
+    // inspection can replay it without rereading a target that may no longer
+    // be available after a lost reply. The native receipt remains authoritative
+    // for settlement; this cache only reconstructs its exact request envelope.
+    private readonly ConcurrentDictionary<string, CachedCheckedRequest> checkedRequests = new(StringComparer.Ordinal);
+
     [McpServerTool(Name = "kicad_pcb_keepout_read", ReadOnly = true),
      Description("Read one typed native keepout by canonical KIID at an exact PCB lifecycle checkpoint. documentJson identifies the board, keepoutId identifies one rule area, and expectedStateJson must carry the matching process epoch, revision and digest. Derived fill polygons and parent links are returned as native state but are never treated as authoring input."),
      KiCadCapability("pcb-keepouts", "compiled-mcp plus-native-board-api", "outcome:p079fb6adb164b14c; explicit PCB document, keepout KIID, process epoch, lifecycle revision and digest"),
@@ -109,6 +117,7 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
         var document = ParseDocument(documentJson);
         PcbKeepoutAuthoringContract.ValidateOperationId(operationId);
         var expected = ParseState(expectedStateJson, document);
+        var callerExpected = expected.Clone();
         var client = registry.Client(instanceId);
         var session = await client.HandshakeAsync(cancellationToken);
         RequireEpoch(session.Epoch, expected.ProcessEpoch);
@@ -144,10 +153,18 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
             default: throw new ArgumentOutOfRangeException(nameof(mutation));
         }
 
+        Zone? requestedZone = mutation == KeepoutMutation.Update ? zone!.Clone() : null;
+
         // Inspect the native process-owned receipt before any target read. A
         // retry can therefore settle from the retained result even when the
         // target was deleted or a live-state reread is no longer possible.
-        var rawRequest = CheckedRequest(expected, session.Epoch, operation, operationId);
+        // Updates may have copied native-owned metadata into the request that
+        // was sent on the first call; reuse that exact envelope for inspection
+        // instead of rebuilding a metadata-free request from the task DTO.
+        var rawRequest = mutation == KeepoutMutation.Update
+            && TryCachedUpdate(instanceId, operationId, targetId, callerExpected, requestedZone, out var cachedRequest)
+            ? cachedRequest
+            : CheckedRequest(expected, session.Epoch, operation, operationId);
         var inspected = await PcbCheckedItemDispatch.InspectAsync(registry, instanceId, rawRequest, cancellationToken);
         if (inspected.Receipt is { State: not CheckedPcbItemTransactionState.CpbtsNotFound })
         {
@@ -192,9 +209,34 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
         }
 
         var checkedRequest = CheckedRequest(expected, session.Epoch, operation, operationId);
+        if (mutation == KeepoutMutation.Update)
+        {
+            checkedRequests[CacheKey(instanceId, operationId)] = new CachedCheckedRequest(
+                mutation, targetId, requestedZone!.Clone(), callerExpected, checkedRequest.Clone());
+        }
         var outcome = await PcbCheckedItemDispatch.ApplyAsync(registry, instanceId, checkedRequest, cancellationToken);
         return KeepoutMutationData(outcome, mutation, targetId);
     }
+
+    private bool TryCachedUpdate(string instanceId, string operationId, string targetId,
+        DocumentLifecycleState callerExpected, Zone? requestedZone,
+        out CheckedPcbItemTransaction request)
+    {
+        request = null!;
+        if (requestedZone is null
+            || !checkedRequests.TryGetValue(CacheKey(instanceId, operationId), out var cached)
+            || cached.Mutation != KeepoutMutation.Update
+            || cached.TargetId != targetId
+            || !cached.CallerExpected.Equals(callerExpected)
+            || !cached.RequestedZone.Equals(requestedZone)
+            || cached.Request.ProcessEpoch != callerExpected.ProcessEpoch)
+            return false;
+
+        request = cached.Request.Clone();
+        return true;
+    }
+
+    private static string CacheKey(string instanceId, string operationId) => instanceId + "\0" + operationId;
 
     private static CheckedPcbItemTransaction CheckedRequest(DocumentLifecycleState expected,
         string processEpoch, PcbItemOperation operation, string operationId)
@@ -409,4 +451,11 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
         Update,
         Delete
     }
+
+    private sealed record CachedCheckedRequest(
+        KeepoutMutation Mutation,
+        string TargetId,
+        Zone RequestedZone,
+        DocumentLifecycleState CallerExpected,
+        CheckedPcbItemTransaction Request);
 }

@@ -82,7 +82,7 @@ public sealed class PcbJobTools(InstanceRegistry registry)
             receipt = await client.InvokeAsync<RunPcbManufacturingExport,
                 PcbManufacturingExportReceipt>(request, cancellationToken);
             PcbManufacturingContract.ValidateReceipt(receipt, document, expected,
-                input.OperationId, expected.ProcessEpoch);
+                input.OperationId, expected.ProcessEpoch, requestFingerprint);
             recovery.MarkReceipt(input.OperationId, receipt,
                 Directory.Exists(receipt.OutputDirectory),
                 PcbExportRecoveryPolicy.OutputMatches(receipt),

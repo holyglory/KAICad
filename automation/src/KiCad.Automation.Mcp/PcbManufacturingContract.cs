@@ -42,7 +42,7 @@ internal static class PcbManufacturingContract
 
     public static void ValidateReceipt(PcbManufacturingExportReceipt receipt,
         DocumentSpecifier document, DocumentLifecycleState? expectedState,
-        string operationId, string processEpoch)
+        string operationId, string processEpoch, string? expectedRequestFingerprintSha256 = null)
     {
         if (receipt is null)
             throw Invalid("The native manufacturing receipt is missing.");
@@ -53,6 +53,11 @@ internal static class PcbManufacturingContract
             throw Invalid("The native manufacturing receipt does not match the requested PCB, process epoch or operation.");
         if (!Sha256(receipt.RequestFingerprintSha256) || string.IsNullOrWhiteSpace(receipt.JobKind))
             throw Invalid("The native manufacturing receipt lacks request and job identity.");
+        if (expectedRequestFingerprintSha256 is not null
+            && (!Sha256(expectedRequestFingerprintSha256)
+                || !string.Equals(receipt.RequestFingerprintSha256, expectedRequestFingerprintSha256,
+                    StringComparison.Ordinal)))
+            throw Invalid("The native manufacturing receipt fingerprint does not match the submitted request.");
         if (!Enum.IsDefined(receipt.Status) || receipt.Status == PcbManufacturingExportStatus.PcbMfgExportStatusUnspecified
             || !Enum.IsDefined(receipt.DispatchStage) || receipt.DispatchStage == PcbManufacturingDispatchStage.PcbMfgDispatchUnspecified
             || !Enum.IsDefined(receipt.PublicationState) || receipt.PublicationState == PcbManufacturingPublicationState.PcbMfgPublicationUnspecified)

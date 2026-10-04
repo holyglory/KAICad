@@ -2,6 +2,7 @@ using Kiapi.Board.Jobs;
 using Kiapi.Common.Types;
 using KiCad.Automation.Model;
 using KiCad.Automation.Mcp;
+using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
@@ -62,6 +63,26 @@ public sealed class PcbManufacturingContractTests
         failedWithStagedArtifact.Artifacts[0].Path = failedWithStagedArtifact.StagingDirectory + "/export.svg";
         PcbManufacturingContract.ValidateReceipt(failedWithStagedArtifact, request.Document, null,
             request.OperationId, request.ProcessEpoch);
+    }
+
+    [TestMethod]
+    public void ReceiptFingerprintMustMatchSubmittedRequest()
+    {
+        var (request, receipt) = Fixture();
+        string fingerprint = PcbExportRecoveryPolicy.Fingerprint(request.OperationId, request.ProcessEpoch,
+            SchematicJson.Formatter.Format(request.Document), request.OutputDirectory, request);
+        receipt.RequestFingerprintSha256 = fingerprint;
+
+        PcbManufacturingContract.ValidateReceipt(receipt, request.Document, request.ExpectedState,
+            request.OperationId, request.ProcessEpoch, fingerprint);
+
+        var mismatch = receipt.Clone();
+        mismatch.RequestFingerprintSha256 = new string('c', 64);
+        var error = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbManufacturingContract.ValidateReceipt(mismatch, request.Document, request.ExpectedState,
+                request.OperationId, request.ProcessEpoch, fingerprint));
+        Assert.AreEqual("invalid_pcb_export_receipt", error.Code);
+        StringAssert.Contains(error.Message, "fingerprint", StringComparison.OrdinalIgnoreCase);
     }
 
     [TestMethod]

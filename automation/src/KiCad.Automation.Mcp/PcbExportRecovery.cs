@@ -56,8 +56,10 @@ internal sealed record PcbExportRecoveryRecord(
         {
             var receipt = SchematicJson.Parser.Parse<PcbManufacturingExportReceipt>(ReceiptJson);
             if (!string.Equals(receipt.OperationId, OperationId, StringComparison.Ordinal)
-                || !string.Equals(receipt.ProcessEpoch, ProcessEpoch, StringComparison.Ordinal))
-                throw Invalid("The durable PCB export receipt does not match its operation or process epoch.");
+                || !string.Equals(receipt.ProcessEpoch, ProcessEpoch, StringComparison.Ordinal)
+                || !string.Equals(receipt.RequestFingerprintSha256, RequestFingerprintSha256,
+                    StringComparison.Ordinal))
+                throw Invalid("The durable PCB export receipt does not match its operation, process epoch or request fingerprint.");
         }
         catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException)
         { throw Invalid("The durable PCB export receipt is invalid: " + error.Message); }
@@ -314,7 +316,7 @@ internal sealed class PcbExportRecoveryStore(string stateDirectory)
             var receipt = SchematicJson.Parser.Parse<PcbManufacturingExportReceipt>(record.ReceiptJson);
             PcbManufacturingContract.ValidateReceipt(receipt,
                 SchematicJson.Parser.Parse<Kiapi.Common.Types.DocumentSpecifier>(record.DocumentJson), null,
-                record.OperationId, record.ProcessEpoch);
+                record.OperationId, record.ProcessEpoch, record.RequestFingerprintSha256);
             return receipt;
         }
         catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException

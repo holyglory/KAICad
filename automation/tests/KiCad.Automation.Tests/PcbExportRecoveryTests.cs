@@ -121,6 +121,7 @@ public sealed class PcbExportRecoveryTests
             {
                 OperationId = record.OperationId,
                 ProcessEpoch = record.ProcessEpoch,
+                RequestFingerprintSha256 = record.RequestFingerprintSha256,
                 Status = PcbManufacturingExportStatus.PcbMfgExportCompleted,
                 PublicationState = PcbManufacturingPublicationState.PcbMfgPublicationPublished,
                 OutputDirectory = record.OutputDirectory,
@@ -142,6 +143,36 @@ public sealed class PcbExportRecoveryTests
                 outputVerified: true, stagingExists: false);
             var after = store.MarkUnknown(record.OperationId, nativeDispatch: true);
             Assert.AreEqual(PcbExportRecoveryPolicy.Completed, after.Status);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public void DurableReceiptMustRetainRequestFingerprint()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-pcb-export-fingerprint-").FullName;
+        try
+        {
+            var record = Record(PcbExportRecoveryPolicy.Pending, nativeDispatchKnown: true,
+                nativeDispatch: true, root: root);
+            var store = new PcbExportRecoveryStore(root);
+            store.Begin(record.InstanceId, record.OperationId, record.ProcessEpoch, record.DocumentJson,
+                record.RequestFingerprintSha256, record.OutputDirectory);
+            var receipt = new PcbManufacturingExportReceipt
+            {
+                OperationId = record.OperationId,
+                ProcessEpoch = record.ProcessEpoch,
+                RequestFingerprintSha256 = new string('b', 64),
+                Status = PcbManufacturingExportStatus.PcbMfgExportFailed,
+                DispatchStage = PcbManufacturingDispatchStage.PcbMfgDispatchTerminal,
+                Terminal = true,
+                ErrorCode = "native_export_failed",
+                PublicationState = PcbManufacturingPublicationState.PcbMfgPublicationFailed
+            };
+            var error = Assert.ThrowsExactly<AutomationException>(() =>
+                store.MarkReceipt(record.OperationId, receipt, outputExists: false,
+                    outputVerified: false, stagingExists: false));
+            Assert.AreEqual("invalid_pcb_export_recovery", error.Code);
         }
         finally { Directory.Delete(root, true); }
     }

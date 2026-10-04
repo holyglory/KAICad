@@ -80,8 +80,12 @@ public sealed class PcbZoneAuthoringInput
         if (points is null)
             throw new AutomationException("invalid_pcb_zone_outline", $"A zone {role} ring cannot be null.");
         var ring = new PolyLine { Closed = true };
-        foreach (PcbZonePointInput point in points)
+        foreach (PcbZonePointInput? point in points)
+        {
+            if (point is null)
+                throw new AutomationException("invalid_pcb_zone_outline", $"A zone {role} ring point cannot be null.");
             ring.Nodes.Add(new PolyLineNode { Point = point.ToNative() });
+        }
         return ring;
     }
 

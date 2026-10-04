@@ -44,25 +44,36 @@ internal static class PcbZoneAuthoringContract
 
     internal static void ValidateOperationId(string operationId)
     {
-        if (!Guid.TryParseExact(operationId, "D", out var value) || value == Guid.Empty)
+        if (!CanonicalUuid(operationId))
             throw new AutomationException("invalid_pcb_zone_operation", "Zone authoring requires a canonical operation UUID.");
     }
 
-    internal static void ValidateCreate(Zone zone) => ValidateZone(zone, requireIdentity: true);
+    internal static void ValidateCreate(Zone zone) => ValidateZone(zone, requireIdentity: true,
+        allowNativeParent: false, nativeIdentity: null);
 
-    internal static void ValidateUpdate(Zone zone) => ValidateZone(zone, requireIdentity: true);
+    internal static void ValidateUpdate(Zone zone) => ValidateZone(zone, requireIdentity: true,
+        allowNativeParent: false, nativeIdentity: null);
+
+    /// <summary>
+    /// Validates an existing native zone before an update or read. Native board
+    /// ownership may populate Parent and Filled/FilledPolygons; those derived
+    /// fields are accepted only when they identify this exact native board.
+    /// </summary>
+    internal static void ValidateExisting(Zone zone, string nativeIdentity) => ValidateZone(zone,
+        requireIdentity: true, allowNativeParent: true, nativeIdentity, allowDerivedFill: true);
 
     internal static void ValidateDeleteId(string zoneId)
     {
-        if (!Guid.TryParseExact(zoneId, "D", out var value) || value == Guid.Empty)
+        if (!CanonicalUuid(zoneId))
             throw new AutomationException("invalid_pcb_zone_identity", "Supply one canonical zone UUID.");
     }
 
-    private static void ValidateZone(Zone? zone, bool requireIdentity)
+    private static void ValidateZone(Zone? zone, bool requireIdentity, bool allowNativeParent,
+        string? nativeIdentity, bool allowDerivedFill = false)
     {
         if (zone is null)
             throw new AutomationException("invalid_pcb_zone", "Supply one typed PCB zone.");
-        if (requireIdentity && (zone.Id is null || !Guid.TryParseExact(zone.Id.Value, "D", out var id) || id == Guid.Empty))
+        if (requireIdentity && (zone.Id is null || !CanonicalUuid(zone.Id.Value)))
             throw new AutomationException("invalid_pcb_zone_identity", "The zone needs one canonical UUID.");
         if (zone.Type != ZoneType.ZtCopper)
             throw new AutomationException("unsupported_pcb_zone_type", "This bounded authoring surface accepts copper zones only; graphical, rule-area and teardrop zones are rejected.");
@@ -89,10 +100,15 @@ internal static class PcbZoneAuthoringContract
                 ValidateRing(hole, "hole", ref totalNodes);
         }
 
-        if (zone.Filled || zone.FilledPolygons.Count != 0)
+        if (!allowDerivedFill && (zone.Filled || zone.FilledPolygons.Count != 0))
             throw new AutomationException("unsupported_pcb_zone_fill", "Filled polygons are native-derived state; omit them and refill the zone through the native operation.");
         if (zone.Parent is not null && !string.IsNullOrWhiteSpace(zone.Parent.Value))
-            throw new AutomationException("unsupported_pcb_zone_parent", "A zone parent is native-owned and cannot be changed by this authoring surface.");
+        {
+            if (!allowNativeParent)
+                throw new AutomationException("unsupported_pcb_zone_parent", "A zone parent is native-owned and cannot be changed by this authoring surface.");
+            if (!CanonicalUuid(nativeIdentity) || zone.Parent.Value != nativeIdentity)
+                throw new AutomationException("unsupported_pcb_zone_parent", "The existing zone belongs to a different native board container.");
+        }
         if (zone.CopperSettings is null)
             throw new AutomationException("invalid_pcb_zone_settings", "A copper zone needs CopperSettings.");
         if (zone.CopperSettings.Net is null)
@@ -161,6 +177,11 @@ internal static class PcbZoneAuthoringContract
         if (value is not null && (value.ValueNm < 0 || value.ValueNm > int.MaxValue))
             throw new AutomationException("invalid_pcb_zone_distance", $"{field} exceeds KiCad's native non-negative 32-bit distance range.");
     }
+
+    private static bool CanonicalUuid(string? value) => !string.IsNullOrWhiteSpace(value)
+        && Guid.TryParseExact(value, "D", out var id)
+        && id != Guid.Empty
+        && id.ToString("D") == value;
 
     internal static void ValidateReadback(Zone expected, Zone actual)
     {

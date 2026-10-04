@@ -102,6 +102,61 @@ public sealed class PcbZoneAuthoringContractTests
     }
 
     [TestMethod]
+    public void CopperZoneContractRejectsNonCanonicalOperationAndDeleteIds()
+    {
+        Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateOperationId("not-a-guid"));
+        Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateOperationId("a2222222-2222-2222-2222-222222222222".ToUpperInvariant()));
+        Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateOperationId(Guid.Empty.ToString("D")));
+        Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateDeleteId("not-a-zone"));
+        Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateDeleteId(Guid.Empty.ToString("D")));
+    }
+
+    [TestMethod]
+    public void CopperZoneContractAcceptsNativeDerivedReadbackOnlyForOwningBoard()
+    {
+        const string nativeIdentity = "77777777-7777-7777-7777-777777777777";
+        var existing = Zone("11111111-1111-1111-1111-111111111111");
+        existing.Parent = new() { Value = nativeIdentity };
+        existing.Filled = true;
+        PcbZoneAuthoringContract.ValidateExisting(existing, nativeIdentity);
+
+        var foreign = existing.Clone();
+        foreign.Parent.Value = "88888888-8888-8888-8888-888888888888";
+        var parentError = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbZoneAuthoringContract.ValidateExisting(foreign, nativeIdentity));
+        Assert.AreEqual("unsupported_pcb_zone_parent", parentError.Code);
+
+        var unowned = existing.Clone();
+        unowned.Parent = null;
+        unowned.Filled = false;
+        PcbZoneAuthoringContract.ValidateUpdate(unowned);
+    }
+
+    [TestMethod]
+    public void CopperZoneContractRejectsCreateUpdatePayloadsBeforeNativeDispatch()
+    {
+        var duplicateLayer = Zone("11111111-1111-1111-1111-111111111111");
+        duplicateLayer.Layers.Add(BoardLayer.BlFCu);
+        Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateCreate(duplicateLayer));
+
+        var negativeClearance = Zone("11111111-1111-1111-1111-111111111111");
+        negativeClearance.CopperSettings.Clearance.ValueNm = -1;
+        Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateUpdate(negativeClearance));
+
+        var missingNet = Zone("11111111-1111-1111-1111-111111111111");
+        missingNet.CopperSettings.Net = null;
+        Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateCreate(missingNet));
+
+        var nullPoint = new PcbZoneAuthoringInput
+        {
+            Id = "11111111-1111-1111-1111-111111111111",
+            Layers = ["F.Cu"],
+            Polygons = [new PcbZonePolygonInput { Outline = [null!] }]
+        };
+        Assert.ThrowsExactly<AutomationException>(() => nullPoint.ToNative());
+    }
+
+    [TestMethod]
     public void CopperZoneReadbackCanonicalizesRingOrderButRejectsArcTopology()
     {
         var expected = Zone("11111111-1111-1111-1111-111111111111");

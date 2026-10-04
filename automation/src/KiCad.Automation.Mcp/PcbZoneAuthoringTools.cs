@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Text.Json;
 using Google.Protobuf;
@@ -22,6 +23,11 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
 {
+    // Keep the exact checked update envelope that was sent. A retry after a
+    // lost reply must be able to inspect the native receipt without rereading
+    // a target that may have changed or disappeared.
+    private readonly ConcurrentDictionary<string, CachedCheckedRequest> checkedRequests = new(StringComparer.Ordinal);
+
     [McpServerTool(Name = "kicad_pcb_zone_read", ReadOnly = true),
      Description("Read one typed native copper zone by canonical KIID at an exact PCB lifecycle checkpoint. documentJson identifies the board, zoneId identifies one zone, and expectedStateJson must carry the matching process epoch, revision and digest. Derived fill polygons are returned as native state but are never treated as authoring input."),
      KiCadCapability("pcb-zones", "compiled-mcp plus-native-board-api", "explicit PCB document, zone KIID, process epoch, lifecycle revision and digest"),
@@ -31,8 +37,8 @@ public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
         Execute(() => ReadCore(instanceId, documentJson, zoneId, expectedStateJson, cancellationToken));
 
     [McpServerTool(Name = "kicad_pcb_zone_create"),
-     Description("Create one typed copper zone through KiCad's native board API. zone is task-oriented input with a canonical UUID, explicit copper layers, closed point-only polygon rings, net and fill settings; documentJson and expectedStateJson identify the exact board checkpoint. The native operation is undoable and lifecycle-guarded. Native-derived fill polygons and parent links are unavailable in this input; operationId is correlation only, so inspect the board after a lost reply before retrying."),
-     KiCadCapability("pcb-zones", "compiled-mcp plus-native-board-api", "explicit PCB document, typed zone input, process epoch, lifecycle revision and digest, operation UUID"),
+     Description("Create one typed copper zone through KiCad's native board API. zone is task-oriented input with a canonical UUID, explicit copper layers, closed point-only polygon rings, net and fill settings; documentJson and expectedStateJson identify the exact board checkpoint. The checked native operation is lifecycle-guarded and retains a receipt so the same operationId can be replayed safely after a lost reply. Native-derived fill polygons and parent links are unavailable in this input."),
+     KiCadCapability("pcb-zones", "compiled-mcp plus-native-board-api", "outcome:p16f42b1cbade388b; explicit PCB document, typed zone input, process epoch, lifecycle revision and digest, operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Create(string instanceId, string documentJson, PcbZoneAuthoringInput zone,
         string expectedStateJson, string operationId, CancellationToken cancellationToken) =>
@@ -40,8 +46,8 @@ public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
             ZoneMutation.Create, cancellationToken));
 
     [McpServerTool(Name = "kicad_pcb_zone_update"),
-     Description("Update one existing typed copper zone through KiCad's native board API. zone is task-oriented input and must retain the existing canonical UUID; the target must already be a native Zone and the board must still equal expectedStateJson. The update is one undoable lifecycle-guarded transaction. Native-derived fill polygons and parent links are unavailable instead of being silently overwritten."),
-     KiCadCapability("pcb-zones", "compiled-mcp plus-native-board-api", "explicit PCB document, typed zone input and KIID, process epoch, lifecycle revision and digest, operation UUID"),
+     Description("Update one existing typed copper zone through KiCad's native board API. zone is task-oriented input and must retain the existing canonical UUID; the target must already be a native copper Zone and the board must still equal expectedStateJson. The checked native operation is lifecycle-guarded and retains a receipt for exact operationId replay. Native-derived fill polygons and parent links are preserved instead of silently overwritten."),
+     KiCadCapability("pcb-zones", "compiled-mcp plus-native-board-api", "outcome:p16f42b1cbade388b; explicit PCB document, typed zone input and KIID, process epoch, lifecycle revision and digest, operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Update(string instanceId, string documentJson, PcbZoneAuthoringInput zone,
         string expectedStateJson, string operationId, CancellationToken cancellationToken) =>
@@ -49,8 +55,8 @@ public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
             ZoneMutation.Update, cancellationToken));
 
     [McpServerTool(Name = "kicad_pcb_zone_delete"),
-     Description("Delete one explicitly identified native copper zone by canonical KIID. The target is read and required to be a Zone before an undoable native transaction opens; documentJson and expectedStateJson guard the exact PCB revision. operationId is correlation only; a lost reply requires a fresh zone read before retrying."),
-     KiCadCapability("pcb-zones", "compiled-mcp plus-native-board-api", "explicit PCB document, zone KIID, process epoch, lifecycle revision and digest, operation UUID"),
+     Description("Delete one explicitly identified native copper zone by canonical KIID. The target is read and required to be a copper Zone before a checked lifecycle-guarded operation is dispatched; documentJson and expectedStateJson guard the exact PCB revision. The native receipt retains operationId and the exact result for safe replay after a lost reply."),
+     KiCadCapability("pcb-zones", "compiled-mcp plus-native-board-api", "outcome:p16f42b1cbade388b; explicit PCB document, zone KIID, process epoch, lifecycle revision and digest, operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Delete(string instanceId, string documentJson, string zoneId,
         string expectedStateJson, string operationId, CancellationToken cancellationToken) =>
@@ -68,12 +74,21 @@ public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
         RequireEpoch(session.Epoch, expected.ProcessEpoch);
         var before = await ReadState(client, document, cancellationToken);
         RequireState(before, expected, "The PCB changed before the zone read; inspect a fresh lifecycle state and retry.");
-        var response = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+        GetItemsResponse response;
+        try
         {
-            Header = new() { Document = document },
-            Items = { new KIID { Value = zoneId } }
-        }, cancellationToken);
+            response = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            {
+                Header = new() { Document = document },
+                Items = { new KIID { Value = zoneId } }
+            }, cancellationToken);
+        }
+        catch (NativeApiException error) when (error.Status == 3)
+        {
+            throw new AutomationException("pcb_zone_not_found", $"Native zone {zoneId} was not found.");
+        }
         Zone zone = RequireSingleZone(response, zoneId);
+        PcbZoneAuthoringContract.ValidateExisting(zone, expected.NativeIdentity);
         var after = await ReadState(client, document, cancellationToken);
         RequireState(after, expected, "The PCB changed while reading the zone; discard this snapshot.");
         return Data(new
@@ -92,156 +107,215 @@ public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
         var document = ParseDocument(documentJson);
         PcbZoneAuthoringContract.ValidateOperationId(operationId);
         var expected = ParseState(expectedStateJson, document);
+        var callerExpected = expected.Clone();
         var client = registry.Client(instanceId);
         var session = await client.HandshakeAsync(cancellationToken);
         RequireEpoch(session.Epoch, expected.ProcessEpoch);
         Zone? zone = null;
         Zone? existing = null;
         string targetId;
-        CreateItems? create = null;
-        UpdateItems? update = null;
-        DeleteItems? delete = null;
+        PcbItemOperation operation;
         switch (mutation)
         {
             case ZoneMutation.Create:
                 zone = input?.ToNative() ?? throw new AutomationException("invalid_pcb_zone", "Supply typed zone input.");
                 PcbZoneAuthoringContract.ValidateCreate(zone);
                 targetId = zone.Id.Value;
-                create = new CreateItems { Header = new() { Document = document } };
+                var create = new CreateItems { Header = new() { Document = document } };
                 create.Items.Add(Any.Pack(zone));
+                operation = new PcbItemOperation { Create = create };
                 break;
             case ZoneMutation.Update:
                 zone = input?.ToNative() ?? throw new AutomationException("invalid_pcb_zone", "Supply typed zone input.");
                 PcbZoneAuthoringContract.ValidateUpdate(zone);
                 targetId = zone.Id.Value;
-                update = new UpdateItems { Header = new() { Document = document } };
+                var update = new UpdateItems { Header = new() { Document = document } };
                 update.Items.Add(Any.Pack(zone));
+                operation = new PcbItemOperation { Update = update };
                 break;
             case ZoneMutation.Delete:
                 PcbZoneAuthoringContract.ValidateDeleteId(zoneIdInput ?? "");
                 targetId = zoneIdInput!;
-                delete = new DeleteItems { Header = new() { Document = document } };
+                var delete = new DeleteItems { Header = new() { Document = document } };
                 delete.ItemIds.Add(new KIID { Value = targetId });
+                operation = new PcbItemOperation { Delete = delete };
                 break;
             default: throw new ArgumentOutOfRangeException(nameof(mutation));
         }
 
-        var admission = await ReadState(client, document, cancellationToken);
-        RequireState(admission, expected, "The PCB changed before the zone transaction could be admitted; inspect it again.");
+        Zone? requestedZone = mutation == ZoneMutation.Update ? zone!.Clone() : null;
+
+        // Inspect the native process-owned receipt before any live target read.
+        // A retry with the same operation ID must settle from its exact retained
+        // request even when the target is gone or the live board is unavailable.
+        var rawRequest = mutation == ZoneMutation.Update
+            && TryCachedUpdate(instanceId, operationId, targetId, callerExpected, requestedZone, out var cachedRequest)
+            ? cachedRequest
+            : CheckedRequest(expected, session.Epoch, operation, operationId);
+        var inspected = await PcbCheckedItemDispatch.InspectAsync(registry, instanceId, rawRequest, cancellationToken);
+        if (inspected.Receipt is { State: not CheckedPcbItemTransactionState.CpbtsNotFound })
+        {
+            inspected.Receipt.Replayed = true;
+            return ZoneMutationData(inspected, mutation, targetId);
+        }
+        if (inspected.ErrorCode is not null)
+            return ZoneMutationData(inspected, mutation, targetId);
+
+        // The checked native controller performs authoritative lifecycle
+        // admission immediately after this managed target preflight.
         if (mutation != ZoneMutation.Create)
         {
-            existing = await ReadExistingZone(client, document, targetId, cancellationToken);
+            try
+            {
+                existing = await ReadExistingZone(client, document, targetId, cancellationToken);
+            }
+            catch (NativeApiException error) when (error.Status == 3)
+            {
+                throw new AutomationException("pcb_zone_not_found", $"Native zone {targetId} was not found; no mutation was attempted.");
+            }
+            PcbZoneAuthoringContract.ValidateExisting(existing, expected.NativeIdentity);
+            // Native reads may advance an observation cursor while materializing
+            // derived fill state. Require semantic equality before admitting the
+            // checked mutation, then bind it to the refreshed checkpoint.
+            var refreshed = await ReadState(client, document, cancellationToken);
+            if (!SemanticStateEqual(expected, refreshed))
+                throw new AutomationException("pcb_state_changed", "The PCB changed while reading the zone; inspect a fresh lifecycle state and retry.");
+            expected = refreshed;
             if (mutation == ZoneMutation.Update)
             {
                 zone = MergeUpdate(existing, zone!);
-                update!.Items[0] = Any.Pack(zone);
+                operation.Update.Items[0] = Any.Pack(zone);
             }
         }
 
-        BeginCommitResponse? begin = null;
-        bool beginDispatched = false;
-        bool commitDispatched = false;
-        bool committed = false;
-        try
+        var checkedRequest = CheckedRequest(expected, session.Epoch, operation, operationId);
+        if (mutation == ZoneMutation.Update)
         {
-            beginDispatched = true;
-            begin = await client.InvokeAsync<BeginCommit, BeginCommitResponse>(new()
-            {
-                Header = new() { Document = document }
-            }, cancellationToken);
-            var before = await ReadState(client, document, cancellationToken);
-            RequireState(before, expected, "The PCB changed before the zone transaction started; retain the edit and inspect it again.");
-            JsonElement response;
-            if (create is not null)
-            {
-                var result = await client.InvokeAsync<CreateItems, CreateItemsResponse>(create, cancellationToken);
-                RequireCreated(result, targetId);
-                response = JsonDocument.Parse(BoardJson.Formatter.Format(result)).RootElement.Clone();
-            }
-            else if (update is not null)
-            {
-                var result = await client.InvokeAsync<UpdateItems, UpdateItemsResponse>(update, cancellationToken);
-                RequireUpdated(result, targetId);
-                response = JsonDocument.Parse(BoardJson.Formatter.Format(result)).RootElement.Clone();
-            }
-            else
-            {
-                var result = await client.InvokeAsync<DeleteItems, DeleteItemsResponse>(delete!, cancellationToken);
-                RequireDeleted(result, targetId);
-                response = JsonDocument.Parse(BoardJson.Formatter.Format(result)).RootElement.Clone();
-            }
+            checkedRequests[CacheKey(instanceId, operationId)] = new CachedCheckedRequest(
+                mutation, targetId, requestedZone!.Clone(), callerExpected, checkedRequest.Clone());
+        }
+        var outcome = await PcbCheckedItemDispatch.ApplyAsync(registry, instanceId, checkedRequest, cancellationToken);
+        return ZoneMutationData(outcome, mutation, targetId);
+    }
 
-            commitDispatched = true;
-            await client.InvokeAsync<EndCommit, EndCommitResponse>(new()
-            {
-                Id = begin.Id, Action = CommitAction.CmaCommit, Header = new() { Document = document },
-                Message = "MCP typed PCB copper-zone transaction"
-            }, cancellationToken);
-            committed = true;
-            bool postCommitVerified;
-            if (mutation == ZoneMutation.Delete)
-                postCommitVerified = await ConfirmDeleted(client, document, targetId, cancellationToken);
-            else
-            {
-                Zone readback = await ReadExistingZone(client, document, targetId, cancellationToken);
-                PcbZoneAuthoringContract.ValidateReadback(zone!, readback);
-                postCommitVerified = true;
-            }
-            var after = await ReadState(client, document, cancellationToken);
-            return Data(new
-            {
-                instanceId, processEpoch = session.Epoch, operationId, operation = mutation.ToString().ToLowerInvariant(),
-                document, zoneId = targetId, beforeState = SchematicJson.Formatter.Format(before),
-                afterState = SchematicJson.Formatter.Format(after), response,
-                mutationConfirmed = true, postCommitVerified, undoableTransaction = true,
-                transactionBoundary = "native BeginCommit + typed zone mutation + EndCommit",
-                nativeReceiptAvailable = false, operationIdCorrelationOnly = true, replaySafe = false,
-                settlement = "committed"
-            });
-        }
-        catch (Exception error) when (error is AutomationException or NativeApiException or NngException or OperationCanceledException
-            or InvalidProtocolBufferException or InvalidJsonException or ArgumentException or InvalidOperationException)
+    private bool TryCachedUpdate(string instanceId, string operationId, string targetId,
+        DocumentLifecycleState callerExpected, Zone? requestedZone,
+        out CheckedPcbItemTransaction request)
+    {
+        request = null!;
+        if (requestedZone is null
+            || !checkedRequests.TryGetValue(CacheKey(instanceId, operationId), out var cached)
+            || cached.Mutation != ZoneMutation.Update
+            || cached.TargetId != targetId
+            || !cached.CallerExpected.Equals(callerExpected)
+            || !cached.RequestedZone.Equals(requestedZone)
+            || cached.Request.ProcessEpoch != callerExpected.ProcessEpoch)
+            return false;
+
+        request = cached.Request.Clone();
+        return true;
+    }
+
+    private static string CacheKey(string instanceId, string operationId) => instanceId + "\0" + operationId;
+
+    private static CheckedPcbItemTransaction CheckedRequest(DocumentLifecycleState expected,
+        string processEpoch, PcbItemOperation operation, string operationId)
+    {
+        var request = new CheckedPcbItemTransaction
         {
-            string settlement = committed ? "committed" : begin is null ? "indeterminate" : "not_submitted";
-            string rollbackStatus = "not_attempted";
-            string? rollbackError = null;
-            if (begin is null && beginDispatched)
-                rollbackStatus = "unavailable";
-            if (begin is not null && !committed)
+            ExpectedState = expected.Clone(),
+            ProcessEpoch = processEpoch,
+            OperationId = operationId,
+            MaximumResultBytes = 512 * 1024,
+            Description = "MCP typed PCB copper-zone transaction"
+        };
+        request.Operations.Add(operation.Clone());
+        return request;
+    }
+
+    private static bool SemanticStateEqual(DocumentLifecycleState expected, DocumentLifecycleState actual) =>
+        expected.Document.Equals(actual.Document)
+        && expected.ProcessEpoch == actual.ProcessEpoch
+        && expected.NativeIdentity == actual.NativeIdentity
+        && expected.StateSha256 == actual.StateSha256
+        && expected.ProjectSettingsIncluded == actual.ProjectSettingsIncluded
+        && CheckedSchematicContract.FileCoverage(expected)
+        && CheckedSchematicContract.FileCoverage(actual);
+
+    private static CallToolResult ZoneMutationData(PcbCheckedItemDispatch.Outcome outcome,
+        ZoneMutation mutation, string targetId)
+    {
+        CheckedPcbItemTransactionReceipt? receipt = outcome.Receipt;
+        JsonElement? receiptJson = receipt is null || outcome.UntrustedReceipt
+            ? null : JsonDocument.Parse(SchematicJson.Formatter.Format(receipt)).RootElement.Clone();
+        string? before = receipt?.ObservedBefore is null || outcome.UntrustedReceipt
+            ? null : SchematicJson.Formatter.Format(receipt.ObservedBefore);
+        string? rollback = receipt?.ObservedRollback is null || outcome.UntrustedReceipt
+            ? null : SchematicJson.Formatter.Format(receipt.ObservedRollback);
+        string? after = receipt?.ObservedAfter is null || outcome.UntrustedReceipt
+            ? rollback : SchematicJson.Formatter.Format(receipt.ObservedAfter);
+        JsonElement? response = null;
+        if (!outcome.UntrustedReceipt && receipt is not null && receipt.Results.Count > 0)
+        {
+            var operationResult = receipt.Results[0];
+            string? json = operationResult.ResultCase switch
             {
-                try
-                {
-                    await client.InvokeAsync<EndCommit, EndCommitResponse>(new()
-                    {
-                        Id = begin.Id, Action = CommitAction.CmaDrop, Header = new() { Document = document }
-                    }, CancellationToken.None);
-                    rollbackStatus = "confirmed";
-                    settlement = commitDispatched
-                        ? await ConfirmUncommitted(client, document, expected, mutation, targetId, existing, cancellationToken)
-                        : "rolled_back";
-                    if (settlement == "committed") rollbackStatus = "unconfirmed";
-                }
-                catch (Exception dropError) when (dropError is NativeApiException or NngException
-                    or InvalidProtocolBufferException or InvalidJsonException or InvalidOperationException)
-                {
-                    rollbackStatus = "unconfirmed";
-                    settlement = "indeterminate";
-                    rollbackError = dropError.Message;
-                }
-            }
-            return Data(new
-            {
-                instanceId, processEpoch = session.Epoch, operationId,
-                operation = mutation.ToString().ToLowerInvariant(), document, zoneId = targetId,
-                mutationConfirmed = committed, postCommitVerified = false,
-                undoableTransaction = begin is not null,
-                transactionBoundary = begin is null ? "not_opened" : "native BeginCommit + typed zone mutation + EndCommit",
-                settlement, rollbackStatus, rollbackError,
-                errorCode = error is OperationCanceledException ? "operation_canceled" : error is AutomationException known ? known.Code : error is NativeApiException native ? "native_status_" + native.Status : "pcb_zone_transaction_failed",
-                errorMessage = error.Message, nativeReceiptAvailable = false,
-                operationIdCorrelationOnly = true, replaySafe = false
-            }, true);
+                PcbItemOperationResult.ResultOneofCase.Create => BoardJson.Formatter.Format(operationResult.Create),
+                PcbItemOperationResult.ResultOneofCase.Update => BoardJson.Formatter.Format(operationResult.Update),
+                PcbItemOperationResult.ResultOneofCase.Delete => BoardJson.Formatter.Format(operationResult.Delete),
+                _ => null
+            };
+            if (json is not null) response = JsonDocument.Parse(json).RootElement.Clone();
         }
+
+        bool success = outcome.Completed;
+        string settlement = receipt?.State switch
+        {
+            CheckedPcbItemTransactionState.CpbtsCompleted => "committed",
+            CheckedPcbItemTransactionState.CpbtsRolledBack => "rolled_back",
+            CheckedPcbItemTransactionState.CpbtsRejected => "rejected",
+            CheckedPcbItemTransactionState.CpbtsIndeterminate => "indeterminate",
+            _ => "not_submitted"
+        };
+        var data = JsonSerializer.SerializeToElement(new
+        {
+            outcome.InstanceId,
+            processEpoch = receipt?.ProcessEpoch ?? outcome.Request.ProcessEpoch,
+            operationId = outcome.Request.OperationId,
+            operation = mutation.ToString().ToLowerInvariant(),
+            document = outcome.Request.ExpectedState.Document,
+            zoneId = targetId,
+            state = outcome.UntrustedReceipt
+                ? CheckedPcbItemTransactionState.CpbtsIndeterminate.ToString() : receipt?.State.ToString(),
+            replayed = receipt?.Replayed ?? false,
+            receipt = receiptJson,
+            nativeReceipt = receiptJson,
+            nativeReceiptAvailable = outcome.NativeReceiptAvailable,
+            untrustedReceipt = outcome.UntrustedReceipt && receipt is not null
+                ? JsonDocument.Parse(SchematicJson.Formatter.Format(receipt)).RootElement.Clone() : (JsonElement?)null,
+            beforeState = before,
+            rollbackState = rollback,
+            afterState = after,
+            response,
+            mutationConfirmed = success,
+            postCommitVerified = success && receipt?.PostCommitState == CheckedPcbItemPostCommitState.CpbpsConfirmed,
+            undoableTransaction = outcome.NativeReceiptAvailable,
+            atomicTransaction = true,
+            transactionBoundary = "native checked PCB item transaction",
+            operationReceipt = outcome.NativeReceiptAvailable,
+            replaySafe = outcome.NativeReceiptAvailable,
+            transportRetrySafe = outcome.NativeReceiptAvailable,
+            operationIdCorrelationOnly = false,
+            settlement,
+            errorCode = success ? null : outcome.ErrorCode,
+            errorMessage = success ? null : outcome.ErrorMessage
+        });
+        return new CallToolResult
+        {
+            IsError = !success,
+            StructuredContent = data,
+            Content = [new TextContentBlock { Text = data.GetRawText() }]
+        };
     }
 
     private static DocumentSpecifier ParseDocument(string json)
@@ -309,43 +383,6 @@ public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
         return merged;
     }
 
-    private static async Task<string> ConfirmUncommitted(NativeClient client, DocumentSpecifier document,
-        DocumentLifecycleState expected, ZoneMutation mutation, string zoneId, Zone? existing,
-        CancellationToken cancellationToken)
-    {
-        try
-        {
-            var state = await ReadState(client, document, cancellationToken);
-            if (!state.Equals(expected)) return "indeterminate";
-            if (mutation == ZoneMutation.Create)
-            {
-                try { _ = await ReadExistingZone(client, document, zoneId, cancellationToken); return "indeterminate"; }
-                catch (NativeApiException error) when (error.Status == 3) { return "rolled_back"; }
-            }
-            if (existing is null) return "indeterminate";
-            var current = await ReadExistingZone(client, document, zoneId, cancellationToken);
-            // Native state digest equality is the primary proof. This read confirms the target
-            // still exists and remains a zone; exact metadata is native-owned during rollback.
-            return current.Id.Value == existing.Id.Value && current.Type == existing.Type ? "rolled_back" : "indeterminate";
-        }
-        catch (Exception error) when (error is AutomationException or NativeApiException or NngException)
-        { return "indeterminate"; }
-    }
-
-    private static async Task<bool> ConfirmDeleted(NativeClient client, DocumentSpecifier document,
-        string zoneId, CancellationToken cancellationToken)
-    {
-        try
-        {
-            _ = await ReadExistingZone(client, document, zoneId, cancellationToken);
-            throw new AutomationException("pcb_zone_delete_unverified", $"Native readback still found zone {zoneId} after the committed delete.");
-        }
-        catch (NativeApiException error) when (error.Status == 3)
-        {
-            return true;
-        }
-    }
-
     private static Zone RequireSingleZone(GetItemsResponse response, string zoneId)
     {
         if (response.Items.Count != 1 || !response.Items[0].Is(Zone.Descriptor))
@@ -354,32 +391,6 @@ public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
         if (zone.Id is null || zone.Id.Value != zoneId)
             throw new AutomationException("pcb_zone_identity_mismatch", "Native readback returned a different zone identity.");
         return zone;
-    }
-
-    private static void RequireCreated(CreateItemsResponse response, string zoneId)
-    {
-        if (response.Status != ItemRequestStatus.IrsOk || response.CreatedItems.Count != 1
-            || response.CreatedItems[0].Status.Code != ItemStatusCode.IscOk
-            || !response.CreatedItems[0].Item.Is(Zone.Descriptor)
-            || response.CreatedItems[0].Item.Unpack<Zone>().Id.Value != zoneId)
-            throw new AutomationException("pcb_zone_transaction_rejected", "The native board did not acknowledge creation of the requested zone; transaction settlement is reported separately.");
-    }
-
-    private static void RequireUpdated(UpdateItemsResponse response, string zoneId)
-    {
-        if (response.Status != ItemRequestStatus.IrsOk || response.UpdatedItems.Count != 1
-            || response.UpdatedItems[0].Status.Code != ItemStatusCode.IscOk
-            || !response.UpdatedItems[0].Item.Is(Zone.Descriptor)
-            || response.UpdatedItems[0].Item.Unpack<Zone>().Id.Value != zoneId)
-            throw new AutomationException("pcb_zone_transaction_rejected", "The native board did not acknowledge update of the requested zone; transaction settlement is reported separately.");
-    }
-
-    private static void RequireDeleted(DeleteItemsResponse response, string zoneId)
-    {
-        if (response.Status != ItemRequestStatus.IrsOk || response.DeletedItems.Count != 1
-            || response.DeletedItems[0].Status != ItemDeletionStatus.IdsOk
-            || response.DeletedItems[0].Id.Value != zoneId)
-            throw new AutomationException("pcb_zone_transaction_rejected", "The native board did not acknowledge deletion of the requested zone; transaction settlement is reported separately.");
     }
 
     private static void RequireEpoch(string actual, string expected)
@@ -421,4 +432,11 @@ public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
         Update,
         Delete
     }
+
+    private sealed record CachedCheckedRequest(
+        ZoneMutation Mutation,
+        string TargetId,
+        Zone RequestedZone,
+        DocumentLifecycleState CallerExpected,
+        CheckedPcbItemTransaction Request);
 }

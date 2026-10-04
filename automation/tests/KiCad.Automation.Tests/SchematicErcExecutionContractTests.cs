@@ -30,6 +30,47 @@ public sealed class SchematicErcExecutionContractTests
     }
 
     [TestMethod]
+    public void LegacyRunAcceptsReceiptWithoutTypedAdmissionButTypedExecutionRejectsIt()
+    {
+        var fixture = Fixture();
+        var legacyRequest = new NativeCapabilitySchematicRunErc
+        {
+            Document = fixture.Document.Clone(),
+            OperationId = fixture.OperationId,
+            ProcessEpoch = fixture.ProcessEpoch,
+            ExpectedRevision = fixture.State.Revision.Clone(),
+            ShowAllErrors = true
+        };
+        var legacyReceipt = fixture.Receipt.Clone();
+        legacyReceipt.AdmissionVerified = false;
+
+        SchematicErcExecutionContract.ValidateReceipt(legacyRequest, legacyReceipt);
+        SchematicErcExecutionContract.RequireSuccessful(legacyReceipt);
+
+        var typedError = Assert.ThrowsExactly<AutomationException>(() =>
+            SchematicErcExecutionContract.ValidateReceipt(fixture.Request, legacyReceipt));
+        Assert.AreEqual("invalid_schematic_erc_receipt", typedError.Code);
+    }
+
+    [TestMethod]
+    public void LegacyRunRejectsReceiptForAnotherRevision()
+    {
+        var fixture = Fixture();
+        var legacyRequest = new NativeCapabilitySchematicRunErc
+        {
+            Document = fixture.Document.Clone(),
+            OperationId = fixture.OperationId,
+            ProcessEpoch = fixture.ProcessEpoch,
+            ExpectedRevision = fixture.State.Revision.Clone()
+        };
+        legacyRequest.ExpectedRevision.Sequence++;
+
+        var error = Assert.ThrowsExactly<AutomationException>(() =>
+            SchematicErcExecutionContract.ValidateReceipt(legacyRequest, fixture.Receipt));
+        Assert.AreEqual("invalid_schematic_erc_receipt", error.Code);
+    }
+
+    [TestMethod]
     public void FailedAndIndeterminateTerminalsRemainRecoverableButNeverSuccessful()
     {
         var fixture = Fixture();

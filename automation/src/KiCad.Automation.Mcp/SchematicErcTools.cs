@@ -81,19 +81,19 @@ public sealed class SchematicErcTools(InstanceRegistry registry)
 
         try
         {
-            NativeErcOperationReceipt result = await client.InvokeAsync<NativeCapabilitySchematicExecuteErc,
-                NativeErcOperationReceipt>(new()
-                {
-                    OperationId = request.OperationId,
-                    ExpectedState = expected,
-                    ShowAllErrors = request.ShowAllErrors
-                }, cancellationToken);
-            SchematicErcExecutionContract.ValidateReceipt(new NativeCapabilitySchematicExecuteErc
+            var typedRequest = new NativeCapabilitySchematicExecuteErc
             {
                 OperationId = request.OperationId,
                 ExpectedState = expected,
                 ShowAllErrors = request.ShowAllErrors
-            }, result);
+            };
+            NativeErcOperationReceipt result = await client.InvokeAsync<NativeCapabilitySchematicExecuteErc,
+                NativeErcOperationReceipt>(typedRequest, cancellationToken);
+            // The legacy wrapper accepts retained receipts created by either
+            // seam. A receipt created through RunErc has no typed admission
+            // proof, but still carries the identity, lifecycle and terminal
+            // evidence validated by this compatibility contract.
+            SchematicErcExecutionContract.ValidateReceipt(request, result);
             SchematicErcExecutionContract.RequireSuccessful(result);
             return DescribeRun(instanceId, session.Epoch, request.Document, result);
         }
@@ -120,7 +120,11 @@ public sealed class SchematicErcTools(InstanceRegistry registry)
                     string.IsNullOrWhiteSpace(legacy.ErrorMessage)
                         ? "The native ERC checker did not complete successfully."
                         : legacy.ErrorMessage);
-            return DescribeLegacyRun(instanceId, session.Epoch, request.Document, legacy, before, after, markers);
+            NativeErcOperationReceipt receipt = CreateLegacyReceipt(legacy, before, after, markers);
+            SchematicErcExecutionContract.ValidateReceipt(request, receipt);
+            SchematicErcExecutionContract.RequireSuccessful(receipt);
+            return DescribeRun(instanceId, session.Epoch, request.Document, receipt,
+                nativeReceiptAvailable: false);
         }
     });
 
@@ -254,11 +258,11 @@ public sealed class SchematicErcTools(InstanceRegistry registry)
             Content = [new TextContentBlock { Text = structured.GetRawText() }] };
     }
 
-    private static CallToolResult DescribeLegacyRun(string instanceId, string processEpoch,
-        DocumentSpecifier document, NativeCapabilitySchematicRunErcResponse legacy,
+    private static NativeErcOperationReceipt CreateLegacyReceipt(
+        NativeCapabilitySchematicRunErcResponse legacy,
         DocumentLifecycleState before, DocumentLifecycleState after, SchematicTrackingErcMarkers markers)
     {
-        var receipt = new NativeErcOperationReceipt
+        return new NativeErcOperationReceipt
         {
             LegacyResult = legacy,
             BeforeState = before,
@@ -269,7 +273,6 @@ public sealed class SchematicErcTools(InstanceRegistry registry)
             ExecutionStarted = legacy.Completed,
             MarkersCaptured = true
         };
-        return DescribeRun(instanceId, processEpoch, document, receipt, nativeReceiptAvailable: false);
     }
 
     private static void ValidateOperationId(string value)

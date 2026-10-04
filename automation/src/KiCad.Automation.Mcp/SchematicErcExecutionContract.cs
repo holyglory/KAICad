@@ -31,6 +31,38 @@ internal static class SchematicErcExecutionContract
             throw Invalid("A typed schematic ERC receipt must confirm lifecycle admission.");
     }
 
+    /// <summary>
+    /// Validates a receipt returned through the legacy revision-bound Run seam.
+    /// Legacy requests predate the typed lifecycle admission flag, so their
+    /// receipts are checked for exact identity, revision, lifecycle and terminal
+    /// evidence without requiring <c>admission_verified</c>.
+    /// </summary>
+    public static void ValidateReceipt(NativeCapabilitySchematicRunErc request,
+        NativeErcOperationReceipt receipt)
+    {
+        ValidateLegacyRequest(request);
+        ValidateReceipt(receipt, request.Document, expectedState: null,
+            request.OperationId, request.ProcessEpoch);
+        if (receipt.BeforeState is null || !receipt.BeforeState.Revision.Equals(request.ExpectedRevision))
+            throw Invalid("The native schematic ERC receipt belongs to a different legacy revision.");
+    }
+
+    private static void ValidateLegacyRequest(NativeCapabilitySchematicRunErc request)
+    {
+        if (request is null)
+            throw Invalid("A legacy schematic ERC request is required.");
+
+        CanonicalUuid(request.OperationId, "operation ID");
+        CanonicalUuid(request.ProcessEpoch, "process epoch");
+        if (request.Document is null || request.Document.Type != DocumentType.DoctypeSchematic)
+            throw Invalid("A schematic document is required for a legacy ERC request.");
+        DocumentStateTools.ValidateTarget(request.Document);
+        if (request.ExpectedRevision is null
+            || !Guid.TryParseExact(request.ExpectedRevision.Epoch, "D", out var revisionEpoch)
+            || revisionEpoch == Guid.Empty)
+            throw InvalidState("A legacy schematic ERC request requires a complete document revision.");
+    }
+
     public static void ValidateReceipt(NativeErcOperationReceipt receipt,
         DocumentSpecifier document, DocumentLifecycleState? expectedState,
         string operationId, string processEpoch)

@@ -60,9 +60,48 @@ public sealed class PcbJobTools(InstanceRegistry registry)
         AutomationSession session = await client.HandshakeAsync(cancellationToken);
         if (session.Epoch != expected.ProcessEpoch)
             throw new AutomationException("stale_process_epoch", "The lifecycle observation belongs to another native process epoch.");
-        PcbManufacturingExportReceipt receipt = await client.InvokeAsync<RunPcbManufacturingExport,
-            PcbManufacturingExportReceipt>(request, cancellationToken);
-        PcbManufacturingContract.ValidateReceipt(receipt, document, expected, input.OperationId, expected.ProcessEpoch);
+        string documentJson = SchematicJson.Formatter.Format(document);
+        string requestFingerprint = PcbExportRecoveryPolicy.Fingerprint(input.OperationId,
+            expected.ProcessEpoch, documentJson, request.OutputDirectory, request);
+        var recovery = new PcbExportRecoveryStore(registry.StateDirectory);
+        recovery.Begin(instanceId, input.OperationId, expected.ProcessEpoch, documentJson,
+            requestFingerprint, request.OutputDirectory);
+
+        PcbManufacturingExportReceipt receipt;
+        try
+        {
+            // A cancellation before the request is handed to NNG is known to be
+            // unsubmitted. Once InvokeAsync starts, cancellation is deliberately
+            // indeterminate because the native exporter may still be running.
+            if (cancellationToken.IsCancellationRequested)
+            {
+                recovery.MarkUnknown(input.OperationId, false);
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+            receipt = await client.InvokeAsync<RunPcbManufacturingExport,
+                PcbManufacturingExportReceipt>(request, cancellationToken);
+            PcbManufacturingContract.ValidateReceipt(receipt, document, expected,
+                input.OperationId, expected.ProcessEpoch);
+            recovery.MarkReceipt(input.OperationId, receipt,
+                Directory.Exists(receipt.OutputDirectory),
+                PcbExportRecoveryPolicy.OutputMatches(receipt),
+                Directory.Exists(receipt.StagingDirectory));
+        }
+        catch (NngException error)
+        {
+            recovery.MarkUnknown(input.OperationId, error.RequestDelivered);
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            recovery.MarkUnknown(input.OperationId, null);
+            throw;
+        }
+        catch
+        {
+            recovery.MarkUnknown(input.OperationId, true);
+            throw;
+        }
         return Data(new
         {
             instanceId,
@@ -121,7 +160,19 @@ public sealed class PcbJobTools(InstanceRegistry registry)
                 ProcessEpoch = processEpoch
             }, cancellationToken);
         if (response.Found)
+        {
             PcbManufacturingContract.ValidateReceipt(response.Receipt, document, null, operationId, processEpoch);
+            var recovery = new PcbExportRecoveryStore(registry.StateDirectory);
+            if (recovery.Read(operationId) is { } record
+                && record.InstanceId == instanceId
+                && record.DocumentJson == SchematicJson.Formatter.Format(document))
+            {
+                recovery.MarkReceipt(operationId, response.Receipt,
+                    Directory.Exists(response.Receipt.OutputDirectory),
+                    PcbExportRecoveryPolicy.OutputMatches(response.Receipt),
+                    Directory.Exists(response.Receipt.StagingDirectory));
+            }
+        }
         JsonElement? receiptJson = response.Found
             ? JsonDocument.Parse(SchematicJson.Formatter.Format(response.Receipt)).RootElement.Clone()
             : null;
@@ -134,6 +185,108 @@ public sealed class PcbJobTools(InstanceRegistry registry)
             receipt = receiptJson
         });
     }, operationId, processEpoch);
+
+    [McpServerTool(Name = "kicad_pcb_export_reconcile", ReadOnly = true),
+     Description("Reconcile one durable typed PCB export after an MCP or native reconnect. Supply the exact instance, PCB document and operationId. A live native receipt is preferred when its process epoch still matches; otherwise the durable receipt and owned output/staging paths are inspected. Only a verified completed publication or a terminal result with no owned paths is retryable; indeterminate outcomes never authorize an automatic retry."),
+     KiCadCapability("pcb-manufacturing", "compiled-mcp plus-native-task-export-recovery", "instance, typed PCB document, operation ID, durable request identity and owned output paths"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> ExportReconcile(string instanceId, NativeDocumentInput documentInput,
+        string operationId, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        ValidateOperationId(operationId);
+        if (string.IsNullOrWhiteSpace(instanceId))
+            throw new AutomationException("invalid_instance_id", "instanceId is required to reconcile a PCB export.");
+        DocumentSpecifier document = NativeDocumentInput.ToNative(documentInput);
+        DocumentStateTools.ValidateTarget(document);
+        if (document.Type != DocumentType.DoctypePcb)
+            throw new AutomationException("invalid_pcb_export_target", "The recovery target must be an explicit PCB document.");
+
+        var recovery = new PcbExportRecoveryStore(registry.StateDirectory);
+        PcbExportRecoveryRecord? record = recovery.Read(operationId);
+        if (record is null)
+            return Data(new
+            {
+                instanceId, operationId, status = "untracked", retryAllowed = false,
+                publicationMayHaveHappened = false, outputExists = false, stagingExists = false,
+                nativeReceiptFound = false, reason = "No durable export operation record exists for this operation ID."
+            });
+        string documentJson = SchematicJson.Formatter.Format(document);
+        if (record.InstanceId != instanceId || record.DocumentJson != documentJson)
+            throw new AutomationException("export_recovery_identity_mismatch",
+                "The durable export record belongs to another instance or PCB document.");
+
+        bool outputExists = Directory.Exists(record.OutputDirectory);
+        bool stagingExists = Directory.Exists(record.StagingDirectory);
+        bool outputVerified = false;
+        bool nativeReceiptFound = false;
+        PcbManufacturingExportReceipt? receipt = null;
+        AutomationSession? session = null;
+        string? nativeUnavailableReason = null;
+
+        try
+        {
+            NativeClient client = registry.Client(instanceId);
+            session = await client.HandshakeAsync(cancellationToken);
+            if (session.Epoch == record.ProcessEpoch)
+            {
+                PcbManufacturingExportReceiptResponse response = await client.InvokeAsync<
+                    ReadPcbManufacturingExport, PcbManufacturingExportReceiptResponse>(new()
+                    {
+                        Document = document,
+                        OperationId = operationId,
+                        ProcessEpoch = record.ProcessEpoch
+                    }, cancellationToken);
+                if (response.Found)
+                {
+                    PcbManufacturingContract.ValidateReceipt(response.Receipt, document, null,
+                        operationId, record.ProcessEpoch);
+                    receipt = response.Receipt;
+                    nativeReceiptFound = true;
+                    outputExists = Directory.Exists(receipt.OutputDirectory);
+                    outputVerified = PcbExportRecoveryPolicy.OutputMatches(receipt);
+                    stagingExists = Directory.Exists(receipt.StagingDirectory);
+                    recovery.MarkReceipt(operationId, receipt, outputExists, outputVerified, stagingExists);
+                }
+            }
+            else
+            {
+                nativeUnavailableReason = "The native process epoch changed; using durable recovery state.";
+            }
+        }
+        catch (Exception error) when (error is AutomationException or NativeApiException or NngException)
+        {
+            nativeUnavailableReason = error.Message;
+        }
+
+        if (receipt is null && record.ReceiptJson is not null)
+        {
+            receipt = PcbExportRecoveryStore.ParseReceipt(record);
+            outputVerified = PcbExportRecoveryPolicy.OutputMatches(receipt);
+        }
+
+        PcbExportRecoveryDecision decision = PcbExportRecoveryPolicy.Reconcile(record,
+            nativeReceiptFound, receipt, outputExists, outputVerified, stagingExists);
+        recovery.ApplyDecision(operationId, decision);
+        JsonElement? receiptJson = receipt is null
+            ? null
+            : JsonDocument.Parse(SchematicJson.Formatter.Format(receipt)).RootElement.Clone();
+        return Data(new
+        {
+            instanceId,
+            processEpoch = session?.Epoch ?? record.ProcessEpoch,
+            operationId,
+            status = decision.Status,
+            retryAllowed = decision.RetryAllowed,
+            publicationMayHaveHappened = decision.PublicationMayHaveHappened,
+            outputExists = decision.OutputExists,
+            stagingExists = decision.StagingExists,
+            nativeReceiptFound = decision.NativeReceiptFound,
+            receiptScope = nativeReceiptFound ? "native-process" : receipt is null ? null : "mcp-state",
+            receipt = receiptJson,
+            reason = decision.Reason,
+            nativeUnavailableReason
+        });
+    }, operationId, null);
 
     [McpServerTool(Name = "kicad_pcb_export_3d", ReadOnly = false),
      Description("Export an explicitly identified PCB as a native 3D model through KiCad's board job. requestJson is RunBoardJobExport3D protobuf JSON with an absolute output path, explicit PCB document and format such as STEP, VRML, GLB or STL; expectedStateJson is the lifecycle observation used for admission and post-export verification. Returns bounded output hashes and never changes the board."),

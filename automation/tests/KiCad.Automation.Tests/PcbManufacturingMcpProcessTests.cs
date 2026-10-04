@@ -132,6 +132,30 @@ public sealed class PcbManufacturingMcpProcessTests
                 Path.Combine(root, "state"), Path.Combine(root, "stderr.log"), timeout.Token);
             JsonElement listed = await mcp.ListTools(null);
             JsonElement tools = listed.GetProperty("tools");
+            JsonElement reconcile = tools.EnumerateArray().Single(tool =>
+                tool.GetProperty("name").GetString() == "kicad_pcb_export_reconcile");
+            Assert.IsTrue(reconcile.GetProperty("inputSchema").GetProperty("properties")
+                .TryGetProperty("instanceId", out _), reconcile.GetRawText());
+            Assert.IsTrue(reconcile.GetProperty("inputSchema").GetProperty("properties")
+                .TryGetProperty("operationId", out _), reconcile.GetRawText());
+
+            JsonElement untracked = await mcp.Tool("kicad_pcb_export_reconcile", new
+            {
+                instanceId = Guid.NewGuid().ToString("D"),
+                operationId = Guid.NewGuid().ToString("D"),
+                documentInput = new
+                {
+                    type = "DOCTYPE_PCB",
+                    project = new { name = "untracked", path = root },
+                    boardFilename = "untracked.kicad_pcb"
+                }
+            });
+            Assert.IsFalse(untracked.GetProperty("isError").GetBoolean(), untracked.GetRawText());
+            Assert.AreEqual("untracked", untracked.GetProperty("structuredContent").GetProperty("status").GetString(),
+                untracked.GetRawText());
+            Assert.IsFalse(untracked.GetProperty("structuredContent").GetProperty("retryAllowed").GetBoolean(),
+                untracked.GetRawText());
+
             JsonElement export = tools.EnumerateArray().Single(tool =>
                 tool.GetProperty("name").GetString() == "kicad_pcb_export");
 

@@ -465,7 +465,7 @@ public sealed class McpProcessTests
             await Request(9343, "tools/call", new { name = "kicad_pcb_highlight_nets", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", requestJson = "{}", expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D") } });
             foreach (string exportTool in new[]
             {
-                "kicad_pcb_export", "kicad_pcb_export_receipt",
+                "kicad_pcb_export", "kicad_pcb_export_receipt", "kicad_pcb_export_reconcile",
                 "kicad_pcb_export_3d", "kicad_pcb_export_svg", "kicad_pcb_export_dxf", "kicad_pcb_export_pdf", "kicad_pcb_export_ps",
                 "kicad_pcb_export_gerbers", "kicad_pcb_export_drill", "kicad_pcb_export_position",
                 "kicad_pcb_export_gencad", "kicad_pcb_export_ipc2581", "kicad_pcb_export_ipc_d356",

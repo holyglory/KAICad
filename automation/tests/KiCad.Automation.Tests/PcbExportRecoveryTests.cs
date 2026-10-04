@@ -1,0 +1,110 @@
+using Kiapi.Common.Types;
+using KiCad.Automation.Mcp;
+using KiCad.Automation.Model;
+using KiCad.Automation.Native;
+using KiCad.Automation.Protocol;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+
+namespace KiCad.Automation.Tests;
+
+[TestClass]
+public sealed class PcbExportRecoveryTests
+{
+    [TestMethod]
+    public void TerminalFailureWithoutOwnedPathsIsRetryable()
+    {
+        var prior = Record(PcbExportRecoveryPolicy.Pending, nativeDispatchKnown: true, nativeDispatch: true);
+        var receipt = new PcbManufacturingExportReceipt
+        {
+            OperationId = prior.OperationId,
+            ProcessEpoch = prior.ProcessEpoch,
+            Status = PcbManufacturingExportStatus.PcbMfgExportFailed,
+            PublicationState = PcbManufacturingPublicationState.PcbMfgPublicationFailed
+        };
+
+        var decision = PcbExportRecoveryPolicy.Reconcile(prior, true, receipt,
+            outputExists: false, outputVerified: false, stagingExists: false);
+
+        Assert.AreEqual(PcbExportRecoveryPolicy.Retryable, decision.Status);
+        Assert.IsTrue(decision.RetryAllowed);
+        Assert.IsFalse(decision.PublicationMayHaveHappened);
+    }
+
+    [TestMethod]
+    public void IndeterminateNeverAuthorizesRetry()
+    {
+        var prior = Record(PcbExportRecoveryPolicy.Indeterminate, nativeDispatchKnown: true, nativeDispatch: true);
+
+        var decision = PcbExportRecoveryPolicy.Reconcile(prior, false, null,
+            outputExists: false, outputVerified: false, stagingExists: false);
+
+        Assert.AreEqual(PcbExportRecoveryPolicy.Indeterminate, decision.Status);
+        Assert.IsFalse(decision.RetryAllowed);
+    }
+
+    [TestMethod]
+    public void PublishedReceiptRequiresVerifiedOutput()
+    {
+        var prior = Record(PcbExportRecoveryPolicy.Pending, nativeDispatchKnown: true, nativeDispatch: true);
+        var receipt = new PcbManufacturingExportReceipt
+        {
+            OperationId = prior.OperationId,
+            ProcessEpoch = prior.ProcessEpoch,
+            Status = PcbManufacturingExportStatus.PcbMfgExportCompleted,
+            PublicationState = PcbManufacturingPublicationState.PcbMfgPublicationPublished,
+            OutputManifestComplete = true
+        };
+
+        var decision = PcbExportRecoveryPolicy.Reconcile(prior, true, receipt,
+            outputExists: true, outputVerified: false, stagingExists: false);
+
+        Assert.AreEqual(PcbExportRecoveryPolicy.Indeterminate, decision.Status);
+        Assert.IsFalse(decision.RetryAllowed);
+    }
+
+    [TestMethod]
+    public void DurableStoreBindsIdentityAndRefusesIndeterminateResubmit()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-pcb-export-recovery-").FullName;
+        try
+        {
+            var record = Record(PcbExportRecoveryPolicy.Pending, nativeDispatchKnown: false, nativeDispatch: false,
+                root: root);
+            var store = new PcbExportRecoveryStore(root);
+            store.Begin(record.InstanceId, record.OperationId, record.ProcessEpoch, record.DocumentJson,
+                record.RequestFingerprintSha256, record.OutputDirectory);
+            store.MarkUnknown(record.OperationId, nativeDispatch: true);
+
+            var error = Assert.ThrowsExactly<AutomationException>(() =>
+                store.Begin(record.InstanceId, record.OperationId, record.ProcessEpoch, record.DocumentJson,
+                    record.RequestFingerprintSha256, record.OutputDirectory));
+            Assert.AreEqual("export_status_required", error.Code);
+
+            var mismatch = Assert.ThrowsExactly<AutomationException>(() =>
+                store.Begin(record.InstanceId, record.OperationId, record.ProcessEpoch, record.DocumentJson,
+                    new string('f', 64), record.OutputDirectory));
+            Assert.AreEqual("export_operation_reused", mismatch.Code);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    private static PcbExportRecoveryRecord Record(string status, bool nativeDispatchKnown,
+        bool nativeDispatch, string? root = null)
+    {
+        root ??= Path.Combine(Path.GetTempPath(), "kicad-pcb-export-recovery-fixture");
+        string operationId = "11111111-1111-1111-1111-111111111111";
+        string processEpoch = "22222222-2222-2222-2222-222222222222";
+        string instanceId = "33333333-3333-3333-3333-333333333333";
+        string output = Path.GetFullPath(Path.Combine(root, "out"));
+        string document = SchematicJson.Formatter.Format(new DocumentSpecifier
+        {
+            Type = DocumentType.DoctypePcb,
+            BoardFilename = "fixture.kicad_pcb",
+            Project = new() { Name = "fixture", Path = root }
+        });
+        return new PcbExportRecoveryRecord(1, instanceId, operationId, processEpoch, document,
+            new string('a', 64), output,
+            PcbExportRecoveryPolicy.StagingDirectory(output, operationId), status,
+            nativeDispatchKnown, nativeDispatch, nativeDispatch, null, DateTimeOffset.UtcNow);
+    }
+}

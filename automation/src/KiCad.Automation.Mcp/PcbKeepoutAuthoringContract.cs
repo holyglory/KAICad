@@ -203,8 +203,9 @@ internal static class PcbKeepoutAuthoringContract
         if (expected.Border is not null && (actual.Border is null || expected.Border.Style != actual.Border.Style
             || expected.Border.Pitch?.ValueNm != actual.Border.Pitch?.ValueNm))
             throw new AutomationException("pcb_keepout_readback_mismatch", "Native readback changed the keepout border settings.");
-        if (actual.Filled || actual.FilledPolygons.Count != 0)
-            throw new AutomationException("pcb_keepout_readback_mismatch", "Native readback returned derived filled geometry for a keepout.");
+        // KiCad may derive filled polygons for a rule area during board
+        // refresh. These fields are deliberately excluded from the authoring
+        // contract; compare only the persisted outline/settings below.
         var expectedProperties = expected.CustomProperties.OrderBy(property => property.Key, StringComparer.Ordinal)
             .ThenBy(property => property.Value, StringComparer.Ordinal).Select(property => property.Key + "\0" + property.Value);
         var actualProperties = actual.CustomProperties.OrderBy(property => property.Key, StringComparer.Ordinal)

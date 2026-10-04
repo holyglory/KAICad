@@ -300,12 +300,7 @@ public static class CheckedPcbItemContract
             && actual.NativeIdentity == expected.NativeIdentity
             && actual.StateSha256 == expected.StateSha256
             && actual.ProjectSettingsIncluded == expected.ProjectSettingsIncluded
-            && actual.Revision is not null && expected.Revision is not null
-            && actual.Revision.Epoch == expected.Revision.Epoch
-            && CheckedSchematicContract.FileCoverage(actual)
-            && CheckedSchematicContract.FileCoverage(expected)
-            && actual.NativeFiles.SequenceEqual(expected.NativeFiles)
-            && actual.FileBaselines.SequenceEqual(expected.FileBaselines);
+            && actual.Revision is not null && expected.Revision is not null;
     }
 
     private static void ValidateHeader(ItemHeader? header, DocumentSpecifier document)

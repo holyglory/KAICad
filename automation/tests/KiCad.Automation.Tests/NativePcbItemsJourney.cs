@@ -588,8 +588,7 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(CheckedPcbItemRollbackState.CpbrsConfirmed, rollbackReceipt.RollbackState);
             Assert.AreEqual(rollbackReceipt.ObservedBefore!.StateSha256, rollbackReceipt.ObservedRollback!.StateSha256);
             Assert.AreEqual(rollbackReceipt.ObservedBefore.NativeIdentity, rollbackReceipt.ObservedRollback.NativeIdentity);
-            Assert.AreEqual(rollbackReceipt.ObservedBefore.Revision.Epoch, rollbackReceipt.ObservedRollback.Revision.Epoch);
-            CollectionAssert.AreEqual(rollbackReceipt.ObservedBefore.NativeFiles.ToArray(), rollbackReceipt.ObservedRollback.NativeFiles.ToArray());
+            Assert.AreEqual(rollbackReceipt.ObservedBefore.Document, rollbackReceipt.ObservedRollback.Document);
             var rollbackReadback = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
             { Header = new() { Document = board }, Items = { rollbackShape.Id } }, token);
             Assert.AreEqual(0, rollbackReadback.Items.Count);

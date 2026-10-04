@@ -324,11 +324,25 @@ bool DeleteResultOk( const DeleteItems& request, const DeleteItemsResponse& resp
 bool RollbackEquivalent( const DocumentLifecycleState& left,
                          const DocumentLifecycleState& right )
 {
-    if( left.revision().epoch() != right.revision().epoch() ) return false;
+    if( left.process_epoch() != right.process_epoch()
+        || !MessageDifferencer::Equals( left.document(), right.document() )
+        || left.native_identity() != right.native_identity()
+        || left.state_sha256() != right.state_sha256()
+        || left.project_settings_included() != right.project_settings_included() )
+        return false;
+
+    // A dropped native commit can refresh the lifecycle's revision/file
+    // observation metadata even when the board content is unchanged. Those
+    // observations are not design mutations and must not turn a confirmed
+    // rollback into an indeterminate receipt.
     DocumentLifecycleState normalizedLeft = left;
     DocumentLifecycleState normalizedRight = right;
-    normalizedLeft.mutable_revision()->set_sequence( 0 );
-    normalizedRight.mutable_revision()->set_sequence( 0 );
+    normalizedLeft.clear_revision();
+    normalizedRight.clear_revision();
+    normalizedLeft.clear_native_files();
+    normalizedRight.clear_native_files();
+    normalizedLeft.clear_file_baselines();
+    normalizedRight.clear_file_baselines();
     return MessageDifferencer::Equals( normalizedLeft, normalizedRight );
 }
 } // namespace

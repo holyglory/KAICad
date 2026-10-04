@@ -115,36 +115,39 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
         Zone? zone = null;
         Zone? existing = null;
         string targetId;
-        CreateItems? create = null;
-        UpdateItems? update = null;
-        DeleteItems? delete = null;
+        PcbItemOperation operation;
         switch (mutation)
         {
             case KeepoutMutation.Create:
                 zone = input?.ToNative() ?? throw new AutomationException("invalid_pcb_keepout", "Supply typed keepout input.");
                 PcbKeepoutAuthoringContract.ValidateCreate(zone);
                 targetId = zone.Id.Value;
-                create = new CreateItems { Header = new() { Document = document } };
+                var create = new CreateItems { Header = new() { Document = document } };
                 create.Items.Add(Any.Pack(zone));
+                operation = new PcbItemOperation { Create = create };
                 break;
             case KeepoutMutation.Update:
                 zone = input?.ToNative() ?? throw new AutomationException("invalid_pcb_keepout", "Supply typed keepout input.");
                 PcbKeepoutAuthoringContract.ValidateUpdate(zone);
                 targetId = zone.Id.Value;
-                update = new UpdateItems { Header = new() { Document = document } };
+                var update = new UpdateItems { Header = new() { Document = document } };
                 update.Items.Add(Any.Pack(zone));
+                operation = new PcbItemOperation { Update = update };
                 break;
             case KeepoutMutation.Delete:
                 PcbKeepoutAuthoringContract.ValidateDeleteId(zoneIdInput ?? "");
                 targetId = zoneIdInput!;
-                delete = new DeleteItems { Header = new() { Document = document } };
+                var delete = new DeleteItems { Header = new() { Document = document } };
                 delete.ItemIds.Add(new KIID { Value = targetId });
+                operation = new PcbItemOperation { Delete = delete };
                 break;
             default: throw new ArgumentOutOfRangeException(nameof(mutation));
         }
 
-        var admission = await ReadState(client, document, cancellationToken);
-        RequireState(admission, expected, "The PCB changed before the keepout transaction could be admitted; inspect it again.");
+        // Rule-area validation and the safe update merge retain the old
+        // keepout authoring semantics. The checked native controller performs
+        // the authoritative admission immediately afterwards and owns the
+        // transaction receipt; it is the only mutation path here.
         if (mutation != KeepoutMutation.Create)
         {
             try
@@ -159,114 +162,97 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
             if (mutation == KeepoutMutation.Update)
             {
                 zone = MergeUpdate(existing, zone!);
-                update!.Items[0] = Any.Pack(zone);
+                operation.Update.Items[0] = Any.Pack(zone);
             }
         }
 
-        BeginCommitResponse? begin = null;
-        bool beginDispatched = false;
-        bool commitDispatched = false;
-        bool committed = false;
-        try
+        var checkedRequest = new CheckedPcbItemTransaction
         {
-            beginDispatched = true;
-            begin = await client.InvokeAsync<BeginCommit, BeginCommitResponse>(new()
-            {
-                Header = new() { Document = document }
-            }, cancellationToken);
-            var before = await ReadState(client, document, cancellationToken);
-            RequireState(before, expected, "The PCB changed before the keepout transaction started; retain the edit and inspect it again.");
-            JsonElement response;
-            if (create is not null)
-            {
-                var result = await client.InvokeAsync<CreateItems, CreateItemsResponse>(create, cancellationToken);
-                RequireCreated(result, targetId);
-                response = JsonDocument.Parse(BoardJson.Formatter.Format(result)).RootElement.Clone();
-            }
-            else if (update is not null)
-            {
-                var result = await client.InvokeAsync<UpdateItems, UpdateItemsResponse>(update, cancellationToken);
-                RequireUpdated(result, targetId);
-                response = JsonDocument.Parse(BoardJson.Formatter.Format(result)).RootElement.Clone();
-            }
-            else
-            {
-                var result = await client.InvokeAsync<DeleteItems, DeleteItemsResponse>(delete!, cancellationToken);
-                RequireDeleted(result, targetId);
-                response = JsonDocument.Parse(BoardJson.Formatter.Format(result)).RootElement.Clone();
-            }
+            ExpectedState = expected.Clone(),
+            ProcessEpoch = session.Epoch,
+            OperationId = operationId,
+            MaximumResultBytes = 512 * 1024,
+            Description = "MCP typed PCB keepout transaction"
+        };
+        checkedRequest.Operations.Add(operation);
+        var outcome = await PcbCheckedItemDispatch.ApplyAsync(registry, instanceId, checkedRequest, cancellationToken);
+        return KeepoutMutationData(outcome, mutation, targetId);
+    }
 
-            commitDispatched = true;
-            await client.InvokeAsync<EndCommit, EndCommitResponse>(new()
-            {
-                Id = begin.Id, Action = CommitAction.CmaCommit, Header = new() { Document = document },
-                Message = "MCP typed PCB keepout transaction"
-            }, cancellationToken);
-            committed = true;
-            bool postCommitVerified;
-            if (mutation == KeepoutMutation.Delete)
-                postCommitVerified = await ConfirmDeleted(client, document, targetId, cancellationToken);
-            else
-            {
-                Zone readback = await ReadExistingZone(client, document, targetId, cancellationToken);
-                PcbKeepoutAuthoringContract.ValidateReadback(zone!, readback, expected.NativeIdentity);
-                postCommitVerified = true;
-            }
-            var after = await ReadState(client, document, cancellationToken);
-            return Data(new
-            {
-                instanceId, processEpoch = session.Epoch, operationId, operation = mutation.ToString().ToLowerInvariant(),
-                document, keepoutId = targetId, beforeState = SchematicJson.Formatter.Format(before),
-                afterState = SchematicJson.Formatter.Format(after), response,
-                mutationConfirmed = true, postCommitVerified, undoableTransaction = true,
-                transactionBoundary = "native BeginCommit + typed keepout mutation + EndCommit",
-                nativeReceiptAvailable = false, operationIdCorrelationOnly = true, replaySafe = false,
-                settlement = "committed"
-            });
-        }
-        catch (Exception error) when (error is AutomationException or NativeApiException or NngException or OperationCanceledException
-            or InvalidProtocolBufferException or InvalidJsonException or ArgumentException or InvalidOperationException)
+    private static CallToolResult KeepoutMutationData(PcbCheckedItemDispatch.Outcome outcome,
+        KeepoutMutation mutation, string targetId)
+    {
+        CheckedPcbItemTransactionReceipt? receipt = outcome.Receipt;
+        JsonElement? receiptJson = receipt is null || outcome.UntrustedReceipt
+            ? null : JsonDocument.Parse(SchematicJson.Formatter.Format(receipt)).RootElement.Clone();
+        string? before = receipt?.ObservedBefore is null || outcome.UntrustedReceipt
+            ? null : SchematicJson.Formatter.Format(receipt.ObservedBefore);
+        string? rollback = receipt?.ObservedRollback is null || outcome.UntrustedReceipt
+            ? null : SchematicJson.Formatter.Format(receipt.ObservedRollback);
+        string? after = receipt?.ObservedAfter is null || outcome.UntrustedReceipt
+            ? rollback : SchematicJson.Formatter.Format(receipt.ObservedAfter);
+        JsonElement? response = null;
+        if (!outcome.UntrustedReceipt && receipt is not null && receipt.Results.Count > 0)
         {
-            string settlement = committed ? "committed" : begin is null ? "indeterminate" : "not_submitted";
-            string rollbackStatus = "not_attempted";
-            string? rollbackError = null;
-            if (begin is null && beginDispatched)
-                rollbackStatus = "unavailable";
-            if (begin is not null && !committed)
+            var operationResult = receipt.Results[0];
+            string? json = operationResult.ResultCase switch
             {
-                try
-                {
-                    await client.InvokeAsync<EndCommit, EndCommitResponse>(new()
-                    {
-                        Id = begin.Id, Action = CommitAction.CmaDrop, Header = new() { Document = document }
-                    }, CancellationToken.None);
-                    rollbackStatus = "confirmed";
-                    settlement = commitDispatched
-                        ? await ConfirmUncommitted(client, document, expected, mutation, targetId, existing, cancellationToken)
-                        : "rolled_back";
-                    if (settlement == "committed") rollbackStatus = "unconfirmed";
-                }
-                catch (Exception dropError) when (dropError is NativeApiException or NngException
-                    or InvalidProtocolBufferException or InvalidJsonException or InvalidOperationException)
-                {
-                    rollbackStatus = "unconfirmed";
-                    settlement = "indeterminate";
-                    rollbackError = dropError.Message;
-                }
-            }
-            return Data(new
-            {
-                instanceId, processEpoch = session.Epoch, operationId,
-                operation = mutation.ToString().ToLowerInvariant(), document, keepoutId = targetId,
-                mutationConfirmed = committed, postCommitVerified = false,
-                undoableTransaction = begin is not null,
-                transactionBoundary = begin is null ? "not_opened" : "native BeginCommit + typed keepout mutation + EndCommit",
-                settlement, rollbackStatus, rollbackError,
-                errorCode = error is OperationCanceledException ? "operation_canceled" : error is AutomationException known ? known.Code : error is NativeApiException native ? "native_status_" + native.Status : "pcb_keepout_transaction_failed",
-                errorMessage = error.Message, nativeReceiptAvailable = false,
-                operationIdCorrelationOnly = true, replaySafe = false
-            }, true);
+                PcbItemOperationResult.ResultOneofCase.Create => BoardJson.Formatter.Format(operationResult.Create),
+                PcbItemOperationResult.ResultOneofCase.Update => BoardJson.Formatter.Format(operationResult.Update),
+                PcbItemOperationResult.ResultOneofCase.Delete => BoardJson.Formatter.Format(operationResult.Delete),
+                _ => null
+            };
+            if (json is not null) response = JsonDocument.Parse(json).RootElement.Clone();
         }
+
+        bool success = outcome.Completed;
+        string settlement = receipt?.State switch
+        {
+            CheckedPcbItemTransactionState.CpbtsCompleted => "committed",
+            CheckedPcbItemTransactionState.CpbtsRolledBack => "rolled_back",
+            CheckedPcbItemTransactionState.CpbtsRejected => "rejected",
+            CheckedPcbItemTransactionState.CpbtsIndeterminate => "indeterminate",
+            _ => "not_submitted"
+        };
+        var data = JsonSerializer.SerializeToElement(new
+        {
+            outcome.InstanceId,
+            processEpoch = receipt?.ProcessEpoch ?? outcome.Request.ProcessEpoch,
+            operationId = outcome.Request.OperationId,
+            operation = mutation.ToString().ToLowerInvariant(),
+            document = outcome.Request.ExpectedState.Document,
+            keepoutId = targetId,
+            state = outcome.UntrustedReceipt
+                ? CheckedPcbItemTransactionState.CpbtsIndeterminate.ToString() : receipt?.State.ToString(),
+            replayed = receipt?.Replayed ?? false,
+            receipt = receiptJson,
+            nativeReceipt = receiptJson,
+            nativeReceiptAvailable = outcome.NativeReceiptAvailable,
+            untrustedReceipt = outcome.UntrustedReceipt && receipt is not null
+                ? JsonDocument.Parse(SchematicJson.Formatter.Format(receipt)).RootElement.Clone() : (JsonElement?)null,
+            beforeState = before,
+            rollbackState = rollback,
+            afterState = after,
+            response,
+            mutationConfirmed = success,
+            postCommitVerified = success && receipt?.PostCommitState == CheckedPcbItemPostCommitState.CpbpsConfirmed,
+            undoableTransaction = outcome.NativeReceiptAvailable,
+            atomicTransaction = true,
+            transactionBoundary = "native checked PCB item transaction",
+            operationReceipt = outcome.NativeReceiptAvailable,
+            replaySafe = outcome.NativeReceiptAvailable,
+            transportRetrySafe = outcome.NativeReceiptAvailable,
+            operationIdCorrelationOnly = false,
+            settlement,
+            errorCode = success ? null : outcome.ErrorCode,
+            errorMessage = success ? null : outcome.ErrorMessage
+        });
+        return new CallToolResult
+        {
+            IsError = !success,
+            StructuredContent = data,
+            Content = [new TextContentBlock { Text = data.GetRawText() }]
+        };
     }
 
     private static DocumentSpecifier ParseDocument(string json)

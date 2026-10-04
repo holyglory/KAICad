@@ -3462,6 +3462,7 @@ retained_artifacts=[{name="pcb-tests",path="automation/artifacts/fixture-retry/p
 [[test.fixture-retry.check]]
 name="keepout"
 tier="development"
+requires=["managed-build"]
 command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativePcbKeepout","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/fixture-retry/keepout"]
 retained_artifacts=[{name="keepout-tests",path="automation/artifacts/fixture-retry/keepout",max_bytes=16777216},{name="keepout-evidence",path="automation/artifacts/native-pcb-keepout",max_bytes=67108864}]
 [[test.fixture-retry.check]]

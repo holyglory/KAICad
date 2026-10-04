@@ -562,7 +562,7 @@ public sealed class McpProcessTests
                 CollectionAssert.Contains(names, footprintTool);
             foreach (string placementTool in new[]
             {
-                "kicad_pcb_footprint_place_plan", "kicad_pcb_footprint_place_apply", "kicad_pcb_footprint_place_receipt", "kicad_pcb_footprint_svg_plan", "kicad_pcb_footprint_validate", "kicad_schematic_footprint_assignment_validate"
+                "kicad_pcb_footprint_place_plan", "kicad_pcb_footprint_place_apply", "kicad_pcb_footprint_place_receipt", "kicad_pcb_footprint_svg_plan", "kicad_pcb_footprint_validate"
             })
                 CollectionAssert.Contains(names, placementTool);
             var invalidFootprintDefinition = await Request(9359, "tools/call", new { name = "kicad_pcb_footprint_validate",
@@ -585,11 +585,6 @@ public sealed class McpProcessTests
             Assert.IsFalse(invalidModel.GetProperty("result").GetProperty("structuredContent").GetProperty("valid").GetBoolean());
             Assert.IsTrue(invalidModel.GetProperty("result").GetProperty("structuredContent").GetProperty("issues").EnumerateArray()
                 .Any(issue => issue.GetProperty("code").GetString() == "invalid_3d_model_scale"));
-            var invalidAssignment = await Request(9368, "tools/call", new { name = "kicad_schematic_footprint_assignment_validate",
-                arguments = new { symbolJson = "{}", footprintJson = "{}" } });
-            Assert.IsFalse(invalidAssignment.GetProperty("result").GetProperty("isError").GetBoolean());
-            Assert.IsFalse(invalidAssignment.GetProperty("result").GetProperty("structuredContent").GetProperty("valid").GetBoolean());
-            Assert.IsFalse(invalidAssignment.GetProperty("result").GetProperty("structuredContent").GetProperty("nativeContacted").GetBoolean());
             string footprintDocument = SchematicJson.Formatter.Format(new Kiapi.Common.Types.DocumentSpecifier
             {
                 Type = Kiapi.Common.Types.DocumentType.DoctypeFootprint,

@@ -22,6 +22,68 @@ public sealed class PcbRenderContractTests
     }
 
     [TestMethod]
+    public void NativeInsetViewportAndSymmetricOrthographicClipPlanesAreValid()
+    {
+        const string stateHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const string inputHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        PcbRenderMetadata metadata = CameraMetadata(stateHash, inputHash);
+        metadata.WidthPixels = 312;
+        metadata.HeightPixels = 224;
+        metadata.ObservedPerspective = false;
+        metadata.NearClip = -110.37;
+        metadata.FarClip = 110.37;
+
+        PcbRenderMetadataValidation validation = PcbRenderMetadataContract.Validate(
+            metadata, RenderRequest(), stateHash, inputHash);
+
+        Assert.IsTrue(validation.IsValid, string.Join("; ", validation.Failures));
+    }
+
+    [TestMethod]
+    public void CameraMetadataDimensionsMustBePositiveAndContainedByTheRequest()
+    {
+        const string stateHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const string inputHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        foreach ((uint width, uint height) in new[]
+        {
+            (0u, 240u), (320u, 0u), (321u, 240u), (320u, 241u)
+        })
+        {
+            PcbRenderMetadata metadata = CameraMetadata(stateHash, inputHash);
+            metadata.WidthPixels = width;
+            metadata.HeightPixels = height;
+
+            PcbRenderMetadataValidation validation = PcbRenderMetadataContract.Validate(
+                metadata, RenderRequest(), stateHash, inputHash);
+
+            Assert.IsFalse(validation.IsValid, $"Unexpectedly accepted {width}x{height} metadata.");
+            StringAssert.Contains(string.Join("; ", validation.Failures), "camera metadata dimensions");
+        }
+    }
+
+    [TestMethod]
+    public void CameraClipPlanesMustBeFiniteAndOrdered()
+    {
+        const string stateHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const string inputHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        foreach ((double nearClip, double farClip) in new[]
+        {
+            (1.0, 1.0), (10.0, -1.0), (double.NaN, 1.0), (1.0, double.PositiveInfinity)
+        })
+        {
+            PcbRenderMetadata metadata = CameraMetadata(stateHash, inputHash);
+            metadata.NearClip = nearClip;
+            metadata.FarClip = farClip;
+
+            PcbRenderMetadataValidation validation = PcbRenderMetadataContract.Validate(
+                metadata, RenderRequest(), stateHash, inputHash);
+
+            Assert.IsFalse(validation.IsValid, $"Unexpectedly accepted clip range {nearClip}..{farClip}.");
+            StringAssert.Contains(string.Join("; ", validation.Failures), "camera clip planes");
+        }
+    }
+
+    [TestMethod]
     public void InvalidCameraTransformAndAssetRowsCannotSupportNativeGeometryClaims()
     {
         var request = RenderRequest();

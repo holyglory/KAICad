@@ -162,8 +162,13 @@ internal static class PcbRenderMetadataContract
     {
         var failures = new List<string>();
 
-        if (metadata.WidthPixels != request.Width || metadata.HeightPixels != request.Height)
-            failures.Add("camera metadata dimensions do not match the requested image");
+        // The native ray tracer may align its work to an inset content region,
+        // so the metadata describes a PNG that is smaller than the requested
+        // window. It must still be a positive viewport contained by that
+        // request; larger or empty dimensions cannot describe this render.
+        if (metadata.WidthPixels == 0 || metadata.HeightPixels == 0
+            || metadata.WidthPixels > request.Width || metadata.HeightPixels > request.Height)
+            failures.Add("camera metadata dimensions must be positive and no larger than the requested image");
 
         if (metadata.ViewMatrixColumnMajor.Count != 16
             || metadata.ProjectionMatrixColumnMajor.Count != 16
@@ -182,9 +187,11 @@ internal static class PcbRenderMetadataContract
         if (!string.Equals(metadata.ProjectionConvention, ProjectionConvention, StringComparison.Ordinal))
             failures.Add("camera projection convention is missing or unsupported");
 
+        // Orthographic native views use a symmetric clip range around the
+        // camera (for example -far..+far), so the near plane may be negative.
         if (!double.IsFinite(metadata.NearClip) || !double.IsFinite(metadata.FarClip)
-            || metadata.NearClip <= 0 || metadata.FarClip <= metadata.NearClip)
-            failures.Add("camera clip planes must be finite, positive, and ordered");
+            || metadata.FarClip <= metadata.NearClip)
+            failures.Add("camera clip planes must be finite and ordered");
 
         if (metadata.ObservedCameraPosition.Count != 3 || metadata.ObservedLookAt.Count != 3
             || !metadata.ObservedCameraPosition.All(double.IsFinite)

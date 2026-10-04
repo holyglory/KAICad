@@ -97,12 +97,23 @@ public:
 
     void UpdateItem( PNS::ITEM* aItem ) override
     {
-        if( !aItem || !aItem->Parent() || aItem->Parent()->GetBoard() != GetBoard() )
+        if( !aItem )
+            throw std::invalid_argument( "Generator update requires an item from its board" );
+
+        BOARD_ITEM* parent = aItem->Parent();
+
+        // Auxiliary router items (for example, an unconnected differential-pair mate) can be
+        // updated without a native source item.  There is no board object to mutate in that
+        // case, so leave the update unbuffered and let the owning generator handle its geometry.
+        if( !parent )
+            return;
+
+        if( parent->GetBoard() != GetBoard() )
             throw std::invalid_argument( "Generator update requires an item from its board" );
 
         // A preview may have no BOARD_COMMIT at all. Keep the latest geometry owned
         // here until EditFinish supplies the same transaction as its add/remove work.
-        m_updatedItems[aItem->Parent()] = std::unique_ptr<PNS::ITEM>( aItem->Clone() );
+        m_updatedItems[parent] = std::unique_ptr<PNS::ITEM>( aItem->Clone() );
     }
 
     void ApplyUpdates( BOARD_COMMIT& aCommit )

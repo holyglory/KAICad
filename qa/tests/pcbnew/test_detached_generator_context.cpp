@@ -155,7 +155,10 @@ BOOST_AUTO_TEST_CASE( InPlaceUpdatesAreOwnedDeferredAndReversibleInTheOuterCommi
     BOOST_CHECK_EQUAL( track->GetWidth(), 200000 );
 
     changed.SetParent( nullptr );
-    BOOST_CHECK_THROW( iface->UpdateItem( &changed ), std::invalid_argument );
+    BOOST_CHECK_NO_THROW( iface->UpdateItem( &changed ) );
+    context.tool->ApplyRouterUpdates( commit );
+    BOOST_CHECK( commit.Empty() );
+    BOOST_CHECK_EQUAL( track->GetWidth(), 200000 );
     PCB_TRACK foreign( &other.board );
     changed.SetParent( &foreign );
     BOOST_CHECK_THROW( iface->UpdateItem( &changed ), std::invalid_argument );

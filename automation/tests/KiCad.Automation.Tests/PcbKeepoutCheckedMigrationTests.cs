@@ -45,7 +45,7 @@ public sealed class PcbKeepoutCheckedMigrationTests
             JsonElement replayData = JsonSerializer.SerializeToElement(replay.StructuredContent);
             Assert.IsTrue(replayData.GetProperty("nativeReceiptAvailable").GetBoolean(), Text(replay));
             Assert.IsTrue(replayData.GetProperty("replayed").GetBoolean(), Text(replay));
-            Assert.AreEqual(2, transport.CheckedMutations);
+            Assert.AreEqual(1, transport.CheckedMutations, "A retained replay is settled by receipt inspection without resubmitting the mutation.");
             Assert.AreEqual(0, transport.LegacyMutations);
         }
         finally { Directory.Delete(root, true); }
@@ -72,6 +72,48 @@ public sealed class PcbKeepoutCheckedMigrationTests
             Assert.AreEqual(CheckedPcbItemTransactionState.CpbtsRolledBack.ToString(), data.GetProperty("state").GetString());
             Assert.AreEqual("pcb_item_transaction_rejected", data.GetProperty("errorCode").GetString());
             Assert.IsFalse(data.GetProperty("mutationConfirmed").GetBoolean(), Text(reply));
+            Assert.AreEqual(0, transport.LegacyMutations);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public async Task UpdateAndDeleteReplaySkipLiveTargetReadsAfterReceiptExists()
+    {
+        string root = Directory.CreateTempSubdirectory("pcb-keepout-checked-target-replay-").FullName;
+        try
+        {
+            var transport = new KeepoutTransport();
+            var registry = new InstanceRegistry(transport, root);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(root, "native.sock")), transport.InstanceId);
+            var tools = new PcbKeepoutAuthoringTools(registry);
+            var state = State(root, transport.Epoch, sequence: 9, digest: 'd');
+            var input = Input(Guid.NewGuid().ToString("D"));
+            transport.Existing = input.ToNative();
+            string document = SchematicJson.Formatter.Format(state.Document);
+            string expected = SchematicJson.Formatter.Format(state);
+            string updateOperation = Guid.NewGuid().ToString("D");
+
+            var updated = await tools.Update(transport.InstanceId, document, input, expected, updateOperation, default);
+            Assert.IsFalse(updated.IsError ?? false, Text(updated));
+            transport.LiveBoardChanged = true;
+            var updateReplay = await tools.Update(transport.InstanceId, document, input, expected, updateOperation, default);
+            Assert.IsFalse(updateReplay.IsError ?? false, Text(updateReplay));
+            Assert.IsTrue(JsonSerializer.SerializeToElement(updateReplay.StructuredContent).GetProperty("replayed").GetBoolean(), Text(updateReplay));
+
+            // A delete has the same target preflight requirement. Its first
+            // call reads the rule area; the exact operation ID then settles
+            // from the receipt even after that live read is unavailable.
+            transport.LiveBoardChanged = false;
+            string deleteOperation = Guid.NewGuid().ToString("D");
+            var deleted = await tools.Delete(transport.InstanceId, document, input.Id, expected, deleteOperation, default);
+            Assert.IsFalse(deleted.IsError ?? false, Text(deleted));
+            transport.LiveBoardChanged = true;
+            var deleteReplay = await tools.Delete(transport.InstanceId, document, input.Id, expected, deleteOperation, default);
+            Assert.IsFalse(deleteReplay.IsError ?? false, Text(deleteReplay));
+            Assert.IsTrue(JsonSerializer.SerializeToElement(deleteReplay.StructuredContent).GetProperty("replayed").GetBoolean(), Text(deleteReplay));
+            Assert.AreEqual(2, transport.ItemReads, "Only the first update and delete may read the live target.");
+            Assert.AreEqual(2, transport.CheckedMutations, "Receipt replays must not resubmit checked mutations.");
             Assert.AreEqual(0, transport.LegacyMutations);
         }
         finally { Directory.Delete(root, true); }
@@ -130,9 +172,11 @@ public sealed class PcbKeepoutCheckedMigrationTests
         internal string Epoch { get; } = Guid.NewGuid().ToString("D");
         internal string InstanceId { get; } = Guid.NewGuid().ToString("D");
         internal bool RejectUpdates { get; init; }
+        internal bool LiveBoardChanged { get; set; }
         internal Zone? Existing { get; set; }
         internal int CheckedMutations { get; private set; }
         internal int LegacyMutations { get; private set; }
+        internal int ItemReads { get; private set; }
 
         public Task<byte[]> ExchangeAsync(string endpoint, byte[] bytes, TimeSpan timeout,
             CancellationToken cancellationToken = default)
@@ -143,9 +187,25 @@ public sealed class PcbKeepoutCheckedMigrationTests
                     ProjectPath = "/fixture/fixture.kicad_pro", Epoch = Epoch });
             if (request.Message.Is(GetItemsById.Descriptor))
             {
+                ItemReads++;
+                if (LiveBoardChanged) return Error("live keepout target unavailable");
                 var response = new GetItemsResponse { Status = ItemRequestStatus.IrsOk };
                 if (Existing is not null) response.Items.Add(Any.Pack(Existing));
                 return Reply(response);
+            }
+            if (request.Message.Is(ReadCheckedPcbItemTransactionReceipt.Descriptor))
+            {
+                var query = request.Message.Unpack<ReadCheckedPcbItemTransactionReceipt>();
+                if (receipts.TryGetValue(query.OperationId, out var retained))
+                    return Reply(retained.Clone());
+                return Reply(new CheckedPcbItemTransactionReceipt
+                {
+                    Document = query.Document.Clone(), ProcessEpoch = Epoch,
+                    OperationId = query.OperationId, State = CheckedPcbItemTransactionState.CpbtsNotFound,
+                    Phase = CheckedPcbItemTransactionPhase.CpbtpUnknown,
+                    RollbackState = CheckedPcbItemRollbackState.CpbrsNotAttempted,
+                    PostCommitState = CheckedPcbItemPostCommitState.CpbpsNotAttempted
+                });
             }
             if (request.Message.Is(BeginCommit.Descriptor) || request.Message.Is(EndCommit.Descriptor)
                 || request.Message.Is(CreateItems.Descriptor) || request.Message.Is(UpdateItems.Descriptor)
@@ -170,6 +230,7 @@ public sealed class PcbKeepoutCheckedMigrationTests
                 PcbItemOperation.ActionOneofCase.Create => CompletedCreate(checkedRequest),
                 PcbItemOperation.ActionOneofCase.Update when RejectUpdates => RolledBack(checkedRequest),
                 PcbItemOperation.ActionOneofCase.Update => CompletedUpdate(checkedRequest),
+                PcbItemOperation.ActionOneofCase.Delete => CompletedDelete(checkedRequest),
                 _ => throw new AssertFailedException("unsupported keepout fixture operation")
             };
             receipts.Add(checkedRequest.OperationId, receipt.Clone());
@@ -193,6 +254,16 @@ public sealed class PcbKeepoutCheckedMigrationTests
                 {
                     Status = ItemRequestStatus.IrsOk,
                     UpdatedItems = { new ItemUpdateResult { Status = new() { Code = ItemStatusCode.IscOk }, Item = request.Operations[0].Update.Items[0].Clone() } }
+                }
+            });
+
+        private static CheckedPcbItemTransactionReceipt CompletedDelete(CheckedPcbItemTransaction request) =>
+            Completed(request, new PcbItemOperationResult
+            {
+                Delete = new DeleteItemsResponse
+                {
+                    Status = ItemRequestStatus.IrsOk,
+                    DeletedItems = { new ItemDeletionResult { Id = request.Operations[0].Delete.ItemIds[0].Clone(), Status = ItemDeletionStatus.IdsOk } }
                 }
             });
 

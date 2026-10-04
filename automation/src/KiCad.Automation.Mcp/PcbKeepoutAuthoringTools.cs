@@ -144,6 +144,22 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
             default: throw new ArgumentOutOfRangeException(nameof(mutation));
         }
 
+        // Inspect the native process-owned receipt before any target read. A
+        // retry can therefore settle from the retained result even when the
+        // target was deleted or a live-state reread is no longer possible.
+        var rawRequest = CheckedRequest(expected, session.Epoch, operation, operationId);
+        var inspected = await PcbCheckedItemDispatch.InspectAsync(registry, instanceId, rawRequest, cancellationToken);
+        if (inspected.Receipt is { State: not CheckedPcbItemTransactionState.CpbtsNotFound })
+        {
+            // Receipt inspection is read-only, but this call is the caller's
+            // replay settlement path. Mark the mapped result so the public
+            // response distinguishes it from a first-call receipt.
+            inspected.Receipt.Replayed = true;
+            return KeepoutMutationData(inspected, mutation, targetId);
+        }
+        if (inspected.ErrorCode is not null)
+            return KeepoutMutationData(inspected, mutation, targetId);
+
         // Rule-area validation and the safe update merge retain the old
         // keepout authoring semantics. The checked native controller performs
         // the authoritative admission immediately afterwards and owns the
@@ -166,17 +182,24 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
             }
         }
 
-        var checkedRequest = new CheckedPcbItemTransaction
+        var checkedRequest = CheckedRequest(expected, session.Epoch, operation, operationId);
+        var outcome = await PcbCheckedItemDispatch.ApplyAsync(registry, instanceId, checkedRequest, cancellationToken);
+        return KeepoutMutationData(outcome, mutation, targetId);
+    }
+
+    private static CheckedPcbItemTransaction CheckedRequest(DocumentLifecycleState expected,
+        string processEpoch, PcbItemOperation operation, string operationId)
+    {
+        var request = new CheckedPcbItemTransaction
         {
             ExpectedState = expected.Clone(),
-            ProcessEpoch = session.Epoch,
+            ProcessEpoch = processEpoch,
             OperationId = operationId,
             MaximumResultBytes = 512 * 1024,
             Description = "MCP typed PCB keepout transaction"
         };
-        checkedRequest.Operations.Add(operation);
-        var outcome = await PcbCheckedItemDispatch.ApplyAsync(registry, instanceId, checkedRequest, cancellationToken);
-        return KeepoutMutationData(outcome, mutation, targetId);
+        request.Operations.Add(operation.Clone());
+        return request;
     }
 
     private static CallToolResult KeepoutMutationData(PcbCheckedItemDispatch.Outcome outcome,

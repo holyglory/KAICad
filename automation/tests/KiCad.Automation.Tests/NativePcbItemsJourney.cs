@@ -342,14 +342,80 @@ public sealed partial class NativeSessionTests
             }
             finally { Directory.Delete(zoneReceiptStateDirectory, true); }
 
-            var removeZone = new DeleteItems { Header = new() { Document = board } };
-            removeZone.ItemIds.Add(new KIID { Value = zoneId });
-            var removeZoneReply = await mcp.Tool("kicad_pcb_items_delete", new
+            // Exercise the task-oriented typed copper-zone surface against the
+            // same native zone and lifecycle checkpoint used by the legacy
+            // create/refill path above.
+            string zoneDocumentJson = SchematicJson.Formatter.Format(board);
+            before = await ObserveLifecycleState(client, board, token);
+            var zoneReadReply = await mcp.Tool("kicad_pcb_zone_read", new
             {
-                instanceId, requestJson = BoardJson.Formatter.Format(removeZone),
-                expectedStateJson = SchematicJson.Formatter.Format(await ObserveLifecycleState(client, board, token))
+                instanceId, documentJson = zoneDocumentJson, zoneId,
+                expectedStateJson = SchematicJson.Formatter.Format(before)
+            });
+            Assert.IsFalse(zoneReadReply.TryGetProperty("isError", out var zoneReadError) && zoneReadError.GetBoolean(), zoneReadReply.GetRawText());
+            var zoneReadData = zoneReadReply.GetProperty("structuredContent");
+            Assert.AreEqual(zoneId, zoneReadData.GetProperty("zoneId").GetString(), zoneReadReply.GetRawText());
+            Assert.IsTrue(zoneReadData.GetProperty("nativeQuery").GetBoolean(), zoneReadReply.GetRawText());
+            var staleZoneState = before.Clone();
+            object updatedZone = new
+            {
+                id = zoneId,
+                layers = new[] { "F.Cu" },
+                polygons = new[] { new
+                {
+                    outline = new[] { new { xNm = 5_000_000L, yNm = 5_000_000L },
+                                      new { xNm = 25_000_000L, yNm = 5_000_000L },
+                                      new { xNm = 25_000_000L, yNm = 25_000_000L },
+                                      new { xNm = 5_000_000L, yNm = 25_000_000L } },
+                    holes = Array.Empty<object>()
+                } },
+                name = "MCP typed zone update", priority = 7U, netName = "",
+                clearanceNm = 200_000L, minThicknessNm = 200_000L,
+                fillMode = "ZFM_SOLID", connection = "ZCS_FULL",
+                islandMode = "IRM_NEVER", borderStyle = "ZBS_SOLID",
+                borderPitchNm = 1_000_000L
+            };
+            string zoneUpdateOperation = Guid.NewGuid().ToString("D");
+            var zoneUpdateReply = await mcp.Tool("kicad_pcb_zone_update", new
+            {
+                instanceId, documentJson = zoneDocumentJson, zone = updatedZone,
+                expectedStateJson = SchematicJson.Formatter.Format(before),
+                operationId = zoneUpdateOperation
+            });
+            Assert.IsFalse(zoneUpdateReply.TryGetProperty("isError", out var zoneUpdateError) && zoneUpdateError.GetBoolean(), zoneUpdateReply.GetRawText());
+            var zoneUpdateData = zoneUpdateReply.GetProperty("structuredContent");
+            Assert.IsTrue(zoneUpdateData.GetProperty("authoredReadbackVerified").GetBoolean(), zoneUpdateReply.GetRawText());
+            Assert.IsTrue(zoneUpdateData.GetProperty("refillRequired").GetBoolean(), zoneUpdateReply.GetRawText());
+            Assert.IsTrue(zoneUpdateData.GetProperty("postCommitVerified").GetBoolean(), zoneUpdateReply.GetRawText());
+            before = SchematicJson.Parser.Parse<DocumentLifecycleState>(zoneUpdateData.GetProperty("afterState").GetString()!);
+
+            var zoneUpdateReplay = await mcp.Tool("kicad_pcb_zone_update", new
+            {
+                instanceId, documentJson = zoneDocumentJson, zone = updatedZone,
+                expectedStateJson = SchematicJson.Formatter.Format(staleZoneState),
+                operationId = zoneUpdateOperation
+            });
+            Assert.IsFalse(zoneUpdateReplay.TryGetProperty("isError", out var zoneUpdateReplayError) && zoneUpdateReplayError.GetBoolean(), zoneUpdateReplay.GetRawText());
+            Assert.IsTrue(zoneUpdateReplay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean(), zoneUpdateReplay.GetRawText());
+
+            var staleZoneUpdate = await mcp.Tool("kicad_pcb_zone_update", new
+            {
+                instanceId, documentJson = zoneDocumentJson, zone = updatedZone,
+                expectedStateJson = SchematicJson.Formatter.Format(staleZoneState),
+                operationId = Guid.NewGuid().ToString("D")
+            });
+            Assert.IsTrue(staleZoneUpdate.GetProperty("isError").GetBoolean(), staleZoneUpdate.GetRawText());
+            Assert.AreEqual("pcb_state_changed", staleZoneUpdate.GetProperty("structuredContent")
+                .GetProperty("errorCode").GetString(), staleZoneUpdate.GetRawText());
+
+            var removeZoneReply = await mcp.Tool("kicad_pcb_zone_delete", new
+            {
+                instanceId, documentJson = zoneDocumentJson, zoneId,
+                expectedStateJson = SchematicJson.Formatter.Format(before),
+                operationId = Guid.NewGuid().ToString("D")
             });
             Assert.IsFalse(removeZoneReply.TryGetProperty("isError", out var removeZoneError) && removeZoneError.GetBoolean(), removeZoneReply.GetRawText());
+            Assert.IsTrue(removeZoneReply.GetProperty("structuredContent").GetProperty("mutationConfirmed").GetBoolean(), removeZoneReply.GetRawText());
             before = SchematicJson.Parser.Parse<DocumentLifecycleState>(removeZoneReply.GetProperty("structuredContent").GetProperty("afterState").GetString()!);
             if (temporaryOutlineIds.Count > 0)
             {

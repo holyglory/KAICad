@@ -433,6 +433,62 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(persistedPads.Items.Select(item => item.Unpack<Pad>()).Any(pad => pad.Net.Name == "MCP_IMPORTED"),
                 "The imported net assignment must survive save, close and reopen.");
             before = await ObserveLifecycleState(client, board, token);
+
+            string connectivityDocumentJson = SchematicJson.Formatter.Format(board);
+            string connectivityStateJson = SchematicJson.Formatter.Format(before);
+            var connectivityReply = await mcp.Tool("kicad_pcb_connectivity_query", new
+            {
+                instanceId, documentJson = connectivityDocumentJson, netName = "MCP_IMPORTED",
+                expectedStateJson = connectivityStateJson
+            });
+            Assert.IsFalse(connectivityReply.TryGetProperty("isError", out var connectivityError) && connectivityError.GetBoolean(),
+                connectivityReply.GetRawText());
+            var connectivityData = connectivityReply.GetProperty("structuredContent");
+            Assert.AreEqual(instanceId, connectivityData.GetProperty("instanceId").GetString(), connectivityReply.GetRawText());
+            Assert.AreEqual("MCP_IMPORTED", connectivityData.GetProperty("netName").GetString(), connectivityReply.GetRawText());
+            Assert.IsTrue(connectivityData.GetProperty("nativeQuery").GetBoolean(), connectivityReply.GetRawText());
+            Assert.IsFalse(connectivityData.GetProperty("boardMutation").GetBoolean(), connectivityReply.GetRawText());
+            Assert.IsFalse(connectivityData.GetProperty("drcValidated").GetBoolean(), connectivityReply.GetRawText());
+            string expectedConnectivityState = SchematicJson.Formatter.Format(before);
+            Assert.AreEqual(expectedConnectivityState, connectivityData.GetProperty("beforeState").GetString(), connectivityReply.GetRawText());
+            Assert.AreEqual(expectedConnectivityState, connectivityData.GetProperty("afterState").GetString(), connectivityReply.GetRawText());
+            var connectivityItems = connectivityData.GetProperty("items").EnumerateArray().ToArray();
+            Assert.AreEqual(2, connectivityData.GetProperty("itemCount").GetInt32(), connectivityReply.GetRawText());
+            Assert.HasCount(2, connectivityItems, connectivityReply.GetRawText());
+            Assert.IsTrue(connectivityItems.All(item => item.GetProperty("kind").GetString() == "pad"
+                && item.GetProperty("netName").GetString() == "MCP_IMPORTED"
+                && Guid.TryParseExact(item.GetProperty("id").GetString(), "D", out _)
+                && item.GetProperty("padNumber").GetString() == "1"), connectivityReply.GetRawText());
+
+            var staleConnectivityState = before.Clone();
+            staleConnectivityState.Revision.Sequence++;
+            var staleConnectivityReply = await mcp.Tool("kicad_pcb_connectivity_query", new
+            {
+                instanceId, documentJson = connectivityDocumentJson, netName = "MCP_IMPORTED",
+                expectedStateJson = SchematicJson.Formatter.Format(staleConnectivityState)
+            });
+            Assert.IsTrue(staleConnectivityReply.TryGetProperty("isError", out var staleConnectivityError)
+                && staleConnectivityError.GetBoolean(), staleConnectivityReply.GetRawText());
+            Assert.AreEqual("pcb_connectivity_state_changed",
+                staleConnectivityReply.GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+                staleConnectivityReply.GetRawText());
+
+            var connectivitySibling = await SiblingInstance(client, token);
+            var connectivitySiblingAttach = await mcp.Tool("kicad_instance_attach", new
+            { endpoint = connectivitySibling.Endpoint, expectedInstanceId = connectivitySibling.InstanceId });
+            Assert.IsFalse(connectivitySiblingAttach.TryGetProperty("isError", out var connectivitySiblingAttachError)
+                && connectivitySiblingAttachError.GetBoolean(), connectivitySiblingAttach.GetRawText());
+            var siblingConnectivityReply = await mcp.Tool("kicad_pcb_connectivity_query", new
+            {
+                instanceId = connectivitySibling.InstanceId, documentJson = connectivityDocumentJson, netName = "MCP_IMPORTED",
+                expectedStateJson = connectivityStateJson
+            });
+            Assert.IsTrue(siblingConnectivityReply.TryGetProperty("isError", out var siblingConnectivityError)
+                && siblingConnectivityError.GetBoolean(), siblingConnectivityReply.GetRawText());
+            Assert.AreEqual("pcb_instance_changed",
+                siblingConnectivityReply.GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+                siblingConnectivityReply.GetRawText());
+
             var createdReply = await mcp.Tool("kicad_pcb_items_create", new
             {
                 instanceId, requestJson = BoardJson.Formatter.Format(create),

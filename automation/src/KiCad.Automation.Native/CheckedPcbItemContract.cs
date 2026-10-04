@@ -195,6 +195,31 @@ public static class CheckedPcbItemContract
         if (result.Results.Count > request.Operations.Count)
             throw Invalid("The native PCB item receipt contains more results than requested operations.");
 
+        // A rollback receipt proves its outcome through the exact before and
+        // rollback lifecycle checkpoints. Native item responses may be
+        // partial or rejected at the operation that triggered the rollback,
+        // and KiCad may normalize earlier staged objects before dropping the
+        // commit. Preserve those bounded responses for diagnosis while still
+        // requiring the oneof kind to match each requested operation.
+        if (result.State == CheckedPcbItemTransactionState.CpbtsRolledBack)
+        {
+            for (int index = 0; index < result.Results.Count; index++)
+            {
+                var operation = request.Operations[index];
+                var operationResult = result.Results[index];
+                bool kindMatches = operation.ActionCase switch
+                {
+                    PcbItemOperation.ActionOneofCase.Create => operationResult.ResultCase == PcbItemOperationResult.ResultOneofCase.Create,
+                    PcbItemOperation.ActionOneofCase.Update => operationResult.ResultCase == PcbItemOperationResult.ResultOneofCase.Update,
+                    PcbItemOperation.ActionOneofCase.Delete => operationResult.ResultCase == PcbItemOperationResult.ResultOneofCase.Delete,
+                    _ => false
+                };
+                if (!kindMatches)
+                    throw Invalid("The rolled-back PCB receipt does not preserve the operation response kind.");
+            }
+            return;
+        }
+
         for (int index = 0; index < result.Results.Count; index++)
         {
             var operation = request.Operations[index];

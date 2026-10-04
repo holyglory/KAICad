@@ -78,16 +78,22 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
                 NativeCapabilityFootprintLibraryDelete, NativeCapabilityFootprintLibraryDeleteResponse>(
                     deleteRequest, cancellationToken);
             NativeCapabilityFootprintLibraryReadOperationResponse receipt = await ReadNativeLibraryReceipt(context, operationId, cancellationToken);
+            FootprintLibraryContract.ValidateDeleteResponse(response, operationId, libraryNickname, footprintName);
+            FootprintLibraryContract.ValidateLibraryReceipt(receipt, operationId, libraryNickname, footprintName);
+            LibraryReadback readback = await VerifyDeletedLibraryEntry(context, libraryNickname, footprintName,
+                response.AfterModifyHash, operationId, "library-delete", cancellationToken);
             return Data(new
             {
                 instanceId, processEpoch = context.Session.Epoch, operationId, libraryNickname, footprintName,
-                operation = "library-delete", operationOutcome = response.Completed ? "completed" : "rejected",
-                nativeCommandSucceeded = response.Completed, operationReceipt = true,
+                operation = "library-delete", operationOutcome = "completed",
+                nativeCommandSucceeded = true, operationReceipt = true,
                 nativeReceiptAvailable = receipt.Found, receiptScope = receipt.Found ? "native-process" : "mcp-process",
                 nativeReceipt = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(receipt)),
                 beforeModifyHash = response.BeforeModifyHash, afterModifyHash = response.AfterModifyHash,
                 expectedModifyHash = string.IsNullOrWhiteSpace(expectedModifyHash) ? null : expectedModifyHash,
                 revisionAdmission = expectedHash.HasValue ? "modify-hash-matched" : "not-requested", revisionTracked = false,
+                libraryEntryAbsent = true, persistenceVerified = true,
+                persistedModifyHash = readback.ModifyHash, persistenceSource = "native-library-list-readback",
                 transportRetrySafe = false
             });
         }));
@@ -263,6 +269,8 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
             }
             NativeCapabilityFootprintReadOperationResponse nativeReceipt = await ReadNativeReceipt(context, operationId, cancellationToken);
             NativeCapabilityFootprintLibraryReadOperationResponse libraryReceipt = await ReadNativeLibraryReceipt(context, operationId, cancellationToken);
+            FootprintLibraryContract.ValidateEditorReceiptIdentity(nativeReceipt, operationId);
+            FootprintLibraryContract.ValidateLibraryReceiptIdentity(libraryReceipt, operationId);
             if (nativeReceipt.Found || libraryReceipt.Found)
                 return Data(new
                 {
@@ -306,6 +314,7 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
             }
 
             NativeCapabilityFootprintReadOperationResponse nativeReceipt = await ReadNativeReceipt(context, operationId, cancellationToken);
+            FootprintLibraryContract.ValidateEditorReceipt(nativeReceipt, operationId, "save", document);
             string snapshotSha256 = await SnapshotHash(context, document, cancellationToken);
             NativeCapabilityFootprintReadDefinitionResponse persistedDefinition = await ReadPersistedDefinitionForVerification(
                 context, document, operationId, "footprint save", cancellationToken);
@@ -369,6 +378,7 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
             }
 
             NativeCapabilityFootprintReadOperationResponse nativeReceipt = await ReadNativeReceipt(context, operationId, cancellationToken);
+            FootprintLibraryContract.ValidateEditorReceipt(nativeReceipt, operationId, "save-copy", document);
             string snapshotSha256 = await SnapshotHash(context, document, cancellationToken);
             DocumentSpecifier persistedDocument = document.Clone();
             persistedDocument.LibId = canonicalTarget;
@@ -422,6 +432,7 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
             }
 
             NativeCapabilityFootprintReadOperationResponse nativeReceipt = await ReadNativeReceipt(context, operationId, cancellationToken);
+            FootprintLibraryContract.ValidateEditorReceipt(nativeReceipt, operationId, "revert", document);
             string snapshotSha256 = await SnapshotHash(context, document, cancellationToken);
             return Data(new
             {
@@ -601,6 +612,35 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
             throw new AutomationException("footprint_persistence_unverified",
                 $"KiCad completed {operation} operation {operationId}, but a native library re-read did not contain {libraryNickname}:{footprintName}. Inspect the library before retrying.");
 
+        return new(response.ModifyHash);
+    }
+
+    private static async Task<LibraryReadback> VerifyDeletedLibraryEntry(NativeContext context,
+        string libraryNickname, string footprintName, ulong expectedModifyHash,
+        string operationId, string operation, CancellationToken cancellationToken)
+    {
+        NativeCapabilityFootprintLibraryReadNamesResponse response;
+        try
+        {
+            response = await context.Client.InvokeAsync<NativeCapabilityFootprintLibraryReadNames,
+                NativeCapabilityFootprintLibraryReadNamesResponse>(new()
+                {
+                    LibraryNickname = libraryNickname,
+                    BestEfforts = false
+                }, cancellationToken);
+        }
+        catch (NngException error)
+        {
+            throw MutationTransport(error, operation + " persistence verification", operationId);
+        }
+        catch (NativeApiException error)
+        {
+            throw new AutomationException("footprint_persistence_unverified",
+                $"KiCad completed {operation} operation {operationId}, but the native library re-read failed: {error.Message}");
+        }
+
+        FootprintLibraryContract.ValidateDeletePersistence(response, operationId, libraryNickname,
+            footprintName, expectedModifyHash);
         return new(response.ModifyHash);
     }
 

@@ -599,6 +599,11 @@ public sealed class McpProcessTests
             var emptyFootprintReceipt = await Request(9355, "tools/call", new { name = "kicad_footprint_receipt",
                 arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = validEpoch, operationId = Guid.NewGuid().ToString("D") } });
             Assert.IsFalse(emptyFootprintReceipt.GetProperty("result").GetProperty("structuredContent").GetProperty("found").GetBoolean());
+            var invalidFootprintReceiptOperation = await Request(9366, "tools/call", new { name = "kicad_footprint_receipt",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = validEpoch, operationId = "invalid" } });
+            Assert.IsTrue(invalidFootprintReceiptOperation.GetProperty("result").GetProperty("isError").GetBoolean());
+            Assert.AreEqual("invalid_operation_id", invalidFootprintReceiptOperation.GetProperty("result")
+                .GetProperty("structuredContent").GetProperty("errorCode").GetString());
             var invalidFootprintId = await Request(9351, "tools/call", new { name = "kicad_footprint_open_library_item",
                 arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = validEpoch,
                     libraryNickname = "", entryName = "QFN-4", operationId = validOperation } });

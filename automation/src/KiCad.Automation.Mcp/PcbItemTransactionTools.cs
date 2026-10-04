@@ -53,7 +53,21 @@ public sealed class PcbItemTransactionTools(InstanceRegistry registry)
                 $"KiCad did not receive checked PCB item operation {request.OperationId} ({error.Message}); no item transaction was started.");
         }
 
-        CheckedPcbItemContract.ValidateResult(request, receipt, inspect: false);
+        try
+        {
+            CheckedPcbItemContract.ValidateResult(request, receipt, inspect: false);
+        }
+        catch (AutomationException error) when (receipt.State != CheckedPcbItemTransactionState.CpbtsUnknown
+                                                 && receipt.RequestVerified)
+        {
+            // Preserve a native terminal receipt even when a managed
+            // postcondition validator finds a malformed or partial response.
+            // The caller still receives IsError=true and the validation error,
+            // but can inspect state/rollback evidence instead of losing the
+            // operation identity behind a generic exception.
+            return ReceiptData(instanceId, receipt, error: true,
+                validationError: error.Code + ": " + error.Message);
+        }
         return ReceiptData(instanceId, receipt, receipt.State != CheckedPcbItemTransactionState.CpbtsCompleted);
     });
 
@@ -100,7 +114,7 @@ public sealed class PcbItemTransactionTools(InstanceRegistry registry)
     }
 
     private static CallToolResult ReceiptData(string instanceId, CheckedPcbItemTransactionReceipt receipt,
-        bool error, bool readOnly = false)
+        bool error, bool readOnly = false, string? validationError = null)
     {
         var receiptJson = JsonDocument.Parse(SchematicJson.Formatter.Format(receipt)).RootElement.Clone();
         var data = JsonSerializer.SerializeToElement(new
@@ -113,6 +127,7 @@ public sealed class PcbItemTransactionTools(InstanceRegistry registry)
             beforeState = receipt.ObservedBefore is null ? null : SchematicJson.Formatter.Format(receipt.ObservedBefore),
             rollbackState = receipt.ObservedRollback is null ? null : SchematicJson.Formatter.Format(receipt.ObservedRollback),
             afterState = receipt.ObservedAfter is null ? null : SchematicJson.Formatter.Format(receipt.ObservedAfter),
+            validationError,
             readOnly
         });
         return new CallToolResult

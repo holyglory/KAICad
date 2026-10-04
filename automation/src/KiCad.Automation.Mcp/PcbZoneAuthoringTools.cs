@@ -25,10 +25,13 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
 {
-    // Keep the exact checked update envelope that was sent. A retry after a
-    // lost reply must be able to inspect the native receipt without rereading
-    // a target that may have changed or disappeared.
-    private readonly ConcurrentDictionary<string, CachedCheckedRequest> checkedRequests = new(StringComparer.Ordinal);
+    // Keep the exact checked update envelope that was sent for the lifetime of
+    // this MCP process. MCP tool dispatch may construct a fresh tool object for
+    // each call, so an instance field loses the metadata needed to reconstruct
+    // the exact native request on replay. The key bounds ownership to one native
+    // instance and operation ID; the cached process epoch and canonical
+    // fingerprints below reject reuse with a different request or checkpoint.
+    private static readonly ConcurrentDictionary<string, CachedCheckedRequest> checkedRequests = new(StringComparer.Ordinal);
 
     [McpServerTool(Name = "kicad_pcb_zone_read", ReadOnly = true),
      Description("Read one typed native copper zone by canonical KIID at an exact PCB lifecycle checkpoint. documentJson identifies the board, zoneId identifies one zone, and expectedStateJson must carry the matching process epoch, revision and digest. Derived fill polygons are returned as native state but are never treated as authoring input."),

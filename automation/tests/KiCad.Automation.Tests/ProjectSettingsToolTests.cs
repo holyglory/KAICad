@@ -19,7 +19,7 @@ public sealed class ProjectSettingsToolTests
     [TestMethod]
     public async Task NetClassesReturnsTypedSnapshotWithUnchangedLifecycleIdentity()
     {
-        using var fixture = Fixture();
+        using var fixture = CreateFixture();
         var result = await fixture.Tool.NetClasses(fixture.Session.InstanceId,
             SchematicJson.Formatter.Format(fixture.Document),
             SchematicJson.Formatter.Format(fixture.State), default);
@@ -37,7 +37,7 @@ public sealed class ProjectSettingsToolTests
     [TestMethod]
     public async Task NetClassesRejectsLifecycleChangesAfterTheNativeQuery()
     {
-        using var fixture = Fixture();
+        using var fixture = CreateFixture();
         fixture.Transport.ChangeAfterQuery = true;
 
         var result = await fixture.Tool.NetClasses(fixture.Session.InstanceId,
@@ -52,7 +52,7 @@ public sealed class ProjectSettingsToolTests
     [TestMethod]
     public async Task NetClassesReportsUnsupportedNativeCommandWithoutInventingData()
     {
-        using var fixture = Fixture();
+        using var fixture = CreateFixture();
         fixture.Transport.Unsupported = true;
 
         var result = await fixture.Tool.NetClasses(fixture.Session.InstanceId,
@@ -70,7 +70,7 @@ public sealed class ProjectSettingsToolTests
     private static string Text(CallToolResult result) =>
         result.Content.OfType<TextContentBlock>().Single().Text;
 
-    private static Fixture Fixture()
+    private static Fixture CreateFixture()
     {
         string directory = Directory.CreateTempSubdirectory("project-netclasses-").FullName;
         var transport = new ProjectTransport();

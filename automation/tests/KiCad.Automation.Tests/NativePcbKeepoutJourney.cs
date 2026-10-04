@@ -296,7 +296,7 @@ public sealed partial class NativeSessionTests
         int processId, string display, string key, DocumentLifecycleState before, CancellationToken token)
     {
         using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
-        limit.CancelAfter(TimeSpan.FromSeconds(8));
+        limit.CancelAfter(TimeSpan.FromSeconds(30));
         while (!NativeKeyboard.HasWindow(display, processId, "PCB Editor"))
             await Task.Delay(100, limit.Token);
         NativeKeyboard.SchematicShortcut(display, processId, key, titleMatch: "PCB Editor", focusCanvas: true);

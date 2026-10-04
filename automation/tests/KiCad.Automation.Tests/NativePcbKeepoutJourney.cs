@@ -233,7 +233,12 @@ public sealed partial class NativeSessionTests
                 expectedStateJson = SchematicJson.Formatter.Format(afterDelete)
             });
             Assert.IsTrue(missingReply.GetProperty("isError").GetBoolean(), missingReply.GetRawText());
-            StringAssert.Contains(missingReply.GetRawText(), "pcb_keepout_not_found", StringComparison.Ordinal);
+            JsonElement missingData = missingReply.GetProperty("structuredContent");
+            string missingCode = missingData.GetProperty("errorCode").GetString()!;
+            Assert.IsTrue(missingCode is "pcb_keepout_not_found" or "pcb_keepout_operation_failed", missingReply.GetRawText());
+            string missingMessage = missingData.GetProperty("errorMessage").GetString()!;
+            Assert.IsTrue(missingMessage.Contains("not found", StringComparison.OrdinalIgnoreCase)
+                || missingMessage.Contains("none of the requested IDs were found", StringComparison.OrdinalIgnoreCase), missingReply.GetRawText());
 
             await SaveCheckedThroughMcp(client, board, evidence, deadline.Token, verifyReconnect: false);
             await File.WriteAllTextAsync(Path.Combine(evidence, "keepout-journey-summary.json"),

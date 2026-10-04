@@ -588,7 +588,11 @@ public sealed class PcbOperationsTools(InstanceRegistry registry)
         catch (Exception error) when (error is AutomationException or NativeApiException or NngException
             or InvalidProtocolBufferException or InvalidJsonException or InvalidOperationException or ArgumentException or IOException)
         {
-            string code = error is AutomationException known ? known.Code : error is NativeApiException native ? "native_status_" + native.Status : "pcb_operation_failed";
+            string code = error is AutomationException known ? known.Code
+                : error is NativeApiException native && native.Status == (int)Kiapi.Common.ApiStatusCode.AsTokenMismatch
+                    ? "pcb_instance_changed"
+                    : error is NativeApiException nativeError ? "native_status_" + nativeError.Status
+                    : "pcb_operation_failed";
             bool submitted = error is AutomationException outcome && outcome.Code == "operation_outcome_unknown";
             var structured = JsonSerializer.SerializeToElement(new
             {

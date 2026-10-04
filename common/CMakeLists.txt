@@ -371,6 +371,7 @@ set( KICOMMON_SRCS
     api/document_lifecycle_controller.cpp
     api/checked_schematic_controller.cpp
     api/checked_pcb_route_controller.cpp
+    api/checked_pcb_item_controller.cpp
     api/api_utils.cpp
     api/cross_probe_client.cpp
     api/python_manager.cpp

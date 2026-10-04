@@ -31,6 +31,7 @@
 #include <api/document_lifecycle_controller.h>
 #include <api/checked_schematic_controller.h>
 #include <api/checked_pcb_route_controller.h>
+#include <api/checked_pcb_item_controller.h>
 #include <api/api_socket_url.h>
 #include <kiid.h>
 #include <kinng.h>
@@ -66,6 +67,7 @@ KICAD_API_SERVER::KICAD_API_SERVER( bool aAutoStart ) :
     m_lifecycle = std::make_unique<DOCUMENT_LIFECYCLE_CONTROLLER>();
     m_checkedSchematic = std::make_unique<CHECKED_SCHEMATIC_CONTROLLER>();
     m_checkedPcbRoute = std::make_unique<CHECKED_PCB_ROUTE_CONTROLLER>();
+    m_checkedPcbItem = std::make_unique<CHECKED_PCB_ITEM_CONTROLLER>();
     if( !aAutoStart )
         return;
 
@@ -494,6 +496,18 @@ API_RESULT KICAD_API_SERVER::DispatchToHandlers( ApiRequest& aRequest )
         return m_checkedPcbRoute->Handle( aRequest, m_token,
                 [this]( ApiRequest& request ) { return DispatchToHandlers( request ); } );
     }
+    if( CHECKED_PCB_ITEM_CONTROLLER::Handles( aRequest ) )
+    {
+        if( !IsAutomation() )
+        {
+            ApiResponseStatus error;
+            error.set_status( ApiStatusCode::AS_UNIMPLEMENTED );
+            error.set_error_message( "Checked PCB item transactions require an explicit automation instance" );
+            return tl::unexpected( error );
+        }
+        return m_checkedPcbItem->Handle( aRequest, m_token,
+                [this]( ApiRequest& request ) { return DispatchToHandlers( request ); } );
+    }
     if( DOCUMENT_LIFECYCLE_CONTROLLER::Handles( aRequest ) )
     {
         if( !IsAutomation() )
@@ -570,6 +584,8 @@ std::vector<std::string> KICAD_API_SERVER::AdvertisedRequestTypes() const
         for( const std::string& type : DOCUMENT_LIFECYCLE_CONTROLLER::RequestTypes() )
             types.insert( type );
         for( const std::string& type : CHECKED_PCB_ROUTE_CONTROLLER::RequestTypes() )
+            types.insert( type );
+        for( const std::string& type : CHECKED_PCB_ITEM_CONTROLLER::RequestTypes() )
             types.insert( type );
 
         // Every checked schematic request is declared beside the handshake in the automation

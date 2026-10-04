@@ -1,0 +1,113 @@
+/* Checked general PCB item transactions and retained native receipts. GPL-3.0-or-later. */
+syntax = "proto3";
+
+package kiapi.automation.v1;
+option csharp_namespace = "KiCad.Automation.Protocol";
+
+import "common/commands/editor_commands.proto";
+import "common/commands/automation_commands.proto";
+import "common/types/base_types.proto";
+
+// One ordered native transaction over the existing generic PCB item commands.
+// Each operation keeps the legacy request shape so containers, field masks and
+// Any-packed native objects remain represented exactly on the wire.
+message PcbItemOperation
+{
+  oneof action
+  {
+    kiapi.common.commands.CreateItems create = 1;
+    kiapi.common.commands.UpdateItems update = 2;
+    kiapi.common.commands.DeleteItems delete = 3;
+  }
+}
+
+message CheckedPcbItemTransaction
+{
+  repeated PcbItemOperation operations = 1;
+  DocumentLifecycleState expected_state = 2;
+  string process_epoch = 3;
+  string operation_id = 4;
+  uint32 maximum_result_bytes = 5;
+  string description = 6;
+}
+
+// The exact native response for the operation at the same repeated index.
+message PcbItemOperationResult
+{
+  oneof result
+  {
+    kiapi.common.commands.CreateItemsResponse create = 1;
+    kiapi.common.commands.UpdateItemsResponse update = 2;
+    kiapi.common.commands.DeleteItemsResponse delete = 3;
+  }
+}
+
+message ReadCheckedPcbItemTransactionReceipt
+{
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string process_epoch = 2;
+  string operation_id = 3;
+  CheckedPcbItemTransaction expected_request = 4;
+}
+
+enum CheckedPcbItemTransactionState
+{
+  CPBTS_UNKNOWN = 0;
+  CPBTS_NOT_FOUND = 1;
+  CPBTS_REJECTED = 2;
+  CPBTS_ROLLED_BACK = 3;
+  CPBTS_COMPLETED = 4;
+  // Native execution or cleanup may have occurred; inspect the retained
+  // lifecycle observations before deciding whether the caller may retry.
+  CPBTS_INDETERMINATE = 5;
+}
+
+enum CheckedPcbItemTransactionPhase
+{
+  CPBTP_UNKNOWN = 0;
+  CPBTP_ADMISSION_VERIFIED = 1;
+  CPBTP_STAGED = 2;
+  CPBTP_COMMIT_REQUESTED = 3;
+  CPBTP_COMMITTED = 4;
+  CPBTP_ROLLBACK_REQUESTED = 5;
+  CPBTP_ROLLBACK_CONFIRMED = 6;
+  CPBTP_POSTCOMMIT_OBSERVED = 7;
+  CPBTP_COMPLETE = 8;
+}
+
+enum CheckedPcbItemRollbackState
+{
+  CPBRS_UNKNOWN = 0;
+  CPBRS_NOT_ATTEMPTED = 1;
+  CPBRS_REQUESTED = 2;
+  CPBRS_CONFIRMED = 3;
+  CPBRS_UNCONFIRMED = 4;
+}
+
+enum CheckedPcbItemPostCommitState
+{
+  CPBPS_UNKNOWN = 0;
+  CPBPS_NOT_ATTEMPTED = 1;
+  CPBPS_REQUESTED = 2;
+  CPBPS_CONFIRMED = 3;
+  CPBPS_UNCONFIRMED = 4;
+}
+
+message CheckedPcbItemTransactionReceipt
+{
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string process_epoch = 2;
+  string operation_id = 3;
+  CheckedPcbItemTransactionState state = 4;
+  bool request_verified = 5;
+  bool replayed = 6;
+  repeated PcbItemOperationResult results = 7;
+  DocumentLifecycleState observed_before = 8;
+  DocumentLifecycleState observed_rollback = 9;
+  DocumentLifecycleState observed_after = 10;
+  CheckedPcbItemTransactionPhase phase = 11;
+  CheckedPcbItemRollbackState rollback_state = 12;
+  CheckedPcbItemPostCommitState post_commit_state = 13;
+  string error_code = 14;
+  string error_message = 15;
+}

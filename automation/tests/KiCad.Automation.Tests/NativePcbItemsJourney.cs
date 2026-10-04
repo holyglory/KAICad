@@ -498,6 +498,98 @@ public sealed partial class NativeSessionTests
             var persistedGuide = guideRead.Items.Single().Unpack<BoardGraphicShape>();
             Assert.AreEqual(BoardLayer.BlDwgsUser, persistedGuide.Layer);
             Assert.IsTrue(persistedGuide.CustomProperties.Any(p => p.Key == "kicad.ai.guide.role" && p.Value == "visual-underlay"));
+
+            // One native checked transaction exercises the general ordered
+            // create/update/delete seam and its retained replay/rollback
+            // receipts. The legacy primitive wrappers above remain in the
+            // journey so compatibility is covered alongside the new path.
+            var transactionShape = guideShape.Clone();
+            transactionShape.Id = new() { Value = Guid.NewGuid().ToString("D") };
+            transactionShape.CustomProperties.Clear();
+            var transactionUpdate = moved.Clone();
+            transactionUpdate.End.XNm += 1_000_000;
+            var transactionCreate = new CreateItems { Header = new() { Document = board } };
+            transactionCreate.Items.Add(Any.Pack(transactionShape));
+            var transactionUpdateRequest = new UpdateItems { Header = new() { Document = board } };
+            transactionUpdateRequest.Items.Add(Any.Pack(transactionUpdate));
+            var transactionDelete = new DeleteItems { Header = new() { Document = board } };
+            transactionDelete.ItemIds.Add(guideShape.Id.Clone());
+            var transactionRequest = new CheckedPcbItemTransaction
+            {
+                ExpectedState = SchematicJson.Parser.Parse<DocumentLifecycleState>(guideState),
+                ProcessEpoch = client.Epoch, OperationId = Guid.NewGuid().ToString("D"),
+                MaximumResultBytes = 512 * 1024, Description = "Native PCB item transaction fixture"
+            };
+            transactionRequest.Operations.Add(new PcbItemOperation { Create = transactionCreate });
+            transactionRequest.Operations.Add(new PcbItemOperation { Update = transactionUpdateRequest });
+            transactionRequest.Operations.Add(new PcbItemOperation { Delete = transactionDelete });
+            var transactionReply = await mcp.Tool("kicad_pcb_items_transaction", new
+            {
+                instanceId, requestJson = SchematicJson.Formatter.Format(transactionRequest)
+            });
+            Assert.IsFalse(transactionReply.TryGetProperty("isError", out var transactionError) && transactionError.GetBoolean(), transactionReply.GetRawText());
+            var transactionData = transactionReply.GetProperty("structuredContent");
+            Assert.AreEqual("CpbtsCompleted", transactionData.GetProperty("state").GetString());
+            var transactionReceipt = SchematicJson.Parser.Parse<CheckedPcbItemTransactionReceipt>(transactionData.GetProperty("receipt").GetRawText());
+            Assert.AreEqual(3, transactionReceipt.Results.Count);
+            Assert.AreEqual(transactionRequest.ExpectedState, transactionReceipt.ObservedBefore);
+            Assert.IsNotNull(transactionReceipt.ObservedAfter);
+            var transactionAfter = transactionReceipt.ObservedAfter!;
+            Assert.IsGreaterThanOrEqualTo(transactionReceipt.ObservedBefore!.Revision.Sequence, transactionAfter.Revision.Sequence);
+            var replayTransaction = await mcp.Tool("kicad_pcb_items_transaction", new
+            {
+                instanceId, requestJson = SchematicJson.Formatter.Format(transactionRequest)
+            });
+            Assert.IsFalse(replayTransaction.TryGetProperty("isError", out var replayTransactionError) && replayTransactionError.GetBoolean(), replayTransaction.GetRawText());
+            var replayReceipt = SchematicJson.Parser.Parse<CheckedPcbItemTransactionReceipt>(
+                replayTransaction.GetProperty("structuredContent").GetProperty("receipt").GetRawText());
+            Assert.IsTrue(replayReceipt.Replayed);
+            var readTransactionReceipt = await mcp.Tool("kicad_pcb_items_transaction_receipt", new
+            {
+                instanceId, requestJson = SchematicJson.Formatter.Format(transactionRequest)
+            });
+            Assert.IsFalse(readTransactionReceipt.TryGetProperty("isError", out var readTransactionError) && readTransactionError.GetBoolean(), readTransactionReceipt.GetRawText());
+            Assert.AreEqual(transactionRequest.OperationId, readTransactionReceipt.GetProperty("structuredContent").GetProperty("operationId").GetString());
+            var mixedReadback = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = board }, Items = { transactionShape.Id, moved.Id, guideShape.Id } }, token);
+            Assert.IsTrue(mixedReadback.Items.Any(item => item.Is(BoardGraphicShape.Descriptor)
+                && item.Unpack<BoardGraphicShape>().Id.Equals(transactionShape.Id)));
+            Assert.IsTrue(mixedReadback.Items.Any(item => item.Is(Track.Descriptor)
+                && item.Unpack<Track>().Id.Equals(moved.Id)
+                && item.Unpack<Track>().End.Equals(transactionUpdate.End)));
+            Assert.IsFalse(mixedReadback.Items.Any(item => item.Is(BoardGraphicShape.Descriptor)
+                && item.Unpack<BoardGraphicShape>().Id.Equals(guideShape.Id)));
+
+            var rollbackShape = transactionShape.Clone();
+            rollbackShape.Id = new() { Value = Guid.NewGuid().ToString("D") };
+            var rollbackCreate = new CreateItems { Header = new() { Document = board } };
+            rollbackCreate.Items.Add(Any.Pack(rollbackShape));
+            var rollbackUpdate = new UpdateItems { Header = new() { Document = board } };
+            rollbackUpdate.Items.Add(Any.Pack(new Track
+            {
+                Id = new() { Value = Guid.NewGuid().ToString("D") }, Start = new() { XNm = 0, YNm = 0 },
+                End = new() { XNm = 1, YNm = 1 }, Width = new() { ValueNm = 100 }, Layer = BoardLayer.BlFCu
+            }));
+            var rollbackRequest = new CheckedPcbItemTransaction
+            {
+                ExpectedState = transactionAfter, ProcessEpoch = client.Epoch,
+                OperationId = Guid.NewGuid().ToString("D"), MaximumResultBytes = 512 * 1024
+            };
+            rollbackRequest.Operations.Add(new PcbItemOperation { Create = rollbackCreate });
+            rollbackRequest.Operations.Add(new PcbItemOperation { Update = rollbackUpdate });
+            var rollbackReply = await mcp.Tool("kicad_pcb_items_transaction", new
+            {
+                instanceId, requestJson = SchematicJson.Formatter.Format(rollbackRequest)
+            });
+            Assert.IsTrue(rollbackReply.GetProperty("isError").GetBoolean(), rollbackReply.GetRawText());
+            var rollbackData = rollbackReply.GetProperty("structuredContent");
+            Assert.AreEqual("CpbtsRolledBack", rollbackData.GetProperty("state").GetString());
+            var rollbackReceipt = SchematicJson.Parser.Parse<CheckedPcbItemTransactionReceipt>(rollbackData.GetProperty("receipt").GetRawText());
+            Assert.AreEqual(CheckedPcbItemRollbackState.CpbrsConfirmed, rollbackReceipt.RollbackState);
+            Assert.AreEqual(rollbackReceipt.ObservedBefore, rollbackReceipt.ObservedRollback);
+            var rollbackReadback = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = board }, Items = { rollbackShape.Id } }, token);
+            Assert.AreEqual(0, rollbackReadback.Items.Count);
             var candidateTrack = track.Clone(); candidateTrack.Id = new() { Value = Guid.NewGuid().ToString("D") };
             var candidateRequest = new CreateItems { Header = new() { Document = board } }; candidateRequest.Items.Add(Any.Pack(candidateTrack));
             var candidateReply = await mcp.Tool("kicad_pcb_route_candidate_validate", new

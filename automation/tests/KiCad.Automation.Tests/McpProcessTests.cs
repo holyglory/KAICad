@@ -311,6 +311,8 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_pcb_items_create");
             CollectionAssert.Contains(names, "kicad_pcb_items_update");
             CollectionAssert.Contains(names, "kicad_pcb_items_delete");
+            CollectionAssert.Contains(names, "kicad_pcb_items_transaction");
+            CollectionAssert.Contains(names, "kicad_pcb_items_transaction_receipt");
             CollectionAssert.Contains(names, "kicad_pcb_guide_create");
             CollectionAssert.Contains(names, "kicad_pcb_guide_svg_create");
             CollectionAssert.Contains(names, "kicad_pcb_route_candidate_from_guide");
@@ -347,6 +349,12 @@ public sealed class McpProcessTests
             } });
             Assert.IsTrue(invalidDelete.GetProperty("result").GetProperty("isError").GetBoolean());
             Assert.AreEqual("invalid_pcb_item_request", invalidDelete.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            var invalidItemTransaction = await Request(9203, "tools/call", new { name = "kicad_pcb_items_transaction", arguments = new
+            {
+                instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}"
+            } });
+            Assert.IsTrue(invalidItemTransaction.GetProperty("result").GetProperty("isError").GetBoolean());
+            Assert.AreEqual("invalid_pcb_item_transaction", invalidItemTransaction.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
             CollectionAssert.Contains(names, "kicad_pcb_render_3d");
             CollectionAssert.Contains(names, "kicad_pcb_render_geometry");
             CollectionAssert.Contains(names, "kicad_pcb_svg_validate");

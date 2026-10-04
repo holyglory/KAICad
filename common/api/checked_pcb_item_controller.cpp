@@ -317,32 +317,38 @@ bool DeleteResultOk( const DeleteItems& request, const DeleteItemsResponse& resp
                            } );
 }
 
-// BeginCommit/EndCommit may advance the lifecycle sequence even when the
-// staged PCB is dropped. The content digest, document identity and complete
-// file baselines are the rollback proof; revision sequence is an observation
-// counter and is deliberately ignored here.
+// BeginCommit/EndCommit may advance BOARD::GetTimeStamp() even when the
+// staged PCB is dropped. That sequence is an observation cursor, not a proof
+// of a design mutation. Every other captured field remains part of the proof:
+// the process/document/native identity, state digest, project settings and
+// complete unchanged file baselines must all agree.
 bool RollbackEquivalent( const DocumentLifecycleState& left,
                          const DocumentLifecycleState& right )
 {
-    if( left.process_epoch() != right.process_epoch()
+    const auto valid = []( const DocumentLifecycleState& state )
+    {
+        return state.scope() == DLS_PCB && state.has_document()
+               && state.document().type() == DOCTYPE_PCB && Uuid( state.process_epoch() )
+               && Uuid( state.native_identity() ) && state.has_revision()
+               && state.revision().epoch() == state.native_identity()
+               && Digest( state.state_sha256() ) && state.project_settings_included()
+               && DOCUMENT_LIFECYCLE_CONTROLLER::HasUnchangedFileBaselines( state );
+    };
+
+    if( !valid( left ) || !valid( right ) || left.process_epoch() != right.process_epoch()
         || !MessageDifferencer::Equals( left.document(), right.document() )
         || left.native_identity() != right.native_identity()
-        || left.state_sha256() != right.state_sha256()
-        || left.project_settings_included() != right.project_settings_included() )
+        || left.state_sha256() != right.state_sha256() )
         return false;
 
-    // A dropped native commit can refresh the lifecycle's revision/file
-    // observation metadata even when the board content is unchanged. Those
-    // observations are not design mutations and must not turn a confirmed
-    // rollback into an indeterminate receipt.
+    // Native PCB capture documents revision.sequence as BOARD::GetTimeStamp(),
+    // explicitly a cache-invalidation cursor. Keep the epoch and all captured
+    // design/file observations exact while permitting that one producer-level
+    // observation counter to advance during a dropped commit.
     DocumentLifecycleState normalizedLeft = left;
     DocumentLifecycleState normalizedRight = right;
-    normalizedLeft.clear_revision();
-    normalizedRight.clear_revision();
-    normalizedLeft.clear_native_files();
-    normalizedRight.clear_native_files();
-    normalizedLeft.clear_file_baselines();
-    normalizedRight.clear_file_baselines();
+    normalizedLeft.mutable_revision()->set_sequence( 0 );
+    normalizedRight.mutable_revision()->set_sequence( 0 );
     return MessageDifferencer::Equals( normalizedLeft, normalizedRight );
 }
 } // namespace
@@ -567,7 +573,7 @@ API_RESULT CHECKED_PCB_ITEM_CONTROLLER::Handle( ApiRequest& envelope,
             // commit was opened. Reobserve before classifying the result.
             auto afterBeginFailure = observe();
             const bool unchanged = afterBeginFailure && before
-                    && MessageDifferencer::Equals( *afterBeginFailure, *before );
+                    && RollbackEquivalent( *afterBeginFailure, *before );
 
             if( afterBeginFailure )
                 stored.mutable_observed_after()->CopyFrom( *afterBeginFailure );
@@ -664,7 +670,7 @@ API_RESULT CHECKED_PCB_ITEM_CONTROLLER::Handle( ApiRequest& envelope,
             bool rolledBack = false;
 
             if( afterCommitFailure && before
-                && MessageDifferencer::Equals( *afterCommitFailure, *before ) )
+                && RollbackEquivalent( *afterCommitFailure, *before ) )
                 rolledBack = rollback();
             else
                 commitOpen = false;
@@ -694,6 +700,7 @@ API_RESULT CHECKED_PCB_ITEM_CONTROLLER::Handle( ApiRequest& envelope,
 
         if( after->process_epoch() != processEpoch
             || !MessageDifferencer::Equals( after->document(), before->document() )
+            || after->native_identity() != before->native_identity()
             || after->revision().epoch() != before->revision().epoch()
             || after->revision().sequence() < before->revision().sequence()
             || !after->project_settings_included() || !Digest( after->state_sha256() )

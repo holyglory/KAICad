@@ -60,13 +60,13 @@ public sealed class PcbItemTransactionTools(InstanceRegistry registry)
         catch (AutomationException error) when (receipt.State != CheckedPcbItemTransactionState.CpbtsUnknown
                                                  && receipt.RequestVerified)
         {
-            // Preserve a native terminal receipt even when a managed
-            // postcondition validator finds a malformed or partial response.
-            // The caller still receives IsError=true and the validation error,
-            // but can inspect state/rollback evidence instead of losing the
-            // operation identity behind a generic exception.
+            // A native flag is evidence about the reply, not proof that the
+            // reply satisfies this managed contract. Keep malformed native
+            // bytes nested as untrusted evidence and expose only an outer
+            // indeterminate state to callers.
             return ReceiptData(instanceId, receipt, error: true,
-                validationError: error.Code + ": " + error.Message);
+                validationErrorCode: "invalid_checked_pcb_receipt",
+                validationError: error.Code + ": " + error.Message, untrustedReceipt: true);
         }
         return ReceiptData(instanceId, receipt, receipt.State != CheckedPcbItemTransactionState.CpbtsCompleted);
     });
@@ -96,8 +96,18 @@ public sealed class PcbItemTransactionTools(InstanceRegistry registry)
         };
         var receipt = await client.InvokeAsync<ReadCheckedPcbItemTransactionReceipt, CheckedPcbItemTransactionReceipt>(
             query, cancellationToken);
-        CheckedPcbItemContract.ValidateResult(request, receipt, inspect: true);
-        return ReceiptData(instanceId, receipt, error: false, readOnly: true);
+        try
+        {
+            CheckedPcbItemContract.ValidateResult(request, receipt, inspect: true);
+            return ReceiptData(instanceId, receipt, error: false, readOnly: true);
+        }
+        catch (AutomationException error) when (receipt.State != CheckedPcbItemTransactionState.CpbtsUnknown
+                                                 && receipt.RequestVerified)
+        {
+            return ReceiptData(instanceId, receipt, error: true, readOnly: true,
+                validationErrorCode: "invalid_checked_pcb_receipt",
+                validationError: error.Code + ": " + error.Message, untrustedReceipt: true);
+        }
     });
 
     private static CheckedPcbItemTransaction Parse(string json, string code)
@@ -114,7 +124,8 @@ public sealed class PcbItemTransactionTools(InstanceRegistry registry)
     }
 
     private static CallToolResult ReceiptData(string instanceId, CheckedPcbItemTransactionReceipt receipt,
-        bool error, bool readOnly = false, string? validationError = null)
+        bool error, bool readOnly = false, string? validationErrorCode = null,
+        string? validationError = null, bool untrustedReceipt = false)
     {
         var receiptJson = JsonDocument.Parse(SchematicJson.Formatter.Format(receipt)).RootElement.Clone();
         var data = JsonSerializer.SerializeToElement(new
@@ -122,11 +133,13 @@ public sealed class PcbItemTransactionTools(InstanceRegistry registry)
             instanceId,
             operationId = receipt.OperationId,
             processEpoch = receipt.ProcessEpoch,
-            state = receipt.State.ToString(),
-            receipt = receiptJson,
-            beforeState = receipt.ObservedBefore is null ? null : SchematicJson.Formatter.Format(receipt.ObservedBefore),
-            rollbackState = receipt.ObservedRollback is null ? null : SchematicJson.Formatter.Format(receipt.ObservedRollback),
-            afterState = receipt.ObservedAfter is null ? null : SchematicJson.Formatter.Format(receipt.ObservedAfter),
+            state = untrustedReceipt ? CheckedPcbItemTransactionState.CpbtsIndeterminate.ToString() : receipt.State.ToString(),
+            receipt = untrustedReceipt ? (JsonElement?) null : receiptJson,
+            untrustedReceipt = untrustedReceipt ? receiptJson : (JsonElement?) null,
+            beforeState = untrustedReceipt || receipt.ObservedBefore is null ? null : SchematicJson.Formatter.Format(receipt.ObservedBefore),
+            rollbackState = untrustedReceipt || receipt.ObservedRollback is null ? null : SchematicJson.Formatter.Format(receipt.ObservedRollback),
+            afterState = untrustedReceipt || receipt.ObservedAfter is null ? null : SchematicJson.Formatter.Format(receipt.ObservedAfter),
+            errorCode = validationErrorCode,
             validationError,
             readOnly
         });

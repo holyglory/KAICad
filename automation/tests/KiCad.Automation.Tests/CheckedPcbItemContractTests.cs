@@ -85,6 +85,38 @@ public sealed class CheckedPcbItemContractTests
         };
         CheckedPcbItemContract.ValidateResult(request, receipt, inspect: true);
 
+        var forgedIdentity = receipt.Clone();
+        forgedIdentity.ObservedRollback.NativeIdentity = Guid.NewGuid().ToString("D");
+        Assert.ThrowsExactly<AutomationException>(() => CheckedPcbItemContract.ValidateResult(request, forgedIdentity, inspect: true));
+
+        var wrongEpoch = receipt.Clone();
+        wrongEpoch.ObservedRollback.Revision.Epoch = Guid.NewGuid().ToString("D");
+        Assert.ThrowsExactly<AutomationException>(() => CheckedPcbItemContract.ValidateResult(request, wrongEpoch, inspect: true));
+
+        var changedFile = receipt.Clone();
+        changedFile.ObservedRollback.FileBaselines[0].CurrentBytes++;
+        Assert.ThrowsExactly<AutomationException>(() => CheckedPcbItemContract.ValidateResult(request, changedFile, inspect: true));
+
+        var rejected = receipt.Clone();
+        rejected.State = CheckedPcbItemTransactionState.CpbtsRejected;
+        rejected.Phase = CheckedPcbItemTransactionPhase.CpbtpAdmissionVerified;
+        rejected.RollbackState = CheckedPcbItemRollbackState.CpbrsNotAttempted;
+        rejected.ObservedRollback = null;
+        rejected.ObservedAfter = before.Clone();
+        rejected.ObservedAfter.Revision.Sequence++;
+        rejected.ErrorCode = "commit_begin_failed";
+        CheckedPcbItemContract.ValidateResult(request, rejected, inspect: true);
+
+        var indeterminate = receipt.Clone();
+        indeterminate.State = CheckedPcbItemTransactionState.CpbtsIndeterminate;
+        indeterminate.Phase = CheckedPcbItemTransactionPhase.CpbtpRollbackRequested;
+        indeterminate.RollbackState = CheckedPcbItemRollbackState.CpbrsUnconfirmed;
+        indeterminate.Results.Clear();
+        indeterminate.Results.Add(new PcbItemOperationResult { Create = new CreateItemsResponse() });
+        indeterminate.ObservedRollback.StateSha256 = new string('c', 64);
+        indeterminate.ErrorCode = "rollback_unconfirmed";
+        CheckedPcbItemContract.ValidateResult(request, indeterminate, inspect: true);
+
         receipt.RollbackState = CheckedPcbItemRollbackState.CpbrsUnconfirmed;
         Assert.ThrowsExactly<AutomationException>(() => CheckedPcbItemContract.ValidateResult(request, receipt, inspect: true));
     }

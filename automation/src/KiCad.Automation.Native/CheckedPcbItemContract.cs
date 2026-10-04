@@ -172,9 +172,13 @@ public static class CheckedPcbItemContract
         CheckedPcbItemTransactionReceipt result)
     {
         if (result.ErrorCode.Length == 0 || result.Results.Count != 0
-            || result.ObservedAfter is not null || result.ObservedRollback is not null
+            || result.ObservedRollback is not null
             || result.RollbackState != CheckedPcbItemRollbackState.CpbrsNotAttempted)
             throw Invalid("A rejected checked PCB item transaction cannot claim staged or committed native changes.");
+
+        if (result.ObservedAfter is not null
+            && (result.ObservedBefore is null || !RollbackEquivalent(result.ObservedAfter, result.ObservedBefore)))
+            throw Invalid("A rejected checked PCB item transaction must retain an unchanged post-admission observation.");
     }
 
     private static void ValidateIndeterminate(CheckedPcbItemTransaction request,
@@ -182,11 +186,11 @@ public static class CheckedPcbItemContract
     {
         if (result.ErrorCode.Length == 0 || result.Results.Count > request.Operations.Count)
             throw Invalid("An indeterminate checked PCB item transaction must retain partial evidence and explain uncertainty.");
-        if (result.ObservedAfter is not null && !StateAfter(result.ObservedAfter, request.ExpectedState))
+        if (result.ObservedAfter is not null && !StateSnapshot(result.ObservedAfter, request.ExpectedState))
             throw Invalid("The indeterminate PCB item receipt contains an after-state for another document or process.");
-        if (result.ObservedRollback is not null && result.ObservedBefore is not null
-            && !result.ObservedRollback.Equals(result.ObservedBefore))
-            throw Invalid("The indeterminate PCB item receipt contains a rollback state that differs from its before-state.");
+        if (result.ObservedRollback is not null
+            && (result.ObservedBefore is null || !StateSnapshot(result.ObservedRollback, request.ExpectedState)))
+            throw Invalid("The indeterminate PCB item receipt contains an invalid rollback observation.");
     }
 
     private static void ValidateResults(CheckedPcbItemTransaction request,
@@ -195,13 +199,12 @@ public static class CheckedPcbItemContract
         if (result.Results.Count > request.Operations.Count)
             throw Invalid("The native PCB item receipt contains more results than requested operations.");
 
-        // A rollback receipt proves its outcome through the exact before and
-        // rollback lifecycle checkpoints. Native item responses may be
-        // partial or rejected at the operation that triggered the rollback,
-        // and KiCad may normalize earlier staged objects before dropping the
-        // commit. Preserve those bounded responses for diagnosis while still
-        // requiring the oneof kind to match each requested operation.
-        if (result.State == CheckedPcbItemTransactionState.CpbtsRolledBack)
+        // Failed operations may have no response, or only a bounded response
+        // for the operation that triggered rollback/uncertainty. Preserve that
+        // evidence while still requiring each retained oneof to match the
+        // corresponding request. Completed receipts remain strict below.
+        if (result.State is CheckedPcbItemTransactionState.CpbtsRolledBack
+            or CheckedPcbItemTransactionState.CpbtsIndeterminate)
         {
             for (int index = 0; index < result.Results.Count; index++)
             {
@@ -224,25 +227,10 @@ public static class CheckedPcbItemContract
         {
             var operation = request.Operations[index];
             var operationResult = result.Results[index];
-            // A confirmed rollback may retain the native response for the
-            // operation that triggered the rollback. That response is
-            // expected to be rejected or partially failed; requiring an OK
-            // response here would discard the very receipt that proves why
-            // the transaction was rolled back. Earlier operations still need
-            // complete successful responses, and the failed operation must be
-            // the final retained result.
-            bool rollbackFailure = result.State == CheckedPcbItemTransactionState.CpbtsRolledBack
-                && index == result.Results.Count - 1;
 
             switch (operation.ActionCase)
             {
                 case PcbItemOperation.ActionOneofCase.Create:
-                    if (rollbackFailure)
-                    {
-                        if (operationResult.ResultCase != PcbItemOperationResult.ResultOneofCase.Create)
-                            throw Invalid("The rolled-back PCB receipt does not preserve the failed create response.");
-                        break;
-                    }
                     if (operationResult.ResultCase != PcbItemOperationResult.ResultOneofCase.Create
                         || operationResult.Create.Status != ItemRequestStatus.IrsOk
                         || operationResult.Create.CreatedItems.Count != operation.Create.Items.Count
@@ -251,12 +239,6 @@ public static class CheckedPcbItemContract
                         throw Invalid("The native PCB item receipt does not preserve the exact create response.");
                     break;
                 case PcbItemOperation.ActionOneofCase.Update:
-                    if (rollbackFailure)
-                    {
-                        if (operationResult.ResultCase != PcbItemOperationResult.ResultOneofCase.Update)
-                            throw Invalid("The rolled-back PCB receipt does not preserve the failed update response.");
-                        break;
-                    }
                     if (operationResult.ResultCase != PcbItemOperationResult.ResultOneofCase.Update
                         || operationResult.Update.Status != ItemRequestStatus.IrsOk
                         || operationResult.Update.UpdatedItems.Count != operation.Update.Items.Count
@@ -265,12 +247,6 @@ public static class CheckedPcbItemContract
                         throw Invalid("The native PCB item receipt does not preserve the exact update response.");
                     break;
                 case PcbItemOperation.ActionOneofCase.Delete:
-                    if (rollbackFailure)
-                    {
-                        if (operationResult.ResultCase != PcbItemOperationResult.ResultOneofCase.Delete)
-                            throw Invalid("The rolled-back PCB receipt does not preserve the failed delete response.");
-                        break;
-                    }
                     if (operationResult.ResultCase != PcbItemOperationResult.ResultOneofCase.Delete
                         || operationResult.Delete.Status != ItemRequestStatus.IrsOk
                         || operationResult.Delete.DeletedItems.Count != operation.Delete.ItemIds.Count
@@ -286,21 +262,38 @@ public static class CheckedPcbItemContract
 
     private static bool StateAfter(DocumentLifecycleState state, DocumentLifecycleState expected)
     {
+        return StateSnapshot(state, expected, requireFileCoverage: true)
+            && state.NativeIdentity == expected.NativeIdentity
+            && state.Revision!.Epoch == expected.Revision!.Epoch;
+    }
+
+    private static bool StateSnapshot(DocumentLifecycleState state, DocumentLifecycleState expected,
+        bool requireFileCoverage = false)
+    {
         return state.Document is not null && state.Document.Equals(expected.Document)
             && state.ProcessEpoch == expected.ProcessEpoch && state.Scope == DocumentLifecycleScope.DlsPcb
             && state.ProjectSettingsIncluded && Uuid(state.NativeIdentity)
-            && state.Revision is not null && state.Revision.Epoch == expected.Revision?.Epoch
-            && Digest(state.StateSha256) && CheckedSchematicContract.FileCoverage(state);
+            && state.NativeIdentity == expected.NativeIdentity
+            && state.Revision is not null && state.Revision.Epoch == state.NativeIdentity
+            && state.Revision.Epoch == expected.Revision?.Epoch && Digest(state.StateSha256)
+            && (!requireFileCoverage || CheckedSchematicContract.FileCoverage(state));
     }
 
     private static bool RollbackEquivalent(DocumentLifecycleState actual, DocumentLifecycleState expected)
     {
-        return actual.Document is not null && actual.Document.Equals(expected.Document)
-            && actual.ProcessEpoch == expected.ProcessEpoch
-            && actual.NativeIdentity == expected.NativeIdentity
-            && actual.StateSha256 == expected.StateSha256
-            && actual.ProjectSettingsIncluded == expected.ProjectSettingsIncluded
-            && actual.Revision is not null && expected.Revision is not null;
+        if (!StateSnapshot(actual, expected, requireFileCoverage: true)
+            || !StateSnapshot(expected, expected, requireFileCoverage: true)
+            || actual.StateSha256 != expected.StateSha256)
+            return false;
+
+        // PCB capture documents revision.sequence as BOARD::GetTimeStamp(), an
+        // observation cursor that may advance while a staged commit is
+        // dropped. Keep its epoch and every design/file observation exact.
+        var normalizedActual = actual.Clone();
+        var normalizedExpected = expected.Clone();
+        normalizedActual.Revision!.Sequence = 0;
+        normalizedExpected.Revision!.Sequence = 0;
+        return normalizedActual.Equals(normalizedExpected);
     }
 
     private static void ValidateHeader(ItemHeader? header, DocumentSpecifier document)

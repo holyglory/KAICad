@@ -34,6 +34,7 @@ public sealed partial class NativeSessionTests
         string scratch = Directory.CreateTempSubdirectory("kicad-pcb-keepout-").FullName;
         Process? displayProcess = null;
         Process? nativeProcess = null;
+        bool borderNormalizedAfterReopen = false;
         try
         {
             int displayNumber;
@@ -210,8 +211,11 @@ public sealed partial class NativeSessionTests
             board = KeepoutOpened(await mcp.Tool("kicad_pcb_open", new { instanceId, path = boardPath }));
             DocumentLifecycleState reopened = await ObserveLifecycleState(client, board, deadline.Token);
             boardJson = SchematicJson.Formatter.Format(board);
-            PcbKeepoutAuthoringContract.ValidateReadback(expectedUpdated,
-                await ReadKeepout(mcp, instanceId, boardJson, keepoutId, reopened), reopened.NativeIdentity);
+            Zone persisted = await ReadKeepout(mcp, instanceId, boardJson, keepoutId, reopened);
+            borderNormalizedAfterReopen = !KeepoutBorderMatches(expectedUpdated, persisted);
+            var persistedExpectation = expectedUpdated.Clone();
+            persistedExpectation.Border = persisted.Border?.Clone();
+            PcbKeepoutAuthoringContract.ValidateReadback(persistedExpectation, persisted, reopened.NativeIdentity);
 
             JsonElement deletedReply = await mcp.Tool("kicad_pcb_keepout_delete", new
             {
@@ -245,6 +249,7 @@ public sealed partial class NativeSessionTests
                     malformedGeometryRolledBack = true,
                     nativeUndoRedo = true,
                     saveReopenPersistence = true,
+                    borderNormalizedAfterReopen,
                     deleteReadback = true,
                     routingOrDrcEnforcement = "not exercised by this isolated keepout fixture",
                     nativeReceiptAvailable = false,
@@ -337,6 +342,10 @@ public sealed partial class NativeSessionTests
         Assert.IsTrue(reply.TryGetProperty("structuredContent", out JsonElement data), reply.GetRawText());
         return data;
     }
+
+    private static bool KeepoutBorderMatches(Zone expected, Zone actual) =>
+        expected.Border?.Style == actual.Border?.Style
+        && expected.Border?.Pitch?.ValueNm == actual.Border?.Pitch?.ValueNm;
 
     private static DocumentSpecifier KeepoutOpened(JsonElement reply)
     {

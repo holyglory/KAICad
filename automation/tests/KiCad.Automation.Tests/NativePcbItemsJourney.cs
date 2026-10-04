@@ -607,6 +607,16 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(restoredGuide.TryGetProperty("isError", out var restoredGuideError) && restoredGuideError.GetBoolean(), restoredGuide.GetRawText());
             rollbackStateJson = restoredGuide.GetProperty("structuredContent").GetProperty("afterState").GetString()!;
             guideState = rollbackStateJson;
+            var restoreTrackRequest = new UpdateItems { Header = new() { Document = board } };
+            restoreTrackRequest.Items.Add(Any.Pack(moved));
+            var restoredTrack = await mcp.Tool("kicad_pcb_items_update", new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(restoreTrackRequest),
+                expectedStateJson = rollbackStateJson
+            });
+            Assert.IsFalse(restoredTrack.TryGetProperty("isError", out var restoredTrackError) && restoredTrackError.GetBoolean(), restoredTrack.GetRawText());
+            rollbackStateJson = restoredTrack.GetProperty("structuredContent").GetProperty("afterState").GetString()!;
+            guideState = rollbackStateJson;
             var candidateTrack = track.Clone(); candidateTrack.Id = new() { Value = Guid.NewGuid().ToString("D") };
             var candidateRequest = new CreateItems { Header = new() { Document = board } }; candidateRequest.Items.Add(Any.Pack(candidateTrack));
             var candidateReply = await mcp.Tool("kicad_pcb_route_candidate_validate", new

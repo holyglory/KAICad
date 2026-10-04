@@ -355,6 +355,10 @@ public sealed class McpProcessTests
             } });
             Assert.IsTrue(invalidItemTransaction.GetProperty("result").GetProperty("isError").GetBoolean());
             Assert.AreEqual("invalid_pcb_item_transaction", invalidItemTransaction.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            await Request(9204, "tools/call", new { name = "kicad_pcb_items_transaction_receipt", arguments = new
+            {
+                instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}"
+            } });
             CollectionAssert.Contains(names, "kicad_pcb_render_3d");
             CollectionAssert.Contains(names, "kicad_pcb_render_geometry");
             CollectionAssert.Contains(names, "kicad_pcb_svg_validate");

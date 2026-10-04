@@ -105,19 +105,31 @@ public sealed partial class NativeSessionTests
                 x0: 10_000_000, y0: 10_000_000, x1: 50_000_000, y1: 50_000_000,
                 holeX0: 20_000_000, holeY0: 20_000_000, holeX1: 30_000_000, holeY1: 30_000_000,
                 copper: true, vias: true, tracks: true, pads: true, footprints: true);
+            string createOperationId = Guid.NewGuid().ToString("D");
             JsonElement createdReply = await mcp.Tool("kicad_pcb_keepout_create", new
             {
                 instanceId, documentJson = boardJson, keepout = initial,
                 expectedStateJson = SchematicJson.Formatter.Format(baseline),
-                operationId = Guid.NewGuid().ToString("D")
+                operationId = createOperationId
             });
             JsonElement created = KeepoutToolSuccess(createdReply);
             Assert.AreEqual("create", created.GetProperty("operation").GetString(), createdReply.GetRawText());
             Assert.IsTrue(created.GetProperty("mutationConfirmed").GetBoolean(), createdReply.GetRawText());
             Assert.IsTrue(created.GetProperty("postCommitVerified").GetBoolean(), createdReply.GetRawText());
-            Assert.IsFalse(created.GetProperty("nativeReceiptAvailable").GetBoolean(), createdReply.GetRawText());
-            Assert.IsTrue(created.GetProperty("operationIdCorrelationOnly").GetBoolean(), createdReply.GetRawText());
-            Assert.IsFalse(created.GetProperty("replaySafe").GetBoolean(), createdReply.GetRawText());
+            Assert.IsTrue(created.GetProperty("nativeReceiptAvailable").GetBoolean(), createdReply.GetRawText());
+            Assert.IsFalse(created.GetProperty("operationIdCorrelationOnly").GetBoolean(), createdReply.GetRawText());
+            Assert.IsTrue(created.GetProperty("replaySafe").GetBoolean(), createdReply.GetRawText());
+
+            JsonElement replayReply = await mcp.Tool("kicad_pcb_keepout_create", new
+            {
+                instanceId, documentJson = boardJson, keepout = initial,
+                expectedStateJson = SchematicJson.Formatter.Format(baseline),
+                operationId = createOperationId
+            });
+            JsonElement replay = KeepoutToolSuccess(replayReply);
+            Assert.IsTrue(replay.GetProperty("nativeReceiptAvailable").GetBoolean(), replayReply.GetRawText());
+            Assert.IsTrue(replay.GetProperty("replayed").GetBoolean(), replayReply.GetRawText());
+            Assert.IsTrue(replay.GetProperty("mutationConfirmed").GetBoolean(), replayReply.GetRawText());
 
             DocumentLifecycleState afterCreate = StateFrom(created, board);
             Zone expectedCreated = KeepoutNative(initial);
@@ -160,7 +172,7 @@ public sealed partial class NativeSessionTests
             PcbKeepoutAuthoringContract.ValidateReadback(expectedUpdated,
                 await ReadKeepout(mcp, instanceId, boardJson, keepoutId, afterUpdate), afterUpdate.NativeIdentity);
 
-            // Malformed geometry is rejected by the typed adapter before BeginCommit;
+            // Malformed geometry is rejected by the typed adapter before checked dispatch;
             // the native board and lifecycle digest remain unchanged.
             object malformed = new
             {
@@ -257,9 +269,10 @@ public sealed partial class NativeSessionTests
                     borderNormalizedAfterReopen,
                     deleteReadback = true,
                     routingOrDrcEnforcement = "not exercised by this isolated keepout fixture",
-                    nativeReceiptAvailable = false,
-                    operationIdCorrelationOnly = true,
-                    lostReplySettlement = "indeterminate until a retained native receipt exists"
+                    nativeReceiptAvailable = true,
+                    operationIdCorrelationOnly = false,
+                    replaySafe = true,
+                    lostReplySettlement = "retained native checked receipt and exact-request replay"
                 }, new JsonSerializerOptions { WriteIndented = true }), deadline.Token);
         }
         finally

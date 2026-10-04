@@ -31,7 +31,7 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
         Execute(() => ReadCore(instanceId, documentJson, keepoutId, expectedStateJson, cancellationToken));
 
     [McpServerTool(Name = "kicad_pcb_keepout_create"),
-     Description("Create one typed keepout through KiCad's native board API. keepout is task-oriented input with a canonical UUID, explicit physical layers, closed point-only polygon rings, a name, border settings and five explicit keepout flags; documentJson and expectedStateJson identify the exact board checkpoint. Placement ownership and derived fill polygons are unavailable in this input. The native operation is undoable and lifecycle-guarded; operationId is correlation only, so inspect the board after a lost reply before retrying."),
+     Description("Create one typed keepout through KiCad's native board API. keepout is task-oriented input with a canonical UUID, explicit physical layers, closed point-only polygon rings, a name, border settings and five explicit keepout flags; documentJson and expectedStateJson identify the exact board checkpoint. Placement ownership and derived fill polygons are unavailable in this input. The native operation is undoable and lifecycle-guarded; operationId is retained by the native checked receipt so an identical request can be replayed safely after a lost reply."),
      KiCadCapability("pcb-keepouts", "compiled-mcp plus-native-board-api", "outcome:p079fb6adb164b14c; explicit PCB document, typed keepout input, process epoch, lifecycle revision and digest, operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbKeepoutMcpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Create(string instanceId, string documentJson, PcbKeepoutAuthoringInput keepout,
@@ -49,7 +49,7 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
             KeepoutMutation.Update, cancellationToken));
 
     [McpServerTool(Name = "kicad_pcb_keepout_delete"),
-     Description("Delete one explicitly identified native keepout by canonical KIID. The target is read and required to be a rule area before an undoable native transaction opens; documentJson and expectedStateJson guard the exact PCB revision. operationId is correlation only; a lost reply requires a fresh keepout read before retrying."),
+     Description("Delete one explicitly identified native keepout by canonical KIID. The target is read and required to be a rule area before a lifecycle-checked undoable native transaction is dispatched; documentJson and expectedStateJson guard the exact PCB revision. The checked receipt retains operationId and the exact result for safe replay after a lost reply."),
      KiCadCapability("pcb-keepouts", "compiled-mcp plus-native-board-api", "outcome:p079fb6adb164b14c; explicit PCB document, keepout KIID, process epoch, lifecycle revision and digest, operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbKeepoutMcpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Delete(string instanceId, string documentJson, string keepoutId,
@@ -317,43 +317,6 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
         return merged;
     }
 
-    private static async Task<string> ConfirmUncommitted(NativeClient client, DocumentSpecifier document,
-        DocumentLifecycleState expected, KeepoutMutation mutation, string zoneId, Zone? existing,
-        CancellationToken cancellationToken)
-    {
-        try
-        {
-            var state = await ReadState(client, document, cancellationToken);
-            if (!state.Equals(expected)) return "indeterminate";
-            if (mutation == KeepoutMutation.Create)
-            {
-                try { _ = await ReadExistingZone(client, document, zoneId, cancellationToken); return "indeterminate"; }
-                catch (NativeApiException error) when (error.Status == 3) { return "rolled_back"; }
-            }
-            if (existing is null) return "indeterminate";
-            var current = await ReadExistingZone(client, document, zoneId, cancellationToken);
-            // Native state digest equality is the primary proof. This read confirms the target
-            // still exists and remains a zone; exact metadata is native-owned during rollback.
-            return current.Id.Value == existing.Id.Value && current.Type == existing.Type ? "rolled_back" : "indeterminate";
-        }
-        catch (Exception error) when (error is AutomationException or NativeApiException or NngException)
-        { return "indeterminate"; }
-    }
-
-    private static async Task<bool> ConfirmDeleted(NativeClient client, DocumentSpecifier document,
-        string zoneId, CancellationToken cancellationToken)
-    {
-        try
-        {
-            _ = await ReadExistingZone(client, document, zoneId, cancellationToken);
-            throw new AutomationException("pcb_keepout_delete_unverified", $"Native readback still found keepout {zoneId} after the committed delete.");
-        }
-        catch (NativeApiException error) when (error.Status == 3)
-        {
-            return true;
-        }
-    }
-
     private static Zone RequireSingleKeepout(GetItemsResponse response, string zoneId)
     {
         if (response.Items.Count != 1 || !response.Items[0].Is(Zone.Descriptor))
@@ -364,32 +327,6 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
         if (zone.Type != ZoneType.ZtRuleArea)
             throw new AutomationException("pcb_keepout_not_found", $"Native item {zoneId} is not a rule area keepout; no mutation was attempted.");
         return zone;
-    }
-
-    private static void RequireCreated(CreateItemsResponse response, string zoneId)
-    {
-        if (response.Status != ItemRequestStatus.IrsOk || response.CreatedItems.Count != 1
-            || response.CreatedItems[0].Status.Code != ItemStatusCode.IscOk
-            || !response.CreatedItems[0].Item.Is(Zone.Descriptor)
-            || response.CreatedItems[0].Item.Unpack<Zone>().Id.Value != zoneId)
-            throw new AutomationException("pcb_keepout_transaction_rejected", "The native board did not acknowledge creation of the requested keepout; transaction settlement is reported separately.");
-    }
-
-    private static void RequireUpdated(UpdateItemsResponse response, string zoneId)
-    {
-        if (response.Status != ItemRequestStatus.IrsOk || response.UpdatedItems.Count != 1
-            || response.UpdatedItems[0].Status.Code != ItemStatusCode.IscOk
-            || !response.UpdatedItems[0].Item.Is(Zone.Descriptor)
-            || response.UpdatedItems[0].Item.Unpack<Zone>().Id.Value != zoneId)
-            throw new AutomationException("pcb_keepout_transaction_rejected", "The native board did not acknowledge update of the requested keepout; transaction settlement is reported separately.");
-    }
-
-    private static void RequireDeleted(DeleteItemsResponse response, string zoneId)
-    {
-        if (response.Status != ItemRequestStatus.IrsOk || response.DeletedItems.Count != 1
-            || response.DeletedItems[0].Status != ItemDeletionStatus.IdsOk
-            || response.DeletedItems[0].Id.Value != zoneId)
-            throw new AutomationException("pcb_keepout_transaction_rejected", "The native board did not acknowledge deletion of the requested keepout; transaction settlement is reported separately.");
     }
 
     private static void RequireEpoch(string actual, string expected)

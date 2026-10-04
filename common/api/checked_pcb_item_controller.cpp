@@ -523,7 +523,8 @@ API_RESULT CHECKED_PCB_ITEM_CONTROLLER::Handle( ApiRequest& envelope,
 
         if( afterRollback ) stored.mutable_observed_rollback()->CopyFrom( *afterRollback );
 
-        const bool unchanged = afterRollback && RollbackEquivalent( *before, *afterRollback );
+        const bool unchanged = afterRollback && afterRollback->process_epoch() == processEpoch
+                && RollbackEquivalent( *before, *afterRollback );
 
         if( dropOk && unchanged )
         {

@@ -589,6 +589,7 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(rollbackReceipt.ObservedBefore!.StateSha256, rollbackReceipt.ObservedRollback!.StateSha256);
             Assert.AreEqual(rollbackReceipt.ObservedBefore.NativeIdentity, rollbackReceipt.ObservedRollback.NativeIdentity);
             Assert.AreEqual(rollbackReceipt.ObservedBefore.Document, rollbackReceipt.ObservedRollback.Document);
+            string rollbackStateJson = SchematicJson.Formatter.Format(rollbackReceipt.ObservedRollback);
             var missingRollbackShape = await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
                 client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
                 { Header = new() { Document = board }, Items = { rollbackShape.Id } }, token));
@@ -598,7 +599,7 @@ public sealed partial class NativeSessionTests
             var candidateReply = await mcp.Tool("kicad_pcb_route_candidate_validate", new
             {
                 instanceId, expectedInstanceEpoch = client.Epoch, requestJson = BoardJson.Formatter.Format(candidateRequest),
-                expectedStateJson = guideState, guideId,
+                expectedStateJson = rollbackStateJson, guideId,
                 sourceSha256 = new string('a', 64)
             });
             // The guide ID is provenance supplied by the caller; the validator must
@@ -611,7 +612,7 @@ public sealed partial class NativeSessionTests
             var rejectedCandidate = await mcp.Tool("kicad_pcb_route_candidate_validate", new
             {
                 instanceId, expectedInstanceEpoch = client.Epoch, requestJson = BoardJson.Formatter.Format(invalidCandidateRequest),
-                expectedStateJson = guideState, guideId, sourceSha256 = new string('a', 64)
+                expectedStateJson = rollbackStateJson, guideId, sourceSha256 = new string('a', 64)
             });
             Assert.IsTrue(rejectedCandidate.GetProperty("isError").GetBoolean());
             var copperGuide = guideShape.Clone(); copperGuide.Layer = BoardLayer.BlFCu;

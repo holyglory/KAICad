@@ -68,11 +68,19 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
         RequireEpoch(session.Epoch, expected.ProcessEpoch);
         var before = await ReadState(client, document, cancellationToken);
         RequireState(before, expected, "The PCB changed before the keepout read; inspect a fresh lifecycle state and retry.");
-        var response = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+        GetItemsResponse response;
+        try
         {
-            Header = new() { Document = document },
-            Items = { new KIID { Value = keepoutId } }
-        }, cancellationToken);
+            response = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            {
+                Header = new() { Document = document },
+                Items = { new KIID { Value = keepoutId } }
+            }, cancellationToken);
+        }
+        catch (NativeApiException error) when (error.Status == 3)
+        {
+            throw new AutomationException("pcb_keepout_not_found", $"Native keepout {keepoutId} was not found.");
+        }
         Zone zone;
         try
         {

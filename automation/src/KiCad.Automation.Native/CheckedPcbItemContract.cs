@@ -199,10 +199,25 @@ public static class CheckedPcbItemContract
         {
             var operation = request.Operations[index];
             var operationResult = result.Results[index];
+            // A confirmed rollback may retain the native response for the
+            // operation that triggered the rollback. That response is
+            // expected to be rejected or partially failed; requiring an OK
+            // response here would discard the very receipt that proves why
+            // the transaction was rolled back. Earlier operations still need
+            // complete successful responses, and the failed operation must be
+            // the final retained result.
+            bool rollbackFailure = result.State == CheckedPcbItemTransactionState.CpbtsRolledBack
+                && index == result.Results.Count - 1;
 
             switch (operation.ActionCase)
             {
                 case PcbItemOperation.ActionOneofCase.Create:
+                    if (rollbackFailure)
+                    {
+                        if (operationResult.ResultCase != PcbItemOperationResult.ResultOneofCase.Create)
+                            throw Invalid("The rolled-back PCB receipt does not preserve the failed create response.");
+                        break;
+                    }
                     if (operationResult.ResultCase != PcbItemOperationResult.ResultOneofCase.Create
                         || operationResult.Create.Status != ItemRequestStatus.IrsOk
                         || operationResult.Create.CreatedItems.Count != operation.Create.Items.Count
@@ -211,6 +226,12 @@ public static class CheckedPcbItemContract
                         throw Invalid("The native PCB item receipt does not preserve the exact create response.");
                     break;
                 case PcbItemOperation.ActionOneofCase.Update:
+                    if (rollbackFailure)
+                    {
+                        if (operationResult.ResultCase != PcbItemOperationResult.ResultOneofCase.Update)
+                            throw Invalid("The rolled-back PCB receipt does not preserve the failed update response.");
+                        break;
+                    }
                     if (operationResult.ResultCase != PcbItemOperationResult.ResultOneofCase.Update
                         || operationResult.Update.Status != ItemRequestStatus.IrsOk
                         || operationResult.Update.UpdatedItems.Count != operation.Update.Items.Count
@@ -219,6 +240,12 @@ public static class CheckedPcbItemContract
                         throw Invalid("The native PCB item receipt does not preserve the exact update response.");
                     break;
                 case PcbItemOperation.ActionOneofCase.Delete:
+                    if (rollbackFailure)
+                    {
+                        if (operationResult.ResultCase != PcbItemOperationResult.ResultOneofCase.Delete)
+                            throw Invalid("The rolled-back PCB receipt does not preserve the failed delete response.");
+                        break;
+                    }
                     if (operationResult.ResultCase != PcbItemOperationResult.ResultOneofCase.Delete
                         || operationResult.Delete.Status != ItemRequestStatus.IrsOk
                         || operationResult.Delete.DeletedItems.Count != operation.Delete.ItemIds.Count

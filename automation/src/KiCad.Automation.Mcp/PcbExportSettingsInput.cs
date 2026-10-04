@@ -49,6 +49,30 @@ internal static class PcbExportDtoValidation
                 $"{name} contains unknown drill-mark setting '{value}'.")
         };
     }
+
+    public static PlotDrillMarks DrillMarks(PlotDrillMarksInput value, string name) => value switch
+    {
+        PlotDrillMarksInput.PdmUnknown or PlotDrillMarksInput.PdmUnknownProtobuf => PlotDrillMarks.PdmUnknown,
+        PlotDrillMarksInput.PdmNone or PlotDrillMarksInput.PdmNoneProtobuf or PlotDrillMarksInput.None => PlotDrillMarks.PdmNone,
+        PlotDrillMarksInput.PdmSmall or PlotDrillMarksInput.PdmSmallProtobuf
+            or PlotDrillMarksInput.Small or PlotDrillMarksInput.SmallDrillShape => PlotDrillMarks.PdmSmall,
+        PlotDrillMarksInput.PdmFull or PlotDrillMarksInput.PdmFullProtobuf
+            or PlotDrillMarksInput.Full or PlotDrillMarksInput.FullDrillShape => PlotDrillMarks.PdmFull,
+        _ => throw new AutomationException("invalid_pcb_export_enum", $"{name} is not a defined value.")
+    };
+
+    public static BoardJobPaginationMode Pagination(BoardJobPaginationModeInput value, string name) => value switch
+    {
+        BoardJobPaginationModeInput.BjpmUnknown or BoardJobPaginationModeInput.BjpmUnknownProtobuf
+            => BoardJobPaginationMode.BjpmUnknown,
+        BoardJobPaginationModeInput.BjpmAllLayersOnePage or BoardJobPaginationModeInput.BjpmAllLayersOnePageProtobuf
+            or BoardJobPaginationModeInput.AllLayersOnePage => BoardJobPaginationMode.BjpmAllLayersOnePage,
+        BoardJobPaginationModeInput.BjpmEachLayerOwnPage or BoardJobPaginationModeInput.BjpmEachLayerOwnPageProtobuf
+            => BoardJobPaginationMode.BjpmEachLayerOwnPage,
+        BoardJobPaginationModeInput.BjpmEachLayerOwnFile or BoardJobPaginationModeInput.BjpmEachLayerOwnFileProtobuf
+            => BoardJobPaginationMode.BjpmEachLayerOwnFile,
+        _ => throw new AutomationException("invalid_pcb_export_enum", $"{name} is not a defined value.")
+    };
 }
 
 /// <summary>
@@ -112,32 +136,33 @@ internal sealed class BoardLayerListJsonConverter : JsonConverter<List<BoardLaye
 public enum PlotDrillMarksInput
 {
     PdmUnknown = 0,
-    [JsonStringEnumMemberName("PDM_UNKNOWN")] PdmUnknownProtobuf = 0,
+    [JsonStringEnumMemberName("PDM_UNKNOWN")] PdmUnknownProtobuf = 100,
     PdmNone = 1,
-    [JsonStringEnumMemberName("PDM_NONE")] PdmNoneProtobuf = 1,
-    [JsonStringEnumMemberName("NONE")] None = 1,
+    [JsonStringEnumMemberName("PDM_NONE")] PdmNoneProtobuf = 101,
+    [JsonStringEnumMemberName("NONE")] None = 102,
     PdmSmall = 2,
-    [JsonStringEnumMemberName("PDM_SMALL")] PdmSmallProtobuf = 2,
-    [JsonStringEnumMemberName("SMALL")] Small = 2,
-    [JsonStringEnumMemberName("SMALL_DRILL_SHAPE")] SmallDrillShape = 2,
+    [JsonStringEnumMemberName("PDM_SMALL")] PdmSmallProtobuf = 103,
+    [JsonStringEnumMemberName("SMALL")] Small = 104,
+    [JsonStringEnumMemberName("SMALL_DRILL_SHAPE")] SmallDrillShape = 105,
     PdmFull = 3,
-    [JsonStringEnumMemberName("PDM_FULL")] PdmFullProtobuf = 3,
-    [JsonStringEnumMemberName("FULL")] Full = 3,
-    [JsonStringEnumMemberName("FULL_DRILL_SHAPE")] FullDrillShape = 3
+    [JsonStringEnumMemberName("PDM_FULL")] PdmFullProtobuf = 106,
+    [JsonStringEnumMemberName("FULL")] Full = 107,
+    [JsonStringEnumMemberName("FULL_DRILL_SHAPE")] FullDrillShape = 108,
+    [JsonStringEnumMemberName("full")] FullLower = 109
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<BoardJobPaginationModeInput>))]
 public enum BoardJobPaginationModeInput
 {
     BjpmUnknown = 0,
-    [JsonStringEnumMemberName("BJPM_UNKNOWN")] BjpmUnknownProtobuf = 0,
+    [JsonStringEnumMemberName("BJPM_UNKNOWN")] BjpmUnknownProtobuf = 100,
     BjpmAllLayersOnePage = 1,
-    [JsonStringEnumMemberName("BJPM_ALL_LAYERS_ONE_PAGE")] BjpmAllLayersOnePageProtobuf = 1,
-    [JsonStringEnumMemberName("ALL_LAYERS_ONE_PAGE")] AllLayersOnePage = 1,
+    [JsonStringEnumMemberName("BJPM_ALL_LAYERS_ONE_PAGE")] BjpmAllLayersOnePageProtobuf = 101,
+    [JsonStringEnumMemberName("ALL_LAYERS_ONE_PAGE")] AllLayersOnePage = 102,
     BjpmEachLayerOwnPage = 2,
-    [JsonStringEnumMemberName("BJPM_EACH_LAYER_OWN_PAGE")] BjpmEachLayerOwnPageProtobuf = 2,
+    [JsonStringEnumMemberName("BJPM_EACH_LAYER_OWN_PAGE")] BjpmEachLayerOwnPageProtobuf = 103,
     BjpmEachLayerOwnFile = 3,
-    [JsonStringEnumMemberName("BJPM_EACH_LAYER_OWN_FILE")] BjpmEachLayerOwnFileProtobuf = 3
+    [JsonStringEnumMemberName("BJPM_EACH_LAYER_OWN_FILE")] BjpmEachLayerOwnFileProtobuf = 104
 }
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
@@ -297,8 +322,7 @@ public sealed class RunBoardJobExportSvgInput
         if (PlotSettings is not null) result.PlotSettings = PlotSettings.ToNative();
         result.FitPageToBoard = FitPageToBoard;
         result.Precision = Precision;
-        PcbExportDtoValidation.Enum(PageMode, nameof(PageMode));
-        result.PageMode = (BoardJobPaginationMode) PageMode;
+        result.PageMode = PcbExportDtoValidation.Pagination(PageMode, nameof(PageMode));
         return result;
     }
 }
@@ -322,8 +346,7 @@ public sealed class RunBoardJobExportDxfInput
         result.PolygonMode = PolygonMode;
         PcbExportDtoValidation.Enum(Units, nameof(Units));
         result.Units = Units;
-        PcbExportDtoValidation.Enum(PageMode, nameof(PageMode));
-        result.PageMode = (BoardJobPaginationMode) PageMode;
+        result.PageMode = PcbExportDtoValidation.Pagination(PageMode, nameof(PageMode));
         return result;
     }
 }
@@ -348,8 +371,7 @@ public sealed class RunBoardJobExportPdfInput
         result.BackFootprintPropertyPopups = BackFootprintPropertyPopups;
         result.IncludeMetadata = IncludeMetadata;
         result.SingleDocument = SingleDocument;
-        PcbExportDtoValidation.Enum(PageMode, nameof(PageMode));
-        result.PageMode = (BoardJobPaginationMode) PageMode;
+        result.PageMode = PcbExportDtoValidation.Pagination(PageMode, nameof(PageMode));
         result.BackgroundColor = BackgroundColor;
         return result;
     }
@@ -371,8 +393,7 @@ public sealed class RunBoardJobExportPsInput
     {
         var result = new RunBoardJobExportPs();
         if (PlotSettings is not null) result.PlotSettings = PlotSettings.ToNative();
-        PcbExportDtoValidation.Enum(PageMode, nameof(PageMode));
-        result.PageMode = (BoardJobPaginationMode) PageMode;
+        result.PageMode = PcbExportDtoValidation.Pagination(PageMode, nameof(PageMode));
         result.TrackWidthCorrection = TrackWidthCorrection;
         result.XScaleAdjust = XScaleAdjust;
         result.YScaleAdjust = YScaleAdjust;
@@ -671,8 +692,7 @@ public sealed class BoardPlotSettingsInput
         result.PlotDrawingSheet = PlotDrawingSheet;
         result.SubtractSolderMaskFromSilk = SubtractSolderMaskFromSilk;
         result.PlotPadNumbers = PlotPadNumbers;
-        PcbExportDtoValidation.Enum(DrillMarks, nameof(DrillMarks));
-        result.DrillMarks = (PlotDrillMarks) DrillMarks;
+        result.DrillMarks = PcbExportDtoValidation.DrillMarks(DrillMarks, nameof(DrillMarks));
         result.UseDrillOrigin = UseDrillOrigin;
         result.CheckZonesBeforePlot = CheckZonesBeforePlot;
         return result;

@@ -104,9 +104,7 @@ public sealed class PcbManufacturingMcpProcessTests
                 + spelling + "\"},\"pageMode\":\"BJPM_ALL_LAYERS_ONE_PAGE\"}}}";
             PcbManufacturingExportInput input = JsonSerializer.Deserialize<PcbManufacturingExportInput>(json, options)!;
             BoardPlotSettingsInput plotSettings = input.Job!.ExportSvg!.PlotSettings!;
-            Assert.AreEqual((PlotDrillMarksInput)expected, plotSettings.DrillMarks, spelling);
             Assert.AreEqual(expected, plotSettings.ToNative().DrillMarks, spelling);
-            Assert.AreEqual(BoardJobPaginationModeInput.BjpmAllLayersOnePage, input.Job.ExportSvg.PageMode, spelling);
             Assert.AreEqual((int)BoardJobPaginationMode.BjpmAllLayersOnePage,
                 (int)input.Job.ExportSvg.ToNative().PageMode, spelling);
         }

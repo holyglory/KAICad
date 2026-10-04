@@ -1,5 +1,7 @@
 using KiCad.Automation.Mcp;
 using KiCad.Automation.Model;
+using KiCad.Automation.Protocol;
+using Kiapi.Common.Types;
 
 namespace KiCad.Automation.Tests;
 
@@ -41,5 +43,110 @@ public sealed class SimulationDeckAdmissionTests
         var failure = Assert.ThrowsExactly<AutomationException>(() =>
             SimulationDeckAdmission.Validate("Big\n" + new string('*', (1 << 20) + 1)));
         Assert.AreEqual("simulation_deck_rejected", failure.Code);
+    }
+
+    [TestMethod]
+    public void CompletedSimulationVectorsRequireFiniteValuesAndValidComplexPairs()
+    {
+        var fixture = SimulationFixture();
+        fixture.Result.Vectors.Add(new SimulationVector { Name = "v(out)", Values = { 1.0, 2.0 }, Complex = true });
+        SimulationJobContract.ValidateStart(fixture.Request, fixture.Result, fixture.ProcessEpoch);
+
+        var nonFinite = fixture.Result.Clone();
+        nonFinite.Vectors[0].Values[1] = double.NaN;
+        RejectResult(fixture.Request, nonFinite, fixture.ProcessEpoch);
+
+        var oddComplex = fixture.Result.Clone();
+        oddComplex.Vectors[0].Values.Add(3.0);
+        RejectResult(fixture.Request, oddComplex, fixture.ProcessEpoch);
+
+        var infiniteProgress = fixture.Result.Clone();
+        infiniteProgress.Progress = double.PositiveInfinity;
+        RejectResult(fixture.Request, infiniteProgress, fixture.ProcessEpoch);
+
+        var outOfRangeProgress = fixture.Result.Clone();
+        outOfRangeProgress.Progress = 101;
+        RejectResult(fixture.Request, outOfRangeProgress, fixture.ProcessEpoch);
+    }
+
+    [TestMethod]
+    public void SimulationDependencyEvidenceBindsIdentityAndDeckProvenance()
+    {
+        var fixture = SimulationFixture();
+        const string deckSha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        var evidence = new NativeCapabilitySimulationDependencies
+        {
+            Document = fixture.Document.Clone(), JobId = fixture.JobId, OperationId = fixture.OperationId,
+            ProcessEpoch = fixture.ProcessEpoch, GeneratedDeckSha256 = deckSha256,
+            DependencyCaptureComplete = false
+        };
+        evidence.DependencyPaths.Add("/tmp/model.lib");
+        evidence.Warnings.Add("Dependency paths were not enumerated");
+
+        SimulationJobContract.ValidateDependencies(evidence, fixture.Document, fixture.ProcessEpoch,
+            fixture.JobId, fixture.OperationId, deckSha256);
+
+        var staleOperation = evidence.Clone();
+        staleOperation.OperationId = "33333333-3333-3333-3333-333333333333";
+        RejectDependencies(staleOperation, fixture, deckSha256);
+
+        var staleHash = evidence.Clone();
+        staleHash.GeneratedDeckSha256 = new string('b', 64);
+        RejectDependencies(staleHash, fixture, deckSha256);
+
+        var duplicatePath = evidence.Clone();
+        duplicatePath.DependencyPaths.Add("/tmp/model.lib");
+        RejectDependencies(duplicatePath, fixture, deckSha256);
+
+        var missingWarning = evidence.Clone();
+        missingWarning.Warnings.Clear();
+        RejectDependencies(missingWarning, fixture, deckSha256);
+
+        var completeWithWarning = evidence.Clone();
+        completeWithWarning.DependencyCaptureComplete = true;
+        RejectDependencies(completeWithWarning, fixture, deckSha256);
+    }
+
+    private static void RejectResult(StartSimulationJob request, SimulationJobState result, string processEpoch)
+    {
+        var failure = Assert.ThrowsExactly<AutomationException>(() =>
+            SimulationJobContract.ValidateStart(request, result, processEpoch));
+        Assert.AreEqual("invalid_simulation_result", failure.Code);
+    }
+
+    private static void RejectDependencies(NativeCapabilitySimulationDependencies result,
+        (DocumentSpecifier Document, string ProcessEpoch, string JobId, string OperationId,
+            StartSimulationJob Request, SimulationJobState Result) fixture, string expectedDeckSha256)
+    {
+        var failure = Assert.ThrowsExactly<AutomationException>(() =>
+            SimulationJobContract.ValidateDependencies(result, fixture.Document, fixture.ProcessEpoch,
+                fixture.JobId, fixture.OperationId, expectedDeckSha256));
+        Assert.AreEqual("invalid_simulation_result", failure.Code);
+    }
+
+    private static (DocumentSpecifier Document, string ProcessEpoch, string JobId, string OperationId,
+        StartSimulationJob Request, SimulationJobState Result) SimulationFixture()
+    {
+        var document = new DocumentSpecifier
+        {
+            Type = DocumentType.DoctypeSchematic,
+            Project = new() { Name = "simulation-contract", Path = "/tmp/kicad-simulation-contract" },
+            SheetPath = new()
+        };
+        document.SheetPath.Path.Add(new KIID { Value = "11111111-1111-1111-1111-111111111111" });
+        const string processEpoch = "22222222-2222-2222-2222-222222222222";
+        const string jobId = "33333333-3333-3333-3333-333333333333";
+        const string operationId = "44444444-4444-4444-4444-444444444444";
+        var request = new StartSimulationJob
+        {
+            Document = document.Clone(), OperationId = operationId, ProcessEpoch = processEpoch
+        };
+        var result = new SimulationJobState
+        {
+            Document = document.Clone(), JobId = jobId, OperationId = operationId,
+            ProcessEpoch = processEpoch, Status = SimulationJobStatus.SimjsCompleted,
+            Progress = 100, WorkerFinished = true
+        };
+        return (document, processEpoch, jobId, operationId, request, result);
     }
 }

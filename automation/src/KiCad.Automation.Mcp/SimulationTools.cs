@@ -122,6 +122,9 @@ public sealed class SimulationTools(InstanceRegistry instances)
             || result.ProcessEpoch != session.Epoch)
             throw new AutomationException("simulation_dependency_identity_mismatch",
                 "Native dependency evidence did not preserve the requested document, job, or process identity.");
+        Decks.TryGetValue(Key(instanceId, session.Epoch, jobId.ToString("D")), out DeckProvenance? deck);
+        SimulationJobContract.ValidateDependencies(result, document, session.Epoch, jobId.ToString("D"),
+            deck?.OperationId, deck?.Sha256);
         return Data(new
         {
             instanceId,

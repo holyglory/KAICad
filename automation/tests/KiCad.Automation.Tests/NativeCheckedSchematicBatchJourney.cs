@@ -428,7 +428,7 @@ public sealed partial class NativeSessionTests
         {
             instanceId,
             documentJson,
-            expectedStateJson = SchematicJson.Formatter.Format(typedObserved.State),
+            expectedStateJson = SchematicJson.Formatter.Format(typedObserved),
             kind = "wire",
             itemId = typedItemId,
             xNm = At(40, 140).XNm,

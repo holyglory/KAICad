@@ -364,6 +364,9 @@ public sealed class PcbItemTools(InstanceRegistry registry)
             || request is UpdateItems updateRequest && updateRequest.Items.Count == 0
             || request is DeleteItems deleteRequest && deleteRequest.ItemIds.Count == 0)
             throw new AutomationException("invalid_pcb_item_request", "Supply at least one typed board item or item ID.");
+        if (request is DeleteItems deleteRequestWithIds
+            && deleteRequestWithIds.ItemIds.Any(id => !Guid.TryParseExact(id.Value, "D", out var value) || value == Guid.Empty))
+            throw new AutomationException("invalid_pcb_item_request", "Supply one or more canonical PCB item KIIDs to delete.");
         var expected = SchematicJson.Parser.Parse<DocumentLifecycleState>(expectedStateJson);
         if (expected.Scope != DocumentLifecycleScope.DlsPcb
             || expected.Document is null || !expected.Document.Equals(header.Document))

@@ -41,10 +41,8 @@ internal static class PcbCheckedItemDispatch
         {
             // A handshake is not the checked mutation. There is no native item
             // receipt to inspect when the peer could not be reached yet.
-            return Failure(instanceId, request, error.RequestDelivered ? "operation_outcome_unknown" : "native_not_reached",
-                error.RequestDelivered
-                    ? $"KiCad received the checked PCB item session request but did not answer ({error.Message})."
-                    : $"KiCad did not receive the checked PCB item session request ({error.Message}).");
+            return Failure(instanceId, request, "native_not_reached",
+                $"KiCad could not establish the checked PCB item session ({error.Message}); no item transaction was started.");
         }
         catch (NativeApiException error)
         {

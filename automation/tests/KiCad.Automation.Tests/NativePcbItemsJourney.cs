@@ -589,9 +589,10 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(rollbackReceipt.ObservedBefore!.StateSha256, rollbackReceipt.ObservedRollback!.StateSha256);
             Assert.AreEqual(rollbackReceipt.ObservedBefore.NativeIdentity, rollbackReceipt.ObservedRollback.NativeIdentity);
             Assert.AreEqual(rollbackReceipt.ObservedBefore.Document, rollbackReceipt.ObservedRollback.Document);
-            var rollbackReadback = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
-            { Header = new() { Document = board }, Items = { rollbackShape.Id } }, token);
-            Assert.AreEqual(0, rollbackReadback.Items.Count);
+            var missingRollbackShape = await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
+                client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+                { Header = new() { Document = board }, Items = { rollbackShape.Id } }, token));
+            Assert.AreEqual(3, missingRollbackShape.Status, "A rolled-back create must be absent from the native board.");
             var candidateTrack = track.Clone(); candidateTrack.Id = new() { Value = Guid.NewGuid().ToString("D") };
             var candidateRequest = new CreateItems { Header = new() { Document = board } }; candidateRequest.Items.Add(Any.Pack(candidateTrack));
             var candidateReply = await mcp.Tool("kicad_pcb_route_candidate_validate", new

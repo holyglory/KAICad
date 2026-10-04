@@ -131,7 +131,14 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
         RequireState(admission, expected, "The PCB changed before the keepout transaction could be admitted; inspect it again.");
         if (mutation != KeepoutMutation.Create)
         {
-            existing = await ReadExistingZone(client, document, targetId, cancellationToken);
+            try
+            {
+                existing = await ReadExistingZone(client, document, targetId, cancellationToken);
+            }
+            catch (NativeApiException error) when (error.Status == 3)
+            {
+                throw new AutomationException("pcb_keepout_not_found", $"Native keepout {targetId} was not found; no mutation was attempted.");
+            }
             PcbKeepoutAuthoringContract.ValidateExisting(existing, expected.NativeIdentity);
             if (mutation == KeepoutMutation.Update)
             {

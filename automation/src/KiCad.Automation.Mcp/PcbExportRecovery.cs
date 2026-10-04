@@ -1,5 +1,4 @@
 using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Google.Protobuf;
@@ -110,13 +109,11 @@ internal static class PcbExportRecoveryPolicy
     internal static string Fingerprint(string operationId, string processEpoch, string documentJson,
         string outputDirectory, IMessage request)
     {
-        byte[] prefix = Encoding.UTF8.GetBytes(operationId + "\n" + processEpoch + "\n"
-            + documentJson + "\n" + Path.GetFullPath(outputDirectory) + "\n");
-        byte[] payload = request.ToByteArray();
-        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        hash.AppendData(prefix);
-        hash.AppendData(payload);
-        return Convert.ToHexStringLower(hash.GetHashAndReset());
+        // KiCad's native receipt uses this exact protobuf payload digest.
+        // The instance, document and output paths are retained separately in
+        // the durable record and are checked before a replay.
+        _ = operationId; _ = processEpoch; _ = documentJson; _ = outputDirectory;
+        return Convert.ToHexStringLower(SHA256.HashData(request.ToByteArray()));
     }
 
     internal static PcbExportRecoveryDecision Reconcile(PcbExportRecoveryRecord? prior,

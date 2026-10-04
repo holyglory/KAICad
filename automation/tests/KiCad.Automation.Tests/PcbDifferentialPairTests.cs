@@ -48,7 +48,8 @@ public sealed class PcbDifferentialPairTests
         var validation = new PcbDifferentialPairTools.PairValidationRequest
         {
             PositiveNet = request.PositiveNet, NegativeNet = request.NegativeNet,
-            WidthNm = request.WidthNm, GapNm = request.GapNm, MaxSkewNm = 1, ToleranceNm = 0
+            WidthNm = request.WidthNm, MinimumGapNm = request.GapNm, TargetGapNm = request.GapNm,
+            MaxSkewNm = 1, ToleranceNm = 0
         };
         var candidate = PcbDifferentialPairTools.BuildCandidate(document, BoardLayer.BlFCu, request,
             new() { XNm = 10_000_000, YNm = 19_835_000 }, new() { XNm = 30_000_000, YNm = 19_835_000 },
@@ -57,11 +58,14 @@ public sealed class PcbDifferentialPairTests
         var result = PcbDifferentialPairTools.ValidateGeometry(validation, candidate.Items);
 
         Assert.IsTrue(result.Compliant);
-        Assert.AreEqual(20_000_000, result.Positive.LengthNm, 0.001);
-        Assert.AreEqual(20_000_000, result.Negative.LengthNm, 0.001);
-        Assert.AreEqual(0, result.SkewNm, 0.001);
-        Assert.AreEqual(330_000, result.MinimumSpacingNm!.Value, 0.001);
-        Assert.AreEqual(0, result.MaximumParallelError, 0.000_000_001);
+        Assert.AreEqual(20_000_000d, result.Positive.LengthNm!.Value, 0.001);
+        Assert.AreEqual(20_000_000d, result.Negative.LengthNm!.Value, 0.001);
+        Assert.AreEqual(0d, result.SkewNm!.Value, 0.001);
+        Assert.AreEqual(330_000d, result.CenterlineSpacingNm!.Value, 0.001);
+        Assert.AreEqual(180_000d, result.CopperEdgeGapNm!.Value, 0.001);
+        Assert.AreEqual(0d, result.MaximumParallelError, 0.000_000_001);
+        Assert.AreEqual(20_000_000d, result.LongitudinalOverlapNm!.Value, 0.001);
+        Assert.AreEqual(0d, result.LongitudinalEndpointDeltaNm!.Value, 0.001);
         Assert.IsEmpty(result.Violations);
     }
 
@@ -70,7 +74,7 @@ public sealed class PcbDifferentialPairTests
     {
         var validation = new PcbDifferentialPairTools.PairValidationRequest
         {
-            PositiveNet = "USB_D_P", NegativeNet = "USB_D_N", WidthNm = 150_000, GapNm = 180_000,
+            PositiveNet = "USB_D_P", NegativeNet = "USB_D_N", WidthNm = 150_000, MinimumGapNm = 180_000,
             MaxSkewNm = 100_000, ToleranceNm = 0
         };
         var items = new[]
@@ -84,15 +88,82 @@ public sealed class PcbDifferentialPairTests
 
         Assert.IsFalse(result.Compliant);
         Assert.IsTrue(codes.Contains("layer_mismatch"));
-        Assert.IsTrue(codes.Contains("spacing_below_gap"));
+        Assert.IsTrue(codes.Contains("copper_gap_below_minimum"));
         Assert.IsTrue(codes.Contains("skew_exceeded"));
     }
 
-    private static Track Track(string id, string net, BoardLayer layer, long y, long endX) => new()
+    [TestMethod]
+    public void ValidationMarksDisconnectedAndMultiSegmentGeometryIncomplete()
+    {
+        var validation = new PcbDifferentialPairTools.PairValidationRequest
+        {
+            PositiveNet = "USB_D_P", NegativeNet = "USB_D_N", WidthNm = 150_000, MinimumGapNm = 0
+        };
+        var items = new[]
+        {
+            Track("00000000-0000-0000-0000-000000000011", "USB_D_P", BoardLayer.BlFCu, 0, 1_000_000),
+            Track("00000000-0000-0000-0000-000000000012", "USB_D_P", BoardLayer.BlFCu, 0, 2_000_000, startX: 2_000_000),
+            Track("00000000-0000-0000-0000-000000000013", "USB_D_N", BoardLayer.BlFCu, 500_000, 3_000_000, startX: 2_000_000)
+        }.Select(Google.Protobuf.WellKnownTypes.Any.Pack);
+
+        var result = PcbDifferentialPairTools.ValidateGeometry(validation, items);
+        var codes = result.Violations.Select(issue => issue.Code).ToHashSet(StringComparer.Ordinal);
+
+        Assert.IsFalse(result.SupportedScope);
+        Assert.IsFalse(result.Compliant);
+        Assert.IsNull(result.Positive.LengthNm);
+        Assert.IsTrue(result.Positive.PartialStraightLengthNm is > 0);
+        Assert.IsTrue(codes.Contains("single_segment_scope"));
+    }
+
+    [TestMethod]
+    public void ValidationRejectsExcessWidthAndArcAsUnsupportedInsteadOfPassing()
+    {
+        var validation = new PcbDifferentialPairTools.PairValidationRequest
+        {
+            PositiveNet = "USB_D_P", NegativeNet = "USB_D_N", WidthNm = 150_000,
+            MinimumGapNm = 180_000, TargetGapNm = 180_000
+        };
+        var wideItems = new[]
+        {
+            Track("00000000-0000-0000-0000-000000000021", "USB_D_P", BoardLayer.BlFCu, 0, 10_000_000, widthNm: 500_000),
+            Track("00000000-0000-0000-0000-000000000022", "USB_D_N", BoardLayer.BlFCu, 330_000, 10_000_000)
+        }.Select(Google.Protobuf.WellKnownTypes.Any.Pack);
+        var wideResult = PcbDifferentialPairTools.ValidateGeometry(validation, wideItems);
+        var wideCodes = wideResult.Violations.Select(issue => issue.Code).ToHashSet(StringComparer.Ordinal);
+        Assert.IsFalse(wideResult.Compliant);
+        Assert.IsTrue(wideCodes.Contains("positive_width_mismatch"));
+        Assert.IsTrue(wideCodes.Contains("copper_gap_below_minimum"));
+
+        var arcItems = new Google.Protobuf.WellKnownTypes.Any[]
+        {
+            Google.Protobuf.WellKnownTypes.Any.Pack(Arc("00000000-0000-0000-0000-000000000023", "USB_D_P", BoardLayer.BlFCu)),
+            Google.Protobuf.WellKnownTypes.Any.Pack(Track("00000000-0000-0000-0000-000000000024", "USB_D_N", BoardLayer.BlFCu, 330_000, 10_000_000))
+        };
+        var arcResult = PcbDifferentialPairTools.ValidateGeometry(validation, arcItems);
+        Assert.IsFalse(arcResult.SupportedScope);
+        Assert.IsFalse(arcResult.Compliant);
+        Assert.IsNull(arcResult.Positive.LengthNm);
+        Assert.IsTrue(arcResult.Violations.Any(issue => issue.Code == "arc_not_supported"));
+    }
+
+    private static Track Track(string id, string net, BoardLayer layer, long y, long endX,
+        long widthNm = 150_000, long startX = 0) => new()
     {
         Id = new() { Value = id },
-        Start = new() { XNm = 0, YNm = y },
+        Start = new() { XNm = startX, YNm = y },
         End = new() { XNm = endX, YNm = y },
+        Width = new() { ValueNm = widthNm },
+        Layer = layer,
+        Net = new() { Name = net }
+    };
+
+    private static Arc Arc(string id, string net, BoardLayer layer) => new()
+    {
+        Id = new() { Value = id },
+        Start = new() { XNm = 0, YNm = 0 },
+        Mid = new() { XNm = 5_000_000, YNm = 1_000_000 },
+        End = new() { XNm = 10_000_000, YNm = 0 },
         Width = new() { ValueNm = 150_000 },
         Layer = layer,
         Net = new() { Name = net }

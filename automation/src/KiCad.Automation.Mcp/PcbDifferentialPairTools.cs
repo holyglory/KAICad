@@ -86,7 +86,7 @@ public sealed class PcbDifferentialPairTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_pcb_diff_pair_validate", ReadOnly = true),
-     Description("Validate the exact native geometry of two explicitly named PCB nets at one lifecycle checkpoint. requestJson contains positiveNet, negativeNet, widthNm, gapNm, optional maxSkewNm, toleranceNm, parallelTolerance and netClassName. The validator reports deterministic per-net lengths, skew, minimum centerline spacing, layer/topology agreement and parallelism violations; it never mutates the board or claims DRC, impedance or manufacturing validity."),
+     Description("Validate one supported straight differential-pair route at one lifecycle checkpoint. requestJson contains positiveNet, negativeNet, widthNm, minimumGapNm, optional targetGapNm, maxSkewNm, toleranceNm, parallelTolerance and netClassName. The validator reports exact straight-segment lengths, skew, copper edge gap, endpoint correspondence, layer agreement and parallelism. Arcs, vias, multi-segment routes and unknown geometry are explicit incomplete results; the tool never mutates the board or claims DRC, impedance or manufacturing validity."),
      KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "explicit PCB lifecycle state, paired native route geometry, spacing/parallelism/skew validation")]
     public Task<CallToolResult> ValidatePair(string instanceId, string documentJson, string expectedStateJson,
         string requestJson, CancellationToken cancellationToken) => Execute(async () =>
@@ -106,7 +106,7 @@ public sealed class PcbDifferentialPairTools(InstanceRegistry registry)
             request = JsonSerializer.Deserialize<PairValidationRequest>(requestJson, JsonOptions)
                 ?? throw new AutomationException("invalid_diff_pair_validation", "requestJson must be a JSON object.");
         }
-        catch (JsonException error)
+        catch (Exception error) when (error is JsonException or ArgumentNullException)
         {
             throw new AutomationException("invalid_diff_pair_validation", error.Message);
         }
@@ -153,26 +153,34 @@ public sealed class PcbDifferentialPairTools(InstanceRegistry registry)
             instanceId, processEpoch = session.Epoch, document,
             beforeState = SchematicJson.Formatter.Format(before), afterState = SchematicJson.Formatter.Format(after),
             positiveNet = positive.Name, negativeNet = negative.Name,
-            widthNm = request.WidthNm, gapNm = request.GapNm,
-            requiredCenterlineSpacingNm = checked(request.WidthNm + request.GapNm),
+            supportedScope = summary.SupportedScope,
+            validationStatus = summary.SupportedScope ? "complete" : "incomplete",
+            widthNm = request.WidthNm, minimumGapNm = request.MinimumGapNm, targetGapNm = request.TargetGapNm,
+            requiredMinimumCenterlineSpacingNm = checked(request.WidthNm + request.MinimumGapNm),
             maxSkewNm = request.MaxSkewNm, toleranceNm = request.ToleranceNm,
             parallelTolerance = request.ParallelTolerance,
             positive = new
             {
                 itemCount = summary.Positive.ItemCount, trackArcCount = summary.Positive.TrackArcCount,
-                viaCount = summary.Positive.ViaCount, lengthNm = Round(summary.Positive.LengthNm),
+                viaCount = summary.Positive.ViaCount, lengthNm = summary.Positive.LengthNm is { } length ? Round(length) : (double?)null,
+                partialStraightLengthNm = summary.Positive.PartialStraightLengthNm is { } partial ? Round(partial) : (double?)null,
                 layers = summary.Positive.Layers
             },
             negative = new
             {
                 itemCount = summary.Negative.ItemCount, trackArcCount = summary.Negative.TrackArcCount,
-                viaCount = summary.Negative.ViaCount, lengthNm = Round(summary.Negative.LengthNm),
+                viaCount = summary.Negative.ViaCount, lengthNm = summary.Negative.LengthNm is { } negativeLength ? Round(negativeLength) : (double?)null,
+                partialStraightLengthNm = summary.Negative.PartialStraightLengthNm is { } negativePartial ? Round(negativePartial) : (double?)null,
                 layers = summary.Negative.Layers
             },
             matchedSegmentCount = summary.MatchedSegmentCount,
-            measuredSkewNm = Round(summary.SkewNm),
-            minimumCenterlineSpacingNm = summary.MinimumSpacingNm is { } spacing ? Round(spacing) : (double?)null,
-            maximumParallelError = summary.MaximumParallelError,
+            measuredSkewNm = summary.SkewNm is { } skew ? Round(skew) : (double?)null,
+            partialStraightSkewNm = summary.PartialStraightSkewNm is { } partialSkew ? Round(partialSkew) : (double?)null,
+            centerlineSpacingNm = summary.CenterlineSpacingNm is { } centerlineSpacing ? Round(centerlineSpacing) : (double?)null,
+            copperEdgeGapNm = summary.CopperEdgeGapNm is { } copperGap ? Round(copperGap) : (double?)null,
+            longitudinalOverlapNm = summary.LongitudinalOverlapNm is { } overlap ? Round(overlap) : (double?)null,
+            longitudinalEndpointDeltaNm = summary.LongitudinalEndpointDeltaNm is { } endpointDelta ? Round(endpointDelta) : (double?)null,
+            maximumParallelError = summary.SupportedScope ? summary.MaximumParallelError : (double?)null,
             routeFound = summary.RouteFound,
             compliant = summary.Compliant,
             violations = summary.Violations,
@@ -217,7 +225,8 @@ public sealed class PcbDifferentialPairTools(InstanceRegistry registry)
         public string NegativeNet { get; set; } = "";
         public string NetClassName { get; set; } = "";
         public long WidthNm { get; set; }
-        public long GapNm { get; set; }
+        public long MinimumGapNm { get; set; }
+        public long? TargetGapNm { get; set; }
         public double? MaxSkewNm { get; set; }
         public double ToleranceNm { get; set; }
         public double ParallelTolerance { get; set; } = 1e-6;
@@ -225,15 +234,16 @@ public sealed class PcbDifferentialPairTools(InstanceRegistry registry)
 
     internal sealed record PairValidationIssue(string Code, string Message, string? PositiveItemId = null, string? NegativeItemId = null);
     internal sealed record PairRouteSummary(string NetName, int ItemCount, int TrackArcCount, int ViaCount,
-        double LengthNm, string[] Layers);
+        double? LengthNm, double? PartialStraightLengthNm, string[] Layers);
     internal sealed record PairValidationSummary(PairRouteSummary Positive, PairRouteSummary Negative,
-        int MatchedSegmentCount, double SkewNm, double? MinimumSpacingNm, double MaximumParallelError,
-        bool RouteFound, PairValidationIssue[] Violations)
+        int MatchedSegmentCount, double? SkewNm, double? PartialStraightSkewNm, double? CenterlineSpacingNm,
+        double? CopperEdgeGapNm, double? LongitudinalOverlapNm, double? LongitudinalEndpointDeltaNm,
+        double MaximumParallelError, bool RouteFound, bool SupportedScope, PairValidationIssue[] Violations)
     {
-        public bool Compliant => RouteFound && Violations.Length == 0;
+        public bool Compliant => RouteFound && SupportedScope && Violations.Length == 0;
     }
     private sealed record PairSegment(string Id, string NetName, string Kind, string Layer, Vector2 Start,
-        Vector2? Mid, Vector2 End, long WidthNm, double LengthNm);
+        Vector2 End, long WidthNm, double LengthNm);
 
     internal sealed class Bounds { public long MinXNm { get; set; } public long MinYNm { get; set; } public long MaxXNm { get; set; } public long MaxYNm { get; set; } }
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
@@ -262,8 +272,9 @@ public sealed class PcbDifferentialPairTools(InstanceRegistry registry)
             throw new AutomationException("invalid_diff_pair_validation", "positiveNet and negativeNet must be distinct nonempty names of at most 512 characters.");
         if (request.NetClassName is null || request.NetClassName.Length > 512)
             throw new AutomationException("invalid_diff_pair_validation", "netClassName must be at most 512 characters.");
-        if (request.WidthNm <= 0 || request.GapNm <= 0 || request.WidthNm > long.MaxValue - request.GapNm)
-            throw new AutomationException("invalid_diff_pair_validation", "widthNm and gapNm must be positive and must fit the bounded planner range.");
+        if (request.WidthNm <= 0 || request.MinimumGapNm < 0 || request.WidthNm > long.MaxValue - request.MinimumGapNm
+            || request.TargetGapNm is < 0 || request.TargetGapNm is { } targetGap && targetGap < request.MinimumGapNm)
+            throw new AutomationException("invalid_diff_pair_validation", "widthNm must be positive, minimumGapNm must be nonnegative, and targetGapNm cannot be below minimumGapNm.");
         if (!double.IsFinite(request.ToleranceNm) || request.ToleranceNm < 0
             || request.MaxSkewNm is { } maxSkew && (!double.IsFinite(maxSkew) || maxSkew < 0)
             || !double.IsFinite(request.ParallelTolerance) || request.ParallelTolerance < 0 || request.ParallelTolerance > 0.25)
@@ -272,128 +283,219 @@ public sealed class PcbDifferentialPairTools(InstanceRegistry registry)
 
     internal static PairValidationSummary ValidateGeometry(PairValidationRequest request, IEnumerable<ProtoAny> packedItems)
     {
+        if (packedItems is null)
+            throw new AutomationException("invalid_diff_pair_validation_geometry", "The native geometry collection is required.");
         var positive = new List<PairSegment>();
         var negative = new List<PairSegment>();
         int positiveVias = 0, negativeVias = 0;
-        foreach (ProtoAny packed in packedItems)
+        int positiveArcs = 0, negativeArcs = 0, unknownItems = 0;
+        var selectedIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (ProtoAny? packed in packedItems)
         {
+            if (packed is null)
+            {
+                unknownItems++;
+                continue;
+            }
+            if (!packed.Is(BoardTrack.Descriptor) && !packed.Is(Arc.Descriptor) && !packed.Is(Via.Descriptor))
+            {
+                unknownItems++;
+                continue;
+            }
             if (packed.Is(Via.Descriptor))
             {
-                Via via = packed.Unpack<Via>();
-                if (via.Net.Name == request.PositiveNet) positiveVias++;
-                else if (via.Net.Name == request.NegativeNet) negativeVias++;
+                Via via = Unpack<Via>(packed, "via");
+                ValidateIdentity("via", via.Id, via.Net);
+                if (via.Net.Name == request.PositiveNet)
+                {
+                    positiveVias++;
+                    AddIdentity(via.Id.Value, selectedIds);
+                }
+                else if (via.Net.Name == request.NegativeNet)
+                {
+                    negativeVias++;
+                    AddIdentity(via.Id.Value, selectedIds);
+                }
+                continue;
+            }
+            if (packed.Is(Arc.Descriptor))
+            {
+                Arc arc = Unpack<Arc>(packed, "arc");
+                ValidateIdentity("arc", arc.Id, arc.Net);
+                if (arc.Net.Name == request.PositiveNet)
+                {
+                    positiveArcs++;
+                    AddIdentity(arc.Id.Value, selectedIds);
+                }
+                else if (arc.Net.Name == request.NegativeNet)
+                {
+                    negativeArcs++;
+                    AddIdentity(arc.Id.Value, selectedIds);
+                }
                 continue;
             }
             PairSegment? segment = Segment(packed);
             if (segment is null) continue;
-            if (segment.NetName == request.PositiveNet) positive.Add(segment);
-            else if (segment.NetName == request.NegativeNet) negative.Add(segment);
+            if (segment.NetName == request.PositiveNet)
+            {
+                AddIdentity(segment.Id, selectedIds);
+                positive.Add(segment);
+            }
+            else if (segment.NetName == request.NegativeNet)
+            {
+                AddIdentity(segment.Id, selectedIds);
+                negative.Add(segment);
+            }
         }
 
-        PairSegment[] orderedPositive = Order(positive);
-        PairSegment[] orderedNegative = Order(negative);
+        PairSegment[] orderedPositive = positive.ToArray();
+        PairSegment[] orderedNegative = negative.ToArray();
         var issues = new List<PairValidationIssue>();
         if (orderedPositive.Length == 0)
-            issues.Add(new("positive_route_missing", "No Track or Arc geometry was found for the positive differential-pair net."));
+            issues.Add(new("positive_route_missing", "No straight Track geometry was found for the positive differential-pair net."));
         if (orderedNegative.Length == 0)
-            issues.Add(new("negative_route_missing", "No Track or Arc geometry was found for the negative differential-pair net."));
+            issues.Add(new("negative_route_missing", "No straight Track geometry was found for the negative differential-pair net."));
+        if (positiveArcs != 0 || negativeArcs != 0)
+            issues.Add(new("arc_not_supported", "Arc geometry is outside the supported single-straight-track validation scope."));
         if (positiveVias != 0 || negativeVias != 0)
-            issues.Add(new("via_not_supported", "Differential-pair validation currently requires matched Track/Arc geometry and reports vias as unsupported.",
-                positiveVias == 0 ? null : $"{positiveVias} vias", negativeVias == 0 ? null : $"{negativeVias} vias"));
-        if (orderedPositive.Length != orderedNegative.Length)
-            issues.Add(new("segment_count_mismatch", "The paired nets do not contain the same number of Track/Arc route segments."));
+            issues.Add(new("via_not_supported", "Via geometry is outside the supported single-straight-track validation scope."));
+        if (unknownItems != 0)
+            issues.Add(new("unknown_geometry", $"The native response contained {unknownItems} unsupported or unreadable geometry item(s)."));
+        if (orderedPositive.Length != 1 || orderedNegative.Length != 1)
+            issues.Add(new("single_segment_scope", "Validation supports exactly one straight Track per named net; multi-segment or disconnected paths are incomplete."));
 
-        double positiveLength = orderedPositive.Sum(segment => segment.LengthNm);
-        double negativeLength = orderedNegative.Sum(segment => segment.LengthNm);
-        double skew = Math.Abs(positiveLength - negativeLength);
-        if (request.MaxSkewNm is { } maxSkew && skew > maxSkew + request.ToleranceNm)
-            issues.Add(new("skew_exceeded", $"Measured differential-pair skew {Round(skew)} nm exceeds the requested bound {Round(maxSkew)} nm.", null, null));
+        double positivePartialLength = orderedPositive.Sum(segment => segment.LengthNm);
+        double negativePartialLength = orderedNegative.Sum(segment => segment.LengthNm);
+        double? positiveLength = orderedPositive.Length == 1 && positiveArcs == 0 && positiveVias == 0 && unknownItems == 0
+            ? orderedPositive[0].LengthNm : null;
+        double? negativeLength = orderedNegative.Length == 1 && negativeArcs == 0 && negativeVias == 0 && unknownItems == 0
+            ? orderedNegative[0].LengthNm : null;
+        double? skew = positiveLength is { } positiveFull && negativeLength is { } negativeFull
+            ? Math.Abs(positiveFull - negativeFull) : null;
+        double partialSkew = Math.Abs(positivePartialLength - negativePartialLength);
+        if (skew is { } fullSkew && request.MaxSkewNm is { } maxSkew && fullSkew > maxSkew + request.ToleranceNm)
+            issues.Add(new("skew_exceeded", $"Measured differential-pair skew {Round(fullSkew)} nm exceeds the requested bound {Round(maxSkew)} nm.", null, null));
 
-        int matched = Math.Min(orderedPositive.Length, orderedNegative.Length);
-        double minimumSpacing = double.PositiveInfinity, maximumParallelError = 0;
-        for (int index = 0; index < matched; index++)
+        bool supported = orderedPositive.Length == 1 && orderedNegative.Length == 1
+            && positiveArcs == 0 && negativeArcs == 0 && positiveVias == 0 && negativeVias == 0 && unknownItems == 0;
+        int matched = supported ? 1 : Math.Min(orderedPositive.Length, orderedNegative.Length);
+        double? centerlineSpacing = null, copperEdgeGap = null, longitudinalOverlap = null, longitudinalEndpointDelta = null;
+        double maximumParallelError = 0;
+        if (supported)
         {
-            PairSegment left = orderedPositive[index], right = orderedNegative[index];
+            PairSegment left = orderedPositive[0], right = orderedNegative[0];
             if (!string.Equals(left.Layer, right.Layer, StringComparison.Ordinal))
-                issues.Add(new("layer_mismatch", $"Paired route segments use different copper layers ({left.Layer} and {right.Layer}).", left.Id, right.Id));
-            if (!string.Equals(left.Kind, right.Kind, StringComparison.Ordinal))
-                issues.Add(new("topology_mismatch", "Paired route segments use different geometry kinds.", left.Id, right.Id));
-            if (Math.Abs(left.WidthNm - right.WidthNm) > request.ToleranceNm)
-                issues.Add(new("width_mismatch", $"Paired route widths differ by {Round(Math.Abs(left.WidthNm - right.WidthNm))} nm.", left.Id, right.Id));
+                issues.Add(new("layer_mismatch", $"The paired tracks use different copper layers ({left.Layer} and {right.Layer}).", left.Id, right.Id));
+            if (Math.Abs((double)left.WidthNm - request.WidthNm) > request.ToleranceNm)
+                issues.Add(new("positive_width_mismatch", $"The positive track width {left.WidthNm} nm differs from requested width {request.WidthNm} nm.", left.Id, null));
+            if (Math.Abs((double)right.WidthNm - request.WidthNm) > request.ToleranceNm)
+                issues.Add(new("negative_width_mismatch", $"The negative track width {right.WidthNm} nm differs from requested width {request.WidthNm} nm.", null, right.Id));
+            if (Math.Abs((double)left.WidthNm - right.WidthNm) > request.ToleranceNm)
+                issues.Add(new("width_mismatch", $"Paired track widths differ by {Round(Math.Abs((double)left.WidthNm - right.WidthNm))} nm.", left.Id, right.Id));
             if (left.LengthNm <= request.ToleranceNm || right.LengthNm <= request.ToleranceNm)
-                issues.Add(new("zero_length", "Differential-pair geometry contains a zero-length or tolerance-sized segment.", left.Id, right.Id));
+                issues.Add(new("zero_length", "Differential-pair geometry contains a zero-length or tolerance-sized track.", left.Id, right.Id));
 
             double parallelError = ParallelError(left, right);
-            maximumParallelError = Math.Max(maximumParallelError, parallelError);
+            maximumParallelError = parallelError;
             if (parallelError > request.ParallelTolerance)
-                issues.Add(new("non_parallel", $"Paired route segments are not parallel within tolerance {request.ParallelTolerance:R}.", left.Id, right.Id));
+                issues.Add(new("non_parallel", $"Paired tracks are not parallel within tolerance {request.ParallelTolerance:R}.", left.Id, right.Id));
 
-            double spacing = PairSpacing(left, right);
-            minimumSpacing = Math.Min(minimumSpacing, spacing);
-            if (spacing + request.ToleranceNm < request.WidthNm + request.GapNm)
-                issues.Add(new("spacing_below_gap", $"Minimum centerline spacing {Round(spacing)} nm is below the required {request.WidthNm + request.GapNm} nm.", left.Id, right.Id));
+            (double overlap, double endpointDelta) = LongitudinalCorrespondence(left, right);
+            longitudinalOverlap = overlap;
+            longitudinalEndpointDelta = endpointDelta;
+            if (overlap <= request.ToleranceNm)
+                issues.Add(new("longitudinal_no_overlap", "Paired tracks have no shared longitudinal span and cannot be treated as coupled.", left.Id, right.Id));
+            if (endpointDelta > request.ToleranceNm)
+                issues.Add(new("longitudinal_endpoint_mismatch", $"Paired track endpoints differ longitudinally by {Round(endpointDelta)} nm.", left.Id, right.Id));
+
+            double spacing = SegmentDistance(left.Start, left.End, right.Start, right.End);
+            centerlineSpacing = spacing;
+            copperEdgeGap = spacing - ((double)left.WidthNm + right.WidthNm) / 2;
+            if (copperEdgeGap + request.ToleranceNm < request.MinimumGapNm)
+                issues.Add(new("copper_gap_below_minimum", $"Measured copper edge gap {Round(copperEdgeGap.Value)} nm is below the minimum {request.MinimumGapNm} nm.", left.Id, right.Id));
+            if (request.TargetGapNm is { } targetGap && Math.Abs(copperEdgeGap.Value - targetGap) > request.ToleranceNm)
+                issues.Add(new("copper_gap_target_mismatch", $"Measured copper edge gap {Round(copperEdgeGap.Value)} nm differs from target {targetGap} nm.", left.Id, right.Id));
         }
 
-        PairRouteSummary positiveSummary = new(request.PositiveNet, orderedPositive.Length + positiveVias,
-            orderedPositive.Length, positiveVias, positiveLength, orderedPositive.Select(segment => segment.Layer).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray());
-        PairRouteSummary negativeSummary = new(request.NegativeNet, orderedNegative.Length + negativeVias,
-            orderedNegative.Length, negativeVias, negativeLength, orderedNegative.Select(segment => segment.Layer).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray());
+        PairRouteSummary positiveSummary = new(request.PositiveNet, orderedPositive.Length + positiveVias + positiveArcs,
+            orderedPositive.Length, positiveVias, positiveLength, positivePartialLength,
+            orderedPositive.Select(segment => segment.Layer).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray());
+        PairRouteSummary negativeSummary = new(request.NegativeNet, orderedNegative.Length + negativeVias + negativeArcs,
+            orderedNegative.Length, negativeVias, negativeLength, negativePartialLength,
+            orderedNegative.Select(segment => segment.Layer).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray());
         PairValidationIssue[] violations = issues
             .DistinctBy(issue => (issue.Code, issue.PositiveItemId, issue.NegativeItemId), EqualityComparer<(string Code, string? PositiveItemId, string? NegativeItemId)>.Default)
             .ToArray();
-        return new(positiveSummary, negativeSummary, matched, skew,
-            double.IsPositiveInfinity(minimumSpacing) ? null : minimumSpacing, maximumParallelError,
-            orderedPositive.Length != 0 && orderedNegative.Length != 0, violations);
+        return new(positiveSummary, negativeSummary, matched, skew, partialSkew, centerlineSpacing,
+            copperEdgeGap, longitudinalOverlap, longitudinalEndpointDelta, maximumParallelError,
+            orderedPositive.Length != 0 && orderedNegative.Length != 0, supported, violations);
     }
 
     private static PairSegment? Segment(ProtoAny packed)
     {
         if (packed.Is(BoardTrack.Descriptor))
         {
-            BoardTrack item = packed.Unpack<BoardTrack>();
-            return new(item.Id.Value, item.Net.Name, "track", item.Layer.ToString(), item.Start.Clone(), null, item.End.Clone(), item.Width.ValueNm,
+            BoardTrack item = Unpack<BoardTrack>(packed, "track");
+            ValidateIdentity("track", item.Id, item.Net);
+            if (item.Start is null || item.End is null || item.Width is null)
+                throw new AutomationException("invalid_diff_pair_validation_geometry", "A native Track is missing endpoints or width.");
+            if (item.Layer is BoardLayer.BlUnknown or BoardLayer.BlUndefined)
+                throw new AutomationException("invalid_diff_pair_validation_geometry", "A native Track has an unknown copper layer.");
+            if (item.Width.ValueNm <= 0)
+                throw new AutomationException("invalid_diff_pair_validation_geometry", "A native Track has a nonpositive width.");
+            return new(item.Id.Value, item.Net.Name, "track", item.Layer.ToString(), item.Start.Clone(), item.End.Clone(), item.Width.ValueNm,
                 Distance(item.Start, item.End));
-        }
-        if (packed.Is(Arc.Descriptor))
-        {
-            Arc item = packed.Unpack<Arc>();
-            return new(item.Id.Value, item.Net.Name, "arc", item.Layer.ToString(), item.Start.Clone(), item.Mid.Clone(), item.End.Clone(), item.Width.ValueNm,
-                Distance(item.Start, item.Mid) + Distance(item.Mid, item.End));
         }
         return null;
     }
 
-    private static PairSegment[] Order(IEnumerable<PairSegment> segments) => segments
-        .OrderBy(segment => segment.Layer, StringComparer.Ordinal)
-        .ThenBy(segment => Math.Min(segment.Start.XNm, segment.End.XNm))
-        .ThenBy(segment => Math.Min(segment.Start.YNm, segment.End.YNm))
-        .ThenBy(segment => Math.Max(segment.Start.XNm, segment.End.XNm))
-        .ThenBy(segment => Math.Max(segment.Start.YNm, segment.End.YNm))
-        .ThenBy(segment => segment.Kind, StringComparer.Ordinal)
-        .ThenBy(segment => segment.Id, StringComparer.Ordinal)
-        .ToArray();
+    private static T Unpack<T>(ProtoAny packed, string kind) where T : class, IMessage<T>, new()
+    {
+        try
+        {
+            return packed.Unpack<T>();
+        }
+        catch (InvalidProtocolBufferException error)
+        {
+            throw new AutomationException("invalid_diff_pair_validation_geometry", $"The native {kind} payload could not be decoded: {error.Message}");
+        }
+    }
+
+    private static void ValidateIdentity(string kind, KIID? id, Net? net)
+    {
+        if (id is null || net is null || string.IsNullOrWhiteSpace(id.Value)
+            || !Guid.TryParseExact(id.Value, "D", out var parsed) || parsed == Guid.Empty || string.IsNullOrWhiteSpace(net.Name))
+            throw new AutomationException("invalid_diff_pair_validation_geometry", $"A native {kind} is missing a canonical identity or net name.");
+    }
+
+    private static void AddIdentity(string id, HashSet<string> selectedIds)
+    {
+        if (!selectedIds.Add(id))
+            throw new AutomationException("invalid_diff_pair_validation_geometry", $"The native differential-pair geometry repeats item identity '{id}'.");
+    }
 
     private static double ParallelError(PairSegment left, PairSegment right)
     {
-        double leftX = left.End.XNm - left.Start.XNm, leftY = left.End.YNm - left.Start.YNm;
-        double rightX = right.End.XNm - right.Start.XNm, rightY = right.End.YNm - right.Start.YNm;
+        double leftX = (double)left.End.XNm - left.Start.XNm, leftY = (double)left.End.YNm - left.Start.YNm;
+        double rightX = (double)right.End.XNm - right.Start.XNm, rightY = (double)right.End.YNm - right.Start.YNm;
         double denominator = Math.Sqrt((leftX * leftX + leftY * leftY) * (rightX * rightX + rightY * rightY));
         return denominator <= 0 ? 1 : Math.Abs(leftX * rightY - leftY * rightX) / denominator;
     }
 
-    private static double PairSpacing(PairSegment left, PairSegment right)
+    private static (double Overlap, double EndpointDelta) LongitudinalCorrespondence(PairSegment left, PairSegment right)
     {
-        (Vector2 Start, Vector2 End)[] leftParts = Parts(left), rightParts = Parts(right);
-        double minimum = double.PositiveInfinity;
-        foreach (var a in leftParts)
-            foreach (var b in rightParts)
-                minimum = Math.Min(minimum, SegmentDistance(a.Start, a.End, b.Start, b.End));
-        return minimum;
+        double dx = (double)left.End.XNm - left.Start.XNm, dy = (double)left.End.YNm - left.Start.YNm;
+        double length = Math.Sqrt(dx * dx + dy * dy);
+        if (length <= 0) return (0, double.PositiveInfinity);
+        double ux = dx / length, uy = dy / length;
+        double leftStart = 0, leftEnd = length;
+        double rightStart = ((double)right.Start.XNm - left.Start.XNm) * ux + ((double)right.Start.YNm - left.Start.YNm) * uy;
+        double rightEnd = ((double)right.End.XNm - left.Start.XNm) * ux + ((double)right.End.YNm - left.Start.YNm) * uy;
+        double rightMin = Math.Min(rightStart, rightEnd), rightMax = Math.Max(rightStart, rightEnd);
+        double overlap = Math.Max(0, Math.Min(leftEnd, rightMax) - Math.Max(leftStart, rightMin));
+        double endpointDelta = Math.Max(Math.Abs(leftStart - rightMin), Math.Abs(leftEnd - rightMax));
+        return (overlap, endpointDelta);
     }
-
-    private static (Vector2 Start, Vector2 End)[] Parts(PairSegment segment) => segment.Mid is null
-        ? [(segment.Start, segment.End)]
-        : [(segment.Start, segment.Mid), (segment.Mid, segment.End)];
 
     private static double SegmentDistance(Vector2 firstStart, Vector2 firstEnd, Vector2 secondStart, Vector2 secondEnd)
     {
@@ -427,8 +529,8 @@ public sealed class PcbDifferentialPairTools(InstanceRegistry registry)
     }
 
     private static double Cross(Vector2 first, Vector2 second, Vector2 point) =>
-        (second.XNm - first.XNm) * (double)(point.YNm - first.YNm)
-        - (second.YNm - first.YNm) * (double)(point.XNm - first.XNm);
+        ((double)second.XNm - first.XNm) * ((double)point.YNm - first.YNm)
+        - ((double)second.YNm - first.YNm) * ((double)point.XNm - first.XNm);
 
     private static bool OnSegment(Vector2 start, Vector2 point, Vector2 end) =>
         point.XNm >= Math.Min(start.XNm, end.XNm) && point.XNm <= Math.Max(start.XNm, end.XNm)

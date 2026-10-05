@@ -3133,7 +3133,8 @@ API_HANDLER_SCH::handleReadLibrarySnapshot(
 
     NativeCapabilityLibrarySnapshotReadResponse response;
     response.mutable_document()->CopyFrom( aCtx.Request.document() );
-    response.set_process_epoch( aCtx.Request.process_epoch() );
+    const std::string actualProcessEpoch = drcApiServer().Token();
+    response.set_process_epoch( actualProcessEpoch );
 
     auto fail = [&]( const char* aCode, const std::string& aMessage,
                      const char* aStatus = "error" )
@@ -3147,6 +3148,9 @@ API_HANDLER_SCH::handleReadLibrarySnapshot(
 
     if( aCtx.Request.process_epoch().empty() )
         return fail( "invalid_process_epoch", "An explicit native process epoch is required." );
+
+    if( aCtx.Request.process_epoch() != actualProcessEpoch )
+        return fail( "stale_process_epoch", "The requested process epoch is no longer current." );
 
     if( !aCtx.Request.has_document() || !aCtx.Request.document().has_project()
             || !aCtx.Request.document().has_lib_id() )

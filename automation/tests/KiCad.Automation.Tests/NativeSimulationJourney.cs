@@ -13,7 +13,7 @@ namespace KiCad.Automation.Tests;
 public sealed partial class NativeSessionTests
 {
     private static async Task VerifyNativeSimulation(NativeClient client, DocumentSpecifier document,
-        string evidence, string instanceId, CancellationToken token)
+        string evidence, string instanceId, string display, CancellationToken token)
     {
         // Exercise a real child path so an MCP binding that drops or truncates the
         // protobuf repeated UUID list cannot accidentally pass with a root target.
@@ -25,7 +25,12 @@ public sealed partial class NativeSessionTests
         string stateDirectory = Directory.CreateTempSubdirectory("kicad-simulation-mcp-").FullName;
         try
         {
-            await using var mcp = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.ProductionStartInfo(),
+            var mcpStart = SyncHarnessProcessTests.ProductionStartInfo();
+            // kicad_instance_start inherits the MCP host environment. Carry the
+            // test-owned Xvfb display through so the restarted native editor can
+            // initialize GTK just like the original fixture process.
+            mcpStart.Environment["DISPLAY"] = display;
+            await using var mcp = await StdioMcpFixture.StartAsync(mcpStart,
                 stateDirectory, Path.Combine(evidence, instanceId + "-simulation-mcp.stderr.log"), token);
             var attached = await mcp.Tool("kicad_instance_attach", new
             { endpoint = client.Endpoint, expectedInstanceId = instanceId });

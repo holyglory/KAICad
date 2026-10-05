@@ -588,7 +588,8 @@ public sealed partial class NativeSessionTests
                         }
                     }
                     else if (journey == NativeJourney.Simulation)
-                        await VerifyNativeSimulation(client, opened.Document, evidence, target.Id, deadline.Token);
+                        await VerifyNativeSimulation(client, opened.Document, evidence, target.Id,
+                            ":" + displayNumber, deadline.Token);
                     else if (journey == NativeJourney.PcbItems)
                         await VerifyNativePcbItems(client, opened.Document, evidence, target.Id, focusProcessId, ":" + displayNumber, deadline.Token);
                     else if (journey == NativeJourney.PcbConnectivity)

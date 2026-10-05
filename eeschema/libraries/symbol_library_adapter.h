@@ -24,6 +24,7 @@
 
 #include <future>
 #include <optional>
+#include <api/library_lifecycle_snapshot.h>
 #include <lib_id.h>
 #include <core/leak_at_exit.h>
 #include <libraries/library_manager.h>
@@ -108,6 +109,17 @@ public:
     {
         return LoadSymbol( aLibId.GetLibNickname(), aLibId.GetLibItemName() );
     }
+
+    /**
+     * Capture one read-only, detached symbol definition together with the exact table row and
+     * file baselines that were observed while reading it.  The document and project are explicit
+     * so a caller cannot accidentally capture a symbol from whichever project happens to be
+     * active in global settings.
+     */
+    tl::expected<LIBRARY_LIFECYCLE_SNAPSHOT, LIBRARY_LIFECYCLE_ERROR> CaptureLibrarySnapshot(
+            const wxString& aNickname, const wxString& aName,
+            const kiapi::common::types::DocumentSpecifier& aDocument,
+            const PROJECT& aProject );
 
     /**
      * The set of return values from SaveSymbol() below.

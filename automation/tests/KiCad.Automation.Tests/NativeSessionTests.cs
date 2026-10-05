@@ -80,6 +80,9 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeRasterTrace")]
     public Task NativeRasterTracePreservesDeterministicContourTopology() => RunNativeSessions(NativeJourney.RasterTrace);
 
+    [TestMethod, TestCategory("NativeRasterTrace")]
+    public Task NativeRasterSchematicProjectionSurvivesSaveReload() => RunNativeSessions(NativeJourney.RasterTraceSchematic);
+
     // Shared PSU/CPU acceptance journeys (psu-cpu-fixture-and-ownership.md §1.9).
     // Each ends Inconclusive (not passed) until its fixture seed and lane journey
     // land; a category joins native-acceptance only after integration.
@@ -133,7 +136,7 @@ public sealed partial class NativeSessionTests
 
     private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, RecursiveEditor, Simulation, PcbItems, PcbConnectivity, CrossProbe,
         PsuCpuSeed, PsuCpuComponentCreation, ConnectedRealization, DiagramCanvas, XmlRebuild, RepeatedSheetRebuild, ProjectRecovery, ProjectRecoveryContainer, OwnershipSync, NativeCrash, NativeCrashRelease,
-        ObserveApplyStress, RepeatedSheetOwnership, ComponentRebind, SymbolLibrary, RasterTrace }
+        ObserveApplyStress, RepeatedSheetOwnership, ComponentRebind, SymbolLibrary, RasterTrace, RasterTraceSchematic }
 
     private async Task RunNativeSessions(NativeJourney journey, string theme = "light")
     {
@@ -161,6 +164,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.CrossProbe => "native-pcb-items",
                 NativeJourney.SymbolLibrary => "native-symbol-library",
                 NativeJourney.RasterTrace => "native-raster-trace",
+                NativeJourney.RasterTraceSchematic => "native-raster-trace-schematic",
                 NativeJourney.PsuCpuSeed => "native-psu-cpu-seed",
                 NativeJourney.PsuCpuComponentCreation => "native-psu-cpu-creation",
                 NativeJourney.ConnectedRealization => "native-connected-realization",
@@ -596,6 +600,8 @@ public sealed partial class NativeSessionTests
                         await VerifyNativeSymbolLibrary(client, opened.Document, evidence, target.Id, deadline.Token);
                     else if (journey == NativeJourney.RasterTrace)
                         await VerifyNativeRasterTrace(client, evidence, target.Id, deadline.Token);
+                    else if (journey == NativeJourney.RasterTraceSchematic)
+                        await VerifyNativeRasterSchematicProjection(client, opened.Document, evidence, target.Id, deadline.Token);
                     else if (journey == NativeJourney.SymbolSheets)
                     {
                         try

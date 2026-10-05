@@ -2336,6 +2336,25 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(staleCreate.TryGetProperty("isError", out var staleCreateError) && staleCreateError.GetBoolean(), staleCreate.GetRawText());
             string staleCreatedStateJson = staleCreate.GetProperty("structuredContent").GetProperty("afterState").GetString()!;
             var staleCreatedState = SchematicJson.Parser.Parse<DocumentLifecycleState>(staleCreatedStateJson);
+            // Read the detached DRC through the same MCP job contract after
+            // the board dependency changes. The finished candidate check must
+            // become a terminal stale result before route commit can inspect
+            // it; it must never keep reporting fresh/completed findings.
+            var staleDrcAfterMutationReply = await mcp.Tool("kicad_pcb_drc_job", new
+            {
+                instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard), jobId = staleDrc.JobId,
+                processEpoch = client.Epoch, candidateRequestJson = BoardJson.Formatter.Format(staleCandidate)
+            });
+            Assert.IsFalse(staleDrcAfterMutationReply.TryGetProperty("isError", out var staleDrcAfterMutationError)
+                && staleDrcAfterMutationError.GetBoolean(), staleDrcAfterMutationReply.GetRawText());
+            staleDrc = SchematicJson.Parser.Parse<PcbDrcJobState>(
+                staleDrcAfterMutationReply.GetProperty("content")[0].GetProperty("text").GetString()!);
+            AssertPcbDrcJobStale(staleDrc, "document_changed",
+                "Reading the detached DRC after the board mutation must invalidate its terminal result.");
+            Assert.AreEqual(staleState.Revision, staleDrc.CheckedRevision);
+            Assert.IsTrue(staleDrc.CandidateDryRun && staleDrc.CandidatePayloadVerified,
+                SchematicJson.Formatter.Format(staleDrc));
+            CollectionAssert.AreEqual(staleCandidate.Items.Select(RouteIdentity).ToArray(), staleDrc.CandidateItemIds.ToArray());
             var staleCommit = await mcp.Tool("kicad_pcb_route_commit", new
             {
                 instanceId, requestJson = BoardJson.Formatter.Format(staleCandidate),

@@ -323,7 +323,12 @@ private:
         std::optional<kiapi::automation::v1::PcbManufacturingExportReceipt> manufacturingExport;
     };
 
-    std::map<std::string, std::shared_ptr<PCB_OPERATION_RECEIPT>> m_operationReceipts;
+    using PCB_OPERATION_RECEIPTS = std::map<std::string, std::shared_ptr<PCB_OPERATION_RECEIPT>>;
+
+    // A receipt belongs to the native process epoch, not to an editor handler.
+    // All handlers registered with the same server must share its lookup, including
+    // after an editor closes and another handler opens the document again.
+    PCB_OPERATION_RECEIPTS& operationReceipts() const;
 };
 
 #endif //KICAD_API_HANDLER_PCB_H

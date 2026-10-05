@@ -144,6 +144,17 @@ KICAD_API_SERVER& API_HANDLER_PCB::drcApiServer() const
 {
     return apiServerOrNull() ? apiServer() : Pgm().GetApiServer();
 }
+
+
+API_HANDLER_PCB::PCB_OPERATION_RECEIPTS& API_HANDLER_PCB::operationReceipts() const
+{
+    // Dispatch and receipt lookup run on the editor thread. Completion callbacks
+    // retain and lock the individual receipt, so handler replacement cannot drop
+    // an in-flight result. Different server tokens never share operation IDs.
+    static std::map<std::string, PCB_OPERATION_RECEIPTS> receiptsByEpoch;
+    return receiptsByEpoch[drcApiServer().Token()];
+}
+
 using types::CommandStatus;
 using types::DocumentType;
 using types::ItemRequestStatus;
@@ -3235,10 +3246,11 @@ HANDLER_RESULT<Empty> API_HANDLER_PCB::handleRefillZones( const HANDLER_CONTEXT<
 
     const std::string operationId = aCtx.Request.operation_id();
     const std::string fingerprint = aCtx.Request.SerializeAsString();
+    PCB_OPERATION_RECEIPTS& receipts = operationReceipts();
     if( !operationId.empty() )
     {
-        auto existing = m_operationReceipts.find( operationId );
-        if( existing != m_operationReceipts.end() )
+        auto existing = receipts.find( operationId );
+        if( existing != receipts.end() )
         {
             if( existing->second->fingerprint != fingerprint )
             {
@@ -3256,7 +3268,7 @@ HANDLER_RESULT<Empty> API_HANDLER_PCB::handleRefillZones( const HANDLER_CONTEXT<
     receipt->fingerprint = fingerprint;
     receipt->document.CopyFrom( aCtx.Request.board() );
     receipt->request = fingerprint;
-    receipt->processEpoch = apiServer().Token();
+    receipt->processEpoch = drcApiServer().Token();
 
     auto mapOutcome = []( ZONE_FILLER::OUTCOME aOutcome )
     {
@@ -3298,7 +3310,7 @@ HANDLER_RESULT<Empty> API_HANDLER_PCB::handleRefillZones( const HANDLER_CONTEXT<
     if( aCtx.Request.zones().empty() )
     {
         if( !operationId.empty() )
-            m_operationReceipts.emplace( operationId, receipt );
+            receipts.emplace( operationId, receipt );
 
         if( PCB_EDIT_FRAME* currentFrame = frame() )
         {
@@ -3377,7 +3389,7 @@ HANDLER_RESULT<Empty> API_HANDLER_PCB::handleRefillZones( const HANDLER_CONTEXT<
         }
 
         if( !operationId.empty() )
-            m_operationReceipts.emplace( operationId, receipt );
+            receipts.emplace( operationId, receipt );
 
         ZONE_FILL_RESULT result;
         result.generatorRefillOutcome = ZONE_FILLER::OUTCOME::NOT_RUN;
@@ -3465,10 +3477,11 @@ HANDLER_RESULT<ImportNetlistResponse> API_HANDLER_PCB::handleImportNetlist( cons
 
     const std::string operationId = aCtx.Request.operation_id();
     const std::string fingerprint = aCtx.Request.SerializeAsString();
+    PCB_OPERATION_RECEIPTS& receipts = operationReceipts();
     if( !operationId.empty() )
     {
-        auto existing = m_operationReceipts.find( operationId );
-        if( existing != m_operationReceipts.end() )
+        auto existing = receipts.find( operationId );
+        if( existing != receipts.end() )
         {
             if( existing->second->fingerprint != fingerprint || !existing->second->importResponse )
             {
@@ -3544,8 +3557,8 @@ HANDLER_RESULT<ImportNetlistResponse> API_HANDLER_PCB::handleImportNetlist( cons
         receipt->request = fingerprint;
         receipt->completed = true;
         receipt->importResponse = response;
-        receipt->processEpoch = apiServer().Token();
-        m_operationReceipts.emplace( operationId, std::move( receipt ) );
+        receipt->processEpoch = drcApiServer().Token();
+        receipts.emplace( operationId, std::move( receipt ) );
     }
     return response;
 }
@@ -3566,8 +3579,9 @@ API_HANDLER_PCB::handleReadPcbOperation(
         return tl::unexpected( e );
     }
 
-    auto found = m_operationReceipts.find( aCtx.Request.operation_id() );
-    if( found == m_operationReceipts.end() )
+    PCB_OPERATION_RECEIPTS& receipts = operationReceipts();
+    auto found = receipts.find( aCtx.Request.operation_id() );
+    if( found == receipts.end() )
     {
         response.set_found( false );
         return response;
@@ -3630,8 +3644,9 @@ API_HANDLER_PCB::handleRunPcbManufacturingExport(
     NATIVE_STATE_DIGEST requestDigest;
     requestDigest.Append( normalizedBytes );
 
-    auto existing = m_operationReceipts.find( request.operation_id() );
-    if( existing != m_operationReceipts.end() )
+    PCB_OPERATION_RECEIPTS& receipts = operationReceipts();
+    auto existing = receipts.find( request.operation_id() );
+    if( existing != receipts.end() )
     {
         std::lock_guard lock( existing->second->mutex );
         if( !existing->second->manufacturingExport
@@ -3719,7 +3734,7 @@ API_HANDLER_PCB::handleRunPcbManufacturingExport(
     // Reserve the bounded manifest capacity before native dispatch. Inventory
     // still fails closed if the byte budget or file count is exceeded.
     retained.mutable_artifacts()->Reserve( 4096 );
-    m_operationReceipts.emplace( request.operation_id(), receipt );
+    receipts.emplace( request.operation_id(), receipt );
 
     std::error_code createError;
     if( !fs::create_directory( stagingDirectory, createError ) || createError )
@@ -4076,8 +4091,9 @@ API_HANDLER_PCB::handleReadPcbManufacturingExport(
     {
         return tl::unexpected( ManufacturingError( "The manufacturing receipt read requires the exact PCB and process epoch" ) );
     }
-    auto found = m_operationReceipts.find( aCtx.Request.operation_id() );
-    if( found == m_operationReceipts.end() )
+    PCB_OPERATION_RECEIPTS& receipts = operationReceipts();
+    auto found = receipts.find( aCtx.Request.operation_id() );
+    if( found == receipts.end() )
     {
         response.set_found( false );
         return response;

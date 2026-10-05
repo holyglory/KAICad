@@ -52,6 +52,9 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(current.WorkerFinished);
             Assert.IsTrue(current.Vectors.Any(vector => vector.Name.Contains("out", StringComparison.OrdinalIgnoreCase)));
             Assert.IsTrue(current.Vectors.SelectMany(vector => vector.Values).Any(value => Math.Abs(value - 2.5) < 0.01));
+            string originalEpoch = client.Epoch;
+            var completedArchive = await ArchiveResult(mcp, current.JobId, originalEpoch);
+            Assert.AreEqual(current, JobResult(completedArchive, originalEpoch));
 
             // Save through the checked lifecycle transaction, replay its receipt,
             // then reload the schematic. The native simulation result is a
@@ -81,13 +84,15 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(SimulationJobStatus.SimjsCompleted, completedRead.Status);
             Assert.AreEqual(current, completedRead, "The MCP job read must retain the complete native result.");
 
-            // A new MCP process has no in-memory deck map, but the native
-            // process-owned result and operation receipt remain authoritative.
-            string reconnectState = Directory.CreateTempSubdirectory("kicad-simulation-mcp-reconnect-").FullName;
-            try
+            // Reopen the same private state directory in a fresh MCP process.
+            // Neither vectors nor the original deck provenance may depend on
+            // an in-memory map in the first host.
             {
                 await using var reconnect = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.ProductionStartInfo(),
-                    reconnectState, Path.Combine(evidence, instanceId + "-simulation-mcp-reconnect.stderr.log"), token);
+                    stateDirectory, Path.Combine(evidence, instanceId + "-simulation-mcp-reconnect.stderr.log"), token);
+                var reconnectArchive = await ArchiveResult(reconnect, current.JobId, originalEpoch);
+                Assert.IsTrue(JsonElement.DeepEquals(completedArchive.GetProperty("structuredContent"),
+                    reconnectArchive.GetProperty("structuredContent")), "A fresh MCP host must retain exact archived vectors and provenance.");
                 var reconnectAttached = await reconnect.Tool("kicad_instance_attach", new
                     { endpoint = client.Endpoint, expectedInstanceId = instanceId });
                 Assert.IsFalse(reconnectAttached.TryGetProperty("isError", out var reconnectError)
@@ -97,8 +102,8 @@ public sealed partial class NativeSessionTests
                 Assert.AreEqual(current, reconnectRead,
                     "A fresh MCP connection must recover the native result instead of inventing a new job.");
 
-                // Native operation identity remains the source of truth after an
-                // MCP restart; preserve its deterministic refusal code.
+                // The durable operation fingerprint must reject changed bytes
+                // after MCP restart before dispatching to the native editor.
                 var reused = await reconnect.Tool("kicad_simulation_start", new
                 {
                     instanceId, expectedInstanceEpoch = client.Epoch, document = Target(simulationDocument),
@@ -106,7 +111,6 @@ public sealed partial class NativeSessionTests
                 });
                 AssertFailure(reused, "simulation_operation_reused");
             }
-            finally { Directory.Delete(reconnectState, true); }
 
             var completedCancel = JobResult(await mcp.Tool("kicad_simulation_cancel", new
             { instanceId, expectedInstanceEpoch = client.Epoch, document = Target(simulationDocument), jobId = started.JobId }));
@@ -120,6 +124,13 @@ public sealed partial class NativeSessionTests
                 { Document = simulationDocument, JobId = started.JobId, ProcessEpoch = client.Epoch }, token);
             Assert.AreEqual(Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(netlist))),
                 inlineDependencies.GeneratedDeckSha256, "Native dependency evidence must hash the exact deck bytes sent to ngspice.");
+            var archivedDependencies = completedArchive.GetProperty("structuredContent").GetProperty("dependencies");
+            Assert.AreEqual(inlineDependencies.GeneratedDeckSha256, archivedDependencies.GetProperty("generatedDeckSha256").GetString());
+            Assert.AreEqual(inlineDependencies.DependencyCaptureComplete, archivedDependencies.GetProperty("dependencyCaptureComplete").GetBoolean());
+            CollectionAssert.AreEqual(inlineDependencies.DependencyPaths.ToArray(),
+                archivedDependencies.GetProperty("dependencyPaths").EnumerateArray().Select(path => path.GetString()).ToArray());
+            CollectionAssert.AreEqual(inlineDependencies.Warnings.ToArray(),
+                archivedDependencies.GetProperty("warnings").EnumerateArray().Select(warning => warning.GetString()).ToArray());
 
             var replay = await Start(netlist, operation);
             Assert.AreEqual(current, replay, "An identical operation replay must retain the same completed job and vectors.");
@@ -164,6 +175,20 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(generatedTerminal.Status is SimulationJobStatus.SimjsCompleted or SimulationJobStatus.SimjsFailed);
             await VerifyGeneratedSimulationDependenciesThroughMcp(client, mcp, simulationDocument,
                 generatedTerminal, evidence, instanceId, token);
+            var afterLaterJob = await ArchiveResult(mcp, current.JobId, originalEpoch);
+            Assert.IsTrue(JsonElement.DeepEquals(completedArchive.GetProperty("structuredContent"),
+                afterLaterJob.GetProperty("structuredContent")), "Starting a later native job must preserve the earlier archive.");
+            Assert.AreEqual(current, await Start(netlist, operation), "An old operation must replay its archive without running again.");
+            Assert.AreEqual(generatedTerminal, await client.InvokeAsync<ReadSimulationJob, SimulationJobState>(new()
+            { Document = simulationDocument, JobId = generated.JobId, ProcessEpoch = originalEpoch }, token),
+                "Replaying an archived operation must not replace the later native job.");
+            foreach (var foreign in new[]
+            {
+                new { instanceId = instanceId + "-other", processEpoch = originalEpoch, document = Target(simulationDocument), jobId = current.JobId },
+                new { instanceId, processEpoch = Guid.NewGuid().ToString("D"), document = Target(simulationDocument), jobId = current.JobId },
+                new { instanceId, processEpoch = originalEpoch, document = Target(document), jobId = current.JobId }
+            })
+                AssertFailure(await mcp.Tool("kicad_simulation_result", foreign), "simulation_result_not_found");
 
             const string longNetlist = "Long transient\nV1 in 0 PULSE(0 5 0 1n 1n 1m 2m)\nR1 in out 1k\nC1 out 0 1u\n.tran 1u 1000m\n.end\n";
             var longRun = await Start(longNetlist, Guid.NewGuid().ToString("D"));
@@ -176,6 +201,8 @@ public sealed partial class NativeSessionTests
             var cancelledRead = JobResult(await mcp.Tool("kicad_simulation_job", new
             { instanceId, expectedInstanceEpoch = client.Epoch, document = Target(simulationDocument), jobId = longRun.JobId }));
             Assert.AreEqual(cancelled, cancelledRead);
+            var cancelledArchive = await ArchiveResult(mcp, cancelled.JobId, originalEpoch);
+            Assert.AreEqual(cancelled, JobResult(cancelledArchive, originalEpoch));
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-simulation.json"),
                 JsonSerializer.Serialize(current), token);
 
@@ -208,6 +235,8 @@ public sealed partial class NativeSessionTests
                 "Reading a failed simulation must preserve the same deterministic terminal receipt.");
             Assert.AreEqual(failed, await Start(failedNetlist, failedOperation),
                 "Retrying a failed operation must return its retained failure receipt.");
+            var failedArchive = await ArchiveResult(mcp, failed.JobId, originalEpoch);
+            Assert.AreEqual(failed, JobResult(failedArchive, originalEpoch));
 
             // The two editor instances run this journey independently. One real
             // restart proves the boundary; the second keeps its fixture process
@@ -220,10 +249,9 @@ public sealed partial class NativeSessionTests
                 return;
             }
 
-            // The native restart path deliberately changes the process epoch. The
-            // simulator currently retains jobs only in API_HANDLER_SCH memory, so
-            // an old job must become an explicit result_lost failure instead of an
-            // empty success or a generic transport error.
+            // The live native job still disappears with the process. Archived
+            // receipts retain the old process identity and must also survive a
+            // subsequent MCP restart without contacting the replacement editor.
             var beforeRestartSession = await client.HandshakeAsync(token);
             int beforeRestartPid = checked((int)beforeRestartSession.ProcessId);
             using (var oldProcess = Process.GetProcessById(beforeRestartPid))
@@ -261,12 +289,29 @@ public sealed partial class NativeSessionTests
                 instanceId, expectedInstanceEpoch = restartedEpoch, document = Target(simulationDocument), jobId = started.JobId
             });
             AssertFailure(lost, "simulation_result_lost");
+            await using (var archiveHost = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.ProductionStartInfo(),
+                stateDirectory, Path.Combine(evidence, instanceId + "-simulation-archive-restart.stderr.log"), token))
+            {
+                foreach (var prior in new[] { completedArchive, cancelledArchive, failedArchive })
+                {
+                    string archivedJobId = prior.GetProperty("structuredContent").GetProperty("job").GetProperty("jobId").GetString()!;
+                    var retained = await ArchiveResult(archiveHost, archivedJobId, originalEpoch);
+                    Assert.IsTrue(JsonElement.DeepEquals(prior.GetProperty("structuredContent"), retained.GetProperty("structuredContent")),
+                        "Both native and MCP restart must preserve exact terminal state, vectors, and provenance.");
+                }
+                AssertFailure(await archiveHost.Tool("kicad_simulation_result", new
+                { instanceId, processEpoch = restartedEpoch, document = Target(simulationDocument), jobId = current.JobId }),
+                    "simulation_result_not_found");
+            }
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-simulation-restart.json"),
                 JsonSerializer.Serialize(new
                 {
                     instanceId, oldEpoch = beforeRestartSession.Epoch, oldProcessId = beforeRestartPid,
                     restartedEpoch, restartedProcessId = restartedData.GetProperty("processId").GetInt32(),
-                    jobId = started.JobId, result = "simulation_result_lost", nativeRetention = false
+                    jobId = started.JobId, liveResult = "simulation_result_lost", nativeRetention = false,
+                    archivedCompleted = completedArchive.GetProperty("structuredContent"),
+                    archivedCancelled = cancelledArchive.GetProperty("structuredContent"),
+                    archivedFailed = failedArchive.GetProperty("structuredContent"), archiveRetainedOriginalIdentity = true
                 }), token);
 
             int restartedPid = restartedData.GetProperty("processId").GetInt32();
@@ -303,19 +348,29 @@ public sealed partial class NativeSessionTests
                 return currentJob;
             }
 
-            SimulationJobState JobResult(JsonElement reply)
+            async Task<JsonElement> ArchiveResult(StdioMcpFixture host, string jobId, string processEpoch)
             {
+                var reply = await host.Tool("kicad_simulation_result", new
+                { instanceId, processEpoch, document = Target(simulationDocument), jobId });
+                Assert.IsFalse(reply.TryGetProperty("isError", out var error) && error.GetBoolean(), reply.GetRawText());
+                Assert.AreEqual("archive", reply.GetProperty("structuredContent").GetProperty("source").GetString());
+                return reply;
+            }
+
+            SimulationJobState JobResult(JsonElement reply, string? expectedEpoch = null)
+            {
+                expectedEpoch ??= client.Epoch;
                 Assert.IsFalse(reply.TryGetProperty("isError", out var error) && error.GetBoolean(), reply.GetRawText());
                 var data = reply.GetProperty("structuredContent");
                 Assert.AreEqual(instanceId, data.GetProperty("instanceId").GetString());
-                Assert.AreEqual(client.Epoch, data.GetProperty("instanceEpoch").GetString());
+                Assert.AreEqual(expectedEpoch, data.GetProperty("instanceEpoch").GetString());
                 Assert.IsTrue(JsonElement.DeepEquals(
                     JsonSerializer.SerializeToElement(simulationDocument, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
                     data.GetProperty("document")), "MCP must preserve the complete project and every native sheet UUID segment.");
                 var job = JsonNode.Parse(data.GetProperty("job").GetRawText())!.AsObject();
                 job["status"] = (int)Enum.Parse<SimulationJobStatus>(job["status"]!.GetValue<string>());
                 job["document"] = Target(simulationDocument);
-                job["processEpoch"] = client.Epoch;
+                job["processEpoch"] = expectedEpoch;
                 return SchematicJson.Parser.Parse<SimulationJobState>(job.ToJsonString());
             }
 

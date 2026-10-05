@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -16,10 +15,9 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class SimulationTools(InstanceRegistry instances)
 {
-    private static readonly ConcurrentDictionary<string, DeckProvenance> Decks = new(StringComparer.Ordinal);
-    private static readonly ConcurrentDictionary<string, SimulationOperation> Operations = new(StringComparer.Ordinal);
+    private readonly SimulationResultReceipts receipts = new(instances.StateDirectory);
     [McpServerTool(Name = "kicad_simulation_start"),
-     Description("Start one explicit ngspice simulation through KiCad's existing native simulator for a verified schematic document. Pass an empty netlist to simulate the deck KiCad generates from the schematic. A supplied netlist must be a plain self-contained circuit: interpreter blocks (.control/.exec, *ng_script) and file includes (.include, .lib file) are rejected. The MCP result records the inline deck SHA-256 when supplied and binds completed job reads to self-contained provenance. The native editor owns the simulator and its result vectors. Retry the same operation ID after a lost reply; a different operation cannot run concurrently."),
+     Description("Start one explicit ngspice simulation through KiCad's existing native simulator for a verified schematic document. Pass an empty netlist to simulate the deck KiCad generates from the schematic. A supplied netlist must be a plain self-contained circuit: interpreter blocks (.control/.exec, *ng_script) and file includes (.include, .lib file) are rejected. The MCP result records the inline deck SHA-256. An identical operation with a durable terminal receipt replays its archive without running again. A dispatched operation whose job ID was not recorded remains explicitly unresolved and is never automatically dispatched again. A different operation cannot replace an unarchived native job."),
      KiCadCapability("simulation", "native-ngspice", "instance epoch, document, operation ID"),
      KiCadVerification(KiCadVerificationLevel.NativeJourney, "NativeSessionTests.NativeSimulationUsesKiCadNgspiceAndReturnsVectors", "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Start(string instanceId, string expectedInstanceEpoch, SimulationDocumentInput document,
@@ -28,59 +26,53 @@ public sealed class SimulationTools(InstanceRegistry instances)
         SimulationDeckAdmission.Validate(netlist);
         ValidateId(operationId, "operation");
         var target = SimulationDocumentInput.ToNative(document);
+        string? deckHash = string.IsNullOrEmpty(netlist) ? null : Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(netlist)));
+        var operation = SimulationOperationReceipt.Prepare(instanceId, expectedInstanceEpoch, target, operationId,
+            deckHash, string.IsNullOrEmpty(netlist) ? "native-schematic-generated" : "inline-caller-deck");
+        using var ownership = receipts.AcquireSession(instanceId);
+        var previous = receipts.ReadOperation(instanceId, operationId);
+        if (previous is not null)
+        {
+            if (!SimulationResultReceipts.SameFingerprint(previous, operation))
+                throw new AutomationException("simulation_operation_reused", "The operation ID is already bound to different original instance, epoch, schematic or deck bytes.");
+            if (receipts.ReadTerminal(previous) is { } archive)
+                return ArchivedData(archive, target);
+            if (previous.Stage == SimulationOperationStage.Dispatched)
+                throw SimulationResultReceipts.Unresolved(previous.OperationId);
+        }
         var client = instances.Client(instanceId); var session = await client.HandshakeAsync(cancellationToken);
         if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
             throw new AutomationException("simulation_instance_changed", "The native instance identity or epoch changed; inspect it again.");
+        if (previous?.Stage == SimulationOperationStage.Accepted)
+        {
+            var retained = await ReadNative(client, instanceId, session.Epoch, target, previous.JobId!, cancellationToken);
+            return Data(new { instanceId, instanceEpoch = session.Epoch, document = target,
+                deck = DescribeDeck(previous), job = Describe(retained) });
+        }
+        await PreserveCurrent(client, instanceId, session.Epoch, operation.OperationId, cancellationToken);
+        receipts.WriteOperation(operation);
+        receipts.MakeCurrent(operation);
+        receipts.WriteOperation(operation = operation with { Stage = SimulationOperationStage.Dispatched });
         var request = new StartSimulationJob
         {
             Document = target, OperationId = operationId.ToString("D"), ProcessEpoch = session.Epoch, Netlist = netlist
         };
-        string operationKey = Key(instanceId, session.Epoch, request.OperationId);
-        string? deckHash = string.IsNullOrEmpty(netlist) ? null : Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(netlist)));
-        var operation = new SimulationOperation(request.OperationId, target.Clone(), deckHash, string.IsNullOrEmpty(netlist) ? "native-schematic-generated" : "inline-caller-deck");
-        if (Operations.TryGetValue(operationKey, out var prior)
-            && (!prior.Document.Equals(target) || prior.Sha256 != operation.Sha256 || prior.Source != operation.Source))
-            throw new AutomationException("simulation_operation_reused", "The operation ID is already bound to different schematic or deck bytes.");
-        Operations[operationKey] = operation;
-
-        SimulationJobState result;
-        try
-        {
-            result = await client.InvokeAsync<StartSimulationJob, SimulationJobState>(request, cancellationToken);
-        }
-        catch
-        {
-            // The native handler is the authoritative transaction receipt. Do not
-            // leave a speculative MCP-side binding after a rejected dispatch:
-            // reconnects must be able to retry the same operation and let KiCad
-            // report whether the bytes match its retained operation.
-            Operations.TryRemove(operationKey, out _);
-            throw;
-        }
+        // The dispatch marker is durable before native invocation. A lost reply
+        // cannot erase the fingerprint or authorize another execution.
+        var result = await client.InvokeAsync<StartSimulationJob, SimulationJobState>(request, cancellationToken);
         SimulationJobContract.ValidateStartIdentity(request, result, session.Epoch);
-        if (result.Status is SimulationJobStatus.SimjsCompleted or SimulationJobStatus.SimjsCancelled or SimulationJobStatus.SimjsFailed)
+        receipts.WriteOperation(operation = operation with { Stage = SimulationOperationStage.Accepted, JobId = result.JobId });
+        if (Terminal(result))
         {
             // A terminal Start replay may omit vectors and worker completion. Read
             // the same retained job instead of weakening the result contract.
-            var retained = await client.InvokeAsync<ReadSimulationJob, SimulationJobState>(new()
-            { Document = target, JobId = result.JobId, ProcessEpoch = session.Epoch }, cancellationToken);
-            SimulationJobContract.ValidateRead(retained, target, session.Epoch, result.JobId, request.OperationId);
+            var retained = await ReadNative(client, instanceId, session.Epoch, target, result.JobId, cancellationToken);
             if (retained.Status != result.Status)
                 throw new AutomationException("invalid_simulation_result", "The terminal simulation state changed while reconciling the start reply.");
             result = retained;
         }
         SimulationJobContract.ValidateStart(request, result, session.Epoch);
-        string deckKey = Key(instanceId, session.Epoch, result.JobId);
-        Decks[deckKey] = new(session.Epoch, target, deckHash, operation.Source,
-            SelfContained: !string.IsNullOrEmpty(netlist), DependenciesKnown: !string.IsNullOrEmpty(netlist), request.OperationId);
-        if (Decks.Count > 4096)
-        {
-            string? oldest = Decks.Keys.FirstOrDefault();
-            if (oldest is not null) Decks.TryRemove(oldest, out _);
-        }
-        if (Operations.Count > 4096 && Operations.Keys.FirstOrDefault() is { } oldOperation)
-            Operations.TryRemove(oldOperation, out _);
-        return Data(new { instanceId, instanceEpoch = session.Epoch, document = target, deck = DescribeDeck(instanceId, session.Epoch, result.JobId), job = Describe(result) });
+        return Data(new { instanceId, instanceEpoch = session.Epoch, document = target, deck = DescribeDeck(operation), job = Describe(result) });
     });
 
     [McpServerTool(Name = "kicad_simulation_job", ReadOnly = true),
@@ -95,18 +87,26 @@ public sealed class SimulationTools(InstanceRegistry instances)
         var client = instances.Client(instanceId); var session = await client.HandshakeAsync(cancellationToken);
         if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
             throw new AutomationException("simulation_instance_changed", "The native instance identity or epoch changed; inspect it again.");
-        var request = new ReadSimulationJob
-        { Document = target, JobId = jobId.ToString("D"), ProcessEpoch = session.Epoch };
-        SimulationJobState result;
-        try { result = await client.InvokeAsync<ReadSimulationJob, SimulationJobState>(request, cancellationToken); }
-        catch (NativeApiException error) when (IsMissingJob(error) && WasRetainedByEarlierEpoch(instanceId, session.Epoch, request.JobId))
-        {
-            throw ResultLostAfterRestart(request.JobId);
-        }
-        string operationKey = Key(instanceId, session.Epoch, result.OperationId);
-        Operations.TryGetValue(operationKey, out var operation);
-        SimulationJobContract.ValidateRead(result, target, session.Epoch, jobId.ToString("D"), operation?.OperationId);
-        return Data(new { instanceId, instanceEpoch = session.Epoch, document = target, deck = DescribeDeck(instanceId, session.Epoch, result.JobId), job = Describe(result) });
+        using var ownership = receipts.AcquireSession(instanceId);
+        var result = await ReadNative(client, instanceId, session.Epoch, target, jobId.ToString("D"), cancellationToken);
+        var operation = receipts.ReadOperation(instanceId, Guid.Parse(result.OperationId));
+        return Data(new { instanceId, instanceEpoch = session.Epoch, document = target, deck = DescribeDeck(operation), job = Describe(result) });
+    });
+
+    [McpServerTool(Name = "kicad_simulation_result", ReadOnly = true),
+     Description("Read an immutable archived terminal simulation result without contacting KiCad. Supply its original instanceId, processEpoch, complete schematic document and jobId. The archive preserves the original native outcome, vectors and captured deck/dependency evidence, including incomplete coverage and warnings; it does not adopt a replacement editor or resume a simulation."),
+     KiCadCapability("simulation", "durable-results", "original instance, process epoch, document, job ID"),
+     KiCadVerification(KiCadVerificationLevel.NativeJourney, "NativeSessionTests.NativeSimulationUsesKiCadNgspiceAndReturnsVectors")]
+    public Task<CallToolResult> Result(string instanceId, string processEpoch, SimulationDocumentInput document,
+        Guid jobId, CancellationToken cancellationToken) => Execute(() =>
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ValidateId(jobId, "job");
+        var target = SimulationDocumentInput.ToNative(document);
+        var archive = receipts.ReadTerminal(instanceId, processEpoch, jobId);
+        if (archive is null || !archive.Operation.Document.Equals(target))
+            throw new AutomationException("simulation_result_not_found", "No terminal simulation archive matches that original instance, process epoch, document and job.");
+        return Task.FromResult(ArchivedData(archive, target));
     });
 
     [McpServerTool(Name = "kicad_simulation_dependencies", ReadOnly = true),
@@ -142,9 +142,10 @@ public sealed class SimulationTools(InstanceRegistry instances)
             || result.ProcessEpoch != session.Epoch)
             throw new AutomationException("simulation_dependency_identity_mismatch",
                 "Native dependency evidence did not preserve the requested document, job, or process identity.");
-        Decks.TryGetValue(Key(instanceId, session.Epoch, jobId.ToString("D")), out DeckProvenance? deck);
+        SimulationJobContract.ValidateDependencies(result, document, session.Epoch, jobId.ToString("D"));
+        var operation = OperationFor(instanceId, document, session.Epoch, result.OperationId);
         SimulationJobContract.ValidateDependencies(result, document, session.Epoch, jobId.ToString("D"),
-            deck?.OperationId, deck?.Sha256);
+            operation?.OperationId, operation?.RequestedDeckSha256);
         return Data(new
         {
             instanceId,
@@ -177,19 +178,16 @@ public sealed class SimulationTools(InstanceRegistry instances)
             deadline.CancelAfter(TimeSpan.FromMinutes(5));
             while (true)
             {
-                var request = new ReadSimulationJob
-                { Document = target, JobId = jobId.ToString("D"), ProcessEpoch = session.Epoch };
-                SimulationJobState result;
-                try { result = await client.InvokeAsync<ReadSimulationJob, SimulationJobState>(request, deadline.Token); }
-                catch (NativeApiException error) when (IsMissingJob(error) && WasRetainedByEarlierEpoch(instanceId, session.Epoch, request.JobId))
                 {
-                    throw ResultLostAfterRestart(request.JobId);
+                    // Release ownership between reads so cancellation can reach
+                    // the native simulator while this wait is pending.
+                    using var ownership = receipts.AcquireSession(instanceId);
+                    var result = await ReadNative(client, instanceId, session.Epoch, target, jobId.ToString("D"), deadline.Token);
+                    var operation = OperationFor(instanceId, target, session.Epoch, result.OperationId);
+                    if (result.Sequence > afterSequence || Terminal(result))
+                        return Data(new { instanceId, instanceEpoch = session.Epoch, document = target,
+                            deck = DescribeDeck(operation), job = Describe(result) });
                 }
-                string operationKey = Key(instanceId, session.Epoch, result.OperationId);
-                Operations.TryGetValue(operationKey, out var operation);
-                SimulationJobContract.ValidateRead(result, target, session.Epoch, jobId.ToString("D"), operation?.OperationId);
-                if (result.Sequence > afterSequence || result.Status is SimulationJobStatus.SimjsCompleted or SimulationJobStatus.SimjsCancelled or SimulationJobStatus.SimjsFailed)
-                    return Data(new { instanceId, instanceEpoch = session.Epoch, document = target, deck = DescribeDeck(instanceId, session.Epoch, result.JobId), job = Describe(result) });
                 await Task.Delay(100, deadline.Token);
             }
         }
@@ -212,17 +210,103 @@ public sealed class SimulationTools(InstanceRegistry instances)
             throw new AutomationException("simulation_instance_changed", "The native instance identity or epoch changed; inspect it again.");
         var request = new CancelSimulationJob
         { Document = target, JobId = jobId.ToString("D"), ProcessEpoch = session.Epoch };
+        using var ownership = receipts.AcquireSession(instanceId);
         SimulationJobState result;
         try { result = await client.InvokeAsync<CancelSimulationJob, SimulationJobState>(request, cancellationToken); }
-        catch (NativeApiException error) when (IsMissingJob(error) && WasRetainedByEarlierEpoch(instanceId, session.Epoch, request.JobId))
+        catch (NativeApiException error) when (IsMissingJob(error) && receipts.HasEarlierEpoch(instanceId, session.Epoch, jobId))
         {
             throw ResultLostAfterRestart(request.JobId);
         }
-        string operationKey = Key(instanceId, session.Epoch, result.OperationId);
-        Operations.TryGetValue(operationKey, out var operation);
-        SimulationJobContract.ValidateRead(result, target, session.Epoch, jobId.ToString("D"), operation?.OperationId);
-        return Data(new { instanceId, instanceEpoch = session.Epoch, document = target, deck = DescribeDeck(instanceId, session.Epoch, result.JobId), job = Describe(result) });
+        SimulationJobContract.ValidateRead(result, target, session.Epoch, jobId.ToString("D"));
+        var operation = OperationFor(instanceId, target, session.Epoch, result.OperationId);
+        if (Terminal(result))
+            result = await ReadNative(client, instanceId, session.Epoch, target, result.JobId, cancellationToken);
+        return Data(new { instanceId, instanceEpoch = session.Epoch, document = target, deck = DescribeDeck(operation), job = Describe(result) });
     });
+
+    private async Task PreserveCurrent(NativeClient client, string instanceId, string epoch, string nextOperationId,
+        CancellationToken cancellationToken)
+    {
+        var current = receipts.ReadCurrent(instanceId, epoch);
+        if (current is null || current.OperationId == nextOperationId || current.Stage == SimulationOperationStage.Prepared
+            || receipts.ReadTerminal(current) is not null) return;
+        if (current.JobId is null) throw SimulationResultReceipts.Unresolved(current.OperationId);
+        var result = await ReadNative(client, instanceId, epoch, current.Document, current.JobId, cancellationToken);
+        if (!Terminal(result)) throw new AutomationException("simulation_busy", "The preceding simulation is still running; wait or cancel it before starting another operation.");
+    }
+
+    private async Task<SimulationJobState> ReadNative(NativeClient client, string instanceId, string epoch,
+        DocumentSpecifier document, string jobId, CancellationToken cancellationToken)
+    {
+        SimulationJobState result;
+        try
+        {
+            result = await client.InvokeAsync<ReadSimulationJob, SimulationJobState>(new()
+            { Document = document, JobId = jobId, ProcessEpoch = epoch }, cancellationToken);
+        }
+        catch (NativeApiException error) when (IsMissingJob(error) && receipts.HasEarlierEpoch(instanceId, epoch, Guid.Parse(jobId)))
+        { throw ResultLostAfterRestart(jobId); }
+        SimulationJobContract.ValidateRead(result, document, epoch, jobId);
+        var operation = OperationFor(instanceId, document, epoch, result.OperationId);
+        SimulationJobContract.ValidateRead(result, document, epoch, jobId, operation?.OperationId);
+        if (Terminal(result)) await CaptureTerminal(client, instanceId, document, epoch, result, cancellationToken);
+        return result;
+    }
+
+    private async Task CaptureTerminal(NativeClient client, string instanceId, DocumentSpecifier document,
+        string epoch, SimulationJobState result, CancellationToken cancellationToken)
+    {
+        var operation = OperationFor(instanceId, document, epoch, result.OperationId);
+        if (operation is null)
+        {
+            // Retain native evidence without inventing caller request bytes when
+            // another state directory originally started the job.
+            operation = SimulationOperationReceipt.Observe(instanceId, result);
+            receipts.WriteOperation(operation);
+        }
+        else if (operation.Stage == SimulationOperationStage.Dispatched)
+        {
+            operation = operation with { Stage = SimulationOperationStage.Accepted, JobId = result.JobId };
+            receipts.WriteOperation(operation);
+        }
+        if (operation.JobId != result.JobId)
+            throw new AutomationException("invalid_simulation_result", "The native result changed its retained operation's job identity.");
+        var dependencies = await client.InvokeAsync<NativeCapabilitySimulationReadDependencies, NativeCapabilitySimulationDependencies>(new()
+        { Document = document, JobId = result.JobId, ProcessEpoch = epoch }, cancellationToken);
+        SimulationJobContract.ValidateDependencies(dependencies, document, epoch, result.JobId,
+            operation.OperationId, operation.RequestedDeckSha256);
+        receipts.WriteTerminal(SimulationTerminalReceipt.Capture(operation, result, dependencies));
+    }
+
+    private SimulationOperationReceipt? OperationFor(string instanceId, DocumentSpecifier document, string epoch, string operationId)
+    {
+        var operation = receipts.ReadOperation(instanceId, Guid.Parse(operationId));
+        if (operation is not null && (operation.ProcessEpoch != epoch || !operation.Document.Equals(document)))
+            throw new AutomationException("invalid_simulation_result", "The native operation does not match its retained original process and schematic identity.");
+        return operation;
+    }
+
+    private static bool Terminal(SimulationJobState result) => result.Status is SimulationJobStatus.SimjsCompleted
+        or SimulationJobStatus.SimjsCancelled or SimulationJobStatus.SimjsFailed;
+
+    private static CallToolResult ArchivedData(SimulationTerminalReceipt receipt, DocumentSpecifier document)
+    {
+        var operation = receipt.Operation; var job = receipt.Job; var dependencies = receipt.Dependencies;
+        SimulationJobContract.ValidateArchive(receipt, document, operation.ProcessEpoch, job.JobId);
+        return Data(new
+        {
+            instanceId = operation.InstanceId, instanceEpoch = operation.ProcessEpoch, document,
+            source = "archive", receiptSha256 = receipt.Sha256,
+            deck = DescribeDeck(operation), job = Describe(job),
+            dependencies = new
+            {
+                document = dependencies.Document, processEpoch = dependencies.ProcessEpoch,
+                jobId = dependencies.JobId, operationId = dependencies.OperationId,
+                generatedDeckSha256 = dependencies.GeneratedDeckSha256, dependencyCaptureComplete = dependencies.DependencyCaptureComplete,
+                dependencyPaths = dependencies.DependencyPaths.ToArray(), warnings = dependencies.Warnings.ToArray()
+            }
+        });
+    }
 
     private static object Describe(SimulationJobState value) => new
     {
@@ -232,23 +316,13 @@ public sealed class SimulationTools(InstanceRegistry instances)
         vectors = value.Status == SimulationJobStatus.SimjsCompleted ? value.Vectors.Select(v => new { name = v.Name, complex = v.Complex, values = v.Values }).ToArray() : []
     };
 
-    private static object? DescribeDeck(string instanceId, string processEpoch, string jobId)
-        => Decks.TryGetValue(Key(instanceId, processEpoch, jobId), out DeckProvenance? deck)
-            ? new { source = deck.Source, sha256 = deck.Sha256, externalFiles = Array.Empty<string>(),
-                selfContained = deck.SelfContained, dependenciesKnown = deck.DependenciesKnown,
-                operationId = deck.OperationId }
+    private static object? DescribeDeck(SimulationOperationReceipt? operation)
+        => operation is { RequestFingerprintKnown: true }
+            ? new { source = operation.DeckSource, sha256 = operation.RequestedDeckSha256, externalFiles = Array.Empty<string>(),
+                selfContained = operation.DeckSource == "inline-caller-deck", dependenciesKnown = operation.DeckSource == "inline-caller-deck",
+                operationId = operation.OperationId }
             : null;
 
-    private static string Key(string instanceId, string processEpoch, string id) => instanceId + "\n" + processEpoch + "\n" + id;
-
-    private static bool WasRetainedByEarlierEpoch(string instanceId, string processEpoch, string jobId)
-    {
-        string prefix = instanceId + "\n";
-        string suffix = "\n" + jobId;
-        return Decks.Keys.Any(key => key.StartsWith(prefix, StringComparison.Ordinal)
-            && key.EndsWith(suffix, StringComparison.Ordinal)
-            && key != Key(instanceId, processEpoch, jobId));
-    }
 
     private static bool IsMissingJob(NativeApiException error)
         => error.Message.Contains("no handler available for request of type kiapi.automation.v1.ReadSimulationJob",
@@ -266,10 +340,6 @@ public sealed class SimulationTools(InstanceRegistry instances)
             throw new AutomationException("invalid_simulation_request", "A nonempty simulation " + kind + " ID is required.");
     }
 
-    private sealed record DeckProvenance(string ProcessEpoch, DocumentSpecifier Document, string? Sha256,
-        string Source, bool SelfContained, bool DependenciesKnown, string OperationId);
-
-    private sealed record SimulationOperation(string OperationId, DocumentSpecifier Document, string? Sha256, string Source);
 
     private static CallToolResult Data(object value, bool error = false)
     {

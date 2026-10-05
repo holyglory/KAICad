@@ -1,5 +1,7 @@
+using Google.Protobuf;
 using KiCad.Automation.Mcp;
 using KiCad.Automation.Model;
+using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
 using Kiapi.Common.Types;
 
@@ -105,6 +107,81 @@ public sealed class SimulationDeckAdmissionTests
         var completeWithWarning = evidence.Clone();
         completeWithWarning.DependencyCaptureComplete = true;
         RejectDependencies(completeWithWarning, fixture, deckSha256);
+    }
+
+    [TestMethod]
+    public void SimulationReceiptsPreserveTerminalBytesAcrossReopenAndRejectConflictingWriters()
+    {
+        // The native journey exercises actual result retention. These isolated
+        // storage cases cover crash/corruption boundaries it cannot deterministically inject.
+        string root = Directory.CreateTempSubdirectory("simulation-receipts-").FullName;
+        try
+        {
+            var fixture = SimulationFixture();
+            var store = new SimulationResultReceipts(root);
+            var prepared = SimulationOperationReceipt.Prepare("receipt-instance", fixture.ProcessEpoch, fixture.Document,
+                Guid.Parse(fixture.OperationId), new string('a', 64), "inline-caller-deck");
+            using (store.AcquireSession(prepared.InstanceId))
+            {
+                Assert.AreEqual("simulation_receipt_busy", Assert.ThrowsExactly<AutomationException>(() =>
+                    new SimulationResultReceipts(root).AcquireSession(prepared.InstanceId)).Code);
+                using var independent = store.AcquireSession("independent-instance");
+            }
+            store.WriteOperation(prepared); store.MakeCurrent(prepared);
+            var dispatched = prepared with { Stage = SimulationOperationStage.Dispatched };
+            store.WriteOperation(dispatched);
+            Assert.AreEqual(dispatched, new SimulationResultReceipts(root).ReadCurrent(prepared.InstanceId, prepared.ProcessEpoch));
+            var next = SimulationOperationReceipt.Prepare(prepared.InstanceId, prepared.ProcessEpoch, fixture.Document,
+                Guid.NewGuid(), new string('b', 64), "inline-caller-deck");
+            store.WriteOperation(next);
+            Assert.AreEqual("simulation_operation_unresolved", Assert.ThrowsExactly<AutomationException>(() => store.MakeCurrent(next)).Code);
+            var accepted = dispatched with { Stage = SimulationOperationStage.Accepted, JobId = fixture.JobId };
+            store.WriteOperation(accepted);
+            fixture.Result.Vectors.Add(new SimulationVector { Name = "v(out)", Values = { 2.5, 3.25 } });
+            var dependencies = new NativeCapabilitySimulationDependencies
+            {
+                Document = fixture.Document.Clone(), ProcessEpoch = fixture.ProcessEpoch, JobId = fixture.JobId,
+                OperationId = fixture.OperationId, GeneratedDeckSha256 = new string('a', 64)
+            };
+            dependencies.Warnings.Add("Dependency paths were not enumerated");
+            var terminal = SimulationTerminalReceipt.Capture(accepted, fixture.Result, dependencies);
+            SimulationJobContract.ValidateArchive(terminal, fixture.Document, fixture.ProcessEpoch, fixture.JobId);
+            store.WriteTerminal(terminal); store.WriteTerminal(terminal);
+            var reopened = new SimulationResultReceipts(root);
+            Assert.AreEqual(terminal, reopened.ReadTerminal(accepted));
+            CollectionAssert.AreEqual(fixture.Result.ToByteArray(), reopened.ReadTerminal(accepted)!.Job.ToByteArray());
+            CollectionAssert.AreEqual(dependencies.ToByteArray(), reopened.ReadTerminal(accepted)!.Dependencies.ToByteArray());
+            store.MakeCurrent(next);
+            Assert.AreEqual(terminal, reopened.ReadTerminal(prepared.InstanceId, fixture.ProcessEpoch, Guid.Parse(fixture.JobId)));
+            Assert.IsNull(reopened.ReadTerminal("another-instance", fixture.ProcessEpoch, Guid.Parse(fixture.JobId)));
+            Assert.IsNull(reopened.ReadTerminal(prepared.InstanceId, "replacement-epoch", Guid.Parse(fixture.JobId)));
+            Assert.AreEqual("simulation_receipt_conflict", Assert.ThrowsExactly<AutomationException>(() =>
+                store.WriteOperation(accepted with { RequestedDeckSha256 = new string('c', 64) })).Code);
+            var changed = fixture.Result.Clone(); changed.Vectors[0].Values[0] = 9;
+            Assert.AreEqual("simulation_receipt_conflict", Assert.ThrowsExactly<AutomationException>(() =>
+                store.WriteTerminal(SimulationTerminalReceipt.Capture(accepted, changed, dependencies))).Code);
+
+            string archivePath = Directory.GetFiles(Path.Combine(root, "simulation-results"), "*-job-*.json").Single();
+            string original = File.ReadAllText(archivePath);
+            File.WriteAllText(archivePath, original.Replace(terminal.Sha256, new string('f', 64), StringComparison.Ordinal));
+            Assert.AreEqual("invalid_simulation_receipt", Assert.ThrowsExactly<AutomationException>(() => reopened.ReadTerminal(accepted)).Code);
+            File.WriteAllText(archivePath, original.Replace("\"Version\":1", "\"Version\":1,\"Version\":1", StringComparison.Ordinal));
+            Assert.AreEqual("invalid_simulation_receipt", Assert.ThrowsExactly<AutomationException>(() => reopened.ReadTerminal(accepted)).Code);
+            File.WriteAllText(archivePath, "{\"Version\":1");
+            Assert.AreEqual("invalid_simulation_receipt", Assert.ThrowsExactly<AutomationException>(() => reopened.ReadTerminal(accepted)).Code);
+            File.WriteAllText(archivePath + ".tmp-interrupted", "uncommitted bytes");
+            File.WriteAllText(archivePath, original);
+            Assert.AreEqual(terminal, reopened.ReadTerminal(accepted), "An interrupted temporary write must not replace the committed archive.");
+            using (var oversized = new FileStream(archivePath, FileMode.Open, FileAccess.Write))
+                oversized.SetLength(SimulationResultReceipts.MaximumReceiptBytes + 1L);
+            Assert.AreEqual("invalid_simulation_receipt", Assert.ThrowsExactly<AutomationException>(() => reopened.ReadTerminal(accepted)).Code);
+            File.WriteAllText(archivePath, original);
+            var running = fixture.Result.Clone(); running.Status = SimulationJobStatus.SimjsRunning; running.WorkerFinished = false;
+            Assert.AreEqual("invalid_simulation_receipt", Assert.ThrowsExactly<AutomationException>(() =>
+                store.WriteTerminal(SimulationTerminalReceipt.Capture(accepted, running, dependencies))).Code);
+            Assert.AreEqual(terminal, reopened.ReadTerminal(accepted));
+        }
+        finally { Directory.Delete(root, true); }
     }
 
     private static void RejectResult(StartSimulationJob request, SimulationJobState result, string processEpoch)

@@ -1,4 +1,5 @@
 using KiCad.Automation.Model;
+using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
 using Kiapi.Common.Types;
 
@@ -12,6 +13,16 @@ namespace KiCad.Automation.Mcp;
 /// </summary>
 internal static class SimulationJobContract
 {
+    public static void ValidateArchive(SimulationTerminalReceipt receipt, DocumentSpecifier document, string processEpoch, string jobId)
+    {
+        var operation = receipt.Operation; var job = receipt.Job;
+        if (operation.ProcessEpoch != processEpoch || operation.JobId != jobId || !operation.Document.Equals(document)
+            || operation.Stage != SimulationOperationStage.Terminal)
+            throw Invalid("The simulation archive does not preserve its original document, process and job identity.");
+        ValidateRead(job, document, processEpoch, jobId, operation.OperationId);
+        ValidateDependencies(receipt.Dependencies, document, processEpoch, jobId, operation.OperationId, operation.RequestedDeckSha256);
+    }
+
     public static void ValidateStart(StartSimulationJob request, SimulationJobState result,
         string processEpoch)
     {

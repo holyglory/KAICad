@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
@@ -54,6 +55,7 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_diagram_physical_allocation");
             CollectionAssert.Contains(names, "kicad_diagram_physical_allocation_set");
             CollectionAssert.Contains(names, "kicad_simulation_start");
+            CollectionAssert.Contains(names, "kicad_simulation_result");
             CollectionAssert.Contains(names, "kicad_simulation_job");
             CollectionAssert.Contains(names, "kicad_simulation_wait");
             CollectionAssert.Contains(names, "kicad_simulation_cancel");
@@ -176,7 +178,7 @@ public sealed class McpProcessTests
             } });
             Assert.IsTrue(malformedProjection.GetProperty("result").GetProperty("isError").GetBoolean(), malformedProjection.GetRawText());
             Assert.AreEqual("invalid_raster_trace_proposal", malformedProjection.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
-            string[] simulationTools = ["kicad_simulation_start", "kicad_simulation_job", "kicad_simulation_wait", "kicad_simulation_cancel"];
+            string[] simulationTools = ["kicad_simulation_start", "kicad_simulation_job", "kicad_simulation_wait", "kicad_simulation_cancel", "kicad_simulation_result"];
             foreach (string simulationTool in simulationTools)
             {
                 var descriptor = listed.GetProperty("result").GetProperty("tools").EnumerateArray()
@@ -221,7 +223,7 @@ public sealed class McpProcessTests
                     else target["identifierCase"] = 3;
                     var validBinding = await Request(simulationRequest++, "tools/call", new
                     { name = simulationTool, arguments = SimulationArguments(simulationTool, target) });
-                    AssertSimulationError(validBinding, "unknown_instance");
+                    AssertSimulationError(validBinding, simulationTool == "kicad_simulation_result" ? "simulation_result_not_found" : "unknown_instance");
                 }
                 var emptySimulationIdentity = SimulationArguments(simulationTool, simulationTarget);
                 emptySimulationIdentity[simulationTool == "kicad_simulation_start" ? "operationId" : "jobId"] = Guid.Empty.ToString("D");
@@ -270,6 +272,29 @@ public sealed class McpProcessTests
                             "Malformed identity must be rejected before instance lookup.");
                 }
             }
+            const string unresolvedDeck = "Unresolved fixture\nV1 in 0 5\nR1 in 0 1k\n.op\n.end\n";
+            string unresolvedInstance = Guid.NewGuid().ToString("D");
+            string unresolvedEpoch = Guid.NewGuid().ToString("D");
+            Guid unresolvedOperation = Guid.NewGuid();
+            var unresolvedTarget = SchematicJson.Parser.Parse<Kiapi.Common.Types.DocumentSpecifier>(simulationTarget.ToJsonString());
+            var unresolvedStore = new SimulationResultReceipts(state);
+            var unresolvedReceipt = SimulationOperationReceipt.Prepare(unresolvedInstance, unresolvedEpoch, unresolvedTarget,
+                unresolvedOperation, Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(unresolvedDeck))), "inline-caller-deck");
+            unresolvedStore.WriteOperation(unresolvedReceipt);
+            unresolvedStore.MakeCurrent(unresolvedReceipt);
+            unresolvedStore.WriteOperation(unresolvedReceipt with { Stage = SimulationOperationStage.Dispatched });
+            var unresolvedReply = await Request(simulationRequest++, "tools/call", new
+            {
+                name = "kicad_simulation_start", arguments = new
+                { instanceId = unresolvedInstance, expectedInstanceEpoch = unresolvedEpoch, document = simulationTarget, netlist = unresolvedDeck, operationId = unresolvedOperation }
+            });
+            AssertSimulationError(unresolvedReply, "simulation_operation_unresolved");
+            var unresolvedChanged = await Request(simulationRequest++, "tools/call", new
+            {
+                name = "kicad_simulation_start", arguments = new
+                { instanceId = unresolvedInstance, expectedInstanceEpoch = unresolvedEpoch, document = simulationTarget, netlist = unresolvedDeck + "* changed\n", operationId = unresolvedOperation }
+            });
+            AssertSimulationError(unresolvedChanged, "simulation_operation_reused");
             var emptySimulationDependencyIdentity = await Request(simulationRequest++, "tools/call", new
             {
                 name = "kicad_simulation_dependencies", arguments = new
@@ -289,9 +314,10 @@ public sealed class McpProcessTests
             {
                 var arguments = new Dictionary<string, object>
                 {
-                    ["instanceId"] = Guid.NewGuid().ToString("D"), ["expectedInstanceEpoch"] = Guid.NewGuid().ToString("D"),
+                    ["instanceId"] = Guid.NewGuid().ToString("D"),
                     ["document"] = target
                 };
+                arguments[name == "kicad_simulation_result" ? "processEpoch" : "expectedInstanceEpoch"] = Guid.NewGuid().ToString("D");
                 if (name == "kicad_simulation_start")
                 {
                     arguments["netlist"] = "Divider\nV1 in 0 5\nR1 in 0 1k\n.op\n.end\n";

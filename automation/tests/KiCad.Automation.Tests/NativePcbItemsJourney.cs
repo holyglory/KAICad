@@ -2406,6 +2406,58 @@ public sealed partial class NativeSessionTests
             // Route across a real foreign-net wall between two F.Cu pads.
             // The wall is attached to its own pads, and spans the full search
             // bounds, so the untouched proposal must change layers twice.
+            // Create its pads only now: disconnected fixture nets would make
+            // the preceding differential-pair/cleanup DRC correctly fail.
+            var multilayerTemplates = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbFootprint } }, token);
+            var multilayerTemplate = multilayerTemplates.Items.Select(item => item.Unpack<FootprintInstance>())
+                .Single(footprint => footprint.Position.XNm == 30_100_000 && footprint.Position.YNm == 30_100_000);
+            var multilayerTemplatePad = multilayerTemplate.Definition.Items.Single(item => item.Is(Pad.Descriptor)).Unpack<Pad>();
+            Assert.AreEqual(PadStackType.PstNormal, multilayerTemplatePad.PadStack.Type);
+            Assert.HasCount(1, multilayerTemplatePad.PadStack.CopperLayers);
+
+            FootprintInstance MultilayerFootprint(string name, string net, long x, long y, long diameter)
+            {
+                var footprint = multilayerTemplate.Clone();
+                footprint.Id = new() { Value = Guid.NewGuid().ToString("D") };
+                footprint.Parent = null; footprint.CustomProperties.Clear(); footprint.SymbolPath = null;
+                footprint.Position = new() { XNm = x, YNm = y };
+                footprint.Definition.Id = new() { LibraryNickname = "Generated", EntryName = name };
+                footprint.Definition.Items.Clear();
+                var pad = multilayerTemplatePad.Clone();
+                pad.Id = new() { Value = Guid.NewGuid().ToString("D") }; pad.Parent = null; pad.CustomProperties.Clear();
+                pad.SymbolPin = null; pad.Net = new() { Name = net };
+                // PAD's native API serializer/deserializer uses board-space
+                // positions even for the child packed inside a footprint.
+                pad.Position = footprint.Position.Clone();
+                pad.PadStack.CopperLayers.Single().Size = new() { XNm = diameter, YNm = diameter };
+                footprint.Definition.Items.Add(Any.Pack(pad));
+                foreach (var field in new[] { footprint.ReferenceField, footprint.ValueField, footprint.DatasheetField, footprint.DescriptionField,
+                    footprint.Definition.ReferenceField, footprint.Definition.ValueField, footprint.Definition.DatasheetField, footprint.Definition.DescriptionField })
+                {
+                    if (field?.Text is null) continue;
+                    field.CustomProperties.Clear(); field.Text.CustomProperties.Clear(); field.Text.Parent = null;
+                    field.Text.Id = new() { Value = Guid.NewGuid().ToString("D") };
+                    field.Text.Text.Position = footprint.Position.Clone();
+                }
+                footprint.ReferenceField.Text.Text.Text_ = name;
+                return footprint;
+            }
+            var multilayerFootprintCreate = new CreateItems { Header = new() { Document = cleanBoard } };
+            multilayerFootprintCreate.Items.Add(new[]
+            {
+                Any.Pack(MultilayerFootprint("MULTILAYER_START", "MULTILAYER_ROUTE", 60_000_000, 60_000_000, 700_000)),
+                Any.Pack(MultilayerFootprint("MULTILAYER_END", "MULTILAYER_ROUTE", 66_000_000, 60_000_000, 700_000)),
+                Any.Pack(MultilayerFootprint("MULTILAYER_WALL_START", "MULTILAYER_BARRIER", 63_000_000, 58_000_000, 500_000)),
+                Any.Pack(MultilayerFootprint("MULTILAYER_WALL_END", "MULTILAYER_BARRIER", 63_000_000, 62_000_000, 500_000))
+            });
+            var multilayerFootprintReply = await mcp.Tool("kicad_pcb_items_create", new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(multilayerFootprintCreate),
+                expectedStateJson = SchematicJson.Formatter.Format(await ObserveLifecycleState(client, cleanBoard, token))
+            });
+            Assert.IsFalse(multilayerFootprintReply.TryGetProperty("isError", out var multilayerFootprintError)
+                && multilayerFootprintError.GetBoolean(), multilayerFootprintReply.GetRawText());
             var multilayerPads = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
             { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbPad } }, token);
             var multilayerStartPad = multilayerPads.Items.Select(item => item.Unpack<Pad>())
@@ -3259,10 +3311,6 @@ public sealed partial class NativeSessionTests
         string f5 = Guid.NewGuid().ToString("D"), f6 = Guid.NewGuid().ToString("D");
         string p5 = Guid.NewGuid().ToString("D"), p6 = Guid.NewGuid().ToString("D");
         string f7 = Guid.NewGuid().ToString("D"), p7 = Guid.NewGuid().ToString("D");
-        string mlStart = Guid.NewGuid().ToString("D"), mlStartPad = Guid.NewGuid().ToString("D");
-        string mlEnd = Guid.NewGuid().ToString("D"), mlEndPad = Guid.NewGuid().ToString("D");
-        string mlWallStart = Guid.NewGuid().ToString("D"), mlWallStartPad = Guid.NewGuid().ToString("D");
-        string mlWallEnd = Guid.NewGuid().ToString("D"), mlWallEndPad = Guid.NewGuid().ToString("D");
         string obstacle = Guid.NewGuid().ToString("D");
         string viaSupport = Guid.NewGuid().ToString("D");
         string edge = Guid.NewGuid().ToString("D");
@@ -3305,18 +3353,6 @@ public sealed partial class NativeSessionTests
   (footprint "POWER_RAIL_B_SUPPORT" (layer "B.Cu") (at 40.875 43) (uuid "{f7}")
     (attr smd)
     (pad "1" smd circle (at 0 0) (size 0.7 0.7) (layers "B.Cu" "B.Paste" "B.Mask") (net 1 "POWER_RAIL") (uuid "{p7}")))
-  (footprint "MULTILAYER_START" (layer "F.Cu") (at 60 60) (uuid "{mlStart}")
-    (attr smd)
-    (pad "1" smd circle (at 0 0) (size 0.7 0.7) (layers "F.Cu" "F.Paste" "F.Mask") (net 4 "MULTILAYER_ROUTE") (uuid "{mlStartPad}")))
-  (footprint "MULTILAYER_END" (layer "F.Cu") (at 66 60) (uuid "{mlEnd}")
-    (attr smd)
-    (pad "1" smd circle (at 0 0) (size 0.7 0.7) (layers "F.Cu" "F.Paste" "F.Mask") (net 4 "MULTILAYER_ROUTE") (uuid "{mlEndPad}")))
-  (footprint "MULTILAYER_WALL_START" (layer "F.Cu") (at 63 58) (uuid "{mlWallStart}")
-    (attr smd)
-    (pad "1" smd circle (at 0 0) (size 0.5 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 5 "MULTILAYER_BARRIER") (uuid "{mlWallStartPad}")))
-  (footprint "MULTILAYER_WALL_END" (layer "F.Cu") (at 63 62) (uuid "{mlWallEnd}")
-    (attr smd)
-    (pad "1" smd circle (at 0 0) (size 0.5 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 5 "MULTILAYER_BARRIER") (uuid "{mlWallEndPad}")))
   (segment (start 39 42) (end 41 42) (width 0.25) (layer "F.Cu") (net 1) (uuid "{obstacle}"))
   (segment (start 40.875 42) (end 40.875 43) (width 0.7) (layer "B.Cu") (net 1) (uuid "{viaSupport}"))
 )

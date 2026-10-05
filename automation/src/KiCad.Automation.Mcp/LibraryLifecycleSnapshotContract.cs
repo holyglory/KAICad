@@ -1,0 +1,131 @@
+using System.Collections.Immutable;
+using Kiapi.Common.Types;
+using KiCad.Automation.Model;
+
+namespace KiCad.Automation.Mcp;
+
+/// <summary>
+/// Preliminary managed mirror of the native read-only symbol-library snapshot boundary.
+///
+/// This contract is intentionally not a tool response and does not add a protobuf message.  It
+/// gives the future native read path one fail-closed validation point while symbol-editor,
+/// import/rescue and remote writers remain outside complete lifecycle tracking.
+/// </summary>
+internal sealed record LibraryLifecycleDependencyBaseline(
+    string Path,
+    string Sha256,
+    ulong Bytes,
+    bool Exists = true,
+    bool Known = true,
+    string Cursor = "");
+
+internal sealed record LibraryLifecycleSnapshot(
+    DocumentSpecifier Document,
+    string TablePath,
+    string TableScope,
+    string Nickname,
+    string RawUri,
+    string ExpandedUri,
+    string Provider,
+    string DetachedDefinitionJson,
+    IReadOnlyList<LibraryLifecycleDependencyBaseline> DependencyBaselines,
+    bool ForcedRefresh,
+    bool ProviderObservable,
+    bool ContentSnapshotComplete,
+    bool DiskBaselineChecked,
+    bool CompleteChangeTracking,
+    bool Postverify);
+
+internal static class LibraryLifecycleSnapshotContract
+{
+    private const string SupportedProvider = "kicad-symbol-file";
+
+    internal static void ValidateReadOnly(
+        LibraryLifecycleSnapshot snapshot,
+        DocumentSpecifier expectedDocument,
+        string expectedProjectName,
+        string expectedProjectPath)
+    {
+        if (snapshot is null || snapshot.Document is null || expectedDocument is null)
+            throw new AutomationException("library_snapshot_incomplete", "A project-bound symbol-library snapshot is required.");
+
+        if (!snapshot.Document.Equals(expectedDocument))
+            throw new AutomationException("library_document_mismatch",
+                "The library snapshot does not identify the exact requested project and symbol document.");
+
+        DocumentSpecifier document = snapshot.Document;
+        if (document.Type != DocumentType.DoctypeSymbol || document.Project is null || document.LibId is null
+            || string.IsNullOrWhiteSpace(document.Project.Name) || string.IsNullOrWhiteSpace(document.Project.Path)
+            || string.IsNullOrWhiteSpace(document.LibId.LibraryNickname) || string.IsNullOrWhiteSpace(document.LibId.EntryName)
+            || document.Project.Name.IndexOf('\0') >= 0 || document.Project.Path.IndexOf('\0') >= 0
+            || document.LibId.LibraryNickname.IndexOf('\0') >= 0 || document.LibId.EntryName.IndexOf('\0') >= 0)
+            throw new AutomationException("invalid_library_document",
+                "A symbol-library snapshot requires a project-bound symbol DocumentSpecifier and library entry.");
+
+        if (!string.Equals(document.Project.Name, expectedProjectName, StringComparison.Ordinal)
+            || !SameAbsolutePath(document.Project.Path, expectedProjectPath))
+            throw new AutomationException("library_project_mismatch",
+                "The requested symbol-library project is not the project served by this native owner.");
+
+        if (string.IsNullOrWhiteSpace(snapshot.Nickname)
+            || !string.Equals(snapshot.Nickname, document.LibId.LibraryNickname, StringComparison.Ordinal)
+            || snapshot.TableScope is not ("PROJECT" or "GLOBAL")
+            || !IsAbsolute(snapshot.TablePath) || string.IsNullOrWhiteSpace(snapshot.RawUri)
+            || snapshot.RawUri.IndexOf('\0') >= 0 || !IsAbsolute(snapshot.ExpandedUri))
+            throw new AutomationException("library_table_row_mismatch",
+                "The symbol-library table row must include the exact scope, table path and raw/expanded URI.");
+
+        if (string.IsNullOrWhiteSpace(snapshot.Provider))
+            throw new AutomationException("library_provider_unknown", "The symbol-library provider was not identified.");
+        if (!string.Equals(snapshot.Provider, SupportedProvider, StringComparison.Ordinal)
+            && !string.Equals(snapshot.Provider, "KiCad", StringComparison.Ordinal))
+            throw new AutomationException("library_provider_unsupported",
+                "The symbol-library provider is outside the read-only lifecycle slice.");
+
+        if (!snapshot.ForcedRefresh || !snapshot.ProviderObservable || !snapshot.ContentSnapshotComplete
+            || !snapshot.DiskBaselineChecked || string.IsNullOrWhiteSpace(snapshot.DetachedDefinitionJson)
+            || snapshot.DependencyBaselines is null || snapshot.DependencyBaselines.Count == 0)
+            throw new AutomationException("library_snapshot_incomplete",
+                "A safe symbol-library snapshot requires a forced refresh, detached definition, observable provider and complete dependency evidence.");
+
+        var paths = ImmutableHashSet.CreateBuilder<string>(StringComparer.Ordinal);
+        foreach (LibraryLifecycleDependencyBaseline baseline in snapshot.DependencyBaselines)
+        {
+            if (baseline is null || !baseline.Known || string.IsNullOrWhiteSpace(baseline.Path)
+                || !IsAbsolute(baseline.Path) || !paths.Add(NormalizePath(baseline.Path)))
+                throw new AutomationException("library_baseline_incomplete",
+                    "Every symbol-library dependency needs one complete, unique absolute file baseline.");
+
+            if (!string.IsNullOrEmpty(baseline.Cursor) || (baseline.Exists && !IsSha256(baseline.Sha256))
+                || (!baseline.Exists && (!string.IsNullOrEmpty(baseline.Sha256) || baseline.Bytes != 0)))
+                throw new AutomationException("library_baseline_incomplete",
+                    "A partial hash or cursor cannot be used as a symbol-library file baseline.");
+        }
+
+        // The current owner coverage deliberately remains incomplete.  A true value would claim
+        // coverage for GUI editor, import/rescue and remote writers that do not share this owner.
+        if (snapshot.CompleteChangeTracking || snapshot.Postverify)
+            throw new AutomationException("library_snapshot_incomplete",
+                "The read-only foundation cannot claim complete mutation tracking or postverify.");
+    }
+
+    internal static void AdmitCheckedMutation(
+        LibraryLifecycleSnapshot snapshot,
+        DocumentSpecifier expectedDocument,
+        string expectedProjectName,
+        string expectedProjectPath)
+    {
+        ValidateReadOnly(snapshot, expectedDocument, expectedProjectName, expectedProjectPath);
+        throw new AutomationException("library_mutation_unavailable",
+            "Checked symbol-library mutation is unavailable until every native writer has shared tracking and rollback proof.");
+    }
+
+    private static bool IsSha256(string value) => value.Length == 64 && value.All(char.IsAsciiHexDigitLower);
+
+    private static bool IsAbsolute(string value) => value.IndexOf('\0') < 0 && Path.IsPathFullyQualified(value);
+
+    private static bool SameAbsolutePath(string left, string right) =>
+        IsAbsolute(left) && IsAbsolute(right) && string.Equals(NormalizePath(left), NormalizePath(right), StringComparison.Ordinal);
+
+    private static string NormalizePath(string value) => Path.GetFullPath(value).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+}

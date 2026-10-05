@@ -186,6 +186,7 @@ set( QA_COMMON_SRCS
     test_settings_save_outcome.cpp
     test_native_state_digest.cpp
     test_file_content_baseline.cpp
+    test_library_lifecycle_snapshot.cpp
     test_document_lifecycle_controller.cpp
     test_checked_schematic_controller.cpp
     test_net_settings.cpp
@@ -291,9 +292,13 @@ setup_qa_env( qa_common )
 add_test( NAME qa_file_content_baseline
     COMMAND $<TARGET_FILE:qa_common> --run_test=FileContentBaseline --log_level=test_suite )
 
+add_test( NAME qa_library_lifecycle_snapshot
+    COMMAND $<TARGET_FILE:qa_common> --run_test=LibraryLifecycleSnapshot --log_level=test_suite )
+
 add_test( NAME qa_undo_geometry_policy
     COMMAND $<TARGET_FILE:qa_common> --run_test=Commit/SchematicGeometryPolicyFollowsTheUndoCommand --log_level=test_suite )
 setup_qa_env( qa_file_content_baseline )
+setup_qa_env( qa_library_lifecycle_snapshot )
 
 # A focused project-copy target avoids rebuilding unrelated editor test modules.
 add_executable( qa_project_analysis_snapshot

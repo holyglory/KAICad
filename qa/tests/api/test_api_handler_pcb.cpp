@@ -18,6 +18,7 @@
  */
 
 #include <memory>
+#include <fstream>
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
@@ -68,7 +69,8 @@ struct API_HANDLER_PCB_FIXTURE
         return board;
     }
 
-    kiapi::common::ApiRequest makeRefillRequest( BOARD* aBoard, const std::vector<wxString>& aZoneIds ) const
+    kiapi::common::ApiRequest makeRefillRequest( BOARD* aBoard, const std::vector<wxString>& aZoneIds,
+                                                 const std::string& aOperationId = {} ) const
     {
         kiapi::board::commands::RefillZones command;
         command.mutable_board()->set_type( kiapi::common::types::DocumentType::DOCTYPE_PCB );
@@ -78,10 +80,40 @@ struct API_HANDLER_PCB_FIXTURE
         for( const wxString& id : aZoneIds )
             command.add_zones()->set_value( id.ToStdString() );
 
+        command.set_operation_id( aOperationId );
+
         kiapi::common::ApiRequest request;
         request.mutable_header()->set_client_name( "kicad.qa" );
         BOOST_REQUIRE( request.mutable_message()->PackFrom( command ) );
 
+        return request;
+    }
+
+    kiapi::common::ApiRequest makeImportRequest( BOARD* aBoard, const wxString& aNetlistPath,
+                                                 const std::string& aOperationId ) const
+    {
+        kiapi::board::commands::ImportNetlist command;
+        command.mutable_board()->set_type( kiapi::common::types::DocumentType::DOCTYPE_PCB );
+        command.mutable_board()->set_board_filename(
+                wxFileName( aBoard->GetFileName() ).GetFullName().ToStdString() );
+        command.set_netlist_path( aNetlistPath.ToStdString() );
+        command.set_match_mode( kiapi::board::commands::NMM_REFERENCE );
+        command.set_operation_id( aOperationId );
+
+        kiapi::common::ApiRequest request;
+        request.mutable_header()->set_client_name( "kicad.qa" );
+        BOOST_REQUIRE( request.mutable_message()->PackFrom( command ) );
+        return request;
+    }
+
+    kiapi::common::ApiRequest makeOperationReadRequest( const std::string& aOperationId ) const
+    {
+        kiapi::automation::v1::NativeCapabilityPcbReadOperation command;
+        command.set_operation_id( aOperationId );
+
+        kiapi::common::ApiRequest request;
+        request.mutable_header()->set_client_name( "kicad.qa" );
+        BOOST_REQUIRE( request.mutable_message()->PackFrom( command ) );
         return request;
     }
 
@@ -242,6 +274,72 @@ BOOST_AUTO_TEST_CASE( RefillZonesUnknownIdRejected )
 
     BOOST_REQUIRE( !result.has_value() );
     BOOST_CHECK_EQUAL( result.error().status(), kiapi::common::ApiStatusCode::AS_BAD_REQUEST );
+}
+
+
+BOOST_AUTO_TEST_CASE( ImportReceiptSurvivesHandlerReplacementAndLaterRefill )
+{
+    BOARD* board = loadBoard( wxS( "issue5830" ) );
+    unfillAll( board );
+
+    // An empty, valid KiCad netlist exercises the native import receipt without
+    // requiring project footprint-library setup. The later selected refill is a
+    // separate operation handled by the replacement handler instance.
+    KI_TEST::TEMPORARY_DIRECTORY scratch( "pcb_receipt_lifecycle_", "" );
+    const wxString netlistPath = wxString::FromUTF8(
+            ( scratch.GetPath() / "empty.kicad.net" ).string() );
+    {
+        std::ofstream netlist( netlistPath.ToStdString() );
+        netlist << "(export (version \"E\")\n"
+                   "  (design (source \"fixture.kicad_sch\") (date \"2026-01-01\")"
+                   " (tool \"kicad.qa\")\n"
+                   "    (sheet (number \"1\") (name \"/\") (tstamps \"/\")))\n"
+                   "  (components)\n  (nets))\n";
+    }
+
+    const std::string importOperation = KIID().AsStdString();
+    kiapi::common::ApiRequest importRequest = makeImportRequest( board, netlistPath, importOperation );
+    kiapi::common::ApiRequest readRequest = makeOperationReadRequest( importOperation );
+    kiapi::automation::v1::NativeCapabilityPcbReadOperationResponse beforeReplacement;
+
+    {
+        API_HANDLER_PCB handler( m_context );
+        API_RESULT result = handler.Handle( importRequest );
+        BOOST_REQUIRE( result.has_value() );
+
+        API_RESULT readResult = handler.Handle( readRequest );
+        BOOST_REQUIRE( readResult.has_value() );
+        BOOST_REQUIRE( readResult->message().UnpackTo( &beforeReplacement ) );
+        BOOST_CHECK( beforeReplacement.found() );
+        BOOST_CHECK_EQUAL( beforeReplacement.operation(), "netlist-import" );
+        BOOST_CHECK_EQUAL( beforeReplacement.document().board_filename(),
+                           wxFileName( board->GetFileName() ).GetFullName().ToStdString() );
+    }
+
+    API_HANDLER_PCB replacement( m_context );
+    const std::string refillOperation = KIID().AsStdString();
+    kiapi::common::ApiRequest refillRequest = makeRefillRequest( board, { F_CU_ZONE }, refillOperation );
+    API_RESULT refillResult = replacement.Handle( refillRequest );
+    BOOST_REQUIRE( refillResult.has_value() );
+
+    API_RESULT afterRefillRead = replacement.Handle( readRequest );
+    BOOST_REQUIRE( afterRefillRead.has_value() );
+    kiapi::automation::v1::NativeCapabilityPcbReadOperationResponse afterRefill;
+    BOOST_REQUIRE( afterRefillRead->message().UnpackTo( &afterRefill ) );
+    BOOST_CHECK( afterRefill.found() );
+    BOOST_CHECK_EQUAL( afterRefill.operation(), beforeReplacement.operation() );
+    BOOST_CHECK_EQUAL( afterRefill.document().SerializeAsString(),
+                       beforeReplacement.document().SerializeAsString() );
+    BOOST_CHECK_EQUAL( afterRefill.process_epoch(), beforeReplacement.process_epoch() );
+
+    kiapi::common::ApiRequest readRefillRequest = makeOperationReadRequest( refillOperation );
+    API_RESULT refillRead = replacement.Handle( readRefillRequest );
+    BOOST_REQUIRE( refillRead.has_value() );
+    kiapi::automation::v1::NativeCapabilityPcbReadOperationResponse refillReceipt;
+    BOOST_REQUIRE( refillRead->message().UnpackTo( &refillReceipt ) );
+    BOOST_CHECK( refillReceipt.found() );
+    BOOST_CHECK_EQUAL( refillReceipt.operation(), "zone-refill" );
+    BOOST_CHECK_EQUAL( refillReceipt.process_epoch(), beforeReplacement.process_epoch() );
 }
 
 

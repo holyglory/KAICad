@@ -26,6 +26,7 @@
 #include <common.h>
 #include <dialog_shim.h>
 #include <file_content_baseline.h>
+#include <richio.h>
 #include <ki_exception.h>
 #include <wx/log.h>
 #include <wx/filename.h>

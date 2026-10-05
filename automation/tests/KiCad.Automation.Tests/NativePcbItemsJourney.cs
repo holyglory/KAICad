@@ -2480,10 +2480,10 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(multilayerPlanData.GetProperty("nativeCommit").GetBoolean());
             Assert.AreEqual(2, multilayerPlanData.GetProperty("viaCount").GetInt32(), multilayerCommitPlan.GetRawText());
             string multilayerCandidateJson = multilayerPlanData.GetProperty("candidateRequestJson").GetString()!;
-            var multilayerCandidate = BoardJson.Parser.Parse<CreateItems>(multilayerCandidateJson);
-            Assert.AreEqual(2, multilayerCandidate.Items.Count(item => item.Is(Via.Descriptor)));
-            Assert.IsTrue(multilayerCandidate.Items.Any(item => item.Is(Track.Descriptor) && item.Unpack<Track>().Layer == BoardLayer.BlBCu));
-            foreach (var via in multilayerCandidate.Items.Where(item => item.Is(Via.Descriptor)).Select(item => item.Unpack<Via>()))
+            var multilayerCommitCandidate = BoardJson.Parser.Parse<CreateItems>(multilayerCandidateJson);
+            Assert.AreEqual(2, multilayerCommitCandidate.Items.Count(item => item.Is(Via.Descriptor)));
+            Assert.IsTrue(multilayerCommitCandidate.Items.Any(item => item.Is(Track.Descriptor) && item.Unpack<Track>().Layer == BoardLayer.BlBCu));
+            foreach (var via in multilayerCommitCandidate.Items.Where(item => item.Is(Via.Descriptor)).Select(item => item.Unpack<Via>()))
             {
                 Assert.AreEqual(PadStackType.PstNormal, via.PadStack.Type);
                 Assert.HasCount(1, via.PadStack.CopperLayers);
@@ -2506,12 +2506,12 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(multilayerBefore, await ObserveLifecycleState(client, cleanBoard, token));
 
             var multilayerDrc = await RouteDrc(multilayerCandidateJson, null, multilayerBefore);
-            CollectionAssert.AreEqual(multilayerCandidate.Items.Select(RouteIdentity).ToArray(), multilayerDrc.CandidateItemIds.ToArray());
+            CollectionAssert.AreEqual(multilayerCommitCandidate.Items.Select(RouteIdentity).ToArray(), multilayerDrc.CandidateItemIds.ToArray());
             Assert.AreEqual(multilayerBefore, await ObserveLifecycleState(client, cleanBoard, token));
             string multilayerOperationId = Guid.NewGuid().ToString("D");
             var multilayerCheckedRequest = new CheckedPcbRouteCommit
             {
-                Candidate = multilayerCandidate, ExpectedState = multilayerBefore, DrcJobId = multilayerDrc.JobId,
+                Candidate = multilayerCommitCandidate, ExpectedState = multilayerBefore, DrcJobId = multilayerDrc.JobId,
                 OperationId = multilayerOperationId, MaximumResultBytes = 4 * 1024 * 1024
             };
             var multilayerCommitArguments = new
@@ -2531,7 +2531,7 @@ public sealed partial class NativeSessionTests
             var multilayerReceipt = SchematicJson.Parser.Parse<CheckedPcbRouteReceipt>(multilayerCommitData.GetProperty("receipt").GetRawText());
             Assert.AreEqual(CheckedPcbRouteReceipt.Types.State.Completed, multilayerReceipt.State);
             CheckedPcbRouteContract.ValidateResult(multilayerCheckedRequest, multilayerReceipt, inspect: false);
-            var multilayerIds = multilayerCandidate.Items.Select(RouteIdentity).Order(StringComparer.Ordinal).ToArray();
+            var multilayerIds = multilayerCommitCandidate.Items.Select(RouteIdentity).Order(StringComparer.Ordinal).ToArray();
             var multilayerExpectedConnected = multilayerIds.Concat(new[] { multilayerStartPad.Id.Value, multilayerEndPad.Id.Value })
                 .Order(StringComparer.Ordinal).ToArray();
             var multilayerNativeReadback = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()

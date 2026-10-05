@@ -482,19 +482,53 @@ bool ZONE::Deserialize( const google::protobuf::Any& aContainer )
     m_borderStyle = FromProtoEnum<ZONE_BORDER_DISPLAY_STYLE>( zone.border().style() );
     m_borderHatchPitch = zone.border().pitch().value_nm();
 
-    if( zone.filled() )
-    {
-        // TODO(JE) check what else has to happen here
-        SetIsFilled( true );
-        SetNeedRefill( false );
+    // The fill data in a zone message is a complete replacement for the existing
+    // derived copper.  In particular, an unfilled update must not leave the old
+    // polygons in place while only changing the IsFilled flag.  Keep an empty
+    // entry for every layer in the layer set because copy/undo paths expect those
+    // per-layer containers to exist, but discard the old polygon objects and all
+    // cached fill state before applying the payload.
+    const bool filled = zone.filled();
+    const LSET layerSet = GetLayerSet();
 
-        for( const types::ZoneFilledPolygons& fillLayer : zone.filled_polygons() )
+    {
+        std::lock_guard<std::mutex> lock( m_filledPolysListMutex );
+
+        unFillLocked();
+        m_filledPolysHash.clear();
+        m_insulatedIslands.clear();
+
+        for( auto it = m_FilledPolysList.begin(); it != m_FilledPolysList.end(); )
         {
-            PCB_LAYER_ID layer = FromProtoEnum<PCB_LAYER_ID>( fillLayer.layer() );
-            SHAPE_POLY_SET shape = kiapi::common::UnpackPolySet( fillLayer.shapes() );
-            m_FilledPolysList[layer] = std::make_shared<SHAPE_POLY_SET>( shape );
+            if( !layerSet.Contains( it->first ) )
+                it = m_FilledPolysList.erase( it );
+            else
+                ++it;
+        }
+
+        layerSet.RunOnLayers(
+                [&]( PCB_LAYER_ID layer )
+                {
+                    if( !m_FilledPolysList.contains( layer ) )
+                        m_FilledPolysList[layer] = std::make_shared<SHAPE_POLY_SET>();
+
+                    m_filledPolysHash[layer] = {};
+                    m_insulatedIslands[layer] = {};
+                } );
+
+        if( filled )
+        {
+            for( const types::ZoneFilledPolygons& fillLayer : zone.filled_polygons() )
+            {
+                PCB_LAYER_ID layer = FromProtoEnum<PCB_LAYER_ID>( fillLayer.layer() );
+                SHAPE_POLY_SET shape = kiapi::common::UnpackPolySet( fillLayer.shapes() );
+                m_FilledPolysList[layer] = std::make_shared<SHAPE_POLY_SET>( shape );
+            }
         }
     }
+
+    SetIsFilled( filled );
+    SetNeedRefill( !filled );
 
     HatchBorder();
 

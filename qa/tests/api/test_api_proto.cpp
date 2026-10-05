@@ -26,6 +26,7 @@
 #include <pcbnew_utils/board_test_utils.h>
 #include <settings/settings_manager.h>
 
+#include <api/api_utils.h>
 #include <api/board/board_types.pb.h>
 #include <api/common/types/embedded_files.pb.h>
 
@@ -41,6 +42,7 @@
 #include <pcb_text.h>
 #include <pcb_textbox.h>
 #include <pcb_track.h>
+#include <geometry/shape_utils.h>
 #include <zone.h>
 
 
@@ -296,6 +298,156 @@ BOOST_FIXTURE_TEST_CASE( CopperThievingZoneRoundTrip, PROTO_TEST_FIXTURE )
     BOOST_CHECK_EQUAL( loaded.line_width, thieving.line_width );
     BOOST_CHECK_EQUAL( loaded.stagger, true );
     BOOST_CHECK( loaded.orientation == EDA_ANGLE( 15.0, DEGREES_T ) );
+}
+
+
+BOOST_FIXTURE_TEST_CASE( FilledZoneRoundTripPreservesLayerPolygons, PROTO_TEST_FIXTURE )
+{
+    m_board = std::make_unique<BOARD>();
+
+    ZONE* zone = new ZONE( m_board.get() );
+    zone->SetLayerSet( LSET( { F_Cu, B_Cu } ) );
+    zone->AppendCorner( VECTOR2I( 0, 0 ), -1 );
+    zone->AppendCorner( VECTOR2I( pcbIUScale.mmToIU( 10 ), 0 ), -1 );
+    zone->AppendCorner( VECTOR2I( pcbIUScale.mmToIU( 10 ), pcbIUScale.mmToIU( 10 ) ), -1 );
+    zone->AppendCorner( VECTOR2I( 0, pcbIUScale.mmToIU( 10 ) ), -1 );
+
+    SHAPE_POLY_SET frontFill;
+    frontFill.AddOutline( KIGEOM::BoxToLineChain(
+            BOX2I( VECTOR2I( pcbIUScale.mmToIU( 1 ), pcbIUScale.mmToIU( 1 ) ),
+                   VECTOR2I( pcbIUScale.mmToIU( 3 ), pcbIUScale.mmToIU( 4 ) ) ) ) );
+
+    SHAPE_POLY_SET backFill;
+    backFill.AddOutline( KIGEOM::BoxToLineChain(
+            BOX2I( VECTOR2I( pcbIUScale.mmToIU( 5 ), pcbIUScale.mmToIU( 2 ) ),
+                   VECTOR2I( pcbIUScale.mmToIU( 2 ), pcbIUScale.mmToIU( 5 ) ) ) ) );
+
+    zone->SetFilledPolysList( F_Cu, frontFill );
+    zone->SetFilledPolysList( B_Cu, backFill );
+    zone->SetIsFilled( true );
+    zone->SetNeedRefill( false );
+    m_board->Add( zone );
+
+    google::protobuf::Any any;
+    BOOST_REQUIRE_NO_THROW( zone->Serialize( any ) );
+
+    kiapi::board::types::Zone proto;
+    BOOST_REQUIRE( any.UnpackTo( &proto ) );
+    BOOST_CHECK( proto.filled() );
+    BOOST_REQUIRE_GE( proto.filled_polygons_size(), 2 );
+
+    std::unique_ptr<ZONE> roundTripped = std::make_unique<ZONE>( m_board.get() );
+    BOOST_REQUIRE( roundTripped->Deserialize( any ) );
+
+    BOOST_CHECK( roundTripped->IsFilled() );
+    BOOST_CHECK( !roundTripped->NeedRefill() );
+
+    const auto checkFill = []( const ZONE& aZone, PCB_LAYER_ID aLayer,
+                               const SHAPE_POLY_SET& aExpected )
+    {
+        BOOST_REQUIRE( aZone.HasFilledPolysForLayer( aLayer ) );
+        const std::shared_ptr<SHAPE_POLY_SET>& actual = aZone.GetFilledPolysList( aLayer );
+        BOOST_REQUIRE_EQUAL( actual->OutlineCount(), aExpected.OutlineCount() );
+        BOOST_REQUIRE_EQUAL( actual->COutline( 0 ).PointCount(), aExpected.COutline( 0 ).PointCount() );
+
+        for( int ii = 0; ii < actual->COutline( 0 ).PointCount(); ++ii )
+        {
+            BOOST_CHECK_EQUAL( actual->COutline( 0 ).CVertex( ii ).x,
+                               aExpected.COutline( 0 ).CVertex( ii ).x );
+            BOOST_CHECK_EQUAL( actual->COutline( 0 ).CVertex( ii ).y,
+                               aExpected.COutline( 0 ).CVertex( ii ).y );
+        }
+    };
+
+    checkFill( *roundTripped, F_Cu, frontFill );
+    checkFill( *roundTripped, B_Cu, backFill );
+}
+
+
+BOOST_FIXTURE_TEST_CASE( ZoneDeserializeReplacesFilledPolygons, PROTO_TEST_FIXTURE )
+{
+    m_board = std::make_unique<BOARD>();
+
+    ZONE* zone = new ZONE( m_board.get() );
+    zone->SetLayerSet( LSET( { F_Cu, B_Cu } ) );
+    zone->AppendCorner( VECTOR2I( 0, 0 ), -1 );
+    zone->AppendCorner( VECTOR2I( pcbIUScale.mmToIU( 10 ), 0 ), -1 );
+    zone->AppendCorner( VECTOR2I( pcbIUScale.mmToIU( 10 ), pcbIUScale.mmToIU( 10 ) ), -1 );
+    zone->AppendCorner( VECTOR2I( 0, pcbIUScale.mmToIU( 10 ) ), -1 );
+
+    SHAPE_POLY_SET oldFrontFill;
+    oldFrontFill.AddOutline( KIGEOM::BoxToLineChain(
+            BOX2I( VECTOR2I( pcbIUScale.mmToIU( 1 ), pcbIUScale.mmToIU( 1 ) ),
+                   VECTOR2I( pcbIUScale.mmToIU( 2 ), pcbIUScale.mmToIU( 2 ) ) ) ) );
+
+    SHAPE_POLY_SET oldBackFill;
+    oldBackFill.AddOutline( KIGEOM::BoxToLineChain(
+            BOX2I( VECTOR2I( pcbIUScale.mmToIU( 6 ), pcbIUScale.mmToIU( 6 ) ),
+                   VECTOR2I( pcbIUScale.mmToIU( 2 ), pcbIUScale.mmToIU( 2 ) ) ) ) );
+
+    zone->SetFilledPolysList( F_Cu, oldFrontFill );
+    zone->SetFilledPolysList( B_Cu, oldBackFill );
+    zone->SetIsFilled( true );
+    zone->SetNeedRefill( false );
+    m_board->Add( zone );
+
+    google::protobuf::Any fullAny;
+    BOOST_REQUIRE_NO_THROW( zone->Serialize( fullAny ) );
+
+    kiapi::board::types::Zone partial;
+    BOOST_REQUIRE( fullAny.UnpackTo( &partial ) );
+    BOOST_REQUIRE_GE( partial.filled_polygons_size(), 2 );
+
+    // Keep the same layer set but provide only the new front-layer fill.  The
+    // back-layer entry left by the previous fill must be replaced with an empty
+    // container rather than surviving the update.
+    const auto frontLayer = partial.filled_polygons( 0 ).layer();
+    kiapi::board::types::ZoneFilledPolygons newFront = partial.filled_polygons( 0 );
+    for( const auto& fillLayer : partial.filled_polygons() )
+    {
+        if( fillLayer.layer() == frontLayer )
+        {
+            newFront = fillLayer;
+            break;
+        }
+    }
+
+    SHAPE_POLY_SET newFrontFill;
+    newFrontFill.AddOutline( KIGEOM::BoxToLineChain(
+            BOX2I( VECTOR2I( pcbIUScale.mmToIU( 2 ), pcbIUScale.mmToIU( 2 ) ),
+                   VECTOR2I( pcbIUScale.mmToIU( 3 ), pcbIUScale.mmToIU( 1 ) ) ) ) );
+    kiapi::common::PackPolySet( *newFront.mutable_shapes(), newFrontFill );
+
+    partial.clear_filled_polygons();
+    partial.add_filled_polygons()->CopyFrom( newFront );
+    partial.set_filled( true );
+
+    google::protobuf::Any partialAny;
+    BOOST_REQUIRE( partialAny.PackFrom( partial ) );
+    BOOST_REQUIRE( zone->Deserialize( partialAny ) );
+
+    BOOST_CHECK( zone->IsFilled() );
+    BOOST_CHECK( !zone->NeedRefill() );
+    BOOST_REQUIRE( zone->HasFilledPolysForLayer( F_Cu ) );
+    BOOST_REQUIRE( zone->HasFilledPolysForLayer( B_Cu ) );
+    BOOST_CHECK_EQUAL( zone->GetFilledPolysList( B_Cu )->OutlineCount(), 0 );
+    BOOST_CHECK_GT( zone->GetFilledPolysList( F_Cu )->OutlineCount(), 0 );
+    BOOST_CHECK_EQUAL( zone->GetFilledPolysList( F_Cu )->COutline( 0 ).CVertex( 0 ).x,
+                       newFrontFill.COutline( 0 ).CVertex( 0 ).x );
+    BOOST_CHECK_EQUAL( zone->GetFilledPolysList( F_Cu )->COutline( 0 ).CVertex( 0 ).y,
+                       newFrontFill.COutline( 0 ).CVertex( 0 ).y );
+
+    // An explicit unfilled update must clear both layers and require a native refill.
+    partial.set_filled( false );
+    partial.clear_filled_polygons();
+    google::protobuf::Any unfilledAny;
+    BOOST_REQUIRE( unfilledAny.PackFrom( partial ) );
+    BOOST_REQUIRE( zone->Deserialize( unfilledAny ) );
+
+    BOOST_CHECK( !zone->IsFilled() );
+    BOOST_CHECK( zone->NeedRefill() );
+    BOOST_CHECK_EQUAL( zone->GetFilledPolysList( F_Cu )->OutlineCount(), 0 );
+    BOOST_CHECK_EQUAL( zone->GetFilledPolysList( B_Cu )->OutlineCount(), 0 );
 }
 
 

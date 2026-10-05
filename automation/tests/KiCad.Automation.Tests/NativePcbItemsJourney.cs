@@ -250,6 +250,20 @@ public sealed partial class NativeSessionTests
                                     new PolyLineNode { Point = new() { XNm = 25_000_000, YNm = 25_000_000 } },
                                     new PolyLineNode { Point = new() { XNm = 5_000_000, YNm = 25_000_000 } }
                                 }
+                            },
+                            Holes =
+                            {
+                                new PolyLine
+                                {
+                                    Closed = true,
+                                    Nodes =
+                                    {
+                                        new PolyLineNode { Point = new() { XNm = 10_000_000, YNm = 10_000_000 } },
+                                        new PolyLineNode { Point = new() { XNm = 20_000_000, YNm = 10_000_000 } },
+                                        new PolyLineNode { Point = new() { XNm = 20_000_000, YNm = 20_000_000 } },
+                                        new PolyLineNode { Point = new() { XNm = 10_000_000, YNm = 20_000_000 } }
+                                    }
+                                }
                             }
                         }
                     }
@@ -263,7 +277,11 @@ public sealed partial class NativeSessionTests
                     FillMode = ZoneFillMode.ZfmSolid,
                     Net = new()
                 },
-                Border = new() { Style = ZoneBorderStyle.ZbsSolid, Pitch = new() { ValueNm = 1_000_000 } }
+                Border = new() { Style = ZoneBorderStyle.ZbsSolid, Pitch = new() { ValueNm = 1_000_000 } },
+                CustomProperties =
+                {
+                    new CustomProperty { Key = "fixture.zone.provenance", Value = "native-create" }
+                }
             };
             zone.Layers.Add(BoardLayer.BlFCu);
             var createZone = new CreateItems { Header = new() { Document = board } };
@@ -309,8 +327,13 @@ public sealed partial class NativeSessionTests
             var filledZones = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
             { Header = new() { Document = board }, Types_ = { KiCadObjectType.KotPcbZone } }, token);
             var filledZone = filledZones.Items.Select(item => item.Unpack<Zone>()).Single(item => item.Id.Value == zoneId);
-            Assert.IsTrue(filledZone.Filled || filledZone.FilledPolygons.Count > 0,
+            AssertZoneFilled(filledZone,
                 "The terminal successful receipt must correspond to filled zone geometry.");
+            // Keep the complete native state before the typed update.  The
+            // update below intentionally changes authored fields, so this is
+            // the exact state that native undo must restore after the refill
+            // entry is undone.
+            var zoneBeforeUpdate = filledZone.Clone();
             var sameProcessReceipt = await mcp.Tool("kicad_pcb_operation_receipt", new
             { instanceId, expectedProcessEpoch = client.Epoch, operationId = refillOperation });
             Assert.IsFalse(sameProcessReceipt.TryGetProperty("isError", out var sameReceiptError) && sameReceiptError.GetBoolean(), sameProcessReceipt.GetRawText());
@@ -367,7 +390,13 @@ public sealed partial class NativeSessionTests
                                       new { xNm = 25_000_000L, yNm = 5_000_000L },
                                       new { xNm = 25_000_000L, yNm = 25_000_000L },
                                       new { xNm = 5_000_000L, yNm = 25_000_000L } },
-                    holes = Array.Empty<object>()
+                    holes = new[] { new[]
+                    {
+                        new { xNm = 9_000_000L, yNm = 9_000_000L },
+                        new { xNm = 21_000_000L, yNm = 9_000_000L },
+                        new { xNm = 21_000_000L, yNm = 21_000_000L },
+                        new { xNm = 9_000_000L, yNm = 21_000_000L }
+                    } }
                 } },
                 name = "MCP typed zone update", priority = 7U, netName = "",
                 clearanceNm = 200_000L, minThicknessNm = 200_000L,
@@ -388,6 +417,11 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(zoneUpdateData.GetProperty("refillRequired").GetBoolean(), zoneUpdateReply.GetRawText());
             Assert.IsTrue(zoneUpdateData.GetProperty("postCommitVerified").GetBoolean(), zoneUpdateReply.GetRawText());
             before = SchematicJson.Parser.Parse<DocumentLifecycleState>(zoneUpdateData.GetProperty("afterState").GetString()!);
+            var zoneAfterUpdate = (await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = board }, Items = { new KIID { Value = zoneId } } }, token))
+                .Items.Single().Unpack<Zone>();
+            AssertZoneUnfilled(zoneAfterUpdate,
+                "A typed zone update must invalidate native-derived fill geometry until the separate refill completes.");
 
             var zoneUpdateReplay = await mcp.Tool("kicad_pcb_zone_update", new
             {
@@ -407,6 +441,90 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(staleZoneUpdate.GetProperty("isError").GetBoolean(), staleZoneUpdate.GetRawText());
             Assert.AreEqual("pcb_state_changed", staleZoneUpdate.GetProperty("structuredContent")
                 .GetProperty("errorCode").GetString(), staleZoneUpdate.GetRawText());
+
+            // Refill only the updated zone and require the terminal native
+            // receipt plus actual filled geometry.  The selected-zone path is
+            // synchronous, but the explicit wait keeps this proof bound to the
+            // native outcome rather than editor responsiveness.
+            string updatedRefillOperation = Guid.NewGuid().ToString("D");
+            var updatedRefillRequest = new RefillZones { Board = board, OperationId = updatedRefillOperation };
+            updatedRefillRequest.Zones.Add(new KIID { Value = zoneId });
+            var updatedRefillReply = await mcp.Tool("kicad_pcb_refill_zones", new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(updatedRefillRequest),
+                expectedStateJson = SchematicJson.Formatter.Format(before), operationId = updatedRefillOperation
+            });
+            Assert.IsFalse(updatedRefillReply.TryGetProperty("isError", out var updatedRefillError)
+                && updatedRefillError.GetBoolean(), updatedRefillReply.GetRawText());
+            Assert.IsTrue(updatedRefillReply.GetProperty("structuredContent").GetProperty("nativeReceiptAvailable").GetBoolean(),
+                updatedRefillReply.GetRawText());
+            var updatedRefillWait = await mcp.Tool("kicad_pcb_operation_wait", new
+            {
+                instanceId, expectedProcessEpoch = client.Epoch,
+                documentJson = SchematicJson.Formatter.Format(board),
+                operationId = updatedRefillOperation, timeoutMs = 5000
+            });
+            Assert.IsFalse(updatedRefillWait.TryGetProperty("isError", out var updatedRefillWaitError)
+                && updatedRefillWaitError.GetBoolean(), updatedRefillWait.GetRawText());
+            var updatedRefillWaitData = updatedRefillWait.GetProperty("structuredContent");
+            Assert.IsTrue(updatedRefillWaitData.GetProperty("terminal").GetBoolean(), updatedRefillWait.GetRawText());
+            Assert.AreEqual("completed", updatedRefillWaitData.GetProperty("zoneFillOutcome").GetString(), updatedRefillWait.GetRawText());
+            Assert.IsTrue(updatedRefillWaitData.GetProperty("completionConfirmed").GetBoolean(), updatedRefillWait.GetRawText());
+            Assert.IsTrue(updatedRefillWaitData.GetProperty("commitStateKnown").GetBoolean(), updatedRefillWait.GetRawText());
+            Assert.AreEqual("", updatedRefillWaitData.GetProperty("errorCode").GetString(), updatedRefillWait.GetRawText());
+            var zoneAfterRefill = (await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = board }, Items = { new KIID { Value = zoneId } } }, token))
+                .Items.Single().Unpack<Zone>();
+            AssertZoneFilled(zoneAfterRefill,
+                "The terminal post-update refill receipt must correspond to filled zone geometry.");
+
+            // Selected refill commits are native undo entries.  Undo the fill,
+            // then the typed update, and redo both in order.  Comparing the
+            // authored state independently from derived polygons keeps the
+            // history proof precise while the fill assertions cover the native
+            // geometry at each refill boundary.
+            var undoneRefill = await ApplyNativeZoneHistory(client, board, focusProcessId, display, "z",
+                zoneAfterUpdate, expectFilled: false, token);
+            AssertZoneUnfilled(undoneRefill,
+                "Undoing the selected refill must restore the updated zone's invalidated fill state.");
+            var undoneUpdate = await ApplyNativeZoneHistory(client, board, focusProcessId, display, "z",
+                zoneBeforeUpdate, expectFilled: true, token);
+            AssertZoneFilled(undoneUpdate,
+                "Undoing the typed update must restore the previous filled copper zone.");
+            var redoneUpdate = await ApplyNativeZoneHistory(client, board, focusProcessId, display, "y",
+                zoneAfterUpdate, expectFilled: false, token);
+            AssertZoneUnfilled(redoneUpdate,
+                "Redoing the typed update must restore its refill-required state.");
+            var redoneRefill = await ApplyNativeZoneHistory(client, board, focusProcessId, display, "y",
+                zoneAfterRefill, expectFilled: true, token);
+            AssertZoneFilled(redoneRefill,
+                "Redoing the selected refill must restore the updated filled copper zone.");
+
+            // Persist the redone typed zone, close the clean native editor and
+            // reopen the same board before reading it through the native API.
+            await SaveCheckedThroughMcp(client, board, evidence, token, verifyReconnect: false);
+            var savedZoneState = await ObserveLifecycleState(client, board, token);
+            var zoneCloseReply = await mcp.Tool("kicad_document_close", new
+            {
+                instanceId, expectedStateJson = SchematicJson.Formatter.Format(savedZoneState),
+                operationId = Guid.NewGuid().ToString("D")
+            });
+            Assert.IsFalse(zoneCloseReply.TryGetProperty("isError", out var zoneCloseError)
+                && zoneCloseError.GetBoolean(), zoneCloseReply.GetRawText());
+            Assert.AreEqual(LifecycleOperationStatus.LosClosed, LifecycleResult(zoneCloseReply).Status,
+                zoneCloseReply.GetRawText());
+            board = (await CreateRootThroughMcp(client.Endpoint, instanceId, boardPath, evidence, token,
+                toolName: "kicad_pcb_open")).Document;
+            finalBoard = board;
+            zoneDocumentJson = SchematicJson.Formatter.Format(board);
+            before = await ObserveLifecycleState(client, board, token);
+            var reopenedZone = (await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = board }, Items = { new KIID { Value = zoneId } } }, token))
+                .Items.Single().Unpack<Zone>();
+            AssertZoneAuthoringMatches(zoneAfterRefill, reopenedZone,
+                "The typed zone authored fields must survive save, close and reopen.");
+            AssertZoneFilled(reopenedZone,
+                "The refilled typed zone geometry must survive save, close and reopen.");
 
             var removeZoneReply = await mcp.Tool("kicad_pcb_zone_delete", new
             {
@@ -2709,6 +2827,77 @@ public sealed partial class NativeSessionTests
         finally { Directory.Delete(stateDirectory, true); }
         finalBoard = await VerifyNativePcbManufacturing(client, finalBoard, evidence, instanceId, token);
         await SaveCheckedThroughMcp(client, finalBoard, evidence, token, verifyReconnect: false);
+    }
+
+    private static async Task<Zone> ApplyNativeZoneHistory(NativeClient client, DocumentSpecifier board,
+        int processId, string display, string key, Zone expected, bool expectFilled, CancellationToken token)
+    {
+        using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
+        limit.CancelAfter(TimeSpan.FromSeconds(30));
+        while (!NativeKeyboard.HasWindow(display, processId, "PCB Editor"))
+            await Task.Delay(100, limit.Token);
+
+        // The editor keeps keyboard focus after the native MCP mutation.  Do
+        // not click the canvas here: a synthetic click near the drawing-sheet
+        // border can open Page Settings instead of applying history.
+        NativeKeyboard.SchematicShortcut(display, processId, key, titleMatch: "PCB Editor", focusCanvas: false);
+        int delay = 25;
+        while (true)
+        {
+            var items = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = board }, Items = { expected.Id } }, limit.Token);
+            if (items.Items.Count == 1 && items.Items[0].Is(Zone.Descriptor))
+            {
+                var actual = items.Items[0].Unpack<Zone>();
+                if (ZoneAuthoringMatches(expected, actual)
+                    && (IsZoneFilled(actual) == expectFilled))
+                    return actual;
+            }
+
+            await Task.Delay(delay, limit.Token);
+            delay = Math.Min(delay * 2, 250);
+        }
+    }
+
+    private static bool ZoneAuthoringMatches(Zone expected, Zone actual)
+    {
+        var expectedAuthoring = expected.Clone();
+        expectedAuthoring.Filled = false;
+        expectedAuthoring.FilledPolygons.Clear();
+        var actualAuthoring = actual.Clone();
+        actualAuthoring.Filled = false;
+        actualAuthoring.FilledPolygons.Clear();
+        return expectedAuthoring.Equals(actualAuthoring);
+    }
+
+    private static void AssertZoneAuthoringMatches(Zone expected, Zone actual, string message)
+    {
+        Assert.IsTrue(ZoneAuthoringMatches(expected, actual), message);
+        Assert.AreEqual(expected.Id?.Value, actual.Id?.Value, message);
+    }
+
+    private static bool IsZoneFilled(Zone zone) => zone.Filled
+        && FilledPolygonCount(zone) > 0 && FilledVertexCount(zone) > 0;
+
+    private static int FilledPolygonCount(Zone zone) => zone.FilledPolygons
+        .Sum(layer => layer.Shapes?.Polygons.Count ?? 0);
+
+    private static int FilledVertexCount(Zone zone) => zone.FilledPolygons
+        .Sum(layer => layer.Shapes?.Polygons.Sum(polygon =>
+            (polygon.Outline?.Nodes.Count ?? 0) + polygon.Holes.Sum(hole => hole.Nodes.Count)) ?? 0);
+
+    private static void AssertZoneFilled(Zone zone, string message)
+    {
+        Assert.IsTrue(zone.Filled, message);
+        Assert.IsGreaterThan(0, FilledPolygonCount(zone), message);
+        Assert.IsGreaterThan(0, FilledVertexCount(zone), message);
+    }
+
+    private static void AssertZoneUnfilled(Zone zone, string message)
+    {
+        Assert.IsFalse(zone.Filled, message);
+        Assert.AreEqual(0, FilledPolygonCount(zone), message);
+        Assert.AreEqual(0, FilledVertexCount(zone), message);
     }
 
     private static string RouteIdentity(Any item) => item.Is(Track.Descriptor) ? item.Unpack<Track>().Id.Value

@@ -115,6 +115,7 @@ public:
 
     bool IsAutomation() const { return !m_automationInstanceId.empty(); }
     const std::string& AutomationInstanceId() const { return m_automationInstanceId; }
+    const std::string& AutomationProjectPath() const { return m_automationProjectPath; }
 
     /**
      * Publish one change on the automation event stream.  Editor-thread only, after the native

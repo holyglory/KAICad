@@ -31,6 +31,7 @@ public sealed partial class NativeSessionTests
     private static async Task VerifyPcbDrcJobs(NativeClient client, DocumentSpecifier board,
         string evidence, CancellationToken token)
     {
+        await VerifyProjectVariableIdentity(client, board, token);
         await using var agent = await PcbDrcAgent.StartAsync(client, Path.Combine(evidence, "pcb-drc-job-mcp.stderr.log"), token);
         Task<(StartPcbDrcJob Request, PcbDrcJobState State)> Run(DocumentLifecycleState at, Action<StartPcbDrcJob>? configure = null) =>
             RunPcbDrcJob(client, board, at, token, configure, agent);
@@ -412,6 +413,105 @@ public sealed partial class NativeSessionTests
         AssertCurrent(unstamped, "Without the clock text, a new check must be complete and fresh again.");
         Assert.AreEqual(state.Findings.Count, unstamped.Findings.Count,
             "A check of the restored board must report the findings of the saved board.");
+    }
+
+    private static async Task VerifyProjectVariableIdentity(NativeClient client, DocumentSpecifier board,
+        CancellationToken token)
+    {
+        var ownProject = new DocumentSpecifier
+        {
+            Type = DocumentType.DoctypeProject,
+            Project = board.Project.Clone()
+        };
+        var ownVariables = await client.InvokeAsync<GetTextVariables, Kiapi.Common.Project.TextVariables>(
+            new() { Document = ownProject }, token);
+        var ownSession = await client.HandshakeAsync(token);
+        string ownProjectFile = ownSession.ProjectPath;
+        byte[] ownProjectBytes = await File.ReadAllBytesAsync(ownProjectFile, token);
+
+        var sibling = await SiblingInstance(client, token);
+        var siblingClient = new NativeClient(new NngTransport(), sibling.Endpoint, sibling.Epoch);
+        var siblingSession = await siblingClient.HandshakeAsync(token);
+        string siblingDirectory = Path.GetDirectoryName(siblingSession.ProjectPath)!;
+        var siblingProject = new DocumentSpecifier
+        {
+            Type = DocumentType.DoctypeProject,
+            Project = new()
+            {
+                Name = Path.GetFileNameWithoutExtension(siblingSession.ProjectPath),
+                Path = siblingDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                    + Path.DirectorySeparatorChar
+            }
+        };
+        var siblingVariables = await siblingClient.InvokeAsync<GetTextVariables, Kiapi.Common.Project.TextVariables>(
+            new() { Document = siblingProject }, token);
+        byte[] siblingProjectBytes = await File.ReadAllBytesAsync(siblingSession.ProjectPath, token);
+
+        async Task RejectGet(DocumentSpecifier target, string label)
+        {
+            var error = await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
+                client.InvokeAsync<GetTextVariables, Kiapi.Common.Project.TextVariables>(
+                    new() { Document = target }, token));
+            StringAssert.Contains(error.Message, "project_target_", label);
+        }
+
+        async Task RejectSet(DocumentSpecifier target, string label)
+        {
+            var request = new SetTextVariables
+            {
+                Document = target,
+                MergeMode = MapMergeMode.MmmMerge,
+                Variables = new()
+            };
+            request.Variables.Variables["PROJECT_IDENTITY_GUARD"] = label;
+            var error = await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
+                client.InvokeAsync<SetTextVariables, Empty>(request, token));
+            StringAssert.Contains(error.Message, "project_target_", label);
+        }
+
+        var omitted = ownProject.Clone(); omitted.Project = null;
+        await RejectGet(omitted, "automation must require the project descriptor");
+        await RejectSet(omitted, "automation must require the project descriptor");
+
+        var wrongName = ownProject.Clone();
+        wrongName.Project.Name = siblingProject.Project.Name;
+        await RejectGet(wrongName, "foreign project name must be refused");
+        await RejectSet(wrongName, "foreign project name must be refused");
+
+        var wrongPath = ownProject.Clone();
+        wrongPath.Project.Path = siblingProject.Project.Path;
+        await RejectGet(wrongPath, "foreign project path must be refused");
+        await RejectSet(wrongPath, "foreign project path must be refused");
+
+        Assert.AreEqual(ownVariables, await client.InvokeAsync<GetTextVariables, Kiapi.Common.Project.TextVariables>(
+            new() { Document = ownProject }, token), "Rejected foreign requests must not change the current project map.");
+        Assert.AreEqual(siblingVariables, await siblingClient.InvokeAsync<GetTextVariables, Kiapi.Common.Project.TextVariables>(
+            new() { Document = siblingProject }, token), "Rejected foreign requests must not change the sibling project map.");
+        CollectionAssert.AreEqual(ownProjectBytes, await File.ReadAllBytesAsync(ownProjectFile, token));
+        CollectionAssert.AreEqual(siblingProjectBytes, await File.ReadAllBytesAsync(siblingSession.ProjectPath, token));
+
+        string marker = "PROJECT_IDENTITY_GUARD_" + Guid.NewGuid().ToString("N");
+        var apply = new SetTextVariables
+        {
+            Document = ownProject,
+            MergeMode = MapMergeMode.MmmMerge,
+            Variables = new()
+        };
+        apply.Variables.Variables[marker] = "correct-target";
+        await client.InvokeAsync<SetTextVariables, Empty>(apply, token);
+        var changed = await client.InvokeAsync<GetTextVariables, Kiapi.Common.Project.TextVariables>(
+            new() { Document = ownProject }, token);
+        Assert.AreEqual("correct-target", changed.Variables[marker]);
+
+        var restore = new SetTextVariables
+        {
+            Document = ownProject,
+            MergeMode = MapMergeMode.MmmReplace,
+            Variables = ownVariables.Clone()
+        };
+        await client.InvokeAsync<SetTextVariables, Empty>(restore, token);
+        Assert.AreEqual(ownVariables, await client.InvokeAsync<GetTextVariables, Kiapi.Common.Project.TextVariables>(
+            new() { Document = ownProject }, token));
     }
 
     // Window activation is the PCB editor's checkpoint for changes that reach it without any notification. Here the

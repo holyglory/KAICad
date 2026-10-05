@@ -19,6 +19,10 @@
 
 #include <utility>
 
+#include <fstream>
+#include <iterator>
+#include <vector>
+
 #include <boost/test/unit_test.hpp>
 #include <wx/filefn.h>
 #include <wx/filename.h>
@@ -590,6 +594,76 @@ BOOST_FIXTURE_TEST_CASE( OpenProjectWithBoardAndSchematic, API_SERVER_E2E_FIXTUR
 
     BOOST_REQUIRE( schDoc.type() == kiapi::common::types::DOCTYPE_SCHEMATIC );
 
+    // The common project-variable API remains compatible with SDK callers that omit the
+    // project submessage outside automation, but a supplied foreign descriptor must never
+    // redirect a read or write to the currently loaded project.
+    auto readVariables = [&]( const kiapi::common::types::DocumentSpecifier& aTarget,
+                              kiapi::common::project::TextVariables* aOut = nullptr )
+    {
+        kiapi::common::commands::GetTextVariables request;
+        *request.mutable_document() = aTarget;
+        kiapi::common::ApiResponse response;
+        if( !Client().SendCommand( request, &response ) )
+        {
+            BOOST_ERROR( "GetTextVariables transport failed: " + Client().LastError() );
+            return response;
+        }
+
+        if( response.status().status() == kiapi::common::AS_OK && aOut
+            && !response.message().UnpackTo( aOut ) )
+            BOOST_ERROR( "Failed to unpack GetTextVariables response" );
+
+        return response;
+    };
+
+    auto projectBytes = []( const wxString& aPath )
+    {
+        std::ifstream input( aPath.ToStdString(), std::ios::binary );
+        return std::vector<char>( std::istreambuf_iterator<char>( input ), std::istreambuf_iterator<char>() );
+    };
+
+    wxString otherDataDir = wxString::FromUTF8( KI_TEST::GetPcbnewTestDataDir() );
+    std::vector<char> projectBefore = projectBytes( testDataDir + wxS( "basic_test.kicad_pro" ) );
+    kiapi::common::project::TextVariables baselineVariables;
+    BOOST_REQUIRE_EQUAL( readVariables( projectDoc, &baselineVariables ).status().status(),
+                         kiapi::common::AS_OK );
+
+    kiapi::common::types::DocumentSpecifier omittedProject;
+    omittedProject.set_type( kiapi::common::types::DOCTYPE_PROJECT );
+    kiapi::common::project::TextVariables omittedVariables;
+    BOOST_REQUIRE_EQUAL( readVariables( omittedProject, &omittedVariables ).status().status(),
+                         kiapi::common::AS_OK );
+    BOOST_REQUIRE_EQUAL( omittedVariables.DebugString(), baselineVariables.DebugString() );
+
+    for( const auto& [foreignName, foreignPath] :
+         { std::pair<std::string, std::string>{ "api_kitchen_sink", otherDataDir.ToStdString() },
+           std::pair<std::string, std::string>{ "basic_test", ( otherDataDir + wxS( "foreign-project/" ) ).ToStdString() } } )
+    {
+        auto foreign = projectDoc;
+        foreign.mutable_project()->set_name( foreignName );
+        foreign.mutable_project()->set_path( foreignPath );
+        auto rejectedRead = readVariables( foreign );
+        BOOST_REQUIRE_NE( rejectedRead.status().status(), kiapi::common::AS_OK );
+        BOOST_CHECK( rejectedRead.status().error_message().find( "project_target_mismatch" ) != std::string::npos );
+
+        kiapi::common::commands::SetTextVariables rejectedSet;
+        *rejectedSet.mutable_document() = foreign;
+        rejectedSet.set_merge_mode( kiapi::common::types::MMM_MERGE );
+        ( *rejectedSet.mutable_variables()->mutable_variables() )["FOREIGN_PROJECT_GUARD"] = "must-not-write";
+        kiapi::common::ApiResponse rejectedSetResponse;
+        BOOST_REQUIRE_MESSAGE( Client().SendCommand( rejectedSet, &rejectedSetResponse ),
+                               "SetTextVariables transport failed: " + Client().LastError() );
+        BOOST_REQUIRE_NE( rejectedSetResponse.status().status(), kiapi::common::AS_OK );
+        BOOST_CHECK( rejectedSetResponse.status().error_message().find( "project_target_mismatch" )
+                     != std::string::npos );
+    }
+
+    kiapi::common::project::TextVariables afterRejected;
+    BOOST_REQUIRE_EQUAL( readVariables( projectDoc, &afterRejected ).status().status(),
+                         kiapi::common::AS_OK );
+    BOOST_REQUIRE_EQUAL( afterRejected.DebugString(), baselineVariables.DebugString() );
+    BOOST_REQUIRE_EQUAL( projectBytes( testDataDir + wxS( "basic_test.kicad_pro" ) ), projectBefore );
+
     // Verify the board is still open by querying it again.
     footprintCount = 0;
     BOOST_REQUIRE_MESSAGE( Client().GetItemsCount( boardDoc, kiapi::common::types::KOT_PCB_FOOTPRINT, &footprintCount ),
@@ -597,8 +671,6 @@ BOOST_FIXTURE_TEST_CASE( OpenProjectWithBoardAndSchematic, API_SERVER_E2E_FIXTUR
     BOOST_CHECK_GT( footprintCount, 0 );
 
     // Verify that opening a document from a different project is rejected.
-    wxString otherDataDir = wxString::FromUTF8( KI_TEST::GetPcbnewTestDataDir() );
-
     kiapi::common::types::DocumentSpecifier otherBoardDoc;
 
     BOOST_REQUIRE_MESSAGE(

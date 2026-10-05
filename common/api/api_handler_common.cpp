@@ -22,6 +22,7 @@
 #include <tuple>
 
 #include <api/api_handler_common.h>
+#include <api/api_server.h>
 #include <bitmap_trace.h>
 #include <build_version.h>
 #include <eda_shape.h>
@@ -45,6 +46,8 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <optional>
+#include <project.h>
 
 using namespace kiapi::common::commands;
 using namespace kiapi::common::types;
@@ -71,6 +74,65 @@ void Fail( ApiResponseStatus& aError, const char* aCode, const std::string& aMes
 {
     aError.set_status( ApiStatusCode::AS_BAD_REQUEST );
     aError.set_error_message( std::string( aCode ) + ": " + aMessage );
+}
+
+std::optional<ApiResponseStatus> ValidateProjectVariableTarget( const DocumentSpecifier& aDocument,
+                                                                const PROJECT& aProject )
+{
+    KICAD_API_SERVER* server = Pgm().ApiServerOrNull();
+
+    // SA-04: the automation boundary serves one explicit project and must reject a stale or
+    // foreign descriptor before exposing or mutating project-owned values.
+    // Existing SDK callers may omit the project submessage in the non-automation API server.
+    // Automation instances always have one owned project and must bind requests to it.
+    if( !server || !server->IsAutomation() )
+    {
+        if( !aDocument.has_project() )
+            return std::nullopt;
+    }
+    else if( !aDocument.has_project() )
+    {
+        ApiResponseStatus error;
+        Fail( error, "project_target_required", "automation project requests must identify the project name and absolute directory" );
+        return error;
+    }
+
+    if( !aDocument.has_project() )
+        return std::nullopt;
+
+    const std::string& requestedPath = aDocument.project().path();
+    if( requestedPath.empty() || requestedPath.find( '\0' ) != std::string::npos )
+    {
+        ApiResponseStatus error;
+        Fail( error, "project_target_invalid", "project.path must be a non-empty NUL-free absolute directory" );
+        return error;
+    }
+
+    wxFileName requested = wxFileName::DirName( wxString::FromUTF8( requestedPath ) );
+    wxFileName current = wxFileName::DirName( aProject.GetProjectPath() );
+    requested.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+    current.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+
+    bool matches = requested.IsAbsolute() && requested == current
+                   && aDocument.project().name() == aProject.GetProjectName().ToStdString( wxConvUTF8 );
+
+    if( matches && server && server->IsAutomation() )
+    {
+        wxFileName configured( wxString::FromUTF8( server->AutomationProjectPath() ) );
+        wxFileName loaded( aProject.GetProjectFullName() );
+        configured.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+        loaded.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+        matches = configured.IsAbsolute() && configured == loaded;
+    }
+
+    if( !matches )
+    {
+        ApiResponseStatus error;
+        Fail( error, "project_target_mismatch", "the requested project does not match this API instance's loaded project" );
+        return error;
+    }
+
+    return std::nullopt;
 }
 
 kiapi::automation::v1::RasterTraceBounds ToProtoBounds( const BITMAP_TRACE_BOUNDS& aBounds )
@@ -556,6 +618,9 @@ HANDLER_RESULT<project::TextVariables> API_HANDLER_COMMON::handleGetTextVariable
         return tl::unexpected( e );
     }
 
+    if( auto target = ValidateProjectVariableTarget( aCtx.Request.document(), project ) )
+        return tl::unexpected( *target );
+
     const std::map<wxString, wxString>& vars = project.GetTextVars();
 
     project::TextVariables reply;
@@ -589,6 +654,9 @@ HANDLER_RESULT<Empty> API_HANDLER_COMMON::handleSetTextVariables(
         return tl::unexpected( e );
     }
 
+    if( auto target = ValidateProjectVariableTarget( aCtx.Request.document(), project ) )
+        return tl::unexpected( *target );
+
     const project::TextVariables& newVars = aCtx.Request.variables();
     std::map<wxString, wxString>& vars = project.GetTextVars();
 
@@ -598,7 +666,12 @@ HANDLER_RESULT<Empty> API_HANDLER_COMMON::handleSetTextVariables(
     for( const auto& [key, value] : newVars.variables() )
         vars[wxString::FromUTF8( key )] = wxString::FromUTF8( value );
 
-    Pgm().GetSettingsManager().SaveProject();
+    if( !Pgm().GetSettingsManager().SaveProject( wxEmptyString, &project ) )
+    {
+        ApiResponseStatus error;
+        Fail( error, "project_variables_save_failed", "KiCad could not save the targeted project's text variables" );
+        return tl::unexpected( error );
+    }
 
     return Empty();
 }

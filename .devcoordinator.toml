@@ -3452,6 +3452,12 @@ requires=["managed-build"]
 command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativePcbKeepout","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/fixture-retry/keepout"]
 retained_artifacts=[{name="keepout-tests",path="automation/artifacts/fixture-retry/keepout",max_bytes=16777216},{name="keepout-evidence",path="automation/artifacts/native-pcb-keepout",max_bytes=67108864}]
 [[test.fixture-retry.check]]
+name="raster"
+tier="development"
+requires=["managed-build"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeRasterTrace","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/fixture-retry/raster"]
+retained_artifacts=[{name="raster-tests",path="automation/artifacts/fixture-retry/raster",max_bytes=16777216},{name="raster-evidence",path="automation/artifacts/native-raster-trace/native-session-current",max_bytes=67108864}]
+[[test.fixture-retry.check]]
 name="footprint"
 tier="development"
 command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeFootprintLibrary","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/fixture-retry/footprint"]

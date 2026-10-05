@@ -831,6 +831,53 @@ public sealed class McpProcessTests
                 Assert.AreEqual("unknown_instance", acceptedDisplay.GetProperty("result").GetProperty("structuredContent")
                     .GetProperty("errorCode").GetString(), "A native-valid display must pass admission and reach the unattached-instance guard.");
             }
+            var multiplicityDefinition = NativeSessionTests.SymbolMultiplicityDefinition(pinDisplayDefinition);
+            string multiplicityDefinitionJson = SchematicJson.Formatter.Format(multiplicityDefinition);
+            int multiplicityCallId = 9520;
+            var multiplicityValidation = await Request(multiplicityCallId++, "tools/call", new { name = "kicad_symbol_library_validate", arguments = new
+            { libraryNickname = "Fixture", definitionJson = multiplicityDefinitionJson } });
+            Assert.IsTrue(multiplicityValidation.GetProperty("result").GetProperty("structuredContent").GetProperty("valid").GetBoolean(),
+                "Repeated numbers, common pins, stacked pins and case-distinct functions must pass the same validator.");
+            var validMultiplicityWrite = await Request(multiplicityCallId++, "tools/call", new { name = "kicad_symbol_library_write", arguments = new
+            {
+                instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = Guid.NewGuid().ToString("D"), libraryNickname = "Fixture",
+                definitionJson = multiplicityDefinitionJson, operationId = Guid.NewGuid().ToString("D")
+            } });
+            Assert.AreEqual("unknown_instance", validMultiplicityWrite.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+                "A valid repeated-number write must pass validation before reaching the unattached instance.");
+            foreach (string invalidPinKind in new[] { "duplicate-id", "duplicate-alternate", "library-link", "active-alternate" })
+            {
+                var invalidMultiplicity = multiplicityDefinition.Clone();
+                var firstPinChild = invalidMultiplicity.Items.First(child => child.Item.Is(SchematicPin.Descriptor));
+                var invalidPin = firstPinChild.Item.Unpack<SchematicPin>();
+                switch (invalidPinKind)
+                {
+                    case "duplicate-id": invalidMultiplicity.Items.Add(firstPinChild.Clone()); break;
+                    case "duplicate-alternate":
+                        invalidPin.Alternates.Add(new SchematicPinAlternate { Name = "MODE", Shape = SchematicPinShape.SpsLine,
+                            ElectricalType = Kiapi.Common.Types.ElectricalPinType.EptInput });
+                        invalidPin.Alternates.Add(invalidPin.Alternates[0].Clone()); firstPinChild.Item = Any.Pack(invalidPin); break;
+                    case "library-link": invalidPin.LibraryPinId = new() { Value = Guid.NewGuid().ToString("D") }; firstPinChild.Item = Any.Pack(invalidPin); break;
+                    case "active-alternate": invalidPin.ActiveAlternate = "MODE"; firstPinChild.Item = Any.Pack(invalidPin); break;
+                }
+                string invalidMultiplicityJson = SchematicJson.Formatter.Format(invalidMultiplicity);
+                var invalidMultiplicityValidation = await Request(multiplicityCallId++, "tools/call", new { name = "kicad_symbol_library_validate", arguments = new
+                { libraryNickname = "Fixture", definitionJson = invalidMultiplicityJson } });
+                Assert.IsFalse(invalidMultiplicityValidation.GetProperty("result").GetProperty("structuredContent").GetProperty("valid").GetBoolean());
+                foreach (string mutationTool in new[] { "kicad_symbol_library_write", "kicad_symbol_library_clone" })
+                {
+                    object mutationArguments = mutationTool.EndsWith("_write", StringComparison.Ordinal)
+                        ? new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = Guid.NewGuid().ToString("D"), libraryNickname = "Fixture",
+                            definitionJson = invalidMultiplicityJson, operationId = Guid.NewGuid().ToString("D") }
+                        : new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = Guid.NewGuid().ToString("D"),
+                            definitionJson = invalidMultiplicityJson, targetLibraryNickname = "Fixture", targetSymbolName = "InvalidClone",
+                            operationId = Guid.NewGuid().ToString("D"), pinDisplayJson = "{\"showPinNames\":false,\"showPinNumbers\":false,\"pinNameOffsetNm\":\"0\"}" };
+                    var refusedMultiplicity = await Request(multiplicityCallId++, "tools/call", new { name = mutationTool, arguments = mutationArguments });
+                    Assert.IsTrue(refusedMultiplicity.GetProperty("result").GetProperty("isError").GetBoolean(), refusedMultiplicity.GetRawText());
+                    Assert.AreEqual("invalid_symbol_definition", refusedMultiplicity.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+                        "Malformed pins must fail validation before native/registry contact for both write and clone.");
+                }
+            }
             var invalidSymbolLibrary = await Request(9096, "tools/call", new { name = "kicad_symbol_library_list",
                 arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = "invalid", libraryNickname = "Fixture" } });
             Assert.IsTrue(invalidSymbolLibrary.GetProperty("result").GetProperty("isError").GetBoolean());

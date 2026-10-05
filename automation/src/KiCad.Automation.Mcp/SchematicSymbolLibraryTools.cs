@@ -162,6 +162,11 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
         SchematicSymbol definition = ParseDefinition(definitionJson);
         if (definition.Id is null || definition.Id.LibraryNickname != libraryNickname || string.IsNullOrWhiteSpace(definition.Id.EntryName))
             throw new AutomationException("symbol_library_definition_mismatch", "definitionJson must carry the same library nickname and a nonempty entry name.");
+        List<SymbolValidationIssue> issues = [];
+        ValidateDefinition(libraryNickname, definition, issues, cancellationToken);
+        if (issues.Count != 0)
+            throw new AutomationException("invalid_symbol_definition", "The symbol definition is invalid: "
+                + string.Join("; ", issues.OrderBy(issue => issue.Path, StringComparer.Ordinal).Select(issue => issue.Code)));
         NativeCapabilitySymbolLibraryPinDisplay? display = ParsePinDisplay(pinDisplayJson, required: false);
         NativeClient client = registry.Client(instanceId); AutomationSession session = await Handshake(client, expectedProcessEpoch, cancellationToken);
         string revisionAdmission = await EnsureModifyHash(client, libraryNickname, operationId, expectedModifyHash, cancellationToken);
@@ -376,7 +381,6 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
 
         var ids = new HashSet<string>(StringComparer.Ordinal);
         var pinIds = new HashSet<string>(StringComparer.Ordinal);
-        var pinNumbers = new HashSet<string>(StringComparer.Ordinal);
         int pins = 0, graphics = 0;
         for (int i = 0; i < definition.Items.Count; i++)
         {
@@ -410,7 +414,7 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
             if (child.Item.Is(SchematicPin.Descriptor))
             {
                 pins++;
-                ValidatePin(child.Item.Unpack<SchematicPin>(), path, definition, pinIds, pinNumbers, issues);
+                ValidatePin(child.Item.Unpack<SchematicPin>(), path, pinIds, issues);
             }
             else if (child.Item.Is(SchematicField.Descriptor))
                 ValidateUserField(child.Item.Unpack<SchematicField>(), path, issues);
@@ -435,29 +439,37 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
         }
     }
 
-    private static void ValidatePin(SchematicPin pin, string path, SchematicSymbol definition,
-        HashSet<string> pinIds, HashSet<string> pinNumbers, List<SymbolValidationIssue> issues)
+    private static void ValidatePin(SchematicPin pin, string path,
+        HashSet<string> pinIds, List<SymbolValidationIssue> issues)
     {
         if (pin.Id is null || !Guid.TryParseExact(pin.Id.Value, "D", out var id) || id == Guid.Empty || pin.Id.Value != id.ToString("D"))
             Issue(issues, "invalid_pin_id", path + ".item.id", "Pins require canonical nonempty UUID identities.");
         else if (!pinIds.Add(pin.Id.Value))
             Issue(issues, "duplicate_pin_id", path + ".item.id", "Pin UUIDs must be distinct.");
+        if (pin.LibraryPinId is not null || pin.HasActiveAlternate)
+            Issue(issues, "instance_only_pin_state", path + ".item",
+                "A library definition owns its pin UUIDs and alternate functions; placed-pin links and active alternate selections belong to instances.");
         if (string.IsNullOrWhiteSpace(pin.Name) || pin.Name.Length > 255 || HasControl(pin.Name) || pin.Name.Contains(' '))
             Issue(issues, "invalid_pin_name", path + ".item.name", "Pins require bounded names without spaces or control characters.");
         if (string.IsNullOrWhiteSpace(pin.Number) || pin.Number.Length > 255 || HasControl(pin.Number) || pin.Number.Contains(' '))
             Issue(issues, "invalid_pin_number", path + ".item.number", "Pins require bounded numbers without spaces or control characters.");
-        if (!string.IsNullOrEmpty(pin.Number) && !pinNumbers.Add(pin.Number))
-            Issue(issues, "duplicate_pin_number", path + ".item.number", "Pin numbers must be unique within a symbol definition.");
+        // A pin number identifies a logical contact, not a unique drawing
+        // object. Native KiCad supports repeated occurrences across units and
+        // styles, stacked pins and multiple locations in the same unit/style.
         if (pin.Length is null || pin.Length.ValueNm <= 0)
             Issue(issues, "invalid_pin_length", path + ".item.length.valueNm", "Pin length must be a positive distance.");
         if (pin.Position is null)
             Issue(issues, "missing_pin_position", path + ".item.position", "Pins require an explicit local position.");
         if (pin.Orientation is SchematicPinOrientation.SpoUnknown or < SchematicPinOrientation.SpoRight or > SchematicPinOrientation.SpoDown)
             Issue(issues, "invalid_pin_orientation", path + ".item.orientation", "Pin orientation must be Right, Left, Up or Down.");
+        var alternateNames = new HashSet<string>(StringComparer.Ordinal);
         for (int i = 0; i < pin.Alternates.Count; i++)
         {
             if (string.IsNullOrWhiteSpace(pin.Alternates[i].Name) || pin.Alternates[i].Name.Length > 255)
                 Issue(issues, "invalid_pin_alternate", $"{path}.item.alternates[{i}]", "Alternate pin names must be bounded and nonempty.");
+            else if (!alternateNames.Add(pin.Alternates[i].Name))
+                Issue(issues, "duplicate_pin_alternate", $"{path}.item.alternates[{i}].name",
+                    "Alternate function names must be distinct within each pin; the native map would otherwise discard a declaration.");
         }
     }
 

@@ -323,6 +323,97 @@ public sealed partial class NativeSessionTests
             editedPreviewSha256 = Convert.ToHexStringLower(SHA256.HashData(editedPreview)),
             reopenedPreviewSha256 = Convert.ToHexStringLower(SHA256.HashData(reloadedPreview))
         }), token);
+        // Number labels can repeat on distinct owned pin objects, including
+        // same-unit/style locations and alternate bodies. Exercise the actual
+        // write and clone tools, then require every occurrence to survive a
+        // native library reopen with its UUID, applicability and functions.
+        var multiplicityDefinition = SymbolMultiplicityDefinition(SchematicJson.Parser.Parse<SchematicSymbol>(definitionJson));
+        multiplicityDefinition.Id.EntryName = "PinMultiplicityProbe";
+        string multiplicityJson = SchematicJson.Formatter.Format(multiplicityDefinition);
+        var multiplicityValidation = await mcp.Tool("kicad_symbol_library_validate", new
+        { libraryNickname, definitionJson = multiplicityJson });
+        RequireToolSuccess(multiplicityValidation);
+        Assert.IsTrue(multiplicityValidation.GetProperty("structuredContent").GetProperty("valid").GetBoolean(), multiplicityValidation.GetRawText());
+        var multiplicityWrite = await mcp.Tool("kicad_symbol_library_write", new
+        {
+            instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, definitionJson = multiplicityJson,
+            operationId = Guid.NewGuid().ToString("D"), overwrite = false, pinDisplayJson = SchematicJson.Formatter.Format(sourceDisplay)
+        });
+        RequireToolSuccess(multiplicityWrite);
+        Assert.IsTrue(multiplicityWrite.GetProperty("structuredContent").GetProperty("persistenceVerified").GetBoolean());
+        var multiplicityRead = await mcp.Tool("kicad_symbol_library_read", new
+        { instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName = multiplicityDefinition.Id.EntryName });
+        RequireToolSuccess(multiplicityRead);
+        var multiplicityNative = SchematicJson.Parser.Parse<SchematicSymbol>(multiplicityRead.GetProperty("structuredContent").GetProperty("definition").GetRawText());
+        CollectionAssert.AreEqual(SymbolPinOccurrences(multiplicityDefinition), SymbolPinOccurrences(multiplicityNative));
+        Assert.AreEqual(2U, multiplicityNative.UnitCount);
+        Assert.IsTrue(multiplicityNative.DemorganBodyStyles);
+        var multiplicityClone = await mcp.Tool("kicad_symbol_library_clone", new
+        {
+            instanceId, expectedProcessEpoch = client.Epoch,
+            definitionJson = multiplicityRead.GetProperty("structuredContent").GetProperty("definition").GetRawText(),
+            pinDisplayJson = multiplicityRead.GetProperty("structuredContent").GetProperty("pinDisplay").GetRawText(),
+            targetLibraryNickname = libraryNickname, targetSymbolName = "PinMultiplicityCloneProbe",
+            operationId = Guid.NewGuid().ToString("D")
+        });
+        RequireToolSuccess(multiplicityClone);
+        Assert.IsTrue(multiplicityClone.GetProperty("structuredContent").GetProperty("persistenceVerified").GetBoolean());
+        CollectionAssert.AreEqual(SymbolPinOccurrences(multiplicityDefinition), SymbolPinOccurrences(
+            SchematicJson.Parser.Parse<SchematicSymbol>(multiplicityClone.GetProperty("structuredContent").GetProperty("definition").GetRawText())));
+        var multiplicityAfterClone = await mcp.Tool("kicad_symbol_library_read", new
+        { instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName = multiplicityDefinition.Id.EntryName });
+        RequireToolSuccess(multiplicityAfterClone);
+        foreach (string malformed in new[] { "duplicate-id", "duplicate-alternate", "library-link", "active-alternate" })
+        {
+            var invalid = multiplicityDefinition.Clone();
+            var firstPin = invalid.Items.First(child => child.Item.Is(SchematicPin.Descriptor));
+            var pin = firstPin.Item.Unpack<SchematicPin>();
+            switch (malformed)
+            {
+                case "duplicate-id": invalid.Items.Add(firstPin.Clone()); break;
+                case "duplicate-alternate":
+                    pin.Alternates.Add(new SchematicPinAlternate { Name = "MODE", Shape = SchematicPinShape.SpsLine,
+                        ElectricalType = Kiapi.Common.Types.ElectricalPinType.EptInput });
+                    pin.Alternates.Add(pin.Alternates[0].Clone()); firstPin.Item = Any.Pack(pin); break;
+                case "library-link": pin.LibraryPinId = new() { Value = Guid.NewGuid().ToString("D") }; firstPin.Item = Any.Pack(pin); break;
+                case "active-alternate": pin.ActiveAlternate = "MODE"; firstPin.Item = Any.Pack(pin); break;
+            }
+            var refused = await mcp.Tool("kicad_symbol_library_write", new
+            {
+                instanceId, expectedProcessEpoch = client.Epoch, libraryNickname,
+                definitionJson = SchematicJson.Formatter.Format(invalid), operationId = Guid.NewGuid().ToString("D"), overwrite = true
+            });
+            Assert.IsTrue(refused.TryGetProperty("isError", out var refusedError) && refusedError.GetBoolean(), refused.GetRawText());
+            Assert.AreEqual("invalid_symbol_definition", refused.GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            var unchangedMultiplicity = await mcp.Tool("kicad_symbol_library_read", new
+            { instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName = multiplicityDefinition.Id.EntryName });
+            RequireToolSuccess(unchangedMultiplicity);
+            Assert.AreEqual(multiplicityAfterClone.GetProperty("structuredContent").GetRawText(),
+                unchangedMultiplicity.GetProperty("structuredContent").GetRawText(), "Rejected raw writes must preserve library content and modify identity.");
+        }
+        var multiplicityCheckpoint = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(new() { Document = document }, token);
+        var multiplicitySave = await mcp.Tool("kicad_document_save", new
+        { instanceId, expectedStateJson = SchematicJson.Formatter.Format(multiplicityCheckpoint), operationId = Guid.NewGuid().ToString("D") });
+        RequireToolSuccess(multiplicitySave);
+        RequireToolSuccess(await mcp.Tool("kicad_document_close", new
+        { instanceId, expectedStateJson = multiplicitySave.GetProperty("structuredContent").GetProperty("observedState").GetRawText(),
+            operationId = Guid.NewGuid().ToString("D") }));
+        var multiplicityReopen = await CreateRootThroughMcp(client.Endpoint, instanceId,
+            Path.Combine(document.Project.Path, document.SchematicFilename), evidence, token);
+        document = multiplicityReopen.Document;
+        foreach (string persistedName in new[] { "PinMultiplicityProbe", "PinMultiplicityCloneProbe" })
+        {
+            var persisted = await mcp.Tool("kicad_symbol_library_read", new
+            { instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName = persistedName });
+            RequireToolSuccess(persisted);
+            var persistedDefinition = SchematicJson.Parser.Parse<SchematicSymbol>(persisted.GetProperty("structuredContent").GetProperty("definition").GetRawText());
+            CollectionAssert.AreEqual(SymbolPinOccurrences(multiplicityDefinition), SymbolPinOccurrences(persistedDefinition));
+            Assert.AreEqual(2U, persistedDefinition.UnitCount); Assert.IsTrue(persistedDefinition.DemorganBodyStyles);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-" + persistedName + "-persisted.json"), persisted.GetRawText(), token);
+            RequireToolSuccess(await mcp.Tool("kicad_symbol_library_delete", new
+            { instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName = persistedName,
+                operationId = Guid.NewGuid().ToString("D") }));
+        }
         var artworkDelete = await mcp.Tool("kicad_symbol_library_delete", new
         {
             instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName = "GeneratedArtworkProbe",
@@ -412,6 +503,49 @@ public sealed partial class NativeSessionTests
             operationId = Guid.NewGuid().ToString("D") });
         RequireToolSuccess(displayCloneDelete);
     }
+
+    internal static SchematicSymbol SymbolMultiplicityDefinition(SchematicSymbol template)
+    {
+        var definition = template.Clone();
+        definition.UnitCount = 2; definition.DemorganBodyStyles = true; definition.PinsUseLocalCoordinates = true;
+        definition.BodyStyle.Clear();
+        definition.BodyStyle.Add(new[] { new SchematicBodyStyle { Name = "Standard" }, new SchematicBodyStyle { Name = "Alternate" } });
+        definition.UnitDisplayNames.Clear();
+        foreach (var child in definition.Items.Where(child => child.Item.Is(SchematicPin.Descriptor)).ToArray()) definition.Items.Remove(child);
+        void Pin(string number, string name, int unit, int style, long x, long y, bool visible = true, bool alternates = false)
+        {
+            var pin = new SchematicPin
+            {
+                Id = new() { Value = Guid.NewGuid().ToString("D") }, Number = number, Name = name,
+                Position = new() { XNm = x, YNm = y }, Length = new() { ValueNm = 2_540_000 },
+                Orientation = SchematicPinOrientation.SpoRight, Shape = SchematicPinShape.SpsLine,
+                ElectricalType = Kiapi.Common.Types.ElectricalPinType.EptPassive, Visible = visible,
+                NameTextSize = new() { ValueNm = 1_270_000 }, NumberTextSize = new() { ValueNm = 1_270_000 }
+            };
+            if (alternates)
+            {
+                pin.Alternates.Add(new SchematicPinAlternate { Name = "MODE", Shape = SchematicPinShape.SpsLine,
+                    ElectricalType = Kiapi.Common.Types.ElectricalPinType.EptInput });
+                pin.Alternates.Add(new SchematicPinAlternate { Name = "mode", Shape = SchematicPinShape.SpsInverted,
+                    ElectricalType = Kiapi.Common.Types.ElectricalPinType.EptOutput });
+            }
+            definition.Items.Add(new SchematicSymbolChild { Unit = new() { Unit = unit }, BodyStyle = new() { Style = style }, Item = Any.Pack(pin) });
+        }
+        Pin("1", "COMMON", 0, 0, 0, 0);
+        Pin("1", "UNIT2", 2, 1, 1_270_000, 0);
+        Pin("2", "A", 1, 1, -2_540_000, 0, alternates: true);
+        Pin("2", "B", 1, 1, 2_540_000, 0, alternates: true);
+        Pin("2", "ALTERNATE", 1, 2, -2_540_000, 1_270_000, alternates: true);
+        Pin("3", "STACK", 1, 0, 0, -2_540_000);
+        Pin("4", "STACK", 1, 0, 0, -2_540_000, visible: false);
+        Pin("[5-7]", "DATA", 2, 0, -1_270_000, 0);
+        return definition;
+    }
+
+    private static string[] SymbolPinOccurrences(SchematicSymbol definition) => definition.Items
+        .Where(child => child.Item.Is(SchematicPin.Descriptor))
+        .Select(child => $"{child.Unit?.Unit ?? 0}:{child.BodyStyle?.Style ?? 0}:{SchematicJson.Formatter.Format(child.Item.Unpack<SchematicPin>())}")
+        .Order(StringComparer.Ordinal).ToArray();
 
     private static async Task<byte[]> RenderLibraryPinDisplay(StdioMcpFixture mcp, NativeClient client,
         DocumentSpecifier document, SchematicSymbol definition, NativeCapabilitySymbolLibraryPinDisplay display,

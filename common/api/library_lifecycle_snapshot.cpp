@@ -41,6 +41,9 @@ bool IsSymbolFile( const wxString& aPath )
 
     wxFileName path( aPath );
 
+    if( !path.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE ) )
+        return false;
+
     if( path.GetExt().CmpNoCase( wxS( "kicad_sym" ) ) != 0 )
         return false;
 

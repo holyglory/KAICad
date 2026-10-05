@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -196,6 +197,64 @@ public sealed partial class NativeSessionTests
                 "Reading a failed simulation must preserve the same deterministic terminal receipt.");
             Assert.AreEqual(failed, await Start(failedNetlist, failedOperation),
                 "Retrying a failed operation must return its retained failure receipt.");
+
+            // The native restart path deliberately changes the process epoch. The
+            // simulator currently retains jobs only in API_HANDLER_SCH memory, so
+            // an old job must become an explicit result_lost failure instead of an
+            // empty success or a generic transport error.
+            var beforeRestartSession = await client.HandshakeAsync(token);
+            int beforeRestartPid = checked((int)beforeRestartSession.ProcessId);
+            using (var oldProcess = Process.GetProcessById(beforeRestartPid))
+            {
+                oldProcess.Kill();
+                await oldProcess.WaitForExitAsync(token);
+            }
+
+            JsonElement restarted;
+            using (var restartDeadline = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                restartDeadline.CancelAfter(TimeSpan.FromSeconds(60));
+                while (true)
+                {
+                    using var list = JsonDocument.Parse(Text(await mcp.Tool("kicad_instances_list", new { })));
+                    var view = list.RootElement.EnumerateArray().Single(item =>
+                        item.GetProperty("instanceId").GetString() == instanceId);
+                    if (view.GetProperty("processState").GetString() == "exited") break;
+                    await Task.Delay(100, restartDeadline.Token);
+                }
+                restarted = await mcp.Tool("kicad_instance_start", new
+                {
+                    executable = Path.Combine(FindRoot(), "automation", "artifacts", "native", "kicad", "kicad"),
+                    projectPath = Path.Combine(document.Project.Path, document.Project.Name + ".kicad_pro")
+                });
+            }
+            Assert.IsFalse(restarted.TryGetProperty("isError", out var restartError) && restartError.GetBoolean(), restarted.GetRawText());
+            var restartedData = restarted.GetProperty("structuredContent");
+            string restartedEpoch = restartedData.GetProperty("epoch").GetString()!;
+            Assert.AreNotEqual(beforeRestartSession.Epoch, restartedEpoch, "A restarted native process must receive a new epoch.");
+            Assert.AreEqual("running", restartedData.GetProperty("processState").GetString(), restarted.GetRawText());
+
+            var lost = await mcp.Tool("kicad_simulation_job", new
+            {
+                instanceId, expectedInstanceEpoch = restartedEpoch, document = Target(simulationDocument), jobId = started.JobId
+            });
+            AssertFailure(lost, "simulation_result_lost");
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-simulation-restart.json"),
+                JsonSerializer.Serialize(new
+                {
+                    instanceId, oldEpoch = beforeRestartSession.Epoch, oldProcessId = beforeRestartPid,
+                    restartedEpoch, restartedProcessId = restartedData.GetProperty("processId").GetInt32(),
+                    jobId = started.JobId, result = "simulation_result_lost", nativeRetention = false
+                }), token);
+
+            // The restarted process belongs to this test and must not outlive the
+            // journey. Its exit is intentionally after the recovery assertion.
+            int restartedPid = restartedData.GetProperty("processId").GetInt32();
+            using (var restartedProcess = Process.GetProcessById(restartedPid))
+            {
+                restartedProcess.Kill();
+                await restartedProcess.WaitForExitAsync(token);
+            }
 
             JsonObject Target(DocumentSpecifier value, bool numericType = false)
             {

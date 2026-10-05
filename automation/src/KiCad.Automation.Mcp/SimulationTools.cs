@@ -95,8 +95,14 @@ public sealed class SimulationTools(InstanceRegistry instances)
         var client = instances.Client(instanceId); var session = await client.HandshakeAsync(cancellationToken);
         if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
             throw new AutomationException("simulation_instance_changed", "The native instance identity or epoch changed; inspect it again.");
-        var result = await client.InvokeAsync<ReadSimulationJob, SimulationJobState>(new()
-        { Document = target, JobId = jobId.ToString("D"), ProcessEpoch = session.Epoch }, cancellationToken);
+        var request = new ReadSimulationJob
+        { Document = target, JobId = jobId.ToString("D"), ProcessEpoch = session.Epoch };
+        SimulationJobState result;
+        try { result = await client.InvokeAsync<ReadSimulationJob, SimulationJobState>(request, cancellationToken); }
+        catch (NativeApiException error) when (IsMissingJob(error) && WasRetainedByEarlierEpoch(instanceId, session.Epoch, request.JobId))
+        {
+            throw ResultLostAfterRestart(request.JobId);
+        }
         string operationKey = Key(instanceId, session.Epoch, result.OperationId);
         Operations.TryGetValue(operationKey, out var operation);
         SimulationJobContract.ValidateRead(result, target, session.Epoch, jobId.ToString("D"), operation?.OperationId);
@@ -171,8 +177,14 @@ public sealed class SimulationTools(InstanceRegistry instances)
             deadline.CancelAfter(TimeSpan.FromMinutes(5));
             while (true)
             {
-                var result = await client.InvokeAsync<ReadSimulationJob, SimulationJobState>(new()
-                { Document = target, JobId = jobId.ToString("D"), ProcessEpoch = session.Epoch }, deadline.Token);
+                var request = new ReadSimulationJob
+                { Document = target, JobId = jobId.ToString("D"), ProcessEpoch = session.Epoch };
+                SimulationJobState result;
+                try { result = await client.InvokeAsync<ReadSimulationJob, SimulationJobState>(request, deadline.Token); }
+                catch (NativeApiException error) when (IsMissingJob(error) && WasRetainedByEarlierEpoch(instanceId, session.Epoch, request.JobId))
+                {
+                    throw ResultLostAfterRestart(request.JobId);
+                }
                 string operationKey = Key(instanceId, session.Epoch, result.OperationId);
                 Operations.TryGetValue(operationKey, out var operation);
                 SimulationJobContract.ValidateRead(result, target, session.Epoch, jobId.ToString("D"), operation?.OperationId);
@@ -198,8 +210,14 @@ public sealed class SimulationTools(InstanceRegistry instances)
         var client = instances.Client(instanceId); var session = await client.HandshakeAsync(cancellationToken);
         if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
             throw new AutomationException("simulation_instance_changed", "The native instance identity or epoch changed; inspect it again.");
-        var result = await client.InvokeAsync<CancelSimulationJob, SimulationJobState>(new()
-        { Document = target, JobId = jobId.ToString("D"), ProcessEpoch = session.Epoch }, cancellationToken);
+        var request = new CancelSimulationJob
+        { Document = target, JobId = jobId.ToString("D"), ProcessEpoch = session.Epoch };
+        SimulationJobState result;
+        try { result = await client.InvokeAsync<CancelSimulationJob, SimulationJobState>(request, cancellationToken); }
+        catch (NativeApiException error) when (IsMissingJob(error) && WasRetainedByEarlierEpoch(instanceId, session.Epoch, request.JobId))
+        {
+            throw ResultLostAfterRestart(request.JobId);
+        }
         string operationKey = Key(instanceId, session.Epoch, result.OperationId);
         Operations.TryGetValue(operationKey, out var operation);
         SimulationJobContract.ValidateRead(result, target, session.Epoch, jobId.ToString("D"), operation?.OperationId);
@@ -222,6 +240,23 @@ public sealed class SimulationTools(InstanceRegistry instances)
             : null;
 
     private static string Key(string instanceId, string processEpoch, string id) => instanceId + "\n" + processEpoch + "\n" + id;
+
+    private static bool WasRetainedByEarlierEpoch(string instanceId, string processEpoch, string jobId)
+    {
+        string prefix = instanceId + "\n";
+        string suffix = "\n" + jobId;
+        return Decks.Keys.Any(key => key.StartsWith(prefix, StringComparison.Ordinal)
+            && key.EndsWith(suffix, StringComparison.Ordinal)
+            && key != Key(instanceId, processEpoch, jobId));
+    }
+
+    private static bool IsMissingJob(NativeApiException error)
+        => error.Status == (int)ApiStatusCode.AsBadRequest
+            && error.Message.Contains("No simulation job matches", StringComparison.OrdinalIgnoreCase);
+
+    private static AutomationException ResultLostAfterRestart(string jobId)
+        => new("simulation_result_lost",
+            $"The native process restarted before simulation job {jobId} could be read; its result was process-owned and is no longer retained.");
 
     private static void ValidateId(Guid id, string kind)
     {

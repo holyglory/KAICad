@@ -12,8 +12,11 @@ namespace KiCad.Automation.Tests;
 
 public sealed partial class NativeSessionTests
 {
+    private static int simulationRestartProofClaimed;
+
     private static async Task VerifyNativeSimulation(NativeClient client, DocumentSpecifier document,
-        string evidence, string instanceId, string display, CancellationToken token)
+        string evidence, string instanceId, string display, InstanceRegistry registry,
+        Action<Process> retainProcess, CancellationToken token)
     {
         // Exercise a real child path so an MCP binding that drops or truncates the
         // protobuf repeated UUID list cannot accidentally pass with a root target.
@@ -206,6 +209,17 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(failed, await Start(failedNetlist, failedOperation),
                 "Retrying a failed operation must return its retained failure receipt.");
 
+            // The two editor instances run this journey independently. One real
+            // restart proves the boundary; the second keeps its fixture process
+            // alive so the enclosing two-project cleanup can still verify both
+            // registrations.
+            if (Interlocked.CompareExchange(ref simulationRestartProofClaimed, 1, 0) != 0)
+            {
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-simulation-restart.json"),
+                    JsonSerializer.Serialize(new { instanceId, result = "restart-proof-covered-by-other-instance" }), token);
+                return;
+            }
+
             // The native restart path deliberately changes the process epoch. The
             // simulator currently retains jobs only in API_HANDLER_SCH memory, so
             // an old job must become an explicit result_lost failure instead of an
@@ -255,14 +269,11 @@ public sealed partial class NativeSessionTests
                     jobId = started.JobId, result = "simulation_result_lost", nativeRetention = false
                 }), token);
 
-            // The restarted process belongs to this test and must not outlive the
-            // journey. Its exit is intentionally after the recovery assertion.
             int restartedPid = restartedData.GetProperty("processId").GetInt32();
-            using (var restartedProcess = Process.GetProcessById(restartedPid))
-            {
-                restartedProcess.Kill();
-                await restartedProcess.WaitForExitAsync(token);
-            }
+            string restartedEndpoint = NativeIpcEndpoint.FromSocketPath(
+                Path.Combine(NativeIpcEndpoint.RuntimeDirectory(instanceId), "api.sock"));
+            await registry.AttachAsync(restartedEndpoint, instanceId, token);
+            retainProcess(Process.GetProcessById(restartedPid));
 
             JsonObject Target(DocumentSpecifier value, bool numericType = false)
             {

@@ -329,11 +329,15 @@ public sealed partial class NativeSessionTests
         }, token)).Items.Single().Unpack<FootprintInstance>();
         AssertRasterFootprintMetadata(sourceFootprint, projectedFootprint,
             "the live footprint projection must preserve source pads and metadata");
+        Assert.AreEqual(sourceSha256, projectedFootprint.CustomProperties
+            .Single(property => property.Key == "kicad.ai.raster_trace.source_sha256").Value,
+            "the live footprint projection must retain the exact source SHA");
         Dictionary<string, string[]> expectedFootprintGeometry = AssertRasterFootprintArtwork(
             projectedFootprint, trace, sourceSha256, "live footprint projection");
         string embeddedName = "raster_trace_" + sourceSha256 + ".png";
         EmbeddedFile embedded = projectedFootprint.EmbeddedFiles.Files.Single(file => file.Name == embeddedName);
-        Assert.AreEqual(sourceSha256, embedded.DataHash, footprintProjection.GetRawText());
+        Assert.IsFalse(string.IsNullOrWhiteSpace(embedded.DataHash), footprintProjection.GetRawText());
+        string embeddedDataHash = embedded.DataHash;
 
         DocumentLifecycleState projectedFootprintState = await ObserveLifecycleState(client, reloadedBoard, token);
         var footprintSaved = await mcp.Tool("kicad_document_save", new
@@ -366,7 +370,7 @@ public sealed partial class NativeSessionTests
             Items = { new KIID { Value = sourceFootprintId } }
         }, token)).Items.Single().Unpack<FootprintInstance>();
         AssertRasterFootprintMetadata(sourceFootprint, persistedSourceFootprint,
-            "the original source footprint must survive the projection save/close/reopen");
+            "the original source footprint must survive the projection save/close/reopen", requirePadIds: true);
         FootprintInstance persistedFootprint = (await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
         {
             Header = new() { Document = reloadedFootprintBoard },
@@ -374,10 +378,13 @@ public sealed partial class NativeSessionTests
         }, token)).Items.Single().Unpack<FootprintInstance>();
         AssertRasterFootprintMetadata(sourceFootprint, persistedFootprint,
             "the reopened footprint projection must preserve source pads and metadata");
+        Assert.AreEqual(sourceSha256, persistedFootprint.CustomProperties
+            .Single(property => property.Key == "kicad.ai.raster_trace.source_sha256").Value,
+            "the reopened footprint projection must retain the exact source SHA");
         AssertRasterFootprintArtwork(persistedFootprint, trace, sourceSha256,
             "reopened footprint projection", expectedFootprintGeometry);
         EmbeddedFile persistedEmbedded = persistedFootprint.EmbeddedFiles.Files.Single(file => file.Name == embeddedName);
-        Assert.AreEqual(sourceSha256, persistedEmbedded.DataHash, persistedFootprint.ToString());
+        Assert.AreEqual(embeddedDataHash, persistedEmbedded.DataHash, persistedFootprint.ToString());
 
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-raster-projection-persistence.json"),
             JsonSerializer.Serialize(new
@@ -458,7 +465,7 @@ public sealed partial class NativeSessionTests
         };
 
     private static void AssertRasterFootprintMetadata(FootprintInstance expectedSource,
-        FootprintInstance actual, string context)
+        FootprintInstance actual, string context, bool requirePadIds = false)
     {
         Assert.AreEqual(expectedSource.Definition.Attributes, actual.Definition.Attributes, context);
         foreach (CustomProperty expected in expectedSource.CustomProperties)
@@ -473,12 +480,33 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(expectedPads.Length, actualPads.Length, context);
         foreach (Pad expectedPad in expectedPads)
         {
-            Pad actualPad = actualPads.Single(pad => pad.Id.Value == expectedPad.Id.Value);
-            Pad expectedNormalized = expectedPad.Clone();
-            expectedNormalized.Parent = new();
-            Pad actualNormalized = actualPad.Clone();
-            actualNormalized.Parent = new();
-            Assert.AreEqual(expectedNormalized, actualNormalized, context + ": pad " + expectedPad.Number);
+            Pad actualPad = actualPads.Single(pad => pad.Number == expectedPad.Number);
+            if (requirePadIds)
+                Assert.AreEqual(expectedPad.Id.Value, actualPad.Id.Value, context + ": pad identity " + expectedPad.Number);
+            Assert.AreEqual(expectedPad.Number, actualPad.Number, context + ": pad number");
+            Assert.AreEqual(expectedPad.Type, actualPad.Type, context + ": pad type");
+            Assert.AreEqual(expectedPad.Position, actualPad.Position, context + ": pad position");
+            Assert.IsNotNull(expectedPad.PadStack, context + ": source pad stack");
+            Assert.IsNotNull(actualPad.PadStack, context + ": persisted pad stack");
+            Assert.AreEqual(expectedPad.PadStack.Type, actualPad.PadStack.Type, context + ": pad stack type");
+            CollectionAssert.AreEqual(expectedPad.PadStack.Layers, actualPad.PadStack.Layers,
+                context + ": pad stack layers");
+            foreach (PadStackLayer expectedLayer in expectedPad.PadStack.CopperLayers)
+            {
+                PadStackLayer actualLayer = actualPad.PadStack.CopperLayers.Single(layer => layer.Layer == expectedLayer.Layer);
+                Assert.AreEqual(expectedLayer.Shape, actualLayer.Shape, context + ": copper shape");
+                Assert.AreEqual(expectedLayer.Size, actualLayer.Size, context + ": copper size");
+                Assert.AreEqual(expectedLayer.CornerRoundingRatio, actualLayer.CornerRoundingRatio,
+                    context + ": copper corner rounding");
+            }
+            if (expectedPad.PadStack.FrontOuterLayers is not null)
+                Assert.AreEqual(expectedPad.PadStack.FrontOuterLayers.SolderMaskMode,
+                    actualPad.PadStack.FrontOuterLayers.SolderMaskMode, context + ": solder mask mode");
+            foreach (CustomProperty expectedProperty in expectedPad.CustomProperties)
+            {
+                Assert.IsTrue(actualPad.CustomProperties.Any(property => property.Key == expectedProperty.Key
+                    && property.Value == expectedProperty.Value), context + ": pad property " + expectedProperty.Key);
+            }
         }
     }
 

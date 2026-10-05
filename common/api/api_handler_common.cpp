@@ -77,9 +77,10 @@ void Fail( ApiResponseStatus& aError, const char* aCode, const std::string& aMes
 }
 
 std::optional<ApiResponseStatus> ValidateProjectVariableTarget( const DocumentSpecifier& aDocument,
-                                                                const PROJECT& aProject )
+                                                                const PROJECT& aProject,
+                                                                const KICAD_API_SERVER* aServer )
 {
-    KICAD_API_SERVER* server = Pgm().ApiServerOrNull();
+    const KICAD_API_SERVER* server = aServer;
 
     // SA-04: the automation boundary serves one explicit project and must reject a stale or
     // foreign descriptor before exposing or mutating project-owned values.
@@ -101,7 +102,8 @@ std::optional<ApiResponseStatus> ValidateProjectVariableTarget( const DocumentSp
         return std::nullopt;
 
     const std::string& requestedPath = aDocument.project().path();
-    if( requestedPath.empty() || requestedPath.find( '\0' ) != std::string::npos )
+    if( requestedPath.empty() || requestedPath.find( '\0' ) != std::string::npos
+        || aDocument.project().name().empty() || aDocument.project().name().find( '\0' ) != std::string::npos )
     {
         ApiResponseStatus error;
         Fail( error, "project_target_invalid", "project.path must be a non-empty NUL-free absolute directory" );
@@ -110,6 +112,12 @@ std::optional<ApiResponseStatus> ValidateProjectVariableTarget( const DocumentSp
 
     wxFileName requested = wxFileName::DirName( wxString::FromUTF8( requestedPath ) );
     wxFileName current = wxFileName::DirName( aProject.GetProjectPath() );
+    if( !requested.IsAbsolute() )
+    {
+        ApiResponseStatus error;
+        Fail( error, "project_target_invalid", "project.path must be an absolute directory" );
+        return error;
+    }
     requested.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
     current.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
 
@@ -618,7 +626,7 @@ HANDLER_RESULT<project::TextVariables> API_HANDLER_COMMON::handleGetTextVariable
         return tl::unexpected( e );
     }
 
-    if( auto target = ValidateProjectVariableTarget( aCtx.Request.document(), project ) )
+    if( auto target = ValidateProjectVariableTarget( aCtx.Request.document(), project, apiServerOrNull() ) )
         return tl::unexpected( *target );
 
     const std::map<wxString, wxString>& vars = project.GetTextVars();
@@ -654,7 +662,7 @@ HANDLER_RESULT<Empty> API_HANDLER_COMMON::handleSetTextVariables(
         return tl::unexpected( e );
     }
 
-    if( auto target = ValidateProjectVariableTarget( aCtx.Request.document(), project ) )
+    if( auto target = ValidateProjectVariableTarget( aCtx.Request.document(), project, apiServerOrNull() ) )
         return tl::unexpected( *target );
 
     const project::TextVariables& newVars = aCtx.Request.variables();

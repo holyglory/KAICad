@@ -483,6 +483,11 @@ public sealed partial class NativeSessionTests
         await RejectGet(wrongPath, "foreign project path must be refused");
         await RejectSet(wrongPath, "foreign project path must be refused");
 
+        var relativePath = ownProject.Clone();
+        relativePath.Project.Path = ".";
+        await RejectGet(relativePath, "relative project path must be refused before normalization");
+        await RejectSet(relativePath, "relative project path must be refused before normalization");
+
         Assert.AreEqual(ownVariables, await client.InvokeAsync<GetTextVariables, Kiapi.Common.Project.TextVariables>(
             new() { Document = ownProject }, token), "Rejected foreign requests must not change the current project map.");
         Assert.AreEqual(siblingVariables, await siblingClient.InvokeAsync<GetTextVariables, Kiapi.Common.Project.TextVariables>(

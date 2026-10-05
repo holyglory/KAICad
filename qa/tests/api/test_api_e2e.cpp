@@ -635,6 +635,12 @@ BOOST_FIXTURE_TEST_CASE( OpenProjectWithBoardAndSchematic, API_SERVER_E2E_FIXTUR
                          kiapi::common::AS_OK );
     BOOST_REQUIRE_EQUAL( omittedVariables.DebugString(), baselineVariables.DebugString() );
 
+    auto relativeProject = projectDoc;
+    relativeProject.mutable_project()->set_path( "." );
+    auto rejectedRelative = readVariables( relativeProject );
+    BOOST_REQUIRE_NE( rejectedRelative.status().status(), kiapi::common::AS_OK );
+    BOOST_CHECK( rejectedRelative.status().error_message().find( "project_target_invalid" ) != std::string::npos );
+
     for( const auto& [foreignName, foreignPath] :
          { std::pair<std::string, std::string>{ "api_kitchen_sink", otherDataDir.ToStdString() },
            std::pair<std::string, std::string>{ "basic_test", ( otherDataDir + wxS( "foreign-project/" ) ).ToStdString() } } )

@@ -132,7 +132,10 @@ enum SimulationJobStatus {
 }
 message SimulationVector {
   string name = 1;
+  // Real vectors contain one value per sample. For complex vectors, values
+  // are interleaved [real0, imaginary0, real1, imaginary1, ...].
   repeated double values = 2;
+  // Native vector type, including complex samples with zero imaginary parts.
   bool complex = 3;
 }
 message SimulationJobState {

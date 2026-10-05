@@ -52,6 +52,7 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(current.WorkerFinished);
             Assert.IsTrue(current.Vectors.Any(vector => vector.Name.Contains("out", StringComparison.OrdinalIgnoreCase)));
             Assert.IsTrue(current.Vectors.SelectMany(vector => vector.Values).Any(value => Math.Abs(value - 2.5) < 0.01));
+            Assert.IsTrue(current.Vectors.All(vector => !vector.Complex), "The operating-point vectors must retain their real, flat representation.");
             string originalEpoch = client.Epoch;
             var completedArchive = await ArchiveResult(mcp, current.JobId, originalEpoch);
             Assert.AreEqual(current, JobResult(completedArchive, originalEpoch));
@@ -238,6 +239,56 @@ public sealed partial class NativeSessionTests
             var failedArchive = await ArchiveResult(mcp, failed.JobId, originalEpoch);
             Assert.AreEqual(failed, JobResult(failedArchive, originalEpoch));
 
+            const string acNetlist = "Complex RC\nV1 in 0 DC 0 AC 1\nR1 in out 1k\nC1 out 0 1u\n.ac lin 3 100 300\n.end\n";
+            string acOperation = Guid.NewGuid().ToString("D");
+            var ac = await WaitForTerminal(await Start(acNetlist, acOperation));
+            Assert.AreEqual(SimulationJobStatus.SimjsCompleted, ac.Status, ac.ErrorMessage);
+            var frequency = ac.Vectors.Single(vector => vector.Name.Equals("frequency", StringComparison.OrdinalIgnoreCase));
+            var acInput = ac.Vectors.Single(vector => vector.Name.Equals("in", StringComparison.OrdinalIgnoreCase)
+                || vector.Name.Equals("v(in)", StringComparison.OrdinalIgnoreCase));
+            var acOutput = ac.Vectors.Single(vector => vector.Name.Equals("out", StringComparison.OrdinalIgnoreCase)
+                || vector.Name.Equals("v(out)", StringComparison.OrdinalIgnoreCase));
+            Assert.IsTrue(acInput.Complex, "A native complex vector remains complex even when every imaginary component is zero.");
+            Assert.IsTrue(acOutput.Complex, "AC phase information must not be discarded or replaced by magnitude.");
+            int pointCount = frequency.Complex ? frequency.Values.Count / 2 : frequency.Values.Count;
+            Assert.AreEqual(3, pointCount);
+            Assert.AreEqual(2 * pointCount, acInput.Values.Count);
+            Assert.AreEqual(2 * pointCount, acOutput.Values.Count);
+            for (int point = 0; point < pointCount; point++)
+            {
+                double hz = frequency.Values[frequency.Complex ? 2 * point : point];
+                Assert.AreEqual(100.0 + 100.0 * point, hz, 1e-9);
+                if (frequency.Complex) Assert.AreEqual(0.0, frequency.Values[2 * point + 1], 1e-12);
+                Assert.AreEqual(1.0, acInput.Values[2 * point], 1e-9);
+                Assert.AreEqual(0.0, acInput.Values[2 * point + 1], 1e-12);
+                double omegaRc = 2.0 * Math.PI * hz * 1000.0 * 1e-6;
+                Assert.AreEqual(1.0 / (1.0 + omegaRc * omegaRc), acOutput.Values[2 * point], 1e-9);
+                Assert.AreEqual(-omegaRc / (1.0 + omegaRc * omegaRc), acOutput.Values[2 * point + 1], 1e-9);
+            }
+            Assert.AreEqual(ac, JobResult(await mcp.Tool("kicad_simulation_job", new
+            { instanceId, expectedInstanceEpoch = originalEpoch, document = Target(simulationDocument), jobId = ac.JobId })));
+            Assert.AreEqual(ac, await Start(acNetlist, acOperation), "Complex pairs must survive exact operation replay.");
+            var complexArchive = await ArchiveResult(mcp, ac.JobId, originalEpoch);
+            Assert.AreEqual(ac, JobResult(complexArchive, originalEpoch));
+            var laterReal = await WaitForTerminal(await Start(netlist, Guid.NewGuid().ToString("D")));
+            Assert.IsTrue(laterReal.Vectors.All(vector => !vector.Complex));
+            Assert.IsTrue(JsonElement.DeepEquals(complexArchive.GetProperty("structuredContent"),
+                (await ArchiveResult(mcp, ac.JobId, originalEpoch)).GetProperty("structuredContent")),
+                "A later real simulation must not change archived complex types or sample pairs.");
+            Assert.AreEqual(ac, await Start(acNetlist, acOperation));
+            Assert.AreEqual(laterReal, await client.InvokeAsync<ReadSimulationJob, SimulationJobState>(new()
+            { Document = simulationDocument, JobId = laterReal.JobId, ProcessEpoch = originalEpoch }, token),
+                "Replaying an archived AC operation must not replace the later native result.");
+            await using (var complexReconnect = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.ProductionStartInfo(),
+                stateDirectory, Path.Combine(evidence, instanceId + "-simulation-complex-reconnect.stderr.log"), token))
+            {
+                Assert.IsTrue(JsonElement.DeepEquals(complexArchive.GetProperty("structuredContent"),
+                    (await ArchiveResult(complexReconnect, ac.JobId, originalEpoch)).GetProperty("structuredContent")),
+                    "A fresh MCP process must retain both components and the native complex type.");
+            }
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-simulation-complex.json"),
+                JsonSerializer.Serialize(complexArchive.GetProperty("structuredContent")), token);
+
             // The two editor instances run this journey independently. One real
             // restart proves the boundary; the second keeps its fixture process
             // alive so the enclosing two-project cleanup can still verify both
@@ -292,7 +343,7 @@ public sealed partial class NativeSessionTests
             await using (var archiveHost = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.ProductionStartInfo(),
                 stateDirectory, Path.Combine(evidence, instanceId + "-simulation-archive-restart.stderr.log"), token))
             {
-                foreach (var prior in new[] { completedArchive, cancelledArchive, failedArchive })
+                foreach (var prior in new[] { completedArchive, cancelledArchive, failedArchive, complexArchive })
                 {
                     string archivedJobId = prior.GetProperty("structuredContent").GetProperty("job").GetProperty("jobId").GetString()!;
                     var retained = await ArchiveResult(archiveHost, archivedJobId, originalEpoch);
@@ -311,7 +362,8 @@ public sealed partial class NativeSessionTests
                     jobId = started.JobId, liveResult = "simulation_result_lost", nativeRetention = false,
                     archivedCompleted = completedArchive.GetProperty("structuredContent"),
                     archivedCancelled = cancelledArchive.GetProperty("structuredContent"),
-                    archivedFailed = failedArchive.GetProperty("structuredContent"), archiveRetainedOriginalIdentity = true
+                    archivedFailed = failedArchive.GetProperty("structuredContent"),
+                    archivedComplex = complexArchive.GetProperty("structuredContent"), archiveRetainedOriginalIdentity = true
                 }), token);
 
             int restartedPid = restartedData.GetProperty("processId").GetInt32();

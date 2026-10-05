@@ -53,6 +53,14 @@ public sealed class SimulationDeckAdmissionTests
         var fixture = SimulationFixture();
         fixture.Result.Vectors.Add(new SimulationVector { Name = "v(out)", Values = { 1.0, 2.0 }, Complex = true });
         SimulationJobContract.ValidateStart(fixture.Request, fixture.Result, fixture.ProcessEpoch);
+        var zeroImaginary = fixture.Result.Clone();
+        zeroImaginary.Vectors[0].Values[1] = 0.0;
+        SimulationJobContract.ValidateStart(fixture.Request, zeroImaginary, fixture.ProcessEpoch);
+        Assert.IsTrue(zeroImaginary.Vectors[0].Complex, "Validation must preserve native complex type when the imaginary component is zero.");
+        var real = fixture.Result.Clone();
+        real.Vectors[0].Complex = false; real.Vectors[0].Values.Add(3.0);
+        SimulationJobContract.ValidateStart(fixture.Request, real, fixture.ProcessEpoch);
+        Assert.AreEqual(3, real.Vectors[0].Values.Count, "Real vectors remain flat samples and do not require an even pair count.");
 
         var nonFinite = fixture.Result.Clone();
         nonFinite.Vectors[0].Values[1] = double.NaN;

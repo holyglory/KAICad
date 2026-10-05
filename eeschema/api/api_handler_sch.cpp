@@ -4264,8 +4264,14 @@ HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> API_HANDLER_SCH::handl
                 if( m_simulationJob->status != SIMJS_COMPLETED ) break;
                 m_simulationJob->vectors.emplace_back();
                 auto& vector = m_simulationJob->vectors.back();
-                vector.set_name( name ); vector.set_complex( false );
-                for( double value : m_automationSimulator->GetRealVector( name ) ) vector.add_values( value );
+                bool complex = false;
+                const std::vector<COMPLEX> values = m_automationSimulator->GetComplexVector( name, -1, &complex );
+                vector.set_name( name ); vector.set_complex( complex );
+                for( const COMPLEX& value : values )
+                {
+                    vector.add_values( value.real() );
+                    if( complex ) vector.add_values( value.imag() );
+                }
             }
         }
     }

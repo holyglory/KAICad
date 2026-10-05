@@ -133,13 +133,17 @@ std::vector<std::string> NGSPICE::AllVectors() const
 }
 
 
-std::vector<COMPLEX> NGSPICE::GetComplexVector( const std::string& aName, int aMaxLen )
+std::vector<COMPLEX> NGSPICE::GetComplexVector( const std::string& aName, int aMaxLen,
+                                            bool* aIsComplex )
 {
     LOCALE_IO            c_locale;       // ngspice works correctly only with C locale
     std::vector<COMPLEX> data;
     NGSPICE_LOCK_REALLOC lock( this );
 
-    if( aMaxLen == 0 )
+    if( aIsComplex )
+        *aIsComplex = false;
+
+    if( aMaxLen == 0 && !aIsComplex )
         return data;
 
     if( vector_info* vi = m_ngGet_Vec_Info( (char*) aName.c_str() ) )
@@ -154,6 +158,11 @@ std::vector<COMPLEX> NGSPICE::GetComplexVector( const std::string& aName, int aM
         }
         else if( vi->v_compdata )
         {
+            // The type comes from ngspice's native vector storage, including
+            // complex vectors whose imaginary samples all happen to be zero.
+            if( aIsComplex )
+                *aIsComplex = true;
+
             for( int i = 0; i < length; i++ )
                 data.emplace_back( vi->v_compdata[i].cx_real, vi->v_compdata[i].cx_imag );
         }

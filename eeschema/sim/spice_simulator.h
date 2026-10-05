@@ -133,9 +133,13 @@ public:
      * @param aName is the vector named in Spice convention (e.g. V(3), I(R1)).
      * @param aMaxLen is max count of returned values.
      * if -1 (default) all available values are returned.
+     * @param aIsComplex optionally receives the native vector's storage type
+     * from the same observation as its samples. Complex vectors with zero
+     * imaginary components remain complex; missing vectors report false.
      * @return Requested vector. It might be empty if there is no vector with requested name.
      */
-    virtual std::vector<COMPLEX> GetComplexVector( const std::string& aName, int aMaxLen = -1 ) = 0;
+    virtual std::vector<COMPLEX> GetComplexVector( const std::string& aName, int aMaxLen = -1,
+                                                bool* aIsComplex = nullptr ) = 0;
 
     /**
      * Return a requested vector with real values. If the vector is complex, then

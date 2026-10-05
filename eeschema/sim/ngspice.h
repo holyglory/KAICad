@@ -92,7 +92,8 @@ public:
     std::vector<std::string> AllVectors() const override final;
 
     ///< @copydoc SPICE_SIMULATOR::GetComplexVector()
-    std::vector<COMPLEX> GetComplexVector( const std::string& aName, int aMaxLen = -1 ) override final;
+    std::vector<COMPLEX> GetComplexVector( const std::string& aName, int aMaxLen = -1,
+                                        bool* aIsComplex = nullptr ) override final;
 
     ///< @copydoc SPICE_SIMULATOR::GetRealVector()
     std::vector<double> GetRealVector( const std::string& aName, int aMaxLen = -1 ) override final;

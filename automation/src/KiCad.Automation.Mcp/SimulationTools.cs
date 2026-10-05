@@ -76,7 +76,7 @@ public sealed class SimulationTools(InstanceRegistry instances)
     });
 
     [McpServerTool(Name = "kicad_simulation_job", ReadOnly = true),
-     Description("Read one exact native KiCad simulation job by process epoch and job ID. Only a completed job exposes copied result vectors; running, cancelled and failed states remain explicit."),
+     Description("Read one exact native KiCad simulation job by process epoch and job ID. Only a completed job exposes copied result vectors; running, cancelled and failed states remain explicit. Real vectors have one value per sample; vectors with complex=true contain ordered [real0, imaginary0, real1, imaginary1, ...] pairs, including zero imaginary components."),
      KiCadCapability("simulation", "native-ngspice", "instance epoch, document, job ID"),
      KiCadVerification(KiCadVerificationLevel.NativeJourney, "NativeSessionTests.NativeSimulationUsesKiCadNgspiceAndReturnsVectors")]
     public Task<CallToolResult> Job(string instanceId, string expectedInstanceEpoch, SimulationDocumentInput document,
@@ -94,7 +94,7 @@ public sealed class SimulationTools(InstanceRegistry instances)
     });
 
     [McpServerTool(Name = "kicad_simulation_result", ReadOnly = true),
-     Description("Read an immutable archived terminal simulation result without contacting KiCad. Supply its original instanceId, processEpoch, complete schematic document and jobId. The archive preserves the original native outcome, vectors and captured deck/dependency evidence, including incomplete coverage and warnings; it does not adopt a replacement editor or resume a simulation."),
+     Description("Read an immutable archived terminal simulation result without contacting KiCad. Supply its original instanceId, processEpoch, complete schematic document and jobId. The archive preserves the original native outcome, vectors and captured deck/dependency evidence, including incomplete coverage and warnings; it does not adopt a replacement editor or resume a simulation. Complex vectors retain ordered real/imaginary pairs and their native type; historical real-only receipts are never reclassified or reconstructed."),
      KiCadCapability("simulation", "durable-results", "original instance, process epoch, document, job ID"),
      KiCadVerification(KiCadVerificationLevel.NativeJourney, "NativeSessionTests.NativeSimulationUsesKiCadNgspiceAndReturnsVectors")]
     public Task<CallToolResult> Result(string instanceId, string processEpoch, SimulationDocumentInput document,

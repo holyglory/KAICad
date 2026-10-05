@@ -65,6 +65,18 @@ public sealed class PcbDrcToolTests
                 candidateRequestJson: BoardJson.Formatter.Format(candidateRequest));
             Assert.IsFalse(candidateStarted.IsError ?? false, candidateStarted.ToString());
             Assert.AreEqual(1, transport.LastStart!.CandidateItems.Count);
+            Assert.IsTrue(SchematicJson.Parser.Parse<PcbDrcJobState>(
+                ((TextContentBlock)candidateStarted.Content.Single()).Text).CandidatePayloadVerified,
+                "A candidate start must return the exact native payload receipt.");
+            Assert.IsTrue(PcbDrcTools.TryGetCandidateReceipt(transport.State.JobId,
+                out string candidateEpoch, out DocumentSpecifier candidateDocument,
+                out DocumentRevision candidateRevision, out string candidateHash,
+                out IReadOnlyList<string> candidateDeleteIds));
+            Assert.AreEqual(transport.Session.Epoch, candidateEpoch);
+            Assert.AreEqual(document, candidateDocument);
+            Assert.AreEqual(transport.State.CheckedRevision, candidateRevision);
+            Assert.AreEqual(PcbDrcTools.CanonicalCandidate(candidateRequest), candidateHash);
+            Assert.IsEmpty(candidateDeleteIds);
             transport.State.CandidateDryRun = false;
             transport.State.CandidateItemIds.Clear();
             var read = await tool.Job(transport.Session.InstanceId, json, transport.State.JobId,
@@ -73,15 +85,15 @@ public sealed class PcbDrcToolTests
             var cancelled = await tool.Cancel(transport.Session.InstanceId, json, transport.State.JobId,
                 transport.Session.Epoch, default);
             Assert.IsFalse(cancelled.IsError ?? false, cancelled.ToString());
-            Assert.AreEqual(4, transport.Calls);
+            Assert.AreEqual(5, transport.Calls);
             var stale = await tool.Job(transport.Session.InstanceId, json, transport.State.JobId,
                 Guid.NewGuid().ToString("D"), default);
             Assert.IsTrue(stale.IsError ?? false);
-            Assert.AreEqual(4, transport.Calls);
+            Assert.AreEqual(5, transport.Calls);
             var badOperation = await tool.Start(transport.Session.InstanceId, json,
                 Guid.Empty.ToString("D"), false, false, false, revisionJson, transport.Session.Epoch, default);
             Assert.IsTrue(badOperation.IsError ?? false);
-            Assert.AreEqual(4, transport.Calls);
+            Assert.AreEqual(5, transport.Calls);
             var valid = transport.State.Clone();
             for (int variant = 0; variant < 10; ++variant)
             {
@@ -236,10 +248,18 @@ public sealed class PcbDrcToolTests
         {
             var message = ApiRequest.Parser.ParseFrom(request).Message;
             if (!message.Is(StartPcbDrcJob.Descriptor) && !message.Is(ReadPcbDrcJob.Descriptor)
-                && !message.Is(CancelPcbDrcJob.Descriptor))
+                && !message.Is(CancelPcbDrcJob.Descriptor)
+                && !message.Is(NativeCapabilityPcbDrcReplacementJob.Descriptor))
                 return Session.ExchangeAsync(endpoint, request, timeout, cancellationToken);
             ++Calls;
             if (message.Is(StartPcbDrcJob.Descriptor)) LastStart = message.Unpack<StartPcbDrcJob>();
+            if (message.Is(NativeCapabilityPcbDrcReplacementJob.Descriptor))
+            {
+                // The native replacement read is the receipt boundary for a
+                // detached candidate. A real peer compares the complete Any
+                // payload and returns the state with this bit set.
+                State.CandidatePayloadVerified = true;
+            }
             return Task.FromResult(new ApiResponse { Header = new() { KicadToken = Session.Epoch },
                 Status = new() { Status = (ApiStatusCode)1 }, Message = Any.Pack(State) }.ToByteArray());
         }

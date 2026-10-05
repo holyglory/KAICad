@@ -2284,6 +2284,126 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(replacementTrack.End, persistedIdentity.Items
                 .Single(item => item.Is(Track.Descriptor) && item.Unpack<Track>().Id.Value == originalCleanTrack.Id.Value)
                 .Unpack<Track>().End);
+
+            // The deterministic multilayer planner must feed the same checked
+            // DRC and native receipt boundary as the ordinary route path.  Use
+            // the two existing POWER_RAIL pads as the endpoints so the
+            // cross-layer candidate is attached to real copper; a zero-cost
+            // through via makes the shortest deterministic path include one
+            // B.Cu segment and one Via rather than reusing the F.Cu route.
+            var multilayerCommitBefore = await ObserveLifecycleState(client, cleanBoard, token);
+            var multilayerCommitPlan = await mcp.Tool("kicad_pcb_route_plan_multilayer", new
+            {
+                instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard),
+                expectedStateJson = SchematicJson.Formatter.Format(multilayerCommitBefore),
+                requestJson = JsonSerializer.Serialize(new
+                {
+                    netName = "POWER_RAIL", start = new { xNm = 30_100_000L, yNm = 30_100_000L },
+                    end = new { xNm = 30_500_000L, yNm = 30_500_000L },
+                    startLayer = "F.Cu", endLayer = "B.Cu", layers = new[] { "F.Cu", "B.Cu" },
+                    widthNm = 250_000L, clearanceNm = 100_000L, gridNm = 100_000L,
+                    bounds = new { minXNm = 29_000_000L, minYNm = 29_000_000L, maxXNm = 31_000_000L, maxYNm = 31_000_000L },
+                    maxNodes = 10000, maxVias = 1,
+                    vias = new[] { new { type = "through", startLayer = "F.Cu", endLayer = "B.Cu", diameterNm = 600_000L, drillNm = 300_000L, costNm = 0L } }
+                })
+            });
+            Assert.IsFalse(multilayerCommitPlan.TryGetProperty("isError", out var multilayerCommitPlanError)
+                && multilayerCommitPlanError.GetBoolean(), multilayerCommitPlan.GetRawText());
+            var multilayerCommitPlanData = multilayerCommitPlan.GetProperty("structuredContent");
+            Assert.IsTrue(multilayerCommitPlanData.GetProperty("routeFound").GetBoolean(), multilayerCommitPlan.GetRawText());
+            Assert.AreEqual(1, multilayerCommitPlanData.GetProperty("viaCount").GetInt32(), multilayerCommitPlan.GetRawText());
+            Assert.IsGreaterThan(0, multilayerCommitPlanData.GetProperty("trackCount").GetInt32(), multilayerCommitPlan.GetRawText());
+            var multilayerCommitCandidate = BoardJson.Parser.Parse<CreateItems>(
+                multilayerCommitPlanData.GetProperty("candidateRequestJson").GetString()!);
+            Assert.IsTrue(multilayerCommitCandidate.Items.Any(item => item.Is(Track.Descriptor)), multilayerCommitPlan.GetRawText());
+            Assert.IsTrue(multilayerCommitCandidate.Items.Any(item => item.Is(Via.Descriptor)), multilayerCommitPlan.GetRawText());
+            Assert.AreEqual(multilayerCommitBefore, await ObserveLifecycleState(client, cleanBoard, token));
+
+            var multilayerCommitDrc = await RouteDrc(
+                BoardJson.Formatter.Format(multilayerCommitCandidate), null, multilayerCommitBefore);
+            string multilayerCommitOperationId = Guid.NewGuid().ToString("D");
+            var multilayerCheckedRequest = new CheckedPcbRouteCommit
+            {
+                Candidate = multilayerCommitCandidate, ExpectedState = multilayerCommitBefore,
+                DrcJobId = multilayerCommitDrc.JobId, OperationId = multilayerCommitOperationId,
+                MaximumResultBytes = 4 * 1024 * 1024
+            };
+            var multilayerCommitArguments = new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(multilayerCommitCandidate),
+                expectedStateJson = SchematicJson.Formatter.Format(multilayerCommitBefore),
+                drcJobStateJson = SchematicJson.Formatter.Format(multilayerCommitDrc),
+                operationId = multilayerCommitOperationId
+            };
+            var multilayerCommit = await mcp.Tool("kicad_pcb_route_commit", multilayerCommitArguments);
+            Assert.IsFalse(multilayerCommit.TryGetProperty("isError", out var multilayerCommitError)
+                && multilayerCommitError.GetBoolean(), multilayerCommit.GetRawText());
+            var multilayerCommitData = multilayerCommit.GetProperty("structuredContent");
+            Assert.IsTrue(multilayerCommitData.GetProperty("mutationConfirmed").GetBoolean(), multilayerCommit.GetRawText());
+            Assert.IsTrue(multilayerCommitData.GetProperty("nativeReceipt").GetBoolean(), multilayerCommit.GetRawText());
+            var multilayerCheckedAfter = SchematicJson.Parser.Parse<DocumentLifecycleState>(
+                multilayerCommitData.GetProperty("afterState").GetString()!);
+            Assert.IsGreaterThan(multilayerCommitBefore.Revision.Sequence, multilayerCheckedAfter.Revision.Sequence);
+            var multilayerReceipt = SchematicJson.Parser.Parse<CheckedPcbRouteReceipt>(
+                multilayerCommitData.GetProperty("receipt").GetRawText());
+            Assert.AreEqual(CheckedPcbRouteReceipt.Types.State.Completed, multilayerReceipt.State, multilayerCommit.GetRawText());
+            Assert.AreEqual(multilayerCommitCandidate.Items.Count, multilayerReceipt.Created.CreatedItems.Count, multilayerCommit.GetRawText());
+            CheckedPcbRouteContract.ValidateResult(multilayerCheckedRequest, multilayerReceipt, inspect: false);
+            var multilayerRead = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+            {
+                Header = new() { Document = cleanBoard },
+                Types_ = { KiCadObjectType.KotPcbTrace, KiCadObjectType.KotPcbVia }
+            }, token);
+            var multilayerReadIds = multilayerRead.Items.Select(RouteIdentity).ToHashSet(StringComparer.Ordinal);
+            Assert.IsTrue(multilayerCommitCandidate.Items.Select(RouteIdentity).All(multilayerReadIds.Contains), multilayerCommit.GetRawText());
+            var multilayerReplay = await mcp.Tool("kicad_pcb_route_commit", multilayerCommitArguments);
+            Assert.IsFalse(multilayerReplay.TryGetProperty("isError", out var multilayerReplayError)
+                && multilayerReplayError.GetBoolean(), multilayerReplay.GetRawText());
+            Assert.IsTrue(multilayerReplay.GetProperty("structuredContent").GetProperty("receipt")
+                .GetProperty("replayed").GetBoolean(), multilayerReplay.GetRawText());
+            Assert.AreEqual(multilayerCheckedAfter, await ObserveLifecycleState(client, cleanBoard, token));
+
+            // Persist the committed cross-layer copper through the same native
+            // save/close/reopen boundary used by the ordinary route journey.
+            // Read back both identity and normalized shape so a receipt that
+            // only exists in the live editor cannot satisfy this proof.
+            var multilayerPersistedState = await ObserveLifecycleState(client, cleanBoard, token);
+            var multilayerSave = await mcp.Tool("kicad_document_save", new
+            {
+                instanceId, expectedStateJson = SchematicJson.Formatter.Format(multilayerPersistedState),
+                operationId = Guid.NewGuid().ToString("D")
+            });
+            Assert.IsFalse(multilayerSave.TryGetProperty("isError", out var multilayerSaveError)
+                && multilayerSaveError.GetBoolean(), multilayerSave.GetRawText());
+            var multilayerClose = await mcp.Tool("kicad_document_close", new
+            {
+                instanceId,
+                expectedStateJson = multilayerSave.GetProperty("structuredContent")
+                    .GetProperty("observedState").GetRawText(),
+                operationId = Guid.NewGuid().ToString("D")
+            });
+            Assert.IsFalse(multilayerClose.TryGetProperty("isError", out var multilayerCloseError)
+                && multilayerCloseError.GetBoolean(), multilayerClose.GetRawText());
+            var multilayerReopen = await CreateRootThroughMcp(
+                client.Endpoint, instanceId, cleanPath, evidence, token, toolName: "kicad_pcb_open");
+            cleanBoard = multilayerReopen.Document;
+            finalBoard = cleanBoard;
+            var multilayerPersistedRead = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+            {
+                Header = new() { Document = cleanBoard },
+                Types_ = { KiCadObjectType.KotPcbTrace, KiCadObjectType.KotPcbVia }
+            }, token);
+            var multilayerPersistedByIdentity = multilayerPersistedRead.Items
+                .ToDictionary(RouteIdentity, StringComparer.Ordinal);
+            foreach (var candidateItem in multilayerCommitCandidate.Items)
+            {
+                string candidateIdentity = RouteIdentity(candidateItem);
+                Assert.IsTrue(multilayerPersistedByIdentity.TryGetValue(candidateIdentity, out var persistedItem),
+                    $"Committed multilayer item {candidateIdentity} must survive save/reopen.");
+                Assert.AreEqual(RouteShape(candidateItem), RouteShape(persistedItem),
+                    $"Committed multilayer item {candidateIdentity} changed after save/reopen.");
+            }
+
             // A checked route DRC is tied to one exact lifecycle checkpoint.
             // Advance that checkpoint with an ordinary create, then prove the
             // old checked request is rejected before native route mutation.

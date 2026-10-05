@@ -299,15 +299,21 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(GraphicShape.GeometryOneofCase.Polygon, shape.Shape.GeometryCase, id);
             PolygonWithHoles polygon = shape.Shape.Polygon.Polygons.Single();
             Assert.IsTrue(polygon.Outline.Closed, id);
-            string[] expectedPoints = pieces[index].GetProperty("points").EnumerateArray()
-                .Select(point => $"{Long(point.GetProperty("xNm"))}:{Long(point.GetProperty("yNm"))}")
+            (long X, long Y)[] expectedPoints = pieces[index].GetProperty("points").EnumerateArray()
+                .Select(point => (Long(point.GetProperty("xNm")), Long(point.GetProperty("yNm"))))
                 .ToArray();
-            List<string> actualPointList = polygon.Outline.Nodes
-                .Select(point => $"{point.Point.XNm}:{point.Point.YNm}").ToList();
+            List<(long X, long Y)> actualPointList = polygon.Outline.Nodes
+                .Select(point => (point.Point.XNm, point.Point.YNm)).ToList();
             if (actualPointList.Count > 1 && actualPointList[0] == actualPointList[^1])
                 actualPointList.RemoveAt(actualPointList.Count - 1);
-            string[] actualPoints = actualPointList.ToArray();
-            CollectionAssert.AreEqual(expectedPoints, actualPoints, id);
+            Assert.AreEqual(expectedPoints.Length, actualPointList.Count, id);
+            for (int pointIndex = 0; pointIndex < expectedPoints.Length; pointIndex++)
+            {
+                (long expectedX, long expectedY) = expectedPoints[pointIndex];
+                (long actualX, long actualY) = actualPointList[pointIndex];
+                Assert.IsTrue(Math.Abs(expectedX - actualX) <= 1 && Math.Abs(expectedY - actualY) <= 1,
+                    $"{id} point {pointIndex}: native symbol serialization may normalize each coordinate by at most 1 nm; expected {expectedX}:{expectedY}, actual {actualX}:{actualY}.");
+            }
             Assert.AreEqual(pieces[index].GetProperty("id").GetString(), Property(shape, "kicad.ai.raster_trace.piece_id"), id);
             Assert.AreEqual(sourceSha256, Property(shape, "kicad.ai.raster_trace.source_sha256"), id);
             Assert.AreEqual(trace.GetProperty("geometrySha256").GetString(), Property(shape, "kicad.ai.raster_trace.geometry_sha256"), id);

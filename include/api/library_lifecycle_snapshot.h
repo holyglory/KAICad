@@ -30,6 +30,10 @@ struct KICOMMON_API LIBRARY_LIFECYCLE_SNAPSHOT
     wxString              rawUri;
     wxString              expandedUri;
     std::string           provider;
+    // The exact options string from the retained library-table row.  Providers must receive the
+    // same parsed option map that was observed here; an adapter must not silently substitute
+    // defaults while building a detached definition.
+    std::string           providerOptions;
 
     // This is a detached, canonical definition captured after a forced provider refresh.  The
     // snapshot does not own a mutable LIB_SYMBOL, so a later caller cannot write through it.

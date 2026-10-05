@@ -573,6 +573,7 @@ SYMBOL_LIBRARY_ADAPTER::CaptureLibrarySnapshot(
     snapshot.rawUri = row->URI();
     snapshot.expandedUri = expandedUri;
     snapshot.provider = row->Type().ToStdString( wxConvUTF8 );
+    snapshot.providerOptions = row->Options().ToStdString( wxConvUTF8 );
     snapshot.detachedDefinition = detachedDefinition;
     snapshot.dependencyBaselines = { tableAfter, libraryAfter };
     snapshot.forcedRefresh = true;

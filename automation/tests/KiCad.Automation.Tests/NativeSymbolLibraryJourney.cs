@@ -1,5 +1,6 @@
 using Google.Protobuf.WellKnownTypes;
 using System.Security.Cryptography;
+using System.Text.Json;
 using Kiapi.Common.Types;
 using Kiapi.Schematic.Types;
 using KiCad.Automation.Native;
@@ -120,14 +121,60 @@ public sealed partial class NativeSessionTests
         Assert.IsTrue(rasterProjection.GetProperty("structuredContent").GetProperty("embeddedSourceVerified").GetBoolean(), rasterProjection.GetRawText());
         string artworkAfterModifyHash = rasterProjection.GetProperty("structuredContent").GetProperty("nativeResult")
             .GetProperty("afterModifyHash").GetUInt64().ToString();
+        SchematicSymbol expectedArtwork = SchematicJson.Parser.Parse<SchematicSymbol>(
+            artworkWrite.GetProperty("structuredContent").GetProperty("definition").GetRawText());
+        string[] createdRasterIds = rasterProjection.GetProperty("structuredContent").GetProperty("createdIds")
+            .EnumerateArray().Select(item => item.GetString()!).ToArray();
+        JsonElement trace = rasterTrace.GetProperty("structuredContent").GetProperty("trace");
+        Assert.AreEqual(trace.GetProperty("filledPieceCount").GetInt32(), createdRasterIds.Length,
+            rasterProjection.GetRawText());
         var artworkRead = await mcp.Tool("kicad_symbol_library_read", new
         { instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName = "GeneratedArtworkProbe" });
         RequireToolSuccess(artworkRead);
-        Assert.IsTrue(artworkRead.GetProperty("structuredContent").GetProperty("definition").GetProperty("items")
-            .EnumerateArray().Any(item => item.GetProperty("item").TryGetProperty("@type", out var type)
-                && type.GetString() == "type.googleapis.com/kiapi.schematic.types.SchematicField"
-                && item.GetProperty("item").TryGetProperty("customProperties", out var properties)
-                && properties.EnumerateArray().Any(property => property.GetProperty("key").GetString() == "kicad.ai.symbol_artwork.source_sha256")), artworkRead.GetRawText());
+        Assert.AreEqual(artworkAfterModifyHash,
+            artworkRead.GetProperty("structuredContent").GetProperty("modifyHash").GetUInt64().ToString(),
+            "the projection readback must retain the native library modify identity");
+        SchematicSymbol projectedArtwork = SchematicJson.Parser.Parse<SchematicSymbol>(
+            artworkRead.GetProperty("structuredContent").GetProperty("definition").GetRawText());
+        AssertSymbolContent(projectedArtwork, expectedArtwork,
+            "the native projection readback must retain the source symbol's pins and fields");
+        AssertRasterSymbolPieces(projectedArtwork, trace, createdRasterIds, rasterSha,
+            sourceKind: "generated", sourceOrigin: "deterministic-fixture");
+        AssertRasterSymbolEmbeddedSource(projectedArtwork, rasterSha, rasterBytes.Length);
+        string projectedCanonical = SchematicJson.Formatter.Format(projectedArtwork);
+
+        // Symbol-library writes are project-scoped, so close and reopen the
+        // clean schematic through the native lifecycle before reading the
+        // library again. This forces the adapter to reload the persisted
+        // .kicad_sym file while keeping the test's disposable project intact.
+        DocumentLifecycleState beforeClose = await ObserveLifecycleState(client, document, token);
+        Assert.IsFalse(beforeClose.NativeContentDirty, "the symbol projection must not dirty the schematic document");
+        string schematicPath = beforeClose.NativeFiles.Single(path =>
+            string.Equals(Path.GetFileName(path), document.Project.Name + ".kicad_sch", StringComparison.OrdinalIgnoreCase));
+        string closeOperationId = Guid.NewGuid().ToString("D");
+        var close = await mcp.Tool("kicad_document_close", new
+        {
+            instanceId, expectedStateJson = SchematicJson.Formatter.Format(beforeClose), operationId = closeOperationId
+        });
+        RequireToolSuccess(close);
+        var reopened = await CreateRootThroughMcp(client.Endpoint, instanceId, schematicPath, evidence, token,
+            toolName: "kicad_schematic_open");
+        Assert.AreEqual(document, reopened.Document, "closing and reopening the project schematic must preserve its native identity");
+        var artworkReloaded = await mcp.Tool("kicad_symbol_library_read", new
+        { instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName = "GeneratedArtworkProbe" });
+        RequireToolSuccess(artworkReloaded);
+        Assert.AreEqual(artworkAfterModifyHash,
+            artworkReloaded.GetProperty("structuredContent").GetProperty("modifyHash").GetUInt64().ToString(),
+            "the native modify identity must survive close and reopen");
+        SchematicSymbol reloadedArtwork = SchematicJson.Parser.Parse<SchematicSymbol>(
+            artworkReloaded.GetProperty("structuredContent").GetProperty("definition").GetRawText());
+        Assert.AreEqual(projectedCanonical, SchematicJson.Formatter.Format(reloadedArtwork),
+            "the projected symbol must be byte-stable across native close and reopen");
+        AssertSymbolContent(reloadedArtwork, expectedArtwork,
+            "close and reopen must retain the source symbol's pins and fields");
+        AssertRasterSymbolPieces(reloadedArtwork, trace, createdRasterIds, rasterSha,
+            sourceKind: "generated", sourceOrigin: "deterministic-fixture");
+        AssertRasterSymbolEmbeddedSource(reloadedArtwork, rasterSha, rasterBytes.Length);
         var artworkDelete = await mcp.Tool("kicad_symbol_library_delete", new
         {
             instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName = "GeneratedArtworkProbe",
@@ -213,4 +260,90 @@ public sealed partial class NativeSessionTests
         Assert.IsTrue(restoredList.GetProperty("structuredContent").GetProperty("symbolNames")
             .EnumerateArray().Any(item => item.GetString() == symbolName), restoredList.GetRawText());
     }
+
+    private static void AssertSymbolContent(SchematicSymbol actual, SchematicSymbol expected, string message)
+    {
+        CollectionAssert.IsSubsetOf(SymbolPins(expected), SymbolPins(actual), message + ": pins");
+        CollectionAssert.IsSubsetOf(SymbolFields(expected), SymbolFields(actual), message + ": fields");
+    }
+
+    private static string[] SymbolPins(SchematicSymbol symbol) => symbol.Items
+        .Where(child => child.Item?.Is(SchematicPin.Descriptor) == true)
+        .Select(child => SchematicJson.Formatter.Format(child.Item!.Unpack<SchematicPin>()))
+        .Order(StringComparer.Ordinal).ToArray();
+
+    private static string[] SymbolFields(SchematicSymbol symbol)
+    {
+        IEnumerable<SchematicField> fields = new[]
+        {
+            symbol.ReferenceField, symbol.ValueField, symbol.FootprintField,
+            symbol.DatasheetField, symbol.DescriptionField
+        }.Where(field => field is not null)!;
+        fields = fields.Concat(symbol.Items.Where(child => child.Item?.Is(SchematicField.Descriptor) == true)
+            .Select(child => child.Item!.Unpack<SchematicField>()));
+        return fields.Select(field => SchematicJson.Formatter.Format(field))
+            .Order(StringComparer.Ordinal).ToArray();
+    }
+
+    private static void AssertRasterSymbolPieces(SchematicSymbol symbol, JsonElement trace,
+        string[] createdIds, string sourceSha256, string sourceKind, string sourceOrigin)
+    {
+        JsonElement[] pieces = trace.GetProperty("filledPieces").EnumerateArray().ToArray();
+        Assert.AreEqual(pieces.Length, createdIds.Length, "the native symbol contains every projected filled raster piece");
+        foreach ((string id, int index) in createdIds.Select((id, index) => (id, index)))
+        {
+            SchematicGraphicShape shape = symbol.Items
+                .Where(child => child.Item?.Is(SchematicGraphicShape.Descriptor) == true)
+                .Select(child => child.Item!.Unpack<SchematicGraphicShape>())
+                .Single(candidate => candidate.Id.Value == id);
+            Assert.AreEqual(GraphicShape.GeometryOneofCase.Polygon, shape.Shape.GeometryCase, id);
+            PolygonWithHoles polygon = shape.Shape.Polygon.Polygons.Single();
+            Assert.IsTrue(polygon.Outline.Closed, id);
+            string[] expectedPoints = pieces[index].GetProperty("points").EnumerateArray()
+                .Select(point => $"{Long(point.GetProperty("xNm"))}:{Long(point.GetProperty("yNm"))}")
+                .ToArray();
+            List<string> actualPointList = polygon.Outline.Nodes
+                .Select(point => $"{point.Point.XNm}:{point.Point.YNm}").ToList();
+            if (actualPointList.Count > 1 && actualPointList[0] == actualPointList[^1])
+                actualPointList.RemoveAt(actualPointList.Count - 1);
+            string[] actualPoints = actualPointList.ToArray();
+            CollectionAssert.AreEqual(expectedPoints, actualPoints, id);
+            Assert.AreEqual(pieces[index].GetProperty("id").GetString(), Property(shape, "kicad.ai.raster_trace.piece_id"), id);
+            Assert.AreEqual(sourceSha256, Property(shape, "kicad.ai.raster_trace.source_sha256"), id);
+            Assert.AreEqual(trace.GetProperty("geometrySha256").GetString(), Property(shape, "kicad.ai.raster_trace.geometry_sha256"), id);
+            Assert.AreEqual(sourceKind, Property(shape, "kicad.ai.raster_trace.source_kind"), id);
+            Assert.AreEqual(sourceOrigin, Property(shape, "kicad.ai.raster_trace.source_origin"), id);
+            Assert.AreEqual("filled-vector-projection", Property(shape, "kicad.ai.raster_trace.role"), id);
+            Assert.AreEqual("true", Property(shape, "kicad.ai.raster_trace.filled"), id);
+        }
+
+        SchematicField manifest = symbol.Items
+            .Where(child => child.Item?.Is(SchematicField.Descriptor) == true)
+            .Select(child => child.Item!.Unpack<SchematicField>())
+            .Single(field => field.Name == "kicad.ai.raster_trace_manifest");
+        Assert.AreEqual(sourceSha256, Property(manifest, "kicad.ai.raster_trace.source_sha256"));
+        Assert.AreEqual(trace.GetProperty("geometrySha256").GetString(), Property(manifest, "kicad.ai.raster_trace.geometry_sha256"));
+        Assert.AreEqual(sourceKind, Property(manifest, "kicad.ai.raster_trace.source_kind"));
+        Assert.AreEqual(sourceOrigin, Property(manifest, "kicad.ai.raster_trace.source_origin"));
+        StringAssert.Contains(manifest.Text.Text_, "kicad.ai.raster_trace.v1");
+    }
+
+    private static void AssertRasterSymbolEmbeddedSource(SchematicSymbol symbol, string sourceSha256, int sourceBytes)
+    {
+        Assert.IsNotNull(symbol.EmbeddedFiles, "the projected symbol must carry embedded source files");
+        EmbeddedFile source = symbol.EmbeddedFiles!.Files.Single(file => file.Name == "raster_trace_" + sourceSha256 + ".png");
+        Assert.AreEqual(sourceSha256, source.DataHash);
+        Assert.IsFalse(source.Data.IsEmpty, "the projected symbol must retain the compressed source payload");
+        Assert.IsGreaterThan(0, sourceBytes);
+    }
+
+    private static string Property(SchematicGraphicShape shape, string key) => shape.CustomProperties
+        .Single(property => property.Key == key).Value;
+
+    private static string Property(SchematicField field, string key) => field.CustomProperties
+        .Single(property => property.Key == key).Value;
+
+    private static long Long(JsonElement value) => value.ValueKind == JsonValueKind.String
+        ? long.Parse(value.GetString()!, System.Globalization.CultureInfo.InvariantCulture)
+        : value.GetInt64();
 }

@@ -2666,9 +2666,12 @@ public sealed partial class NativeSessionTests
                 multilayerUndoDeadline.CancelAfter(TimeSpan.FromSeconds(8));
                 while (true)
                 {
-                    var undone = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
-                    { Header = new() { Document = cleanBoard }, Items = { multilayerIds.Select(id => new KIID { Value = id }) } }, multilayerUndoDeadline.Token);
-                    if (undone.Items.Count == 0) break;
+                    // An all-missing GetItemsById request is a native error.
+                    // Observe the copper collection so absence after undo is
+                    // an ordinary result without swallowing API failures.
+                    var undone = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+                    { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbTrace, KiCadObjectType.KotPcbArc, KiCadObjectType.KotPcbVia } }, multilayerUndoDeadline.Token);
+                    if (!undone.Items.Any(item => multilayerIds.Contains(RouteIdentity(item), StringComparer.Ordinal))) break;
                     await Task.Delay(100, multilayerUndoDeadline.Token);
                 }
             }
@@ -2684,11 +2687,12 @@ public sealed partial class NativeSessionTests
                 multilayerRedoDeadline.CancelAfter(TimeSpan.FromSeconds(8));
                 while (true)
                 {
-                    var redone = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
-                    { Header = new() { Document = cleanBoard }, Items = { multilayerIds.Select(id => new KIID { Value = id }) } }, multilayerRedoDeadline.Token);
-                    if (redone.Items.Count == multilayerIds.Length)
+                    var redone = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+                    { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbTrace, KiCadObjectType.KotPcbArc, KiCadObjectType.KotPcbVia } }, multilayerRedoDeadline.Token);
+                    var redoneRoute = redone.Items.Where(item => multilayerIds.Contains(RouteIdentity(item), StringComparer.Ordinal)).ToArray();
+                    if (redoneRoute.Length == multilayerIds.Length)
                     {
-                        foreach (var item in redone.Items)
+                        foreach (var item in redoneRoute)
                             Assert.AreEqual(multilayerSnapshot[RouteIdentity(item)], item, "Redo must restore the exact native route state.");
                         break;
                     }

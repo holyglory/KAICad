@@ -1765,7 +1765,7 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(expectedCreates.Overlaps(expectedUpdates) || expectedCreates.Overlaps(expectedRemovals) || expectedUpdates.Overlaps(expectedRemovals));
 
             async Task<PcbDrcJobState> RouteDrc(string candidateJson, string? deleteJson,
-                DocumentLifecycleState checkpoint, string? groupJson = null)
+                DocumentLifecycleState checkpoint, string? groupJson = null, string diagnosticJson = "")
             {
                 var reply = await mcp.Tool("kicad_pcb_drc_start", new
                 {
@@ -1794,7 +1794,8 @@ public sealed partial class NativeSessionTests
                     Assert.IsGreaterThan(0, job.VerifiedGroupChanges.Count, SchematicJson.Formatter.Format(job));
                     Assert.AreEqual(job.VerifiedGroupChanges.Count, job.AfterGroupStates.Count, SchematicJson.Formatter.Format(job));
                 }
-                Assert.IsEmpty(job.Findings, SchematicJson.Formatter.Format(job));
+                Assert.IsEmpty(job.Findings, SchematicJson.Formatter.Format(job)
+                    + (diagnosticJson.Length == 0 ? "" : "\nRoute input evidence: " + diagnosticJson));
                 return job;
             }
             var shoveDrc = await RouteDrc(shoveData.GetProperty("drcCandidateRequestJson").GetString()!,
@@ -2422,7 +2423,9 @@ public sealed partial class NativeSessionTests
                 footprint.Id = new() { Value = Guid.NewGuid().ToString("D") };
                 footprint.Parent = null; footprint.CustomProperties.Clear(); footprint.SymbolPath = null;
                 footprint.Position = new() { XNm = x, YNm = y };
-                footprint.Definition.Id = new() { LibraryNickname = "Generated", EntryName = name };
+                // This is a board-local copy of the native fixture pad, not
+                // an entry in an invented external footprint library.
+                footprint.Definition.Id = multilayerTemplate.Definition.Id.Clone();
                 footprint.Definition.Items.Clear();
                 var pad = multilayerTemplatePad.Clone();
                 pad.Id = new() { Value = Guid.NewGuid().ToString("D") }; pad.Parent = null; pad.CustomProperties.Clear();
@@ -2441,15 +2444,23 @@ public sealed partial class NativeSessionTests
                     field.Text.Text.Position = footprint.Position.Clone();
                 }
                 footprint.ReferenceField.Text.Text.Text_ = name;
+                // Put readable, compact labels beside the pad instead of
+                // stacking every silk field on its copper and mask opening.
+                long labelDirection = y < 60_000_000 ? -1 : 1;
+                bool barrier = net == "MULTILAYER_BARRIER";
+                footprint.ReferenceField.Text.Text.Position = new()
+                { XNm = x, YNm = barrier ? y + labelDirection * 2_000_000 : y - 2_000_000 };
+                footprint.ValueField.Text.Text.Position = new()
+                { XNm = x, YNm = barrier ? y + labelDirection * 3_500_000 : y + 2_000_000 };
                 return footprint;
             }
             var multilayerFootprintCreate = new CreateItems { Header = new() { Document = cleanBoard } };
             multilayerFootprintCreate.Items.Add(new[]
             {
-                Any.Pack(MultilayerFootprint("MULTILAYER_START", "MULTILAYER_ROUTE", 60_000_000, 60_000_000, 700_000)),
-                Any.Pack(MultilayerFootprint("MULTILAYER_END", "MULTILAYER_ROUTE", 66_000_000, 60_000_000, 700_000)),
-                Any.Pack(MultilayerFootprint("MULTILAYER_WALL_START", "MULTILAYER_BARRIER", 63_000_000, 58_000_000, 500_000)),
-                Any.Pack(MultilayerFootprint("MULTILAYER_WALL_END", "MULTILAYER_BARRIER", 63_000_000, 62_000_000, 500_000))
+                Any.Pack(MultilayerFootprint("ML1", "MULTILAYER_ROUTE", 60_000_000, 60_000_000, 700_000)),
+                Any.Pack(MultilayerFootprint("ML2", "MULTILAYER_ROUTE", 66_000_000, 60_000_000, 700_000)),
+                Any.Pack(MultilayerFootprint("ML3", "MULTILAYER_BARRIER", 63_000_000, 58_000_000, 500_000)),
+                Any.Pack(MultilayerFootprint("ML4", "MULTILAYER_BARRIER", 63_000_000, 62_000_000, 500_000))
             });
             var multilayerFootprintReply = await mcp.Tool("kicad_pcb_items_create", new
             {
@@ -2507,6 +2518,20 @@ public sealed partial class NativeSessionTests
             CollectionAssert.AreEqual(new[] { multilayerStartPad.Id.Value }, await MultilayerConnectedIds(multilayerBefore),
                 "The endpoint pads must start disconnected; matching net names do not establish physical connectivity.");
 
+            var multilayerNativeRules = await client.InvokeAsync<GetBoardDesignRules, BoardDesignRulesResponse>(
+                new() { Board = cleanBoard }, token);
+            Assert.IsNotNull(multilayerNativeRules.Rules?.Constraints?.MinClearance);
+            var multilayerNativeClasses = await client.InvokeAsync<GetNetClassForNets, NetClassForNetsResponse>(new()
+            { Net = { multilayerStartPad.Net.Clone(), multilayerWallPads[0].Net.Clone() } }, token);
+            Assert.IsTrue(multilayerNativeClasses.Classes.ContainsKey("MULTILAYER_ROUTE"));
+            Assert.IsTrue(multilayerNativeClasses.Classes.ContainsKey("MULTILAYER_BARRIER"));
+            Assert.IsNotNull(multilayerNativeClasses.Classes["MULTILAYER_ROUTE"].Board?.Clearance);
+            Assert.IsNotNull(multilayerNativeClasses.Classes["MULTILAYER_BARRIER"].Board?.Clearance);
+            long multilayerClearanceNm = Math.Max(multilayerNativeRules.Rules.Constraints.MinClearance.ValueNm,
+                Math.Max(multilayerNativeClasses.Classes["MULTILAYER_ROUTE"].Board.Clearance.ValueNm,
+                    multilayerNativeClasses.Classes["MULTILAYER_BARRIER"].Board.Clearance.ValueNm));
+            Assert.IsGreaterThanOrEqualTo(0L, multilayerClearanceNm);
+
             var multilayerPlanArguments = new
             {
                 instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard),
@@ -2517,7 +2542,7 @@ public sealed partial class NativeSessionTests
                     start = new { xNm = multilayerStartPad.Position.XNm, yNm = multilayerStartPad.Position.YNm },
                     end = new { xNm = multilayerEndPad.Position.XNm, yNm = multilayerEndPad.Position.YNm },
                     startLayer = "F.Cu", endLayer = "F.Cu", layers = new[] { "F.Cu", "B.Cu" },
-                    widthNm = 250_000L, clearanceNm = 100_000L, gridNm = 100_000L,
+                    widthNm = 250_000L, clearanceNm = multilayerClearanceNm, gridNm = 100_000L,
                     bounds = new { minXNm = 59_000_000L, minYNm = 59_000_000L, maxXNm = 67_000_000L, maxYNm = 61_000_000L },
                     maxNodes = 10_000, maxVias = 2,
                     vias = new[] { new { type = "through", startLayer = "F.Cu", endLayer = "B.Cu", diameterNm = 600_000L, drillNm = 300_000L, costNm = 1_000_000L } }
@@ -2557,7 +2582,40 @@ public sealed partial class NativeSessionTests
                 multilayerPlanReplay.GetProperty("structuredContent").GetProperty("candidateRequestJson").GetString());
             Assert.AreEqual(multilayerBefore, await ObserveLifecycleState(client, cleanBoard, token));
 
-            var multilayerDrc = await RouteDrc(multilayerCandidateJson, null, multilayerBefore);
+            var multilayerDiagnosticItems = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            {
+                Header = new() { Document = cleanBoard }, Items = { multilayerWall.Id, multilayerStartPad.Id, multilayerEndPad.Id,
+                    multilayerWallPads[0].Id, multilayerWallPads[1].Id,
+                    multilayerFootprintCreate.Items.Select(item => item.Unpack<FootprintInstance>().Id.Clone()) }
+            }, token);
+            var multilayerNativeNets = await client.InvokeAsync<GetNets, NetsResponse>(new() { Board = cleanBoard }, token);
+            string multilayerDiagnosticJson = JsonSerializer.Serialize(new
+            {
+                instanceId, processEpoch = client.Epoch, document = cleanBoard,
+                beforeState = SchematicJson.Formatter.Format(multilayerBefore),
+                planningRequestJson = multilayerPlanArguments.requestJson,
+                requestedClearanceNm = multilayerClearanceNm,
+                nativeRulesJson = BoardJson.Formatter.Format(multilayerNativeRules),
+                nativeNetClassesJson = BoardJson.Formatter.Format(multilayerNativeClasses),
+                nativeNetsJson = BoardJson.Formatter.Format(multilayerNativeNets),
+                candidateRequestJson = multilayerCandidateJson,
+                candidateGeometry = multilayerCommitCandidate.Items.Select(DescribeRouteItem).ToArray(),
+                routePoints = multilayerPlanData.GetProperty("routePoints"),
+                obstacleReport = multilayerPlanData.GetProperty("obstacleReport"),
+                existingItemsJson = BoardJson.Formatter.Format(multilayerDiagnosticItems),
+                roles = new
+                {
+                    wallId = multilayerWall.Id.Value, startPadId = multilayerStartPad.Id.Value, endPadId = multilayerEndPad.Id.Value,
+                    wallPadIds = multilayerWallPads.Select(pad => pad.Id.Value).ToArray()
+                }
+            });
+            Assert.IsLessThanOrEqualTo(512 * 1024, Encoding.UTF8.GetByteCount(multilayerDiagnosticJson),
+                "Multilayer diagnosis must remain bounded.");
+            // Retain input before DRC, and include it in any failed TRX
+            // assertion so a later case cannot overwrite the only geometry.
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-multilayer-input.json"), multilayerDiagnosticJson, token);
+            Assert.AreEqual(multilayerBefore, await ObserveLifecycleState(client, cleanBoard, token));
+            var multilayerDrc = await RouteDrc(multilayerCandidateJson, null, multilayerBefore, diagnosticJson: multilayerDiagnosticJson);
             CollectionAssert.AreEqual(multilayerCommitCandidate.Items.Select(RouteIdentity).ToArray(), multilayerDrc.CandidateItemIds.ToArray());
             Assert.AreEqual(multilayerBefore, await ObserveLifecycleState(client, cleanBoard, token));
             string multilayerOperationId = Guid.NewGuid().ToString("D");

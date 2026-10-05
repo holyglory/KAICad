@@ -2871,12 +2871,24 @@ public sealed partial class NativeSessionTests
         actualAuthoring.Filled = false;
         actualAuthoring.FilledPolygons.Clear();
         actualAuthoring.Parent = new();
-        return expectedAuthoring.Equals(actualAuthoring);
+        return BoardJson.Formatter.Format(expectedAuthoring) == BoardJson.Formatter.Format(actualAuthoring);
     }
 
     private static void AssertZoneAuthoringMatches(Zone expected, Zone actual, string message)
     {
-        Assert.IsTrue(ZoneAuthoringMatches(expected, actual), message);
+        if (!ZoneAuthoringMatches(expected, actual))
+        {
+            var expectedAuthoring = expected.Clone();
+            expectedAuthoring.Filled = false;
+            expectedAuthoring.FilledPolygons.Clear();
+            expectedAuthoring.Parent = new();
+            var actualAuthoring = actual.Clone();
+            actualAuthoring.Filled = false;
+            actualAuthoring.FilledPolygons.Clear();
+            actualAuthoring.Parent = new();
+            Assert.AreEqual(BoardJson.Formatter.Format(expectedAuthoring),
+                BoardJson.Formatter.Format(actualAuthoring), message);
+        }
         Assert.AreEqual(expected.Id?.Value, actual.Id?.Value, message);
     }
 

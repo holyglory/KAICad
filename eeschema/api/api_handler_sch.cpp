@@ -3133,7 +3133,7 @@ API_HANDLER_SCH::handleReadLibrarySnapshot(
 
     NativeCapabilityLibrarySnapshotReadResponse response;
     response.mutable_document()->CopyFrom( aCtx.Request.document() );
-    const std::string actualProcessEpoch = drcApiServer().Token();
+    const std::string actualProcessEpoch = apiServer().Token();
     response.set_process_epoch( actualProcessEpoch );
 
     auto fail = [&]( const char* aCode, const std::string& aMessage,

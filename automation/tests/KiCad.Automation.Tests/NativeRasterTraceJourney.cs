@@ -1,6 +1,11 @@
 using System.Security.Cryptography;
 using System.Text.Json;
+using Kiapi.Board.Commands;
+using Kiapi.Board.Types;
+using Kiapi.Common.Commands;
+using Kiapi.Common.Types;
 using KiCad.Automation.Native;
+using KiCad.Automation.Protocol;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace KiCad.Automation.Tests;
@@ -99,5 +104,158 @@ public sealed partial class NativeSessionTests
         Assert.IsFalse(hugeCoordinates.GetProperty("isError").GetBoolean(), hugeCoordinates.GetRawText());
         Assert.IsFalse(hugeCoordinates.GetProperty("structuredContent").GetProperty("trace").GetProperty("accepted").GetBoolean(), hugeCoordinates.GetRawText());
         Assert.AreEqual("coordinate_range", hugeCoordinates.GetProperty("structuredContent").GetProperty("trace").GetProperty("rejectionCode").GetString());
+
+        await VerifyNativeRasterProjectionPersistence(client, mcp, source, hash, trace,
+            evidence, instanceId, token);
     }
+
+    private static async Task VerifyNativeRasterProjectionPersistence(NativeClient client, StdioMcpFixture mcp,
+        string source, string sourceSha256, JsonElement trace, string evidence, string instanceId,
+        CancellationToken token)
+    {
+        // Board projection is the smallest real target: it writes the filled
+        // polygons through the native PCB item transaction and keeps the
+        // source bytes in the explicit repository archive.  The projection
+        // used to be deleted before any save, so this closes the native
+        // save/close/reopen proof gap without changing the projection API.
+        var session = await client.HandshakeAsync(token);
+        string projectPath = session.ProjectPath;
+        string projectDirectory = Path.GetDirectoryName(projectPath)!;
+        string boardPath = Path.ChangeExtension(projectPath, ".kicad_pcb");
+        Assert.IsFalse(File.Exists(boardPath), "The raster persistence fixture must start with a new board.");
+
+        string boardOpenEvidence = Path.Combine(evidence, instanceId + "-raster-projection-board-open");
+        Directory.CreateDirectory(boardOpenEvidence);
+        var opened = await CreateRootThroughMcp(client.Endpoint, instanceId, boardPath, boardOpenEvidence, token,
+            toolName: "kicad_pcb_create");
+        DocumentSpecifier board = opened.Document;
+        Assert.AreEqual(Path.GetFileName(boardPath), board.BoardFilename);
+
+        DocumentLifecycleState before = await ObserveLifecycleState(client, board, token);
+        JsonElement documentJson = JsonDocument.Parse(SchematicJson.Formatter.Format(board)).RootElement.Clone();
+        JsonElement expectedStateJson = JsonDocument.Parse(SchematicJson.Formatter.Format(before)).RootElement.Clone();
+        const string archivePath = "raster-trace/projection.png";
+        var projection = await mcp.Tool("kicad_artwork_raster_project", new
+        {
+            instanceId,
+            input = new
+            {
+                operationId = Guid.NewGuid().ToString("D"),
+                targetKind = "BOARD",
+                expectedProcessEpoch = client.Epoch,
+                sourcePath = source,
+                sourceKind = "generated",
+                sourceOrigin = "deterministic-fixture",
+                proposal = trace,
+                board = new
+                {
+                    document = documentJson,
+                    expectedState = expectedStateJson,
+                    layer = "F.SilkS",
+                    originXNm = 30_000_000L,
+                    originYNm = 30_000_000L,
+                    repositoryRoot = projectDirectory,
+                    sourceArchivePath = archivePath
+                }
+            }
+        });
+        RequireToolSuccess(projection);
+        JsonElement projectionData = projection.GetProperty("structuredContent");
+        Assert.IsTrue(projectionData.GetProperty("accepted").GetBoolean(), projection.GetRawText());
+        Assert.IsFalse(projectionData.GetProperty("provenanceAtomic").GetBoolean(), projection.GetRawText());
+        Assert.AreEqual(sourceSha256, projectionData.GetProperty("sourceSha256").GetString(), projection.GetRawText());
+        Assert.AreEqual(trace.GetProperty("geometrySha256").GetString(), projectionData.GetProperty("geometrySha256").GetString(),
+            projection.GetRawText());
+        string archive = projectionData.GetProperty("sourceArchive").GetString()!;
+        Assert.AreEqual(archivePath, archive, projection.GetRawText());
+        string archivedSource = Path.Combine(projectDirectory, archive.Replace('/', Path.DirectorySeparatorChar));
+        Assert.IsTrue(File.Exists(archivedSource), projection.GetRawText());
+        Assert.AreEqual(sourceSha256, Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(archivedSource, token))));
+
+        string[] createdIds = projectionData.GetProperty("createdIds").EnumerateArray()
+            .Select(item => item.GetString()!).ToArray();
+        Assert.AreEqual(trace.GetProperty("filledPieceCount").GetInt32(), createdIds.Length, projection.GetRawText());
+        var live = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+        {
+            Header = new() { Document = board },
+            Items = { createdIds.Select(id => new KIID { Value = id }) }
+        }, token);
+        Assert.AreEqual(createdIds.Length, live.Items.Count, projection.GetRawText());
+        var expectedGeometry = new Dictionary<string, string[]>(StringComparer.Ordinal);
+        foreach (var item in live.Items)
+        {
+            Assert.IsTrue(item.Is(BoardGraphicShape.Descriptor), projection.GetRawText());
+            BoardGraphicShape shape = item.Unpack<BoardGraphicShape>();
+            Assert.AreEqual(BoardLayer.BlFSilkS, shape.Layer, projection.GetRawText());
+            Assert.AreEqual(GraphicShape.GeometryOneofCase.Polygon, shape.Shape.GeometryCase, projection.GetRawText());
+            Assert.IsTrue(shape.Shape.Polygon.Polygons.Single().Outline.Closed, projection.GetRawText());
+            expectedGeometry[shape.Id.Value] = shape.Shape.Polygon.Polygons.Single().Outline.Nodes
+                .Select(node => $"{node.Point.XNm}:{node.Point.YNm}").ToArray();
+            Assert.AreEqual(trace.GetProperty("geometrySha256").GetString(), Property(shape, "kicad.ai.raster_trace.geometry_sha256"), projection.GetRawText());
+            Assert.AreEqual(sourceSha256, Property(shape, "kicad.ai.raster_trace.source_sha256"), projection.GetRawText());
+            Assert.AreEqual("filled-vector-projection", Property(shape, "kicad.ai.raster_trace.role"), projection.GetRawText());
+            Assert.AreEqual(archivePath, Property(shape, "kicad.ai.raster_trace.source_archive"), projection.GetRawText());
+        }
+
+        DocumentLifecycleState projected = await ObserveLifecycleState(client, board, token);
+        var saved = await mcp.Tool("kicad_document_save", new
+        {
+            instanceId,
+            expectedStateJson = SchematicJson.Formatter.Format(projected),
+            operationId = Guid.NewGuid().ToString("D")
+        });
+        RequireToolSuccess(saved);
+        JsonElement savedData = saved.GetProperty("structuredContent");
+        DocumentLifecycleState savedState = SchematicJson.Parser.Parse<DocumentLifecycleState>(
+            savedData.GetProperty("observedState").GetRawText());
+        Assert.IsFalse(savedState.NativeContentDirty, saved.GetRawText());
+        var closed = await mcp.Tool("kicad_document_close", new
+        {
+            instanceId,
+            expectedStateJson = SchematicJson.Formatter.Format(savedState),
+            operationId = Guid.NewGuid().ToString("D")
+        });
+        RequireToolSuccess(closed);
+        var reopened = await CreateRootThroughMcp(client.Endpoint, instanceId, boardPath, boardOpenEvidence, token,
+            toolName: "kicad_pcb_open");
+        DocumentSpecifier reloadedBoard = reopened.Document;
+        DocumentLifecycleState reloaded = await ObserveLifecycleState(client, reloadedBoard, token);
+        Assert.IsFalse(reloaded.NativeContentDirty, "A board reopened from the saved projection must be clean.");
+        var persisted = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+        {
+            Header = new() { Document = reloadedBoard },
+            Items = { createdIds.Select(id => new KIID { Value = id }) }
+        }, token);
+        Assert.AreEqual(createdIds.Length, persisted.Items.Count,
+            "Every projected filled piece must survive a native save, close and reopen.");
+        foreach (var item in persisted.Items)
+        {
+            Assert.IsTrue(item.Is(BoardGraphicShape.Descriptor), item.ToString());
+            BoardGraphicShape shape = item.Unpack<BoardGraphicShape>();
+            Assert.IsTrue(expectedGeometry.TryGetValue(shape.Id.Value, out string[]? geometry), shape.Id.Value);
+            CollectionAssert.AreEqual(geometry, shape.Shape.Polygon.Polygons.Single().Outline.Nodes
+                .Select(node => $"{node.Point.XNm}:{node.Point.YNm}").ToArray(), shape.Id.Value);
+            Assert.AreEqual(trace.GetProperty("geometrySha256").GetString(), Property(shape, "kicad.ai.raster_trace.geometry_sha256"), shape.Id.Value);
+            Assert.AreEqual(sourceSha256, Property(shape, "kicad.ai.raster_trace.source_sha256"), shape.Id.Value);
+            Assert.AreEqual("filled-vector-projection", Property(shape, "kicad.ai.raster_trace.role"), shape.Id.Value);
+            Assert.AreEqual(archivePath, Property(shape, "kicad.ai.raster_trace.source_archive"), shape.Id.Value);
+        }
+
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-raster-projection-persistence.json"),
+            JsonSerializer.Serialize(new
+            {
+                board = boardPath,
+                sourceSha256,
+                geometrySha256 = trace.GetProperty("geometrySha256").GetString(),
+                archive = archivedSource,
+                createdIds,
+                saved = true,
+                closed = true,
+                reopened = true,
+                persistedShapeCount = persisted.Items.Count
+            }, new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true }), token);
+    }
+
+    private static string Property(BoardGraphicShape shape, string key)
+        => shape.CustomProperties.Single(property => property.Key == key).Value;
 }

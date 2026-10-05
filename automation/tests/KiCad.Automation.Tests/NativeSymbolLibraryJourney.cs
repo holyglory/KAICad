@@ -140,7 +140,7 @@ public sealed partial class NativeSessionTests
             "the native projection readback must retain the source symbol's pins and fields");
         AssertRasterSymbolPieces(projectedArtwork, trace, createdRasterIds, rasterSha,
             sourceKind: "generated", sourceOrigin: "deterministic-fixture");
-        AssertRasterSymbolEmbeddedSource(projectedArtwork, rasterSha, rasterBytes.Length);
+        string embeddedDataHash = AssertRasterSymbolEmbeddedSource(projectedArtwork, rasterSha, rasterBytes.Length);
         string projectedCanonical = SchematicJson.Formatter.Format(projectedArtwork);
 
         // Symbol-library writes are project-scoped, so close and reopen the
@@ -174,7 +174,7 @@ public sealed partial class NativeSessionTests
             "close and reopen must retain the source symbol's pins and fields");
         AssertRasterSymbolPieces(reloadedArtwork, trace, createdRasterIds, rasterSha,
             sourceKind: "generated", sourceOrigin: "deterministic-fixture");
-        AssertRasterSymbolEmbeddedSource(reloadedArtwork, rasterSha, rasterBytes.Length);
+        AssertRasterSymbolEmbeddedSource(reloadedArtwork, rasterSha, rasterBytes.Length, embeddedDataHash);
         var artworkDelete = await mcp.Tool("kicad_symbol_library_delete", new
         {
             instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName = "GeneratedArtworkProbe",
@@ -334,13 +334,17 @@ public sealed partial class NativeSessionTests
         StringAssert.Contains(manifest.Text.Text_, "kicad.ai.raster_trace.v1");
     }
 
-    private static void AssertRasterSymbolEmbeddedSource(SchematicSymbol symbol, string sourceSha256, int sourceBytes)
+    private static string AssertRasterSymbolEmbeddedSource(SchematicSymbol symbol, string sourceSha256, int sourceBytes,
+        string? expectedDataHash = null)
     {
         Assert.IsNotNull(symbol.EmbeddedFiles, "the projected symbol must carry embedded source files");
         EmbeddedFile source = symbol.EmbeddedFiles!.Files.Single(file => file.Name == "raster_trace_" + sourceSha256 + ".png");
-        Assert.AreEqual(sourceSha256, source.DataHash);
+        Assert.IsFalse(string.IsNullOrWhiteSpace(source.DataHash), "the projected symbol must retain a native embedded-file hash");
+        if (expectedDataHash is not null)
+            Assert.AreEqual(expectedDataHash, source.DataHash, "the embedded-file hash must survive native close and reopen");
         Assert.IsFalse(source.Data.IsEmpty, "the projected symbol must retain the compressed source payload");
         Assert.IsGreaterThan(0, sourceBytes);
+        return source.DataHash;
     }
 
     private static string Property(SchematicGraphicShape shape, string key) => shape.CustomProperties

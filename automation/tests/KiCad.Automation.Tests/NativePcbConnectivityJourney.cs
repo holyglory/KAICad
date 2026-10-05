@@ -137,9 +137,6 @@ public sealed partial class NativeSessionTests
                 }
             };
 
-            // A mixed track/via/zone create currently rolls back with an
-            // indeterminate native result.  Keep the zone summary open until
-            // its native admission and refill receipt have a bounded proof.
             var trackCreate = new CreateItems { Header = new() { Document = board }, Items = { Any.Pack(track) } };
             var trackReply = await mcp.Tool("kicad_pcb_items_create", new
             {
@@ -177,8 +174,106 @@ public sealed partial class NativeSessionTests
             var liveTrack = createdRouteItems.Items.Single(item => item.Is(Track.Descriptor)).Unpack<Track>();
             var liveVia = createdRouteItems.Items.Single(item => item.Is(Via.Descriptor)).Unpack<Via>();
 
-            string expectedStateJson = SchematicJson.Formatter.Format(afterCreate);
-            string documentJson = SchematicJson.Formatter.Format(board);
+            // Create the copper zone through the task-oriented typed authoring
+            // boundary.  The old connectivity fixture packed track, via and
+            // zone into one legacy CreateItems request; KiCad could roll that
+            // mixed transaction back without a deterministic native receipt.
+            // This path has an authored readback receipt before the separate
+            // native refill operation is admitted.
+            string zoneId = Guid.NewGuid().ToString("D");
+            object typedZone = new
+            {
+                id = zoneId,
+                layers = new[] { "F.Cu" },
+                polygons = new[]
+                {
+                    new
+                    {
+                        outline = new[]
+                        {
+                            new { xNm = 5_000_000L, yNm = 5_000_000L },
+                            new { xNm = 25_000_000L, yNm = 5_000_000L },
+                            new { xNm = 25_000_000L, yNm = 25_000_000L },
+                            new { xNm = 5_000_000L, yNm = 25_000_000L }
+                        },
+                        holes = Array.Empty<object>()
+                    }
+                },
+                name = "MCP connectivity zone",
+                priority = 0U,
+                netName = connectivityNet,
+                clearanceNm = 200_000L,
+                minThicknessNm = 200_000L,
+                fillMode = "ZFM_SOLID",
+                connection = "ZCS_FULL",
+                islandMode = "IRM_NEVER",
+                borderStyle = "ZBS_SOLID",
+                borderPitchNm = 1_000_000L
+            };
+            string zoneDocumentJson = SchematicJson.Formatter.Format(board);
+            string zoneCreateOperation = Guid.NewGuid().ToString("D");
+            var zoneCreateReply = await mcp.Tool("kicad_pcb_zone_create", new
+            {
+                instanceId,
+                documentJson = zoneDocumentJson,
+                zone = typedZone,
+                expectedStateJson = SchematicJson.Formatter.Format(afterCreate),
+                operationId = zoneCreateOperation
+            });
+            Assert.IsFalse(zoneCreateReply.TryGetProperty("isError", out var zoneCreateError) && zoneCreateError.GetBoolean(),
+                zoneCreateReply.GetRawText());
+            var zoneCreateData = zoneCreateReply.GetProperty("structuredContent");
+            Assert.IsTrue(zoneCreateData.GetProperty("mutationConfirmed").GetBoolean(), zoneCreateReply.GetRawText());
+            Assert.IsTrue(zoneCreateData.GetProperty("authoredReadbackVerified").GetBoolean(), zoneCreateReply.GetRawText());
+            Assert.IsTrue(zoneCreateData.GetProperty("postCommitVerified").GetBoolean(), zoneCreateReply.GetRawText());
+            Assert.IsTrue(zoneCreateData.GetProperty("refillRequired").GetBoolean(), zoneCreateReply.GetRawText());
+            var afterZoneCreate = SchematicJson.Parser.Parse<DocumentLifecycleState>(
+                zoneCreateData.GetProperty("afterState").GetString()!);
+
+            // A selected-zone refill is synchronous in the native API.  Still
+            // inspect its terminal receipt so this journey proves fill
+            // settlement and rollback semantics rather than only editor
+            // responsiveness.
+            string refillOperation = Guid.NewGuid().ToString("D");
+            var refillRequest = new RefillZones { Board = board, OperationId = refillOperation };
+            refillRequest.Zones.Add(new KIID { Value = zoneId });
+            var refillReply = await mcp.Tool("kicad_pcb_refill_zones", new
+            {
+                instanceId,
+                requestJson = BoardJson.Formatter.Format(refillRequest),
+                expectedStateJson = SchematicJson.Formatter.Format(afterZoneCreate),
+                operationId = refillOperation
+            });
+            Assert.IsFalse(refillReply.TryGetProperty("isError", out var refillError) && refillError.GetBoolean(),
+                refillReply.GetRawText());
+            var refillData = refillReply.GetProperty("structuredContent");
+            Assert.IsTrue(refillData.GetProperty("nativeReceiptAvailable").GetBoolean(), refillReply.GetRawText());
+            var refillWait = await mcp.Tool("kicad_pcb_operation_wait", new
+            {
+                instanceId,
+                expectedProcessEpoch = client.Epoch,
+                documentJson = zoneDocumentJson,
+                operationId = refillOperation,
+                timeoutMs = 5000
+            });
+            Assert.IsFalse(refillWait.TryGetProperty("isError", out var refillWaitError) && refillWaitError.GetBoolean(),
+                refillWait.GetRawText());
+            var refillWaitData = refillWait.GetProperty("structuredContent");
+            Assert.IsTrue(refillWaitData.GetProperty("terminal").GetBoolean(), refillWait.GetRawText());
+            Assert.AreEqual("completed", refillWaitData.GetProperty("zoneFillOutcome").GetString(), refillWait.GetRawText());
+            Assert.IsTrue(refillWaitData.GetProperty("completionConfirmed").GetBoolean(), refillWait.GetRawText());
+            Assert.IsTrue(refillWaitData.GetProperty("commitStateKnown").GetBoolean(), refillWait.GetRawText());
+            Assert.AreEqual("", refillWaitData.GetProperty("errorCode").GetString(), refillWait.GetRawText());
+            var afterRefill = await ObserveLifecycleState(client, board, token);
+            var liveZone = (await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            {
+                Header = new() { Document = board }, Items = { new KIID { Value = zoneId } }
+            }, token)).Items.Single().Unpack<Zone>();
+            Assert.IsTrue(liveZone.Filled || liveZone.FilledPolygons.Count > 0,
+                "The terminal successful refill receipt must correspond to filled copper-zone geometry.");
+
+            string expectedStateJson = SchematicJson.Formatter.Format(afterRefill);
+            string documentJson = zoneDocumentJson;
             var queryReply = await mcp.Tool("kicad_pcb_connectivity_query", new
             {
                 instanceId, documentJson, netName = connectivityNet, expectedStateJson
@@ -193,13 +288,13 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(queryData.GetProperty("drcValidated").GetBoolean(), queryReply.GetRawText());
             Assert.AreEqual(expectedStateJson, queryData.GetProperty("beforeState").GetString(), queryReply.GetRawText());
             Assert.AreEqual(expectedStateJson, queryData.GetProperty("afterState").GetString(), queryReply.GetRawText());
-            Assert.AreEqual(afterCreate, await ObserveLifecycleState(client, board, token),
+            Assert.AreEqual(afterRefill, await ObserveLifecycleState(client, board, token),
                 "A successful connectivity read must leave the exact native lifecycle state unchanged.");
 
             JsonElement[] rows = queryData.GetProperty("items").EnumerateArray().ToArray();
             Assert.AreEqual(rows.Length, queryData.GetProperty("itemCount").GetInt32(), queryReply.GetRawText());
-            Assert.HasCount(importedPads.Length + 2, rows, queryReply.GetRawText());
-            CollectionAssert.AreEqual(new[] { "pad", "track", "via" },
+            Assert.HasCount(importedPads.Length + 3, rows, queryReply.GetRawText());
+            CollectionAssert.AreEqual(new[] { "pad", "track", "via", "zone" },
                 rows.Select(row => row.GetProperty("kind").GetString()!).Distinct().ToArray(), queryReply.GetRawText());
             Assert.IsTrue(rows.Count(row => row.GetProperty("kind").GetString() == "pad") == importedPads.Length, queryReply.GetRawText());
             AssertSummary(rows.Single(row => row.GetProperty("id").GetString() == trackId), "track", trackId,
@@ -207,6 +302,9 @@ public sealed partial class NativeSessionTests
             AssertSummary(rows.Single(row => row.GetProperty("id").GetString() == viaId), "via", viaId,
                 CanonicalParent(liveVia.Parent), connectivityNet, null, null,
                 liveVia.PadStack.Layers.Select(layer => layer.ToString()).Order(StringComparer.Ordinal).ToArray(), queryReply.GetRawText());
+            AssertSummary(rows.Single(row => row.GetProperty("id").GetString() == zoneId), "zone", zoneId,
+                CanonicalParent(liveZone.Parent), connectivityNet, null, null,
+                liveZone.Layers.Select(layer => layer.ToString()).Order(StringComparer.Ordinal).ToArray(), queryReply.GetRawText());
             foreach (Pad pad in importedPads)
             {
                 string id = Guid.ParseExact(pad.Id.Value, "D").ToString("D");
@@ -225,7 +323,7 @@ public sealed partial class NativeSessionTests
             });
             Assert.IsTrue(wrongInstance.TryGetProperty("isError", out var wrongInstanceError) && wrongInstanceError.GetBoolean(), wrongInstance.GetRawText());
             Assert.AreEqual("pcb_instance_changed", wrongInstance.GetProperty("structuredContent").GetProperty("errorCode").GetString(), wrongInstance.GetRawText());
-            Assert.AreEqual(afterCreate, await ObserveLifecycleState(client, board, token),
+            Assert.AreEqual(afterRefill, await ObserveLifecycleState(client, board, token),
                 "A wrong-instance refusal must not mutate the original board.");
 
             var reattach = await mcp.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId });
@@ -242,7 +340,7 @@ public sealed partial class NativeSessionTests
             });
             Assert.IsFalse(mutation.TryGetProperty("isError", out var mutationError) && mutationError.GetBoolean(), mutation.GetRawText());
             var afterMutation = SchematicJson.Parser.Parse<DocumentLifecycleState>(mutation.GetProperty("structuredContent").GetProperty("afterState").GetString()!);
-            Assert.IsGreaterThan(afterCreate.Revision.Sequence, afterMutation.Revision.Sequence, mutation.GetRawText());
+            Assert.IsGreaterThan(afterRefill.Revision.Sequence, afterMutation.Revision.Sequence, mutation.GetRawText());
             var staleQuery = await mcp.Tool("kicad_pcb_connectivity_query", new
             {
                 instanceId, documentJson, netName = connectivityNet, expectedStateJson

@@ -544,9 +544,17 @@ internal static class MultilayerRoutePlanner
                     BoardLayer boardLayer = (BoardLayer)layer;
                     if (!enabledCopper.Contains(boardLayer)) continue;
                     via.PadStack.Layers.Add(boardLayer);
-                    via.PadStack.CopperLayers.Add(new PadStackLayer { Layer = boardLayer, Shape = PadStackShape.PssCircle,
-                        Size = new() { XNm = spec.DiameterNm, YNm = spec.DiameterNm } });
                 }
+                // Native normal padstacks use F.Cu as their single ALL_LAYERS
+                // shape definition, independently of the physical via span.
+                // Keep the native rectangle anchor so save/reopen preserves
+                // the same padstack, including its circular copper geometry.
+                via.PadStack.CopperLayers.Add(new PadStackLayer
+                {
+                    Layer = BoardLayer.BlFCu, Shape = PadStackShape.PssCircle,
+                    CustomAnchorShape = PadStackShape.PssRectangle,
+                    Size = new() { XNm = spec.DiameterNm, YNm = spec.DiameterNm }
+                });
                 via.PadStack.Drill = new DrillProperties
                 {
                     StartLayer = spec.StartLayer, EndLayer = spec.EndLayer,

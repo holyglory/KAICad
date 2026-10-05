@@ -2402,6 +2402,218 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(replacementTrack.End, persistedIdentity.Items
                 .Single(item => item.Is(Track.Descriptor) && item.Unpack<Track>().Id.Value == originalCleanTrack.Id.Value)
                 .Unpack<Track>().End);
+
+            // Route across a real foreign-net wall between two F.Cu pads.
+            // The wall is attached to its own pads, and spans the full search
+            // bounds, so the untouched proposal must change layers twice.
+            var multilayerPads = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbPad } }, token);
+            var multilayerStartPad = multilayerPads.Items.Select(item => item.Unpack<Pad>())
+                .Single(pad => pad.Net.Name == "MULTILAYER_ROUTE" && pad.Position.XNm == 60_000_000);
+            var multilayerEndPad = multilayerPads.Items.Select(item => item.Unpack<Pad>())
+                .Single(pad => pad.Net.Name == "MULTILAYER_ROUTE" && pad.Position.XNm == 66_000_000);
+            var multilayerWallPads = multilayerPads.Items.Select(item => item.Unpack<Pad>())
+                .Where(pad => pad.Net.Name == "MULTILAYER_BARRIER").OrderBy(pad => pad.Position.YNm).ToArray();
+            Assert.HasCount(2, multilayerWallPads);
+            Assert.IsTrue(multilayerStartPad.PadStack.Layers.Contains(BoardLayer.BlFCu));
+            Assert.IsTrue(multilayerEndPad.PadStack.Layers.Contains(BoardLayer.BlFCu));
+            var multilayerWall = new Track
+            {
+                Id = new() { Value = Guid.NewGuid().ToString("D") },
+                Start = multilayerWallPads[0].Position.Clone(), End = multilayerWallPads[1].Position.Clone(),
+                Width = new() { ValueNm = 250_000 }, Layer = BoardLayer.BlFCu, Net = multilayerWallPads[0].Net.Clone()
+            };
+            var multilayerWallCreate = new CreateItems { Header = new() { Document = cleanBoard }, Items = { Any.Pack(multilayerWall) } };
+            var multilayerWallReply = await mcp.Tool("kicad_pcb_items_create", new
+            {
+                instanceId, requestJson = BoardJson.Formatter.Format(multilayerWallCreate),
+                expectedStateJson = SchematicJson.Formatter.Format(await ObserveLifecycleState(client, cleanBoard, token))
+            });
+            Assert.IsFalse(multilayerWallReply.TryGetProperty("isError", out var multilayerWallError)
+                && multilayerWallError.GetBoolean(), multilayerWallReply.GetRawText());
+            var multilayerBefore = await ObserveLifecycleState(client, cleanBoard, token);
+
+            async Task<string[]> MultilayerConnectedIds(DocumentLifecycleState checkpoint)
+            {
+                var reply = await mcp.Tool("kicad_pcb_connected_items", new
+                {
+                    instanceId, expectedStateJson = SchematicJson.Formatter.Format(checkpoint),
+                    requestJson = BoardJson.Formatter.Format(new GetConnectedItems
+                    { Header = new() { Document = cleanBoard }, Items = { multilayerStartPad.Id.Clone() } })
+                });
+                Assert.IsFalse(reply.TryGetProperty("isError", out var error) && error.GetBoolean(), reply.GetRawText());
+                var data = reply.GetProperty("structuredContent");
+                Assert.IsTrue(data.GetProperty("nativeQuery").GetBoolean(), reply.GetRawText());
+                Assert.IsFalse(data.GetProperty("boardMutation").GetBoolean(), reply.GetRawText());
+                Assert.AreEqual(SchematicJson.Formatter.Format(checkpoint), data.GetProperty("beforeState").GetString());
+                Assert.AreEqual(data.GetProperty("beforeState").GetString(), data.GetProperty("afterState").GetString());
+                var response = BoardJson.Parser.Parse<GetItemsResponse>(data.GetProperty("response").GetRawText());
+                Assert.AreEqual(ItemRequestStatus.IrsOk, response.Status, reply.GetRawText());
+                return response.Items.Select(item => item.Is(Pad.Descriptor) ? item.Unpack<Pad>().Id.Value : RouteIdentity(item))
+                    .Order(StringComparer.Ordinal).ToArray();
+            }
+            CollectionAssert.AreEqual(new[] { multilayerStartPad.Id.Value }, await MultilayerConnectedIds(multilayerBefore),
+                "The endpoint pads must start disconnected; matching net names do not establish physical connectivity.");
+
+            var multilayerPlanArguments = new
+            {
+                instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard),
+                expectedStateJson = SchematicJson.Formatter.Format(multilayerBefore),
+                requestJson = JsonSerializer.Serialize(new
+                {
+                    netName = "MULTILAYER_ROUTE",
+                    start = new { xNm = multilayerStartPad.Position.XNm, yNm = multilayerStartPad.Position.YNm },
+                    end = new { xNm = multilayerEndPad.Position.XNm, yNm = multilayerEndPad.Position.YNm },
+                    startLayer = "F.Cu", endLayer = "F.Cu", layers = new[] { "F.Cu", "B.Cu" },
+                    widthNm = 250_000L, clearanceNm = 100_000L, gridNm = 100_000L,
+                    bounds = new { minXNm = 59_000_000L, minYNm = 59_000_000L, maxXNm = 67_000_000L, maxYNm = 61_000_000L },
+                    maxNodes = 10_000, maxVias = 2,
+                    vias = new[] { new { type = "through", startLayer = "F.Cu", endLayer = "B.Cu", diameterNm = 600_000L, drillNm = 300_000L, costNm = 1_000_000L } }
+                })
+            };
+            var multilayerCommitPlan = await mcp.Tool("kicad_pcb_route_plan_multilayer", multilayerPlanArguments);
+            Assert.IsFalse(multilayerCommitPlan.TryGetProperty("isError", out var multilayerPlanError)
+                && multilayerPlanError.GetBoolean(), multilayerCommitPlan.GetRawText());
+            var multilayerPlanData = multilayerCommitPlan.GetProperty("structuredContent");
+            Assert.IsTrue(multilayerPlanData.GetProperty("routeFound").GetBoolean(), multilayerCommitPlan.GetRawText());
+            Assert.IsFalse(multilayerPlanData.GetProperty("drcValidated").GetBoolean());
+            Assert.IsFalse(multilayerPlanData.GetProperty("nativeCommit").GetBoolean());
+            Assert.AreEqual(2, multilayerPlanData.GetProperty("viaCount").GetInt32(), multilayerCommitPlan.GetRawText());
+            string multilayerCandidateJson = multilayerPlanData.GetProperty("candidateRequestJson").GetString()!;
+            var multilayerCandidate = BoardJson.Parser.Parse<CreateItems>(multilayerCandidateJson);
+            Assert.AreEqual(2, multilayerCandidate.Items.Count(item => item.Is(Via.Descriptor)));
+            Assert.IsTrue(multilayerCandidate.Items.Any(item => item.Is(Track.Descriptor) && item.Unpack<Track>().Layer == BoardLayer.BlBCu));
+            foreach (var via in multilayerCandidate.Items.Where(item => item.Is(Via.Descriptor)).Select(item => item.Unpack<Via>()))
+            {
+                Assert.AreEqual(PadStackType.PstNormal, via.PadStack.Type);
+                Assert.HasCount(1, via.PadStack.CopperLayers);
+                Assert.AreEqual(BoardLayer.BlFCu, via.PadStack.CopperLayers.Single().Layer);
+                Assert.AreEqual(PadStackShape.PssCircle, via.PadStack.CopperLayers.Single().Shape);
+                Assert.AreEqual(PadStackShape.PssRectangle, via.PadStack.CopperLayers.Single().CustomAnchorShape);
+                Assert.AreEqual(new Vector2 { XNm = 600_000, YNm = 600_000 }, via.PadStack.CopperLayers.Single().Size);
+                CollectionAssert.AreEqual(new[] { BoardLayer.BlFCu, BoardLayer.BlBCu }, via.PadStack.Layers.ToArray());
+                Assert.AreEqual(BoardLayer.BlFCu, via.PadStack.Drill.StartLayer);
+                Assert.AreEqual(BoardLayer.BlBCu, via.PadStack.Drill.EndLayer);
+                Assert.AreEqual(new Vector2 { XNm = 300_000, YNm = 300_000 }, via.PadStack.Drill.Diameter);
+            }
+            var multilayerPlanReplay = await mcp.Tool("kicad_pcb_route_plan_multilayer", multilayerPlanArguments);
+            Assert.IsFalse(multilayerPlanReplay.TryGetProperty("isError", out var multilayerPlanReplayError)
+                && multilayerPlanReplayError.GetBoolean(), multilayerPlanReplay.GetRawText());
+            Assert.AreEqual(multilayerPlanData.GetProperty("planId").GetString(),
+                multilayerPlanReplay.GetProperty("structuredContent").GetProperty("planId").GetString());
+            Assert.AreEqual(multilayerCandidateJson,
+                multilayerPlanReplay.GetProperty("structuredContent").GetProperty("candidateRequestJson").GetString());
+            Assert.AreEqual(multilayerBefore, await ObserveLifecycleState(client, cleanBoard, token));
+
+            var multilayerDrc = await RouteDrc(multilayerCandidateJson, null, multilayerBefore);
+            CollectionAssert.AreEqual(multilayerCandidate.Items.Select(RouteIdentity).ToArray(), multilayerDrc.CandidateItemIds.ToArray());
+            Assert.AreEqual(multilayerBefore, await ObserveLifecycleState(client, cleanBoard, token));
+            string multilayerOperationId = Guid.NewGuid().ToString("D");
+            var multilayerCheckedRequest = new CheckedPcbRouteCommit
+            {
+                Candidate = multilayerCandidate, ExpectedState = multilayerBefore, DrcJobId = multilayerDrc.JobId,
+                OperationId = multilayerOperationId, MaximumResultBytes = 4 * 1024 * 1024
+            };
+            var multilayerCommitArguments = new
+            {
+                instanceId, requestJson = multilayerCandidateJson,
+                expectedStateJson = SchematicJson.Formatter.Format(multilayerBefore),
+                drcJobStateJson = SchematicJson.Formatter.Format(multilayerDrc), operationId = multilayerOperationId
+            };
+            var multilayerCommitReply = await mcp.Tool("kicad_pcb_route_commit", multilayerCommitArguments);
+            Assert.IsFalse(multilayerCommitReply.TryGetProperty("isError", out var multilayerCommitError)
+                && multilayerCommitError.GetBoolean(), multilayerCommitReply.GetRawText());
+            var multilayerCommitData = multilayerCommitReply.GetProperty("structuredContent");
+            Assert.IsTrue(multilayerCommitData.GetProperty("mutationConfirmed").GetBoolean());
+            Assert.IsTrue(multilayerCommitData.GetProperty("nativeReceipt").GetBoolean());
+            var multilayerAfter = SchematicJson.Parser.Parse<DocumentLifecycleState>(multilayerCommitData.GetProperty("afterState").GetString()!);
+            Assert.IsGreaterThan(multilayerBefore.Revision.Sequence, multilayerAfter.Revision.Sequence);
+            var multilayerReceipt = SchematicJson.Parser.Parse<CheckedPcbRouteReceipt>(multilayerCommitData.GetProperty("receipt").GetRawText());
+            Assert.AreEqual(CheckedPcbRouteReceipt.Types.State.Completed, multilayerReceipt.State);
+            CheckedPcbRouteContract.ValidateResult(multilayerCheckedRequest, multilayerReceipt, inspect: false);
+            var multilayerIds = multilayerCandidate.Items.Select(RouteIdentity).Order(StringComparer.Ordinal).ToArray();
+            var multilayerExpectedConnected = multilayerIds.Concat(new[] { multilayerStartPad.Id.Value, multilayerEndPad.Id.Value })
+                .Order(StringComparer.Ordinal).ToArray();
+            var multilayerNativeReadback = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Items = { multilayerIds.Select(id => new KIID { Value = id }) } }, token);
+            CollectionAssert.AreEqual(multilayerIds, multilayerNativeReadback.Items.Select(RouteIdentity).Order(StringComparer.Ordinal).ToArray());
+            var multilayerSnapshot = multilayerNativeReadback.Items.ToDictionary(RouteIdentity, item => item.Clone(), StringComparer.Ordinal);
+            foreach (var created in multilayerReceipt.Created.CreatedItems)
+                Assert.AreEqual(created.Item, multilayerSnapshot[RouteIdentity(created.Item)], "Receipt geometry must match native readback.");
+            CollectionAssert.AreEqual(multilayerExpectedConnected, await MultilayerConnectedIds(multilayerAfter));
+            var multilayerCommitReplay = await mcp.Tool("kicad_pcb_route_commit", multilayerCommitArguments);
+            Assert.IsFalse(multilayerCommitReplay.TryGetProperty("isError", out var multilayerCommitReplayError)
+                && multilayerCommitReplayError.GetBoolean(), multilayerCommitReplay.GetRawText());
+            Assert.IsTrue(multilayerCommitReplay.GetProperty("structuredContent").GetProperty("receipt").GetProperty("replayed").GetBoolean());
+            Assert.AreEqual(multilayerAfter, await ObserveLifecycleState(client, cleanBoard, token));
+
+            // Undo removes the entire cross-layer route but preserves its pads
+            // and the foreign wall. Redo restores the same native item state.
+            NativeKeyboard.SchematicShortcut(display, focusProcessId, "z", "PCB Editor", true, true,
+                clickFromLeft: 500, clickFromTop: 500);
+            using (var multilayerUndoDeadline = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                multilayerUndoDeadline.CancelAfter(TimeSpan.FromSeconds(8));
+                while (true)
+                {
+                    var undone = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+                    { Header = new() { Document = cleanBoard }, Items = { multilayerIds.Select(id => new KIID { Value = id }) } }, multilayerUndoDeadline.Token);
+                    if (undone.Items.Count == 0) break;
+                    await Task.Delay(100, multilayerUndoDeadline.Token);
+                }
+            }
+            CollectionAssert.AreEqual(new[] { multilayerStartPad.Id.Value },
+                await MultilayerConnectedIds(await ObserveLifecycleState(client, cleanBoard, token)));
+            var multilayerWallRead = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Items = { multilayerWall.Id } }, token);
+            Assert.AreEqual(multilayerWall.Id.Value, multilayerWallRead.Items.Single().Unpack<Track>().Id.Value);
+            NativeKeyboard.SchematicShortcut(display, focusProcessId, "y", "PCB Editor", true, true,
+                clickFromLeft: 500, clickFromTop: 500);
+            using (var multilayerRedoDeadline = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                multilayerRedoDeadline.CancelAfter(TimeSpan.FromSeconds(8));
+                while (true)
+                {
+                    var redone = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+                    { Header = new() { Document = cleanBoard }, Items = { multilayerIds.Select(id => new KIID { Value = id }) } }, multilayerRedoDeadline.Token);
+                    if (redone.Items.Count == multilayerIds.Length)
+                    {
+                        foreach (var item in redone.Items)
+                            Assert.AreEqual(multilayerSnapshot[RouteIdentity(item)], item, "Redo must restore the exact native route state.");
+                        break;
+                    }
+                    await Task.Delay(100, multilayerRedoDeadline.Token);
+                }
+            }
+            var multilayerRedoState = await ObserveLifecycleState(client, cleanBoard, token);
+            CollectionAssert.AreEqual(multilayerExpectedConnected, await MultilayerConnectedIds(multilayerRedoState));
+            var multilayerSave = await mcp.Tool("kicad_document_save", new
+            { instanceId, expectedStateJson = SchematicJson.Formatter.Format(multilayerRedoState), operationId = Guid.NewGuid().ToString("D") });
+            Assert.IsFalse(multilayerSave.TryGetProperty("isError", out var multilayerSaveError)
+                && multilayerSaveError.GetBoolean(), multilayerSave.GetRawText());
+            var multilayerClose = await mcp.Tool("kicad_document_close", new
+            { instanceId, expectedStateJson = multilayerSave.GetProperty("structuredContent").GetProperty("observedState").GetRawText(), operationId = Guid.NewGuid().ToString("D") });
+            Assert.IsFalse(multilayerClose.TryGetProperty("isError", out var multilayerCloseError)
+                && multilayerCloseError.GetBoolean(), multilayerClose.GetRawText());
+            var multilayerReopen = await CreateRootThroughMcp(client.Endpoint, instanceId, cleanPath, evidence, token, toolName: "kicad_pcb_open");
+            cleanBoard = multilayerReopen.Document;
+            finalBoard = cleanBoard;
+            var multilayerPersisted = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Items = { multilayerIds.Select(id => new KIID { Value = id }) } }, token);
+            CollectionAssert.AreEqual(multilayerIds, multilayerPersisted.Items.Select(RouteIdentity).Order(StringComparer.Ordinal).ToArray());
+            foreach (var item in multilayerPersisted.Items)
+                AssertPersistedRouteState(multilayerSnapshot[RouteIdentity(item)], item);
+            var multilayerPersistedConnected = await MultilayerConnectedIds(await ObserveLifecycleState(client, cleanBoard, token));
+            CollectionAssert.AreEqual(multilayerExpectedConnected, multilayerPersistedConnected);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-multilayer-route.json"), JsonSerializer.Serialize(new
+            {
+                planId = multilayerPlanData.GetProperty("planId").GetString(), candidateRequestJson = multilayerCandidateJson,
+                drc = SchematicJson.Formatter.Format(multilayerDrc), receipt = SchematicJson.Formatter.Format(multilayerReceipt),
+                endpointPadIds = new[] { multilayerStartPad.Id.Value, multilayerEndPad.Id.Value }, connectedItemIds = multilayerPersistedConnected,
+                nativeReadback = BoardJson.Formatter.Format(multilayerNativeReadback), persistedReadback = BoardJson.Formatter.Format(multilayerPersisted),
+                deterministicReplayVerified = true, commitReplayVerified = true, undoRedoVerified = true, saveReopenVerified = true
+            }), token);
+
             // A checked route DRC is tied to one exact lifecycle checkpoint.
             // Advance that checkpoint with an ordinary create, then prove the
             // old checked request is rejected before native route mutation.
@@ -3012,6 +3224,32 @@ public sealed partial class NativeSessionTests
         return right < 0 ? (0, 0, 0, 0, 0, 0) : (left, top, right, bottom, right - left + 1, bottom - top + 1);
     }
 
+    private static void AssertPersistedRouteState(Any expected, Any actual)
+    {
+        Assert.AreEqual(expected.TypeUrl, actual.TypeUrl);
+        // The board's runtime parent identity can change when reopened, and
+        // native net codes are assigned from the persisted names. Compare all
+        // remaining typed fields, including the complete via padstack, rather
+        // than reducing the check to position, diameter or a shape summary.
+        if (expected.Is(Track.Descriptor))
+        {
+            var expectedTrack = expected.Unpack<Track>();
+            var actualTrack = actual.Unpack<Track>();
+            expectedTrack.Parent = null; actualTrack.Parent = null;
+            expectedTrack.Net.Code = null; actualTrack.Net.Code = null;
+            Assert.AreEqual(expectedTrack, actualTrack, "Persisted track state changed.");
+        }
+        else
+        {
+            Assert.IsTrue(expected.Is(Via.Descriptor));
+            var expectedVia = expected.Unpack<Via>();
+            var actualVia = actual.Unpack<Via>();
+            expectedVia.Parent = null; actualVia.Parent = null;
+            expectedVia.Net.Code = null; actualVia.Net.Code = null;
+            Assert.AreEqual(expectedVia, actualVia, "Persisted via state changed.");
+        }
+    }
+
     private static string CleanRouteBoard()
     {
         string f1 = Guid.NewGuid().ToString("D"), f2 = Guid.NewGuid().ToString("D");
@@ -3021,6 +3259,10 @@ public sealed partial class NativeSessionTests
         string f5 = Guid.NewGuid().ToString("D"), f6 = Guid.NewGuid().ToString("D");
         string p5 = Guid.NewGuid().ToString("D"), p6 = Guid.NewGuid().ToString("D");
         string f7 = Guid.NewGuid().ToString("D"), p7 = Guid.NewGuid().ToString("D");
+        string mlStart = Guid.NewGuid().ToString("D"), mlStartPad = Guid.NewGuid().ToString("D");
+        string mlEnd = Guid.NewGuid().ToString("D"), mlEndPad = Guid.NewGuid().ToString("D");
+        string mlWallStart = Guid.NewGuid().ToString("D"), mlWallStartPad = Guid.NewGuid().ToString("D");
+        string mlWallEnd = Guid.NewGuid().ToString("D"), mlWallEndPad = Guid.NewGuid().ToString("D");
         string obstacle = Guid.NewGuid().ToString("D");
         string viaSupport = Guid.NewGuid().ToString("D");
         string edge = Guid.NewGuid().ToString("D");
@@ -3039,6 +3281,8 @@ public sealed partial class NativeSessionTests
   (net 1 "POWER_RAIL")
   (net 2 "USB_D+")
   (net 3 "USB_D-")
+  (net 4 "MULTILAYER_ROUTE")
+  (net 5 "MULTILAYER_BARRIER")
   (gr_rect (start 0 0) (end 100 100) (stroke (width 0.05) (type default)) (fill none) (layer "Edge.Cuts") (uuid "{edge}"))
   (footprint "PAD1" (layer "F.Cu") (at 30.1 30.1) (uuid "{f1}")
     (attr smd)
@@ -3061,6 +3305,18 @@ public sealed partial class NativeSessionTests
   (footprint "POWER_RAIL_B_SUPPORT" (layer "B.Cu") (at 40.875 43) (uuid "{f7}")
     (attr smd)
     (pad "1" smd circle (at 0 0) (size 0.7 0.7) (layers "B.Cu" "B.Paste" "B.Mask") (net 1 "POWER_RAIL") (uuid "{p7}")))
+  (footprint "MULTILAYER_START" (layer "F.Cu") (at 60 60) (uuid "{mlStart}")
+    (attr smd)
+    (pad "1" smd circle (at 0 0) (size 0.7 0.7) (layers "F.Cu" "F.Paste" "F.Mask") (net 4 "MULTILAYER_ROUTE") (uuid "{mlStartPad}")))
+  (footprint "MULTILAYER_END" (layer "F.Cu") (at 66 60) (uuid "{mlEnd}")
+    (attr smd)
+    (pad "1" smd circle (at 0 0) (size 0.7 0.7) (layers "F.Cu" "F.Paste" "F.Mask") (net 4 "MULTILAYER_ROUTE") (uuid "{mlEndPad}")))
+  (footprint "MULTILAYER_WALL_START" (layer "F.Cu") (at 63 58) (uuid "{mlWallStart}")
+    (attr smd)
+    (pad "1" smd circle (at 0 0) (size 0.5 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 5 "MULTILAYER_BARRIER") (uuid "{mlWallStartPad}")))
+  (footprint "MULTILAYER_WALL_END" (layer "F.Cu") (at 63 62) (uuid "{mlWallEnd}")
+    (attr smd)
+    (pad "1" smd circle (at 0 0) (size 0.5 0.5) (layers "F.Cu" "F.Paste" "F.Mask") (net 5 "MULTILAYER_BARRIER") (uuid "{mlWallEndPad}")))
   (segment (start 39 42) (end 41 42) (width 0.25) (layer "F.Cu") (net 1) (uuid "{obstacle}"))
   (segment (start 40.875 42) (end 40.875 43) (width 0.7) (layer "B.Cu") (net 1) (uuid "{viaSupport}"))
 )

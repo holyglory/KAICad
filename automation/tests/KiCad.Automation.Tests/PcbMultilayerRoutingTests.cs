@@ -19,7 +19,7 @@ public sealed class PcbMultilayerRoutingTests
     [TestMethod]
     public void ThroughViasCrossAFullForeignWallAndReturnToTheFrontLayer()
     {
-        var enabled = new[] { BoardLayer.BlFCu, BoardLayer.BlIn1Cu, BoardLayer.BlBCu }.ToImmutableArray();
+        var enabled = new[] { BoardLayer.BlFCu, BoardLayer.BlIn1Cu, BoardLayer.BlIn2Cu, BoardLayer.BlBCu }.ToImmutableArray();
         var request = Request(enabled);
         var validated = MultilayerRoutePlanner.Validate(request, enabled);
         var wall = new Track
@@ -43,9 +43,19 @@ public sealed class PcbMultilayerRoutingTests
         {
             Via via = item.Unpack<Via>();
             return via.Type == ViaType.VtThrough
+                && via.PadStack.Type == PadStackType.PstNormal
                 && via.PadStack.Layers.SequenceEqual(enabled)
                 && via.PadStack.Drill.StartLayer == BoardLayer.BlFCu
-                && via.PadStack.Drill.EndLayer == BoardLayer.BlBCu;
+                && via.PadStack.Drill.EndLayer == BoardLayer.BlBCu
+                && via.PadStack.Drill.Shape == DrillShape.DsCircle
+                && via.PadStack.Drill.Diameter.XNm == 200_000
+                && via.PadStack.Drill.Diameter.YNm == 200_000
+                && via.PadStack.CopperLayers.Count == 1
+                && via.PadStack.CopperLayers[0].Layer == BoardLayer.BlFCu
+                && via.PadStack.CopperLayers[0].Shape == PadStackShape.PssCircle
+                && via.PadStack.CopperLayers[0].CustomAnchorShape == PadStackShape.PssRectangle
+                && via.PadStack.CopperLayers[0].Size.XNm == 400_000
+                && via.PadStack.CopperLayers[0].Size.YNm == 400_000;
         }));
         Assert.IsTrue(first.Candidate.Items.Where(item => item.Is(Track.Descriptor)).All(item => item.Unpack<Track>().Layer is BoardLayer.BlFCu or BoardLayer.BlBCu));
         CollectionAssert.AreEqual(first.Candidate.Items.Select(item => item.ToString()).ToArray(), replay.Candidate!.Items.Select(item => item.ToString()).ToArray());
@@ -55,7 +65,7 @@ public sealed class PcbMultilayerRoutingTests
     [TestMethod]
     public void ThroughViaMustSpanThePhysicalCopperStack()
     {
-        var enabled = new[] { BoardLayer.BlFCu, BoardLayer.BlIn1Cu, BoardLayer.BlBCu }.ToImmutableArray();
+        var enabled = new[] { BoardLayer.BlFCu, BoardLayer.BlIn1Cu, BoardLayer.BlIn2Cu, BoardLayer.BlBCu }.ToImmutableArray();
         var request = Request(enabled);
         request.Vias[0].EndLayer = "In1.Cu";
         AutomationException error = Assert.ThrowsExactly<AutomationException>(() => MultilayerRoutePlanner.Validate(request, enabled));

@@ -38,7 +38,7 @@ public sealed class PcbConnectivityTools(InstanceRegistry registry)
     [McpServerTool(Name = "kicad_pcb_connectivity_query", ReadOnly = true),
      Description("Read the native copper items on one explicitly named PCB net at one exact lifecycle checkpoint. documentJson identifies the open board and expectedStateJson must be the matching kicad_document_state observation. The result contains deterministic typed pad, track, arc, via and zone summaries with canonical identities; it never passes through native Any payloads, infers DRC or changes the board."),
      KiCadCapability("pcb-connectivity", "compiled-mcp plus native-board-api", "explicit PCB document, process epoch, lifecycle state, exact net name"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbConnectivityQueryUsesTypedNativeSummaries", "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Query(string instanceId, string documentJson, string netName,
         string expectedStateJson, CancellationToken cancellationToken) => Execute(async () =>
     {

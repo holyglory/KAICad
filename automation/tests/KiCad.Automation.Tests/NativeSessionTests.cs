@@ -65,6 +65,9 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativePcbItems")]
     public Task NativePcbItemsAreCreatedAndUpdatedThroughMcp() => RunNativeSessions(NativeJourney.PcbItems);
 
+    [TestMethod, TestCategory("NativePcbItems")]
+    public Task NativePcbConnectivityQueryUsesTypedNativeSummaries() => RunNativeSessions(NativeJourney.PcbConnectivity);
+
     // Keep this focused GUI-only journey in the existing NativePcbItems lane so
     // it reuses the native PCB build/test graph without adding another scheduler
     // category or changing the shared coordinator configuration.
@@ -128,7 +131,7 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeComponentRebind")]
     public Task NativeComponentReplacementKeepsExactInstructionsAndHistory() => RunNativeSessions(NativeJourney.ComponentRebind);
 
-    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, RecursiveEditor, Simulation, PcbItems, CrossProbe,
+    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, RecursiveEditor, Simulation, PcbItems, PcbConnectivity, CrossProbe,
         PsuCpuSeed, PsuCpuComponentCreation, ConnectedRealization, DiagramCanvas, XmlRebuild, RepeatedSheetRebuild, ProjectRecovery, ProjectRecoveryContainer, OwnershipSync, NativeCrash, NativeCrashRelease,
         ObserveApplyStress, RepeatedSheetOwnership, ComponentRebind, SymbolLibrary, RasterTrace }
 
@@ -154,6 +157,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.RecursiveEditor => Path.Combine("native-recursive-editor", theme),
                 NativeJourney.Simulation => "native-simulation",
                 NativeJourney.PcbItems => "native-pcb-items",
+                NativeJourney.PcbConnectivity => "native-pcb-items",
                 NativeJourney.CrossProbe => "native-pcb-items",
                 NativeJourney.SymbolLibrary => "native-symbol-library",
                 NativeJourney.RasterTrace => "native-raster-trace",
@@ -240,7 +244,7 @@ public sealed partial class NativeSessionTests
                 if (journey == NativeJourney.NetSettings)
                     projectDirectory = Path.Combine(projectDirectory, "電源");
                 Directory.CreateDirectory(projectDirectory);
-                if (journey == NativeJourney.PcbItems)
+                if (journey is NativeJourney.PcbItems or NativeJourney.PcbConnectivity)
                     PreparePcbImportLibrary(projectDirectory);
                 if (journey == NativeJourney.CrossProbe)
                     PrepareNativeCrossProbeBoard(projectDirectory);
@@ -583,6 +587,8 @@ public sealed partial class NativeSessionTests
                         await VerifyNativeSimulation(client, opened.Document, evidence, target.Id, deadline.Token);
                     else if (journey == NativeJourney.PcbItems)
                         await VerifyNativePcbItems(client, opened.Document, evidence, target.Id, focusProcessId, ":" + displayNumber, deadline.Token);
+                    else if (journey == NativeJourney.PcbConnectivity)
+                        await VerifyNativePcbConnectivity(client, opened.Document, evidence, target.Id, deadline.Token);
                     else if (journey == NativeJourney.CrossProbe)
                         await VerifyNativeCrossProbe(client, opened.Document, registry, launched, evidence,
                             target.Id, deadline.Token);

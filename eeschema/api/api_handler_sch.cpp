@@ -120,6 +120,38 @@ using kiapi::automation::v1::SchematicTrackingErcMarker;
 using kiapi::automation::v1::SchematicTrackingErcMarkers;
 using kiapi::common::types::DocumentSpecifier;
 
+void PackSymbolLibraryPinDisplay(
+        kiapi::automation::v1::NativeCapabilitySymbolLibraryPinDisplay& aDisplay,
+        const LIB_SYMBOL& aSymbol )
+{
+    aDisplay.set_show_pin_names( aSymbol.GetShowPinNames() );
+    aDisplay.set_show_pin_numbers( aSymbol.GetShowPinNumbers() );
+    aDisplay.set_pin_name_offset_nm( schIUScale.IUToNm( aSymbol.GetPinNameOffset() ) );
+}
+
+bool ApplySymbolLibraryPinDisplay(
+        const kiapi::automation::v1::NativeCapabilitySymbolLibraryPinDisplay& aDisplay,
+        LIB_SYMBOL& aSymbol )
+{
+    if( !aDisplay.has_show_pin_names() || !aDisplay.has_show_pin_numbers()
+            || !aDisplay.has_pin_name_offset_nm() )
+        return false;
+
+    // Match UnpackCachedSymbol's native distance contract, including zero
+    // and negative offsets. Validate before changing the private definition.
+    const int64_t offset = aDisplay.pin_name_offset_nm();
+    const int64_t quantum = schIUScale.IUToNm( 1 );
+    if( offset < schIUScale.IUToNm( std::numeric_limits<int>::min() )
+            || offset > schIUScale.IUToNm( std::numeric_limits<int>::max() )
+            || offset % quantum != 0 )
+        return false;
+
+    aSymbol.SetShowPinNames( aDisplay.show_pin_names() );
+    aSymbol.SetShowPinNumbers( aDisplay.show_pin_numbers() );
+    aSymbol.SetPinNameOffset( static_cast<int>( offset / quantum ) );
+    return true;
+}
+
 bool ErcUuid( const std::string& value )
 {
     if( value.size() != 36 ) return false;
@@ -3080,6 +3112,7 @@ HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySymbolLibraryReadSymbolRes
         NativeCapabilitySymbolLibraryReadSymbolResponse response;
         response.set_library_nickname( nickname ); response.set_symbol_name( name );
         PackSymbolDefinition( *response.mutable_definition(), *symbol, true );
+        PackSymbolLibraryPinDisplay( *response.mutable_pin_display(), *symbol );
         response.set_modify_hash( adapter->GetLibraryModifyHash( wxString::FromUTF8( nickname ) ).value_or( 0 ) );
         return response;
     }
@@ -3109,18 +3142,33 @@ HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySymbolLibraryWriteSymbolRe
     }
     std::unique_ptr<LIB_SYMBOL> symbol = UnpackSymbolDefinition( aCtx.Request.definition() );
     if( !symbol ) return reject( "The symbol definition was rejected by the native decoder" );
+    if( aCtx.Request.has_pin_display()
+            && !ApplySymbolLibraryPinDisplay( aCtx.Request.pin_display(), *symbol ) )
+        return reject( "Pin display requires both visibility values and a native-range, grid-aligned offset" );
     try
     {
         SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &project() );
         if( !adapter->LoadOne( wxString::FromUTF8( nickname ) ) ) return reject( "The requested symbol library could not be loaded" );
         const uint64_t before = adapter->GetLibraryModifyHash( wxString::FromUTF8( nickname ) ).value_or( 0 );
         const wxString symbolName = symbol->GetName();
+        if( !aCtx.Request.has_pin_display() )
+        {
+            // Preserve the existing entry's library-owned display independently
+            // of its replacement body. A new entry retains LIB_SYMBOL defaults.
+            if( LIB_SYMBOL* existing = adapter->LoadSymbol( wxString::FromUTF8( nickname ), symbolName ) )
+            {
+                symbol->SetShowPinNames( existing->GetShowPinNames() );
+                symbol->SetShowPinNumbers( existing->GetShowPinNumbers() );
+                symbol->SetPinNameOffset( existing->GetPinNameOffset() );
+            }
+        }
         SYMBOL_LIBRARY_ADAPTER::SAVE_T result = adapter->SaveSymbol( wxString::FromUTF8( nickname ), symbol.get(), aCtx.Request.overwrite() );
         if( result == SYMBOL_LIBRARY_ADAPTER::SAVE_SKIPPED ) return reject( "The symbol already exists and overwrite is disabled" );
         NativeCapabilitySymbolLibraryWriteSymbolResponse response;
         response.set_library_nickname( nickname ); response.set_symbol_name( symbolName.ToStdString( wxConvUTF8 ) );
         response.set_operation_id( operationId ); response.set_before_modify_hash( before ); response.set_completed( true );
         PackSymbolDefinition( *response.mutable_definition(), *symbol, true );
+        PackSymbolLibraryPinDisplay( *response.mutable_pin_display(), *symbol );
         symbol.release();
         response.set_after_modify_hash( adapter->GetLibraryModifyHash( wxString::FromUTF8( nickname ) ).value_or( before ) );
         m_symbolLibraryOperationFingerprints[operationId] = fingerprint;

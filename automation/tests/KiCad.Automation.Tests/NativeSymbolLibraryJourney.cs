@@ -46,6 +46,120 @@ public sealed partial class NativeSessionTests
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-symbol-library-read.json"), read.GetRawText(), token);
 
         string definitionJson = definition.GetRawText();
+        var sourceDisplay = SchematicJson.Parser.Parse<NativeCapabilitySymbolLibraryPinDisplay>(
+            read.GetProperty("structuredContent").GetProperty("pinDisplay").GetRawText());
+        Assert.IsTrue(sourceDisplay.HasShowPinNames && sourceDisplay.HasShowPinNumbers && sourceDisplay.HasPinNameOffsetNm);
+        Assert.IsFalse(sourceDisplay.ShowPinNames, "The native fixture explicitly hides pin names.");
+        Assert.IsTrue(sourceDisplay.ShowPinNumbers);
+        Assert.AreEqual(0L, sourceDisplay.PinNameOffsetNm, "Zero spacing is an explicit native fixture value.");
+        var sourcePreview = await RenderLibraryPinDisplay(mcp, client, document,
+            SchematicJson.Parser.Parse<SchematicSymbol>(definitionJson), sourceDisplay, evidence, instanceId, "source", token);
+        // Backward-compatible creation without an envelope uses actual native
+        // LIB_SYMBOL defaults (visible names/numbers and the 20 mil offset).
+        var defaultDefinition = SchematicJson.Parser.Parse<SchematicSymbol>(definitionJson);
+        defaultDefinition.Id.EntryName = "PinDisplayDefaultsProbe";
+        var defaultWrite = await mcp.Tool("kicad_symbol_library_write", new
+        {
+            instanceId, expectedProcessEpoch = client.Epoch, libraryNickname,
+            definitionJson = SchematicJson.Formatter.Format(defaultDefinition), operationId = Guid.NewGuid().ToString("D"), overwrite = false
+        });
+        RequireToolSuccess(defaultWrite);
+        Assert.AreEqual(new NativeCapabilitySymbolLibraryPinDisplay
+        { ShowPinNames = true, ShowPinNumbers = true, PinNameOffsetNm = 508_000 },
+            SchematicJson.Parser.Parse<NativeCapabilitySymbolLibraryPinDisplay>(
+                defaultWrite.GetProperty("structuredContent").GetProperty("pinDisplay").GetRawText()));
+        RequireToolSuccess(await mcp.Tool("kicad_symbol_library_delete", new
+        { instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName = defaultDefinition.Id.EntryName,
+            operationId = Guid.NewGuid().ToString("D") }));
+        const string displayCloneName = "PinDisplayCloneProbe";
+        string displayCloneOperation = Guid.NewGuid().ToString("D");
+        var displayCloneArguments = new
+        {
+            instanceId, expectedProcessEpoch = client.Epoch, definitionJson,
+            targetLibraryNickname = libraryNickname, targetSymbolName = displayCloneName,
+            operationId = displayCloneOperation, pinDisplayJson = SchematicJson.Formatter.Format(sourceDisplay)
+        };
+        var displayClone = await mcp.Tool("kicad_symbol_library_clone", displayCloneArguments);
+        RequireToolSuccess(displayClone);
+        Assert.IsTrue(displayClone.GetProperty("structuredContent").GetProperty("persistenceVerified").GetBoolean());
+        Assert.IsTrue(displayClone.GetProperty("structuredContent").GetProperty("pinDisplayInputVerified").GetBoolean());
+        var displayCloneReplay = await mcp.Tool("kicad_symbol_library_clone", displayCloneArguments);
+        RequireToolSuccess(displayCloneReplay);
+        Assert.AreEqual(displayClone.GetProperty("structuredContent").GetRawText(), displayCloneReplay.GetProperty("structuredContent").GetRawText());
+
+        var displayCloneRead = await mcp.Tool("kicad_symbol_library_read", new
+        { instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName = displayCloneName });
+        RequireToolSuccess(displayCloneRead);
+        var cloneDisplay = SchematicJson.Parser.Parse<NativeCapabilitySymbolLibraryPinDisplay>(
+            displayCloneRead.GetProperty("structuredContent").GetProperty("pinDisplay").GetRawText());
+        Assert.AreEqual(sourceDisplay, cloneDisplay, "Compare the captured source display with the saved clone, not a response with itself.");
+        var displayCloneDefinition = SchematicJson.Parser.Parse<SchematicSymbol>(
+            displayCloneRead.GetProperty("structuredContent").GetProperty("definition").GetRawText());
+        var clonePreview = await RenderLibraryPinDisplay(mcp, client, document,
+            displayCloneDefinition, cloneDisplay, evidence, instanceId, "clone", token);
+        CollectionAssert.AreEqual(sourcePreview, clonePreview, "The cloned library pin display must render like its source.");
+
+        // A legacy body-only update must preserve the current library display.
+        // Changing body metadata ensures this exercises a real edit.
+        displayCloneDefinition.Keywords = "native pin display preservation";
+        var omittedDisplayWrite = await mcp.Tool("kicad_symbol_library_write", new
+        {
+            instanceId, expectedProcessEpoch = client.Epoch, libraryNickname,
+            definitionJson = SchematicJson.Formatter.Format(displayCloneDefinition), operationId = Guid.NewGuid().ToString("D")
+        });
+        RequireToolSuccess(omittedDisplayWrite);
+        Assert.AreEqual(sourceDisplay, SchematicJson.Parser.Parse<NativeCapabilitySymbolLibraryPinDisplay>(
+            omittedDisplayWrite.GetProperty("structuredContent").GetProperty("pinDisplay").GetRawText()));
+        var editedDisplay = new NativeCapabilitySymbolLibraryPinDisplay
+        { ShowPinNames = true, ShowPinNumbers = false, PinNameOffsetNm = -1_270_000 };
+        string displayEditOperation = Guid.NewGuid().ToString("D");
+        var displayEditArguments = new
+        {
+            instanceId, expectedProcessEpoch = client.Epoch, libraryNickname,
+            definitionJson = SchematicJson.Formatter.Format(displayCloneDefinition), operationId = displayEditOperation,
+            pinDisplayJson = SchematicJson.Formatter.Format(editedDisplay)
+        };
+        var displayEdit = await mcp.Tool("kicad_symbol_library_write", displayEditArguments);
+        RequireToolSuccess(displayEdit);
+        Assert.IsTrue(displayEdit.GetProperty("structuredContent").GetProperty("pinDisplayInputVerified").GetBoolean());
+        var displayEditReplay = await mcp.Tool("kicad_symbol_library_write", displayEditArguments);
+        RequireToolSuccess(displayEditReplay);
+        Assert.AreEqual(displayEdit.GetProperty("structuredContent").GetRawText(), displayEditReplay.GetProperty("structuredContent").GetRawText());
+        var displayEditReceipt = await mcp.Tool("kicad_symbol_library_receipt", new
+        { instanceId, expectedProcessEpoch = client.Epoch, operationId = displayEditOperation });
+        RequireToolSuccess(displayEditReceipt);
+        var retainedDisplayWrite = SchematicJson.Parser.Parse<NativeCapabilitySymbolLibraryWriteSymbolResponse>(
+            displayEditReceipt.GetProperty("structuredContent").GetProperty("writeResponse").GetRawText());
+        Assert.AreEqual(editedDisplay, retainedDisplayWrite.PinDisplay);
+
+        // The native owner enforces completeness and grid validity even when a
+        // caller bypasses managed admission. Rejected writes preserve content.
+        foreach (var invalidDisplay in new[]
+        {
+            new NativeCapabilitySymbolLibraryPinDisplay { ShowPinNames = false },
+            new NativeCapabilitySymbolLibraryPinDisplay { ShowPinNames = false, ShowPinNumbers = false, PinNameOffsetNm = 1 }
+        })
+        {
+            try
+            {
+                await client.InvokeAsync<NativeCapabilitySymbolLibraryWriteSymbol, NativeCapabilitySymbolLibraryWriteSymbolResponse>(
+                    new() { LibraryNickname = libraryNickname, Definition = displayCloneDefinition.Clone(), Overwrite = true,
+                        OperationId = Guid.NewGuid().ToString("D"), PinDisplay = invalidDisplay }, token);
+                Assert.Fail("The native owner accepted an incomplete or unrepresentable display.");
+            }
+            catch (NativeApiException) { }
+        }
+        var editedDisplayRead = await mcp.Tool("kicad_symbol_library_read", new
+        { instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName = displayCloneName });
+        RequireToolSuccess(editedDisplayRead);
+        Assert.AreEqual(editedDisplay, SchematicJson.Parser.Parse<NativeCapabilitySymbolLibraryPinDisplay>(
+            editedDisplayRead.GetProperty("structuredContent").GetProperty("pinDisplay").GetRawText()));
+        var editedPreview = await RenderLibraryPinDisplay(mcp, client, document,
+            displayCloneDefinition, editedDisplay, evidence, instanceId, "edited", token);
+        Assert.IsFalse(sourcePreview.SequenceEqual(editedPreview), "Changing pin-name/number visibility must change the native drawing.");
+
+        initialModifyHash = editedDisplayRead.GetProperty("structuredContent").GetProperty("modifyHash").GetUInt64()
+            .ToString(System.Globalization.CultureInfo.InvariantCulture);
         const string artworkSvg = "<svg viewBox=\"0 0 10 10\"><line x1=\"1\" y1=\"2\" x2=\"8\" y2=\"2\"/></svg>";
         string artworkHash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(artworkSvg)));
         var artworkPlan = await mcp.Tool("kicad_symbol_svg_plan", new
@@ -184,6 +298,31 @@ public sealed partial class NativeSessionTests
         AssertRasterSymbolPieces(reloadedArtwork, trace, createdRasterIds, rasterSha,
             sourceKind: "generated", sourceOrigin: "deterministic-fixture");
         AssertRasterSymbolEmbeddedSource(reloadedArtwork, rasterSha, rasterBytes.Length, embeddedDataHash);
+        var displayCloneReloaded = await mcp.Tool("kicad_symbol_library_read", new
+        { instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName = displayCloneName });
+        RequireToolSuccess(displayCloneReloaded);
+        var reloadedDisplay = SchematicJson.Parser.Parse<NativeCapabilitySymbolLibraryPinDisplay>(
+            displayCloneReloaded.GetProperty("structuredContent").GetProperty("pinDisplay").GetRawText());
+        Assert.AreEqual(editedDisplay, reloadedDisplay, "Native reopen must retain false visibility and negative spacing exactly.");
+        var reloadedPreview = await RenderLibraryPinDisplay(mcp, client, document,
+            SchematicJson.Parser.Parse<SchematicSymbol>(displayCloneReloaded.GetProperty("structuredContent").GetProperty("definition").GetRawText()),
+            reloadedDisplay, evidence, instanceId, "reloaded", token);
+        CollectionAssert.AreEqual(editedPreview, reloadedPreview, "Reopening must retain the actual native pin drawing.");
+        var unchangedSource = await mcp.Tool("kicad_symbol_library_read", new
+        { instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName });
+        RequireToolSuccess(unchangedSource);
+        Assert.AreEqual(sourceDisplay, SchematicJson.Parser.Parse<NativeCapabilitySymbolLibraryPinDisplay>(
+            unchangedSource.GetProperty("structuredContent").GetProperty("pinDisplay").GetRawText()));
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-symbol-pin-display.json"), JsonSerializer.Serialize(new
+        {
+            sourceRead = read, cloneRead = displayCloneRead, editRead = editedDisplayRead, reopenedRead = displayCloneReloaded,
+            cloneOperation = displayCloneOperation, editOperation = displayEditOperation,
+            cloneReplayVerified = true, editReplayVerified = true, omittedUpdatePreserved = true,
+            sourcePreviewSha256 = Convert.ToHexStringLower(SHA256.HashData(sourcePreview)),
+            clonePreviewSha256 = Convert.ToHexStringLower(SHA256.HashData(clonePreview)),
+            editedPreviewSha256 = Convert.ToHexStringLower(SHA256.HashData(editedPreview)),
+            reopenedPreviewSha256 = Convert.ToHexStringLower(SHA256.HashData(reloadedPreview))
+        }), token);
         var artworkDelete = await mcp.Tool("kicad_symbol_library_delete", new
         {
             instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName = "GeneratedArtworkProbe",
@@ -268,6 +407,102 @@ public sealed partial class NativeSessionTests
         RequireToolSuccess(restoredList);
         Assert.IsTrue(restoredList.GetProperty("structuredContent").GetProperty("symbolNames")
             .EnumerateArray().Any(item => item.GetString() == symbolName), restoredList.GetRawText());
+        var displayCloneDelete = await mcp.Tool("kicad_symbol_library_delete", new
+        { instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName = displayCloneName,
+            operationId = Guid.NewGuid().ToString("D") });
+        RequireToolSuccess(displayCloneDelete);
+    }
+
+    private static async Task<byte[]> RenderLibraryPinDisplay(StdioMcpFixture mcp, NativeClient client,
+        DocumentSpecifier document, SchematicSymbol definition, NativeCapabilitySymbolLibraryPinDisplay display,
+        string evidence, string instanceId, string phase, CancellationToken token)
+    {
+        // Use the existing checked placement and native offscreen renderer.
+        // The library definition remains library-owned; temporary placed pins
+        // receive distinct identities and explicit links to their source pins.
+        var checkedReply = await mcp.Tool("kicad_schematic_checked_state", new
+        { instanceId, documentJson = SchematicJson.Formatter.Format(document) });
+        RequireToolSuccess(checkedReply);
+        var before = SchematicJson.Parser.Parse<CheckedSchematicState>(checkedReply.GetProperty("structuredContent").GetRawText());
+        var template = before.Electrical.Hierarchy.Data.Instances.Single(screen => Equals(screen.Metadata.Document, document))
+            .Items.Where(item => item.Is(SchematicSymbolInstance.Descriptor)).Select(item => item.Unpack<SchematicSymbolInstance>()).First();
+        var sample = template.Clone();
+        sample.Id = new() { Value = Guid.NewGuid().ToString("D") };
+        sample.Position = new() { XNm = 100_000_000, YNm = 80_000_000 };
+        sample.Transform = new() { Orientation = SchematicSymbolOrientation.Sso0 };
+        sample.Unit = new() { Unit = 1 }; sample.BodyStyle = new() { Style = 1 };
+        sample.Definition = definition.Clone(); sample.LibraryId = definition.Id.Clone(); sample.LibName = "";
+        sample.SeparatePinIdentities = true; sample.Definition.PinsUseLocalCoordinates = true;
+        sample.ShowPinNames = display.ShowPinNames; sample.ShowPinNumbers = display.ShowPinNumbers;
+        sample.PinNameOffset = new() { ValueNm = display.PinNameOffsetNm };
+        sample.DefinitionPinNameOffset = sample.PinNameOffset.Clone();
+        sample.ReferenceField = definition.ReferenceField.Clone(); sample.ValueField = definition.ValueField.Clone();
+        sample.FootprintField = definition.FootprintField.Clone(); sample.DatasheetField = definition.DatasheetField.Clone();
+        sample.DescriptionField = definition.DescriptionField.Clone(); sample.UserFields.Clear();
+        sample.ReferenceField.Text.Text_ = "PINVIEW"; sample.ValueField.Text.Text_ = "Pin display";
+        foreach (var field in new[] { sample.ReferenceField, sample.ValueField, sample.FootprintField, sample.DatasheetField, sample.DescriptionField })
+        {
+            field.Text.Position.XNm += sample.Position.XNm;
+            field.Text.Position.YNm += sample.Position.YNm;
+        }
+        for (int index = 0; index < sample.Definition.Items.Count; index++)
+        {
+            var child = sample.Definition.Items[index];
+            if (!child.Item.Is(SchematicPin.Descriptor)) continue;
+            var pin = child.Item.Unpack<SchematicPin>();
+            pin.LibraryPinId = pin.Id.Clone(); pin.Id = new() { Value = Guid.NewGuid().ToString("D") };
+            child.Item = Any.Pack(pin);
+        }
+        sample.Path = document.SheetPath.Clone();
+        sample.InstanceRecords.Records.Clear();
+        var instance = template.InstanceRecords.Records.First().Clone();
+        instance.Path.Clear(); instance.Path.Add(document.SheetPath.Path.Select(id => id.Clone()));
+        instance.Reference = "PINVIEW"; instance.Unit = 1;
+        sample.InstanceRecords.Records.Add(instance);
+        var create = await mcp.Tool("kicad_schematic_create_symbol_instance", new
+        {
+            instanceId, documentJson = SchematicJson.Formatter.Format(document), expectedStateJson = SchematicJson.Formatter.Format(before),
+            symbolJson = SchematicJson.Formatter.Format(sample), operationId = Guid.NewGuid().ToString("D")
+        });
+        RequireToolSuccess(create);
+        var receipt = SchematicJson.Parser.Parse<CheckedSchematicBatchReceipt>(create.GetProperty("structuredContent").GetProperty("receipt").GetRawText());
+        Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, receipt.Status);
+        var placed = receipt.Result.Items.Single().Unpack<SchematicSymbolInstance>();
+        Assert.AreEqual(display.ShowPinNames, placed.ShowPinNames);
+        Assert.AreEqual(display.ShowPinNumbers, placed.ShowPinNumbers);
+        Assert.AreEqual(display.PinNameOffsetNm, placed.PinNameOffset.ValueNm);
+
+        var renderRequest = new RenderSchematicViews { Document = document };
+        renderRequest.Views.Add(new SchematicRenderView
+        {
+            Key = "library-pin-display", WidthPixels = 800, HeightPixels = 800,
+            Region = new() { Position = new() { XNm = 90_000_000, YNm = 70_000_000 }, Size = new() { XNm = 20_000_000, YNm = 20_000_000 } }
+        });
+        var render = await mcp.Tool("kicad_schematic_render_views", new
+        { instanceId, requestJson = SchematicJson.Formatter.Format(renderRequest) });
+        RequireToolSuccess(render);
+        var rendered = SchematicJson.Parser.Parse<SchematicViewSet>(render.GetProperty("structuredContent").GetProperty("viewSet").GetRawText());
+        var renderedSample = rendered.Snapshot.Data.Items.Where(item => item.Is(SchematicSymbolInstance.Descriptor))
+            .Select(item => item.Unpack<SchematicSymbolInstance>()).Single(symbol => symbol.Id.Equals(sample.Id));
+        Assert.AreEqual(display.ShowPinNames, renderedSample.ShowPinNames);
+        Assert.AreEqual(display.ShowPinNumbers, renderedSample.ShowPinNumbers);
+        Assert.AreEqual(display.PinNameOffsetNm, renderedSample.PinNameOffset.ValueNm);
+        byte[] png = Convert.FromBase64String(render.GetProperty("content").EnumerateArray()
+            .Single(block => block.GetProperty("type").GetString() == "image").GetProperty("data").GetString()!);
+        Assert.IsGreaterThan(100, png.Length);
+        Assert.AreEqual(800U, System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(png.AsSpan(16, 4)));
+        Assert.AreEqual(800U, System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(png.AsSpan(20, 4)));
+        await File.WriteAllBytesAsync(Path.Combine(evidence, instanceId + "-symbol-pin-display-" + phase + ".png"), png, token);
+        var afterReply = await mcp.Tool("kicad_schematic_checked_state", new
+        { instanceId, documentJson = SchematicJson.Formatter.Format(document) });
+        RequireToolSuccess(afterReply);
+        var delete = await mcp.Tool("kicad_schematic_delete_symbol_instance", new
+        {
+            instanceId, documentJson = SchematicJson.Formatter.Format(document), itemId = sample.Id.Value,
+            expectedStateJson = afterReply.GetProperty("structuredContent").GetRawText(), operationId = Guid.NewGuid().ToString("D")
+        });
+        RequireToolSuccess(delete);
+        return png;
     }
 
     private static void AssertSymbolContent(SchematicSymbol actual, SchematicSymbol expected, string message)

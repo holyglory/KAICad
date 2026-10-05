@@ -75,12 +75,12 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
     }
 
     [McpServerTool(Name = "kicad_symbol_library_clone", ReadOnly = false),
-     Description("Clone one complete symbol definition into an explicitly named project symbol library through the native adapter. definitionJson is the source definition returned by kicad_symbol_library_read or kicad_symbol_library_validate; targetLibraryNickname and targetSymbolName replace only its library identity and entry name. The clone is validated before the native write and keeps the caller operation UUID and native process receipt semantics of kicad_symbol_library_write."),
+     Description("Clone one complete symbol definition into an explicitly named project symbol library through the native adapter. Supply definitionJson and pinDisplayJson from the same kicad_symbol_library_read result; complete pinDisplayJson is required because the definition body does not own pin-label visibility or spacing. targetLibraryNickname and targetSymbolName replace only its library identity and entry name. The clone is validated before the native write and verifies the supplied source display against the persisted clone, retaining the caller operation UUID and native receipt semantics of kicad_symbol_library_write."),
      KiCadCapability("symbol-library", "compiled-mcp plus native-symbol-library-adapter", "validated symbol clone, explicit target library/name, operation UUID and native modify hashes"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Clone(string instanceId, string expectedProcessEpoch, string definitionJson,
         string targetLibraryNickname, string targetSymbolName, string operationId,
-        CancellationToken cancellationToken, bool overwrite = false) => Execute(async () =>
+        CancellationToken cancellationToken, bool overwrite = false, string pinDisplayJson = "") => Execute(async () =>
     {
         ValidateEpoch(expectedProcessEpoch);
         ValidateLibrary(targetLibraryNickname);
@@ -93,8 +93,10 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
         ValidateDefinition(targetLibraryNickname, clone, issues, cancellationToken);
         if (issues.Count != 0)
             throw new AutomationException("invalid_symbol_definition", "The cloned definition is invalid: " + string.Join("; ", issues.OrderBy(i => i.Path, StringComparer.Ordinal).Select(i => i.Code)));
+        NativeCapabilitySymbolLibraryPinDisplay display = ParsePinDisplay(pinDisplayJson, required: true)!;
         return await Write(instanceId, expectedProcessEpoch, targetLibraryNickname,
-            SchematicJson.Formatter.Format(clone), operationId, cancellationToken, overwrite);
+            SchematicJson.Formatter.Format(clone), operationId, cancellationToken, overwrite,
+            pinDisplayJson: SchematicJson.Formatter.Format(display));
     });
 
     [McpServerTool(Name = "kicad_symbol_library_receipt", ReadOnly = true),
@@ -131,7 +133,7 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_symbol_library_read", ReadOnly = true),
-     Description("Read one complete typed symbol definition from an explicitly named project symbol library. The native definition is returned as SchematicSymbol protobuf JSON with the library modify hash.")]
+     Description("Read one complete typed symbol definition from an explicitly named project symbol library. The native definition body is returned as SchematicSymbol protobuf JSON, alongside a separate complete pinDisplay object with pin-name visibility, pin-number visibility and exact spacing in nanometers. Preserve both objects when cloning or editing. The result also carries the library modify hash.")]
     [KiCadCapability("symbol-library", "native-symbol-library-adapter", "library nickname, symbol name and native modify hash"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativeSymbolLibraryReadbackUsesMcp")]
     public Task<CallToolResult> Read(string instanceId, string expectedProcessEpoch, string libraryNickname,
@@ -141,34 +143,41 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
         NativeClient client = registry.Client(instanceId); AutomationSession session = await Handshake(client, expectedProcessEpoch, cancellationToken);
         var response = await client.InvokeAsync<NativeCapabilitySymbolLibraryReadSymbol, NativeCapabilitySymbolLibraryReadSymbolResponse>(
             new() { LibraryNickname = libraryNickname, SymbolName = symbolName }, cancellationToken);
+        ValidatePinDisplay(response.PinDisplay);
         return Data(new { instanceId, processEpoch = session.Epoch, libraryNickname, symbolName,
             definition = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(response.Definition)),
+            pinDisplay = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(response.PinDisplay)),
             modifyHash = response.ModifyHash, revisionTracked = false, nativeReceiptAvailable = false });
     });
 
     [McpServerTool(Name = "kicad_symbol_library_write", ReadOnly = false),
-     Description("Create or replace one complete symbol definition in an explicitly named project symbol library through KiCad's native adapter. When expectedModifyHash is supplied, the write is admitted only if the library's current native modify hash still matches; an already recorded operation ID is replayed before that check. operationId binds the request to a process-owned native receipt, and the completed write is verified by reading the persisted symbol back through the native adapter. The library still has no durable lifecycle revision sequence.")]
+     Description("Create or replace one complete symbol definition in an explicitly named project symbol library through KiCad's native adapter. Optional pinDisplayJson supplies all of showPinNames, showPinNumbers and pinNameOffsetNm; false and zero are explicit values, and native-valid negative spacing is supported. When omitted, updates preserve the existing library display and new entries use native defaults. When expectedModifyHash is supplied, the write is admitted only if the current native modify hash matches; an already recorded operation ID is replayed before that check. The process-owned receipt and persisted readback verify the supplied display as well as the definition. The library still has no durable lifecycle revision sequence.")]
     [KiCadCapability("symbol-library", "native-symbol-library-adapter", "library nickname, complete SchematicSymbol, overwrite flag, operation UUID and native modify hashes"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativeSymbolLibraryReadbackUsesMcp")]
     public Task<CallToolResult> Write(string instanceId, string expectedProcessEpoch, string libraryNickname,
         string definitionJson, string operationId, CancellationToken cancellationToken, bool overwrite = true,
-        string expectedModifyHash = "") => Execute(async () =>
+        string expectedModifyHash = "", string pinDisplayJson = "") => Execute(async () =>
     {
         ValidateEpoch(expectedProcessEpoch); ValidateLibrary(libraryNickname); ValidateOperation(operationId);
         SchematicSymbol definition = ParseDefinition(definitionJson);
         if (definition.Id is null || definition.Id.LibraryNickname != libraryNickname || string.IsNullOrWhiteSpace(definition.Id.EntryName))
             throw new AutomationException("symbol_library_definition_mismatch", "definitionJson must carry the same library nickname and a nonempty entry name.");
+        NativeCapabilitySymbolLibraryPinDisplay? display = ParsePinDisplay(pinDisplayJson, required: false);
         NativeClient client = registry.Client(instanceId); AutomationSession session = await Handshake(client, expectedProcessEpoch, cancellationToken);
         string revisionAdmission = await EnsureModifyHash(client, libraryNickname, operationId, expectedModifyHash, cancellationToken);
         var response = await client.InvokeAsync<NativeCapabilitySymbolLibraryWriteSymbol, NativeCapabilitySymbolLibraryWriteSymbolResponse>(
-            new() { LibraryNickname = libraryNickname, Definition = definition, Overwrite = overwrite, OperationId = operationId }, cancellationToken);
+            new() { LibraryNickname = libraryNickname, Definition = definition, Overwrite = overwrite, OperationId = operationId,
+                PinDisplay = display }, cancellationToken);
         SymbolLibraryWriteReadback readback = response.Completed
-            ? await VerifyWriteReadback(client, libraryNickname, response, cancellationToken)
+            ? await VerifyWriteReadback(client, libraryNickname, response, display, cancellationToken)
             : new(false, null, null);
         return Data(new { instanceId, processEpoch = session.Epoch, libraryNickname,
             symbolName = response.SymbolName, operationId, operationOutcome = response.Completed ? "completed" : "skipped",
             beforeModifyHash = response.BeforeModifyHash, afterModifyHash = response.AfterModifyHash,
             definition = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(response.Definition)),
+            pinDisplay = response.PinDisplay is null ? (JsonElement?)null
+                : JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(response.PinDisplay)),
+            pinDisplayInputVerified = display is not null && readback.Verified,
             nativeCommandSucceeded = response.Completed, nativeReceiptAvailable = true,
             operationReceipt = true, revisionTracked = false, persistenceVerified = readback.Verified,
             persistedContentSha256 = readback.ContentSha256, persistedModifyHash = readback.ModifyHash,
@@ -205,11 +214,17 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
 
     private static async Task<SymbolLibraryWriteReadback> VerifyWriteReadback(NativeClient client,
         string libraryNickname, NativeCapabilitySymbolLibraryWriteSymbolResponse response,
+        NativeCapabilitySymbolLibraryPinDisplay? requestedDisplay,
         CancellationToken cancellationToken)
     {
+        ValidatePinDisplay(response.PinDisplay);
+        if (requestedDisplay is not null && !requestedDisplay.Equals(response.PinDisplay))
+            throw new AutomationException("symbol_library_persistence_mismatch",
+                $"KiCad's receipt for {response.OperationId} changed the supplied source pin display.");
         NativeCapabilitySymbolLibraryReadSymbolResponse persisted = await client.InvokeAsync<
             NativeCapabilitySymbolLibraryReadSymbol, NativeCapabilitySymbolLibraryReadSymbolResponse>(
                 new() { LibraryNickname = libraryNickname, SymbolName = response.SymbolName }, cancellationToken);
+        ValidatePinDisplay(persisted.PinDisplay);
         string canonical = SchematicJson.Formatter.Format(persisted.Definition);
         string expectedCanonical = SchematicJson.Formatter.Format(response.Definition);
         if (!string.Equals(canonical, expectedCanonical, StringComparison.Ordinal))
@@ -218,9 +233,45 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
         if (persisted.ModifyHash != response.AfterModifyHash)
             throw new AutomationException("symbol_library_persistence_mismatch",
                 $"KiCad accepted symbol-library write {response.OperationId}, but native readback reported modify hash {persisted.ModifyHash} instead of {response.AfterModifyHash}.");
+        NativeCapabilitySymbolLibraryPinDisplay expectedDisplay = requestedDisplay ?? response.PinDisplay;
+        if (!expectedDisplay.Equals(persisted.PinDisplay))
+            throw new AutomationException("symbol_library_persistence_mismatch",
+                $"KiCad accepted symbol-library write {response.OperationId}, but the persisted pin display differed from the supplied source or retained receipt.");
 
         return new(true,
-            Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))), persisted.ModifyHash);
+            Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+                canonical + "\0" + SchematicJson.Formatter.Format(persisted.PinDisplay)))), persisted.ModifyHash);
+    }
+
+    private static NativeCapabilitySymbolLibraryPinDisplay? ParsePinDisplay(string json, bool required)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            if (required)
+                throw new AutomationException("symbol_library_pin_display_required",
+                    "Cloning requires complete pinDisplayJson from the same source library read as definitionJson.");
+            return null;
+        }
+        if (Encoding.UTF8.GetByteCount(json) > 4096)
+            throw new AutomationException("invalid_symbol_pin_display", "pinDisplayJson exceeds the bounded settings size.");
+        NativeCapabilitySymbolLibraryPinDisplay display;
+        try { display = SchematicJson.Parser.Parse<NativeCapabilitySymbolLibraryPinDisplay>(json); }
+        catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException)
+        { throw new AutomationException("invalid_symbol_pin_display", "pinDisplayJson is not valid pin-display protobuf JSON: " + error.Message); }
+        ValidatePinDisplay(display);
+        return display;
+    }
+
+    private static void ValidatePinDisplay(NativeCapabilitySymbolLibraryPinDisplay? display)
+    {
+        if (display is null || !display.HasShowPinNames || !display.HasShowPinNumbers || !display.HasPinNameOffsetNm)
+            throw new AutomationException("invalid_symbol_pin_display",
+                "Pin display must explicitly contain showPinNames, showPinNumbers and pinNameOffsetNm.");
+        // Match the existing native schematic range and 100 nm grid contract.
+        long offset = display.PinNameOffsetNm;
+        if (offset % 100 != 0 || offset < (long)int.MinValue * 100 || offset > (long)int.MaxValue * 100)
+            throw new AutomationException("invalid_symbol_pin_display",
+                "pinNameOffsetNm must lie on the native 100 nm grid and within the native coordinate range.");
     }
 
     private static async Task<SymbolLibraryDeleteReadback> VerifyDeleteReadback(NativeClient client,

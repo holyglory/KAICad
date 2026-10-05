@@ -776,6 +776,61 @@ public sealed class McpProcessTests
                     targetLibraryNickname = "Fixture", targetSymbolName = "Clone", operationId = Guid.NewGuid().ToString("D") } });
             Assert.IsTrue(invalidSymbolClone.GetProperty("result").GetProperty("isError").GetBoolean());
             Assert.AreEqual("invalid_symbol_definition", invalidSymbolClone.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            // Exercise the production STDIO admission boundary before any
+            // native connection: complete display values, including false and
+            // zero, must survive parsing; incomplete or lossy inputs must fail.
+            static SchematicField PinDisplayField(string name) => new() { Name = name, Text = new() { Text_ = name } };
+            var pinDisplayDefinition = new SchematicSymbol
+            {
+                Id = new() { LibraryNickname = "Fixture", EntryName = "PinDisplayProbe" },
+                Type = SchematicSymbolType.SstNormal, UnitCount = 1, PinsUseLocalCoordinates = true,
+                ReferenceField = PinDisplayField("Reference"), ValueField = PinDisplayField("Value"),
+                FootprintField = PinDisplayField("Footprint"), DatasheetField = PinDisplayField("Datasheet"),
+                DescriptionField = PinDisplayField("Description"), BodyStyle = { new SchematicBodyStyle { Name = "?" } },
+                Items = { new SchematicSymbolChild { Unit = new() { Unit = 1 }, BodyStyle = new() { Style = 1 },
+                    Item = Any.Pack(new SchematicPin { Id = new() { Value = Guid.NewGuid().ToString("D") }, Name = "IN", Number = "1",
+                        Position = new(), Length = new() { ValueNm = 2_540_000 }, Orientation = SchematicPinOrientation.SpoRight }) } }
+            };
+            string pinDisplayDefinitionJson = SchematicJson.Formatter.Format(pinDisplayDefinition);
+            var cloneMissingDisplay = await Request(9490, "tools/call", new { name = "kicad_symbol_library_clone", arguments = new
+            {
+                instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = Guid.NewGuid().ToString("D"),
+                definitionJson = pinDisplayDefinitionJson, targetLibraryNickname = "Fixture", targetSymbolName = "Clone",
+                operationId = Guid.NewGuid().ToString("D")
+            } });
+            Assert.AreEqual("symbol_library_pin_display_required", cloneMissingDisplay.GetProperty("result")
+                .GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            int pinDisplayCallId = 9491;
+            foreach (string invalidDisplay in new[]
+            {
+                "{}", "{\"showPinNames\":false,\"showPinNumbers\":false}",
+                "{\"showPinNames\":false,\"pinNameOffsetNm\":\"0\"}",
+                "{\"showPinNames\":false,\"showPinNumbers\":false,\"pinNameOffsetNm\":\"1\"}",
+                "{\"showPinNames\":true,\"showPinNumbers\":true,\"pinNameOffsetNm\":\"214748364800\"}",
+                "{\"showPinNames\":true,\"showPinNumbers\":true,\"pinNameOffsetNm\":\"-214748364900\"}"
+            })
+            {
+                var invalidDisplayWrite = await Request(pinDisplayCallId++, "tools/call", new { name = "kicad_symbol_library_write", arguments = new
+                {
+                    instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = Guid.NewGuid().ToString("D"),
+                    libraryNickname = "Fixture", definitionJson = pinDisplayDefinitionJson,
+                    operationId = Guid.NewGuid().ToString("D"), pinDisplayJson = invalidDisplay
+                } });
+                Assert.AreEqual("invalid_symbol_pin_display", invalidDisplayWrite.GetProperty("result")
+                    .GetProperty("structuredContent").GetProperty("errorCode").GetString(), invalidDisplayWrite.GetRawText());
+            }
+            foreach (long offset in new[] { 0L, -1_270_000L, 1_270_000L, (long)int.MinValue * 100, (long)int.MaxValue * 100 })
+            {
+                var acceptedDisplay = await Request(pinDisplayCallId++, "tools/call", new { name = "kicad_symbol_library_clone", arguments = new
+                {
+                    instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = Guid.NewGuid().ToString("D"),
+                    definitionJson = pinDisplayDefinitionJson, targetLibraryNickname = "Fixture", targetSymbolName = "Clone",
+                    operationId = Guid.NewGuid().ToString("D"), pinDisplayJson = JsonSerializer.Serialize(new
+                    { showPinNames = false, showPinNumbers = false, pinNameOffsetNm = offset.ToString(System.Globalization.CultureInfo.InvariantCulture) })
+                } });
+                Assert.AreEqual("unknown_instance", acceptedDisplay.GetProperty("result").GetProperty("structuredContent")
+                    .GetProperty("errorCode").GetString(), "A native-valid display must pass admission and reach the unattached-instance guard.");
+            }
             var invalidSymbolLibrary = await Request(9096, "tools/call", new { name = "kicad_symbol_library_list",
                 arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = "invalid", libraryNickname = "Fixture" } });
             Assert.IsTrue(invalidSymbolLibrary.GetProperty("result").GetProperty("isError").GetBoolean());

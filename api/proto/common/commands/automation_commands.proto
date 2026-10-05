@@ -1242,9 +1242,16 @@ message SchematicWiringDrawingSheet {
 
 // == lane 2D messages ==
 // Read and mutate project symbol-library entries through the schematic
-// library adapter. These commands are process-scoped; the MCP layer supplies
-// operation IDs and reports that a native receipt is unavailable until the
-// library lifecycle gets a durable revision controller.
+// library adapter. Receipts live in the native process; complete durable
+// library lifecycle revisions remain a separate capability.
+message NativeCapabilitySymbolLibraryPinDisplay {
+  // A supplied envelope must contain all three fields. False and zero are
+  // explicit values, not requests to restore native defaults.
+  optional bool show_pin_names = 1;
+  optional bool show_pin_numbers = 2;
+  optional int64 pin_name_offset_nm = 3;
+}
+
 message NativeCapabilitySymbolLibraryReadNames {
   string library_nickname = 1;
 }
@@ -1265,6 +1272,7 @@ message NativeCapabilitySymbolLibraryReadSymbolResponse {
   string symbol_name = 2;
   kiapi.schematic.types.SchematicSymbol definition = 3;
   uint64 modify_hash = 4;
+  NativeCapabilitySymbolLibraryPinDisplay pin_display = 5;
 }
 
 message NativeCapabilitySymbolLibraryWriteSymbol {
@@ -1272,6 +1280,9 @@ message NativeCapabilitySymbolLibraryWriteSymbol {
   kiapi.schematic.types.SchematicSymbol definition = 2;
   bool overwrite = 3;
   string operation_id = 4;
+  // Omitted on updates: preserve the existing library entry's display.
+  // Omitted on genuinely new entries: use native LIB_SYMBOL defaults.
+  NativeCapabilitySymbolLibraryPinDisplay pin_display = 5;
 }
 
 message NativeCapabilitySymbolLibraryWriteSymbolResponse {
@@ -1282,6 +1293,7 @@ message NativeCapabilitySymbolLibraryWriteSymbolResponse {
   uint64 after_modify_hash = 5;
   bool completed = 6;
   string operation_id = 7;
+  NativeCapabilitySymbolLibraryPinDisplay pin_display = 8;
 }
 
 message NativeCapabilitySymbolLibraryDeleteSymbol {

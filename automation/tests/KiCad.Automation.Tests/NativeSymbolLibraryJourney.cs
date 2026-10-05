@@ -52,8 +52,13 @@ public sealed partial class NativeSessionTests
         Assert.IsFalse(sourceDisplay.ShowPinNames, "The native fixture explicitly hides pin names.");
         Assert.IsTrue(sourceDisplay.ShowPinNumbers);
         Assert.AreEqual(0L, sourceDisplay.PinNameOffsetNm, "Zero spacing is an explicit native fixture value.");
+        var pinDisplayRegion = new Box2
+        {
+            Position = new() { XNm = 230_000_000, YNm = 120_000_000 },
+            Size = new() { XNm = 20_000_000, YNm = 20_000_000 }
+        };
         var sourcePreview = await RenderLibraryPinDisplay(mcp, client, document,
-            SchematicJson.Parser.Parse<SchematicSymbol>(definitionJson), sourceDisplay, evidence, instanceId, "source", token);
+            SchematicJson.Parser.Parse<SchematicSymbol>(definitionJson), sourceDisplay, pinDisplayRegion, evidence, instanceId, "source", token);
         // Backward-compatible creation without an envelope uses actual native
         // LIB_SYMBOL defaults (visible names/numbers and the 20 mil offset).
         var defaultDefinition = SchematicJson.Parser.Parse<SchematicSymbol>(definitionJson);
@@ -96,7 +101,7 @@ public sealed partial class NativeSessionTests
         var displayCloneDefinition = SchematicJson.Parser.Parse<SchematicSymbol>(
             displayCloneRead.GetProperty("structuredContent").GetProperty("definition").GetRawText());
         var clonePreview = await RenderLibraryPinDisplay(mcp, client, document,
-            displayCloneDefinition, cloneDisplay, evidence, instanceId, "clone", token);
+            displayCloneDefinition, cloneDisplay, pinDisplayRegion, evidence, instanceId, "clone", token);
         CollectionAssert.AreEqual(sourcePreview, clonePreview, "The cloned library pin display must render like its source.");
 
         // A legacy body-only update must preserve the current library display.
@@ -155,7 +160,7 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(editedDisplay, SchematicJson.Parser.Parse<NativeCapabilitySymbolLibraryPinDisplay>(
             editedDisplayRead.GetProperty("structuredContent").GetProperty("pinDisplay").GetRawText()));
         var editedPreview = await RenderLibraryPinDisplay(mcp, client, document,
-            displayCloneDefinition, editedDisplay, evidence, instanceId, "edited", token);
+            displayCloneDefinition, editedDisplay, pinDisplayRegion, evidence, instanceId, "edited", token);
         Assert.IsFalse(sourcePreview.SequenceEqual(editedPreview), "Changing pin-name/number visibility must change the native drawing.");
 
         initialModifyHash = editedDisplayRead.GetProperty("structuredContent").GetProperty("modifyHash").GetUInt64()
@@ -306,7 +311,7 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(editedDisplay, reloadedDisplay, "Native reopen must retain false visibility and negative spacing exactly.");
         var reloadedPreview = await RenderLibraryPinDisplay(mcp, client, document,
             SchematicJson.Parser.Parse<SchematicSymbol>(displayCloneReloaded.GetProperty("structuredContent").GetProperty("definition").GetRawText()),
-            reloadedDisplay, evidence, instanceId, "reloaded", token);
+            reloadedDisplay, pinDisplayRegion, evidence, instanceId, "reloaded", token);
         CollectionAssert.AreEqual(editedPreview, reloadedPreview, "Reopening must retain the actual native pin drawing.");
         var unchangedSource = await mcp.Tool("kicad_symbol_library_read", new
         { instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName });
@@ -318,10 +323,10 @@ public sealed partial class NativeSessionTests
             sourceRead = read, cloneRead = displayCloneRead, editRead = editedDisplayRead, reopenedRead = displayCloneReloaded,
             cloneOperation = displayCloneOperation, editOperation = displayEditOperation,
             cloneReplayVerified = true, editReplayVerified = true, omittedUpdatePreserved = true,
-            sourcePreviewSha256 = Convert.ToHexStringLower(SHA256.HashData(sourcePreview)),
-            clonePreviewSha256 = Convert.ToHexStringLower(SHA256.HashData(clonePreview)),
-            editedPreviewSha256 = Convert.ToHexStringLower(SHA256.HashData(editedPreview)),
-            reopenedPreviewSha256 = Convert.ToHexStringLower(SHA256.HashData(reloadedPreview))
+            sourcePixelsSha256 = Convert.ToHexStringLower(SHA256.HashData(sourcePreview)),
+            clonePixelsSha256 = Convert.ToHexStringLower(SHA256.HashData(clonePreview)),
+            editedPixelsSha256 = Convert.ToHexStringLower(SHA256.HashData(editedPreview)),
+            reopenedPixelsSha256 = Convert.ToHexStringLower(SHA256.HashData(reloadedPreview))
         }), token);
         // Number labels can repeat on distinct owned pin objects, including
         // same-unit/style locations and alternate bodies. Exercise the actual
@@ -549,7 +554,7 @@ public sealed partial class NativeSessionTests
 
     private static async Task<byte[]> RenderLibraryPinDisplay(StdioMcpFixture mcp, NativeClient client,
         DocumentSpecifier document, SchematicSymbol definition, NativeCapabilitySymbolLibraryPinDisplay display,
-        string evidence, string instanceId, string phase, CancellationToken token)
+        Box2 region, string evidence, string instanceId, string phase, CancellationToken token)
     {
         // Use the existing checked placement and native offscreen renderer.
         // The library definition remains library-owned; temporary placed pins
@@ -558,11 +563,45 @@ public sealed partial class NativeSessionTests
         { instanceId, documentJson = SchematicJson.Formatter.Format(document) });
         RequireToolSuccess(checkedReply);
         var before = SchematicJson.Parser.Parse<CheckedSchematicState>(checkedReply.GetProperty("structuredContent").GetRawText());
+        var presentationBefore = await client.InvokeAsync<ReadSchematicPresentationFacts, SchematicPresentationFacts>(
+            new() { Document = document }, token);
+        static bool Intersects(Box2 a, Box2 b) => a.Position.XNm <= b.Position.XNm + b.Size.XNm
+            && a.Position.XNm + a.Size.XNm >= b.Position.XNm && a.Position.YNm <= b.Position.YNm + b.Size.YNm
+            && a.Position.YNm + a.Size.YNm >= b.Position.YNm;
+        Assert.IsTrue(region.Position.XNm >= presentationBefore.PageBounds.Position.XNm
+            && region.Position.YNm >= presentationBefore.PageBounds.Position.YNm
+            && region.Position.XNm + region.Size.XNm <= presentationBefore.PageBounds.Position.XNm + presentationBefore.PageBounds.Size.XNm
+            && region.Position.YNm + region.Size.YNm <= presentationBefore.PageBounds.Position.YNm + presentationBefore.PageBounds.Size.YNm);
+        Assert.IsFalse(presentationBefore.Objects.Any(item => item.Visible && item.Bounds is not null && Intersects(item.Bounds, region)),
+            "The pin-display comparison region must contain no existing visible object or field.");
+        Assert.IsFalse(presentationBefore.Wires.Any(wire => Intersects(new Box2
+        {
+            Position = new() { XNm = Math.Min(wire.Start.XNm, wire.End.XNm), YNm = Math.Min(wire.Start.YNm, wire.End.YNm) },
+            Size = new() { XNm = Math.Abs(wire.End.XNm - wire.Start.XNm), YNm = Math.Abs(wire.End.YNm - wire.Start.YNm) }
+        }, region)), "The comparison region must contain no wire.");
+        Assert.IsFalse(presentationBefore.Junctions.Any(point => point.XNm >= region.Position.XNm
+            && point.XNm <= region.Position.XNm + region.Size.XNm && point.YNm >= region.Position.YNm
+            && point.YNm <= region.Position.YNm + region.Size.YNm));
+        var renderRequest = new RenderSchematicViews { Document = document };
+        renderRequest.Views.Add(new SchematicRenderView
+        { Key = "library-pin-display", WidthPixels = 800, HeightPixels = 800, Region = region.Clone() });
+        var emptyRender = await mcp.Tool("kicad_schematic_render_views", new
+        { instanceId, requestJson = SchematicJson.Formatter.Format(renderRequest) });
+        RequireToolSuccess(emptyRender);
+        static byte[] RenderPixels(JsonElement reply) => Convert.FromBase64String(reply.GetProperty("content").EnumerateArray()
+            .Single(block => block.GetProperty("type").GetString() == "image").GetProperty("data").GetString()!);
+        var emptyRaster = NativePresentationRaster.Decode(RenderPixels(emptyRender));
+        var background = emptyRaster.Rgba.AsSpan(0, 4).ToArray();
+        for (int pixel = 0; pixel < emptyRaster.Width * emptyRaster.Height; pixel++)
+            Assert.IsTrue(emptyRaster.Rgba.AsSpan(pixel * 4, 4).SequenceEqual(background),
+                "The native render must prove the comparison region is empty before placement.");
         var template = before.Electrical.Hierarchy.Data.Instances.Single(screen => Equals(screen.Metadata.Document, document))
-            .Items.Where(item => item.Is(SchematicSymbolInstance.Descriptor)).Select(item => item.Unpack<SchematicSymbolInstance>()).First();
+            .Items.Where(item => item.Is(SchematicSymbolInstance.Descriptor)).Select(item => item.Unpack<SchematicSymbolInstance>())
+            .OrderBy(symbol => symbol.Id.Value, StringComparer.Ordinal).First();
+        string CaptureIdentity(string role) => new Guid(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(instanceId + ":pin-display:" + role)).AsSpan(0, 16)).ToString("D");
         var sample = template.Clone();
-        sample.Id = new() { Value = Guid.NewGuid().ToString("D") };
-        sample.Position = new() { XNm = 100_000_000, YNm = 80_000_000 };
+        sample.Id = new() { Value = CaptureIdentity("symbol") };
+        sample.Position = new() { XNm = region.Position.XNm + region.Size.XNm / 2, YNm = region.Position.YNm + region.Size.YNm / 2 };
         sample.Transform = new() { Orientation = SchematicSymbolOrientation.Sso0 };
         sample.Unit = new() { Unit = 1 }; sample.BodyStyle = new() { Style = 1 };
         sample.Definition = definition.Clone(); sample.LibraryId = definition.Id.Clone(); sample.LibName = "";
@@ -584,7 +623,7 @@ public sealed partial class NativeSessionTests
             var child = sample.Definition.Items[index];
             if (!child.Item.Is(SchematicPin.Descriptor)) continue;
             var pin = child.Item.Unpack<SchematicPin>();
-            pin.LibraryPinId = pin.Id.Clone(); pin.Id = new() { Value = Guid.NewGuid().ToString("D") };
+            pin.LibraryPinId = pin.Id.Clone(); pin.Id = new() { Value = CaptureIdentity("pin:" + pin.LibraryPinId.Value) };
             child.Item = Any.Pack(pin);
         }
         sample.Path = document.SheetPath.Clone();
@@ -606,12 +645,6 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(display.ShowPinNumbers, placed.ShowPinNumbers);
         Assert.AreEqual(display.PinNameOffsetNm, placed.PinNameOffset.ValueNm);
 
-        var renderRequest = new RenderSchematicViews { Document = document };
-        renderRequest.Views.Add(new SchematicRenderView
-        {
-            Key = "library-pin-display", WidthPixels = 800, HeightPixels = 800,
-            Region = new() { Position = new() { XNm = 90_000_000, YNm = 70_000_000 }, Size = new() { XNm = 20_000_000, YNm = 20_000_000 } }
-        });
         var render = await mcp.Tool("kicad_schematic_render_views", new
         { instanceId, requestJson = SchematicJson.Formatter.Format(renderRequest) });
         RequireToolSuccess(render);
@@ -621,12 +654,25 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(display.ShowPinNames, renderedSample.ShowPinNames);
         Assert.AreEqual(display.ShowPinNumbers, renderedSample.ShowPinNumbers);
         Assert.AreEqual(display.PinNameOffsetNm, renderedSample.PinNameOffset.ValueNm);
-        byte[] png = Convert.FromBase64String(render.GetProperty("content").EnumerateArray()
-            .Single(block => block.GetProperty("type").GetString() == "image").GetProperty("data").GetString()!);
+        byte[] png = RenderPixels(render);
         Assert.IsGreaterThan(100, png.Length);
         Assert.AreEqual(800U, System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(png.AsSpan(16, 4)));
         Assert.AreEqual(800U, System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(png.AsSpan(20, 4)));
         await File.WriteAllBytesAsync(Path.Combine(evidence, instanceId + "-symbol-pin-display-" + phase + ".png"), png, token);
+        var raster = NativePresentationRaster.Decode(png);
+        var presentationAfter = await client.InvokeAsync<ReadSchematicPresentationFacts, SchematicPresentationFacts>(
+            new() { Document = document }, token);
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-symbol-pin-display-" + phase + ".json"), JsonSerializer.Serialize(new
+        {
+            phase, requestJson = SchematicJson.Formatter.Format(renderRequest),
+            presentationBeforeJson = SchematicJson.Formatter.Format(presentationBefore),
+            presentationAfterJson = SchematicJson.Formatter.Format(presentationAfter),
+            viewSet = render.GetProperty("structuredContent").GetProperty("viewSet"),
+            emptyViewSet = emptyRender.GetProperty("structuredContent").GetProperty("viewSet"),
+            definitionJson = SchematicJson.Formatter.Format(definition), pinDisplayJson = SchematicJson.Formatter.Format(display),
+            placedJson = SchematicJson.Formatter.Format(placed), renderedJson = SchematicJson.Formatter.Format(renderedSample),
+            pngSha256 = Convert.ToHexStringLower(SHA256.HashData(png)), pixelsSha256 = Convert.ToHexStringLower(SHA256.HashData(raster.Rgba))
+        }), token);
         var afterReply = await mcp.Tool("kicad_schematic_checked_state", new
         { instanceId, documentJson = SchematicJson.Formatter.Format(document) });
         RequireToolSuccess(afterReply);
@@ -636,7 +682,9 @@ public sealed partial class NativeSessionTests
             expectedStateJson = afterReply.GetProperty("structuredContent").GetRawText(), operationId = Guid.NewGuid().ToString("D")
         });
         RequireToolSuccess(delete);
-        return png;
+        // Compare exact decoded native pixels, independently of PNG encoding.
+        // No pixel tolerance is applied; changed label settings must still fail.
+        return raster.Rgba;
     }
 
     private static void AssertSymbolContent(SchematicSymbol actual, SchematicSymbol expected, string message)

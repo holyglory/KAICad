@@ -2864,9 +2864,13 @@ public sealed partial class NativeSessionTests
         var expectedAuthoring = expected.Clone();
         expectedAuthoring.Filled = false;
         expectedAuthoring.FilledPolygons.Clear();
+        // Parent is native ownership metadata, not authored zone content.  Its
+        // representation may be regenerated when the board is reopened.
+        expectedAuthoring.Parent = new();
         var actualAuthoring = actual.Clone();
         actualAuthoring.Filled = false;
         actualAuthoring.FilledPolygons.Clear();
+        actualAuthoring.Parent = new();
         return expectedAuthoring.Equals(actualAuthoring);
     }
 

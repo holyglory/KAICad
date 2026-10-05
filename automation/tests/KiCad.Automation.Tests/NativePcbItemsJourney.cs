@@ -2871,7 +2871,24 @@ public sealed partial class NativeSessionTests
         actualAuthoring.Filled = false;
         actualAuthoring.FilledPolygons.Clear();
         actualAuthoring.Parent = new();
+        NormalizeNativeDefaults(expectedAuthoring);
+        NormalizeNativeDefaults(actualAuthoring);
         return BoardJson.Formatter.Format(expectedAuthoring) == BoardJson.Formatter.Format(actualAuthoring);
+    }
+
+    private static void NormalizeNativeDefaults(Zone zone)
+    {
+        if (zone.CopperSettings is not { } settings)
+            return;
+        // KiCad materializes omitted settings on reload.  Compare authored
+        // values while treating those materialized defaults as equivalent.
+        settings.HatchSettings = new();
+        settings.ThievingSettings = new();
+        settings.MinIslandArea = 0;
+        settings.CornerSmoothing = ZoneCornerSmoothingMode.ZcsmNone;
+        settings.CornerRadius = null;
+        settings.Connection ??= new();
+        settings.Connection.ThermalSpokes = new();
     }
 
     private static void AssertZoneAuthoringMatches(Zone expected, Zone actual, string message)

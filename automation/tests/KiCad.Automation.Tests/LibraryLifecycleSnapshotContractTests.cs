@@ -42,6 +42,66 @@ public sealed class LibraryLifecycleSnapshotContractTests
     }
 
     [TestMethod]
+    public void RelativeProjectPathsAreRejectedEvenWhenExpectedPathMatches()
+    {
+        (LibraryLifecycleSnapshot snapshot, DocumentSpecifier document, _) = Fixture();
+        var relativeDocument = document.Clone();
+        relativeDocument.Project.Path = "relative/project";
+        Reject(() => LibraryLifecycleSnapshotContract.ValidateReadOnly(
+            snapshot with { Document = relativeDocument }, relativeDocument, "fixture", "relative/project"),
+            "library_project_mismatch");
+    }
+
+    [TestMethod]
+    public void AbsoluteDotAliasesRemainValid()
+    {
+        (LibraryLifecycleSnapshot snapshot, DocumentSpecifier document, string projectPath) = Fixture();
+        string tableAlias = Path.Combine(projectPath, "tables", "..", "sym-lib-table");
+        string libraryAlias = Path.Combine(projectPath, "libs", "..", "libs", "fixture.kicad_sym");
+        var aliased = snapshot with
+        {
+            TablePath = tableAlias,
+            ExpandedUri = libraryAlias,
+            DependencyBaselines =
+            [
+                new LibraryLifecycleDependencyBaseline(tableAlias, new string('a', 64), 7),
+                new LibraryLifecycleDependencyBaseline(libraryAlias, new string('b', 64), 7)
+            ]
+        };
+
+        LibraryLifecycleSnapshotContract.ValidateReadOnly(aliased, document, "fixture",
+            Path.Combine(projectPath, "tables", ".."));
+    }
+
+    [TestMethod]
+    public void RelativeTableAndExpandedUriAreRejected()
+    {
+        (LibraryLifecycleSnapshot snapshot, DocumentSpecifier document, string projectPath) = Fixture();
+
+        Reject(() => LibraryLifecycleSnapshotContract.ValidateReadOnly(
+            snapshot with { TablePath = "relative/sym-lib-table" }, document, "fixture", projectPath),
+            "library_table_row_mismatch");
+
+        Reject(() => LibraryLifecycleSnapshotContract.ValidateReadOnly(
+            snapshot with { ExpandedUri = "relative/fixture.kicad_sym" }, document, "fixture", projectPath),
+            "library_table_row_mismatch");
+    }
+
+    [TestMethod]
+    public void NulTableAndExpandedUriAreRejected()
+    {
+        (LibraryLifecycleSnapshot snapshot, DocumentSpecifier document, string projectPath) = Fixture();
+
+        Reject(() => LibraryLifecycleSnapshotContract.ValidateReadOnly(
+            snapshot with { TablePath = snapshot.TablePath + "\0" }, document, "fixture", projectPath),
+            "library_table_row_mismatch");
+
+        Reject(() => LibraryLifecycleSnapshotContract.ValidateReadOnly(
+            snapshot with { ExpandedUri = snapshot.ExpandedUri + "\0" }, document, "fixture", projectPath),
+            "library_table_row_mismatch");
+    }
+
+    [TestMethod]
     public void IncompleteSnapshotAndPartialHashOrCursorCannotBeAdmitted()
     {
         (LibraryLifecycleSnapshot snapshot, DocumentSpecifier document, string projectPath) = Fixture();
@@ -63,6 +123,73 @@ public sealed class LibraryLifecycleSnapshotContractTests
         };
         Reject(() => LibraryLifecycleSnapshotContract.ValidateReadOnly(
             cursor, document, "fixture", projectPath), "library_baseline_incomplete");
+    }
+
+    [TestMethod]
+    public void RequiresExistingTableAndLibraryBaselines()
+    {
+        (LibraryLifecycleSnapshot snapshot, DocumentSpecifier document, string projectPath) = Fixture();
+
+        Reject(() => LibraryLifecycleSnapshotContract.ValidateReadOnly(
+            snapshot with { DependencyBaselines = [snapshot.DependencyBaselines[1]] },
+            document, "fixture", projectPath), "library_baseline_incomplete");
+
+        Reject(() => LibraryLifecycleSnapshotContract.ValidateReadOnly(
+            snapshot with { DependencyBaselines = [snapshot.DependencyBaselines[0]] },
+            document, "fixture", projectPath), "library_baseline_incomplete");
+
+        var absentTable = snapshot with
+        {
+            DependencyBaselines =
+            [
+                snapshot.DependencyBaselines[0] with { Exists = false, Sha256 = "", Bytes = 0 },
+                snapshot.DependencyBaselines[1]
+            ]
+        };
+        Reject(() => LibraryLifecycleSnapshotContract.ValidateReadOnly(
+            absentTable, document, "fixture", projectPath), "library_baseline_incomplete");
+
+        var unknownLibrary = snapshot with
+        {
+            DependencyBaselines =
+            [
+                snapshot.DependencyBaselines[0],
+                snapshot.DependencyBaselines[1] with { Known = false, Sha256 = "", Bytes = 0 }
+            ]
+        };
+        Reject(() => LibraryLifecycleSnapshotContract.ValidateReadOnly(
+            unknownLibrary, document, "fixture", projectPath), "library_baseline_incomplete");
+    }
+
+    [TestMethod]
+    public void DuplicateNormalizedDependencyAliasesAreRejected()
+    {
+        (LibraryLifecycleSnapshot snapshot, DocumentSpecifier document, string projectPath) = Fixture();
+        string libraryAlias = Path.Combine(projectPath, "libs", "..", "libs", "fixture.kicad_sym");
+        var duplicate = snapshot with
+        {
+            DependencyBaselines =
+            [
+                snapshot.DependencyBaselines[0],
+                snapshot.DependencyBaselines[1],
+                new LibraryLifecycleDependencyBaseline(libraryAlias, new string('c', 64), 7)
+            ]
+        };
+        Reject(() => LibraryLifecycleSnapshotContract.ValidateReadOnly(
+            duplicate, document, "fixture", projectPath), "library_baseline_incomplete");
+    }
+
+    [TestMethod]
+    public void DirectoryAndNestedSymbolFileShapesAreRejected()
+    {
+        (LibraryLifecycleSnapshot snapshot, DocumentSpecifier document, string projectPath) = Fixture();
+        Reject(() => LibraryLifecycleSnapshotContract.ValidateReadOnly(
+            snapshot with { ExpandedUri = Path.Combine(projectPath, "libs") },
+            document, "fixture", projectPath), "library_table_row_mismatch");
+
+        Reject(() => LibraryLifecycleSnapshotContract.ValidateReadOnly(
+            snapshot with { ExpandedUri = Path.Combine(projectPath, "folder.kicad_sym", "fixture.kicad_sym") },
+            document, "fixture", projectPath), "library_table_row_mismatch");
     }
 
     [TestMethod]
@@ -92,7 +219,10 @@ public sealed class LibraryLifecycleSnapshotContractTests
             document, Path.Combine(projectPath, "sym-lib-table"), "PROJECT", "Fixture",
             "${KIPRJMOD}/libs/fixture.kicad_sym", libraryPath, "kicad-symbol-file",
             "{\"id\":\"Fixture:Probe\"}",
-            [new LibraryLifecycleDependencyBaseline(libraryPath, new string('a', 64), 7)],
+            [
+                new LibraryLifecycleDependencyBaseline(Path.Combine(projectPath, "sym-lib-table"), new string('b', 64), 11),
+                new LibraryLifecycleDependencyBaseline(libraryPath, new string('a', 64), 7)
+            ],
             ForcedRefresh: true, ProviderObservable: true, ContentSnapshotComplete: true,
             DiskBaselineChecked: true, CompleteChangeTracking: false, Postverify: false);
         return (snapshot, document, projectPath);

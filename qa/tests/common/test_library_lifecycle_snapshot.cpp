@@ -31,6 +31,8 @@ LIBRARY_LIFECYCLE_SNAPSHOT Snapshot()
     snapshot.provider = "kicad-symbol-file";
     snapshot.detachedDefinition = "(symbol (lib_id Fixture:Probe))";
     snapshot.dependencyBaselines.push_back(
+            FILE_CONTENT_BASELINE::FromBytes( snapshot.tablePath, "(sym_lib_table)" ) );
+    snapshot.dependencyBaselines.push_back(
             FILE_CONTENT_BASELINE::FromBytes( snapshot.expandedUri, "fixture" ) );
     snapshot.forcedRefresh = true;
     snapshot.providerObservable = true;
@@ -75,6 +77,72 @@ BOOST_AUTO_TEST_CASE( RejectsForeignProjectBeforeProviderRead )
 }
 
 
+BOOST_AUTO_TEST_CASE( RejectsRelativeProjectPathsEvenWhenExpectedPathMatches )
+{
+    auto snapshot = Snapshot();
+    snapshot.document.mutable_project()->set_path( "relative/project" );
+    RequireError( ValidateLibraryLifecycleSnapshot( snapshot, wxS( "fixture" ),
+                                                     wxS( "relative/project" ) ),
+                  LIBRARY_LIFECYCLE_ERROR_CODE::PROJECT_MISMATCH );
+}
+
+
+BOOST_AUTO_TEST_CASE( AcceptsAbsoluteDotAliasesForProjectAndFiles )
+{
+    auto snapshot = Snapshot();
+    const std::filesystem::path root = std::filesystem::path( snapshot.document.project().path() );
+    const std::filesystem::path tableAlias = root / "tables" / ".." / "sym-lib-table";
+    const std::filesystem::path libraryAlias = root / "libs" / ".." / "libs" / "fixture.kicad_sym";
+    snapshot.tablePath = wxString::FromUTF8( tableAlias.string() );
+    snapshot.expandedUri = wxString::FromUTF8( libraryAlias.string() );
+    snapshot.dependencyBaselines.clear();
+    snapshot.dependencyBaselines.push_back(
+            FILE_CONTENT_BASELINE::FromBytes( snapshot.tablePath, "(sym_lib_table)" ) );
+    snapshot.dependencyBaselines.push_back(
+            FILE_CONTENT_BASELINE::FromBytes( snapshot.expandedUri, "fixture" ) );
+
+    const auto result = ValidateLibraryLifecycleSnapshot(
+            snapshot, wxS( "fixture" ), wxString::FromUTF8( ( root / "tables" / ".." ).string() ) );
+    BOOST_REQUIRE( result.has_value() );
+}
+
+
+BOOST_AUTO_TEST_CASE( RejectsRelativeTableAndExpandedUri )
+{
+    auto relativeTable = Snapshot();
+    relativeTable.tablePath = wxS( "relative/sym-lib-table" );
+    RequireError( ValidateLibraryLifecycleSnapshot(
+                          relativeTable, wxS( "fixture" ),
+                          wxString::FromUTF8( relativeTable.document.project().path() ) ),
+                  LIBRARY_LIFECYCLE_ERROR_CODE::INVALID_TABLE_ROW );
+
+    auto relativeLibrary = Snapshot();
+    relativeLibrary.expandedUri = wxS( "relative/fixture.kicad_sym" );
+    RequireError( ValidateLibraryLifecycleSnapshot(
+                          relativeLibrary, wxS( "fixture" ),
+                          wxString::FromUTF8( relativeLibrary.document.project().path() ) ),
+                  LIBRARY_LIFECYCLE_ERROR_CODE::INVALID_TABLE_ROW );
+}
+
+
+BOOST_AUTO_TEST_CASE( RejectsNulTableAndExpandedUri )
+{
+    auto nulTable = Snapshot();
+    nulTable.tablePath += wxUniChar( '\0' );
+    RequireError( ValidateLibraryLifecycleSnapshot(
+                          nulTable, wxS( "fixture" ),
+                          wxString::FromUTF8( nulTable.document.project().path() ) ),
+                  LIBRARY_LIFECYCLE_ERROR_CODE::INVALID_TABLE_ROW );
+
+    auto nulLibrary = Snapshot();
+    nulLibrary.expandedUri += wxUniChar( '\0' );
+    RequireError( ValidateLibraryLifecycleSnapshot(
+                          nulLibrary, wxS( "fixture" ),
+                          wxString::FromUTF8( nulLibrary.document.project().path() ) ),
+                  LIBRARY_LIFECYCLE_ERROR_CODE::INVALID_TABLE_ROW );
+}
+
+
 BOOST_AUTO_TEST_CASE( RejectsUnknownAndUnsupportedProviders )
 {
     auto unknown = Snapshot();
@@ -107,6 +175,78 @@ BOOST_AUTO_TEST_CASE( RejectsIncompleteRefreshAndDependencyEvidence )
     RequireError( ValidateLibraryLifecycleSnapshot( partialBaseline, wxS( "fixture" ),
                                                      wxString::FromUTF8( partialBaseline.document.project().path() ) ),
                   LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_BASELINE );
+}
+
+
+BOOST_AUTO_TEST_CASE( RequiresExistingTableAndLibraryBaselines )
+{
+    auto missingTable = Snapshot();
+    missingTable.dependencyBaselines.erase( missingTable.dependencyBaselines.begin() );
+    RequireError( ValidateLibraryLifecycleSnapshot(
+                          missingTable, wxS( "fixture" ),
+                          wxString::FromUTF8( missingTable.document.project().path() ) ),
+                  LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_BASELINE );
+
+    auto missingLibrary = Snapshot();
+    missingLibrary.dependencyBaselines.pop_back();
+    RequireError( ValidateLibraryLifecycleSnapshot(
+                          missingLibrary, wxS( "fixture" ),
+                          wxString::FromUTF8( missingLibrary.document.project().path() ) ),
+                  LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_BASELINE );
+
+    auto absentTable = Snapshot();
+    const std::filesystem::path root = std::filesystem::path( absentTable.document.project().path() );
+    absentTable.tablePath = wxString::FromUTF8( ( root / "missing-sym-lib-table" ).string() );
+    absentTable.dependencyBaselines[0] = FILE_CONTENT_BASELINE::Read( absentTable.tablePath );
+    // The producer owns filesystem IO.  The validator only requires an existing baseline for
+    // the table and expanded URI identities; it does not probe the path itself.
+    RequireError( ValidateLibraryLifecycleSnapshot(
+                          absentTable, wxS( "fixture" ),
+                          wxString::FromUTF8( absentTable.document.project().path() ) ),
+                  LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_BASELINE );
+
+    auto unknownLibrary = Snapshot();
+    unknownLibrary.dependencyBaselines[1] = FILE_CONTENT_BASELINE{};
+    RequireError( ValidateLibraryLifecycleSnapshot(
+                          unknownLibrary, wxS( "fixture" ),
+                          wxString::FromUTF8( unknownLibrary.document.project().path() ) ),
+                  LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_BASELINE );
+}
+
+
+BOOST_AUTO_TEST_CASE( RejectsDuplicateNormalizedDependencyAliases )
+{
+    auto snapshot = Snapshot();
+    const std::filesystem::path root = std::filesystem::path( snapshot.document.project().path() );
+    snapshot.dependencyBaselines.push_back( FILE_CONTENT_BASELINE::FromBytes(
+            wxString::FromUTF8( ( root / "libs" / ".." / "libs" / "fixture.kicad_sym" ).string() ),
+            "duplicate" ) );
+    RequireError( ValidateLibraryLifecycleSnapshot(
+                          snapshot, wxS( "fixture" ),
+                          wxString::FromUTF8( snapshot.document.project().path() ) ),
+                  LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_BASELINE );
+}
+
+
+BOOST_AUTO_TEST_CASE( RejectsDirectoryAndNestedSymbolFileShapes )
+{
+    auto directory = Snapshot();
+    directory.expandedUri = wxString::FromUTF8(
+            ( std::filesystem::path( directory.document.project().path() ) / "libs" ).string() );
+    RequireError( ValidateLibraryLifecycleSnapshot(
+                          directory, wxS( "fixture" ),
+                          wxString::FromUTF8( directory.document.project().path() ) ),
+                  LIBRARY_LIFECYCLE_ERROR_CODE::INVALID_TABLE_ROW );
+
+    auto nested = Snapshot();
+    nested.expandedUri = wxString::FromUTF8( ( std::filesystem::path(
+                                                       nested.document.project().path() )
+                                               / "folder.kicad_sym" / "fixture.kicad_sym" )
+                                                      .string() );
+    RequireError( ValidateLibraryLifecycleSnapshot(
+                          nested, wxS( "fixture" ),
+                          wxString::FromUTF8( nested.document.project().path() ) ),
+                  LIBRARY_LIFECYCLE_ERROR_CODE::INVALID_TABLE_ROW );
 }
 
 

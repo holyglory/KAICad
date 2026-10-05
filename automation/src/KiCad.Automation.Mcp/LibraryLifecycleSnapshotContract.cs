@@ -62,7 +62,8 @@ internal static class LibraryLifecycleSnapshotContract
             throw new AutomationException("invalid_library_document",
                 "A symbol-library snapshot requires a project-bound symbol DocumentSpecifier and library entry.");
 
-        if (!string.Equals(document.Project.Name, expectedProjectName, StringComparison.Ordinal)
+        if (string.IsNullOrWhiteSpace(expectedProjectName) || expectedProjectName.IndexOf('\0') >= 0
+            || !string.Equals(document.Project.Name, expectedProjectName, StringComparison.Ordinal)
             || !SameAbsolutePath(document.Project.Path, expectedProjectPath))
             throw new AutomationException("library_project_mismatch",
                 "The requested symbol-library project is not the project served by this native owner.");
@@ -71,7 +72,7 @@ internal static class LibraryLifecycleSnapshotContract
             || !string.Equals(snapshot.Nickname, document.LibId.LibraryNickname, StringComparison.Ordinal)
             || snapshot.TableScope is not ("PROJECT" or "GLOBAL")
             || !IsAbsolute(snapshot.TablePath) || string.IsNullOrWhiteSpace(snapshot.RawUri)
-            || snapshot.RawUri.IndexOf('\0') >= 0 || !IsAbsolute(snapshot.ExpandedUri))
+            || snapshot.RawUri.IndexOf('\0') >= 0 || !IsSymbolFile(snapshot.ExpandedUri))
             throw new AutomationException("library_table_row_mismatch",
                 "The symbol-library table row must include the exact scope, table path and raw/expanded URI.");
 
@@ -89,18 +90,33 @@ internal static class LibraryLifecycleSnapshotContract
                 "A safe symbol-library snapshot requires a forced refresh, detached definition, observable provider and complete dependency evidence.");
 
         var paths = ImmutableHashSet.CreateBuilder<string>(StringComparer.Ordinal);
+        bool hasTableBaseline = false;
+        bool hasLibraryBaseline = false;
         foreach (LibraryLifecycleDependencyBaseline baseline in snapshot.DependencyBaselines)
         {
-            if (baseline is null || !baseline.Known || string.IsNullOrWhiteSpace(baseline.Path)
-                || !IsAbsolute(baseline.Path) || !paths.Add(NormalizePath(baseline.Path)))
+            string? normalizedPath = baseline is null ? null : NormalizeAbsolutePath(baseline.Path);
+            if (baseline is null || !baseline.Known || normalizedPath is null || !paths.Add(normalizedPath))
                 throw new AutomationException("library_baseline_incomplete",
                     "Every symbol-library dependency needs one complete, unique absolute file baseline.");
+
+            bool isTable = SameAbsolutePath(baseline.Path, snapshot.TablePath);
+            bool isLibrary = SameAbsolutePath(baseline.Path, snapshot.ExpandedUri);
+            if ((isTable || isLibrary) && !baseline.Exists)
+                throw new AutomationException("library_baseline_incomplete",
+                    "The table and expanded symbol-library URI each need an existing content baseline.");
+
+            hasTableBaseline |= isTable && baseline.Exists;
+            hasLibraryBaseline |= isLibrary && baseline.Exists;
 
             if (!string.IsNullOrEmpty(baseline.Cursor) || (baseline.Exists && !IsSha256(baseline.Sha256))
                 || (!baseline.Exists && (!string.IsNullOrEmpty(baseline.Sha256) || baseline.Bytes != 0)))
                 throw new AutomationException("library_baseline_incomplete",
                     "A partial hash or cursor cannot be used as a symbol-library file baseline.");
         }
+
+        if (!hasTableBaseline || !hasLibraryBaseline)
+            throw new AutomationException("library_baseline_incomplete",
+                "The table and expanded symbol-library URI each need an existing content baseline.");
 
         // The current owner coverage deliberately remains incomplete.  A true value would claim
         // coverage for GUI editor, import/rescue and remote writers that do not share this owner.
@@ -122,10 +138,36 @@ internal static class LibraryLifecycleSnapshotContract
 
     private static bool IsSha256(string value) => value.Length == 64 && value.All(char.IsAsciiHexDigitLower);
 
-    private static bool IsAbsolute(string value) => value.IndexOf('\0') < 0 && Path.IsPathFullyQualified(value);
+    private static bool IsAbsolute(string value) => !string.IsNullOrWhiteSpace(value)
+        && value.IndexOf('\0') < 0 && Path.IsPathFullyQualified(value);
+
+    private static bool IsSymbolFile(string value)
+    {
+        if (!IsAbsolute(value) || HasTrailingSeparator(value)) return false;
+
+        string normalized = NormalizePath(value);
+        if (!string.Equals(Path.GetExtension(normalized), ".kicad_sym", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        for (string? parent = Path.GetDirectoryName(normalized);
+             !string.IsNullOrEmpty(parent); parent = Path.GetDirectoryName(parent))
+        {
+            if (string.Equals(Path.GetExtension(Path.GetFileName(parent)), ".kicad_sym",
+                StringComparison.OrdinalIgnoreCase))
+                return false;
+        }
+
+        return true;
+    }
+
+    private static bool HasTrailingSeparator(string value) =>
+        value.EndsWith(Path.DirectorySeparatorChar) || value.EndsWith(Path.AltDirectorySeparatorChar);
 
     private static bool SameAbsolutePath(string left, string right) =>
         IsAbsolute(left) && IsAbsolute(right) && string.Equals(NormalizePath(left), NormalizePath(right), StringComparison.Ordinal);
 
-    private static string NormalizePath(string value) => Path.GetFullPath(value).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    private static string? NormalizeAbsolutePath(string value) => IsAbsolute(value) ? NormalizePath(value) : null;
+
+    private static string NormalizePath(string value) =>
+        Path.TrimEndingDirectorySeparator(Path.GetFullPath(value));
 }

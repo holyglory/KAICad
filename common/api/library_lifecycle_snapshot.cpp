@@ -4,7 +4,6 @@
 #include <wx/filename.h>
 
 #include <algorithm>
-#include <set>
 #include <utility>
 
 
@@ -12,7 +11,7 @@ namespace
 {
 wxString NormalizeDirectory( const wxString& aPath )
 {
-    if( aPath.empty() )
+    if( aPath.empty() || aPath.Find( '\0' ) != wxNOT_FOUND )
         return {};
 
     wxFileName path = wxFileName::DirName( aPath );
@@ -20,17 +19,41 @@ wxString NormalizeDirectory( const wxString& aPath )
     if( !path.IsAbsolute() || !path.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE ) )
         return {};
 
-    return path.GetPath();
+    const wxString normalized = path.GetPath();
+    return normalized.empty() ? wxString{} : normalized;
 }
 
 
 bool IsAbsoluteFile( const wxString& aPath )
 {
-    if( aPath.empty() )
+    if( aPath.empty() || aPath.Find( '\0' ) != wxNOT_FOUND )
         return false;
 
     wxFileName path( aPath );
     return path.IsAbsolute() && path.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+}
+
+
+bool IsSymbolFile( const wxString& aPath )
+{
+    if( !IsAbsoluteFile( aPath ) || aPath.Last() == '/' || aPath.Last() == '\\' )
+        return false;
+
+    wxFileName path( aPath );
+
+    if( path.GetExt().CmpNoCase( wxS( "kicad_sym" ) ) != 0 )
+        return false;
+
+    // A directory ending in .kicad_sym would be a folder/nested provider, not the direct
+    // symbol-file provider covered by this slice.  The producer still owns filesystem IO; this
+    // check only rejects an explicitly unsupported path shape.
+    for( const wxString& directory : path.GetDirs() )
+    {
+        if( directory.Lower().EndsWith( wxS( ".kicad_sym" ) ) )
+            return false;
+    }
+
+    return true;
 }
 
 
@@ -72,9 +95,14 @@ LIBRARY_LIFECYCLE_RESULT ValidateLibraryLifecycleSnapshot(
                       "a symbol-library snapshot requires a project-bound symbol DocumentSpecifier" );
     }
 
-    if( document.project().name() != aExpectedProjectName.ToStdString( wxConvUTF8 )
-            || NormalizeDirectory( wxString::FromUTF8( document.project().path() ) )
-                       != NormalizeDirectory( aExpectedProjectPath ) )
+    const wxString normalizedProjectPath =
+            NormalizeDirectory( wxString::FromUTF8( document.project().path() ) );
+    const wxString normalizedExpectedProjectPath = NormalizeDirectory( aExpectedProjectPath );
+
+    if( aExpectedProjectName.empty() || aExpectedProjectName.Find( '\0' ) != wxNOT_FOUND
+            || normalizedProjectPath.empty() || normalizedExpectedProjectPath.empty()
+            || document.project().name() != aExpectedProjectName.ToStdString( wxConvUTF8 )
+            || normalizedProjectPath != normalizedExpectedProjectPath )
     {
         return Error( LIBRARY_LIFECYCLE_ERROR_CODE::PROJECT_MISMATCH,
                       "the requested symbol-library project is not the project served by this native owner" );
@@ -85,7 +113,7 @@ LIBRARY_LIFECYCLE_RESULT ValidateLibraryLifecycleSnapshot(
             || ( aSnapshot.tableScope != LIBRARY_TABLE_SCOPE::GLOBAL
                  && aSnapshot.tableScope != LIBRARY_TABLE_SCOPE::PROJECT )
             || !IsAbsoluteFile( aSnapshot.tablePath ) || aSnapshot.rawUri.empty()
-            || aSnapshot.rawUri.Find( '\0' ) != wxNOT_FOUND || !IsAbsoluteFile( aSnapshot.expandedUri ) )
+            || aSnapshot.rawUri.Find( '\0' ) != wxNOT_FOUND || !IsSymbolFile( aSnapshot.expandedUri ) )
     {
         return Error( LIBRARY_LIFECYCLE_ERROR_CODE::INVALID_TABLE_ROW,
                       "the symbol-library table row is missing its exact scope, path or URI identity" );
@@ -115,16 +143,40 @@ LIBRARY_LIFECYCLE_RESULT ValidateLibraryLifecycleSnapshot(
                       "observable provider and complete content/dependency evidence" );
     }
 
-    std::set<wxString> paths;
+    std::vector<wxString> paths;
+    bool hasTableBaseline = false;
+    bool hasLibraryBaseline = false;
 
     for( const FILE_CONTENT_BASELINE& baseline : aSnapshot.dependencyBaselines )
     {
-        if( !baseline.Known() || !IsAbsoluteFile( baseline.Path() )
-                || !paths.insert( baseline.Path() ).second )
+        if( !baseline.Known() || !IsAbsoluteFile( baseline.Path() ) )
         {
             return Error( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_BASELINE,
                           "every symbol-library dependency needs one complete, unique absolute file baseline" );
         }
+
+        for( const wxString& path : paths )
+        {
+            if( FILE_CONTENT_BASELINE::SamePath( path, baseline.Path() ) )
+            {
+                return Error( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_BASELINE,
+                              "every symbol-library dependency needs one complete, unique absolute file baseline" );
+            }
+        }
+
+        paths.push_back( baseline.Path() );
+
+        const bool isTable = FILE_CONTENT_BASELINE::SamePath( baseline.Path(), aSnapshot.tablePath );
+        const bool isLibrary = FILE_CONTENT_BASELINE::SamePath( baseline.Path(), aSnapshot.expandedUri );
+
+        if( ( isTable || isLibrary ) && !baseline.Exists() )
+        {
+            return Error( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_BASELINE,
+                          "the table and expanded symbol-library URI each need an existing content baseline" );
+        }
+
+        hasTableBaseline = hasTableBaseline || ( isTable && baseline.Exists() );
+        hasLibraryBaseline = hasLibraryBaseline || ( isLibrary && baseline.Exists() );
 
         if( baseline.Exists() && !IsSha256( baseline.Sha256() ) )
         {
@@ -137,6 +189,12 @@ LIBRARY_LIFECYCLE_RESULT ValidateLibraryLifecycleSnapshot(
             return Error( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_BASELINE,
                           "an absent dependency must have an empty digest and zero bytes" );
         }
+    }
+
+    if( !hasTableBaseline || !hasLibraryBaseline )
+    {
+        return Error( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_BASELINE,
+                      "the table and expanded symbol-library URI each need an existing content baseline" );
     }
 
     // The current owner coverage deliberately remains incomplete.  A true value here would be a

@@ -45,7 +45,7 @@ public sealed partial class NativeSessionTests
             Types_ = { KiCadObjectType.KotPcbFootprint }
         }, token);
         Assert.IsTrue(boardFootprints.Items.Any(item => item.Is(FootprintInstance.Descriptor)
-            && item.Unpack<FootprintInstance>().ReferenceField.Text.Text_ == "U1"),
+            && item.Unpack<FootprintInstance>().ReferenceField.Text.Text.Text_ == "U1"),
             "The copied board must expose U1 through the live PCB API.");
 
         var selectionRequest = new SyncSelection
@@ -94,7 +94,7 @@ public sealed partial class NativeSessionTests
             }
         }
         Assert.IsTrue(selected.Items.Any(item => item.Is(FootprintInstance.Descriptor)
-            && item.Unpack<FootprintInstance>().ReferenceField.Text.Text_ == "U1"),
+            && item.Unpack<FootprintInstance>().ReferenceField.Text.Text.Text_ == "U1"),
             "The live PCB editor must select the requested U1 footprint. Selection: "
             + string.Join(", ", selected.Items.Select(item => item.TypeUrl)));
         Assert.AreEqual(before, await ObserveLifecycleState(client, board, token),

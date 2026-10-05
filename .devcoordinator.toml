@@ -3395,7 +3395,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.fixture-retry.check]]
 name="pcb"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativePcbItems","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/fixture-retry/pcb"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativePcbItems|FullyQualifiedName~NativeEvidenceDirectoryTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/fixture-retry/pcb"]
 retained_artifacts=[{name="pcb-tests",path="automation/artifacts/fixture-retry/pcb",max_bytes=16777216},{name="pcb-evidence",path="automation/artifacts/native-pcb-items/native-session-current",max_bytes=67108864}]
 [[test.fixture-retry.check]]
 name="keepout"
@@ -3437,7 +3437,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 name="managed-contracts"
 tier="development"
 requires=["managed-build"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","((FullyQualifiedName~PcbMultilayerRoutingTests|FullyQualifiedName~PcbRoutingContractTests|FullyQualifiedName~CheckedPcbItemContractTests|FullyQualifiedName~McpProcessTests|FullyQualifiedName~SimulationDeckAdmissionTests|FullyQualifiedName~SharedProtoBandTests|FullyQualifiedName~CapabilityCatalogTests)&TestCategory!=NativeSession)|TestCategory=NativePcbItemsFixture","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/pcb-simulation-checkpoint/contracts"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","((FullyQualifiedName~PcbMultilayerRoutingTests|FullyQualifiedName~PcbRoutingContractTests|FullyQualifiedName~CheckedPcbItemContractTests|FullyQualifiedName~NativeEvidenceDirectoryTests|FullyQualifiedName~McpProcessTests|FullyQualifiedName~SimulationDeckAdmissionTests|FullyQualifiedName~SharedProtoBandTests|FullyQualifiedName~CapabilityCatalogTests)&TestCategory!=NativeSession)|TestCategory=NativePcbItemsFixture","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/pcb-simulation-checkpoint/contracts"]
 retained_artifacts=[{name="contracts",path="automation/artifacts/pcb-simulation-checkpoint/contracts",max_bytes=16777216}]
 [[test.pcb-simulation-checkpoint.check]]
 name="native-build"

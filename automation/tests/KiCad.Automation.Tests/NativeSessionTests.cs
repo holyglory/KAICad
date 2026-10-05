@@ -145,7 +145,7 @@ public sealed partial class NativeSessionTests
         string executable = Path.Combine(root, "automation", "artifacts", "native", "kicad", "kicad");
         Assert.IsTrue(File.Exists(executable), "The linked native manager must be built first.");
         string artifacts = Path.Combine(root, "automation", "artifacts");
-        string evidence = NativeEvidenceDirectory.Begin(journey == NativeJourney.Foundation ? artifacts
+        string evidenceRoot = journey == NativeJourney.Foundation ? artifacts
             : Path.Combine(artifacts, journey switch { NativeJourney.TableVariants => "native-table-variants",
                 NativeJourney.Setup => "native-setup-draft", NativeJourney.BomSettings => "native-bom-settings",
                 NativeJourney.NetSettings => "native-net-settings",
@@ -178,7 +178,16 @@ public sealed partial class NativeSessionTests
                 NativeJourney.NativeCrash => "native-crash",
                 NativeJourney.NativeCrashRelease => "native-crash-release",
                 NativeJourney.ObserveApplyStress => "native-observe-apply-stress",
-                _ => "native-net-chains" }));
+                _ => "native-net-chains" });
+        string caseIdentity = journey switch
+        {
+            NativeJourney.PcbItems => nameof(NativePcbItemsAreCreatedAndUpdatedThroughMcp),
+            NativeJourney.PcbConnectivity => nameof(NativePcbConnectivityQueryUsesTypedNativeSummaries),
+            NativeJourney.CrossProbe => nameof(NativePcbCrossProbeBindsTheLiveBoardWithoutMutation),
+            _ => ""
+        };
+        string evidence = caseIdentity.Length == 0 ? NativeEvidenceDirectory.Begin(evidenceRoot)
+            : NativeEvidenceDirectory.BeginCase(evidenceRoot, caseIdentity);
         string temporary = Directory.CreateTempSubdirectory("kicad-native-").FullName;
         // The earlier composed journey took 433s before expanded Setup and
         // annotation coverage. Keep all per-action limits and focused ceilings;

@@ -992,7 +992,7 @@ HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleRea
     base.set_process_epoch( aCtx.Request.process_epoch() );
     base.mutable_expected_candidate_items()->CopyFrom( aCtx.Request.expected_candidate_items() );
     base.mutable_expected_group_changes()->CopyFrom( aCtx.Request.expected_group_changes() );
-    auto read = m_drcJobs.Read( base, *board(), apiServer().Token(),
+    auto read = m_drcJobs.Read( base, *board(), drcApiServer().Token(),
             [this]( const auto& document ) { return observeDrcSchematic( document ); },
             [this]( BOARD& source ) { return observeDrcLibraries( source ); }, true );
     if( !read )
@@ -1002,7 +1002,7 @@ HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleRea
         error.set_error_message( read.error() );
         return tl::unexpected( error );
     }
-    auto deletes = m_drcJobs.VerifyDeleteItems( aCtx.Request.job_id(), apiServer().Token(),
+    auto deletes = m_drcJobs.VerifyDeleteItems( aCtx.Request.job_id(), drcApiServer().Token(),
                                                  aCtx.Request.document(),
                                                  aCtx.Request.expected_delete_item_ids() );
     if( !deletes )

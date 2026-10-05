@@ -1325,6 +1325,51 @@ message NativeCapabilitySymbolLibraryReadOperationResponse {
   NativeCapabilitySymbolLibraryDeleteSymbolResponse delete_response = 4;
 }
 
+// Read-only, project-bound symbol-library lifecycle evidence. This transport
+// deliberately returns compact hashes/baselines instead of exposing the
+// detached provider definition wholesale. Footprint requests are explicit and
+// return an unsupported status until their producer is covered by the same
+// owner contract.
+message NativeCapabilityLibrarySnapshotDependencyBaseline {
+  string path = 1;
+  bool exists = 2;
+  bool known = 3;
+  string sha256 = 4;
+  uint64 bytes = 5;
+}
+
+message NativeCapabilityLibrarySnapshotRead {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string process_epoch = 2;
+  string library_nickname = 3;
+  string entry_name = 4;
+  bool forced_refresh = 5;
+}
+
+message NativeCapabilityLibrarySnapshotReadResponse {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string process_epoch = 2;
+  string status = 3;
+  string error_code = 4;
+  string error_message = 5;
+  string table_path = 6;
+  string table_scope = 7;
+  string nickname = 8;
+  string raw_uri = 9;
+  string expanded_uri = 10;
+  string provider = 11;
+  string provider_options = 12;
+  string detached_definition_sha256 = 13;
+  uint64 detached_definition_bytes = 14;
+  repeated NativeCapabilityLibrarySnapshotDependencyBaseline dependency_baselines = 15;
+  bool forced_refresh = 16;
+  bool provider_observable = 17;
+  bool content_snapshot_complete = 18;
+  bool disk_baseline_checked = 19;
+  bool complete_change_tracking = 20;
+  bool postverify = 21;
+}
+
 // Process-owned footprint editor receipts. The native editor retains these
 // across MCP reconnects while the editor process remains alive.
 message NativeCapabilityFootprintReadOperation {

@@ -123,6 +123,8 @@ protected:
             const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySymbolLibraryReadNames>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySymbolLibraryReadSymbolResponse> handleReadSymbolLibrarySymbol(
             const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySymbolLibraryReadSymbol>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::NativeCapabilityLibrarySnapshotReadResponse> handleReadLibrarySnapshot(
+            const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityLibrarySnapshotRead>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySymbolLibraryWriteSymbolResponse> handleWriteSymbolLibrarySymbol(
             const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySymbolLibraryWriteSymbol>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySymbolLibraryDeleteSymbolResponse> handleDeleteSymbolLibrarySymbol(

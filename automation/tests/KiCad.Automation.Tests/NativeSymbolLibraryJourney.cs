@@ -45,6 +45,30 @@ public sealed partial class NativeSessionTests
         Assert.IsFalse(read.GetProperty("structuredContent").GetProperty("revisionTracked").GetBoolean());
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-symbol-library-read.json"), read.GetRawText(), token);
 
+        var lifecycleSnapshot = await mcp.Tool("kicad_library_snapshot_read", new
+        {
+            instanceId, expectedProcessEpoch = client.Epoch,
+            documentJson = SchematicJson.Formatter.Format(document), libraryNickname, entryName = symbolName,
+            forcedRefresh = true
+        });
+        RequireToolSuccess(lifecycleSnapshot);
+        var lifecycleData = lifecycleSnapshot.GetProperty("structuredContent");
+        Assert.AreEqual("complete", lifecycleData.GetProperty("status").GetString());
+        Assert.AreEqual(instanceId, lifecycleData.GetProperty("instanceId").GetString());
+        Assert.AreEqual(client.Epoch, lifecycleData.GetProperty("processEpoch").GetString());
+        Assert.AreEqual(libraryNickname, lifecycleData.GetProperty("nickname").GetString());
+        Assert.AreEqual(symbolName, lifecycleData.GetProperty("document").GetProperty("libId").GetProperty("entryName").GetString());
+        Assert.IsTrue(lifecycleData.GetProperty("forcedRefresh").GetBoolean());
+        Assert.IsTrue(lifecycleData.GetProperty("providerObservable").GetBoolean());
+        Assert.IsTrue(lifecycleData.GetProperty("contentSnapshotComplete").GetBoolean());
+        Assert.IsTrue(lifecycleData.GetProperty("diskBaselineChecked").GetBoolean());
+        Assert.IsFalse(lifecycleData.GetProperty("completeChangeTracking").GetBoolean());
+        Assert.IsFalse(lifecycleData.GetProperty("postverify").GetBoolean());
+        Assert.IsTrue(lifecycleData.GetProperty("detachedDefinitionBytes").GetUInt64() > 0);
+        Assert.AreEqual(64, lifecycleData.GetProperty("detachedDefinitionSha256").GetString()!.Length);
+        Assert.HasCount(2, lifecycleData.GetProperty("dependencyBaselines").EnumerateArray());
+        await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-symbol-library-snapshot.json"), lifecycleSnapshot.GetRawText(), token);
+
         string definitionJson = definition.GetRawText();
         var sourceDisplay = SchematicJson.Parser.Parse<NativeCapabilitySymbolLibraryPinDisplay>(
             read.GetProperty("structuredContent").GetProperty("pinDisplay").GetRawText());

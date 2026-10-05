@@ -474,7 +474,9 @@ public sealed partial class NativeSessionTests
         await RejectSet(omitted, "automation must require the project descriptor");
 
         var wrongName = ownProject.Clone();
-        wrongName.Project.Name = siblingProject.Project.Name;
+        // The two harness projects can intentionally share a basename. Use a distinct name so
+        // this case exercises the name guard independently of the path guard.
+        wrongName.Project.Name = ownProject.Project.Name + "-foreign";
         await RejectGet(wrongName, "foreign project name must be refused");
         await RejectSet(wrongName, "foreign project name must be refused");
 

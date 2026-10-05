@@ -1,5 +1,7 @@
 using System.Security.Cryptography;
 using System.Text.Json;
+using Google.Protobuf;
+using Google.Protobuf.WellKnownTypes;
 using Kiapi.Board.Commands;
 using Kiapi.Board.Types;
 using Kiapi.Common.Commands;
@@ -134,6 +136,41 @@ public sealed partial class NativeSessionTests
         DocumentLifecycleState before = await ObserveLifecycleState(client, board, token);
         JsonElement documentJson = JsonDocument.Parse(SchematicJson.Formatter.Format(board)).RootElement.Clone();
         JsonElement expectedStateJson = JsonDocument.Parse(SchematicJson.Formatter.Format(before)).RootElement.Clone();
+
+        // Seed a real source footprint through the same native placement
+        // adapter used by the projection handler.  The source deliberately
+        // carries pads, attributes and custom metadata so the clone path can
+        // prove that generated artwork does not replace the existing design
+        // content.
+        string sourceFootprintId = Guid.NewGuid().ToString("D");
+        FootprintInstance sourceFootprintCandidate = RasterSourceFootprint(sourceFootprintId);
+        var sourcePlan = await mcp.Tool("kicad_pcb_footprint_place_plan", new
+        {
+            documentJson,
+            expectedStateJson,
+            footprintJson = BoardJson.Formatter.Format(sourceFootprintCandidate)
+        });
+        RequireToolSuccess(sourcePlan);
+        JsonElement sourcePlanData = sourcePlan.GetProperty("structuredContent");
+        var sourceApply = await mcp.Tool("kicad_pcb_footprint_place_apply", new
+        {
+            instanceId,
+            candidateRequestJson = sourcePlanData.GetProperty("candidateRequestJson").GetString(),
+            expectedStateJson = SchematicJson.Formatter.Format(before),
+            operationId = Guid.NewGuid().ToString("D")
+        });
+        RequireToolSuccess(sourceApply);
+        DocumentLifecycleState sourcePlacedState = SchematicJson.Parser.Parse<DocumentLifecycleState>(
+            sourceApply.GetProperty("structuredContent").GetProperty("afterState").GetString()!);
+        FootprintInstance sourceFootprint = (await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+        {
+            Header = new() { Document = board },
+            Items = { new KIID { Value = sourceFootprintId } }
+        }, token)).Items.Single().Unpack<FootprintInstance>();
+        AssertRasterFootprintMetadata(sourceFootprintCandidate, sourceFootprint,
+            "the native source footprint must retain its seeded metadata");
+        documentJson = JsonDocument.Parse(SchematicJson.Formatter.Format(board)).RootElement.Clone();
+        expectedStateJson = JsonDocument.Parse(SchematicJson.Formatter.Format(sourcePlacedState)).RootElement.Clone();
         const string archivePath = "raster-trace/projection.png";
         var projection = await mcp.Tool("kicad_artwork_raster_project", new
         {
@@ -241,6 +278,107 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(archivePath, Property(shape, "kicad.ai.raster_trace.source_archive"), shape.Id.Value);
         }
 
+        // Reuse the saved board as the source for the footprint target.  This
+        // exercises the real clone transaction after the board itself has
+        // already survived a save/close/reopen cycle.
+        DocumentLifecycleState footprintBefore = await ObserveLifecycleState(client, reloadedBoard, token);
+        JsonElement footprintDocumentJson = JsonDocument.Parse(SchematicJson.Formatter.Format(reloadedBoard)).RootElement.Clone();
+        JsonElement footprintExpectedStateJson = JsonDocument.Parse(SchematicJson.Formatter.Format(footprintBefore)).RootElement.Clone();
+        string projectedFootprintId = Guid.NewGuid().ToString("D");
+        var footprintProjection = await mcp.Tool("kicad_artwork_raster_project", new
+        {
+            instanceId,
+            input = new
+            {
+                operationId = Guid.NewGuid().ToString("D"),
+                targetKind = "FOOTPRINT",
+                expectedProcessEpoch = client.Epoch,
+                sourcePath = source,
+                sourceKind = "generated",
+                sourceOrigin = "deterministic-fixture",
+                proposal = trace,
+                footprint = new
+                {
+                    document = footprintDocumentJson,
+                    expectedState = footprintExpectedStateJson,
+                    sourceFootprintId,
+                    targetFootprintId = projectedFootprintId,
+                    libraryNickname = "Generated",
+                    footprintName = "RasterProjected",
+                    originXNm = 70_000_000L,
+                    originYNm = 70_000_000L,
+                    orientationDegrees = 0.0,
+                    layer = "F.Cu",
+                    artworkLayer = "F.SilkS"
+                }
+            }
+        });
+        RequireToolSuccess(footprintProjection);
+        JsonElement footprintProjectionData = footprintProjection.GetProperty("structuredContent");
+        Assert.IsTrue(footprintProjectionData.GetProperty("accepted").GetBoolean(), footprintProjection.GetRawText());
+        Assert.IsTrue(footprintProjectionData.GetProperty("embeddedSourceVerified").GetBoolean(), footprintProjection.GetRawText());
+        Assert.IsTrue(footprintProjectionData.GetProperty("provenanceAtomic").GetBoolean(), footprintProjection.GetRawText());
+        Assert.AreEqual(sourceSha256, footprintProjectionData.GetProperty("sourceSha256").GetString(), footprintProjection.GetRawText());
+        Assert.AreEqual(trace.GetProperty("geometrySha256").GetString(),
+            footprintProjectionData.GetProperty("geometrySha256").GetString(), footprintProjection.GetRawText());
+
+        FootprintInstance projectedFootprint = (await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+        {
+            Header = new() { Document = reloadedBoard },
+            Items = { new KIID { Value = projectedFootprintId } }
+        }, token)).Items.Single().Unpack<FootprintInstance>();
+        AssertRasterFootprintMetadata(sourceFootprint, projectedFootprint,
+            "the live footprint projection must preserve source pads and metadata");
+        Dictionary<string, string[]> expectedFootprintGeometry = AssertRasterFootprintArtwork(
+            projectedFootprint, trace, sourceSha256, "live footprint projection");
+        string embeddedName = "raster_trace_" + sourceSha256 + ".png";
+        EmbeddedFile embedded = projectedFootprint.EmbeddedFiles.Files.Single(file => file.Name == embeddedName);
+        Assert.AreEqual(sourceSha256, embedded.DataHash, footprintProjection.GetRawText());
+
+        DocumentLifecycleState projectedFootprintState = await ObserveLifecycleState(client, reloadedBoard, token);
+        var footprintSaved = await mcp.Tool("kicad_document_save", new
+        {
+            instanceId,
+            expectedStateJson = SchematicJson.Formatter.Format(projectedFootprintState),
+            operationId = Guid.NewGuid().ToString("D")
+        });
+        RequireToolSuccess(footprintSaved);
+        DocumentLifecycleState footprintSavedState = SchematicJson.Parser.Parse<DocumentLifecycleState>(
+            footprintSaved.GetProperty("structuredContent").GetProperty("observedState").GetRawText());
+        Assert.IsFalse(footprintSavedState.NativeContentDirty, footprintSaved.GetRawText());
+        var footprintClosed = await mcp.Tool("kicad_document_close", new
+        {
+            instanceId,
+            expectedStateJson = SchematicJson.Formatter.Format(footprintSavedState),
+            operationId = Guid.NewGuid().ToString("D")
+        });
+        RequireToolSuccess(footprintClosed);
+        var footprintReopened = await CreateRootThroughMcp(client.Endpoint, instanceId, boardPath, boardOpenEvidence,
+            token, toolName: "kicad_pcb_open");
+        DocumentSpecifier reloadedFootprintBoard = footprintReopened.Document;
+        DocumentLifecycleState footprintReloadedState = await ObserveLifecycleState(client, reloadedFootprintBoard, token);
+        Assert.IsFalse(footprintReloadedState.NativeContentDirty,
+            "A board reopened from the saved footprint projection must be clean.");
+
+        FootprintInstance persistedSourceFootprint = (await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+        {
+            Header = new() { Document = reloadedFootprintBoard },
+            Items = { new KIID { Value = sourceFootprintId } }
+        }, token)).Items.Single().Unpack<FootprintInstance>();
+        AssertRasterFootprintMetadata(sourceFootprint, persistedSourceFootprint,
+            "the original source footprint must survive the projection save/close/reopen");
+        FootprintInstance persistedFootprint = (await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+        {
+            Header = new() { Document = reloadedFootprintBoard },
+            Items = { new KIID { Value = projectedFootprintId } }
+        }, token)).Items.Single().Unpack<FootprintInstance>();
+        AssertRasterFootprintMetadata(sourceFootprint, persistedFootprint,
+            "the reopened footprint projection must preserve source pads and metadata");
+        AssertRasterFootprintArtwork(persistedFootprint, trace, sourceSha256,
+            "reopened footprint projection", expectedFootprintGeometry);
+        EmbeddedFile persistedEmbedded = persistedFootprint.EmbeddedFiles.Files.Single(file => file.Name == embeddedName);
+        Assert.AreEqual(sourceSha256, persistedEmbedded.DataHash, persistedFootprint.ToString());
+
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-raster-projection-persistence.json"),
             JsonSerializer.Serialize(new
             {
@@ -252,8 +390,130 @@ public sealed partial class NativeSessionTests
                 saved = true,
                 closed = true,
                 reopened = true,
-                persistedShapeCount = persisted.Items.Count
+                persistedShapeCount = persisted.Items.Count,
+                sourceFootprintId,
+                projectedFootprintId,
+                persistedFootprintPadCount = persistedFootprint.Definition.Items.Count(item => item.Is(Pad.Descriptor)),
+                persistedFootprintArtworkCount = persistedFootprint.Definition.Items.Count(item => item.Is(BoardGraphicShape.Descriptor)),
+                footprintSaved = true,
+                footprintClosed = true,
+                footprintReopened = true
             }, new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true }), token);
+    }
+
+    private static FootprintInstance RasterSourceFootprint(string id)
+    {
+        var footprint = new FootprintInstance
+        {
+            Id = new() { Value = id },
+            Position = new() { XNm = 10_000_000, YNm = 10_000_000 },
+            Orientation = new() { ValueDegrees = 15.0 },
+            Layer = BoardLayer.BlFCu,
+            Definition = new Footprint
+            {
+                Id = new() { LibraryNickname = "Generated", EntryName = "RasterSource" },
+                Attributes = new FootprintAttributes
+                {
+                    Description = "Raster source fixture",
+                    Keywords = "raster,source",
+                    MountingStyle = FootprintMountingStyle.FmsSmd
+                }
+            },
+            CustomProperties =
+            {
+                new CustomProperty { Key = "fixture-owner", Value = "raster-trace" },
+                new CustomProperty { Key = "fixture-revision", Value = "source-v1" }
+            }
+        };
+        footprint.Definition.Items.Add(Any.Pack(RasterSourcePad(
+            "10000000-0000-4000-8000-000000000001", "1", 0, 0, "pad-one")));
+        footprint.Definition.Items.Add(Any.Pack(RasterSourcePad(
+            "10000000-0000-4000-8000-000000000002", "2", 2_000_000, 0, "pad-two")));
+        return footprint;
+    }
+
+    private static Pad RasterSourcePad(string id, string number, long xNm, long yNm, string role)
+        => new()
+        {
+            Id = new() { Value = id },
+            Number = number,
+            Type = PadType.PtSmd,
+            Position = new() { XNm = xNm, YNm = yNm },
+            PadStack = new PadStack
+            {
+                Type = PadStackType.PstNormal,
+                Layers = { BoardLayer.BlFCu },
+                CopperLayers =
+                {
+                    new PadStackLayer
+                    {
+                        Layer = BoardLayer.BlFCu,
+                        Shape = PadStackShape.PssRoundrect,
+                        Size = new() { XNm = 1_000_000, YNm = 800_000 },
+                        CornerRoundingRatio = 0.2
+                    }
+                },
+                FrontOuterLayers = new() { SolderMaskMode = SolderMaskMode.SmmMasked }
+            },
+            CustomProperties = { new CustomProperty { Key = "fixture-pad-role", Value = role } }
+        };
+
+    private static void AssertRasterFootprintMetadata(FootprintInstance expectedSource,
+        FootprintInstance actual, string context)
+    {
+        Assert.AreEqual(expectedSource.Definition.Attributes, actual.Definition.Attributes, context);
+        foreach (CustomProperty expected in expectedSource.CustomProperties)
+        {
+            Assert.IsTrue(actual.CustomProperties.Any(property => property.Key == expected.Key
+                && property.Value == expected.Value), context + ": " + expected.Key);
+        }
+        Pad[] expectedPads = expectedSource.Definition.Items.Where(item => item.Is(Pad.Descriptor))
+            .Select(item => item.Unpack<Pad>()).ToArray();
+        Pad[] actualPads = actual.Definition.Items.Where(item => item.Is(Pad.Descriptor))
+            .Select(item => item.Unpack<Pad>()).ToArray();
+        Assert.AreEqual(expectedPads.Length, actualPads.Length, context);
+        foreach (Pad expectedPad in expectedPads)
+        {
+            Pad actualPad = actualPads.Single(pad => pad.Id.Value == expectedPad.Id.Value);
+            Pad expectedNormalized = expectedPad.Clone();
+            expectedNormalized.Parent = new();
+            Pad actualNormalized = actualPad.Clone();
+            actualNormalized.Parent = new();
+            Assert.AreEqual(expectedNormalized, actualNormalized, context + ": pad " + expectedPad.Number);
+        }
+    }
+
+    private static Dictionary<string, string[]> AssertRasterFootprintArtwork(FootprintInstance footprint,
+        JsonElement trace, string sourceSha256, string context,
+        Dictionary<string, string[]>? expectedGeometry = null)
+    {
+        string geometrySha256 = trace.GetProperty("geometrySha256").GetString()!;
+        string contributorSemantics = trace.GetProperty("contributorSemantics").GetString()!;
+        var actualGeometry = new Dictionary<string, string[]>(StringComparer.Ordinal);
+        BoardGraphicShape[] artwork = footprint.Definition.Items.Where(item => item.Is(BoardGraphicShape.Descriptor))
+            .Select(item => item.Unpack<BoardGraphicShape>()).ToArray();
+        Assert.AreEqual(trace.GetProperty("filledPieceCount").GetInt32(), artwork.Length, context);
+        foreach (BoardGraphicShape shape in artwork)
+        {
+            Assert.AreEqual(BoardLayer.BlFSilkS, shape.Layer, context + ": layer");
+            Assert.AreEqual(GraphicShape.GeometryOneofCase.Polygon, shape.Shape.GeometryCase, context + ": geometry");
+            Assert.IsTrue(shape.Shape.Polygon.Polygons.Single().Outline.Closed, context + ": closed polygon");
+            string[] geometry = shape.Shape.Polygon.Polygons.Single().Outline.Nodes
+                .Select(node => $"{node.Point.XNm}:{node.Point.YNm}").ToArray();
+            actualGeometry[shape.Id.Value] = geometry;
+            Assert.AreEqual(geometrySha256, Property(shape, "kicad.ai.raster_trace.geometry_sha256"), context + ": geometry hash");
+            Assert.AreEqual(sourceSha256, Property(shape, "kicad.ai.raster_trace.source_sha256"), context + ": source hash");
+            Assert.AreEqual("generated", Property(shape, "kicad.ai.raster_trace.source_kind"), context + ": source kind");
+            Assert.AreEqual("deterministic-fixture", Property(shape, "kicad.ai.raster_trace.source_origin"), context + ": source origin");
+            Assert.AreEqual("filled-vector-projection", Property(shape, "kicad.ai.raster_trace.role"), context + ": role");
+            Assert.AreEqual(contributorSemantics, Property(shape, "kicad.ai.raster_trace.contributor_semantics"), context + ": contributor semantics");
+            if (expectedGeometry is not null)
+            {
+                Assert.IsTrue(expectedGeometry.TryGetValue(shape.Id.Value, out string[]? expected), context + ": shape " + shape.Id.Value);
+                CollectionAssert.AreEqual(expected, geometry, context + ": shape " + shape.Id.Value);
+            }
+        }
+        return actualGeometry;
     }
 
     private static string Property(BoardGraphicShape shape, string key)

@@ -2317,18 +2317,6 @@ public sealed partial class NativeSessionTests
                 multilayerCommitPlanData.GetProperty("candidateRequestJson").GetString()!);
             Assert.IsTrue(multilayerCommitCandidate.Items.Any(item => item.Is(Track.Descriptor)), multilayerCommitPlan.GetRawText());
             Assert.IsTrue(multilayerCommitCandidate.Items.Any(item => item.Is(Via.Descriptor)), multilayerCommitPlan.GetRawText());
-            // The planner's compact proposal uses one circular definition per
-            // copper layer.  Native KiCad accepts that exact geometry as a
-            // custom via padstack; normalize only the type marker before the
-            // checked DRC/commit boundary so the candidate uses the same valid
-            // native form as the existing shove-via fixture.
-            for (int itemIndex = 0; itemIndex < multilayerCommitCandidate.Items.Count; ++itemIndex)
-            {
-                if (!multilayerCommitCandidate.Items[itemIndex].Is(Via.Descriptor)) continue;
-                var nativeVia = multilayerCommitCandidate.Items[itemIndex].Unpack<Via>();
-                nativeVia.PadStack.Type = PadStackType.PstCustom;
-                multilayerCommitCandidate.Items[itemIndex] = Any.Pack(nativeVia);
-            }
             Assert.AreEqual(multilayerCommitBefore, await ObserveLifecycleState(client, cleanBoard, token));
 
             var multilayerCommitDrc = await RouteDrc(

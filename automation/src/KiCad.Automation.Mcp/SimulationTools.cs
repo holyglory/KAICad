@@ -251,8 +251,10 @@ public sealed class SimulationTools(InstanceRegistry instances)
     }
 
     private static bool IsMissingJob(NativeApiException error)
-        => error.Status == (int)ApiStatusCode.AsBadRequest
-            && error.Message.Contains("No simulation job matches", StringComparison.OrdinalIgnoreCase);
+        => error.Message.Contains("no handler available for request of type kiapi.automation.v1.ReadSimulationJob",
+               StringComparison.OrdinalIgnoreCase)
+            || (error.Status == (int)ApiStatusCode.AsBadRequest
+                && error.Message.Contains("No simulation job matches", StringComparison.OrdinalIgnoreCase));
 
     private static AutomationException ResultLostAfterRestart(string jobId)
         => new("simulation_result_lost",

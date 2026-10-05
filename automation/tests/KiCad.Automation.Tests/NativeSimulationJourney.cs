@@ -30,6 +30,9 @@ public sealed partial class NativeSessionTests
             // test-owned Xvfb display through so the restarted native editor can
             // initialize GTK just like the original fixture process.
             mcpStart.Environment["DISPLAY"] = display;
+            mcpStart.Environment["KICAD_RUN_FROM_BUILD_DIR"] = "1";
+            mcpStart.Environment["XDG_CONFIG_HOME"] = Path.Combine(stateDirectory, "config");
+            mcpStart.Environment["XDG_CACHE_HOME"] = Path.Combine(stateDirectory, "cache");
             await using var mcp = await StdioMcpFixture.StartAsync(mcpStart,
                 stateDirectory, Path.Combine(evidence, instanceId + "-simulation-mcp.stderr.log"), token);
             var attached = await mcp.Tool("kicad_instance_attach", new

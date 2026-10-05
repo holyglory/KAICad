@@ -468,7 +468,10 @@ public sealed partial class NativeSessionTests
                     new() { Document = opened.Document }, deadline.Token)).Document);
                 if (journey != NativeJourney.Foundation)
                 {
-                    int focusProcessId = processes.Single(p => p.StartInfo.ArgumentList.Contains(target.Project)).Id;
+                    // The simulation journey may replace its native process through
+                    // the MCP restart proof; it does not use a focus PID below.
+                    int focusProcessId = journey == NativeJourney.Simulation ? 0
+                        : processes.Single(p => p.StartInfo.ArgumentList.Contains(target.Project)).Id;
                     await client.InvokeAsync<SaveDocument, Empty>(new() { Document = opened.Document }, deadline.Token);
                     Console.WriteLine($"Focused {journey} {target.Id} reached its target at {elapsed.Elapsed.TotalSeconds:F1}s.");
                     if (journey == NativeJourney.Setup)

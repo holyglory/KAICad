@@ -79,11 +79,13 @@ def main():
             "automation/artifacts/native/kicad_build_version.h",
             "automation/artifacts/native/resources/images.tar.gz",
         )],
-        "schemas": [file_record(root, str(path.relative_to(root)))
-                    for path in sorted((build / "schemas").glob("*.json"))],
+        "schemas": [file_record(root, "automation/artifacts/native/schemas/" + name)
+                    for name in (
+                        "api.v1.schema.json", "pcm.v1.schema.json", "pcm.v2.schema.json",
+                        "kicad-remote-provider-metadata-v1.schema.json",
+                        "kicad-remote-symbol-manifest-v1.schema.json",
+                    )],
     }
-    if not identity["schemas"]:
-        raise RuntimeError("Required native startup schemas are missing.")
     if git(root, "rev-parse", "HEAD") != commit or git(
         root, "status", "--porcelain=v1", "--untracked-files=normal"
     ):

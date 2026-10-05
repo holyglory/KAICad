@@ -146,8 +146,8 @@ public sealed partial class NativeSessionTests
         FootprintInstance sourceFootprintCandidate = RasterSourceFootprint(sourceFootprintId);
         var sourcePlan = await mcp.Tool("kicad_pcb_footprint_place_plan", new
         {
-            documentJson,
-            expectedStateJson,
+            documentJson = SchematicJson.Formatter.Format(board),
+            expectedStateJson = SchematicJson.Formatter.Format(before),
             footprintJson = BoardJson.Formatter.Format(sourceFootprintCandidate)
         });
         RequireToolSuccess(sourcePlan);
@@ -415,8 +415,7 @@ public sealed partial class NativeSessionTests
                 Attributes = new FootprintAttributes
                 {
                     Description = "Raster source fixture",
-                    Keywords = "raster,source",
-                    MountingStyle = FootprintMountingStyle.FmsSmd
+                    Keywords = "raster,source"
                 }
             },
             CustomProperties =

@@ -42,4 +42,89 @@ public sealed class PcbVectorContractTests
         Assert.IsTrue(copper.IsError);
         Assert.AreEqual("invalid_pcb_svg_guide_layer", copper.StructuredContent!.Value.GetProperty("errorCode").GetString());
     }
+
+    [TestMethod]
+    public void SvgParserRejectsHiddenGeometryAndOutOfViewBoxCoordinates()
+    {
+        var invalidSources = new[]
+        {
+            (Name: "transform", Svg: "<svg viewBox=\"0 0 2 2\"><g transform=\"translate(1)\"><line x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"/></g></svg>",
+                Message: "SVG transforms, scripts, images, text and external references are not allowed in a PCB guide."),
+            (Name: "image", Svg: "<svg viewBox=\"0 0 2 2\"><image href=\"asset.png\" x=\"0\" y=\"0\" width=\"1\" height=\"1\"/></svg>",
+                Message: "SVG transforms, scripts, images, text and external references are not allowed in a PCB guide."),
+            (Name: "text", Svg: "<svg viewBox=\"0 0 2 2\"><text x=\"0\" y=\"1\">hidden</text></svg>",
+                Message: "SVG transforms, scripts, images, text and external references are not allowed in a PCB guide."),
+            (Name: "out-of-viewBox", Svg: "<svg viewBox=\"0 0 2 2\"><line x1=\"-1\" y1=\"0\" x2=\"1\" y2=\"1\"/></svg>",
+                Message: "SVG guide geometry must remain inside its declared viewBox.")
+        };
+
+        var tools = new PcbVectorTools();
+        foreach (var testCase in invalidSources)
+        {
+            var result = tools.ValidateSvg(testCase.Svg);
+            Assert.IsTrue(result.IsError, testCase.Name);
+            var data = result.StructuredContent!.Value;
+            Assert.AreEqual("invalid_pcb_svg_guide", data.GetProperty("errorCode").GetString(), testCase.Name);
+            Assert.AreEqual(testCase.Message, data.GetProperty("errorMessage").GetString(), testCase.Name);
+            Assert.IsFalse(data.GetProperty("boardMutation").GetBoolean(), testCase.Name);
+            Assert.IsFalse(data.GetProperty("nativeCommit").GetBoolean(), testCase.Name);
+        }
+    }
+
+    [TestMethod]
+    public void SvgValidationRejectsSegmentBoundsAndInvalidConversionParameters()
+    {
+        const string svg = "<svg viewBox=\"0 0 2 2\"><line x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"/></svg>";
+        var invalidParameters = new[]
+        {
+            (Name: "maximumSegments below minimum", Result: new PcbVectorTools().ValidateSvg(svg, maximumSegments: 0),
+                Message: "maximumSegments must be between 1 and 20,000."),
+            (Name: "maximumSegments above maximum", Result: new PcbVectorTools().ValidateSvg(svg, maximumSegments: 20_001),
+                Message: "maximumSegments must be between 1 and 20,000."),
+            (Name: "zero scale", Result: new PcbVectorTools().ValidateSvg(svg, nanometersPerSvgUnit: "0"),
+                Message: "nanometersPerSvgUnit must be positive."),
+            (Name: "negative scale", Result: new PcbVectorTools().ValidateSvg(svg, nanometersPerSvgUnit: "-1"),
+                Message: "nanometersPerSvgUnit must be positive."),
+            (Name: "zero stroke width", Result: new PcbVectorTools().ValidateSvg(svg, strokeWidthNm: 0),
+                Message: "strokeWidthNm must be positive."),
+            (Name: "negative stroke width", Result: new PcbVectorTools().ValidateSvg(svg, strokeWidthNm: -1),
+                Message: "strokeWidthNm must be positive.")
+        };
+
+        foreach (var testCase in invalidParameters)
+        {
+            Assert.IsTrue(testCase.Result.IsError, testCase.Name);
+            var data = testCase.Result.StructuredContent!.Value;
+            Assert.AreEqual("invalid_pcb_svg_guide", data.GetProperty("errorCode").GetString(), testCase.Name);
+            Assert.AreEqual(testCase.Message, data.GetProperty("errorMessage").GetString(), testCase.Name);
+            Assert.IsFalse(data.GetProperty("boardMutation").GetBoolean(), testCase.Name);
+            Assert.IsFalse(data.GetProperty("nativeCommit").GetBoolean(), testCase.Name);
+        }
+    }
+
+    [TestMethod]
+    public void ValidPolygonAndPathConversionPreservesShaAndRemainsReadOnly()
+    {
+        const string svg = "<svg viewBox=\"0 0 10 10\"><polygon points=\"1,1 4,1 4,4\"/><path d=\"M6 2 H9 V5 Z\"/></svg>";
+        string hash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(svg)));
+
+        var result = new PcbVectorTools().ValidateSvg(svg, hash, "Dwgs.User", "1000", "-2000", "1000", 80_000);
+        Assert.IsFalse(result.IsError, result.StructuredContent?.ToString());
+        var data = result.StructuredContent!.Value;
+        Assert.IsTrue(data.GetProperty("vectorValidation").GetBoolean());
+        Assert.IsTrue(data.GetProperty("provenanceBound").GetBoolean());
+        Assert.AreEqual(hash, data.GetProperty("sourceSha256").GetString());
+        Assert.AreEqual(6, data.GetProperty("segmentCount").GetInt32());
+        Assert.AreEqual(2_000, data.GetProperty("boundsNm").GetProperty("minXNm").GetInt64());
+        Assert.AreEqual(-1_000, data.GetProperty("boundsNm").GetProperty("minYNm").GetInt64());
+        Assert.AreEqual(10_000, data.GetProperty("boundsNm").GetProperty("maxXNm").GetInt64());
+        Assert.AreEqual(3_000, data.GetProperty("boundsNm").GetProperty("maxYNm").GetInt64());
+        var segments = data.GetProperty("segments");
+        Assert.AreEqual(2_000, segments[0].GetProperty("start").GetProperty("xNm").GetInt64());
+        Assert.AreEqual(-1_000, segments[0].GetProperty("start").GetProperty("yNm").GetInt64());
+        Assert.AreEqual(7_000, segments[5].GetProperty("end").GetProperty("xNm").GetInt64());
+        Assert.AreEqual(0, segments[5].GetProperty("end").GetProperty("yNm").GetInt64());
+        Assert.IsFalse(data.GetProperty("boardMutation").GetBoolean());
+        Assert.IsFalse(data.GetProperty("nativeCommit").GetBoolean());
+    }
 }

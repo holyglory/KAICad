@@ -419,10 +419,15 @@ public sealed partial class NativeSessionTests
             { instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName = persistedName,
                 operationId = Guid.NewGuid().ToString("D") }));
         }
+        var artworkBeforeDeleteList = await mcp.Tool("kicad_symbol_library_list", new
+        { instanceId, expectedProcessEpoch = client.Epoch, libraryNickname });
+        RequireToolSuccess(artworkBeforeDeleteList);
+        string artworkDeleteModifyHash = artworkBeforeDeleteList.GetProperty("structuredContent").GetProperty("modifyHash")
+            .GetUInt64().ToString(System.Globalization.CultureInfo.InvariantCulture);
         var artworkDelete = await mcp.Tool("kicad_symbol_library_delete", new
         {
             instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName = "GeneratedArtworkProbe",
-            operationId = Guid.NewGuid().ToString("D"), expectedModifyHash = artworkAfterModifyHash
+            operationId = Guid.NewGuid().ToString("D"), expectedModifyHash = artworkDeleteModifyHash
         });
         RequireToolSuccess(artworkDelete);
         Assert.IsTrue(artworkDelete.GetProperty("structuredContent").GetProperty("persistenceVerified").GetBoolean(), artworkDelete.GetRawText());

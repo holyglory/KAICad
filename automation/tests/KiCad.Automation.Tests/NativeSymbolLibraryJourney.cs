@@ -399,7 +399,7 @@ public sealed partial class NativeSessionTests
         { instanceId, expectedStateJson = multiplicitySave.GetProperty("structuredContent").GetProperty("observedState").GetRawText(),
             operationId = Guid.NewGuid().ToString("D") }));
         var multiplicityReopen = await CreateRootThroughMcp(client.Endpoint, instanceId,
-            Path.Combine(document.Project.Path, document.SchematicFilename), evidence, token);
+            schematicPath, evidence, token, toolName: "kicad_schematic_open");
         document = multiplicityReopen.Document;
         foreach (string persistedName in new[] { "PinMultiplicityProbe", "PinMultiplicityCloneProbe" })
         {

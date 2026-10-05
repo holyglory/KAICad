@@ -352,10 +352,10 @@ BOOST_FIXTURE_TEST_CASE( FilledZoneRoundTripPreservesLayerPolygons, PROTO_TEST_F
 
         for( int ii = 0; ii < actual->COutline( 0 ).PointCount(); ++ii )
         {
-            BOOST_CHECK_EQUAL( actual->COutline( 0 ).CVertex( ii ).x,
-                               aExpected.COutline( 0 ).CVertex( ii ).x );
-            BOOST_CHECK_EQUAL( actual->COutline( 0 ).CVertex( ii ).y,
-                               aExpected.COutline( 0 ).CVertex( ii ).y );
+            BOOST_CHECK_EQUAL( actual->COutline( 0 ).CPoint( ii ).x,
+                               aExpected.COutline( 0 ).CPoint( ii ).x );
+            BOOST_CHECK_EQUAL( actual->COutline( 0 ).CPoint( ii ).y,
+                               aExpected.COutline( 0 ).CPoint( ii ).y );
         }
     };
 
@@ -401,8 +401,8 @@ BOOST_FIXTURE_TEST_CASE( ZoneDeserializeReplacesFilledPolygons, PROTO_TEST_FIXTU
     // Keep the same layer set but provide only the new front-layer fill.  The
     // back-layer entry left by the previous fill must be replaced with an empty
     // container rather than surviving the update.
-    const auto frontLayer = partial.filled_polygons( 0 ).layer();
-    kiapi::board::types::ZoneFilledPolygons newFront = partial.filled_polygons( 0 );
+    const auto frontLayer = kiapi::board::types::BoardLayer::BL_F_Cu;
+    kiapi::board::types::ZoneFilledPolygons newFront;
     for( const auto& fillLayer : partial.filled_polygons() )
     {
         if( fillLayer.layer() == frontLayer )
@@ -416,6 +416,7 @@ BOOST_FIXTURE_TEST_CASE( ZoneDeserializeReplacesFilledPolygons, PROTO_TEST_FIXTU
     newFrontFill.AddOutline( KIGEOM::BoxToLineChain(
             BOX2I( VECTOR2I( pcbIUScale.mmToIU( 2 ), pcbIUScale.mmToIU( 2 ) ),
                    VECTOR2I( pcbIUScale.mmToIU( 3 ), pcbIUScale.mmToIU( 1 ) ) ) ) );
+    newFront.clear_shapes();
     kiapi::common::PackPolySet( *newFront.mutable_shapes(), newFrontFill );
 
     partial.clear_filled_polygons();
@@ -432,10 +433,10 @@ BOOST_FIXTURE_TEST_CASE( ZoneDeserializeReplacesFilledPolygons, PROTO_TEST_FIXTU
     BOOST_REQUIRE( zone->HasFilledPolysForLayer( B_Cu ) );
     BOOST_CHECK_EQUAL( zone->GetFilledPolysList( B_Cu )->OutlineCount(), 0 );
     BOOST_CHECK_GT( zone->GetFilledPolysList( F_Cu )->OutlineCount(), 0 );
-    BOOST_CHECK_EQUAL( zone->GetFilledPolysList( F_Cu )->COutline( 0 ).CVertex( 0 ).x,
-                       newFrontFill.COutline( 0 ).CVertex( 0 ).x );
-    BOOST_CHECK_EQUAL( zone->GetFilledPolysList( F_Cu )->COutline( 0 ).CVertex( 0 ).y,
-                       newFrontFill.COutline( 0 ).CVertex( 0 ).y );
+    BOOST_CHECK_EQUAL( zone->GetFilledPolysList( F_Cu )->COutline( 0 ).CPoint( 0 ).x,
+                       newFrontFill.COutline( 0 ).CPoint( 0 ).x );
+    BOOST_CHECK_EQUAL( zone->GetFilledPolysList( F_Cu )->COutline( 0 ).CPoint( 0 ).y,
+                       newFrontFill.COutline( 0 ).CPoint( 0 ).y );
 
     // An explicit unfilled update must clear both layers and require a native refill.
     partial.set_filled( false );

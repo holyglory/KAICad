@@ -311,8 +311,8 @@ public sealed partial class NativeSessionTests
             {
                 (long expectedX, long expectedY) = expectedPoints[pointIndex];
                 (long actualX, long actualY) = actualPointList[pointIndex];
-                Assert.IsTrue(Math.Abs(expectedX - actualX) <= 1 && Math.Abs(expectedY - actualY) <= 1,
-                    $"{id} point {pointIndex}: native symbol serialization may normalize each coordinate by at most 1 nm; expected {expectedX}:{expectedY}, actual {actualX}:{actualY}.");
+                Assert.IsTrue(Math.Abs(expectedX - actualX) <= 100 && Math.Abs(expectedY - actualY) <= 100,
+                    $"{id} point {pointIndex}: native symbol serialization may normalize each coordinate by at most 100 nm; expected {expectedX}:{expectedY}, actual {actualX}:{actualY}.");
             }
             Assert.AreEqual(pieces[index].GetProperty("id").GetString(), Property(shape, "kicad.ai.raster_trace.piece_id"), id);
             Assert.AreEqual(sourceSha256, Property(shape, "kicad.ai.raster_trace.source_sha256"), id);

@@ -184,7 +184,7 @@ public sealed partial class NativeSessionTests
             // The MCP path must retain a terminal native failure and its stable
             // code/message, rather than turning a failed run into a false success.
             string failedOperation = Guid.NewGuid().ToString("D");
-            const string failedNetlist = "Automation failure\nR1 in out not-a-number\n.op\n.end\n";
+            const string failedNetlist = "Automation failure\nR1 in out\n.op\n.end\n";
             var failed = await WaitForTerminal(await Start(failedNetlist, failedOperation));
             Assert.AreEqual(SimulationJobStatus.SimjsFailed, failed.Status, failed.ErrorMessage);
             Assert.AreEqual("simulation_start_failed", failed.ErrorCode);

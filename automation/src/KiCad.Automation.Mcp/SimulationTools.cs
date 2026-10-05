@@ -6,6 +6,7 @@ using System.Text.Json;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
+using Kiapi.Common;
 using Kiapi.Common.Types;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
@@ -42,7 +43,20 @@ public sealed class SimulationTools(InstanceRegistry instances)
             throw new AutomationException("simulation_operation_reused", "The operation ID is already bound to different schematic or deck bytes.");
         Operations[operationKey] = operation;
 
-        var result = await client.InvokeAsync<StartSimulationJob, SimulationJobState>(request, cancellationToken);
+        SimulationJobState result;
+        try
+        {
+            result = await client.InvokeAsync<StartSimulationJob, SimulationJobState>(request, cancellationToken);
+        }
+        catch
+        {
+            // The native handler is the authoritative transaction receipt. Do not
+            // leave a speculative MCP-side binding after a rejected dispatch:
+            // reconnects must be able to retry the same operation and let KiCad
+            // report whether the bytes match its retained operation.
+            Operations.TryRemove(operationKey, out _);
+            throw;
+        }
         SimulationJobContract.ValidateStartIdentity(request, result, session.Epoch);
         if (result.Status is SimulationJobStatus.SimjsCompleted or SimulationJobStatus.SimjsCancelled or SimulationJobStatus.SimjsFailed)
         {
@@ -230,6 +244,20 @@ public sealed class SimulationTools(InstanceRegistry instances)
         try { return await action(); }
         catch (Exception error) when (error is AutomationException or NativeApiException or NngException or IOException
             or UnauthorizedAccessException or ArgumentException or ObjectDisposedException)
-        { return Data(new { errorCode = error is AutomationException known ? known.Code : "simulation_unavailable", errorMessage = error.Message }, true); }
+        {
+            string code = error is AutomationException known ? known.Code
+                : error is NativeApiException native ? NativeErrorCode(native) : "simulation_unavailable";
+            return Data(new { errorCode = code, errorMessage = error.Message }, true);
+        }
+    }
+
+    private static string NativeErrorCode(NativeApiException error)
+    {
+        if (error.Status == (int)ApiStatusCode.AsBusy)
+            return "simulation_busy";
+        if (error.Status == (int)ApiStatusCode.AsBadRequest
+            && error.Message.Contains("operation identity was reused", StringComparison.OrdinalIgnoreCase))
+            return "simulation_operation_reused";
+        return "simulation_unavailable";
     }
 }

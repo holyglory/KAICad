@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
+using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
 
 namespace KiCad.Automation.Tests;
@@ -40,10 +41,60 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(current.Vectors.Any(vector => vector.Name.Contains("out", StringComparison.OrdinalIgnoreCase)));
             Assert.IsTrue(current.Vectors.SelectMany(vector => vector.Values).Any(value => Math.Abs(value - 2.5) < 0.01));
 
+            // Save through the checked lifecycle transaction, replay its receipt,
+            // then reload the schematic. The native simulation result is a
+            // process-owned receipt and must remain readable across that reload.
+            var beforeReload = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
+                new() { Document = simulationDocument }, token);
+            var saveRequest = new CheckedSaveDocument
+            {
+                Document = simulationDocument.Clone(),
+                ExpectedState = beforeReload.Clone(),
+                OperationId = Guid.NewGuid().ToString("D")
+            };
+            var saveReceipt = await client.InvokeAsync<CheckedSaveDocument, LifecycleOperationResult>(saveRequest, token);
+            Assert.AreEqual(LifecycleOperationStatus.LosSaved, saveReceipt.Status, saveReceipt.ErrorMessage);
+            Assert.AreEqual(saveReceipt,
+                await client.InvokeAsync<CheckedSaveDocument, LifecycleOperationResult>(saveRequest, token),
+                "Replaying the checked save must return its original receipt without writing again.");
+            await client.InvokeAsync<RevertDocument, Google.Protobuf.WellKnownTypes.Empty>(
+                new() { Document = simulationDocument.Clone() }, token);
+            var afterReload = await client.InvokeAsync<ReadSimulationJob, SimulationJobState>(new()
+            { Document = simulationDocument, JobId = started.JobId, ProcessEpoch = client.Epoch }, token);
+            Assert.AreEqual(current, afterReload,
+                "Reloading the saved schematic must retain the completed native simulation result.");
+
             var completedRead = JobResult(await mcp.Tool("kicad_simulation_job", new
             { instanceId, expectedInstanceEpoch = client.Epoch, document = Target(simulationDocument), jobId = started.JobId }));
             Assert.AreEqual(SimulationJobStatus.SimjsCompleted, completedRead.Status);
             Assert.AreEqual(current, completedRead, "The MCP job read must retain the complete native result.");
+
+            // A new MCP process has no in-memory deck map, but the native
+            // process-owned result and operation receipt remain authoritative.
+            string reconnectState = Directory.CreateTempSubdirectory("kicad-simulation-mcp-reconnect-").FullName;
+            try
+            {
+                await using var reconnect = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.ProductionStartInfo(),
+                    reconnectState, Path.Combine(evidence, instanceId + "-simulation-mcp-reconnect.stderr.log"), token);
+                var reconnectAttached = await reconnect.Tool("kicad_instance_attach", new
+                    { endpoint = client.Endpoint, expectedInstanceId = instanceId });
+                Assert.IsFalse(reconnectAttached.TryGetProperty("isError", out var reconnectError)
+                    && reconnectError.GetBoolean(), reconnectAttached.GetRawText());
+                var reconnectRead = JobResult(await reconnect.Tool("kicad_simulation_job", new
+                { instanceId, expectedInstanceEpoch = client.Epoch, document = Target(simulationDocument), jobId = started.JobId }));
+                Assert.AreEqual(current, reconnectRead,
+                    "A fresh MCP connection must recover the native result instead of inventing a new job.");
+
+                // Native operation identity remains the source of truth after an
+                // MCP restart; preserve its deterministic refusal code.
+                var reused = await reconnect.Tool("kicad_simulation_start", new
+                {
+                    instanceId, expectedInstanceEpoch = client.Epoch, document = Target(simulationDocument),
+                    netlist = netlist + "* changed after reconnect\n", operationId = operation
+                });
+                AssertFailure(reused, "simulation_operation_reused");
+            }
+            finally { Directory.Delete(reconnectState, true); }
 
             var completedCancel = JobResult(await mcp.Tool("kicad_simulation_cancel", new
             { instanceId, expectedInstanceEpoch = client.Epoch, document = Target(simulationDocument), jobId = started.JobId }));
@@ -129,6 +180,22 @@ public sealed partial class NativeSessionTests
             var invalidRead = JobResult(await mcp.Tool("kicad_simulation_job", new
             { instanceId, expectedInstanceEpoch = client.Epoch, document = Target(simulationDocument), jobId = invalidTerminal.JobId }));
             Assert.AreEqual(SimulationJobStatus.SimjsFailed, invalidRead.Status);
+
+            // The MCP path must retain a terminal native failure and its stable
+            // code/message, rather than turning a failed run into a false success.
+            string failedOperation = Guid.NewGuid().ToString("D");
+            const string failedNetlist = "Automation failure\nR1 in out not-a-number\n.op\n.end\n";
+            var failed = await WaitForTerminal(await Start(failedNetlist, failedOperation));
+            Assert.AreEqual(SimulationJobStatus.SimjsFailed, failed.Status, failed.ErrorMessage);
+            Assert.AreEqual("simulation_start_failed", failed.ErrorCode);
+            Assert.AreEqual("KiCad's native ngspice wrapper rejected the netlist or run command", failed.ErrorMessage);
+            Assert.IsTrue(failed.WorkerFinished);
+            var failedRead = JobResult(await mcp.Tool("kicad_simulation_job", new
+            { instanceId, expectedInstanceEpoch = client.Epoch, document = Target(simulationDocument), jobId = failed.JobId }));
+            Assert.AreEqual(failed, failedRead,
+                "Reading a failed simulation must preserve the same deterministic terminal receipt.");
+            Assert.AreEqual(failed, await Start(failedNetlist, failedOperation),
+                "Retrying a failed operation must return its retained failure receipt.");
 
             JsonObject Target(DocumentSpecifier value, bool numericType = false)
             {

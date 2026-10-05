@@ -147,8 +147,17 @@ public sealed partial class NativeSessionTests
         // clean schematic through the native lifecycle before reading the
         // library again. This forces the adapter to reload the persisted
         // .kicad_sym file while keeping the test's disposable project intact.
-        DocumentLifecycleState beforeClose = await ObserveLifecycleState(client, document, token);
-        Assert.IsFalse(beforeClose.NativeContentDirty, "the symbol projection must not dirty the schematic document");
+        DocumentLifecycleState projectedState = await ObserveLifecycleState(client, document, token);
+        var saved = await mcp.Tool("kicad_document_save", new
+        {
+            instanceId,
+            expectedStateJson = SchematicJson.Formatter.Format(projectedState),
+            operationId = Guid.NewGuid().ToString("D")
+        });
+        RequireToolSuccess(saved);
+        DocumentLifecycleState beforeClose = SchematicJson.Parser.Parse<DocumentLifecycleState>(
+            saved.GetProperty("structuredContent").GetProperty("observedState").GetRawText());
+        Assert.IsFalse(beforeClose.NativeContentDirty, saved.GetRawText());
         string schematicPath = beforeClose.NativeFiles.Single(path =>
             string.Equals(Path.GetFileName(path), document.Project.Name + ".kicad_sch", StringComparison.OrdinalIgnoreCase));
         string closeOperationId = Guid.NewGuid().ToString("D");

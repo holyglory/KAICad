@@ -221,6 +221,8 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
     if( Empty() )
         return;
 
+    const int startingTimestamp = board->GetTimeStamp();
+
     undoList.SetDescription( aMessage );
 
     TEARDROP_MANAGER                   teardropMgr( board, m_toolMgr );
@@ -708,7 +710,16 @@ void BOARD_COMMIT::Push( const wxString& aMessage, int aCommitFlags )
     }
 
     if( bulkAddedItems.size() > 0 || bulkRemovedItems.size() > 0 || itemsChanged.size() > 0 )
+    {
+        // A normal GUI commit advances the observation counter in OnModify.
+        // Headless and deliberately clean commits lack that callback. Add and
+        // remove paths may already have advanced it while staging this push.
+        if( ( !frame || ( aCommitFlags & SKIP_SET_DIRTY ) )
+                && board->GetTimeStamp() == startingTimestamp )
+            board->IncrementTimeStamp();
+
         board->OnItemsCompositeUpdate( bulkAddedItems, bulkRemovedItems, itemsChanged );
+    }
 
     if( frame )
     {

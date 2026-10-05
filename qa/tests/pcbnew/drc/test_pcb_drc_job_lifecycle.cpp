@@ -309,12 +309,26 @@ BOOST_AUTO_TEST_CASE( NativeCommitInvalidatesBeforeReadAndPreservesIndependentOw
     BOOST_REQUIRE( started ); BOOST_REQUIRE( separate );
     BOOST_REQUIRE( Wait( jobs, board, *started ).status() == PDRCJS_COMPLETED );
     BOOST_REQUIRE( Wait( independent, other, *separate ).status() == PDRCJS_COMPLETED );
+    const int beforeCommit = board.GetTimeStamp();
+    const int independentBefore = other.GetTimeStamp();
+    NATIVE_STATE_DIGEST beforeContent;
+    PCB_IO_KICAD_SEXPR().FormatBoardToFormatter( &beforeContent, &board, nullptr, false );
     board.OnBoardSelectionChanged(); board.OnRatsnestChanged();
     BOOST_CHECK( jobs.Read( Query( *started ), board, epoch )->status() == PDRCJS_COMPLETED );
+    BOARD_COMMIT empty( &tools, true, false );
+    empty.Push( "Empty observation", SKIP_UNDO | SKIP_SET_DIRTY | SKIP_TEARDROPS );
+    BOOST_CHECK_EQUAL( board.GetTimeStamp(), beforeCommit );
+    BOOST_CHECK_EQUAL( other.GetTimeStamp(), independentBefore );
 
     BOARD_COMMIT commit( &tools, true, false );
     commit.Modify( track ); track->SetEnd( { 2000000, 0 } );
     commit.Push( "Native edit", SKIP_UNDO | SKIP_SET_DIRTY | SKIP_TEARDROPS );
+    BOOST_CHECK_EQUAL( board.GetTimeStamp(), beforeCommit + 1 );
+    BOOST_CHECK_EQUAL( other.GetTimeStamp(), independentBefore );
+    NATIVE_STATE_DIGEST changedContent;
+    PCB_IO_KICAD_SEXPR().FormatBoardToFormatter( &changedContent, &board, nullptr, false );
+    BOOST_CHECK( changedContent.Hex() != beforeContent.Hex() );
+    BOOST_CHECK_EQUAL( board.GetTimeStamp(), beforeCommit + 1 );
     observations = 0;
     auto stale = jobs.Read( Query( *started ), board, epoch );
     BOOST_REQUIRE( stale );
@@ -327,10 +341,33 @@ BOOST_AUTO_TEST_CASE( NativeCommitInvalidatesBeforeReadAndPreservesIndependentOw
     BOARD_COMMIT restore( &tools, true, false );
     restore.Modify( track ); track->SetEnd( { 1000000, 0 } );
     restore.Push( "Restore geometry", SKIP_UNDO | SKIP_SET_DIRTY | SKIP_TEARDROPS );
+    BOOST_CHECK_EQUAL( board.GetTimeStamp(), beforeCommit + 2 );
+    BOOST_CHECK_EQUAL( other.GetTimeStamp(), independentBefore );
+    NATIVE_STATE_DIGEST restoredContent;
+    PCB_IO_KICAD_SEXPR().FormatBoardToFormatter( &restoredContent, &board, nullptr, false );
+    BOOST_CHECK_EQUAL( restoredContent.Hex(), beforeContent.Hex() );
+    BOOST_CHECK_EQUAL( board.GetTimeStamp(), beforeCommit + 2 );
     auto replay = jobs.ReadOperation( request, board, epoch );
     BOOST_REQUIRE( replay ); BOOST_REQUIRE( replay->has_value() );
     BOOST_CHECK( ( **replay ).status() == PDRCJS_STALE );
     BOOST_CHECK_EQUAL( ( **replay ).findings_size(), 0 );
+
+    // BOARD::Add/Remove already advance the counter. The commit fallback must
+    // not count their nonempty composite notifications a second time.
+    auto* added = new PCB_TRACK( &board );
+    added->SetStart( { 0, 1000000 } ); added->SetEnd( { 1000000, 1000000 } ); added->SetWidth( 100000 );
+    const int beforeAdd = board.GetTimeStamp();
+    BOARD_COMMIT add( &tools, true, false );
+    add.Add( added );
+    add.Push( "Add once", SKIP_UNDO | SKIP_SET_DIRTY | SKIP_TEARDROPS );
+    BOOST_CHECK_EQUAL( board.GetTimeStamp(), beforeAdd + 1 );
+    const int beforeRemove = board.GetTimeStamp();
+    BOARD_COMMIT remove( &tools, true, false );
+    remove.Remove( added );
+    remove.Push( "Remove once", SKIP_UNDO | SKIP_SET_DIRTY | SKIP_TEARDROPS );
+    BOOST_CHECK_EQUAL( board.GetTimeStamp(), beforeRemove + 1 );
+    BOOST_CHECK_EQUAL( other.GetTimeStamp(), independentBefore );
+    BOOST_CHECK( independent.Read( Query( *separate ), other, epoch )->status() == PDRCJS_COMPLETED );
 }
 
 BOOST_AUTO_TEST_CASE( NativeChangeCancelsActiveWorkerWithoutPrematureTerminalAcknowledgement )

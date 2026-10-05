@@ -55,14 +55,18 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
             if (!string.IsNullOrWhiteSpace(candidateRequestJson))
             {
                 try { candidate = BoardJson.Parser.Parse<CreateItems>(candidateRequestJson); }
-                catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException)
+                catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException
+                    or InvalidOperationException)
                 { throw new AutomationException("invalid_drc_candidate", "candidateRequestJson is not a valid board CreateItems request: " + error.Message); }
                 ValidateCandidate(candidate, document, allowEmpty: true);
             }
             DeleteItems? delete = null;
             if (!string.IsNullOrWhiteSpace(deleteRequestJson))
             {
-                delete = BoardJson.Parser.Parse<DeleteItems>(deleteRequestJson);
+                try { delete = BoardJson.Parser.Parse<DeleteItems>(deleteRequestJson); }
+                catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException
+                    or InvalidOperationException)
+                { throw new AutomationException("invalid_drc_delete_candidate", "deleteRequestJson is not a valid board DeleteItems request: " + error.Message); }
                 if (delete.Header?.Document is null || !delete.Header.Document.Equals(document) || delete.ItemIds.Count == 0
                     || delete.ItemIds.Any(item => !Guid.TryParseExact(item.Value, "D", out var id) || id == Guid.Empty)
                     || delete.ItemIds.Select(item => item.Value).Distinct(StringComparer.Ordinal).Count() != delete.ItemIds.Count)
@@ -151,16 +155,24 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
             read.ExpectedGroupChanges.Add(groupChanges);
             if (!string.IsNullOrWhiteSpace(candidateRequestJson))
             {
-                candidate = BoardJson.Parser.Parse<CreateItems>(candidateRequestJson);
+                try { candidate = BoardJson.Parser.Parse<CreateItems>(candidateRequestJson); }
+                catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException
+                    or InvalidOperationException)
+                { throw new AutomationException("invalid_drc_candidate", "candidateRequestJson is not a valid board CreateItems request: " + error.Message); }
                 ValidateCandidate(candidate, document, allowEmpty: true);
                 read.ExpectedCandidateItems.Add(candidate.Items);
             }
             if (!string.IsNullOrWhiteSpace(deleteRequestJson))
             {
-                delete = BoardJson.Parser.Parse<DeleteItems>(deleteRequestJson);
+                try { delete = BoardJson.Parser.Parse<DeleteItems>(deleteRequestJson); }
+                catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException
+                    or InvalidOperationException)
+                { throw new AutomationException("invalid_drc_delete_candidate", "deleteRequestJson is not a valid board DeleteItems request: " + error.Message); }
                 if (delete.Header?.Document is null || !delete.Header.Document.Equals(document)
-                    || delete.ItemIds.Count == 0 || delete.ItemIds.Any(item => !Guid.TryParseExact(item.Value, "D", out _)))
-                    throw new AutomationException("invalid_drc_delete_candidate", "deleteRequestJson must target this PCB with canonical item IDs.");
+                    || delete.ItemIds.Count == 0
+                    || delete.ItemIds.Any(item => !Guid.TryParseExact(item.Value, "D", out var id) || id == Guid.Empty)
+                    || delete.ItemIds.Select(item => item.Value).Distinct(StringComparer.Ordinal).Count() != delete.ItemIds.Count)
+                    throw new AutomationException("invalid_drc_delete_candidate", "deleteRequestJson must target this PCB with distinct canonical item IDs.");
                 candidate ??= new CreateItems { Header = new() { Document = document } };
             }
             if (candidate is not null && candidate.Items.Count == 0 && delete is null)

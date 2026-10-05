@@ -94,6 +94,16 @@ public sealed class PcbDrcToolTests
                 Guid.Empty.ToString("D"), false, false, false, revisionJson, transport.Session.Epoch, default);
             Assert.IsTrue(badOperation.IsError ?? false);
             Assert.AreEqual(5, transport.Calls);
+            var malformedCandidate = await tool.Job(transport.Session.InstanceId, json, transport.State.JobId,
+                transport.Session.Epoch, default, candidateRequestJson: "{");
+            Assert.IsTrue(malformedCandidate.IsError ?? false,
+                "A malformed candidate retry must fail before native dispatch.");
+            Assert.AreEqual(5, transport.Calls);
+            var malformedDelete = await tool.Job(transport.Session.InstanceId, json, transport.State.JobId,
+                transport.Session.Epoch, default, deleteRequestJson: "{");
+            Assert.IsTrue(malformedDelete.IsError ?? false,
+                "A malformed delete retry must fail before native dispatch.");
+            Assert.AreEqual(5, transport.Calls);
             var valid = transport.State.Clone();
             for (int variant = 0; variant < 10; ++variant)
             {

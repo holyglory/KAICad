@@ -510,6 +510,28 @@ public sealed class McpProcessTests
             Assert.AreEqual("project_text_variables_mutation_unavailable",
                 refusedProjectTextVariablesSet.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(),
                 refusedProjectTextVariablesSet.GetRawText());
+            var nullProjectTextVariablesSet = await Request(9374, "tools/call", new
+            {
+                name = "kicad_project_text_variables_set",
+                arguments = new
+                {
+                    instanceId = Guid.NewGuid().ToString("D"),
+                    project = new { name = "project-settings-contract", path = "/tmp" },
+                    document = new
+                    {
+                        type = "DOCTYPE_PCB",
+                        project = new { name = "project-settings-contract", path = "/tmp" },
+                        boardFilename = "board.kicad_pcb"
+                    },
+                    expectedStateJson = projectTextVariablesState,
+                    variables = (object?)null, mergeMode = "MMM_MERGE", operationId = Guid.NewGuid().ToString("D")
+                }
+            });
+            Assert.IsTrue(nullProjectTextVariablesSet.GetProperty("result").GetProperty("isError").GetBoolean(),
+                nullProjectTextVariablesSet.GetRawText());
+            Assert.AreEqual("invalid_project_text_variables_request",
+                nullProjectTextVariablesSet.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+                nullProjectTextVariablesSet.GetRawText());
             CollectionAssert.Contains(names, "kicad_pcb_diff_pair_validate");
             var invalidDiffPairValidation = await Request(9369, "tools/call", new
             {

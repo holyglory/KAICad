@@ -267,7 +267,7 @@ public sealed class LibraryLifecycleSnapshotContractTests
         var snapshot = new LibraryLifecycleSnapshot(
             document, Path.Combine(projectPath, "fp-lib-table"), "PROJECT", "Fixture",
             "${KIPRJMOD}/libs/fixture.pretty", libraryPath, "kicad-footprint-file",
-            "",
+            "(footprint (version 20240108) (generator pcbnew))",
             [
                 new LibraryLifecycleDependencyBaseline(Path.Combine(projectPath, "fp-lib-table"), new string('b', 64), 11),
                 new LibraryLifecycleDependencyBaseline(libraryPath, new string('a', 64), 7)

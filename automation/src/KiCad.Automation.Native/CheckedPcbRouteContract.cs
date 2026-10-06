@@ -271,7 +271,7 @@ public static class CheckedPcbRouteContract
         // cannot claim a changed after-state; that is indeterminate instead.
         if (result.Before is not null && !result.Before.Equals(request.ExpectedState))
             throw Invalid("A rejected checked route contains a before-state for another revision.");
-        if (result.After is not null && result.Before is not null && !result.After.Equals(result.Before))
+        if (result.After is not null && !result.After.Equals(request.ExpectedState))
             throw Invalid("A rejected checked route cannot claim a changed native after-state.");
     }
 

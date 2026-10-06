@@ -297,6 +297,40 @@ public sealed class PcbRoutingContractTests
     }
 
     [TestMethod]
+    public void CheckedRouteRejectedReceiptRequiresUnchangedAfterState()
+    {
+        var (request, _, state) = CleanRoute();
+        var rejected = new CheckedPcbRouteReceipt
+        {
+            Document = request.Candidate.Header.Document.Clone(),
+            ProcessEpoch = state.ProcessEpoch,
+            OperationId = request.OperationId,
+            State = CheckedPcbRouteReceipt.Types.State.Rejected,
+            RequestVerified = true,
+            ErrorCode = "route_items_rejected",
+            ErrorMessage = "native route item validation rejected the candidate"
+        };
+
+        CheckedPcbRouteContract.ValidateResult(request, rejected, inspect: false);
+
+        var unchangedAfter = rejected.Clone();
+        unchangedAfter.After = state.Clone();
+        CheckedPcbRouteContract.ValidateResult(request, unchangedAfter, inspect: false);
+
+        var forgedAfter = rejected.Clone();
+        forgedAfter.After = state.Clone();
+        forgedAfter.After.StateSha256 = new string('b', 64);
+        Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedPcbRouteContract.ValidateResult(request, forgedAfter, inspect: false));
+
+        var unanchoredChangedAfter = rejected.Clone();
+        unanchoredChangedAfter.After = state.Clone();
+        unanchoredChangedAfter.After.Revision.Sequence++;
+        Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedPcbRouteContract.ValidateResult(request, unanchoredChangedAfter, inspect: false));
+    }
+
+    [TestMethod]
     public void CheckedRouteContractRejectsNonCopperGeometryBeforeNativeAdmission()
     {
         var (request, _, state) = CleanRoute();

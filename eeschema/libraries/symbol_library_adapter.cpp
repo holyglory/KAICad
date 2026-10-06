@@ -519,8 +519,11 @@ SYMBOL_LIBRARY_ADAPTER::CaptureLibrarySnapshot(
                                   "the refreshed symbol provider is not available" );
 
         std::map<std::string, UTF8> options = row->GetOptionsMap();
-        loadedSymbol.reset( schplugin( *loaded )->LoadSymbol( getUri( ( *loaded )->row ), aName,
-                                                               &options ) );
+        // The adapter/plugin owns the returned cache symbol. Copy it while the provider lock is
+        // held; never put the borrowed pointer in a unique_ptr or delete provider-owned state.
+        if( LIB_SYMBOL* borrowed = schplugin( *loaded )->LoadSymbol( getUri( ( *loaded )->row ), aName,
+                                                                       &options ) )
+            loadedSymbol = std::make_unique<LIB_SYMBOL>( *borrowed );
     }
     catch( const IO_ERROR& e )
     {

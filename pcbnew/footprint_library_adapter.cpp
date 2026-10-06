@@ -529,7 +529,7 @@ FOOTPRINT_LIBRARY_ADAPTER::CaptureLibrarySnapshot(
         loaded->SetFPID( LIB_ID( aNickname, aName ) );
 
         const wxString tempDirectory = wxFileName::GetTempDir() + wxFileName::GetPathSeparator()
-                + wxS( "kicad-footprint-snapshot-" ) + wxString::FromUTF8( KIID().AsStdString() );
+                + wxS( "kicad-footprint-snapshot-" ) + wxString::FromUTF8( ::KIID().AsStdString() );
 
         if( !wxFileName::Mkdir( tempDirectory, 0700, wxPATH_MKDIR_FULL ) )
         {

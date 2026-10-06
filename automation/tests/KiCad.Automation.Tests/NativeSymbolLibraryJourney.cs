@@ -45,10 +45,13 @@ public sealed partial class NativeSessionTests
         Assert.IsFalse(read.GetProperty("structuredContent").GetProperty("revisionTracked").GetBoolean());
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-symbol-library-read.json"), read.GetRawText(), token);
 
+        var symbolDocument = document.Clone();
+        symbolDocument.Type = DocumentType.DoctypeSymbol;
+        symbolDocument.LibId = new() { LibraryNickname = libraryNickname, EntryName = symbolName };
         var lifecycleSnapshot = await mcp.Tool("kicad_library_snapshot_read", new
         {
             instanceId, expectedProcessEpoch = client.Epoch,
-            documentJson = SchematicJson.Formatter.Format(document), libraryNickname, entryName = symbolName,
+            documentJson = SchematicJson.Formatter.Format(symbolDocument), libraryNickname, entryName = symbolName,
             forcedRefresh = true
         });
         RequireToolSuccess(lifecycleSnapshot);

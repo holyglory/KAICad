@@ -14,11 +14,11 @@
 
 
 /**
- * The first library lifecycle slice is deliberately read-only.  It binds one detached symbol
- * definition to the project and library-table row from which it was observed, and records the
- * complete file baselines that were used for the observation.  This type is an internal native
- * contract; it is not an API/protobuf response and therefore cannot accidentally advertise a
- * checked mutation capability before all native writers are covered.
+ * The first library lifecycle slice is deliberately read-only.  It binds one detached symbol or
+ * footprint definition to the project and library-table row from which it was observed, and
+ * records the complete file baselines that were used for the observation.  This type is an
+ * internal native contract; it is not an API/protobuf response and therefore cannot accidentally
+ * advertise a checked mutation capability before all native writers are covered.
  */
 struct KICOMMON_API LIBRARY_LIFECYCLE_SNAPSHOT
 {
@@ -36,7 +36,7 @@ struct KICOMMON_API LIBRARY_LIFECYCLE_SNAPSHOT
     std::string           providerOptions;
 
     // This is a detached, canonical definition captured after a forced provider refresh.  The
-    // snapshot does not own a mutable LIB_SYMBOL, so a later caller cannot write through it.
+    // snapshot does not own a mutable library object, so a later caller cannot write through it.
     std::string           detachedDefinition;
     std::vector<FILE_CONTENT_BASELINE> dependencyBaselines;
 
@@ -59,6 +59,7 @@ enum class LIBRARY_LIFECYCLE_ERROR_CODE
     INVALID_TABLE_ROW,
     UNKNOWN_PROVIDER,
     UNSUPPORTED_PROVIDER,
+    UNSUPPORTED_DEPENDENCY,
     INCOMPLETE_SNAPSHOT,
     INCOMPLETE_BASELINE,
     MUTATION_NOT_AVAILABLE

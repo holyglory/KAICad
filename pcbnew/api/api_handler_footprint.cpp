@@ -399,6 +399,9 @@ API_HANDLER_FOOTPRINT::API_HANDLER_FOOTPRINT( std::shared_ptr<FOOTPRINT_CONTEXT>
     registerHandler<kiapi::automation::v1::NativeCapabilityFootprintReadDefinition,
                     kiapi::automation::v1::NativeCapabilityFootprintReadDefinitionResponse>(
             &API_HANDLER_FOOTPRINT::handleReadDefinition );
+    registerHandler<kiapi::automation::v1::NativeCapabilityLibrarySnapshotRead,
+                    kiapi::automation::v1::NativeCapabilityLibrarySnapshotReadResponse>(
+            &API_HANDLER_FOOTPRINT::handleReadLibrarySnapshot );
 
     registerHandler<GetItems, GetItemsResponse>( &API_HANDLER_FOOTPRINT::handleGetItems );
 }
@@ -1061,6 +1064,140 @@ API_HANDLER_FOOTPRINT::handleReadDefinition(
         e.set_status( ApiStatusCode::AS_BAD_REQUEST );
         e.set_error_message( error.What().ToStdString() );
         return tl::unexpected( e );
+    }
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::NativeCapabilityLibrarySnapshotReadResponse>
+API_HANDLER_FOOTPRINT::handleReadLibrarySnapshot(
+        const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityLibrarySnapshotRead>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    using namespace kiapi::common::types;
+
+    NativeCapabilityLibrarySnapshotReadResponse response;
+    response.mutable_document()->CopyFrom( aCtx.Request.document() );
+    const std::string actualProcessEpoch = apiServer().Token();
+    response.set_process_epoch( actualProcessEpoch );
+
+    auto fail = [&]( const char* aCode, const std::string& aMessage,
+                     const char* aStatus = "error" )
+            -> HANDLER_RESULT<NativeCapabilityLibrarySnapshotReadResponse>
+    {
+        response.set_status( aStatus );
+        response.set_error_code( aCode );
+        response.set_error_message( aMessage );
+        return response;
+    };
+
+    if( aCtx.Request.process_epoch().empty() )
+        return fail( "invalid_process_epoch", "An explicit native process epoch is required." );
+
+    if( aCtx.Request.process_epoch() != actualProcessEpoch )
+        return fail( "stale_process_epoch", "The requested process epoch is no longer current." );
+
+    if( !aCtx.Request.has_document() || !aCtx.Request.document().has_project()
+            || !aCtx.Request.document().has_lib_id() )
+    {
+        return fail( "invalid_library_document", "A project-bound footprint DocumentSpecifier is required." );
+    }
+
+    if( aCtx.Request.document().type() != DOCTYPE_FOOTPRINT )
+        return fail( "library_document_unsupported",
+                     "Read-only lifecycle snapshots currently support footprint documents in this handler.",
+                     "unsupported" );
+
+    const std::string nickname = aCtx.Request.library_nickname();
+    const std::string entryName = aCtx.Request.entry_name();
+    if( nickname.empty() || entryName.empty()
+            || nickname != aCtx.Request.document().lib_id().library_nickname()
+            || entryName != aCtx.Request.document().lib_id().entry_name()
+            || nickname.find( '\0' ) != std::string::npos
+            || entryName.find( '\0' ) != std::string::npos )
+    {
+        return fail( "invalid_library_document",
+                     "libraryNickname and entryName must match the explicit footprint DocumentSpecifier." );
+    }
+
+    if( !aCtx.Request.forced_refresh() )
+        return fail( "library_snapshot_incomplete", "A forced provider refresh is required for a lifecycle snapshot." );
+
+    auto codeName = []( LIBRARY_LIFECYCLE_ERROR_CODE aCode ) -> const char*
+    {
+        switch( aCode )
+        {
+        case LIBRARY_LIFECYCLE_ERROR_CODE::INVALID_DOCUMENT: return "invalid_library_document";
+        case LIBRARY_LIFECYCLE_ERROR_CODE::PROJECT_MISMATCH: return "library_project_mismatch";
+        case LIBRARY_LIFECYCLE_ERROR_CODE::INVALID_TABLE_ROW: return "library_table_row_mismatch";
+        case LIBRARY_LIFECYCLE_ERROR_CODE::UNKNOWN_PROVIDER: return "library_provider_unknown";
+        case LIBRARY_LIFECYCLE_ERROR_CODE::UNSUPPORTED_PROVIDER: return "library_provider_unsupported";
+        case LIBRARY_LIFECYCLE_ERROR_CODE::UNSUPPORTED_DEPENDENCY: return "library_dependency_unsupported";
+        case LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_SNAPSHOT: return "library_snapshot_incomplete";
+        case LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_BASELINE: return "library_baseline_incomplete";
+        case LIBRARY_LIFECYCLE_ERROR_CODE::MUTATION_NOT_AVAILABLE: return "library_mutation_unavailable";
+        }
+        return "library_snapshot_failed";
+    };
+
+    try
+    {
+        FOOTPRINT_LIBRARY_ADAPTER* adapter = PROJECT_PCB::FootprintLibAdapter( &project() );
+        if( !adapter )
+            return fail( "library_provider_unknown", "The board editor has no footprint-library adapter." );
+
+        auto captured = adapter->CaptureLibrarySnapshot( wxString::FromUTF8( nickname ),
+                                                         wxString::FromUTF8( entryName ),
+                                                         aCtx.Request.document(), project() );
+        if( !captured )
+            return fail( codeName( captured.error().code ), captured.error().message );
+
+        const LIBRARY_LIFECYCLE_SNAPSHOT& snapshot = *captured;
+        if( auto valid = ValidateLibraryLifecycleSnapshot( snapshot, project().GetProjectName(),
+                                                            project().GetProjectPath() ); !valid )
+        {
+            return fail( codeName( valid.error().code ), valid.error().message );
+        }
+
+        if( snapshot.providerOptions.size() > 64 * 1024
+                || snapshot.detachedDefinition.size() > 4 * 1024 * 1024 )
+        {
+            return fail( "library_snapshot_too_large", "The read-only snapshot exceeds its bounded transport size." );
+        }
+
+        NATIVE_STATE_DIGEST definitionDigest;
+        definitionDigest.Append( snapshot.detachedDefinition );
+        response.set_status( "complete" );
+        response.set_table_path( snapshot.tablePath.ToStdString( wxConvUTF8 ) );
+        response.set_table_scope( snapshot.tableScope == LIBRARY_TABLE_SCOPE::PROJECT ? "PROJECT" : "GLOBAL" );
+        response.set_nickname( snapshot.nickname.ToStdString( wxConvUTF8 ) );
+        response.set_raw_uri( snapshot.rawUri.ToStdString( wxConvUTF8 ) );
+        response.set_expanded_uri( snapshot.expandedUri.ToStdString( wxConvUTF8 ) );
+        response.set_provider( snapshot.provider );
+        response.set_provider_options( snapshot.providerOptions );
+        response.set_detached_definition_sha256( definitionDigest.Hex() );
+        response.set_detached_definition_bytes( definitionDigest.Bytes() );
+        response.set_forced_refresh( snapshot.forcedRefresh );
+        response.set_provider_observable( snapshot.providerObservable );
+        response.set_content_snapshot_complete( snapshot.contentSnapshotComplete );
+        response.set_disk_baseline_checked( snapshot.diskBaselineChecked );
+        response.set_complete_change_tracking( snapshot.completeChangeTracking );
+        response.set_postverify( snapshot.postverify );
+
+        for( const FILE_CONTENT_BASELINE& baseline : snapshot.dependencyBaselines )
+        {
+            auto* output = response.add_dependency_baselines();
+            output->set_path( baseline.Path().ToStdString( wxConvUTF8 ) );
+            output->set_exists( baseline.Exists() );
+            output->set_known( baseline.Known() );
+            output->set_sha256( baseline.Sha256() );
+            output->set_bytes( baseline.Bytes() );
+        }
+
+        return response;
+    }
+    catch( const std::exception& error )
+    {
+        return fail( "library_snapshot_failed", error.what() );
     }
 }
 

@@ -74,6 +74,10 @@ private:
             handleReadDefinition(
                     const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityFootprintReadDefinition>& aCtx );
 
+    HANDLER_RESULT<kiapi::automation::v1::NativeCapabilityLibrarySnapshotReadResponse>
+            handleReadLibrarySnapshot(
+                    const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityLibrarySnapshotRead>& aCtx );
+
     HANDLER_RESULT<commands::GetItemsResponse> handleGetItems(
             const HANDLER_CONTEXT<commands::GetItems>& aCtx );
 

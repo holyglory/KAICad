@@ -26,12 +26,116 @@
 #include <thread_pool.h>
 #include <trace_helpers.h>
 #include <footprint.h>
+#include <api/library_lifecycle_snapshot.h>
+#include <file_content_baseline.h>
+#include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
+#include <pcb_io/pcb_io_mgr.h>
+#include <string_utils.h>
+#include <wildcards_and_files_ext.h>
 
 #include <magic_enum.hpp>
 #include <wx/hash.h>
+#include <wx/filename.h>
 #include <wx/log.h>
 
+#include <utility>
+
 using namespace std::chrono_literals;
+
+
+namespace
+{
+using SNAPSHOT_RESULT = tl::expected<LIBRARY_LIFECYCLE_SNAPSHOT, LIBRARY_LIFECYCLE_ERROR>;
+
+
+SNAPSHOT_RESULT SnapshotError( LIBRARY_LIFECYCLE_ERROR_CODE aCode, std::string aMessage )
+{
+    return tl::unexpected( LIBRARY_LIFECYCLE_ERROR { .code = aCode, .message = std::move( aMessage ) } );
+}
+
+
+bool HasNoNul( const wxString& aValue )
+{
+    return aValue.Find( '\0' ) == wxNOT_FOUND;
+}
+
+
+wxString NormalizeDirectory( const wxString& aPath )
+{
+    if( aPath.empty() || !HasNoNul( aPath ) )
+        return {};
+
+    wxFileName path = wxFileName::DirName( aPath );
+
+    if( !path.IsAbsolute() || !path.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE ) )
+        return {};
+
+    return path.GetPath();
+}
+
+
+bool IsAbsoluteFile( const wxString& aPath )
+{
+    if( aPath.empty() || !HasNoNul( aPath ) )
+        return false;
+
+    wxFileName path( aPath );
+    return path.IsAbsolute() && path.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE );
+}
+
+
+bool IsFootprintDirectoryUri( const wxString& aUri )
+{
+    if( aUri.empty() || !HasNoNul( aUri ) )
+        return false;
+
+    wxString normalized = aUri;
+    while( normalized.Last() == '/' || normalized.Last() == '\\' )
+        normalized.RemoveLast();
+
+    return normalized.Lower().EndsWith( wxS( ".pretty" ) );
+}
+
+
+bool SameBaseline( const FILE_CONTENT_BASELINE& aLeft, const FILE_CONTENT_BASELINE& aRight )
+{
+    return aLeft.Known() && aRight.Known() && aLeft.Exists() == aRight.Exists()
+           && aLeft.Bytes() == aRight.Bytes() && aLeft.Sha256() == aRight.Sha256()
+           && FILE_CONTENT_BASELINE::SamePath( aLeft.Path(), aRight.Path() );
+}
+
+
+bool SameTableRow( const LIBRARY_TABLE_ROW& aLeft, const LIBRARY_TABLE_ROW& aRight )
+{
+    return aLeft.Nickname() == aRight.Nickname() && aLeft.URI() == aRight.URI()
+           && aLeft.Type() == aRight.Type() && aLeft.Options() == aRight.Options()
+           && aLeft.Scope() == aRight.Scope() && aLeft.Disabled() == aRight.Disabled()
+           && aLeft.Hidden() == aRight.Hidden();
+}
+
+
+bool IsValidDocumentForProject( const kiapi::common::types::DocumentSpecifier& aDocument,
+                                const PROJECT& aProject )
+{
+    using namespace kiapi::common::types;
+
+    if( aDocument.type() != DOCTYPE_FOOTPRINT || !aDocument.has_project()
+            || !aDocument.has_lib_id() || aDocument.project().name().empty()
+            || aDocument.project().path().empty() || aDocument.lib_id().library_nickname().empty()
+            || aDocument.lib_id().entry_name().empty()
+            || aDocument.project().name().find( '\0' ) != std::string::npos
+            || aDocument.project().path().find( '\0' ) != std::string::npos
+            || aDocument.lib_id().library_nickname().find( '\0' ) != std::string::npos
+            || aDocument.lib_id().entry_name().find( '\0' ) != std::string::npos )
+    {
+        return false;
+    }
+
+    return aDocument.project().name() == aProject.GetProjectName().ToStdString( wxConvUTF8 )
+           && NormalizeDirectory( wxString::FromUTF8( aDocument.project().path() ) )
+                      == NormalizeDirectory( aProject.GetProjectDirectory() );
+}
+} // namespace
 
 
 LEAK_AT_EXIT<std::map<wxString, LIB_DATA>> FOOTPRINT_LIBRARY_ADAPTER::GlobalLibraries;
@@ -282,6 +386,225 @@ void FOOTPRINT_LIBRARY_ADAPTER::RefreshLibraryIfChanged( const wxString& aNickna
         plugin->ClearCachedFootprints( uri );
     }
     enumerateLibrary( lib, uri );
+}
+
+
+tl::expected<LIBRARY_LIFECYCLE_SNAPSHOT, LIBRARY_LIFECYCLE_ERROR>
+FOOTPRINT_LIBRARY_ADAPTER::CaptureLibrarySnapshot(
+        const wxString& aNickname, const wxString& aName,
+        const kiapi::common::types::DocumentSpecifier& aDocument, const PROJECT& aProject )
+{
+    using namespace kiapi::common::types;
+
+    if( aNickname.empty() || aName.empty() || !HasNoNul( aNickname ) || !HasNoNul( aName )
+            || !IsValidDocumentForProject( aDocument, aProject )
+            || aDocument.lib_id().library_nickname() != aNickname.ToStdString( wxConvUTF8 )
+            || aDocument.lib_id().entry_name() != aName.ToStdString( wxConvUTF8 ) )
+    {
+        return SnapshotError( LIBRARY_LIFECYCLE_ERROR_CODE::INVALID_DOCUMENT,
+                              "the footprint snapshot document is not a valid identity for this project" );
+    }
+
+    if( aProject.IsNullProject() )
+    {
+        return SnapshotError( LIBRARY_LIFECYCLE_ERROR_CODE::PROJECT_MISMATCH,
+                              "a footprint snapshot requires a non-null owning project" );
+    }
+
+    std::optional<LIBRARY_TABLE_ROW*> rowResult = GetRow( aNickname, LIBRARY_TABLE_SCOPE::BOTH );
+
+    if( !rowResult || !( *rowResult ) )
+    {
+        return SnapshotError( LIBRARY_LIFECYCLE_ERROR_CODE::INVALID_TABLE_ROW,
+                              "the requested footprint nickname is absent from the library tables" );
+    }
+
+    const LIBRARY_TABLE_ROW* row = *rowResult;
+
+    if( row->Scope() != LIBRARY_TABLE_SCOPE::GLOBAL && row->Scope() != LIBRARY_TABLE_SCOPE::PROJECT )
+    {
+        return SnapshotError( LIBRARY_LIFECYCLE_ERROR_CODE::INVALID_TABLE_ROW,
+                              "the footprint row does not identify one concrete library-table scope" );
+    }
+
+    std::optional<LIBRARY_TABLE*> tableResult = Manager().Table( Type(), row->Scope() );
+
+    if( !tableResult || !( *tableResult ) || ( *tableResult )->Path().empty()
+            || !( *tableResult )->IsOk() )
+    {
+        return SnapshotError( LIBRARY_LIFECYCLE_ERROR_CODE::INVALID_TABLE_ROW,
+                              "the footprint row has no readable owning library-table file" );
+    }
+
+    LIBRARY_TABLE* table = *tableResult;
+    bool rowBelongsToRootTable = false;
+
+    for( const LIBRARY_TABLE_ROW& candidate : table->Rows() )
+    {
+        if( &candidate == row )
+        {
+            rowBelongsToRootTable = true;
+            break;
+        }
+    }
+
+    if( !rowBelongsToRootTable )
+    {
+        return SnapshotError( LIBRARY_LIFECYCLE_ERROR_CODE::UNSUPPORTED_PROVIDER,
+                              "nested footprint-table rows are not covered by this snapshot owner" );
+    }
+
+    if( row->Disabled() || PCB_IO_MGR::EnumFromStr( row->Type() ) != PCB_IO_MGR::KICAD_SEXP )
+    {
+        return SnapshotError( LIBRARY_LIFECYCLE_ERROR_CODE::UNSUPPORTED_PROVIDER,
+                              "only direct KiCad footprint .pretty providers are covered by this snapshot owner" );
+    }
+
+    const wxString expandedDirectory = LIBRARY_MANAGER::ExpandURI( row->URI(), aProject );
+
+    if( !IsFootprintDirectoryUri( row->URI() ) || !IsAbsoluteFile( table->Path() )
+            || !IsAbsoluteFile( expandedDirectory )
+            || !wxFileName( expandedDirectory ).DirExists()
+            || wxFileName( expandedDirectory ).GetExt().CmpNoCase( wxS( "pretty" ) ) != 0 )
+    {
+        return SnapshotError( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_BASELINE,
+                              "the footprint table or .pretty provider path is not an existing absolute directory" );
+    }
+
+    wxString fileName = aName;
+    ReplaceIllegalFileNameChars( fileName, '_' );
+    const wxString expandedEntry = wxFileName( expandedDirectory, fileName,
+                                               FILEEXT::KiCadFootprintFileExtension ).GetFullPath();
+
+    std::string tableContents;
+    const FILE_CONTENT_BASELINE tableBefore = FILE_CONTENT_BASELINE::Read( table->Path(), &tableContents );
+    const FILE_CONTENT_BASELINE entryBefore = FILE_CONTENT_BASELINE::Read( expandedEntry );
+
+    if( !tableBefore.Known() || !tableBefore.Exists() || !entryBefore.Known() || !entryBefore.Exists() )
+    {
+        return SnapshotError( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_BASELINE,
+                              "the footprint table and exact .kicad_mod entry need complete readable baselines" );
+    }
+
+    LIBRARY_TABLE tableFromDisk( true, wxString::FromUTF8( tableContents ), row->Scope() );
+    std::optional<LIBRARY_TABLE_ROW*> diskRow = tableFromDisk.Row( aNickname );
+
+    if( !tableFromDisk.IsOk() || !diskRow || !( *diskRow ) || !SameTableRow( **diskRow, *row ) )
+    {
+        return SnapshotError( LIBRARY_LIFECYCLE_ERROR_CODE::INVALID_TABLE_ROW,
+                              "the in-memory footprint row does not match the captured table file" );
+    }
+
+    try
+    {
+        std::optional<LIB_STATUS> loadedStatus = LoadOne( aNickname );
+
+        if( !loadedStatus || loadedStatus->load_status != LOAD_STATUS::LOADED )
+        {
+            return SnapshotError( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_SNAPSHOT,
+                                  "the footprint provider could not be loaded" );
+        }
+
+        // Force the provider to discard timestamp-based caches before reading the requested entry.
+        RefreshLibraryIfChanged( aNickname, true );
+        std::unique_ptr<FOOTPRINT> loaded( LoadFootprint( aNickname, aName, true ) );
+
+        if( !loaded )
+        {
+            return SnapshotError( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_SNAPSHOT,
+                                  "the requested footprint was not present in the refreshed provider" );
+        }
+
+        // Model paths point to files outside the table and entry baselines.  Do not fold those
+        // references into detachedDefinition and accidentally claim dependency coverage.
+        if( !loaded->Models().empty() )
+        {
+            return SnapshotError( LIBRARY_LIFECYCLE_ERROR_CODE::UNSUPPORTED_DEPENDENCY,
+                                  "footprint 3D model dependencies are outside the captured table and entry baseline scope" );
+        }
+
+        loaded->SetParent( nullptr );
+        loaded->SetParentGroup( nullptr );
+        loaded->ClearAllNets();
+        loaded->SetFPID( LIB_ID( aNickname, aName ) );
+
+        const wxString tempDirectory = wxFileName::GetTempDir() + wxFileName::GetPathSeparator()
+                + wxS( "kicad-footprint-snapshot-" ) + wxString::FromUTF8( KIID().AsStdString() );
+
+        if( !wxFileName::Mkdir( tempDirectory, 0700, wxPATH_MKDIR_FULL ) )
+        {
+            return SnapshotError( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_SNAPSHOT,
+                                  "could not allocate a private native temporary footprint library" );
+        }
+
+        struct TEMP_DIRECTORY
+        {
+            wxString path;
+            ~TEMP_DIRECTORY()
+            {
+                if( !path.empty() )
+                    wxFileName::Rmdir( path, wxPATH_RMDIR_RECURSIVE );
+            }
+        } temporary{ tempDirectory };
+
+        PCB_IO_KICAD_SEXPR writer;
+        writer.FootprintSave( tempDirectory, loaded.get(), nullptr );
+
+        wxString canonicalName = aName;
+        ReplaceIllegalFileNameChars( canonicalName, '_' );
+        const wxString canonicalPath = wxFileName( tempDirectory, canonicalName,
+                                                   FILEEXT::KiCadFootprintFileExtension ).GetFullPath();
+        std::string detachedDefinition;
+        const FILE_CONTENT_BASELINE canonicalBaseline =
+                FILE_CONTENT_BASELINE::Read( canonicalPath, &detachedDefinition );
+
+        if( !canonicalBaseline.Known() || !canonicalBaseline.Exists() || detachedDefinition.empty()
+                || detachedDefinition.find( "(footprint" ) == std::string::npos )
+        {
+            return SnapshotError( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_SNAPSHOT,
+                                  "the native footprint writer did not produce a complete detached definition" );
+        }
+
+        const FILE_CONTENT_BASELINE tableAfter = FILE_CONTENT_BASELINE::Read( table->Path() );
+        const FILE_CONTENT_BASELINE entryAfter = FILE_CONTENT_BASELINE::Read( expandedEntry );
+
+        if( !SameBaseline( tableBefore, tableAfter ) || !SameBaseline( entryBefore, entryAfter ) )
+        {
+            return SnapshotError( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_BASELINE,
+                                  "the footprint table or entry changed while the snapshot was captured" );
+        }
+
+        LIBRARY_LIFECYCLE_SNAPSHOT snapshot;
+        snapshot.document = aDocument;
+        snapshot.tablePath = table->Path();
+        snapshot.tableScope = row->Scope();
+        snapshot.nickname = row->Nickname();
+        snapshot.rawUri = row->URI();
+        // The expanded URI is the exact sanitized entry file, not the .pretty directory.  This
+        // makes the detached definition and its file baseline refer to one concrete source.
+        snapshot.expandedUri = expandedEntry;
+        snapshot.provider = "kicad-footprint-file";
+        snapshot.providerOptions = row->Options().ToStdString( wxConvUTF8 );
+        snapshot.detachedDefinition = std::move( detachedDefinition );
+        snapshot.dependencyBaselines = { tableAfter, entryAfter };
+        snapshot.forcedRefresh = true;
+        snapshot.providerObservable = true;
+        snapshot.contentSnapshotComplete = true;
+        snapshot.diskBaselineChecked = true;
+        snapshot.completeChangeTracking = false;
+        snapshot.postverify = false;
+        return snapshot;
+    }
+    catch( const IO_ERROR& error )
+    {
+        return SnapshotError( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_SNAPSHOT,
+                              "the footprint provider threw while refreshing: " + error.What().ToStdString() );
+    }
+    catch( const std::exception& error )
+    {
+        return SnapshotError( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_SNAPSHOT,
+                              std::string( "the footprint provider failed while capturing: " ) + error.what() );
+    }
 }
 
 

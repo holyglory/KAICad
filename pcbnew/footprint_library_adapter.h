@@ -26,6 +26,7 @@
 #include <memory>
 
 #include <lib_id.h>
+#include <api/library_lifecycle_snapshot.h>
 #include <core/leak_at_exit.h>
 #include <libraries/library_manager.h>
 #include <pcb_io/pcb_io.h>
@@ -95,6 +96,16 @@ public:
     void RefreshLibraryIfChanged( const wxString& aNickname, bool aForceReload = false );
 
     void RefreshChangedLibraries();
+
+    /**
+     * Capture one read-only, detached footprint definition together with the exact table row and
+     * file baselines observed while reading it.  Only direct KiCad .pretty providers are covered;
+     * nested, remote, database and external-model dependencies are refused explicitly.
+     */
+    tl::expected<LIBRARY_LIFECYCLE_SNAPSHOT, LIBRARY_LIFECYCLE_ERROR> CaptureLibrarySnapshot(
+            const wxString& aNickname, const wxString& aName,
+            const kiapi::common::types::DocumentSpecifier& aDocument,
+            const PROJECT& aProject );
 
     bool FootprintExists( const wxString& aNickname, const wxString& aName );
 

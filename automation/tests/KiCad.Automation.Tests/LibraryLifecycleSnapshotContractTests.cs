@@ -205,6 +205,32 @@ public sealed class LibraryLifecycleSnapshotContractTests
             "library_snapshot_incomplete");
     }
 
+    [TestMethod]
+    public void FootprintSnapshotAcceptsDirectPrettyEntryAndRejectsNestedEntry()
+    {
+        (LibraryLifecycleSnapshot snapshot, DocumentSpecifier document, string projectPath) = FootprintFixture();
+
+        LibraryLifecycleSnapshotContract.ValidateReadOnly(snapshot, document, "fixture", projectPath);
+
+        Reject(() => LibraryLifecycleSnapshotContract.ValidateReadOnly(
+            snapshot with { ExpandedUri = Path.Combine(projectPath, "libs", "fixture.pretty.kicad_mod", "Probe.kicad_mod") },
+            document, "fixture", projectPath), "library_table_row_mismatch");
+    }
+
+    [TestMethod]
+    public void FootprintSnapshotRejectsNonPrettyRowsAndExternalProvider()
+    {
+        (LibraryLifecycleSnapshot snapshot, DocumentSpecifier document, string projectPath) = FootprintFixture();
+
+        Reject(() => LibraryLifecycleSnapshotContract.ValidateReadOnly(
+            snapshot with { RawUri = "${KIPRJMOD}/libs/fixture.kicad_mod" },
+            document, "fixture", projectPath), "library_table_row_mismatch");
+
+        Reject(() => LibraryLifecycleSnapshotContract.ValidateReadOnly(
+            snapshot with { Provider = "http" }, document, "fixture", projectPath),
+            "library_provider_unsupported");
+    }
+
     private static (LibraryLifecycleSnapshot Snapshot, DocumentSpecifier Document, string ProjectPath) Fixture()
     {
         string projectPath = Path.Combine(Path.GetTempPath(), "kicad-library-lifecycle-fixture");
@@ -221,6 +247,29 @@ public sealed class LibraryLifecycleSnapshotContractTests
             "{\"id\":\"Fixture:Probe\"}",
             [
                 new LibraryLifecycleDependencyBaseline(Path.Combine(projectPath, "sym-lib-table"), new string('b', 64), 11),
+                new LibraryLifecycleDependencyBaseline(libraryPath, new string('a', 64), 7)
+            ],
+            ForcedRefresh: true, ProviderObservable: true, ContentSnapshotComplete: true,
+            DiskBaselineChecked: true, CompleteChangeTracking: false, Postverify: false);
+        return (snapshot, document, projectPath);
+    }
+
+    private static (LibraryLifecycleSnapshot Snapshot, DocumentSpecifier Document, string ProjectPath) FootprintFixture()
+    {
+        string projectPath = Path.Combine(Path.GetTempPath(), "kicad-library-lifecycle-footprint-fixture");
+        string libraryPath = Path.Combine(projectPath, "libs", "fixture.pretty", "Probe.kicad_mod");
+        var document = new DocumentSpecifier
+        {
+            Type = DocumentType.DoctypeFootprint,
+            Project = new() { Name = "fixture", Path = projectPath },
+            LibId = new() { LibraryNickname = "Fixture", EntryName = "Probe" }
+        };
+        var snapshot = new LibraryLifecycleSnapshot(
+            document, Path.Combine(projectPath, "fp-lib-table"), "PROJECT", "Fixture",
+            "${KIPRJMOD}/libs/fixture.pretty", libraryPath, "kicad-footprint-file",
+            "",
+            [
+                new LibraryLifecycleDependencyBaseline(Path.Combine(projectPath, "fp-lib-table"), new string('b', 64), 11),
                 new LibraryLifecycleDependencyBaseline(libraryPath, new string('a', 64), 7)
             ],
             ForcedRefresh: true, ProviderObservable: true, ContentSnapshotComplete: true,

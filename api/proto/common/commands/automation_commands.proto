@@ -1325,11 +1325,12 @@ message NativeCapabilitySymbolLibraryReadOperationResponse {
   NativeCapabilitySymbolLibraryDeleteSymbolResponse delete_response = 4;
 }
 
-// Read-only, project-bound symbol-library lifecycle evidence. This transport
-// deliberately returns compact hashes/baselines instead of exposing the
-// detached provider definition wholesale. Footprint requests are explicit and
-// return an unsupported status until their producer is covered by the same
-// owner contract.
+// Read-only, project-bound symbol/footprint-library lifecycle evidence. This
+// transport deliberately returns compact hashes/baselines instead of exposing
+// the detached provider definition wholesale. Symbol rows retain their direct
+// .kicad_sym expanded URI; footprint rows retain the exact row .pretty URI in
+// raw_uri and the sanitized entry .kicad_mod path in expanded_uri. Unsupported
+// providers and external dependencies remain explicit refusals.
 message NativeCapabilityLibrarySnapshotDependencyBaseline {
   string path = 1;
   bool exists = 2;

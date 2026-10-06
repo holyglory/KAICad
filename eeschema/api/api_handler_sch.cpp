@@ -3185,6 +3185,7 @@ API_HANDLER_SCH::handleReadLibrarySnapshot(
         case LIBRARY_LIFECYCLE_ERROR_CODE::INVALID_TABLE_ROW: return "library_table_row_mismatch";
         case LIBRARY_LIFECYCLE_ERROR_CODE::UNKNOWN_PROVIDER: return "library_provider_unknown";
         case LIBRARY_LIFECYCLE_ERROR_CODE::UNSUPPORTED_PROVIDER: return "library_provider_unsupported";
+        case LIBRARY_LIFECYCLE_ERROR_CODE::UNSUPPORTED_DEPENDENCY: return "library_dependency_unsupported";
         case LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_SNAPSHOT: return "library_snapshot_incomplete";
         case LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_BASELINE: return "library_baseline_incomplete";
         case LIBRARY_LIFECYCLE_ERROR_CODE::MUTATION_NOT_AVAILABLE: return "library_mutation_unavailable";

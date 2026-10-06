@@ -60,6 +60,44 @@ bool IsSymbolFile( const wxString& aPath )
 }
 
 
+bool IsFootprintFile( const wxString& aPath )
+{
+    if( !IsAbsoluteFile( aPath ) || aPath.Last() == '/' || aPath.Last() == '\\' )
+        return false;
+
+    wxFileName path( aPath );
+
+    if( !path.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE )
+            || path.GetExt().CmpNoCase( wxS( "kicad_mod" ) ) != 0 )
+    {
+        return false;
+    }
+
+    // A .kicad_mod parent denotes a nested/derived provider path, not a direct
+    // entry in the .pretty directory covered by this slice.
+    for( const wxString& directory : path.GetDirs() )
+    {
+        if( directory.Lower().EndsWith( wxS( ".kicad_mod" ) ) )
+            return false;
+    }
+
+    return true;
+}
+
+
+bool IsFootprintDirectoryUri( const wxString& aUri )
+{
+    if( aUri.empty() || aUri.Find( '\0' ) != wxNOT_FOUND )
+        return false;
+
+    wxString normalized = aUri;
+    while( normalized.Last() == '/' || normalized.Last() == '\\' )
+        normalized.RemoveLast();
+
+    return normalized.Lower().EndsWith( wxS( ".pretty" ) );
+}
+
+
 bool IsSha256( const std::string& aDigest )
 {
     return aDigest.size() == 64
@@ -86,7 +124,10 @@ LIBRARY_LIFECYCLE_RESULT ValidateLibraryLifecycleSnapshot(
 
     const DocumentSpecifier& document = aSnapshot.document;
 
-    if( document.type() != DOCTYPE_SYMBOL || !document.has_project() || !document.has_lib_id()
+    const bool isSymbol = document.type() == DOCTYPE_SYMBOL;
+    const bool isFootprint = document.type() == DOCTYPE_FOOTPRINT;
+
+    if( ( !isSymbol && !isFootprint ) || !document.has_project() || !document.has_lib_id()
             || document.project().name().empty() || document.project().path().empty()
             || document.lib_id().library_nickname().empty() || document.lib_id().entry_name().empty()
             || document.project().name().find( '\0' ) != std::string::npos
@@ -95,7 +136,7 @@ LIBRARY_LIFECYCLE_RESULT ValidateLibraryLifecycleSnapshot(
             || document.lib_id().entry_name().find( '\0' ) != std::string::npos )
     {
         return Error( LIBRARY_LIFECYCLE_ERROR_CODE::INVALID_DOCUMENT,
-                      "a symbol-library snapshot requires a project-bound symbol DocumentSpecifier" );
+                      "a library snapshot requires a project-bound symbol or footprint DocumentSpecifier" );
     }
 
     const wxString normalizedProjectPath =
@@ -108,7 +149,7 @@ LIBRARY_LIFECYCLE_RESULT ValidateLibraryLifecycleSnapshot(
             || normalizedProjectPath != normalizedExpectedProjectPath )
     {
         return Error( LIBRARY_LIFECYCLE_ERROR_CODE::PROJECT_MISMATCH,
-                      "the requested symbol-library project is not the project served by this native owner" );
+                      "the requested library project is not the project served by this native owner" );
     }
 
     if( aSnapshot.nickname.empty() || aSnapshot.nickname.Find( '\0' ) != wxNOT_FOUND
@@ -116,25 +157,32 @@ LIBRARY_LIFECYCLE_RESULT ValidateLibraryLifecycleSnapshot(
             || ( aSnapshot.tableScope != LIBRARY_TABLE_SCOPE::GLOBAL
                  && aSnapshot.tableScope != LIBRARY_TABLE_SCOPE::PROJECT )
             || !IsAbsoluteFile( aSnapshot.tablePath ) || aSnapshot.rawUri.empty()
-            || aSnapshot.rawUri.Find( '\0' ) != wxNOT_FOUND || !IsSymbolFile( aSnapshot.expandedUri ) )
+            || aSnapshot.rawUri.Find( '\0' ) != wxNOT_FOUND
+            || ( isSymbol && !IsSymbolFile( aSnapshot.expandedUri ) )
+            || ( isFootprint && ( !IsFootprintDirectoryUri( aSnapshot.rawUri )
+                                  || !IsFootprintFile( aSnapshot.expandedUri ) ) ) )
     {
         return Error( LIBRARY_LIFECYCLE_ERROR_CODE::INVALID_TABLE_ROW,
-                      "the symbol-library table row is missing its exact scope, path or URI identity" );
+                      "the library table row is missing its exact scope, path or URI identity" );
     }
 
     if( aSnapshot.provider.empty() )
     {
         return Error( LIBRARY_LIFECYCLE_ERROR_CODE::UNKNOWN_PROVIDER,
-                      "the symbol-library provider was not identified" );
+                      "the library provider was not identified" );
     }
 
-    // This foundation slice can observe a direct KiCad symbol file only.  Folder, database,
-    // HTTP and nested providers are deliberately refused until their complete file sets and
-    // mutation owners are covered by the same lifecycle contract.
-    if( aSnapshot.provider != "kicad-symbol-file" && aSnapshot.provider != "KiCad" )
+    // This foundation slice can observe only direct KiCad symbol files and direct footprint
+    // entries in .pretty directories. Folder, database, HTTP and nested providers are deliberately
+    // refused until their complete file sets and mutation owners share this lifecycle contract.
+    const bool providerSupported = aSnapshot.provider == "KiCad"
+                                   || ( isSymbol && aSnapshot.provider == "kicad-symbol-file" )
+                                   || ( isFootprint && aSnapshot.provider == "kicad-footprint-file" );
+
+    if( !providerSupported )
     {
         return Error( LIBRARY_LIFECYCLE_ERROR_CODE::UNSUPPORTED_PROVIDER,
-                      "the symbol-library provider is not covered by the read-only lifecycle slice" );
+                      "the library provider is not covered by the read-only lifecycle slice" );
     }
 
     if( !aSnapshot.forcedRefresh || !aSnapshot.providerObservable || !aSnapshot.contentSnapshotComplete
@@ -142,7 +190,7 @@ LIBRARY_LIFECYCLE_RESULT ValidateLibraryLifecycleSnapshot(
             || aSnapshot.dependencyBaselines.empty() )
     {
         return Error( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_SNAPSHOT,
-                      "a safe symbol-library snapshot requires a forced refresh, detached definition, "
+                      "a safe library snapshot requires a forced refresh, detached definition, "
                       "observable provider and complete content/dependency evidence" );
     }
 
@@ -155,7 +203,7 @@ LIBRARY_LIFECYCLE_RESULT ValidateLibraryLifecycleSnapshot(
         if( !baseline.Known() || !IsAbsoluteFile( baseline.Path() ) )
         {
             return Error( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_BASELINE,
-                          "every symbol-library dependency needs one complete, unique absolute file baseline" );
+                          "every library dependency needs one complete, unique absolute file baseline" );
         }
 
         for( const wxString& path : paths )
@@ -163,7 +211,7 @@ LIBRARY_LIFECYCLE_RESULT ValidateLibraryLifecycleSnapshot(
             if( FILE_CONTENT_BASELINE::SamePath( path, baseline.Path() ) )
             {
                 return Error( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_BASELINE,
-                              "every symbol-library dependency needs one complete, unique absolute file baseline" );
+                          "every library dependency needs one complete, unique absolute file baseline" );
             }
         }
 
@@ -175,7 +223,7 @@ LIBRARY_LIFECYCLE_RESULT ValidateLibraryLifecycleSnapshot(
         if( ( isTable || isLibrary ) && !baseline.Exists() )
         {
             return Error( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_BASELINE,
-                          "the table and expanded symbol-library URI each need an existing content baseline" );
+                          "the table and expanded library URI each need an existing content baseline" );
         }
 
         hasTableBaseline = hasTableBaseline || ( isTable && baseline.Exists() );
@@ -197,7 +245,7 @@ LIBRARY_LIFECYCLE_RESULT ValidateLibraryLifecycleSnapshot(
     if( !hasTableBaseline || !hasLibraryBaseline )
     {
         return Error( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_BASELINE,
-                      "the table and expanded symbol-library URI each need an existing content baseline" );
+                      "the table and expanded library URI each need an existing content baseline" );
     }
 
     // The current owner coverage deliberately remains incomplete.  A true value here would be a
@@ -223,6 +271,6 @@ LIBRARY_LIFECYCLE_RESULT AdmitLibraryLifecycleMutation(
         return valid;
 
     return Error( LIBRARY_LIFECYCLE_ERROR_CODE::MUTATION_NOT_AVAILABLE,
-                  "checked symbol-library mutation is unavailable until every native writer has "
+                      "checked library mutation is unavailable until every native writer has "
                   "shared tracking and rollback proof" );
 }

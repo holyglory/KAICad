@@ -46,6 +46,39 @@ LIBRARY_LIFECYCLE_SNAPSHOT Snapshot()
 }
 
 
+LIBRARY_LIFECYCLE_SNAPSHOT FootprintSnapshot()
+{
+    const std::filesystem::path root =
+            std::filesystem::temp_directory_path() / "kicad-library-lifecycle-footprint-fixture";
+    const std::filesystem::path entry = root / "libs" / "fixture.pretty" / "Probe.kicad_mod";
+
+    LIBRARY_LIFECYCLE_SNAPSHOT snapshot;
+    snapshot.document.set_type( DOCTYPE_FOOTPRINT );
+    snapshot.document.mutable_project()->set_name( "fixture" );
+    snapshot.document.mutable_project()->set_path( root.string() );
+    snapshot.document.mutable_lib_id()->set_library_nickname( "Fixture" );
+    snapshot.document.mutable_lib_id()->set_entry_name( "Probe" );
+    snapshot.tablePath = wxString::FromUTF8( ( root / "fp-lib-table" ).string() );
+    snapshot.tableScope = LIBRARY_TABLE_SCOPE::PROJECT;
+    snapshot.nickname = wxS( "Fixture" );
+    snapshot.rawUri = wxS( "${KIPRJMOD}/libs/fixture.pretty" );
+    snapshot.expandedUri = wxString::FromUTF8( entry.string() );
+    snapshot.provider = "kicad-footprint-file";
+    snapshot.detachedDefinition = "(footprint Probe)";
+    snapshot.dependencyBaselines.push_back(
+            FILE_CONTENT_BASELINE::FromBytes( snapshot.tablePath, "(fp_lib_table)" ) );
+    snapshot.dependencyBaselines.push_back(
+            FILE_CONTENT_BASELINE::FromBytes( snapshot.expandedUri, "(footprint Probe)" ) );
+    snapshot.forcedRefresh = true;
+    snapshot.providerObservable = true;
+    snapshot.contentSnapshotComplete = true;
+    snapshot.diskBaselineChecked = true;
+    snapshot.completeChangeTracking = false;
+    snapshot.postverify = false;
+    return snapshot;
+}
+
+
 void RequireError( const LIBRARY_LIFECYCLE_RESULT& aResult,
                    LIBRARY_LIFECYCLE_ERROR_CODE aCode )
 {
@@ -247,6 +280,44 @@ BOOST_AUTO_TEST_CASE( RejectsDirectoryAndNestedSymbolFileShapes )
                           nested, wxS( "fixture" ),
                           wxString::FromUTF8( nested.document.project().path() ) ),
                   LIBRARY_LIFECYCLE_ERROR_CODE::INVALID_TABLE_ROW );
+}
+
+
+BOOST_AUTO_TEST_CASE( AcceptsDirectFootprintEntryAndRejectsNestedEntry )
+{
+    const auto snapshot = FootprintSnapshot();
+    BOOST_REQUIRE( ValidateLibraryLifecycleSnapshot(
+                           snapshot, wxS( "fixture" ),
+                           wxString::FromUTF8( snapshot.document.project().path() ) )
+                           .has_value() );
+
+    auto nested = snapshot;
+    nested.expandedUri = wxString::FromUTF8( ( std::filesystem::path(
+                                                        snapshot.document.project().path() )
+                                                / "libs" / "fixture.pretty.kicad_mod" / "Probe.kicad_mod" )
+                                                       .string() );
+    RequireError( ValidateLibraryLifecycleSnapshot(
+                          nested, wxS( "fixture" ),
+                          wxString::FromUTF8( nested.document.project().path() ) ),
+                  LIBRARY_LIFECYCLE_ERROR_CODE::INVALID_TABLE_ROW );
+}
+
+
+BOOST_AUTO_TEST_CASE( RejectsFootprintRowsWithoutPrettyProviderOrWithExternalProvider )
+{
+    auto badRow = FootprintSnapshot();
+    badRow.rawUri = wxS( "${KIPRJMOD}/libs/fixture.kicad_mod" );
+    RequireError( ValidateLibraryLifecycleSnapshot(
+                          badRow, wxS( "fixture" ),
+                          wxString::FromUTF8( badRow.document.project().path() ) ),
+                  LIBRARY_LIFECYCLE_ERROR_CODE::INVALID_TABLE_ROW );
+
+    auto external = FootprintSnapshot();
+    external.provider = "http";
+    RequireError( ValidateLibraryLifecycleSnapshot(
+                          external, wxS( "fixture" ),
+                          wxString::FromUTF8( external.document.project().path() ) ),
+                  LIBRARY_LIFECYCLE_ERROR_CODE::UNSUPPORTED_PROVIDER );
 }
 
 

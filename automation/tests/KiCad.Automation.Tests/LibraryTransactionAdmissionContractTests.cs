@@ -7,7 +7,7 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 namespace KiCad.Automation.Tests;
 
 [TestClass]
-public sealed class SymbolLibraryTransactionAdmissionTests
+public sealed class LibraryTransactionAdmissionContractTests
 {
     [TestMethod]
     public void BuildRequestBindsExplicitDocumentProcessCheckpointAndPayload()

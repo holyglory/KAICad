@@ -506,20 +506,21 @@ SYMBOL_LIBRARY_ADAPTER::CaptureLibrarySnapshot(
             row->Scope() == LIBRARY_TABLE_SCOPE::GLOBAL ? globalLibsMutex() : m_librariesMutex );
     std::lock_guard pluginGuard( pluginMutex( aNickname ) );
 
-    std::map<std::string, UTF8> options = row->GetOptionsMap();
-    std::unique_ptr<SCH_IO> freshProvider( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
-
-    if( !freshProvider )
-    {
-        return SnapshotError( LIBRARY_LIFECYCLE_ERROR_CODE::UNKNOWN_PROVIDER,
-                              "the KiCad symbol-file provider could not be constructed" );
-    }
-
+    // LoadOne above forces the adapter's provider refresh. Reuse the adapter's detached load
+    // path here rather than constructing a second plugin instance: this keeps provider ownership
+    // and cache synchronization in one native owner while the plugin mutex is held.
     std::unique_ptr<LIB_SYMBOL> loadedSymbol;
 
     try
     {
-        loadedSymbol.reset( freshProvider->LoadSymbol( expandedUri, aName, &options ) );
+        std::optional<const LIB_DATA*> loaded = fetchIfLoaded( aNickname );
+        if( !loaded || !( *loaded ) || !schplugin( *loaded ) )
+            return SnapshotError( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_SNAPSHOT,
+                                  "the refreshed symbol provider is not available" );
+
+        std::map<std::string, UTF8> options = row->GetOptionsMap();
+        loadedSymbol.reset( schplugin( *loaded )->LoadSymbol( getUri( ( *loaded )->row ), aName,
+                                                               &options ) );
     }
     catch( const IO_ERROR& e )
     {

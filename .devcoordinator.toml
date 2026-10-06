@@ -3310,8 +3310,8 @@ command=["cmake","--build","automation/artifacts/native","--target","api_schema_
 name="native-pcb-simulation"
 tier="development"
 requires=["native-build"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeSimulation|TestCategory=NativePcbItems|TestCategory=NativeErcDialog|TestCategory=NativeRasterTrace","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/slice-native-pcb-simulation"]
-retained_artifacts=[{name="slice-native-pcb-simulation",path="automation/artifacts/slice-native-pcb-simulation",max_bytes=536870912},{name="slice-native-pcb-evidence",path="automation/artifacts/native-pcb-items/native-session-current",max_bytes=67108864},{name="slice-native-simulation-evidence",path="automation/artifacts/native-simulation/native-session-current",max_bytes=67108864}]
+command=["bash","automation/tools/run-isolated-test-results.sh","automation/artifacts/slice-native-pcb-simulation","dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeSimulation|TestCategory=NativePcbItems|TestCategory=NativeErcDialog|TestCategory=NativeRasterTrace","--logger","trx;LogFileName=results.trx"]
+retained_artifacts=[{name="slice-native-pcb-simulation",path="automation/artifacts/slice-native-pcb-simulation/current",max_bytes=536870912},{name="slice-native-pcb-evidence",path="automation/artifacts/native-pcb-items/native-session-current",max_bytes=67108864},{name="slice-native-simulation-evidence",path="automation/artifacts/native-simulation/native-session-current",max_bytes=67108864}]
 [[test.slice-verification.check]]
 name="native-library-readback"
 tier="development"

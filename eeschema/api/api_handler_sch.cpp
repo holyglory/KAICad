@@ -426,6 +426,29 @@ API_HANDLER_SCH::API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext,
 }
 
 
+std::optional<ApiResponseStatus> API_HANDLER_SCH::checkRequestTarget(
+        const google::protobuf::Message& aRequest ) const
+{
+    if( aRequest.GetDescriptor()
+            == kiapi::automation::v1::NativeCapabilityLibrarySnapshotRead::descriptor() )
+    {
+        const auto& snapshot =
+                static_cast<const kiapi::automation::v1::NativeCapabilityLibrarySnapshotRead&>( aRequest );
+
+        if( snapshot.has_document()
+                && snapshot.document().type() == kiapi::common::types::DOCTYPE_SYMBOL )
+        {
+            // Symbol library snapshots are served by the schematic handler even though their
+            // explicit document target is a library entry rather than an open schematic sheet.
+            // The snapshot handler performs the project, library identity and lifecycle checks.
+            return std::nullopt;
+        }
+    }
+
+    return API_HANDLER_EDITOR::checkRequestTarget( aRequest );
+}
+
+
 std::unique_ptr<COMMIT> API_HANDLER_SCH::createCommit()
 {
     if( m_frame )

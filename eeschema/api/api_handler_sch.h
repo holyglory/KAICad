@@ -68,6 +68,9 @@ public:
     static std::optional<std::string> ScreenIdentityRefusal( SCHEMATIC& aSchematic, const SCH_SHEET_PATH& aTarget );
 
 protected:
+    std::optional<ApiResponseStatus> checkRequestTarget(
+            const google::protobuf::Message& aRequest ) const override;
+
     std::optional<ApiResponseStatus> checkForHeadless( const std::string& aCommandName ) const;
 
     std::unique_ptr<COMMIT> createCommit() override;

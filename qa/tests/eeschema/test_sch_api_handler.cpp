@@ -52,6 +52,14 @@ struct API_HANDLER_SCH_FIXTURE
 };
 
 
+class TESTABLE_API_HANDLER_SCH : public API_HANDLER_SCH
+{
+public:
+    using API_HANDLER_SCH::API_HANDLER_SCH;
+    using API_HANDLER_SCH::checkRequestTarget;
+};
+
+
 kiapi::common::types::DocumentSpecifier makeDocument( const SCHEMATIC& aSchematic )
 {
     kiapi::common::types::DocumentSpecifier document;
@@ -92,6 +100,28 @@ kiapi::common::ApiRequest makeRevertRequest( const SCHEMATIC& aSchematic )
 
 
 BOOST_FIXTURE_TEST_SUITE( ApiHandlerSch, API_HANDLER_SCH_FIXTURE )
+
+
+BOOST_AUTO_TEST_CASE( SymbolLibrarySnapshotRoutesToSchematicOwnerOnly )
+{
+    loadSchematic( wxS( "api_kitchen_sink" ) );
+    TESTABLE_API_HANDLER_SCH handler( m_context );
+
+    kiapi::automation::v1::NativeCapabilityLibrarySnapshotRead snapshot;
+    snapshot.mutable_document()->set_type( kiapi::common::types::DOCTYPE_SYMBOL );
+    BOOST_CHECK( !handler.checkRequestTarget( snapshot ) );
+
+    snapshot.mutable_document()->set_type( kiapi::common::types::DOCTYPE_FOOTPRINT );
+    auto foreignLibrary = handler.checkRequestTarget( snapshot );
+    BOOST_REQUIRE( foreignLibrary.has_value() );
+    BOOST_CHECK_EQUAL( foreignLibrary->status(), kiapi::common::ApiStatusCode::AS_UNHANDLED );
+
+    kiapi::common::commands::SaveDocument save;
+    save.mutable_document()->set_type( kiapi::common::types::DOCTYPE_PCB );
+    auto foreignEditor = handler.checkRequestTarget( save );
+    BOOST_REQUIRE( foreignEditor.has_value() );
+    BOOST_CHECK_EQUAL( foreignEditor->status(), kiapi::common::ApiStatusCode::AS_UNHANDLED );
+}
 
 
 BOOST_AUTO_TEST_CASE( RevertDocumentRejectedWithOpenCommit )

@@ -410,6 +410,8 @@ public sealed class McpProcessTests
             })
                 CollectionAssert.Contains(names, boardTool);
             CollectionAssert.Contains(names, "kicad_project_net_classes");
+            CollectionAssert.Contains(names, "kicad_project_text_variables");
+            CollectionAssert.Contains(names, "kicad_project_text_variables_set");
             var invalidConnectivityQuery = await Request(9362, "tools/call", new
             {
                 name = "kicad_pcb_connectivity_query",
@@ -460,6 +462,54 @@ public sealed class McpProcessTests
             Assert.AreEqual("invalid_project_net_classes_state",
                 missingProjectSettingsState.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(),
                 missingProjectSettingsState.GetRawText());
+            var missingProjectTextVariablesState = await Request(9372, "tools/call", new
+            {
+                name = "kicad_project_text_variables",
+                arguments = new
+                {
+                    instanceId = Guid.NewGuid().ToString("D"),
+                    project = new { name = "project-settings-contract", path = "/tmp" },
+                    document = new
+                    {
+                        type = "DOCTYPE_PCB",
+                        project = new { name = "project-settings-contract", path = "/tmp" },
+                        boardFilename = "board.kicad_pcb"
+                    },
+                    expectedStateJson = "{}"
+                }
+            });
+            Assert.IsTrue(missingProjectTextVariablesState.GetProperty("result").GetProperty("isError").GetBoolean(),
+                missingProjectTextVariablesState.GetRawText());
+            Assert.AreEqual("invalid_project_text_variables_state",
+                missingProjectTextVariablesState.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+                missingProjectTextVariablesState.GetRawText());
+            string projectTextVariablesState = JsonSerializer.Serialize(new
+            {
+                document = JsonSerializer.Deserialize<JsonElement>(projectSettingsDocument),
+                processEpoch = Guid.NewGuid().ToString("D"), scope = "DLS_PCB", projectSettingsIncluded = true
+            });
+            var refusedProjectTextVariablesSet = await Request(9373, "tools/call", new
+            {
+                name = "kicad_project_text_variables_set",
+                arguments = new
+                {
+                    instanceId = Guid.NewGuid().ToString("D"),
+                    project = new { name = "project-settings-contract", path = "/tmp" },
+                    document = new
+                    {
+                        type = "DOCTYPE_PCB",
+                        project = new { name = "project-settings-contract", path = "/tmp" },
+                        boardFilename = "board.kicad_pcb"
+                    },
+                    expectedStateJson = projectTextVariablesState,
+                    variables = new { NOTE = "pending" }, mergeMode = "MMM_MERGE", operationId = Guid.NewGuid().ToString("D")
+                }
+            });
+            Assert.IsTrue(refusedProjectTextVariablesSet.GetProperty("result").GetProperty("isError").GetBoolean(),
+                refusedProjectTextVariablesSet.GetRawText());
+            Assert.AreEqual("project_text_variables_mutation_unavailable",
+                refusedProjectTextVariablesSet.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+                refusedProjectTextVariablesSet.GetRawText());
             CollectionAssert.Contains(names, "kicad_pcb_diff_pair_validate");
             var invalidDiffPairValidation = await Request(9369, "tools/call", new
             {

@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using Google.Protobuf;
 using Kiapi.Common.Commands;
+using Kiapi.Common.Project;
 using Kiapi.Common.Types;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
@@ -103,6 +104,150 @@ public sealed class ProjectSettingsTools(InstanceRegistry registry)
             boardMutation = false
         });
     });
+
+    [McpServerTool(Name = "kicad_project_text_variables", ReadOnly = true),
+     Description("Read the native project text-variable map at one exact lifecycle checkpoint. project identifies the loaded project; document and expectedStateJson identify an open schematic or PCB in that project and its project-settings revision coverage. The native common API is project-wide, so the result is paired with the requested document only as an identity and revision guard. This never changes design data and reports supported=false when the connected peer lacks the command."),
+     KiCadCapability("project-settings", "compiled-mcp plus native-common-api", "explicit project, lifecycle document, process epoch, revision and project-settings coverage"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> TextVariables(string instanceId, NativeProjectInput project,
+        NativeDocumentInput document, string expectedStateJson, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        DocumentSpecifier projectDocument = ProjectDocument(project);
+        DocumentSpecifier target = NativeDocumentInput.ToNative(document);
+        ValidateProjectContext(projectDocument, target, "invalid_project_text_variables_target");
+        DocumentLifecycleState expected = Parse<DocumentLifecycleState>(expectedStateJson,
+            "invalid_project_text_variables_state");
+        ValidateTextVariableExpected(target, expected);
+
+        NativeClient client = registry.Client(instanceId);
+        AutomationSession session = await client.HandshakeAsync(cancellationToken);
+        if (session.Epoch != expected.ProcessEpoch)
+            throw new AutomationException("project_settings_instance_changed",
+                "The expected project state belongs to another native process epoch.");
+
+        DocumentLifecycleState before = await ReadState(client, target, cancellationToken);
+        ValidateTextVariableObserved(target, before);
+        if (!before.Equals(expected))
+            throw new AutomationException("project_settings_state_changed",
+                "The project changed before text variables were read; inspect a fresh lifecycle state.");
+
+        Kiapi.Common.Project.TextVariables response;
+        try
+        {
+            response = await client.InvokeAsync<GetTextVariables, Kiapi.Common.Project.TextVariables>(
+                new() { Document = projectDocument }, cancellationToken);
+        }
+        catch (NativeApiException error) when (error.Status == (int)Kiapi.Common.ApiStatusCode.AsUnhandled
+            || error.Status == (int)Kiapi.Common.ApiStatusCode.AsUnimplemented)
+        {
+            DocumentLifecycleState unsupportedAfter = await ReadState(client, target, cancellationToken);
+            ValidateTextVariableObserved(target, unsupportedAfter);
+            if (!unsupportedAfter.Equals(expected))
+                throw new AutomationException("project_settings_state_changed",
+                    "The project changed while checking text-variable support; inspect a fresh lifecycle state.");
+            return Data(new
+            {
+                instanceId, processEpoch = session.Epoch, project = projectDocument, document = target,
+                beforeState = SchematicJson.Formatter.Format(before), afterState = SchematicJson.Formatter.Format(unsupportedAfter),
+                supported = false, unsupportedReason = "The connected native peer does not provide project text variables.",
+                variables = (Dictionary<string, string>?)null, nativeQuery = false, mutation = false
+            });
+        }
+
+        if (response.Variables.Count > 4096 || response.Variables.Keys.Any(string.IsNullOrWhiteSpace)
+            || response.Variables.Keys.Distinct(StringComparer.Ordinal).Count() != response.Variables.Count)
+            throw new AutomationException("invalid_project_text_variables_response",
+                "The native project returned unnamed, duplicate or oversized text variables.");
+
+        DocumentLifecycleState after = await ReadState(client, target, cancellationToken);
+        ValidateTextVariableObserved(target, after);
+        if (!after.Equals(expected))
+            throw new AutomationException("project_settings_state_changed",
+                "The project changed while text variables were read; discard the result.");
+
+        return Data(new
+        {
+            instanceId, processEpoch = session.Epoch, project = projectDocument, document = target,
+            beforeState = SchematicJson.Formatter.Format(before), afterState = SchematicJson.Formatter.Format(after),
+            supported = true, unsupportedReason = (string?)null,
+            variables = response.Variables.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
+            nativeQuery = true, mutation = false
+        });
+    });
+
+    [McpServerTool(Name = "kicad_project_text_variables_set", ReadOnly = false),
+     Description("Checked admission boundary for project text-variable writes. The native SetTextVariables command has no revision token, recoverable receipt, rollback proof or lost-reply replay contract, so this tool validates the project, lifecycle checkpoint, operation ID and requested map, then refuses without contacting KiCad."),
+     KiCadCapability("project-settings", "checked-admission-only", "explicit project, lifecycle document, expected revision, operation ID and variable map"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> SetTextVariables(string instanceId, NativeProjectInput project,
+        NativeDocumentInput document, string expectedStateJson, Dictionary<string, string> variables,
+        string mergeMode, Guid operationId, CancellationToken cancellationToken) => Execute(() =>
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (operationId == Guid.Empty)
+            throw new AutomationException("invalid_operation_id", "Provide a nonempty operation UUID for a project text-variable mutation.");
+        DocumentSpecifier projectDocument = ProjectDocument(project);
+        DocumentSpecifier target = NativeDocumentInput.ToNative(document);
+        ValidateProjectContext(projectDocument, target, "invalid_project_text_variables_target");
+        DocumentLifecycleState expected = Parse<DocumentLifecycleState>(expectedStateJson,
+            "invalid_project_text_variables_state");
+        ValidateTextVariableExpected(target, expected);
+        if (mergeMode is not ("MMM_MERGE" or "MMM_REPLACE"))
+            throw new AutomationException("invalid_project_text_variables_merge_mode",
+                "mergeMode must be MMM_MERGE or MMM_REPLACE.");
+        if (variables is null)
+            throw new AutomationException("invalid_project_text_variables_request",
+                "A text-variable map is required, even when it is intentionally empty.");
+        if (variables.Count > 4096 || variables.Keys.Any(string.IsNullOrWhiteSpace)
+            || variables.Keys.Distinct(StringComparer.Ordinal).Count() != variables.Count
+            || variables.Values.Any(value => value is null || value.Contains('\0')))
+            throw new AutomationException("invalid_project_text_variables_request",
+                "The requested text-variable map is unnamed, duplicated, oversized or contains a NUL value.");
+        throw new AutomationException("project_text_variables_mutation_unavailable",
+            "Project text-variable writes remain disabled until the native owner supplies revision-safe receipts, rollback and lost-reply recovery.");
+    });
+
+    private static DocumentSpecifier ProjectDocument(NativeProjectInput project)
+    {
+        if (project is null || string.IsNullOrWhiteSpace(project.Name) || string.IsNullOrWhiteSpace(project.Path)
+            || !Path.IsPathFullyQualified(project.Path))
+            throw new AutomationException("invalid_project_text_variables_target",
+                "project requires a nonempty name and absolute path.");
+        return new DocumentSpecifier
+        {
+            Type = DocumentType.DoctypeProject,
+            Project = new() { Name = project.Name, Path = project.Path }
+        };
+    }
+
+    private static void ValidateProjectContext(DocumentSpecifier project, DocumentSpecifier document, string code)
+    {
+        if (document.Project is null || !string.Equals(document.Project.Name, project.Project.Name, StringComparison.Ordinal)
+            || !string.Equals(Path.GetFullPath(document.Project.Path), Path.GetFullPath(project.Project.Path), StringComparison.Ordinal)
+            || document.Type is not (DocumentType.DoctypeSchematic or DocumentType.DoctypePcb))
+            throw new AutomationException(code,
+                "The lifecycle document must be a schematic or PCB in the explicitly named project.");
+    }
+
+    private static void ValidateTextVariableExpected(DocumentSpecifier document, DocumentLifecycleState expected)
+    {
+        if (expected.Document is null || !expected.Document.Equals(document) || string.IsNullOrWhiteSpace(expected.ProcessEpoch)
+            || expected.Scope != Scope(document) || !expected.ProjectSettingsIncluded)
+            throw new AutomationException("invalid_project_text_variables_state",
+                "expectedStateJson must identify the same project document, native process epoch and project-settings coverage.");
+    }
+
+    private static void ValidateTextVariableObserved(DocumentSpecifier document, DocumentLifecycleState state)
+    {
+        if (state.Document is null || !state.Document.Equals(document) || state.Scope != Scope(document)
+            || string.IsNullOrWhiteSpace(state.ProcessEpoch) || !state.ProjectSettingsIncluded
+            || state.StateSha256.Length != 64 || !state.StateSha256.All(char.IsAsciiHexDigitLower)
+            || !Guid.TryParseExact(state.NativeIdentity, "D", out _)
+            || state.Revision is null || !Guid.TryParseExact(state.Revision.Epoch, "D", out _))
+            throw new AutomationException("invalid_project_text_variables_state",
+                "Native lifecycle state did not provide the requested document, revision, digest or project-settings coverage.");
+    }
 
     private static async Task<DocumentLifecycleState> ReadState(NativeClient client,
         DocumentSpecifier document, CancellationToken cancellationToken) =>

@@ -42,6 +42,29 @@ public sealed partial class NativeSessionTests
                 if (Directory.Exists(stateDirectory)) Directory.Delete(stateDirectory, true);
             }
         }
+        async Task<JsonElement> ReadProjectTextVariables(DocumentLifecycleState expected, string phase)
+        {
+            string stateDirectory = Directory.CreateTempSubdirectory("kicad-project-text-variables-mcp-").FullName;
+            try
+            {
+                await using var mcp = await StdioMcpFixture.StartAsync(
+                    stateDirectory, Path.Combine(evidence, processId + "-project-text-variables-mcp-" + phase + ".stderr.log"), token);
+                var session = await client.HandshakeAsync(token);
+                RequireToolSuccess(await mcp.Tool("kicad_instance_attach", new
+                { endpoint = client.Endpoint, expectedInstanceId = session.InstanceId }));
+                return await mcp.Tool("kicad_project_text_variables", new
+                {
+                    instanceId = session.InstanceId,
+                    project = new { name = document.Project.Name, path = document.Project.Path },
+                    document = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(document)),
+                    expectedStateJson = SchematicJson.Formatter.Format(expected)
+                });
+            }
+            finally
+            {
+                if (Directory.Exists(stateDirectory)) Directory.Delete(stateDirectory, true);
+            }
+        }
         static void AssertProjectNetClasses(JsonElement reply, DocumentLifecycleState expected, string phase)
         {
             RequireToolSuccess(reply);
@@ -59,6 +82,27 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(names.Length, names.Distinct(StringComparer.Ordinal).Count(),
                 $"{phase}: native netclass names must be unique.");
             CollectionAssert.Contains(names!, "Default", $"{phase}: KiCad must return its Default netclass.");
+        }
+        async Task AssertProjectTextVariables(JsonElement reply, DocumentLifecycleState expected, string phase)
+        {
+            RequireToolSuccess(reply);
+            var structured = reply.GetProperty("structuredContent");
+            Assert.IsTrue(structured.GetProperty("supported").GetBoolean(), $"{phase}: native text-variable support is required.");
+            Assert.IsTrue(structured.GetProperty("nativeQuery").GetBoolean(), $"{phase}: the result must come from KiCad.");
+            Assert.IsFalse(structured.GetProperty("mutation").GetBoolean(), $"{phase}: reading text variables must not mutate the project.");
+            Assert.AreEqual(SchematicJson.Formatter.Format(expected), structured.GetProperty("beforeState").GetString(),
+                $"{phase}: text-variable read must use the supplied lifecycle checkpoint.");
+            Assert.AreEqual(structured.GetProperty("beforeState").GetString(), structured.GetProperty("afterState").GetString(),
+                $"{phase}: a text-variable read must leave the lifecycle checkpoint unchanged.");
+            var project = new DocumentSpecifier { Type = DocumentType.DoctypeProject, Project = document.Project.Clone() };
+            var native = await client.InvokeAsync<GetTextVariables, Kiapi.Common.Project.TextVariables>(
+                new() { Document = project }, token);
+            var variables = structured.GetProperty("variables");
+            Assert.AreEqual(native.Variables.Count, variables.EnumerateObject().Count(),
+                $"{phase}: MCP must return every native project text variable exactly once.");
+            foreach (var pair in native.Variables)
+                Assert.AreEqual(pair.Value, variables.GetProperty(pair.Key).GetString(),
+                    $"{phase}: MCP changed native map value for {pair.Key}.");
         }
         ApplySchematicItemBatch Batch(SchematicScreenDataSnapshot before, SchematicNetSettings settings)
         {
@@ -142,6 +186,7 @@ public sealed partial class NativeSessionTests
         Assert.IsNotNull(original.Data.Metadata.NetSettings);
         var originalLifecycle = await ObserveLifecycleState(client, document, token);
         AssertProjectNetClasses(await ReadProjectNetClasses(originalLifecycle, "initial"), originalLifecycle, "initial");
+        await AssertProjectTextVariables(await ReadProjectTextVariables(originalLifecycle, "initial"), originalLifecycle, "initial");
         var desired = original.Data.Clone(); var settings = desired.Metadata.NetSettings;
         settings.DefaultClass.Schematic.WireWidth = new() { ValueNm = 50800 };
         settings.DefaultClass.Board.TrackWidth = new() { ValueNm = 450000 };
@@ -186,8 +231,16 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual("project_settings_state_changed",
             staleProjectNetClasses.GetProperty("structuredContent").GetProperty("errorCode").GetString(),
             staleProjectNetClasses.GetRawText());
+        var staleProjectTextVariables = await ReadProjectTextVariables(originalLifecycle, "stale");
+        Assert.IsTrue(staleProjectTextVariables.GetProperty("isError").GetBoolean(),
+            "A project text-variable read with a pre-mutation lifecycle state must be refused.");
+        Assert.AreEqual("project_settings_state_changed",
+            staleProjectTextVariables.GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+            staleProjectTextVariables.GetRawText());
         var appliedLifecycle = await ObserveLifecycleState(client, document, token);
         AssertProjectNetClasses(await ReadProjectNetClasses(appliedLifecycle, "after-settings-change"), appliedLifecycle, "after-settings-change");
+        await AssertProjectTextVariables(await ReadProjectTextVariables(appliedLifecycle, "after-settings-change"),
+            appliedLifecycle, "after-settings-change");
         Assert.AreEqual(result, await Apply(batch));
         var stale = batch.Clone(); stale.OperationId = Guid.NewGuid().ToString("D");
         await Assert.ThrowsExactlyAsync<NativeApiException>(() => Apply(stale));

@@ -1,6 +1,7 @@
 using Kiapi.Common.Types;
 using KiCad.Automation.Mcp;
 using KiCad.Automation.Model;
+using KiCad.Automation.Native;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace KiCad.Automation.Tests;
@@ -231,6 +232,133 @@ public sealed class LibraryLifecycleSnapshotContractTests
             "library_provider_unsupported");
     }
 
+    [TestMethod]
+    public void LibraryTransactionAdmissionRefusesStaleForeignAndPartialObservations()
+    {
+        (LibraryTransactionRequest request, LibraryLifecycleState state, DocumentSpecifier document, string projectPath) = TransactionFixture();
+
+        LibraryTransactionContract.ValidateAdmission(request, state);
+
+        var stale = state with { Revision = state.Revision with { Sequence = state.Revision.Sequence + 1 } };
+        Reject(() => LibraryTransactionContract.ValidateAdmission(request, stale), "stale_library_state");
+
+        var foreignProcess = state with { ProcessEpoch = Guid.NewGuid().ToString("D") };
+        Reject(() => LibraryTransactionContract.ValidateAdmission(request, foreignProcess), "foreign_library_process");
+
+        var foreignDocument = document.Clone();
+        foreignDocument.LibId.EntryName = "Other";
+        Reject(() => LibraryTransactionContract.ValidateAdmission(request,
+            state with { Document = foreignDocument }), "foreign_library_document");
+
+        var partialCursor = state with
+        {
+            FileBaselines = [state.FileBaselines[0] with { Cursor = "cursor:17" }, state.FileBaselines[1]]
+        };
+        Reject(() => LibraryTransactionContract.ValidateAdmission(request, partialCursor), "partial_library_state");
+
+        var partialHash = state with
+        {
+            FileBaselines = [state.FileBaselines[0] with { Sha256 = "partial" }, state.FileBaselines[1]]
+        };
+        Reject(() => LibraryTransactionContract.ValidateAdmission(request, partialHash), "partial_library_state");
+    }
+
+    [TestMethod]
+    public void LibraryTransactionFingerprintBindsCanonicalRequestAndReplayIdentity()
+    {
+        (LibraryTransactionRequest request, LibraryLifecycleState state, _, _) = TransactionFixture();
+        var rejected = new LibraryTransactionReceipt(request, LibraryTransactionState.Rejected,
+            RequestVerified: true, NativeWriteStarted: false, CancellationObservedAfterWrite: false,
+            ObservedBefore: state, ObservedAfter: null, ObservedRollback: null,
+            Postverified: false, RollbackAttempted: false, RollbackVerified: false,
+            ErrorCode: "admission_refused", ErrorMessage: "provider refused");
+        LibraryTransactionContract.ValidateReceipt(request, rejected, inspect: true);
+        LibraryTransactionContract.ValidateReplay(request, rejected);
+
+        var reorderedState = state with
+        {
+            FileBaselines = [state.FileBaselines[1], state.FileBaselines[0]]
+        };
+        var reordered = request with { ExpectedState = reorderedState };
+        reordered = reordered with
+        {
+            RequestFingerprintSha256 = LibraryTransactionContract.ComputeFingerprint(reordered)
+        };
+        Assert.AreEqual(request.RequestFingerprintSha256, reordered.RequestFingerprintSha256,
+            "Dependency-set order must not change the canonical request identity.");
+        LibraryTransactionContract.ValidateReplay(reordered, rejected);
+
+        var changedPayload = request with { OperationPayload = "(library-edit v2)" };
+        changedPayload = changedPayload with
+        {
+            RequestFingerprintSha256 = LibraryTransactionContract.ComputeFingerprint(changedPayload)
+        };
+        Reject(() => LibraryTransactionContract.ValidateReplay(changedPayload, rejected), "operation_id_conflict");
+
+        var forged = request with { RequestFingerprintSha256 = new string('a', 64) };
+        Reject(() => LibraryTransactionContract.ValidateRequest(forged), "invalid_library_transaction");
+    }
+
+    [TestMethod]
+    public void LibraryTransactionReceiptsRequirePostverifyOrVerifiedRollback()
+    {
+        (LibraryTransactionRequest request, LibraryLifecycleState state, _, _) = TransactionFixture();
+        var after = state with
+        {
+            Revision = state.Revision with { Sequence = state.Revision.Sequence + 1 },
+            FullStateSha256 = new string('b', 64),
+            FileBaselines = [
+                state.FileBaselines[0],
+                state.FileBaselines[1] with { Sha256 = new string('c', 64) }
+            ]
+        };
+        var committed = new LibraryTransactionReceipt(request, LibraryTransactionState.CommittedPostverified,
+            RequestVerified: true, NativeWriteStarted: true, CancellationObservedAfterWrite: false,
+            ObservedBefore: state, ObservedAfter: after, ObservedRollback: null,
+            Postverified: true, RollbackAttempted: false, RollbackVerified: false);
+        LibraryTransactionContract.ValidateReceipt(request, committed);
+
+        var missingAfter = committed with { ObservedAfter = null };
+        Reject(() => LibraryTransactionContract.ValidateReceipt(request, missingAfter), "invalid_library_transaction");
+
+        var rolledBack = new LibraryTransactionReceipt(request, LibraryTransactionState.RolledBackVerified,
+            RequestVerified: true, NativeWriteStarted: true, CancellationObservedAfterWrite: false,
+            ObservedBefore: state, ObservedAfter: null, ObservedRollback: state,
+            Postverified: false, RollbackAttempted: true, RollbackVerified: true,
+            ErrorCode: "native_rejected", ErrorMessage: "provider refused");
+        LibraryTransactionContract.ValidateReceipt(request, rolledBack);
+
+        var forgedRollback = rolledBack with { ObservedRollback = after };
+        Reject(() => LibraryTransactionContract.ValidateReceipt(request, forgedRollback), "invalid_library_transaction");
+    }
+
+    [TestMethod]
+    public void CancellationAfterWriteIsIndeterminateUntilInspected()
+    {
+        (LibraryTransactionRequest request, LibraryLifecycleState state, _, _) = TransactionFixture();
+        var indeterminate = new LibraryTransactionReceipt(request, LibraryTransactionState.Indeterminate,
+            RequestVerified: true, NativeWriteStarted: true, CancellationObservedAfterWrite: true,
+            ObservedBefore: state, ObservedAfter: null, ObservedRollback: null,
+            Postverified: false, RollbackAttempted: false, RollbackVerified: false,
+            ErrorCode: "cancelled_after_native_write", ErrorMessage: "native outcome is unknown");
+        LibraryTransactionContract.ValidateReceipt(request, indeterminate, inspect: true);
+        LibraryTransactionContract.ValidateReceipt(request, indeterminate);
+
+        var forgedRejected = new LibraryTransactionReceipt(request, LibraryTransactionState.Rejected,
+            RequestVerified: true, NativeWriteStarted: true, CancellationObservedAfterWrite: true,
+            ObservedBefore: state, ObservedAfter: null, ObservedRollback: null,
+            Postverified: false, RollbackAttempted: false, RollbackVerified: false,
+            ErrorCode: "cancelled_after_native_write", ErrorMessage: "native outcome is unknown");
+        Reject(() => LibraryTransactionContract.ValidateReceipt(request, forgedRejected), "invalid_library_transaction");
+
+        var rollbackUnknown = new LibraryTransactionReceipt(request, LibraryTransactionState.RollbackUnknown,
+            RequestVerified: true, NativeWriteStarted: true, CancellationObservedAfterWrite: true,
+            ObservedBefore: state, ObservedAfter: null, ObservedRollback: null,
+            Postverified: false, RollbackAttempted: true, RollbackVerified: false,
+            ErrorCode: "rollback_unknown", ErrorMessage: "rollback was requested but not verified");
+        LibraryTransactionContract.ValidateReceipt(request, rollbackUnknown, inspect: true);
+    }
+
     private static (LibraryLifecycleSnapshot Snapshot, DocumentSpecifier Document, string ProjectPath) Fixture()
     {
         string projectPath = Path.Combine(Path.GetTempPath(), "kicad-library-lifecycle-fixture");
@@ -275,6 +403,29 @@ public sealed class LibraryLifecycleSnapshotContractTests
             ForcedRefresh: true, ProviderObservable: true, ContentSnapshotComplete: true,
             DiskBaselineChecked: true, CompleteChangeTracking: false, Postverify: false);
         return (snapshot, document, projectPath);
+    }
+
+    private static (LibraryTransactionRequest Request, LibraryLifecycleState State,
+        DocumentSpecifier Document, string ProjectPath) TransactionFixture()
+    {
+        string projectPath = Path.Combine(Path.GetTempPath(), "kicad-library-transaction-fixture");
+        string libraryPath = Path.Combine(projectPath, "libs", "fixture.kicad_sym");
+        var document = new DocumentSpecifier
+        {
+            Type = DocumentType.DoctypeSymbol,
+            Project = new() { Name = "fixture", Path = projectPath },
+            LibId = new() { LibraryNickname = "Fixture", EntryName = "Probe" }
+        };
+        var state = new LibraryLifecycleState(document, Guid.NewGuid().ToString("D"),
+            new LibraryDocumentRevision(Guid.NewGuid().ToString("D"), 4), new string('a', 64),
+            [
+                new LibraryFileBaseline(Path.Combine(projectPath, "sym-lib-table"), true, new string('b', 64), 11),
+                new LibraryFileBaseline(libraryPath, true, new string('c', 64), 7)
+            ]);
+        var request = new LibraryTransactionRequest(Guid.NewGuid().ToString("D"), document,
+            state.ProcessEpoch, state, "update", "(library-edit v1)", "");
+        return (request with { RequestFingerprintSha256 = LibraryTransactionContract.ComputeFingerprint(request) },
+            state, document, projectPath);
     }
 
     private static void Reject(Action action, string expectedCode)

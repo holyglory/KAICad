@@ -429,8 +429,8 @@ API_HANDLER_SCH::API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext,
 std::optional<ApiResponseStatus> API_HANDLER_SCH::checkRequestTarget(
         const google::protobuf::Message& aRequest ) const
 {
-    if( aRequest.GetDescriptor()
-            == kiapi::automation::v1::NativeCapabilityLibrarySnapshotRead::descriptor() )
+    if( aRequest.GetDescriptor()->full_name()
+            == kiapi::automation::v1::NativeCapabilityLibrarySnapshotRead::descriptor()->full_name() )
     {
         const auto& snapshot =
                 static_cast<const kiapi::automation::v1::NativeCapabilityLibrarySnapshotRead&>( aRequest );

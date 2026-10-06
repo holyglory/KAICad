@@ -359,6 +359,40 @@ public sealed class LibraryLifecycleSnapshotContractTests
         LibraryTransactionContract.ValidateReceipt(request, rollbackUnknown, inspect: true);
     }
 
+    [TestMethod]
+    [DataRow("symbol-clone->write")]
+    [DataRow("symbol-write")]
+    [DataRow("symbol-delete")]
+    [DataRow("footprint-library-delete")]
+    [DataRow("footprint-save")]
+    [DataRow("footprint-save-copy")]
+    [DataRow("footprint-revert")]
+    public void LegacyLibraryMutationEvidenceCannotCrossCheckedAdmission(string mutationPath)
+    {
+        // These are the currently qualified managed/native entry points.  They
+        // carry only a modify hash (symbol paths), an editor snapshot digest
+        // (footprint paths), or neither.  None carries the complete process,
+        // revision, full-state and dependency-baseline observation required by
+        // LibraryTransactionContract.  Keep the test here as the integration
+        // seam until each writer publishes that observation.
+        (LibraryTransactionRequest request, _, _, _) = TransactionFixture();
+        var legacyState = request.ExpectedState with
+        {
+            FullStateSha256 = new string('a', 64),
+            FileBaselines = [],
+            CompleteState = false
+        };
+        var legacyRequest = request with { ExpectedState = legacyState };
+        legacyRequest = legacyRequest with
+        {
+            RequestFingerprintSha256 = LibraryTransactionContract.ComputeFingerprint(legacyRequest)
+        };
+
+        Reject(() => LibraryTransactionContract.ValidateAdmission(legacyRequest, legacyState),
+            "partial_library_state");
+        Assert.IsFalse(string.IsNullOrWhiteSpace(mutationPath));
+    }
+
     private static (LibraryLifecycleSnapshot Snapshot, DocumentSpecifier Document, string ProjectPath) Fixture()
     {
         string projectPath = Path.Combine(Path.GetTempPath(), "kicad-library-lifecycle-fixture");

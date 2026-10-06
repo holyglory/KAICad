@@ -53,7 +53,7 @@ public sealed class SimulationTools(InstanceRegistry instances)
                 throw SimulationResultReceipts.Unresolved(previous.OperationId);
             receipts.WriteOperation(previous with { Stage = SimulationOperationStage.Accepted, JobId = recovered.JobId });
             if (Terminal(recovered))
-                recovered = await ReadNative(client, instanceId, session.Epoch, target, recovered.JobId, cancellationToken);
+                await CaptureTerminal(client, instanceId, target, session.Epoch, recovered, cancellationToken);
             return Data(new { instanceId, instanceEpoch = session.Epoch, document = target,
                 deck = DescribeDeck(previous), job = Describe(recovered) });
         }
@@ -125,7 +125,7 @@ public sealed class SimulationTools(InstanceRegistry instances)
             return Data(new { instanceId, instanceEpoch = session.Epoch, document = target,
                 operationId = operationId.ToString("D"), found = false, lookupSupported = true });
         if (Terminal(result))
-            result = await ReadNative(client, instanceId, session.Epoch, target, result.JobId, cancellationToken);
+            await CaptureTerminal(client, instanceId, target, session.Epoch, result, cancellationToken);
         var operation = OperationFor(instanceId, target, session.Epoch, result.OperationId);
         return Data(new { instanceId, instanceEpoch = session.Epoch, document = target,
             operationId = result.OperationId, found = true, lookupSupported = true,
@@ -320,6 +320,15 @@ public sealed class SimulationTools(InstanceRegistry instances)
     private async Task CaptureTerminal(NativeClient client, string instanceId, DocumentSpecifier document,
         string epoch, SimulationJobState result, CancellationToken cancellationToken)
     {
+        if (receipts.ReadTerminal(instanceId, epoch, Guid.Parse(result.JobId)) is { } existing)
+        {
+            SimulationJobContract.ValidateArchive(existing, document, epoch, result.JobId);
+            if (existing.Job.OperationId != result.OperationId || existing.Job.Status != result.Status)
+                throw new AutomationException("invalid_simulation_result",
+                    "The native terminal operation changed after its immutable archive was recorded.");
+            return;
+        }
+
         var operation = OperationFor(instanceId, document, epoch, result.OperationId);
         if (operation is null)
         {

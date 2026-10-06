@@ -53,6 +53,22 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(current.Vectors.Any(vector => vector.Name.Contains("out", StringComparison.OrdinalIgnoreCase)));
             Assert.IsTrue(current.Vectors.SelectMany(vector => vector.Values).Any(value => Math.Abs(value - 2.5) < 0.01));
             Assert.IsTrue(current.Vectors.All(vector => !vector.Complex), "The operating-point vectors must retain their real, flat representation.");
+            var nativeOperation = await client.InvokeAsync<NativeCapabilitySimulationReadOperation,
+                NativeCapabilitySimulationReadOperationResponse>(new()
+                { Document = simulationDocument, OperationId = operation, ProcessEpoch = client.Epoch }, token);
+            Assert.IsTrue(nativeOperation.Found);
+            Assert.IsNotNull(nativeOperation.Job);
+            Assert.AreEqual(current.JobId, nativeOperation.Job.JobId);
+            Assert.AreEqual(current.Status, nativeOperation.Job.Status);
+            var operationLookup = await mcp.Tool("kicad_simulation_operation", new
+            { instanceId, expectedInstanceEpoch = client.Epoch, document = Target(simulationDocument), operationId = operation });
+            Assert.AreEqual(current.JobId, JobResult(operationLookup).JobId,
+                "Operation lookup must recover the existing native job without dispatching a duplicate.");
+            var missingOperationLookup = await mcp.Tool("kicad_simulation_operation", new
+            { instanceId, expectedInstanceEpoch = client.Epoch, document = Target(simulationDocument), operationId = Guid.NewGuid().ToString("D") });
+            Assert.IsFalse(missingOperationLookup.GetProperty("isError").GetBoolean());
+            Assert.IsFalse(missingOperationLookup.GetProperty("structuredContent").GetProperty("found").GetBoolean(),
+                "A native peer with no authoritative operation record must report found=false.");
             string originalEpoch = client.Epoch;
             var completedArchive = await ArchiveResult(mcp, current.JobId, originalEpoch);
             Assert.AreEqual(current, JobResult(completedArchive, originalEpoch));
@@ -144,12 +160,14 @@ public sealed partial class NativeSessionTests
 
             // The root is valid in this same project, but it is a different full
             // sheet path from the child bound to this job.
-            foreach (string name in new[] { "kicad_simulation_job", "kicad_simulation_wait", "kicad_simulation_cancel" })
+            foreach (string name in new[] { "kicad_simulation_job", "kicad_simulation_operation", "kicad_simulation_wait", "kicad_simulation_cancel" })
             {
                 var arguments = new Dictionary<string, object>
                 {
                     ["instanceId"] = instanceId, ["expectedInstanceEpoch"] = client.Epoch,
-                    ["document"] = Target(document), ["jobId"] = started.JobId
+                    ["document"] = Target(document),
+                    [name == "kicad_simulation_operation" ? "operationId" : "jobId"] =
+                        name == "kicad_simulation_operation" ? operation : started.JobId
                 };
                 if (name == "kicad_simulation_wait") arguments["afterSequence"] = current.Sequence;
                 var wrongSheet = await mcp.Tool(name, arguments);
@@ -179,6 +197,17 @@ public sealed partial class NativeSessionTests
             var afterLaterJob = await ArchiveResult(mcp, current.JobId, originalEpoch);
             Assert.IsTrue(JsonElement.DeepEquals(completedArchive.GetProperty("structuredContent"),
                 afterLaterJob.GetProperty("structuredContent")), "Starting a later native job must preserve the earlier archive.");
+            var historicalOperation = await client.InvokeAsync<NativeCapabilitySimulationReadOperation,
+                NativeCapabilitySimulationReadOperationResponse>(new()
+                { Document = simulationDocument, OperationId = operation, ProcessEpoch = originalEpoch }, token);
+            Assert.IsTrue(historicalOperation.Found);
+            Assert.IsNotNull(historicalOperation.Job);
+            Assert.AreEqual(current.JobId, historicalOperation.Job.JobId,
+                "Native operation history must retain the original job after a later simulation.");
+            Assert.AreEqual(current.Status, historicalOperation.Job.Status);
+            Assert.AreEqual(current.JobId, JobResult(await mcp.Tool("kicad_simulation_operation", new
+                { instanceId, expectedInstanceEpoch = originalEpoch, document = Target(simulationDocument), operationId = operation })).JobId,
+                "Managed operation recovery must read the original job after a later simulation.");
             Assert.AreEqual(current, await Start(netlist, operation), "An old operation must replay its archive without running again.");
             Assert.AreEqual(generatedTerminal, await client.InvokeAsync<ReadSimulationJob, SimulationJobState>(new()
             { Document = simulationDocument, JobId = generated.JobId, ProcessEpoch = originalEpoch }, token),

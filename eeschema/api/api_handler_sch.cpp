@@ -362,6 +362,9 @@ API_HANDLER_SCH::API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext,
             &API_HANDLER_SCH::handleStartSimulation );
     registerHandler<kiapi::automation::v1::ReadSimulationJob, kiapi::automation::v1::SimulationJobState>(
             &API_HANDLER_SCH::handleReadSimulation );
+    registerHandler<kiapi::automation::v1::NativeCapabilitySimulationReadOperation,
+                    kiapi::automation::v1::NativeCapabilitySimulationReadOperationResponse>(
+            &API_HANDLER_SCH::handleReadSimulationOperation );
     registerHandler<kiapi::automation::v1::CancelSimulationJob, kiapi::automation::v1::SimulationJobState>(
             &API_HANDLER_SCH::handleCancelSimulation );
     registerHandler<kiapi::automation::v1::NativeCapabilitySimulationReadDependencies,
@@ -4294,6 +4297,28 @@ tl::unexpected<kiapi::common::ApiResponseStatus> SimulationError(
 }
 }
 
+kiapi::automation::v1::SimulationJobState API_HANDLER_SCH::simulationState(
+        const SIMULATION_JOB& aJob, const kiapi::common::types::DocumentSpecifier& aDocument ) const
+{
+    using namespace kiapi::automation::v1;
+    SimulationJobState result;
+    result.mutable_document()->CopyFrom( aDocument );
+    result.set_job_id( aJob.jobId );
+    result.set_operation_id( aJob.operationId );
+    result.set_process_epoch( aJob.processEpoch );
+    result.set_status( aJob.status );
+    result.set_sequence( aJob.sequence );
+    result.set_progress( aJob.status == SIMJS_COMPLETED ? 100 : 0 );
+    result.set_cancellation_requested( aJob.cancellationRequested );
+    result.set_worker_finished( aJob.workerFinished );
+    result.set_error_code( aJob.errorCode );
+    result.set_error_message( aJob.errorMessage );
+    result.mutable_messages()->Add( aJob.messages.begin(), aJob.messages.end() );
+    for( const auto& vector : aJob.vectors )
+        result.add_vectors()->CopyFrom( vector );
+    return result;
+}
+
 HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> API_HANDLER_SCH::handleStartSimulation(
         const HANDLER_CONTEXT<kiapi::automation::v1::StartSimulationJob>& aCtx )
 {
@@ -4318,6 +4343,18 @@ HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> API_HANDLER_SCH::handl
     }
 
     std::lock_guard<std::mutex> lock( m_simulationMutex );
+    auto historical = m_simulationHistory.find( aCtx.Request.operation_id() );
+    if( historical != m_simulationHistory.end() )
+    {
+        if( historical->second.netlist != netlist
+                || !google::protobuf::util::MessageDifferencer::Equals( historical->second.document,
+                                                                         aCtx.Request.document() ) )
+            return SimulationError( ApiStatusCode::AS_BAD_REQUEST,
+                                    "Simulation operation identity was reused with different netlist bytes" );
+
+        return simulationState( historical->second, aCtx.Request.document() );
+    }
+
     bool start = false;
     if( m_simulationJob && m_simulationJob->operationId == aCtx.Request.operation_id() )
     {
@@ -4331,6 +4368,16 @@ HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> API_HANDLER_SCH::handl
     else
     {
         start = true;
+        if( m_simulationJob )
+        {
+            m_simulationHistory.emplace( m_simulationJob->operationId, *m_simulationJob );
+            m_simulationHistoryOrder.push_back( m_simulationJob->operationId );
+            while( m_simulationHistoryOrder.size() > MaxSimulationHistory )
+            {
+                m_simulationHistory.erase( m_simulationHistoryOrder.front() );
+                m_simulationHistoryOrder.pop_front();
+            }
+        }
         m_simulationJob.emplace();
         m_simulationJob->jobId = KIID().AsString();
         m_simulationJob->operationId = aCtx.Request.operation_id();
@@ -4396,7 +4443,29 @@ HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> API_HANDLER_SCH::handl
     if( auto valid = validateDocument( aCtx.Request.document() ); !valid ) return tl::unexpected( valid.error() );
     std::lock_guard<std::mutex> lock( m_simulationMutex );
     if( !m_simulationJob || m_simulationJob->jobId != aCtx.Request.job_id() )
-        return SimulationError( ApiStatusCode::AS_BAD_REQUEST, "No simulation job matches this schematic document" );
+    {
+        const SIMULATION_JOB* historical = nullptr;
+        for( const auto& [operationId, job] : m_simulationHistory )
+        {
+            (void) operationId;
+            if( job.jobId == aCtx.Request.job_id() )
+            {
+                historical = &job;
+                break;
+            }
+        }
+
+        if( !historical )
+            return SimulationError( ApiStatusCode::AS_BAD_REQUEST,
+                                    "No simulation job matches this schematic document" );
+        if( !google::protobuf::util::MessageDifferencer::Equals( historical->document,
+                                                                  aCtx.Request.document() ) )
+            return SimulationError( ApiStatusCode::AS_BAD_REQUEST,
+                                    "The simulation job belongs to another schematic document" );
+        if( !aCtx.Request.process_epoch().empty() && aCtx.Request.process_epoch() != historical->processEpoch )
+            return SimulationError( ApiStatusCode::AS_BAD_REQUEST, "The simulation process epoch is stale" );
+        return simulationState( *historical, aCtx.Request.document() );
+    }
     if( !google::protobuf::util::MessageDifferencer::Equals( m_simulationJob->document,
                                                               aCtx.Request.document() ) )
         return SimulationError( ApiStatusCode::AS_BAD_REQUEST, "The simulation job belongs to another schematic document" );
@@ -4431,16 +4500,66 @@ HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> API_HANDLER_SCH::handl
             }
         }
     }
-    SimulationJobState result;
-    result.mutable_document()->CopyFrom( aCtx.Request.document() ); result.set_job_id( m_simulationJob->jobId );
-    result.set_operation_id( m_simulationJob->operationId ); result.set_process_epoch( m_simulationJob->processEpoch );
-    result.set_status( m_simulationJob->status ); result.set_sequence( m_simulationJob->sequence );
-    result.set_progress( m_simulationJob->status == SIMJS_COMPLETED ? 100 : 0 );
-    result.set_cancellation_requested( m_simulationJob->cancellationRequested ); result.set_worker_finished( m_simulationJob->workerFinished );
-    result.set_error_code( m_simulationJob->errorCode ); result.set_error_message( m_simulationJob->errorMessage );
-    result.mutable_messages()->Add( m_simulationJob->messages.begin(), m_simulationJob->messages.end() );
-    for( const auto& vector : m_simulationJob->vectors ) result.add_vectors()->CopyFrom( vector );
-    return result;
+    return simulationState( *m_simulationJob, aCtx.Request.document() );
+}
+
+HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySimulationReadOperationResponse>
+API_HANDLER_SCH::handleReadSimulationOperation(
+        const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySimulationReadOperation>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+
+    if( aCtx.Request.operation_id().empty() || aCtx.Request.process_epoch() != apiServer().Token() )
+        return SimulationError( ApiStatusCode::AS_BAD_REQUEST,
+                                "Simulation operation lookup requires a native operation UUID and current process epoch" );
+
+    SIMULATION_JOB snapshot;
+    bool current = false;
+    {
+        std::lock_guard<std::mutex> lock( m_simulationMutex );
+        if( m_simulationJob && m_simulationJob->operationId == aCtx.Request.operation_id() )
+        {
+            snapshot = *m_simulationJob;
+            current = true;
+        }
+        else
+        {
+            auto historical = m_simulationHistory.find( aCtx.Request.operation_id() );
+            if( historical == m_simulationHistory.end() )
+            {
+                NativeCapabilitySimulationReadOperationResponse response;
+                response.set_found( false );
+                return response;
+            }
+            snapshot = historical->second;
+        }
+
+        if( snapshot.processEpoch != aCtx.Request.process_epoch()
+                || !google::protobuf::util::MessageDifferencer::Equals( snapshot.document,
+                                                                          aCtx.Request.document() ) )
+            return SimulationError( ApiStatusCode::AS_BAD_REQUEST,
+                                    "The simulation operation belongs to another schematic document or native process epoch" );
+    }
+
+    NativeCapabilitySimulationReadOperationResponse response;
+    response.set_found( true );
+    if( current )
+    {
+        HANDLER_CONTEXT<ReadSimulationJob> read;
+        read.ClientName = aCtx.ClientName;
+        read.Request.mutable_document()->CopyFrom( aCtx.Request.document() );
+        read.Request.set_job_id( snapshot.jobId );
+        read.Request.set_process_epoch( aCtx.Request.process_epoch() );
+        auto result = handleReadSimulation( read );
+        if( !result )
+            return tl::unexpected( result.error() );
+        response.mutable_job()->CopyFrom( *result );
+    }
+    else
+        response.mutable_job()->CopyFrom( simulationState( snapshot, aCtx.Request.document() ) );
+    return response;
 }
 
 HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> API_HANDLER_SCH::handleCancelSimulation(

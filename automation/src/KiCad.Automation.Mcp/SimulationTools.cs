@@ -17,7 +17,7 @@ public sealed class SimulationTools(InstanceRegistry instances)
 {
     private readonly SimulationResultReceipts receipts = new(instances.StateDirectory);
     [McpServerTool(Name = "kicad_simulation_start"),
-     Description("Start one explicit ngspice simulation through KiCad's existing native simulator for a verified schematic document. Pass an empty netlist to simulate the deck KiCad generates from the schematic. A supplied netlist must be a plain self-contained circuit: interpreter blocks (.control/.exec, *ng_script) and file includes (.include, .lib file) are rejected. The MCP result records the inline deck SHA-256. An identical operation with a durable terminal receipt replays its archive without running again. A dispatched operation whose job ID was not recorded remains explicitly unresolved and is never automatically dispatched again. A different operation cannot replace an unarchived native job."),
+     Description("Start one explicit ngspice simulation through KiCad's existing native simulator for a verified schematic document. Pass an empty netlist to simulate the deck KiCad generates from the schematic. A supplied netlist must be a plain self-contained circuit: interpreter blocks (.control/.exec, *ng_script) and file includes (.include, .lib file) are rejected. The MCP result records the inline deck SHA-256. An identical operation with a durable terminal receipt replays its archive without running again. A dispatched operation is recovered by its native operation identity when possible; if no authoritative native record exists it remains explicitly unresolved and is never automatically dispatched again. A different operation cannot replace an unarchived native job."),
      KiCadCapability("simulation", "native-ngspice", "instance epoch, document, operation ID"),
      KiCadVerification(KiCadVerificationLevel.NativeJourney, "NativeSessionTests.NativeSimulationUsesKiCadNgspiceAndReturnsVectors", "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Start(string instanceId, string expectedInstanceEpoch, SimulationDocumentInput document,
@@ -37,12 +37,26 @@ public sealed class SimulationTools(InstanceRegistry instances)
                 throw new AutomationException("simulation_operation_reused", "The operation ID is already bound to different original instance, epoch, schematic or deck bytes.");
             if (receipts.ReadTerminal(previous) is { } archive)
                 return ArchivedData(archive, target);
-            if (previous.Stage == SimulationOperationStage.Dispatched)
-                throw SimulationResultReceipts.Unresolved(previous.OperationId);
         }
-        var client = instances.Client(instanceId); var session = await client.HandshakeAsync(cancellationToken);
+        NativeClient client;
+        try { client = instances.Client(instanceId); }
+        catch (AutomationException error) when (previous?.Stage == SimulationOperationStage.Dispatched
+            && error.Code == "unknown_instance")
+        { throw SimulationResultReceipts.Unresolved(previous.OperationId); }
+        var session = await client.HandshakeAsync(cancellationToken);
         if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
             throw new AutomationException("simulation_instance_changed", "The native instance identity or epoch changed; inspect it again.");
+        if (previous?.Stage == SimulationOperationStage.Dispatched)
+        {
+            var recovered = await LookupNative(client, target, session.Epoch, previous.OperationId, cancellationToken);
+            if (recovered is null)
+                throw SimulationResultReceipts.Unresolved(previous.OperationId);
+            receipts.WriteOperation(previous with { Stage = SimulationOperationStage.Accepted, JobId = recovered.JobId });
+            if (Terminal(recovered))
+                recovered = await ReadNative(client, instanceId, session.Epoch, target, recovered.JobId, cancellationToken);
+            return Data(new { instanceId, instanceEpoch = session.Epoch, document = target,
+                deck = DescribeDeck(previous), job = Describe(recovered) });
+        }
         if (previous?.Stage == SimulationOperationStage.Accepted)
         {
             var retained = await ReadNative(client, instanceId, session.Epoch, target, previous.JobId!, cancellationToken);
@@ -91,6 +105,31 @@ public sealed class SimulationTools(InstanceRegistry instances)
         var result = await ReadNative(client, instanceId, session.Epoch, target, jobId.ToString("D"), cancellationToken);
         var operation = receipts.ReadOperation(instanceId, Guid.Parse(result.OperationId));
         return Data(new { instanceId, instanceEpoch = session.Epoch, document = target, deck = DescribeDeck(operation), job = Describe(result) });
+    });
+
+    [McpServerTool(Name = "kicad_simulation_operation", ReadOnly = true),
+     Description("Look up one process-owned native simulation by its original operation ID after a lost start reply. The lookup is bound to the current instance epoch and complete schematic document, returns found=false when the native process has no authoritative record, and never starts or replays a simulation."),
+     KiCadCapability("simulation", "native-ngspice", "instance epoch, document, operation ID"),
+     KiCadVerification(KiCadVerificationLevel.NativeJourney, "NativeSessionTests.NativeSimulationUsesKiCadNgspiceAndReturnsVectors")]
+    public Task<CallToolResult> Operation(string instanceId, string expectedInstanceEpoch, SimulationDocumentInput document,
+        Guid operationId, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        ValidateId(operationId, "operation");
+        var target = SimulationDocumentInput.ToNative(document);
+        var client = instances.Client(instanceId); var session = await client.HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
+            throw new AutomationException("simulation_instance_changed", "The native instance identity or epoch changed; inspect it again.");
+        using var ownership = receipts.AcquireSession(instanceId);
+        var result = await LookupNative(client, target, session.Epoch, operationId.ToString("D"), cancellationToken);
+        if (result is null)
+            return Data(new { instanceId, instanceEpoch = session.Epoch, document = target,
+                operationId = operationId.ToString("D"), found = false, lookupSupported = true });
+        if (Terminal(result))
+            result = await ReadNative(client, instanceId, session.Epoch, target, result.JobId, cancellationToken);
+        var operation = OperationFor(instanceId, target, session.Epoch, result.OperationId);
+        return Data(new { instanceId, instanceEpoch = session.Epoch, document = target,
+            operationId = result.OperationId, found = true, lookupSupported = true,
+            deck = DescribeDeck(operation), job = Describe(result) });
     });
 
     [McpServerTool(Name = "kicad_simulation_result", ReadOnly = true),
@@ -233,6 +272,31 @@ public sealed class SimulationTools(InstanceRegistry instances)
         if (current.JobId is null) throw SimulationResultReceipts.Unresolved(current.OperationId);
         var result = await ReadNative(client, instanceId, epoch, current.Document, current.JobId, cancellationToken);
         if (!Terminal(result)) throw new AutomationException("simulation_busy", "The preceding simulation is still running; wait or cancel it before starting another operation.");
+    }
+
+    private async Task<SimulationJobState?> LookupNative(NativeClient client, DocumentSpecifier document,
+        string epoch, string operationId, CancellationToken cancellationToken)
+    {
+        NativeCapabilitySimulationReadOperationResponse response;
+        try
+        {
+            response = await client.InvokeAsync<NativeCapabilitySimulationReadOperation,
+                NativeCapabilitySimulationReadOperationResponse>(new()
+                { Document = document, OperationId = operationId, ProcessEpoch = epoch }, cancellationToken);
+        }
+        catch (NativeApiException error) when (error.Status == (int)ApiStatusCode.AsUnhandled
+            || error.Status == (int)ApiStatusCode.AsUnimplemented)
+        {
+            throw new AutomationException("simulation_operation_lookup_unavailable",
+                "The connected KiCad peer does not provide native simulation operation lookup.");
+        }
+
+        if (!response.Found) return null;
+        if (response.Job is null)
+            throw new AutomationException("invalid_simulation_result",
+                "The native simulation operation lookup reported a job without its state.");
+        SimulationJobContract.ValidateRead(response.Job, document, epoch, response.Job.JobId, operationId);
+        return response.Job;
     }
 
     private async Task<SimulationJobState> ReadNative(NativeClient client, string instanceId, string epoch,

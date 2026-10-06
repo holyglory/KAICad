@@ -38,6 +38,7 @@
 
 #include <mutex>
 #include <map>
+#include <deque>
 #include <optional>
 
 using namespace kiapi;
@@ -215,6 +216,9 @@ private:
             const HANDLER_CONTEXT<kiapi::automation::v1::StartSimulationJob>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> handleReadSimulation(
             const HANDLER_CONTEXT<kiapi::automation::v1::ReadSimulationJob>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySimulationReadOperationResponse>
+    handleReadSimulationOperation(
+            const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySimulationReadOperation>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::SimulationJobState> handleCancelSimulation(
             const HANDLER_CONTEXT<kiapi::automation::v1::CancelSimulationJob>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySimulationDependencies>
@@ -252,6 +256,16 @@ private:
     std::mutex m_simulationMutex;
     std::shared_ptr<SPICE_SIMULATOR> m_automationSimulator;
     std::optional<SIMULATION_JOB> m_simulationJob;
+    // Keep terminal jobs addressable by their original operation after a
+    // later simulation replaces the current slot.  This is process-owned
+    // evidence only; a new editor process starts with an empty history.
+    std::map<std::string, SIMULATION_JOB> m_simulationHistory;
+    std::deque<std::string> m_simulationHistoryOrder;
+    static constexpr size_t MaxSimulationHistory = 32;
+
+    kiapi::automation::v1::SimulationJobState simulationState(
+            const SIMULATION_JOB& aJob,
+            const kiapi::common::types::DocumentSpecifier& aDocument ) const;
 
     // Process-owned retry receipts for global symbol-library mutations. The
     // document lifecycle controller does not yet cover library files, so bind

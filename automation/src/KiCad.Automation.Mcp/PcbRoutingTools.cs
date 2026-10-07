@@ -363,16 +363,27 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
         {
             var request = SchematicJson.Parser.Parse<CheckedPcbRouteCommit>(requestJson);
             if (request.Candidate is null || request.Candidate.Header?.Document is null
-                || !Guid.TryParseExact(request.OperationId, "D", out var op) || op == Guid.Empty
-                || string.IsNullOrWhiteSpace(processEpoch))
+                || !Guid.TryParseExact(request.OperationId, "D", out var requestOperation) || requestOperation == Guid.Empty
+                || !Guid.TryParseExact(operationId, "D", out var requestedOperation) || requestedOperation == Guid.Empty
+                || !string.Equals(request.OperationId, operationId, StringComparison.Ordinal)
+                || !Guid.TryParseExact(processEpoch, "D", out var requestedEpoch) || requestedEpoch == Guid.Empty
+                || request.ExpectedState is null
+                || !string.Equals(request.ExpectedState.ProcessEpoch, processEpoch, StringComparison.Ordinal))
                 throw new AutomationException("invalid_route_receipt", "Supply the exact checked route request, operation ID and process epoch.");
+            CheckedPcbRouteContract.ValidateRequest(request, processEpoch, inspect: true);
             var document = request.Candidate.Header.Document;
-            var read = new ReadCheckedPcbRouteReceipt { Document = document, ProcessEpoch = processEpoch,
+            NativeClient client = registry.Client(instanceId);
+            AutomationSession session = await client.HandshakeAsync(cancellationToken);
+            if (!string.Equals(session.Epoch, processEpoch, StringComparison.Ordinal))
+                throw new AutomationException("stale_process_epoch", "The native process epoch changed; attach the checked route request again.");
+            var read = new ReadCheckedPcbRouteReceipt { Document = document, ProcessEpoch = session.Epoch,
                 OperationId = operationId, ExpectedRequest = request };
-            var result = await registry.Client(instanceId).InvokeAsync<ReadCheckedPcbRouteReceipt, CheckedPcbRouteReceipt>(read, cancellationToken);
+            var result = await client.InvokeAsync<ReadCheckedPcbRouteReceipt, CheckedPcbRouteReceipt>(read, cancellationToken);
+            CheckedPcbRouteContract.ValidateResult(request, result, inspect: true);
             var structured = JsonSerializer.SerializeToElement(new { instanceId,
                 receipt = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(result)),
-                operationId, readOnly = true });
+                operationId, processEpoch = session.Epoch, state = result.State.ToString(),
+                replayed = result.Replayed, readOnly = true });
             return new CallToolResult { StructuredContent = structured, Content = [new TextContentBlock { Text = structured.GetRawText() }] };
         }
         catch (Exception error) when (error is AutomationException or NativeApiException or NngException or InvalidProtocolBufferException or InvalidJsonException)

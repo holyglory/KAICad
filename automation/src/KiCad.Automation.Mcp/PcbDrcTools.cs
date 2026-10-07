@@ -68,7 +68,7 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                     or InvalidOperationException)
                 { throw new AutomationException("invalid_drc_delete_candidate", "deleteRequestJson is not a valid board DeleteItems request: " + error.Message); }
                 if (delete.Header?.Document is null || !delete.Header.Document.Equals(document) || delete.ItemIds.Count == 0
-                    || delete.ItemIds.Any(item => !Guid.TryParseExact(item.Value, "D", out var id) || id == Guid.Empty)
+                    || delete.ItemIds.Any(item => !CanonicalUuid(item.Value))
                     || delete.ItemIds.Select(item => item.Value).Distinct(StringComparer.Ordinal).Count() != delete.ItemIds.Count)
                     throw new AutomationException("invalid_drc_delete_candidate", "deleteRequestJson must target this PCB with distinct canonical route IDs.");
                 candidate ??= new CreateItems { Header = new() { Document = document } };
@@ -170,7 +170,7 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                 { throw new AutomationException("invalid_drc_delete_candidate", "deleteRequestJson is not a valid board DeleteItems request: " + error.Message); }
                 if (delete.Header?.Document is null || !delete.Header.Document.Equals(document)
                     || delete.ItemIds.Count == 0
-                    || delete.ItemIds.Any(item => !Guid.TryParseExact(item.Value, "D", out var id) || id == Guid.Empty)
+                    || delete.ItemIds.Any(item => !CanonicalUuid(item.Value))
                     || delete.ItemIds.Select(item => item.Value).Distinct(StringComparer.Ordinal).Count() != delete.ItemIds.Count)
                     throw new AutomationException("invalid_drc_delete_candidate", "deleteRequestJson must target this PCB with distinct canonical item IDs.");
                 candidate ??= new CreateItems { Header = new() { Document = document } };
@@ -246,7 +246,7 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                 || state.Revision is null || !Guid.TryParseExact(state.Revision.Epoch, "D", out _)
                 || (state.Running && (state.MarkerSnapshotComplete || state.Findings.Count != 0))
                 || (!state.Running && !state.MarkerSnapshotComplete)
-                || state.Findings.Any(finding => !Guid.TryParseExact(finding.NativeId, "D", out _) || finding.Marker is null)
+                || state.Findings.Any(finding => !CanonicalUuid(finding.NativeId) || finding.Marker is null)
                 || state.Findings.Select(finding => finding.NativeId).Distinct().Count() != state.Findings.Count)
                 throw new AutomationException("invalid_drc_state", "Native marker inventory did not match the requested target or snapshot contract.");
             return SchematicJson.Formatter.Format(state);
@@ -297,6 +297,11 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
         return id.ToString("D");
     }
 
+    private static bool CanonicalUuid(string? value) => value is not null
+        && Guid.TryParseExact(value, "D", out var id)
+        && id != Guid.Empty
+        && string.Equals(value, id.ToString("D"), StringComparison.Ordinal);
+
     private static void ValidateJobState(PcbDrcJobState state, DocumentSpecifier document,
         string processEpoch)
     {
@@ -321,7 +326,7 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
             // An incomplete snapshot always carries its reason, and a complete one none.
             || state.SnapshotComplete == state.InputWarnings.Any(warning => warning.StartsWith(IncompleteSnapshot, StringComparison.Ordinal))
             || (!state.CandidateDryRun && state.CandidateItemIds.Count != 0)
-            || state.CandidateItemIds.Any(id => !Guid.TryParseExact(id, "D", out _) || id == Guid.Empty.ToString("D"))
+            || state.CandidateItemIds.Any(id => !CanonicalUuid(id))
             || (!state.GroupPayloadVerified && (state.VerifiedGroupChanges.Count != 0 || state.AfterGroupStates.Count != 0))
             || (state.GroupPayloadVerified && (state.VerifiedGroupChanges.Count == 0
                 || state.AfterGroupStates.Count != state.VerifiedGroupChanges.Count))
@@ -329,7 +334,7 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
             || ((int)state.Status == 6 && !state.CancellationRequested)
             || ((int)state.Status is 5 or 6 or 7
                 && (string.IsNullOrWhiteSpace(state.ErrorCode) || string.IsNullOrWhiteSpace(state.ErrorMessage)))
-            || state.Findings.Any(finding => !Guid.TryParseExact(finding.NativeId, "D", out _)
+            || state.Findings.Any(finding => !CanonicalUuid(finding.NativeId)
             || finding.Marker is null)
             || state.Findings.Select(finding => finding.NativeId).Distinct().Count() != state.Findings.Count)
             throw new AutomationException("invalid_drc_job_state", "Native DRC job state did not match its target, identity or terminal-state contract.");
@@ -362,7 +367,7 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                     throw new AutomationException("invalid_drc_candidate", "A via must declare its pad-stack layers.");
             }
             else throw new AutomationException("invalid_drc_candidate", "Dry-run candidates must contain only Track, Arc or Via items.");
-            if (!Guid.TryParseExact(id, "D", out var identity) || identity == Guid.Empty || !ids.Add(id))
+            if (!CanonicalUuid(id) || !ids.Add(id))
                 throw new AutomationException("invalid_drc_candidate", "Dry-run candidates need distinct canonical identities.");
             if (string.IsNullOrWhiteSpace(net))
                 throw new AutomationException("invalid_drc_candidate", "Dry-run candidates need explicit existing-net names.");

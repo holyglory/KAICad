@@ -1,3 +1,5 @@
+using Google.Protobuf.WellKnownTypes;
+using Kiapi.Board.Types;
 using Kiapi.Common.Types;
 using KiCad.Automation.Mcp;
 using KiCad.Automation.Model;
@@ -174,6 +176,79 @@ public sealed class FootprintLibraryContractTests
         Reject(() => FootprintLibraryContract.ValidateDefinitionReadbackIdentity(
             before, wrongProcess, source, destination, processEpoch, "footprint save-copy", "22222222-2222-2222-2222-222222222222"),
             "footprint_persistence_unverified");
+
+        Reject(() => FootprintLibraryContract.ValidateDefinitionReadbackIdentity(
+            before, after, source, destination, processEpoch, "footprint save-copy", "malformed-operation"),
+            "invalid_operation_id");
+    }
+
+    [TestMethod]
+    public void CompleteDefinitionCoverageProvesNestedPadsGeometryAndProperties()
+    {
+        const string epoch = "77777777-7777-7777-7777-777777777777";
+        DocumentSpecifier document = Document("Probe");
+        NativeCapabilityFootprintReadDefinitionResponse response = CompleteDefinition(document, epoch);
+
+        FootprintLibraryContract.FootprintDefinitionCoverage coverage =
+            FootprintLibraryContract.ValidateDefinitionResponse(response, document, epoch,
+                (NativeFootprintDefinitionSource)2, document.LibId);
+
+        Assert.IsTrue(coverage.Complete);
+        Assert.IsTrue(coverage.CanonicalWriterHashVerified);
+        Assert.IsTrue(coverage.ProviderIdentityHashVerified);
+        Assert.IsTrue(coverage.NestedGeometryVerified);
+        Assert.IsTrue(coverage.PadsVerified);
+        Assert.IsTrue(coverage.PropertiesVerified);
+        Assert.IsTrue(coverage.UnsupportedItemsExcluded);
+        Assert.AreEqual(2, coverage.ItemCount);
+        Assert.AreEqual(2, coverage.GeometryItemCount);
+        Assert.AreEqual(1, coverage.PadCount);
+        Assert.IsGreaterThan(0, coverage.PropertyCount);
+        Assert.AreEqual("complete", coverage.Status);
+
+        FootprintLibraryContract.FootprintDefinitionCoverage persisted =
+            coverage.WithPersistence(persistedReadbackVerified: true, canonicalHashMatched: true);
+        Assert.IsTrue(persisted.PersistedReadbackVerified);
+        Assert.IsTrue(persisted.CanonicalHashMatched);
+        Assert.IsTrue(persisted.Complete);
+    }
+
+    [TestMethod]
+    public void CompleteClaimRejectsMalformedNestedPayloadAndDigest()
+    {
+        const string epoch = "88888888-8888-8888-8888-888888888888";
+        DocumentSpecifier document = Document("Probe");
+        NativeCapabilityFootprintReadDefinitionResponse malformed = CompleteDefinition(document, epoch);
+        malformed.Footprint.Definition.Items[0] = new()
+        {
+            TypeUrl = "type.googleapis.com/kiapi.board.types.FutureFootprintItem",
+            Value = Google.Protobuf.ByteString.CopyFromUtf8("not-a-pad")
+        };
+        Reject(() => FootprintLibraryContract.ValidateDefinitionResponse(malformed, document, epoch,
+            (NativeFootprintDefinitionSource)2, document.LibId), "footprint_definition_incomplete");
+
+        NativeCapabilityFootprintReadDefinitionResponse badHash = CompleteDefinition(document, epoch);
+        badHash.CanonicalSha256 = "not-a-sha";
+        Reject(() => FootprintLibraryContract.ValidateDefinitionResponse(badHash, document, epoch,
+            (NativeFootprintDefinitionSource)2, document.LibId), "footprint_definition_incomplete");
+    }
+
+    [TestMethod]
+    public void DefinitionCoverageKeepsIncompleteNativeResponsesTruthful()
+    {
+        const string epoch = "99999999-9999-9999-9999-999999999999";
+        DocumentSpecifier document = Document("Incomplete");
+        NativeCapabilityFootprintReadDefinitionResponse response = CompleteDefinition(document, epoch);
+        response.DefinitionComplete = false;
+        response.Limitations.Add("native provider omitted a property");
+
+        FootprintLibraryContract.FootprintDefinitionCoverage coverage =
+            FootprintLibraryContract.ValidateDefinitionResponse(response, document, epoch,
+                (NativeFootprintDefinitionSource)2, document.LibId);
+
+        Assert.IsFalse(coverage.Complete);
+        Assert.AreEqual("incomplete", coverage.Status);
+        CollectionAssert.Contains(coverage.Limitations, "native provider omitted a property");
     }
 
     private static DocumentSpecifier Document(string entryName) => new()
@@ -181,6 +256,55 @@ public sealed class FootprintLibraryContractTests
         Type = DocumentType.DoctypeFootprint,
         LibId = new() { LibraryNickname = "Fixture", EntryName = entryName }
     };
+
+    private static NativeCapabilityFootprintReadDefinitionResponse CompleteDefinition(
+        DocumentSpecifier document, string processEpoch)
+    {
+        var definition = new Footprint
+        {
+            Id = document.LibId.Clone(),
+            Attributes = new(),
+            Overrides = new(),
+            ReferenceField = new(),
+            ValueField = new(),
+            DatasheetField = new(),
+            DescriptionField = new(),
+            Jumpers = new()
+        };
+        definition.Items.Add(Any.Pack(new Pad
+        {
+            Id = new() { Value = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+            Number = "1",
+            PadStack = new()
+            {
+                Layers = { BoardLayer.BlFCu },
+                CopperLayers = { new PadStackLayer
+                {
+                    Layer = BoardLayer.BlFCu,
+                    Shape = PadStackShape.PssCircle,
+                    Size = new() { XNm = 1_000, YNm = 1_000 }
+                } }
+            }
+        }));
+        definition.Items.Add(Any.Pack(new Footprint3DModel { Filename = "probe.step" }));
+        var response = new NativeCapabilityFootprintReadDefinitionResponse
+        {
+            Document = document.Clone(),
+            ProcessEpoch = processEpoch,
+            Footprint = new() { Definition = definition },
+            CanonicalSha256 = new string('a', 64),
+            ProviderSha256 = new string('b', 64),
+            DefinitionComplete = true,
+            CanonicalTarget = document.LibId.Clone(),
+            FileBaseline = new()
+            {
+                BaselineKnown = true, BaselineExists = true,
+                CurrentKnown = true, CurrentExists = true,
+                Status = NativeFileBaselineStatus.NfbsUnchanged
+            }
+        };
+        return response;
+    }
 
     private static void Reject(Action action, string expectedCode)
     {

@@ -208,6 +208,9 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
             NativeContext context = await Admit(instanceId, expectedProcessEpoch, cancellationToken);
             NativeCapabilityFootprintReadDefinitionResponse response = await ReadNativeDefinition(
                 context, document, sourceValue, canonicalTarget, cancellationToken);
+            FootprintLibraryContract.FootprintDefinitionCoverage coverage =
+                FootprintLibraryContract.ValidateDefinitionResponse(response, document,
+                    context.Session.Epoch, sourceValue, canonicalTarget);
             return Data(new
             {
                 instanceId, processEpoch = context.Session.Epoch, document, source,
@@ -218,7 +221,8 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
                 footprint = JsonSerializer.Deserialize<JsonElement>(BoardJson.Formatter.Format(response.Footprint)),
                 fileBaseline = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(response.FileBaseline)),
                 limitations = response.Limitations.ToArray(),
-                canonicalTarget = response.CanonicalTarget
+                canonicalTarget = response.CanonicalTarget,
+                definitionCoverage = coverage
             });
         });
 
@@ -304,6 +308,8 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
             await EnsureSnapshot(context, document, expectedSnapshotSha256, cancellationToken);
             NativeCapabilityFootprintReadDefinitionResponse expectedDefinition = await ReadNativeDefinition(
                 context, document, (NativeFootprintDefinitionSource)2, document.LibId, cancellationToken);
+            FootprintLibraryContract.ValidateDefinitionResponse(expectedDefinition, document,
+                context.Session.Epoch, (NativeFootprintDefinitionSource)2, document.LibId);
             RequireCompleteDefinition(expectedDefinition, "footprint save");
             try
             {
@@ -319,8 +325,9 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
             string snapshotSha256 = await SnapshotHash(context, document, cancellationToken);
             NativeCapabilityFootprintReadDefinitionResponse persistedDefinition = await ReadPersistedDefinitionForVerification(
                 context, document, operationId, "footprint save", cancellationToken);
-            VerifyCanonicalPersistence(expectedDefinition, persistedDefinition, document, document,
-                context.Session.Epoch, "footprint save", operationId);
+            FootprintLibraryContract.FootprintDefinitionCoverage persistedCoverage =
+                VerifyCanonicalPersistence(expectedDefinition, persistedDefinition, document, document,
+                    context.Session.Epoch, "footprint save", operationId, document.LibId);
             LibraryReadback readback = await VerifyLibraryEntry(context, document.LibId.LibraryNickname,
                 document.LibId.EntryName, operationId, "footprint save", cancellationToken);
             return Data(new
@@ -334,6 +341,7 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
                 canonicalSha256 = persistedDefinition.CanonicalSha256,
                 providerSha256 = persistedDefinition.ProviderSha256,
                 definitionComplete = persistedDefinition.DefinitionComplete,
+                definitionCoverage = persistedCoverage,
                 fileBaseline = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(persistedDefinition.FileBaseline)),
                 persistedLibraryNickname = document.LibId.LibraryNickname,
                 persistedFootprintName = document.LibId.EntryName,
@@ -364,6 +372,8 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
             LibraryIdentifier canonicalTarget = new() { LibraryNickname = targetLibrary, EntryName = targetName };
             NativeCapabilityFootprintReadDefinitionResponse expectedDefinition = await ReadNativeDefinition(
                 context, document, (NativeFootprintDefinitionSource)2, canonicalTarget, cancellationToken);
+            FootprintLibraryContract.ValidateDefinitionResponse(expectedDefinition, document,
+                context.Session.Epoch, (NativeFootprintDefinitionSource)2, canonicalTarget);
             RequireCompleteDefinition(expectedDefinition, "footprint save-copy");
             try
             {
@@ -386,8 +396,9 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
             persistedDocument.LibId = canonicalTarget;
             NativeCapabilityFootprintReadDefinitionResponse persistedDefinition = await ReadPersistedDefinitionForVerification(
                 context, persistedDocument, operationId, "footprint save-copy", cancellationToken);
-            VerifyCanonicalPersistence(expectedDefinition, persistedDefinition, document, persistedDocument,
-                context.Session.Epoch, "footprint save-copy", operationId);
+            FootprintLibraryContract.FootprintDefinitionCoverage persistedCoverage =
+                VerifyCanonicalPersistence(expectedDefinition, persistedDefinition, document, persistedDocument,
+                    context.Session.Epoch, "footprint save-copy", operationId, canonicalTarget);
             LibraryReadback readback = await VerifyLibraryEntry(context, targetLibrary, targetName, operationId,
                 "footprint save-copy", cancellationToken);
             return Data(new
@@ -402,6 +413,7 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
                 canonicalSha256 = persistedDefinition.CanonicalSha256,
                 providerSha256 = persistedDefinition.ProviderSha256,
                 definitionComplete = persistedDefinition.DefinitionComplete,
+                definitionCoverage = persistedCoverage,
                 fileBaseline = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(persistedDefinition.FileBaseline)),
                 persistedLibraryNickname = targetLibrary, persistedFootprintName = targetName,
                 persistedModifyHash = readback.ModifyHash,
@@ -523,15 +535,7 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
 
     private static void RequireCompleteDefinition(
         NativeCapabilityFootprintReadDefinitionResponse response, string operation)
-    {
-        if (!response.DefinitionComplete || string.IsNullOrWhiteSpace(response.CanonicalSha256))
-        {
-            string limits = response.Limitations.Count == 0 ? "no native completeness explanation was returned"
-                : string.Join("; ", response.Limitations);
-            throw new AutomationException("footprint_definition_incomplete",
-                $"Cannot perform {operation} until the native footprint definition is complete: {limits}");
-        }
-    }
+        => FootprintLibraryContract.ValidateCompleteDefinition(response, operation);
 
     private static async Task<NativeCapabilityFootprintReadDefinitionResponse>
         ReadPersistedDefinitionForVerification(NativeContext context, DocumentSpecifier document,
@@ -556,18 +560,23 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
         }
     }
 
-    private static void VerifyCanonicalPersistence(
+    private static FootprintLibraryContract.FootprintDefinitionCoverage VerifyCanonicalPersistence(
         NativeCapabilityFootprintReadDefinitionResponse before,
         NativeCapabilityFootprintReadDefinitionResponse after,
         DocumentSpecifier expectedBeforeDocument,
         DocumentSpecifier expectedAfterDocument,
         string expectedProcessEpoch,
-        string operation, string operationId)
+        string operation, string operationId, LibraryIdentifier expectedBeforeTarget)
     {
         FootprintLibraryContract.ValidateDefinitionReadbackIdentity(before, after,
             expectedBeforeDocument, expectedAfterDocument, expectedProcessEpoch, operation, operationId);
-        if (!before.DefinitionComplete || !after.DefinitionComplete
-            || string.IsNullOrWhiteSpace(before.ProviderSha256)
+        FootprintLibraryContract.FootprintDefinitionCoverage beforeCoverage =
+            FootprintLibraryContract.ValidateDefinitionResponse(before, expectedBeforeDocument,
+                expectedProcessEpoch, (NativeFootprintDefinitionSource)2, expectedBeforeTarget);
+        FootprintLibraryContract.FootprintDefinitionCoverage afterCoverage =
+            FootprintLibraryContract.ValidateDefinitionResponse(after, expectedAfterDocument,
+                expectedProcessEpoch, (NativeFootprintDefinitionSource)1, null);
+        if (!beforeCoverage.Complete || !afterCoverage.Complete
             || !string.Equals(before.ProviderSha256, after.ProviderSha256, StringComparison.OrdinalIgnoreCase)
             || string.IsNullOrWhiteSpace(after.CanonicalSha256)
             || !string.Equals(before.CanonicalSha256, after.CanonicalSha256, StringComparison.OrdinalIgnoreCase)
@@ -580,6 +589,7 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
             throw new AutomationException("footprint_persistence_unverified",
                 $"KiCad completed {operation} operation {operationId}, but complete native definition readback was not verified: {limits}");
         }
+        return afterCoverage.WithPersistence(persistedReadbackVerified: true, canonicalHashMatched: true);
     }
 
     private static async Task EnsureSnapshot(NativeContext context, DocumentSpecifier document,

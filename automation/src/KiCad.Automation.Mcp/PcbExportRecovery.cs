@@ -244,6 +244,35 @@ internal static class PcbExportRecoveryPolicy
             throw new AutomationException("export_recovery_identity_mismatch",
                 "The durable export record belongs to another instance, process epoch or PCB document.");
     }
+
+    internal static void ValidateReceiptPaths(PcbExportRecoveryRecord record,
+        PcbManufacturingExportReceipt receipt)
+    {
+        if (!string.IsNullOrWhiteSpace(receipt.OutputDirectory)
+            && !PathEqualsCanonical(record.OutputDirectory, receipt.OutputDirectory))
+            throw new AutomationException("export_recovery_identity_mismatch",
+                "The native manufacturing receipt output directory does not match the durable export operation.");
+        if (!string.IsNullOrWhiteSpace(receipt.StagingDirectory)
+            && !PathEqualsCanonical(record.StagingDirectory, receipt.StagingDirectory))
+            throw new AutomationException("export_recovery_identity_mismatch",
+                "The native manufacturing receipt staging directory does not match the durable export operation.");
+        if (receipt.Status == PcbManufacturingExportStatus.PcbMfgExportCompleted
+            && (string.IsNullOrWhiteSpace(receipt.OutputDirectory)
+                || !PathEqualsCanonical(record.OutputDirectory, receipt.OutputDirectory)))
+            throw new AutomationException("export_recovery_identity_mismatch",
+                "A completed native manufacturing receipt must identify the durable published output directory.");
+    }
+
+    private static bool PathEqualsCanonical(string expected, string actual)
+    {
+        if (!Path.IsPathFullyQualified(actual)) return false;
+        try
+        {
+            return string.Equals(Path.GetFullPath(expected), Path.GetFullPath(actual),
+                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+        }
+        catch (ArgumentException) { return false; }
+    }
 }
 
 /// <summary>Atomic, process-reconnectable MCP state for typed manufacturing exports.</summary>
@@ -322,6 +351,12 @@ internal sealed class PcbExportRecoveryStore(string stateDirectory)
     {
         return Update(operationId, prior =>
         {
+            // A native receipt is replayable only for the exact operation-owned
+            // paths that were admitted with this durable request.  Operation,
+            // epoch and request-fingerprint checks alone do not protect the
+            // publication boundary when a malformed or stale peer reports a
+            // different output location.
+            PcbExportRecoveryPolicy.ValidateReceiptPaths(prior, receipt);
             var decision = PcbExportRecoveryPolicy.Reconcile(prior, true, receipt, outputExists,
                 outputVerified, stagingExists);
             return prior with

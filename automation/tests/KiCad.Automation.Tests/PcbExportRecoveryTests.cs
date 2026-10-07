@@ -1,3 +1,8 @@
+using System.Text.Json;
+using Google.Protobuf;
+using Google.Protobuf.WellKnownTypes;
+using Kiapi.Common;
+using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
 using KiCad.Automation.Mcp;
 using KiCad.Automation.Model;
@@ -292,6 +297,120 @@ public sealed class PcbExportRecoveryTests
     }
 
     [TestMethod]
+    public void DurableReceiptMustRetainOperationOwnedOutputPaths()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-pcb-export-path-binding-").FullName;
+        try
+        {
+            var record = Record(PcbExportRecoveryPolicy.Pending, nativeDispatchKnown: true,
+                nativeDispatch: true, root: root);
+            var store = new PcbExportRecoveryStore(root);
+            store.Begin(record.InstanceId, record.OperationId, record.ProcessEpoch, record.DocumentJson,
+                record.RequestFingerprintSha256, record.OutputDirectory);
+            var receipt = new PcbManufacturingExportReceipt
+            {
+                OperationId = record.OperationId,
+                ProcessEpoch = record.ProcessEpoch,
+                RequestFingerprintSha256 = record.RequestFingerprintSha256,
+                Status = PcbManufacturingExportStatus.PcbMfgExportFailed,
+                DispatchStage = PcbManufacturingDispatchStage.PcbMfgDispatchTerminal,
+                Terminal = true,
+                ErrorCode = "native_export_failed",
+                ErrorMessage = "fixture failure",
+                PublicationState = PcbManufacturingPublicationState.PcbMfgPublicationFailed,
+                OutputDirectory = Path.Combine(root, "foreign-output"),
+                StagingDirectory = PcbExportRecoveryPolicy.StagingDirectory(record.OutputDirectory, record.OperationId)
+            };
+
+            var outputError = Assert.ThrowsExactly<AutomationException>(() => store.MarkReceipt(
+                record.OperationId, receipt, outputExists: false, outputVerified: false, stagingExists: false));
+            Assert.AreEqual("export_recovery_identity_mismatch", outputError.Code);
+
+            receipt.OutputDirectory = record.OutputDirectory;
+            receipt.StagingDirectory = Path.Combine(root, "foreign-staging");
+            var stagingError = Assert.ThrowsExactly<AutomationException>(() => store.MarkReceipt(
+                record.OperationId, receipt, outputExists: false, outputVerified: false, stagingExists: false));
+            Assert.AreEqual("export_recovery_identity_mismatch", stagingError.Code);
+
+            Assert.AreEqual(PcbExportRecoveryPolicy.Pending, store.Read(record.OperationId)!.Status,
+                "A receipt with foreign paths must not change durable recovery state.");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public async Task CancellationRefusalReconcilesLiveTerminalReceipt()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-pcb-export-cancel-reconcile-").FullName;
+        try
+        {
+            string instanceId = "33333333-3333-3333-3333-333333333333";
+            string processEpoch = "22222222-2222-2222-2222-222222222222";
+            string operationId = "11111111-1111-1111-1111-111111111111";
+            var document = new DocumentSpecifier
+            {
+                Type = DocumentType.DoctypePcb,
+                BoardFilename = "fixture.kicad_pcb",
+                Project = new() { Name = "fixture", Path = root }
+            };
+            var state = new DocumentLifecycleState
+            {
+                Document = document.Clone(),
+                Scope = DocumentLifecycleScope.DlsPcb,
+                ProcessEpoch = processEpoch,
+                StateSha256 = new string('a', 64)
+            };
+            string output = Path.Combine(root, "out");
+            string fingerprint = new string('b', 64);
+            var receipt = new PcbManufacturingExportReceipt
+            {
+                OperationId = operationId,
+                ProcessEpoch = processEpoch,
+                Document = document.Clone(),
+                RequestFingerprintSha256 = fingerprint,
+                JobKind = "svg",
+                Status = PcbManufacturingExportStatus.PcbMfgExportFailed,
+                DispatchStage = PcbManufacturingDispatchStage.PcbMfgDispatchTerminal,
+                NativeDispatch = true,
+                Terminal = true,
+                ErrorCode = "native_export_failed",
+                ErrorMessage = "fixture failure",
+                ExpectedState = state.Clone(),
+                ObservedBefore = state.Clone(),
+                OutputDirectory = output,
+                StagingDirectory = PcbExportRecoveryPolicy.StagingDirectory(output, operationId),
+                PublicationState = PcbManufacturingPublicationState.PcbMfgPublicationFailed
+            };
+            var peer = new ManufacturingReceiptPeer(instanceId, processEpoch, root, receipt);
+            var registry = new InstanceRegistry(peer, Path.Combine(root, "state"));
+            await registry.AttachAsync("ipc:///tmp/kicad-pcb-export-cancel-reconcile", instanceId);
+
+            var store = new PcbExportRecoveryStore(registry.StateDirectory);
+            store.Begin(instanceId, operationId, processEpoch,
+                SchematicJson.Formatter.Format(document), fingerprint, output);
+
+            var result = await new PcbJobTools(registry).ExportCancel(instanceId,
+                new NativeDocumentInput
+                {
+                    Type = NativeDocumentType.Pcb,
+                    Project = new NativeProjectInput { Name = "fixture", Path = root },
+                    BoardFilename = "fixture.kicad_pcb"
+                }, processEpoch, operationId, CancellationToken.None);
+
+            Assert.IsTrue(result.IsError, result.StructuredContent?.GetRawText());
+            JsonElement data = result.StructuredContent!.Value;
+            Assert.IsTrue(data.GetProperty("nativeReceiptFound").GetBoolean(), data.GetRawText());
+            Assert.AreEqual("native-process", data.GetProperty("receiptScope").GetString(), data.GetRawText());
+            Assert.AreEqual(PcbExportRecoveryPolicy.Retryable, data.GetProperty("status").GetString(), data.GetRawText());
+            Assert.AreEqual(PcbExportRecoveryPolicy.Failed, data.GetProperty("outcome").GetString(), data.GetRawText());
+            Assert.AreEqual("pcb_export_cancellation_unsupported", data.GetProperty("errorCode").GetString(), data.GetRawText());
+            Assert.AreEqual(1, peer.ReceiptReads);
+            Assert.AreEqual(PcbExportRecoveryPolicy.Retryable, store.Read(operationId)!.Status);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
     public void ReceiptBindingRejectsDifferentInstanceEpochOrDocument()
     {
         var record = Record(PcbExportRecoveryPolicy.Pending, nativeDispatchKnown: false,
@@ -327,6 +446,54 @@ public sealed class PcbExportRecoveryTests
                 }
             }
         }
+    }
+
+    private sealed class ManufacturingReceiptPeer(string instanceId, string epoch, string projectPath,
+        PcbManufacturingExportReceipt receipt) : INativeTransport
+    {
+        internal int ReceiptReads { get; private set; }
+
+        public Task<byte[]> ExchangeAsync(string endpoint, byte[] bytes, TimeSpan timeout,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ApiRequest request = ApiRequest.Parser.ParseFrom(bytes);
+            if (request.Message.Is(GetAutomationSession.Descriptor))
+                return Task.FromResult(Response(new AutomationSession
+                {
+                    ProtocolVersion = 1,
+                    InstanceId = instanceId,
+                    ProjectPath = projectPath,
+                    Epoch = epoch
+                }));
+            if (request.Message.Is(ReadPcbManufacturingExport.Descriptor))
+            {
+                ReceiptReads++;
+                var query = request.Message.Unpack<ReadPcbManufacturingExport>();
+                if (query.OperationId != receipt.OperationId || query.ProcessEpoch != epoch
+                    || !query.Document.Equals(receipt.Document))
+                    return Task.FromResult(Error("manufacturing receipt query identity mismatch"));
+                return Task.FromResult(Response(new PcbManufacturingExportReceiptResponse
+                {
+                    Found = true,
+                    Receipt = receipt.Clone()
+                }));
+            }
+            throw new AssertFailedException("Unexpected manufacturing native request: " + request.Message.TypeUrl);
+        }
+
+        private byte[] Response(IMessage message) => new ApiResponse
+        {
+            Header = new() { KicadToken = epoch },
+            Status = new() { Status = ApiStatusCode.AsOk },
+            Message = Any.Pack(message)
+        }.ToByteArray();
+
+        private byte[] Error(string message) => new ApiResponse
+        {
+            Header = new() { KicadToken = epoch },
+            Status = new() { Status = ApiStatusCode.AsBadRequest, ErrorMessage = message }
+        }.ToByteArray();
     }
 
     private static PcbExportRecoveryRecord Record(string status, bool nativeDispatchKnown,

@@ -312,7 +312,7 @@ public sealed class PcbJobTools(InstanceRegistry registry)
     }, operationId, null);
 
     [McpServerTool(Name = "kicad_pcb_export_cancel", ReadOnly = false),
-     Description("Request cancellation of one exact typed PCB manufacturing export. KiCad's synchronous manufacturing protocol has no native cancellation command, so this tool always refuses cancellation after inspecting the durable operation identity and current receipt. It never reports a successful cancellation; use kicad_pcb_export_reconcile or kicad_pcb_export_receipt to recover the native outcome."),
+     Description("Request cancellation of one exact typed PCB manufacturing export. KiCad's synchronous manufacturing protocol has no native cancellation command, so this tool refuses cancellation after checking the durable identity and, when the exact process epoch is alive, reconciling one native receipt. It never reports a successful cancellation; use kicad_pcb_export_reconcile or kicad_pcb_export_receipt to recover an unavailable native outcome."),
      KiCadCapability("pcb-manufacturing", "cancellation-refusal", "exact instance, PCB document, process epoch and operation ID"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbManufacturingMcpProcessTests.TypedManufacturingToolPublishesJobSchemaAndRejectsMalformedIdentity")]
     public Task<CallToolResult> ExportCancel(string instanceId, NativeDocumentInput documentInput,
@@ -348,6 +348,70 @@ public sealed class PcbJobTools(InstanceRegistry registry)
 
         PcbManufacturingExportReceipt? receipt = record.ReceiptJson is null
             ? null : PcbExportRecoveryStore.ParseReceipt(record);
+        AutomationSession? session = null;
+        bool nativeReceiptFound = false;
+        string? nativeUnavailableReason = null;
+
+        // Cancellation is not a native operation, but a caller that asks for
+        // it is often recovering a lost export reply.  Read the process-owned
+        // receipt once when the exact epoch is still alive so the refusal can
+        // report the actual terminal outcome instead of stale durable state.
+        if (receipt is null && record.Status != PcbExportRecoveryPolicy.Cancelled)
+        {
+            try
+            {
+                NativeClient client = registry.Client(instanceId);
+                session = await client.HandshakeAsync(cancellationToken);
+                if (session.Epoch != processEpoch)
+                {
+                    nativeUnavailableReason = "The native process epoch changed; the live export receipt cannot be inspected.";
+                }
+                else
+                {
+                    PcbManufacturingExportReceiptResponse response = await client.InvokeAsync<
+                        ReadPcbManufacturingExport, PcbManufacturingExportReceiptResponse>(new()
+                        {
+                            Document = document,
+                            OperationId = operationId,
+                            ProcessEpoch = processEpoch
+                        }, cancellationToken);
+                    if (response.Found)
+                    {
+                        PcbManufacturingContract.ValidateReceipt(response.Receipt, document, null,
+                            operationId, processEpoch, record.RequestFingerprintSha256);
+                        receipt = response.Receipt;
+                        record = recovery.MarkReceipt(operationId, receipt,
+                            Directory.Exists(receipt.OutputDirectory),
+                            PcbExportRecoveryPolicy.OutputMatches(receipt),
+                            Directory.Exists(receipt.StagingDirectory));
+                        nativeReceiptFound = true;
+                    }
+                    else
+                    {
+                        nativeUnavailableReason = "The native process has no receipt for this operation yet; cancellation remains unsupported.";
+                    }
+                }
+            }
+            catch (AutomationException error) when (error.Code is "unknown_instance"
+                or "instance_exited" or "instance_changed" or "incompatible_native")
+            {
+                nativeUnavailableReason = error.Message;
+            }
+            catch (NativeApiException error)
+            {
+                nativeUnavailableReason = error.Message;
+            }
+            catch (NngException error)
+            {
+                nativeUnavailableReason = error.Message;
+            }
+        }
+
+        // A native receipt may have been unavailable, while a prior MCP
+        // reconnect retained one.  Keep that cached receipt explicitly
+        // labelled as MCP state and never turn it into a cancellation claim.
+        if (receipt is null && record.ReceiptJson is not null)
+            receipt = PcbExportRecoveryStore.ParseReceipt(record);
         string outcome = receipt is not null
             ? PcbExportRecoveryPolicy.Outcome(receipt, receipt.NativeDispatch)
             : record.Status switch
@@ -361,11 +425,16 @@ public sealed class PcbJobTools(InstanceRegistry registry)
             ? null : JsonDocument.Parse(SchematicJson.Formatter.Format(receipt)).RootElement.Clone();
         return Data(new
         {
-            instanceId, processEpoch, operationId, cancellationSupported = false,
-            cancellationRequested = false, outcome, status = record.Status,
+            instanceId, processEpoch = session?.Epoch ?? processEpoch, operationId,
+            cancellationSupported = false, cancellationRequested = false, outcome,
+            status = record.Status, nativeReceiptFound,
+            receiptScope = nativeReceiptFound ? "native-process" : receipt is null ? null : "mcp-state",
             requestFingerprintSha256 = record.RequestFingerprintSha256,
             receipt = receiptJson,
-            reason = "Native manufacturing cancellation is unsupported; the recorded outcome was left unchanged."
+            reason = nativeReceiptFound
+                ? "Native manufacturing cancellation is unsupported; the live receipt was reconciled before refusal."
+                : "Native manufacturing cancellation is unsupported; the recorded outcome was left unchanged.",
+            nativeUnavailableReason
         }, true, "pcb_export_cancellation_unsupported",
             "KiCad does not expose a native cancellation command for synchronous manufacturing exports.");
     }, operationId, processEpoch);

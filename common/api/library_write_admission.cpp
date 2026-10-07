@@ -90,8 +90,10 @@ wxString LIBRARY_WRITE_ADMISSION::resolvePath( const wxString& aRequested )
     std::error_code error;
     const fs::path canonical = fs::weakly_canonical( ToFilesystemPath( normalized ), error );
 
-    if( error || canonical.empty() )
+    if( ( error && error != std::errc::no_such_file_or_directory ) || canonical.empty() )
         THROW_IO_ERRORF( "Could not resolve library admission path '%s'", normalized );
+
+    error.clear();
 
     const fs::path parent = canonical.parent_path();
     const fs::file_status parentStatus = fs::status( parent, error );

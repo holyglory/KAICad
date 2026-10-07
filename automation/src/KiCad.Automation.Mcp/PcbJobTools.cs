@@ -72,8 +72,9 @@ public sealed class PcbJobTools(InstanceRegistry registry)
         // indeterminate because the native exporter may still be running.
         if (cancellationToken.IsCancellationRequested)
         {
-            recovery.MarkUnknown(input.OperationId, false);
-            cancellationToken.ThrowIfCancellationRequested();
+            recovery.MarkCancelled(input.OperationId);
+            throw new AutomationException("operation_cancelled",
+                "The manufacturing export was cancelled before native dispatch; no native cancellation was requested.");
         }
 
         PcbManufacturingExportReceipt receipt;
@@ -108,8 +109,10 @@ public sealed class PcbJobTools(InstanceRegistry registry)
             instanceId,
             processEpoch = session.Epoch,
             operationId = receipt.OperationId,
+            requestFingerprintSha256 = receipt.RequestFingerprintSha256,
             job = receipt.JobKind,
             status = receipt.Status.ToString(),
+            outcome = PcbExportRecoveryPolicy.Outcome(receipt, receipt.NativeDispatch),
             dispatchStage = receipt.DispatchStage.ToString(),
             nativeDispatch = receipt.NativeDispatch,
             terminal = receipt.Terminal,
@@ -187,6 +190,9 @@ public sealed class PcbJobTools(InstanceRegistry registry)
             processEpoch = session.Epoch,
             operationId,
             found = response.Found,
+            outcome = response.Found
+                ? PcbExportRecoveryPolicy.Outcome(response.Receipt, response.Receipt.NativeDispatch)
+                : PcbExportRecoveryPolicy.Unknown,
             receipt = receiptJson
         });
     }, operationId, processEpoch);
@@ -285,6 +291,14 @@ public sealed class PcbJobTools(InstanceRegistry registry)
             processEpoch = session?.Epoch ?? record.ProcessEpoch,
             operationId,
             status = decision.Status,
+            outcome = receipt is not null
+                ? PcbExportRecoveryPolicy.Outcome(receipt, receipt.NativeDispatch)
+                : decision.Status == PcbExportRecoveryPolicy.Cancelled
+                    ? PcbExportRecoveryPolicy.Cancelled
+                    : decision.Status == PcbExportRecoveryPolicy.Completed
+                        ? PcbExportRecoveryPolicy.OutcomeCompleted
+                        : PcbExportRecoveryPolicy.Unknown,
+            requestFingerprintSha256 = record.RequestFingerprintSha256,
             retryAllowed = decision.RetryAllowed,
             publicationMayHaveHappened = decision.PublicationMayHaveHappened,
             outputExists = decision.OutputExists,
@@ -296,6 +310,65 @@ public sealed class PcbJobTools(InstanceRegistry registry)
             nativeUnavailableReason
         });
     }, operationId, null);
+
+    [McpServerTool(Name = "kicad_pcb_export_cancel", ReadOnly = false),
+     Description("Request cancellation of one exact typed PCB manufacturing export. KiCad's synchronous manufacturing protocol has no native cancellation command, so this tool always refuses cancellation after inspecting the durable operation identity and current receipt. It never reports a successful cancellation; use kicad_pcb_export_reconcile or kicad_pcb_export_receipt to recover the native outcome."),
+     KiCadCapability("pcb-manufacturing", "cancellation-refusal", "exact instance, PCB document, process epoch and operation ID"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> ExportCancel(string instanceId, NativeDocumentInput documentInput,
+        string processEpoch, string operationId, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        ValidateOperationId(operationId);
+        ValidateEpoch(processEpoch);
+        if (string.IsNullOrWhiteSpace(instanceId))
+            throw new AutomationException("invalid_instance_id", "instanceId is required to cancel a PCB export.");
+        DocumentSpecifier document = NativeDocumentInput.ToNative(documentInput);
+        DocumentStateTools.ValidateTarget(document);
+        if (document.Type != DocumentType.DoctypePcb)
+            throw new AutomationException("invalid_pcb_export_target", "The cancellation target must be an explicit PCB document.");
+
+        var recovery = new PcbExportRecoveryStore(registry.StateDirectory);
+        PcbExportRecoveryRecord? record = recovery.Read(operationId);
+        if (record is null)
+        {
+            return Data(new
+            {
+                instanceId, processEpoch, operationId, cancellationSupported = false,
+                outcome = PcbExportRecoveryPolicy.Unknown, status = "untracked",
+                reason = "No durable export operation record exists; native cancellation is unavailable."
+            }, true, "pcb_export_cancellation_unsupported",
+                "KiCad does not expose a native cancellation command for synchronous manufacturing exports.");
+        }
+
+        string documentJson = SchematicJson.Formatter.Format(document);
+        if (record.InstanceId != instanceId || record.DocumentJson != documentJson
+            || record.ProcessEpoch != processEpoch)
+            throw new AutomationException("export_recovery_identity_mismatch",
+                "The cancellation target does not match the durable export operation identity.");
+
+        PcbManufacturingExportReceipt? receipt = record.ReceiptJson is null
+            ? null : PcbExportRecoveryStore.ParseReceipt(record);
+        string outcome = receipt is not null
+            ? PcbExportRecoveryPolicy.Outcome(receipt, receipt.NativeDispatch)
+            : record.Status switch
+            {
+                PcbExportRecoveryPolicy.Cancelled => PcbExportRecoveryPolicy.Cancelled,
+                PcbExportRecoveryPolicy.Completed => PcbExportRecoveryPolicy.OutcomeCompleted,
+                PcbExportRecoveryPolicy.Retryable => PcbExportRecoveryPolicy.Failed,
+                _ => PcbExportRecoveryPolicy.Unknown
+            };
+        JsonElement? receiptJson = receipt is null
+            ? null : JsonDocument.Parse(SchematicJson.Formatter.Format(receipt)).RootElement.Clone();
+        return Data(new
+        {
+            instanceId, processEpoch, operationId, cancellationSupported = false,
+            cancellationRequested = false, outcome, status = record.Status,
+            requestFingerprintSha256 = record.RequestFingerprintSha256,
+            receipt = receiptJson,
+            reason = "Native manufacturing cancellation is unsupported; the recorded outcome was left unchanged."
+        }, true, "pcb_export_cancellation_unsupported",
+            "KiCad does not expose a native cancellation command for synchronous manufacturing exports.");
+    }, operationId, processEpoch);
 
     [McpServerTool(Name = "kicad_pcb_export_3d", ReadOnly = false),
      Description("Export an explicitly identified PCB as a native 3D model through KiCad's board job. requestJson is RunBoardJobExport3D protobuf JSON with an absolute output path, explicit PCB document and format such as STEP, VRML, GLB or STL; expectedStateJson is the lifecycle observation used for admission and post-export verification. Returns bounded output hashes and never changes the board."),
@@ -445,12 +518,14 @@ public sealed class PcbJobTools(InstanceRegistry registry)
                 {
                     instanceId, processEpoch = session.Epoch, job = jobKind, document = job.Document,
                     beforeState = SchematicJson.Formatter.Format(before), afterState = SchematicJson.Formatter.Format(after),
-                    outputs, nativeJob = true, boardMutation = false
+                    outputs, nativeJob = true, boardMutation = false,
+                    outcome = PcbExportRecoveryPolicy.OutcomeCompleted
                 }),
                 Content = [new TextContentBlock { Text = JsonSerializer.Serialize(new
                 {
                     instanceId, processEpoch = session.Epoch, job = jobKind, outputs,
-                    nativeJob = true, boardMutation = false
+                    nativeJob = true, boardMutation = false,
+                    outcome = PcbExportRecoveryPolicy.OutcomeCompleted
                 }) }]
             };
         }
@@ -463,7 +538,8 @@ public sealed class PcbJobTools(InstanceRegistry registry)
                 errorMessage = error.Message, job = jobKind,
                 nativeDispatch = nativeDispatchStarted,
                 dispatchOutcome = nativeDispatchStarted ? "indeterminate" : "unsubmitted",
-                mutationSubmitted = nativeDispatchStarted
+                mutationSubmitted = nativeDispatchStarted,
+                outcome = nativeDispatchStarted ? PcbExportRecoveryPolicy.Unknown : PcbExportRecoveryPolicy.Failed
             });
             return new CallToolResult { IsError = true, Content = [new TextContentBlock { Text = structured.GetRawText() }], StructuredContent = structured };
         }
@@ -548,7 +624,8 @@ public sealed class PcbJobTools(InstanceRegistry registry)
                 errorCode = error.RequestDelivered ? "operation_outcome_unknown" : "native_not_reached",
                 errorMessage = error.Message,
                 nativeDispatch = error.RequestDelivered,
-                dispatchOutcome = error.RequestDelivered ? "indeterminate" : "unsubmitted"
+                dispatchOutcome = error.RequestDelivered ? "indeterminate" : "unsubmitted",
+                outcome = error.RequestDelivered ? PcbExportRecoveryPolicy.Unknown : PcbExportRecoveryPolicy.Failed
             });
             return new CallToolResult { IsError = true,
                 Content = [new TextContentBlock { Text = structured.GetRawText() }], StructuredContent = structured };
@@ -562,6 +639,7 @@ public sealed class PcbJobTools(InstanceRegistry registry)
                 errorMessage = "The MCP request was cancelled before its native outcome was confirmed; read the retained export receipt with the same operationId.",
                 nativeDispatch = (bool?)null,
                 dispatchOutcome = "indeterminate",
+                outcome = PcbExportRecoveryPolicy.Unknown,
                 cancellationRequested = true
             });
             return new CallToolResult { IsError = true,
@@ -571,12 +649,15 @@ public sealed class PcbJobTools(InstanceRegistry registry)
             or InvalidProtocolBufferException or InvalidJsonException or InvalidOperationException
             or ArgumentException or IOException or JsonException)
         {
+            string errorCode = error is AutomationException automation ? automation.Code : "pcb_export_failed";
             var structured = JsonSerializer.SerializeToElement(new
             {
                 operationId, processEpoch,
-                errorCode = error is AutomationException known ? known.Code : "pcb_export_failed",
+                errorCode,
                 errorMessage = error.Message,
-                dispatchOutcome = "unknown"
+                dispatchOutcome = "unknown",
+                outcome = errorCode == "operation_cancelled"
+                    ? PcbExportRecoveryPolicy.Cancelled : PcbExportRecoveryPolicy.Failed
             });
             return new CallToolResult { IsError = true,
                 Content = [new TextContentBlock { Text = structured.GetRawText() }], StructuredContent = structured };

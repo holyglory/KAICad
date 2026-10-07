@@ -95,9 +95,45 @@ internal static class PcbExportRecoveryPolicy
     internal const string Completed = "completed";
     internal const string Indeterminate = "indeterminate";
     internal const string Retryable = "retryable";
+    internal const string Cancelled = "cancelled";
+
+    // These are the stable agent-facing outcome names.  The native receipt
+    // status remains the authoritative KiCad enum; this small vocabulary lets
+    // callers distinguish a request that was handed to KiCad from one whose
+    // result is still unknown without interpreting transport details.
+    internal const string Submitted = "submitted";
+    internal const string Unknown = "unknown";
+    internal const string Failed = "failed";
+    internal const string OutcomeCompleted = "completed";
 
     internal static IReadOnlySet<string> Statuses { get; } =
-        new HashSet<string>(StringComparer.Ordinal) { Pending, Completed, Indeterminate, Retryable };
+        new HashSet<string>(StringComparer.Ordinal) { Pending, Completed, Indeterminate, Retryable, Cancelled };
+
+    internal static string Outcome(PcbManufacturingExportReceipt? receipt,
+        bool nativeDispatch, bool cancellationRequested = false)
+    {
+        if (receipt is not null)
+        {
+            return receipt.Status switch
+            {
+                PcbManufacturingExportStatus.PcbMfgExportCompleted => OutcomeCompleted,
+                PcbManufacturingExportStatus.PcbMfgExportFailed => Failed,
+                PcbManufacturingExportStatus.PcbMfgExportIndeterminate => Unknown,
+                PcbManufacturingExportStatus.PcbMfgExportAdmitted
+                    or PcbManufacturingExportStatus.PcbMfgExportRunning => Submitted,
+                // Native uses UNSUBMITTED for admission failures as well as
+                // a caller cancellation.  Without an explicit cancellation
+                // marker it is a failed admission, never a successful cancel.
+                PcbManufacturingExportStatus.PcbMfgExportUnsubmitted => Failed,
+                _ => Unknown
+            };
+        }
+
+        if (cancellationRequested && !nativeDispatch)
+            return Cancelled;
+
+        return nativeDispatch ? Unknown : Submitted;
+    }
 
     internal static string StagingDirectory(string outputDirectory, string operationId)
     {
@@ -155,6 +191,10 @@ internal static class PcbExportRecoveryPolicy
         if (prior.Status == Completed && outputExists && outputVerified)
             return new(Completed, false, true, true, stagingExists, nativeReceiptFound,
                 "The durable completed receipt still matches the verified published output.");
+
+        if (prior.Status == Cancelled && !outputExists && !stagingExists)
+            return new(Cancelled, true, false, false, false, nativeReceiptFound,
+                "The export was cancelled before native dispatch and left no owned output or staging path.");
 
         if (outputExists || stagingExists)
             return new(Indeterminate, false, true, outputExists, stagingExists, nativeReceiptFound,
@@ -265,7 +305,7 @@ internal sealed class PcbExportRecoveryStore(string stateDirectory)
             // A terminal native receipt is replayable by the native process. Keep
             // its durable record unchanged until that exact replay returns.
             if (prior.ReceiptJson is not null) return prior;
-            if (prior.Status != PcbExportRecoveryPolicy.Retryable)
+            if (prior.Status is not (PcbExportRecoveryPolicy.Retryable or PcbExportRecoveryPolicy.Cancelled))
                 throw new AutomationException("export_recovery_invalid",
                     "The durable export record cannot be submitted again.");
         }
@@ -314,6 +354,27 @@ internal sealed class PcbExportRecoveryStore(string stateDirectory)
                 NativeDispatchKnown = known,
                 NativeDispatch = dispatched,
                 PublicationMayHaveHappened = outputExists || stagingExists || dispatched
+            };
+        });
+    }
+
+    internal PcbExportRecoveryRecord MarkCancelled(string operationId)
+    {
+        return Update(operationId, prior =>
+        {
+            // A cancellation is only recorded by the MCP before invoking NNG.
+            // If a receipt or owned path already exists, preserving that
+            // evidence is safer than relabelling a dispatched operation.
+            if (prior.ReceiptJson is not null || Directory.Exists(prior.OutputDirectory)
+                || Directory.Exists(prior.StagingDirectory))
+                return prior;
+
+            return prior with
+            {
+                Status = PcbExportRecoveryPolicy.Cancelled,
+                NativeDispatchKnown = true,
+                NativeDispatch = false,
+                PublicationMayHaveHappened = false
             };
         });
     }

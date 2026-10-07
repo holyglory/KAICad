@@ -156,6 +156,31 @@ public sealed class PcbManufacturingMcpProcessTests
             Assert.IsFalse(untracked.GetProperty("structuredContent").GetProperty("retryAllowed").GetBoolean(),
                 untracked.GetRawText());
 
+            JsonElement cancel = tools.EnumerateArray().Single(tool =>
+                tool.GetProperty("name").GetString() == "kicad_pcb_export_cancel");
+            Assert.IsTrue(cancel.GetProperty("inputSchema").GetProperty("properties")
+                .TryGetProperty("processEpoch", out _), cancel.GetRawText());
+            JsonElement cancellationRefusal = await mcp.Tool("kicad_pcb_export_cancel", new
+            {
+                instanceId = Guid.NewGuid().ToString("D"),
+                processEpoch = Guid.NewGuid().ToString("D"),
+                operationId = Guid.NewGuid().ToString("D"),
+                documentInput = new
+                {
+                    type = "DOCTYPE_PCB",
+                    project = new { name = "untracked", path = root },
+                    boardFilename = "untracked.kicad_pcb"
+                }
+            });
+            Assert.IsTrue(cancellationRefusal.GetProperty("isError").GetBoolean(),
+                cancellationRefusal.GetRawText());
+            Assert.AreEqual("pcb_export_cancellation_unsupported",
+                cancellationRefusal.GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+                cancellationRefusal.GetRawText());
+            Assert.AreEqual("unknown",
+                cancellationRefusal.GetProperty("structuredContent").GetProperty("outcome").GetString(),
+                cancellationRefusal.GetRawText());
+
             JsonElement export = tools.EnumerateArray().Single(tool =>
                 tool.GetProperty("name").GetString() == "kicad_pcb_export");
 

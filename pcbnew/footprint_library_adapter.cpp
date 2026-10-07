@@ -822,7 +822,7 @@ void FOOTPRINT_LIBRARY_ADAPTER::DeleteFootprint( const wxString& aNickname, cons
         {
             wxLogTrace( traceLibraries, "DeleteFootprint: error deleting %s:%s: %s", aNickname,
                         aFootprintName, e.What() );
-            return;
+            throw;
         }
 
         {

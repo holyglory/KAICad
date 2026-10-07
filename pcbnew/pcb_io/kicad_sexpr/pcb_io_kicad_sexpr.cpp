@@ -3731,7 +3731,9 @@ void PCB_IO_KICAD_SEXPR::validateCache( const wxString& aLibraryPath, bool check
     if( m_writeAdmission )
         m_writeAdmission->CheckUnchanged();
 
-    if( !m_cache || !m_cache->IsPath( aLibraryPath ) || ( checkModified && m_cache->IsModified() ) )
+    const bool cacheChanged = checkModified && !m_writeAdmission && m_cache && m_cache->IsModified();
+
+    if( !m_cache || !m_cache->IsPath( aLibraryPath ) || cacheChanged )
     {
         // a spectacular episode in memory management:
         delete m_cache;
@@ -3898,7 +3900,29 @@ void PCB_IO_KICAD_SEXPR::FootprintSave( const wxString& aLibraryPath, const FOOT
     }
 
     if( !wxDir::Exists( libPath ) )
-        THROW_IO_ERRORF( _( "Footprint library '%s' must already exist as a directory." ), libPath );
+    {
+        // Preserve the established interactive creation flow.  Admission is
+        // acquired only after this explicit directory creation, and still
+        // covers the individual .kicad_mod target below.
+        delete m_cache;
+        m_cache = new FP_CACHE( this, libPath );
+
+        const wxString msg = wxString::Format( _( "Library '%s' does not exist.\n"
+                                                  "Would you like to create it?" ), libPath );
+
+        if( !Pgm().IsGUI() || wxMessageBox( msg, _( "Library Not Found" ),
+                                            wxYES_NO | wxICON_QUESTION ) != wxID_YES )
+            return;
+
+        m_cache->Save( nullptr );
+    }
+    else
+    {
+        validateCache( libPath, !aProperties || !aProperties->contains( "skip_cache_validation" ) );
+
+        if( !m_cache->IsWritable() )
+            THROW_IO_ERRORF( _( "Footprint library '%s' is read only." ), libPath );
+    }
 
     // The map key used by the cache and the on-disk filename base.
     wxString footprintName = saveSingleFile ? singleFileBaseName
@@ -3909,63 +3933,59 @@ void PCB_IO_KICAD_SEXPR::FootprintSave( const wxString& aLibraryPath, const FOOT
 
     // Write through symlinks, don't replace them.  Admission is for the one
     // regular .kicad_mod entry, never the whole multi-file .pretty folder.
-    WX_FILENAME fn( libPath, fpName, FILEEXT::KiCadFootprintFileExtension );
+    wxFileName fn( libPath, fpName, FILEEXT::KiCadFootprintFileExtension );
+    const wxString requestedTargetPath = fn.GetFullPath();
     WX_FILENAME::ResolvePossibleSymlinks( fn );
 
     if( !fn.IsOk() || ( fn.FileExists() && !fn.IsFileWritable() ) )
         THROW_IO_ERRORF( _( "Footprint file name '%s' is not writable." ), fn.GetFullPath() );
 
-    const wxString targetPath = fn.GetFullPath();
-
     try
     {
-        acquireFootprintWriteAdmission( targetPath );
+        acquireFootprintWriteAdmission( requestedTargetPath );
         validateCache( libPath, !aProperties || !aProperties->contains( "skip_cache_validation" ) );
         m_writeAdmission->CheckUnchanged();
 
-        if( !m_cache->IsWritable() )
-            THROW_IO_ERRORF( _( "Footprint library '%s' is read only." ), libPath );
+        wxString fullPath = fn.GetFullPath();
+        wxString fullName = fn.GetFullName();
+        auto     it = m_cache->GetFootprints().find( footprintName );
 
-    wxString fullPath = fn.GetFullPath();
-    wxString fullName = fn.GetFullName();
-    auto     it = m_cache->GetFootprints().find( footprintName );
+        if( it != m_cache->GetFootprints().end() )
+        {
+            // Save() below writes atomically via sibling temp + rename, so no pre-delete.
+            wxLogTrace( traceKicadPcbPlugin, wxT( "Replacing footprint file '%s'." ), fullPath );
+            m_cache->GetFootprints().erase( footprintName );
+        }
 
-    if( it != m_cache->GetFootprints().end() )
-    {
-        // Save() below writes atomically via sibling temp + rename, so no pre-delete.
-        wxLogTrace( traceKicadPcbPlugin, wxT( "Replacing footprint file '%s'." ), fullPath );
-        m_cache->GetFootprints().erase( footprintName );
-    }
+        // I need my own copy for the cache
+        FOOTPRINT* footprint = static_cast<FOOTPRINT*>( aFootprint->Clone() );
 
-    // I need my own copy for the cache
-    FOOTPRINT* footprint = static_cast<FOOTPRINT*>( aFootprint->Clone() );
+        // It's orientation should be zero and it should be on the front layer.
+        footprint->SetOrientation( ANGLE_0 );
 
-    // It's orientation should be zero and it should be on the front layer.
-    footprint->SetOrientation( ANGLE_0 );
+        if( footprint->GetLayer() != F_Cu )
+        {
+            PCBNEW_SETTINGS* cfg = dynamic_cast<PCBNEW_SETTINGS*>( Kiface().KifaceSettings() );
 
-    if( footprint->GetLayer() != F_Cu )
-    {
-        PCBNEW_SETTINGS* cfg = dynamic_cast<PCBNEW_SETTINGS*>( Kiface().KifaceSettings() );
+            if( cfg )
+                footprint->Flip( footprint->GetPosition(), cfg->m_FlipDirection );
+            else
+                footprint->Flip( footprint->GetPosition(), FLIP_DIRECTION::TOP_BOTTOM );
+        }
 
-        if( cfg )
-            footprint->Flip( footprint->GetPosition(), cfg->m_FlipDirection );
-        else
-            footprint->Flip( footprint->GetPosition(), FLIP_DIRECTION::TOP_BOTTOM );
-    }
+        // Detach it from the board and its group
+        footprint->SetParent( nullptr );
+        footprint->SetParentGroup( nullptr );
 
-    // Detach it from the board and its group
-    footprint->SetParent( nullptr );
-    footprint->SetParentGroup( nullptr );
+        // Now that the clone is detached from its parent board, any m_netinfo pointers its
+        // descendants still carry reference NETINFO_ITEMs owned by that board and may dangle.
+        // Force them all to the board-independent ORPHANED singleton before serialization.
+        footprint->ClearAllNets();
 
-    // Now that the clone is detached from its parent board, any m_netinfo pointers its
-    // descendants still carry reference NETINFO_ITEMs owned by that board and may dangle.
-    // Force them all to the board-independent ORPHANED singleton before serialization.
-    footprint->ClearAllNets();
-
-    wxLogTrace( traceKicadPcbPlugin, wxT( "Creating s-expr footprint file '%s'." ), fullPath );
-    m_cache->GetFootprints().insert( footprintName,
-                                     new FP_CACHE_ENTRY( footprint,
-                                                         WX_FILENAME( fn.GetPath(), fullName ) ) );
+        wxLogTrace( traceKicadPcbPlugin, wxT( "Creating s-expr footprint file '%s'." ), fullPath );
+        m_cache->GetFootprints().insert( footprintName,
+                                         new FP_CACHE_ENTRY( footprint,
+                                                             WX_FILENAME( fn.GetPath(), fullName ) ) );
         m_cache->Save( footprint );
         m_writeAdmission->Observe();
         releaseFootprintWriteAdmission();
@@ -3990,7 +4010,8 @@ void PCB_IO_KICAD_SEXPR::FootprintDelete( const wxString& aLibraryPath,
 
     wxString fileBaseName = aFootprintName;
     ReplaceIllegalFileNameChars( fileBaseName, '_' );
-    WX_FILENAME fn( aLibraryPath, fileBaseName, FILEEXT::KiCadFootprintFileExtension );
+    wxFileName fn( aLibraryPath, fileBaseName, FILEEXT::KiCadFootprintFileExtension );
+    const wxString requestedTargetPath = fn.GetFullPath();
     WX_FILENAME::ResolvePossibleSymlinks( fn );
 
     if( !fn.IsOk() )
@@ -3998,7 +4019,7 @@ void PCB_IO_KICAD_SEXPR::FootprintDelete( const wxString& aLibraryPath,
 
     try
     {
-        acquireFootprintWriteAdmission( fn.GetFullPath() );
+        acquireFootprintWriteAdmission( requestedTargetPath );
         validateCache( aLibraryPath );
         m_writeAdmission->CheckUnchanged();
 

@@ -213,6 +213,15 @@ public sealed class LibraryLifecycleSnapshotContractTests
 
         LibraryLifecycleSnapshotContract.ValidateReadOnly(snapshot, document, "fixture", projectPath);
 
+        // A complete observation of one entry is still not checked mutation
+        // admission or proof that every native writer participates.
+        Reject(() => LibraryLifecycleSnapshotContract.AdmitCheckedMutation(
+            snapshot, document, "fixture", projectPath), "library_mutation_unavailable");
+
+        Reject(() => LibraryLifecycleSnapshotContract.ValidateReadOnly(
+            snapshot with { ExpandedUri = Path.Combine(projectPath, "libs", "fixture.pretty") },
+            document, "fixture", projectPath), "library_table_row_mismatch");
+
         Reject(() => LibraryLifecycleSnapshotContract.ValidateReadOnly(
             snapshot with { ExpandedUri = Path.Combine(projectPath, "libs", "fixture.pretty.kicad_mod", "Probe.kicad_mod") },
             document, "fixture", projectPath), "library_table_row_mismatch");
@@ -230,6 +239,39 @@ public sealed class LibraryLifecycleSnapshotContractTests
         Reject(() => LibraryLifecycleSnapshotContract.ValidateReadOnly(
             snapshot with { Provider = "http" }, document, "fixture", projectPath),
             "library_provider_unsupported");
+    }
+
+    [TestMethod]
+    public void FootprintSnapshotCannotHideIncompleteSourceOrModelDependencies()
+    {
+        (LibraryLifecycleSnapshot snapshot, DocumentSpecifier document, string projectPath) = FootprintFixture();
+        // Multi-file providers must report incomplete content until their full
+        // source set is observed; one valid entry hash cannot replace that flag.
+        Reject(() => LibraryLifecycleSnapshotContract.ValidateReadOnly(
+            snapshot with { ContentSnapshotComplete = false }, document, "fixture", projectPath),
+            "library_snapshot_incomplete");
+
+        foreach (string dependency in new[] { "other-source.kicad_mod", "model.step" })
+        {
+            var unobserved = snapshot with
+            {
+                DependencyBaselines = [.. snapshot.DependencyBaselines,
+                    new(Path.Combine(projectPath, dependency), "", 0, Known: false)]
+            };
+            Reject(() => LibraryLifecycleSnapshotContract.ValidateReadOnly(
+                unobserved, document, "fixture", projectPath), "library_baseline_incomplete");
+        }
+
+        // Fully observed extra assets are valid read evidence. They still do
+        // not enable mutation, whole-library locking or rollback verification.
+        var observedModel = snapshot with
+        {
+            DependencyBaselines = [.. snapshot.DependencyBaselines,
+                new(Path.Combine(projectPath, "model.step"), new string('c', 64), 123)]
+        };
+        LibraryLifecycleSnapshotContract.ValidateReadOnly(observedModel, document, "fixture", projectPath);
+        Reject(() => LibraryLifecycleSnapshotContract.AdmitCheckedMutation(
+            observedModel, document, "fixture", projectPath), "library_mutation_unavailable");
     }
 
     [TestMethod]

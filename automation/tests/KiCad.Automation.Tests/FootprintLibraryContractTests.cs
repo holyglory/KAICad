@@ -69,6 +69,15 @@ public sealed class FootprintLibraryContractTests
         };
         FootprintLibraryContract.ValidateLibraryReceipt(receipt, operationId, libraryNickname, footprintName);
 
+        // A present receipt is not completion proof when the native provider
+        // failed to delete the file, even if a separate name lookup is empty.
+        var failedDelete = receipt.Clone();
+        failedDelete.DeleteResponse.Completed = false;
+        FootprintLibraryContract.ValidateDeletePersistence(new()
+        { LibraryNickname = libraryNickname, ModifyHash = 42 }, operationId, libraryNickname, footprintName, 42);
+        Reject(() => FootprintLibraryContract.ValidateLibraryReceipt(
+            failedDelete, operationId, libraryNickname, footprintName), "footprint_native_rejected");
+
         var wrongNestedOperation = receipt.Clone();
         wrongNestedOperation.DeleteResponse.OperationId = "33333333-3333-3333-3333-333333333333";
         Reject(() => FootprintLibraryContract.ValidateLibraryReceipt(

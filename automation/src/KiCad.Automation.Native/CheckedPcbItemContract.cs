@@ -325,7 +325,8 @@ public static class CheckedPcbItemContract
         foreach (var item in items)
         {
             var id = ItemIdentity(item);
-            if (id is null) continue;
+            if (id is null || !Uuid(id))
+                throw Invalid("Every checked PCB create or update item must carry a supported canonical identity.");
             if (!local.Add(id) || otherA.Contains(id) || otherB.Contains(id))
                 throw Invalid("Checked PCB create, update and delete operations must use distinct item identities.");
         }
@@ -336,7 +337,9 @@ public static class CheckedPcbItemContract
         if (!string.Equals(expected.TypeUrl, actual.TypeUrl, StringComparison.Ordinal)) return false;
         var expectedId = ItemIdentity(expected);
         var actualId = ItemIdentity(actual);
-        return expectedId is null || string.Equals(expectedId, actualId, StringComparison.Ordinal);
+        return expectedId is not null && actualId is not null
+            && Uuid(expectedId) && Uuid(actualId)
+            && string.Equals(expectedId, actualId, StringComparison.Ordinal);
     }
 
     private static string? ItemIdentity(Any item)

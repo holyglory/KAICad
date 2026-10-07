@@ -145,6 +145,35 @@ public sealed class CheckedPcbItemContractTests
         Assert.ThrowsExactly<AutomationException>(() => CheckedPcbItemContract.ValidateResult(request, receipt, inspect: false));
     }
 
+    [TestMethod]
+    public void CheckedItemAdmissionRequiresSupportedCanonicalCreateAndUpdateIdentities()
+    {
+        var (request, create, _, _, _) = Request();
+
+        var missingIdentity = request.Clone();
+        var missing = create.Clone();
+        missing.Id = null;
+        missingIdentity.Operations[0].Create.Items[0] = Any.Pack(missing);
+        Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedPcbItemContract.ValidateRequest(missingIdentity, request.ProcessEpoch, inspect: true));
+
+        var uppercaseIdentity = request.Clone();
+        var uppercase = create.Clone();
+        uppercase.Id.Value = uppercase.Id.Value.ToUpperInvariant();
+        uppercaseIdentity.Operations[0].Create.Items[0] = Any.Pack(uppercase);
+        Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedPcbItemContract.ValidateRequest(uppercaseIdentity, request.ProcessEpoch, inspect: true));
+
+        var unsupported = request.Clone();
+        unsupported.Operations[0].Create.Items[0] = new Any
+        {
+            TypeUrl = "type.googleapis.com/kiapi.board.types.FutureItem",
+            Value = Google.Protobuf.ByteString.CopyFromUtf8("future")
+        };
+        Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedPcbItemContract.ValidateRequest(unsupported, request.ProcessEpoch, inspect: true));
+    }
+
     private static (CheckedPcbItemTransaction Request, Track Create, Track Update, KIID Delete,
         DocumentLifecycleState State) Request()
     {

@@ -192,7 +192,7 @@ public static class CapabilityCatalog
             ["pa512d3c7c739352d"]),
         ("schematic-cross-probe-qualification", "schematic-operations",
             "Typed schematic selection and net-highlight wrappers are registered with exact document, process-epoch and lifecycle-revision admission plus MCP-process receipts. Managed contracts cover typed protobuf mapping, stale admission and exact operation replay; a live native schematic GUI journey and broader cross-platform qualification remain open.",
-            ["pa512d3c7c739352d"]),
+            ["p9b350f7cc194d413"]),
         ("pcb-connectivity-query", "pcb-connectivity",
             "The typed PCB connectivity query reads one named net at a complete lifecycle checkpoint and returns deterministic pad, track, arc, via and zone summaries with canonical identities, parent/layer data and fail-closed handling for unknown native items. The governed Linux PCB run t20261005T024812Z-58e191 now qualifies live pad, track, via and copper-zone summaries after typed zone creation/refill and save/close/reopen index refresh, exact lifecycle binding, stale and wrong-instance refusal, and no mutation; durable zone save/reopen/undo-redo, arc breadth and cross-platform coverage remain open.",
             ["pfb6962d39fc1f813"]),

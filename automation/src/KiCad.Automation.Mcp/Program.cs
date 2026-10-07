@@ -58,7 +58,7 @@ if (args.FirstOrDefault() is "--prepare-update" or "--check-update" or "--instal
     return;
 }
 
-HostApplicationBuilder builder = Host.CreateApplicationBuilder(args);
+HostApplicationBuilder builder = McpHostConfiguration.CreateBuilder(args);
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = LogLevel.Trace);
 string stateDirectory = builder.Configuration["state-directory"]

@@ -56,7 +56,7 @@ if (args is ["--block-proposal-select-file", var selectionFile])
     Console.WriteLine(JsonSerializer.Serialize(new { result.ContentSha256 }));
     return;
 }
-var builder = Host.CreateApplicationBuilder(args);
+var builder = McpHostConfiguration.CreateBuilder(args);
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = LogLevel.Trace);
 builder.Services.AddSingleton(pause);

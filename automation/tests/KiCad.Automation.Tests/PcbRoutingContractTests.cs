@@ -732,6 +732,19 @@ public sealed class PcbRoutingContractTests
             "A changed deletion set must change the candidate fingerprint.");
     }
 
+    [TestMethod]
+    public void CandidateFingerprintRejectsDuplicateCustomPropertyKeys()
+    {
+        var (request, source, _) = CleanRoute();
+        source.CustomProperties.Add(new CustomProperty { Key = "duplicate", Value = "one" });
+        source.CustomProperties.Add(new CustomProperty { Key = "duplicate", Value = "two" });
+        request.Candidate.Items.Add(Any.Pack(source));
+
+        var error = Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedPcbRouteContract.CandidateFingerprint(request));
+        Assert.AreEqual("invalid_checked_pcb_route", error.Code);
+    }
+
     private static (CheckedPcbRouteCommit Request, Track Track, DocumentLifecycleState State) CleanRoute()
     {
         string projectPath = Path.Combine(Path.GetTempPath(), "kicad-route-contract");

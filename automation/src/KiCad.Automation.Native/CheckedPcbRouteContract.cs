@@ -601,18 +601,24 @@ public static class CheckedPcbRouteContract
             if (source.Is(Track.Descriptor))
             {
                 var item = source.Unpack<Track>();
+                if (!UniqueProperties(item.CustomProperties))
+                    throw Invalid("Route custom-property keys must be unique before fingerprinting.");
                 NormalizeProperties(item.CustomProperties);
                 return Any.Pack(item);
             }
             if (source.Is(Arc.Descriptor))
             {
                 var item = source.Unpack<Arc>();
+                if (!UniqueProperties(item.CustomProperties))
+                    throw Invalid("Route custom-property keys must be unique before fingerprinting.");
                 NormalizeProperties(item.CustomProperties);
                 return Any.Pack(item);
             }
             if (source.Is(Via.Descriptor))
             {
                 var item = source.Unpack<Via>();
+                if (!UniqueProperties(item.CustomProperties))
+                    throw Invalid("Route custom-property keys must be unique before fingerprinting.");
                 NormalizeProperties(item.CustomProperties);
                 return Any.Pack(item);
             }

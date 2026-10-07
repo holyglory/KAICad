@@ -182,11 +182,14 @@ internal static class PcbZoneAuthoringContract
         && id != Guid.Empty
         && id.ToString("D") == value;
 
-    internal static void ValidateReadback(Zone expected, Zone actual)
+    internal static void ValidateReadback(Zone expected, Zone actual, string? nativeIdentity = null)
     {
         ValidateCreate(expected);
         if (actual.Id is null || actual.Id.Value != expected.Id.Value || actual.Type != ZoneType.ZtCopper)
             throw new AutomationException("pcb_zone_readback_mismatch", "Native readback returned a different zone identity or type.");
+        if (actual.Parent is not null && !string.IsNullOrWhiteSpace(actual.Parent.Value)
+            && nativeIdentity is not null && actual.Parent.Value != nativeIdentity)
+            throw new AutomationException("pcb_zone_readback_mismatch", "Native readback returned a zone parented to a different board.");
         if (!expected.Layers.OrderBy(layer => (int)layer).SequenceEqual(actual.Layers.OrderBy(layer => (int)layer)))
             throw new AutomationException("pcb_zone_readback_mismatch", "Native readback changed the zone copper layers.");
         if (expected.Name != actual.Name || expected.Priority != actual.Priority)

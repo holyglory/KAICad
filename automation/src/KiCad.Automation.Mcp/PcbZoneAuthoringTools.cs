@@ -335,7 +335,8 @@ public sealed class PcbZoneAuthoringTools(InstanceRegistry registry)
                 if (committedZone is null)
                     throw new AutomationException("pcb_zone_readback_mismatch",
                         "The checked native receipt did not return the committed copper zone.");
-                PcbZoneAuthoringContract.ValidateReadback(authoredZone, committedZone);
+                PcbZoneAuthoringContract.ValidateReadback(authoredZone, committedZone,
+                    receipt.ObservedAfter?.NativeIdentity ?? receipt.ObservedBefore?.NativeIdentity);
                 authoredReadbackVerified = true;
             }
             catch (AutomationException error)

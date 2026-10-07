@@ -176,6 +176,11 @@ public sealed class PcbZoneAuthoringContractTests
             Start = new() { XNm = 0, YNm = 0 }, Mid = new() { XNm = 1, YNm = 1 }, End = new() { XNm = 2, YNm = 0 }
         };
         Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateReadback(expected, rotated));
+
+        var foreignParent = expected.Clone();
+        foreignParent.Parent = new KIID { Value = "88888888-8888-8888-8888-888888888888" };
+        Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateReadback(
+            expected, foreignParent, "77777777-7777-7777-7777-777777777777"));
     }
 
     [TestMethod]

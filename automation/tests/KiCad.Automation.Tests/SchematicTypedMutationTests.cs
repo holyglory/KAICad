@@ -491,6 +491,66 @@ public sealed class SchematicTypedMutationTests
         Assert.AreEqual(1, fixture.Batches.Count);
     }
 
+    [TestMethod]
+    public async Task HierarchyToolsHierarchicalLabelCrudAndDeleteReplayForwardTheItemId()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var label = new HierarchicalLabel
+        {
+            Id = new() { Value = Id }, Position = new() { XNm = 30_000, YNm = 40_000 },
+            Text = new() { Text_ = "MCP_HIER" }, SpinStyle = SchematicLabelSpinStyle.SlssRight,
+            Shape = SchematicLabelShape.SlshPassive, Locked = LockedState.LsUnlocked,
+            FieldsAutoplaced = true
+        };
+        string targetJson = SchematicJson.Formatter.Format(fixture.TargetDocument);
+        string before = fixture.ExpectedJson;
+        string createOperation = Guid.NewGuid().ToString("D");
+        var created = await fixture.HierarchyTools.CreateHierarchicalLabel(fixture.InstanceId,
+            fixture.DocumentJson, targetJson, before, SchematicJson.Formatter.Format(label),
+            createOperation, default);
+        Assert.IsFalse(created.IsError ?? false, Data(created).GetRawText());
+        Assert.AreEqual(1, fixture.Batches.Count);
+
+        string afterCreate = fixture.ExpectedJson;
+        var read = await fixture.HierarchyTools.ReadHierarchicalLabel(fixture.InstanceId,
+            fixture.DocumentJson, Id, afterCreate, default);
+        Assert.IsFalse(read.IsError ?? false, Data(read).GetRawText());
+        Assert.AreEqual(Id, SchematicJson.Parser.Parse<Any>(Data(read).GetProperty("item").GetRawText())
+            .Unpack<HierarchicalLabel>().Id.Value);
+
+        var updated = label.Clone(); updated.Text.Text_ = "MCP_HIER_UPDATED";
+        string updateOperation = Guid.NewGuid().ToString("D");
+        var changed = await fixture.HierarchyTools.UpdateHierarchicalLabel(fixture.InstanceId,
+            fixture.DocumentJson, Id, afterCreate, SchematicJson.Formatter.Format(updated),
+            updateOperation, default);
+        Assert.IsFalse(changed.IsError ?? false, Data(changed).GetRawText());
+        Assert.AreEqual(2, fixture.Batches.Count);
+        Assert.AreEqual("MCP_HIER_UPDATED", fixture.Batches[1].Batch.Operations.Single()
+            .Update.Unpack<HierarchicalLabel>().Text.Text_);
+
+        var updateReplay = await fixture.HierarchyTools.UpdateHierarchicalLabel(fixture.InstanceId,
+            fixture.DocumentJson, Id, afterCreate, SchematicJson.Formatter.Format(updated),
+            updateOperation, default);
+        Assert.IsFalse(updateReplay.IsError ?? false, Data(updateReplay).GetRawText());
+        Assert.IsTrue(Data(updateReplay).GetProperty("replayed").GetBoolean());
+        Assert.AreEqual(2, fixture.Batches.Count);
+
+        string afterUpdate = fixture.ExpectedJson;
+        string deleteOperation = Guid.NewGuid().ToString("D");
+        var deleted = await fixture.HierarchyTools.DeleteHierarchicalLabel(fixture.InstanceId,
+            fixture.DocumentJson, Id, afterUpdate, deleteOperation, default);
+        Assert.IsFalse(deleted.IsError ?? false, Data(deleted).GetRawText());
+        Assert.AreEqual(3, fixture.Batches.Count);
+        Assert.AreEqual(Id, fixture.Batches[2].Batch.Operations.Single().Remove.Value);
+        Assert.IsEmpty(fixture.Items);
+
+        var deleteReplay = await fixture.HierarchyTools.DeleteHierarchicalLabel(fixture.InstanceId,
+            fixture.DocumentJson, Id, afterUpdate, deleteOperation, default);
+        Assert.IsFalse(deleteReplay.IsError ?? false, Data(deleteReplay).GetRawText());
+        Assert.IsTrue(Data(deleteReplay).GetProperty("replayed").GetBoolean());
+        Assert.AreEqual(3, fixture.Batches.Count);
+    }
+
     private static JsonElement Data(CallToolResult result) => JsonSerializer.SerializeToElement(result.StructuredContent);
     private static CheckedSchematicBatchReceipt Receipt(CallToolResult result) =>
         SchematicJson.Parser.Parse<CheckedSchematicBatchReceipt>(Data(result).GetProperty("receipt").GetRawText());

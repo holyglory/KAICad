@@ -147,7 +147,7 @@ public sealed class SchematicHierarchyMutationTools(InstanceRegistry registry)
     public Task<CallToolResult> DeleteHierarchicalLabel(string instanceId, string documentJson,
         string labelId, string expectedStateJson, string operationId,
         CancellationToken cancellationToken) => Execute(instanceId, documentJson, null,
-            expectedStateJson, labelId, null, null, operationId, Mutation.DeleteLabel,
+            expectedStateJson, null, labelId, null, operationId, Mutation.DeleteLabel,
             cancellationToken);
 
     private enum Mutation { CreateSheet, UpdateSheet, DeleteSheet, CreatePin, UpdatePin, DeletePin, CreateLabel, UpdateLabel, DeleteLabel }

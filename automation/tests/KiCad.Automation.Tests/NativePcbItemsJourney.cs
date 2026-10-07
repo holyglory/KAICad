@@ -2959,7 +2959,7 @@ public sealed partial class NativeSessionTests
                 var placementData = placementApply.GetProperty("structuredContent");
                 Assert.IsTrue(placementData.GetProperty("mutationConfirmed").GetBoolean());
                 Assert.IsTrue(placementData.GetProperty("atomicTransaction").GetBoolean());
-                Assert.IsFalse(placementData.GetProperty("nativeReceiptAvailable").GetBoolean());
+                Assert.IsTrue(placementData.GetProperty("nativeReceiptAvailable").GetBoolean());
                 var placementReceipt = await mcp.Tool("kicad_pcb_footprint_place_receipt", new
                 { instanceId, expectedProcessEpoch = client.Epoch, operationId = placementOperationId });
                 Assert.IsFalse(placementReceipt.TryGetProperty("isError", out var placementReceiptError)

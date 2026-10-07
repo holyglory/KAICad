@@ -94,7 +94,7 @@ public sealed class PcbFootprintPlacementTools(InstanceRegistry registry)
     }
 
     [McpServerTool(Name = "kicad_pcb_footprint_place_apply"),
-     Description("Apply one exact footprint placement candidate returned by kicad_pcb_footprint_place_plan. candidateRequestJson must contain exactly one FootprintInstance and the matching PCB document; expectedStateJson admits the native board checkpoint; operationId binds the request to a process-local replay receipt. The native transaction is undoable, but the legacy board item protocol has no cross-process receipt or footprint-library revision snapshot, so a lost reply remains indeterminate until the board is inspected."),
+     Description("Apply one exact footprint placement candidate returned by kicad_pcb_footprint_place_plan. candidateRequestJson must contain exactly one FootprintInstance and the matching PCB document; expectedStateJson admits the native board checkpoint; operationId binds the retained checked native receipt for exact replay after a lost reply."),
      KiCadCapability("pcb-placement", "compiled-mcp plus native-board-api", "exact FootprintInstance candidate, lifecycle checkpoint, native undo transaction, operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp", "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Apply(string instanceId, string candidateRequestJson, string expectedStateJson,
@@ -119,52 +119,10 @@ public sealed class PcbFootprintPlacementTools(InstanceRegistry registry)
         string fingerprint = instanceId + "\n" + canonicalCandidate + "\n" + SchematicJson.Formatter.Format(expected);
         return await WithReceipt(operationId, fingerprint, async () =>
         {
-            NativeClient client = registry.Client(instanceId);
-            AutomationSession session = await client.HandshakeAsync(cancellationToken);
-            if (session.Epoch != expected.ProcessEpoch)
-                throw new AutomationException("pcb_instance_changed", "The placement candidate belongs to another native process epoch.");
-            DocumentLifecycleState admission = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
-                new() { Document = request.Header.Document }, cancellationToken);
-            if (!admission.Equals(expected))
-                throw new AutomationException("pcb_state_changed", "The board changed before footprint placement could be admitted.");
-            BeginCommitResponse begin = await client.InvokeAsync<BeginCommit, BeginCommitResponse>(new() { Header = request.Header }, cancellationToken);
-            bool committed = false;
-            try
-            {
-                DocumentLifecycleState before = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
-                    new() { Document = request.Header.Document }, cancellationToken);
-                if (!before.Equals(expected))
-                    throw new AutomationException("pcb_state_changed", "The board changed before footprint placement.");
-                CreateItemsResponse response = await client.InvokeAsync<CreateItems, CreateItemsResponse>(request, cancellationToken);
-                if (response.CreatedItems.Any(item => item.Status.Code != ItemStatusCode.IscOk))
-                    throw new AutomationException("pcb_footprint_place_rejected", "KiCad rejected the footprint placement; the staged transaction was dropped.");
-                await client.InvokeAsync<EndCommit, EndCommitResponse>(new()
-                { Id = begin.Id, Action = CommitAction.CmaCommit, Header = request.Header, Message = "MCP footprint placement" }, cancellationToken);
-                committed = true;
-                DocumentLifecycleState after = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
-                    new() { Document = request.Header.Document }, cancellationToken);
-                JsonElement structured = JsonSerializer.SerializeToElement(new
-                {
-                    instanceId, processEpoch = session.Epoch, operationId, planId = plan.PlanId,
-                    operation = "footprint-place", operationOutcome = "completed",
-                    beforeState = SchematicJson.Formatter.Format(before), afterState = SchematicJson.Formatter.Format(after),
-                    response = JsonSerializer.Deserialize<JsonElement>(BoardJson.Formatter.Format(response)),
-                    mutationConfirmed = true, atomicTransaction = true, operationReceipt = true,
-                    nativeReceiptAvailable = false, replayableWithinProcess = true,
-                    receiptScope = "mcp-process", transportRetrySafe = false, drcValidated = false
-                });
-                return new CallToolResult { StructuredContent = structured,
-                    Content = [new TextContentBlock { Text = structured.GetRawText() }] };
-            }
-            finally
-            {
-                if (!committed)
-                {
-                    try { await client.InvokeAsync<EndCommit, EndCommitResponse>(new()
-                    { Id = begin.Id, Action = CommitAction.CmaDrop, Header = request.Header }, CancellationToken.None); }
-                    catch { }
-                }
-            }
+            CheckedPcbItemTransaction checkedRequest = BuildCheckedRequest(expected, request, operationId);
+            PcbCheckedItemDispatch.Outcome outcome = await PcbCheckedItemDispatch.ApplyAsync(
+                registry, instanceId, checkedRequest, cancellationToken);
+            return PlacementMutationData(outcome, plan);
         });
     });
 
@@ -192,8 +150,10 @@ public sealed class PcbFootprintPlacementTools(InstanceRegistry registry)
             string? receiptInstance = payload.TryGetProperty("instanceId", out JsonElement instance) ? instance.GetString() : null;
             if (!string.Equals(receiptInstance, instanceId, StringComparison.Ordinal))
                 throw new AutomationException("wrong_instance_receipt", "The placement receipt belongs to a different MCP instance.");
+            bool nativeReceiptAvailable = payload.TryGetProperty("nativeReceiptAvailable", out JsonElement native)
+                && native.ValueKind == JsonValueKind.True;
             return ReceiptData(new { instanceId, processEpoch, operationId, found = true,
-                receiptScope = "mcp-process", nativeReceiptAvailable = false, receipt = payload });
+                receiptScope = "mcp-process", nativeReceiptAvailable, receipt = payload });
         }
         finally { MutationGate.Release(); }
     });
@@ -241,6 +201,72 @@ public sealed class PcbFootprintPlacementTools(InstanceRegistry registry)
     }
 
     internal sealed record FootprintPlacementPlan(string PlanId, string CandidateRequestJson);
+
+    internal static CheckedPcbItemTransaction BuildCheckedRequest(
+        DocumentLifecycleState expected, CreateItems candidate, string operationId)
+    {
+        var request = new CheckedPcbItemTransaction
+        {
+            ExpectedState = expected.Clone(),
+            ProcessEpoch = expected.ProcessEpoch,
+            OperationId = operationId,
+            MaximumResultBytes = 512 * 1024,
+            Description = "MCP footprint placement"
+        };
+        request.Operations.Add(new PcbItemOperation { Create = candidate.Clone() });
+        return request;
+    }
+
+    private static CallToolResult PlacementMutationData(PcbCheckedItemDispatch.Outcome outcome,
+        FootprintPlacementPlan plan)
+    {
+        CheckedPcbItemTransactionReceipt? receipt = outcome.Receipt;
+        bool success = outcome.Completed;
+        JsonElement? receiptJson = receipt is null || outcome.UntrustedReceipt ? null
+            : JsonDocument.Parse(SchematicJson.Formatter.Format(receipt)).RootElement.Clone();
+        string? before = receipt?.ObservedBefore is null || outcome.UntrustedReceipt ? null
+            : SchematicJson.Formatter.Format(receipt.ObservedBefore);
+        string? after = receipt?.ObservedAfter is null || outcome.UntrustedReceipt
+            ? receipt?.ObservedRollback is null || outcome.UntrustedReceipt ? null : SchematicJson.Formatter.Format(receipt.ObservedRollback)
+            : SchematicJson.Formatter.Format(receipt.ObservedAfter);
+        JsonElement? response = null;
+        if (!outcome.UntrustedReceipt && receipt is not null && receipt.Results.Count > 0
+            && receipt.Results[0].ResultCase == PcbItemOperationResult.ResultOneofCase.Create)
+            response = JsonDocument.Parse(BoardJson.Formatter.Format(receipt.Results[0].Create)).RootElement.Clone();
+
+        JsonElement structured = JsonSerializer.SerializeToElement(new
+        {
+            outcome.InstanceId,
+            processEpoch = receipt?.ProcessEpoch ?? outcome.Request.ProcessEpoch,
+            operationId = outcome.Request.OperationId,
+            planId = plan.PlanId,
+            operation = "footprint-place",
+            operationOutcome = success ? "completed" : receipt?.State.ToString(),
+            state = outcome.UntrustedReceipt ? CheckedPcbItemTransactionState.CpbtsIndeterminate.ToString() : receipt?.State.ToString(),
+            replayed = receipt?.Replayed ?? false,
+            receipt = receiptJson,
+            nativeReceipt = receiptJson,
+            nativeReceiptAvailable = outcome.NativeReceiptAvailable,
+            mutationConfirmed = success,
+            atomicTransaction = true,
+            operationReceipt = outcome.NativeReceiptAvailable,
+            replayableWithinNativeProcess = outcome.NativeReceiptAvailable,
+            receiptScope = outcome.NativeReceiptAvailable ? "native-process" : "none",
+            transportRetrySafe = outcome.NativeReceiptAvailable,
+            beforeState = before,
+            afterState = after,
+            response,
+            drcValidated = false,
+            errorCode = success ? null : outcome.ErrorCode,
+            errorMessage = success ? null : outcome.ErrorMessage
+        });
+        return new CallToolResult
+        {
+            IsError = !success,
+            StructuredContent = structured,
+            Content = [new TextContentBlock { Text = structured.GetRawText() }]
+        };
+    }
 
     private static CreateItems ParseCandidate(string json)
     {

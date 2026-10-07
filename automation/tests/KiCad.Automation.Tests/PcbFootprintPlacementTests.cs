@@ -37,6 +37,26 @@ public sealed class PcbFootprintPlacementTests
     }
 
     [TestMethod]
+    public void PlacementApplyBuildsOneCheckedCreateTransactionWithRetainedOperationIdentity()
+    {
+        DocumentSpecifier document = Document();
+        DocumentLifecycleState state = State(document);
+        FootprintInstance source = Footprint(BoardLayer.BlFCu, 0);
+        var candidate = new CreateItems { Header = new() { Document = document }, Items = { Any.Pack(source) } };
+        string operationId = Guid.NewGuid().ToString("D");
+
+        CheckedPcbItemTransaction checkedRequest = PcbFootprintPlacementTools.BuildCheckedRequest(
+            state, candidate, operationId);
+
+        Assert.AreEqual(operationId, checkedRequest.OperationId);
+        Assert.AreEqual(state.ProcessEpoch, checkedRequest.ProcessEpoch);
+        Assert.AreEqual(1, checkedRequest.Operations.Count);
+        Assert.AreEqual(PcbItemOperation.ActionOneofCase.Create, checkedRequest.Operations[0].ActionCase);
+        Assert.AreEqual(candidate, checkedRequest.Operations[0].Create);
+        CheckedPcbItemContract.ValidateRequest(checkedRequest, state.ProcessEpoch, inspect: true);
+    }
+
+    [TestMethod]
     public void PlacementPlanRejectsNonCopperFootprintLayer()
     {
         DocumentSpecifier document = Document();
@@ -132,13 +152,18 @@ public sealed class PcbFootprintPlacementTests
         Project = new() { Name = "placement", Path = "/tmp/kicad-placement" }
     };
 
-    private static DocumentLifecycleState State(DocumentSpecifier document) => new()
+    private static DocumentLifecycleState State(DocumentSpecifier document)
     {
-        Document = document,
-        Scope = DocumentLifecycleScope.DlsPcb,
-        ProcessEpoch = Guid.NewGuid().ToString("D"),
-        NativeIdentity = Guid.NewGuid().ToString("D"),
-        StateSha256 = new string('a', 64),
-        Revision = new() { Epoch = Guid.NewGuid().ToString("D"), Sequence = 7 }
-    };
+        string identity = Guid.NewGuid().ToString("D");
+        return new()
+        {
+            Document = document,
+            Scope = DocumentLifecycleScope.DlsPcb,
+            ProcessEpoch = Guid.NewGuid().ToString("D"),
+            NativeIdentity = identity,
+            ProjectSettingsIncluded = true,
+            StateSha256 = new string('a', 64),
+            Revision = new() { Epoch = identity, Sequence = 7 }
+        };
+    }
 }

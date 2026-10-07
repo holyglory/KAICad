@@ -71,7 +71,7 @@ void ExpectIoError( const std::function<void()>& aAction )
 BOOST_AUTO_TEST_SUITE( LibraryWriteAdmission )
 
 
-BOOST_AUTO_TEST_CASE( UnknownAndAbsentBaselinesAreRefused )
+BOOST_AUTO_TEST_CASE( UnknownAndKnownAbsentBaselinesAreDistinguished )
 {
     ADMISSION_DIRECTORY directory;
     const wxString absent = directory.File( "future.kicad_sym" );
@@ -83,7 +83,14 @@ BOOST_AUTO_TEST_CASE( UnknownAndAbsentBaselinesAreRefused )
     BOOST_REQUIRE( expectedAbsent.Known() );
     BOOST_CHECK( !expectedAbsent.Exists() );
 
-    ExpectIoError( [&] { (void) LIBRARY_WRITE_ADMISSION::Acquire( { expectedAbsent } ); } );
+    auto admission = LIBRARY_WRITE_ADMISSION::Acquire( { expectedAbsent } );
+    BOOST_REQUIRE( admission );
+    BOOST_REQUIRE_EQUAL( admission->Before().size(), 1 );
+    BOOST_CHECK( !admission->Before()[0].Exists() );
+    const auto observed = admission->Observe();
+    BOOST_REQUIRE_EQUAL( observed.size(), 1 );
+    BOOST_CHECK( !observed[0].Exists() );
+    admission->CheckUnchanged();
 }
 
 

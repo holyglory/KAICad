@@ -128,6 +128,40 @@ public sealed class PcbRouteOptimizationTests
         finally { Directory.Delete(root, true); }
     }
 
+    [TestMethod]
+    public void CornerReplacementBuildsOrderedCheckedDeleteCreateRequest()
+    {
+        DocumentSpecifier document = Document();
+        string identity = Guid.NewGuid().ToString("D");
+        string epoch = Guid.NewGuid().ToString("D");
+        var expected = new DocumentLifecycleState
+        {
+            Document = document,
+            ProcessEpoch = epoch,
+            NativeIdentity = identity,
+            Scope = DocumentLifecycleScope.DlsPcb,
+            ProjectSettingsIncluded = true,
+            StateSha256 = new string('a', 64),
+            Revision = new() { Epoch = identity, Sequence = 4 }
+        };
+        var replacement = MakeTrack(Guid.NewGuid().ToString("D"), 0, 0, 20, 0);
+        var create = new CreateItems { Header = new() { Document = document }, Items = { Any.Pack(replacement) } };
+        var delete = new DeleteItems
+        {
+            Header = new() { Document = document },
+            ItemIds = { new KIID { Value = Guid.NewGuid().ToString("D") } }
+        };
+        var request = PcbRouteOptimizationTools.BuildCornerCheckedRequest(
+            create, delete, expected, Guid.NewGuid().ToString("D"));
+
+        Assert.AreEqual(2, request.Operations.Count);
+        Assert.AreEqual(PcbItemOperation.ActionOneofCase.Delete, request.Operations[0].ActionCase);
+        Assert.AreEqual(PcbItemOperation.ActionOneofCase.Create, request.Operations[1].ActionCase);
+        Assert.AreEqual(delete, request.Operations[0].Delete);
+        Assert.AreEqual(create, request.Operations[1].Create);
+        CheckedPcbItemContract.ValidateRequest(request, epoch, inspect: true);
+    }
+
     private static Track MakeTrack(string id, long x1, long y1, long x2, long y2, string net = "N", long width = 100)
         => new()
         {

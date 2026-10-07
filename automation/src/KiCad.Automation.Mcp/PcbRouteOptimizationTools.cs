@@ -157,76 +157,8 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
                     cancellationToken: cancellationToken);
                 return CheckedRouteResult(checkedResult, drc);
             });
-        return await WithReceipt(operationId, fingerprint, async () =>
-        {
-            NativeClient client = registry.Client(instanceId);
-            AutomationSession session = await client.HandshakeAsync(cancellationToken);
-            if (session.Epoch != expected.ProcessEpoch)
-                throw new AutomationException("pcb_instance_changed", "The corner-optimization candidate belongs to another native process epoch.");
-            if (drc is not null)
-            {
-                var nativeDrcRequest = new ReadPcbDrcJob
-                { Document = delete.Header.Document, JobId = drc.JobId, ProcessEpoch = session.Epoch };
-                nativeDrcRequest.ExpectedCandidateItems.Add(create.Items);
-                PcbDrcJobState nativeDrc = await client.InvokeAsync<ReadPcbDrcJob, PcbDrcJobState>(nativeDrcRequest, cancellationToken);
-                if (nativeDrc.Status != PcbDrcJobStatus.PdrcjsCompleted || !nativeDrc.ResultsFresh
-                    || nativeDrc.Findings.Count != 0 || nativeDrc.CheckedRevision is null
-                    || !nativeDrc.CheckedRevision.Equals(expected.Revision) || !nativeDrc.CandidatePayloadVerified)
-                    throw new AutomationException("invalid_route_replacement_drc", "The native DRC job is no longer fresh, clean or revision-matched; rerun DRC before applying.");
-            }
-            DocumentLifecycleState admission = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
-                new() { Document = delete.Header.Document }, cancellationToken);
-            if (!admission.Equals(expected)) throw new AutomationException("pcb_state_changed", "The board changed before route replacement could be admitted.");
-            GetItemsResponse deletedItems = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
-            { Header = new() { Document = delete.Header.Document }, Items = { delete.ItemIds } }, cancellationToken);
-            var requestedDeleteIds = delete.ItemIds.Select(item => item.Value).ToHashSet(StringComparer.Ordinal);
-            var observedDeleteIds = deletedItems.Items.Select(item => RouteObjectId(item)).Where(id => id is not null)
-                .Select(id => id!).ToHashSet(StringComparer.Ordinal);
-            if (observedDeleteIds.Count != requestedDeleteIds.Count || !observedDeleteIds.SetEquals(requestedDeleteIds)
-                || deletedItems.Items.Any(item => !item.Is(Track.Descriptor) && !item.Is(Arc.Descriptor) && !item.Is(Via.Descriptor)))
-                throw new AutomationException("invalid_pcb_route_optimize_candidate", "Every removed item must be an existing Track, Arc or Via at the exact admitted board state.");
-            BeginCommitResponse begin = await client.InvokeAsync<BeginCommit, BeginCommitResponse>(new() { Header = delete.Header }, cancellationToken);
-            bool committed = false;
-            try
-            {
-                DocumentLifecycleState before = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
-                    new() { Document = delete.Header.Document }, cancellationToken);
-                if (!before.Equals(expected)) throw new AutomationException("pcb_state_changed", "The board changed before route replacement.");
-                DeleteItemsResponse deleted = await client.InvokeAsync<DeleteItems, DeleteItemsResponse>(delete, cancellationToken);
-                if (deleted.DeletedItems.Any(item => item.Status != ItemDeletionStatus.IdsOk))
-                    throw new AutomationException("pcb_route_optimize_rejected", "KiCad rejected one or more source route deletions; the transaction was dropped.");
-                CreateItemsResponse created = await client.InvokeAsync<CreateItems, CreateItemsResponse>(create, cancellationToken);
-                if (created.CreatedItems.Any(item => item.Status.Code != ItemStatusCode.IscOk))
-                    throw new AutomationException("pcb_route_optimize_rejected", "KiCad rejected one or more replacement route objects; the transaction was dropped.");
-                await client.InvokeAsync<EndCommit, EndCommitResponse>(new()
-                { Id = begin.Id, Action = CommitAction.CmaCommit, Header = delete.Header, Message = "MCP PCB route replacement" }, cancellationToken);
-                committed = true;
-                DocumentLifecycleState after = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
-                    new() { Document = delete.Header.Document }, cancellationToken);
-                JsonElement structured = JsonSerializer.SerializeToElement(new
-                {
-                    instanceId, processEpoch = session.Epoch, operationId, operationOutcome = "completed",
-                    beforeState = SchematicJson.Formatter.Format(before), afterState = SchematicJson.Formatter.Format(after),
-                    deleted = JsonSerializer.Deserialize<JsonElement>(BoardJson.Formatter.Format(deleted)),
-                    created = JsonSerializer.Deserialize<JsonElement>(BoardJson.Formatter.Format(created)),
-                    mutationConfirmed = true, atomicTransaction = true, operationReceipt = true,
-                    nativeReceiptAvailable = false, receiptScope = "mcp-process", replayableWithinProcess = true,
-                    transportRetrySafe = false, drcValidated = drc is not null,
-                    drcJobId = drc?.JobId
-                }, JsonOptions);
-                return new CallToolResult { StructuredContent = structured,
-                    Content = [new TextContentBlock { Text = structured.GetRawText() }] };
-            }
-            finally
-            {
-                if (!committed)
-                {
-                    try { await client.InvokeAsync<EndCommit, EndCommitResponse>(new()
-                    { Id = begin.Id, Action = CommitAction.CmaDrop, Header = delete.Header }, CancellationToken.None); }
-                    catch { }
-                }
-            }
-        });
+        return await WithNativeReceipt(operationId, fingerprint, () =>
+            ApplyCornerChecked(instanceId, delete, create, expected, operationId, cancellationToken));
     });
 
     [McpServerTool(Name = "kicad_pcb_route_reroute_apply"),
@@ -364,6 +296,116 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
             OperationId = operationId,
             MaximumResultBytes = 4 * 1024 * 1024
         };
+
+    internal static CheckedPcbItemTransaction BuildCornerCheckedRequest(CreateItems create, DeleteItems delete,
+        DocumentLifecycleState expected, string operationId)
+    {
+        var request = new CheckedPcbItemTransaction
+        {
+            ExpectedState = expected.Clone(),
+            ProcessEpoch = expected.ProcessEpoch,
+            OperationId = operationId,
+            MaximumResultBytes = 4 * 1024 * 1024,
+            Description = "MCP PCB route corner optimization"
+        };
+        request.Operations.Add(new PcbItemOperation { Delete = delete.Clone() });
+        request.Operations.Add(new PcbItemOperation { Create = create.Clone() });
+        return request;
+    }
+
+    private async Task<CallToolResult> ApplyCornerChecked(string instanceId, DeleteItems delete,
+        CreateItems create, DocumentLifecycleState expected, string operationId, CancellationToken cancellationToken)
+    {
+        CheckedPcbItemTransaction checkedRequest = BuildCornerCheckedRequest(create, delete, expected, operationId);
+        PcbCheckedItemDispatch.Outcome inspected = await PcbCheckedItemDispatch.InspectAsync(
+            registry, instanceId, checkedRequest, cancellationToken);
+        if (inspected.ErrorCode is not null)
+            return CornerMutationData(inspected);
+        if (inspected.Receipt is { State: not CheckedPcbItemTransactionState.CpbtsNotFound })
+        {
+            inspected.Receipt.Replayed = true;
+            return CornerMutationData(inspected);
+        }
+
+        NativeClient client = registry.Client(instanceId);
+        DocumentLifecycleState admission = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
+            new() { Document = delete.Header.Document }, cancellationToken);
+        if (!admission.Equals(expected))
+            throw new AutomationException("pcb_state_changed", "The board changed before route replacement could be admitted.");
+
+        GetItemsResponse deletedItems = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+        { Header = new() { Document = delete.Header.Document }, Items = { delete.ItemIds } }, cancellationToken);
+        var requestedDeleteIds = delete.ItemIds.Select(item => item.Value).ToHashSet(StringComparer.Ordinal);
+        var observedDeleteIds = deletedItems.Items.Select(RouteObjectId).Where(id => id is not null)
+            .Select(id => id!).ToHashSet(StringComparer.Ordinal);
+        if (observedDeleteIds.Count != requestedDeleteIds.Count || !observedDeleteIds.SetEquals(requestedDeleteIds)
+            || deletedItems.Items.Any(item => !item.Is(Track.Descriptor) && !item.Is(Arc.Descriptor) && !item.Is(Via.Descriptor)))
+            throw new AutomationException("invalid_pcb_route_optimize_candidate", "Every removed item must be an existing Track, Arc or Via at the exact admitted board state.");
+
+        PcbCheckedItemDispatch.Outcome outcome = await PcbCheckedItemDispatch.ApplyAsync(
+            registry, instanceId, checkedRequest, cancellationToken);
+        return CornerMutationData(outcome);
+    }
+
+    private static CallToolResult CornerMutationData(PcbCheckedItemDispatch.Outcome outcome)
+    {
+        CheckedPcbItemTransactionReceipt? receipt = outcome.Receipt;
+        bool success = outcome.Completed;
+        JsonElement? receiptJson = receipt is null || outcome.UntrustedReceipt
+            ? null : JsonDocument.Parse(SchematicJson.Formatter.Format(receipt)).RootElement.Clone();
+        string? before = receipt?.ObservedBefore is null || outcome.UntrustedReceipt
+            ? null : SchematicJson.Formatter.Format(receipt.ObservedBefore);
+        string? rollback = receipt?.ObservedRollback is null || outcome.UntrustedReceipt
+            ? null : SchematicJson.Formatter.Format(receipt.ObservedRollback);
+        string? after = receipt?.ObservedAfter is null || outcome.UntrustedReceipt
+            ? rollback : SchematicJson.Formatter.Format(receipt.ObservedAfter);
+        JsonElement? deleted = null;
+        JsonElement? created = null;
+        if (!outcome.UntrustedReceipt && receipt is not null)
+        {
+            foreach (PcbItemOperationResult result in receipt.Results)
+            {
+                if (result.ResultCase == PcbItemOperationResult.ResultOneofCase.Delete)
+                    deleted = JsonDocument.Parse(BoardJson.Formatter.Format(result.Delete)).RootElement.Clone();
+                else if (result.ResultCase == PcbItemOperationResult.ResultOneofCase.Create)
+                    created = JsonDocument.Parse(BoardJson.Formatter.Format(result.Create)).RootElement.Clone();
+            }
+        }
+        JsonElement structured = JsonSerializer.SerializeToElement(new
+        {
+            outcome.InstanceId,
+            processEpoch = receipt?.ProcessEpoch ?? outcome.Request.ProcessEpoch,
+            operationId = outcome.Request.OperationId,
+            operationOutcome = success ? "completed" : receipt?.State.ToString(),
+            state = outcome.UntrustedReceipt
+                ? CheckedPcbItemTransactionState.CpbtsIndeterminate.ToString()
+                : receipt?.State.ToString(),
+            replayed = receipt?.Replayed ?? false,
+            receipt = receiptJson,
+            nativeReceipt = receiptJson,
+            nativeReceiptAvailable = outcome.NativeReceiptAvailable,
+            mutationConfirmed = success,
+            atomicTransaction = true,
+            operationReceipt = outcome.NativeReceiptAvailable,
+            receiptScope = outcome.NativeReceiptAvailable ? "native-process" : "none",
+            replayableWithinNativeProcess = outcome.NativeReceiptAvailable,
+            transportRetrySafe = outcome.NativeReceiptAvailable,
+            beforeState = before,
+            rollbackState = rollback,
+            afterState = after,
+            deleted,
+            created,
+            drcValidated = false,
+            errorCode = success ? null : outcome.ErrorCode,
+            errorMessage = success ? null : outcome.ErrorMessage
+        }, JsonOptions);
+        return new CallToolResult
+        {
+            IsError = !success,
+            StructuredContent = structured,
+            Content = [new TextContentBlock { Text = structured.GetRawText() }]
+        };
+    }
 
     private static bool TryFindMerge(List<Segment> segments, out int left, out int right, out Vector2 junction)
     {
@@ -510,25 +552,6 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
             StructuredContent = structured,
             Content = [new TextContentBlock { Text = structured.GetRawText() }]
         };
-    }
-
-    private static async Task<CallToolResult> WithReceipt(string operationId, string fingerprint,
-        Func<Task<CallToolResult>> action)
-    {
-        await MutationGate.WaitAsync();
-        try
-        {
-            if (Receipts.TryGetValue(operationId, out StoredReceipt? existing))
-            {
-                if (existing.Fingerprint != fingerprint)
-                    throw new AutomationException("operation_id_reused", "The operation ID is already bound to a different corner-optimization request.");
-                return existing.Result;
-            }
-            CallToolResult result = await action();
-            if (!(result.IsError ?? false)) Receipts[operationId] = new(fingerprint, result);
-            return result;
-        }
-        finally { MutationGate.Release(); }
     }
 
     private static Task<CallToolResult> ExecuteMutation(Func<Task<CallToolResult>> action) => Execute(action);

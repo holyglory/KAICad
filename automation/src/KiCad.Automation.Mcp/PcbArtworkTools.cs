@@ -115,8 +115,7 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
         {
             if (!Receipts.TryGetValue(operationId, out StoredReceipt? stored)) return Data(new { instanceId, processEpoch = expectedProcessEpoch, operationId, found = false });
             JsonElement payload = stored.Result.StructuredContent ?? JsonSerializer.SerializeToElement(new { });
-            if (payload.TryGetProperty("instanceId", out JsonElement owner) && owner.GetString() != instanceId)
-                throw new AutomationException("wrong_instance_receipt", "The artwork receipt belongs to another instance.");
+            PcbArtworkContract.ValidateReceiptIdentity(payload, instanceId, expectedProcessEpoch);
             return Data(new { instanceId, processEpoch = expectedProcessEpoch, operationId, found = true, receipt = payload, receiptScope = "mcp-process" });
         }
         finally { Gate.Release(); }

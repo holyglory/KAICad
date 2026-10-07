@@ -3948,16 +3948,10 @@ void PCB_IO_KICAD_SEXPR::FootprintSave( const wxString& aLibraryPath, const FOOT
 
         wxString fullPath = fn.GetFullPath();
         wxString fullName = fn.GetFullName();
-        auto     it = m_cache->GetFootprints().find( footprintName );
 
-        if( it != m_cache->GetFootprints().end() )
-        {
-            // Save() below writes atomically via sibling temp + rename, so no pre-delete.
-            wxLogTrace( traceKicadPcbPlugin, wxT( "Replacing footprint file '%s'." ), fullPath );
-            m_cache->GetFootprints().erase( footprintName );
-        }
-
-        // I need my own copy for the cache
+        // Clone before replacing the cache entry.  GetEnumeratedFootprint() deliberately
+        // returns a borrowed pointer into m_cache; erasing the old entry first would delete
+        // aFootprint when a caller saves that borrowed object.
         FOOTPRINT* footprint = static_cast<FOOTPRINT*>( aFootprint->Clone() );
 
         // It's orientation should be zero and it should be on the front layer.
@@ -3981,6 +3975,15 @@ void PCB_IO_KICAD_SEXPR::FootprintSave( const wxString& aLibraryPath, const FOOT
         // descendants still carry reference NETINFO_ITEMs owned by that board and may dangle.
         // Force them all to the board-independent ORPHANED singleton before serialization.
         footprint->ClearAllNets();
+
+        auto it = m_cache->GetFootprints().find( footprintName );
+
+        if( it != m_cache->GetFootprints().end() )
+        {
+            // Save() below writes atomically via sibling temp + rename, so no pre-delete.
+            wxLogTrace( traceKicadPcbPlugin, wxT( "Replacing footprint file '%s'." ), fullPath );
+            m_cache->GetFootprints().erase( footprintName );
+        }
 
         wxLogTrace( traceKicadPcbPlugin, wxT( "Creating s-expr footprint file '%s'." ), fullPath );
         m_cache->GetFootprints().insert( footprintName,

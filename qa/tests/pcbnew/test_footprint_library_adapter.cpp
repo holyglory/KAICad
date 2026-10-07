@@ -173,7 +173,7 @@ BOOST_AUTO_TEST_CASE( SaveFootprintReadOnlyFilePropagatesError )
 }
 
 
-BOOST_AUTO_TEST_CASE( SaveFootprintRejectsChangedRegularTarget )
+BOOST_AUTO_TEST_CASE( SaveFootprintRejectsMalformedRegularTarget )
 {
     KI_TEST::TEMPORARY_DIRECTORY tmpLib( "kicad_qa_adapter_stale_save", ".pretty" );
 
@@ -182,11 +182,11 @@ BOOST_AUTO_TEST_CASE( SaveFootprintRejectsChangedRegularTarget )
     const wxString nickname = wxS( "stale_save" );
     adapter.SeedLoadedLibrary( nickname, tmpLib.GetPath().string() );
 
-    auto board = std::make_unique<BOARD>();
-    auto footprint = std::make_unique<FOOTPRINT>( board.get() );
-    board->Add( footprint.get() );
+    auto        board = std::make_unique<BOARD>();
+    FOOTPRINT*  footprint = new FOOTPRINT( board.get() );
+    board->Add( footprint );
     footprint->SetFPID( LIB_ID( nickname, wxS( "stale_target" ) ) );
-    BOOST_REQUIRE( adapter.SaveFootprint( nickname, footprint.get() ) == FOOTPRINT_LIBRARY_ADAPTER::SAVE_OK );
+    BOOST_REQUIRE( adapter.SaveFootprint( nickname, footprint ) == FOOTPRINT_LIBRARY_ADAPTER::SAVE_OK );
 
     const auto target = tmpLib.GetPath() / "stale_target.kicad_mod";
     std::fstream external( target, std::ios::in | std::ios::out | std::ios::binary );
@@ -198,25 +198,29 @@ BOOST_AUTO_TEST_CASE( SaveFootprintRejectsChangedRegularTarget )
     external.put( first == '(' ? '[' : '(' );
     external.close();
 
-    BOOST_CHECK_THROW( adapter.SaveFootprint( nickname, footprint.get() ), IO_ERROR );
+    BOOST_CHECK_THROW( adapter.SaveFootprint( nickname, footprint ), IO_ERROR );
 }
 
 
-BOOST_AUTO_TEST_CASE( DeleteFootprintRejectsChangedRegularTarget )
+BOOST_AUTO_TEST_CASE( DeleteFootprintRejectsMalformedRegularTarget )
 {
     KI_TEST::TEMPORARY_DIRECTORY tmpLib( "kicad_qa_adapter_stale_delete", ".pretty" );
     PCB_IO_KICAD_SEXPR          writer;
     auto                        board = std::make_unique<BOARD>();
-    auto                        footprint = std::make_unique<FOOTPRINT>( board.get() );
-    board->Add( footprint.get() );
+    FOOTPRINT*                  footprint = new FOOTPRINT( board.get() );
+    board->Add( footprint );
     footprint->SetFPID( LIB_ID( wxS( "stale_delete" ), wxS( "stale_target" ) ) );
 
     const wxString libPath = wxString::FromUTF8( tmpLib.GetPath().string() );
-    writer.FootprintSave( libPath, footprint.get() );
+    writer.FootprintSave( libPath, footprint );
     const auto target = tmpLib.GetPath() / "stale_target.kicad_mod";
-    std::ofstream external( target, std::ios::app );
+    std::fstream external( target, std::ios::in | std::ios::out | std::ios::binary );
     BOOST_REQUIRE( external.good() );
-    external << '\n';
+    char first = '\0';
+    external.read( &first, 1 );
+    BOOST_REQUIRE( external.gcount() == 1 );
+    external.seekp( 0 );
+    external.put( first == '(' ? '[' : '(' );
     external.close();
 
     BOOST_CHECK_THROW( writer.FootprintDelete( libPath, wxS( "stale_target" ) ), IO_ERROR );
@@ -224,7 +228,7 @@ BOOST_AUTO_TEST_CASE( DeleteFootprintRejectsChangedRegularTarget )
 }
 
 
-BOOST_AUTO_TEST_CASE( AdapterDeleteFootprintPropagatesProviderWriteFailure )
+BOOST_AUTO_TEST_CASE( AdapterDeleteFootprintPropagatesProviderReadFailure )
 {
     KI_TEST::TEMPORARY_DIRECTORY tmpLib( "kicad_qa_adapter_delete_failure", ".pretty" );
     LIBRARY_MANAGER                manager;
@@ -232,16 +236,20 @@ BOOST_AUTO_TEST_CASE( AdapterDeleteFootprintPropagatesProviderWriteFailure )
     const wxString nickname = wxS( "delete_failure" );
     adapter.SeedLoadedLibrary( nickname, tmpLib.GetPath().string() );
 
-    auto board = std::make_unique<BOARD>();
-    auto footprint = std::make_unique<FOOTPRINT>( board.get() );
-    board->Add( footprint.get() );
+    auto        board = std::make_unique<BOARD>();
+    FOOTPRINT*  footprint = new FOOTPRINT( board.get() );
+    board->Add( footprint );
     footprint->SetFPID( LIB_ID( nickname, wxS( "delete_target" ) ) );
-    BOOST_REQUIRE( adapter.SaveFootprint( nickname, footprint.get() ) == FOOTPRINT_LIBRARY_ADAPTER::SAVE_OK );
+    BOOST_REQUIRE( adapter.SaveFootprint( nickname, footprint ) == FOOTPRINT_LIBRARY_ADAPTER::SAVE_OK );
 
     const auto target = tmpLib.GetPath() / "delete_target.kicad_mod";
-    std::ofstream external( target, std::ios::app );
+    std::fstream external( target, std::ios::in | std::ios::out | std::ios::binary );
     BOOST_REQUIRE( external.good() );
-    external << '\n';
+    char first = '\0';
+    external.read( &first, 1 );
+    BOOST_REQUIRE( external.gcount() == 1 );
+    external.seekp( 0 );
+    external.put( first == '(' ? '[' : '(' );
     external.close();
 
     BOOST_CHECK_THROW( adapter.DeleteFootprint( nickname, wxS( "delete_target" ) ), IO_ERROR );

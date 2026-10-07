@@ -128,9 +128,13 @@ public sealed class SchematicTypedMutationTests
         Assert.AreEqual(1, fixture.Batches.Count);
         Assert.AreEqual(1, fixture.Captures, "Replay must not capture a now-advanced live state.");
 
-        AssertError(await fixture.CacheTools.Replace(fixture.InstanceId, fixture.DocumentJson,
+        // Legacy lifecycle-only callers remain root-scoped and keep the original native request
+        // shape; they cannot silently bind a child screen.
+        var legacy = await fixture.CacheTools.Replace(fixture.InstanceId, fixture.DocumentJson,
             SchematicJson.Formatter.Format(fixture.State.State), fixture.ScreenId, definitions,
-            Guid.NewGuid().ToString("D"), default), "invalid_checked_state");
+            Guid.NewGuid().ToString("D"), default);
+        Assert.IsFalse(legacy.IsError ?? false, Data(legacy).GetRawText());
+        Assert.IsNull(fixture.Batches[^1].Batch.Operations.Single().TargetDocument);
     }
 
     [TestMethod]

@@ -30,26 +30,41 @@ public sealed class SchematicLibraryCacheTools(InstanceRegistry registry)
         cancellationToken.ThrowIfCancellationRequested();
         DocumentSpecifier document = Parse<DocumentSpecifier>(documentJson, "invalid_checked_document");
         ValidateRoot(document);
-        CheckedSchematicState expected = ParseExpectedObservation(expectedStateJson, document);
+        bool legacyRootRequest = !HasCheckedStateEnvelope(expectedStateJson);
+        CheckedSchematicState? checkedExpected = legacyRootRequest ? null : ParseExpectedObservation(expectedStateJson, document);
+        DocumentLifecycleState expectedState = legacyRootRequest
+            ? Parse<DocumentLifecycleState>(expectedStateJson, "invalid_checked_state")
+            : checkedExpected!.State.Clone();
+        if (legacyRootRequest)
+        {
+            if (expectedState.Scope != DocumentLifecycleScope.DlsSchematicHierarchy
+                || !expectedState.Document.Equals(document) || string.IsNullOrWhiteSpace(expectedState.ProcessEpoch))
+                throw new AutomationException("invalid_checked_state", "expectedStateJson must identify the same schematic root and native process epoch.");
+        }
         ValidateIdentity(screenId, "screenId");
         ValidateIdentity(operationId, "operationId");
         SchematicCachedSymbol[] definitions = ParseDefinitions(definitionsJson);
         if (definitions.Length > 4096)
             throw new AutomationException("invalid_library_cache", "A cache replacement may contain at most 4096 definitions.");
-        DocumentSpecifier target = ResolveTargetDocument(expected, document, screenId);
+        DocumentSpecifier? target = checkedExpected is null ? null : ResolveTargetDocument(checkedExpected, document, screenId);
         var cache = new SchematicLibraryCacheState { ScreenId = new() { Value = screenId } };
         cache.Definitions.Add(definitions);
         var batch = new ApplySchematicItemBatch
         {
-            Document = document.Clone(), DocumentEpoch = expected.State.Revision.Epoch,
-            ExpectedRevision = expected.State.Revision.Clone(), OperationId = operationId,
+            Document = document.Clone(), DocumentEpoch = expectedState.Revision.Epoch,
+            ExpectedRevision = expectedState.Revision.Clone(), OperationId = operationId,
             Description = "Replace typed schematic library cache"
         };
-        batch.Operations.Add(new SchematicItemOperation { TargetDocument = target.Clone(), ReplaceLibraryCache = cache });
-        var request = new CheckedSchematicBatch { Batch = batch, ExpectedState = expected.State.Clone() };
+        batch.Operations.Add(new SchematicItemOperation { ReplaceLibraryCache = cache });
+        if (target is not null)
+            batch.Operations[0].TargetDocument = target.Clone();
+        var request = new CheckedSchematicBatch { Batch = batch, ExpectedState = expectedState.Clone() };
         NativeClient client = registry.Client(instanceId);
         AutomationSession session = await client.HandshakeAsync(cancellationToken);
-        CheckedSchematicContract.ValidateObservation(expected, document, session.Epoch);
+        if (checkedExpected is not null)
+            CheckedSchematicContract.ValidateObservation(checkedExpected, document, session.Epoch);
+        else if (expectedState.ProcessEpoch != session.Epoch)
+            throw new AutomationException("stale_process_epoch", "The lifecycle observation belongs to another native process epoch.");
         CheckedSchematicTools.ValidateRequest(request, session.Epoch);
         var prior = await client.InvokeAsync<ReadCheckedSchematicBatchReceipt, CheckedSchematicBatchReceipt>(new()
         {
@@ -58,25 +73,28 @@ public sealed class SchematicLibraryCacheTools(InstanceRegistry registry)
         }, cancellationToken);
         CheckedSchematicTools.ValidateResult(request, prior, inspect: true);
         if (prior.Status != CheckedSchematicBatchStatus.CsbsNotFound)
-            return MutationReply(instanceId, session.Epoch, document, target, screenId, definitions.Length,
+            return MutationReply(instanceId, session.Epoch, document, target ?? document, screenId, definitions.Length,
                 operationId, prior, mutationSubmitted: false, replayed: true);
-        CheckedSchematicState live = await ReadExpected(client, document, expected, cancellationToken);
-        DocumentSpecifier liveTarget = ResolveTargetDocument(live, document, screenId);
-        if (!liveTarget.Equals(target))
-            throw new AutomationException("stale_document_state", "The target screen changed after the checked observation; inspect a fresh checked state and retry.");
+        if (checkedExpected is not null)
+        {
+            CheckedSchematicState live = await ReadExpected(client, document, checkedExpected, cancellationToken);
+            DocumentSpecifier liveTarget = ResolveTargetDocument(live, document, screenId);
+            if (!liveTarget.Equals(target))
+                throw new AutomationException("stale_document_state", "The target screen changed after the checked observation; inspect a fresh checked state and retry.");
+        }
         cancellationToken.ThrowIfCancellationRequested();
         try
         {
             var receipt = await client.InvokeAsync<CheckedSchematicBatch, CheckedSchematicBatchReceipt>(request, cancellationToken);
             CheckedSchematicTools.ValidateResult(request, receipt, inspect: false);
-            return MutationReply(instanceId, session.Epoch, document, target, screenId, definitions.Length,
+            return MutationReply(instanceId, session.Epoch, document, target ?? document, screenId, definitions.Length,
                 operationId, receipt, mutationSubmitted: true, replayed: false);
         }
         catch (Exception error) when (error is AutomationException or NativeApiException or NngException
             or InvalidProtocolBufferException or InvalidJsonException or InvalidOperationException or IOException
             or OperationCanceledException)
         {
-            return Failure(instanceId, operationId, screenId, target, true, error);
+            return Failure(instanceId, operationId, screenId, target ?? document, true, error);
         }
     });
 
@@ -95,6 +113,19 @@ public sealed class SchematicLibraryCacheTools(InstanceRegistry registry)
         catch (AutomationException) { throw; }
         catch (Exception error) when (error is JsonException or InvalidProtocolBufferException or InvalidJsonException or InvalidOperationException)
         { throw new AutomationException("invalid_checked_state", "expectedStateJson is not a complete checked schematic observation: " + error.Message); }
+    }
+
+    private static bool HasCheckedStateEnvelope(string json)
+    {
+        try
+        {
+            using JsonDocument root = JsonDocument.Parse(json);
+            return root.RootElement.ValueKind == JsonValueKind.Object && root.RootElement.TryGetProperty("state", out _);
+        }
+        catch (JsonException error)
+        {
+            throw new AutomationException("invalid_checked_state", "expectedStateJson is not valid protobuf JSON: " + error.Message);
+        }
     }
 
     private static DocumentSpecifier ResolveTargetDocument(CheckedSchematicState state, DocumentSpecifier root, string screenId)

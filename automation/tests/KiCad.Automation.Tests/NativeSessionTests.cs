@@ -42,6 +42,9 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeCheckedSchematicBatch")]
     public Task CheckedBatchesRejectChangedStateAndPreserveNativeUndo() => RunNativeSessions(NativeJourney.CheckedBatch);
 
+    [TestMethod, TestCategory("NativeCache")]
+    public Task TypedSchematicCachesPersistAcrossSharedSheetsThroughMcp() => RunNativeSessions(NativeJourney.Cache);
+
     [TestMethod, TestCategory("NativeOffscreenConnectedMove")]
     public Task OffscreenConnectedMovesPreserveTheVisibleEditor() => RunNativeSessions(NativeJourney.OffscreenMove);
 
@@ -136,7 +139,7 @@ public sealed partial class NativeSessionTests
 
     private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, RecursiveEditor, Simulation, PcbItems, PcbConnectivity, CrossProbe,
         PsuCpuSeed, PsuCpuComponentCreation, ConnectedRealization, DiagramCanvas, XmlRebuild, RepeatedSheetRebuild, ProjectRecovery, ProjectRecoveryContainer, OwnershipSync, NativeCrash, NativeCrashRelease,
-        ObserveApplyStress, RepeatedSheetOwnership, ComponentRebind, SymbolLibrary, RasterTrace, RasterTraceSchematic }
+        ObserveApplyStress, RepeatedSheetOwnership, ComponentRebind, SymbolLibrary, RasterTrace, RasterTraceSchematic, Cache }
 
     private async Task RunNativeSessions(NativeJourney journey, string theme = "light")
     {
@@ -152,6 +155,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.HierarchyPolicy => "native-hierarchy-policy",
                 NativeJourney.SynchronizationPlan => "native-synchronization-plan",
                 NativeJourney.CheckedBatch => "native-checked-batch",
+                NativeJourney.Cache => "native-cache",
                 NativeJourney.OffscreenMove => "native-offscreen-move",
                 NativeJourney.TransformSync => "native-transform-sync",
                 NativeJourney.SymbolSheets => "native-symbol-sheet-ownership",
@@ -611,6 +615,19 @@ public sealed partial class NativeSessionTests
                             target.Id, deadline.Token);
                     else if (journey == NativeJourney.SymbolLibrary)
                         await VerifyNativeSymbolLibrary(client, opened.Document, evidence, target.Id, deadline.Token);
+                    else if (journey == NativeJourney.Cache)
+                    {
+                        try
+                        {
+                            await VerifyTypedNativeCacheTransaction(client, opened.Document, evidence, target.Id, deadline.Token);
+                        }
+                        catch (Exception error) when (!deadline.IsCancellationRequested)
+                        {
+                            synchronizationFailures.Add(error);
+                            await File.WriteAllTextAsync(Path.Combine(evidence, target.Id + "-typed-cache-failure.txt"),
+                                error.ToString(), deadline.Token);
+                        }
+                    }
                     else if (journey == NativeJourney.RasterTrace)
                         await VerifyNativeRasterTrace(client, evidence, target.Id, deadline.Token);
                     else if (journey == NativeJourney.RasterTraceSchematic)

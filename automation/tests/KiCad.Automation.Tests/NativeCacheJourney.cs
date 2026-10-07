@@ -1,4 +1,5 @@
 using Google.Protobuf.WellKnownTypes;
+using System.Text.Json;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
 using Kiapi.Common.Commands;
@@ -180,5 +181,136 @@ public sealed partial class NativeSessionTests
         cleanup.Operations.Insert(0, new SchematicItemOperation { Update = Any.Pack(fixtureSymbol) });
         await Apply(cleanup);
         Assert.AreEqual(originalFixture.Data, (await Read()).Data, "Explicit local fixture setup must not leak into later journeys.");
+    }
+
+    private static async Task VerifyTypedNativeCacheTransaction(NativeClient client, DocumentSpecifier document,
+        string evidence, string instanceId, CancellationToken token)
+    {
+        string documentJson = SchematicJson.Formatter.Format(document);
+        string Evidence(string phase) => Path.Combine(evidence, instanceId + "-typed-cache-" + phase);
+        await using var mcp = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.ProductionStartInfo(),
+            Evidence("mcp-state"), Evidence("mcp.stderr.log"), token);
+        RequireToolSuccess(await mcp.Tool("kicad_instance_attach", new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
+
+        async Task<CheckedSchematicState> Capture(string phase)
+        {
+            var reply = await mcp.Tool("kicad_schematic_checked_state", new { instanceId, documentJson });
+            RequireToolSuccess(reply);
+            string json = reply.GetProperty("structuredContent").GetRawText();
+            await File.WriteAllTextAsync(Evidence(phase + ".json"), json, token);
+            return SchematicJson.Parser.Parse<CheckedSchematicState>(json);
+        }
+        static string Definitions(IEnumerable<SchematicCachedSymbol> symbols) =>
+            "[" + string.Join(',', symbols.Select(symbol => SchematicJson.Formatter.Format(symbol))) + "]";
+        object Request(CheckedSchematicState state, SchematicScreenData screen, string definitions,
+            string operationId, bool legacy = false) => new
+        {
+            instanceId, documentJson, screenId = screen.Metadata.ScreenId.Value, definitionsJson = definitions, operationId,
+            expectedStateJson = legacy ? SchematicJson.Formatter.Format(state.State) : SchematicJson.Formatter.Format(state)
+        };
+        async Task<CheckedSchematicBatchReceipt> Replace(object request, string phase)
+        {
+            var reply = await mcp.Tool("kicad_schematic_library_cache_replace", request);
+            await File.WriteAllTextAsync(Evidence(phase + "-reply.json"), reply.GetRawText(), token);
+            RequireToolSuccess(reply);
+            var data = reply.GetProperty("structuredContent");
+            Assert.IsFalse(data.GetProperty("designFilesSaved").GetBoolean());
+            var receipt = SchematicJson.Parser.Parse<CheckedSchematicBatchReceipt>(data.GetProperty("receipt").GetRawText());
+            Assert.AreEqual(document, receipt.Document);
+            Assert.AreEqual(client.Epoch, receipt.ProcessEpoch);
+            Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, receipt.Status);
+            return receipt;
+        }
+        async Task<CheckedSchematicState> SaveAndReload(CheckedSchematicState expected, string phase)
+        {
+            var reply = await mcp.Tool("kicad_document_save", new
+            {
+                instanceId, expectedStateJson = SchematicJson.Formatter.Format(expected.State),
+                operationId = Guid.NewGuid().ToString("D")
+            });
+            await File.WriteAllTextAsync(Evidence(phase + "-save.json"), reply.GetRawText(), token);
+            RequireToolSuccess(reply);
+            var saved = SchematicJson.Parser.Parse<LifecycleOperationResult>(reply.GetProperty("structuredContent").GetRawText());
+            Assert.AreEqual(LifecycleOperationStatus.LosSaved, saved.Status);
+            Assert.AreEqual(document, saved.Document);
+            Assert.AreEqual(client.Epoch, saved.ProcessEpoch);
+            Assert.IsFalse(saved.ObservedState.NativeContentDirty, "Reload only the confirmed clean saved state.");
+            var beforeReload = await Capture(phase + "-saved");
+            Assert.AreEqual(saved.ObservedState, beforeReload.State);
+            // RevertDocument reloads the complete hierarchy from the files the checked MCP save just wrote.
+            await client.InvokeAsync<RevertDocument, Empty>(new() { Document = document.Clone() }, token);
+            var reopened = await Capture(phase + "-reopened");
+            Assert.AreEqual(beforeReload.State.SaveStableStateSha256, reopened.State.SaveStableStateSha256,
+                "The whole saved hierarchy must retain its native save-stable state after reload.");
+            Assert.AreEqual(beforeReload.Electrical.Hierarchy.Data, reopened.Electrical.Hierarchy.Data,
+                NativeSnapshotDifference.Describe(beforeReload.Electrical.Hierarchy.Data, reopened.Electrical.Hierarchy.Data));
+            return reopened;
+        }
+
+        var original = await Capture("original");
+        var root = original.Electrical.Hierarchy.Data.Instances.Single(s => s.Metadata.Document.Equals(document));
+        Assert.IsNotEmpty(root.CachedSymbols, "The existing native fixture supplies a complete symbol definition to copy.");
+        var sharedInstances = original.Electrical.Hierarchy.Data.Instances
+            .Where(s => s.Metadata.Document.SheetPath.Path.Count > 1)
+            .GroupBy(s => s.Metadata.ScreenId.Value).Single(g => g.Count() > 1)
+            .OrderBy(s => string.Join('/', s.Metadata.Document.SheetPath.Path.Select(id => id.Value)), StringComparer.Ordinal).ToArray();
+        var child = sharedInstances[0];
+        foreach (var instance in sharedInstances.Skip(1))
+            CollectionAssert.AreEqual(child.CachedSymbols.ToArray(), instance.CachedSymbols.ToArray());
+
+        // Compatibility: the lifecycle-only root request still changes its cache and an exact retry
+        // returns its original native receipt even though the live revision has advanced.
+        var legacyDefinition = root.CachedSymbols[0].Clone();
+        legacyDefinition.CacheKey = "AutomationCache:LegacyRoot";
+        legacyDefinition.Definition.Id = new() { LibraryNickname = "AutomationCache", EntryName = "LegacyRoot" };
+        var legacyRequest = Request(original, root, Definitions(root.CachedSymbols.Append(legacyDefinition)),
+            Guid.NewGuid().ToString("D"), legacy: true);
+        var legacyReceipt = await Replace(legacyRequest, "legacy-root");
+        Assert.IsTrue(legacyReceipt.Result.LibraryCacheChanged);
+        Assert.AreEqual(legacyReceipt, await Replace(legacyRequest, "legacy-root-replay"));
+        var afterLegacy = await Capture("after-legacy-root");
+        Assert.AreEqual(legacyReceipt.ObservedAfter, afterLegacy.State);
+        await Replace(Request(afterLegacy, root, Definitions(root.CachedSymbols), Guid.NewGuid().ToString("D"), legacy: true),
+            "restore-legacy-root");
+        var before = await Capture("before-child");
+        var childDefinition = root.CachedSymbols[0].Clone();
+        childDefinition.CacheKey = "AutomationCache:SharedChild";
+        childDefinition.Definition.Id = new() { LibraryNickname = "AutomationCache", EntryName = "SharedChild" };
+        var childRequest = Request(before, child, Definitions(child.CachedSymbols.Append(childDefinition)), Guid.NewGuid().ToString("D"));
+        var childReply = await mcp.Tool("kicad_schematic_library_cache_replace", childRequest);
+        await File.WriteAllTextAsync(Evidence("child-reply.json"), childReply.GetRawText(), token);
+        RequireToolSuccess(childReply);
+        var childData = childReply.GetProperty("structuredContent");
+        Assert.AreEqual(child.Metadata.Document, SchematicJson.Parser.Parse<DocumentSpecifier>(childData.GetProperty("targetDocument").GetRawText()));
+        var childReceipt = SchematicJson.Parser.Parse<CheckedSchematicBatchReceipt>(childData.GetProperty("receipt").GetRawText());
+        Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, childReceipt.Status);
+        Assert.AreEqual(before.State, childReceipt.ObservedBefore);
+        Assert.IsTrue(childReceipt.Result.LibraryCacheChanged);
+        Assert.IsFalse(childData.GetProperty("designFilesSaved").GetBoolean());
+        var changed = await Capture("changed-child");
+        Assert.AreEqual(childReceipt.ObservedAfter, changed.State);
+        foreach (var instance in changed.Electrical.Hierarchy.Data.Instances.Where(s => s.Metadata.ScreenId.Equals(child.Metadata.ScreenId)))
+            CollectionAssert.AreEqual(child.CachedSymbols.Append(childDefinition).ToArray(), instance.CachedSymbols.ToArray());
+        var replay = await mcp.Tool("kicad_schematic_library_cache_replace", childRequest);
+        RequireToolSuccess(replay);
+        Assert.IsTrue(replay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean());
+        Assert.IsFalse(replay.GetProperty("structuredContent").GetProperty("mutationSubmitted").GetBoolean());
+        Assert.AreEqual(childReceipt, SchematicJson.Parser.Parse<CheckedSchematicBatchReceipt>(
+            replay.GetProperty("structuredContent").GetProperty("receipt").GetRawText()));
+        Assert.AreEqual(changed, await Capture("after-child-replay"));
+        var stale = await mcp.Tool("kicad_schematic_library_cache_replace",
+            Request(before, child, Definitions(child.CachedSymbols), Guid.NewGuid().ToString("D")));
+        await File.WriteAllTextAsync(Evidence("stale-reply.json"), stale.GetRawText(), token);
+        Assert.IsTrue(stale.GetProperty("isError").GetBoolean());
+        Assert.AreEqual("stale_document_state", stale.GetProperty("structuredContent").GetProperty("errorCode").GetString());
+        Assert.IsFalse(stale.GetProperty("structuredContent").GetProperty("mutationSubmitted").GetBoolean());
+        Assert.AreEqual(changed, await Capture("after-stale"));
+        var reopened = await SaveAndReload(changed, "child");
+        foreach (var instance in reopened.Electrical.Hierarchy.Data.Instances.Where(s => s.Metadata.ScreenId.Equals(child.Metadata.ScreenId)))
+            CollectionAssert.AreEqual(child.CachedSymbols.Append(childDefinition).ToArray(), instance.CachedSymbols.ToArray());
+        await Replace(Request(reopened, child, Definitions(child.CachedSymbols), Guid.NewGuid().ToString("D")), "restore-child");
+        var restored = await SaveAndReload(await Capture("restored"), "restored");
+        Assert.AreEqual(original.State.SaveStableStateSha256, restored.State.SaveStableStateSha256,
+            "The focused cache journey restores the existing fixture before handing it back.");
     }
 }

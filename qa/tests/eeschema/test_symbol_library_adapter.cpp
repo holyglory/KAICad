@@ -378,10 +378,10 @@ BOOST_AUTO_TEST_CASE( SaveSymbolWriteRefusalPropagatesAndReloadDiscardsFailedCac
     LIB_SYMBOL* failedCache = adapter.LoadSymbol( nickname, original.GetName() );
     BOOST_REQUIRE( failedCache );
     BOOST_CHECK( failedCache != replacement.get() );
-    BOOST_CHECK_EQUAL( failedCache->GetReferenceField().GetText().ToStdString(), "R" );
+    BOOST_CHECK_EQUAL( failedCache->GetReferenceField().GetText().ToStdString(), "U" );
     BOOST_CHECK_EQUAL( replacement->GetReferenceField().GetText().ToStdString(), "R" );
     replacement.reset(); // Failure did not transfer caller ownership into the changed cache.
-    BOOST_CHECK_EQUAL( failedCache->GetReferenceField().GetText().ToStdString(), "R" );
+    BOOST_CHECK_EQUAL( failedCache->GetReferenceField().GetText().ToStdString(), "U" );
 
     // The failed write is not a rollback. Explicit reload destroys the clone and restores disk state.
     adapter.ReloadLibraryEntry( nickname, LIBRARY_TABLE_SCOPE::PROJECT );

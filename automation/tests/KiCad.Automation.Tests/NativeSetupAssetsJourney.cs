@@ -13,6 +13,13 @@ public sealed partial class NativeSessionTests
     private static async Task VerifySetupAssets(NativeClient client, DocumentSpecifier document,
         int processId, string display, string evidence, string instanceId, CancellationToken token)
     {
+        string mcpState = Path.Combine(evidence, instanceId + "-embedded-files-mcp-state");
+        await using var mcp = await StdioMcpFixture.StartAsync(
+            SyncHarnessProcessTests.ProductionStartInfo(), mcpState,
+            Path.Combine(evidence, instanceId + "-embedded-files-mcp.stderr.log"), token);
+        RequireToolSuccess(await mcp.Tool("kicad_instance_attach",
+            new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
+
         Task<SchematicScreenDataSnapshot> Read() => client.InvokeAsync<ReadSchematicScreenData, SchematicScreenDataSnapshot>(
             new() { Document = document }, token);
         // The composed fixture starts in a supported older file format. Base
@@ -116,6 +123,7 @@ public sealed partial class NativeSessionTests
         await Apply(original.Data);
         await client.InvokeAsync<SaveDocument, Empty>(new() { Document = document }, token);
         await Same(original.Data, "assets-original-restored");
+        await VerifyTypedEmbeddedFilesThroughMcp(mcp, client, document, instanceId, original.Data.Metadata, token);
 
         Task Capture(string stage) => NativeKeyboard.CaptureAsync(display, Path.Combine(evidence, instanceId + "-setup-" + stage + ".png"), token);
         async Task BeginRemoval(string stage)
@@ -172,5 +180,46 @@ public sealed partial class NativeSessionTests
                 await Task.Delay(delay, wait.Token); delay = Math.Min(delay * 2, 500);
             }
         }
+    }
+
+    private static async Task VerifyTypedEmbeddedFilesThroughMcp(StdioMcpFixture mcp, NativeClient client,
+        DocumentSpecifier document, string instanceId, SchematicMetadata original, CancellationToken token)
+    {
+        string documentJson = SchematicJson.Formatter.Format(document);
+        async Task<DocumentLifecycleState> State() => await client.InvokeAsync<ReadDocumentLifecycleState,
+            DocumentLifecycleState>(new() { Document = document }, token);
+        async Task<SchematicMetadataSnapshot> Metadata() => await client.InvokeAsync<ReadSchematicMetadata,
+            SchematicMetadataSnapshot>(new() { Document = document }, token);
+
+        DocumentLifecycleState before = await State();
+        string filesJson = SchematicJson.Formatter.Format(original.EmbeddedFiles);
+        var cleared = await mcp.Tool("kicad_schematic_replace_embedded_files", new
+        {
+            instanceId, documentJson,
+            expectedStateJson = SchematicJson.Formatter.Format(before),
+            embeddedFilesJson = SchematicJson.Formatter.Format(new EmbeddedFiles()),
+            operationId = Guid.NewGuid().ToString("D"), embeddedFonts = original.EmbeddedFonts
+        });
+        RequireToolSuccess(cleared);
+        Assert.IsTrue(cleared.GetProperty("structuredContent").GetProperty("mutationSubmitted").GetBoolean(),
+            cleared.GetRawText());
+        Assert.AreEqual(0, (await Metadata()).Metadata.EmbeddedFiles.Files.Count,
+            "The typed MCP operation must replace the schematic-owned asset set.");
+
+        DocumentLifecycleState afterClear = await State();
+        var restored = await mcp.Tool("kicad_schematic_replace_embedded_files", new
+        {
+            instanceId, documentJson,
+            expectedStateJson = SchematicJson.Formatter.Format(afterClear),
+            embeddedFilesJson = filesJson,
+            operationId = Guid.NewGuid().ToString("D"), embeddedFonts = original.EmbeddedFonts
+        });
+        RequireToolSuccess(restored);
+        Assert.AreEqual(original.EmbeddedFiles, (await Metadata()).Metadata.EmbeddedFiles,
+            "The typed MCP operation must restore the exact embedded-file set.");
+        await client.InvokeAsync<SaveDocument, Empty>(new() { Document = document }, token);
+        await client.InvokeAsync<RevertDocument, Empty>(new() { Document = document }, token);
+        Assert.AreEqual(original.EmbeddedFiles, (await Metadata()).Metadata.EmbeddedFiles,
+            "The typed MCP embedded-file replacement must survive save/reload.");
     }
 }

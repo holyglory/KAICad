@@ -137,6 +137,19 @@ public sealed class SymbolLibraryCheckedContractTests
         Assert.AreEqual("invalid_symbol_library_response", error.Code);
     }
 
+    [TestMethod]
+    public void PreAdmissionRejectionMayUseLegacyUnknownReceiptStatus()
+    {
+        (DocumentSpecifier document, string epoch, string operation, string expected) = Fixture();
+        NativeCapabilitySymbolLibraryCheckedWriteResponse response = Response(document, epoch, operation,
+            status: "rejected", errorCode: "invalid_library_document",
+            errorMessage: "The project-bound symbol document is invalid.");
+
+        // Identity was rejected before a request fingerprint existed.  The UNKNOWN enum is an
+        // honest pre-admission terminal envelope and remains backward compatible with older peers.
+        SymbolLibraryCheckedContract.ValidateResponse(response, document, epoch, operation, expected);
+    }
+
     private static NativeCapabilitySymbolLibraryCheckedWriteResponse Response(
         DocumentSpecifier document, string epoch, string operation, string status,
         bool committed = false, bool replayed = false, bool rollbackCompleted = false,

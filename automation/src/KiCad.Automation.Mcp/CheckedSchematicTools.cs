@@ -324,11 +324,9 @@ public sealed class CheckedSchematicTools(InstanceRegistry registry)
             {
                 SchematicImage image = SchematicJson.Parser.Parse<SchematicImage>(imageJson ?? "{}");
                 ValidateImage(image);
-                batch.Operations.Add(new SchematicItemOperation
-                {
-                    Create = mutation == ImageMutation.Create ? Any.Pack(image) : null,
-                    Update = mutation == ImageMutation.Update ? Any.Pack(image) : null
-                });
+                batch.Operations.Add(mutation == ImageMutation.Create
+                    ? new SchematicItemOperation { Create = Any.Pack(image) }
+                    : new SchematicItemOperation { Update = Any.Pack(image) });
             }
             return await Run(instanceId, SchematicJson.Formatter.Format(new CheckedSchematicBatch
             {

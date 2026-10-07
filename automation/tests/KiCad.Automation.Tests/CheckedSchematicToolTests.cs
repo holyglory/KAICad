@@ -3,6 +3,7 @@ using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using Kiapi.Common;
 using Kiapi.Common.Types;
+using Kiapi.Schematic.Types;
 using KiCad.Automation.Mcp;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
@@ -107,6 +108,53 @@ public sealed class CheckedSchematicToolTests
             Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, receipt.Status);
             Assert.AreEqual(SchematicItemOperation.OperationOneofCase.ReplaceEmbeddedFiles,
                 transport.LastCheckedRequest!.Batch.Operations[0].OperationCase);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public async Task TypedImageTitleAndPageMetadataUseTheirCheckedOperationKinds()
+    {
+        string root = Directory.CreateTempSubdirectory("checked-schematic-metadata-").FullName;
+        try
+        {
+            var transport = new Transport();
+            transport.Session.ProjectPath = Path.Combine(root, "fixture.kicad_pro");
+            var registry = new InstanceRegistry(transport, root);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(root, "native.sock")), transport.Session.InstanceId);
+            var tool = new CheckedSchematicTools(registry);
+            var request = Request(root, transport.Session.Epoch);
+            string document = SchematicJson.Formatter.Format(request.Batch.Document);
+            string state = SchematicJson.Formatter.Format(request.ExpectedState);
+
+            var image = new SchematicImage
+            {
+                Id = new() { Value = Guid.NewGuid().ToString("D") },
+                Position = new() { XNm = 1_000, YNm = 2_000 },
+                ImageScale = new() { Value = 1 },
+                ImageData = ByteString.CopyFromUtf8("png fixture")
+            };
+            var imageReply = await tool.CreateImage(transport.Session.InstanceId, document, state,
+                SchematicJson.Formatter.Format(image), Guid.NewGuid().ToString("D"), default);
+            Assert.IsFalse(imageReply.IsError ?? false, JsonSerializer.Serialize(imageReply.StructuredContent));
+            Assert.AreEqual(SchematicItemOperation.OperationOneofCase.Create,
+                transport.LastCheckedRequest!.Batch.Operations[0].OperationCase);
+            Assert.IsTrue(transport.LastCheckedRequest.Batch.Operations[0].Create.Is(SchematicImage.Descriptor));
+
+            var titleReply = await tool.SetTitleBlock(transport.Session.ProjectPath.Length > 0 ? transport.Session.InstanceId : transport.Session.InstanceId,
+                document, state, SchematicJson.Formatter.Format(new TitleBlockInfo { Title = "MCP title" }),
+                Guid.NewGuid().ToString("D"), default);
+            Assert.IsFalse(titleReply.IsError ?? false, JsonSerializer.Serialize(titleReply.StructuredContent));
+            Assert.AreEqual(SchematicItemOperation.OperationOneofCase.SetTitleBlock,
+                transport.LastCheckedRequest.Batch.Operations[0].OperationCase);
+
+            var pageReply = await tool.SetPageSettings(transport.Session.InstanceId, document, state,
+                SchematicJson.Formatter.Format(new PageSettings { Orientation = PageOrientation.PoLandscape }),
+                Guid.NewGuid().ToString("D"), default);
+            Assert.IsFalse(pageReply.IsError ?? false, JsonSerializer.Serialize(pageReply.StructuredContent));
+            Assert.AreEqual(SchematicItemOperation.OperationOneofCase.SetPageSettings,
+                transport.LastCheckedRequest.Batch.Operations[0].OperationCase);
+            Assert.AreEqual(0, transport.LegacyMutations);
         }
         finally { Directory.Delete(root, true); }
     }

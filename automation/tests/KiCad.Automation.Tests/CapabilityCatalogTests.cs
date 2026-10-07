@@ -57,8 +57,8 @@ public sealed class CapabilityCatalogTests
                 AssertKinds(entries["kicad_symbol_library_write"], "library");
                 AssertKinds(entries["kicad_footprint_library_delete"], "library");
                 AssertKinds(entries["kicad_pcb_export_3d"], "pcb", "job");
-                AssertKinds(entries["kicad_simulation_start"], "schematic", "simulation");
-                AssertKinds(entries["kicad_simulation_result"], "schematic", "simulation");
+                AssertKinds(entries["kicad_simulation_start"], "schematic", "job");
+                AssertKinds(entries["kicad_simulation_result"], "schematic", "job");
                 AssertKinds(entries["kicad_instances_list"]);
                 foreach (string name in DeclaredToolNames())
                 {

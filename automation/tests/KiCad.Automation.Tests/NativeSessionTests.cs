@@ -48,6 +48,9 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeSchematicMetadata")]
     public Task TypedSchematicMetadataPersistsThroughMcp() => RunNativeSessions(NativeJourney.SchematicMetadata);
 
+    [TestMethod, TestCategory("NativeSchematicExport")]
+    public Task NativeSchematicSvgExportUsesRealContentAndPreservesState() => RunNativeSessions(NativeJourney.SchematicExport);
+
     [TestMethod, TestCategory("NativeSchematicHierarchy")]
     public Task TypedSchematicHierarchyAuthoringPersistsThroughMcp() => RunNativeSessions(NativeJourney.SchematicHierarchy);
 
@@ -145,7 +148,7 @@ public sealed partial class NativeSessionTests
 
     private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, RecursiveEditor, Simulation, PcbItems, PcbConnectivity, CrossProbe,
         PsuCpuSeed, PsuCpuComponentCreation, ConnectedRealization, DiagramCanvas, XmlRebuild, RepeatedSheetRebuild, ProjectRecovery, ProjectRecoveryContainer, OwnershipSync, NativeCrash, NativeCrashRelease,
-        ObserveApplyStress, RepeatedSheetOwnership, ComponentRebind, SymbolLibrary, RasterTrace, RasterTraceSchematic, Cache, SchematicMetadata, SchematicHierarchy }
+        ObserveApplyStress, RepeatedSheetOwnership, ComponentRebind, SymbolLibrary, RasterTrace, RasterTraceSchematic, Cache, SchematicMetadata, SchematicExport, SchematicHierarchy }
 
     private async Task RunNativeSessions(NativeJourney journey, string theme = "light")
     {
@@ -163,6 +166,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.CheckedBatch => "native-checked-batch",
                 NativeJourney.Cache => "native-cache",
                 NativeJourney.SchematicMetadata => "native-schematic-metadata",
+                NativeJourney.SchematicExport => "native-schematic-export",
                 NativeJourney.SchematicHierarchy => "native-schematic-metadata",
                 NativeJourney.OffscreenMove => "native-offscreen-move",
                 NativeJourney.TransformSync => "native-transform-sync",
@@ -197,6 +201,7 @@ public sealed partial class NativeSessionTests
             NativeJourney.PcbConnectivity => nameof(NativePcbConnectivityQueryUsesTypedNativeSummaries),
             NativeJourney.CrossProbe => nameof(NativePcbCrossProbeBindsTheLiveBoardWithoutMutation),
             NativeJourney.SchematicMetadata => nameof(TypedSchematicMetadataPersistsThroughMcp),
+            NativeJourney.SchematicExport => nameof(NativeSchematicSvgExportUsesRealContentAndPreservesState),
             NativeJourney.SchematicHierarchy => nameof(TypedSchematicHierarchyAuthoringPersistsThroughMcp),
             _ => ""
         };
@@ -404,6 +409,9 @@ public sealed partial class NativeSessionTests
                 string textId = Guid.NewGuid().ToString("D");
                 var electrical = MakeElectricalFixture(rootId);
                 var hierarchyFixture = await MakeHierarchyFixture(rootId, Path.GetDirectoryName(schematic)!, deadline.Token);
+                string fixtureText = journey == NativeJourney.SchematicExport
+                    ? "Native SVG export fixture " + textId
+                    : "Native automation fixture";
                 if (journey == NativeJourney.OffscreenMove)
                 {
                     string childFile = Path.Combine(Path.GetDirectoryName(schematic)!, "shared-child.kicad_sch");
@@ -422,7 +430,7 @@ public sealed partial class NativeSessionTests
                 string repairableHierarchy = hierarchyFixture.Contents.Replace("(page \"2\")", "(page \"1\")", StringComparison.Ordinal);
                 await File.WriteAllTextAsync(schematic,
                     $"(kicad_sch (version 20250114) (generator eeschema) (uuid {rootScreenId}) (paper \"A4\") " + electrical.Contents + repairableHierarchy +
-                    "(text \"Native automation fixture\" (at 50 50 0) (effects (font (size 1.27 1.27))) " +
+                    $"(text \"{fixtureText}\" (at 50 50 0) (effects (font (size 1.27 1.27))) " +
                     $"(uuid {textId})) (sheet_instances (path \"/\" (page \"1\"))) {embeddedAsset.Native})", deadline.Token);
                 // The native-created empty document was saved and checked above.
                 // Load this separate serialized-feature fixture explicitly; opening
@@ -641,6 +649,9 @@ public sealed partial class NativeSessionTests
                     else if (journey == NativeJourney.SchematicMetadata)
                         await VerifyNativeSchematicMetadata(client, opened.Document, focusProcessId,
                             ":" + displayNumber, evidence, target.Id, deadline.Token);
+                    else if (journey == NativeJourney.SchematicExport)
+                        await VerifyNativeSchematicExport(client, opened.Document, schematic, fixtureText,
+                            evidence, target.Id, deadline.Token);
                     else if (journey == NativeJourney.SchematicHierarchy)
                         await VerifyNativeSchematicHierarchy(client, opened.Document, hierarchyFixture, focusProcessId,
                             ":" + displayNumber, evidence, target.Id, deadline.Token);

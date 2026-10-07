@@ -804,6 +804,7 @@ HANDLER_RESULT<SetTextVariablesCheckedResponse> API_HANDLER_COMMON::handleSetTex
     fingerprint.Append( request.project().SerializeAsString() );
     fingerprint.Append( request.document().SerializeAsString() );
     fingerprint.Append( request.process_epoch() );
+    fingerprint.Append( request.expected_variables_sha256() );
     fingerprint.Append( std::to_string( request.merge_mode() ) );
     fingerprint.Append( TextVariablesDigest( requested ) );
     const std::string fingerprintValue = fingerprint.Hex();
@@ -848,6 +849,8 @@ HANDLER_RESULT<SetTextVariablesCheckedResponse> API_HANDLER_COMMON::handleSetTex
     response.mutable_document()->CopyFrom( request.document() );
     response.set_operation_id( request.operation_id() );
     response.set_process_epoch( request.process_epoch() );
+    response.set_revision_tracked( false );
+    response.set_complete_lifecycle( false );
     response.set_before_variables_sha256( beforeDigest );
     response.set_after_variables_sha256( TextVariablesDigest( after ) );
     PackTextVariables( before, *response.mutable_before_variables() );

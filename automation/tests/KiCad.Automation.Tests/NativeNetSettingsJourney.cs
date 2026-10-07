@@ -66,7 +66,8 @@ public sealed partial class NativeSessionTests
             }
         }
         async Task<JsonElement> SetProjectTextVariables(DocumentLifecycleState expected,
-            IReadOnlyDictionary<string, string> variables, string mergeMode, string operationId, string phase)
+            IReadOnlyDictionary<string, string> variables, string mergeMode, string operationId, string phase,
+            string? expectedVariablesSha256 = null)
         {
             string stateDirectory = Directory.CreateTempSubdirectory("kicad-project-text-variables-set-mcp-").FullName;
             try
@@ -82,7 +83,7 @@ public sealed partial class NativeSessionTests
                     project = new { name = document.Project.Name, path = document.Project.Path },
                     document = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(document)),
                     expectedStateJson = SchematicJson.Formatter.Format(expected),
-                    variables, mergeMode, operationId
+                    variables, mergeMode, operationId, expectedVariablesSha256
                 });
             }
             finally
@@ -224,6 +225,8 @@ public sealed partial class NativeSessionTests
         var textVariablesSetData = textVariablesSet.GetProperty("structuredContent");
         Assert.IsTrue(textVariablesSetData.GetProperty("committed").GetBoolean());
         Assert.IsFalse(textVariablesSetData.GetProperty("replayed").GetBoolean());
+        Assert.IsFalse(textVariablesSetData.GetProperty("revisionTracked").GetBoolean());
+        Assert.IsFalse(textVariablesSetData.GetProperty("completeLifecycle").GetBoolean());
         Assert.AreEqual(changedTextVariables.Count, textVariablesSetData.GetProperty("afterVariables").EnumerateObject().Count());
         foreach (var pair in changedTextVariables)
             Assert.AreEqual(pair.Value, textVariablesSetData.GetProperty("afterVariables").GetProperty(pair.Key).GetString());
@@ -232,7 +235,7 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(changedTextVariables.Count, nativeChangedTextVariables.Count);
         Assert.AreEqual(changedTextVariables["AUTOMATION_TEXT_VARIABLE"], nativeChangedTextVariables["AUTOMATION_TEXT_VARIABLE"]);
         var textVariablesReplay = await SetProjectTextVariables(originalLifecycle, changedTextVariables, "MMM_REPLACE",
-            textVariablesOperation, "replay");
+            textVariablesOperation, "replay", textVariablesSetData.GetProperty("beforeVariablesSha256").GetString());
         RequireToolSuccess(textVariablesReplay);
         Assert.IsTrue(textVariablesReplay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean());
         Assert.IsTrue(textVariablesReplay.GetProperty("structuredContent").GetProperty("committed").GetBoolean());

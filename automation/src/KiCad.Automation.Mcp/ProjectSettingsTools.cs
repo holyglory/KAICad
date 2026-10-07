@@ -184,7 +184,8 @@ public sealed class ProjectSettingsTools(InstanceRegistry registry)
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> SetTextVariables(string instanceId, NativeProjectInput project,
         NativeDocumentInput document, string expectedStateJson, Dictionary<string, string> variables,
-        string mergeMode, Guid operationId, CancellationToken cancellationToken) => Execute(async () =>
+        string mergeMode, Guid operationId, CancellationToken cancellationToken,
+        string? expectedVariablesSha256 = null) => Execute(async () =>
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (operationId == Guid.Empty)
@@ -219,7 +220,11 @@ public sealed class ProjectSettingsTools(InstanceRegistry registry)
         // successful write advanced the document observation.
         Kiapi.Common.Project.TextVariables current = await client.InvokeAsync<GetTextVariables,
             Kiapi.Common.Project.TextVariables>(new() { Document = projectDocument }, cancellationToken);
-        string expectedVariablesSha256 = Digest(current.Variables);
+        string expectedVariablesDigest = string.IsNullOrWhiteSpace(expectedVariablesSha256)
+            ? Digest(current.Variables) : expectedVariablesSha256;
+        if (expectedVariablesDigest.Length != 64 || !expectedVariablesDigest.All(char.IsAsciiHexDigitLower))
+            throw new AutomationException("invalid_project_text_variables_revision",
+                "expectedVariablesSha256 must be a lowercase SHA-256 digest when supplied.");
         SetTextVariablesCheckedResponse response;
         try
         {
@@ -229,7 +234,7 @@ public sealed class ProjectSettingsTools(InstanceRegistry registry)
                 Document = target,
                 OperationId = operationId.ToString("D"),
                 ProcessEpoch = session.Epoch,
-                ExpectedVariablesSha256 = expectedVariablesSha256,
+                ExpectedVariablesSha256 = expectedVariablesDigest,
                 Variables = new Kiapi.Common.Project.TextVariables { Variables = { variables } },
                 MergeMode = mergeMode == "MMM_REPLACE" ? MapMergeMode.MmmReplace : MapMergeMode.MmmMerge
             }, cancellationToken);
@@ -243,7 +248,7 @@ public sealed class ProjectSettingsTools(InstanceRegistry registry)
         if (response.Project is null || !response.Project.Equals(projectDocument)
             || response.Document is null || !response.Document.Equals(target)
             || response.OperationId != operationId.ToString("D") || response.ProcessEpoch != session.Epoch
-            || response.BeforeVariablesSha256 != expectedVariablesSha256)
+            || response.BeforeVariablesSha256 != expectedVariablesDigest)
             throw new AutomationException("invalid_project_text_variables_response",
                 "Native checked text-variable mutation did not preserve its project, document, operation or map identity.");
         var structured = new
@@ -252,6 +257,7 @@ public sealed class ProjectSettingsTools(InstanceRegistry registry)
             operationId = response.OperationId, committed = response.Committed, replayed = response.Replayed,
             rollbackCompleted = response.RollbackCompleted, beforeVariablesSha256 = response.BeforeVariablesSha256,
             afterVariablesSha256 = response.AfterVariablesSha256,
+            revisionTracked = response.RevisionTracked, completeLifecycle = response.CompleteLifecycle,
             beforeVariables = response.BeforeVariables.Variables.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
             afterVariables = response.AfterVariables.Variables.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
             errorCode = response.ErrorCode, errorMessage = response.ErrorMessage

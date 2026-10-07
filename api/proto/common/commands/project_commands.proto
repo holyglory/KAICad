@@ -119,6 +119,10 @@ message SetTextVariablesCheckedResponse
   bool rollback_completed = 11;
   string error_code = 12;
   string error_message = 13;
+  // The checked owner admits the map by digest; it does not yet carry the
+  // schematic/PCB lifecycle revision token into the common project owner.
+  bool revision_tracked = 14;
+  bool complete_lifecycle = 15;
 }
 
 

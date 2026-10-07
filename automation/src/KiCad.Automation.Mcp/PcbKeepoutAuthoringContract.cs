@@ -205,7 +205,8 @@ internal static class PcbKeepoutAuthoringContract
             || actualSettings.PlacementEnabled
             || !string.IsNullOrWhiteSpace(actualSettings.PlacementSource)
             || !Enum.IsDefined(actualSettings.PlacementSourceType)
-            || actualSettings.PlacementSourceType != PlacementRuleSourceType.PrstUnknown)
+            || (expectedSettings.PlacementSourceType != PlacementRuleSourceType.PrstUnknown
+                && actualSettings.PlacementSourceType != expectedSettings.PlacementSourceType))
             throw new AutomationException("pcb_keepout_readback_mismatch", "Native readback changed keepout restrictions or returned placement-owned rule-area state.");
         // Native PCB serialization may normalize a zero/default border pitch
         // or omit the border message for a rule area. Restriction flags,

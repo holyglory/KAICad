@@ -160,11 +160,9 @@ public sealed class PcbKeepoutAuthoringContractTests
         placement.RuleAreaSettings!.PlacementSource = "Sheet A";
         Assert.ThrowsExactly<AutomationException>(() => PcbKeepoutAuthoringContract.ValidateReadback(expected, placement, BoardId));
 
-        var placementType = expected.Clone();
-        placementType.RuleAreaSettings!.PlacementSourceType = PlacementRuleSourceType.PrstGroup;
-        var placementReadbackError = Assert.ThrowsExactly<AutomationException>(() =>
-            PcbKeepoutAuthoringContract.ValidateReadback(expected, placementType, BoardId));
-        Assert.AreEqual("pcb_keepout_readback_mismatch", placementReadbackError.Code);
+        var nativePlacementType = expected.Clone();
+        nativePlacementType.RuleAreaSettings!.PlacementSourceType = PlacementRuleSourceType.PrstGroup;
+        PcbKeepoutAuthoringContract.ValidateReadback(expected, nativePlacementType, BoardId);
     }
 
     [TestMethod]

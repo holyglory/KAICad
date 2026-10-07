@@ -107,7 +107,11 @@ std::map<std::string, std::string> ReadTextVariables( const PROJECT& aProject )
 {
     std::map<std::string, std::string> variables;
     for( const auto& [key, value] : aProject.GetTextVars() )
-        variables.emplace( key.ToUTF8().ToStdString(), value.ToUTF8().ToStdString() );
+    {
+        const wxScopedCharBuffer keyUtf8 = key.ToUTF8();
+        const wxScopedCharBuffer valueUtf8 = value.ToUTF8();
+        variables.emplace( keyUtf8.data() ? keyUtf8.data() : "", valueUtf8.data() ? valueUtf8.data() : "" );
+    }
     return variables;
 }
 

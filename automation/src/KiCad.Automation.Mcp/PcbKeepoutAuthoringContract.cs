@@ -29,12 +29,11 @@ internal static class PcbKeepoutAuthoringContract
     {
         if (expected is null || expected.Scope != DocumentLifecycleScope.DlsPcb
             || expected.Document is null || !expected.Document.Equals(document)
-            || string.IsNullOrWhiteSpace(expected.ProcessEpoch)
-            || !Guid.TryParseExact(expected.ProcessEpoch, "D", out var processEpoch) || processEpoch == Guid.Empty
-            || string.IsNullOrWhiteSpace(expected.NativeIdentity)
-            || !Guid.TryParseExact(expected.NativeIdentity, "D", out var nativeIdentity) || nativeIdentity == Guid.Empty
+            || !CanonicalUuid(expected.ProcessEpoch)
+            || !CanonicalUuid(expected.NativeIdentity)
             || expected.Revision is null
-            || !Guid.TryParseExact(expected.Revision.Epoch, "D", out var revisionEpoch) || revisionEpoch == Guid.Empty
+            || !CanonicalUuid(expected.Revision.Epoch)
+            || expected.Revision.Epoch != expected.NativeIdentity
             || expected.StateSha256.Length != 64 || !expected.StateSha256.All(char.IsAsciiHexDigitLower))
             throw new AutomationException("invalid_pcb_keepout_state",
                 "expectedStateJson must identify the same PCB with a complete native lifecycle revision and digest.");
@@ -42,8 +41,7 @@ internal static class PcbKeepoutAuthoringContract
 
     internal static void ValidateOperationId(string operationId)
     {
-        if (!Guid.TryParseExact(operationId, "D", out var value) || value == Guid.Empty
-            || !string.Equals(operationId, value.ToString("D"), StringComparison.Ordinal))
+        if (!CanonicalUuid(operationId))
             throw new AutomationException("invalid_pcb_keepout_operation", "Keepout authoring requires a canonical operation UUID.");
     }
 
@@ -60,15 +58,20 @@ internal static class PcbKeepoutAuthoringContract
 
     internal static void ValidateDeleteId(string keepoutId)
     {
-        if (!Guid.TryParseExact(keepoutId, "D", out var value) || value == Guid.Empty)
+        if (!CanonicalUuid(keepoutId))
             throw new AutomationException("invalid_pcb_keepout_identity", "Supply one canonical keepout UUID.");
     }
+
+    internal static bool CanonicalUuid(string? value) => !string.IsNullOrWhiteSpace(value)
+        && Guid.TryParseExact(value, "D", out var id)
+        && id != Guid.Empty
+        && string.Equals(id.ToString("D"), value, StringComparison.Ordinal);
 
     private static void ValidateZone(Zone? zone, bool requireIdentity, bool allowNativeParent, string? nativeIdentity, bool allowDerivedFill = false)
     {
         if (zone is null)
             throw new AutomationException("invalid_pcb_keepout", "Supply one typed PCB keepout.");
-        if (requireIdentity && (zone.Id is null || !Guid.TryParseExact(zone.Id.Value, "D", out var id) || id == Guid.Empty))
+        if (requireIdentity && (zone.Id is null || !CanonicalUuid(zone.Id.Value)))
             throw new AutomationException("invalid_pcb_keepout_identity", "The keepout needs one canonical UUID.");
         if (zone.Type != ZoneType.ZtRuleArea)
             throw new AutomationException("unsupported_pcb_keepout_type", "This authoring surface accepts PCB rule areas (keepouts) only.");
@@ -101,7 +104,7 @@ internal static class PcbKeepoutAuthoringContract
         {
             if (!allowNativeParent)
                 throw new AutomationException("unsupported_pcb_keepout_parent", "A keepout parent is native-owned and cannot be authored.");
-            if (string.IsNullOrWhiteSpace(nativeIdentity) || zone.Parent.Value != nativeIdentity)
+            if (!CanonicalUuid(nativeIdentity) || zone.Parent.Value != nativeIdentity)
                 throw new AutomationException("unsupported_pcb_keepout_parent", "The existing keepout belongs to a different native board container.");
         }
 
@@ -111,10 +114,11 @@ internal static class PcbKeepoutAuthoringContract
         if (!settings.KeepoutCopper && !settings.KeepoutVias && !settings.KeepoutTracks
             && !settings.KeepoutPads && !settings.KeepoutFootprints)
             throw new AutomationException("invalid_pcb_keepout_settings", "A keepout must disallow at least one native object class.");
-        if (settings.PlacementEnabled || !string.IsNullOrWhiteSpace(settings.PlacementSource))
-            throw new AutomationException("unsupported_pcb_keepout_placement", "Placement-owned rule areas are not accepted by this keepout authoring surface.");
         if (!Enum.IsDefined(settings.PlacementSourceType))
             throw new AutomationException("invalid_pcb_keepout_settings", "RuleAreaSettings.PlacementSourceType must be a defined native enum value.");
+        if (settings.PlacementEnabled || !string.IsNullOrWhiteSpace(settings.PlacementSource)
+            || settings.PlacementSourceType != PlacementRuleSourceType.PrstUnknown)
+            throw new AutomationException("unsupported_pcb_keepout_placement", "Placement-owned rule areas are not accepted by this keepout authoring surface.");
         if (zone.Border is not null && !Enum.IsDefined(zone.Border.Style))
             throw new AutomationException("invalid_pcb_keepout_settings", "Keepout border style must be a defined native enum value.");
         ValidateDistance(zone.Border?.Pitch, "borderPitch");
@@ -199,7 +203,9 @@ internal static class PcbKeepoutAuthoringContract
             || expectedSettings.KeepoutPads != actualSettings.KeepoutPads
             || expectedSettings.KeepoutFootprints != actualSettings.KeepoutFootprints
             || actualSettings.PlacementEnabled
-            || !string.IsNullOrWhiteSpace(actualSettings.PlacementSource))
+            || !string.IsNullOrWhiteSpace(actualSettings.PlacementSource)
+            || !Enum.IsDefined(actualSettings.PlacementSourceType)
+            || actualSettings.PlacementSourceType != PlacementRuleSourceType.PrstUnknown)
             throw new AutomationException("pcb_keepout_readback_mismatch", "Native readback changed keepout restrictions or returned placement-owned rule-area state.");
         // Native PCB serialization may normalize a zero/default border pitch
         // or omit the border message for a rule area. Restriction flags,

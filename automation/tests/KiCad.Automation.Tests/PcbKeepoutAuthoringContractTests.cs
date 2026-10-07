@@ -76,6 +76,24 @@ public sealed class PcbKeepoutAuthoringContractTests
         var placement = Keepout();
         placement.RuleAreaSettings!.PlacementEnabled = true;
         Assert.ThrowsExactly<AutomationException>(() => PcbKeepoutAuthoringContract.ValidateCreate(placement));
+
+        var placementSourceType = Keepout();
+        placementSourceType.RuleAreaSettings!.PlacementSourceType = PlacementRuleSourceType.PrstSheetName;
+        var placementError = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbKeepoutAuthoringContract.ValidateCreate(placementSourceType));
+        Assert.AreEqual("unsupported_pcb_keepout_placement", placementError.Code);
+
+        var malformedPlacementType = Keepout();
+        malformedPlacementType.RuleAreaSettings!.PlacementSourceType = (PlacementRuleSourceType)999;
+        var placementTypeError = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbKeepoutAuthoringContract.ValidateCreate(malformedPlacementType));
+        Assert.AreEqual("invalid_pcb_keepout_settings", placementTypeError.Code);
+
+        var derivedFill = Keepout();
+        derivedFill.FilledPolygons.Add(new ZoneFilledPolygons { Layer = BoardLayer.BlFCu, Shapes = new PolySet() });
+        var fillError = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbKeepoutAuthoringContract.ValidateCreate(derivedFill));
+        Assert.AreEqual("unsupported_pcb_keepout_fill", fillError.Code);
     }
 
     [TestMethod]
@@ -116,13 +134,20 @@ public sealed class PcbKeepoutAuthoringContractTests
         {
             Document = document,
             Scope = DocumentLifecycleScope.DlsPcb,
-            ProcessEpoch = "44444444-4444-4444-4444-444444444444",
+            ProcessEpoch = "a4444444-4444-4444-4444-444444444444",
             NativeIdentity = BoardId,
             StateSha256 = new string('a', 64),
             Revision = new() { Epoch = BoardId, Sequence = 4 }
         };
         PcbKeepoutAuthoringContract.ValidateDocument(document);
         PcbKeepoutAuthoringContract.ValidateState(document, state);
+
+        var uppercaseEpoch = state.Clone();
+        uppercaseEpoch.ProcessEpoch = state.ProcessEpoch.ToUpperInvariant();
+        Assert.ThrowsExactly<AutomationException>(() => PcbKeepoutAuthoringContract.ValidateState(document, uppercaseEpoch));
+        var wrongRevisionEpoch = state.Clone();
+        wrongRevisionEpoch.Revision.Epoch = "66666666-6666-6666-6666-666666666666";
+        Assert.ThrowsExactly<AutomationException>(() => PcbKeepoutAuthoringContract.ValidateState(document, wrongRevisionEpoch));
 
         var expected = Keepout();
         var actual = expected.Clone();
@@ -134,6 +159,34 @@ public sealed class PcbKeepoutAuthoringContractTests
         var placement = expected.Clone();
         placement.RuleAreaSettings!.PlacementSource = "Sheet A";
         Assert.ThrowsExactly<AutomationException>(() => PcbKeepoutAuthoringContract.ValidateReadback(expected, placement, BoardId));
+
+        var placementType = expected.Clone();
+        placementType.RuleAreaSettings!.PlacementSourceType = PlacementRuleSourceType.PrstGroup;
+        var placementReadbackError = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbKeepoutAuthoringContract.ValidateReadback(expected, placementType, BoardId));
+        Assert.AreEqual("pcb_keepout_readback_mismatch", placementReadbackError.Code);
+    }
+
+    [TestMethod]
+    public void KeepoutContractRequiresCanonicalPayloadAndDeleteIdentity()
+    {
+        var uppercaseInput = new PcbKeepoutAuthoringInput
+        {
+            Id = "a1111111-1111-1111-1111-111111111111".ToUpperInvariant(),
+            Layers = ["F.Cu"],
+            Polygons = [new PcbKeepoutPolygonInput
+            {
+                Outline = [new() { XNm = 0, YNm = 0 }, new() { XNm = 20_000, YNm = 0 }, new() { XNm = 0, YNm = 20_000 }]
+            }],
+            KeepoutTracks = true
+        };
+        var inputError = Assert.ThrowsExactly<AutomationException>(() => uppercaseInput.ToNative());
+        Assert.AreEqual("invalid_pcb_keepout_identity", inputError.Code);
+
+        Assert.ThrowsExactly<AutomationException>(() =>
+            PcbKeepoutAuthoringContract.ValidateDeleteId("a1111111-1111-1111-1111-111111111111".ToUpperInvariant()));
+        Assert.ThrowsExactly<AutomationException>(() =>
+            PcbKeepoutAuthoringContract.ValidateDeleteId(Guid.Empty.ToString("D")));
     }
 
     private static Zone Keepout()

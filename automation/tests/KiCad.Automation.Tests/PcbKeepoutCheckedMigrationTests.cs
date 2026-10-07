@@ -133,6 +133,52 @@ public sealed class PcbKeepoutCheckedMigrationTests
         finally { Directory.Delete(root, true); }
     }
 
+    [TestMethod]
+    public async Task UpdateReplayUsesCanonicalRequestAndRefusesChangedPayload()
+    {
+        string root = Directory.CreateTempSubdirectory("pcb-keepout-checked-replay-binding-").FullName;
+        try
+        {
+            var transport = new KeepoutTransport();
+            var registry = new InstanceRegistry(transport, root);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(root, "native.sock")), transport.InstanceId);
+            var tools = new PcbKeepoutAuthoringTools(registry);
+            var state = State(root, transport.Epoch, sequence: 11, digest: 'e');
+            transport.LifecycleState = state;
+            var input = Input(Guid.NewGuid().ToString("D"));
+            transport.Existing = input.ToNative();
+            string document = SchematicJson.Formatter.Format(state.Document);
+            string expected = SchematicJson.Formatter.Format(state);
+            string operationId = Guid.NewGuid().ToString("D");
+
+            var first = await tools.Update(transport.InstanceId, document, input, expected, operationId, default);
+            Assert.IsFalse(first.IsError ?? false, Text(first));
+
+            var equivalentInput = JsonSerializer.Deserialize<PcbKeepoutAuthoringInput>(
+                JsonSerializer.Serialize(input))!;
+            var equivalentState = SchematicJson.Parser.Parse<DocumentLifecycleState>(
+                SchematicJson.Formatter.Format(state));
+            var replay = await tools.Update(transport.InstanceId,
+                SchematicJson.Formatter.Format(equivalentState.Document), equivalentInput,
+                SchematicJson.Formatter.Format(equivalentState), operationId, default);
+            Assert.IsFalse(replay.IsError ?? false, Text(replay));
+            Assert.IsTrue(JsonSerializer.SerializeToElement(replay.StructuredContent)
+                .GetProperty("replayed").GetBoolean(), Text(replay));
+
+            var changedInput = JsonSerializer.Deserialize<PcbKeepoutAuthoringInput>(
+                JsonSerializer.Serialize(input))!;
+            changedInput.Name = "different operation payload";
+            var refused = await tools.Update(transport.InstanceId, document, changedInput,
+                expected, operationId, default);
+            Assert.IsTrue(refused.IsError ?? false, Text(refused));
+            JsonElement refusedData = JsonSerializer.SerializeToElement(refused.StructuredContent);
+            Assert.AreEqual("invalid_operation_replay", refusedData.GetProperty("errorCode").GetString(), Text(refused));
+            Assert.AreEqual(1, transport.ItemReads, "Replay binding must not reread the live target.");
+            Assert.AreEqual(1, transport.CheckedMutations, "Replay binding must not resubmit a changed request.");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
     private static PcbKeepoutAuthoringInput Input(string id) => new()
     {
         Id = id,
@@ -335,5 +381,5 @@ public sealed class PcbKeepoutCheckedMigrationTests
         {
             Header = new() { KicadToken = Epoch }, Status = new() { Status = (ApiStatusCode) 3, ErrorMessage = message }
         }.ToByteArray());
+        }
     }
-}

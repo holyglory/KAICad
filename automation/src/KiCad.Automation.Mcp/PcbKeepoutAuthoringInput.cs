@@ -44,7 +44,7 @@ public sealed class PcbKeepoutAuthoringInput
 
     internal Zone ToNative()
     {
-        if (!Guid.TryParseExact(Id, "D", out var id) || id == Guid.Empty)
+        if (!PcbKeepoutAuthoringContract.CanonicalUuid(Id))
             throw new AutomationException("invalid_pcb_keepout_identity", "The keepout needs one canonical UUID.");
         if (Layers is null || Layers.Count == 0)
             throw new AutomationException("invalid_pcb_keepout_layers", "Supply at least one physical board layer.");

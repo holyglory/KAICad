@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
 using System.ComponentModel;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
@@ -28,7 +30,7 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
     // inspection can replay it without rereading a target that may no longer
     // be available after a lost reply. The native receipt remains authoritative
     // for settlement; this cache only reconstructs its exact request envelope.
-    private readonly ConcurrentDictionary<string, CachedCheckedRequest> checkedRequests = new(StringComparer.Ordinal);
+    private static readonly ConcurrentDictionary<string, CachedCheckedRequest> checkedRequests = new(StringComparer.Ordinal);
 
     [McpServerTool(Name = "kicad_pcb_keepout_read", ReadOnly = true),
      Description("Read one typed native keepout by canonical KIID at an exact PCB lifecycle checkpoint. documentJson identifies the board, keepoutId identifies one rule area, and expectedStateJson must carry the matching process epoch, revision and digest. Derived fill polygons and parent links are returned as native state but are never treated as authoring input."),
@@ -39,7 +41,7 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
         Execute(() => ReadCore(instanceId, documentJson, keepoutId, expectedStateJson, cancellationToken));
 
     [McpServerTool(Name = "kicad_pcb_keepout_create"),
-     Description("Create one typed keepout through KiCad's native board API. keepout is task-oriented input with a canonical UUID, explicit physical layers, closed point-only polygon rings, a name, border settings and five explicit keepout flags; documentJson and expectedStateJson identify the exact board checkpoint. Placement ownership and derived fill polygons are unavailable in this input. The native operation is undoable and lifecycle-guarded; operationId is retained by the native checked receipt so an identical request can be replayed safely after a lost reply."),
+     Description("Create one typed keepout through KiCad's native checked PCB item transaction. keepout is task-oriented input with a canonical UUID, explicit physical layers, closed point-only polygon rings, a name, border settings and five explicit routing restrictions for copper, vias, tracks, pads and footprints; documentJson and expectedStateJson identify the exact board checkpoint. Placement-owned fields, parent links and derived fill polygons are unavailable in this input and rejected from native readback when they are not board-owned. The operation is undoable, lifecycle-guarded and replay-safe through its retained native receipt. This contract does not qualify routing or DRC enforcement."),
      KiCadCapability("pcb-keepouts", "compiled-mcp plus-native-board-api", "outcome:p079fb6adb164b14c; explicit PCB document, typed keepout input, process epoch, lifecycle revision and digest, operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbKeepoutMcpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Create(string instanceId, string documentJson, PcbKeepoutAuthoringInput keepout,
@@ -48,7 +50,7 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
             KeepoutMutation.Create, cancellationToken));
 
     [McpServerTool(Name = "kicad_pcb_keepout_update"),
-     Description("Update one existing typed keepout through KiCad's native board API. keepout is task-oriented input and must retain the existing canonical UUID; the target must already be a native rule area with no placement ownership, and the board must still equal expectedStateJson. The update is one undoable lifecycle-guarded transaction. Native-derived fill polygons and parent links are preserved rather than silently overwritten."),
+     Description("Update one existing typed keepout through KiCad's native checked PCB item transaction. keepout is task-oriented input and must retain the existing canonical UUID; the target must already be a native rule area with no placement ownership, and the board must still equal expectedStateJson. The update is one undoable lifecycle-guarded transaction. Native-owned layer properties, custom properties, lock state and priority are preserved; placement-owned fields, parent links and derived fill polygons are never authored. This contract does not qualify routing or DRC enforcement."),
      KiCadCapability("pcb-keepouts", "compiled-mcp plus-native-board-api", "outcome:p079fb6adb164b14c; explicit PCB document, typed keepout input and KIID, process epoch, lifecycle revision and digest, operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbKeepoutMcpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Update(string instanceId, string documentJson, PcbKeepoutAuthoringInput keepout,
@@ -57,7 +59,7 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
             KeepoutMutation.Update, cancellationToken));
 
     [McpServerTool(Name = "kicad_pcb_keepout_delete"),
-     Description("Delete one explicitly identified native keepout by canonical KIID. The target is read and required to be a rule area before a lifecycle-checked undoable native transaction is dispatched; documentJson and expectedStateJson guard the exact PCB revision. The checked receipt retains operationId and the exact result for safe replay after a lost reply."),
+     Description("Delete one explicitly identified native keepout by canonical KIID. The target is read and required to be a rule area without placement ownership before a lifecycle-checked undoable native transaction is dispatched; documentJson and expectedStateJson guard the exact PCB revision. The checked receipt retains operationId and the exact result for safe replay after a lost reply. This contract does not qualify routing or DRC enforcement."),
      KiCadCapability("pcb-keepouts", "compiled-mcp plus-native-board-api", "outcome:p079fb6adb164b14c; explicit PCB document, keepout KIID, process epoch, lifecycle revision and digest, operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbKeepoutMcpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Delete(string instanceId, string documentJson, string keepoutId,
@@ -172,10 +174,12 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
             // replay settlement path. Mark the mapped result so the public
             // response distinguishes it from a first-call receipt.
             inspected.Receipt.Replayed = true;
-            return KeepoutMutationData(inspected, mutation, targetId);
+            return KeepoutMutationData(inspected, mutation, targetId,
+                AuthoredKeepout(rawRequest, mutation));
         }
         if (inspected.ErrorCode is not null)
-            return KeepoutMutationData(inspected, mutation, targetId);
+            return KeepoutMutationData(inspected, mutation, targetId,
+                AuthoredKeepout(rawRequest, mutation));
 
         // Rule-area validation and the safe update merge retain the old
         // keepout authoring semantics. The checked native controller performs
@@ -212,10 +216,11 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
         if (mutation == KeepoutMutation.Update)
         {
             checkedRequests[CacheKey(instanceId, operationId)] = new CachedCheckedRequest(
-                mutation, targetId, requestedZone!.Clone(), callerExpected, checkedRequest.Clone());
+                mutation, targetId, Fingerprint(callerExpected), Fingerprint(requestedZone!), checkedRequest.Clone());
         }
         var outcome = await PcbCheckedItemDispatch.ApplyAsync(registry, instanceId, checkedRequest, cancellationToken);
-        return KeepoutMutationData(outcome, mutation, targetId);
+        return KeepoutMutationData(outcome, mutation, targetId,
+            AuthoredKeepout(checkedRequest, mutation));
     }
 
     private bool TryCachedUpdate(string instanceId, string operationId, string targetId,
@@ -227,16 +232,29 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
             || !checkedRequests.TryGetValue(CacheKey(instanceId, operationId), out var cached)
             || cached.Mutation != KeepoutMutation.Update
             || cached.TargetId != targetId
-            || !cached.CallerExpected.Equals(callerExpected)
-            || !cached.RequestedZone.Equals(requestedZone)
+            || cached.CallerExpectedFingerprint != Fingerprint(callerExpected)
+            || cached.RequestedZoneFingerprint != Fingerprint(requestedZone)
             || cached.Request.ProcessEpoch != callerExpected.ProcessEpoch)
+        {
+            if (checkedRequests.ContainsKey(CacheKey(instanceId, operationId)))
+                throw new AutomationException("invalid_operation_replay",
+                    "operationId is already bound to a different PCB keepout request or lifecycle checkpoint.");
             return false;
+        }
 
         request = cached.Request.Clone();
         return true;
     }
 
     private static string CacheKey(string instanceId, string operationId) => instanceId + "\0" + operationId;
+
+    private static string Fingerprint(DocumentLifecycleState state) =>
+        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+            SchematicJson.Formatter.Format(state))));
+
+    private static string Fingerprint(Zone zone) =>
+        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+            BoardJson.Formatter.Format(zone))));
 
     private static CheckedPcbItemTransaction CheckedRequest(DocumentLifecycleState expected,
         string processEpoch, PcbItemOperation operation, string operationId)
@@ -262,8 +280,45 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
         && CheckedSchematicContract.FileCoverage(expected)
         && CheckedSchematicContract.FileCoverage(actual);
 
+    private static Zone? AuthoredKeepout(CheckedPcbItemTransaction request, KeepoutMutation mutation)
+    {
+        if (mutation == KeepoutMutation.Delete || request.Operations.Count == 0)
+            return null;
+
+        PcbItemOperation operation = request.Operations[0];
+        Any? item = operation.ActionCase switch
+        {
+            PcbItemOperation.ActionOneofCase.Create when operation.Create.Items.Count == 1
+                => operation.Create.Items[0],
+            PcbItemOperation.ActionOneofCase.Update when operation.Update.Items.Count == 1
+                => operation.Update.Items[0],
+            _ => null
+        };
+        return item is not null && item.Is(Zone.Descriptor) ? item.Unpack<Zone>() : null;
+    }
+
+    private static Zone? CommittedKeepout(CheckedPcbItemTransactionReceipt receipt,
+        KeepoutMutation mutation)
+    {
+        if (receipt.Results.Count == 0)
+            return null;
+
+        PcbItemOperationResult result = receipt.Results[0];
+        Any? item = mutation switch
+        {
+            KeepoutMutation.Create when result.ResultCase == PcbItemOperationResult.ResultOneofCase.Create
+                && result.Create.CreatedItems.Count == 1
+                => result.Create.CreatedItems[0].Item,
+            KeepoutMutation.Update when result.ResultCase == PcbItemOperationResult.ResultOneofCase.Update
+                && result.Update.UpdatedItems.Count == 1
+                => result.Update.UpdatedItems[0].Item,
+            _ => null
+        };
+        return item is not null && item.Is(Zone.Descriptor) ? item.Unpack<Zone>() : null;
+    }
+
     private static CallToolResult KeepoutMutationData(PcbCheckedItemDispatch.Outcome outcome,
-        KeepoutMutation mutation, string targetId)
+        KeepoutMutation mutation, string targetId, Zone? authoredKeepout)
     {
         CheckedPcbItemTransactionReceipt? receipt = outcome.Receipt;
         JsonElement? receiptJson = receipt is null || outcome.UntrustedReceipt
@@ -289,6 +344,32 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
         }
 
         bool success = outcome.Completed;
+        bool authoredReadbackVerified = false;
+        AutomationException? readbackError = null;
+        if (success && authoredKeepout is not null && receipt is not null && !outcome.UntrustedReceipt)
+        {
+            try
+            {
+                Zone? committedKeepout = CommittedKeepout(receipt, mutation);
+                if (committedKeepout is null)
+                    throw new AutomationException("pcb_keepout_readback_mismatch",
+                        "The checked native receipt did not return the committed PCB keepout.");
+                PcbKeepoutAuthoringContract.ValidateReadback(authoredKeepout, committedKeepout,
+                    receipt.ObservedAfter?.NativeIdentity ?? receipt.ObservedBefore?.NativeIdentity);
+                authoredReadbackVerified = true;
+            }
+            catch (AutomationException error)
+            {
+                readbackError = error;
+            }
+        }
+        // A completed native receipt proves settlement, while authoredReadbackVerified
+        // proves that the native result retained the requested restrictions, layers and
+        // outline. Keep those claims separate so a corrupt receipt cannot look verified.
+        bool postCommitVerified = success
+            && receipt?.PostCommitState == CheckedPcbItemPostCommitState.CpbpsConfirmed
+            && (authoredKeepout is null || authoredReadbackVerified);
+        bool resultAccepted = success && (authoredKeepout is null || authoredReadbackVerified);
         string settlement = receipt?.State switch
         {
             CheckedPcbItemTransactionState.CpbtsCompleted => "committed",
@@ -318,7 +399,8 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
             afterState = after,
             response,
             mutationConfirmed = success,
-            postCommitVerified = success && receipt?.PostCommitState == CheckedPcbItemPostCommitState.CpbpsConfirmed,
+            authoredReadbackVerified,
+            postCommitVerified,
             undoableTransaction = outcome.NativeReceiptAvailable,
             atomicTransaction = true,
             transactionBoundary = "native checked PCB item transaction",
@@ -327,12 +409,12 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
             transportRetrySafe = outcome.NativeReceiptAvailable,
             operationIdCorrelationOnly = false,
             settlement,
-            errorCode = success ? null : outcome.ErrorCode,
-            errorMessage = success ? null : outcome.ErrorMessage
+            errorCode = readbackError?.Code ?? (success ? null : outcome.ErrorCode),
+            errorMessage = readbackError?.Message ?? (success ? null : outcome.ErrorMessage)
         });
         return new CallToolResult
         {
-            IsError = !success,
+            IsError = !resultAccepted,
             StructuredContent = data,
             Content = [new TextContentBlock { Text = data.GetRawText() }]
         };
@@ -455,7 +537,7 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
     private sealed record CachedCheckedRequest(
         KeepoutMutation Mutation,
         string TargetId,
-        Zone RequestedZone,
-        DocumentLifecycleState CallerExpected,
+        string CallerExpectedFingerprint,
+        string RequestedZoneFingerprint,
         CheckedPcbItemTransaction Request);
 }

@@ -161,7 +161,8 @@ internal static class PcbManufacturingContract
 
     private static void CanonicalUuid(string value, string name)
     {
-        if (!Guid.TryParseExact(value, "D", out Guid id) || id == Guid.Empty)
+        if (!Guid.TryParseExact(value, "D", out Guid id) || id == Guid.Empty
+            || !string.Equals(value, id.ToString("D"), StringComparison.Ordinal))
             throw Invalid($"The manufacturing {name} must be a nonempty canonical UUID.");
     }
 

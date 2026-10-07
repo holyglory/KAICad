@@ -103,6 +103,21 @@ public sealed class PcbManufacturingContractTests
         RejectRequest(relativeOutput);
     }
 
+    [TestMethod]
+    public void RequestIdentityRequiresCanonicalLowercaseOperationAndProcessIds()
+    {
+        var (request, _) = Fixture();
+
+        var uppercaseOperation = request.Clone();
+        uppercaseOperation.OperationId = "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA";
+        RejectRequest(uppercaseOperation);
+
+        var uppercaseProcess = request.Clone();
+        uppercaseProcess.ProcessEpoch = "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB";
+        uppercaseProcess.ExpectedState.ProcessEpoch = uppercaseProcess.ProcessEpoch;
+        RejectRequest(uppercaseProcess);
+    }
+
     private static void Reject(PcbManufacturingExportReceipt receipt,
         RunPcbManufacturingExport request, string code)
     {

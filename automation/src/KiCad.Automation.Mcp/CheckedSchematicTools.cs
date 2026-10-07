@@ -1,7 +1,9 @@
 using System.ComponentModel;
 using System.Text.Json;
 using Google.Protobuf;
+using Google.Protobuf.WellKnownTypes;
 using Kiapi.Common.Types;
+using Kiapi.Schematic.Types;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
@@ -166,7 +168,7 @@ public sealed class CheckedSchematicTools(InstanceRegistry registry)
                     EmbeddedFonts = embeddedFonts
                 }
             });
-            return await Run(instanceId, SchematicJson.Formatter.Format(request), inspect: false, cancellationToken);
+        return await Run(instanceId, SchematicJson.Formatter.Format(request), inspect: false, cancellationToken);
         }
         catch (Exception error) when (error is AutomationException or InvalidProtocolBufferException
             or InvalidJsonException or InvalidOperationException or NngException or NativeApiException)
@@ -188,6 +190,110 @@ public sealed class CheckedSchematicTools(InstanceRegistry registry)
             };
         }
     }
+
+    [McpServerTool(Name = "kicad_schematic_create_image"),
+     Description("Create one typed schematic image through the checked native batch path. imageJson is a complete SchematicImage with a canonical UUID, position, positive scale and bounded PNG/JPEG bytes; documentJson and expectedStateJson bind the exact root revision, and operationId provides receipt replay. The edit is undoable and remains unsaved until kicad_document_save."),
+     KiCadCapability("schematic-design", "native-api", "explicit root document, lifecycle checkpoint, complete image payload and operation UUID"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> CreateImage(string instanceId, string documentJson, string expectedStateJson,
+        string imageJson, string operationId, CancellationToken cancellationToken) =>
+        ExecuteImageMutation(instanceId, documentJson, expectedStateJson, imageJson, null, operationId,
+            ImageMutation.Create, cancellationToken);
+
+    [McpServerTool(Name = "kicad_schematic_update_image"),
+     Description("Replace one existing typed schematic image through the checked native batch path. imageJson must retain the existing canonical UUID and carry bounded image bytes; documentJson and expectedStateJson bind the exact root revision, and operationId provides receipt replay. The edit is undoable and remains unsaved until kicad_document_save."),
+     KiCadCapability("schematic-design", "native-api", "explicit root document, lifecycle checkpoint, complete image payload and operation UUID"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> UpdateImage(string instanceId, string documentJson, string expectedStateJson,
+        string imageJson, string operationId, CancellationToken cancellationToken) =>
+        ExecuteImageMutation(instanceId, documentJson, expectedStateJson, imageJson, null, operationId,
+            ImageMutation.Update, cancellationToken);
+
+    [McpServerTool(Name = "kicad_schematic_delete_image"),
+     Description("Delete one explicitly identified schematic image through the checked native batch path. imageId must be the canonical UUID observed in the root schematic state; documentJson and expectedStateJson bind the exact revision, and operationId provides receipt replay. The edit is undoable and remains unsaved until kicad_document_save."),
+     KiCadCapability("schematic-design", "native-api", "explicit root document, lifecycle checkpoint, image UUID and operation UUID"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> DeleteImage(string instanceId, string documentJson, string expectedStateJson,
+        string imageId, string operationId, CancellationToken cancellationToken) =>
+        ExecuteImageMutation(instanceId, documentJson, expectedStateJson, null, imageId, operationId,
+            ImageMutation.Delete, cancellationToken);
+
+    private enum ImageMutation { Create, Update, Delete }
+
+    private async Task<CallToolResult> ExecuteImageMutation(string instanceId, string documentJson,
+        string expectedStateJson, string? imageJson, string? imageId, string operationId,
+        ImageMutation mutation, CancellationToken cancellationToken)
+    {
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            DocumentSpecifier document = ParseDocument(documentJson, "documentJson");
+            DocumentLifecycleState expected = SchematicJson.Parser.Parse<DocumentLifecycleState>(expectedStateJson);
+            if (document.Type != DocumentType.DoctypeSchematic || document.SheetPath?.Path.Count != 1
+                || !expected.Document.Equals(document) || expected.Scope != DocumentLifecycleScope.DlsSchematicHierarchy
+                || string.IsNullOrWhiteSpace(expected.ProcessEpoch) || expected.Revision is null)
+                throw new AutomationException("invalid_schematic_image_state", "Image mutation requires the explicit schematic root and a matching lifecycle checkpoint.");
+            if (!Guid.TryParseExact(operationId, "D", out var operation) || operation == Guid.Empty
+                || !string.Equals(operationId, operation.ToString("D"), StringComparison.Ordinal))
+                throw new AutomationException("invalid_operation_id", "operationId must be a canonical UUID.");
+
+            var batch = new ApplySchematicItemBatch
+            {
+                Document = document.Clone(), DocumentEpoch = expected.Revision.Epoch,
+                ExpectedRevision = expected.Revision.Clone(), OperationId = operationId,
+                Description = "MCP typed schematic image " + mutation.ToString().ToLowerInvariant()
+            };
+            if (mutation == ImageMutation.Delete)
+            {
+                if (!CanonicalUuid(imageId))
+                    throw new AutomationException("invalid_schematic_image_id", "imageId must be a canonical UUID.");
+                batch.Operations.Add(new SchematicItemOperation { Remove = new KIID { Value = imageId } });
+            }
+            else
+            {
+                SchematicImage image = SchematicJson.Parser.Parse<SchematicImage>(imageJson ?? "{}");
+                ValidateImage(image);
+                batch.Operations.Add(new SchematicItemOperation
+                {
+                    Create = mutation == ImageMutation.Create ? Any.Pack(image) : null,
+                    Update = mutation == ImageMutation.Update ? Any.Pack(image) : null
+                });
+            }
+            return await Run(instanceId, SchematicJson.Formatter.Format(new CheckedSchematicBatch
+            {
+                Batch = batch, ExpectedState = expected.Clone()
+            }), inspect: false, cancellationToken);
+        }
+        catch (Exception error) when (error is AutomationException or InvalidProtocolBufferException
+            or InvalidJsonException or InvalidOperationException or NngException or NativeApiException)
+        {
+            string code = error is AutomationException known ? known.Code
+                : error is NativeApiException native ? "native_status_" + native.Status
+                : error is NngException transport ? "transport_status_" + transport.ErrorCode
+                : "invalid_schematic_image";
+            JsonElement data = JsonSerializer.SerializeToElement(new
+            {
+                instanceId, operationId, mutationSubmitted = false,
+                outcome = "not_submitted", errorCode = code, errorMessage = error.Message
+            });
+            return new CallToolResult { IsError = true, StructuredContent = data,
+                Content = [new TextContentBlock { Text = data.GetRawText() }] };
+        }
+    }
+
+    private static void ValidateImage(SchematicImage image)
+    {
+        if (!CanonicalUuid(image.Id?.Value))
+            throw new AutomationException("invalid_schematic_image_id", "imageJson must carry a canonical image UUID.");
+        if (image.ImageData.Length is < 1 or > 32 * 1024 * 1024)
+            throw new AutomationException("invalid_schematic_image_data", "imageJson must carry between 1 byte and 32 MiB of image data.");
+        if (image.ImageScale is null || !double.IsFinite(image.ImageScale.Value) || image.ImageScale.Value <= 0)
+            throw new AutomationException("invalid_schematic_image_scale", "imageJson must carry a positive finite image scale.");
+    }
+
+    private static bool CanonicalUuid(string? value) => value is not null
+        && Guid.TryParseExact(value, "D", out var id) && id != Guid.Empty
+        && string.Equals(value, id.ToString("D"), StringComparison.Ordinal);
 
     [McpServerTool(Name = "kicad_schematic_checked_batch_receipt", ReadOnly = true),
      Description("Inspect the process-owned receipt for an exact CheckedSchematicBatch requestJson and instance ID. Does not submit or repeat a mutation. The original process, operation UUID, document and complete request must match; missing receipts remain not-found, and indeterminate results require reconciliation rather than a new operation ID. Receipts do not prove that the live document has not changed since the recorded operation."),

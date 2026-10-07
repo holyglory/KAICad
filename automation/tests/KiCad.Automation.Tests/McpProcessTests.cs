@@ -63,6 +63,9 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_artwork_raster_trace");
             CollectionAssert.Contains(names, "kicad_artwork_raster_project");
             CollectionAssert.Contains(names, "kicad_schematic_replace_embedded_files");
+            CollectionAssert.Contains(names, "kicad_schematic_create_image");
+            CollectionAssert.Contains(names, "kicad_schematic_update_image");
+            CollectionAssert.Contains(names, "kicad_schematic_delete_image");
             CollectionAssert.Contains(names, "kicad_pcb_zone_read");
             CollectionAssert.Contains(names, "kicad_pcb_zone_create");
             CollectionAssert.Contains(names, "kicad_pcb_zone_update");
@@ -130,6 +133,12 @@ public sealed class McpProcessTests
                 instanceId = unknownInstance, documentJson = "{}", expectedStateJson = "{}",
                 embeddedFilesJson = "{}", operationId = unknownOperation, embeddedFonts = false
             } });
+            await Request(9079, "tools/call", new { name = "kicad_schematic_create_image", arguments = new
+            { instanceId = unknownInstance, documentJson = "{}", expectedStateJson = "{}", imageJson = "{}", operationId = unknownOperation } });
+            await Request(9083, "tools/call", new { name = "kicad_schematic_update_image", arguments = new
+            { instanceId = unknownInstance, documentJson = "{}", expectedStateJson = "{}", imageJson = "{}", operationId = unknownOperation } });
+            await Request(9084, "tools/call", new { name = "kicad_schematic_delete_image", arguments = new
+            { instanceId = unknownInstance, documentJson = "{}", expectedStateJson = "{}", imageId = unknownInstance, operationId = unknownOperation } });
             var rasterTraceSchema = listed.GetProperty("result").GetProperty("tools").EnumerateArray()
                 .Single(tool => tool.GetProperty("name").GetString() == "kicad_artwork_raster_trace")
                 .GetProperty("inputSchema").GetProperty("properties").GetProperty("input");

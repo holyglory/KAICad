@@ -2190,7 +2190,18 @@ SCH_KICAD_SEXPR_CHECKED_WRITE_RESULT SCH_IO_KICAD_SEXPR::SaveSymbolChecked(
         admission->CheckUnchanged();
         result.writeStarted = true;
         m_cache->SetModified();
-        m_cache->Save();
+        // The cache's PRETTIFIED_FILE_OUTPUTFORMATTER has its own observer boundary. Suppress
+        // that inner dispatch so the checked transaction exposes exactly one outer write event
+        // after the atomic save; the caller's AFTER callback can then inject/observe drift before
+        // this method performs post-readback and rollback checks.
+        FILE_WRITE_OBSERVER::BeforeWrite( aLibraryPath );
+        {
+            FILE_WRITE_OBSERVER suppressInnerObserver(
+                    []( const wxString& ) {},
+                    []( const FILE_CONTENT_BASELINE& ) {} );
+            m_cache->Save();
+        }
+        FILE_WRITE_OBSERVER::AfterWrite( FILE_CONTENT_BASELINE::Read( aLibraryPath ) );
         writtenBaselines = admission->Observe();
 
         if( !SameCheckedBaselines( aExpectedBaselines, writtenBaselines, aLibraryPath ) )

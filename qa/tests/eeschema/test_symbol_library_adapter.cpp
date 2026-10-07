@@ -494,7 +494,7 @@ BOOST_AUTO_TEST_CASE( SaveSymbolCheckedVerifiesEntriesAndReportsWriteBoundaries 
     // prove the original definition instead of reporting a false commit.
     std::string postverifyContents;
     FILE_CONTENT_BASELINE postverifyBaseline = FILE_CONTENT_BASELINE::Read( path, &postverifyContents );
-    FILE_CONTENT_BASELINE postverifyTableBaseline = FILE_CONTENT_BASELINE::Read( tableFile.Path() );
+    FILE_CONTENT_BASELINE postverifyTableBaseline = FILE_CONTENT_BASELINE::Read( tablePath );
     const std::vector<FILE_CONTENT_BASELINE> completePostverify { postverifyTableBaseline, postverifyBaseline };
     bool postverifyMutationCalled = false;
     SCH_KICAD_SEXPR_CHECKED_WRITE_RESULT postverifyFailure;

@@ -85,22 +85,121 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
                 if (existing.Fingerprint != fingerprint) throw new AutomationException("operation_id_reused", "operationId is already bound to another artwork commit.");
                 return existing.Result;
             }
-            CallToolResult native = await new PcbItemTools(registry).Create(instanceId, BoardJson.Formatter.Format(create), expectedStateJson, cancellationToken);
-            if (native.IsError ?? false) return native;
-            JsonElement structured = JsonSerializer.SerializeToElement(new
-            {
-                instanceId, processEpoch = expected.ProcessEpoch, document, operationId, assetId, sourceKind,
-                sourceSha256 = actualSha256, sourceArchive = archive, layer = boardLayer.ToString(), segmentCount = create.Items.Count,
-                nativeResult = native.StructuredContent, authoritativeVector = true, electricalValidation = false,
-                manufacturabilityValidation = false, operationReceipt = true, nativeReceiptAvailable = false,
-                replayableWithinProcess = true, receiptScope = "mcp-process"
-            });
-            var result = new CallToolResult { StructuredContent = structured, Content = [new TextContentBlock { Text = structured.GetRawText() }] };
-            Receipts[operationId] = new(fingerprint, result);
+            CheckedPcbItemTransaction checkedRequest = BuildCheckedRequest(expected, create, operationId);
+            PcbCheckedItemDispatch.Outcome outcome = await PcbCheckedItemDispatch.ApplyAsync(
+                registry, instanceId, checkedRequest, cancellationToken);
+            CallToolResult result = ArtworkMutationData(outcome, document, operationId, assetId,
+                sourceKind, actualSha256, archive, boardLayer, create.Items.Count);
+            if (!(result.IsError ?? false)) Receipts[operationId] = new(fingerprint, result);
             return result;
         }
         finally { Gate.Release(); }
     });
+
+    /// <summary>Builds the checked native create transaction without contacting KiCad.</summary>
+    internal static CheckedPcbItemTransaction BuildCheckedRequest(
+        DocumentLifecycleState expected, CreateItems candidate, string operationId)
+    {
+        var request = new CheckedPcbItemTransaction
+        {
+            ExpectedState = expected.Clone(),
+            ProcessEpoch = expected.ProcessEpoch,
+            OperationId = operationId,
+            MaximumResultBytes = 4 * 1024 * 1024,
+            Description = "MCP SVG PCB artwork"
+        };
+        request.Operations.Add(new PcbItemOperation { Create = candidate.Clone() });
+        return request;
+    }
+
+    private static CallToolResult ArtworkMutationData(
+        PcbCheckedItemDispatch.Outcome outcome,
+        DocumentSpecifier document,
+        string operationId,
+        string assetId,
+        string sourceKind,
+        string sourceSha256,
+        string sourceArchive,
+        BoardLayer boardLayer,
+        int segmentCount)
+    {
+        CheckedPcbItemTransactionReceipt? receipt = outcome.Receipt;
+        bool success = outcome.Completed;
+        JsonElement? receiptJson = receipt is null || outcome.UntrustedReceipt
+            ? null : JsonDocument.Parse(SchematicJson.Formatter.Format(receipt)).RootElement.Clone();
+        string? before = receipt?.ObservedBefore is null || outcome.UntrustedReceipt
+            ? null : SchematicJson.Formatter.Format(receipt.ObservedBefore);
+        string? after = receipt?.ObservedAfter is null || outcome.UntrustedReceipt
+            ? receipt?.ObservedRollback is null || outcome.UntrustedReceipt
+                ? null : SchematicJson.Formatter.Format(receipt.ObservedRollback)
+            : SchematicJson.Formatter.Format(receipt.ObservedAfter);
+        JsonElement? response = null;
+        if (!outcome.UntrustedReceipt && receipt is not null && receipt.Results.Count > 0
+            && receipt.Results[0].ResultCase == PcbItemOperationResult.ResultOneofCase.Create)
+            response = JsonDocument.Parse(BoardJson.Formatter.Format(receipt.Results[0].Create)).RootElement.Clone();
+
+        string operationOutcome = success ? "completed"
+            : receipt is null ? "not_submitted" : receipt.State.ToString();
+        JsonElement nativeResult = JsonSerializer.SerializeToElement(new
+        {
+            instanceId = outcome.InstanceId,
+            processEpoch = receipt?.ProcessEpoch ?? outcome.Request.ProcessEpoch,
+            operationId,
+            document,
+            operationOutcome,
+            state = outcome.UntrustedReceipt
+                ? CheckedPcbItemTransactionState.CpbtsIndeterminate.ToString() : receipt?.State.ToString(),
+            beforeState = before,
+            afterState = after,
+            nativeReceiptAvailable = outcome.NativeReceiptAvailable,
+            receipt = receiptJson,
+            mutationConfirmed = success,
+            response
+        });
+        JsonElement structured = JsonSerializer.SerializeToElement(new
+        {
+            instanceId = outcome.InstanceId,
+            processEpoch = receipt?.ProcessEpoch ?? outcome.Request.ProcessEpoch,
+            document,
+            operationId,
+            assetId,
+            sourceKind,
+            sourceSha256,
+            sourceArchive,
+            layer = boardLayer.ToString(),
+            segmentCount,
+            operationOutcome,
+            state = outcome.UntrustedReceipt
+                ? CheckedPcbItemTransactionState.CpbtsIndeterminate.ToString() : receipt?.State.ToString(),
+            replayed = receipt?.Replayed ?? false,
+            receipt = receiptJson,
+            nativeReceipt = receiptJson,
+            nativeResult,
+            authoritativeVector = success,
+            electricalValidation = false,
+            manufacturabilityValidation = false,
+            mutationConfirmed = success,
+            nativeCommitConfirmed = success,
+            nativeReceiptAvailable = outcome.NativeReceiptAvailable,
+            operationReceipt = outcome.NativeReceiptAvailable,
+            replayableWithinProcess = outcome.NativeReceiptAvailable,
+            transportRetrySafe = outcome.NativeReceiptAvailable,
+            receiptScope = outcome.NativeReceiptAvailable ? "native-process" : "none",
+            // The archive is written before the native item transaction and is
+            // intentionally a separate persistence boundary.
+            archivePersisted = true,
+            archiveNativeAtomic = false,
+            provenanceAtomic = false,
+            errorCode = success ? null : outcome.ErrorCode,
+            errorMessage = success ? null : outcome.ErrorMessage
+        });
+        return new CallToolResult
+        {
+            IsError = !success,
+            StructuredContent = structured,
+            Content = [new TextContentBlock { Text = structured.GetRawText() }]
+        };
+    }
 
     [McpServerTool(Name = "kicad_pcb_svg_artwork_receipt", ReadOnly = true),
      Description("Read the process-owned receipt for an authoritative SVG artwork commit. It never resubmits board geometry and does not replace a native cross-process receipt."),

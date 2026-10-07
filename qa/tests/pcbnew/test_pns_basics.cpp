@@ -655,6 +655,39 @@ BOOST_FIXTURE_TEST_CASE( PNSRoutePartitionRetainsViaSourceIdentity, PNS_TEST_FIX
 }
 
 
+BOOST_FIXTURE_TEST_CASE( PNSRoutePartitionRetainsArcSourceIdentity, PNS_TEST_FIXTURE )
+{
+    BOARD board;
+    PCB_ARC nativeArc( &board );
+
+    PNS::ARC removed( SHAPE_ARC( VECTOR2I( 1000000, 1000000 ), VECTOR2I( 1500000, 1200000 ),
+                                 VECTOR2I( 2000000, 1000000 ), 200000 ), nullptr );
+    removed.SetParent( &nativeArc );
+
+    PNS::LINE sourceLine;
+    sourceLine.SetSourceItem( &nativeArc );
+    PNS::ARC replacement( sourceLine,
+                          SHAPE_ARC( VECTOR2I( 1000000, 1600000 ), VECTOR2I( 1500000, 1800000 ),
+                                      VECTOR2I( 2000000, 1600000 ), 200000 ) );
+
+    BOOST_CHECK_EQUAL( replacement.GetSourceItem(), &nativeArc );
+
+    std::vector<PNS::ITEM*> removedItems{ &removed };
+    std::vector<PNS::ITEM*> addedItems{ &replacement };
+    std::vector<PNS::ITEM*> deleted;
+    std::vector<PNS::ITEM*> created;
+    std::vector<PNS::ITEM*> updated;
+
+    PNS::ROUTER::PartitionRoutingChanges( std::move( removedItems ), std::move( addedItems ),
+                                          deleted, created, updated );
+
+    BOOST_REQUIRE_EQUAL( updated.size(), 1 );
+    BOOST_CHECK_EQUAL( updated.front(), &replacement );
+    BOOST_CHECK( deleted.empty() );
+    BOOST_CHECK( created.empty() );
+}
+
+
 BOOST_AUTO_TEST_CASE( PCBViaBackdrillCloneRetainsData )
 {
     BOARD board;

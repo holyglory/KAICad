@@ -62,6 +62,7 @@ public:
         LINKED_ITEM( ARC_T ),
         m_arc( aArc.GetP0(), aArc.GetArcMid(), aArc.GetP1(), aParentLine.Width() )
     {
+        m_sourceItem = aParentLine.GetSourceItem();
         m_net = aParentLine.Net();
         m_layers = aParentLine.Layers();
         m_marker = aParentLine.Marker();

@@ -2214,7 +2214,6 @@ bool SCH_IO_KICAD_SEXPR::DeleteLibrary( const wxString& aLibraryPath,
 
         if( admitted )
         {
-            m_writeAdmission->Observe();
             releaseWriteAdmission();
         }
     }

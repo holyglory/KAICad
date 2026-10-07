@@ -5,6 +5,8 @@ using KiCad.Automation.Protocol;
 using Kiapi.Board.Types;
 using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace KiCad.Automation.Native;
 
@@ -24,6 +26,54 @@ public static class CheckedPcbRouteContract
     public static bool HasPreviewDelta(PcbRoutePreviewState preview) => preview.RouteItems.Count != 0
         || (preview.ReplacementUpdates?.Items.Count ?? 0) != 0 || preview.RemovedItemIds.Count != 0
         || preview.GroupChanges.Count != 0;
+
+    /// <summary>
+    /// Compute the stable identity of one complete route delta.
+    ///
+    /// The native DRC and checked transaction still receive the original
+    /// ordered protobuf payload.  The fingerprint is an additional caller
+    /// boundary: it covers every create, identity-preserving update, explicit
+    /// removal and group ownership change, while canonicalizing collection
+    /// order and custom-property order so the same delta has one identity.
+    /// </summary>
+    public static string CandidateFingerprint(CheckedPcbRouteCommit request)
+    {
+        if (request is null)
+            throw Invalid("A checked PCB route is required to compute its candidate fingerprint.");
+
+        return CandidateFingerprint(request.Candidate, request.ReplacementUpdates,
+            request.Removals, request.GroupChanges);
+    }
+
+    /// <summary>Compute the stable identity for a preview delta before a DRC job exists.</summary>
+    public static string CandidateFingerprint(CreateItems candidate, UpdateItems? replacementUpdates,
+        DeleteItems? removals, IEnumerable<NativeRouteGroupChange>? groupChanges)
+    {
+        if (candidate is null || candidate.Header?.Document is null)
+            throw Invalid("A route candidate and explicit PCB document are required to compute its fingerprint.");
+
+        CreateItems canonicalCandidate = CanonicalCreate(candidate);
+        UpdateItems? canonicalUpdates = replacementUpdates is null ? null : CanonicalUpdate(replacementUpdates);
+        DeleteItems? canonicalRemovals = removals is null ? null : CanonicalDelete(removals);
+        NativeRouteGroupChange[] canonicalGroups = (groupChanges ?? [])
+            .Select(CanonicalGroupChange)
+            .OrderBy(change => change.ExpectedBefore.Group.Id.Value, StringComparer.Ordinal)
+            .ToArray();
+
+        using var material = new MemoryStream();
+        using (var writer = new BinaryWriter(material, Encoding.UTF8, leaveOpen: true))
+        {
+            writer.Write("kicad-pcb-route-delta-v1");
+            WriteCanonical(writer, BoardJson.Formatter.Format(canonicalCandidate));
+            WriteCanonical(writer, canonicalUpdates is null ? string.Empty : BoardJson.Formatter.Format(canonicalUpdates));
+            WriteCanonical(writer, canonicalRemovals is null ? string.Empty : BoardJson.Formatter.Format(canonicalRemovals));
+            writer.Write(canonicalGroups.Length);
+            foreach (var group in canonicalGroups)
+                WriteCanonical(writer, SchematicJson.Formatter.Format(group));
+        }
+
+        return Convert.ToHexString(SHA256.HashData(material.ToArray())).ToLowerInvariant();
+    }
 
     public static void ValidatePreview(PcbRoutePreviewState preview, bool inspectStateOnly = false)
     {
@@ -509,6 +559,97 @@ public static class CheckedPcbRouteContract
             stack.ZoneSettings.ThermalSpokes.Angle ??= new Angle();
         }
     }
+
+    private static CreateItems CanonicalCreate(CreateItems source)
+    {
+        var result = source.Clone();
+        var items = result.Items.Select(CanonicalRouteItem)
+            .OrderBy(item => RouteItemId(item), StringComparer.Ordinal)
+            .ThenBy(item => item.TypeUrl, StringComparer.Ordinal)
+            .ToArray();
+        result.Items.Clear();
+        result.Items.Add(items);
+        return result;
+    }
+
+    private static UpdateItems CanonicalUpdate(UpdateItems source)
+    {
+        var result = source.Clone();
+        var items = result.Items.Select(CanonicalRouteItem)
+            .OrderBy(item => RouteItemId(item), StringComparer.Ordinal)
+            .ThenBy(item => item.TypeUrl, StringComparer.Ordinal)
+            .ToArray();
+        result.Items.Clear();
+        result.Items.Add(items);
+        return result;
+    }
+
+    private static DeleteItems CanonicalDelete(DeleteItems source)
+    {
+        var result = source.Clone();
+        var ids = result.ItemIds.OrderBy(id => id.Value, StringComparer.Ordinal)
+            .Select(id => id.Clone()).ToArray();
+        result.ItemIds.Clear();
+        result.ItemIds.Add(ids);
+        return result;
+    }
+
+    private static Any CanonicalRouteItem(Any source)
+    {
+        try
+        {
+            if (source.Is(Track.Descriptor))
+            {
+                var item = source.Unpack<Track>();
+                NormalizeProperties(item.CustomProperties);
+                return Any.Pack(item);
+            }
+            if (source.Is(Arc.Descriptor))
+            {
+                var item = source.Unpack<Arc>();
+                NormalizeProperties(item.CustomProperties);
+                return Any.Pack(item);
+            }
+            if (source.Is(Via.Descriptor))
+            {
+                var item = source.Unpack<Via>();
+                NormalizeProperties(item.CustomProperties);
+                return Any.Pack(item);
+            }
+        }
+        catch (InvalidProtocolBufferException)
+        {
+            // Contract validation reports malformed route geometry. Preserve
+            // the payload here so the fingerprint remains a pure function of
+            // the supplied request while validation rejects it later.
+        }
+
+        return source.Clone();
+    }
+
+    private static NativeRouteGroupChange CanonicalGroupChange(NativeRouteGroupChange source)
+    {
+        var result = source.Clone();
+        CanonicalGroupItems(result.ExpectedBefore.Group);
+        CanonicalGroupItems(result.ExpectedAfter.Group);
+        var sources = result.CreatedSources
+            .OrderBy(item => item.CreatedItemId.Value, StringComparer.Ordinal)
+            .ThenBy(item => item.SourceItemId.Value, StringComparer.Ordinal)
+            .Select(item => item.Clone()).ToArray();
+        result.CreatedSources.Clear();
+        result.CreatedSources.Add(sources);
+        return result;
+    }
+
+    private static void CanonicalGroupItems(Group group)
+    {
+        var ids = group.Items.OrderBy(id => id.Value, StringComparer.Ordinal)
+            .Select(id => id.Clone()).ToArray();
+        group.Items.Clear();
+        group.Items.Add(ids);
+    }
+
+    private static void WriteCanonical(BinaryWriter writer, string value) => writer.Write(value ?? string.Empty);
 
     private static string RouteItemId(Any item)
     {

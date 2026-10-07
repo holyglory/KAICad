@@ -41,7 +41,10 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
                 string.IsNullOrWhiteSpace(result.ErrorMessage) ? "Native routing preview did not complete." : result.ErrorMessage);
         var candidate = new CreateItems { Header = new() { Document = request.Document } };
         candidate.Items.Add(result.RouteItems);
-        string? candidateDeleteRequestJson = DeleteRouteCandidate(request.Document, result.RemovedItemIds, result.ReplacementUpdates);
+        var candidateRemovals = BuildDeleteRouteRequest(request.Document, result.RemovedItemIds, result.ReplacementUpdates);
+        string? candidateDeleteRequestJson = candidateRemovals is null ? null : BoardJson.Formatter.Format(candidateRemovals);
+        string candidateFingerprint = CheckedPcbRouteContract.CandidateFingerprint(
+            candidate, result.ReplacementUpdates, candidateRemovals, result.GroupChanges);
         var after = await registry.Client(instanceId).InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
             new() { Document = request.Document }, cancellationToken);
         if (!after.Equals(expected))
@@ -56,6 +59,7 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
             drcDeleteRequestJson = DrcDeletes(request.Document, result),
             replacementUpdatesJson = ReplacementUpdatesJson(result),
             groupChangesJson = GroupChangesJson(result),
+            candidateFingerprintSha256 = candidateFingerprint,
             replacementUpdatesUnavailable = ReplacementUpdatesUnavailable(result),
             removedItemIds = result.RemovedItemIds.Select(item => item.Value).ToArray(),
             beforeState = SchematicJson.Formatter.Format(expected), afterState = SchematicJson.Formatter.Format(after),
@@ -93,7 +97,10 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
             throw new AutomationException("route_preview_changed", "The board changed while native routing continued; reconcile the session before using candidates.");
         var candidate = new CreateItems { Header = new() { Document = request.Document } };
         candidate.Items.Add(result.RouteItems);
-        string? candidateDeleteRequestJson = DeleteRouteCandidate(request.Document, result.RemovedItemIds, result.ReplacementUpdates);
+        var candidateRemovals = BuildDeleteRouteRequest(request.Document, result.RemovedItemIds, result.ReplacementUpdates);
+        string? candidateDeleteRequestJson = candidateRemovals is null ? null : BoardJson.Formatter.Format(candidateRemovals);
+        string candidateFingerprint = CheckedPcbRouteContract.CandidateFingerprint(
+            candidate, result.ReplacementUpdates, candidateRemovals, result.GroupChanges);
         var data = JsonSerializer.SerializeToElement(new
         {
             instanceId, operationId = result.OperationId, processEpoch = result.ProcessEpoch,
@@ -105,6 +112,7 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
             drcDeleteRequestJson = DrcDeletes(request.Document, result),
             replacementUpdatesJson = ReplacementUpdatesJson(result),
             groupChangesJson = GroupChangesJson(result),
+            candidateFingerprintSha256 = candidateFingerprint,
             replacementUpdatesUnavailable = ReplacementUpdatesUnavailable(result),
             removedItemIds = result.RemovedItemIds.Select(item => item.Value).ToArray(),
             beforeState = SchematicJson.Formatter.Format(expected), afterState = SchematicJson.Formatter.Format(after),
@@ -164,16 +172,24 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
         CheckedPcbRouteContract.ValidatePreview(result, inspectStateOnly: !actionable);
         var candidate = new CreateItems { Header = new() { Document = request.Document } };
         if (actionable) candidate.Items.Add(result.RouteItems);
+        var candidateRemovals = actionable
+            ? BuildDeleteRouteRequest(request.Document, result.RemovedItemIds, result.ReplacementUpdates)
+            : null;
+        string? candidateFingerprint = actionable
+            ? CheckedPcbRouteContract.CandidateFingerprint(candidate, result.ReplacementUpdates,
+                candidateRemovals, result.GroupChanges)
+            : null;
         var data = JsonSerializer.SerializeToElement(new
         {
             instanceId, operationId = result.OperationId, processEpoch = result.ProcessEpoch,
             preview = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(result)),
             candidateRequestJson = actionable ? BoardJson.Formatter.Format(candidate) : null,
-            candidateDeleteRequestJson = actionable ? DeleteRouteCandidate(request.Document, result.RemovedItemIds, result.ReplacementUpdates) : null,
+            candidateDeleteRequestJson = candidateRemovals is null ? null : BoardJson.Formatter.Format(candidateRemovals),
             drcCandidateRequestJson = actionable ? BoardJson.Formatter.Format(DrcCandidate(candidate, result)) : null,
             drcDeleteRequestJson = actionable ? DrcDeletes(request.Document, result) : null,
             replacementUpdatesJson = ReplacementUpdatesJson(result),
             groupChangesJson = GroupChangesJson(result),
+            candidateFingerprintSha256 = candidateFingerprint,
             replacementUpdatesUnavailable = ReplacementUpdatesUnavailable(result),
             removedItemIds = result.RemovedItemIds.Select(item => item.Value).ToArray(),
             sessionActive = result.SessionActive, reconciled = result.Reconciled, cancelled = result.Cancelled,
@@ -273,7 +289,7 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public async Task<CallToolResult> Commit(string instanceId, string requestJson, string expectedStateJson,
      string drcJobStateJson, string operationId, string replacementUpdatesJson = "", string removalsJson = "",
-     string groupChangesJson = "", CancellationToken cancellationToken = default)
+     string groupChangesJson = "", string candidateFingerprintSha256 = "", CancellationToken cancellationToken = default)
     {
         try
         {
@@ -312,6 +328,11 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
                 Removals = removals
             };
             checkedRequest.GroupChanges.Add(groupChanges);
+            string computedFingerprint = CheckedPcbRouteContract.CandidateFingerprint(checkedRequest);
+            if (!string.IsNullOrWhiteSpace(candidateFingerprintSha256)
+                && !string.Equals(candidateFingerprintSha256, computedFingerprint, StringComparison.Ordinal))
+                throw new AutomationException("route_candidate_fingerprint_mismatch",
+                    "The supplied route candidate fingerprint does not match the complete create/update/remove/group delta.");
             // Reject malformed geometry before contacting the native editor.  The
             // native checked controller repeats this admission check, but doing it
             // here gives callers a deterministic typed error and avoids spending a
@@ -335,6 +356,7 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
                 afterState = receipt.After is null ? null : SchematicJson.Formatter.Format(receipt.After),
                 replacementUpdateCount = replacementUpdates?.Items.Count ?? 0,
                 removalCount = removals?.ItemIds.Count ?? 0,
+                candidateFingerprintSha256 = computedFingerprint,
                 mutationConfirmed = true, atomicTransaction = true, nativeReceipt = true
             });
             return new CallToolResult { StructuredContent = structured, Content = [new TextContentBlock { Text = structured.GetRawText() }] };
@@ -380,10 +402,11 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
                 OperationId = operationId, ExpectedRequest = request };
             var result = await client.InvokeAsync<ReadCheckedPcbRouteReceipt, CheckedPcbRouteReceipt>(read, cancellationToken);
             CheckedPcbRouteContract.ValidateResult(request, result, inspect: true);
+            string candidateFingerprint = CheckedPcbRouteContract.CandidateFingerprint(request);
             var structured = JsonSerializer.SerializeToElement(new { instanceId,
                 receipt = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(result)),
                 operationId, processEpoch = session.Epoch, state = result.State.ToString(),
-                replayed = result.Replayed, readOnly = true });
+                replayed = result.Replayed, candidateFingerprintSha256 = candidateFingerprint, readOnly = true });
             return new CallToolResult { StructuredContent = structured, Content = [new TextContentBlock { Text = structured.GetRawText() }] };
         }
         catch (Exception error) when (error is AutomationException or NativeApiException or NngException or InvalidProtocolBufferException or InvalidJsonException)
@@ -495,14 +518,14 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
         throw new AutomationException("invalid_route_delta", "Native routing returned unsupported copper geometry.");
     }
 
-    private static string? DeleteRouteCandidate(DocumentSpecifier document,
+    private static DeleteItems? BuildDeleteRouteRequest(DocumentSpecifier document,
         Google.Protobuf.Collections.RepeatedField<KIID> removed, UpdateItems? updates = null)
     {
         var updatedIds = updates?.Items.Select(RouteItemId).ToHashSet(StringComparer.Ordinal)
             ?? new HashSet<string>(StringComparer.Ordinal);
         var request = new DeleteItems { Header = new() { Document = document } };
         request.ItemIds.Add(removed.Where(id => !updatedIds.Contains(id.Value)).Select(id => id.Clone()));
-        return request.ItemIds.Count == 0 ? null : BoardJson.Formatter.Format(request);
+        return request.ItemIds.Count == 0 ? null : request;
     }
 
     private static CreateItems DrcCandidate(CreateItems candidate, PcbRoutePreviewState preview)

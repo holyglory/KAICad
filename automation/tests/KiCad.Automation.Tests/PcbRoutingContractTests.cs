@@ -650,6 +650,88 @@ public sealed class PcbRoutingContractTests
         Assert.AreEqual(displaced, parsed.ItemIds.Single());
     }
 
+    [TestMethod]
+    public void CandidateFingerprintIsDeterministicAndCoversCompleteRouteDelta()
+    {
+        var (request, source, _) = CleanRoute();
+        string createdId = Guid.NewGuid().ToString("D");
+        var created = source.Clone();
+        created.Id = new() { Value = createdId };
+        created.Start.XNm += 10_000;
+        created.End.XNm += 10_000;
+        created.CustomProperties.Add(new CustomProperty { Key = "route-origin", Value = "preview" });
+        request.Candidate.Items.Add(Any.Pack(created));
+
+        var replacement = source.Clone();
+        replacement.End.XNm += 20_000;
+        replacement.CustomProperties.Add(new CustomProperty { Key = "replacement", Value = "preserve" });
+        request.ReplacementUpdates = new UpdateItems { Header = new() { Document = request.Candidate.Header.Document } };
+        request.ReplacementUpdates.Items.Add(Any.Pack(replacement));
+        request.Removals = new DeleteItems { Header = new() { Document = request.Candidate.Header.Document } };
+        request.Removals.ItemIds.Add(new KIID { Value = Guid.NewGuid().ToString("D") });
+
+        var groupId = Guid.NewGuid().ToString("D");
+        request.GroupChanges.Add(new NativeRouteGroupChange
+        {
+            ExpectedBefore = new NativeRouteGroupState
+            {
+                Kind = NativeRouteGroupKind.NrgkOrdinary,
+                Group = new Group { Id = new() { Value = groupId }, Name = "route" }
+            },
+            ExpectedAfter = new NativeRouteGroupState
+            {
+                Kind = NativeRouteGroupKind.NrgkOrdinary,
+                Group = new Group { Id = new() { Value = groupId }, Name = "route", Items = { new KIID { Value = createdId } } }
+            },
+            CreatedSources =
+            {
+                new NativeRouteCreatedSource
+                {
+                    CreatedItemId = new KIID { Value = createdId },
+                    SourceItemId = source.Id.Clone(),
+                    SourceGroupId = new KIID { Value = groupId }
+                }
+            }
+        });
+
+        string fingerprint = CheckedPcbRouteContract.CandidateFingerprint(request);
+        Assert.AreEqual(64, fingerprint.Length);
+        Assert.IsTrue(fingerprint.All(character => (character >= '0' && character <= '9')
+            || (character >= 'a' && character <= 'f')));
+
+        var reordered = request.Clone();
+        var candidateItems = reordered.Candidate.Items.Select(item => item.Clone()).Reverse().ToArray();
+        reordered.Candidate.Items.Clear();
+        reordered.Candidate.Items.Add(candidateItems);
+        var updateItems = reordered.ReplacementUpdates.Items.Select(item => item.Clone()).Reverse().ToArray();
+        reordered.ReplacementUpdates.Items.Clear();
+        reordered.ReplacementUpdates.Items.Add(updateItems);
+        var removalIds = reordered.Removals.ItemIds.Select(item => item.Clone()).Reverse().ToArray();
+        reordered.Removals.ItemIds.Clear();
+        reordered.Removals.ItemIds.Add(removalIds);
+        var group = reordered.GroupChanges[0];
+        var groupMembers = group.ExpectedAfter.Group.Items.Select(item => item.Clone()).Reverse().ToArray();
+        group.ExpectedAfter.Group.Items.Clear();
+        group.ExpectedAfter.Group.Items.Add(groupMembers);
+        var sources = group.CreatedSources.Select(item => item.Clone()).Reverse().ToArray();
+        group.CreatedSources.Clear();
+        group.CreatedSources.Add(sources);
+        Assert.AreEqual(fingerprint, CheckedPcbRouteContract.CandidateFingerprint(reordered),
+            "Equivalent route deltas must have one deterministic fingerprint.");
+
+        var changed = request.Clone();
+        var changedTrack = changed.Candidate.Items[0].Unpack<Track>();
+        changedTrack.Width.ValueNm++;
+        changed.Candidate.Items[0] = Any.Pack(changedTrack);
+        Assert.AreNotEqual(fingerprint, CheckedPcbRouteContract.CandidateFingerprint(changed),
+            "A changed route property must change the candidate fingerprint.");
+
+        var changedRemoval = request.Clone();
+        changedRemoval.Removals.ItemIds[0].Value = Guid.NewGuid().ToString("D");
+        Assert.AreNotEqual(fingerprint, CheckedPcbRouteContract.CandidateFingerprint(changedRemoval),
+            "A changed deletion set must change the candidate fingerprint.");
+    }
+
     private static (CheckedPcbRouteCommit Request, Track Track, DocumentLifecycleState State) CleanRoute()
     {
         string projectPath = Path.Combine(Path.GetTempPath(), "kicad-route-contract");

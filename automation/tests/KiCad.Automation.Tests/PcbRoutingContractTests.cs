@@ -292,8 +292,14 @@ public sealed class PcbRoutingContractTests
         uncertain.State = CheckedPcbRouteReceipt.Types.State.Indeterminate;
         uncertain.RequestVerified = true;
         uncertain.ErrorCode = "commit_result_unknown";
+        uncertain.ErrorMessage = "native commit outcome is unknown";
         uncertain.Before = state.Clone();
         CheckedPcbRouteContract.ValidateResult(request, uncertain, inspect: false);
+
+        var missingMessage = uncertain.Clone();
+        missingMessage.ErrorMessage = "";
+        Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedPcbRouteContract.ValidateResult(request, missingMessage, inspect: false));
     }
 
     [TestMethod]

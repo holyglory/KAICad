@@ -264,7 +264,8 @@ public static class CheckedPcbRouteContract
 
     private static void ValidateRejected(CheckedPcbRouteCommit request, CheckedPcbRouteReceipt result)
     {
-        if (!result.RequestVerified || result.Created is not null || string.IsNullOrWhiteSpace(result.ErrorCode))
+        if (!result.RequestVerified || result.Created is not null
+            || string.IsNullOrWhiteSpace(result.ErrorCode) || string.IsNullOrWhiteSpace(result.ErrorMessage))
             throw Invalid("A rejected checked route must be verified, explain its refusal and contain no created items.");
 
         // A rejection may preserve the before checkpoint for diagnosis.  It
@@ -277,7 +278,8 @@ public static class CheckedPcbRouteContract
 
     private static void ValidateIndeterminate(CheckedPcbRouteCommit request, CheckedPcbRouteReceipt result)
     {
-        if (!result.RequestVerified || string.IsNullOrWhiteSpace(result.ErrorCode))
+        if (!result.RequestVerified || string.IsNullOrWhiteSpace(result.ErrorCode)
+            || string.IsNullOrWhiteSpace(result.ErrorMessage))
             throw Invalid("An indeterminate checked route must remain verified as uncertain and explain why.");
 
         // Do not require Created/Before/After to be absent: the native owner

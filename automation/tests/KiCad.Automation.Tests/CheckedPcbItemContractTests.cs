@@ -91,6 +91,11 @@ public sealed class CheckedPcbItemContractTests
         };
         CheckedPcbItemContract.ValidateResult(request, receipt, inspect: true);
 
+        var missingMessage = receipt.Clone();
+        missingMessage.ErrorMessage = "";
+        Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedPcbItemContract.ValidateResult(request, missingMessage, inspect: true));
+
         var forgedIdentity = receipt.Clone();
         forgedIdentity.ObservedRollback.NativeIdentity = Guid.NewGuid().ToString("D");
         Assert.ThrowsExactly<AutomationException>(() => CheckedPcbItemContract.ValidateResult(request, forgedIdentity, inspect: true));

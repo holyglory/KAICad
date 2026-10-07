@@ -109,8 +109,9 @@ public static class CheckedPcbItemContract
             return;
         }
 
-        if (!result.RequestVerified || string.IsNullOrWhiteSpace(result.ErrorCode)
-            && result.State != CheckedPcbItemTransactionState.CpbtsCompleted)
+        if (!result.RequestVerified
+            || (result.State != CheckedPcbItemTransactionState.CpbtsCompleted
+                && (string.IsNullOrWhiteSpace(result.ErrorCode) || string.IsNullOrWhiteSpace(result.ErrorMessage))))
             throw Invalid("A native PCB item receipt must verify the request and explain failed outcomes.");
 
         if (result.ObservedBefore is not null && !result.ObservedBefore.Equals(request.ExpectedState))
@@ -161,7 +162,8 @@ public static class CheckedPcbItemContract
     private static void ValidateRolledBack(CheckedPcbItemTransaction request,
         CheckedPcbItemTransactionReceipt result)
     {
-        if (result.ErrorCode.Length == 0 || result.Results.Count > request.Operations.Count
+        if (string.IsNullOrWhiteSpace(result.ErrorCode) || string.IsNullOrWhiteSpace(result.ErrorMessage)
+            || result.Results.Count > request.Operations.Count
             || result.Phase != CheckedPcbItemTransactionPhase.CpbtpRollbackConfirmed
             || result.RollbackState != CheckedPcbItemRollbackState.CpbrsConfirmed
             || result.PostCommitState != CheckedPcbItemPostCommitState.CpbpsNotAttempted
@@ -174,7 +176,8 @@ public static class CheckedPcbItemContract
     private static void ValidateRejected(CheckedPcbItemTransaction request,
         CheckedPcbItemTransactionReceipt result)
     {
-        if (result.ErrorCode.Length == 0 || result.Results.Count != 0
+        if (string.IsNullOrWhiteSpace(result.ErrorCode) || string.IsNullOrWhiteSpace(result.ErrorMessage)
+            || result.Results.Count != 0
             || result.ObservedRollback is not null
             || result.RollbackState != CheckedPcbItemRollbackState.CpbrsNotAttempted)
             throw Invalid("A rejected checked PCB item transaction cannot claim staged or committed native changes.");
@@ -187,7 +190,8 @@ public static class CheckedPcbItemContract
     private static void ValidateIndeterminate(CheckedPcbItemTransaction request,
         CheckedPcbItemTransactionReceipt result)
     {
-        if (result.ErrorCode.Length == 0 || result.Results.Count > request.Operations.Count)
+        if (string.IsNullOrWhiteSpace(result.ErrorCode) || string.IsNullOrWhiteSpace(result.ErrorMessage)
+            || result.Results.Count > request.Operations.Count)
             throw Invalid("An indeterminate checked PCB item transaction must retain partial evidence and explain uncertainty.");
         if (result.ObservedAfter is not null && !StateSnapshot(result.ObservedAfter, request.ExpectedState))
             throw Invalid("The indeterminate PCB item receipt contains an after-state for another document or process.");

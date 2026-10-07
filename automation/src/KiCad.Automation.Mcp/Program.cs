@@ -105,6 +105,7 @@ builder.Services.AddMcpServer(options =>
     .WithTools<DocumentTools>()
     .WithTools<DocumentStateTools>()
     .WithTools<ProjectSettingsTools>()
+    .WithTools<CrossProbeTools>()
     .WithTools<DocumentLifecycleTools>()
     .WithTools<FootprintLibraryTools>()
     .WithTools<PcbDrcTools>()

@@ -66,6 +66,8 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_schematic_create_image");
             CollectionAssert.Contains(names, "kicad_schematic_update_image");
             CollectionAssert.Contains(names, "kicad_schematic_delete_image");
+            CollectionAssert.Contains(names, "kicad_schematic_set_title_block");
+            CollectionAssert.Contains(names, "kicad_schematic_set_page_settings");
             CollectionAssert.Contains(names, "kicad_pcb_zone_read");
             CollectionAssert.Contains(names, "kicad_pcb_zone_create");
             CollectionAssert.Contains(names, "kicad_pcb_zone_update");
@@ -139,6 +141,10 @@ public sealed class McpProcessTests
             { instanceId = unknownInstance, documentJson = "{}", expectedStateJson = "{}", imageJson = "{}", operationId = unknownOperation } });
             await Request(9084, "tools/call", new { name = "kicad_schematic_delete_image", arguments = new
             { instanceId = unknownInstance, documentJson = "{}", expectedStateJson = "{}", imageId = unknownInstance, operationId = unknownOperation } });
+            await Request(9085, "tools/call", new { name = "kicad_schematic_set_title_block", arguments = new
+            { instanceId = unknownInstance, documentJson = "{}", expectedStateJson = "{}", titleBlockJson = "{}", operationId = unknownOperation } });
+            await Request(9086, "tools/call", new { name = "kicad_schematic_set_page_settings", arguments = new
+            { instanceId = unknownInstance, documentJson = "{}", expectedStateJson = "{}", pageSettingsJson = "{}", operationId = unknownOperation } });
             var rasterTraceSchema = listed.GetProperty("result").GetProperty("tools").EnumerateArray()
                 .Single(tool => tool.GetProperty("name").GetString() == "kicad_artwork_raster_trace")
                 .GetProperty("inputSchema").GetProperty("properties").GetProperty("input");

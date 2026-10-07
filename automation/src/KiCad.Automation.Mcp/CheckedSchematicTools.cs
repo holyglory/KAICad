@@ -218,6 +218,77 @@ public sealed class CheckedSchematicTools(InstanceRegistry registry)
         ExecuteImageMutation(instanceId, documentJson, expectedStateJson, null, imageId, operationId,
             ImageMutation.Delete, cancellationToken);
 
+    [McpServerTool(Name = "kicad_schematic_set_title_block"),
+     Description("Replace the complete schematic title block through the checked native batch path. titleBlockJson is a typed TitleBlockInfo payload; documentJson and expectedStateJson bind the explicit root revision, and operationId provides receipt replay. The edit is undoable and remains unsaved until kicad_document_save."),
+     KiCadCapability("schematic-design", "native-api", "explicit root document, lifecycle checkpoint, typed title block and operation UUID"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> SetTitleBlock(string instanceId, string documentJson, string expectedStateJson,
+        string titleBlockJson, string operationId, CancellationToken cancellationToken) =>
+        ExecuteTypedMetadataMutation(instanceId, documentJson, expectedStateJson, titleBlockJson,
+            operationId, MetadataMutation.TitleBlock, cancellationToken);
+
+    [McpServerTool(Name = "kicad_schematic_set_page_settings"),
+     Description("Replace the complete schematic page settings through the checked native batch path. pageSettingsJson is a typed PageSettings payload; documentJson and expectedStateJson bind the explicit root revision, and operationId provides receipt replay. The edit is undoable and remains unsaved until kicad_document_save."),
+     KiCadCapability("schematic-design", "native-api", "explicit root document, lifecycle checkpoint, typed page settings and operation UUID"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> SetPageSettings(string instanceId, string documentJson, string expectedStateJson,
+        string pageSettingsJson, string operationId, CancellationToken cancellationToken) =>
+        ExecuteTypedMetadataMutation(instanceId, documentJson, expectedStateJson, pageSettingsJson,
+            operationId, MetadataMutation.PageSettings, cancellationToken);
+
+    private enum MetadataMutation { TitleBlock, PageSettings }
+
+    private async Task<CallToolResult> ExecuteTypedMetadataMutation(string instanceId, string documentJson,
+        string expectedStateJson, string payloadJson, string operationId, MetadataMutation mutation,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            DocumentSpecifier document = ParseDocument(documentJson, "documentJson");
+            DocumentLifecycleState expected = SchematicJson.Parser.Parse<DocumentLifecycleState>(expectedStateJson);
+            if (document.Type != DocumentType.DoctypeSchematic || document.SheetPath?.Path.Count != 1
+                || !expected.Document.Equals(document) || expected.Scope != DocumentLifecycleScope.DlsSchematicHierarchy
+                || string.IsNullOrWhiteSpace(expected.ProcessEpoch) || expected.Revision is null)
+                throw new AutomationException("invalid_schematic_metadata_state", "The metadata mutation requires the explicit schematic root and a matching lifecycle checkpoint.");
+            if (!Guid.TryParseExact(operationId, "D", out var operation) || operation == Guid.Empty
+                || !string.Equals(operationId, operation.ToString("D"), StringComparison.Ordinal))
+                throw new AutomationException("invalid_operation_id", "operationId must be a canonical UUID.");
+            var batch = new ApplySchematicItemBatch
+            {
+                Document = document.Clone(), DocumentEpoch = expected.Revision.Epoch,
+                ExpectedRevision = expected.Revision.Clone(), OperationId = operationId,
+                Description = "MCP typed schematic " + mutation.ToString().ToLowerInvariant()
+            };
+            SchematicItemOperation item = mutation switch
+            {
+                MetadataMutation.TitleBlock => new() { SetTitleBlock = SchematicJson.Parser.Parse<TitleBlockInfo>(payloadJson) },
+                MetadataMutation.PageSettings => new() { SetPageSettings = SchematicJson.Parser.Parse<PageSettings>(payloadJson) },
+                _ => throw new ArgumentOutOfRangeException(nameof(mutation))
+            };
+            batch.Operations.Add(item);
+            return await Run(instanceId, SchematicJson.Formatter.Format(new CheckedSchematicBatch
+            {
+                Batch = batch, ExpectedState = expected.Clone()
+            }), inspect: false, cancellationToken);
+        }
+        catch (Exception error) when (error is AutomationException or InvalidProtocolBufferException
+            or InvalidJsonException or InvalidOperationException or NngException or NativeApiException)
+        {
+            string code = error is AutomationException known ? known.Code
+                : error is NativeApiException native ? "native_status_" + native.Status
+                : error is NngException transport ? "transport_status_" + transport.ErrorCode
+                : "invalid_schematic_metadata";
+            JsonElement data = JsonSerializer.SerializeToElement(new
+            {
+                instanceId, operationId, mutationSubmitted = false,
+                outcome = "not_submitted", errorCode = code, errorMessage = error.Message
+            });
+            return new CallToolResult { IsError = true, StructuredContent = data,
+                Content = [new TextContentBlock { Text = data.GetRawText() }] };
+        }
+    }
+
     private enum ImageMutation { Create, Update, Delete }
 
     private async Task<CallToolResult> ExecuteImageMutation(string instanceId, string documentJson,

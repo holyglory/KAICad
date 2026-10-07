@@ -31,12 +31,11 @@ internal static class PcbZoneAuthoringContract
     {
         if (expected is null || expected.Scope != DocumentLifecycleScope.DlsPcb
             || expected.Document is null || !expected.Document.Equals(document)
-            || string.IsNullOrWhiteSpace(expected.ProcessEpoch)
-            || !Guid.TryParseExact(expected.ProcessEpoch, "D", out var processEpoch) || processEpoch == Guid.Empty
-            || string.IsNullOrWhiteSpace(expected.NativeIdentity)
-            || !Guid.TryParseExact(expected.NativeIdentity, "D", out var nativeIdentity) || nativeIdentity == Guid.Empty
+            || !CanonicalUuid(expected.ProcessEpoch)
+            || !CanonicalUuid(expected.NativeIdentity)
             || expected.Revision is null
-            || !Guid.TryParseExact(expected.Revision.Epoch, "D", out var revisionEpoch) || revisionEpoch == Guid.Empty
+            || !CanonicalUuid(expected.Revision.Epoch)
+            || expected.Revision.Epoch != expected.NativeIdentity
             || expected.StateSha256.Length != 64 || !expected.StateSha256.All(char.IsAsciiHexDigitLower))
             throw new AutomationException("invalid_pcb_zone_state",
                 "expectedStateJson must identify the same PCB with a complete native lifecycle revision and digest.");

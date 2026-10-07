@@ -91,7 +91,7 @@ public sealed class PcbZoneAuthoringContractTests
             ProcessEpoch = "44444444-4444-4444-4444-444444444444",
             NativeIdentity = "55555555-5555-5555-5555-555555555555",
             StateSha256 = new string('a', 64),
-            Revision = new() { Epoch = "66666666-6666-6666-6666-666666666666", Sequence = 4 }
+            Revision = new() { Epoch = "55555555-5555-5555-5555-555555555555", Sequence = 4 }
         };
         PcbZoneAuthoringContract.ValidateDocument(document);
         PcbZoneAuthoringContract.ValidateState(document, state);
@@ -99,6 +99,10 @@ public sealed class PcbZoneAuthoringContractTests
         wrongDocument.Document.BoardFilename = "other.kicad_pcb";
         Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateState(document,
             wrongDocument));
+        var wrongRevisionEpoch = state.Clone();
+        wrongRevisionEpoch.Revision.Epoch = "66666666-6666-6666-6666-666666666666";
+        Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateState(document,
+            wrongRevisionEpoch));
     }
 
     [TestMethod]

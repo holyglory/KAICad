@@ -3,6 +3,7 @@ using Google.Protobuf.WellKnownTypes;
 using Kiapi.Board.Types;
 using Kiapi.Common.Types;
 using KiCad.Automation.Mcp;
+using KiCad.Automation.Model;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace KiCad.Automation.Tests;
@@ -56,5 +57,25 @@ public sealed class PcbGeometryManifestTests
             .GetProperty("outline").GetProperty("nodes").GetArrayLength());
         Assert.AreEqual(1000, zoneGeometry.GetProperty("outline").GetProperty("polygons")[0]
             .GetProperty("outline").GetProperty("nodes")[1].GetProperty("point").GetProperty("xNm").GetInt64());
+    }
+
+    [TestMethod]
+    public void GeometryManifestRequiresDistinctCanonicalNativeIdentities()
+    {
+        var id = new KIID { Value = "11111111-1111-1111-1111-111111111111" };
+        PcbGeometryManifestTools.ValidateNativeIdentities([id]);
+
+        var duplicate = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbGeometryManifestTools.ValidateNativeIdentities([id, id.Clone()]));
+        Assert.AreEqual("pcb_render_geometry_bounds_incomplete", duplicate.Code);
+
+        var uppercase = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbGeometryManifestTools.ValidateNativeIdentities([
+                new KIID { Value = "a2222222-2222-2222-2222-222222222222".ToUpperInvariant() }]));
+        Assert.AreEqual("pcb_render_geometry_bounds_incomplete", uppercase.Code);
+
+        var missing = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbGeometryManifestTools.ValidateNativeIdentities([null]));
+        Assert.AreEqual("pcb_render_geometry_bounds_incomplete", missing.Code);
     }
 }

@@ -77,7 +77,8 @@ public sealed class PcbGeometryManifestTools(InstanceRegistry registry)
         if (selected.Length > request.MaxObjects)
             throw new AutomationException("pcb_render_geometry_oversized", "The filtered geometry manifest exceeds maxObjects.");
 
-        var ids = selected.Select(GetId).Where(id => !string.IsNullOrWhiteSpace(id.Value)).ToArray();
+        var ids = selected.Select(GetId).ToArray();
+        ValidateNativeIdentities(ids);
         Dictionary<string, Box2> boxes = new(StringComparer.Ordinal);
         if (ids.Length != 0)
         {
@@ -199,6 +200,20 @@ public sealed class PcbGeometryManifestTools(InstanceRegistry registry)
         : packed.Is(FootprintInstance.Descriptor) ? packed.Unpack<FootprintInstance>().Id
         : packed.Is(BoardGraphicShape.Descriptor) ? packed.Unpack<BoardGraphicShape>().Id
         : packed.Unpack<Zone>().Id;
+
+    internal static void ValidateNativeIdentities(IEnumerable<KIID?> identities)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (KIID? identity in identities)
+        {
+            string? value = identity?.Value;
+            if (!Guid.TryParseExact(value, "D", out Guid parsed) || parsed == Guid.Empty
+                || !string.Equals(value, parsed.ToString("D"), StringComparison.Ordinal)
+                || !seen.Add(value!))
+                throw new AutomationException("pcb_render_geometry_bounds_incomplete",
+                    "Every geometry item must carry one distinct canonical native UUID.");
+        }
+    }
 
     private static string? TryNetName(Any packed) => packed.Is(Track.Descriptor) ? packed.Unpack<Track>().Net?.Name
         : packed.Is(Arc.Descriptor) ? packed.Unpack<Arc>().Net?.Name

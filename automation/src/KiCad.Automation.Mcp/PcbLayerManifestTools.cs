@@ -18,8 +18,8 @@ namespace KiCad.Automation.Mcp;
 public sealed class PcbLayerManifestTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_pcb_layer_manifest", ReadOnly = true),
-     Description("Read a revision-bound machine-readable PCB layer manifest. requestJson contains optional layers[] names such as F.Cu, F.SilkS, Dwgs.User or their BoardLayer enum names, plus includeEmpty; returned layer names retain their BoardLayer enum spelling. The tool returns enabled-layer metadata plus native object counts per layer and type without rendering or mutating the board. This is inspection metadata, not DRC, geometry rasterization or manufacturing proof.")]
-    [KiCadCapability("pcb-rendering", "compiled-mcp plus native-board-api", "exact PCB lifecycle state, enabled layers, per-layer typed object counts"),
+     Description("Read a revision-bound machine-readable PCB layer manifest. requestJson contains optional layers[] names such as F.Cu, F.SilkS, Dwgs.User or their BoardLayer enum names, plus includeEmpty; returned layer names retain their BoardLayer enum spelling. The tool returns enabled-layer metadata plus native object counts per layer and type without rendering or mutating the board. The svgExport field identifies the existing typed kicad_pcb_export SVG route for authoritative layer-subset vector output, including composite or one-file-per-layer pagination, lifecycle binding and output hashes. This manifest itself is inspection metadata, not DRC, geometry rasterization or pixel-rendering proof.")]
+    [KiCadCapability("pcb-rendering", "compiled-mcp plus native-board-api plus typed-svg-export", "exact PCB lifecycle state, enabled layers, per-layer typed object counts; SVG export uses its own operation ID, process epoch and output manifest"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Read(string instanceId, string documentJson, string expectedStateJson,
         string requestJson, CancellationToken cancellationToken) => Execute(async () =>
@@ -149,6 +149,7 @@ public sealed class PcbLayerManifestTools(InstanceRegistry registry)
             compositeObjects = new { byType = compositeCounts, total = compositeCounts.Values.Sum() },
             unassignedObjects = new { byType = unassignedCounts, total = unassignedCounts.Values.Sum() },
             totalObjects = items.Items.Count, layerMemberships = layerRows.Sum(layer => layer.membershipCount),
+            svgExport = SvgExportCoverage,
             nativeQuery = true, boardMutation = false,
             drcValidated = false, vectorGeometry = false
         });
@@ -167,6 +168,38 @@ public sealed class PcbLayerManifestTools(InstanceRegistry registry)
                     "Every layer-manifest object must carry one distinct canonical native UUID.");
         }
     }
+
+    // The manifest is an observation tool.  It must not imply that its object
+    // counts are an SVG render or that it owns export output.  This compact
+    // capability row points callers to the already-qualified typed board-job
+    // export and states exactly which layer/pagination and evidence guarantees
+    // that route provides.
+    internal static IReadOnlyDictionary<string, object?> SvgExportCoverage { get; } =
+        new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["supported"] = true,
+            ["tool"] = "kicad_pcb_export",
+            ["job"] = "exportSvg",
+            ["layerSubset"] = true,
+            ["composite"] = true,
+            ["onePagePerLayer"] = true,
+            ["oneFilePerLayer"] = true,
+            ["lifecycleBound"] = true,
+            ["processEpochBound"] = true,
+            ["outputHashes"] = true,
+            ["boardMutation"] = false,
+            ["paginationModes"] = new[]
+            {
+                "BJPM_ALL_LAYERS_ONE_PAGE",
+                "BJPM_EACH_LAYER_OWN_PAGE",
+                "BJPM_EACH_LAYER_OWN_FILE"
+            },
+            ["limitations"] = new[]
+            {
+                "The layer manifest does not contain SVG geometry or exact rendered pixels.",
+                "Invoke kicad_pcb_export with exportSvg for the lifecycle-bound vector artifact."
+            }
+        };
 
     private sealed class ManifestRequest { public string[] Layers { get; set; } = []; public bool IncludeEmpty { get; set; } = true; }
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };

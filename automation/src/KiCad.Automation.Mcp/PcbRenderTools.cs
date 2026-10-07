@@ -17,7 +17,7 @@ namespace KiCad.Automation.Mcp;
 public sealed class PcbRenderTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_pcb_render_3d", ReadOnly = true),
-     Description("Render one exact native PCB view through KiCad's existing 3D renderer and return the PNG alongside the matching lifecycle state. requestJson is RunBoardJobExportRender protobuf JSON with an explicit PCB document; the MCP service owns the temporary output path. The operation is read-only, rejects unsupported dimensions/formats and discards the image if the board changes during rendering. Invoke it repeatedly for top/bottom/side or zoomed views; this is observation, not routing or RF correctness."),
+     Description("Render one exact native PCB view through KiCad's existing 3D renderer and return the PNG alongside the matching lifecycle state. requestJson is RunBoardJobExportRender protobuf JSON with an explicit PCB document; the MCP service owns the temporary output path. The operation is read-only, rejects unsupported dimensions/formats and discards the image if the board changes during rendering. Renderer metadata is complete only for the covered, shown footprint-model rows; board copper/pads/tracks/zones, texture identities, exact pixels and occlusion remain explicit limitations. Invoke it repeatedly for top/bottom/side or zoomed views; this is observation, not routing or RF correctness."),
      KiCadCapability("pcb-observation", "compiled-mcp plus native-board-job-renderer", "board lifecycle state, native image snapshot"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public Task<CallToolResult> Render3D(string instanceId, string requestJson, string expectedStateJson,
@@ -73,6 +73,7 @@ public sealed class PcbRenderTools(InstanceRegistry registry)
             {
                 inspection = await client.InvokeAsync<PcbRenderInspectionRequest, PcbRenderInspectionResponse>(
                     new() { RenderRequest = request, ExpectedState = expected }, cancellationToken);
+                PcbRenderInspectionContract.ValidateBinding(inspection, document, expected);
             }
             else
             {
@@ -99,12 +100,24 @@ public sealed class PcbRenderTools(InstanceRegistry registry)
             PcbRenderMetadataValidation metadataValidation = inspection is null
                 ? PcbRenderMetadataValidation.Unavailable
                 : PcbRenderMetadataContract.Validate(inspection.Metadata, request, expected.StateSha256, requestSha256);
+            PcbRenderCoverage coverage = inspection is null
+                ? PcbRenderCoverage.Unavailable
+                : PcbRenderCoverageContract.Evaluate(inspection.Metadata, metadataValidation.IsValid,
+                    inspection.MetadataComplete);
             if (inspection is not null)
                 limitations.AddRange(inspection.Limitations);
             limitations.AddRange(metadataValidation.Failures.Select(failure => "renderer metadata contract: " + failure));
             var structured = JsonSerializer.SerializeToElement(new
             {
                 instanceId, processEpoch = session.Epoch, document,
+                inputIdentity = new
+                {
+                    boardDocument = document,
+                    processEpoch = expected.ProcessEpoch,
+                    revision = expected.Revision,
+                    nativeIdentity = expected.NativeIdentity,
+                    boardSnapshotSha256 = expected.StateSha256
+                },
                 beforeState = SchematicJson.Formatter.Format(before),
                 afterState = SchematicJson.Formatter.Format(after),
                 view = new { side = request.Side.ToString(), width = request.Width, height = request.Height,
@@ -115,6 +128,14 @@ public sealed class PcbRenderTools(InstanceRegistry registry)
                 metadataAvailable = inspection is not null,
                 metadataValidated = metadataValidation.IsValid,
                 metadataComplete = inspection?.MetadataComplete == true && metadataValidation.IsValid,
+                metadataCoverage = new
+                {
+                    modelInstancesComplete = coverage.ModelInstancesComplete,
+                    boardGeometryComplete = coverage.BoardGeometryComplete,
+                    secondaryAssetIdentitiesComplete = coverage.SecondaryAssetIdentitiesComplete,
+                    exactVisiblePixels = coverage.ExactVisiblePixels,
+                    occlusionDepth = coverage.OcclusionDepth
+                },
                 metadata,
                 limitations,
                 nativeRender = true, boardMutation = false, electricalValidation = false
@@ -144,6 +165,115 @@ public sealed class PcbRenderTools(InstanceRegistry registry)
             });
             return new CallToolResult { IsError = true, Content = [new TextContentBlock { Text = structured.GetRawText() }], StructuredContent = structured };
         }
+    }
+}
+
+internal static class PcbRenderInspectionContract
+{
+    internal static void ValidateBinding(PcbRenderInspectionResponse inspection,
+        DocumentSpecifier document, DocumentLifecycleState expected)
+    {
+        if (inspection is null
+            || inspection.Document is null
+            || expected.Document is null
+            || !inspection.Document.Equals(expected)
+            || inspection.Document.Document is null
+            || !inspection.Document.Document.Equals(document))
+            throw new AutomationException("pcb_render_identity_mismatch",
+                "The native render inspection returned metadata for a different PCB lifecycle checkpoint.");
+
+        if (!string.Equals(inspection.ProcessEpoch, expected.ProcessEpoch, StringComparison.Ordinal))
+            throw new AutomationException("pcb_render_identity_mismatch",
+                "The native render inspection returned metadata from a different process epoch.");
+
+        if (inspection.Job is null || inspection.Metadata is null)
+            throw new AutomationException("pcb_render_metadata_unavailable",
+                "The native render inspection did not return its job and metadata envelopes.");
+    }
+}
+
+internal readonly record struct PcbRenderCoverage(
+    bool ModelInstancesComplete,
+    bool BoardGeometryComplete,
+    bool SecondaryAssetIdentitiesComplete,
+    bool ExactVisiblePixels,
+    bool OcclusionDepth)
+{
+    internal static PcbRenderCoverage Unavailable => new(false, false, false, false, false);
+}
+
+internal static class PcbRenderCoverageContract
+{
+    private const string BoardGeometryEnumerated = "board geometry are enumerated";
+    private const string BoardGeometryNotEnumerated = "board geometry are not enumerated";
+
+    internal static PcbRenderCoverage Evaluate(PcbRenderMetadata metadata,
+        bool metadataValidated, bool nativeMetadataComplete)
+    {
+        bool boardGeometryComplete = metadata.CoverageNotes.Any(note =>
+            note.Contains(BoardGeometryEnumerated, StringComparison.OrdinalIgnoreCase)
+            && !note.Contains(BoardGeometryNotEnumerated, StringComparison.OrdinalIgnoreCase));
+        bool secondaryAssetsComplete = metadata.Models.Count > 0
+            && metadata.Models.All(model => model.SecondaryAssetsComplete);
+        bool modelInstancesComplete = nativeMetadataComplete
+            && metadataValidated
+            && metadata.Models.Count > 0
+            && metadata.Models.All(HasCompleteModelIdentityAndGeometry);
+
+        // The current native hook deliberately emits conservative mesh bounds;
+        // it does not inspect raster visibility, depth, or board copper geometry.
+        return new(modelInstancesComplete, boardGeometryComplete, secondaryAssetsComplete, false, false);
+    }
+
+    private static bool HasCompleteModelIdentityAndGeometry(PcbRenderModelMetadata model) =>
+        CanonicalUuid(model.NativeUuid)
+        && !string.IsNullOrWhiteSpace(model.RequestedIdentity)
+        && !string.IsNullOrWhiteSpace(model.ResolvedIdentity)
+        && model.Loaded
+        && !model.Missing
+        && ValidSha256(model.ContentSha256)
+        && model.SceneTransformColumnMajor.Count == 16
+        && model.SceneTransformColumnMajor.All(double.IsFinite)
+        && Invertible(model.SceneTransformColumnMajor)
+        && model.NativeGeometryBoundsAvailable
+        && model.NativeGeometryBounds.Count == 6
+        && model.NativeGeometryBounds.All(double.IsFinite)
+        && model.NativeGeometryBounds[3] >= model.NativeGeometryBounds[0]
+        && model.NativeGeometryBounds[4] >= model.NativeGeometryBounds[1]
+        && model.NativeGeometryBounds[5] >= model.NativeGeometryBounds[2];
+
+    private static bool CanonicalUuid(string value) =>
+        Guid.TryParseExact(value, "D", out Guid id) && id != Guid.Empty
+        && string.Equals(value, id.ToString("D"), StringComparison.Ordinal);
+
+    private static bool ValidSha256(string value) =>
+        value.Length == 64 && value.All(Uri.IsHexDigit);
+
+    private static bool Invertible(IReadOnlyList<double> values)
+    {
+        var matrix = new double[4, 4];
+        for (int row = 0; row < 4; row++)
+            for (int column = 0; column < 4; column++)
+                matrix[row, column] = values[column * 4 + row];
+
+        for (int column = 0; column < 4; column++)
+        {
+            int pivot = column;
+            for (int row = column + 1; row < 4; row++)
+                if (Math.Abs(matrix[row, column]) > Math.Abs(matrix[pivot, column]))
+                    pivot = row;
+            if (matrix[pivot, column] == 0)
+                return false;
+            for (int index = column; index < 4; index++)
+                (matrix[column, index], matrix[pivot, index]) = (matrix[pivot, index], matrix[column, index]);
+            for (int row = column + 1; row < 4; row++)
+            {
+                double factor = matrix[row, column] / matrix[column, column];
+                for (int index = column + 1; index < 4; index++)
+                    matrix[row, index] -= factor * matrix[column, index];
+            }
+        }
+        return true;
     }
 }
 

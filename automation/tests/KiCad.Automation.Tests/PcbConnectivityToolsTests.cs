@@ -13,15 +13,15 @@ public sealed class PcbConnectivityToolsTests
     [TestMethod]
     public void NormalizeReturnsTypedItemsInDeterministicOrder()
     {
-        var track = new Track { Id = new() { Value = "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB" }, Layer = BoardLayer.BlFCu,
+        var track = new Track { Id = new() { Value = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }, Layer = BoardLayer.BlFCu,
             Net = new() { Name = "POWER" } };
-        var pad = new Pad { Id = new() { Value = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA" }, Number = "1",
-            Parent = new() { Value = "CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC" }, Net = new() { Name = "POWER" } };
-        var arc = new Arc { Id = new() { Value = "DDDDDDDD-DDDD-4DDD-8DDD-DDDDDDDDDDDD" }, Layer = BoardLayer.BlFCu,
+        var pad = new Pad { Id = new() { Value = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }, Number = "1",
+            Parent = new() { Value = "cccccccc-cccc-4ccc-8ccc-cccccccccccc" }, Net = new() { Name = "POWER" } };
+        var arc = new Arc { Id = new() { Value = "dddddddd-dddd-4ddd-8ddd-dddddddddddd" }, Layer = BoardLayer.BlFCu,
             Net = new() { Name = "POWER" } };
-        var via = new Via { Id = new() { Value = "EEEEEEEE-EEEE-4EEE-8EEE-EEEEEEEEEEEE" }, Net = new() { Name = "POWER" },
+        var via = new Via { Id = new() { Value = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" }, Net = new() { Name = "POWER" },
             PadStack = new() { Layers = { BoardLayer.BlFCu, BoardLayer.BlBCu } } };
-        var zone = new Zone { Id = new() { Value = "FFFFFFFF-FFFF-4FFF-8FFF-FFFFFFFFFFFF" }, Layers = { BoardLayer.BlFCu } };
+        var zone = new Zone { Id = new() { Value = "ffffffff-ffff-4fff-8fff-ffffffffffff" }, Layers = { BoardLayer.BlFCu } };
 
         var result = PcbConnectivityTools.Normalize([
             Any.Pack(zone), Any.Pack(via), Any.Pack(arc), Any.Pack(track), Any.Pack(pad)
@@ -41,6 +41,11 @@ public sealed class PcbConnectivityToolsTests
         var pad = Any.Pack(new Pad { Id = id });
         var duplicate = Assert.ThrowsExactly<AutomationException>(() => PcbConnectivityTools.Normalize([pad, pad.Clone()]));
         Assert.AreEqual("duplicate_pcb_connectivity_item", duplicate.Code);
+
+        var uppercase = Assert.ThrowsExactly<AutomationException>(() => PcbConnectivityTools.Normalize([
+            Any.Pack(new Pad { Id = new() { Value = "a2222222-2222-4222-8222-222222222222".ToUpperInvariant() } })
+        ]));
+        Assert.AreEqual("invalid_pcb_connectivity_item_identity", uppercase.Code);
 
         var unknown = Assert.ThrowsExactly<AutomationException>(() => PcbConnectivityTools.Normalize([
             new Any { TypeUrl = "type.googleapis.com/kiapi.board.types.FutureItem" }

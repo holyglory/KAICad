@@ -164,10 +164,11 @@ public sealed class PcbConnectivityTools(InstanceRegistry registry)
     private static string CanonicalId(KIID? value, string kind)
     {
         string id = value?.Value ?? "";
-        if (!Guid.TryParseExact(id, "D", out Guid parsed) || parsed == Guid.Empty)
+        if (!Guid.TryParseExact(id, "D", out Guid parsed) || parsed == Guid.Empty
+            || !string.Equals(id, parsed.ToString("D"), StringComparison.Ordinal))
             throw new AutomationException("invalid_pcb_connectivity_item_identity",
                 $"Native {kind} connectivity item did not carry a canonical KIID.");
-        return parsed.ToString("D");
+        return id;
     }
 
     private static string? ParentId(KIID? value)
@@ -175,10 +176,11 @@ public sealed class PcbConnectivityTools(InstanceRegistry registry)
         string id = value?.Value ?? "";
         if (id.Length == 0)
             return null;
-        if (!Guid.TryParseExact(id, "D", out Guid parsed) || parsed == Guid.Empty)
+        if (!Guid.TryParseExact(id, "D", out Guid parsed) || parsed == Guid.Empty
+            || !string.Equals(id, parsed.ToString("D"), StringComparison.Ordinal))
             throw new AutomationException("invalid_pcb_connectivity_parent_identity",
                 "Native connectivity item carried a non-canonical parent KIID.");
-        return parsed.ToString("D");
+        return id;
     }
 
     private static string? NetName(Net? value) =>

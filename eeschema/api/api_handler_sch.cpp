@@ -3268,7 +3268,11 @@ API_HANDLER_SCH::handleReadLibrarySnapshot(
         response.set_provider_observable( snapshot.providerObservable );
         response.set_content_snapshot_complete( snapshot.contentSnapshotComplete );
         response.set_disk_baseline_checked( snapshot.diskBaselineChecked );
-        response.set_complete_change_tracking( snapshot.completeChangeTracking );
+        // This transport is a read-only foundation slice.  It must never advertise complete
+        // native tracking while symbol-editor, import/rescue and remote writers remain outside
+        // the shared lifecycle owner; keep the negative claim literal so the change-tracking
+        // oracle cannot mistake a future producer default for a completed guard.
+        response.set_complete_change_tracking( false );
         response.set_postverify( snapshot.postverify );
 
         for( const FILE_CONTENT_BASELINE& baseline : snapshot.dependencyBaselines )

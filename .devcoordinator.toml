@@ -40,7 +40,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 name="contracts"
 tier="development"
 timeout_seconds=300
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","(FullyQualifiedName~Diagram|FullyQualifiedName~Recursive|FullyQualifiedName~Structural|FullyQualifiedName~NativeKeyboard|FullyQualifiedName~McpProcess|FullyQualifiedName~Knowledge|FullyQualifiedName~ComponentPackage|FullyQualifiedName~BlockProposal|FullyQualifiedName~CandidateRecovery|FullyQualifiedName~PhysicalAllocation)&TestCategory!=NativeSession","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/diagram-requirement-history/contracts"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","(FullyQualifiedName~Diagram|FullyQualifiedName~Recursive|FullyQualifiedName~Structural|FullyQualifiedName~NativeKeyboard|FullyQualifiedName~McpProcess|FullyQualifiedName~Knowledge|FullyQualifiedName~ComponentPackage|FullyQualifiedName~BlockProposal|FullyQualifiedName~CandidateRecovery|FullyQualifiedName~PhysicalAllocation)&TestCategory!=NativeSession","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/diagram-requirement-history/contracts"]
 retained_artifacts=[{name="contracts",path="automation/artifacts/diagram-requirement-history/contracts",max_bytes=67108864}]
 [[test.diagram-requirement-history.check]]
 name="native-protocol"
@@ -52,7 +52,7 @@ name="native-ui"
 tier="development"
 requires=["contracts","native-protocol"]
 timeout_seconds=900
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeFieldHistory|TestCategory=NativeRecursiveEditor|TestCategory=NativeSimulation|TestCategory=NativePcbItems","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/field-history-dialog-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeFieldHistory|TestCategory=NativeRecursiveEditor|TestCategory=NativeSimulation|TestCategory=NativePcbItems","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/field-history-dialog-tests"]
 retained_artifacts=[{name="dialog-tests",path="automation/artifacts/field-history-dialog-tests",max_bytes=16777216},{name="light",path="automation/artifacts/native-field-history/light/native-session-current",max_bytes=16777216},{name="dark",path="automation/artifacts/native-field-history/dark/native-session-current",max_bytes=16777216},{name="editor-light",path="automation/artifacts/native-recursive-editor/light/native-session-current",max_bytes=67108864},{name="editor-dark",path="automation/artifacts/native-recursive-editor/dark/native-session-current",max_bytes=67108864}]
 [[test.diagram-requirement-history.check]]
 name="psu-cpu-canvas"
@@ -60,7 +60,7 @@ tier="development"
 requires=["contracts","native-protocol"]
 after=["native-ui"]
 timeout_seconds=900
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeDiagramCanvas","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-diagram-canvas-tests","--","MSTest.MapInconclusiveToFailed=true"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeDiagramCanvas","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-diagram-canvas-tests","--","MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{name="canvas-tests",path="automation/artifacts/native-diagram-canvas-tests",max_bytes=16777216},{name="canvas-light",path="automation/artifacts/native-diagram-canvas/light/native-session-current",max_bytes=67108864},{name="canvas-dark",path="automation/artifacts/native-diagram-canvas/dark/native-session-current",max_bytes=67108864}]
 [test.part-symbol-contracts]
 timeout_seconds=600
@@ -74,7 +74,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.part-symbol-contracts.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~SchematicLibraryCacheEquivalenceTests|FullyQualifiedName~SchematicItemDeltaTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~SchematicPartSymbolTests|FullyQualifiedName~SchematicDesignTests|FullyQualifiedName~SchematicNativeCreationProjectionTests|FullyQualifiedName~SchematicSynchronizationPlanTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/part-symbol-contracts"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~SchematicLibraryCacheEquivalenceTests|FullyQualifiedName~SchematicItemDeltaTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~SchematicPartSymbolTests|FullyQualifiedName~SchematicDesignTests|FullyQualifiedName~SchematicNativeCreationProjectionTests|FullyQualifiedName~SchematicSynchronizationPlanTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/part-symbol-contracts"]
 retained_artifacts=[{name="part-symbol-contracts",path="automation/artifacts/part-symbol-contracts",max_bytes=16777216}]
 [test.archive-pruning-contracts]
 timeout_seconds=600
@@ -88,7 +88,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.archive-pruning-contracts.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~IntermediateArchivePruningTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/archive-pruning-contracts"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~IntermediateArchivePruningTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/archive-pruning-contracts"]
 retained_artifacts=[{name="archive-pruning-contracts",path="automation/artifacts/archive-pruning-contracts",max_bytes=16777216}]
 [test.retained-part-symbol-diagnosis]
 timeout_seconds=600
@@ -102,7 +102,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.retained-part-symbol-diagnosis.check]]
 name="compare"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=RetainedPartSymbolDiagnosis","--logger","console;verbosity=normal","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/retained-part-symbol-diagnosis"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=RetainedPartSymbolDiagnosis","--logger","console;verbosity=normal","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/retained-part-symbol-diagnosis"]
 retained_artifacts=[{name="part-symbol-diagnosis",path="automation/artifacts/retained-part-symbol-diagnosis",max_bytes=16777216}]
 [test.compiler-cache]
 timeout_seconds=1200
@@ -118,7 +118,7 @@ name="cache-contracts"
 tier="development"
 role="preflight"
 invalidates=["native-configure","native-build","native-journal"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=CompilerCache","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/compiler-cache-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=CompilerCache","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/compiler-cache-tests"]
 retained_artifacts=[{name="cache-tests",path="automation/artifacts/compiler-cache-tests",max_bytes=16777216},{name="cache-evidence",path="automation/artifacts/compiler-cache",max_bytes=16777216}]
 [[test.compiler-cache.check]]
 name="native-configure"
@@ -183,7 +183,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.download-page.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=LandingPage|FullyQualifiedName~DownloadServerTests|FullyQualifiedName~SignedUpdateServerTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/landing-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=LandingPage|FullyQualifiedName~DownloadServerTests|FullyQualifiedName~SignedUpdateServerTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/landing-tests"]
 retained_artifacts=[{name="landing-tests",path="automation/artifacts/landing-tests",max_bytes=16777216}]
 [test.landing-verifier-self-test]
 timeout_seconds=360
@@ -225,13 +225,13 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.public-caption-update.check]]
 name="https"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=PublicDownloads","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/public-download-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=PublicDownloads","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/public-download-tests"]
 retained_artifacts=[{name="public-download-tests",path="automation/artifacts/public-download-tests",max_bytes=16777216},{name="public-download-evidence",path="automation/artifacts/public-download-evidence",max_bytes=16777216}]
 [[test.public-caption-update.check]]
 name="rendered"
 tier="development"
 requires=["https"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=PublicCaptionMcpUpdate|TestCategory=EmptyCaptionUpdate","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/public-caption-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=PublicCaptionMcpUpdate|TestCategory=EmptyCaptionUpdate","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/public-caption-tests"]
 retained_artifacts=[{name="public-caption-tests",path="automation/artifacts/public-caption-tests",max_bytes=16777216},{name="public-caption-evidence",path="automation/artifacts/native-session-current",max_bytes=33554432}]
 [[test.public-caption-update.check]]
 name="landing"
@@ -240,7 +240,7 @@ command=["devcoordinator2-tooling","formal-ui","verify","--config","automation/q
 [[test.public-caption-update.check]]
 name="browser"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=LandingBrowser","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/preview18-landing-browser"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=LandingBrowser","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/preview18-landing-browser"]
 retained_artifacts=[{name="download-browser",path="automation/artifacts/preview18-landing-browser",max_bytes=16777216}]
 [test.signed-update-site]
 timeout_seconds=600
@@ -254,7 +254,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.signed-update-site.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~SignedUpdateServerTests|FullyQualifiedName~UpdatePublishingTests|FullyQualifiedName~DownloadServerTests|FullyQualifiedName~UpdateManifestTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/signed-site-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~SignedUpdateServerTests|FullyQualifiedName~UpdatePublishingTests|FullyQualifiedName~DownloadServerTests|FullyQualifiedName~UpdateManifestTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/signed-site-tests"]
 retained_artifacts=[{name="signed-site-tests",path="automation/artifacts/signed-site-tests",max_bytes=16777216}]
 [test.platform-update-feeds]
 timeout_seconds=600
@@ -268,7 +268,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.platform-update-feeds.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~PlatformUpdateFeedTests|FullyQualifiedName~SignedUpdateServerTests|FullyQualifiedName~DownloadServerTests|FullyQualifiedName~HostedPreviewStagingTests|FullyQualifiedName~SignedLinuxPreviewStagingTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/platform-update-feeds"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~PlatformUpdateFeedTests|FullyQualifiedName~SignedUpdateServerTests|FullyQualifiedName~DownloadServerTests|FullyQualifiedName~HostedPreviewStagingTests|FullyQualifiedName~SignedLinuxPreviewStagingTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/platform-update-feeds"]
 retained_artifacts=[{name="platform-update-feeds",path="automation/artifacts/platform-update-feeds",max_bytes=16777216}]
 [test.mac-update-concurrency]
 timeout_seconds=600
@@ -282,7 +282,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.mac-update-concurrency.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~UpdateStoreLeaseTests|FullyQualifiedName~UpdateRegistrationRetryTests|FullyQualifiedName~MacCaptionActionTests|FullyQualifiedName~MacUiDriverTests|FullyQualifiedName~MacVerifiedInstallationTests|FullyQualifiedName~MacUpdatePairTests|FullyQualifiedName~NativeCaptionMcpProbeTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/mac-update-concurrency"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~UpdateStoreLeaseTests|FullyQualifiedName~UpdateRegistrationRetryTests|FullyQualifiedName~MacCaptionActionTests|FullyQualifiedName~MacUiDriverTests|FullyQualifiedName~MacVerifiedInstallationTests|FullyQualifiedName~MacUpdatePairTests|FullyQualifiedName~NativeCaptionMcpProbeTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/mac-update-concurrency"]
 retained_artifacts=[{name="mac-update-concurrency",path="automation/artifacts/mac-update-concurrency",max_bytes=16777216}]
 [test.mcp-update-reconnection]
 timeout_seconds=900
@@ -298,12 +298,12 @@ name="contracts"
 tier="development"
 role="preflight"
 invalidates=["rendered"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~InstanceReplacementTests|FullyQualifiedName~InstanceUpdateReconnectionTests|FullyQualifiedName~UpdateOriginTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/mcp-reconnection-contracts"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~InstanceReplacementTests|FullyQualifiedName~InstanceUpdateReconnectionTests|FullyQualifiedName~UpdateOriginTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/mcp-reconnection-contracts"]
 retained_artifacts=[{name="contracts",path="automation/artifacts/mcp-reconnection-contracts",max_bytes=16777216}]
 [[test.mcp-update-reconnection.check]]
 name="rendered"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeMcpUpdateReconnection","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/mcp-reconnection-native"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeMcpUpdateReconnection","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/mcp-reconnection-native"]
 retained_artifacts=[{name="native-tests",path="automation/artifacts/mcp-reconnection-native",max_bytes=16777216},{name="native-evidence",path="automation/artifacts/native-session-current",max_bytes=33554432}]
 [test.instance-replacement]
 timeout_seconds=600
@@ -317,7 +317,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--configuration","
 [[test.instance-replacement.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~InstanceReplacementTests|FullyQualifiedName~InstanceRegistryTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~UpdateOriginTests|FullyQualifiedName~InstanceUpdateReconnectionTests|FullyQualifiedName~UpdateInspectionTests|FullyQualifiedName~WindowsUpdateInspectionTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/instance-replacement-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~InstanceReplacementTests|FullyQualifiedName~InstanceRegistryTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~UpdateOriginTests|FullyQualifiedName~InstanceUpdateReconnectionTests|FullyQualifiedName~UpdateInspectionTests|FullyQualifiedName~WindowsUpdateInspectionTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/instance-replacement-tests"]
 retained_artifacts=[{name="instance-replacement-tests",path="automation/artifacts/instance-replacement-tests",max_bytes=16777216}]
 [test.windows-json-link]
 timeout_seconds=600
@@ -331,7 +331,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--configuration","
 [[test.windows-json-link.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~WindowsJsonLinkTests|FullyQualifiedName~WindowsNativeRestartRequestTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/windows-json-link-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~WindowsJsonLinkTests|FullyQualifiedName~WindowsNativeRestartRequestTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/windows-json-link-tests"]
 retained_artifacts=[{name="windows-json-link-tests",path="automation/artifacts/windows-json-link-tests",max_bytes=16777216}]
 [test.windows-first-feed]
 timeout_seconds=600
@@ -357,7 +357,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.windows-harness.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~WindowsInstalledHarnessTests|FullyQualifiedName~WindowsFixtureCleanupTests|FullyQualifiedName~McpToolPayloadTests|FullyQualifiedName~WindowsNativeLogTests|FullyQualifiedName~WindowsRetainedPackageInputTests|FullyQualifiedName~WindowsRequalifiedPreviewTests|FullyQualifiedName~WindowsDiagnosticPackageTests|FullyQualifiedName~HostedDeliveryTests|FullyQualifiedName~HostedPreviewStagingTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/windows-harness-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~WindowsInstalledHarnessTests|FullyQualifiedName~WindowsFixtureCleanupTests|FullyQualifiedName~McpToolPayloadTests|FullyQualifiedName~WindowsNativeLogTests|FullyQualifiedName~WindowsRetainedPackageInputTests|FullyQualifiedName~WindowsRequalifiedPreviewTests|FullyQualifiedName~WindowsDiagnosticPackageTests|FullyQualifiedName~HostedDeliveryTests|FullyQualifiedName~HostedPreviewStagingTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/windows-harness-tests"]
 retained_artifacts=[{name="windows-harness-tests",path="automation/artifacts/windows-harness-tests",max_bytes=16777216}]
 [test.download-recovery]
 timeout_seconds=1800
@@ -371,12 +371,12 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.download-recovery.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=LandingPage|FullyQualifiedName~DownloadServerTests|FullyQualifiedName~SignedUpdateServerTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/download-recovery-contracts"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=LandingPage|FullyQualifiedName~DownloadServerTests|FullyQualifiedName~SignedUpdateServerTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/download-recovery-contracts"]
 retained_artifacts=[{name="download-contracts",path="automation/artifacts/download-recovery-contracts",max_bytes=16777216}]
 [[test.download-recovery.check]]
 name="browser"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=LandingBrowser","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/download-recovery-browser"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=LandingBrowser","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/download-recovery-browser"]
 retained_artifacts=[{name="download-browser",path="automation/artifacts/download-recovery-browser",max_bytes=16777216}]
 [[test.download-recovery.check]]
 name="verifier-self-test"
@@ -399,7 +399,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.landing-browser.check]]
 name="browser"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=LandingBrowser","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/landing-browser-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=LandingBrowser","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/landing-browser-tests"]
 retained_artifacts=[{name="browser-tests",path="automation/artifacts/landing-browser-tests",max_bytes=16777216}]
 [test.windows-caption]
 timeout_seconds=600
@@ -413,7 +413,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.windows-caption.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~WindowsCaptionActionTests|FullyQualifiedName~WindowsUiDriverTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/windows-caption-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~WindowsCaptionActionTests|FullyQualifiedName~WindowsUiDriverTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/windows-caption-tests"]
 retained_artifacts=[{name="windows-caption-tests",path="automation/artifacts/windows-caption-tests",max_bytes=16777216}]
 [test.update-check-contention]
 timeout_seconds=600
@@ -427,7 +427,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.update-check-contention.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~UpdateCheckerTests|FullyQualifiedName~UpdateStoreLeaseTests|FullyQualifiedName~UpdateCommandTests|FullyQualifiedName~UpdateRegistrationRetryTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/update-check-contention"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~UpdateCheckerTests|FullyQualifiedName~UpdateStoreLeaseTests|FullyQualifiedName~UpdateCommandTests|FullyQualifiedName~UpdateRegistrationRetryTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/update-check-contention"]
 retained_artifacts=[{name="update-check-contention",path="automation/artifacts/update-check-contention",max_bytes=16777216}]
 [test.windows-process-identity]
 timeout_seconds=600
@@ -441,7 +441,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.windows-process-identity.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~WindowsProcessIdentityTests|FullyQualifiedName~WindowsUpdateHandoffTests|FullyQualifiedName~WindowsRestartCommandTests|FullyQualifiedName~WindowsUpdateInspectionTests|FullyQualifiedName~WindowsNativeHandoffJourneyTests|FullyQualifiedName~WindowsLauncherTests|FullyQualifiedName~UpdateCommandTests|FullyQualifiedName~WindowsVerifiedVersionsTests|FullyQualifiedName~UpdateStoreLeaseTests|FullyQualifiedName~UpdateRegistrationRetryTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/windows-process-identity"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~WindowsProcessIdentityTests|FullyQualifiedName~WindowsUpdateHandoffTests|FullyQualifiedName~WindowsRestartCommandTests|FullyQualifiedName~WindowsUpdateInspectionTests|FullyQualifiedName~WindowsNativeHandoffJourneyTests|FullyQualifiedName~WindowsLauncherTests|FullyQualifiedName~UpdateCommandTests|FullyQualifiedName~WindowsVerifiedVersionsTests|FullyQualifiedName~UpdateStoreLeaseTests|FullyQualifiedName~UpdateRegistrationRetryTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/windows-process-identity"]
 retained_artifacts=[{name="windows-process-identity",path="automation/artifacts/windows-process-identity",max_bytes=16777216}]
 [test.windows-launchers]
 timeout_seconds=600
@@ -455,7 +455,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.windows-launchers.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~WindowsLauncherTests|FullyQualifiedName~WindowsInstallerTests|FullyQualifiedName~WindowsVerifiedVersionsTests|FullyQualifiedName~UpdateCommandTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/windows-launchers"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~WindowsLauncherTests|FullyQualifiedName~WindowsInstallerTests|FullyQualifiedName~WindowsVerifiedVersionsTests|FullyQualifiedName~UpdateCommandTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/windows-launchers"]
 retained_artifacts=[{name="windows-launchers",path="automation/artifacts/windows-launchers",max_bytes=16777216}]
 [test.windows-archive-preflight]
 timeout_seconds=600
@@ -469,7 +469,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.windows-archive-preflight.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~WindowsArchivePreflightTests|FullyQualifiedName~WindowsUpdateStagerTests|FullyQualifiedName~UpdateCommandTests|FullyQualifiedName~WindowsVersionSelectionTests|FullyQualifiedName~WindowsFixtureCleanupTests|FullyQualifiedName~WindowsVerifiedVersionsTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/windows-archive-preflight"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~WindowsArchivePreflightTests|FullyQualifiedName~WindowsUpdateStagerTests|FullyQualifiedName~UpdateCommandTests|FullyQualifiedName~WindowsVersionSelectionTests|FullyQualifiedName~WindowsFixtureCleanupTests|FullyQualifiedName~WindowsVerifiedVersionsTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/windows-archive-preflight"]
 retained_artifacts=[{name="windows-archive-preflight",path="automation/artifacts/windows-archive-preflight",max_bytes=16777216}]
 [test.windows-native-ui]
 timeout_seconds=600
@@ -483,7 +483,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.windows-native-ui.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~WindowsUiDriverTests|FullyQualifiedName~WindowsInstalledPackageTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/windows-native-ui"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~WindowsUiDriverTests|FullyQualifiedName~WindowsInstalledPackageTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/windows-native-ui"]
 retained_artifacts=[{name="windows-native-ui",path="automation/artifacts/windows-native-ui",max_bytes=16777216}]
 [test.native-endpoint-contracts]
 timeout_seconds=600
@@ -497,7 +497,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.native-endpoint-contracts.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~NativeIpcEndpointTests|FullyQualifiedName~NngTransportTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~InstanceRegistryTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-endpoint-contracts"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~NativeIpcEndpointTests|FullyQualifiedName~NngTransportTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~InstanceRegistryTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-endpoint-contracts"]
 retained_artifacts=[{name="native-endpoint-contracts",path="automation/artifacts/native-endpoint-contracts",max_bytes=16777216}]
 [test.nng-binding-lifetime]
 timeout_seconds=600
@@ -511,7 +511,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.nng-binding-lifetime.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~NngBindingLifetimeTests|FullyQualifiedName~NngTransportTests|FullyQualifiedName~RuntimeInfoTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/nng-binding-lifetime"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~NngBindingLifetimeTests|FullyQualifiedName~NngTransportTests|FullyQualifiedName~RuntimeInfoTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/nng-binding-lifetime"]
 retained_artifacts=[{name="nng-binding-lifetime",path="automation/artifacts/nng-binding-lifetime",max_bytes=16777216}]
 [test.caption-update]
 timeout_seconds=900
@@ -525,7 +525,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.caption-update.check]]
 name="rendered"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeCaptionUpdate","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/caption-update-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeCaptionUpdate","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/caption-update-tests"]
 retained_artifacts=[{name="caption-update-tests",path="automation/artifacts/caption-update-tests",max_bytes=16777216},{name="caption-update-evidence",path="automation/artifacts/native-session-current",max_bytes=33554432}]
 [test.native-caption]
 timeout_seconds=600
@@ -557,7 +557,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--configuration","
 [[test.package-source-context.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--no-restore","--filter","FullyQualifiedName~LinuxPackageTests|FullyQualifiedName~LinuxStagingTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/package-source-context"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--filter","FullyQualifiedName~LinuxPackageTests|FullyQualifiedName~LinuxStagingTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/package-source-context"]
 retained_artifacts=[{name="package-source-context",path="automation/artifacts/package-source-context",max_bytes=16777216}]
 [test.instance-tool-errors]
 timeout_seconds=300
@@ -571,7 +571,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--configuration","
 [[test.instance-tool-errors.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--no-restore","--filter","FullyQualifiedName~InstanceToolBoundaryTests|FullyQualifiedName~InstanceRegistryTests|FullyQualifiedName~McpProcessTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/instance-tool-errors"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--filter","FullyQualifiedName~InstanceToolBoundaryTests|FullyQualifiedName~InstanceRegistryTests|FullyQualifiedName~McpProcessTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/instance-tool-errors"]
 retained_artifacts=[{name="instance-tool-errors",path="automation/artifacts/instance-tool-errors",max_bytes=16777216}]
 [test.codex-desktop-journey]
 timeout_seconds=1800
@@ -585,7 +585,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--configuration","
 [[test.codex-desktop-journey.check]]
 name="actual-client"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--no-restore","--filter","TestCategory=NativeCodexDesktop","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/codex-desktop-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--filter","TestCategory=NativeCodexDesktop","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/codex-desktop-tests"]
 retained_artifacts=[{name="codex-desktop-tests",path="automation/artifacts/codex-desktop-tests",max_bytes=16777216},{name="codex-desktop-evidence",path="automation/artifacts/codex-desktop-f120-20260919",max_bytes=33554432}]
 [test.native-updater-objects]
 timeout_seconds=1200
@@ -599,7 +599,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.native-updater-objects.check]]
 name="managed-contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~WindowsRestartCommandTests|FullyQualifiedName~WindowsNativeRestartRequestTests|FullyQualifiedName~UpdateOriginTests|FullyQualifiedName~UpdateInspectionTests|FullyQualifiedName~UpdateRecoveryTests|FullyQualifiedName~UpdateCommandTests|FullyQualifiedName~MacUpdateHandoffTests|FullyQualifiedName~WindowsUpdateHandoffTests|FullyQualifiedName~WindowsUpdateInspectionTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-restart-contracts"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~WindowsRestartCommandTests|FullyQualifiedName~WindowsNativeRestartRequestTests|FullyQualifiedName~UpdateOriginTests|FullyQualifiedName~UpdateInspectionTests|FullyQualifiedName~UpdateRecoveryTests|FullyQualifiedName~UpdateCommandTests|FullyQualifiedName~MacUpdateHandoffTests|FullyQualifiedName~WindowsUpdateHandoffTests|FullyQualifiedName~WindowsUpdateInspectionTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-restart-contracts"]
 retained_artifacts=[{name="native-restart-contracts",path="automation/artifacts/native-restart-contracts",max_bytes=16777216}]
 [[test.native-updater-objects.check]]
 name="configure"
@@ -638,7 +638,7 @@ command=["ctest","--test-dir","automation/artifacts/native","--tests-regex","^qa
 name="rendered"
 tier="development"
 requires=["native","helper"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeEmptyManager","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/empty-manager-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeEmptyManager","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/empty-manager-tests"]
 retained_artifacts=[{name="empty-manager-tests",path="automation/artifacts/empty-manager-tests",max_bytes=16777216},{name="empty-manager-evidence",path="automation/artifacts/native-session-current",max_bytes=33554432}]
 [test.empty-caption-update]
 timeout_seconds=900
@@ -652,7 +652,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.empty-caption-update.check]]
 name="rendered"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=EmptyCaptionUpdate|TestCategory=NativeCaptionUpdate","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/empty-caption-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=EmptyCaptionUpdate|TestCategory=NativeCaptionUpdate","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/empty-caption-tests"]
 retained_artifacts=[{name="empty-caption-tests",path="automation/artifacts/empty-caption-tests",max_bytes=16777216},{name="empty-caption-evidence",path="automation/artifacts/native-session-current",max_bytes=33554432}]
 [test.update-close-recovery]
 timeout_seconds=600
@@ -666,7 +666,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.update-close-recovery.check]]
 name="rendered"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeUpdateCloseRecovery|TestCategory=NativeUpdateEarlyExit","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/update-close-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeUpdateCloseRecovery|TestCategory=NativeUpdateEarlyExit","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/update-close-tests"]
 retained_artifacts=[{name="update-close-tests",path="automation/artifacts/update-close-tests",max_bytes=16777216},{name="update-close-evidence",path="automation/artifacts/native-session-current",max_bytes=33554432}]
 [test.update-early-exit]
 timeout_seconds=600
@@ -680,7 +680,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.update-early-exit.check]]
 name="rendered"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeUpdateEarlyExit","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/update-early-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeUpdateEarlyExit","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/update-early-tests"]
 retained_artifacts=[{name="update-early-tests",path="automation/artifacts/update-early-tests",max_bytes=16777216},{name="update-early-evidence",path="automation/artifacts/native-session-current",max_bytes=33554432}]
 [test.update-inspection]
 timeout_seconds=900
@@ -696,12 +696,12 @@ name="contracts"
 tier="development"
 role="preflight"
 invalidates=["rendered"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~UpdateInspectionTests|FullyQualifiedName~UpdateCommandTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/update-inspection-contracts"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~UpdateInspectionTests|FullyQualifiedName~UpdateCommandTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/update-inspection-contracts"]
 retained_artifacts=[{name="inspection-contracts",path="automation/artifacts/update-inspection-contracts",max_bytes=16777216}]
 [[test.update-inspection.check]]
 name="rendered"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeUpdateInspection","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/update-inspection-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeUpdateInspection","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/update-inspection-tests"]
 retained_artifacts=[{name="inspection-tests",path="automation/artifacts/update-inspection-tests",max_bytes=16777216},{name="inspection-evidence",path="automation/artifacts/native-session-current",max_bytes=33554432}]
 [test.interrupted-recovery]
 timeout_seconds=900
@@ -717,12 +717,12 @@ name="contracts"
 tier="development"
 role="preflight"
 invalidates=["rendered"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~UpdateRecoveryTests|FullyQualifiedName~UpdateInspectionTests|FullyQualifiedName~UpdateCommandTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/interrupted-recovery-contracts"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~UpdateRecoveryTests|FullyQualifiedName~UpdateInspectionTests|FullyQualifiedName~UpdateCommandTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/interrupted-recovery-contracts"]
 retained_artifacts=[{name="recovery-contracts",path="automation/artifacts/interrupted-recovery-contracts",max_bytes=16777216}]
 [[test.interrupted-recovery.check]]
 name="rendered"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeInterruptedRecovery|TestCategory=NativeUpdateInspection|TestCategory=NativeUpdateCloseRecovery|TestCategory=NativeUpdateEarlyExit","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/interrupted-recovery-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeInterruptedRecovery|TestCategory=NativeUpdateInspection|TestCategory=NativeUpdateCloseRecovery|TestCategory=NativeUpdateEarlyExit","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/interrupted-recovery-tests"]
 retained_artifacts=[{name="interrupted-tests",path="automation/artifacts/interrupted-recovery-tests",max_bytes=16777216},{name="interrupted-evidence",path="automation/artifacts/native-session-current",max_bytes=33554432}]
 [test.native-updater-journey]
 timeout_seconds=3600
@@ -750,7 +750,7 @@ command=["ctest","--test-dir","automation/artifacts/native","--tests-regex","^qa
 name="rendered"
 tier="development"
 requires=["publish","native-build","lifecycle"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeUpdater","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-updater-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeUpdater","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-updater-tests"]
 retained_artifacts=[{name="native-updater-tests",path="automation/artifacts/native-updater-tests",max_bytes=16777216},{name="native-updater-evidence",path="automation/artifacts/native-session-current",max_bytes=33554432}]
 [test.public-downloads]
 timeout_seconds=600
@@ -764,7 +764,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.public-downloads.check]]
 name="https"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=PublicDownloads","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/public-mac-both-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=PublicDownloads","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/public-mac-both-tests"]
 retained_artifacts=[{name="public-download-tests",path="automation/artifacts/public-mac-both-tests",max_bytes=16777216},{name="public-download-evidence",path="automation/artifacts/public-mac-both-evidence",max_bytes=16777216}]
 [test.update-contracts]
 timeout_seconds=600
@@ -778,7 +778,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.update-contracts.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~UpdateManifestTests|FullyQualifiedName~UpdateDownloaderTests|FullyQualifiedName~UpdateCheckerTests|FullyQualifiedName~LinuxUpdateStagerTests|FullyQualifiedName~LinuxUpdateRuntimeTests|FullyQualifiedName~LinuxUpdateActivationTests|FullyQualifiedName~LinuxVerifiedInstallationTests|FullyQualifiedName~LinuxPayloadFingerprintTests|FullyQualifiedName~UpdateCommandTests|FullyQualifiedName~McpProcessTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/update-contract-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~UpdateManifestTests|FullyQualifiedName~UpdateDownloaderTests|FullyQualifiedName~UpdateCheckerTests|FullyQualifiedName~LinuxUpdateStagerTests|FullyQualifiedName~LinuxUpdateRuntimeTests|FullyQualifiedName~LinuxUpdateActivationTests|FullyQualifiedName~LinuxVerifiedInstallationTests|FullyQualifiedName~LinuxPayloadFingerprintTests|FullyQualifiedName~UpdateCommandTests|FullyQualifiedName~McpProcessTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/update-contract-tests"]
 retained_artifacts=[{name="update-contract-tests",path="automation/artifacts/update-contract-tests",max_bytes=16777216}]
 [test.update-archive]
 timeout_seconds=900
@@ -794,12 +794,12 @@ name="contracts"
 tier="development"
 role="preflight"
 invalidates=["native-journey"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~UpdateManifestTests|FullyQualifiedName~UpdateDownloaderTests|FullyQualifiedName~UpdateCheckerTests|FullyQualifiedName~LinuxUpdateStagerTests|FullyQualifiedName~LinuxUpdateRuntimeTests|FullyQualifiedName~LinuxUpdateActivationTests|FullyQualifiedName~LinuxVerifiedInstallationTests|FullyQualifiedName~LinuxPayloadFingerprintTests|FullyQualifiedName~UpdateCommandTests|FullyQualifiedName~McpProcessTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/update-contract-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~UpdateManifestTests|FullyQualifiedName~UpdateDownloaderTests|FullyQualifiedName~UpdateCheckerTests|FullyQualifiedName~LinuxUpdateStagerTests|FullyQualifiedName~LinuxUpdateRuntimeTests|FullyQualifiedName~LinuxUpdateActivationTests|FullyQualifiedName~LinuxVerifiedInstallationTests|FullyQualifiedName~LinuxPayloadFingerprintTests|FullyQualifiedName~UpdateCommandTests|FullyQualifiedName~McpProcessTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/update-contract-tests"]
 retained_artifacts=[{name="update-contract-tests",path="automation/artifacts/update-contract-tests",max_bytes=16777216}]
 [[test.update-archive.check]]
 name="native-journey"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeUpdateArchive","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/update-archive-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeUpdateArchive","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/update-archive-tests"]
 retained_artifacts=[{name="update-archive-tests",path="automation/artifacts/update-archive-tests",max_bytes=16777216},{name="update-archive-evidence",path="automation/artifacts/native-session-current",max_bytes=33554432}]
 [test.clean-probe-build]
 timeout_seconds=600
@@ -835,7 +835,7 @@ name="contracts"
 tier="development"
 role="preflight"
 invalidates=["package"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~DebianPackageTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/debian-package-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~DebianPackageTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/debian-package-tests"]
 retained_artifacts=[{name="debian-package-tests",path="automation/artifacts/debian-package-tests",max_bytes=16777216}]
 [[test.debian-package.check]]
 name="package"
@@ -853,7 +853,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.mac-validation-contracts.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~MacArchitectureTests|FullyQualifiedName~ValidationEvidenceTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/mac-validation-contracts"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~MacArchitectureTests|FullyQualifiedName~ValidationEvidenceTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/mac-validation-contracts"]
 retained_artifacts=[{name="mac-validation-contracts",path="automation/artifacts/mac-validation-contracts",max_bytes=16777216}]
 [test.mac-update-archive]
 timeout_seconds=600
@@ -867,7 +867,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.mac-update-archive.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~MacArchivePreflightTests|FullyQualifiedName~MacUpdateStagerTests|FullyQualifiedName~UpdateCommandTests|FullyQualifiedName~LinuxUpdateStagerTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/mac-update-archive"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~MacArchivePreflightTests|FullyQualifiedName~MacUpdateStagerTests|FullyQualifiedName~UpdateCommandTests|FullyQualifiedName~LinuxUpdateStagerTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/mac-update-archive"]
 retained_artifacts=[{name="mac-update-archive",path="automation/artifacts/mac-update-archive",max_bytes=16777216}]
 [test.mac-installation]
 timeout_seconds=900
@@ -881,7 +881,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.mac-installation.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~MacVerifiedInstallationTests|FullyQualifiedName~PosixUpdateActivationTests|FullyQualifiedName~LinuxUpdateActivationTests|FullyQualifiedName~LinuxVerifiedInstallationTests|FullyQualifiedName~LinuxPayloadFingerprintTests|FullyQualifiedName~UpdateCommandTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/mac-installation"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~MacVerifiedInstallationTests|FullyQualifiedName~PosixUpdateActivationTests|FullyQualifiedName~LinuxUpdateActivationTests|FullyQualifiedName~LinuxVerifiedInstallationTests|FullyQualifiedName~LinuxPayloadFingerprintTests|FullyQualifiedName~UpdateCommandTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/mac-installation"]
 retained_artifacts=[{name="mac-installation",path="automation/artifacts/mac-installation",max_bytes=16777216}]
 [test.mac-restart]
 timeout_seconds=900
@@ -895,7 +895,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.mac-restart.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~MacProcessIdentityTests|FullyQualifiedName~MacUpdateHandoffTests|FullyQualifiedName~LinuxUpdateActivationTests|FullyQualifiedName~UpdateCommandTests|FullyQualifiedName~UpdateRecoveryTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/mac-restart"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~MacProcessIdentityTests|FullyQualifiedName~MacUpdateHandoffTests|FullyQualifiedName~LinuxUpdateActivationTests|FullyQualifiedName~UpdateCommandTests|FullyQualifiedName~UpdateRecoveryTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/mac-restart"]
 retained_artifacts=[{name="mac-restart",path="automation/artifacts/mac-restart",max_bytes=16777216}]
 [test.mac-ui-driver]
 timeout_seconds=600
@@ -909,7 +909,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.mac-ui-driver.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~MacUiDriverTests|FullyQualifiedName~MacProcessIdentityTests|FullyQualifiedName~MacIntegratedUpdateTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/mac-ui-driver"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~MacUiDriverTests|FullyQualifiedName~MacProcessIdentityTests|FullyQualifiedName~MacIntegratedUpdateTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/mac-ui-driver"]
 retained_artifacts=[{name="mac-ui-driver",path="automation/artifacts/mac-ui-driver",max_bytes=16777216}]
 [[test.mac-restart.check]]
 name="native"
@@ -932,7 +932,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.archive-delivery.check]]
 name="download-and-launch"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativePackageArchive","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/archive-delivery-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativePackageArchive","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/archive-delivery-tests"]
 retained_artifacts=[{name="archive-delivery-tests",path="automation/artifacts/archive-delivery-tests",max_bytes=16777216},{name="archive-delivery-evidence",path="automation/artifacts/native-session-current",max_bytes=33554432}]
 [test.package-lock-refresh]
 timeout_seconds=900
@@ -958,7 +958,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 name="http"
 tier="development"
 requires=["build"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~DownloadServerTests|FullyQualifiedName~LinuxPackageTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/download-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~DownloadServerTests|FullyQualifiedName~LinuxPackageTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/download-tests"]
 retained_artifacts=[{name="download-tests",path="automation/artifacts/download-tests",max_bytes=16777216}]
 [test.linux-package-stage]
 timeout_seconds=14400
@@ -974,7 +974,7 @@ name="package-contracts"
 tier="development"
 role="preflight"
 invalidates=["managed-publish","native-runtime","stage"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~LinuxStagingTests|FullyQualifiedName~LinuxPackageTests|FullyQualifiedName~ValidationEvidenceTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/package-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~LinuxStagingTests|FullyQualifiedName~LinuxPackageTests|FullyQualifiedName~ValidationEvidenceTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/package-tests"]
 retained_artifacts=[{name="package-tests",path="automation/artifacts/package-tests",max_bytes=16777216}]
 [[test.linux-package-stage.check]]
 name="managed-publish"
@@ -993,7 +993,7 @@ command=["bash","-lc",'kicad_package_root=$(git rev-parse --show-toplevel) || ex
 name="installed-journey"
 tier="development"
 requires=["stage"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativePackage","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/package-native-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativePackage","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/package-native-tests"]
 retained_artifacts=[{name="package-native-tests",path="automation/artifacts/package-native-tests",max_bytes=16777216},{name="package-native-evidence",path="automation/artifacts/native-session-current",max_bytes=33554432}]
 [[test.linux-package-stage.check]]
 name="archives"
@@ -1017,7 +1017,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 name="contracts"
 tier="development"
 requires=["build"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~NativeEventCursorTests|FullyQualifiedName~NativeEventToolContractTests|FullyQualifiedName~McpProcessTests|FullyQualifiedName~DesignFileSubscriptionTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/event-contract-results"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~NativeEventCursorTests|FullyQualifiedName~NativeEventToolContractTests|FullyQualifiedName~McpProcessTests|FullyQualifiedName~DesignFileSubscriptionTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/event-contract-results"]
 retained_artifacts=[{name="event-contract-results",path="automation/artifacts/event-contract-results",max_bytes=16777216}]
 [test.engineering-model]
 timeout_seconds=3600
@@ -1036,7 +1036,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 name="contracts"
 tier="development"
 requires=["build"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","(FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~SchematicHierarchyDeltaTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignRecoveryFileObserverTests|FullyQualifiedName~DesignFileIntakeSessionTests|FullyQualifiedName~SchematicSyncStoreTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicOrientationTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicDesignTests|FullyQualifiedName~SchematicHierarchyTopologyTests|FullyQualifiedName~EngineeringDesignXmlTests|FullyQualifiedName~StructuralDiagram|FullyQualifiedName~CircuitXmlTests|FullyQualifiedName~ComponentGuidanceTests|FullyQualifiedName~HardwareRepositoryXmlTests|FullyQualifiedName~EngineeringDesignToolTests|FullyQualifiedName~CapabilityCatalogTests|FullyQualifiedName~McpProcessTests|FullyQualifiedName~PcbRoutingContractTests|FullyQualifiedName~SharedProtoBandTests)&TestCategory!=NativeSession","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/engineering-model-results"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","(FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~SchematicHierarchyDeltaTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignRecoveryFileObserverTests|FullyQualifiedName~DesignFileIntakeSessionTests|FullyQualifiedName~SchematicSyncStoreTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicOrientationTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicDesignTests|FullyQualifiedName~SchematicHierarchyTopologyTests|FullyQualifiedName~EngineeringDesignXmlTests|FullyQualifiedName~StructuralDiagram|FullyQualifiedName~CircuitXmlTests|FullyQualifiedName~ComponentGuidanceTests|FullyQualifiedName~HardwareRepositoryXmlTests|FullyQualifiedName~EngineeringDesignToolTests|FullyQualifiedName~CapabilityCatalogTests|FullyQualifiedName~McpProcessTests|FullyQualifiedName~PcbRoutingContractTests|FullyQualifiedName~SharedProtoBandTests)&TestCategory!=NativeSession","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/engineering-model-results"]
 retained_artifacts=[{name="engineering-model-results",path="automation/artifacts/engineering-model-results",max_bytes=16777216}]
 [test.automation]
 timeout_seconds=3600
@@ -1060,7 +1060,7 @@ name="unit"
 timeout_seconds=1500
 tier="development"
 cwd="automation"
-command=["dotnet","test","KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory!=NativeSession&TestCategory!=NativeDocuments&TestCategory!=ExternalIntegration&TestCategory!=NativeFieldHistory","--logger","trx;LogFileName=results.trx","--results-directory","artifacts/tests"]
+command=["dotnet","test","KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory!=NativeSession&TestCategory!=NativeDocuments&TestCategory!=ExternalIntegration&TestCategory!=NativeFieldHistory","--logger","trx;LogFileName=results.trx","--results-directory","artifacts/tests"]
 requires=["build"]
 retained_artifacts=[{name="dotnet-test-results",path="automation/artifacts/tests",max_bytes=16777216}]
 [[test.automation.check]]
@@ -1069,7 +1069,7 @@ timeout_seconds=600
 tier="development"
 cwd="automation"
 requires=["build"]
-command=["dotnet","test","KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeDocuments","--logger","trx;LogFileName=results.trx","--results-directory","artifacts/source-document-tests"]
+command=["dotnet","test","KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeDocuments","--logger","trx;LogFileName=results.trx","--results-directory","artifacts/source-document-tests"]
 retained_artifacts=[{name="source-document-results",path="automation/artifacts/source-document-tests",max_bytes=16777216}]
 [[test.automation.check]]
 name="native-configure"
@@ -1101,7 +1101,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--disable-build-se
 [[test.psu-cpu-fixture.check]]
 name="fixture-contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~PsuCpuFixtureTests&TestCategory!=NativeSession","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/psu-cpu-fixture/contracts"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~PsuCpuFixtureTests&TestCategory!=NativeSession","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/psu-cpu-fixture/contracts"]
 retained_artifacts=[{name="psu-cpu-fixture-contracts",path="automation/artifacts/psu-cpu-fixture/contracts",max_bytes=16777216},{name="psu-cpu-fixture-generated",path="automation/artifacts/psu-cpu-fixture/generated",max_bytes=4194304}]
 [[test.psu-cpu-fixture.check]]
 name="native-configure"
@@ -1117,7 +1117,7 @@ command=["cmake","--build","automation/artifacts/native","--target","kicad-cli",
 name="symbol-normalization"
 tier="development"
 requires=["native-build"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=PsuCpuFixtureNative","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/psu-cpu-fixture/native-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=PsuCpuFixtureNative","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/psu-cpu-fixture/native-tests"]
 retained_artifacts=[{name="psu-cpu-fixture-native-tests",path="automation/artifacts/psu-cpu-fixture/native-tests",max_bytes=16777216},{name="psu-cpu-fixture-native-evidence",path="automation/artifacts/psu-cpu-fixture/native",max_bytes=16777216}]
 [[test.psu-cpu-fixture.check]]
 name="native-runtime"
@@ -1128,7 +1128,7 @@ command=["cmake","--build","automation/artifacts/native","--target","kicad","kic
 name="native-seed"
 tier="development"
 requires=["native-runtime"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativePsuCpuSeed","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/psu-cpu-fixture/native-seed-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativePsuCpuSeed","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/psu-cpu-fixture/native-seed-tests"]
 retained_artifacts=[{name="psu-cpu-seed-tests",path="automation/artifacts/psu-cpu-fixture/native-seed-tests",max_bytes=16777216},{name="psu-cpu-seed-evidence",path="automation/artifacts/native-psu-cpu-seed/native-session-current",max_bytes=67108864}]
 [[test.psu-cpu-fixture.check]]
 name="xml-rebuild"
@@ -1136,14 +1136,14 @@ tier="development"
 requires=["native-runtime"]
 after=["native-seed"]
 timeout_seconds=1200
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeXmlRebuild","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-xml-rebuild-tests","--","MSTest.MapInconclusiveToFailed=true"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeXmlRebuild","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-xml-rebuild-tests","--","MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{name="native-xml-rebuild-tests",path="automation/artifacts/native-xml-rebuild-tests",max_bytes=16777216},{name="native-xml-rebuild-evidence",path="automation/artifacts/native-xml-rebuild/native-session-current",max_bytes=67108864}]
 [[test.psu-cpu-fixture.check]]
 name="ownership-sync"
 tier="development"
 requires=["managed-build","native-runtime"]
 timeout_seconds=3000
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeOwnershipSync","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-ownership-sync-tests","--","MSTest.MapInconclusiveToFailed=true"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeOwnershipSync","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-ownership-sync-tests","--","MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{name="native-ownership-sync-tests",path="automation/artifacts/native-ownership-sync-tests",max_bytes=16777216},{name="native-ownership-sync-evidence",path="automation/artifacts/native-ownership-sync/native-session-current",max_bytes=67108864}]
 [test.native-crash]
 timeout_seconds=3600
@@ -1169,7 +1169,7 @@ name="native-crash"
 tier="development"
 requires=["native-build"]
 timeout_seconds=900
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeCrash","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-crash-tests","--","MSTest.MapInconclusiveToFailed=true"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeCrash","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-crash-tests","--","MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{name="native-crash-tests",path="automation/artifacts/native-crash-tests",max_bytes=16777216},{name="native-crash-evidence",path="automation/artifacts/native-crash/native-session-current",max_bytes=67108864},{name="native-crash-release-evidence",path="automation/artifacts/native-crash-release/native-session-current",max_bytes=67108864}]
 [test.native-observe-apply-stress]
 timeout_seconds=3600
@@ -1195,7 +1195,7 @@ name="observe-apply-stress"
 tier="development"
 requires=["native-build"]
 timeout_seconds=900
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeObserveApplyStress","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-observe-apply-stress-tests","--","MSTest.MapInconclusiveToFailed=true"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeObserveApplyStress","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-observe-apply-stress-tests","--","MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{name="native-observe-apply-stress-tests",path="automation/artifacts/native-observe-apply-stress-tests",max_bytes=16777216},{name="native-observe-apply-stress-evidence",path="automation/artifacts/native-observe-apply-stress/native-session-current",max_bytes=67108864}]
 [test.psu-cpu-fixture-writer-drift]
 timeout_seconds=3600
@@ -1226,7 +1226,7 @@ command=["cmake","--build","automation/artifacts/native","--target","kicad-cli",
 name="writer-drift"
 tier="development"
 requires=["native-build"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=PsuCpuFixtureWriterDrift","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/psu-cpu-fixture/writer-drift-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=PsuCpuFixtureWriterDrift","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/psu-cpu-fixture/writer-drift-tests"]
 retained_artifacts=[{name="psu-cpu-fixture-writer-drift-tests",path="automation/artifacts/psu-cpu-fixture/writer-drift-tests",max_bytes=16777216},{name="psu-cpu-fixture-writer-drift-evidence",path="automation/artifacts/psu-cpu-fixture/writer-drift",max_bytes=16777216}]
 [test.native-intake-model]
 timeout_seconds=600
@@ -1240,7 +1240,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.native-intake-model.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~DesignRecoveryNativeObserverTests|FullyQualifiedName~NativeIntakeRegistryTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~NativeEventCursorTests|FullyQualifiedName~DesignFileIntakeSessionTests|FullyQualifiedName~McpProcessTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-intake-model"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~DesignRecoveryNativeObserverTests|FullyQualifiedName~NativeIntakeRegistryTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~NativeEventCursorTests|FullyQualifiedName~DesignFileIntakeSessionTests|FullyQualifiedName~McpProcessTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-intake-model"]
 retained_artifacts=[{name="native-intake-model",path="automation/artifacts/native-intake-model",max_bytes=16777216}]
 [test.initial-schematic-layout]
 timeout_seconds=900
@@ -1260,7 +1260,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--configuration","
 [[test.initial-schematic-layout.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--no-restore","--filter","FullyQualifiedName~SchematicFieldLayoutPlannerTests|FullyQualifiedName~SchematicInitialLayoutPlannerTests|FullyQualifiedName~InitialSchematicLayoutTests|FullyQualifiedName~LayoutRefinementTests|FullyQualifiedName~PresentationVerificationTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/initial-schematic-layout"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--filter","FullyQualifiedName~SchematicFieldLayoutPlannerTests|FullyQualifiedName~SchematicInitialLayoutPlannerTests|FullyQualifiedName~InitialSchematicLayoutTests|FullyQualifiedName~LayoutRefinementTests|FullyQualifiedName~PresentationVerificationTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/initial-schematic-layout"]
 retained_artifacts=[{name="initial-schematic-layout",path="automation/artifacts/initial-schematic-layout",max_bytes=16777216}]
 [test.automatic-sync-model]
 timeout_seconds=900
@@ -1280,7 +1280,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--configuration","
 [[test.automatic-sync-model.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--no-restore","--filter","FullyQualifiedName~AutomaticDesignSynchronizationTests|FullyQualifiedName~DesignFileIntakeSessionTests|FullyQualifiedName~DesignRecoveryNativeObserverTests|FullyQualifiedName~NativeIntakeRegistryTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~SchematicOwnershipResolutionTests|FullyQualifiedName~SyncHarnessProcessTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/automatic-sync-model"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--filter","FullyQualifiedName~AutomaticDesignSynchronizationTests|FullyQualifiedName~DesignFileIntakeSessionTests|FullyQualifiedName~DesignRecoveryNativeObserverTests|FullyQualifiedName~NativeIntakeRegistryTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~SchematicOwnershipResolutionTests|FullyQualifiedName~SyncHarnessProcessTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/automatic-sync-model"]
 retained_artifacts=[{name="automatic-sync-model",path="automation/artifacts/automatic-sync-model",max_bytes=16777216}]
 [test.native-owner-restoration]
 timeout_seconds=900
@@ -1300,7 +1300,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--disable-build-se
 [[test.native-owner-restoration.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--no-restore","--filter","FullyQualifiedName~SchematicRebuildTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignElectricalRecoveryTests|FullyQualifiedName~SchematicElectricalComparisonTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignRecoveryReattachmentTests|FullyQualifiedName~DesignRecoveryNativeObserverTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~SymbolSheetOwnershipTests|FullyQualifiedName~AutomaticDesignSynchronizationTests|FullyQualifiedName~SchematicOwnershipResolutionTests|FullyQualifiedName~SchematicNativeRestorationTests|FullyQualifiedName~SchematicNativeRemovalProjectionTests|FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicPropertyProjectionTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicNetReconciliationTests|FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~RetainedXmlHistoryTests|FullyQualifiedName~DesignSynchronizationReceiptTests|FullyQualifiedName~McpProcessTests|FullyQualifiedName~PinPartition","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-owner-restoration"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--filter","FullyQualifiedName~SchematicRebuildTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignElectricalRecoveryTests|FullyQualifiedName~SchematicElectricalComparisonTests|FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignRecoveryReattachmentTests|FullyQualifiedName~DesignRecoveryNativeObserverTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~SymbolSheetOwnershipTests|FullyQualifiedName~AutomaticDesignSynchronizationTests|FullyQualifiedName~SchematicOwnershipResolutionTests|FullyQualifiedName~SchematicNativeRestorationTests|FullyQualifiedName~SchematicNativeRemovalProjectionTests|FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicPropertyProjectionTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicNetReconciliationTests|FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~RetainedXmlHistoryTests|FullyQualifiedName~DesignSynchronizationReceiptTests|FullyQualifiedName~McpProcessTests|FullyQualifiedName~PinPartition","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-owner-restoration"]
 retained_artifacts=[{name="native-owner-restoration",path="automation/artifacts/native-owner-restoration",max_bytes=16777216}]
 [test.native-removal-projection]
 timeout_seconds=900
@@ -1320,7 +1320,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--configuration","
 [[test.native-removal-projection.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--no-restore","--filter","FullyQualifiedName~SchematicNativeRemovalProjectionTests|FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicPropertyProjectionTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignElectricalRecoveryTests|FullyQualifiedName~PinPartition|FullyQualifiedName~SymbolPinCoverageTests|FullyQualifiedName~SymbolSheetOwnershipTests|FullyQualifiedName~SchematicNetReconciliationTests|FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~UnresolvedNetBindingTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-removal-projection"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--filter","FullyQualifiedName~SchematicNativeRemovalProjectionTests|FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicPropertyProjectionTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignElectricalRecoveryTests|FullyQualifiedName~PinPartition|FullyQualifiedName~SymbolPinCoverageTests|FullyQualifiedName~SymbolSheetOwnershipTests|FullyQualifiedName~SchematicNetReconciliationTests|FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~UnresolvedNetBindingTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-removal-projection"]
 retained_artifacts=[{name="native-removal-projection",path="automation/artifacts/native-removal-projection",max_bytes=16777216}]
 [test.retained-xml-content]
 timeout_seconds=900
@@ -1340,7 +1340,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--configuration","
 [[test.retained-xml-content.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--no-restore","--filter","FullyQualifiedName~RetainedXmlHistoryTests|FullyQualifiedName~DesignSynchronizationReceiptTests|FullyQualifiedName~DesignPublicationRecoveryTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignFilePublisherTests|FullyQualifiedName~PreservingFileReplacementTests|FullyQualifiedName~SyncHarnessProcessTests|FullyQualifiedName~DesignLayoutRecoveryTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/retained-xml-content"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--filter","FullyQualifiedName~RetainedXmlHistoryTests|FullyQualifiedName~DesignSynchronizationReceiptTests|FullyQualifiedName~DesignPublicationRecoveryTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignFilePublisherTests|FullyQualifiedName~PreservingFileReplacementTests|FullyQualifiedName~SyncHarnessProcessTests|FullyQualifiedName~DesignLayoutRecoveryTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/retained-xml-content"]
 retained_artifacts=[{name="retained-xml-content",path="automation/artifacts/retained-xml-content",max_bytes=16777216}]
 [test.pin-partition-evolution]
 timeout_seconds=900
@@ -1360,7 +1360,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--configuration","
 [[test.pin-partition-evolution.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--no-restore","--filter","FullyQualifiedName~PinPartition|FullyQualifiedName~SymbolPinCoverageTests|FullyQualifiedName~SymbolSheetOwnershipTests|FullyQualifiedName~SchematicNetReconciliationTests|FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~UnresolvedNetBindingTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/pin-partition-evolution"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--filter","FullyQualifiedName~PinPartition|FullyQualifiedName~SymbolPinCoverageTests|FullyQualifiedName~SymbolSheetOwnershipTests|FullyQualifiedName~SchematicNetReconciliationTests|FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~UnresolvedNetBindingTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/pin-partition-evolution"]
 retained_artifacts=[{name="pin-partition-evolution",path="automation/artifacts/pin-partition-evolution",max_bytes=16777216}]
 [test.symbol-sheet-ownership]
 timeout_seconds=900
@@ -1380,7 +1380,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--configuration","
 [[test.symbol-sheet-ownership.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--no-restore","--filter","FullyQualifiedName~SymbolSheetOwnershipTests|FullyQualifiedName~SymbolPinCoverageTests|FullyQualifiedName~CircuitXmlTests|FullyQualifiedName~SchematicDesignTests|FullyQualifiedName~SchematicElectricalComparisonTests|FullyQualifiedName~SchematicPropertyProjectionTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~ComponentGuidanceTests|FullyQualifiedName~UnresolvedNetBindingTests|FullyQualifiedName~StructuralDiagram|FullyQualifiedName~EngineeringDesign|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~McpProcessTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/symbol-sheet-ownership"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--filter","FullyQualifiedName~SymbolSheetOwnershipTests|FullyQualifiedName~SymbolPinCoverageTests|FullyQualifiedName~CircuitXmlTests|FullyQualifiedName~SchematicDesignTests|FullyQualifiedName~SchematicElectricalComparisonTests|FullyQualifiedName~SchematicPropertyProjectionTests|FullyQualifiedName~SchematicPlacementPlanTests|FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~ComponentGuidanceTests|FullyQualifiedName~UnresolvedNetBindingTests|FullyQualifiedName~StructuralDiagram|FullyQualifiedName~EngineeringDesign|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~McpProcessTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/symbol-sheet-ownership"]
 retained_artifacts=[{name="symbol-sheet-ownership",path="automation/artifacts/symbol-sheet-ownership",max_bytes=16777216}]
 [test.component-reference-retention]
 timeout_seconds=900
@@ -1400,7 +1400,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--configuration","
 [[test.component-reference-retention.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--no-restore","--filter","FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~ComponentGuidanceTests|FullyQualifiedName~UnresolvedNetBindingTests|FullyQualifiedName~StructuralDiagram|FullyQualifiedName~EngineeringDesign|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~McpProcessTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/component-reference-retention"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--filter","FullyQualifiedName~ComponentReferenceRetentionTests|FullyQualifiedName~ComponentGuidanceTests|FullyQualifiedName~UnresolvedNetBindingTests|FullyQualifiedName~StructuralDiagram|FullyQualifiedName~EngineeringDesign|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~McpProcessTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/component-reference-retention"]
 retained_artifacts=[{name="component-reference-retention",path="automation/artifacts/component-reference-retention",max_bytes=16777216}]
 [test.unresolved-net-bindings]
 timeout_seconds=900
@@ -1420,7 +1420,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--configuration","
 [[test.unresolved-net-bindings.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--no-restore","--filter","FullyQualifiedName~UnresolvedNetBindingTests|FullyQualifiedName~StructuralDiagram|FullyQualifiedName~EngineeringDesign|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~McpProcessTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/unresolved-net-bindings"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--filter","FullyQualifiedName~UnresolvedNetBindingTests|FullyQualifiedName~StructuralDiagram|FullyQualifiedName~EngineeringDesign|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~McpProcessTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/unresolved-net-bindings"]
 retained_artifacts=[{name="unresolved-net-bindings",path="automation/artifacts/unresolved-net-bindings",max_bytes=16777216}]
 [test.electrical-state]
 timeout_seconds=900
@@ -1434,7 +1434,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.electrical-state.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~SchematicElectricalComparisonTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~McpProcessTests|FullyQualifiedName~SchematicDesignTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/electrical-state"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~SchematicElectricalComparisonTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~McpProcessTests|FullyQualifiedName~SchematicDesignTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/electrical-state"]
 retained_artifacts=[{name="electrical-state",path="automation/artifacts/electrical-state",max_bytes=16777216}]
 [test.electrical-recovery]
 timeout_seconds=900
@@ -1448,7 +1448,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--configuration","
 [[test.electrical-recovery.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--no-restore","--filter","FullyQualifiedName~DesignElectricalRecoveryTests|FullyQualifiedName~DesignRecovery|FullyQualifiedName~DesignFileIntakeSessionTests|FullyQualifiedName~NativeIntakeRegistryTests|FullyQualifiedName~SchematicElectricalComparisonTests|FullyQualifiedName~McpProcessTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/electrical-recovery"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--filter","FullyQualifiedName~DesignElectricalRecoveryTests|FullyQualifiedName~DesignRecovery|FullyQualifiedName~DesignFileIntakeSessionTests|FullyQualifiedName~NativeIntakeRegistryTests|FullyQualifiedName~SchematicElectricalComparisonTests|FullyQualifiedName~McpProcessTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/electrical-recovery"]
 retained_artifacts=[{name="electrical-recovery",path="automation/artifacts/electrical-recovery",max_bytes=16777216}]
 [test.net-reconciliation]
 timeout_seconds=900
@@ -1462,7 +1462,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--configuration","
 [[test.net-reconciliation.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--no-restore","--filter","FullyQualifiedName~PinPartitionMergeTests|FullyQualifiedName~SchematicNetReconciliationTests|FullyQualifiedName~UnresolvedNetBindingTests|FullyQualifiedName~SchematicElectricalComparisonTests|FullyQualifiedName~McpProcessTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/net-reconciliation"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Debug","--no-build","--filter","FullyQualifiedName~PinPartitionMergeTests|FullyQualifiedName~SchematicNetReconciliationTests|FullyQualifiedName~UnresolvedNetBindingTests|FullyQualifiedName~SchematicElectricalComparisonTests|FullyQualifiedName~McpProcessTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/net-reconciliation"]
 retained_artifacts=[{name="net-reconciliation",path="automation/artifacts/net-reconciliation",max_bytes=16777216}]
 [test.erc-model]
 timeout_seconds=600
@@ -1476,7 +1476,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.erc-model.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~SchematicErcSettingsTests|FullyQualifiedName~SchematicDataXmlTests|FullyQualifiedName~SchematicItemDeltaTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~SchematicHierarchyMergeTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/erc-model"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~SchematicErcSettingsTests|FullyQualifiedName~SchematicDataXmlTests|FullyQualifiedName~SchematicItemDeltaTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~SchematicHierarchyMergeTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/erc-model"]
 retained_artifacts=[{name="erc-model",path="automation/artifacts/erc-model",max_bytes=16777216}]
 [test.native-erc-dialog]
 timeout_seconds=600
@@ -1490,7 +1490,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.native-erc-dialog.check]]
 name="dialog-observation"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeErcDialog","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-erc-dialog"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeErcDialog","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-erc-dialog"]
 retained_artifacts=[{name="native-erc-dialog",path="automation/artifacts/native-erc-evidence/native-session-current",max_bytes=33554432}]
 [test.native-erc-overrides]
 timeout_seconds=3600
@@ -1537,21 +1537,21 @@ tier="development"
 role="preflight"
 requires=["managed-build"]
 invalidates=["native-build","native-session"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~NativeEventCursorTests|FullyQualifiedName~NativeEventToolContractTests|FullyQualifiedName~McpProcessTests|FullyQualifiedName~ConnectedMoveToolTests|FullyQualifiedName~SchematicElectricalComparisonTests|FullyQualifiedName~NativeKeyboardTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/event-model-results"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~NativeEventCursorTests|FullyQualifiedName~NativeEventToolContractTests|FullyQualifiedName~McpProcessTests|FullyQualifiedName~ConnectedMoveToolTests|FullyQualifiedName~SchematicElectricalComparisonTests|FullyQualifiedName~NativeKeyboardTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/event-model-results"]
 [[test.native-foundation.check]]
 name="field-fidelity-model"
 tier="development"
 role="preflight"
 requires=["managed-build"]
 invalidates=["native-build","native-session"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~SchematicFieldTextModeTests|FullyQualifiedName~SchematicItemDeltaTests|FullyQualifiedName~SchematicLibraryIdentityTests|FullyQualifiedName~SchematicFormattingTests|FullyQualifiedName~SchematicAnnotationTests|FullyQualifiedName~SchematicReferenceInventoryTests|FullyQualifiedName~SchematicHierarchyDeltaTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~SchematicSyncStoreTests|FullyQualifiedName~SchematicGroupGraphTests|FullyQualifiedName~SchematicDrawingRatiosTests|FullyQualifiedName~SchematicNetChainClassesTests|FullyQualifiedName~SchematicNetChainExclusionTests|FullyQualifiedName~GuidanceQuantityTests|FullyQualifiedName~ComponentGuidanceTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/field-fidelity-results"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~SchematicFieldTextModeTests|FullyQualifiedName~SchematicItemDeltaTests|FullyQualifiedName~SchematicLibraryIdentityTests|FullyQualifiedName~SchematicFormattingTests|FullyQualifiedName~SchematicAnnotationTests|FullyQualifiedName~SchematicReferenceInventoryTests|FullyQualifiedName~SchematicHierarchyDeltaTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~SchematicSyncStoreTests|FullyQualifiedName~SchematicGroupGraphTests|FullyQualifiedName~SchematicDrawingRatiosTests|FullyQualifiedName~SchematicNetChainClassesTests|FullyQualifiedName~SchematicNetChainExclusionTests|FullyQualifiedName~GuidanceQuantityTests|FullyQualifiedName~ComponentGuidanceTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/field-fidelity-results"]
 [[test.native-foundation.check]]
 name="recovery-model"
 tier="development"
 role="preflight"
 requires=["managed-build"]
 invalidates=["native-build","native-session"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignElectricalRecoveryTests|FullyQualifiedName~DesignRecoveryFileObserverTests|FullyQualifiedName~DesignFileIntakeSessionTests|FullyQualifiedName~DesignRecoveryNativeObserverTests|FullyQualifiedName~NativeIntakeRegistryTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~PinPartitionMergeTests|FullyQualifiedName~SchematicNetReconciliationTests|FullyQualifiedName~UnresolvedNetBindingTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/recovery-model-results"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~DesignRecoveryInspectorTests|FullyQualifiedName~DesignRecoveryStoreTests|FullyQualifiedName~DesignElectricalRecoveryTests|FullyQualifiedName~DesignRecoveryFileObserverTests|FullyQualifiedName~DesignFileIntakeSessionTests|FullyQualifiedName~DesignRecoveryNativeObserverTests|FullyQualifiedName~NativeIntakeRegistryTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~PinPartitionMergeTests|FullyQualifiedName~SchematicNetReconciliationTests|FullyQualifiedName~UnresolvedNetBindingTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/recovery-model-results"]
 retained_artifacts=[{name="recovery-model-results",path="automation/artifacts/recovery-model-results",max_bytes=16777216}]
 [[test.native-foundation.check]]
 name="native-build"
@@ -1573,13 +1573,13 @@ command=["ctest","--test-dir","automation/artifacts/native","--tests-regex","^qa
 name="native-session"
 tier="development"
 requires=["native-build"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeSourceSession","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-session-results"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeSourceSession","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-session-results"]
 retained_artifacts=[{name="native-session-evidence",path="automation/artifacts/native-session-current",max_bytes=67108864}]
 [[test.native-foundation.check]]
 name="native-erc-exclusion"
 tier="development"
 requires=["native-build"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeErcDialog","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-erc-foundation"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeErcDialog","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-erc-foundation"]
 retained_artifacts=[{name="native-erc-exclusion",path="automation/artifacts/native-erc-evidence/native-session-current",max_bytes=33554432}]
 [test.native-table-variants]
 timeout_seconds=1800
@@ -1601,7 +1601,7 @@ name="input-contracts"
 tier="development"
 role="preflight"
 invalidates=["native-build","native-table"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~NativeKeyboardTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-input-results"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~NativeKeyboardTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-input-results"]
 [[test.native-table-variants.check]]
 name="native-build"
 tier="development"
@@ -1610,7 +1610,7 @@ command=["cmake","--build","automation/artifacts/native","--target","kicad","kic
 name="native-table"
 tier="development"
 requires=["native-build"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeTableVariant","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-table-variant-results"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeTableVariant","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-table-variant-results"]
 retained_artifacts=[{name="native-table-evidence",path="automation/artifacts/native-table-variants/native-session-current",max_bytes=33554432}]
 [test.native-setup-draft]
 timeout_seconds=3600
@@ -1659,7 +1659,7 @@ name="input-contracts"
 tier="development"
 role="preflight"
 invalidates=["rendered"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~NativeKeyboardTests|FullyQualifiedName~SchematicAnnotationTests|FullyQualifiedName~SchematicReferenceInventoryTests|FullyQualifiedName~SchematicSymbolProjectSettingsTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~NativeClientTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-setup-input-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~NativeKeyboardTests|FullyQualifiedName~SchematicAnnotationTests|FullyQualifiedName~SchematicReferenceInventoryTests|FullyQualifiedName~SchematicSymbolProjectSettingsTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~NativeClientTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-setup-input-tests"]
 retained_artifacts=[{name="native-setup-input-tests",path="automation/artifacts/native-setup-input-tests",max_bytes=16777216}]
 [[test.native-setup-dialog.check]]
 name="contracts"
@@ -1670,7 +1670,7 @@ command=["ctest","--test-dir","automation/artifacts/native","--tests-regex","^qa
 name="rendered"
 tier="development"
 requires=["native-build"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeSetupDraft","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-setup-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeSetupDraft","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-setup-tests"]
 retained_artifacts=[{name="native-setup-tests",path="automation/artifacts/native-setup-tests",max_bytes=16777216},{name="native-setup-evidence",path="automation/artifacts/native-setup-draft/native-session-current",max_bytes=33554432}]
 [test.bom-settings-model]
 timeout_seconds=600
@@ -1684,7 +1684,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.bom-settings-model.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~SchematicBomSettingsTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~SchematicDataXmlTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/bom-settings-model"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~SchematicBomSettingsTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~SchematicDataXmlTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/bom-settings-model"]
 retained_artifacts=[{name="bom-settings-model",path="automation/artifacts/bom-settings-model",max_bytes=16777216}]
 [test.bom-settings-native-codec]
 timeout_seconds=3600
@@ -1734,7 +1734,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.net-settings-contract.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~SchematicNetSettingsSnapshotTests|FullyQualifiedName~SchematicDataXmlTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~NativeBoardReloadComparisonTests|FullyQualifiedName~DocumentStateToolTests|FullyQualifiedName~DocumentLifecycleToolTests|FullyQualifiedName~PcbDrcToolTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/net-settings-contract"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~SchematicNetSettingsSnapshotTests|FullyQualifiedName~SchematicDataXmlTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~NativeBoardReloadComparisonTests|FullyQualifiedName~DocumentStateToolTests|FullyQualifiedName~DocumentLifecycleToolTests|FullyQualifiedName~PcbDrcToolTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/net-settings-contract"]
 retained_artifacts=[{name="net-settings-contract",path="automation/artifacts/net-settings-contract",max_bytes=16777216}]
 [test.netclass-native-codec]
 timeout_seconds=1800
@@ -1811,7 +1811,7 @@ command=["ctest","--test-dir","automation/artifacts/native","--tests-regex","^qa
 [[test.drc-provider-isolation.check]]
 name="native-pcb-items"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativePcbItems|TestCategory=NativeSimulation"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativePcbItems|TestCategory=NativeSimulation"]
 [test.project-analysis-snapshot]
 timeout_seconds=1800
 env={TMPDIR="/mnt/build-storage/codex/kicad/t"}
@@ -1842,7 +1842,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.drc-project-freshness.check]]
 name="managed-contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~UpdateManifestTests|FullyQualifiedName~UpdateCheckerTests|FullyQualifiedName~UpdateDownloaderTests|FullyQualifiedName~UpdatePublishingTests|FullyQualifiedName~SignedUpdateServerTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/drc-project-freshness"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~UpdateManifestTests|FullyQualifiedName~UpdateCheckerTests|FullyQualifiedName~UpdateDownloaderTests|FullyQualifiedName~UpdatePublishingTests|FullyQualifiedName~SignedUpdateServerTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/drc-project-freshness"]
 retained_artifacts=[{name="update-recovery",path="automation/artifacts/drc-project-freshness",max_bytes=16777216}]
 [[test.project-analysis-snapshot.check]]
 name="configure"
@@ -1889,7 +1889,7 @@ name="input-contracts"
 tier="development"
 role="preflight"
 invalidates=["configure","model-build","codec","native-build","rendered"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~SchematicNetSettingsSnapshotTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~NativeKeyboardTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~SchematicDataXmlTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~SchematicErcSettingsTests|FullyQualifiedName~NativeBoardReloadComparisonTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/net-settings-input-contracts"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~SchematicNetSettingsSnapshotTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~NativeKeyboardTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~SchematicDataXmlTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~SchematicErcSettingsTests|FullyQualifiedName~NativeBoardReloadComparisonTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/net-settings-input-contracts"]
 retained_artifacts=[{name="net-settings-input-contracts",path="automation/artifacts/net-settings-input-contracts",max_bytes=16777216}]
 [[test.native-net-settings.check]]
 name="configure"
@@ -1915,7 +1915,7 @@ command=["cmake","--build","automation/artifacts/native","--target","kicad","kic
 name="rendered"
 tier="development"
 requires=["native-build"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeNetSettings","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-net-settings-tests","--","MSTest.MapInconclusiveToFailed=true"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeNetSettings","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-net-settings-tests","--","MSTest.MapInconclusiveToFailed=true"]
 retained_artifacts=[{name="native-net-settings-tests",path="automation/artifacts/native-net-settings-tests",max_bytes=16777216},{name="native-net-settings-evidence",path="automation/artifacts/native-net-settings/native-session-current",max_bytes=33554432}]
 [[test.native-net-settings.check]]
 name="pcb-lifecycle"
@@ -1936,7 +1936,7 @@ name="input-contracts"
 tier="development"
 role="preflight"
 invalidates=["configure","model-build","codec","native-build","rendered"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~SchematicBomSettingsTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~NativeKeyboardTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~SchematicDataXmlTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/bom-input-contracts"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~SchematicBomSettingsTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~NativeKeyboardTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~SchematicDataXmlTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/bom-input-contracts"]
 retained_artifacts=[{name="bom-input-contracts",path="automation/artifacts/bom-input-contracts",max_bytes=16777216}]
 [[test.native-bom-settings.check]]
 name="configure"
@@ -1962,7 +1962,7 @@ command=["cmake","--build","automation/artifacts/native","--target","kicad","kic
 name="rendered"
 tier="development"
 requires=["native-build"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeBomSettings|TestCategory=NativeTableVariant","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-bom-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeBomSettings|TestCategory=NativeTableVariant","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-bom-tests"]
 retained_artifacts=[{name="native-bom-tests",path="automation/artifacts/native-bom-tests",max_bytes=16777216},{name="native-bom-evidence",path="automation/artifacts/native-bom-settings/native-session-current",max_bytes=33554432},{name="native-table-evidence",path="automation/artifacts/native-table-variants/native-session-current",max_bytes=33554432}]
 [test.net-chain-exclusion-model]
 timeout_seconds=900
@@ -1976,7 +1976,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.net-chain-exclusion-model.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~SchematicNetChainExclusionTests|FullyQualifiedName~SchematicItemDeltaTests|FullyQualifiedName~SchematicHierarchyDeltaTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~SchematicDataXmlTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~McpProcessTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/net-chain-exclusion-model"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~SchematicNetChainExclusionTests|FullyQualifiedName~SchematicItemDeltaTests|FullyQualifiedName~SchematicHierarchyDeltaTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~SchematicDataXmlTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~McpProcessTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/net-chain-exclusion-model"]
 retained_artifacts=[{name="exclusion-model-results",path="automation/artifacts/net-chain-exclusion-model",max_bytes=16777216}]
 [test.component-quantity-model]
 timeout_seconds=900
@@ -1990,7 +1990,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.component-quantity-model.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~GuidanceQuantityTests|FullyQualifiedName~ComponentGuidanceTests|FullyQualifiedName~EngineeringDesignXmlTests|FullyQualifiedName~SchematicDesignTests|FullyQualifiedName~McpProcessTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/component-quantity-model"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~GuidanceQuantityTests|FullyQualifiedName~ComponentGuidanceTests|FullyQualifiedName~EngineeringDesignXmlTests|FullyQualifiedName~SchematicDesignTests|FullyQualifiedName~McpProcessTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/component-quantity-model"]
 retained_artifacts=[{name="quantity-model-results",path="automation/artifacts/component-quantity-model",max_bytes=16777216}]
 [test.net-chain-class-model]
 timeout_seconds=900
@@ -2004,7 +2004,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.net-chain-class-model.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~SchematicNetChainClassesTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~SchematicItemDeltaTests|FullyQualifiedName~SchematicHierarchyDeltaTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~SchematicDataXmlTests|FullyQualifiedName~McpProcessTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/net-chain-class-model"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~SchematicNetChainClassesTests|FullyQualifiedName~NativeClientTests|FullyQualifiedName~SchematicItemDeltaTests|FullyQualifiedName~SchematicHierarchyDeltaTests|FullyQualifiedName~SchematicItemMergeTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~SchematicDataXmlTests|FullyQualifiedName~McpProcessTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/net-chain-class-model"]
 retained_artifacts=[{name="class-model-results",path="automation/artifacts/net-chain-class-model",max_bytes=16777216}]
 [test.native-net-chains]
 timeout_seconds=1800
@@ -2026,7 +2026,7 @@ name="input-contracts"
 tier="development"
 role="preflight"
 invalidates=["native-chains","setup-dialog"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~NativeKeyboardTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-input-results"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~NativeKeyboardTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-input-results"]
 [[test.native-net-chains.check]]
 name="native-build"
 tier="development"
@@ -2045,13 +2045,13 @@ command=["ctest","--test-dir","automation/artifacts/native","--tests-regex","^qa
 name="native-chains"
 tier="development"
 requires=["native-build"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeNetChains","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-net-chain-results"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeNetChains","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-net-chain-results"]
 retained_artifacts=[{name="native-chain-evidence",path="automation/artifacts/native-net-chains/native-session-current",max_bytes=33554432}]
 [[test.native-net-chains.check]]
 name="setup-dialog"
 tier="development"
 requires=["native-build"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeSetupDraft","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-setup-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeSetupDraft","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-setup-tests"]
 retained_artifacts=[{name="native-setup-tests",path="automation/artifacts/native-setup-tests",max_bytes=16777216},{name="native-setup-evidence",path="automation/artifacts/native-setup-draft/native-session-current",max_bytes=33554432}]
 [test.mac-runtime-contracts]
 timeout_seconds=600
@@ -2065,12 +2065,12 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.mac-runtime-contracts.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~MacDependencyAuditTests|FullyQualifiedName~MacManagedRuntimeTests|FullyQualifiedName~MacArchitectureTests|FullyQualifiedName~RuntimeInfoTests|FullyQualifiedName~NngTransportTests|FullyQualifiedName~LoadCommandParserDoesNotConfuseALibraryIdentifierWithAnImport","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/mac-runtime-contracts"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~MacDependencyAuditTests|FullyQualifiedName~MacManagedRuntimeTests|FullyQualifiedName~MacArchitectureTests|FullyQualifiedName~RuntimeInfoTests|FullyQualifiedName~NngTransportTests|FullyQualifiedName~LoadCommandParserDoesNotConfuseALibraryIdentifierWithAnImport","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/mac-runtime-contracts"]
 retained_artifacts=[{name="mac-runtime-contracts",path="automation/artifacts/mac-runtime-contracts",max_bytes=16777216}]
 [[test.mac-runtime-contracts.check]]
 name="explicit-transport"
 tier="development"
-command=["env","KICAD_AUTOMATION_NNG_LIBRARY=/usr/lib/x86_64-linux-gnu/libnng.so","dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~NngTransportTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/explicit-nng-contracts"]
+command=["env","KICAD_AUTOMATION_NNG_LIBRARY=/usr/lib/x86_64-linux-gnu/libnng.so","dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~NngTransportTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/explicit-nng-contracts"]
 retained_artifacts=[{name="explicit-nng-contracts",path="automation/artifacts/explicit-nng-contracts",max_bytes=16777216}]
 [test.mac-arm64-receipt]
 timeout_seconds=600
@@ -2088,7 +2088,7 @@ command=["dotnet","automation/tools/KiCad.Automation.Validation/bin/Debug/net10.
 [[test.mac-arm64-receipt.check]]
 name="codec"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~ValidationEvidenceTests|FullyQualifiedName~MacManagedRuntimeTests|FullyQualifiedName~MacArchitectureTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/mac-receipt-codec"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~ValidationEvidenceTests|FullyQualifiedName~MacManagedRuntimeTests|FullyQualifiedName~MacArchitectureTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/mac-receipt-codec"]
 retained_artifacts=[{name="mac-receipt-codec",path="automation/artifacts/mac-receipt-codec",max_bytes=16777216}]
 [test.hosted-delivery-contracts]
 timeout_seconds=900
@@ -2102,7 +2102,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.hosted-delivery-contracts.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~HostedDeliveryTests|FullyQualifiedName~MacManagedRuntimeTests|FullyQualifiedName~MacArchitectureTests|FullyQualifiedName~RuntimeInfoTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/hosted-delivery-contracts"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~HostedDeliveryTests|FullyQualifiedName~MacManagedRuntimeTests|FullyQualifiedName~MacArchitectureTests|FullyQualifiedName~RuntimeInfoTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/hosted-delivery-contracts"]
 retained_artifacts=[{name="hosted-delivery-contracts",path="automation/artifacts/hosted-delivery-contracts",max_bytes=16777216}]
 [[test.hosted-delivery-contracts.check]]
 name="windows-publish"
@@ -2121,7 +2121,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.hosted-preview-import.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~HostedPreviewStagingTests|FullyQualifiedName~ValidationEvidenceTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/hosted-preview-import"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~HostedPreviewStagingTests|FullyQualifiedName~ValidationEvidenceTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/hosted-preview-import"]
 retained_artifacts=[{name="hosted-preview-import",path="automation/artifacts/hosted-preview-import",max_bytes=16777216}]
 [test.signed-preview-publication]
 timeout_seconds=600
@@ -2140,7 +2140,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore"]
 name="contracts"
 tier="development"
 requires=["build"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--filter","FullyQualifiedName~HostedPreviewStagingTests|FullyQualifiedName~SignedLinuxPreviewStagingTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/signed-preview-publication"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--filter","FullyQualifiedName~HostedPreviewStagingTests|FullyQualifiedName~SignedLinuxPreviewStagingTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/signed-preview-publication"]
 retained_artifacts=[{name="signed-preview-publication",path="automation/artifacts/signed-preview-publication",max_bytes=16777216}]
 [test.windows-delivery-checkpoint]
 timeout_seconds=600
@@ -2154,7 +2154,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore"]
 [[test.windows-delivery-checkpoint.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--filter","FullyQualifiedName~HostedWindowsCheckpointTests|FullyQualifiedName~HostedDeliveryTests|FullyQualifiedName~HostedPreviewStagingTests|FullyQualifiedName~WindowsJsonLinkTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/windows-delivery-checkpoint"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--filter","FullyQualifiedName~HostedWindowsCheckpointTests|FullyQualifiedName~HostedDeliveryTests|FullyQualifiedName~HostedPreviewStagingTests|FullyQualifiedName~WindowsJsonLinkTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/windows-delivery-checkpoint"]
 retained_artifacts=[{name="windows-delivery-checkpoint",path="automation/artifacts/windows-delivery-checkpoint",max_bytes=16777216}]
 [[test.windows-delivery-checkpoint.check]]
 name="native-link"
@@ -2177,26 +2177,41 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore"]
 [[test.native-update-metadata.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--filter","FullyQualifiedName~UpdateManifestTests|FullyQualifiedName~UpdateCheckerTests|FullyQualifiedName~UpdateDownloaderTests|FullyQualifiedName~UpdatePublishingTests|FullyQualifiedName~SignedUpdateServerTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-update-metadata"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--filter","FullyQualifiedName~UpdateManifestTests|FullyQualifiedName~UpdateCheckerTests|FullyQualifiedName~UpdateDownloaderTests|FullyQualifiedName~UpdatePublishingTests|FullyQualifiedName~SignedUpdateServerTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-update-metadata"]
 retained_artifacts=[{name="native-update-metadata",path="automation/artifacts/native-update-metadata",max_bytes=16777216}]
 [test.native-symbol-library-identity]
 timeout_seconds=7200
 env={TMPDIR="/mnt/build-storage/codex/kicad/t",KICAD_RUN_FROM_BUILD_DIR="1",KICAD_CONFIG_HOME="/mnt/build-storage/codex/kicad/t/native-library-identity-config",KICAD_CACHE_HOME="/mnt/build-storage/codex/kicad/t/native-library-identity-cache"}
 [[test.native-symbol-library-identity.check]]
-name="build"
+name="managed-build"
 tier="development"
 role="preflight"
-invalidates=["identity"]
-command=["cmake","--build","automation/artifacts/native","--target","qa_eeschema","qa_common"]
+invalidates=["managed-contracts","native-build","identity","native-symbol-library"]
+command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--configuration","Debug"]
+[[test.native-symbol-library-identity.check]]
+name="managed-contracts"
+tier="development"
+requires=["managed-build"]
+invalidates=["native-build","identity","native-symbol-library"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~SymbolLibraryCheckedContractTests|FullyQualifiedName~LibraryLifecycleSnapshotContractTests|FullyQualifiedName~LibraryTransactionAdmissionContractTests|FullyQualifiedName~CapabilityCatalogTests|FullyQualifiedName~McpProcessTests|FullyQualifiedName~SharedProtoBandTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-symbol-library-managed-contracts"]
+retained_artifacts=[{name="managed-contracts",path="automation/artifacts/native-symbol-library-managed-contracts",max_bytes=16777216}]
+[[test.native-symbol-library-identity.check]]
+name="native-build"
+tier="development"
+requires=["managed-contracts"]
+command=["cmake","--build","automation/artifacts/native","--target","qa_eeschema","qa_common","api_schema_build_copy","bitmap_archive_build","kiapi","kicad","kicad-cli","eeschema","eeschema_kiface","schema_build_copy"]
 [[test.native-symbol-library-identity.check]]
 name="identity"
 tier="development"
+requires=["native-build"]
 command=["xvfb-run","-a","cmake","-E","chdir","automation/artifacts/native","ctest","--no-tests=error","-V","--output-junit","Testing/Temporary/symbol-identity.xml","-R","^qa_(.*symbol_library.*|schematic_formatting|api_sch_proto|sch_(pin_geometry_facts|change_tracking)|library_write_admission)$"]
 retained_artifacts=[{name="identity",path="automation/artifacts/native/Testing/Temporary",max_bytes=16777216}]
 [[test.native-symbol-library-identity.check]]
-name="managed-build"
+name="native-symbol-library"
 tier="development"
-command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore"]
+requires=["identity"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeSymbolLibrary","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-symbol-library-live-results","--","MSTest.MapInconclusiveToFailed=true"]
+retained_artifacts=[{name="native-symbol-library-results",path="automation/artifacts/native-symbol-library-live-results",max_bytes=16777216},{name="native-symbol-library-evidence",path="automation/artifacts/native-symbol-library/native-session-current",max_bytes=67108864}]
 [test.upstream-release]
 timeout_seconds=1200
 env={TMPDIR="/mnt/build-storage/codex/kicad/t"}
@@ -2215,7 +2230,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--configuration","
 [[test.upstream-release.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Release","--no-build","--no-restore","--filter","TestCategory=UpstreamRelease|FullyQualifiedName~HostedWindowsCheckpointTests|FullyQualifiedName~HostedDeliveryTests|FullyQualifiedName~HostedPreviewStagingTests|FullyQualifiedName~WindowsRequalifiedPreviewTests|FullyQualifiedName~LinuxPackageTests|FullyQualifiedName~DownloadPageTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/upstream-release"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--configuration","Release","--no-build","--filter","TestCategory=UpstreamRelease|FullyQualifiedName~HostedWindowsCheckpointTests|FullyQualifiedName~HostedDeliveryTests|FullyQualifiedName~HostedPreviewStagingTests|FullyQualifiedName~WindowsRequalifiedPreviewTests|FullyQualifiedName~LinuxPackageTests|FullyQualifiedName~DownloadPageTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/upstream-release"]
 retained_artifacts=[{name="upstream-release",path="automation/artifacts/upstream-release",max_bytes=16777216}]
 [test.delivery-receipts]
 timeout_seconds=900
@@ -2229,7 +2244,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.delivery-receipts.check]]
 name="observations"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=DeliveryReceipts","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/preview24-delivery-receipt-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=DeliveryReceipts","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/preview24-delivery-receipt-tests"]
 retained_artifacts=[{name="delivery-observations",path="automation/artifacts/preview24-delivery-receipts",max_bytes=536870912},{name="delivery-receipt-tests",path="automation/artifacts/preview24-delivery-receipt-tests",max_bytes=16777216}]
 [test.write-observer-boundary]
 timeout_seconds=1800
@@ -2245,7 +2260,7 @@ name="dll-boundary"
 tier="development"
 role="preflight"
 invalidates=["configure","native-build","native-contracts"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=WriteObserverBoundary","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/write-observer-boundary"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=WriteObserverBoundary","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/write-observer-boundary"]
 retained_artifacts=[{name="dll-boundary",path="automation/artifacts/write-observer-boundary",max_bytes=16777216}]
 [[test.write-observer-boundary.check]]
 name="configure"
@@ -2280,7 +2295,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.windows-dependency-cache.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~HostedDeliveryTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/windows-dependency-cache-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~HostedDeliveryTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/windows-dependency-cache-tests"]
 retained_artifacts=[{name="cache-contracts",path="automation/artifacts/windows-dependency-cache-tests",max_bytes=16777216}]
 [[test.windows-file-mode-native.check]]
 name="managed-build"
@@ -2310,7 +2325,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 [[test.caption-mcp-capabilities.check]]
 name="contracts"
 tier="development"
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~NativeCaptionMcpProbeTests&TestCategory!=NativeWindowsMcpCapabilities","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/caption-mcp-capability-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~NativeCaptionMcpProbeTests&TestCategory!=NativeWindowsMcpCapabilities","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/caption-mcp-capability-tests"]
 retained_artifacts=[{name="capability-contracts",path="automation/artifacts/caption-mcp-capability-tests",max_bytes=16777216}]
 [test.native-hierarchy-policy]
 timeout_seconds=3600
@@ -2326,7 +2341,7 @@ name="input-contracts"
 tier="development"
 role="preflight"
 invalidates=["configure","model-build","codec","native-build","rendered"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~SchematicHierarchyDeltaTests|FullyQualifiedName~SchematicHierarchyTopologyTests|FullyQualifiedName~SchematicErcSettingsTests|FullyQualifiedName~NativeKeyboardTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/hierarchy-policy-input-contracts"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~SchematicHierarchyDeltaTests|FullyQualifiedName~SchematicHierarchyTopologyTests|FullyQualifiedName~SchematicErcSettingsTests|FullyQualifiedName~NativeKeyboardTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/hierarchy-policy-input-contracts"]
 retained_artifacts=[{name="hierarchy-policy-input-contracts",path="automation/artifacts/hierarchy-policy-input-contracts",max_bytes=16777216}]
 [[test.native-hierarchy-policy.check]]
 name="configure"
@@ -2352,7 +2367,7 @@ command=["cmake","--build","automation/artifacts/native","--target","kicad","kic
 name="rendered"
 tier="development"
 requires=["native-build"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeHierarchyPolicy","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-hierarchy-policy-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeHierarchyPolicy","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-hierarchy-policy-tests"]
 retained_artifacts=[{name="native-hierarchy-policy-tests",path="automation/artifacts/native-hierarchy-policy-tests",max_bytes=16777216},{name="native-hierarchy-policy-evidence",path="automation/artifacts/native-hierarchy-policy/native-session-current",max_bytes=33554432}]
 [test.native-synchronization-plan]
 timeout_seconds=3600
@@ -2368,7 +2383,7 @@ name="input-contracts"
 tier="development"
 role="preflight"
 invalidates=["configure","model-build","codec","native-build","rendered"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~SchematicNetReconciliationTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/synchronization-plan-input-contracts"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~SchematicSynchronizationPlanTests|FullyQualifiedName~SchematicNetReconciliationTests|FullyQualifiedName~SchematicModelProjectionTests|FullyQualifiedName~SchematicHierarchyMergeTests|FullyQualifiedName~McpProcessTests.InitializeDiscoverAndCallOverStdio","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/synchronization-plan-input-contracts"]
 retained_artifacts=[{name="synchronization-plan-input-contracts",path="automation/artifacts/synchronization-plan-input-contracts",max_bytes=16777216}]
 [[test.native-synchronization-plan.check]]
 name="configure"
@@ -2394,7 +2409,7 @@ command=["cmake","--build","automation/artifacts/native","--target","kicad","kic
 name="rendered"
 tier="development"
 requires=["native-build"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=NativeSynchronizationPlan","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-synchronization-plan-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeSynchronizationPlan","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-synchronization-plan-tests"]
 retained_artifacts=[{name="native-synchronization-plan-tests",path="automation/artifacts/native-synchronization-plan-tests",max_bytes=16777216},{name="native-synchronization-plan-evidence",path="automation/artifacts/native-synchronization-plan/native-session-current",max_bytes=33554432}]
 [test.native-symbol-sheet-ownership]
 timeout_seconds=3600
@@ -2405,7 +2420,7 @@ tier="development"
 role="preflight"
 requires=["managed-build"]
 invalidates=["configure","model-build","codec","native-build","rendered"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","FullyQualifiedName~ConnectedMoveToolTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/connected-tool-contracts"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~ConnectedMoveToolTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/connected-tool-contracts"]
 retained_artifacts=[{name="connected-tool-contracts",path="automation/artifacts/connected-tool-contracts",max_bytes=16777216}]
 [[test.native-symbol-sheet-ownership.check]]
 name="managed-build"

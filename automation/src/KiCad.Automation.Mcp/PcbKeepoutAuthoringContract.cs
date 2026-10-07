@@ -42,7 +42,8 @@ internal static class PcbKeepoutAuthoringContract
 
     internal static void ValidateOperationId(string operationId)
     {
-        if (!Guid.TryParseExact(operationId, "D", out var value) || value == Guid.Empty)
+        if (!Guid.TryParseExact(operationId, "D", out var value) || value == Guid.Empty
+            || !string.Equals(operationId, value.ToString("D"), StringComparison.Ordinal))
             throw new AutomationException("invalid_pcb_keepout_operation", "Keepout authoring requires a canonical operation UUID.");
     }
 

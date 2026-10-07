@@ -48,6 +48,8 @@ public sealed class PcbKeepoutAuthoringContractTests
         CollectionAssert.AreEquivalent(
             new[] { BoardLayer.BlFCu, BoardLayer.BlFMask, BoardLayer.BlDwgsUser }, native.Layers.ToArray());
         PcbKeepoutAuthoringContract.ValidateOperationId("22222222-2222-2222-2222-222222222222");
+        Assert.ThrowsExactly<AutomationException>(() =>
+            PcbKeepoutAuthoringContract.ValidateOperationId("a2222222-2222-2222-2222-222222222222".ToUpperInvariant()));
     }
 
     [TestMethod]

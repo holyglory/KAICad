@@ -94,6 +94,18 @@ public sealed class PcbDrcToolTests
                 Guid.Empty.ToString("D"), false, false, false, revisionJson, transport.Session.Epoch, default);
             Assert.IsTrue(badOperation.IsError ?? false);
             Assert.AreEqual(5, transport.Calls);
+            int beforeNonCanonical = transport.Calls;
+            var uppercaseOperation = await tool.Start(transport.Session.InstanceId, json,
+                "A2222222-2222-2222-2222-222222222222", false, false, false,
+                revisionJson, transport.Session.Epoch, default);
+            Assert.IsTrue(uppercaseOperation.IsError ?? false,
+                "DRC operation IDs must be rejected rather than normalized from uppercase text.");
+            Assert.AreEqual(beforeNonCanonical, transport.Calls);
+            var uppercaseJob = await tool.Job(transport.Session.InstanceId, json,
+                "B2222222-2222-2222-2222-222222222222", transport.Session.Epoch, default);
+            Assert.IsTrue(uppercaseJob.IsError ?? false,
+                "DRC job IDs must be rejected rather than normalized from uppercase text.");
+            Assert.AreEqual(beforeNonCanonical, transport.Calls);
             var malformedCandidate = await tool.Job(transport.Session.InstanceId, json, transport.State.JobId,
                 transport.Session.Epoch, default, candidateRequestJson: "{");
             Assert.IsTrue(malformedCandidate.IsError ?? false,

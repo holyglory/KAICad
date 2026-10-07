@@ -291,7 +291,8 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
 
     private static string Identifier(string value, string kind)
     {
-        if (!Guid.TryParseExact(value, "D", out var id) || id == Guid.Empty)
+        if (!Guid.TryParseExact(value, "D", out var id) || id == Guid.Empty
+            || !string.Equals(value, id.ToString("D"), StringComparison.Ordinal))
             throw new AutomationException("invalid_" + kind + "_id", $"Provide a nonempty {kind} UUID.");
         return id.ToString("D");
     }

@@ -3261,7 +3261,8 @@ API_HANDLER_SCH::handleReadLibrarySnapshot(
             return fail( "library_snapshot_too_large", "The read-only snapshot exceeds its bounded transport size." );
 
         NATIVE_STATE_DIGEST definitionDigest;
-        definitionDigest.Append( snapshot.detachedDefinition );
+        if( snapshot.entryExists )
+            definitionDigest.Append( snapshot.detachedDefinition );
         response.set_status( "complete" );
         response.set_table_path( snapshot.tablePath.ToStdString( wxConvUTF8 ) );
         response.set_table_scope( snapshot.tableScope == LIBRARY_TABLE_SCOPE::PROJECT ? "PROJECT" : "GLOBAL" );
@@ -3270,8 +3271,11 @@ API_HANDLER_SCH::handleReadLibrarySnapshot(
         response.set_expanded_uri( snapshot.expandedUri.ToStdString( wxConvUTF8 ) );
         response.set_provider( snapshot.provider );
         response.set_provider_options( snapshot.providerOptions );
-        response.set_detached_definition_sha256( definitionDigest.Hex() );
-        response.set_detached_definition_bytes( definitionDigest.Bytes() );
+        if( snapshot.entryExists )
+        {
+            response.set_detached_definition_sha256( definitionDigest.Hex() );
+            response.set_detached_definition_bytes( definitionDigest.Bytes() );
+        }
         response.set_forced_refresh( snapshot.forcedRefresh );
         response.set_provider_observable( snapshot.providerObservable );
         response.set_content_snapshot_complete( snapshot.contentSnapshotComplete );
@@ -3414,7 +3418,11 @@ API_HANDLER_SCH::handleCheckedWriteSymbolLibrarySymbol(
     response.set_process_epoch( apiServer().Token() );
     response.set_operation_id( request.operation_id() );
     response.set_status( "rejected" );
-    response.set_receipt_status( SLCWS_REJECTED );
+    // Keep the typed receipt unknown until the request identity, operation UUID and process
+    // epoch have been verified.  Pre-admission errors intentionally use the historical terminal
+    // envelope so managed callers can report the precise validation code instead of rejecting an
+    // incomplete receipt of an invalid request.
+    response.set_receipt_status( SLCWS_UNKNOWN );
     response.set_scope( "mcp_direct_symbol_file" );
     response.set_complete_change_tracking( false );
     response.mutable_request()->CopyFrom( request );
@@ -3457,6 +3465,7 @@ API_HANDLER_SCH::handleCheckedWriteSymbolLibrarySymbol(
 
     response.set_request_fingerprint_sha256( SymbolLibrarySha256( SymbolLibraryDeterministicBytes( request ) ) );
     response.set_expected_request_verified( true );
+    response.set_receipt_status( SLCWS_REJECTED );
     if( !request.has_expected_state() )
         return refuse( "library_mutation_unavailable", "A complete native direct-file checkpoint is required; the digest-only legacy seam cannot write a library.", true );
     if( !SymbolLibraryIsDigest( request.expected_snapshot_sha256() )

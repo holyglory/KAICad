@@ -508,10 +508,17 @@ BOOST_AUTO_TEST_CASE( SaveSymbolCheckedVerifiesEntriesAndReportsWriteBoundaries 
                     std::ifstream input( path.ToStdString(), std::ios::binary );
                     std::string mutated( ( std::istreambuf_iterator<char>( input ) ),
                                          std::istreambuf_iterator<char>() );
-                    const std::string target = "(property \"Reference\" \"R\"";
-                    const size_t targetAt = mutated.find( target );
-                    BOOST_REQUIRE( targetAt != std::string::npos );
-                    mutated[targetAt + target.rfind( 'R' )] = 'Z';
+                    const std::string targetSymbol = "(symbol \"" + replacement.GetName().ToStdString() + "\"";
+                    const size_t symbolAt = mutated.find( targetSymbol );
+                    BOOST_REQUIRE( symbolAt != std::string::npos );
+                    const size_t propertyAt = mutated.find( "(property \"Reference\"", symbolAt );
+                    BOOST_REQUIRE( propertyAt != std::string::npos );
+                    const size_t labelOpen = mutated.find( '"', propertyAt );
+                    const size_t labelClose = mutated.find( '"', labelOpen + 1 );
+                    const size_t valueOpen = mutated.find( '"', labelClose + 1 );
+                    const size_t valueClose = mutated.find( '"', valueOpen + 1 );
+                    BOOST_REQUIRE( valueOpen != std::string::npos && valueClose > valueOpen + 1 );
+                    mutated[valueOpen + 1] = mutated[valueOpen + 1] == 'Z' ? 'Y' : 'Z';
                     std::ofstream output( path.ToStdString(), std::ios::binary | std::ios::trunc );
                     output.write( mutated.data(), static_cast<std::streamsize>( mutated.size() ) );
                     output.close();

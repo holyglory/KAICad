@@ -27,6 +27,7 @@
 
 #include <richio.h>
 #include <string>
+#include <memory>
 #include <optional>
 #include <layer_ids.h>
 #include <zone_settings.h>
@@ -41,6 +42,7 @@ class BOARD_ITEM;
 class FP_CACHE;
 class LSET;
 class PCB_IO_KICAD_SEXPR_PARSER;
+class LIBRARY_WRITE_ADMISSION;
 class BOARD_DESIGN_SETTINGS;
 class PCB_DIMENSION_BASE;
 class PCB_POINT;
@@ -530,9 +532,15 @@ private:
     friend class FP_CACHE;
 
 protected:
+    void acquireFootprintWriteAdmission( const wxString& aTargetPath );
+    void releaseFootprintWriteAdmission();
+    void abandonFootprintWriteAdmission();
+
     wxString               m_error;      ///< for throwing exceptions
 
     FP_CACHE*              m_cache;      ///< Footprint library cache
+    std::unique_ptr<LIBRARY_WRITE_ADMISSION> m_writeAdmission;
+    wxString               m_writeAdmissionPath;
 
     LINE_READER*           m_reader;     ///< no ownership
     wxString               m_filename;   ///< for saves only, name is in m_reader for loads

@@ -25,6 +25,7 @@
 #include <wx/msgdlg.h>
 #include <wx/mstream.h>
 
+#include <api/library_write_admission.h>
 #include <board.h>
 #include <board_design_settings.h>
 #include <callback_gal.h>
@@ -70,6 +71,7 @@
 #include <build_version.h>
 #include <filter_reader.h>
 #include <ctl_flags.h>
+#include <file_content_baseline.h>
 
 
 using namespace PCB_KEYS_T;
@@ -227,8 +229,12 @@ void FP_CACHE::Remove( const wxString& aFootprintName )
 
     // Remove the footprint from the cache and delete the footprint file from the library.
     wxString fullPath = it->second->GetFileName().GetFullPath();
+    if( !wxRemoveFile( fullPath ) )
+        THROW_IO_ERRORF( _( "Footprint file '%s' cannot be deleted." ), fullPath );
+
+    // The cache owns this footprint entry.  Remove it only after the file
+    // deletion succeeds so a failed delete cannot masquerade as a mutation.
     m_footprints.erase( aFootprintName );
-    wxRemoveFile( fullPath );
 }
 
 
@@ -3529,6 +3535,38 @@ PCB_IO_KICAD_SEXPR::~PCB_IO_KICAD_SEXPR()
 }
 
 
+void PCB_IO_KICAD_SEXPR::acquireFootprintWriteAdmission( const wxString& aTargetPath )
+{
+    if( m_writeAdmission )
+    {
+        if( !FILE_CONTENT_BASELINE::SamePath( m_writeAdmissionPath, aTargetPath ) )
+            THROW_IO_ERROR( "A footprint write cannot change its admitted target path." );
+
+        m_writeAdmission->CheckUnchanged();
+        return;
+    }
+
+    const FILE_CONTENT_BASELINE expected = FILE_CONTENT_BASELINE::Read( aTargetPath );
+    m_writeAdmission = LIBRARY_WRITE_ADMISSION::Acquire( { expected } );
+    m_writeAdmissionPath = aTargetPath;
+}
+
+
+void PCB_IO_KICAD_SEXPR::releaseFootprintWriteAdmission()
+{
+    m_writeAdmission.reset();
+    m_writeAdmissionPath.clear();
+}
+
+
+void PCB_IO_KICAD_SEXPR::abandonFootprintWriteAdmission()
+{
+    delete m_cache;
+    m_cache = nullptr;
+    releaseFootprintWriteAdmission();
+}
+
+
 BOARD* PCB_IO_KICAD_SEXPR::LoadBoard( const wxString& aFileName, BOARD* aAppendToMe,
                                       const std::map<std::string, UTF8>* aProperties,
                                       PROJECT* aProject )
@@ -3686,6 +3724,12 @@ void PCB_IO_KICAD_SEXPR::validateCache( const wxString& aLibraryPath, bool check
 {
     // Suppress font substitution warnings (RAII - automatically restored on scope exit)
     FONTCONFIG_REPORTER_SCOPE fontconfigScope( nullptr );
+
+    // Admission covers one regular footprint entry, while this cache covers
+    // the containing multi-file directory.  Recheck the admitted entry before
+    // a timestamp-driven cache rebuild can discard pending cache state.
+    if( m_writeAdmission )
+        m_writeAdmission->CheckUnchanged();
 
     if( !m_cache || !m_cache->IsPath( aLibraryPath ) || ( checkModified && m_cache->IsModified() ) )
     {
@@ -3853,47 +3897,34 @@ void PCB_IO_KICAD_SEXPR::FootprintSave( const wxString& aLibraryPath, const FOOT
         }
     }
 
-    validateCache( libPath, !aProperties || !aProperties->contains( "skip_cache_validation" ) );
-
-    if( !m_cache->IsWritable() )
-    {
-        if( !m_cache->Exists() )
-        {
-            const wxString msg = wxString::Format( _( "Library '%s' does not exist.\n"
-                                                      "Would you like to create it?"),
-                                                      libPath );
-
-            if( !Pgm().IsGUI() || wxMessageBox( msg, _( "Library Not Found" ), wxYES_NO | wxICON_QUESTION ) != wxYES )
-                return;
-
-            // Save throws its own IO_ERROR on failure, so no need to recreate here
-            m_cache->Save( nullptr );
-        }
-        else
-        {
-            THROW_IO_ERRORF( _( "Library '%s' is read only." ), libPath );
-        }
-    }
+    if( !wxDir::Exists( libPath ) )
+        THROW_IO_ERRORF( _( "Footprint library '%s' must already exist as a directory." ), libPath );
 
     // The map key used by the cache and the on-disk filename base.
     wxString footprintName = saveSingleFile ? singleFileBaseName
                                             : aFootprint->GetFPID().GetUniStringLibItemName();
 
-    wxString fpName = saveSingleFile ? singleFileBaseName
-                                     : aFootprint->GetFPID().GetUniStringLibItemName();
+    wxString fpName = footprintName;
     ReplaceIllegalFileNameChars( fpName, '_' );
 
-    // Quietly overwrite footprint and delete footprint file from path for any by same name.
-    wxFileName fn( libPath, fpName, FILEEXT::KiCadFootprintFileExtension );
-
-    // Write through symlinks, don't replace them
+    // Write through symlinks, don't replace them.  Admission is for the one
+    // regular .kicad_mod entry, never the whole multi-file .pretty folder.
+    WX_FILENAME fn( libPath, fpName, FILEEXT::KiCadFootprintFileExtension );
     WX_FILENAME::ResolvePossibleSymlinks( fn );
 
-    if( !fn.IsOk() )
-        THROW_IO_ERRORF( _( "Footprint file name '%s' is not valid." ), fn.GetFullPath() );
+    if( !fn.IsOk() || ( fn.FileExists() && !fn.IsFileWritable() ) )
+        THROW_IO_ERRORF( _( "Footprint file name '%s' is not writable." ), fn.GetFullPath() );
 
-    if( fn.FileExists() && !fn.IsFileWritable() )
-        THROW_IO_ERRORF( _( "Insufficient permissions to delete '%s'." ), fn.GetFullPath() );
+    const wxString targetPath = fn.GetFullPath();
+
+    try
+    {
+        acquireFootprintWriteAdmission( targetPath );
+        validateCache( libPath, !aProperties || !aProperties->contains( "skip_cache_validation" ) );
+        m_writeAdmission->CheckUnchanged();
+
+        if( !m_cache->IsWritable() )
+            THROW_IO_ERRORF( _( "Footprint library '%s' is read only." ), libPath );
 
     wxString fullPath = fn.GetFullPath();
     wxString fullName = fn.GetFullName();
@@ -3935,7 +3966,15 @@ void PCB_IO_KICAD_SEXPR::FootprintSave( const wxString& aLibraryPath, const FOOT
     m_cache->GetFootprints().insert( footprintName,
                                      new FP_CACHE_ENTRY( footprint,
                                                          WX_FILENAME( fn.GetPath(), fullName ) ) );
-    m_cache->Save( footprint );
+        m_cache->Save( footprint );
+        m_writeAdmission->Observe();
+        releaseFootprintWriteAdmission();
+    }
+    catch( ... )
+    {
+        abandonFootprintWriteAdmission();
+        throw;
+    }
 }
 
 
@@ -3945,12 +3984,36 @@ void PCB_IO_KICAD_SEXPR::FootprintDelete( const wxString& aLibraryPath,
 {
     init( aProperties );
 
-    validateCache( aLibraryPath );
+    if( !wxDir::Exists( aLibraryPath ) )
+        THROW_IO_ERRORF( _( "Footprint library '%s' must already exist as a directory." ),
+                         aLibraryPath );
 
-    if( !m_cache->IsWritable() )
-        THROW_IO_ERRORF( _( "Library '%s' is read only." ), aLibraryPath.GetData() );
+    wxString fileBaseName = aFootprintName;
+    ReplaceIllegalFileNameChars( fileBaseName, '_' );
+    WX_FILENAME fn( aLibraryPath, fileBaseName, FILEEXT::KiCadFootprintFileExtension );
+    WX_FILENAME::ResolvePossibleSymlinks( fn );
 
-    m_cache->Remove( aFootprintName );
+    if( !fn.IsOk() )
+        THROW_IO_ERRORF( _( "Footprint file name '%s' is not valid." ), fn.GetFullPath() );
+
+    try
+    {
+        acquireFootprintWriteAdmission( fn.GetFullPath() );
+        validateCache( aLibraryPath );
+        m_writeAdmission->CheckUnchanged();
+
+        if( !m_cache->IsWritable() )
+            THROW_IO_ERRORF( _( "Library '%s' is read only." ), aLibraryPath.GetData() );
+
+        m_cache->Remove( aFootprintName );
+        m_writeAdmission->Observe();
+        releaseFootprintWriteAdmission();
+    }
+    catch( ... )
+    {
+        abandonFootprintWriteAdmission();
+        throw;
+    }
 }
 
 

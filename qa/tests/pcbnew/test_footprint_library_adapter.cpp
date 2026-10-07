@@ -173,6 +173,52 @@ BOOST_AUTO_TEST_CASE( SaveFootprintReadOnlyFilePropagatesError )
 }
 
 
+BOOST_AUTO_TEST_CASE( SaveFootprintRejectsChangedRegularTarget )
+{
+    KI_TEST::TEMPORARY_DIRECTORY tmpLib( "kicad_qa_adapter_stale_save", ".pretty" );
+
+    LIBRARY_MANAGER                manager;
+    TEST_FOOTPRINT_LIBRARY_ADAPTER adapter( manager );
+    const wxString nickname = wxS( "stale_save" );
+    adapter.SeedLoadedLibrary( nickname, tmpLib.GetPath().string() );
+
+    auto board = std::make_unique<BOARD>();
+    auto footprint = std::make_unique<FOOTPRINT>( board.get() );
+    board->Add( footprint.get() );
+    footprint->SetFPID( LIB_ID( nickname, wxS( "stale_target" ) ) );
+    BOOST_REQUIRE( adapter.SaveFootprint( nickname, footprint.get() ) == FOOTPRINT_LIBRARY_ADAPTER::SAVE_OK );
+
+    const auto target = tmpLib.GetPath() / "stale_target.kicad_mod";
+    std::ofstream external( target, std::ios::app );
+    BOOST_REQUIRE( external.good() );
+    external << '\n';
+    external.close();
+
+    BOOST_CHECK_THROW( adapter.SaveFootprint( nickname, footprint.get() ), IO_ERROR );
+}
+
+
+BOOST_AUTO_TEST_CASE( DeleteFootprintRejectsChangedRegularTarget )
+{
+    KI_TEST::TEMPORARY_DIRECTORY tmpLib( "kicad_qa_adapter_stale_delete", ".pretty" );
+    PCB_IO_KICAD_SEXPR          writer;
+    auto                        board = std::make_unique<BOARD>();
+    auto                        footprint = std::make_unique<FOOTPRINT>( board.get() );
+    board->Add( footprint.get() );
+    footprint->SetFPID( LIB_ID( wxS( "stale_delete" ), wxS( "stale_target" ) ) );
+
+    writer.FootprintSave( tmpLib.GetPath(), footprint.get() );
+    const auto target = tmpLib.GetPath() / "stale_target.kicad_mod";
+    std::ofstream external( target, std::ios::app );
+    BOOST_REQUIRE( external.good() );
+    external << '\n';
+    external.close();
+
+    BOOST_CHECK_THROW( writer.FootprintDelete( tmpLib.GetPath(), wxS( "stale_target" ) ), IO_ERROR );
+    BOOST_CHECK( std::filesystem::exists( target ) );
+}
+
+
 // Concurrency regression for the FP_CACHE heap corruption (Sentry 6819786130 / 6322230945 /
 // 7271165487): a writer churns the library while readers rebuild the cache, which races unserialized.
 BOOST_AUTO_TEST_CASE( ConcurrentPluginAccessIsSerialized )

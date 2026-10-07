@@ -169,18 +169,24 @@ public sealed class PcbZoneAuthoringContractTests
         rotated.Outline.Polygons[0].Outline.Nodes.Clear();
         rotated.Outline.Polygons[0].Outline.Nodes.Add(nodes.Skip(2).Concat(nodes.Take(2)));
         rotated.Parent = new KIID { Value = "77777777-7777-7777-7777-777777777777" };
-        PcbZoneAuthoringContract.ValidateReadback(expected, rotated);
+        PcbZoneAuthoringContract.ValidateReadback(expected, rotated, rotated.Parent.Value);
 
         rotated.Outline.Polygons[0].Outline.Nodes[0].Arc = new ArcStartMidEnd
         {
             Start = new() { XNm = 0, YNm = 0 }, Mid = new() { XNm = 1, YNm = 1 }, End = new() { XNm = 2, YNm = 0 }
         };
-        Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateReadback(expected, rotated));
+        Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateReadback(
+            expected, rotated, rotated.Parent.Value));
 
         var foreignParent = expected.Clone();
         foreignParent.Parent = new KIID { Value = "88888888-8888-8888-8888-888888888888" };
         Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateReadback(
             expected, foreignParent, "77777777-7777-7777-7777-777777777777"));
+
+        var unknownOwner = expected.Clone();
+        unknownOwner.Parent = new KIID { Value = "77777777-7777-7777-7777-777777777777" };
+        Assert.ThrowsExactly<AutomationException>(() => PcbZoneAuthoringContract.ValidateReadback(
+            expected, unknownOwner));
     }
 
     [TestMethod]

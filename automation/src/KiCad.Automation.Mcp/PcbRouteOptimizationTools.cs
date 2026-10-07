@@ -79,7 +79,7 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_pcb_route_corner_optimize_apply"),
-     Description("Apply one exact route-replacement delete/create pair returned by a checked routing planner in one native undoable transaction. The pair may be a corner-optimization replacement or a headless reroute rip-up candidate; both requests must target the same PCB and expectedStateJson. A supplied drcJobStateJson must be a completed, fresh, finding-free detached DRC receipt whose checked revision and replacement IDs exactly match this request; DRC-bound reroute and tuning use the retained checked route receipt for exact replay. Corner optimization without DRC remains a legacy native transaction until a checked route request can represent it safely."),
+     Description("Apply one exact route-replacement delete/create pair through a native checked transaction. Both requests must target the same PCB and expectedStateJson. drcJobStateJson supplies only a native job locator; the checked native controller requires that job's authoritative completed, fresh, finding-free result and exact replacement payload before a first commit. DRC-bound reroute and tuning use the retained checked route receipt. Corner optimization without DRC uses an ordered checked item delete/create transaction and does not claim DRC validation. Exact retries settle from retained native receipts."),
      KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "exact corner-optimization delete/create pair, lifecycle checkpoint, native undo transaction, operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Apply(string instanceId, string deleteRequestJson, string createRequestJson,
@@ -116,32 +116,18 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
             || string.IsNullOrWhiteSpace(expected.ProcessEpoch))
             throw new AutomationException("invalid_pcb_route_optimize_state", "expectedStateJson must identify the same PCB and native process epoch.");
         PcbDrcJobState? drc = null;
-        string? drcCandidateHash = null;
         if (!string.IsNullOrWhiteSpace(drcJobStateJson))
         {
             drc = Parse<PcbDrcJobState>(drcJobStateJson, "invalid_route_replacement_drc");
-            var drcReplacementIds = create.Items.Select(item => item.Is(Track.Descriptor) ? item.Unpack<Track>().Id.Value
-                : item.Is(Arc.Descriptor) ? item.Unpack<Arc>().Id.Value : item.Unpack<Via>().Id.Value)
-                .Order(StringComparer.Ordinal).ToArray();
-            if (!PcbDrcTools.TryGetCandidateReceipt(drc.JobId, out string drcEpoch, out DocumentSpecifier drcDocument,
-                    out KiCad.Automation.Protocol.DocumentRevision drcRevision, out string recordedCandidateHash,
-                    out IReadOnlyList<string> recordedDeleteIds)
-                || !drcDocument.Equals(delete.Header.Document) || drcEpoch != expected.ProcessEpoch
-                || drc.Status != PcbDrcJobStatus.PdrcjsCompleted || !drc.WorkerFinished
-                || !drc.SnapshotComplete || !drc.ResultsFresh || drc.Findings.Count != 0
-                || drc.CheckedRevision is null || !drc.CheckedRevision.Equals(expected.Revision)
-                || !drcRevision.Equals(expected.Revision)
-                || !recordedDeleteIds.SequenceEqual(delete.ItemIds.Select(item => item.Value).Order(StringComparer.Ordinal))
-                || !drc.CandidateItemIds.Order(StringComparer.Ordinal).SequenceEqual(drcReplacementIds, StringComparer.Ordinal))
-                throw new AutomationException("invalid_route_replacement_drc", "The detached DRC receipt is not a completed, fresh, finding-free, revision-matched native job bound to this MCP process and replacement geometry.");
-            drcCandidateHash = recordedCandidateHash;
-            if (!string.Equals(drcCandidateHash, CandidateHash(create), StringComparison.Ordinal))
-                throw new AutomationException("invalid_route_replacement_drc", "The replacement geometry differs from the exact candidate submitted to the detached DRC job.");
         }
         string canonicalDelete = BoardJson.Formatter.Format(delete);
         string canonicalCreate = BoardJson.Formatter.Format(create);
         string canonicalExpected = SchematicJson.Formatter.Format(expected);
-        string canonicalDrc = drc is null ? "" : SchematicJson.Formatter.Format(drc);
+        // DRC JSON supplies only a native job locator. The checked native
+        // controller replays an exact retained request before rereading that
+        // job's authoritative state and complete replacement payload. An MCP
+        // cache or caller-supplied completion flags cannot establish admission.
+        string canonicalDrc = drc is null ? "" : SchematicJson.Formatter.Format(new PcbDrcJobState { JobId = drc.JobId });
         string fingerprint = instanceId + "\n" + canonicalDelete + "\n" + canonicalCreate + "\n"
             + canonicalExpected + "\n" + canonicalDrc;
         if (drc is not null)
@@ -153,7 +139,7 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
                 CallToolResult checkedResult = await new PcbRoutingTools(registry).Commit(
                     instanceId, BoardJson.Formatter.Format(checkedRequest.Candidate),
                     SchematicJson.Formatter.Format(checkedRequest.ExpectedState),
-                    SchematicJson.Formatter.Format(drc),
+                    canonicalDrc,
                     checkedRequest.OperationId, removalsJson: BoardJson.Formatter.Format(checkedRequest.Removals),
                     cancellationToken: cancellationToken);
                 return CheckedRouteResult(checkedResult, drc);
@@ -224,7 +210,7 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
                 : payload.TryGetProperty("nativeReceipt", out JsonElement nativeReceipt)
                     && nativeReceipt.ValueKind == JsonValueKind.True;
             return ReceiptData(new { instanceId, processEpoch, operationId, found = true,
-                receiptScope = nativeReceiptAvailable ? "native-process" : "mcp-process",
+                receiptScope = "mcp-process",
                 nativeReceiptAvailable, receipt = payload });
         }
         finally { MutationGate.Release(); }
@@ -320,13 +306,13 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
         CheckedPcbItemTransaction checkedRequest = BuildCornerCheckedRequest(create, delete, expected, operationId);
         PcbCheckedItemDispatch.Outcome inspected = await PcbCheckedItemDispatch.InspectAsync(
             registry, instanceId, checkedRequest, cancellationToken);
-        if (inspected.ErrorCode is not null)
-            return CornerMutationData(inspected);
         if (inspected.Receipt is { State: not CheckedPcbItemTransactionState.CpbtsNotFound })
         {
             inspected.Receipt.Replayed = true;
             return CornerMutationData(inspected);
         }
+        if (inspected.ErrorCode is not null)
+            return CornerMutationData(inspected);
 
         NativeClient client = registry.Client(instanceId);
         DocumentLifecycleState admission = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
@@ -352,6 +338,7 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
     {
         CheckedPcbItemTransactionReceipt? receipt = outcome.Receipt;
         bool success = outcome.Completed;
+        bool retrySafe = outcome.NativeReceiptAvailable && !outcome.UntrustedReceipt;
         JsonElement? receiptJson = receipt is null || outcome.UntrustedReceipt
             ? null : JsonDocument.Parse(SchematicJson.Formatter.Format(receipt)).RootElement.Clone();
         string? before = receipt?.ObservedBefore is null || outcome.UntrustedReceipt
@@ -375,22 +362,25 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
         JsonElement structured = JsonSerializer.SerializeToElement(new
         {
             outcome.InstanceId,
-            processEpoch = receipt?.ProcessEpoch ?? outcome.Request.ProcessEpoch,
+            processEpoch = outcome.Request.ProcessEpoch,
             operationId = outcome.Request.OperationId,
-            operationOutcome = success ? "completed" : receipt?.State.ToString(),
+            operationOutcome = success ? "completed" : outcome.UntrustedReceipt
+                ? CheckedPcbItemTransactionState.CpbtsIndeterminate.ToString() : receipt?.State.ToString(),
             state = outcome.UntrustedReceipt
                 ? CheckedPcbItemTransactionState.CpbtsIndeterminate.ToString()
                 : receipt?.State.ToString(),
-            replayed = receipt?.Replayed ?? false,
+            replayed = !outcome.UntrustedReceipt && receipt?.Replayed == true,
             receipt = receiptJson,
             nativeReceipt = receiptJson,
+            untrustedReceipt = outcome.UntrustedReceipt && receipt is not null
+                ? JsonDocument.Parse(SchematicJson.Formatter.Format(receipt)).RootElement.Clone() : (JsonElement?)null,
             nativeReceiptAvailable = outcome.NativeReceiptAvailable,
             mutationConfirmed = success,
             atomicTransaction = true,
-            operationReceipt = outcome.NativeReceiptAvailable,
-            receiptScope = outcome.NativeReceiptAvailable ? "native-process" : "none",
-            replayableWithinNativeProcess = outcome.NativeReceiptAvailable,
-            transportRetrySafe = outcome.NativeReceiptAvailable,
+            operationReceipt = retrySafe,
+            receiptScope = retrySafe ? "native-process" : "none",
+            replayableWithinNativeProcess = retrySafe,
+            transportRetrySafe = retrySafe,
             beforeState = before,
             rollbackState = rollback,
             afterState = after,
@@ -512,9 +502,6 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
             throw new AutomationException("invalid_process_epoch", "Provide the canonical native process epoch.");
     }
 
-    private static string CandidateHash(CreateItems create)
-        => PcbDrcTools.CanonicalCandidate(create);
-
     private static string? RouteObjectId(Any packed)
         => packed.Is(Track.Descriptor) ? packed.Unpack<Track>().Id.Value
         : packed.Is(Arc.Descriptor) ? packed.Unpack<Arc>().Id.Value
@@ -525,6 +512,7 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
         if (result.IsError ?? false || result.StructuredContent is null)
             return result;
         JsonElement payload = result.StructuredContent!.Value;
+        var receipt = SchematicJson.Parser.Parse<CheckedPcbRouteReceipt>(payload.GetProperty("receipt").GetRawText());
 
         JsonElement structured = JsonSerializer.SerializeToElement(new
         {
@@ -532,6 +520,8 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
             processEpoch = payload.GetProperty("processEpoch").GetString(),
             operationId = payload.GetProperty("operationId").GetString(),
             operationOutcome = "completed",
+            state = receipt.State.ToString(),
+            replayed = receipt.Replayed,
             receipt = payload.GetProperty("receipt"),
             beforeState = payload.TryGetProperty("beforeState", out JsonElement before) ? before.GetString() : null,
             afterState = payload.TryGetProperty("afterState", out JsonElement after) ? after.GetString() : null,

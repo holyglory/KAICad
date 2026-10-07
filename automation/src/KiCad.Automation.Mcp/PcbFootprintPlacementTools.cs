@@ -222,6 +222,7 @@ public sealed class PcbFootprintPlacementTools(InstanceRegistry registry)
     {
         CheckedPcbItemTransactionReceipt? receipt = outcome.Receipt;
         bool success = outcome.Completed;
+        bool retrySafe = outcome.NativeReceiptAvailable && !outcome.UntrustedReceipt;
         JsonElement? receiptJson = receipt is null || outcome.UntrustedReceipt ? null
             : JsonDocument.Parse(SchematicJson.Formatter.Format(receipt)).RootElement.Clone();
         string? before = receipt?.ObservedBefore is null || outcome.UntrustedReceipt ? null
@@ -237,22 +238,25 @@ public sealed class PcbFootprintPlacementTools(InstanceRegistry registry)
         JsonElement structured = JsonSerializer.SerializeToElement(new
         {
             instanceId = outcome.InstanceId,
-            processEpoch = receipt?.ProcessEpoch ?? outcome.Request.ProcessEpoch,
+            processEpoch = outcome.Request.ProcessEpoch,
             operationId = outcome.Request.OperationId,
             planId = plan.PlanId,
             operation = "footprint-place",
-            operationOutcome = success ? "completed" : receipt?.State.ToString(),
+            operationOutcome = success ? "completed" : outcome.UntrustedReceipt
+                ? CheckedPcbItemTransactionState.CpbtsIndeterminate.ToString() : receipt?.State.ToString(),
             state = outcome.UntrustedReceipt ? CheckedPcbItemTransactionState.CpbtsIndeterminate.ToString() : receipt?.State.ToString(),
-            replayed = receipt?.Replayed ?? false,
+            replayed = !outcome.UntrustedReceipt && receipt?.Replayed == true,
             receipt = receiptJson,
             nativeReceipt = receiptJson,
+            untrustedReceipt = outcome.UntrustedReceipt && receipt is not null
+                ? JsonDocument.Parse(SchematicJson.Formatter.Format(receipt)).RootElement.Clone() : (JsonElement?)null,
             nativeReceiptAvailable = outcome.NativeReceiptAvailable,
             mutationConfirmed = success,
             atomicTransaction = true,
-            operationReceipt = outcome.NativeReceiptAvailable,
-            replayableWithinNativeProcess = outcome.NativeReceiptAvailable,
-            receiptScope = outcome.NativeReceiptAvailable ? "native-process" : "none",
-            transportRetrySafe = outcome.NativeReceiptAvailable,
+            operationReceipt = retrySafe,
+            replayableWithinNativeProcess = retrySafe,
+            receiptScope = retrySafe ? "native-process" : "none",
+            transportRetrySafe = retrySafe,
             beforeState = before,
             afterState = after,
             response,
@@ -297,7 +301,6 @@ public sealed class PcbFootprintPlacementTools(InstanceRegistry registry)
             {
                 if (existing.Fingerprint != fingerprint)
                     throw new AutomationException("operation_id_reused", "The operation ID is already bound to a different footprint placement.");
-                return existing.Result;
             }
             CallToolResult result = await action();
             if (!(result.IsError ?? false)) Receipts[operationId] = new(fingerprint, result);

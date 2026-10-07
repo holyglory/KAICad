@@ -195,6 +195,7 @@ public sealed class PcbRouteCleanupTools(InstanceRegistry registry)
     {
         CheckedPcbItemTransactionReceipt? receipt = outcome.Receipt;
         bool success = outcome.Completed;
+        bool retrySafe = outcome.NativeReceiptAvailable && !outcome.UntrustedReceipt;
         JsonElement? receiptJson = receipt is null || outcome.UntrustedReceipt
             ? null : JsonDocument.Parse(SchematicJson.Formatter.Format(receipt)).RootElement.Clone();
         string? before = receipt?.ObservedBefore is null || outcome.UntrustedReceipt
@@ -210,23 +211,26 @@ public sealed class PcbRouteCleanupTools(InstanceRegistry registry)
 
         JsonElement structured = JsonSerializer.SerializeToElement(new
         {
-            outcome.InstanceId,
-            processEpoch = receipt?.ProcessEpoch ?? outcome.Request.ProcessEpoch,
+            instanceId = outcome.InstanceId,
+            processEpoch = outcome.Request.ProcessEpoch,
             operationId = outcome.Request.OperationId,
-            operationOutcome = success ? "completed" : receipt?.State.ToString(),
+            operationOutcome = success ? "completed" : outcome.UntrustedReceipt
+                ? CheckedPcbItemTransactionState.CpbtsIndeterminate.ToString() : receipt?.State.ToString(),
             state = outcome.UntrustedReceipt
                 ? CheckedPcbItemTransactionState.CpbtsIndeterminate.ToString()
                 : receipt?.State.ToString(),
-            replayed = receipt?.Replayed ?? false,
+            replayed = !outcome.UntrustedReceipt && receipt?.Replayed == true,
             receipt = receiptJson,
             nativeReceipt = receiptJson,
+            untrustedReceipt = outcome.UntrustedReceipt && receipt is not null
+                ? JsonDocument.Parse(SchematicJson.Formatter.Format(receipt)).RootElement.Clone() : (JsonElement?)null,
             nativeReceiptAvailable = outcome.NativeReceiptAvailable,
             mutationConfirmed = success,
             atomicTransaction = true,
-            operationReceipt = outcome.NativeReceiptAvailable,
-            replayableWithinProcess = outcome.NativeReceiptAvailable,
-            receiptScope = outcome.NativeReceiptAvailable ? "native-process" : "none",
-            transportRetrySafe = outcome.NativeReceiptAvailable,
+            operationReceipt = retrySafe,
+            replayableWithinProcess = retrySafe,
+            receiptScope = retrySafe ? "native-process" : "none",
+            transportRetrySafe = retrySafe,
             beforeState = before,
             rollbackState = rollback,
             afterState = after,

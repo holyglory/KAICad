@@ -15,7 +15,7 @@ using ModelContextProtocol.Protocol;
 namespace KiCad.Automation.Tests;
 
 [TestClass]
-public sealed class PcbCheckedItemMigrationTests
+public sealed partial class PcbCheckedItemMigrationTests
 {
     [TestMethod]
     public async Task CreateUpdateDeleteUseOneCheckedDispatchAndReplayBeforeStaleRead()
@@ -94,18 +94,22 @@ public sealed class PcbCheckedItemMigrationTests
                 Header = new() { Document = state.Document.Clone() },
                 ItemIds = { new KIID { Value = Guid.NewGuid().ToString("D") } }
             };
+            transport.ExistingItems.Items.Add(Any.Pack(Track(delete.ItemIds[0].Value, 1_000, 2_000)));
             string operationId = Guid.NewGuid().ToString("D");
 
             var applied = await tools.Apply(transport.InstanceId, BoardJson.Formatter.Format(delete),
                 SchematicJson.Formatter.Format(state), operationId, default);
             Assert.IsFalse(applied.IsError ?? false, Text(applied));
             JsonElement appliedData = JsonSerializer.SerializeToElement(applied.StructuredContent);
+            Assert.AreEqual(transport.InstanceId, appliedData.GetProperty("instanceId").GetString());
             Assert.IsTrue(appliedData.GetProperty("nativeReceiptAvailable").GetBoolean());
             Assert.IsTrue(appliedData.GetProperty("mutationConfirmed").GetBoolean());
             Assert.AreEqual(CheckedPcbItemTransactionState.CpbtsCompleted.ToString(),
                 appliedData.GetProperty("state").GetString());
             var response = BoardJson.Parser.Parse<DeleteItemsResponse>(appliedData.GetProperty("response").GetRawText());
             Assert.AreEqual(delete.ItemIds[0], response.DeletedItems[0].Id);
+            await AssertReceiptIdentity((instance, epoch) => tools.Receipt(instance, epoch, operationId, default),
+                transport, operationId);
 
             // A retry must use the native retained receipt without reopening a
             // legacy board transaction or rereading a changed board.
@@ -116,8 +120,17 @@ public sealed class PcbCheckedItemMigrationTests
             JsonElement replayData = JsonSerializer.SerializeToElement(replay.StructuredContent);
             Assert.IsTrue(replayData.GetProperty("replayed").GetBoolean());
             Assert.AreEqual(2, transport.CheckedMutations);
+            var foreignState = state.Clone(); foreignState.ProcessEpoch = Guid.NewGuid().ToString("D");
+            AssertError(await tools.Apply(transport.InstanceId, BoardJson.Formatter.Format(delete),
+                SchematicJson.Formatter.Format(foreignState), Guid.NewGuid().ToString("D"), default), "pcb_instance_changed");
+            transport.LiveBoardChanged = false;
+            Assert.IsEmpty(await ReadNativeItems(registry, transport.InstanceId, state.Document, delete.ItemIds));
             Assert.AreEqual(0, transport.LifecycleReads);
             Assert.AreEqual(0, transport.LegacyMutations);
+            var changed = delete.Clone(); changed.ItemIds[0].Value = Guid.NewGuid().ToString("D");
+            AssertError(await tools.Apply(transport.InstanceId, BoardJson.Formatter.Format(changed),
+                SchematicJson.Formatter.Format(state), operationId, default), "operation_id_reused");
+            Assert.AreEqual(2, transport.CheckedMutations);
         }
         finally { Directory.Delete(root, true); }
     }
@@ -189,17 +202,32 @@ public sealed class PcbCheckedItemMigrationTests
     private sealed class MigrationTransport : INativeTransport
     {
         private readonly Dictionary<string, CheckedPcbItemTransactionReceipt> receipts = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, CheckedPcbItemTransaction> checkedRequests = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, (StartPcbDrcJob Request, PcbDrcJobState State)> drcJobs = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, (CheckedPcbRouteCommit Request, CheckedPcbRouteReceipt Receipt)> routeReceipts = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, Any> boardItems = new(StringComparer.Ordinal);
+        private bool boardInitialized;
         internal string Epoch { get; } = Guid.NewGuid().ToString("D");
         internal string InstanceId { get; } = Guid.NewGuid().ToString("D");
         internal bool LiveBoardChanged { get; set; }
         internal bool RejectUpdates { get; init; }
+        internal bool ForeignReceipt { get; init; }
+        internal DocumentLifecycleState? LiveState { get; set; }
+        internal GetItemsResponse ExistingItems { get; } = new();
         internal int CheckedMutations { get; private set; }
+        internal int ReceiptReads { get; private set; }
+        internal int ItemReads { get; private set; }
+        internal int RouteMutations { get; private set; }
+        internal int AppliedItemTransactions { get; private set; }
+        internal int AppliedRouteTransactions { get; private set; }
+        internal int Exchanges { get; private set; }
         internal int LifecycleReads { get; private set; }
         internal int LegacyMutations { get; private set; }
 
         public Task<byte[]> ExchangeAsync(string endpoint, byte[] bytes, TimeSpan timeout,
             CancellationToken cancellationToken = default)
         {
+            Exchanges++;
             var request = ApiRequest.Parser.ParseFrom(bytes);
             if (request.Message.Is(GetAutomationSession.Descriptor))
                 return Reply(new AutomationSession { ProtocolVersion = 1, InstanceId = InstanceId,
@@ -207,7 +235,99 @@ public sealed class PcbCheckedItemMigrationTests
             if (request.Message.Is(ReadDocumentLifecycleState.Descriptor))
             {
                 LifecycleReads++;
-                return Reply(new DocumentLifecycleState { ProcessEpoch = Epoch });
+                return Reply(!LiveBoardChanged && LiveState is not null
+                    ? LiveState.Clone() : new DocumentLifecycleState { ProcessEpoch = Epoch });
+            }
+            if (request.Message.Is(GetItemsById.Descriptor))
+            {
+                ItemReads++;
+                if (LiveBoardChanged) return Error("live target read is unavailable");
+                InitializeBoard();
+                var query = request.Message.Unpack<GetItemsById>();
+                var found = new GetItemsResponse();
+                found.Items.Add(query.Items.Where(id => boardItems.ContainsKey(id.Value)).Select(id => boardItems[id.Value].Clone()));
+                return Reply(found);
+            }
+            if (request.Message.Is(ReadCheckedPcbItemTransactionReceipt.Descriptor))
+            {
+                ReceiptReads++;
+                var query = request.Message.Unpack<ReadCheckedPcbItemTransactionReceipt>();
+                if (receipts.TryGetValue(query.OperationId, out var retained))
+                {
+                    if (!checkedRequests[query.OperationId].Equals(query.ExpectedRequest))
+                        return Error("receipt request differs from the original transaction");
+                    return Reply(retained.Clone());
+                }
+                return Reply(new CheckedPcbItemTransactionReceipt
+                {
+                    Document = query.Document.Clone(), ProcessEpoch = Epoch, OperationId = query.OperationId,
+                    State = CheckedPcbItemTransactionState.CpbtsNotFound
+                });
+            }
+            if (request.Message.Is(StartPcbDrcJob.Descriptor))
+            {
+                var start = request.Message.Unpack<StartPcbDrcJob>();
+                var state = new PcbDrcJobState
+                {
+                    Document = start.Document.Clone(), ProcessEpoch = Epoch, OperationId = start.OperationId,
+                    JobId = Guid.NewGuid().ToString("D"), CheckedRevision = start.ExpectedRevision.Clone(),
+                    Status = PcbDrcJobStatus.PdrcjsCompleted, WorkerFinished = true, Progress = 1,
+                    SnapshotComplete = true, ResultsFresh = true, CandidateDryRun = true
+                };
+                state.CandidateItemIds.Add(start.CandidateItems.Select(item => item.Unpack<Track>().Id.Value));
+                drcJobs.Add(state.JobId, (start.Clone(), state));
+                return Reply(state);
+            }
+            if (request.Message.Is(NativeCapabilityPcbDrcReplacementJob.Descriptor))
+            {
+                var query = request.Message.Unpack<NativeCapabilityPcbDrcReplacementJob>();
+                var job = drcJobs[query.JobId];
+                if (!job.Request.CandidateItems.Equals(query.ExpectedCandidateItems)
+                    || !job.Request.DeleteItemIds.Equals(query.ExpectedDeleteItemIds))
+                    return Error("DRC payload differs from the checked replacement");
+                job.State.CandidatePayloadVerified = true;
+                return Reply(job.State);
+            }
+            if (request.Message.Is(CheckedPcbRouteCommit.Descriptor))
+            {
+                RouteMutations++;
+                var commit = request.Message.Unpack<CheckedPcbRouteCommit>();
+                if (routeReceipts.TryGetValue(commit.OperationId, out var retained))
+                {
+                    if (!retained.Request.Equals(commit)) return Error("route replay payload differs");
+                    var replay = retained.Receipt.Clone(); replay.Replayed = true;
+                    return Reply(replay);
+                }
+                var job = drcJobs[commit.DrcJobId];
+                if (job.State.Status != PcbDrcJobStatus.PdrcjsCompleted || !job.State.ResultsFresh
+                    || !job.State.SnapshotComplete || job.State.Findings.Count != 0)
+                    return Reply(new CheckedPcbRouteReceipt
+                    {
+                        Document = commit.ExpectedState.Document.Clone(), ProcessEpoch = Epoch, OperationId = commit.OperationId,
+                        State = CheckedPcbRouteReceipt.Types.State.Rejected, RequestVerified = true,
+                        ErrorCode = "native_drc_not_clean", ErrorMessage = "The retained native DRC job is not fresh and clean."
+                    });
+                if (!job.Request.Document.Equals(commit.ExpectedState.Document)
+                    || !job.Request.ExpectedRevision.Equals(commit.ExpectedState.Revision)
+                    || !job.Request.CandidateItems.Equals(commit.Candidate.Items)
+                    || !job.Request.DeleteItemIds.Equals(commit.Removals.ItemIds))
+                    return Error("route request differs from the checked DRC job");
+                var after = commit.ExpectedState.Clone(); after.Revision.Sequence++; after.StateSha256 = new string('b', 64);
+                var routeReceipt = new CheckedPcbRouteReceipt
+                {
+                    Document = commit.ExpectedState.Document.Clone(), ProcessEpoch = Epoch, OperationId = commit.OperationId,
+                    State = CheckedPcbRouteReceipt.Types.State.Completed, RequestVerified = true,
+                    Before = commit.ExpectedState.Clone(), After = after,
+                    Created = CompleteOperation(new PcbItemOperation { Create = commit.Candidate }).Create,
+                    Removals = commit.Removals.Clone(),
+                    RemovedResult = CompleteOperation(new PcbItemOperation { Delete = commit.Removals }).Delete
+                };
+                routeReceipts.Add(commit.OperationId, (commit.Clone(), routeReceipt.Clone()));
+                ApplyBoardOperation(new PcbItemOperation { Delete = commit.Removals });
+                ApplyBoardOperation(new PcbItemOperation { Create = commit.Candidate });
+                LiveState = after.Clone();
+                AppliedRouteTransactions++;
+                return Reply(routeReceipt);
             }
             if (request.Message.Is(BeginCommit.Descriptor) || request.Message.Is(EndCommit.Descriptor)
                 || request.Message.Is(CreateItems.Descriptor) || request.Message.Is(UpdateItems.Descriptor)
@@ -223,53 +343,92 @@ public sealed class PcbCheckedItemMigrationTests
             var checkedRequest = request.Message.Unpack<CheckedPcbItemTransaction>();
             if (receipts.TryGetValue(checkedRequest.OperationId, out var existing))
             {
+                if (!checkedRequests[checkedRequest.OperationId].Equals(checkedRequest))
+                    return Error("checked replay payload differs");
                 var replay = existing.Clone(); replay.Replayed = true;
                 return Reply(replay);
             }
-            var receipt = checkedRequest.Operations[0].ActionCase switch
+            var receipt = checkedRequest.Operations[0].ActionCase == PcbItemOperation.ActionOneofCase.Update && RejectUpdates
+                ? RolledBackUpdate(checkedRequest)
+                : Completed(checkedRequest, checkedRequest.Operations.Select(CompleteOperation));
+            if (receipt.State == CheckedPcbItemTransactionState.CpbtsCompleted)
             {
-                PcbItemOperation.ActionOneofCase.Create => CompletedCreate(checkedRequest),
-                PcbItemOperation.ActionOneofCase.Update when RejectUpdates => RolledBackUpdate(checkedRequest),
-                PcbItemOperation.ActionOneofCase.Update => CompletedUpdate(checkedRequest),
-                PcbItemOperation.ActionOneofCase.Delete => CompletedDelete(checkedRequest),
-                _ => throw new AssertFailedException("unsupported fixture operation")
-            };
+                foreach (var operation in checkedRequest.Operations) ApplyBoardOperation(operation);
+                LiveState = receipt.ObservedAfter.Clone();
+                AppliedItemTransactions++;
+            }
+            if (ForeignReceipt)
+            {
+                receipt.OperationId = Guid.NewGuid().ToString("D");
+                receipt.ProcessEpoch = Guid.NewGuid().ToString("D");
+                receipt.Document.BoardFilename = "foreign.kicad_pcb";
+            }
+            checkedRequests.Add(checkedRequest.OperationId, checkedRequest.Clone());
             receipts.Add(checkedRequest.OperationId, receipt.Clone());
             return Reply(receipt);
         }
 
-        private CheckedPcbItemTransactionReceipt CompletedCreate(CheckedPcbItemTransaction request) =>
-            Completed(request, new PcbItemOperationResult
-            {
-                Create = new CreateItemsResponse
-                {
-                    Status = ItemRequestStatus.IrsOk,
-                    CreatedItems = { new ItemCreationResult { Status = new() { Code = ItemStatusCode.IscOk }, Item = request.Operations[0].Create.Items[0].Clone() } }
-                }
-            });
+        private void InitializeBoard()
+        {
+            if (boardInitialized) return;
+            foreach (var item in ExistingItems.Items) boardItems.Add(ItemId(item), item.Clone());
+            boardInitialized = true;
+        }
 
-        private CheckedPcbItemTransactionReceipt CompletedUpdate(CheckedPcbItemTransaction request) =>
-            Completed(request, new PcbItemOperationResult
+        private void ApplyBoardOperation(PcbItemOperation operation)
+        {
+            InitializeBoard();
+            if (operation.ActionCase == PcbItemOperation.ActionOneofCase.Delete)
             {
-                Update = new UpdateItemsResponse
+                foreach (var id in operation.Delete.ItemIds)
+                    Assert.IsTrue(boardItems.Remove(id.Value), "A native deletion cannot run twice.");
+            }
+            else
+            {
+                var items = operation.ActionCase == PcbItemOperation.ActionOneofCase.Create
+                    ? operation.Create.Items : operation.Update.Items;
+                foreach (var item in items)
                 {
-                    Status = ItemRequestStatus.IrsOk,
-                    UpdatedItems = { new ItemUpdateResult { Status = new() { Code = ItemStatusCode.IscOk }, Item = request.Operations[0].Update.Items[0].Clone() } }
+                    if (operation.ActionCase == PcbItemOperation.ActionOneofCase.Create)
+                        Assert.IsFalse(boardItems.ContainsKey(ItemId(item)), "A native creation cannot run twice.");
+                    boardItems[ItemId(item)] = item.Clone();
                 }
-            });
+            }
+        }
 
-        private CheckedPcbItemTransactionReceipt CompletedDelete(CheckedPcbItemTransaction request) =>
-            Completed(request, new PcbItemOperationResult
+        private static string ItemId(Any item) => item.Is(Kiapi.Board.Types.Track.Descriptor)
+            ? item.Unpack<Track>().Id.Value : item.Unpack<FootprintInstance>().Id.Value;
+
+        internal void InvalidateDrc(string jobId)
+        {
+            drcJobs[jobId].State.ResultsFresh = false;
+        }
+
+        private static PcbItemOperationResult CompleteOperation(PcbItemOperation operation)
+        {
+            switch (operation.ActionCase)
             {
-                Delete = new DeleteItemsResponse
-                {
-                    Status = ItemRequestStatus.IrsOk,
-                    DeletedItems = { new ItemDeletionResult { Id = request.Operations[0].Delete.ItemIds[0].Clone(), Status = ItemDeletionStatus.IdsOk } }
-                }
-            });
+                case PcbItemOperation.ActionOneofCase.Create:
+                    var create = new CreateItemsResponse { Status = ItemRequestStatus.IrsOk };
+                    create.CreatedItems.Add(operation.Create.Items.Select(item => new ItemCreationResult
+                    { Status = new() { Code = ItemStatusCode.IscOk }, Item = item.Clone() }));
+                    return new() { Create = create };
+                case PcbItemOperation.ActionOneofCase.Update:
+                    var update = new UpdateItemsResponse { Status = ItemRequestStatus.IrsOk };
+                    update.UpdatedItems.Add(operation.Update.Items.Select(item => new ItemUpdateResult
+                    { Status = new() { Code = ItemStatusCode.IscOk }, Item = item.Clone() }));
+                    return new() { Update = update };
+                case PcbItemOperation.ActionOneofCase.Delete:
+                    var delete = new DeleteItemsResponse { Status = ItemRequestStatus.IrsOk };
+                    delete.DeletedItems.Add(operation.Delete.ItemIds.Select(id => new ItemDeletionResult
+                    { Id = id.Clone(), Status = ItemDeletionStatus.IdsOk }));
+                    return new() { Delete = delete };
+                default: throw new AssertFailedException("unsupported fixture operation");
+            }
+        }
 
         private static CheckedPcbItemTransactionReceipt Completed(CheckedPcbItemTransaction request,
-            PcbItemOperationResult result)
+            IEnumerable<PcbItemOperationResult> results)
         {
             var after = request.ExpectedState.Clone(); after.Revision.Sequence++; after.StateSha256 = new string('b', 64);
             var receipt = new CheckedPcbItemTransactionReceipt
@@ -281,7 +440,7 @@ public sealed class PcbCheckedItemMigrationTests
                 PostCommitState = CheckedPcbItemPostCommitState.CpbpsConfirmed,
                 ObservedBefore = request.ExpectedState.Clone(), ObservedAfter = after
             };
-            receipt.Results.Add(result);
+            receipt.Results.Add(results);
             return receipt;
         }
 

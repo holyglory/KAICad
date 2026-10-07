@@ -71,6 +71,9 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_schematic_export_svg");
             CollectionAssert.Contains(names, "kicad_schematic_export_dxf");
             CollectionAssert.Contains(names, "kicad_schematic_export_pdf");
+            CollectionAssert.Contains(names, "kicad_schematic_export_ps");
+            CollectionAssert.Contains(names, "kicad_schematic_export_netlist");
+            CollectionAssert.Contains(names, "kicad_schematic_export_bom");
             CollectionAssert.Contains(names, "kicad_pcb_zone_read");
             CollectionAssert.Contains(names, "kicad_pcb_zone_create");
             CollectionAssert.Contains(names, "kicad_pcb_zone_update");
@@ -162,6 +165,24 @@ public sealed class McpProcessTests
             Assert.AreEqual("invalid_schematic_export_target",
                 invalidSchematicExportPdf.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(),
                 invalidSchematicExportPdf.GetRawText());
+            JsonElement invalidSchematicExportPs = await Request(90912, "tools/call", new
+            { name = "kicad_schematic_export_ps", arguments = new { instanceId = unknownInstance, requestJson = "{}", expectedStateJson = "{}" } });
+            Assert.IsTrue(invalidSchematicExportPs.GetProperty("result").GetProperty("isError").GetBoolean(), invalidSchematicExportPs.GetRawText());
+            Assert.AreEqual("invalid_schematic_export_target",
+                invalidSchematicExportPs.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+                invalidSchematicExportPs.GetRawText());
+            JsonElement invalidSchematicExportNetlist = await Request(90913, "tools/call", new
+            { name = "kicad_schematic_export_netlist", arguments = new { instanceId = unknownInstance, requestJson = "{}", expectedStateJson = "{}" } });
+            Assert.IsTrue(invalidSchematicExportNetlist.GetProperty("result").GetProperty("isError").GetBoolean(), invalidSchematicExportNetlist.GetRawText());
+            Assert.AreEqual("invalid_schematic_export_target",
+                invalidSchematicExportNetlist.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+                invalidSchematicExportNetlist.GetRawText());
+            JsonElement invalidSchematicExportBom = await Request(90914, "tools/call", new
+            { name = "kicad_schematic_export_bom", arguments = new { instanceId = unknownInstance, requestJson = "{}", expectedStateJson = "{}" } });
+            Assert.IsTrue(invalidSchematicExportBom.GetProperty("result").GetProperty("isError").GetBoolean(), invalidSchematicExportBom.GetRawText());
+            Assert.AreEqual("invalid_schematic_export_target",
+                invalidSchematicExportBom.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+                invalidSchematicExportBom.GetRawText());
             var rasterTraceSchema = listed.GetProperty("result").GetProperty("tools").EnumerateArray()
                 .Single(tool => tool.GetProperty("name").GetString() == "kicad_artwork_raster_trace")
                 .GetProperty("inputSchema").GetProperty("properties").GetProperty("input");

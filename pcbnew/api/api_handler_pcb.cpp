@@ -1174,8 +1174,15 @@ static HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> ExtractRouteP
     std::set<std::string> displacedIds;
     for( const auto& item : removedSnapshot )
     {
-        if( auxiliary( item.get() ) || !item->Parent() )
+        if( auxiliary( item.get() ) )
             continue;
+        // An unowned removed PNS item has no stable BOARD_ITEM identity, so
+        // it cannot be represented by the exact DeleteItems portion of a
+        // complete route delta. Dropping it here would expose a seemingly
+        // actionable candidate that leaves displaced copper behind.
+        if( !item->Parent() )
+            return reject( "route_delta_removed_geometry_unassigned",
+                           "The complete native route delta cannot identify removed copper for deletion" );
         BOARD_ITEM* parent = item->Parent();
         if( parent->m_Uuid == niluuid || !parent->IsType( { PCB_TRACE_T, PCB_ARC_T, PCB_VIA_T } ) )
             return reject( "route_delta_removed_geometry_unsupported", "The complete native route delta removes unsupported board geometry" );

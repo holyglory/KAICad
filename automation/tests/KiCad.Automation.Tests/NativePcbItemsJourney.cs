@@ -935,11 +935,40 @@ public sealed partial class NativeSessionTests
             var artworkData = artworkReply.GetProperty("structuredContent");
             Assert.IsTrue(artworkData.GetProperty("authoritativeVector").GetBoolean());
             Assert.AreEqual(artworkId, artworkData.GetProperty("assetId").GetString());
-            Assert.AreEqual(svg, await File.ReadAllTextAsync(Path.Combine(board.Project.Path, "artwork/imagegen.svg"), token));
+            string artworkArchivePath = Path.Combine(board.Project.Path, "artwork/imagegen.svg");
+            Assert.AreEqual(svg, await File.ReadAllTextAsync(artworkArchivePath, token));
+            byte[] artworkArchiveBytes = await File.ReadAllBytesAsync(artworkArchivePath, token);
+            Assert.AreEqual(svgHash, Convert.ToHexStringLower(SHA256.HashData(artworkArchiveBytes)), artworkReply.GetRawText());
+            JsonElement artworkArchive = artworkData.GetProperty("archivePreflight");
+            Assert.IsTrue(artworkArchive.GetProperty("persisted").GetBoolean(), artworkReply.GetRawText());
+            Assert.IsTrue(artworkArchive.GetProperty("exactBytesVerified").GetBoolean(), artworkReply.GetRawText());
+            Assert.IsTrue(artworkArchive.GetProperty("atomicWrite").GetBoolean(), artworkReply.GetRawText());
+            Assert.IsFalse(artworkArchive.GetProperty("boardTransactionJoined").GetBoolean(), artworkReply.GetRawText());
+            Assert.AreEqual(svgHash, artworkArchive.GetProperty("sha256").GetString(), artworkReply.GetRawText());
+            Assert.AreEqual(artworkArchiveBytes.LongLength, artworkArchive.GetProperty("bytes").GetInt64(), artworkReply.GetRawText());
+            Assert.IsFalse(artworkData.GetProperty("provenanceAtomic").GetBoolean(), artworkReply.GetRawText());
             svgState = artworkData.GetProperty("nativeResult").GetProperty("afterState").GetString()!;
             var artworkReceipt = await mcp.Tool("kicad_pcb_svg_artwork_receipt", new
             { instanceId, expectedProcessEpoch = client.Epoch, operationId = artworkOperation });
             Assert.IsTrue(artworkReceipt.GetProperty("structuredContent").GetProperty("found").GetBoolean());
+            var conflictBefore = await ObserveLifecycleState(client, board, token);
+            const string conflictingSvg = "<svg viewBox=\"0 0 10 10\"><polyline points=\"1,1 5,1 5,6\"/></svg>";
+            string conflictingSvgHash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(conflictingSvg)));
+            var conflictingArtwork = await mcp.Tool("kicad_pcb_svg_artwork_commit", new
+            {
+                instanceId, documentJson = SchematicJson.Formatter.Format(board), expectedStateJson = svgState,
+                svg = conflictingSvg, sourceSha256 = conflictingSvgHash, sourceKind = "generated",
+                assetId = Guid.NewGuid().ToString("D"), repositoryRoot = board.Project.Path,
+                sourceArchivePath = "artwork/imagegen.svg", layer = "F.SilkS",
+                originXNm = "30000000", originYNm = "30000000", nanometersPerSvgUnit = "100000",
+                operationId = Guid.NewGuid().ToString("D"), strokeWidthNm = 100000
+            });
+            Assert.IsTrue(conflictingArtwork.GetProperty("isError").GetBoolean(), conflictingArtwork.GetRawText());
+            Assert.AreEqual("pcb_artwork_source_conflict",
+                conflictingArtwork.GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+                conflictingArtwork.GetRawText());
+            Assert.AreEqual(conflictBefore, await ObserveLifecycleState(client, board, token),
+                "A source archive conflict must be rejected before the board transaction changes lifecycle state.");
             var svgShapes = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
             { Header = new() { Document = board }, Types_ = { KiCadObjectType.KotPcbShape } }, token);
             Assert.IsTrue(svgShapes.Items.Any(item => item.Unpack<BoardGraphicShape>().CustomProperties.Any(p => p.Key == "kicad.ai.guide.source_format" && p.Value == "svg")));
@@ -3011,7 +3040,43 @@ public sealed partial class NativeSessionTests
                 var boardProjectionData = boardProjection.GetProperty("structuredContent");
                 Assert.IsTrue(boardProjectionData.GetProperty("accepted").GetBoolean(), boardProjection.GetRawText());
                 Assert.IsFalse(boardProjectionData.GetProperty("provenanceAtomic").GetBoolean(), boardProjection.GetRawText());
-                Assert.IsTrue(File.Exists(Path.Combine(cleanBoard.Project.Path, boardProjectionArchive)), boardProjection.GetRawText());
+                string boardProjectionArchivePath = Path.Combine(cleanBoard.Project.Path, boardProjectionArchive);
+                Assert.IsTrue(File.Exists(boardProjectionArchivePath), boardProjection.GetRawText());
+                byte[] boardProjectionArchiveBytes = await File.ReadAllBytesAsync(boardProjectionArchivePath, token);
+                Assert.AreEqual(rasterSha, Convert.ToHexStringLower(SHA256.HashData(boardProjectionArchiveBytes)), boardProjection.GetRawText());
+                JsonElement boardArchive = boardProjectionData.GetProperty("archivePreflight");
+                Assert.IsTrue(boardArchive.GetProperty("persisted").GetBoolean(), boardProjection.GetRawText());
+                Assert.IsTrue(boardArchive.GetProperty("exactBytesVerified").GetBoolean(), boardProjection.GetRawText());
+                Assert.IsTrue(boardArchive.GetProperty("atomicWrite").GetBoolean(), boardProjection.GetRawText());
+                Assert.IsFalse(boardArchive.GetProperty("boardTransactionJoined").GetBoolean(), boardProjection.GetRawText());
+                Assert.AreEqual(rasterSha, boardArchive.GetProperty("sha256").GetString(), boardProjection.GetRawText());
+                Assert.AreEqual(boardProjectionArchiveBytes.LongLength, boardArchive.GetProperty("bytes").GetInt64(), boardProjection.GetRawText());
+                DocumentLifecycleState projectionConflictBefore = await ObserveLifecycleState(client, cleanBoard, token);
+                await File.WriteAllTextAsync(boardProjectionArchivePath, "conflicting archive bytes", token);
+                var conflictingProjection = await mcp.Tool("kicad_artwork_raster_project", new
+                {
+                    instanceId,
+                    input = new
+                    {
+                        operationId = Guid.NewGuid().ToString("D"), targetKind = "BOARD", expectedProcessEpoch = client.Epoch,
+                        sourcePath = rasterSource, sourceKind = "generated", sourceOrigin = "deterministic-fixture",
+                        proposal = rasterTrace.GetProperty("structuredContent").GetProperty("trace"),
+                        board = new
+                        {
+                            document = projectionDocument,
+                            expectedState = JsonDocument.Parse(SchematicJson.Formatter.Format(projectionConflictBefore)).RootElement.Clone(),
+                            layer = "F.SilkS", originXNm = 30_000_000L, originYNm = 30_000_000L,
+                            repositoryRoot = cleanBoard.Project.Path, sourceArchivePath = boardProjectionArchive
+                        }
+                    }
+                });
+                Assert.IsTrue(conflictingProjection.GetProperty("isError").GetBoolean(), conflictingProjection.GetRawText());
+                Assert.AreEqual("raster_trace_source_conflict",
+                    conflictingProjection.GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+                    conflictingProjection.GetRawText());
+                Assert.AreEqual(projectionConflictBefore, await ObserveLifecycleState(client, cleanBoard, token),
+                    "A raster source archive conflict must be rejected before the board transaction changes lifecycle state.");
+                await File.WriteAllBytesAsync(boardProjectionArchivePath, rasterBytes, token);
                 string boardProjectionAfter = boardProjectionData.GetProperty("nativeResult").GetProperty("afterState").GetString()!;
                 string[] boardProjectionIds = boardProjectionData.GetProperty("createdIds").EnumerateArray().Select(item => item.GetString()!).ToArray();
                 var projectedShapes = await client.InvokeAsync<GetItems, GetItemsResponse>(new()

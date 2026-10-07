@@ -5,16 +5,16 @@ using KiCad.Automation.Model;
 namespace KiCad.Automation.Mcp;
 
 /// <summary>
-/// Persists a generated-artwork source before a board mutation and proves that
-/// the exact bytes can be read back.  The source archive is deliberately a
+/// Publishes a generated-artwork source before a board mutation and proves that
+/// the exact bytes can be read back. The source archive is deliberately a
 /// separate persistence boundary from KiCad's checked item transaction; the
-/// receipt therefore proves the archive preflight, not a joint board/archive
-/// commit.
+/// receipt therefore proves archive preflight, not a joint board/archive
+/// commit or power-loss durability of the parent directory entry.
 /// </summary>
 internal static class ArtworkSourceArchive
 {
     internal sealed record Receipt(string RelativePath, string Sha256, long Bytes,
-        bool Persisted, bool AtomicWrite);
+        bool Persisted, bool ExactBytesVerified, bool AtomicWrite);
 
     internal static Receipt Persist(string repositoryRoot, string relativePath, byte[] bytes,
         string expectedSha256, string invalidCode, string conflictCode)
@@ -52,7 +52,7 @@ internal static class ArtworkSourceArchive
                         "The source archive already contains different bytes.");
 
                 return new(relativePath.Replace('\\', '/'), actualSha256, existing.LongLength,
-                    Persisted: true, AtomicWrite: true);
+                    Persisted: true, ExactBytesVerified: true, AtomicWrite: false);
             }
 
             string temporary = Path.Combine(Path.GetDirectoryName(full)!,
@@ -69,7 +69,25 @@ internal static class ArtworkSourceArchive
                     stream.Flush(flushToDisk: true);
                 }
 
-                File.Move(temporary, full);
+                try
+                {
+                    File.Move(temporary, full);
+                }
+                catch (IOException) when (File.Exists(full))
+                {
+                    // Another writer may have published the same archive
+                    // between our existence check and rename. Reuse it only
+                    // after hashing its complete bytes; a different payload
+                    // remains a source conflict.
+                    byte[] existing = File.ReadAllBytes(full);
+                    if (!string.Equals(Convert.ToHexStringLower(SHA256.HashData(existing)), actualSha256,
+                            StringComparison.Ordinal))
+                        throw new AutomationException(conflictCode,
+                            "The source archive already contains different bytes.");
+
+                    return new(relativePath.Replace('\\', '/'), actualSha256, existing.LongLength,
+                        Persisted: true, ExactBytesVerified: true, AtomicWrite: false);
+                }
             }
             finally
             {
@@ -84,7 +102,7 @@ internal static class ArtworkSourceArchive
                     "The source archive could not be verified after its atomic write.");
 
             return new(relativePath.Replace('\\', '/'), actualSha256, observed.LongLength,
-                Persisted: true, AtomicWrite: true);
+                Persisted: true, ExactBytesVerified: true, AtomicWrite: true);
         }
         catch (AutomationException)
         {

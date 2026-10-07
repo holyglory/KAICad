@@ -28,7 +28,7 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
     private static readonly SemaphoreSlim BoardGate = new(1, 1);
 
     [McpServerTool(Name = "kicad_artwork_raster_project", ReadOnly = false),
-     Description("Project one accepted KiCad raster trace proposal into an existing symbol library, a cloned PCB footprint, a non-copper PCB board graphic, or a checked schematic drawing. Filled pieces remain filled polygons; signed contour topology stays in a bounded manifest. Existing pins, pads, fields and metadata are retained. Source kind/origin are caller declarations only. Board source archives are durably preflighted before the item transaction, while board geometry and archival remain separate persistence boundaries and provenanceAtomic stays false."),
+     Description("Project one accepted KiCad raster trace proposal into an existing symbol library, a cloned PCB footprint, a non-copper PCB board graphic, or a checked schematic drawing. Filled pieces remain filled polygons; signed contour topology stays in a bounded manifest. Existing pins, pads, fields and metadata are retained. Source kind/origin are caller declarations only. Board source archives are preflighted with an atomic publish and readback hash before the item transaction, while board geometry and archival remain separate persistence boundaries and provenanceAtomic stays false."),
      KiCadCapability("generated-artwork-cad", "typed-projection-adapters", "accepted raster proposal, exact source SHA, deterministic filled polygons, target lifecycle admission and provenance"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp", "NativeSessionTests.NativeSymbolLibraryReadbackUsesMcp")]
     public Task<CallToolResult> Project(string instanceId, RasterTraceProjectionInput input,
@@ -223,6 +223,7 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
                 archivePreflight = new
                 {
                     persisted = archive.Persisted, sha256 = archive.Sha256, bytes = archive.Bytes,
+                    exactBytesVerified = archive.ExactBytesVerified,
                     atomicWrite = archive.AtomicWrite, boardTransactionJoined = false
                 },
                 archivePersisted = archive.Persisted, archiveAtomicWrite = archive.AtomicWrite,
@@ -237,6 +238,7 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
                 archivePreflight = new
                 {
                     persisted = archive.Persisted, sha256 = archive.Sha256, bytes = archive.Bytes,
+                    exactBytesVerified = archive.ExactBytesVerified,
                     atomicWrite = archive.AtomicWrite, boardTransactionJoined = false
                 },
                 geometrySha256 = context.Proposal.GeometrySha256, sourceSha256 = context.SourceSha256,

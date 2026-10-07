@@ -23,7 +23,7 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
     private static readonly SemaphoreSlim Gate = new(1, 1);
 
     [McpServerTool(Name = "kicad_pcb_svg_artwork_commit"),
-     Description("Commit a validated strict SVG asset as authoritative non-copper PCB BoardGraphicShape geometry. The source bytes are durably preflighted under the explicit repository root, exact SHA-256 and sourceKind are recorded on every object, and the native mutation is lifecycle-checked and undoable. Board geometry and source archival remain separate persistence boundaries, so provenanceAtomic stays false. sourceKind may be imagegen, human or generated; this tool never creates Track, Arc or Via copper and does not claim electrical or manufacturing validity."),
+     Description("Commit a validated strict SVG asset as authoritative non-copper PCB BoardGraphicShape geometry. The source bytes are preflighted with an atomic publish and readback hash under the explicit repository root, exact SHA-256 and sourceKind are recorded on every object, and the native mutation is lifecycle-checked and undoable. Board geometry and source archival remain separate persistence boundaries, so provenanceAtomic stays false. sourceKind may be imagegen, human or generated; this tool never creates Track, Arc or Via copper and does not claim electrical or manufacturing validity."),
      KiCadCapability("pcb-artwork", "compiled-mcp plus native-board-api", "strict SVG, source archive and SHA-256 provenance, non-copper vector geometry, lifecycle checkpoint, operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp", "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Commit(string instanceId, string documentJson, string expectedStateJson,
@@ -174,6 +174,7 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
                 persisted = sourceArchive.Persisted,
                 sha256 = sourceArchive.Sha256,
                 bytes = sourceArchive.Bytes,
+                exactBytesVerified = sourceArchive.ExactBytesVerified,
                 atomicWrite = sourceArchive.AtomicWrite,
                 boardTransactionJoined = false
             },
@@ -196,8 +197,8 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
             replayableWithinProcess = outcome.NativeReceiptAvailable,
             transportRetrySafe = outcome.NativeReceiptAvailable,
             receiptScope = outcome.NativeReceiptAvailable ? "native-process" : "none",
-            // The archive is durably preflighted before the native item
-            // transaction. It remains a separate persistence boundary.
+            // The archive is published and readback-verified before the native
+            // item transaction. It remains a separate persistence boundary.
             archivePersisted = sourceArchive.Persisted,
             archiveAtomicWrite = sourceArchive.AtomicWrite,
             archiveNativeAtomic = false,

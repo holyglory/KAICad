@@ -50,6 +50,7 @@ public sealed class PcbArtworkContractTests
             ArtworkSourceArchive.Receipt first = ArtworkSourceArchive.Persist(root, "artwork/source.svg",
                 bytes, hash, "invalid_archive", "archive_conflict");
             Assert.IsTrue(first.Persisted);
+            Assert.IsTrue(first.ExactBytesVerified);
             Assert.IsTrue(first.AtomicWrite);
             Assert.AreEqual("artwork/source.svg", first.RelativePath);
             Assert.AreEqual(hash, first.Sha256);
@@ -58,7 +59,13 @@ public sealed class PcbArtworkContractTests
 
             ArtworkSourceArchive.Receipt replay = ArtworkSourceArchive.Persist(root, "artwork/source.svg",
                 bytes, hash, "invalid_archive", "archive_conflict");
-            Assert.AreEqual(first, replay);
+            Assert.IsTrue(replay.ExactBytesVerified);
+            Assert.IsFalse(replay.AtomicWrite, "An existing same-content archive is verified and reused; this call did not publish a new file.");
+            Assert.AreEqual(first.RelativePath, replay.RelativePath);
+            Assert.AreEqual(first.Sha256, replay.Sha256);
+            Assert.AreEqual(first.Bytes, replay.Bytes);
+            Assert.AreEqual(first.Persisted, replay.Persisted);
+            Assert.AreEqual(first.ExactBytesVerified, replay.ExactBytesVerified);
         }
         finally
         {
@@ -84,6 +91,29 @@ public sealed class PcbArtworkContractTests
             Reject(() => ArtworkSourceArchive.Persist(root, "../" + outsideName, expected,
                 expectedHash, "invalid_archive", "archive_conflict"), "invalid_archive");
             Assert.IsFalse(File.Exists(Path.Combine(Directory.GetParent(root)!.FullName, outsideName)));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [TestMethod]
+    public async Task SourceArchivePreflightSharesConcurrentSameContentPublish()
+    {
+        string root = Directory.CreateTempSubdirectory("pcb-artwork-archive-").FullName;
+        byte[] bytes = Encoding.UTF8.GetBytes("concurrent-artwork-source");
+        string hash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes));
+        try
+        {
+            ArtworkSourceArchive.Receipt[] receipts = await Task.WhenAll(
+                Enumerable.Range(0, 8).Select(_ => Task.Run(() => ArtworkSourceArchive.Persist(
+                    root, "artwork/concurrent.svg", bytes, hash, "invalid_archive", "archive_conflict"))));
+            Assert.IsTrue(receipts.All(receipt => receipt.Persisted && receipt.ExactBytesVerified));
+            Assert.IsTrue(receipts.Any(receipt => receipt.AtomicWrite), "One writer must publish the archive atomically.");
+            Assert.IsTrue(receipts.Any(receipt => !receipt.AtomicWrite),
+                "Racing callers must verify and reuse the same published bytes.");
+            CollectionAssert.AreEqual(bytes, File.ReadAllBytes(Path.Combine(root, "artwork", "concurrent.svg")));
         }
         finally
         {

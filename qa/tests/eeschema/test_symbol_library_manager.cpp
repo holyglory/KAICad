@@ -598,7 +598,7 @@ BOOST_AUTO_TEST_CASE( BufferedLibraryWriteRejectsStaleTarget )
         plugin->SaveLibrary( libPath );
     }
 
-    const wxFileOffset originalSize = wxFileName( libPath ).GetSize();
+    const auto originalSize = wxFileName( libPath ).GetSize();
     IO_RELEASER<SCH_IO> buffered( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
     std::map<std::string, UTF8> properties;
     properties.emplace( SCH_IO_KICAD_SEXPR::PropBuffering, "" );

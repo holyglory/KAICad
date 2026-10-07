@@ -501,21 +501,12 @@ public sealed class SchematicTypedMutationTools(InstanceRegistry registry)
             ExpectedObservation expected = ParseExpectedObservation(expectedStateJson, document);
             ValidateIdentity(itemId, "itemId");
             ValidateIdentity(operationId, "operationId");
+            ValidateCreateArguments(kind, endXNm, endYNm, text);
             ValidateCoordinate(xNm, nameof(xNm));
             ValidateCoordinate(yNm, nameof(yNm));
-            if (kind is SchematicConnectionItemKind.Wire or SchematicConnectionItemKind.Bus or SchematicConnectionItemKind.BusEntry)
-            {
-                if (endXNm is null || endYNm is null)
-                    throw new AutomationException("missing_connection_endpoint", "Wire, bus and bus-entry creation require endXNm and endYNm.");
-                ValidateCoordinate(endXNm.Value, nameof(endXNm));
-                ValidateCoordinate(endYNm.Value, nameof(endYNm));
-            }
-            if (kind is SchematicConnectionItemKind.LocalLabel or SchematicConnectionItemKind.GlobalLabel
-                or SchematicConnectionItemKind.HierarchicalLabel or SchematicConnectionItemKind.Text)
-                if (string.IsNullOrWhiteSpace(text) || text.Length > 4096)
-                    throw new AutomationException("invalid_connection_text", "Labels and text require 1..4096 characters.");
 
             IMessage item = BuildItem(kind, itemId, xNm, yNm, endXNm, endYNm, text);
+            EnsureCreateIdentityAvailable(expected.Electrical, itemId);
             var client = registry.Client(instanceId);
             var session = await client.HandshakeAsync(cancellationToken);
             ValidateExpectedState(document, expected, session.Epoch);
@@ -631,6 +622,70 @@ public sealed class SchematicTypedMutationTools(InstanceRegistry registry)
     }
 
     private static Text Caption(string text) => new() { Text_ = text };
+
+    private static void ValidateCreateArguments(SchematicConnectionItemKind kind,
+        long? endXNm, long? endYNm, string? text)
+    {
+        if (endXNm.HasValue != endYNm.HasValue)
+            throw new AutomationException("invalid_connection_patch",
+                "endXNm and endYNm must be supplied as a coordinate pair.");
+
+        switch (kind)
+        {
+            case SchematicConnectionItemKind.Wire:
+            case SchematicConnectionItemKind.Bus:
+            case SchematicConnectionItemKind.BusEntry:
+                if (endXNm is null)
+                    throw new AutomationException("missing_connection_endpoint",
+                        "Wire, bus and bus-entry creation require endXNm and endYNm.");
+                if (text is not null)
+                    throw new AutomationException("invalid_connection_patch",
+                        "Wires, buses and bus entries do not accept text.");
+                ValidateCoordinate(endXNm.Value, nameof(endXNm));
+                ValidateCoordinate(endYNm!.Value, nameof(endYNm));
+                break;
+            case SchematicConnectionItemKind.Junction:
+                if (endXNm is not null || text is not null)
+                    throw new AutomationException("invalid_connection_patch",
+                        "Junction creation accepts only xNm and yNm.");
+                break;
+            case SchematicConnectionItemKind.LocalLabel:
+            case SchematicConnectionItemKind.GlobalLabel:
+            case SchematicConnectionItemKind.HierarchicalLabel:
+            case SchematicConnectionItemKind.Text:
+                if (endXNm is not null)
+                    throw new AutomationException("invalid_connection_patch",
+                        "Labels and text do not accept endXNm/endYNm.");
+                if (string.IsNullOrWhiteSpace(text) || text.Length > 4096)
+                    throw new AutomationException("invalid_connection_text",
+                        "Labels and text require 1..4096 characters.");
+                break;
+            default:
+                throw new AutomationException("invalid_connection_kind",
+                    "Choose a supported schematic connection item kind.");
+        }
+    }
+
+    private static void EnsureCreateIdentityAvailable(SchematicElectricalState electrical, string itemId)
+    {
+        foreach (var screen in electrical.Hierarchy.Data.Instances)
+        foreach (var packed in screen.Items)
+        {
+            try
+            {
+                ConnectionItemSnapshot existing = RequireConnectionItem(packed);
+                if (ItemId(existing.Item) == itemId)
+                    throw new AutomationException("duplicate_connection_item",
+                        $"UUID {itemId} already exists in the checked schematic hierarchy.");
+            }
+            catch (AutomationException error) when (error.Code == "unsupported_connection_item")
+            {
+                // Other native objects remain outside this typed surface. They cannot be
+                // addressed here, but unsupported graphics must not make a valid typed create
+                // appear to be its target.
+            }
+        }
+    }
 
     private static Vector2 Endpoint(long? xNm, long? yNm)
     {

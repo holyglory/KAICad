@@ -194,15 +194,15 @@ public sealed class FootprintLibraryContractTests
                 (NativeFootprintDefinitionSource)2, document.LibId);
 
         Assert.IsTrue(coverage.Complete);
-        Assert.IsTrue(coverage.CanonicalWriterHashVerified);
-        Assert.IsTrue(coverage.ProviderIdentityHashVerified);
-        Assert.IsTrue(coverage.NestedGeometryVerified);
-        Assert.IsTrue(coverage.PadsVerified);
-        Assert.IsTrue(coverage.PropertiesVerified);
-        Assert.IsTrue(coverage.UnsupportedItemsExcluded);
-        Assert.AreEqual(2, coverage.ItemCount);
-        Assert.AreEqual(2, coverage.GeometryItemCount);
-        Assert.AreEqual(1, coverage.PadCount);
+        Assert.IsTrue(coverage.CanonicalWriterHashValid);
+        Assert.IsTrue(coverage.ProviderIdentityHashValid);
+        Assert.IsTrue(coverage.NestedItemsDecoded);
+        Assert.IsTrue(coverage.PadsDecoded);
+        Assert.IsTrue(coverage.PropertiesPresent);
+        Assert.IsTrue(coverage.ItemsKnownAndDecoded);
+        Assert.AreEqual(6, coverage.ItemCount);
+        Assert.AreEqual(6, coverage.GeometryItemCount);
+        Assert.AreEqual(2, coverage.PadCount);
         Assert.IsGreaterThan(0, coverage.PropertyCount);
         Assert.AreEqual("complete", coverage.Status);
 
@@ -211,6 +211,22 @@ public sealed class FootprintLibraryContractTests
         Assert.IsTrue(persisted.PersistedReadbackVerified);
         Assert.IsTrue(persisted.CanonicalHashMatched);
         Assert.IsTrue(persisted.Complete);
+    }
+
+    [TestMethod]
+    public void NativeNpthAndNonPadItemPayloadsRemainComplete()
+    {
+        const string epoch = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        DocumentSpecifier document = Document("NativeItems");
+        NativeCapabilityFootprintReadDefinitionResponse response = CompleteDefinition(document, epoch);
+
+        FootprintLibraryContract.FootprintDefinitionCoverage coverage =
+            FootprintLibraryContract.ValidateDefinitionResponse(response, document, epoch,
+                (NativeFootprintDefinitionSource)2, document.LibId);
+
+        Assert.IsTrue(coverage.Complete);
+        Assert.AreEqual(2, coverage.PadCount);
+        Assert.IsTrue(coverage.NestedItemsDecoded);
     }
 
     [TestMethod]
@@ -285,6 +301,31 @@ public sealed class FootprintLibraryContractTests
                     Size = new() { XNm = 1_000, YNm = 1_000 }
                 } }
             }
+        }));
+        definition.Items.Add(Any.Pack(new Pad
+        {
+            Id = new() { Value = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" },
+            Type = PadType.PtNpth,
+            Number = "",
+            PadStack = new()
+            {
+                Layers = { BoardLayer.BlFCu },
+                CopperLayers = { new PadStackLayer
+                {
+                    Layer = BoardLayer.BlFCu,
+                    Shape = PadStackShape.PssCircle,
+                    Size = new() { XNm = 1_000, YNm = 1_000 }
+                } }
+            }
+        }));
+        definition.Items.Add(Any.Pack(new Kiapi.Board.Types.Field { Text = new() }));
+        definition.Items.Add(Any.Pack(new ReferencePoint
+        {
+            Id = new() { Value = "cccccccc-cccc-cccc-cccc-cccccccccccc" }
+        }));
+        definition.Items.Add(Any.Pack(new Zone
+        {
+            Id = new() { Value = "dddddddd-dddd-dddd-dddd-dddddddddddd" }
         }));
         definition.Items.Add(Any.Pack(new Footprint3DModel { Filename = "probe.step" }));
         var response = new NativeCapabilityFootprintReadDefinitionResponse

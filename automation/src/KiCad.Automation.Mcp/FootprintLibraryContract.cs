@@ -24,18 +24,20 @@ internal static class FootprintLibraryContract
     /// Typed evidence for the detached definition envelope.  The native response's
     /// boolean is retained as <see cref="NativeDefinitionComplete"/>, but callers
     /// must use <see cref="Complete"/> before advertising complete content: it also
-    /// requires valid digests, a decodable nested item envelope and the mandatory
-    /// footprint properties.
+    /// requires valid digest syntax, a decodable nested item envelope and the
+    /// mandatory footprint properties.  Native writer/provider equality is checked
+    /// separately by the persistence verifier; these flags do not claim that a
+    /// digest is the digest for another response.
     /// </summary>
     internal sealed record FootprintDefinitionCoverage(
         bool NativeDefinitionComplete,
         bool Complete,
-        bool CanonicalWriterHashVerified,
-        bool ProviderIdentityHashVerified,
-        bool NestedGeometryVerified,
-        bool PadsVerified,
-        bool PropertiesVerified,
-        bool UnsupportedItemsExcluded,
+        bool CanonicalWriterHashValid,
+        bool ProviderIdentityHashValid,
+        bool NestedItemsDecoded,
+        bool PadsDecoded,
+        bool PropertiesPresent,
+        bool ItemsKnownAndDecoded,
         int ItemCount,
         int GeometryItemCount,
         int PadCount,
@@ -130,10 +132,13 @@ internal static class FootprintLibraryContract
                     Pad pad = item.Unpack<Pad>();
                     padCount++;
                     geometryCount++;
+                    // KiCad intentionally leaves NPTH pad numbers empty (for
+                    // example mounting holes).  Number is required only for pad
+                    // kinds that participate in electrical pin identity.
                     padsComplete &= pad.PadStack is not null
                         && pad.PadStack.Layers.Count > 0
                         && pad.PadStack.CopperLayers.Count > 0
-                        && !string.IsNullOrWhiteSpace(pad.Number);
+                        && (pad.Type == PadType.PtNpth || !string.IsNullOrWhiteSpace(pad.Number));
                     if (pad.Id is not null && !CanonicalUuid(pad.Id.Value))
                         padsComplete = false;
                     if (pad.Id is not null && !itemIds.Add(pad.Id.Value))
@@ -194,18 +199,55 @@ internal static class FootprintLibraryContract
                 }
                 else if (item.Is(Footprint3DModel.Descriptor))
                 {
-                    Footprint3DModel model = item.Unpack<Footprint3DModel>();
+                    _ = item.Unpack<Footprint3DModel>();
                     geometryCount++;
-                    nestedComplete &= !string.IsNullOrWhiteSpace(model.Filename);
+                }
+                else if (item.Is(Kiapi.Board.Types.Field.Descriptor))
+                {
+                    Kiapi.Board.Types.Field field = item.Unpack<Kiapi.Board.Types.Field>();
+                    geometryCount++;
+                    nestedComplete &= field.Text is not null;
+                }
+                else if (item.Is(ReferencePoint.Descriptor))
+                {
+                    ReferencePoint point = item.Unpack<ReferencePoint>();
+                    geometryCount++;
+                    nestedComplete &= point.Id is null || CanonicalUuid(point.Id.Value);
+                    if (point.Id is not null && !itemIds.Add(point.Id.Value))
+                        nestedComplete = false;
+                }
+                else if (item.Is(Zone.Descriptor))
+                {
+                    Zone zone = item.Unpack<Zone>();
+                    geometryCount++;
+                    nestedComplete &= zone.Id is null || CanonicalUuid(zone.Id.Value);
+                    if (zone.Id is not null && !itemIds.Add(zone.Id.Value))
+                        nestedComplete = false;
                 }
                 else if (item.Is(Table.Descriptor) || item.Is(Kiapi.Board.Types.Group.Descriptor)
                     || item.Is(Constraint.Descriptor))
                 {
                     // These are typed nested properties.  Unpack them to prove that
                     // their payload is decodable, even though they have no pad count.
-                    if (item.Is(Table.Descriptor)) _ = item.Unpack<Table>();
-                    else if (item.Is(Kiapi.Board.Types.Group.Descriptor)) _ = item.Unpack<Kiapi.Board.Types.Group>();
-                    else _ = item.Unpack<Constraint>();
+                    if (item.Is(Table.Descriptor))
+                    {
+                        _ = item.Unpack<Table>();
+                        geometryCount++;
+                    }
+                    else if (item.Is(Kiapi.Board.Types.Group.Descriptor))
+                    {
+                        Kiapi.Board.Types.Group group = item.Unpack<Kiapi.Board.Types.Group>();
+                        nestedComplete &= group.Id is null || CanonicalUuid(group.Id.Value);
+                        if (group.Id is not null && !itemIds.Add(group.Id.Value))
+                            nestedComplete = false;
+                    }
+                    else
+                    {
+                        Constraint constraint = item.Unpack<Constraint>();
+                        nestedComplete &= constraint.Id is null || CanonicalUuid(constraint.Id.Value);
+                        if (constraint.Id is not null && !itemIds.Add(constraint.Id.Value))
+                            nestedComplete = false;
+                    }
                 }
                 else
                 {

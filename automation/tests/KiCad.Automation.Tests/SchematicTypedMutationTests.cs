@@ -100,6 +100,33 @@ public sealed class SchematicTypedMutationTests
     }
 
     [TestMethod]
+    public async Task CreateRejectsDuplicateIdentityAndMalformedTypedArgumentsBeforeNativeDispatch()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        fixture.AddWire();
+        string expected = fixture.ExpectedJson;
+
+        AssertError(await fixture.Tools.CreateConnectionItem(fixture.InstanceId, fixture.DocumentJson,
+            expected, SchematicConnectionItemKind.Bus, Id, 1_000, 2_000,
+            Guid.NewGuid().ToString("D"), default, endXNm: 4_000, endYNm: 2_000),
+            "duplicate_connection_item");
+        AssertError(await fixture.Tools.CreateConnectionItem(fixture.InstanceId, fixture.DocumentJson,
+            expected, SchematicConnectionItemKind.LocalLabel, Guid.NewGuid().ToString("D"),
+            1_000, 2_000, Guid.NewGuid().ToString("D"), default,
+            endXNm: 4_000, endYNm: 2_000, text: "DATA"),
+            "invalid_connection_patch");
+        AssertError(await fixture.Tools.CreateConnectionItem(fixture.InstanceId, fixture.DocumentJson,
+            expected, SchematicConnectionItemKind.Wire, Guid.NewGuid().ToString("D"),
+            1_000, 2_000, Guid.NewGuid().ToString("D"), default,
+            endXNm: 4_000, endYNm: 2_000, text: "wire text"),
+            "invalid_connection_patch");
+
+        Assert.IsEmpty(fixture.Batches, "Malformed and duplicate creates must never reach the checked batch writer.");
+        Assert.AreEqual(0, fixture.Captures);
+        Assert.AreEqual(0, fixture.Inspections);
+    }
+
+    [TestMethod]
     public async Task LibraryCacheReplaceUsesCompleteCheckedHierarchyScreenTargetAndReceiptReplay()
     {
         using var fixture = await Fixture.CreateAsync();

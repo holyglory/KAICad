@@ -425,20 +425,27 @@ BOOST_AUTO_TEST_CASE( SaveSymbolCheckedVerifiesEntriesAndReportsWriteBoundaries 
     auto* direct = dynamic_cast<SCH_IO_KICAD_SEXPR*>( plugin.get() );
     BOOST_REQUIRE( direct );
 
+    std::string tableContents;
+    FILE_CONTENT_BASELINE tableBefore = FILE_CONTENT_BASELINE::Read( tableFile.Path(), &tableContents );
     std::string beforeContents;
     FILE_CONTENT_BASELINE before = FILE_CONTENT_BASELINE::Read( path, &beforeContents );
-    BOOST_REQUIRE( before.Known() );
+    BOOST_REQUIRE( tableBefore.Known() && before.Known() );
+    // The native checked lane admits the table row and the direct library bytes together.  Keep
+    // this order stable: the write path compares every observed dependency by its retained path,
+    // while the library file itself is the one intentional replacement.
+    const std::vector<FILE_CONTENT_BASELINE> completeBefore { tableBefore, before };
     LIB_SYMBOL created( wxS( "Created" ) );
     created.GetValueField().SetText( created.GetName() );
     created.GetReferenceField().SetText( wxS( "C" ) );
     SCH_KICAD_SEXPR_CHECKED_WRITE_RESULT createResult = direct->SaveSymbolChecked(
-            path, &created, false, { before }, beforeContents, created.GetName() );
+            path, &created, false, completeBefore, beforeContents, created.GetName() );
     BOOST_CHECK( createResult.writeStarted );
     BOOST_CHECK( createResult.committed );
     BOOST_CHECK( createResult.postverified );
     BOOST_CHECK( createResult.targetVerified );
     BOOST_CHECK( createResult.unrelatedEntriesVerified );
     BOOST_CHECK( createResult.beforeDefinition.empty() );
+    BOOST_CHECK( tableBefore.Check( tableFile.Path() ) == FILE_BASELINE_CHECK::UNCHANGED );
 
     IO_RELEASER<SCH_IO> createReadback( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
     LIB_SYMBOL* persistedCreated = createReadback->LoadSymbol( path, created.GetName() );
@@ -453,6 +460,8 @@ BOOST_AUTO_TEST_CASE( SaveSymbolCheckedVerifiesEntriesAndReportsWriteBoundaries 
     replacement.GetReferenceField().SetText( wxS( "R" ) );
     std::string refusalContents;
     FILE_CONTENT_BASELINE refusalBaseline = FILE_CONTENT_BASELINE::Read( path, &refusalContents );
+    FILE_CONTENT_BASELINE refusalTableBaseline = FILE_CONTENT_BASELINE::Read( tableFile.Path() );
+    const std::vector<FILE_CONTENT_BASELINE> completeRefusal { refusalTableBaseline, refusalBaseline };
     bool beforeCalled = false;
     SCH_KICAD_SEXPR_CHECKED_WRITE_RESULT refused;
     {
@@ -464,7 +473,7 @@ BOOST_AUTO_TEST_CASE( SaveSymbolCheckedVerifiesEntriesAndReportsWriteBoundaries 
                     THROW_IO_ERROR( "Controlled checked write refusal before replacement" );
                 },
                 [&]( const FILE_CONTENT_BASELINE& ) {} );
-        refused = direct->SaveSymbolChecked( path, &replacement, true, { refusalBaseline },
+        refused = direct->SaveSymbolChecked( path, &replacement, true, completeRefusal,
                                              refusalContents, replacement.GetName() );
     }
     BOOST_CHECK( beforeCalled );
@@ -482,6 +491,8 @@ BOOST_AUTO_TEST_CASE( SaveSymbolCheckedVerifiesEntriesAndReportsWriteBoundaries 
     // has no safe attribution for a second overwrite, and the persisted result remains observable.
     std::string afterContents;
     FILE_CONTENT_BASELINE afterBaseline = FILE_CONTENT_BASELINE::Read( path, &afterContents );
+    FILE_CONTENT_BASELINE afterTableBaseline = FILE_CONTENT_BASELINE::Read( tableFile.Path() );
+    const std::vector<FILE_CONTENT_BASELINE> completeAfter { afterTableBaseline, afterBaseline };
     bool afterCalled = false;
     SCH_KICAD_SEXPR_CHECKED_WRITE_RESULT afterFailure;
     {
@@ -496,7 +507,7 @@ BOOST_AUTO_TEST_CASE( SaveSymbolCheckedVerifiesEntriesAndReportsWriteBoundaries 
                         THROW_IO_ERROR( "Controlled checked write refusal after replacement" );
                     }
                 } );
-        afterFailure = direct->SaveSymbolChecked( path, &replacement, true, { afterBaseline },
+        afterFailure = direct->SaveSymbolChecked( path, &replacement, true, completeAfter,
                                                   afterContents, replacement.GetName() );
     }
     BOOST_CHECK( afterCalled );

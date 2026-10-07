@@ -60,8 +60,7 @@ internal static class SimulationJobContract
             throw new AutomationException("unsupported_simulation_document", "Simulation requires a schematic document.");
         if (!document.Equals(result.Document) || result.JobId != jobId || result.ProcessEpoch != processEpoch)
             throw Invalid("The native simulation dependency evidence does not match the requested schematic, process epoch or job.");
-        if (!Guid.TryParseExact(result.JobId, "D", out var job) || job == Guid.Empty
-            || !Guid.TryParseExact(result.OperationId, "D", out var operation) || operation == Guid.Empty)
+        if (!CanonicalUuid(result.JobId) || !CanonicalUuid(result.OperationId))
             throw Invalid("The native simulation dependency evidence lacks canonical job and operation identities.");
         if (expectedOperationId is not null && result.OperationId != expectedOperationId)
             throw Invalid("The native simulation dependency evidence changed operation identity.");
@@ -93,8 +92,7 @@ internal static class SimulationJobContract
             || result.JobId != jobId || string.IsNullOrWhiteSpace(result.OperationId)
             || (operationId is not null && result.OperationId != operationId))
             throw Invalid("The native simulation result does not match the requested schematic, process epoch, job or operation.");
-        if (!Guid.TryParseExact(result.JobId, "D", out var job) || job == Guid.Empty
-            || !Guid.TryParseExact(result.OperationId, "D", out var operation) || operation == Guid.Empty)
+        if (!CanonicalUuid(result.JobId) || !CanonicalUuid(result.OperationId))
             throw Invalid("The native simulation result lacks canonical job and operation identities.");
     }
 
@@ -124,6 +122,10 @@ internal static class SimulationJobContract
     }
 
     private static bool Sha256(string value) => value.Length == 64 && value.All(char.IsAsciiHexDigitLower);
+
+    private static bool CanonicalUuid(string value) =>
+        Guid.TryParseExact(value, "D", out Guid id) && id != Guid.Empty
+        && string.Equals(value, id.ToString("D"), StringComparison.Ordinal);
 
     private static AutomationException Invalid(string message) => new("invalid_simulation_result", message);
 }

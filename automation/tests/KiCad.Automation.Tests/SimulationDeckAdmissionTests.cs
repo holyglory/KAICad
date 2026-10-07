@@ -77,6 +77,10 @@ public sealed class SimulationDeckAdmissionTests
         var outOfRangeProgress = fixture.Result.Clone();
         outOfRangeProgress.Progress = 101;
         RejectResult(fixture.Request, outOfRangeProgress, fixture.ProcessEpoch);
+
+        var uppercaseJob = fixture.Result.Clone();
+        uppercaseJob.JobId = "a2222222-2222-4222-8222-222222222222".ToUpperInvariant();
+        RejectResult(fixture.Request, uppercaseJob, fixture.ProcessEpoch);
     }
 
     [TestMethod]
@@ -99,6 +103,14 @@ public sealed class SimulationDeckAdmissionTests
         var staleOperation = evidence.Clone();
         staleOperation.OperationId = "33333333-3333-3333-3333-333333333333";
         RejectDependencies(staleOperation, fixture, deckSha256);
+
+        var uppercaseIdentity = evidence.Clone();
+        uppercaseIdentity.JobId = "a2222222-2222-4222-8222-222222222222".ToUpperInvariant();
+        uppercaseIdentity.OperationId = "b2222222-2222-4222-8222-222222222222".ToUpperInvariant();
+        var uppercaseFailure = Assert.ThrowsExactly<AutomationException>(() =>
+            SimulationJobContract.ValidateDependencies(uppercaseIdentity, fixture.Document,
+                fixture.ProcessEpoch, uppercaseIdentity.JobId, uppercaseIdentity.OperationId, deckSha256));
+        Assert.AreEqual("invalid_simulation_result", uppercaseFailure.Code);
 
         var staleHash = evidence.Clone();
         staleHash.GeneratedDeckSha256 = new string('b', 64);

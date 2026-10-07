@@ -1381,13 +1381,13 @@ message NativeCapabilitySymbolLibraryCheckedState {
 }
 
 enum NativeCapabilitySymbolLibraryCheckedReceiptStatus {
-  SLCWS_UNKNOWN = 0;
-  SLCWS_REJECTED = 1;
-  SLCWS_COMMITTED_POSTVERIFIED = 2;
-  SLCWS_ROLLED_BACK_VERIFIED = 3;
-  SLCWS_INDETERMINATE = 4;
-  SLCWS_UNAVAILABLE = 5;
-  SLCWS_NOT_FOUND = 6;
+  NCP_SLCWS_UNKNOWN = 0;
+  NCP_SLCWS_REJECTED = 1;
+  NCP_SLCWS_COMMITTED_POSTVERIFIED = 2;
+  NCP_SLCWS_ROLLED_BACK_VERIFIED = 3;
+  NCP_SLCWS_INDETERMINATE = 4;
+  NCP_SLCWS_UNAVAILABLE = 5;
+  NCP_SLCWS_NOT_FOUND = 6;
 }
 
 message NativeCapabilitySymbolLibraryCheckedWriteResponse {

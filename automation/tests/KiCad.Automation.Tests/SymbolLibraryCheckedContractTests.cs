@@ -95,7 +95,7 @@ public sealed class SymbolLibraryCheckedContractTests
         NativeCapabilitySymbolLibraryCheckedWriteResponse response = Response(document, epoch, operation,
             status: "committed_postverified", committed: true, revisionTracked: true,
             completeLifecycle: false, before: expectedSnapshot, after: after.StateSha256);
-        response.ReceiptStatus = NativeCapabilitySymbolLibraryCheckedReceiptStatus.SlcwsCommittedPostverified;
+        response.ReceiptStatus = NativeCapabilitySymbolLibraryCheckedReceiptStatus.NcpSlcwsCommittedPostverified;
         response.Scope = "mcp_direct_symbol_file";
         response.RequestFingerprintSha256 = new string('c', 64);
         response.ExpectedRequestVerified = true;
@@ -122,7 +122,7 @@ public sealed class SymbolLibraryCheckedContractTests
         var response = Response(document, epoch, operation,
             status: "committed", committed: true, revisionTracked: true,
             completeLifecycle: true, before: expected, after: new string('b', 64));
-        response.ReceiptStatus = NativeCapabilitySymbolLibraryCheckedReceiptStatus.SlcwsCommittedPostverified;
+        response.ReceiptStatus = NativeCapabilitySymbolLibraryCheckedReceiptStatus.NcpSlcwsCommittedPostverified;
         response.Scope = "mcp_direct_symbol_file";
         response.RequestFingerprintSha256 = new string('c', 64);
         response.ExpectedRequestVerified = true;

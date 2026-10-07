@@ -3439,7 +3439,7 @@ API_HANDLER_SCH::handleCheckedWriteSymbolLibrarySymbol(
     // epoch have been verified.  Pre-admission errors intentionally use the historical terminal
     // envelope so managed callers can report the precise validation code instead of rejecting an
     // incomplete receipt of an invalid request.
-    response.set_receipt_status( SLCWS_UNKNOWN );
+    response.set_receipt_status( NCP_SLCWS_UNKNOWN );
     response.set_scope( "mcp_direct_symbol_file" );
     response.set_complete_change_tracking( false );
     response.mutable_request()->CopyFrom( request );
@@ -3452,7 +3452,7 @@ API_HANDLER_SCH::handleCheckedWriteSymbolLibrarySymbol(
         if( aUnavailable )
         {
             response.set_status( "unavailable" );
-            response.set_receipt_status( SLCWS_UNAVAILABLE );
+            response.set_receipt_status( NCP_SLCWS_UNAVAILABLE );
         }
         if( response.expected_request_verified() )
             m_checkedSymbolLibraryReceipts[request.operation_id()] = response;
@@ -3482,7 +3482,7 @@ API_HANDLER_SCH::handleCheckedWriteSymbolLibrarySymbol(
 
     response.set_request_fingerprint_sha256( SymbolLibrarySha256( SymbolLibraryDeterministicBytes( request ) ) );
     response.set_expected_request_verified( true );
-    response.set_receipt_status( SLCWS_REJECTED );
+    response.set_receipt_status( NCP_SLCWS_REJECTED );
     if( !request.has_expected_state() )
         return refuse( "library_mutation_unavailable", "A complete native direct-file checkpoint is required; the digest-only legacy seam cannot write a library.", true );
     if( !SymbolLibraryIsDigest( request.expected_snapshot_sha256() )
@@ -3545,7 +3545,7 @@ API_HANDLER_SCH::handleCheckedWriteSymbolLibrarySymbol(
             response.mutable_observed_after()->CopyFrom( state );
             response.set_after_snapshot_sha256( state.state_sha256() );
             response.set_status( "committed_postverified" );
-            response.set_receipt_status( SLCWS_COMMITTED_POSTVERIFIED );
+            response.set_receipt_status( NCP_SLCWS_COMMITTED_POSTVERIFIED );
             response.set_committed( true );
             response.set_revision_tracked( true );
             // This is the checked MCP direct-file lane only.  GUI/editor/import/rescue/remote
@@ -3560,12 +3560,12 @@ API_HANDLER_SCH::handleCheckedWriteSymbolLibrarySymbol(
             restored.entryExists = !write.rollbackDefinition.empty();
             response.mutable_observed_rollback()->CopyFrom( symbolLibraryCheckpoint( restored, true ) );
             response.set_status( "rolled_back_verified" );
-            response.set_receipt_status( SLCWS_ROLLED_BACK_VERIFIED );
+            response.set_receipt_status( NCP_SLCWS_ROLLED_BACK_VERIFIED );
         }
         else if( write.writeStarted )
         {
             response.set_status( "indeterminate" );
-            response.set_receipt_status( SLCWS_INDETERMINATE );
+            response.set_receipt_status( NCP_SLCWS_INDETERMINATE );
         }
 
         response.set_error_code( write.errorCode );
@@ -3578,7 +3578,7 @@ API_HANDLER_SCH::handleCheckedWriteSymbolLibrarySymbol(
         if( response.native_write_started() )
         {
             response.set_status( "indeterminate" );
-            response.set_receipt_status( SLCWS_INDETERMINATE );
+            response.set_receipt_status( NCP_SLCWS_INDETERMINATE );
         }
         return refuse( "symbol_library_write_failed", error.what() );
     }

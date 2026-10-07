@@ -70,7 +70,7 @@ internal static class SymbolLibraryCheckedContract
 
         // New native peers attach the typed receipt envelope.  Older peers leave the enum at
         // UNKNOWN and are still handled as the historical unavailable/read-only seam below.
-        if (response.ReceiptStatus != NativeCapabilitySymbolLibraryCheckedReceiptStatus.SlcwsUnknown)
+        if (response.ReceiptStatus != NativeCapabilitySymbolLibraryCheckedReceiptStatus.NcpSlcwsUnknown)
         {
             if (response.Scope != "mcp_direct_symbol_file" || !response.ExpectedRequestVerified
                 || response.CompleteChangeTracking || response.RequestFingerprintSha256.Length != 64
@@ -83,12 +83,12 @@ internal static class SymbolLibraryCheckedContract
 
         if (response.Committed)
         {
-            bool typedDirectReceipt = response.ReceiptStatus != NativeCapabilitySymbolLibraryCheckedReceiptStatus.SlcwsUnknown;
+            bool typedDirectReceipt = response.ReceiptStatus != NativeCapabilitySymbolLibraryCheckedReceiptStatus.NcpSlcwsUnknown;
             if (!response.RevisionTracked || (typedDirectReceipt ? response.CompleteLifecycle : !response.CompleteLifecycle)
                 || response.RollbackCompleted || hasCode)
                 throw Invalid("A committed checked symbol response requires complete lifecycle and revision evidence without an error.");
-            if (response.ReceiptStatus != NativeCapabilitySymbolLibraryCheckedReceiptStatus.SlcwsUnknown
-                && (response.ReceiptStatus != NativeCapabilitySymbolLibraryCheckedReceiptStatus.SlcwsCommittedPostverified
+            if (response.ReceiptStatus != NativeCapabilitySymbolLibraryCheckedReceiptStatus.NcpSlcwsUnknown
+                && (response.ReceiptStatus != NativeCapabilitySymbolLibraryCheckedReceiptStatus.NcpSlcwsCommittedPostverified
                     || response.CompleteLifecycle || !response.NativeWriteStarted || !response.Postverified
                     || !response.TargetVerified || !response.UnrelatedEntriesVerified || response.RollbackAttempted
                     || response.ObservedBefore is null || response.ObservedAfter is null
@@ -115,8 +115,8 @@ internal static class SymbolLibraryCheckedContract
         {
             if (!response.RollbackCompleted)
                 throw Invalid("A rolled-back checked symbol response must prove rollback completion.");
-            if (response.ReceiptStatus != NativeCapabilitySymbolLibraryCheckedReceiptStatus.SlcwsUnknown
-                && (response.ReceiptStatus != NativeCapabilitySymbolLibraryCheckedReceiptStatus.SlcwsRolledBackVerified
+            if (response.ReceiptStatus != NativeCapabilitySymbolLibraryCheckedReceiptStatus.NcpSlcwsUnknown
+                && (response.ReceiptStatus != NativeCapabilitySymbolLibraryCheckedReceiptStatus.NcpSlcwsRolledBackVerified
                     || !response.NativeWriteStarted || !response.RollbackAttempted
                     || response.ObservedRollback is null
                     || !ValidateState(response.ObservedRollback, expectedRequest.ExpectedState)

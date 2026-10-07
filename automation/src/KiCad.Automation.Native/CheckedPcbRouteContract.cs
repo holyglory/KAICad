@@ -377,6 +377,12 @@ public static class CheckedPcbRouteContract
                     || (!removedIds.Contains(source.SourceItemId.Value) && !updateIds.Contains(source.SourceItemId.Value)))
                     throw Invalid("Every grouped route child must identify one requested source and ordinary source group.");
             }
+
+            var beforeSet = beforeMembers.ToHashSet(StringComparer.Ordinal);
+            var afterSet = afterMembers.ToHashSet(StringComparer.Ordinal);
+            if (afterSet.Except(beforeSet).Any(id => !createdIds.Contains(id))
+                || beforeSet.Except(afterSet).Any(id => !removedIds.Contains(id) && !updateIds.Contains(id)))
+                throw Invalid("Grouped route membership changes must correspond to requested creates, updates or removals.");
         }
     }
 

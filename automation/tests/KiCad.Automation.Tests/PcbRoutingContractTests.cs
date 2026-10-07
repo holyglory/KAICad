@@ -405,6 +405,51 @@ public sealed class PcbRoutingContractTests
     }
 
     [TestMethod]
+    public void CheckedRouteGroupMembershipChangesRequireExplicitItemOperations()
+    {
+        var (request, track, state) = CleanRoute();
+        var group = new Group
+        {
+            Id = new() { Value = Guid.NewGuid().ToString("D") }, Name = "route-group",
+            Items = { track.Id.Clone() }
+        };
+
+        var addedWithoutSource = request.Clone();
+        var addedGroup = group.Clone();
+        addedGroup.Items.Add(new KIID { Value = Guid.NewGuid().ToString("D") });
+        addedWithoutSource.GroupChanges.Add(new NativeRouteGroupChange
+        {
+            ExpectedBefore = new NativeRouteGroupState
+            {
+                Group = group.Clone(), Kind = NativeRouteGroupKind.NrgkOrdinary
+            },
+            ExpectedAfter = new NativeRouteGroupState
+            {
+                Group = addedGroup, Kind = NativeRouteGroupKind.NrgkOrdinary
+            }
+        });
+        Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedPcbRouteContract.ValidateRequest(addedWithoutSource, state.ProcessEpoch));
+
+        var removedWithoutRequest = request.Clone();
+        var removedGroup = group.Clone();
+        removedGroup.Items.Clear();
+        removedWithoutRequest.GroupChanges.Add(new NativeRouteGroupChange
+        {
+            ExpectedBefore = new NativeRouteGroupState
+            {
+                Group = group.Clone(), Kind = NativeRouteGroupKind.NrgkOrdinary
+            },
+            ExpectedAfter = new NativeRouteGroupState
+            {
+                Group = removedGroup, Kind = NativeRouteGroupKind.NrgkOrdinary
+            }
+        });
+        Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedPcbRouteContract.ValidateRequest(removedWithoutRequest, state.ProcessEpoch));
+    }
+
+    [TestMethod]
     public void RoutePreviewContractAcceptsOrdinaryGroupDeltaAndRejectsLegacyVersion()
     {
         var (request, source, state) = CleanRoute();

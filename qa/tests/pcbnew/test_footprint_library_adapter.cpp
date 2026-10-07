@@ -202,7 +202,7 @@ BOOST_AUTO_TEST_CASE( SaveFootprintRejectsMalformedRegularTarget )
 }
 
 
-BOOST_AUTO_TEST_CASE( DeleteFootprintRejectsMalformedRegularTarget )
+BOOST_AUTO_TEST_CASE( FreshProviderDeleteRejectsMalformedRegularTarget )
 {
     KI_TEST::TEMPORARY_DIRECTORY tmpLib( "kicad_qa_adapter_stale_delete", ".pretty" );
     PCB_IO_KICAD_SEXPR          writer;
@@ -223,7 +223,10 @@ BOOST_AUTO_TEST_CASE( DeleteFootprintRejectsMalformedRegularTarget )
     external.put( first == '(' ? '[' : '(' );
     external.close();
 
-    BOOST_CHECK_THROW( writer.FootprintDelete( libPath, wxS( "stale_target" ) ), IO_ERROR );
+    // A fresh provider must parse the current file.  The writer's already-loaded cache
+    // intentionally stays stable during admission, so it cannot prove a read failure here.
+    PCB_IO_KICAD_SEXPR reader;
+    BOOST_CHECK_THROW( reader.FootprintDelete( libPath, wxS( "stale_target" ) ), IO_ERROR );
     BOOST_CHECK( std::filesystem::exists( target ) );
 }
 
@@ -252,7 +255,10 @@ BOOST_AUTO_TEST_CASE( AdapterDeleteFootprintPropagatesProviderReadFailure )
     external.put( first == '(' ? '[' : '(' );
     external.close();
 
-    BOOST_CHECK_THROW( adapter.DeleteFootprint( nickname, wxS( "delete_target" ) ), IO_ERROR );
+    // Use a fresh adapter/provider so deleting this entry first reads the malformed file.
+    TEST_FOOTPRINT_LIBRARY_ADAPTER reader( manager );
+    reader.SeedLoadedLibrary( nickname, tmpLib.GetPath().string() );
+    BOOST_CHECK_THROW( reader.DeleteFootprint( nickname, wxS( "delete_target" ) ), IO_ERROR );
     BOOST_CHECK( std::filesystem::exists( target ) );
 }
 

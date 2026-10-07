@@ -232,6 +232,21 @@ public sealed class PcbRenderContractTests
             metadata, RenderRequest(), stateHash, inputHash);
 
         Assert.IsTrue(validation.IsValid, string.Join("; ", validation.Failures));
+
+        // The native producer copies the model transform and scene bounds
+        // into its corresponding object row. Individually valid rows cannot
+        // locate the same model differently while claiming verified geometry.
+        var movedObject = metadata.Clone();
+        movedObject.Objects[0].SceneTransformColumnMajor[12] = 5;
+        var movedBounds = metadata.Clone();
+        movedBounds.Objects[0].NativeGeometryBounds[3] = 2;
+        foreach (PcbRenderMetadata inconsistent in new[] { movedObject, movedBounds })
+        {
+            PcbRenderMetadataValidation mismatch = PcbRenderMetadataContract.Validate(
+                inconsistent, RenderRequest(), stateHash, inputHash);
+            Assert.IsFalse(mismatch.IsValid, "Contradictory model/object geometry was accepted.");
+            StringAssert.Contains(string.Join("; ", mismatch.Failures), "declared model geometry");
+        }
     }
 
     private static RunBoardJobExportRender RenderRequest() => new()

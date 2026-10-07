@@ -222,11 +222,11 @@ internal static class PcbRenderMetadataContract
             || !string.Equals(metadata.EffectiveRenderInputSha256, requestSha256, StringComparison.OrdinalIgnoreCase))
             failures.Add("camera metadata is not bound to the effective render input");
 
-        var modelKeys = new HashSet<string>(StringComparer.Ordinal);
+        var modelsByKey = new Dictionary<string, PcbRenderModelMetadata>(StringComparer.Ordinal);
         foreach (PcbRenderModelMetadata model in metadata.Models)
         {
             string key = GeometryKey(model.NativeUuid, model.ModelIndex);
-            if (!CanonicalUuid(model.NativeUuid) || !modelKeys.Add(key))
+            if (!CanonicalUuid(model.NativeUuid) || !modelsByKey.TryAdd(key, model))
                 failures.Add("model metadata must identify each native model exactly once");
             if (string.IsNullOrWhiteSpace(model.RequestedIdentity) || string.IsNullOrWhiteSpace(model.ResolvedIdentity))
                 failures.Add("model metadata must include requested and resolved asset identities");
@@ -242,17 +242,23 @@ internal static class PcbRenderMetadataContract
         foreach (PcbRenderObjectMetadata item in metadata.Objects)
         {
             string key = GeometryKey(item.NativeUuid, item.ModelIndex);
-            if (!CanonicalUuid(item.NativeUuid) || !objectKeys.Add(key) || !modelKeys.Contains(key))
+            if (!CanonicalUuid(item.NativeUuid) || !objectKeys.Add(key) || !modelsByKey.ContainsKey(key))
                 failures.Add("object metadata must map one-to-one to a declared native model");
             ValidateTransform(item.SceneTransformColumnMajor, "object", failures);
             ValidateBounds(item.NativeGeometryBounds, item.NativeGeometryBoundsAvailable, 6, "object native geometry", failures);
+            // The native producer copies these scene-space fields from the
+            // model row. A matching identity cannot describe two locations.
+            if (modelsByKey.TryGetValue(key, out PcbRenderModelMetadata? model)
+                && (!item.SceneTransformColumnMajor.SequenceEqual(model.SceneTransformColumnMajor)
+                    || !item.NativeGeometryBounds.SequenceEqual(model.NativeGeometryBounds)))
+                failures.Add("object metadata must preserve its declared model geometry");
             if (item.ProjectedBoundsAvailable)
                 ValidateBounds(item.ProjectedConservativeBounds, true, 4, "object projected geometry", failures);
             if (item.ExactVisiblePixels || item.OcclusionTested)
                 failures.Add("object metadata cannot claim exact pixels or occlusion testing");
         }
 
-        if (objectKeys.Count != modelKeys.Count)
+        if (objectKeys.Count != modelsByKey.Count)
             failures.Add("every declared native model must have one corresponding object geometry row");
 
         return new(failures.Count == 0, failures);

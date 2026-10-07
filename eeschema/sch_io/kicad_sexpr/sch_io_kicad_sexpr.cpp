@@ -2039,11 +2039,15 @@ bool RestoreCheckedLibrary( const wxString& aPath, const std::string& aContents 
     // when opening, writing or committing the replacement fails.
     try
     {
+        // Recovery must not redispatch the observer that intentionally mutated or failed the
+        // original write.  Keep the replacement atomic and preserve the caller's symlink while
+        // isolating this compensating write from the original transaction callback.
+        FILE_WRITE_OBSERVER suppressRecoveryObserver(
+                []( const wxString& ) {},
+                []( const FILE_CONTENT_BASELINE& ) {} );
         FILE_OUTPUTFORMATTER output( aPath, wxS( "wb" ) );
         output.Print( "%s", aContents.c_str() );
-        FILE_WRITE_OBSERVER::BeforeWrite( aPath );
         output.Finish();
-        FILE_WRITE_OBSERVER::AfterWrite( FILE_CONTENT_BASELINE::Read( aPath ) );
         return true;
     }
     catch( const std::exception& )

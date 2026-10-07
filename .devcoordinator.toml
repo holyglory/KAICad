@@ -3419,7 +3419,7 @@ env={TMPDIR="/tmp"}
 name="managed-build"
 tier="development"
 role="preflight"
-invalidates=["pcb","footprint"]
+invalidates=["pcb","footprint","schematic-export"]
 command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--configuration","Debug"]
 [[test.fixture-retry.check]]
 name="pcb"
@@ -3447,8 +3447,8 @@ retained_artifacts=[{name="fp-tests",path="automation/artifacts/fixture-retry/fo
 name="schematic-export"
 tier="development"
 requires=["managed-build"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeSchematicExport"]
-retained_artifacts=[{name="sx-tests",path="automation/artifacts/fixture-retry/schematic-export",max_bytes=16777216},{name="sx-evidence",path="automation/artifacts/native-schematic-export/native-session-current",max_bytes=67108864}]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeSchematicExport","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/fixture-retry/schematic-export","--","MSTest.MapInconclusiveToFailed=true"]
+retained_artifacts=[{name="schematic-export-tests",path="automation/artifacts/fixture-retry/schematic-export",max_bytes=16777216},{name="schematic-export-evidence",path="automation/artifacts/native-schematic-export/native-session-current",max_bytes=67108864}]
 
 [test.pcb-simulation-checkpoint]
 timeout_seconds=1800

@@ -107,6 +107,7 @@ internal static class SchematicErcExecutionContract
         {
             case NativeErcOperationState.NeosAdmitted:
                 if (legacy.Completed || receipt.ExecutionStarted || receipt.MarkersCaptured
+                    || receipt.AfterState is not null || legacy.ObservedRevision is not null
                     || !string.IsNullOrWhiteSpace(legacy.ErrorCode)
                     || !string.IsNullOrWhiteSpace(legacy.ErrorMessage))
                     throw Invalid("An admitted schematic ERC receipt cannot claim execution or a terminal error.");
@@ -122,6 +123,7 @@ internal static class SchematicErcExecutionContract
 
             case NativeErcOperationState.NeosFailed:
                 if (legacy.Completed || receipt.ExecutionStarted || receipt.MarkersCaptured
+                    || receipt.AfterState is not null || legacy.ObservedRevision is not null
                     || string.IsNullOrWhiteSpace(legacy.ErrorCode)
                     || string.IsNullOrWhiteSpace(legacy.ErrorMessage))
                     throw Invalid("A failed schematic ERC receipt must retain its pre-execution error.");

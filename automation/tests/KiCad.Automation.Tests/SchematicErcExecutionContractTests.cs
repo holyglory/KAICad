@@ -81,6 +81,7 @@ public sealed class SchematicErcExecutionContractTests
         failed.MarkersCaptured = false;
         failed.CapturedMarkers = null;
         failed.AfterState = null;
+        failed.LegacyResult.ObservedRevision = null;
         failed.LegacyResult.Completed = false;
         failed.LegacyResult.ErrorCode = "erc_library_unavailable";
         failed.LegacyResult.ErrorMessage = "fixture failure";
@@ -102,6 +103,30 @@ public sealed class SchematicErcExecutionContractTests
         var indeterminateError = Assert.ThrowsExactly<AutomationException>(() =>
             SchematicErcExecutionContract.RequireSuccessful(indeterminate));
         Assert.AreEqual("erc_execution_indeterminate", indeterminateError.Code);
+    }
+
+    [TestMethod]
+    public void PreExecutionAdmittedOrFailedReceiptCannotClaimAnAfterState()
+    {
+        var fixture = Fixture();
+
+        var admitted = fixture.Receipt.Clone();
+        admitted.State = NativeErcOperationState.NeosAdmitted;
+        admitted.ExecutionStarted = false;
+        admitted.MarkersCaptured = false;
+        admitted.CapturedMarkers = null;
+        admitted.AfterState = fixture.State.Clone();
+        admitted.LegacyResult.ObservedRevision = fixture.State.Revision.Clone();
+        admitted.LegacyResult.Completed = false;
+        admitted.LegacyResult.ErrorCode = "";
+        admitted.LegacyResult.ErrorMessage = "";
+        RejectReceipt(fixture.Request, admitted, "admitted after-state");
+
+        var failed = admitted.Clone();
+        failed.State = NativeErcOperationState.NeosFailed;
+        failed.LegacyResult.ErrorCode = "erc_library_unavailable";
+        failed.LegacyResult.ErrorMessage = "fixture failure";
+        RejectReceipt(fixture.Request, failed, "failed after-state");
     }
 
     [TestMethod]

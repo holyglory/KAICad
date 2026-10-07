@@ -435,7 +435,16 @@ void SCH_IO_KICAD_SEXPR::SaveSchematicFile( const wxString& aFileName, SCH_SHEET
         aSheet->GetScreen()->SetFileExists( true );
         // Autosave/export copies must not replace the loaded document's baseline.
         if( FILE_CONTENT_BASELINE::SamePath( aFileName, aSheet->GetScreen()->GetFileName() ) )
+        {
             aSheet->GetScreen()->SetFileBaseline( formatter.CommittedBaseline() );
+
+            // The file now contains this writer's format.  Keep the in-memory
+            // provenance aligned with the persisted document so a checked
+            // save followed by reload observes the same complete hierarchy.
+            // Copies and exports deliberately retain the loaded document's
+            // original format provenance.
+            aSheet->GetScreen()->SetFileFormatVersionAtLoad( SEXPR_SCHEMATIC_FILE_VERSION );
+        }
     }
 }
 

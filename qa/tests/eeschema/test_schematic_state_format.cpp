@@ -4,6 +4,7 @@
 #include <sch_sheet.h>
 #include <sch_screen.h>
 #include <sch_io/kicad_sexpr/sch_io_kicad_sexpr.h>
+#include <sch_file_versions.h>
 #include <embedded_files.h>
 #include <richio.h>
 #include <api/native_state_digest.h>
@@ -39,6 +40,8 @@ BOOST_AUTO_TEST_CASE( NativeSaveLoadAndExportKeepTheCorrectFileBaseline )
     schematic.RootScreen()->SetFileName( file );
     SCH_IO_KICAD_SEXPR io;
     io.SaveSchematicFile( file, schematic.GetTopLevelSheet(), &schematic );
+    BOOST_CHECK_EQUAL( schematic.RootScreen()->GetFileFormatVersionAtLoad(),
+                       SEXPR_SCHEMATIC_FILE_VERSION );
     const auto baseline = schematic.RootScreen()->FileBaseline();
     BOOST_CHECK( baseline.Check( file ) == FILE_BASELINE_CHECK::UNCHANGED );
     TEST_PROJECT reloadProject;

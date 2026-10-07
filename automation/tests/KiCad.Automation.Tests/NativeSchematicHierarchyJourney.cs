@@ -263,6 +263,7 @@ public sealed partial class NativeSessionTests
         RequireToolSuccess(labelCreateReplay);
         Assert.IsTrue(labelCreateReplay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean(),
             labelCreateReplay.GetRawText());
+        AssertTargetDocument(labelCreateReplay, childDocument);
         JsonElement labelRead = await mcp.Tool("kicad_schematic_read_hierarchical_label", new
         {
             instanceId, documentJson, labelId,
@@ -271,6 +272,7 @@ public sealed partial class NativeSessionTests
         });
         RequireToolSuccess(labelRead);
         Assert.AreEqual(labelId, Unpack<HierarchicalLabel>(labelRead, "item").Id.Value);
+        AssertTargetDocument(labelRead, childDocument);
         var updatedLabel = label.Clone(); updatedLabel.Text.Text_ = "MCP_HIER_UPDATED";
         string labelUpdateOperation = Guid.NewGuid().ToString("D");
         JsonElement labelUpdated = await mcp.Tool("kicad_schematic_update_hierarchical_label", new
@@ -281,6 +283,7 @@ public sealed partial class NativeSessionTests
             targetDocumentJson = childJson
         });
         RequireToolSuccess(labelUpdated);
+        AssertTargetDocument(labelUpdated, childDocument);
         CheckedSchematicState afterLabelUpdate = await Capture();
         Assert.AreEqual("MCP_HIER_UPDATED", Label(afterLabelUpdate, childDocument, labelId).Text.Text_);
         JsonElement labelUpdateReplay = await mcp.Tool("kicad_schematic_update_hierarchical_label", new
@@ -293,6 +296,7 @@ public sealed partial class NativeSessionTests
         RequireToolSuccess(labelUpdateReplay);
         Assert.IsTrue(labelUpdateReplay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean(),
             labelUpdateReplay.GetRawText());
+        AssertTargetDocument(labelUpdateReplay, childDocument);
 
         // Persistence is observed at the native boundary before exercising
         // undo/redo. A stale checkpoint from before the update must be refused.
@@ -317,6 +321,7 @@ public sealed partial class NativeSessionTests
             targetDocumentJson = childJson
         });
         RequireToolSuccess(labelDeleted);
+        AssertTargetDocument(labelDeleted, childDocument);
         CheckedSchematicState afterLabelDelete = await Capture();
         Assert.ThrowsExactly<InvalidOperationException>(() => Label(afterLabelDelete, childDocument, labelId));
         JsonElement labelDeleteReplay = await mcp.Tool("kicad_schematic_delete_hierarchical_label", new
@@ -328,6 +333,7 @@ public sealed partial class NativeSessionTests
         RequireToolSuccess(labelDeleteReplay);
         Assert.IsTrue(labelDeleteReplay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean(),
             labelDeleteReplay.GetRawText());
+        AssertTargetDocument(labelDeleteReplay, childDocument);
 
         NativeKeyboard.SchematicShortcut(display, processId, "z");
         CheckedSchematicState undoLabel = await WaitForRevision(Capture,
@@ -387,4 +393,10 @@ public sealed partial class NativeSessionTests
 
     private static DocumentSpecifier ParseDocument(JsonElement json) =>
         SchematicJson.Parser.Parse<DocumentSpecifier>(json.GetRawText());
+
+    private static void AssertTargetDocument(JsonElement result, DocumentSpecifier expected)
+    {
+        Assert.AreEqual(expected, ParseDocument(result.GetProperty("structuredContent")
+            .GetProperty("targetDocument")), result.GetRawText());
+    }
 }

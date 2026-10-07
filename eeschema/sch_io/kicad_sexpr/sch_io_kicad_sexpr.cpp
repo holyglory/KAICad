@@ -2074,10 +2074,10 @@ void SCH_IO_KICAD_SEXPR::SaveSymbol( const wxString& aLibraryPath, const LIB_SYM
                                      const std::map<std::string, UTF8>* aProperties )
 {
     const bool buffered = isBuffering( aProperties );
-    acquireWriteAdmission( aLibraryPath, buffered );
 
     try
     {
+        acquireWriteAdmission( aLibraryPath, buffered );
         cacheLib( aLibraryPath, aProperties );
         if( m_writeAdmission )
             m_writeAdmission->CheckUnchanged();
@@ -2105,10 +2105,10 @@ void SCH_IO_KICAD_SEXPR::DeleteSymbol( const wxString& aLibraryPath, const wxStr
                                        const std::map<std::string, UTF8>* aProperties )
 {
     const bool buffered = isBuffering( aProperties );
-    acquireWriteAdmission( aLibraryPath, buffered );
 
     try
     {
+        acquireWriteAdmission( aLibraryPath, buffered );
         cacheLib( aLibraryPath, aProperties );
         if( m_writeAdmission )
             m_writeAdmission->CheckUnchanged();
@@ -2236,10 +2236,9 @@ bool SCH_IO_KICAD_SEXPR::DeleteLibrary( const wxString& aLibraryPath,
 
 void SCH_IO_KICAD_SEXPR::SaveLibrary( const wxString& aLibraryPath, const std::map<std::string, UTF8>* aProperties )
 {
-    acquireWriteAdmission( aLibraryPath, true );
-
     try
     {
+        acquireWriteAdmission( aLibraryPath, true );
         if( !m_cache )
             m_cache = new SCH_IO_KICAD_SEXPR_LIB_CACHE( aLibraryPath );
 

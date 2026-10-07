@@ -614,9 +614,15 @@ BOOST_AUTO_TEST_CASE( BufferedLibraryWriteRejectsStaleTarget )
     BOOST_CHECK_THROW( buffered->SaveLibrary( libPath ), IO_ERROR );
     BOOST_CHECK( wxFileName( libPath ).GetSize() > originalSize );
 
+    // A stale buffered scope must be abandoned on the throwing path so another
+    // provider can acquire the same target immediately.
+    IO_RELEASER<SCH_IO> recovery( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
+    BOOST_CHECK_NO_THROW( recovery->SaveSymbol( libPath, new LIB_SYMBOL( wxS( "Recovered" ) ) ) );
+
     IO_RELEASER<SCH_IO> verify( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
     BOOST_REQUIRE( verify->LoadSymbol( libPath, wxS( "Original" ) ) != nullptr );
     BOOST_CHECK( verify->LoadSymbol( libPath, wxS( "Buffered" ) ) == nullptr );
+    BOOST_CHECK( verify->LoadSymbol( libPath, wxS( "Recovered" ) ) != nullptr );
 
     wxFileName::Rmdir( tempDir, wxPATH_RMDIR_RECURSIVE );
 }

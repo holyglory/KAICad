@@ -819,7 +819,7 @@ public sealed class McpProcessTests
             foreach (string symbolLibraryTool in new[]
             {
                 "kicad_symbol_library_validate", "kicad_symbol_library_clone", "kicad_symbol_svg_plan", "kicad_symbol_library_list", "kicad_symbol_library_read", "kicad_symbol_library_receipt",
-                "kicad_symbol_library_write", "kicad_symbol_library_delete", "kicad_library_snapshot_read"
+                "kicad_symbol_library_write", "kicad_symbol_library_write_checked", "kicad_symbol_library_delete", "kicad_library_snapshot_read"
             })
                 CollectionAssert.Contains(names, symbolLibraryTool);
             var invalidSymbolDefinition = await Request(9093, "tools/call", new { name = "kicad_symbol_library_validate",
@@ -850,6 +850,19 @@ public sealed class McpProcessTests
                     targetLibraryNickname = "Fixture", targetSymbolName = "Clone", operationId = Guid.NewGuid().ToString("D") } });
             Assert.IsTrue(invalidSymbolClone.GetProperty("result").GetProperty("isError").GetBoolean());
             Assert.AreEqual("invalid_symbol_definition", invalidSymbolClone.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            var invalidCheckedSymbolWrite = await Request(9499, "tools/call", new
+            {
+                name = "kicad_symbol_library_write_checked",
+                arguments = new
+                {
+                    instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = Guid.NewGuid().ToString("D"),
+                    documentJson = "{}", definitionJson = "{}", operationId = Guid.NewGuid().ToString("D"),
+                    expectedSnapshotSha256 = new string('a', 64)
+                }
+            });
+            Assert.IsTrue(invalidCheckedSymbolWrite.GetProperty("result").GetProperty("isError").GetBoolean());
+            Assert.AreEqual("invalid_library_document", invalidCheckedSymbolWrite.GetProperty("result")
+                .GetProperty("structuredContent").GetProperty("errorCode").GetString());
             var invalidLibrarySnapshot = await Request(9091, "tools/call", new { name = "kicad_library_snapshot_read",
                 arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = "invalid",
                     documentJson = "{}", libraryNickname = "Fixture", entryName = "Probe" } });

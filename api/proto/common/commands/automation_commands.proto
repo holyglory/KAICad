@@ -1340,6 +1340,36 @@ message NativeCapabilitySymbolLibraryReadOperationResponse {
   NativeCapabilitySymbolLibraryDeleteSymbolResponse delete_response = 4;
 }
 
+// Checked symbol-library mutation seam. The current native owner returns an
+// explicit unavailable receipt until provider locks, complete snapshot
+// admission and rollback/readback are implemented; legacy writers remain
+// separate and unchanged.
+message NativeCapabilitySymbolLibraryCheckedWrite {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string process_epoch = 2;
+  string operation_id = 3;
+  string expected_snapshot_sha256 = 4;
+  kiapi.schematic.types.SchematicSymbol definition = 5;
+  bool overwrite = 6;
+  NativeCapabilitySymbolLibraryPinDisplay pin_display = 7;
+}
+
+message NativeCapabilitySymbolLibraryCheckedWriteResponse {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string process_epoch = 2;
+  string operation_id = 3;
+  string status = 4;
+  string error_code = 5;
+  string error_message = 6;
+  bool committed = 7;
+  bool replayed = 8;
+  bool rollback_completed = 9;
+  bool revision_tracked = 10;
+  bool complete_lifecycle = 11;
+  string before_snapshot_sha256 = 12;
+  string after_snapshot_sha256 = 13;
+}
+
 // Read-only, project-bound symbol/footprint-library lifecycle evidence. This
 // transport deliberately returns compact hashes/baselines instead of exposing
 // the detached provider definition wholesale. Symbol rows retain their direct

@@ -191,6 +191,58 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
             revisionAdmission });
     });
 
+    [McpServerTool(Name = "kicad_symbol_library_write_checked", ReadOnly = false),
+     Description("Checked symbol-library write seam. The request carries an explicit project-bound symbol document, process epoch, operation UUID, complete snapshot digest and definition. The current native lifecycle owner reports library_mutation_unavailable without reaching legacy writers until provider locks, complete snapshot admission and rollback are implemented."),
+     KiCadCapability("symbol-library", "checked-native-admission-seam", "project-bound symbol document, process epoch, operation UUID and complete snapshot digest"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> WriteChecked(string instanceId, string expectedProcessEpoch, string documentJson,
+        string definitionJson, string operationId, string expectedSnapshotSha256, CancellationToken cancellationToken,
+        bool overwrite = true, string pinDisplayJson = "") => Execute(async () =>
+    {
+        ValidateEpoch(expectedProcessEpoch); ValidateOperation(operationId);
+        if (expectedSnapshotSha256.Length != 64 || !expectedSnapshotSha256.All(char.IsAsciiHexDigitLower))
+            throw new AutomationException("invalid_library_snapshot", "expectedSnapshotSha256 must be a lowercase complete snapshot digest.");
+        DocumentSpecifier document;
+        try { document = SchematicJson.Parser.Parse<DocumentSpecifier>(documentJson); }
+        catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException)
+        { throw new AutomationException("invalid_library_document", "documentJson is not a valid symbol document: " + error.Message); }
+        if (document.Type != DocumentType.DoctypeSymbol || document.Project is null || document.LibId is null)
+            throw new AutomationException("invalid_library_document", "A project-bound symbol document is required.");
+        SchematicSymbol definition = ParseDefinition(definitionJson);
+        if (definition.Id is null || definition.Id.LibraryNickname != document.LibId.LibraryNickname
+            || string.IsNullOrWhiteSpace(definition.Id.EntryName))
+            throw new AutomationException("symbol_library_definition_mismatch", "The definition identity must match the symbol document.");
+        List<SymbolValidationIssue> issues = [];
+        ValidateDefinition(document.LibId.LibraryNickname, definition, issues, cancellationToken);
+        if (issues.Count != 0)
+            throw new AutomationException("invalid_symbol_definition", "The symbol definition is invalid: "
+                + string.Join("; ", issues.OrderBy(issue => issue.Path, StringComparer.Ordinal).Select(issue => issue.Code)));
+        NativeCapabilitySymbolLibraryPinDisplay? display = ParsePinDisplay(pinDisplayJson, required: false);
+        NativeClient client = registry.Client(instanceId); AutomationSession session = await Handshake(client, expectedProcessEpoch, cancellationToken);
+        NativeCapabilitySymbolLibraryCheckedWriteResponse response = await client.InvokeAsync<
+            NativeCapabilitySymbolLibraryCheckedWrite, NativeCapabilitySymbolLibraryCheckedWriteResponse>(new()
+            {
+                Document = document, ProcessEpoch = session.Epoch, OperationId = operationId,
+                ExpectedSnapshotSha256 = expectedSnapshotSha256, Definition = definition,
+                Overwrite = overwrite, PinDisplay = display
+            }, cancellationToken);
+        if (response.Document is null || !response.Document.Equals(document)
+            || response.ProcessEpoch != session.Epoch || response.OperationId != operationId
+            || response.RevisionTracked || response.CompleteLifecycle)
+            throw new AutomationException("invalid_symbol_library_response",
+                "The checked native symbol response changed its identity or falsely claimed lifecycle coverage.");
+        var data = new
+        {
+            instanceId, processEpoch = session.Epoch, document, operationId,
+            status = response.Status, committed = response.Committed, replayed = response.Replayed,
+            rollbackCompleted = response.RollbackCompleted, revisionTracked = response.RevisionTracked,
+            completeLifecycle = response.CompleteLifecycle, beforeSnapshotSha256 = response.BeforeSnapshotSha256,
+            afterSnapshotSha256 = response.AfterSnapshotSha256, errorCode = response.ErrorCode,
+            errorMessage = response.ErrorMessage
+        };
+        return Data(data, !response.Committed || !string.IsNullOrEmpty(response.ErrorCode));
+    });
+
     [McpServerTool(Name = "kicad_symbol_library_delete", ReadOnly = false),
      Description("Delete one named symbol from an explicitly identified project symbol library through KiCad's native adapter. When expectedModifyHash is supplied, deletion is admitted only if the library's current native modify hash still matches; an already recorded operation ID is replayed before that check. operationId binds the request to a process-owned native receipt, and the completed delete is verified by re-enumerating the persisted library through the native adapter. The library still has no durable lifecycle revision sequence.")]
     [KiCadCapability("symbol-library", "native-symbol-library-adapter", "library nickname, symbol name, operation UUID and native modify hashes"),

@@ -133,6 +133,9 @@ protected:
             const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySymbolLibraryWriteSymbol>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySymbolLibraryDeleteSymbolResponse> handleDeleteSymbolLibrarySymbol(
             const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySymbolLibraryDeleteSymbol>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedWriteResponse>
+    handleCheckedWriteSymbolLibrarySymbol(
+            const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedWrite>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySymbolLibraryReadOperationResponse> handleReadSymbolLibraryOperation(
             const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySymbolLibraryReadOperation>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySchematicRunErcResponse> handleRunErc(

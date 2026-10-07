@@ -337,6 +337,9 @@ API_HANDLER_SCH::API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext,
     registerHandler<kiapi::automation::v1::NativeCapabilitySymbolLibraryDeleteSymbol,
                     kiapi::automation::v1::NativeCapabilitySymbolLibraryDeleteSymbolResponse>(
             &API_HANDLER_SCH::handleDeleteSymbolLibrarySymbol );
+    registerHandler<kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedWrite,
+                    kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedWriteResponse>(
+            &API_HANDLER_SCH::handleCheckedWriteSymbolLibrarySymbol );
     registerHandler<kiapi::automation::v1::NativeCapabilitySymbolLibraryReadOperation,
                     kiapi::automation::v1::NativeCapabilitySymbolLibraryReadOperationResponse>(
             &API_HANDLER_SCH::handleReadSymbolLibraryOperation );
@@ -446,6 +449,14 @@ std::optional<ApiResponseStatus> API_HANDLER_SCH::checkRequestTarget(
             // The snapshot handler performs the project, library identity and lifecycle checks.
             return std::nullopt;
         }
+    }
+
+    if( aRequest.GetDescriptor()->full_name()
+            == kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedWrite::descriptor()->full_name() )
+    {
+        // Checked symbol writes address an explicit project library document;
+        // the handler performs identity validation before refusing the seam.
+        return std::nullopt;
     }
 
     return API_HANDLER_EDITOR::checkRequestTarget( aRequest );
@@ -3276,6 +3287,46 @@ API_HANDLER_SCH::handleReadLibrarySnapshot(
     {
         return fail( "library_snapshot_failed", error.what() );
     }
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedWriteResponse>
+API_HANDLER_SCH::handleCheckedWriteSymbolLibrarySymbol(
+        const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedWrite>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    NativeCapabilitySymbolLibraryCheckedWriteResponse response;
+    response.mutable_document()->CopyFrom( aCtx.Request.document() );
+    response.set_process_epoch( apiServer().Token() );
+    response.set_operation_id( aCtx.Request.operation_id() );
+    response.set_status( "unavailable" );
+    response.set_committed( false );
+    response.set_replayed( false );
+    response.set_rollback_completed( false );
+    response.set_revision_tracked( false );
+    response.set_complete_lifecycle( false );
+
+    auto refuse = [&]( const char* aCode, const std::string& aMessage )
+    {
+        response.set_error_code( aCode );
+        response.set_error_message( aMessage );
+        return response;
+    };
+    if( !aCtx.Request.has_document() || aCtx.Request.document().type() != kiapi::common::types::DOCTYPE_SYMBOL
+            || !aCtx.Request.document().has_project() || !aCtx.Request.document().has_lib_id() )
+        return refuse( "invalid_library_document", "A checked symbol mutation requires an explicit project-bound symbol document." );
+    if( !ErcUuid( aCtx.Request.process_epoch() ) || aCtx.Request.process_epoch() != apiServer().Token() )
+        return refuse( "stale_process_epoch", "The checked symbol mutation belongs to another native process epoch." );
+    if( !ErcUuid( aCtx.Request.operation_id() ) )
+        return refuse( "invalid_operation_id", "A canonical operation UUID is required." );
+    const std::string& digest = aCtx.Request.expected_snapshot_sha256();
+    if( digest.size() != 64
+            || !std::all_of( digest.begin(), digest.end(), []( char c )
+                    { return ( c >= '0' && c <= '9' ) || ( c >= 'a' && c <= 'f' ); } ) )
+        return refuse( "invalid_library_snapshot", "expected_snapshot_sha256 must be a lowercase complete snapshot digest." );
+
+    return refuse( "library_mutation_unavailable",
+                   "Checked symbol-library mutation is not yet owned by the native lifecycle controller; no legacy writer was called." );
 }
 
 

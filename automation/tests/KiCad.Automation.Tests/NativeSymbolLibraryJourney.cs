@@ -1,5 +1,6 @@
 using Google.Protobuf.WellKnownTypes;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Kiapi.Common.Types;
 using Kiapi.Schematic.Types;
@@ -86,6 +87,255 @@ public sealed partial class NativeSessionTests
         };
         var sourcePreview = await RenderLibraryPinDisplay(mcp, client, document,
             SchematicJson.Parser.Parse<SchematicSymbol>(definitionJson), sourceDisplay, pinDisplayRegion, evidence, instanceId, "source", token);
+
+        // The checked direct-file lane must admit a complete snapshot, retain the exact
+        // request, and verify the saved file through the independent native read path.  Keep an
+        // unrelated entry in the same file so the post-write proof covers the complete provider,
+        // not only the requested symbol.
+        const string checkedUnrelatedName = "CheckedUnrelatedProbe";
+        var checkedUnrelatedDefinition = SchematicJson.Parser.Parse<SchematicSymbol>(definitionJson);
+        checkedUnrelatedDefinition.Id.EntryName = checkedUnrelatedName;
+        var checkedUnrelatedWrite = await mcp.Tool("kicad_symbol_library_write", new
+        {
+            instanceId, expectedProcessEpoch = client.Epoch, libraryNickname,
+            definitionJson = SchematicJson.Formatter.Format(checkedUnrelatedDefinition),
+            operationId = Guid.NewGuid().ToString("D"), overwrite = false,
+            pinDisplayJson = SchematicJson.Formatter.Format(sourceDisplay)
+        });
+        RequireToolSuccess(checkedUnrelatedWrite);
+        var checkedUnrelatedBefore = await mcp.Tool("kicad_symbol_library_read", new
+        { instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName = checkedUnrelatedName });
+        RequireToolSuccess(checkedUnrelatedBefore);
+        string checkedUnrelatedDefinitionBefore = checkedUnrelatedBefore.GetProperty("structuredContent")
+            .GetProperty("definition").GetRawText();
+        string checkedUnrelatedDisplayBefore = checkedUnrelatedBefore.GetProperty("structuredContent")
+            .GetProperty("pinDisplay").GetRawText();
+
+        // A same-size, same-mtime edit must still be found by the forced provider refresh.  The
+        // fixture deliberately contains an offset token whose replacement preserves both file
+        // length and syntax; restore the exact bytes before continuing the write journey.
+        string expandedLibraryPath = lifecycleData.GetProperty("expandedUri").GetString()!;
+        byte[] originalLibraryBytes = await File.ReadAllBytesAsync(expandedLibraryPath, token);
+        DateTime originalLibraryMtime = File.GetLastWriteTimeUtc(expandedLibraryPath);
+        string originalLibraryText = Encoding.UTF8.GetString(originalLibraryBytes);
+        const string externalMarker = "(offset 0)";
+        int externalMarkerIndex = originalLibraryText.IndexOf(externalMarker, StringComparison.Ordinal);
+        Assert.IsTrue(externalMarkerIndex >= 0, "The fixture must contain a stable pin-name offset token.");
+        string externallyEditedText = originalLibraryText[..externalMarkerIndex] + "(offset 1)"
+            + originalLibraryText[(externalMarkerIndex + externalMarker.Length)..];
+        byte[] externallyEditedBytes = Encoding.UTF8.GetBytes(externallyEditedText);
+        Assert.AreEqual(originalLibraryBytes.Length, externallyEditedBytes.Length);
+        JsonElement externalSnapshotData;
+        try
+        {
+            await File.WriteAllBytesAsync(expandedLibraryPath, externallyEditedBytes, token);
+            File.SetLastWriteTimeUtc(expandedLibraryPath, originalLibraryMtime);
+            Assert.AreEqual(originalLibraryMtime, File.GetLastWriteTimeUtc(expandedLibraryPath));
+            var externalSnapshot = await mcp.Tool("kicad_library_snapshot_read", new
+            {
+                instanceId, expectedProcessEpoch = client.Epoch,
+                documentJson = SchematicJson.Formatter.Format(symbolDocument), libraryNickname, entryName = symbolName,
+                forcedRefresh = true
+            });
+            RequireToolSuccess(externalSnapshot);
+            externalSnapshotData = externalSnapshot.GetProperty("structuredContent");
+            var externalState = SchematicJson.Parser.Parse<NativeCapabilitySymbolLibraryCheckedState>(
+                externalSnapshotData.GetProperty("checkedState").GetRawText());
+            var originalState = SchematicJson.Parser.Parse<NativeCapabilitySymbolLibraryCheckedState>(
+                lifecycleData.GetProperty("checkedState").GetRawText());
+            Assert.AreNotEqual(originalState.StateSha256, externalState.StateSha256,
+                "A same-size, same-mtime external edit must advance the forced snapshot digest.");
+            Assert.IsTrue(externalState.EntryExists);
+        }
+        finally
+        {
+            await File.WriteAllBytesAsync(expandedLibraryPath, originalLibraryBytes, CancellationToken.None);
+            File.SetLastWriteTimeUtc(expandedLibraryPath, originalLibraryMtime);
+        }
+        Assert.AreEqual(originalLibraryMtime, File.GetLastWriteTimeUtc(expandedLibraryPath));
+
+        // Refresh after restoring the external bytes; this is the current complete state from
+        // which the missing-entry transaction is admitted.
+        var restoredSnapshot = await mcp.Tool("kicad_library_snapshot_read", new
+        {
+            instanceId, expectedProcessEpoch = client.Epoch,
+            documentJson = SchematicJson.Formatter.Format(symbolDocument), libraryNickname, entryName = symbolName,
+            forcedRefresh = true
+        });
+        RequireToolSuccess(restoredSnapshot);
+        var restoredState = SchematicJson.Parser.Parse<NativeCapabilitySymbolLibraryCheckedState>(
+            restoredSnapshot.GetProperty("structuredContent").GetProperty("checkedState").GetRawText());
+
+        const string checkedCreateName = "CheckedCreateProbe";
+        var checkedDocument = symbolDocument.Clone();
+        checkedDocument.LibId.EntryName = checkedCreateName;
+        var checkedDefinition = SchematicJson.Parser.Parse<SchematicSymbol>(definitionJson);
+        checkedDefinition.Id.EntryName = checkedCreateName;
+        var missingSnapshot = await mcp.Tool("kicad_library_snapshot_read", new
+        {
+            instanceId, expectedProcessEpoch = client.Epoch,
+            documentJson = SchematicJson.Formatter.Format(checkedDocument), libraryNickname,
+            entryName = checkedCreateName, forcedRefresh = true, allowMissingEntry = true
+        });
+        RequireToolSuccess(missingSnapshot);
+        var missingState = SchematicJson.Parser.Parse<NativeCapabilitySymbolLibraryCheckedState>(
+            missingSnapshot.GetProperty("structuredContent").GetProperty("checkedState").GetRawText());
+        Assert.IsFalse(missingState.EntryExists);
+        Assert.IsTrue(missingState.StateComplete && missingState.DiskBaselineChecked);
+        Assert.IsFalse(missingState.CompleteChangeTracking);
+        Assert.AreEqual(restoredState.DependencyBaselines.Count, missingState.DependencyBaselines.Count);
+
+        string checkedOperationId = Guid.NewGuid().ToString("D");
+        var checkedRequest = new NativeCapabilitySymbolLibraryCheckedWrite
+        {
+            Document = checkedDocument.Clone(), ProcessEpoch = client.Epoch, OperationId = checkedOperationId,
+            ExpectedSnapshotSha256 = missingState.StateSha256, Definition = checkedDefinition.Clone(),
+            Overwrite = false, PinDisplay = sourceDisplay.Clone(), ExpectedState = missingState.Clone()
+        };
+        string checkedRequestJson = SchematicJson.Formatter.Format(checkedRequest);
+        var checkedCreate = await mcp.Tool("kicad_symbol_library_write_checked", new
+        {
+            instanceId, expectedProcessEpoch = client.Epoch,
+            documentJson = SchematicJson.Formatter.Format(checkedDocument),
+            definitionJson = SchematicJson.Formatter.Format(checkedDefinition), operationId = checkedOperationId,
+            expectedSnapshotSha256 = missingState.StateSha256,
+            expectedStateJson = SchematicJson.Formatter.Format(missingState), overwrite = false,
+            pinDisplayJson = SchematicJson.Formatter.Format(sourceDisplay)
+        });
+        RequireToolSuccess(checkedCreate);
+        var checkedCreateData = checkedCreate.GetProperty("structuredContent");
+        Assert.AreEqual("committed_postverified", checkedCreateData.GetProperty("status").GetString());
+        Assert.IsTrue(checkedCreateData.GetProperty("committed").GetBoolean());
+        Assert.IsTrue(checkedCreateData.GetProperty("revisionTracked").GetBoolean());
+        Assert.IsTrue(checkedCreateData.GetProperty("completeLifecycle").GetBoolean());
+        Assert.IsTrue(checkedCreateData.GetProperty("targetVerified").GetBoolean());
+        Assert.IsTrue(checkedCreateData.GetProperty("unrelatedEntriesVerified").GetBoolean());
+        Assert.AreEqual(missingState.StateSha256, checkedCreateData.GetProperty("beforeSnapshotSha256").GetString());
+        Assert.AreNotEqual(missingState.StateSha256, checkedCreateData.GetProperty("afterSnapshotSha256").GetString());
+
+        var checkedCreateRead = await mcp.Tool("kicad_symbol_library_read", new
+        { instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName = checkedCreateName });
+        RequireToolSuccess(checkedCreateRead);
+        var checkedCreateReadData = checkedCreateRead.GetProperty("structuredContent");
+        Assert.AreEqual(libraryNickname, checkedCreateReadData.GetProperty("definition").GetProperty("id")
+            .GetProperty("libraryNickname").GetString());
+        Assert.AreEqual(checkedCreateName, checkedCreateReadData.GetProperty("definition").GetProperty("id")
+            .GetProperty("entryName").GetString());
+        Assert.AreEqual(sourceDisplay, SchematicJson.Parser.Parse<NativeCapabilitySymbolLibraryPinDisplay>(
+            checkedCreateReadData.GetProperty("pinDisplay").GetRawText()));
+        var checkedCreatePreview = await RenderLibraryPinDisplay(mcp, client, document,
+            SchematicJson.Parser.Parse<SchematicSymbol>(checkedCreateReadData.GetProperty("definition").GetRawText()),
+            sourceDisplay, pinDisplayRegion, evidence, instanceId, "checked-create", token);
+        CollectionAssert.AreEqual(sourcePreview, checkedCreatePreview);
+        var checkedUnrelatedAfter = await mcp.Tool("kicad_symbol_library_read", new
+        { instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName = checkedUnrelatedName });
+        RequireToolSuccess(checkedUnrelatedAfter);
+        Assert.AreEqual(checkedUnrelatedDefinitionBefore, checkedUnrelatedAfter.GetProperty("structuredContent")
+            .GetProperty("definition").GetRawText());
+        Assert.AreEqual(checkedUnrelatedDisplayBefore, checkedUnrelatedAfter.GetProperty("structuredContent")
+            .GetProperty("pinDisplay").GetRawText());
+
+        // The retained receipt is the complete source of post-write evidence and binds the
+        // target identity, pin display, exact request and advancing revision.
+        var checkedReceipt = await mcp.Tool("kicad_symbol_library_checked_receipt", new
+        {
+            instanceId, expectedProcessEpoch = client.Epoch,
+            documentJson = SchematicJson.Formatter.Format(checkedDocument), operationId = checkedOperationId,
+            expectedRequestJson = checkedRequestJson
+        });
+        RequireToolSuccess(checkedReceipt);
+        var checkedReceiptData = checkedReceipt.GetProperty("structuredContent");
+        Assert.IsTrue(checkedReceiptData.GetProperty("found").GetBoolean());
+        Assert.IsFalse(checkedReceiptData.GetProperty("retryDispatched").GetBoolean());
+        var checkedReceiptEnvelope = checkedReceiptData.GetProperty("receipt");
+        Assert.AreEqual(checkedOperationId, checkedReceiptEnvelope.GetProperty("operationId").GetString());
+        Assert.AreEqual("mcp_direct_symbol_file", checkedReceiptEnvelope.GetProperty("scope").GetString());
+        Assert.AreEqual("committed_postverified", checkedReceiptEnvelope.GetProperty("status").GetString());
+        Assert.IsTrue(checkedReceiptEnvelope.GetProperty("expectedRequestVerified").GetBoolean());
+        Assert.IsTrue(checkedReceiptEnvelope.GetProperty("postverified").GetBoolean());
+        Assert.IsTrue(checkedReceiptEnvelope.GetProperty("targetVerified").GetBoolean());
+        Assert.IsTrue(checkedReceiptEnvelope.GetProperty("unrelatedEntriesVerified").GetBoolean());
+        Assert.AreEqual(checkedCreateName, checkedReceiptEnvelope.GetProperty("request").GetProperty("document")
+            .GetProperty("libId").GetProperty("entryName").GetString());
+        Assert.AreEqual(checkedCreateName, checkedReceiptEnvelope.GetProperty("observedAfter").GetProperty("document")
+            .GetProperty("libId").GetProperty("entryName").GetString());
+        Assert.AreEqual(sourceDisplay, SchematicJson.Parser.Parse<NativeCapabilitySymbolLibraryPinDisplay>(
+            checkedReceiptEnvelope.GetProperty("request").GetProperty("pinDisplay").GetRawText()));
+
+        // Advance live state through the legacy writer, then prove the original checked request
+        // replays without another write and a changed request with the same UUID is rejected.
+        var advancedDefinition = checkedDefinition.Clone();
+        advancedDefinition.Keywords = "live state advanced";
+        var advancedWrite = await mcp.Tool("kicad_symbol_library_write", new
+        {
+            instanceId, expectedProcessEpoch = client.Epoch, libraryNickname,
+            definitionJson = SchematicJson.Formatter.Format(advancedDefinition),
+            operationId = Guid.NewGuid().ToString("D"), overwrite = true,
+            pinDisplayJson = SchematicJson.Formatter.Format(sourceDisplay)
+        });
+        RequireToolSuccess(advancedWrite);
+        var staleWrite = await mcp.Tool("kicad_symbol_library_write_checked", new
+        {
+            instanceId, expectedProcessEpoch = client.Epoch,
+            documentJson = SchematicJson.Formatter.Format(checkedDocument),
+            definitionJson = SchematicJson.Formatter.Format(checkedDefinition),
+            operationId = Guid.NewGuid().ToString("D"), expectedSnapshotSha256 = missingState.StateSha256,
+            expectedStateJson = SchematicJson.Formatter.Format(missingState), overwrite = true,
+            pinDisplayJson = SchematicJson.Formatter.Format(sourceDisplay)
+        });
+        Assert.IsTrue(staleWrite.TryGetProperty("isError", out var staleWriteError) && staleWriteError.GetBoolean(), staleWrite.GetRawText());
+        Assert.AreEqual("stale_library_state", staleWrite.GetProperty("structuredContent").GetProperty("errorCode").GetString());
+
+        var checkedReplay = await mcp.Tool("kicad_symbol_library_write_checked", new
+        {
+            instanceId, expectedProcessEpoch = client.Epoch,
+            documentJson = SchematicJson.Formatter.Format(checkedDocument),
+            definitionJson = SchematicJson.Formatter.Format(checkedDefinition), operationId = checkedOperationId,
+            expectedSnapshotSha256 = missingState.StateSha256,
+            expectedStateJson = SchematicJson.Formatter.Format(missingState), overwrite = false,
+            pinDisplayJson = SchematicJson.Formatter.Format(sourceDisplay)
+        });
+        RequireToolSuccess(checkedReplay);
+        Assert.IsTrue(checkedReplay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean());
+        Assert.AreEqual(checkedCreateData.GetProperty("afterSnapshotSha256").GetString(),
+            checkedReplay.GetProperty("structuredContent").GetProperty("afterSnapshotSha256").GetString());
+
+        var conflictingRequest = checkedRequest.Clone();
+        conflictingRequest.Definition.Keywords = "operation id conflict";
+        var conflictResponse = await client.InvokeAsync<NativeCapabilitySymbolLibraryCheckedWrite,
+            NativeCapabilitySymbolLibraryCheckedWriteResponse>(conflictingRequest, token);
+        Assert.AreEqual("operation_id_conflict", conflictResponse.ErrorCode);
+        Assert.AreEqual(NativeCapabilitySymbolLibraryCheckedReceiptStatus.SlcwsRejected, conflictResponse.ReceiptStatus);
+        Assert.IsFalse(conflictResponse.Committed);
+
+        // A fresh MCP process can retrieve the retained receipt after reconnect; lookup never
+        // dispatches another native write.
+        string reconnectState = Path.Combine(evidence, instanceId + "-symbol-library-mcp-reconnect");
+        await using (var reconnectMcp = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.ProductionStartInfo(),
+            reconnectState, Path.Combine(evidence, instanceId + "-symbol-library-mcp-reconnect.stderr.log"), token))
+        {
+            RequireToolSuccess(await reconnectMcp.Tool("kicad_instance_attach", new
+                { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
+            var reconnectReceipt = await reconnectMcp.Tool("kicad_symbol_library_checked_receipt", new
+            {
+                instanceId, expectedProcessEpoch = client.Epoch,
+                documentJson = SchematicJson.Formatter.Format(checkedDocument), operationId = checkedOperationId,
+                expectedRequestJson = checkedRequestJson
+            });
+            RequireToolSuccess(reconnectReceipt);
+            Assert.IsTrue(reconnectReceipt.GetProperty("structuredContent").GetProperty("found").GetBoolean());
+            Assert.IsFalse(reconnectReceipt.GetProperty("structuredContent").GetProperty("retryDispatched").GetBoolean());
+            Assert.AreEqual(checkedOperationId, reconnectReceipt.GetProperty("structuredContent").GetProperty("receipt")
+                .GetProperty("operationId").GetString());
+        }
+
+        RequireToolSuccess(await mcp.Tool("kicad_symbol_library_delete", new
+        { instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName = checkedCreateName,
+            operationId = Guid.NewGuid().ToString("D") }));
+        RequireToolSuccess(await mcp.Tool("kicad_symbol_library_delete", new
+        { instanceId, expectedProcessEpoch = client.Epoch, libraryNickname, symbolName = checkedUnrelatedName,
+            operationId = Guid.NewGuid().ToString("D") }));
+
         // Backward-compatible creation without an envelope uses actual native
         // LIB_SYMBOL defaults (visible names/numbers and the 20 mil offset).
         var defaultDefinition = SchematicJson.Parser.Parse<SchematicSymbol>(definitionJson);

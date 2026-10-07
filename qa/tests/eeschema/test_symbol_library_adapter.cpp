@@ -27,6 +27,7 @@
 #include <libraries/library_manager.h>
 #include <sch_io/sch_io.h>
 #include <sch_io/sch_io_mgr.h>
+#include <sch_io/kicad_sexpr/sch_io_kicad_sexpr.h>
 
 #include <wx/filename.h>
 #include <wx/textfile.h>
@@ -392,6 +393,122 @@ BOOST_AUTO_TEST_CASE( SaveSymbolWriteRefusalPropagatesAndReloadDiscardsFailedCac
     BOOST_CHECK_EQUAL( restored->GetReferenceField().GetText().ToStdString(), "U" );
     BOOST_CHECK( baseline.Check( path ) == FILE_BASELINE_CHECK::UNCHANGED );
     BOOST_CHECK( adapter.SaveSymbol( nickname, &original, false ) == SYMBOL_LIBRARY_ADAPTER::SAVE_SKIPPED );
+}
+
+
+BOOST_AUTO_TEST_CASE( SaveSymbolCheckedVerifiesEntriesAndReportsWriteBoundaries )
+{
+    const wxString nickname = wxS( "Checked" );
+    SCOPED_SYM_LIB_TABLE tableFile( { nickname } );
+    const wxString path = tableFile.LibraryPath( nickname );
+    {
+        IO_RELEASER<SCH_IO> plugin( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
+        plugin->CreateLibrary( path );
+    }
+
+    LIBRARY_MANAGER manager;
+    manager.LoadProjectTables( tableFile.Path(), { LIBRARY_TABLE_TYPE::SYMBOL } );
+    TEST_SYMBOL_LIBRARY_ADAPTER adapter( manager );
+    const auto loaded = adapter.LoadOne( nickname );
+    BOOST_REQUIRE( loaded && loaded->load_status == LOAD_STATUS::LOADED );
+
+    LIB_SYMBOL original( wxS( "Existing" ) );
+    original.GetValueField().SetText( original.GetName() );
+    original.GetReferenceField().SetText( wxS( "U" ) );
+    BOOST_REQUIRE( adapter.SaveSymbol( nickname, &original ) == SYMBOL_LIBRARY_ADAPTER::SAVE_OK );
+    LIB_SYMBOL unrelated( wxS( "Unrelated" ) );
+    unrelated.GetValueField().SetText( unrelated.GetName() );
+    unrelated.GetReferenceField().SetText( wxS( "X" ) );
+    BOOST_REQUIRE( adapter.SaveSymbol( nickname, &unrelated ) == SYMBOL_LIBRARY_ADAPTER::SAVE_OK );
+
+    IO_RELEASER<SCH_IO> plugin( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
+    auto* direct = dynamic_cast<SCH_IO_KICAD_SEXPR*>( plugin.get() );
+    BOOST_REQUIRE( direct );
+
+    std::string beforeContents;
+    FILE_CONTENT_BASELINE before = FILE_CONTENT_BASELINE::Read( path, &beforeContents );
+    BOOST_REQUIRE( before.Known() );
+    LIB_SYMBOL created( wxS( "Created" ) );
+    created.GetValueField().SetText( created.GetName() );
+    created.GetReferenceField().SetText( wxS( "C" ) );
+    SCH_KICAD_SEXPR_CHECKED_WRITE_RESULT createResult = direct->SaveSymbolChecked(
+            path, &created, false, { before }, beforeContents, created.GetName() );
+    BOOST_CHECK( createResult.writeStarted );
+    BOOST_CHECK( createResult.committed );
+    BOOST_CHECK( createResult.postverified );
+    BOOST_CHECK( createResult.targetVerified );
+    BOOST_CHECK( createResult.unrelatedEntriesVerified );
+    BOOST_CHECK( createResult.beforeDefinition.empty() );
+
+    IO_RELEASER<SCH_IO> createReadback( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
+    LIB_SYMBOL* persistedCreated = createReadback->LoadSymbol( path, created.GetName() );
+    LIB_SYMBOL* persistedUnrelated = createReadback->LoadSymbol( path, unrelated.GetName() );
+    BOOST_REQUIRE( persistedCreated && persistedUnrelated );
+    BOOST_CHECK_EQUAL( persistedCreated->GetReferenceField().GetText().ToStdString(), "C" );
+    BOOST_CHECK_EQUAL( persistedUnrelated->GetReferenceField().GetText().ToStdString(), "X" );
+
+    // A refusal before replacement leaves the original bytes and proves rollback to the
+    // pre-write provider state.
+    LIB_SYMBOL replacement( original );
+    replacement.GetReferenceField().SetText( wxS( "R" ) );
+    std::string refusalContents;
+    FILE_CONTENT_BASELINE refusalBaseline = FILE_CONTENT_BASELINE::Read( path, &refusalContents );
+    bool beforeCalled = false;
+    SCH_KICAD_SEXPR_CHECKED_WRITE_RESULT refused;
+    {
+        FILE_WRITE_OBSERVER observer(
+                [&]( const wxString& aPath )
+                {
+                    beforeCalled = true;
+                    BOOST_CHECK( FILE_CONTENT_BASELINE::SamePath( path, aPath ) );
+                    THROW_IO_ERROR( "Controlled checked write refusal before replacement" );
+                },
+                [&]( const FILE_CONTENT_BASELINE& ) {} );
+        refused = direct->SaveSymbolChecked( path, &replacement, true, { refusalBaseline },
+                                             refusalContents, replacement.GetName() );
+    }
+    BOOST_CHECK( beforeCalled );
+    BOOST_CHECK( refused.writeStarted );
+    BOOST_CHECK( refused.rollbackAttempted );
+    BOOST_CHECK( refused.rollbackVerified );
+    BOOST_CHECK( !refused.committed );
+    BOOST_CHECK( refusalBaseline.Check( path ) == FILE_BASELINE_CHECK::UNCHANGED );
+    IO_RELEASER<SCH_IO> refusalReadback( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
+    LIB_SYMBOL* afterRefusal = refusalReadback->LoadSymbol( path, original.GetName() );
+    BOOST_REQUIRE( afterRefusal );
+    BOOST_CHECK_EQUAL( afterRefusal->GetReferenceField().GetText().ToStdString(), "U" );
+
+    // A callback failure after the atomic replacement is reported as indeterminate: the provider
+    // has no safe attribution for a second overwrite, and the persisted result remains observable.
+    std::string afterContents;
+    FILE_CONTENT_BASELINE afterBaseline = FILE_CONTENT_BASELINE::Read( path, &afterContents );
+    bool afterCalled = false;
+    SCH_KICAD_SEXPR_CHECKED_WRITE_RESULT afterFailure;
+    {
+        FILE_WRITE_OBSERVER observer(
+                [&]( const wxString& aPath )
+                { BOOST_CHECK( FILE_CONTENT_BASELINE::SamePath( path, aPath ) ); },
+                [&]( const FILE_CONTENT_BASELINE& )
+                {
+                    if( !afterCalled )
+                    {
+                        afterCalled = true;
+                        THROW_IO_ERROR( "Controlled checked write refusal after replacement" );
+                    }
+                } );
+        afterFailure = direct->SaveSymbolChecked( path, &replacement, true, { afterBaseline },
+                                                  afterContents, replacement.GetName() );
+    }
+    BOOST_CHECK( afterCalled );
+    BOOST_CHECK( afterFailure.writeStarted );
+    BOOST_CHECK( afterFailure.rollbackAttempted );
+    BOOST_CHECK( afterFailure.rollbackIndeterminate );
+    BOOST_CHECK( !afterFailure.committed );
+    BOOST_CHECK( afterBaseline.Check( path ) == FILE_BASELINE_CHECK::CHANGED );
+    IO_RELEASER<SCH_IO> afterReadback( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
+    LIB_SYMBOL* afterReplacement = afterReadback->LoadSymbol( path, replacement.GetName() );
+    BOOST_REQUIRE( afterReplacement );
+    BOOST_CHECK_EQUAL( afterReplacement->GetReferenceField().GetText().ToStdString(), "R" );
 }
 
 

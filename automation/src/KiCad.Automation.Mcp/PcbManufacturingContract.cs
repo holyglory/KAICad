@@ -110,8 +110,9 @@ internal static class PcbManufacturingContract
         {
             if (receipt.PublicationState == PcbManufacturingPublicationState.PcbMfgPublicationPublished)
                 throw Invalid("Only a completed manufacturing export may report published output.");
-            if (receipt.Terminal && string.IsNullOrWhiteSpace(receipt.ErrorCode))
-                throw Invalid("A terminal unsuccessful manufacturing export must retain an error code.");
+            if (receipt.Terminal && (string.IsNullOrWhiteSpace(receipt.ErrorCode)
+                || string.IsNullOrWhiteSpace(receipt.ErrorMessage)))
+                throw Invalid("A terminal unsuccessful manufacturing export must retain an error code and message.");
         }
     }
 

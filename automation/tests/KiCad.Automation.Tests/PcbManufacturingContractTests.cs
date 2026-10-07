@@ -118,6 +118,20 @@ public sealed class PcbManufacturingContractTests
         RejectRequest(uppercaseProcess);
     }
 
+    [TestMethod]
+    public void TerminalUnsuccessfulReceiptRequiresErrorCodeAndMessage()
+    {
+        var (request, receipt) = Fixture();
+        receipt.Status = PcbManufacturingExportStatus.PcbMfgExportFailed;
+        receipt.DispatchStage = PcbManufacturingDispatchStage.PcbMfgDispatchTerminal;
+        receipt.Terminal = true;
+        receipt.PublicationState = PcbManufacturingPublicationState.PcbMfgPublicationFailed;
+        receipt.ErrorCode = "native_export_failed";
+        receipt.ErrorMessage = "";
+
+        Reject(receipt, request, "invalid_pcb_export_receipt");
+    }
+
     private static void Reject(PcbManufacturingExportReceipt receipt,
         RunPcbManufacturingExport request, string code)
     {

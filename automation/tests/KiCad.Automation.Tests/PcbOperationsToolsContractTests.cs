@@ -17,6 +17,50 @@ namespace KiCad.Automation.Tests;
 public sealed class PcbOperationsToolsContractTests
 {
     [TestMethod]
+    public void NativeMutationReceiptMustMatchOperationProcessAndBoardIdentity()
+    {
+        const string operationId = "11111111-1111-1111-1111-111111111111";
+        const string processEpoch = "22222222-2222-2222-2222-222222222222";
+        var document = new DocumentSpecifier
+        {
+            Type = DocumentType.DoctypePcb,
+            BoardFilename = "board.kicad_pcb",
+            Project = new() { Name = "receipt-contract", Path = Path.GetTempPath() }
+        };
+        var receipt = new NativeCapabilityPcbReadOperationResponse
+        {
+            Found = true,
+            OperationId = operationId,
+            Operation = "zone-refill",
+            ProcessEpoch = processEpoch,
+            Document = document.Clone()
+        };
+
+        PcbOperationsContract.ValidateNativeReceiptIdentity(receipt, operationId,
+            processEpoch, document, "zone-refill");
+
+        var wrongOperation = receipt.Clone();
+        wrongOperation.OperationId = "33333333-3333-3333-3333-333333333333";
+        Reject(() => PcbOperationsContract.ValidateNativeReceiptIdentity(wrongOperation,
+            operationId, processEpoch, document, "zone-refill"), "wrong_operation_receipt");
+
+        var wrongProcess = receipt.Clone();
+        wrongProcess.ProcessEpoch = "44444444-4444-4444-4444-444444444444";
+        Reject(() => PcbOperationsContract.ValidateNativeReceiptIdentity(wrongProcess,
+            operationId, processEpoch, document, "zone-refill"), "stale_process_epoch");
+
+        var wrongDocument = receipt.Clone();
+        wrongDocument.Document.BoardFilename = "other.kicad_pcb";
+        Reject(() => PcbOperationsContract.ValidateNativeReceiptIdentity(wrongDocument,
+            operationId, processEpoch, document, "zone-refill"), "wrong_operation_document");
+
+        var wrongKind = receipt.Clone();
+        wrongKind.Operation = "netlist-import";
+        Reject(() => PcbOperationsContract.ValidateNativeReceiptIdentity(wrongKind,
+            operationId, processEpoch, document, "zone-refill"), "wrong_operation_receipt");
+    }
+
+    [TestMethod]
     public async Task CrossProbeRequiresExactDocumentAndRevisionBeforeDispatch()
     {
         using var fixture = await Fixture.CreateAsync();
@@ -141,6 +185,12 @@ public sealed class PcbOperationsToolsContractTests
         Assert.AreEqual(expectedCode, result.StructuredContent!.Value.GetProperty("errorCode").GetString(),
             result.StructuredContent.Value.GetRawText());
         Assert.IsFalse(result.StructuredContent.Value.GetProperty("mutationSubmitted").GetBoolean());
+    }
+
+    private static void Reject(Action action, string expectedCode)
+    {
+        AutomationException error = Assert.ThrowsExactly<AutomationException>(action);
+        Assert.AreEqual(expectedCode, error.Code);
     }
 
     private sealed class Fixture : IDisposable

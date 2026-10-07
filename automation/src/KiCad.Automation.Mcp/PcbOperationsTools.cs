@@ -129,19 +129,12 @@ public sealed class PcbOperationsTools(InstanceRegistry registry)
         if (session.Epoch != expectedProcessEpoch)
             throw new AutomationException("stale_process_epoch", "The PCB operation belongs to a different native process epoch.");
 
-        NativeCapabilityPcbReadOperationResponse nativeReceipt = await ReadNativeReceipt(client, operationId, cancellationToken);
-        if (!nativeReceipt.Found)
-            return Data(new { instanceId, processEpoch = session.Epoch, operationId, found = false,
-                operationOutcome = "not_found", completionConfirmed = false, nativeReceiptAvailable = false });
-        if (!string.Equals(nativeReceipt.OperationId, operationId, StringComparison.Ordinal))
-            throw new AutomationException("wrong_operation_receipt", "KiCad returned a receipt for a different PCB operation.");
-        if (nativeReceipt.ProcessEpoch.Length != 0
-            && !string.Equals(nativeReceipt.ProcessEpoch, expectedProcessEpoch, StringComparison.Ordinal))
-            throw new AutomationException("stale_process_epoch", "The PCB operation receipt belongs to a different process epoch.");
-        if (!nativeReceipt.Document.Equals(document))
-            throw new AutomationException("wrong_operation_document", "The PCB operation receipt belongs to a different document.");
-        if (!string.Equals(nativeReceipt.Operation, "zone-refill", StringComparison.Ordinal))
-            throw new AutomationException("operation_wait_unsupported", "Only native zone-refill operations can be waited on.");
+                NativeCapabilityPcbReadOperationResponse nativeReceipt = await ReadNativeReceipt(client, operationId, cancellationToken);
+                if (!nativeReceipt.Found)
+                    return Data(new { instanceId, processEpoch = session.Epoch, operationId, found = false,
+                        operationOutcome = "not_found", completionConfirmed = false, nativeReceiptAvailable = false });
+                PcbOperationsContract.ValidateNativeReceiptIdentity(nativeReceipt, operationId,
+                    expectedProcessEpoch, document, "zone-refill");
 
         string nativeReceiptJson = SchematicJson.Formatter.Format(nativeReceipt);
         if (HasTerminalZoneOutcome(nativeReceipt))
@@ -174,6 +167,9 @@ public sealed class PcbOperationsTools(InstanceRegistry registry)
             await Task.Delay(Math.Min(delayMs, remaining), cancellationToken);
             nativeReceipt = await ReadNativeReceipt(client, operationId, cancellationToken);
             nativeReceiptJson = SchematicJson.Formatter.Format(nativeReceipt);
+            if (nativeReceipt.Found)
+                PcbOperationsContract.ValidateNativeReceiptIdentity(nativeReceipt, operationId,
+                    expectedProcessEpoch, document, "zone-refill");
             if (HasTerminalZoneOutcome(nativeReceipt))
             {
                 DocumentLifecycleState settled = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
@@ -266,6 +262,8 @@ public sealed class PcbOperationsTools(InstanceRegistry registry)
         }
         var after = await ReadAfter(client, request.Board, "netlist import", operationId, cancellationToken);
         NativeCapabilityPcbReadOperationResponse nativeReceipt = await ReadNativeReceipt(client, operationId, cancellationToken);
+        PcbOperationsContract.ValidateNativeReceiptIdentity(nativeReceipt, operationId,
+            session.Epoch, request.Board, "netlist-import");
         bool changed = !before.Equals(after);
         if (request.DryRun && changed)
             throw new AutomationException("pcb_netlist_dry_run_changed", "The native dry-run changed the board; discard the result and inspect the board before any retry.");
@@ -305,6 +303,8 @@ public sealed class PcbOperationsTools(InstanceRegistry registry)
         }
         var after = await ReadAfter(client, request.Board, "zone refill", operationId, cancellationToken);
         NativeCapabilityPcbReadOperationResponse nativeReceipt = await ReadNativeReceipt(client, operationId, cancellationToken);
+        PcbOperationsContract.ValidateNativeReceiptIdentity(nativeReceipt, operationId,
+            session.Epoch, request.Board, "zone-refill");
         bool mayBeAsynchronous = request.Zones.Count == 0;
         bool terminal = HasTerminalZoneOutcome(nativeReceipt);
         bool completed = terminal && IsSuccessfulZoneOutcome(nativeReceipt);

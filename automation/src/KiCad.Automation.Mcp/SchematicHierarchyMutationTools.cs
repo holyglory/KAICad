@@ -25,7 +25,7 @@ public sealed class SchematicHierarchyMutationTools(InstanceRegistry registry)
         UseStructuredContent = true),
      Description("Create one complete hierarchical sheet symbol on the explicitly targeted loaded parent sheet. documentJson identifies the schematic root, targetDocumentJson identifies the parent sheet instance, expectedStateJson is the complete checked state returned by kicad_schematic_checked_state, and sheetJson is a complete SheetSymbol with a new UUID, childScreenId, filename, path and fields. Existing loaded child screens may be referenced, including repeated/shared instances; creating an unseen child requires a document-level hierarchy transaction and is refused. The checked native receipt makes an identical operationId retry safe after a lost reply. The edit remains unsaved until kicad_document_save is called."),
      KiCadCapability("schematic-design", "compiled-mcp plus native-api", "explicit root and target sheet, complete checked hierarchy, process epoch, revision and operation UUID"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TypedSchematicHierarchyAuthoringPersistsThroughMcp")]
     public Task<CallToolResult> CreateSheetSymbol(string instanceId, string documentJson,
         string targetDocumentJson, string expectedStateJson, string sheetJson, string operationId,
         CancellationToken cancellationToken) => Execute(instanceId, documentJson, targetDocumentJson,
@@ -36,7 +36,7 @@ public sealed class SchematicHierarchyMutationTools(InstanceRegistry registry)
         UseStructuredContent = true),
      Description("Read one exact SheetSymbol from the checked native hierarchy by UUID. The complete checked state, process epoch, native identity, revision and file baselines must still describe the same root; a changed hierarchy is rejected and no native edit occurs. The response includes the owning parent sheet and complete sheet-pin list."),
      KiCadCapability("schematic-design", "compiled-mcp plus native-api", "explicit root and sheet UUID, complete checked hierarchy and process epoch"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TypedSchematicHierarchyAuthoringPersistsThroughMcp")]
     public Task<CallToolResult> ReadSheetSymbol(string instanceId, string documentJson,
         string sheetId, string expectedStateJson, CancellationToken cancellationToken) =>
         ExecuteRead(instanceId, documentJson, expectedStateJson, sheetId, null, ReadKind.Sheet,
@@ -46,7 +46,7 @@ public sealed class SchematicHierarchyMutationTools(InstanceRegistry registry)
         UseStructuredContent = true),
      Description("Replace one complete SheetSymbol while retaining the explicit sheetId, parent sheet, child-screen identity and filename binding. Supply the exact checked state and a new operationId. Rebinding a sheet to another child or moving it to another parent requires an explicit hierarchy transaction and is refused. The edit is one native undo step and is unsaved until kicad_document_save."),
      KiCadCapability("schematic-design", "compiled-mcp plus native-api", "explicit root and sheet UUID, complete replacement, checked hierarchy, process epoch, revision and operation UUID"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TypedSchematicHierarchyAuthoringPersistsThroughMcp")]
     public Task<CallToolResult> UpdateSheetSymbol(string instanceId, string documentJson,
         string sheetId, string expectedStateJson, string sheetJson, string operationId,
         CancellationToken cancellationToken) => Execute(instanceId, documentJson, null,
@@ -57,7 +57,7 @@ public sealed class SchematicHierarchyMutationTools(InstanceRegistry registry)
         UseStructuredContent = true),
      Description("Delete one explicitly identified SheetSymbol from its checked parent sheet. The complete hierarchy checkpoint and child-screen identity are checked before dispatch; native rejection leaves the hierarchy unchanged. Reuse the same operationId only with the same request after a lost reply. The edit is unsaved until kicad_document_save."),
      KiCadCapability("schematic-design", "compiled-mcp plus native-api", "explicit root and sheet UUID, checked hierarchy, process epoch, revision and operation UUID"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TypedSchematicHierarchyAuthoringPersistsThroughMcp")]
     public Task<CallToolResult> DeleteSheetSymbol(string instanceId, string documentJson,
         string sheetId, string expectedStateJson, string operationId,
         CancellationToken cancellationToken) => Execute(instanceId, documentJson, null,
@@ -68,7 +68,7 @@ public sealed class SchematicHierarchyMutationTools(InstanceRegistry registry)
         UseStructuredContent = true),
      Description("Add one typed SheetPin to an existing SheetSymbol. parentSheetId identifies the exact parent object in the checked hierarchy; pinJson is a complete SheetPin with a new UUID, text, position, side and electrical shape. The parent SheetSymbol is replaced atomically, preserving every other pin and field. The operation is checked, replayable and unsaved until kicad_document_save."),
      KiCadCapability("schematic-design", "compiled-mcp plus native-api", "explicit root and parent sheet UUID, complete checked hierarchy, process epoch, revision and operation UUID"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TypedSchematicHierarchyAuthoringPersistsThroughMcp")]
     public Task<CallToolResult> CreateSheetPin(string instanceId, string documentJson,
         string parentSheetId, string expectedStateJson, string pinJson, string operationId,
         CancellationToken cancellationToken) => Execute(instanceId, documentJson, null,
@@ -79,7 +79,7 @@ public sealed class SchematicHierarchyMutationTools(InstanceRegistry registry)
         UseStructuredContent = true),
      Description("Read one exact SheetPin nested in a SheetSymbol from the checked hierarchy. Supply the parent sheet UUID and pin UUID. The response includes the complete pin, owning SheetSymbol and parent sheet document; it refuses stale state before returning data."),
      KiCadCapability("schematic-design", "compiled-mcp plus native-api", "explicit root, parent sheet UUID and pin UUID, complete checked hierarchy and process epoch"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TypedSchematicHierarchyAuthoringPersistsThroughMcp")]
     public Task<CallToolResult> ReadSheetPin(string instanceId, string documentJson,
         string parentSheetId, string pinId, string expectedStateJson,
         CancellationToken cancellationToken) => ExecuteRead(instanceId, documentJson,
@@ -89,7 +89,7 @@ public sealed class SchematicHierarchyMutationTools(InstanceRegistry registry)
         UseStructuredContent = true),
      Description("Replace one complete SheetPin identified by pinId inside its explicitly identified parent SheetSymbol. Its UUID and parent remain fixed; the checked batch preserves all sibling pins and sheet properties, and exact operation replay is supported. The edit is unsaved until kicad_document_save."),
      KiCadCapability("schematic-design", "compiled-mcp plus native-api", "explicit root, parent sheet UUID and pin UUID, complete replacement, checked hierarchy, process epoch, revision and operation UUID"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TypedSchematicHierarchyAuthoringPersistsThroughMcp")]
     public Task<CallToolResult> UpdateSheetPin(string instanceId, string documentJson,
         string parentSheetId, string pinId, string expectedStateJson, string pinJson, string operationId,
         CancellationToken cancellationToken) => Execute(instanceId, documentJson, null,
@@ -100,7 +100,7 @@ public sealed class SchematicHierarchyMutationTools(InstanceRegistry registry)
         UseStructuredContent = true),
      Description("Delete one SheetPin from the explicitly identified parent SheetSymbol. The complete checked hierarchy and parent UUID are admitted before one atomic parent replacement; stale, rejected and indeterminate receipts remain errors and do not claim a deletion. The edit is unsaved until kicad_document_save."),
      KiCadCapability("schematic-design", "compiled-mcp plus native-api", "explicit root, parent sheet UUID and pin UUID, checked hierarchy, process epoch, revision and operation UUID"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TypedSchematicHierarchyAuthoringPersistsThroughMcp")]
     public Task<CallToolResult> DeleteSheetPin(string instanceId, string documentJson,
         string parentSheetId, string pinId, string expectedStateJson, string operationId,
         CancellationToken cancellationToken) => Execute(instanceId, documentJson, null,
@@ -111,7 +111,7 @@ public sealed class SchematicHierarchyMutationTools(InstanceRegistry registry)
         UseStructuredContent = true),
      Description("Create a typed HierarchicalLabel on an explicitly targeted loaded child or root sheet. labelJson carries a new UUID, text, position, shape, spin and fields; targetDocumentJson binds the label to its physical sheet. The checked batch is atomic, replayable by operationId and unsaved until kicad_document_save."),
      KiCadCapability("schematic-design", "compiled-mcp plus native-api", "explicit root and target sheet, complete checked hierarchy, process epoch, revision and operation UUID"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TypedSchematicHierarchyAuthoringPersistsThroughMcp")]
     public Task<CallToolResult> CreateHierarchicalLabel(string instanceId, string documentJson,
         string targetDocumentJson, string expectedStateJson, string labelJson, string operationId,
         CancellationToken cancellationToken) => Execute(instanceId, documentJson, targetDocumentJson,
@@ -122,7 +122,7 @@ public sealed class SchematicHierarchyMutationTools(InstanceRegistry registry)
         UseStructuredContent = true),
      Description("Read one exact HierarchicalLabel by UUID from the checked hierarchy, including its owning sheet. A complete state checkpoint is required and stale observations are refused."),
      KiCadCapability("schematic-design", "compiled-mcp plus native-api", "explicit root and label UUID, complete checked hierarchy and process epoch"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TypedSchematicHierarchyAuthoringPersistsThroughMcp")]
     public Task<CallToolResult> ReadHierarchicalLabel(string instanceId, string documentJson,
         string labelId, string expectedStateJson, CancellationToken cancellationToken) =>
         ExecuteRead(instanceId, documentJson, expectedStateJson, labelId, null, ReadKind.Label,
@@ -132,7 +132,7 @@ public sealed class SchematicHierarchyMutationTools(InstanceRegistry registry)
         UseStructuredContent = true),
      Description("Replace one complete HierarchicalLabel identified by labelId while retaining its UUID and owning sheet. The checked state, native receipt and operationId prevent stale or duplicate edits; the result remains unsaved until kicad_document_save."),
      KiCadCapability("schematic-design", "compiled-mcp plus native-api", "explicit root and label UUID, complete replacement, checked hierarchy, process epoch, revision and operation UUID"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TypedSchematicHierarchyAuthoringPersistsThroughMcp")]
     public Task<CallToolResult> UpdateHierarchicalLabel(string instanceId, string documentJson,
         string labelId, string expectedStateJson, string labelJson, string operationId,
         CancellationToken cancellationToken) => Execute(instanceId, documentJson, null,
@@ -143,7 +143,7 @@ public sealed class SchematicHierarchyMutationTools(InstanceRegistry registry)
         UseStructuredContent = true),
      Description("Delete one explicitly identified HierarchicalLabel from its checked sheet. The operation is atomic, revision guarded and replayable; use kicad_document_save to persist it."),
      KiCadCapability("schematic-design", "compiled-mcp plus native-api", "explicit root and label UUID, checked hierarchy, process epoch, revision and operation UUID"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TypedSchematicHierarchyAuthoringPersistsThroughMcp")]
     public Task<CallToolResult> DeleteHierarchicalLabel(string instanceId, string documentJson,
         string labelId, string expectedStateJson, string operationId,
         CancellationToken cancellationToken) => Execute(instanceId, documentJson, null,

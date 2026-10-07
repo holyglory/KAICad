@@ -117,7 +117,7 @@ public sealed class PcbDrcToolTests
                 "A malformed delete retry must fail before native dispatch.");
             Assert.AreEqual(5, transport.Calls);
             var valid = transport.State.Clone();
-            for (int variant = 0; variant < 11; ++variant)
+            for (int variant = 0; variant < 12; ++variant)
             {
                 transport.State = valid.Clone();
                 switch (variant)
@@ -141,6 +141,13 @@ public sealed class PcbDrcToolTests
                         transport.State.Status = (PcbDrcJobStatus)5; transport.State.WorkerFinished = true;
                         transport.State.SnapshotComplete = true; transport.State.ResultsFresh = false;
                         transport.State.ErrorCode = ""; transport.State.ErrorMessage = "";
+                        break;
+                    case 11:
+                        transport.State.Status = (PcbDrcJobStatus)6; transport.State.WorkerFinished = true;
+                        transport.State.SnapshotComplete = true; transport.State.ResultsFresh = false;
+                        transport.State.CancellationRequested = false;
+                        transport.State.ErrorCode = "document_changed";
+                        transport.State.ErrorMessage = "The live PCB changed while DRC was running";
                         break;
                 }
                 Assert.IsTrue((await tool.Job(transport.Session.InstanceId, json, valid.JobId,

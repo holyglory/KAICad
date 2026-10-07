@@ -326,6 +326,7 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
             || (state.GroupPayloadVerified && (state.VerifiedGroupChanges.Count == 0
                 || state.AfterGroupStates.Count != state.VerifiedGroupChanges.Count))
             || ((int)state.Status == 4 && !state.CancellationRequested)
+            || ((int)state.Status == 6 && !state.CancellationRequested)
             || ((int)state.Status is 5 or 6 or 7
                 && (string.IsNullOrWhiteSpace(state.ErrorCode) || string.IsNullOrWhiteSpace(state.ErrorMessage)))
             || state.Findings.Any(finding => !Guid.TryParseExact(finding.NativeId, "D", out _)

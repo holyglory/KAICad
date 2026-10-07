@@ -200,7 +200,7 @@ public sealed class PcbJobTools(InstanceRegistry registry)
     [McpServerTool(Name = "kicad_pcb_export_reconcile", ReadOnly = true),
      Description("Reconcile one durable typed PCB export after an MCP or native reconnect. Supply the exact instance, PCB document and operationId. A live native receipt is preferred when its process epoch still matches; otherwise the durable receipt and owned output/staging paths are inspected. Only a verified completed publication or a terminal result with no owned paths is retryable; indeterminate outcomes never authorize an automatic retry."),
      KiCadCapability("pcb-manufacturing", "compiled-mcp plus-native-task-export-recovery", "instance, typed PCB document, operation ID, durable request identity and owned output paths"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbManufacturingMcpProcessTests.TypedManufacturingToolPublishesJobSchemaAndRejectsMalformedIdentity")]
     public Task<CallToolResult> ExportReconcile(string instanceId, NativeDocumentInput documentInput,
         string operationId, CancellationToken cancellationToken) => Execute(async () =>
     {
@@ -314,7 +314,7 @@ public sealed class PcbJobTools(InstanceRegistry registry)
     [McpServerTool(Name = "kicad_pcb_export_cancel", ReadOnly = false),
      Description("Request cancellation of one exact typed PCB manufacturing export. KiCad's synchronous manufacturing protocol has no native cancellation command, so this tool always refuses cancellation after inspecting the durable operation identity and current receipt. It never reports a successful cancellation; use kicad_pcb_export_reconcile or kicad_pcb_export_receipt to recover the native outcome."),
      KiCadCapability("pcb-manufacturing", "cancellation-refusal", "exact instance, PCB document, process epoch and operation ID"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbManufacturingMcpProcessTests.TypedManufacturingToolPublishesJobSchemaAndRejectsMalformedIdentity")]
     public Task<CallToolResult> ExportCancel(string instanceId, NativeDocumentInput documentInput,
         string processEpoch, string operationId, CancellationToken cancellationToken) => Execute(async () =>
     {

@@ -363,7 +363,7 @@ public static class CheckedPcbRouteContract
                 throw Invalid("Grouped route changes may change direct members only; group metadata must remain exact.");
             var beforeMembers = before.Items.Select(RouteId).ToArray();
             var afterMembers = after.Items.Select(RouteId).ToArray();
-            if (beforeMembers.Any(string.IsNullOrEmpty) || afterMembers.Any(string.IsNullOrEmpty)
+            if (beforeMembers.Any(id => !Uuid(id)) || afterMembers.Any(id => !Uuid(id))
                 || beforeMembers.Distinct(StringComparer.Ordinal).Count() != beforeMembers.Length
                 || afterMembers.Distinct(StringComparer.Ordinal).Count() != afterMembers.Length)
                 throw Invalid("Grouped route membership must contain distinct canonical item identities.");

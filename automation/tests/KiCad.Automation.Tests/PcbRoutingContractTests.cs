@@ -379,6 +379,32 @@ public sealed class PcbRoutingContractTests
     }
 
     [TestMethod]
+    public void CheckedRouteGroupMembershipRequiresCanonicalItemIdentities()
+    {
+        var (request, track, state) = CleanRoute();
+        var group = new Group
+        {
+            Id = new() { Value = Guid.NewGuid().ToString("D") }, Name = "route-group",
+            Items = { new KIID { Value = "a2222222-2222-2222-2222-222222222222".ToUpperInvariant() } }
+        };
+        request.GroupChanges.Add(new NativeRouteGroupChange
+        {
+            ExpectedBefore = new NativeRouteGroupState
+            {
+                Group = group.Clone(), Kind = NativeRouteGroupKind.NrgkOrdinary
+            },
+            ExpectedAfter = new NativeRouteGroupState
+            {
+                Group = group.Clone(), Kind = NativeRouteGroupKind.NrgkOrdinary
+            }
+        });
+        request.Candidate.Items[0] = Any.Pack(track);
+
+        Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedPcbRouteContract.ValidateRequest(request, state.ProcessEpoch));
+    }
+
+    [TestMethod]
     public void RoutePreviewContractAcceptsOrdinaryGroupDeltaAndRejectsLegacyVersion()
     {
         var (request, source, state) = CleanRoute();

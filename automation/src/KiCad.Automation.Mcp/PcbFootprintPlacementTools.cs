@@ -236,7 +236,7 @@ public sealed class PcbFootprintPlacementTools(InstanceRegistry registry)
 
         JsonElement structured = JsonSerializer.SerializeToElement(new
         {
-            outcome.InstanceId,
+            instanceId = outcome.InstanceId,
             processEpoch = receipt?.ProcessEpoch ?? outcome.Request.ProcessEpoch,
             operationId = outcome.Request.OperationId,
             planId = plan.PlanId,

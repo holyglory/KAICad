@@ -152,7 +152,8 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
                 CheckedPcbRouteContract.ValidateRequest(checkedRequest, expected.ProcessEpoch);
                 CallToolResult checkedResult = await new PcbRoutingTools(registry).Commit(
                     instanceId, BoardJson.Formatter.Format(checkedRequest.Candidate),
-                    SchematicJson.Formatter.Format(checkedRequest.ExpectedState), checkedRequest.DrcJobId,
+                    SchematicJson.Formatter.Format(checkedRequest.ExpectedState),
+                    SchematicJson.Formatter.Format(drc),
                     checkedRequest.OperationId, removalsJson: BoardJson.Formatter.Format(checkedRequest.Removals),
                     cancellationToken: cancellationToken);
                 return CheckedRouteResult(checkedResult, drc);

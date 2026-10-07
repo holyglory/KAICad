@@ -111,6 +111,43 @@ public sealed class FootprintLibraryContractTests
             staleHash, operationId, "Fixture", "Probe", 73), "footprint_persistence_unverified");
     }
 
+    [TestMethod]
+    public void DefinitionReadbackRequiresExactSourceDestinationAndProcessIdentity()
+    {
+        string processEpoch = "11111111-1111-1111-1111-111111111111";
+        var source = Document("Source");
+        var destination = Document("Destination");
+        var before = new NativeCapabilityFootprintReadDefinitionResponse
+        {
+            Document = source.Clone(), ProcessEpoch = processEpoch
+        };
+        var after = new NativeCapabilityFootprintReadDefinitionResponse
+        {
+            Document = destination.Clone(), ProcessEpoch = processEpoch
+        };
+
+        FootprintLibraryContract.ValidateDefinitionReadbackIdentity(
+            before, after, source, destination, processEpoch, "footprint save-copy", "22222222-2222-2222-2222-222222222222");
+
+        var wrongDestination = after.Clone();
+        wrongDestination.Document.LibId.EntryName = "Other";
+        Reject(() => FootprintLibraryContract.ValidateDefinitionReadbackIdentity(
+            before, wrongDestination, source, destination, processEpoch, "footprint save-copy", "22222222-2222-2222-2222-222222222222"),
+            "footprint_persistence_unverified");
+
+        var wrongProcess = after.Clone();
+        wrongProcess.ProcessEpoch = "33333333-3333-3333-3333-333333333333";
+        Reject(() => FootprintLibraryContract.ValidateDefinitionReadbackIdentity(
+            before, wrongProcess, source, destination, processEpoch, "footprint save-copy", "22222222-2222-2222-2222-222222222222"),
+            "footprint_persistence_unverified");
+    }
+
+    private static DocumentSpecifier Document(string entryName) => new()
+    {
+        Type = DocumentType.DoctypeFootprint,
+        LibId = new() { LibraryNickname = "Fixture", EntryName = entryName }
+    };
+
     private static void Reject(Action action, string expectedCode)
     {
         AutomationException error = Assert.ThrowsExactly<AutomationException>(action);

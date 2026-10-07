@@ -318,7 +318,8 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
             string snapshotSha256 = await SnapshotHash(context, document, cancellationToken);
             NativeCapabilityFootprintReadDefinitionResponse persistedDefinition = await ReadPersistedDefinitionForVerification(
                 context, document, operationId, "footprint save", cancellationToken);
-            VerifyCanonicalPersistence(expectedDefinition, persistedDefinition, "footprint save", operationId);
+            VerifyCanonicalPersistence(expectedDefinition, persistedDefinition, document, document,
+                context.Session.Epoch, "footprint save", operationId);
             LibraryReadback readback = await VerifyLibraryEntry(context, document.LibId.LibraryNickname,
                 document.LibId.EntryName, operationId, "footprint save", cancellationToken);
             return Data(new
@@ -384,7 +385,8 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
             persistedDocument.LibId = canonicalTarget;
             NativeCapabilityFootprintReadDefinitionResponse persistedDefinition = await ReadPersistedDefinitionForVerification(
                 context, persistedDocument, operationId, "footprint save-copy", cancellationToken);
-            VerifyCanonicalPersistence(expectedDefinition, persistedDefinition, "footprint save-copy", operationId);
+            VerifyCanonicalPersistence(expectedDefinition, persistedDefinition, document, persistedDocument,
+                context.Session.Epoch, "footprint save-copy", operationId);
             LibraryReadback readback = await VerifyLibraryEntry(context, targetLibrary, targetName, operationId,
                 "footprint save-copy", cancellationToken);
             return Data(new
@@ -555,8 +557,14 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
 
     private static void VerifyCanonicalPersistence(
         NativeCapabilityFootprintReadDefinitionResponse before,
-        NativeCapabilityFootprintReadDefinitionResponse after, string operation, string operationId)
+        NativeCapabilityFootprintReadDefinitionResponse after,
+        DocumentSpecifier expectedBeforeDocument,
+        DocumentSpecifier expectedAfterDocument,
+        string expectedProcessEpoch,
+        string operation, string operationId)
     {
+        FootprintLibraryContract.ValidateDefinitionReadbackIdentity(before, after,
+            expectedBeforeDocument, expectedAfterDocument, expectedProcessEpoch, operation, operationId);
         if (!before.DefinitionComplete || !after.DefinitionComplete
             || string.IsNullOrWhiteSpace(before.ProviderSha256)
             || !string.Equals(before.ProviderSha256, after.ProviderSha256, StringComparison.OrdinalIgnoreCase)

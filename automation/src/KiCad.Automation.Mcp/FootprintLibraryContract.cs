@@ -96,6 +96,25 @@ internal static class FootprintLibraryContract
                 $"KiCad completed footprint-library delete operation {operationId}, but the native library readback did not prove that {libraryNickname}:{footprintName} is absent at modify hash {expectedModifyHash}.");
     }
 
+    internal static void ValidateDefinitionReadbackIdentity(
+        NativeCapabilityFootprintReadDefinitionResponse before,
+        NativeCapabilityFootprintReadDefinitionResponse after,
+        DocumentSpecifier expectedBeforeDocument,
+        DocumentSpecifier expectedAfterDocument,
+        string expectedProcessEpoch,
+        string operation,
+        string operationId)
+    {
+        if (before is null || after is null
+            || before.Document is null || !before.Document.Equals(expectedBeforeDocument)
+            || after.Document is null || !after.Document.Equals(expectedAfterDocument)
+            || string.IsNullOrWhiteSpace(expectedProcessEpoch)
+            || !string.Equals(before.ProcessEpoch, expectedProcessEpoch, StringComparison.Ordinal)
+            || !string.Equals(after.ProcessEpoch, expectedProcessEpoch, StringComparison.Ordinal))
+            throw new AutomationException("footprint_persistence_unverified",
+                $"KiCad completed {operation} operation {operationId}, but the definition readback identity did not match the source, destination or native process.");
+    }
+
     private static void ValidateOperationId(string value)
     {
         if (!Guid.TryParseExact(value, "D", out Guid operation) || operation == Guid.Empty)

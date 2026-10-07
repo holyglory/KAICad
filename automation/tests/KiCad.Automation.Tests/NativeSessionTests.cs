@@ -45,6 +45,9 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeCache")]
     public Task TypedSchematicCachesPersistAcrossSharedSheetsThroughMcp() => RunNativeSessions(NativeJourney.Cache);
 
+    [TestMethod, TestCategory("NativeSchematicMetadata")]
+    public Task TypedSchematicMetadataPersistsThroughMcp() => RunNativeSessions(NativeJourney.SchematicMetadata);
+
     [TestMethod, TestCategory("NativeOffscreenConnectedMove")]
     public Task OffscreenConnectedMovesPreserveTheVisibleEditor() => RunNativeSessions(NativeJourney.OffscreenMove);
 
@@ -139,7 +142,7 @@ public sealed partial class NativeSessionTests
 
     private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, RecursiveEditor, Simulation, PcbItems, PcbConnectivity, CrossProbe,
         PsuCpuSeed, PsuCpuComponentCreation, ConnectedRealization, DiagramCanvas, XmlRebuild, RepeatedSheetRebuild, ProjectRecovery, ProjectRecoveryContainer, OwnershipSync, NativeCrash, NativeCrashRelease,
-        ObserveApplyStress, RepeatedSheetOwnership, ComponentRebind, SymbolLibrary, RasterTrace, RasterTraceSchematic, Cache }
+        ObserveApplyStress, RepeatedSheetOwnership, ComponentRebind, SymbolLibrary, RasterTrace, RasterTraceSchematic, Cache, SchematicMetadata }
 
     private async Task RunNativeSessions(NativeJourney journey, string theme = "light")
     {
@@ -156,6 +159,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.SynchronizationPlan => "native-synchronization-plan",
                 NativeJourney.CheckedBatch => "native-checked-batch",
                 NativeJourney.Cache => "native-cache",
+                NativeJourney.SchematicMetadata => "native-schematic-metadata",
                 NativeJourney.OffscreenMove => "native-offscreen-move",
                 NativeJourney.TransformSync => "native-transform-sync",
                 NativeJourney.SymbolSheets => "native-symbol-sheet-ownership",
@@ -188,6 +192,7 @@ public sealed partial class NativeSessionTests
             NativeJourney.PcbItems => nameof(NativePcbItemsAreCreatedAndUpdatedThroughMcp),
             NativeJourney.PcbConnectivity => nameof(NativePcbConnectivityQueryUsesTypedNativeSummaries),
             NativeJourney.CrossProbe => nameof(NativePcbCrossProbeBindsTheLiveBoardWithoutMutation),
+            NativeJourney.SchematicMetadata => nameof(TypedSchematicMetadataPersistsThroughMcp),
             _ => ""
         };
         string evidence = caseIdentity.Length == 0 ? NativeEvidenceDirectory.Begin(evidenceRoot)
@@ -628,6 +633,9 @@ public sealed partial class NativeSessionTests
                                 error.ToString(), deadline.Token);
                         }
                     }
+                    else if (journey == NativeJourney.SchematicMetadata)
+                        await VerifyNativeSchematicMetadata(client, opened.Document, focusProcessId,
+                            ":" + displayNumber, evidence, target.Id, deadline.Token);
                     else if (journey == NativeJourney.RasterTrace)
                         await VerifyNativeRasterTrace(client, evidence, target.Id, deadline.Token);
                     else if (journey == NativeJourney.RasterTraceSchematic)

@@ -65,6 +65,31 @@ public sealed partial class NativeSessionTests
                 if (Directory.Exists(stateDirectory)) Directory.Delete(stateDirectory, true);
             }
         }
+        async Task<JsonElement> SetProjectTextVariables(DocumentLifecycleState expected,
+            IReadOnlyDictionary<string, string> variables, string mergeMode, string operationId, string phase)
+        {
+            string stateDirectory = Directory.CreateTempSubdirectory("kicad-project-text-variables-set-mcp-").FullName;
+            try
+            {
+                await using var mcp = await StdioMcpFixture.StartAsync(
+                    stateDirectory, Path.Combine(evidence, processId + "-project-text-variables-set-mcp-" + phase + ".stderr.log"), token);
+                var session = await client.HandshakeAsync(token);
+                RequireToolSuccess(await mcp.Tool("kicad_instance_attach", new
+                { endpoint = client.Endpoint, expectedInstanceId = session.InstanceId }));
+                return await mcp.Tool("kicad_project_text_variables_set", new
+                {
+                    instanceId = session.InstanceId,
+                    project = new { name = document.Project.Name, path = document.Project.Path },
+                    document = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(document)),
+                    expectedStateJson = SchematicJson.Formatter.Format(expected),
+                    variables, mergeMode, operationId
+                });
+            }
+            finally
+            {
+                if (Directory.Exists(stateDirectory)) Directory.Delete(stateDirectory, true);
+            }
+        }
         static void AssertProjectNetClasses(JsonElement reply, DocumentLifecycleState expected, string phase)
         {
             RequireToolSuccess(reply);
@@ -187,6 +212,31 @@ public sealed partial class NativeSessionTests
         var originalLifecycle = await ObserveLifecycleState(client, document, token);
         AssertProjectNetClasses(await ReadProjectNetClasses(originalLifecycle, "initial"), originalLifecycle, "initial");
         await AssertProjectTextVariables(await ReadProjectTextVariables(originalLifecycle, "initial"), originalLifecycle, "initial");
+        var projectDocument = new DocumentSpecifier { Type = DocumentType.DoctypeProject, Project = document.Project.Clone() };
+        var originalTextVariables = (await client.InvokeAsync<GetTextVariables, Kiapi.Common.Project.TextVariables>(
+            new() { Document = projectDocument }, token)).Variables.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+        var changedTextVariables = new Dictionary<string, string>(originalTextVariables, StringComparer.Ordinal)
+        { ["AUTOMATION_TEXT_VARIABLE"] = "checked-native-value" };
+        string textVariablesOperation = Guid.NewGuid().ToString("D");
+        var textVariablesSet = await SetProjectTextVariables(originalLifecycle, changedTextVariables, "MMM_REPLACE",
+            textVariablesOperation, "set");
+        RequireToolSuccess(textVariablesSet);
+        var textVariablesSetData = textVariablesSet.GetProperty("structuredContent");
+        Assert.IsTrue(textVariablesSetData.GetProperty("committed").GetBoolean());
+        Assert.IsFalse(textVariablesSetData.GetProperty("replayed").GetBoolean());
+        Assert.AreEqual(changedTextVariables.Count, textVariablesSetData.GetProperty("afterVariables").EnumerateObject().Count());
+        foreach (var pair in changedTextVariables)
+            Assert.AreEqual(pair.Value, textVariablesSetData.GetProperty("afterVariables").GetProperty(pair.Key).GetString());
+        var nativeChangedTextVariables = (await client.InvokeAsync<GetTextVariables, Kiapi.Common.Project.TextVariables>(
+            new() { Document = projectDocument }, token)).Variables;
+        Assert.AreEqual(changedTextVariables.Count, nativeChangedTextVariables.Count);
+        Assert.AreEqual(changedTextVariables["AUTOMATION_TEXT_VARIABLE"], nativeChangedTextVariables["AUTOMATION_TEXT_VARIABLE"]);
+        var textVariablesReplay = await SetProjectTextVariables(originalLifecycle, changedTextVariables, "MMM_REPLACE",
+            textVariablesOperation, "replay");
+        RequireToolSuccess(textVariablesReplay);
+        Assert.IsTrue(textVariablesReplay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean());
+        Assert.IsTrue(textVariablesReplay.GetProperty("structuredContent").GetProperty("committed").GetBoolean());
+        await SetProjectTextVariables(originalLifecycle, originalTextVariables, "MMM_REPLACE", Guid.NewGuid().ToString("D"), "restore");
         var desired = original.Data.Clone(); var settings = desired.Metadata.NetSettings;
         settings.DefaultClass.Schematic.WireWidth = new() { ValueNm = 50800 };
         settings.DefaultClass.Board.TrackWidth = new() { ValueNm = 450000 };

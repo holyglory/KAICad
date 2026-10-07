@@ -1,4 +1,6 @@
 using System.ComponentModel;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Google.Protobuf;
 using Kiapi.Common.Commands;
@@ -177,12 +179,12 @@ public sealed class ProjectSettingsTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_project_text_variables_set", ReadOnly = false),
-     Description("Checked admission boundary for project text-variable writes. The native SetTextVariables command has no revision token, recoverable receipt, rollback proof or lost-reply replay contract, so this tool validates the project, lifecycle checkpoint, operation ID and requested map, then refuses without contacting KiCad."),
-     KiCadCapability("project-settings", "checked-admission-only", "explicit project, lifecycle document, expected revision, operation ID and variable map"),
+     Description("Set project text variables with a native map-digest admission, process-owned operation receipt and save/readback outcome. The legacy SetTextVariables command remains unchanged; this typed path refuses stale maps, mismatched projects and operation reuse."),
+     KiCadCapability("project-settings", "checked-native-common-api", "explicit project, lifecycle document, expected revision, operation ID and variable map"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> SetTextVariables(string instanceId, NativeProjectInput project,
         NativeDocumentInput document, string expectedStateJson, Dictionary<string, string> variables,
-        string mergeMode, Guid operationId, CancellationToken cancellationToken) => Execute(() =>
+        string mergeMode, Guid operationId, CancellationToken cancellationToken) => Execute(async () =>
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (operationId == Guid.Empty)
@@ -204,9 +206,70 @@ public sealed class ProjectSettingsTools(InstanceRegistry registry)
             || variables.Values.Any(value => value is null || value.Contains('\0')))
             throw new AutomationException("invalid_project_text_variables_request",
                 "The requested text-variable map is unnamed, duplicated, oversized or contains a NUL value.");
-        throw new AutomationException("project_text_variables_mutation_unavailable",
-            "Project text-variable writes remain disabled until the native owner supplies revision-safe receipts, rollback and lost-reply recovery.");
+        NativeClient client = registry.Client(instanceId);
+        AutomationSession session = await client.HandshakeAsync(cancellationToken);
+        if (session.Epoch != expected.ProcessEpoch)
+            throw new AutomationException("project_settings_instance_changed",
+                "The expected project state belongs to another native process epoch.");
+        DocumentLifecycleState before = await ReadState(client, target, cancellationToken);
+        ValidateTextVariableObserved(target, before);
+        // The native checked command admits the write against the complete
+        // project-variable digest. A changed lifecycle checkpoint is allowed
+        // here so an operation ID can replay its original receipt after the
+        // successful write advanced the document observation.
+        Kiapi.Common.Project.TextVariables current = await client.InvokeAsync<GetTextVariables,
+            Kiapi.Common.Project.TextVariables>(new() { Document = projectDocument }, cancellationToken);
+        string expectedVariablesSha256 = Digest(current.Variables);
+        SetTextVariablesCheckedResponse response;
+        try
+        {
+            response = await client.InvokeAsync<SetTextVariablesChecked, SetTextVariablesCheckedResponse>(new()
+            {
+                Project = projectDocument,
+                Document = target,
+                OperationId = operationId.ToString("D"),
+                ProcessEpoch = session.Epoch,
+                ExpectedVariablesSha256 = expectedVariablesSha256,
+                Variables = new Kiapi.Common.Project.TextVariables { Variables = { variables } },
+                MergeMode = mergeMode == "MMM_REPLACE" ? MapMergeMode.MmmReplace : MapMergeMode.MmmMerge
+            }, cancellationToken);
+        }
+        catch (NativeApiException error) when (error.Status == (int)Kiapi.Common.ApiStatusCode.AsUnhandled
+            || error.Status == (int)Kiapi.Common.ApiStatusCode.AsUnimplemented)
+        {
+            throw new AutomationException("project_text_variables_mutation_unavailable",
+                "The connected native peer does not provide checked project text-variable mutation.");
+        }
+        if (response.Project is null || !response.Project.Equals(projectDocument)
+            || response.Document is null || !response.Document.Equals(target)
+            || response.OperationId != operationId.ToString("D") || response.ProcessEpoch != session.Epoch
+            || response.BeforeVariablesSha256 != expectedVariablesSha256)
+            throw new AutomationException("invalid_project_text_variables_response",
+                "Native checked text-variable mutation did not preserve its project, document, operation or map identity.");
+        var structured = new
+        {
+            instanceId, processEpoch = session.Epoch, project = projectDocument, document = target,
+            operationId = response.OperationId, committed = response.Committed, replayed = response.Replayed,
+            rollbackCompleted = response.RollbackCompleted, beforeVariablesSha256 = response.BeforeVariablesSha256,
+            afterVariablesSha256 = response.AfterVariablesSha256,
+            beforeVariables = response.BeforeVariables.Variables.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
+            afterVariables = response.AfterVariables.Variables.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
+            errorCode = response.ErrorCode, errorMessage = response.ErrorMessage
+        };
+        return Data(structured, !response.Committed);
     });
+
+    private static string Digest(IReadOnlyDictionary<string, string> variables)
+    {
+        var bytes = new List<byte>();
+        foreach (var pair in variables.OrderBy(pair => pair.Key, StringComparer.Ordinal))
+        {
+            byte[] key = Encoding.UTF8.GetBytes(pair.Key); byte[] value = Encoding.UTF8.GetBytes(pair.Value);
+            bytes.AddRange(Encoding.UTF8.GetBytes(key.Length.ToString())); bytes.Add((byte)'\n'); bytes.AddRange(key);
+            bytes.AddRange(Encoding.UTF8.GetBytes(value.Length.ToString())); bytes.Add((byte)'\n'); bytes.AddRange(value);
+        }
+        return Convert.ToHexStringLower(SHA256.HashData(bytes.ToArray()));
+    }
 
     private static DocumentSpecifier ProjectDocument(NativeProjectInput project)
     {
@@ -318,12 +381,13 @@ public sealed class ProjectSettingsTools(InstanceRegistry registry)
         }
     }
 
-    private static CallToolResult Data(object value)
+    private static CallToolResult Data(object value, bool error = false)
     {
         JsonElement structured = JsonSerializer.SerializeToElement(value,
             new JsonSerializerOptions(JsonSerializerDefaults.Web));
         return new CallToolResult
         {
+            IsError = error,
             StructuredContent = structured,
             Content = [new TextContentBlock { Text = structured.GetRawText() }]
         };

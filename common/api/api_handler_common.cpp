@@ -20,6 +20,7 @@
 
 #include <ranges>
 #include <tuple>
+#include <cctype>
 
 #include <api/api_handler_common.h>
 #include <api/api_server.h>
@@ -74,6 +75,48 @@ void Fail( ApiResponseStatus& aError, const char* aCode, const std::string& aMes
 {
     aError.set_status( ApiStatusCode::AS_BAD_REQUEST );
     aError.set_error_message( std::string( aCode ) + ": " + aMessage );
+}
+
+bool IsOperationId( const std::string& aValue )
+{
+    if( aValue.size() != 36 ) return false;
+    for( size_t index = 0; index < aValue.size(); ++index )
+    {
+        if( index == 8 || index == 13 || index == 18 || index == 23 )
+        {
+            if( aValue[index] != '-' ) return false;
+        }
+        else if( !std::isxdigit( static_cast<unsigned char>( aValue[index] ) ) )
+            return false;
+    }
+    return true;
+}
+
+std::string TextVariablesDigest( const std::map<std::string, std::string>& aVariables )
+{
+    NATIVE_STATE_DIGEST digest;
+    for( const auto& [key, value] : aVariables )
+    {
+        digest.Append( std::to_string( key.size() ) ); digest.Append( "\n" ); digest.Append( key );
+        digest.Append( std::to_string( value.size() ) ); digest.Append( "\n" ); digest.Append( value );
+    }
+    return digest.Hex();
+}
+
+std::map<std::string, std::string> ReadTextVariables( const PROJECT& aProject )
+{
+    std::map<std::string, std::string> variables;
+    for( const auto& [key, value] : aProject.GetTextVars() )
+        variables.emplace( key.ToUTF8().ToStdString(), value.ToUTF8().ToStdString() );
+    return variables;
+}
+
+void PackTextVariables( const std::map<std::string, std::string>& aVariables,
+                        project::TextVariables& aOutput )
+{
+    aOutput.mutable_variables()->clear();
+    for( const auto& [key, value] : aVariables )
+        ( *aOutput.mutable_variables() )[key] = value;
 }
 
 std::optional<ApiResponseStatus> ValidateProjectVariableTarget( const DocumentSpecifier& aDocument,
@@ -215,6 +258,8 @@ API_HANDLER_COMMON::API_HANDLER_COMMON() :
             &API_HANDLER_COMMON::handleGetTextVariables );
     registerHandler<SetTextVariables, Empty>(
             &API_HANDLER_COMMON::handleSetTextVariables );
+    registerHandler<SetTextVariablesChecked, SetTextVariablesCheckedResponse>(
+            &API_HANDLER_COMMON::handleSetTextVariablesChecked );
     registerHandler<kiapi::automation::v1::RasterTraceRequest,
                     kiapi::automation::v1::RasterTraceResult>( &API_HANDLER_COMMON::handleRasterTrace );
 
@@ -682,6 +727,157 @@ HANDLER_RESULT<Empty> API_HANDLER_COMMON::handleSetTextVariables(
     }
 
     return Empty();
+}
+
+
+HANDLER_RESULT<SetTextVariablesCheckedResponse> API_HANDLER_COMMON::handleSetTextVariablesChecked(
+        const HANDLER_CONTEXT<SetTextVariablesChecked>& aCtx )
+{
+    const auto& request = aCtx.Request;
+    SetTextVariablesCheckedResponse response;
+
+    if( !request.has_project() || request.project().type() != DOCTYPE_PROJECT
+        || !request.has_document() || request.document().type() == DOCTYPE_PROJECT )
+    {
+        ApiResponseStatus error;
+        Fail( error, "project_text_variables_target_invalid",
+              "checked text-variable writes require a project descriptor and a schematic or PCB lifecycle document" );
+        return tl::unexpected( error );
+    }
+
+    PROJECT& project = Pgm().GetSettingsManager().Prj();
+    if( project.IsNullProject() )
+    {
+        ApiResponseStatus error;
+        Fail( error, "project_text_variables_project_unavailable", "no valid project is loaded" );
+        return tl::unexpected( error );
+    }
+
+    if( auto target = ValidateProjectVariableTarget( request.project(), project, apiServerOrNull() ) )
+        return tl::unexpected( *target );
+    if( auto target = ValidateProjectVariableTarget( request.document(), project, apiServerOrNull() ) )
+        return tl::unexpected( *target );
+    if( !IsOperationId( request.operation_id() ) || request.operation_id().find( '\0' ) != std::string::npos )
+    {
+        ApiResponseStatus error;
+        Fail( error, "invalid_operation_id", "A canonical operation UUID is required" );
+        return tl::unexpected( error );
+    }
+    if( request.process_epoch().empty() || request.process_epoch().find( '\0' ) != std::string::npos
+        || ( apiServerOrNull() && request.process_epoch() != apiServerOrNull()->Token() ) )
+    {
+        ApiResponseStatus error;
+        Fail( error, "stale_process_epoch", "The checked text-variable request belongs to another native process epoch" );
+        return tl::unexpected( error );
+    }
+    if( !IsSha256( request.expected_variables_sha256() ) )
+    {
+        ApiResponseStatus error;
+        Fail( error, "invalid_project_text_variables_revision", "expected_variables_sha256 must be a lowercase SHA-256 digest" );
+        return tl::unexpected( error );
+    }
+    if( request.merge_mode() != MapMergeMode::MMM_MERGE && request.merge_mode() != MapMergeMode::MMM_REPLACE )
+    {
+        ApiResponseStatus error;
+        Fail( error, "invalid_project_text_variables_merge_mode", "merge_mode must be MMM_MERGE or MMM_REPLACE" );
+        return tl::unexpected( error );
+    }
+    if( request.variables().variables_size() > 4096 )
+    {
+        ApiResponseStatus error;
+        Fail( error, "invalid_project_text_variables_request", "A project text-variable mutation is limited to 4096 entries" );
+        return tl::unexpected( error );
+    }
+    for( const auto& [key, value] : request.variables().variables() )
+    {
+        if( key.empty() || key.find( '\0' ) != std::string::npos || value.find( '\0' ) != std::string::npos )
+        {
+            ApiResponseStatus error;
+            Fail( error, "invalid_project_text_variables_request", "Project text-variable names and values must be nonempty and NUL-free" );
+            return tl::unexpected( error );
+        }
+    }
+
+    std::map<std::string, std::string> requested;
+    for( const auto& [key, value] : request.variables().variables() ) requested.emplace( key, value );
+    NATIVE_STATE_DIGEST fingerprint;
+    fingerprint.Append( request.project().SerializeAsString() );
+    fingerprint.Append( request.document().SerializeAsString() );
+    fingerprint.Append( request.process_epoch() );
+    fingerprint.Append( std::to_string( request.merge_mode() ) );
+    fingerprint.Append( TextVariablesDigest( requested ) );
+    const std::string fingerprintValue = fingerprint.Hex();
+
+    auto prior = m_textVariablesReceipts.find( request.operation_id() );
+    if( prior != m_textVariablesReceipts.end() )
+    {
+        if( prior->second.fingerprint != fingerprintValue )
+        {
+            ApiResponseStatus error;
+            Fail( error, "operation_id_reused", "The operation ID is already bound to another project text-variable request" );
+            return tl::unexpected( error );
+        }
+        response = prior->second.response;
+        response.set_replayed( true );
+        return response;
+    }
+
+    const std::map<std::string, std::string> before = ReadTextVariables( project );
+    const std::string beforeDigest = TextVariablesDigest( before );
+    if( beforeDigest != request.expected_variables_sha256() )
+    {
+        ApiResponseStatus error;
+        Fail( error, "project_text_variables_stale", "The project text-variable map changed; inspect a fresh map before writing" );
+        return tl::unexpected( error );
+    }
+
+    std::map<std::string, std::string> after = request.merge_mode() == MapMergeMode::MMM_REPLACE
+            ? requested : before;
+    if( request.merge_mode() == MapMergeMode::MMM_MERGE )
+        for( const auto& [key, value] : requested ) after[key] = value;
+
+    auto writeMap = [&]( const std::map<std::string, std::string>& values )
+    {
+        auto& native = project.GetTextVars();
+        native.clear();
+        for( const auto& [key, value] : values ) native[wxString::FromUTF8( key )] = wxString::FromUTF8( value );
+    };
+    writeMap( after );
+
+    response.mutable_project()->CopyFrom( request.project() );
+    response.mutable_document()->CopyFrom( request.document() );
+    response.set_operation_id( request.operation_id() );
+    response.set_process_epoch( request.process_epoch() );
+    response.set_before_variables_sha256( beforeDigest );
+    response.set_after_variables_sha256( TextVariablesDigest( after ) );
+    PackTextVariables( before, *response.mutable_before_variables() );
+    PackTextVariables( after, *response.mutable_after_variables() );
+
+    if( !Pgm().GetSettingsManager().SaveProject( wxEmptyString, &project ) )
+    {
+        writeMap( before );
+        bool rollback = Pgm().GetSettingsManager().SaveProject( wxEmptyString, &project );
+        response.set_committed( false ); response.set_rollback_completed( rollback );
+        response.set_error_code( "project_variables_save_failed" );
+        response.set_error_message( "KiCad could not save the checked project text-variable mutation" );
+        return response;
+    }
+
+    const std::map<std::string, std::string> readback = ReadTextVariables( project );
+    if( readback != after )
+    {
+        writeMap( before );
+        bool rollback = Pgm().GetSettingsManager().SaveProject( wxEmptyString, &project );
+        response.set_committed( false ); response.set_rollback_completed( rollback );
+        response.set_error_code( "project_variables_readback_mismatch" );
+        response.set_error_message( "The checked project text-variable save did not read back the requested map" );
+        return response;
+    }
+
+    response.set_committed( true );
+    response.set_rollback_completed( false );
+    m_textVariablesReceipts.emplace( request.operation_id(), TEXT_VARIABLES_RECEIPT{ fingerprintValue, response } );
+    return response;
 }
 
 

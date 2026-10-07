@@ -507,7 +507,7 @@ public sealed class McpProcessTests
             });
             Assert.IsTrue(refusedProjectTextVariablesSet.GetProperty("result").GetProperty("isError").GetBoolean(),
                 refusedProjectTextVariablesSet.GetRawText());
-            Assert.AreEqual("project_text_variables_mutation_unavailable",
+            Assert.AreEqual("unknown_instance",
                 refusedProjectTextVariablesSet.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(),
                 refusedProjectTextVariablesSet.GetRawText());
             var nullProjectTextVariablesSet = await Request(9374, "tools/call", new

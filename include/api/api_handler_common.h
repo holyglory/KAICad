@@ -22,6 +22,7 @@
 #define KICAD_API_HANDLER_COMMON_H
 
 #include <functional>
+#include <map>
 
 #include <google/protobuf/empty.pb.h>
 
@@ -93,6 +94,9 @@ private:
     HANDLER_RESULT<Empty> handleSetTextVariables(
         const HANDLER_CONTEXT<commands::SetTextVariables>& aCtx );
 
+    HANDLER_RESULT<commands::SetTextVariablesCheckedResponse> handleSetTextVariablesChecked(
+        const HANDLER_CONTEXT<commands::SetTextVariablesChecked>& aCtx );
+
     HANDLER_RESULT<commands::OpenDocumentResponse> handleOpenDocument(
         const HANDLER_CONTEXT<commands::OpenDocument>& aCtx );
 
@@ -109,6 +113,14 @@ private:
     OPEN_DOCUMENT_HANDLER m_openDocumentHandler;
     CLOSE_ALL_DOCUMENTS_HANDLER m_closeAllDocumentsHandler;
     CLOSE_DOCUMENT_HANDLER m_closeDocumentHandler;
+
+    struct TEXT_VARIABLES_RECEIPT
+    {
+        std::string fingerprint;
+        commands::SetTextVariablesCheckedResponse response;
+    };
+
+    std::map<std::string, TEXT_VARIABLES_RECEIPT> m_textVariablesReceipts;
 };
 
 #endif //KICAD_API_HANDLER_COMMON_H

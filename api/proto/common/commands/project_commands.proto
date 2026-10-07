@@ -86,6 +86,41 @@ message SetTextVariables
   kiapi.common.types.MapMergeMode merge_mode = 3;
 }
 
+// Revision-safe project text-variable mutation for typed automation callers.
+// The legacy SetTextVariables command remains unchanged for existing SDKs.
+message SetTextVariablesChecked
+{
+  // The project descriptor used by the common project owner.
+  kiapi.common.types.DocumentSpecifier project = 1;
+  // An open schematic or PCB in the same project, used to bind the lifecycle
+  // checkpoint supplied by the managed caller.
+  kiapi.common.types.DocumentSpecifier document = 2;
+  string operation_id = 3;
+  string process_epoch = 4;
+  // Digest of the complete current project text-variable map, in canonical
+  // UTF-8 key/value order. The native owner refuses stale maps.
+  string expected_variables_sha256 = 5;
+  kiapi.common.project.TextVariables variables = 6;
+  kiapi.common.types.MapMergeMode merge_mode = 7;
+}
+
+message SetTextVariablesCheckedResponse
+{
+  kiapi.common.types.DocumentSpecifier project = 1;
+  kiapi.common.types.DocumentSpecifier document = 2;
+  string operation_id = 3;
+  string process_epoch = 4;
+  kiapi.common.project.TextVariables before_variables = 5;
+  kiapi.common.project.TextVariables after_variables = 6;
+  string before_variables_sha256 = 7;
+  string after_variables_sha256 = 8;
+  bool committed = 9;
+  bool replayed = 10;
+  bool rollback_completed = 11;
+  string error_code = 12;
+  string error_message = 13;
+}
+
 
 // Opens a document (currently only supported in CLI api-server mode)
 // A document cannot be opened unless no project is currently loaded or it is

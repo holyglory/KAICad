@@ -58,8 +58,7 @@ internal static class SchematicErcExecutionContract
             throw Invalid("A schematic document is required for a legacy ERC request.");
         DocumentStateTools.ValidateTarget(request.Document);
         if (request.ExpectedRevision is null
-            || !Guid.TryParseExact(request.ExpectedRevision.Epoch, "D", out var revisionEpoch)
-            || revisionEpoch == Guid.Empty)
+            || !IsCanonicalUuid(request.ExpectedRevision.Epoch))
             throw InvalidState("A legacy schematic ERC request requires a complete document revision.");
     }
 
@@ -167,11 +166,9 @@ internal static class SchematicErcExecutionContract
         if (state.Scope != DocumentLifecycleScope.DlsSchematicHierarchy
             || state.Document is null || !state.Document.Equals(document)
             || state.ProcessEpoch != processEpoch
-            || string.IsNullOrWhiteSpace(state.NativeIdentity)
-            || !Guid.TryParseExact(state.NativeIdentity, "D", out var nativeIdentity)
-            || nativeIdentity == Guid.Empty || state.Revision is null
-            || !Guid.TryParseExact(state.Revision.Epoch, "D", out var revisionEpoch)
-            || revisionEpoch == Guid.Empty || state.StateSha256.Length != 64
+            || !IsCanonicalUuid(state.NativeIdentity) || state.Revision is null
+            || !IsCanonicalUuid(state.Revision.Epoch) || state.Revision.Epoch != state.NativeIdentity
+            || state.StateSha256.Length != 64
             || !state.StateSha256.All(char.IsAsciiHexDigitLower))
             throw InvalidState("The native schematic ERC lifecycle state is incomplete or targets another revision.");
     }
@@ -186,9 +183,13 @@ internal static class SchematicErcExecutionContract
 
     private static void CanonicalUuid(string value, string label)
     {
-        if (!Guid.TryParseExact(value, "D", out var id) || id == Guid.Empty)
+        if (!IsCanonicalUuid(value))
             throw Invalid($"A nonempty canonical {label} is required.");
     }
+
+    private static bool IsCanonicalUuid(string? value) =>
+        Guid.TryParseExact(value, "D", out Guid id) && id != Guid.Empty
+        && string.Equals(value, id.ToString("D"), StringComparison.Ordinal);
 
     private static AutomationException Invalid(string message) =>
         new("invalid_schematic_erc_receipt", message);

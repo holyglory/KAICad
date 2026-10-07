@@ -1670,7 +1670,7 @@ command=["ctest","--test-dir","automation/artifacts/native","--tests-regex","^qa
 name="rendered"
 tier="development"
 requires=["native-build"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeSetupDraft","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-setup-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory~NativeSchematic","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-setup-tests"]
 retained_artifacts=[{name="native-setup-tests",path="automation/artifacts/native-setup-tests",max_bytes=16777216},{name="native-setup-evidence",path="automation/artifacts/native-setup-draft/native-session-current",max_bytes=33554432}]
 [test.bom-settings-model]
 timeout_seconds=600

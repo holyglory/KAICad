@@ -851,6 +851,13 @@ public sealed class McpProcessTests
                     documentJson = footprintDocument, path = "../unsafe", operationId = validOperation } });
             Assert.IsTrue(invalidFootprintCopy.GetProperty("result").GetProperty("isError").GetBoolean());
             Assert.AreEqual("invalid_footprint_copy_path", invalidFootprintCopy.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            var invalidFootprintCopyRevision = await Request(9370, "tools/call", new { name = "kicad_footprint_save_copy",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = validEpoch,
+                    documentJson = footprintDocument, path = "QFN-4", operationId = Guid.NewGuid().ToString("D"),
+                    expectedModifyHash = "not-a-number" } });
+            Assert.IsTrue(invalidFootprintCopyRevision.GetProperty("result").GetProperty("isError").GetBoolean());
+            Assert.AreEqual("invalid_footprint_library_revision", invalidFootprintCopyRevision.GetProperty("result")
+                .GetProperty("structuredContent").GetProperty("errorCode").GetString());
             var invalidFootprintRevert = await Request(9354, "tools/call", new { name = "kicad_footprint_revert",
                 arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = validEpoch,
                     documentJson = "{}", operationId = validOperation } });

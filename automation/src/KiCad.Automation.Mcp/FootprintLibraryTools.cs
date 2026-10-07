@@ -362,20 +362,24 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
         }));
 
     [McpServerTool(Name = "kicad_footprint_save_copy"),
-     Description("Save a detached copy of the explicitly identified footprint to a library entry without opening the copy. Before mutation this captures the complete editor definition under the intended destination identity; after native save it forces a persisted read of that destination and compares the full native-writer canonical hash and file baseline. A successful reply proves complete save-copy persistence; operationId and the existing receipts retain lost-reply reconciliation."),
-     KiCadCapability("footprint-library", "compiled-mcp plus native-footprint-api", "explicit footprint document, process epoch, operation ID, native process receipt; no lifecycle revision token"),
+     Description("Save a detached copy of the explicitly identified footprint to a library entry without opening the copy. Before mutation this captures the complete editor definition under the intended destination identity and, when expectedModifyHash is supplied, rejects a changed destination library before the native save-copy. The expected hash is bound to operation replay. After native save it forces a persisted read of that destination and compares the full native-writer canonical hash and file baseline. A successful reply proves complete save-copy persistence; operationId and the existing receipts retain lost-reply reconciliation."),
+     KiCadCapability("footprint-library", "compiled-mcp plus native-footprint-api", "explicit footprint document, process epoch, operation ID, optional native destination-library modify hash and native process receipt; no lifecycle revision token"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> SaveCopy(string instanceId, string expectedProcessEpoch, string documentJson,
         string path, string operationId, CancellationToken cancellationToken, bool overwrite = false,
-        bool includeProject = false) =>
-        Execute(() => WithReceipt(operationId, Fingerprint(instanceId, "save-copy", expectedProcessEpoch, documentJson + "\n" + path + "\n" + overwrite + "\n" + includeProject), async () =>
+        bool includeProject = false, string expectedModifyHash = "") =>
+        Execute(() => WithReceipt(operationId, Fingerprint(instanceId, "save-copy", expectedProcessEpoch,
+            documentJson + "\n" + path + "\n" + overwrite + "\n" + includeProject + "\n" + expectedModifyHash), async () =>
         {
             ValidateOperationId(operationId);
             ValidateEpoch(expectedProcessEpoch);
             DocumentSpecifier document = ParseFootprintDocument(documentJson);
             ValidateCopyPath(path);
-            NativeContext context = await Admit(instanceId, expectedProcessEpoch, cancellationToken);
             (string targetLibrary, string targetName) = ResolveCopyTarget(document, path);
+            ulong? expectedLibraryHash = ParseExpectedModifyHash(expectedModifyHash);
+            NativeContext context = await Admit(instanceId, expectedProcessEpoch, cancellationToken);
+            ulong beforeModifyHash = await EnsureLibraryModifyHash(context, targetLibrary,
+                expectedLibraryHash, cancellationToken);
             LibraryIdentifier canonicalTarget = new() { LibraryNickname = targetLibrary, EntryName = targetName };
             NativeCapabilityFootprintReadDefinitionResponse expectedDefinition = await ReadNativeDefinition(
                 context, document, (NativeFootprintDefinitionSource)2, canonicalTarget, cancellationToken);
@@ -423,7 +427,10 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
                 definitionCoverage = persistedCoverage,
                 fileBaseline = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(persistedDefinition.FileBaseline)),
                 persistedLibraryNickname = targetLibrary, persistedFootprintName = targetName,
+                beforeModifyHash,
+                expectedModifyHash = string.IsNullOrWhiteSpace(expectedModifyHash) ? null : expectedModifyHash,
                 persistedModifyHash = readback.ModifyHash,
+                revisionAdmission = expectedLibraryHash.HasValue ? "modify-hash-matched" : "not-requested",
                 copyOpened = false, transportRetrySafe = false,
                 replayableWithinProcess = true, receiptScope = nativeReceipt.Found ? "native-process" : "mcp-process",
                 nativeReceipt = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(nativeReceipt)), snapshotSha256,

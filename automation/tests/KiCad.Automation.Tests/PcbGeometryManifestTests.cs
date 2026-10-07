@@ -12,6 +12,57 @@ namespace KiCad.Automation.Tests;
 public sealed class PcbGeometryManifestTests
 {
     [TestMethod]
+    public void GeometryLayerAliasesResolveToCanonicalBoardLayersAndUnknownNamesAreRefused()
+    {
+        Assert.AreEqual(BoardLayer.BlFCu, PcbGeometryManifestTools.ParseLayer("F.Cu"));
+        Assert.AreEqual(BoardLayer.BlFCu, PcbGeometryManifestTools.ParseLayer("BL_F_Cu"));
+        Assert.AreEqual(BoardLayer.BlDwgsUser, PcbGeometryManifestTools.ParseLayer("Dwgs.User"));
+
+        var unknown = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbGeometryManifestTools.ParseLayer("F.NotARealLayer"));
+        Assert.AreEqual("invalid_pcb_render_geometry", unknown.Code);
+    }
+
+    [TestMethod]
+    public void GeometryProjectionUsesImageYAxisAndReportsUnclippedViewportIntersection()
+    {
+        var viewport = new PcbGeometryManifestTools.Viewport
+        {
+            MinXNm = -100, MinYNm = -200, MaxXNm = 900, MaxYNm = 800
+        };
+
+        PcbGeometryManifestTools.PixelPointProjection topLeft =
+            PcbGeometryManifestTools.ProjectPoint(-100, 800, viewport, 320, 240);
+        PcbGeometryManifestTools.PixelPointProjection bottomRight =
+            PcbGeometryManifestTools.ProjectPoint(900, -200, viewport, 320, 240);
+        PcbGeometryManifestTools.PixelPointProjection center =
+            PcbGeometryManifestTools.ProjectPoint(400, 300, viewport, 320, 240);
+
+        Assert.AreEqual(0d, topLeft.X, 1e-9);
+        Assert.AreEqual(0d, topLeft.Y, 1e-9);
+        Assert.AreEqual(320d, bottomRight.X, 1e-9);
+        Assert.AreEqual(240d, bottomRight.Y, 1e-9);
+        Assert.AreEqual(160d, center.X, 1e-9);
+        Assert.AreEqual(120d, center.Y, 1e-9);
+
+        PcbGeometryManifestTools.PixelBoundsProjection intersecting =
+            PcbGeometryManifestTools.ProjectBounds(-200, -300, 400, 900, viewport, 320, 240);
+        Assert.IsTrue(intersecting.IntersectsViewport);
+        Assert.AreEqual(-32d, intersecting.Left, 1e-9);
+        Assert.AreEqual(-24d, intersecting.Top, 1e-9);
+        Assert.AreEqual(160d, intersecting.Right, 1e-9);
+        Assert.AreEqual(264d, intersecting.Bottom, 1e-9);
+        Assert.AreEqual(192d, intersecting.Width, 1e-9);
+        Assert.AreEqual(288d, intersecting.Height, 1e-9);
+
+        PcbGeometryManifestTools.PixelBoundsProjection outside =
+            PcbGeometryManifestTools.ProjectBounds(1000, 900, 1100, 1000, viewport, 320, 240);
+        Assert.IsFalse(outside.IntersectsViewport);
+        Assert.IsTrue(outside.Left > 320d);
+        Assert.IsTrue(outside.Top < 0d);
+    }
+
+    [TestMethod]
     public void GeometryProjectionIncludesPadStackDrillAndZoneVertices()
     {
         var pad = new Pad

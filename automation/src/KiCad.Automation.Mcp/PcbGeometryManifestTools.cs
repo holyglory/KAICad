@@ -24,7 +24,7 @@ namespace KiCad.Automation.Mcp;
 public sealed class PcbGeometryManifestTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_pcb_render_geometry", ReadOnly = true),
-     Description("Read a revision-bound PCB geometry manifest for independent layer inspection. requestJson supplies an explicit nanometre viewport, output width/height, optional layers[] and objectTypes[] filters, and includeGeometry; each native item's exact bounding box is paired with deterministic pixel bounds and optional control geometry. The transform uses image coordinates with y increasing downward. This is observation metadata and does not produce pixels, validate DRC, or mutate the board."),
+     Description("Read a revision-bound PCB geometry manifest for independent layer inspection. requestJson supplies an explicit nanometre viewport, output width/height, optional layers[] names such as F.Cu or BL_F_Cu, objectTypes[] filters, and includeGeometry; unknown layer aliases are refused instead of silently returning an empty selection. Each native item's exact bounding box is paired with deterministic pixel bounds and optional control geometry. The transform uses image coordinates with y increasing downward. This is observation metadata and does not produce pixels, validate DRC, or mutate the board."),
      KiCadCapability("pcb-rendering", "compiled-mcp plus native-board-api", "exact PCB lifecycle state, native item bounding boxes, deterministic coordinate transform"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Read(string instanceId, string documentJson, string expectedStateJson,
@@ -67,11 +67,11 @@ public sealed class PcbGeometryManifestTools(InstanceRegistry registry)
         if (response.Items.Count > request.MaxObjects)
             throw new AutomationException("pcb_render_geometry_oversized", $"The native query returned {response.Items.Count} items; narrow the layer or object-type filters.");
 
-        HashSet<string>? requestedLayers = request.Layers.Length == 0
-            ? null : request.Layers.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        HashSet<BoardLayer>? requestedLayers = request.Layers.Length == 0
+            ? null : request.Layers.Select(ParseLayer).ToHashSet();
         HashSet<string>? requestedTypes = request.ObjectTypes.Length == 0
             ? null : request.ObjectTypes.ToHashSet(StringComparer.OrdinalIgnoreCase);
-        Any[] selected = response.Items.Where(item => TryDescribe(item, out string type, out string[] layers)
+        Any[] selected = response.Items.Where(item => TryDescribe(item, out string type, out BoardLayer[] layers)
             && (requestedTypes is null || requestedTypes.Contains(type))
             && (requestedLayers is null || layers.Any(requestedLayers.Contains))).ToArray();
         if (selected.Length > request.MaxObjects)
@@ -96,7 +96,8 @@ public sealed class PcbGeometryManifestTools(InstanceRegistry registry)
         var items = new List<object>(selected.Length);
         foreach (Any packed in selected)
         {
-            if (!TryDescribe(packed, out string type, out string[] layers)) continue;
+            if (!TryDescribe(packed, out string type, out BoardLayer[] layerValues)) continue;
+            string[] layers = layerValues.Select(layer => layer.ToString()).ToArray();
             KIID id = GetId(packed);
             if (string.IsNullOrWhiteSpace(id.Value) || !boxes.TryGetValue(id.Value, out Box2? box))
                 throw new AutomationException("pcb_render_geometry_bounds_incomplete", $"KiCad returned no native bounds for {type} '{id.Value}'.");
@@ -153,7 +154,7 @@ public sealed class PcbGeometryManifestTools(InstanceRegistry registry)
         public int MaxObjects { get; set; } = 8192;
     }
 
-    private sealed class Viewport
+    internal sealed class Viewport
     {
         public long MinXNm { get; set; }
         public long MinYNm { get; set; }
@@ -170,27 +171,41 @@ public sealed class PcbGeometryManifestTools(InstanceRegistry registry)
             throw new AutomationException("invalid_pcb_render_geometry", "viewport must contain positive min/max nanometre extents.");
         if (request.Width is < 1 or > 8192 || request.Height is < 1 or > 8192)
             throw new AutomationException("invalid_pcb_render_geometry", "width and height must be between 1 and 8192 pixels.");
-        if (request.Layers.Length > 128 || request.Layers.Any(string.IsNullOrWhiteSpace)
+        if (request.Layers is null || request.ObjectTypes is null
+            || request.Layers.Length > 128 || request.Layers.Any(string.IsNullOrWhiteSpace)
             || request.ObjectTypes.Length > 7 || request.ObjectTypes.Any(string.IsNullOrWhiteSpace))
-            throw new AutomationException("invalid_pcb_render_geometry", "layers may contain at most 128 names and objectTypes at most 7 names.");
+            throw new AutomationException("invalid_pcb_render_geometry", "layers and objectTypes must be arrays; layers may contain at most 128 names and objectTypes at most 7 names.");
         string[] known = ["track", "arc", "via", "pad", "footprint", "shape", "zone"];
         if (request.ObjectTypes.Any(value => !known.Contains(value, StringComparer.OrdinalIgnoreCase)))
             throw new AutomationException("invalid_pcb_render_geometry", "objectTypes must use track, arc, via, pad, footprint, shape or zone.");
         if (request.MaxObjects is < 1 or > 8192)
             throw new AutomationException("invalid_pcb_render_geometry", "maxObjects must be between 1 and 8192.");
+        foreach (string layer in request.Layers)
+            _ = ParseLayer(layer);
     }
 
-    private static bool TryDescribe(Any packed, out string type, out string[] layers)
+    private static bool TryDescribe(Any packed, out string type, out BoardLayer[] layers)
     {
-        if (packed.Is(Track.Descriptor)) { Track item = packed.Unpack<Track>(); type = "track"; layers = [item.Layer.ToString()]; return true; }
-        if (packed.Is(Arc.Descriptor)) { Arc item = packed.Unpack<Arc>(); type = "arc"; layers = [item.Layer.ToString()]; return true; }
-        if (packed.Is(Via.Descriptor)) { Via item = packed.Unpack<Via>(); type = "via"; layers = item.PadStack?.Layers.Select(layer => layer.ToString()).ToArray() ?? []; return true; }
-        if (packed.Is(Pad.Descriptor)) { Pad item = packed.Unpack<Pad>(); type = "pad"; layers = item.PadStack?.Layers.Select(layer => layer.ToString()).ToArray() ?? []; return true; }
-        if (packed.Is(FootprintInstance.Descriptor)) { FootprintInstance item = packed.Unpack<FootprintInstance>(); type = "footprint"; layers = [item.Layer.ToString()]; return true; }
-        if (packed.Is(BoardGraphicShape.Descriptor)) { BoardGraphicShape item = packed.Unpack<BoardGraphicShape>(); type = "shape"; layers = [item.Layer.ToString()]; return true; }
-        if (packed.Is(Zone.Descriptor)) { Zone item = packed.Unpack<Zone>(); type = "zone"; layers = item.Layers.Select(layer => layer.ToString()).ToArray(); return true; }
+        if (packed.Is(Track.Descriptor)) { Track item = packed.Unpack<Track>(); type = "track"; layers = [item.Layer]; return true; }
+        if (packed.Is(Arc.Descriptor)) { Arc item = packed.Unpack<Arc>(); type = "arc"; layers = [item.Layer]; return true; }
+        if (packed.Is(Via.Descriptor)) { Via item = packed.Unpack<Via>(); type = "via"; layers = item.PadStack?.Layers.ToArray() ?? []; return true; }
+        if (packed.Is(Pad.Descriptor)) { Pad item = packed.Unpack<Pad>(); type = "pad"; layers = item.PadStack?.Layers.ToArray() ?? []; return true; }
+        if (packed.Is(FootprintInstance.Descriptor)) { FootprintInstance item = packed.Unpack<FootprintInstance>(); type = "footprint"; layers = [item.Layer]; return true; }
+        if (packed.Is(BoardGraphicShape.Descriptor)) { BoardGraphicShape item = packed.Unpack<BoardGraphicShape>(); type = "shape"; layers = [item.Layer]; return true; }
+        if (packed.Is(Zone.Descriptor)) { Zone item = packed.Unpack<Zone>(); type = "zone"; layers = item.Layers.ToArray(); return true; }
         type = ""; layers = [];
         return false;
+    }
+
+    internal static BoardLayer ParseLayer(string value)
+    {
+        string normalized = value.Trim().Replace(".", "", StringComparison.Ordinal).Replace("_", "", StringComparison.Ordinal);
+        string enumName = normalized.StartsWith("Bl", StringComparison.OrdinalIgnoreCase) ? normalized : "Bl" + normalized;
+        if (System.Enum.TryParse<BoardLayer>(enumName, true, out BoardLayer layer)
+            && System.Enum.IsDefined(layer) && layer is not BoardLayer.BlUnknown and not BoardLayer.BlUndefined and not BoardLayer.BlUnselected)
+            return layer;
+        throw new AutomationException("invalid_pcb_render_geometry",
+            $"Unknown board layer '{value}'. Use a board layer name such as F.Cu or its BoardLayer enum name.");
     }
 
     private static KIID GetId(Any packed) => packed.Is(Track.Descriptor) ? packed.Unpack<Track>().Id
@@ -342,20 +357,43 @@ public sealed class PcbGeometryManifestTools(InstanceRegistry registry)
     }
 
     private static object PixelPoint(Vector2 point, Viewport viewport, int width, int height)
-        => new { x = PixelX(point.XNm, viewport, width), y = PixelY(point.YNm, viewport, height), xNm = point.XNm, yNm = point.YNm };
+    {
+        PixelPointProjection projected = ProjectPoint(point.XNm, point.YNm, viewport, width, height);
+        return new { x = projected.X, y = projected.Y, xNm = point.XNm, yNm = point.YNm };
+    }
 
     private static object PixelBounds(long minX, long minY, long maxX, long maxY, Viewport viewport, int width, int height)
     {
-        double left = PixelX(minX, viewport, width), right = PixelX(maxX, viewport, width);
-        double top = PixelY(maxY, viewport, height), bottom = PixelY(minY, viewport, height);
-        return new { left, top, right, bottom, width = right - left, height = bottom - top,
-            intersectsViewport = maxX >= viewport.MinXNm && minX <= viewport.MaxXNm
-                && maxY >= viewport.MinYNm && minY <= viewport.MaxYNm };
+        PixelBoundsProjection projected = ProjectBounds(minX, minY, maxX, maxY, viewport, width, height);
+        return new { left = projected.Left, top = projected.Top, right = projected.Right, bottom = projected.Bottom,
+            width = projected.Width, height = projected.Height, intersectsViewport = projected.IntersectsViewport };
     }
 
-    private static double PixelX(long value, Viewport viewport, int width)
+    internal readonly record struct PixelPointProjection(double X, double Y);
+
+    internal readonly record struct PixelBoundsProjection(double Left, double Top, double Right, double Bottom,
+        bool IntersectsViewport)
+    {
+        internal double Width => Right - Left;
+        internal double Height => Bottom - Top;
+    }
+
+    internal static PixelPointProjection ProjectPoint(long xNm, long yNm, Viewport viewport, int width, int height)
+        => new(ProjectX(xNm, viewport, width), ProjectY(yNm, viewport, height));
+
+    internal static PixelBoundsProjection ProjectBounds(long minX, long minY, long maxX, long maxY,
+        Viewport viewport, int width, int height)
+    {
+        double left = ProjectX(minX, viewport, width), right = ProjectX(maxX, viewport, width);
+        double top = ProjectY(maxY, viewport, height), bottom = ProjectY(minY, viewport, height);
+        return new(left, top, right, bottom,
+            maxX >= viewport.MinXNm && minX <= viewport.MaxXNm
+                && maxY >= viewport.MinYNm && minY <= viewport.MaxYNm);
+    }
+
+    private static double ProjectX(long value, Viewport viewport, int width)
         => ((double)value - viewport.MinXNm) * width / ((double)viewport.MaxXNm - viewport.MinXNm);
-    private static double PixelY(long value, Viewport viewport, int height)
+    private static double ProjectY(long value, Viewport viewport, int height)
         => ((double)viewport.MaxYNm - value) * height / ((double)viewport.MaxYNm - viewport.MinYNm);
 
     private static T Parse<T>(string json, string code) where T : class, IMessage<T>, new()

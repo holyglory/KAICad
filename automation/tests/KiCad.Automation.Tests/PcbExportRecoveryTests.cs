@@ -80,6 +80,28 @@ public sealed class PcbExportRecoveryTests
     }
 
     [TestMethod]
+    public void CompletedRecoveryRequiresTerminalReceiptAndCompleteManifest()
+    {
+        var prior = Record(PcbExportRecoveryPolicy.Pending, nativeDispatchKnown: true, nativeDispatch: true);
+        var receipt = new PcbManufacturingExportReceipt
+        {
+            OperationId = prior.OperationId,
+            ProcessEpoch = prior.ProcessEpoch,
+            RequestFingerprintSha256 = prior.RequestFingerprintSha256,
+            Status = PcbManufacturingExportStatus.PcbMfgExportCompleted,
+            PublicationState = PcbManufacturingPublicationState.PcbMfgPublicationPublished,
+            Terminal = false,
+            OutputManifestComplete = false
+        };
+
+        var decision = PcbExportRecoveryPolicy.Reconcile(prior, true, receipt,
+            outputExists: true, outputVerified: true, stagingExists: false);
+
+        Assert.AreEqual(PcbExportRecoveryPolicy.Indeterminate, decision.Status);
+        Assert.IsFalse(decision.RetryAllowed);
+    }
+
+    [TestMethod]
     public void DurableStoreBindsIdentityAndRefusesIndeterminateResubmit()
     {
         string root = Directory.CreateTempSubdirectory("kicad-pcb-export-recovery-").FullName;
@@ -124,6 +146,7 @@ public sealed class PcbExportRecoveryTests
                 RequestFingerprintSha256 = record.RequestFingerprintSha256,
                 Status = PcbManufacturingExportStatus.PcbMfgExportCompleted,
                 PublicationState = PcbManufacturingPublicationState.PcbMfgPublicationPublished,
+                Terminal = true,
                 OutputDirectory = record.OutputDirectory,
                 OutputManifestComplete = true,
                 OutputManifestSha256 = new string('a', 64)

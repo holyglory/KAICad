@@ -129,7 +129,12 @@ internal static class PcbExportRecoveryPolicy
         if (receipt is not null)
         {
             bool completed = receipt.Status == PcbManufacturingExportStatus.PcbMfgExportCompleted
-                && receipt.PublicationState == PcbManufacturingPublicationState.PcbMfgPublicationPublished;
+                && receipt.Terminal
+                && receipt.PublicationState == PcbManufacturingPublicationState.PcbMfgPublicationPublished
+                && receipt.OutputManifestComplete && receipt.Artifacts.Count != 0
+                && receipt.OperationId == prior.OperationId
+                && receipt.ProcessEpoch == prior.ProcessEpoch
+                && receipt.RequestFingerprintSha256 == prior.RequestFingerprintSha256;
             if (completed && outputExists && outputVerified)
                 return new(Completed, false, true, true, stagingExists, true,
                     "The native receipt and verified published output agree.");

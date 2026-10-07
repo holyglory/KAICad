@@ -128,6 +128,12 @@ internal static class PcbExportRecoveryPolicy
 
         if (receipt is not null)
         {
+            if (receipt.OperationId != prior.OperationId
+                || receipt.ProcessEpoch != prior.ProcessEpoch
+                || receipt.RequestFingerprintSha256 != prior.RequestFingerprintSha256)
+                return new(Indeterminate, false, true, outputExists, stagingExists, nativeReceiptFound,
+                    "The native receipt belongs to a different export operation identity; retry is not authorized.");
+
             bool completed = receipt.Status == PcbManufacturingExportStatus.PcbMfgExportCompleted
                 && receipt.Terminal
                 && receipt.PublicationState == PcbManufacturingPublicationState.PcbMfgPublicationPublished

@@ -18,8 +18,12 @@ public sealed class PcbExportRecoveryTests
         {
             OperationId = prior.OperationId,
             ProcessEpoch = prior.ProcessEpoch,
+            RequestFingerprintSha256 = prior.RequestFingerprintSha256,
             Status = PcbManufacturingExportStatus.PcbMfgExportFailed,
-            PublicationState = PcbManufacturingPublicationState.PcbMfgPublicationFailed
+            PublicationState = PcbManufacturingPublicationState.PcbMfgPublicationFailed,
+            Terminal = true,
+            ErrorCode = "native_export_failed",
+            ErrorMessage = "The exporter failed without creating output."
         };
 
         var decision = PcbExportRecoveryPolicy.Reconcile(prior, true, receipt,
@@ -28,6 +32,39 @@ public sealed class PcbExportRecoveryTests
         Assert.AreEqual(PcbExportRecoveryPolicy.Retryable, decision.Status);
         Assert.IsTrue(decision.RetryAllowed);
         Assert.IsFalse(decision.PublicationMayHaveHappened);
+    }
+
+    [TestMethod]
+    [DataRow("operation")]
+    [DataRow("process")]
+    [DataRow("fingerprint")]
+    public void MismatchedTerminalReceiptIdentityNeverAuthorizesRetry(string changedIdentity)
+    {
+        var prior = Record(PcbExportRecoveryPolicy.Pending, nativeDispatchKnown: true, nativeDispatch: true);
+        var receipt = new PcbManufacturingExportReceipt
+        {
+            OperationId = prior.OperationId,
+            ProcessEpoch = prior.ProcessEpoch,
+            RequestFingerprintSha256 = prior.RequestFingerprintSha256,
+            Status = PcbManufacturingExportStatus.PcbMfgExportFailed,
+            PublicationState = PcbManufacturingPublicationState.PcbMfgPublicationFailed,
+            Terminal = true,
+            ErrorCode = "native_export_failed",
+            ErrorMessage = "The exporter failed without creating output."
+        };
+
+        switch (changedIdentity)
+        {
+            case "operation": receipt.OperationId = "44444444-4444-4444-4444-444444444444"; break;
+            case "process": receipt.ProcessEpoch = "55555555-5555-5555-5555-555555555555"; break;
+            case "fingerprint": receipt.RequestFingerprintSha256 = new string('b', 64); break;
+        }
+
+        var decision = PcbExportRecoveryPolicy.Reconcile(prior, true, receipt,
+            outputExists: false, outputVerified: false, stagingExists: false);
+
+        Assert.AreEqual(PcbExportRecoveryPolicy.Indeterminate, decision.Status);
+        Assert.IsFalse(decision.RetryAllowed);
     }
 
     [TestMethod]

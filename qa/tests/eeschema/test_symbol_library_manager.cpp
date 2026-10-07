@@ -35,6 +35,7 @@
 #include <richio.h>
 
 #include <wx/filename.h>
+#include <wx/file.h>
 
 class SYMBOL_LIBRARY_MANAGER_TEST_FIXTURE
 {
@@ -575,6 +576,83 @@ BOOST_AUTO_TEST_CASE( SaveCopyAsDerivedSymbolToNewLibrary )
 
     if( wxFileName::DirExists( tempDir ) )
         wxFileName::Rmdir( tempDir, wxPATH_RMDIR_RECURSIVE );
+}
+
+
+/**
+ * A buffered provider edit must refuse a target changed after the first
+ * in-memory mutation instead of replacing that external content at SaveLibrary.
+ */
+BOOST_AUTO_TEST_CASE( BufferedLibraryWriteRejectsStaleTarget )
+{
+    wxString tempDir = wxFileName::CreateTempFileName( wxS( "kicad_test_" ) );
+    wxRemoveFile( tempDir );
+    wxFileName::Mkdir( tempDir );
+    wxString libPath = wxFileName( tempDir, wxS( "stale.kicad_sym" ) ).GetFullPath();
+
+    {
+        IO_RELEASER<SCH_IO> plugin( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
+        plugin->CreateLibrary( libPath );
+        auto original = std::make_unique<LIB_SYMBOL>( wxS( "Original" ) );
+        plugin->SaveSymbol( libPath, original.release() );
+        plugin->SaveLibrary( libPath );
+    }
+
+    const wxFileOffset originalSize = wxFileName( libPath ).GetSize();
+    IO_RELEASER<SCH_IO> buffered( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
+    std::map<std::string, UTF8> properties;
+    properties.emplace( SCH_IO_KICAD_SEXPR::PropBuffering, "" );
+    buffered->SaveSymbol( libPath, new LIB_SYMBOL( wxS( "Buffered" ) ), &properties );
+
+    // Simulate an external writer that does not participate in the provider
+    // admission protocol while preserving a parseable library.
+    wxFile external( libPath, wxFile::write_append );
+    BOOST_REQUIRE( external.IsOpened() );
+    BOOST_REQUIRE( external.Write( "\n" ) );
+    external.Close();
+
+    BOOST_CHECK_THROW( buffered->SaveLibrary( libPath ), IO_ERROR );
+    BOOST_CHECK( wxFileName( libPath ).GetSize() > originalSize );
+
+    IO_RELEASER<SCH_IO> verify( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
+    BOOST_REQUIRE( verify->LoadSymbol( libPath, wxS( "Original" ) ) != nullptr );
+    BOOST_CHECK( verify->LoadSymbol( libPath, wxS( "Buffered" ) ) == nullptr );
+
+    wxFileName::Rmdir( tempDir, wxPATH_RMDIR_RECURSIVE );
+}
+
+
+/**
+ * A second provider must not mutate a path already held by a buffered provider;
+ * the first provider can still finalize its own admitted target afterwards.
+ */
+BOOST_AUTO_TEST_CASE( ConcurrentProviderLibraryWritesDoNotShareAdmission )
+{
+    wxString tempDir = wxFileName::CreateTempFileName( wxS( "kicad_test_" ) );
+    wxRemoveFile( tempDir );
+    wxFileName::Mkdir( tempDir );
+    wxString libPath = wxFileName( tempDir, wxS( "contended.kicad_sym" ) ).GetFullPath();
+
+    {
+        IO_RELEASER<SCH_IO> plugin( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
+        plugin->CreateLibrary( libPath );
+        plugin->SaveLibrary( libPath );
+    }
+
+    std::map<std::string, UTF8> properties;
+    properties.emplace( SCH_IO_KICAD_SEXPR::PropBuffering, "" );
+    IO_RELEASER<SCH_IO> first( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
+    IO_RELEASER<SCH_IO> second( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
+    first->SaveSymbol( libPath, new LIB_SYMBOL( wxS( "First" ) ), &properties );
+
+    BOOST_CHECK_THROW( second->SaveSymbol( libPath, new LIB_SYMBOL( wxS( "Second" ) ) ), IO_ERROR );
+    BOOST_CHECK_NO_THROW( first->SaveLibrary( libPath ) );
+
+    IO_RELEASER<SCH_IO> verify( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
+    BOOST_REQUIRE( verify->LoadSymbol( libPath, wxS( "First" ) ) != nullptr );
+    BOOST_CHECK( verify->LoadSymbol( libPath, wxS( "Second" ) ) == nullptr );
+
+    wxFileName::Rmdir( tempDir, wxPATH_RMDIR_RECURSIVE );
 }
 
 

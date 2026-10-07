@@ -54,6 +54,7 @@ class SCH_FIELD;
 struct SCH_SYMBOL_INSTANCE;
 class SCH_SELECTION;
 class SCH_IO_KICAD_SEXPR_LIB_CACHE;
+class LIBRARY_WRITE_ADMISSION;
 class LIB_SYMBOL;
 class LEGACY_SYMBOL_LIB;
 class BUS_ALIAS;
@@ -173,6 +174,10 @@ private:
 
     void cacheLib( const wxString& aLibraryFileName, const std::map<std::string, UTF8>* aProperties );
     bool isBuffering( const std::map<std::string, UTF8>* aProperties );
+    void acquireWriteAdmission( const wxString& aLibraryPath, bool aBuffered );
+    void releaseWriteAdmission();
+    void abandonWriteAdmission();
+    static bool isRegularLibraryPath( const wxString& aLibraryPath );
 
 protected:
     int                     m_version;          ///< Version of file being loaded.
@@ -191,6 +196,12 @@ protected:
     SCHEMATIC*              m_schematic = nullptr;  ///< init() reads this before assigning it.
     OUTPUTFORMATTER*        m_out;              ///< The formatter for saving SCH_SCREEN objects.
     SCH_IO_KICAD_SEXPR_LIB_CACHE* m_cache;
+    // One regular-file admission is held across buffered SaveSymbol/DeleteSymbol calls
+    // until SaveLibrary finalizes the target. Folder libraries remain on their legacy
+    // incomplete multi-file tracking path.
+    std::unique_ptr<LIBRARY_WRITE_ADMISSION> m_writeAdmission;
+    wxString m_writeAdmissionPath;
+    bool m_writeAdmissionBuffered = false;
 
     /// initialize PLUGIN like a constructor would.
     void init( SCHEMATIC* aSchematic, const std::map<std::string, UTF8>* aProperties = nullptr );

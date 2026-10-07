@@ -22,6 +22,8 @@
 
 #include <algorithm>
 #include <digesting_file_line_reader.h>
+#include <api/library_write_admission.h>
+#include <file_content_baseline.h>
 
 #include <fmt/format.h>
 #include <magic_enum.hpp>
@@ -1890,6 +1892,17 @@ void SCH_IO_KICAD_SEXPR::cacheLib( const wxString& aLibraryFileName,
     // Suppress font substitution warnings (RAII - automatically restored on scope exit)
     FONTCONFIG_REPORTER_SCOPE fontconfigScope( nullptr );
 
+    if( m_writeAdmission )
+    {
+        if( !FILE_CONTENT_BASELINE::SamePath( m_writeAdmissionPath, aLibraryFileName ) )
+            THROW_IO_ERROR( "A buffered library write cannot change its target path." );
+
+        // A buffered edit must never be discarded by cache replacement after
+        // an external write.  Check the held baseline before IsFileChanged()
+        // can replace the in-memory cache.
+        m_writeAdmission->CheckUnchanged();
+    }
+
     if( !m_cache || !m_cache->IsFile( aLibraryFileName ) || m_cache->IsFileChanged() )
     {
         int  oldModifyHash = 1;
@@ -1916,6 +1929,66 @@ void SCH_IO_KICAD_SEXPR::cacheLib( const wxString& aLibraryFileName,
 bool SCH_IO_KICAD_SEXPR::isBuffering( const std::map<std::string, UTF8>* aProperties )
 {
     return ( aProperties && aProperties->contains( SCH_IO_KICAD_SEXPR::PropBuffering ) );
+}
+
+
+bool SCH_IO_KICAD_SEXPR::isRegularLibraryPath( const wxString& aLibraryPath )
+{
+    wxFileName path( aLibraryPath );
+
+    if( !path.IsDir() && wxFileName::DirExists( path.GetFullPath() ) )
+        path.AssignDir( path.GetFullPath() );
+
+    // A non-existing path with an existing parent is a regular-file target for
+    // admission purposes.  Folder libraries deliberately retain their legacy
+    // incomplete multi-file tracking contract.
+    return !path.IsDir();
+}
+
+
+void SCH_IO_KICAD_SEXPR::acquireWriteAdmission( const wxString& aLibraryPath, bool aBuffered )
+{
+    if( !isRegularLibraryPath( aLibraryPath ) )
+    {
+        if( m_writeAdmission
+            && !FILE_CONTENT_BASELINE::SamePath( m_writeAdmissionPath, aLibraryPath ) )
+            THROW_IO_ERROR( "A library write cannot change from a regular-file target to a folder." );
+
+        return;
+    }
+
+    if( m_writeAdmission )
+    {
+        if( !FILE_CONTENT_BASELINE::SamePath( m_writeAdmissionPath, aLibraryPath ) )
+            THROW_IO_ERROR( "A library write cannot change its admitted target path." );
+
+        m_writeAdmission->CheckUnchanged();
+        return;
+    }
+
+    FILE_CONTENT_BASELINE expected = FILE_CONTENT_BASELINE::Read( aLibraryPath );
+    m_writeAdmission = LIBRARY_WRITE_ADMISSION::Acquire( { expected } );
+    m_writeAdmissionPath = aLibraryPath;
+    m_writeAdmissionBuffered = aBuffered;
+}
+
+
+void SCH_IO_KICAD_SEXPR::releaseWriteAdmission()
+{
+    m_writeAdmission.reset();
+    m_writeAdmissionPath.clear();
+    m_writeAdmissionBuffered = false;
+}
+
+
+void SCH_IO_KICAD_SEXPR::abandonWriteAdmission()
+{
+    // A failed write leaves the cache's in-memory symbols potentially newer
+    // than disk.  Discard it with the admission so a later call cannot reuse
+    // dirty state against a freshly acquired baseline.
+    delete m_cache;
+    m_cache = nullptr;
+    releaseWriteAdmission();
 }
 
 
@@ -2000,24 +2073,62 @@ LIB_SYMBOL* SCH_IO_KICAD_SEXPR::LoadSymbol( const wxString& aLibraryPath,
 void SCH_IO_KICAD_SEXPR::SaveSymbol( const wxString& aLibraryPath, const LIB_SYMBOL* aSymbol,
                                      const std::map<std::string, UTF8>* aProperties )
 {
-    cacheLib( aLibraryPath, aProperties );
+    const bool buffered = isBuffering( aProperties );
+    acquireWriteAdmission( aLibraryPath, buffered );
 
-    m_cache->AddSymbol( aSymbol );
+    try
+    {
+        cacheLib( aLibraryPath, aProperties );
+        if( m_writeAdmission )
+            m_writeAdmission->CheckUnchanged();
+        m_cache->AddSymbol( aSymbol );
 
-    if( !isBuffering( aProperties ) )
-        m_cache->Save();
+        if( !buffered )
+        {
+            m_cache->Save();
+            if( m_writeAdmission )
+            {
+                m_writeAdmission->Observe();
+                releaseWriteAdmission();
+            }
+        }
+    }
+    catch( ... )
+    {
+        abandonWriteAdmission();
+        throw;
+    }
 }
 
 
 void SCH_IO_KICAD_SEXPR::DeleteSymbol( const wxString& aLibraryPath, const wxString& aSymbolName,
                                        const std::map<std::string, UTF8>* aProperties )
 {
-    cacheLib( aLibraryPath, aProperties );
+    const bool buffered = isBuffering( aProperties );
+    acquireWriteAdmission( aLibraryPath, buffered );
 
-    m_cache->DeleteSymbol( aSymbolName );
+    try
+    {
+        cacheLib( aLibraryPath, aProperties );
+        if( m_writeAdmission )
+            m_writeAdmission->CheckUnchanged();
+        m_cache->DeleteSymbol( aSymbolName );
 
-    if( !isBuffering( aProperties ) )
-        m_cache->Save();
+        if( !buffered )
+        {
+            m_cache->Save();
+            if( m_writeAdmission )
+            {
+                m_writeAdmission->Observe();
+                releaseWriteAdmission();
+            }
+        }
+    }
+    catch( ... )
+    {
+        abandonWriteAdmission();
+        throw;
+    }
 }
 
 
@@ -2038,11 +2149,31 @@ void SCH_IO_KICAD_SEXPR::CreateLibrary( const wxString& aLibraryPath,
     if( fn.IsDir() && fn.DirExists() )
         THROW_IO_ERRORF( _( "Symbol library path '%s' already exists." ), fn.GetPath() );
 
-    delete m_cache;
-    m_cache = new SCH_IO_KICAD_SEXPR_LIB_CACHE( aLibraryPath );
-    m_cache->SetModified();
-    m_cache->Save();
-    m_cache->Load();    // update m_writable and m_timestamp
+    const bool admitted = isRegularLibraryPath( aLibraryPath );
+
+    if( admitted )
+        acquireWriteAdmission( aLibraryPath, false );
+
+    try
+    {
+        delete m_cache;
+        m_cache = new SCH_IO_KICAD_SEXPR_LIB_CACHE( aLibraryPath );
+        m_cache->SetModified();
+        m_cache->Save();
+        m_cache->Load();    // update m_writable and m_timestamp
+
+        if( admitted )
+        {
+            m_writeAdmission->Observe();
+            releaseWriteAdmission();
+        }
+    }
+    catch( ... )
+    {
+        if( admitted )
+            abandonWriteAdmission();
+        throw;
+    }
 }
 
 
@@ -2059,19 +2190,39 @@ bool SCH_IO_KICAD_SEXPR::DeleteLibrary( const wxString& aLibraryPath,
     if( !fn.FileExists() && !fn.DirExists() )
         return false;
 
-    // Some of the more elaborate wxRemoveFile() crap puts up its own wxLog dialog
-    // we don't want that.  we want bare metal portability with no UI here.
-    if( !fn.IsDir() )
+    const bool admitted = !fn.IsDir() && isRegularLibraryPath( aLibraryPath );
+
+    if( admitted )
+        acquireWriteAdmission( aLibraryPath, false );
+
+    try
     {
-        if( wxRemove( aLibraryPath ) )
-            THROW_IO_ERRORF( _( "Symbol library file '%s' cannot be deleted." ), aLibraryPath.GetData() );
+        // Some of the more elaborate wxRemoveFile() crap puts up its own wxLog dialog
+        // we don't want that.  we want bare metal portability with no UI here.
+        if( !fn.IsDir() )
+        {
+            if( wxRemove( aLibraryPath ) )
+                THROW_IO_ERRORF( _( "Symbol library file '%s' cannot be deleted." ), aLibraryPath.GetData() );
+        }
+        else
+        {
+            // This may be overly agressive.  Perhaps in the future we should remove all of the *.kicad_sym
+            // files and only delete the folder if it's empty.
+            if( !fn.Rmdir( wxPATH_RMDIR_RECURSIVE ) )
+                THROW_IO_ERRORF( _( "Symbol library folder '%s' cannot be deleted." ), fn.GetPath() );
+        }
+
+        if( admitted )
+        {
+            m_writeAdmission->Observe();
+            releaseWriteAdmission();
+        }
     }
-    else
+    catch( ... )
     {
-        // This may be overly agressive.  Perhaps in the future we should remove all of the *.kicad_sym
-        // files and only delete the folder if it's empty.
-        if( !fn.Rmdir( wxPATH_RMDIR_RECURSIVE ) )
-            THROW_IO_ERRORF( _( "Symbol library folder '%s' cannot be deleted." ), fn.GetPath() );
+        if( admitted )
+            abandonWriteAdmission();
+        throw;
     }
 
     if( m_cache && m_cache->IsFile( aLibraryPath ) )
@@ -2086,19 +2237,36 @@ bool SCH_IO_KICAD_SEXPR::DeleteLibrary( const wxString& aLibraryPath,
 
 void SCH_IO_KICAD_SEXPR::SaveLibrary( const wxString& aLibraryPath, const std::map<std::string, UTF8>* aProperties )
 {
-    if( !m_cache )
-        m_cache = new SCH_IO_KICAD_SEXPR_LIB_CACHE( aLibraryPath );
+    acquireWriteAdmission( aLibraryPath, true );
 
-    wxString oldFileName = m_cache->GetFileName();
+    try
+    {
+        if( !m_cache )
+            m_cache = new SCH_IO_KICAD_SEXPR_LIB_CACHE( aLibraryPath );
 
-    if( !m_cache->IsFile( aLibraryPath ) )
-        m_cache->SetFileName( aLibraryPath );
+        wxString oldFileName = m_cache->GetFileName();
 
-    // This is a forced save.
-    m_cache->SetModified();
-    m_cache->Save();
+        if( !m_cache->IsFile( aLibraryPath ) )
+            m_cache->SetFileName( aLibraryPath );
 
-    m_cache->SetFileName( oldFileName );
+        // This is a forced save.  Check immediately before touching disk so
+        // all buffered Add/Delete calls share one stale-baseline boundary.
+        if( m_writeAdmission )
+            m_writeAdmission->CheckUnchanged();
+        m_cache->SetModified();
+        m_cache->Save();
+        if( m_writeAdmission )
+        {
+            m_writeAdmission->Observe();
+            releaseWriteAdmission();
+        }
+        m_cache->SetFileName( oldFileName );
+    }
+    catch( ... )
+    {
+        abandonWriteAdmission();
+        throw;
+    }
 }
 
 

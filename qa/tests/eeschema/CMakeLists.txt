@@ -348,6 +348,10 @@ add_test( NAME qa_symbol_library_adapter
     COMMAND $<TARGET_FILE:qa_eeschema> --run_test=SymbolLibraryAdapter --log_level=test_suite )
 setup_qa_env( qa_symbol_library_adapter )
 
+add_test( NAME qa_symbol_library_manager
+    COMMAND $<TARGET_FILE:qa_eeschema> --run_test=SymbolLibraryManager --log_level=test_suite )
+setup_qa_env( qa_symbol_library_manager )
+
 add_test( NAME qa_schematic_formatting
     COMMAND $<TARGET_FILE:qa_eeschema> --run_test=SchematicFormatting --log_level=test_suite )
 setup_qa_env( qa_schematic_formatting )

@@ -23,7 +23,7 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
     private static readonly SemaphoreSlim Gate = new(1, 1);
 
     [McpServerTool(Name = "kicad_pcb_svg_artwork_commit"),
-     Description("Commit a validated strict SVG asset as authoritative non-copper PCB BoardGraphicShape geometry. The source bytes are archived under the explicit repository root, exact SHA-256 and sourceKind are recorded on every object, and the native mutation is lifecycle-checked and undoable. sourceKind may be imagegen, human or generated; this tool never creates Track, Arc or Via copper and does not claim electrical or manufacturing validity."),
+     Description("Commit a validated strict SVG asset as authoritative non-copper PCB BoardGraphicShape geometry. The source bytes are durably preflighted under the explicit repository root, exact SHA-256 and sourceKind are recorded on every object, and the native mutation is lifecycle-checked and undoable. Board geometry and source archival remain separate persistence boundaries, so provenanceAtomic stays false. sourceKind may be imagegen, human or generated; this tool never creates Track, Arc or Via copper and does not claim electrical or manufacturing validity."),
      KiCadCapability("pcb-artwork", "compiled-mcp plus native-board-api", "strict SVG, source archive and SHA-256 provenance, non-copper vector geometry, lifecycle checkpoint, operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp", "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Commit(string instanceId, string documentJson, string expectedStateJson,
@@ -57,7 +57,8 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
         decimal x = Decimal(originXNm, "originXNm"), y = Decimal(originYNm, "originYNm"), scale = Decimal(nanometersPerSvgUnit, "nanometersPerSvgUnit");
         if (scale <= 0 || strokeWidthNm <= 0) throw new AutomationException("invalid_pcb_artwork", "Scale and strokeWidthNm must be positive.");
         PcbSvgGuide parsed = PcbSvgGuideParser.Parse(svg, 20_000);
-        string archive = Archive(repositoryRoot, sourceArchivePath, Encoding.UTF8.GetBytes(svg), actualSha256);
+        ArtworkSourceArchive.Receipt archive = Archive(repositoryRoot, sourceArchivePath,
+            Encoding.UTF8.GetBytes(svg), actualSha256);
         CreateItems create = new() { Header = new() { Document = document } };
         for (int index = 0; index < parsed.Segments.Length; index++)
         {
@@ -71,7 +72,7 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
             shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.artwork.id", Value = assetId });
             shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.artwork.source_sha256", Value = actualSha256 });
             shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.artwork.source_kind", Value = sourceKind });
-            shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.artwork.source_archive", Value = archive });
+            shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.artwork.source_archive", Value = archive.RelativePath });
             shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.artwork.role", Value = "authoritative-vector" });
             shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.artwork.segment_index", Value = index.ToString() });
             create.Items.Add(Any.Pack(shape));
@@ -119,7 +120,7 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
         string assetId,
         string sourceKind,
         string sourceSha256,
-        string sourceArchive,
+        ArtworkSourceArchive.Receipt sourceArchive,
         BoardLayer boardLayer,
         int segmentCount)
     {
@@ -165,7 +166,17 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
             assetId,
             sourceKind,
             sourceSha256,
-            sourceArchive,
+            sourceArchive = sourceArchive.RelativePath,
+            archiveSha256 = sourceArchive.Sha256,
+            archiveBytes = sourceArchive.Bytes,
+            archivePreflight = new
+            {
+                persisted = sourceArchive.Persisted,
+                sha256 = sourceArchive.Sha256,
+                bytes = sourceArchive.Bytes,
+                atomicWrite = sourceArchive.AtomicWrite,
+                boardTransactionJoined = false
+            },
             layer = boardLayer.ToString(),
             segmentCount,
             operationOutcome,
@@ -185,9 +196,10 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
             replayableWithinProcess = outcome.NativeReceiptAvailable,
             transportRetrySafe = outcome.NativeReceiptAvailable,
             receiptScope = outcome.NativeReceiptAvailable ? "native-process" : "none",
-            // The archive is written before the native item transaction and is
-            // intentionally a separate persistence boundary.
-            archivePersisted = true,
+            // The archive is durably preflighted before the native item
+            // transaction. It remains a separate persistence boundary.
+            archivePersisted = sourceArchive.Persisted,
+            archiveAtomicWrite = sourceArchive.AtomicWrite,
             archiveNativeAtomic = false,
             provenanceAtomic = false,
             errorCode = success ? null : outcome.ErrorCode,
@@ -220,17 +232,9 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
         finally { Gate.Release(); }
     });
 
-    private static string Archive(string root, string relative, byte[] bytes, string hash)
-    {
-        if (!Path.IsPathFullyQualified(root) || string.IsNullOrWhiteSpace(relative) || Path.IsPathFullyQualified(relative)) throw new AutomationException("invalid_pcb_artwork_archive", "repositoryRoot must be absolute and sourceArchivePath repository-relative.");
-        string full = Path.GetFullPath(Path.Combine(root, relative));
-        string prefix = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        if (!full.StartsWith(prefix, StringComparison.Ordinal) || relative.Split('/', '\\').Any(part => part is "" or "." or "..")) throw new AutomationException("invalid_pcb_artwork_archive", "sourceArchivePath escapes repositoryRoot.");
-        Directory.CreateDirectory(Path.GetDirectoryName(full)!);
-        if (File.Exists(full) && !string.Equals(Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(full))), hash, StringComparison.Ordinal)) throw new AutomationException("pcb_artwork_source_conflict", "The source archive already contains different bytes.");
-        if (!File.Exists(full)) File.WriteAllBytes(full, bytes);
-        return relative.Replace('\\', '/');
-    }
+    private static ArtworkSourceArchive.Receipt Archive(string root, string relative, byte[] bytes, string hash)
+        => ArtworkSourceArchive.Persist(root, relative, bytes, hash,
+            "invalid_pcb_artwork_archive", "pcb_artwork_source_conflict");
     private static BoardLayer ParseLayer(string value) => value switch
     {
         "F.SilkS" => BoardLayer.BlFSilkS, "B.SilkS" => BoardLayer.BlBSilkS,

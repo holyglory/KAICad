@@ -28,7 +28,7 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
     private static readonly SemaphoreSlim BoardGate = new(1, 1);
 
     [McpServerTool(Name = "kicad_artwork_raster_project", ReadOnly = false),
-     Description("Project one accepted KiCad raster trace proposal into an existing symbol library, a cloned PCB footprint, a non-copper PCB board graphic, or a checked schematic drawing. Filled pieces remain filled polygons; signed contour topology stays in a bounded manifest. Existing pins, pads, fields and metadata are retained. Source kind/origin are caller declarations only. Board source embedding is explicitly non-atomic because the current board embedded-file command is separate from the item transaction."),
+     Description("Project one accepted KiCad raster trace proposal into an existing symbol library, a cloned PCB footprint, a non-copper PCB board graphic, or a checked schematic drawing. Filled pieces remain filled polygons; signed contour topology stays in a bounded manifest. Existing pins, pads, fields and metadata are retained. Source kind/origin are caller declarations only. Board source archives are durably preflighted before the item transaction, while board geometry and archival remain separate persistence boundaries and provenanceAtomic stays false."),
      KiCadCapability("generated-artwork-cad", "typed-projection-adapters", "accepted raster proposal, exact source SHA, deterministic filled polygons, target lifecycle admission and provenance"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp", "NativeSessionTests.NativeSymbolLibraryReadbackUsesMcp")]
     public Task<CallToolResult> Project(string instanceId, RasterTraceProjectionInput input,
@@ -191,7 +191,8 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
             throw new AutomationException("invalid_raster_projection_state", "Board target state must identify the same PCB and process epoch.");
         BoardLayer layer = ParseLayer(target.Layer);
         ValidateArtworkLayer(layer);
-        string archive = ArchiveSource(target.RepositoryRoot!, target.SourceArchivePath!, context.SourceBytes, context.SourceSha256);
+        ArtworkSourceArchive.Receipt archive = ArchiveSource(target.RepositoryRoot!, target.SourceArchivePath!,
+            context.SourceBytes, context.SourceSha256);
         var create = new CreateItems { Header = new() { Document = document } };
         List<string> created = [];
         for (int index = 0; index < context.Proposal.FilledPieces.Count; index++)
@@ -217,17 +218,31 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
             if (native.IsError ?? false) return Data(new
             {
                 operationId = context.OperationId, targetKind = "board", accepted = false,
-                nativeResult = native.StructuredContent, sourceArchive = archive,
+                nativeResult = native.StructuredContent, sourceArchive = archive.RelativePath,
+                archiveSha256 = archive.Sha256, archiveBytes = archive.Bytes,
+                archivePreflight = new
+                {
+                    persisted = archive.Persisted, sha256 = archive.Sha256, bytes = archive.Bytes,
+                    atomicWrite = archive.AtomicWrite, boardTransactionJoined = false
+                },
+                archivePersisted = archive.Persisted, archiveAtomicWrite = archive.AtomicWrite,
                 geometrySha256 = context.Proposal.GeometrySha256, sourceSha256 = context.SourceSha256,
-                provenanceAtomic = false, limitation = "Board embedded-file persistence is a separate native command; only the external archive and per-shape SHA are committed here."
+                provenanceAtomic = false, limitation = "Board embedded-file persistence is a separate native command; the durable archive preflight and per-shape SHA remain a separate persistence boundary."
             }, true);
             CallToolResult result = Data(new
             {
                 operationId = context.OperationId, targetKind = "board", accepted = true, createdIds = created,
-                nativeResult = native.StructuredContent, sourceArchive = archive,
+                nativeResult = native.StructuredContent, sourceArchive = archive.RelativePath,
+                archiveSha256 = archive.Sha256, archiveBytes = archive.Bytes,
+                archivePreflight = new
+                {
+                    persisted = archive.Persisted, sha256 = archive.Sha256, bytes = archive.Bytes,
+                    atomicWrite = archive.AtomicWrite, boardTransactionJoined = false
+                },
                 geometrySha256 = context.Proposal.GeometrySha256, sourceSha256 = context.SourceSha256,
-                embeddedSourceVerified = false, provenanceAtomic = false,
-                limitation = "Board embedded-file persistence is a separate native command; external archive + SHA is the durable provenance boundary.",
+                embeddedSourceVerified = false, archivePersisted = archive.Persisted,
+                archiveAtomicWrite = archive.AtomicWrite, provenanceAtomic = false,
+                limitation = "Board embedded-file persistence is a separate native command; the durable archive preflight and per-shape SHA remain a separate persistence boundary.",
                 electricalValidated = false, manufacturingValidated = false, receiptScope = "mcp-process"
             });
             BoardReceipts[context.OperationId] = new(fingerprint, result);
@@ -326,7 +341,7 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
         {
             string id = DeterministicId(context.Proposal.GeometrySha256, "footprint", index);
             footprint.Definition.Items.Add(Any.Pack(NewBoardShape(id, context.Proposal.FilledPieces[index],
-                context, layer, 0, 0, "")));
+                context, layer, 0, 0, null)));
             created.Add(id);
         }
         return created;
@@ -350,7 +365,7 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
     }
 
     private static BoardGraphicShape NewBoardShape(string id, KiCad.Automation.Protocol.RasterTraceFilledPiece piece,
-        ProjectionContext context, BoardLayer layer, long originX, long originY, string archive)
+        ProjectionContext context, BoardLayer layer, long originX, long originY, ArtworkSourceArchive.Receipt? archive)
     {
         var shape = new BoardGraphicShape
         {
@@ -362,8 +377,8 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
             }
         };
         AddProvenanceProperties(shape.CustomProperties, context, piece.Id);
-        if (!string.IsNullOrWhiteSpace(archive))
-            shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.source_archive", Value = archive });
+        if (archive is not null)
+            shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.source_archive", Value = archive.RelativePath });
         return shape;
     }
 
@@ -516,24 +531,10 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
     private static void ExistingEmbeddedFile(EmbeddedFiles files, string name, string hash, bool preserveExisting)
         => ExistingEmbeddedFile(files, name, hash);
 
-    private static string ArchiveSource(string repositoryRoot, string relative, byte[] bytes, string hash)
-    {
-        if (!Path.IsPathFullyQualified(repositoryRoot) || string.IsNullOrWhiteSpace(relative)
-            || Path.IsPathFullyQualified(relative) || relative.Split('/', '\\').Any(part => part is "" or "." or ".."))
-            throw new AutomationException("invalid_raster_projection_archive", "RepositoryRoot must be absolute and sourceArchivePath repository-relative.");
-        string root = Path.GetFullPath(repositoryRoot).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        string full = Path.GetFullPath(Path.Combine(repositoryRoot, relative));
-        if (!full.StartsWith(root, StringComparison.Ordinal))
-            throw new AutomationException("invalid_raster_projection_archive", "Source archive escapes repositoryRoot.");
-        Directory.CreateDirectory(Path.GetDirectoryName(full)!);
-        if (File.Exists(full))
-        {
-            if (!string.Equals(Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(full))), hash, StringComparison.Ordinal))
-                throw new AutomationException("raster_trace_source_conflict", "The source archive already contains different bytes.");
-        }
-        else File.WriteAllBytes(full, bytes);
-        return relative.Replace('\\', '/');
-    }
+    private static ArtworkSourceArchive.Receipt ArchiveSource(string repositoryRoot, string relative,
+        byte[] bytes, string hash)
+        => ArtworkSourceArchive.Persist(repositoryRoot, relative, bytes, hash,
+            "invalid_raster_projection_archive", "raster_trace_source_conflict");
 
     private static JsonElement Property(JsonElement value, string name)
         => value.TryGetProperty(name, out JsonElement result) ? result : throw new AutomationException("invalid_raster_projection_result", "Native result omitted " + name + ".");

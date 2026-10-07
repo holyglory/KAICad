@@ -100,6 +100,95 @@ public sealed class SchematicTypedMutationTests
     }
 
     [TestMethod]
+    public async Task LibraryCacheReplaceUsesCompleteCheckedHierarchyScreenTargetAndReceiptReplay()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var cache = new SchematicCachedSymbol
+        {
+            CacheKey = "Fixture:Cached",
+            Definition = new() { Id = new() { LibraryNickname = "Fixture", EntryName = "Cached" } }
+        };
+        string definitions = "[" + SchematicJson.Formatter.Format(cache) + "]";
+        string operation = Guid.NewGuid().ToString("D");
+        string expected = fixture.ExpectedJson;
+
+        var result = await fixture.CacheTools.Replace(fixture.InstanceId, fixture.DocumentJson,
+            expected, fixture.ScreenId, definitions, operation, default);
+        Assert.IsFalse(result.IsError ?? false, Data(result).GetRawText());
+        Assert.AreEqual(fixture.TargetDocument, fixture.Batches.Single().Batch.Operations.Single().TargetDocument);
+        Assert.AreEqual(1, fixture.Inspections, "The tool must inspect the retained receipt before its live checkpoint.");
+        Assert.AreEqual(1, fixture.Captures, "A new operation needs one live checked-state confirmation.");
+        Assert.IsFalse(Data(result).GetProperty("designFilesSaved").GetBoolean());
+
+        var replay = await fixture.CacheTools.Replace(fixture.InstanceId, fixture.DocumentJson,
+            expected, fixture.ScreenId, definitions, operation, default);
+        Assert.IsFalse(replay.IsError ?? false, Data(replay).GetRawText());
+        Assert.IsTrue(Data(replay).GetProperty("replayed").GetBoolean());
+        Assert.IsFalse(Data(replay).GetProperty("mutationSubmitted").GetBoolean());
+        Assert.AreEqual(1, fixture.Batches.Count);
+        Assert.AreEqual(1, fixture.Captures, "Replay must not capture a now-advanced live state.");
+
+        AssertError(await fixture.CacheTools.Replace(fixture.InstanceId, fixture.DocumentJson,
+            SchematicJson.Formatter.Format(fixture.State.State), fixture.ScreenId, definitions,
+            Guid.NewGuid().ToString("D"), default), "invalid_checked_state");
+    }
+
+    [TestMethod]
+    public async Task SharedLibraryCacheReplacementRejectsDisagreementAndRetainsUntrustedReplyIdentity()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var shared = fixture.State.Electrical.Hierarchy.Data.Instances[0].Clone();
+        shared.Metadata.Document.SheetPath.Path[^1].Value = Guid.NewGuid().ToString("D");
+        fixture.State.Electrical.Hierarchy.Data.Instances.Add(shared);
+        shared.CachedSymbols.Add(new SchematicCachedSymbol
+        {
+            CacheKey = "Fixture:Different",
+            Definition = new() { Id = new() { LibraryNickname = "Fixture", EntryName = "Different" } }
+        });
+        var refused = await fixture.CacheTools.Replace(fixture.InstanceId, fixture.DocumentJson,
+            fixture.ExpectedJson, fixture.ScreenId, "[]", Guid.NewGuid().ToString("D"), default);
+        Assert.IsTrue(refused.IsError);
+        Assert.AreEqual("inconsistent_shared_screen_cache", Data(refused).GetProperty("errorCode").GetString());
+        Assert.AreEqual(0, fixture.Batches.Count);
+
+        shared.CachedSymbols.Clear();
+        fixture.TamperCacheReceipt = true;
+        string operation = Guid.NewGuid().ToString("D");
+        var untrusted = await fixture.CacheTools.Replace(fixture.InstanceId, fixture.DocumentJson,
+            fixture.ExpectedJson, fixture.ScreenId, "[]", operation, default);
+        Assert.IsTrue(untrusted.IsError);
+        Assert.AreEqual(operation, Data(untrusted).GetProperty("operationId").GetString());
+        Assert.IsTrue(Data(untrusted).GetProperty("mutationSubmitted").GetBoolean());
+        Assert.AreEqual("not_confirmed", Data(untrusted).GetProperty("outcome").GetString());
+        Assert.AreEqual("invalid_checked_batch", Data(untrusted).GetProperty("errorCode").GetString());
+        Assert.AreEqual(1, fixture.Batches.Count);
+    }
+
+    [TestMethod]
+    public async Task LibraryCacheLostReplyRetainsOperationAndReplaysWithoutAnotherMutation()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        string expected = fixture.ExpectedJson;
+        string operation = Guid.NewGuid().ToString("D");
+        fixture.CacheTransportFailure = new NngException(5, "Lost fixture reply", requestDelivered: true);
+        var lost = await fixture.CacheTools.Replace(fixture.InstanceId, fixture.DocumentJson,
+            expected, fixture.ScreenId, "[]", operation, default);
+        Assert.IsTrue(lost.IsError);
+        Assert.AreEqual(operation, Data(lost).GetProperty("operationId").GetString());
+        Assert.AreEqual("operation_outcome_unknown", Data(lost).GetProperty("errorCode").GetString());
+        Assert.AreEqual("indeterminate", Data(lost).GetProperty("outcome").GetString());
+        Assert.IsTrue(Data(lost).GetProperty("mutationSubmitted").GetBoolean());
+        Assert.AreEqual(1, fixture.Batches.Count);
+        int captures = fixture.Captures;
+        var recovered = await fixture.CacheTools.Replace(fixture.InstanceId, fixture.DocumentJson,
+            expected, fixture.ScreenId, "[]", operation, default);
+        Assert.IsFalse(recovered.IsError ?? false, Data(recovered).GetRawText());
+        Assert.IsTrue(Data(recovered).GetProperty("replayed").GetBoolean());
+        Assert.AreEqual(captures, fixture.Captures);
+        Assert.AreEqual(1, fixture.Batches.Count);
+    }
+
+    [TestMethod]
     public async Task CompleteReadSnapshotRoundTripsAndKeepsLabelPropertiesForUpdate()
     {
         using var fixture = await Fixture.CreateAsync();
@@ -313,26 +402,34 @@ public sealed class SchematicTypedMutationTests
         internal DocumentSpecifier TargetDocument => State.Electrical.Hierarchy.Data.Instances[0].Metadata.Document;
         internal Google.Protobuf.Collections.RepeatedField<Any> Items => State.Electrical.Hierarchy.Data.Instances[0].Items;
         internal SchematicTypedMutationTools Tools { get; }
+        internal SchematicLibraryCacheTools CacheTools { get; }
         internal string InstanceId => Session.InstanceId;
         internal string DocumentJson => SchematicJson.Formatter.Format(State.State.Document);
         internal string ExpectedJson => SchematicJson.Formatter.Format(State);
+        internal string ScreenId { get; }
         internal List<CheckedSchematicBatch> Batches { get; } = [];
         internal int Captures { get; private set; }
         internal int Inspections { get; private set; }
         internal CheckedSchematicBatchStatus Status { get; set; } = CheckedSchematicBatchStatus.CsbsCompleted;
         internal bool BadNotFoundReceipt { get; set; }
+        internal bool TamperCacheReceipt { get; set; }
+        internal NngException? CacheTransportFailure { get; set; }
         private InstanceRegistry Registry { get; }
 
         private Fixture()
         {
             Session.ProjectPath = Path.Combine(root, "fixture.kicad_pro");
-            Registry = new(this, root); Tools = new(Registry);
+            Registry = new(this, root); Tools = new(Registry); CacheTools = new(Registry);
             var checkedRequest = CheckedSchematicToolTests.Request(root, Session.Epoch);
             State = new() { State = checkedRequest.ExpectedState.Clone(), Electrical = new()
                 { Hierarchy = new() { Data = new() { Document = checkedRequest.Batch.Document.Clone() },
                     Revision = checkedRequest.Batch.ExpectedRevision.Clone() } } };
             var child = State.State.Document.Clone(); child.SheetPath.Path.Add(new KIID { Value = Guid.NewGuid().ToString("D") });
-            State.Electrical.Hierarchy.Data.Instances.Add(new SchematicScreenData { Metadata = new() { Document = child } });
+            ScreenId = Guid.NewGuid().ToString("D");
+            State.Electrical.Hierarchy.Data.Instances.Add(new SchematicScreenData
+            {
+                Metadata = new() { Document = child, ScreenId = new() { Value = ScreenId } }
+            });
         }
 
         internal static async Task<Fixture> CreateAsync()
@@ -409,19 +506,45 @@ public sealed class SchematicTypedMutationTests
                 {
                     var operation = batch.Batch.Operations.Single();
                     if (operation.TargetDocument is { } targetDocument)
-                        Assert.AreEqual(TargetDocument, targetDocument);
-                    if (operation.Create is not null) Items.Add(operation.Create.Clone());
+                    {
+                        if (operation.ReplaceLibraryCache is null) Assert.AreEqual(TargetDocument, targetDocument);
+                        else Assert.IsTrue(State.Electrical.Hierarchy.Data.Instances.Any(i => i.Metadata.Document.Equals(targetDocument)));
+                    }
+                    if (operation.ReplaceLibraryCache is not null)
+                    {
+                        Assert.AreEqual(ScreenId, operation.ReplaceLibraryCache.ScreenId.Value);
+                        foreach (var screen in State.Electrical.Hierarchy.Data.Instances.Where(i => i.Metadata.ScreenId.Value == ScreenId))
+                        {
+                            screen.CachedSymbols.Clear(); screen.CachedSymbols.Add(operation.ReplaceLibraryCache.Definitions.Select(d => d.Clone()));
+                        }
+                        result.Result = new() { Revision = State.State.Revision.Clone(), LibraryCacheChanged = true };
+                    }
+                    else if (operation.Create is not null) Items.Add(operation.Create.Clone());
                     else if (operation.Update is not null) Items[0] = operation.Update.Clone();
                     else { Assert.AreEqual(Id, operation.Remove.Value); Items.Clear(); }
                     State.State.Revision.Sequence++; State.Electrical.Hierarchy.Revision = State.State.Revision.Clone();
                     State.State.StateSha256 = new string('d', 64);
-                    result.ObservedAfter = State.State.Clone(); result.Result = new() { Revision = State.State.Revision.Clone() };
-                    if (operation.Create is not null) result.Result.Items.Add(operation.Create.Clone());
-                    else if (operation.Update is not null) result.Result.Items.Add(operation.Update.Clone());
-                    else result.Result.Removed.Add(operation.Remove.Clone());
+                    result.ObservedAfter = State.State.Clone();
+                    if (operation.ReplaceLibraryCache is not null)
+                        result.Result.Revision = State.State.Revision.Clone();
+                    else
+                    {
+                        result.Result = new() { Revision = State.State.Revision.Clone() };
+                        if (operation.Create is not null) result.Result.Items.Add(operation.Create.Clone());
+                        else if (operation.Update is not null) result.Result.Items.Add(operation.Update.Clone());
+                        else result.Result.Removed.Add(operation.Remove.Clone());
+                    }
                 }
                 else { result.ErrorCode = "fixture_failure"; result.ObservedAfter = State.State.Clone(); }
-                receipts[batch.Batch.OperationId] = (batch.Clone(), result.Clone()); payload = result;
+                receipts[batch.Batch.OperationId] = (batch.Clone(), result.Clone());
+                if (CacheTransportFailure is { } transportError && batch.Batch.Operations.Single().ReplaceLibraryCache is not null)
+                {
+                    CacheTransportFailure = null;
+                    return Task.FromException<byte[]>(transportError);
+                }
+                if (TamperCacheReceipt && batch.Batch.Operations.Single().ReplaceLibraryCache is not null)
+                    result.OperationId = Guid.NewGuid().ToString("D");
+                payload = result;
             }
             else return Session.ExchangeAsync(endpoint, requestBytes, timeout, cancellationToken);
             return Reply(payload);

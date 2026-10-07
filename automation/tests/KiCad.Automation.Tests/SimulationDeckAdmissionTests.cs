@@ -157,6 +157,13 @@ public sealed class SimulationDeckAdmissionTests
             Assert.AreEqual("simulation_operation_unresolved", Assert.ThrowsExactly<AutomationException>(() => store.MakeCurrent(next)).Code);
             var accepted = dispatched with { Stage = SimulationOperationStage.Accepted, JobId = fixture.JobId };
             store.WriteOperation(accepted);
+            var afterRestart = new SimulationResultReceipts(root);
+            Assert.IsTrue(afterRestart.HasEarlierEpoch(prepared.InstanceId, "replacement-epoch", Guid.Parse(fixture.JobId)),
+                "An accepted operation must identify a process-owned job even when terminal dependency capture was interrupted.");
+            Assert.IsFalse(afterRestart.HasEarlierEpoch(prepared.InstanceId, prepared.ProcessEpoch, Guid.Parse(fixture.JobId)),
+                "The same process epoch is still the authoritative owner of the accepted job.");
+            Assert.IsFalse(afterRestart.HasEarlierEpoch(prepared.InstanceId, "replacement-epoch", Guid.Parse("55555555-5555-4555-8555-555555555555")),
+                "A different job identity must not be classified as a lost result.");
             fixture.Result.Vectors.Add(new SimulationVector { Name = "v(out)", Values = { 2.5, 3.25 } });
             var dependencies = new NativeCapabilitySimulationDependencies
             {

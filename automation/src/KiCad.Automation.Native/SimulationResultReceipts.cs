@@ -159,13 +159,32 @@ public sealed class SimulationResultReceipts(string stateDirectory)
         RequireIdentity(instanceId, "instance"); RequireIdentity(processEpoch, "process epoch"); RequireId(jobId);
         if (!Directory.Exists(directory)) return false;
         RequireDirectory(false);
+        string canonicalJobId = jobId.ToString("D");
+
+        // A terminal archive is the strongest evidence that a job belonged to
+        // an earlier native process.  An accepted operation is also durable
+        // evidence, though: dependency capture or the terminal archive may
+        // have been interrupted after KiCad accepted the job.  Keep that
+        // distinction explicit so a read after restart reports a lost
+        // process-owned result instead of pretending the job was never known.
         foreach (string path in Directory.EnumerateFiles(directory, InstanceKey(instanceId) + "-*-job-" + jobId.ToString("N") + ".json"))
         {
             var result = Read<SimulationTerminalReceipt>(path);
             if (result is null) continue;
             Validate(result);
             if (result.Operation.InstanceId == instanceId && result.Operation.ProcessEpoch != processEpoch
-                && result.Operation.JobId == jobId.ToString("D")) return true;
+                && result.Operation.JobId == canonicalJobId) return true;
+        }
+
+        foreach (string path in Directory.EnumerateFiles(directory, InstanceKey(instanceId) + "-operation-*.json"))
+        {
+            var operation = Read<SimulationOperationReceipt>(path);
+            if (operation is null) continue;
+            Validate(operation);
+            if (operation.InstanceId == instanceId && operation.ProcessEpoch != processEpoch
+                && operation.JobId == canonicalJobId
+                && (operation.Stage is SimulationOperationStage.Accepted or SimulationOperationStage.Terminal))
+                return true;
         }
         return false;
     }

@@ -51,6 +51,13 @@ public sealed class PcbLayerManifestTools(InstanceRegistry registry)
         var objectIdsByLayer = new Dictionary<BoardLayer, HashSet<string>>();
         var compositeCounts = new Dictionary<string, int>(StringComparer.Ordinal);
         var unassignedCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+        var nativeIdentityValues = new List<string?>();
+        string Identity(KIID? identity)
+        {
+            string? value = identity?.Value;
+            nativeIdentityValues.Add(value);
+            return value ?? string.Empty;
+        }
         void Add(BoardLayer layer, string type, string objectId)
         {
             if (requested is not null && !requested.Contains(layer)) return;
@@ -77,39 +84,40 @@ public sealed class PcbLayerManifestTools(InstanceRegistry registry)
             if (packed.Is(Track.Descriptor))
             {
                 Track item = packed.Unpack<Track>();
-                AddMembership([item.Layer], "track", item.Id.Value);
+                AddMembership([item.Layer], "track", Identity(item.Id));
             }
             else if (packed.Is(Arc.Descriptor))
             {
                 Arc item = packed.Unpack<Arc>();
-                AddMembership([item.Layer], "arc", item.Id.Value);
+                AddMembership([item.Layer], "arc", Identity(item.Id));
             }
             else if (packed.Is(Via.Descriptor))
             {
                 Via item = packed.Unpack<Via>();
-                AddMembership(item.PadStack?.Layers.AsEnumerable() ?? Enumerable.Empty<BoardLayer>(), "via", item.Id.Value);
+                AddMembership(item.PadStack?.Layers.AsEnumerable() ?? Enumerable.Empty<BoardLayer>(), "via", Identity(item.Id));
             }
             else if (packed.Is(Pad.Descriptor))
             {
                 Pad item = packed.Unpack<Pad>();
-                AddMembership(item.PadStack?.Layers.AsEnumerable() ?? Enumerable.Empty<BoardLayer>(), "pad", item.Id.Value);
+                AddMembership(item.PadStack?.Layers.AsEnumerable() ?? Enumerable.Empty<BoardLayer>(), "pad", Identity(item.Id));
             }
             else if (packed.Is(FootprintInstance.Descriptor))
             {
                 FootprintInstance item = packed.Unpack<FootprintInstance>();
-                AddMembership([item.Layer], "footprint", item.Id.Value);
+                AddMembership([item.Layer], "footprint", Identity(item.Id));
             }
             else if (packed.Is(BoardGraphicShape.Descriptor))
             {
                 BoardGraphicShape item = packed.Unpack<BoardGraphicShape>();
-                AddMembership([item.Layer], "shape", item.Id.Value);
+                AddMembership([item.Layer], "shape", Identity(item.Id));
             }
             else if (packed.Is(Zone.Descriptor))
             {
                 Zone item = packed.Unpack<Zone>();
-                AddMembership(item.Layers, "zone", item.Id.Value);
+                AddMembership(item.Layers, "zone", Identity(item.Id));
             }
         }
+        ValidateNativeIdentities(nativeIdentityValues);
         DocumentLifecycleState after = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(new() { Document = document }, cancellationToken);
         if (!after.Equals(expected)) throw new AutomationException("pcb_layer_manifest_changed", "The board changed while reading the layer manifest.");
         var enabledLayerNames = enabled.Layers.Select(layer => layer.ToString()).ToArray();
@@ -146,6 +154,19 @@ public sealed class PcbLayerManifestTools(InstanceRegistry registry)
         });
         return new CallToolResult { StructuredContent = structured, Content = [new TextContentBlock { Text = structured.GetRawText() }] };
     });
+
+    internal static void ValidateNativeIdentities(IEnumerable<string?> identities)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (string? value in identities)
+        {
+            if (!Guid.TryParseExact(value, "D", out Guid parsed) || parsed == Guid.Empty
+                || !string.Equals(value, parsed.ToString("D"), StringComparison.Ordinal)
+                || !seen.Add(value!))
+                throw new AutomationException("pcb_layer_manifest_identity",
+                    "Every layer-manifest object must carry one distinct canonical native UUID.");
+        }
+    }
 
     private sealed class ManifestRequest { public string[] Layers { get; set; } = []; public bool IncludeEmpty { get; set; } = true; }
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };

@@ -370,6 +370,7 @@ set( KICOMMON_SRCS
     api/api_server.cpp
     api/document_lifecycle_controller.cpp
     api/library_lifecycle_snapshot.cpp
+    api/library_write_admission.cpp
     api/checked_schematic_controller.cpp
     api/checked_pcb_route_controller.cpp
     api/checked_pcb_item_controller.cpp

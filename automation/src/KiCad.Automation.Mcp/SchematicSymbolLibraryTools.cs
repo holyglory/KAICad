@@ -192,7 +192,7 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_symbol_library_write_checked", ReadOnly = false),
-     Description("Checked symbol-library write seam. The request carries an explicit project-bound symbol document, process epoch, operation UUID, complete snapshot digest and definition. The current native lifecycle owner reports library_mutation_unavailable without reaching legacy writers until provider locks, complete snapshot admission and rollback are implemented."),
+     Description("Checked symbol-library write. The request carries an explicit project-bound symbol document, process epoch, operation UUID, complete snapshot digest and definition. A commit is returned only when the native lifecycle receipt proves the same identity, complete revision tracking and before/after snapshots; older or incomplete native owners return an explicit error without reaching legacy writers."),
      KiCadCapability("symbol-library", "checked-native-admission-seam", "project-bound symbol document, process epoch, operation UUID and complete snapshot digest"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> WriteChecked(string instanceId, string expectedProcessEpoch, string documentJson,
@@ -226,11 +226,8 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
                 ExpectedSnapshotSha256 = expectedSnapshotSha256, Definition = definition,
                 Overwrite = overwrite, PinDisplay = display
             }, cancellationToken);
-        if (response.Document is null || !response.Document.Equals(document)
-            || response.ProcessEpoch != session.Epoch || response.OperationId != operationId
-            || response.RevisionTracked || response.CompleteLifecycle)
-            throw new AutomationException("invalid_symbol_library_response",
-                "The checked native symbol response changed its identity or falsely claimed lifecycle coverage.");
+        SymbolLibraryCheckedContract.ValidateResponse(
+            response, document, session.Epoch, operationId, expectedSnapshotSha256);
         var data = new
         {
             instanceId, processEpoch = session.Epoch, document, operationId,
@@ -238,7 +235,10 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
             rollbackCompleted = response.RollbackCompleted, revisionTracked = response.RevisionTracked,
             completeLifecycle = response.CompleteLifecycle, beforeSnapshotSha256 = response.BeforeSnapshotSha256,
             afterSnapshotSha256 = response.AfterSnapshotSha256, errorCode = response.ErrorCode,
-            errorMessage = response.ErrorMessage
+            errorMessage = response.ErrorMessage, nativeReceiptAvailable = true,
+            receiptVerified = true, persistenceVerified = response.Committed,
+            persistenceSource = response.Committed ? "native-lifecycle-receipt" : null,
+            transportRetrySafe = !response.Committed || response.Replayed
         };
         return Data(data, !response.Committed || !string.IsNullOrEmpty(response.ErrorCode));
     });

@@ -2194,7 +2194,7 @@ tier="development"
 role="preflight"
 requires=["managed-build"]
 invalidates=["identity"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~SymbolLibraryCheckedContractTests|FullyQualifiedName~LibraryLifecycleSnapshotContractTests|FullyQualifiedName~LibraryTransactionAdmissionContractTests|FullyQualifiedName~CapabilityCatalogTests|FullyQualifiedName~McpProcessTests|FullyQualifiedName~SharedProtoBandTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-symbol-library-managed-contracts"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~SymbolLibraryCheckedContract|FullyQualifiedName~LibraryLifecycleSnapshotContract|FullyQualifiedName~LibraryTransactionAdmissionContract|FullyQualifiedName~SchematicMetadataMutation|FullyQualifiedName~PcbArtworkContract|FullyQualifiedName~CapabilityCatalog|FullyQualifiedName~McpProcess|FullyQualifiedName~SharedProtoBand","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-symbol-library-managed-contracts"]
 retained_artifacts=[{name="managed-contracts",path="automation/artifacts/native-symbol-library-managed-contracts",max_bytes=16777216}]
 [[test.native-symbol-library-identity.check]]
 name="native-build"
@@ -2211,8 +2211,8 @@ retained_artifacts=[{name="identity",path="automation/artifacts/native/Testing/T
 name="native-symbol-library"
 tier="development"
 requires=["identity"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeSymbolLibrary","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-symbol-library-live-results","--","MSTest.MapInconclusiveToFailed=true"]
-retained_artifacts=[{name="native-symbol-library-results",path="automation/artifacts/native-symbol-library-live-results",max_bytes=16777216},{name="native-symbol-library-evidence",path="automation/artifacts/native-symbol-library/native-session-current",max_bytes=67108864}]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeSymbolLibrary|TestCategory=NativeSchematicMetadata","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-symbol-library-live-results","--","MSTest.MapInconclusiveToFailed=true"]
+retained_artifacts=[{name="native-symbol-library-results",path="automation/artifacts/native-symbol-library-live-results",max_bytes=16777216},{name="native-symbol-library-evidence",path="automation/artifacts/native-symbol-library/native-session-current",max_bytes=67108864},{name="native-schematic-metadata-evidence",path="automation/artifacts/native-schematic-metadata/native-session-current",max_bytes=67108864}]
 [test.upstream-release]
 timeout_seconds=1200
 env={TMPDIR="/mnt/build-storage/codex/kicad/t"}

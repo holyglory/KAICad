@@ -102,13 +102,17 @@ wxString LIBRARY_WRITE_ADMISSION::resolvePath( const wxString& aRequested )
     const fs::path requestedPath = ToFilesystemPath( normalized );
     const fs::file_status requestedLinkStatus = fs::symlink_status( requestedPath, error );
 
-    if( error )
+    if( error && error != std::errc::no_such_file_or_directory )
         THROW_IO_ERRORF( "Could not inspect library admission path '%s'", normalized );
+
+    error.clear();
 
     const fs::file_status targetStatus = fs::status( canonical, error );
 
-    if( error )
+    if( error && error != std::errc::no_such_file_or_directory )
         THROW_IO_ERRORF( "Could not inspect resolved library admission path '%s'", FromFilesystemPath( canonical ) );
+
+    error.clear();
 
     if( fs::is_symlink( requestedLinkStatus ) && !fs::exists( targetStatus ) )
         THROW_IO_ERRORF( "Library admission path '%s' is a broken symbolic link", normalized );

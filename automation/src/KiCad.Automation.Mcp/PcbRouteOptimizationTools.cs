@@ -79,7 +79,7 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_pcb_route_corner_optimize_apply"),
-     Description("Apply one exact route-replacement delete/create pair returned by a checked routing planner in one native undoable transaction. The pair may be a corner-optimization replacement or a headless reroute rip-up candidate; both requests must target the same PCB and expectedStateJson. Optional drcJobStateJson must be a completed, fresh, finding-free detached DRC receipt whose checked revision and replacement IDs exactly match this request. operationId binds a process-local receipt; the native board protocol has no durable cross-process receipt."),
+     Description("Apply one exact route-replacement delete/create pair returned by a checked routing planner in one native undoable transaction. The pair may be a corner-optimization replacement or a headless reroute rip-up candidate; both requests must target the same PCB and expectedStateJson. A supplied drcJobStateJson must be a completed, fresh, finding-free detached DRC receipt whose checked revision and replacement IDs exactly match this request; DRC-bound reroute and tuning use the retained checked route receipt for exact replay. Corner optimization without DRC remains a legacy native transaction until a checked route request can represent it safely."),
      KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "exact corner-optimization delete/create pair, lifecycle checkpoint, native undo transaction, operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Apply(string instanceId, string deleteRequestJson, string createRequestJson,
@@ -138,8 +138,25 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
             if (!string.Equals(drcCandidateHash, CandidateHash(create), StringComparison.Ordinal))
                 throw new AutomationException("invalid_route_replacement_drc", "The replacement geometry differs from the exact candidate submitted to the detached DRC job.");
         }
-        string fingerprint = instanceId + "\n" + deleteRequestJson + "\n" + createRequestJson + "\n"
-            + SchematicJson.Formatter.Format(expected) + "\n" + (drcJobStateJson ?? "");
+        string canonicalDelete = BoardJson.Formatter.Format(delete);
+        string canonicalCreate = BoardJson.Formatter.Format(create);
+        string canonicalExpected = SchematicJson.Formatter.Format(expected);
+        string canonicalDrc = drc is null ? "" : SchematicJson.Formatter.Format(drc);
+        string fingerprint = instanceId + "\n" + canonicalDelete + "\n" + canonicalCreate + "\n"
+            + canonicalExpected + "\n" + canonicalDrc;
+        if (drc is not null)
+            return await WithNativeReceipt(operationId, fingerprint, async () =>
+            {
+                CheckedPcbRouteCommit checkedRequest = BuildCheckedRequest(
+                    create, delete, expected, drc.JobId, operationId);
+                CheckedPcbRouteContract.ValidateRequest(checkedRequest, expected.ProcessEpoch);
+                CallToolResult checkedResult = await new PcbRoutingTools(registry).Commit(
+                    instanceId, BoardJson.Formatter.Format(checkedRequest.Candidate),
+                    SchematicJson.Formatter.Format(checkedRequest.ExpectedState), checkedRequest.DrcJobId,
+                    checkedRequest.OperationId, removalsJson: BoardJson.Formatter.Format(checkedRequest.Removals),
+                    cancellationToken: cancellationToken);
+                return CheckedRouteResult(checkedResult, drc);
+            });
         return await WithReceipt(operationId, fingerprint, async () =>
         {
             NativeClient client = registry.Client(instanceId);
@@ -269,8 +286,13 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
             if (!string.Equals(processEpoch, expectedProcessEpoch, StringComparison.Ordinal)) throw new AutomationException("stale_process_epoch", "The route-optimization receipt belongs to another native process epoch.");
             string? receiptInstance = payload.TryGetProperty("instanceId", out JsonElement instance) ? instance.GetString() : null;
             if (!string.Equals(receiptInstance, instanceId, StringComparison.Ordinal)) throw new AutomationException("wrong_instance_receipt", "The route-optimization receipt belongs to another MCP instance.");
+            bool nativeReceiptAvailable = payload.TryGetProperty("nativeReceiptAvailable", out JsonElement native)
+                ? native.ValueKind == JsonValueKind.True
+                : payload.TryGetProperty("nativeReceipt", out JsonElement nativeReceipt)
+                    && nativeReceipt.ValueKind == JsonValueKind.True;
             return ReceiptData(new { instanceId, processEpoch, operationId, found = true,
-                receiptScope = "mcp-process", nativeReceiptAvailable = false, receipt = payload });
+                receiptScope = nativeReceiptAvailable ? "native-process" : "mcp-process",
+                nativeReceiptAvailable, receipt = payload });
         }
         finally { MutationGate.Release(); }
     });
@@ -330,6 +352,18 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
             removed.Order(StringComparer.Ordinal).ToArray(), tracks.Where(segment => !segment.Existing).Select(segment => segment.Item.Id.Value).Order(StringComparer.Ordinal).ToArray(),
             preserved.Count + tracks.Count);
     }
+
+    internal static CheckedPcbRouteCommit BuildCheckedRequest(CreateItems create, DeleteItems delete,
+        DocumentLifecycleState expected, string drcJobId, string operationId)
+        => new()
+        {
+            Candidate = create.Clone(),
+            Removals = delete.Clone(),
+            ExpectedState = expected.Clone(),
+            DrcJobId = drcJobId,
+            OperationId = operationId,
+            MaximumResultBytes = 4 * 1024 * 1024
+        };
 
     private static bool TryFindMerge(List<Segment> segments, out int left, out int right, out Vector2 junction)
     {
@@ -443,6 +477,41 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
         : packed.Is(Arc.Descriptor) ? packed.Unpack<Arc>().Id.Value
         : packed.Is(Via.Descriptor) ? packed.Unpack<Via>().Id.Value : null;
 
+    private static CallToolResult CheckedRouteResult(CallToolResult result, PcbDrcJobState drc)
+    {
+        if (result.IsError ?? false || result.StructuredContent is null)
+            return result;
+        JsonElement payload = result.StructuredContent!.Value;
+
+        JsonElement structured = JsonSerializer.SerializeToElement(new
+        {
+            instanceId = payload.GetProperty("instanceId").GetString(),
+            processEpoch = payload.GetProperty("processEpoch").GetString(),
+            operationId = payload.GetProperty("operationId").GetString(),
+            operationOutcome = "completed",
+            receipt = payload.GetProperty("receipt"),
+            beforeState = payload.TryGetProperty("beforeState", out JsonElement before) ? before.GetString() : null,
+            afterState = payload.TryGetProperty("afterState", out JsonElement after) ? after.GetString() : null,
+            replacementUpdateCount = payload.TryGetProperty("replacementUpdateCount", out JsonElement updates) ? updates.GetInt32() : 0,
+            removalCount = payload.TryGetProperty("removalCount", out JsonElement removals) ? removals.GetInt32() : 0,
+            mutationConfirmed = true,
+            atomicTransaction = true,
+            operationReceipt = true,
+            nativeReceiptAvailable = true,
+            receiptScope = "native-process",
+            replayableWithinProcess = true,
+            transportRetrySafe = true,
+            drcValidated = true,
+            drcJobId = drc.JobId,
+            checkedRoute = payload
+        }, JsonOptions);
+        return new CallToolResult
+        {
+            StructuredContent = structured,
+            Content = [new TextContentBlock { Text = structured.GetRawText() }]
+        };
+    }
+
     private static async Task<CallToolResult> WithReceipt(string operationId, string fingerprint,
         Func<Task<CallToolResult>> action)
     {
@@ -492,6 +561,22 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
             return new CallToolResult { IsError = true, StructuredContent = structured,
                 Content = [new TextContentBlock { Text = structured.GetRawText() }] };
         }
+    }
+
+    private static async Task<CallToolResult> WithNativeReceipt(string operationId, string fingerprint,
+        Func<Task<CallToolResult>> action)
+    {
+        await MutationGate.WaitAsync();
+        try
+        {
+            if (Receipts.TryGetValue(operationId, out StoredReceipt? existing)
+                && existing.Fingerprint != fingerprint)
+                throw new AutomationException("operation_id_reused", "The operation ID is already bound to a different route replacement request.");
+            CallToolResult result = await action();
+            if (!(result.IsError ?? false)) Receipts[operationId] = new(fingerprint, result);
+            return result;
+        }
+        finally { MutationGate.Release(); }
     }
 
     internal sealed class OptimizeRequest

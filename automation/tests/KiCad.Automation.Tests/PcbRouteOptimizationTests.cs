@@ -5,6 +5,7 @@ using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
 using KiCad.Automation.Mcp;
 using KiCad.Automation.Native;
+using KiCad.Automation.Protocol;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace KiCad.Automation.Tests;
@@ -54,6 +55,77 @@ public sealed class PcbRouteOptimizationTests
         };
 
         Assert.AreEqual(5, PcbRouteTuningTools.PathLength(points));
+    }
+
+    [TestMethod]
+    public void DrcReplacementBuildsExactCheckedRouteRequestForReplay()
+    {
+        string root = Directory.CreateTempSubdirectory("pcb-route-checked-").FullName;
+        try
+        {
+            DocumentSpecifier document = Document();
+            document.Project.Path = root;
+            string identity = Guid.NewGuid().ToString("D");
+            string epoch = Guid.NewGuid().ToString("D");
+            var expected = new DocumentLifecycleState
+            {
+                Document = document,
+                ProcessEpoch = epoch,
+                NativeIdentity = identity,
+                Scope = DocumentLifecycleScope.DlsPcb,
+                ProjectSettingsIncluded = true,
+                DiskBaselineChecked = true,
+                StateSha256 = new string('a', 64),
+                Revision = new() { Epoch = identity, Sequence = 4 }
+            };
+            string board = Path.Combine(root, document.BoardFilename);
+            string project = Path.Combine(root, "optimization.kicad_pro");
+            foreach (string path in new[] { board, project })
+            {
+                expected.NativeFiles.Add(path);
+                expected.FileBaselines.Add(new NativeFileBaselineState
+                {
+                    Path = path, BaselinePath = path, BaselineKnown = true, CurrentKnown = true,
+                    BaselineExists = false, CurrentExists = false,
+                    Status = NativeFileBaselineStatus.NfbsUnchanged
+                });
+            }
+            var replacement = MakeTrack(Guid.NewGuid().ToString("D"), 0, 0, 20, 0);
+            var create = new CreateItems { Header = new() { Document = document }, Items = { Any.Pack(replacement) } };
+            var delete = new DeleteItems { Header = new() { Document = document }, ItemIds = { new KIID { Value = Guid.NewGuid().ToString("D") } } };
+            var request = PcbRouteOptimizationTools.BuildCheckedRequest(
+                create, delete, expected, Guid.NewGuid().ToString("D"), Guid.NewGuid().ToString("D"));
+
+            CheckedPcbRouteContract.ValidateRequest(request, epoch);
+            var after = expected.Clone();
+            after.Revision.Sequence++;
+            after.StateSha256 = new string('b', 64);
+            var receipt = new CheckedPcbRouteReceipt
+            {
+                Document = document,
+                ProcessEpoch = epoch,
+                OperationId = request.OperationId,
+                State = CheckedPcbRouteReceipt.Types.State.Completed,
+                RequestVerified = true,
+                Before = expected,
+                After = after,
+                Created = new CreateItemsResponse { Status = ItemRequestStatus.IrsOk }
+            };
+            receipt.Created.CreatedItems.Add(new ItemCreationResult
+            {
+                Status = new() { Code = ItemStatusCode.IscOk }, Item = Any.Pack(replacement)
+            });
+            receipt.Removals = delete.Clone();
+            receipt.RemovedResult = new DeleteItemsResponse
+            {
+                Status = ItemRequestStatus.IrsOk,
+                DeletedItems = { new ItemDeletionResult { Id = delete.ItemIds[0].Clone(), Status = ItemDeletionStatus.IdsOk } }
+            };
+            CheckedPcbRouteContract.ValidateResult(request, receipt, inspect: false);
+            receipt.Replayed = true;
+            CheckedPcbRouteContract.ValidateResult(request, receipt, inspect: false);
+        }
+        finally { Directory.Delete(root, true); }
     }
 
     private static Track MakeTrack(string id, long x1, long y1, long x2, long y2, string net = "N", long width = 100)

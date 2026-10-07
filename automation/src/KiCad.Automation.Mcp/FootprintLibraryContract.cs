@@ -15,6 +15,17 @@ namespace KiCad.Automation.Mcp;
 /// </summary>
 internal static class FootprintLibraryContract
 {
+    /// <summary>
+    /// Reports whether either native receipt source actually contains the
+    /// requested operation. A successful read transport with Found=false is
+    /// still an honest receipt miss and must not be advertised as available
+    /// native evidence.
+    /// </summary>
+    internal static bool HasNativeReceipt(
+        NativeCapabilityFootprintReadOperationResponse? editorReceipt,
+        NativeCapabilityFootprintLibraryReadOperationResponse? libraryReceipt) =>
+        editorReceipt?.Found == true || libraryReceipt?.Found == true;
+
     internal static void ValidateDeleteResponse(
         NativeCapabilityFootprintLibraryDeleteResponse response,
         string operationId, string libraryNickname, string footprintName)

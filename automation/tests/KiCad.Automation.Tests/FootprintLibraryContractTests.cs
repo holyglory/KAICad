@@ -10,6 +10,31 @@ namespace KiCad.Automation.Tests;
 public sealed class FootprintLibraryContractTests
 {
     [TestMethod]
+    public void NativeReceiptAvailabilityRequiresAFoundReceipt()
+    {
+        const string operationId = "00000000-0000-0000-0000-000000000001";
+        var editorReceipt = new NativeCapabilityFootprintReadOperationResponse
+        {
+            OperationId = operationId,
+            Found = false
+        };
+        var libraryReceipt = new NativeCapabilityFootprintLibraryReadOperationResponse
+        {
+            OperationId = operationId,
+            Found = false
+        };
+
+        Assert.IsFalse(FootprintLibraryContract.HasNativeReceipt(editorReceipt, libraryReceipt));
+
+        editorReceipt.Found = true;
+        Assert.IsTrue(FootprintLibraryContract.HasNativeReceipt(editorReceipt, libraryReceipt));
+
+        editorReceipt.Found = false;
+        libraryReceipt.Found = true;
+        Assert.IsTrue(FootprintLibraryContract.HasNativeReceipt(editorReceipt, libraryReceipt));
+    }
+
+    [TestMethod]
     public void DeleteResponseAndReceiptRequireExactIdentityAndCompletion()
     {
         const string operationId = "11111111-1111-1111-1111-111111111111";

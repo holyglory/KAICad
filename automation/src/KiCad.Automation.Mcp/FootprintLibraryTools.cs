@@ -271,17 +271,18 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
             NativeCapabilityFootprintLibraryReadOperationResponse libraryReceipt = await ReadNativeLibraryReceipt(context, operationId, cancellationToken);
             FootprintLibraryContract.ValidateEditorReceiptIdentity(nativeReceipt, operationId);
             FootprintLibraryContract.ValidateLibraryReceiptIdentity(libraryReceipt, operationId);
-            if (nativeReceipt.Found || libraryReceipt.Found)
+            bool nativeReceiptAvailable = FootprintLibraryContract.HasNativeReceipt(nativeReceipt, libraryReceipt);
+            if (nativeReceiptAvailable)
                 return Data(new
                 {
                     instanceId, processEpoch = context.Session.Epoch, operationId, found = true,
-                    receiptScope = "native-process", nativeReceiptAvailable = true,
+                    receiptScope = "native-process", nativeReceiptAvailable,
                     nativeReceipt = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(nativeReceipt)),
                     nativeLibraryReceipt = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(libraryReceipt))
                 });
 
             return Data(new { instanceId, processEpoch = context.Session.Epoch, operationId, found = false,
-                receiptScope = "native-process", nativeReceiptAvailable = true,
+                receiptScope = "native-process", nativeReceiptAvailable,
                 nativeReceipt = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(nativeReceipt)),
                 nativeLibraryReceipt = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(libraryReceipt)) });
         }

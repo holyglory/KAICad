@@ -50,10 +50,32 @@ internal static class SymbolLibraryCheckedContract
         if (response.Committed != committedStatus)
             throw Invalid("The checked native symbol response status and committed flag disagree.");
 
+        // New native peers attach the typed receipt envelope.  Older peers leave the enum at
+        // UNKNOWN and are still handled as the historical unavailable/read-only seam below.
+        if (response.ReceiptStatus != NativeCapabilitySymbolLibraryCheckedReceiptStatus.SlcwsUnknown)
+        {
+            if (response.Scope != "mcp_direct_symbol_file" || !response.ExpectedRequestVerified
+                || response.CompleteChangeTracking || response.RequestFingerprintSha256.Length != 64
+                || !response.RequestFingerprintSha256.All(char.IsAsciiHexDigitLower))
+                throw Invalid("A checked symbol receipt must prove the direct-file scope, request identity and fingerprint.");
+            if (response.Request is null || !response.Request.Document.Equals(expectedDocument)
+                || response.Request.ProcessEpoch != expectedProcessEpoch || response.Request.OperationId != operationId
+                || response.Request.ExpectedSnapshotSha256 != expectedSnapshotSha256)
+                throw Invalid("A checked symbol receipt must retain the exact admitted request.");
+        }
+
         if (response.Committed)
         {
             if (!response.RevisionTracked || !response.CompleteLifecycle || response.RollbackCompleted || hasCode)
                 throw Invalid("A committed checked symbol response requires complete lifecycle and revision evidence without an error.");
+            if (response.ReceiptStatus != NativeCapabilitySymbolLibraryCheckedReceiptStatus.SlcwsUnknown
+                && (response.ReceiptStatus != NativeCapabilitySymbolLibraryCheckedReceiptStatus.SlcwsCommittedPostverified
+                    || !response.NativeWriteStarted || !response.Postverified || !response.TargetVerified
+                    || !response.UnrelatedEntriesVerified || response.RollbackAttempted
+                    || response.ObservedBefore is null || response.ObservedAfter is null
+                    || response.ObservedBefore.Revision is null || response.ObservedAfter.Revision is null
+                    || response.ObservedAfter.Revision.Sequence <= response.ObservedBefore.Revision.Sequence))
+                throw Invalid("A committed checked symbol receipt requires native write, target, unrelated-entry and advancing revision evidence.");
             RequireDigest(response.BeforeSnapshotSha256, "before snapshot");
             RequireDigest(response.AfterSnapshotSha256, "after snapshot");
             if (!string.Equals(response.BeforeSnapshotSha256, expectedSnapshotSha256, StringComparison.Ordinal))
@@ -71,6 +93,11 @@ internal static class SymbolLibraryCheckedContract
         {
             if (!response.RollbackCompleted)
                 throw Invalid("A rolled-back checked symbol response must prove rollback completion.");
+            if (response.ReceiptStatus != NativeCapabilitySymbolLibraryCheckedReceiptStatus.SlcwsUnknown
+                && (response.ReceiptStatus != NativeCapabilitySymbolLibraryCheckedReceiptStatus.SlcwsRolledBackVerified
+                    || !response.NativeWriteStarted || !response.RollbackAttempted
+                    || response.ObservedRollback is null))
+                throw Invalid("A rolled-back checked symbol receipt requires native write and rollback evidence.");
         }
         else if (response.RollbackCompleted)
             throw Invalid("Rollback completion is only valid for a rolled-back checked symbol response.");

@@ -116,6 +116,47 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
             nativeReceipt = response.Found, revisionTracked = false });
     });
 
+    [McpServerTool(Name = "kicad_symbol_library_checked_receipt", ReadOnly = true),
+     Description("Read one exact process-owned checked direct-symbol-file receipt after a lost reply or MCP reconnect. The original request, document, process epoch and operation fingerprint must match; lookup never retries or dispatches a writer."),
+     KiCadCapability("symbol-library", "checked-native-direct-symbol-file", "exact checked request, process-owned receipt, revision and rollback evidence"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativeSymbolLibraryReadbackUsesMcp")]
+    public Task<CallToolResult> CheckedReceipt(string instanceId, string expectedProcessEpoch,
+        string documentJson, string operationId, string expectedRequestJson,
+        CancellationToken cancellationToken) => Execute(async () =>
+    {
+        ValidateEpoch(expectedProcessEpoch); ValidateOperation(operationId);
+        DocumentSpecifier document = ParseDocument(documentJson);
+        NativeCapabilitySymbolLibraryCheckedWrite expectedRequest;
+        try { expectedRequest = SchematicJson.Parser.Parse<NativeCapabilitySymbolLibraryCheckedWrite>(expectedRequestJson); }
+        catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException)
+        { throw new AutomationException("invalid_library_request", "expectedRequestJson is not valid checked symbol-library request: " + error.Message); }
+        if (!expectedRequest.Document.Equals(document) || expectedRequest.ProcessEpoch != expectedProcessEpoch
+            || expectedRequest.OperationId != operationId)
+            throw new AutomationException("invalid_library_request", "expectedRequestJson must retain the same document, process epoch and operation UUID.");
+        NativeClient client = registry.Client(instanceId); AutomationSession session = await Handshake(client, expectedProcessEpoch, cancellationToken);
+        NativeCapabilitySymbolLibraryCheckedReadOperationResponse response = await client.InvokeAsync<
+            NativeCapabilitySymbolLibraryCheckedReadOperation, NativeCapabilitySymbolLibraryCheckedReadOperationResponse>(new()
+            {
+                Document = document, ProcessEpoch = session.Epoch, OperationId = operationId,
+                ExpectedRequest = expectedRequest
+            }, cancellationToken);
+        if (response.Found)
+            SymbolLibraryCheckedContract.ValidateResponse(response.Receipt, document, session.Epoch,
+                operationId, expectedRequest.ExpectedSnapshotSha256);
+        return Data(new
+        {
+            instanceId,
+            processEpoch = session.Epoch,
+            operationId,
+            found = response.Found,
+            receipt = response.Found
+                ? JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(response.Receipt))
+                : (JsonElement?)null,
+            nativeReceiptAvailable = response.Found,
+            retryDispatched = false
+        });
+    });
+
     [McpServerTool(Name = "kicad_symbol_library_list", ReadOnly = true),
      Description("List symbols in an explicitly named project symbol library through KiCad's native symbol-library adapter. The result includes the adapter modify hash; this is an observation, not a revision admission.")]
     [KiCadCapability("symbol-library", "native-symbol-library-adapter", "library nickname and native modify hash"),
@@ -192,12 +233,12 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_symbol_library_write_checked", ReadOnly = false),
-     Description("Checked symbol-library write. The request carries an explicit project-bound symbol document, process epoch, operation UUID, complete snapshot digest and definition. A commit is returned only when the native lifecycle receipt proves the same identity, complete revision tracking and before/after snapshots; older or incomplete native owners return an explicit error without reaching legacy writers."),
-     KiCadCapability("symbol-library", "checked-native-admission-seam", "project-bound symbol document, process epoch, operation UUID and complete snapshot digest"),
+     Description("Checked direct-file symbol-library write. Pass the exact checkedStateJson returned by kicad_library_snapshot_read together with its state digest. The native owner admits only an existing direct KiCad .kicad_sym file, holds one complete dependency lock through save/readback/rollback, verifies the target and unrelated entries, and retains the exact receipt for replay after a lost reply. Legacy, folder, database, HTTP and incomplete providers return an honest refusal without reaching a writer."),
+     KiCadCapability("symbol-library", "checked-native-direct-symbol-file", "project-bound symbol document, process epoch, complete checked state/revision, operation UUID, definition and typed receipt"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> WriteChecked(string instanceId, string expectedProcessEpoch, string documentJson,
         string definitionJson, string operationId, string expectedSnapshotSha256, CancellationToken cancellationToken,
-        bool overwrite = true, string pinDisplayJson = "") => Execute(async () =>
+        bool overwrite = true, string pinDisplayJson = "", string expectedStateJson = "") => Execute(async () =>
     {
         ValidateEpoch(expectedProcessEpoch); ValidateOperation(operationId);
         if (expectedSnapshotSha256.Length != 64 || !expectedSnapshotSha256.All(char.IsAsciiHexDigitLower))
@@ -218,13 +259,20 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
             throw new AutomationException("invalid_symbol_definition", "The symbol definition is invalid: "
                 + string.Join("; ", issues.OrderBy(issue => issue.Path, StringComparer.Ordinal).Select(issue => issue.Code)));
         NativeCapabilitySymbolLibraryPinDisplay? display = ParsePinDisplay(pinDisplayJson, required: false);
+        NativeCapabilitySymbolLibraryCheckedState? expectedState = null;
+        if (!string.IsNullOrWhiteSpace(expectedStateJson))
+        {
+            try { expectedState = SchematicJson.Parser.Parse<NativeCapabilitySymbolLibraryCheckedState>(expectedStateJson); }
+            catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException)
+            { throw new AutomationException("invalid_library_snapshot", "expectedStateJson is not valid checked symbol-library state: " + error.Message); }
+        }
         NativeClient client = registry.Client(instanceId); AutomationSession session = await Handshake(client, expectedProcessEpoch, cancellationToken);
         NativeCapabilitySymbolLibraryCheckedWriteResponse response = await client.InvokeAsync<
             NativeCapabilitySymbolLibraryCheckedWrite, NativeCapabilitySymbolLibraryCheckedWriteResponse>(new()
             {
                 Document = document, ProcessEpoch = session.Epoch, OperationId = operationId,
                 ExpectedSnapshotSha256 = expectedSnapshotSha256, Definition = definition,
-                Overwrite = overwrite, PinDisplay = display
+                Overwrite = overwrite, PinDisplay = display, ExpectedState = expectedState
             }, cancellationToken);
         SymbolLibraryCheckedContract.ValidateResponse(
             response, document, session.Epoch, operationId, expectedSnapshotSha256);
@@ -237,6 +285,18 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
             afterSnapshotSha256 = response.AfterSnapshotSha256, errorCode = response.ErrorCode,
             errorMessage = response.ErrorMessage, nativeReceiptAvailable = true,
             receiptVerified = true, persistenceVerified = response.Committed,
+            requestFingerprintSha256 = response.RequestFingerprintSha256,
+            expectedRequestVerified = response.ExpectedRequestVerified,
+            nativeWriteStarted = response.NativeWriteStarted,
+            postverified = response.Postverified,
+            targetVerified = response.TargetVerified,
+            unrelatedEntriesVerified = response.UnrelatedEntriesVerified,
+            rollbackAttempted = response.RollbackAttempted,
+            receiptStatus = response.ReceiptStatus.ToString(),
+            scope = response.Scope,
+            beforeRevision = response.ObservedBefore?.Revision,
+            afterRevision = response.ObservedAfter?.Revision,
+            rollbackRevision = response.ObservedRollback?.Revision,
             persistenceSource = response.Committed ? "native-lifecycle-receipt" : null,
             transportRetrySafe = !response.Committed || response.Replayed
         };
@@ -584,6 +644,13 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
         issues.Add(new(code, path, message));
 
     private static bool HasControl(string value) => value.Any(char.IsControl);
+    private static DocumentSpecifier ParseDocument(string json)
+    {
+        try { return SchematicJson.Parser.Parse<DocumentSpecifier>(json); }
+        catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException)
+        { throw new AutomationException("invalid_library_document", "documentJson is not valid DocumentSpecifier protobuf JSON: " + error.Message); }
+    }
+
     private static void ValidateLibraryIdentity(string value)
     {
         if (string.IsNullOrWhiteSpace(value) || value.Length > 255 || value.Contains(':') || HasControl(value))

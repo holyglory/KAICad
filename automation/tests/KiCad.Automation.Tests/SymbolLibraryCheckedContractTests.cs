@@ -85,6 +85,58 @@ public sealed class SymbolLibraryCheckedContractTests
         Assert.AreEqual("invalid_symbol_library_response", error.Code);
     }
 
+    [TestMethod]
+    public void DirectFileReceiptRequiresTargetUnrelatedAndAdvancingRevisionEvidence()
+    {
+        (DocumentSpecifier document, string epoch, string operation, string expected) = Fixture();
+        var before = State(document, epoch, sequence: 7, expected);
+        var after = State(document, epoch, sequence: 8, new string('b', 64));
+        NativeCapabilitySymbolLibraryCheckedWriteResponse response = Response(document, epoch, operation,
+            status: "committed_postverified", committed: true, revisionTracked: true,
+            completeLifecycle: true, before: expected, after: new string('b', 64));
+        response.ReceiptStatus = NativeCapabilitySymbolLibraryCheckedReceiptStatus.SlcwsCommittedPostverified;
+        response.Scope = "mcp_direct_symbol_file";
+        response.RequestFingerprintSha256 = new string('c', 64);
+        response.ExpectedRequestVerified = true;
+        response.NativeWriteStarted = true;
+        response.Postverified = true;
+        response.TargetVerified = true;
+        response.UnrelatedEntriesVerified = true;
+        response.ObservedBefore = before;
+        response.ObservedAfter = after;
+        response.Request = new NativeCapabilitySymbolLibraryCheckedWrite
+        {
+            Document = document.Clone(), ProcessEpoch = epoch, OperationId = operation,
+            ExpectedSnapshotSha256 = expected, ExpectedState = before
+        };
+
+        SymbolLibraryCheckedContract.ValidateResponse(response, document, epoch, operation, expected);
+    }
+
+    [TestMethod]
+    public void DirectFileReceiptRejectsCommitWithoutPostverificationProof()
+    {
+        (DocumentSpecifier document, string epoch, string operation, string expected) = Fixture();
+        var response = Response(document, epoch, operation,
+            status: "committed", committed: true, revisionTracked: true,
+            completeLifecycle: true, before: expected, after: new string('b', 64));
+        response.ReceiptStatus = NativeCapabilitySymbolLibraryCheckedReceiptStatus.SlcwsCommittedPostverified;
+        response.Scope = "mcp_direct_symbol_file";
+        response.RequestFingerprintSha256 = new string('c', 64);
+        response.ExpectedRequestVerified = true;
+        response.NativeWriteStarted = true;
+        response.Request = new NativeCapabilitySymbolLibraryCheckedWrite
+        {
+            Document = document.Clone(), ProcessEpoch = epoch, OperationId = operation,
+            ExpectedSnapshotSha256 = expected
+        };
+
+        AutomationException error = Assert.ThrowsExactly<AutomationException>(() =>
+            SymbolLibraryCheckedContract.ValidateResponse(response, document, epoch, operation, expected));
+
+        Assert.AreEqual("invalid_symbol_library_response", error.Code);
+    }
+
     private static NativeCapabilitySymbolLibraryCheckedWriteResponse Response(
         DocumentSpecifier document, string epoch, string operation, string status,
         bool committed = false, bool replayed = false, bool rollbackCompleted = false,
@@ -110,4 +162,13 @@ public sealed class SymbolLibraryCheckedContractTests
         };
         return (document, "epoch", "operation", new string('a', 64));
     }
+
+    private static NativeCapabilitySymbolLibraryCheckedState State(DocumentSpecifier document,
+        string epoch, ulong sequence, string stateSha) => new()
+        {
+            Document = document.Clone(), ProcessEpoch = epoch,
+            Revision = new() { Epoch = epoch, Sequence = sequence }, Scope = "mcp_direct_symbol_file",
+            StateSha256 = stateSha, StateComplete = true, DiskBaselineChecked = true,
+            CompleteChangeTracking = false
+        };
 }

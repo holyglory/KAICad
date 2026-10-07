@@ -15,11 +15,12 @@ namespace KiCad.Automation.Mcp;
 public sealed class LibrarySnapshotTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_library_snapshot_read", ReadOnly = true),
-     Description("Read compact, project-bound lifecycle evidence for one explicitly identified symbol library entry. The request carries the complete symbol DocumentSpecifier and native process epoch; the native owner refreshes the direct KiCad symbol-file provider, captures detached-definition and table/library file baselines, and returns only bounded metadata and SHA-256 digests. This never writes a library, exposes the detached definition, or claims complete mutation tracking. Footprint documents receive an explicit unsupported status until their producer is covered."),
-     KiCadCapability("library-snapshot", "native-symbol-library-adapter", "explicit project/document identity, provider row, detached digest and dependency baselines"),
+     Description("Read compact, project-bound lifecycle evidence for one explicitly identified symbol library entry. The native owner forces a disk refresh, captures the complete direct KiCad symbol-file checkpoint, revision and dependency baselines, and returns the state envelope required by kicad_symbol_library_write_checked. This never exposes the detached definition or claims complete tracking for GUI, folder, legacy, database or HTTP writers. Footprint documents receive an explicit unsupported status until their producer is covered."),
+     KiCadCapability("library-snapshot", "native-symbol-library-adapter", "explicit project/document identity, direct provider row, checked revision/state digest and dependency baselines"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Read(string instanceId, string expectedProcessEpoch, string documentJson,
-        string libraryNickname, string entryName, CancellationToken cancellationToken, bool forcedRefresh = true)
+        string libraryNickname, string entryName, CancellationToken cancellationToken, bool forcedRefresh = true,
+        bool allowMissingEntry = false)
         => Execute(async () =>
         {
             ValidateEpoch(expectedProcessEpoch);
@@ -44,7 +45,8 @@ public sealed class LibrarySnapshotTools(InstanceRegistry registry)
                     ProcessEpoch = expectedProcessEpoch,
                     LibraryNickname = libraryNickname,
                     EntryName = entryName,
-                    ForcedRefresh = forcedRefresh
+                    ForcedRefresh = forcedRefresh,
+                    AllowMissingEntry = allowMissingEntry
                 }, cancellationToken);
 
             if (!string.Equals(response.Status, "complete", StringComparison.Ordinal))
@@ -81,8 +83,9 @@ public sealed class LibrarySnapshotTools(InstanceRegistry registry)
                 diskBaselineChecked = response.DiskBaselineChecked,
                 completeChangeTracking = response.CompleteChangeTracking,
                 postverify = response.Postverify,
+                checkedState = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(response.CheckedState)),
                 readOnly = true,
-                mutationAvailable = false
+                mutationAvailable = response.CheckedState.StateComplete
             });
         });
 

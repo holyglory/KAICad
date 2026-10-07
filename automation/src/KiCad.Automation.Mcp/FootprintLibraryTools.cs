@@ -294,17 +294,21 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_footprint_save"),
-     Description("Save the explicitly identified footprint currently loaded in the attached native footprint editor. Before mutation this captures a complete detached editor definition; after native save it forces a persisted library read and compares the full native-writer canonical hash and file baseline. A successful reply therefore proves complete definition persistence for this entry. operationId and the existing native/MCP receipts retain the lost-reply reconciliation behavior."),
-     KiCadCapability("footprint-library", "compiled-mcp plus native-footprint-api", "explicit footprint document, process epoch, operation ID, native process receipt; no lifecycle revision token"),
+     Description("Save the explicitly identified footprint currently loaded in the attached native footprint editor. Before mutation this captures a complete detached editor definition; after native save it forces a persisted library read and compares the full native-writer canonical hash and file baseline. Optional expectedModifyHash rejects a changed library before the native save and is bound to operation replay. A successful reply therefore proves complete definition persistence for this entry. operationId and the existing native/MCP receipts retain the lost-reply reconciliation behavior."),
+     KiCadCapability("footprint-library", "compiled-mcp plus native-footprint-api", "explicit footprint document, process epoch, operation ID, optional native library modify hash and native process receipt; no durable lifecycle sequence"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Save(string instanceId, string expectedProcessEpoch, string documentJson,
-        string operationId, CancellationToken cancellationToken, string expectedSnapshotSha256 = "") =>
-        Execute(() => WithReceipt(operationId, Fingerprint(instanceId, "save", expectedProcessEpoch, documentJson + "\n" + expectedSnapshotSha256), async () =>
+        string operationId, CancellationToken cancellationToken, string expectedSnapshotSha256 = "",
+        string expectedModifyHash = "") =>
+        Execute(() => WithReceipt(operationId, Fingerprint(instanceId, "save", expectedProcessEpoch, documentJson + "\n" + expectedSnapshotSha256 + "\n" + expectedModifyHash), async () =>
         {
             ValidateOperationId(operationId);
             ValidateEpoch(expectedProcessEpoch);
             DocumentSpecifier document = ParseFootprintDocument(documentJson);
             NativeContext context = await Admit(instanceId, expectedProcessEpoch, cancellationToken);
+            ulong? expectedLibraryHash = ParseExpectedModifyHash(expectedModifyHash);
+            ulong beforeModifyHash = await EnsureLibraryModifyHash(context, document.LibId.LibraryNickname,
+                expectedLibraryHash, cancellationToken);
             await EnsureSnapshot(context, document, expectedSnapshotSha256, cancellationToken);
             NativeCapabilityFootprintReadDefinitionResponse expectedDefinition = await ReadNativeDefinition(
                 context, document, (NativeFootprintDefinitionSource)2, document.LibId, cancellationToken);
@@ -345,7 +349,10 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
                 fileBaseline = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(persistedDefinition.FileBaseline)),
                 persistedLibraryNickname = document.LibId.LibraryNickname,
                 persistedFootprintName = document.LibId.EntryName,
+                beforeModifyHash,
                 persistedModifyHash = readback.ModifyHash,
+                expectedModifyHash = string.IsNullOrWhiteSpace(expectedModifyHash) ? null : expectedModifyHash,
+                revisionAdmission = expectedLibraryHash.HasValue ? "modify-hash-matched" : "not-requested",
                 transportRetrySafe = false,
                 replayableWithinProcess = true, receiptScope = nativeReceipt.Found ? "native-process" : "mcp-process",
                 nativeReceipt = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(nativeReceipt)),
@@ -632,6 +639,32 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
                 $"KiCad completed {operation} operation {operationId}, but a native library re-read did not contain {libraryNickname}:{footprintName}. Inspect the library before retrying.");
 
         return new(response.ModifyHash);
+    }
+
+    private static ulong? ParseExpectedModifyHash(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        if (!ulong.TryParse(value, System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out ulong parsed))
+            throw new AutomationException("invalid_footprint_library_revision",
+                "expectedModifyHash must be an unsigned decimal native modify hash.");
+        return parsed;
+    }
+
+    private static async Task<ulong> EnsureLibraryModifyHash(NativeContext context,
+        string libraryNickname, ulong? expected, CancellationToken cancellationToken)
+    {
+        NativeCapabilityFootprintLibraryReadNamesResponse response =
+            await context.Client.InvokeAsync<NativeCapabilityFootprintLibraryReadNames,
+                NativeCapabilityFootprintLibraryReadNamesResponse>(new()
+                {
+                    LibraryNickname = libraryNickname,
+                    BestEfforts = false
+                }, cancellationToken);
+        if (expected.HasValue && response.ModifyHash != expected.Value)
+            throw new AutomationException("footprint_library_changed",
+                $"The footprint library modify hash changed from {expected.Value} to {response.ModifyHash}; inspect it and retry with a fresh operation ID.");
+        return response.ModifyHash;
     }
 
     private static async Task<LibraryReadback> VerifyDeletedLibraryEntry(NativeContext context,

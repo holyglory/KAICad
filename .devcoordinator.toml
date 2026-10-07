@@ -2186,7 +2186,7 @@ env={TMPDIR="/mnt/build-storage/codex/kicad/t",KICAD_RUN_FROM_BUILD_DIR="1",KICA
 name="managed-build"
 tier="development"
 role="preflight"
-invalidates=["managed-contracts","native-build","identity","native-symbol-library"]
+invalidates=["native-build","identity","native-symbol-library"]
 command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--configuration","Debug"]
 [[test.native-symbol-library-identity.check]]
 name="managed-contracts"

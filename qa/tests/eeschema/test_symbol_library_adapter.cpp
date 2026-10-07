@@ -402,6 +402,7 @@ BOOST_AUTO_TEST_CASE( SaveSymbolCheckedVerifiesEntriesAndReportsWriteBoundaries 
     const wxString nickname = wxS( "Checked" );
     SCOPED_SYM_LIB_TABLE tableFile( { nickname } );
     const wxString path = tableFile.LibraryPath( nickname );
+    const wxString tablePath = wxFileName( tableFile.Path(), wxS( "sym-lib-table" ) ).GetFullPath();
     {
         IO_RELEASER<SCH_IO> plugin( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
         plugin->CreateLibrary( path );
@@ -427,7 +428,7 @@ BOOST_AUTO_TEST_CASE( SaveSymbolCheckedVerifiesEntriesAndReportsWriteBoundaries 
     BOOST_REQUIRE( direct );
 
     std::string tableContents;
-    FILE_CONTENT_BASELINE tableBefore = FILE_CONTENT_BASELINE::Read( tableFile.Path(), &tableContents );
+    FILE_CONTENT_BASELINE tableBefore = FILE_CONTENT_BASELINE::Read( tablePath, &tableContents );
     std::string beforeContents;
     FILE_CONTENT_BASELINE before = FILE_CONTENT_BASELINE::Read( path, &beforeContents );
     BOOST_REQUIRE( tableBefore.Known() && before.Known() );
@@ -446,7 +447,7 @@ BOOST_AUTO_TEST_CASE( SaveSymbolCheckedVerifiesEntriesAndReportsWriteBoundaries 
     BOOST_CHECK( createResult.targetVerified );
     BOOST_CHECK( createResult.unrelatedEntriesVerified );
     BOOST_CHECK( createResult.beforeDefinition.empty() );
-    BOOST_CHECK( tableBefore.Check( tableFile.Path() ) == FILE_BASELINE_CHECK::UNCHANGED );
+    BOOST_CHECK( tableBefore.Check( tablePath ) == FILE_BASELINE_CHECK::UNCHANGED );
 
     IO_RELEASER<SCH_IO> createReadback( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
     LIB_SYMBOL* persistedCreated = createReadback->LoadSymbol( path, created.GetName() );
@@ -461,7 +462,7 @@ BOOST_AUTO_TEST_CASE( SaveSymbolCheckedVerifiesEntriesAndReportsWriteBoundaries 
     replacement.GetReferenceField().SetText( wxS( "R" ) );
     std::string refusalContents;
     FILE_CONTENT_BASELINE refusalBaseline = FILE_CONTENT_BASELINE::Read( path, &refusalContents );
-    FILE_CONTENT_BASELINE refusalTableBaseline = FILE_CONTENT_BASELINE::Read( tableFile.Path() );
+    FILE_CONTENT_BASELINE refusalTableBaseline = FILE_CONTENT_BASELINE::Read( tablePath );
     const std::vector<FILE_CONTENT_BASELINE> completeRefusal { refusalTableBaseline, refusalBaseline };
     bool beforeCalled = false;
     SCH_KICAD_SEXPR_CHECKED_WRITE_RESULT refused;
@@ -534,7 +535,7 @@ BOOST_AUTO_TEST_CASE( SaveSymbolCheckedVerifiesEntriesAndReportsWriteBoundaries 
     // has no safe attribution for a second overwrite, and the persisted result remains observable.
     std::string afterContents;
     FILE_CONTENT_BASELINE afterBaseline = FILE_CONTENT_BASELINE::Read( path, &afterContents );
-    FILE_CONTENT_BASELINE afterTableBaseline = FILE_CONTENT_BASELINE::Read( tableFile.Path() );
+    FILE_CONTENT_BASELINE afterTableBaseline = FILE_CONTENT_BASELINE::Read( tablePath );
     const std::vector<FILE_CONTENT_BASELINE> completeAfter { afterTableBaseline, afterBaseline };
     bool afterCalled = false;
     SCH_KICAD_SEXPR_CHECKED_WRITE_RESULT afterFailure;

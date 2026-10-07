@@ -106,7 +106,7 @@ public sealed class PcbRouteCleanupTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_pcb_route_cleanup_apply", ReadOnly = false),
-     Description("Apply one exact route cleanup DeleteItems candidate through KiCad's native undoable transaction. requestJson must be the candidateRequestJson returned by kicad_pcb_route_cleanup_plan; expectedStateJson must be the matching board observation; operationId binds the mutation and its process-local replay receipt. A lost reply remains indeterminate until the same operation is inspected or retried.")]
+     Description("Apply one exact route cleanup DeleteItems candidate through KiCad's checked native PCB item transaction. requestJson must be the candidateRequestJson returned by kicad_pcb_route_cleanup_plan; expectedStateJson must be the matching board observation; operationId binds the retained native receipt for exact replay after a lost reply.")]
     [KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "exact DeleteItems candidate, lifecycle checkpoint, native undo transaction, operation ID"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Apply(string instanceId, string requestJson, string expectedStateJson,
@@ -122,55 +122,14 @@ public sealed class PcbRouteCleanupTools(InstanceRegistry registry)
         DocumentLifecycleState expected = Parse<DocumentLifecycleState>(expectedStateJson, "invalid_route_cleanup_state");
         if (expected.Scope != DocumentLifecycleScope.DlsPcb || !expected.Document.Equals(request.Header.Document))
             throw new AutomationException("invalid_route_cleanup_state", "The expected state must identify the same PCB document.");
-        string fingerprint = instanceId + "\n" + requestJson + "\n" + SchematicJson.Formatter.Format(expected);
-        if (Receipts.TryGetValue(operationId, out StoredReceipt? replay))
-        {
-            if (replay.Fingerprint != fingerprint)
-                throw new AutomationException("operation_id_reused", "operationId is already bound to a different cleanup request.");
-            return replay.Result;
-        }
+        string canonicalRequest = BoardJson.Formatter.Format(request);
+        string fingerprint = instanceId + "\n" + canonicalRequest + "\n" + SchematicJson.Formatter.Format(expected);
         return await WithReceipt(operationId, fingerprint, async () =>
         {
-            NativeClient client = registry.Client(instanceId);
-            AutomationSession session = await client.HandshakeAsync(cancellationToken);
-            if (session.Epoch != expected.ProcessEpoch)
-                throw new AutomationException("pcb_instance_changed", "The cleanup candidate belongs to another native process epoch.");
-            DocumentLifecycleState admission = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
-                new() { Document = request.Header.Document }, cancellationToken);
-            if (!admission.Equals(expected)) throw new AutomationException("pcb_state_changed", "The board changed before cleanup could be admitted.");
-            BeginCommitResponse begin = await client.InvokeAsync<BeginCommit, BeginCommitResponse>(new() { Header = request.Header }, cancellationToken);
-            bool committed = false;
-            try
-            {
-                DocumentLifecycleState before = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
-                    new() { Document = request.Header.Document }, cancellationToken);
-                if (!before.Equals(expected)) throw new AutomationException("pcb_state_changed", "The board changed before cleanup mutation.");
-                DeleteItemsResponse response = await client.InvokeAsync<DeleteItems, DeleteItemsResponse>(request, cancellationToken);
-                if (response.DeletedItems.Any(item => item.Status != ItemDeletionStatus.IdsOk))
-                    throw new AutomationException("pcb_cleanup_rejected", "KiCad rejected one or more cleanup deletions; the transaction was dropped.");
-                await client.InvokeAsync<EndCommit, EndCommitResponse>(new()
-                { Id = begin.Id, Action = CommitAction.CmaCommit, Header = request.Header, Message = "MCP route cleanup" }, cancellationToken);
-                committed = true;
-                DocumentLifecycleState after = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
-                    new() { Document = request.Header.Document }, cancellationToken);
-                JsonElement result = JsonSerializer.SerializeToElement(new
-                {
-                    instanceId, processEpoch = session.Epoch, operationId, operationOutcome = "completed",
-                    beforeState = SchematicJson.Formatter.Format(before), afterState = SchematicJson.Formatter.Format(after),
-                    response = JsonSerializer.Deserialize<JsonElement>(BoardJson.Formatter.Format(response)),
-                    mutationConfirmed = true, atomicTransaction = true, nativeReceiptAvailable = false,
-                    replayableWithinProcess = true
-                });
-                return new CallToolResult { StructuredContent = result, Content = [new TextContentBlock { Text = result.GetRawText() }] };
-            }
-            finally
-            {
-                if (!committed)
-                {
-                    try { await client.InvokeAsync<EndCommit, EndCommitResponse>(new() { Id = begin.Id, Action = CommitAction.CmaDrop, Header = request.Header }, CancellationToken.None); }
-                    catch { }
-                }
-            }
+            CheckedPcbItemTransaction checkedRequest = BuildCheckedRequest(expected, request, operationId);
+            PcbCheckedItemDispatch.Outcome outcome = await PcbCheckedItemDispatch.ApplyAsync(
+                registry, instanceId, checkedRequest, cancellationToken);
+            return CleanupMutationData(outcome);
         });
     });
 
@@ -201,8 +160,10 @@ public sealed class PcbRouteCleanupTools(InstanceRegistry registry)
                 string? receiptInstance = payload.TryGetProperty("instanceId", out JsonElement instance) ? instance.GetString() : null;
                 if (!string.Equals(receiptInstance, instanceId, StringComparison.Ordinal))
                     throw new AutomationException("wrong_instance_receipt", "The cleanup receipt belongs to a different MCP instance.");
+                bool nativeReceiptAvailable = payload.TryGetProperty("nativeReceiptAvailable", out JsonElement native)
+                    && native.ValueKind == JsonValueKind.True;
                 return ReceiptData(new { instanceId, processEpoch, operationId, found = true,
-                    receiptScope = "mcp-process", nativeReceiptAvailable = false, receipt = payload });
+                    receiptScope = "mcp-process", nativeReceiptAvailable, receipt = payload });
             }
             finally { MutationGate.Release(); }
         }
@@ -213,6 +174,72 @@ public sealed class PcbRouteCleanupTools(InstanceRegistry registry)
             return new CallToolResult { IsError = true, StructuredContent = structured,
                 Content = [new TextContentBlock { Text = structured.GetRawText() }] };
         }
+    }
+
+    internal static CheckedPcbItemTransaction BuildCheckedRequest(
+        DocumentLifecycleState expected, DeleteItems candidate, string operationId)
+    {
+        var request = new CheckedPcbItemTransaction
+        {
+            ExpectedState = expected.Clone(),
+            ProcessEpoch = expected.ProcessEpoch,
+            OperationId = operationId,
+            MaximumResultBytes = 512 * 1024,
+            Description = "MCP route cleanup"
+        };
+        request.Operations.Add(new PcbItemOperation { Delete = candidate.Clone() });
+        return request;
+    }
+
+    private static CallToolResult CleanupMutationData(PcbCheckedItemDispatch.Outcome outcome)
+    {
+        CheckedPcbItemTransactionReceipt? receipt = outcome.Receipt;
+        bool success = outcome.Completed;
+        JsonElement? receiptJson = receipt is null || outcome.UntrustedReceipt
+            ? null : JsonDocument.Parse(SchematicJson.Formatter.Format(receipt)).RootElement.Clone();
+        string? before = receipt?.ObservedBefore is null || outcome.UntrustedReceipt
+            ? null : SchematicJson.Formatter.Format(receipt.ObservedBefore);
+        string? rollback = receipt?.ObservedRollback is null || outcome.UntrustedReceipt
+            ? null : SchematicJson.Formatter.Format(receipt.ObservedRollback);
+        string? after = receipt?.ObservedAfter is null || outcome.UntrustedReceipt
+            ? rollback : SchematicJson.Formatter.Format(receipt.ObservedAfter);
+        JsonElement? response = null;
+        if (!outcome.UntrustedReceipt && receipt is not null && receipt.Results.Count > 0
+            && receipt.Results[0].ResultCase == PcbItemOperationResult.ResultOneofCase.Delete)
+            response = JsonDocument.Parse(BoardJson.Formatter.Format(receipt.Results[0].Delete)).RootElement.Clone();
+
+        JsonElement structured = JsonSerializer.SerializeToElement(new
+        {
+            outcome.InstanceId,
+            processEpoch = receipt?.ProcessEpoch ?? outcome.Request.ProcessEpoch,
+            operationId = outcome.Request.OperationId,
+            operationOutcome = success ? "completed" : receipt?.State.ToString(),
+            state = outcome.UntrustedReceipt
+                ? CheckedPcbItemTransactionState.CpbtsIndeterminate.ToString()
+                : receipt?.State.ToString(),
+            replayed = receipt?.Replayed ?? false,
+            receipt = receiptJson,
+            nativeReceipt = receiptJson,
+            nativeReceiptAvailable = outcome.NativeReceiptAvailable,
+            mutationConfirmed = success,
+            atomicTransaction = true,
+            operationReceipt = outcome.NativeReceiptAvailable,
+            replayableWithinProcess = outcome.NativeReceiptAvailable,
+            receiptScope = outcome.NativeReceiptAvailable ? "native-process" : "none",
+            transportRetrySafe = outcome.NativeReceiptAvailable,
+            beforeState = before,
+            rollbackState = rollback,
+            afterState = after,
+            response,
+            errorCode = success ? null : outcome.ErrorCode,
+            errorMessage = success ? null : outcome.ErrorMessage
+        });
+        return new CallToolResult
+        {
+            IsError = !success,
+            StructuredContent = structured,
+            Content = [new TextContentBlock { Text = structured.GetRawText() }]
+        };
     }
 
     private static Candidate? TrackCandidate(Track track, CleanupRequest request)
@@ -268,7 +295,6 @@ public sealed class PcbRouteCleanupTools(InstanceRegistry registry)
             {
                 if (existing.Fingerprint != fingerprint)
                     throw new AutomationException("operation_id_reused", "operationId is already bound to a different cleanup request.");
-                return existing.Result;
             }
             CallToolResult result = await action();
             if (!(result.IsError ?? false)) Receipts[operationId] = new(fingerprint, result);

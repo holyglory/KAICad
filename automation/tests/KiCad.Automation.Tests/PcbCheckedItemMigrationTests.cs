@@ -79,6 +79,50 @@ public sealed class PcbCheckedItemMigrationTests
     }
 
     [TestMethod]
+    public async Task RouteCleanupUsesCheckedDeleteDispatchAndReplayBeforeStaleRead()
+    {
+        string root = Directory.CreateTempSubdirectory("pcb-route-cleanup-migration-").FullName;
+        try
+        {
+            var transport = new MigrationTransport();
+            var registry = new InstanceRegistry(transport, root);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(root, "native.sock")), transport.InstanceId);
+            var tools = new PcbRouteCleanupTools(registry);
+            var state = State(root, transport.Epoch, sequence: 5, digest: 'a');
+            var delete = new DeleteItems
+            {
+                Header = new() { Document = state.Document.Clone() },
+                ItemIds = { new KIID { Value = Guid.NewGuid().ToString("D") } }
+            };
+            string operationId = Guid.NewGuid().ToString("D");
+
+            var applied = await tools.Apply(transport.InstanceId, BoardJson.Formatter.Format(delete),
+                SchematicJson.Formatter.Format(state), operationId, default);
+            Assert.IsFalse(applied.IsError ?? false, Text(applied));
+            JsonElement appliedData = JsonSerializer.SerializeToElement(applied.StructuredContent);
+            Assert.IsTrue(appliedData.GetProperty("nativeReceiptAvailable").GetBoolean());
+            Assert.IsTrue(appliedData.GetProperty("mutationConfirmed").GetBoolean());
+            Assert.AreEqual(CheckedPcbItemTransactionState.CpbtsCompleted.ToString(),
+                appliedData.GetProperty("state").GetString());
+            var response = BoardJson.Parser.Parse<DeleteItemsResponse>(appliedData.GetProperty("response").GetRawText());
+            Assert.AreEqual(delete.ItemIds[0], response.DeletedItems[0].Id);
+
+            // A retry must use the native retained receipt without reopening a
+            // legacy board transaction or rereading a changed board.
+            transport.LiveBoardChanged = true;
+            var replay = await tools.Apply(transport.InstanceId, BoardJson.Formatter.Format(delete),
+                SchematicJson.Formatter.Format(state), operationId, default);
+            Assert.IsFalse(replay.IsError ?? false, Text(replay));
+            JsonElement replayData = JsonSerializer.SerializeToElement(replay.StructuredContent);
+            Assert.IsTrue(replayData.GetProperty("replayed").GetBoolean());
+            Assert.AreEqual(2, transport.CheckedMutations);
+            Assert.AreEqual(0, transport.LifecycleReads);
+            Assert.AreEqual(0, transport.LegacyMutations);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
     public async Task GeneratedOperationIdIsReturnedAndRejectedUpdateKeepsBeforeSnapshot()
     {
         string root = Directory.CreateTempSubdirectory("pcb-checked-rejection-").FullName;

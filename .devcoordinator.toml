@@ -2191,8 +2191,8 @@ command=["cmake","--build","automation/artifacts/native","--target","qa_eeschema
 [[test.native-symbol-library-identity.check]]
 name="identity"
 tier="development"
-command=["xvfb-run","-a","cmake","-E","chdir","automation/artifacts/native","ctest","--no-tests=error","-V","--output-junit","symbol-identity.xml","-R","^qa_(schematic_(symbol_library_identity|formatting)|symbol_library_adapter|api_sch_proto|sch_(pin_geometry_facts|change_tracking))$"]
-retained_artifacts=[{name="identity",path="automation/artifacts/native/symbol-identity.xml",max_bytes=16777216}]
+command=["xvfb-run","-a","cmake","-E","chdir","automation/artifacts/native","ctest","--no-tests=error","-V","--output-junit","Testing/Temporary/symbol-identity.xml","-R","^qa_(schematic_(symbol_library_identity|formatting)|symbol_library_adapter|api_sch_proto|sch_(pin_geometry_facts|change_tracking))$"]
+retained_artifacts=[{name="identity",path="automation/artifacts/native/Testing/Temporary",max_bytes=16777216}]
 [[test.native-symbol-library-identity.check]]
 name="managed-build"
 tier="development"

@@ -183,7 +183,11 @@ internal static class PcbKeepoutAuthoringContract
 
     internal static void ValidateReadback(Zone expected, Zone actual, string? nativeIdentity = null)
     {
-        ValidateCreate(expected);
+        // Updates carry native-owned placement metadata forward from the existing
+        // rule area. Validate the authored geometry/restrictions while permitting
+        // that metadata to be present in the expected replacement.
+        ValidateZone(expected, requireIdentity: true, allowNativeParent: true, nativeIdentity,
+            allowDerivedFill: true, allowNativePlacementMetadata: true);
         if (actual.Id is null || actual.Id.Value != expected.Id.Value || actual.Type != ZoneType.ZtRuleArea)
             throw new AutomationException("pcb_keepout_readback_mismatch", "Native readback returned a different keepout identity or type.");
         if (actual.Parent is not null && !string.IsNullOrWhiteSpace(actual.Parent.Value)
@@ -204,8 +208,8 @@ internal static class PcbKeepoutAuthoringContract
             || expectedSettings.KeepoutTracks != actualSettings.KeepoutTracks
             || expectedSettings.KeepoutPads != actualSettings.KeepoutPads
             || expectedSettings.KeepoutFootprints != actualSettings.KeepoutFootprints
-            || actualSettings.PlacementEnabled
-            || !string.IsNullOrWhiteSpace(actualSettings.PlacementSource)
+            || expectedSettings.PlacementEnabled != actualSettings.PlacementEnabled
+            || !string.Equals(expectedSettings.PlacementSource, actualSettings.PlacementSource, StringComparison.Ordinal)
             || !Enum.IsDefined(actualSettings.PlacementSourceType)
             || (expectedSettings.PlacementSourceType != PlacementRuleSourceType.PrstUnknown
                 && actualSettings.PlacementSourceType != expectedSettings.PlacementSourceType))

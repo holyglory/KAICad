@@ -34,6 +34,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 
 
 namespace
@@ -486,6 +487,48 @@ BOOST_AUTO_TEST_CASE( SaveSymbolCheckedVerifiesEntriesAndReportsWriteBoundaries 
     LIB_SYMBOL* afterRefusal = refusalReadback->LoadSymbol( path, original.GetName() );
     BOOST_REQUIRE( afterRefusal );
     BOOST_CHECK_EQUAL( afterRefusal->GetReferenceField().GetText().ToStdString(), "U" );
+
+    // Let the write reach disk, then alter only the requested entry before post-readback.  The
+    // checked owner must recognize the attributed file state, restore the captured bytes, and
+    // prove the original definition instead of reporting a false commit.
+    std::string postverifyContents;
+    FILE_CONTENT_BASELINE postverifyBaseline = FILE_CONTENT_BASELINE::Read( path, &postverifyContents );
+    FILE_CONTENT_BASELINE postverifyTableBaseline = FILE_CONTENT_BASELINE::Read( tableFile.Path() );
+    const std::vector<FILE_CONTENT_BASELINE> completePostverify { postverifyTableBaseline, postverifyBaseline };
+    bool postverifyMutationCalled = false;
+    SCH_KICAD_SEXPR_CHECKED_WRITE_RESULT postverifyFailure;
+    {
+        FILE_WRITE_OBSERVER observer(
+                [&]( const wxString& aPath )
+                { BOOST_CHECK( FILE_CONTENT_BASELINE::SamePath( path, aPath ) ); },
+                [&]( const FILE_CONTENT_BASELINE& )
+                {
+                    postverifyMutationCalled = true;
+                    std::ifstream input( path.ToStdString(), std::ios::binary );
+                    std::string mutated( ( std::istreambuf_iterator<char>( input ) ),
+                                         std::istreambuf_iterator<char>() );
+                    const std::string target = "(property \"Reference\" \"R\"";
+                    const size_t targetAt = mutated.find( target );
+                    BOOST_REQUIRE( targetAt != std::string::npos );
+                    mutated[targetAt + target.rfind( 'R' )] = 'Z';
+                    std::ofstream output( path.ToStdString(), std::ios::binary | std::ios::trunc );
+                    output.write( mutated.data(), static_cast<std::streamsize>( mutated.size() ) );
+                    output.close();
+                } );
+        postverifyFailure = direct->SaveSymbolChecked( path, &replacement, true, completePostverify,
+                                                       postverifyContents, replacement.GetName() );
+    }
+    BOOST_CHECK( postverifyMutationCalled );
+    BOOST_CHECK( postverifyFailure.writeStarted );
+    BOOST_CHECK( postverifyFailure.rollbackAttempted );
+    BOOST_CHECK( postverifyFailure.rollbackVerified );
+    BOOST_CHECK( !postverifyFailure.rollbackIndeterminate );
+    BOOST_CHECK( !postverifyFailure.committed );
+    BOOST_CHECK( postverifyBaseline.Check( path ) == FILE_BASELINE_CHECK::UNCHANGED );
+    IO_RELEASER<SCH_IO> postverifyReadback( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
+    LIB_SYMBOL* afterPostverifyFailure = postverifyReadback->LoadSymbol( path, replacement.GetName() );
+    BOOST_REQUIRE( afterPostverifyFailure );
+    BOOST_CHECK_EQUAL( afterPostverifyFailure->GetReferenceField().GetText().ToStdString(), "U" );
 
     // A callback failure after the atomic replacement is reported as indeterminate: the provider
     // has no safe attribution for a second overwrite, and the persisted result remains observable.

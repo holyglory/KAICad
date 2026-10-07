@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Text.Json;
 using Google.Protobuf;
+using Kiapi.Common.Types;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
@@ -114,6 +115,79 @@ public sealed class CheckedSchematicTools(InstanceRegistry registry)
          "NativeSessionTests.AgentAndPersonEditingTogetherNeverGetStaleOrPartialEdits")]
     public Task<CallToolResult> Apply(string instanceId, string requestJson, CancellationToken cancellationToken) =>
         Run(instanceId, requestJson, inspect: false, cancellationToken);
+
+    [McpServerTool(Name = "kicad_schematic_replace_embedded_files"),
+     Description("Replace the complete schematic-owned embedded-file set as one checked native undo step. documentJson identifies the explicit schematic root; expectedStateJson is the exact DocumentLifecycleState checkpoint from kicad_schematic_checked_state or kicad_document_state; embeddedFilesJson is a typed EmbeddedFiles protobuf object and embeddedFonts selects the native font archive flag. operationId is replay-safe and remains bound to the exact file payload and expected revision. The operation does not save the design file; inspect the receipt and call kicad_document_save separately."),
+     KiCadCapability("schematic-design", "native-api", "explicit root document, lifecycle checkpoint, embedded-file payload and operation UUID"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> ReplaceEmbeddedFiles(string instanceId, string documentJson,
+        string expectedStateJson, string embeddedFilesJson, string operationId, bool embeddedFonts,
+        CancellationToken cancellationToken) => ExecuteEmbeddedReplacement(instanceId, documentJson,
+            expectedStateJson, embeddedFilesJson, operationId, embeddedFonts, cancellationToken);
+
+    private async Task<CallToolResult> ExecuteEmbeddedReplacement(string instanceId, string documentJson,
+        string expectedStateJson, string embeddedFilesJson, string operationId, bool embeddedFonts,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            DocumentSpecifier document = ParseDocument(documentJson, "documentJson");
+            DocumentLifecycleState expected = SchematicJson.Parser.Parse<DocumentLifecycleState>(expectedStateJson);
+            if (document.Type != DocumentType.DoctypeSchematic || document.SheetPath?.Path.Count != 1
+                || !expected.Document.Equals(document) || expected.Scope != DocumentLifecycleScope.DlsSchematicHierarchy
+                || string.IsNullOrWhiteSpace(expected.ProcessEpoch) || expected.Revision is null)
+                throw new AutomationException("invalid_embedded_file_state",
+                    "The embedded-file replacement requires the explicit schematic root and a matching lifecycle checkpoint.");
+            if (!Guid.TryParseExact(operationId, "D", out var operation) || operation == Guid.Empty
+                || !string.Equals(operationId, operation.ToString("D"), StringComparison.Ordinal))
+                throw new AutomationException("invalid_operation_id", "operationId must be a canonical UUID.");
+            EmbeddedFiles files = SchematicJson.Parser.Parse<EmbeddedFiles>(embeddedFilesJson);
+            if (files.Files.Count > 4096 || files.Files.Any(file => string.IsNullOrWhiteSpace(file.Name)))
+                throw new AutomationException("invalid_embedded_file_state", "embeddedFilesJson must contain at most 4096 named files.");
+
+            CheckedSchematicBatch request = new()
+            {
+                Batch = new ApplySchematicItemBatch
+                {
+                    Document = document.Clone(),
+                    DocumentEpoch = expected.Revision.Epoch,
+                    ExpectedRevision = expected.Revision.Clone(),
+                    OperationId = operationId,
+                    Description = "MCP replace schematic embedded files"
+                },
+                ExpectedState = expected.Clone()
+            };
+            request.Batch.Operations.Add(new SchematicItemOperation
+            {
+                ReplaceEmbeddedFiles = new SchematicEmbeddedFileState
+                {
+                    Files = files,
+                    EmbeddedFonts = embeddedFonts
+                }
+            });
+            return await Run(instanceId, SchematicJson.Formatter.Format(request), inspect: false, cancellationToken);
+        }
+        catch (Exception error) when (error is AutomationException or InvalidProtocolBufferException
+            or InvalidJsonException or InvalidOperationException or NngException or NativeApiException)
+        {
+            string code = error is AutomationException known ? known.Code
+                : error is NativeApiException native ? "native_status_" + native.Status
+                : error is NngException transport ? "transport_status_" + transport.ErrorCode
+                : "invalid_embedded_file_state";
+            JsonElement data = JsonSerializer.SerializeToElement(new
+            {
+                instanceId, operationId, mutationSubmitted = false,
+                outcome = "not_submitted", errorCode = code, errorMessage = error.Message
+            });
+            return new CallToolResult
+            {
+                IsError = true,
+                StructuredContent = data,
+                Content = [new TextContentBlock { Text = data.GetRawText() }]
+            };
+        }
+    }
 
     [McpServerTool(Name = "kicad_schematic_checked_batch_receipt", ReadOnly = true),
      Description("Inspect the process-owned receipt for an exact CheckedSchematicBatch requestJson and instance ID. Does not submit or repeat a mutation. The original process, operation UUID, document and complete request must match; missing receipts remain not-found, and indeterminate results require reconciliation rather than a new operation ID. Receipts do not prove that the live document has not changed since the recorded operation."),

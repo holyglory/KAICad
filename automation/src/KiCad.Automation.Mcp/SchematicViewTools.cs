@@ -221,7 +221,7 @@ public sealed class SchematicViewTools(InstanceRegistry registry)
         });
 
     [McpServerTool(Name = "kicad_schematic_metadata", ReadOnly = true),
-     Description("Read typed metadata for an explicit currently displayed schematic sheet: screen identity, page/title settings, project text variables, bus aliases and embedded-file records. Returns explicit unrepresented-state entries and incomplete revision tracking. This is a partial read-only snapshot, not a complete reconstruction or restore operation; embedded-file restoration is not implemented.")]
+     Description("Read typed metadata for an explicit currently displayed schematic sheet: screen identity, page/title settings, project text variables, bus aliases and embedded-file records. Returns explicit unrepresented-state entries and incomplete revision tracking. This is a partial read-only snapshot, not a complete reconstruction or restore operation; use kicad_schematic_replace_embedded_files for checked embedded-file mutation.")]
     public Task<CallToolResult> ReadMetadata(string instanceId, string documentJson, CancellationToken cancellationToken) =>
         Execute(async () =>
         {

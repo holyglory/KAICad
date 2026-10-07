@@ -51,6 +51,7 @@ class SCH_ITEM;
 class SCH_SHEET;
 class SCH_SHEET_PATH;
 class SCHEMATIC;
+struct LIBRARY_LIFECYCLE_SNAPSHOT;
 
 
 class API_HANDLER_SCH : public API_HANDLER_EDITOR
@@ -136,6 +137,11 @@ protected:
     HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedWriteResponse>
     handleCheckedWriteSymbolLibrarySymbol(
             const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedWrite>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedReadOperationResponse>
+    handleReadCheckedSymbolLibraryOperation(
+            const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedReadOperation>& aCtx );
+    kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedState symbolLibraryCheckpoint(
+            const LIBRARY_LIFECYCLE_SNAPSHOT& aSnapshot, bool aAdvanceRevision = false );
     HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySymbolLibraryReadOperationResponse> handleReadSymbolLibraryOperation(
             const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySymbolLibraryReadOperation>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySchematicRunErcResponse> handleRunErc(
@@ -278,6 +284,16 @@ private:
             m_symbolLibraryWriteReceipts;
     std::map<std::string, kiapi::automation::v1::NativeCapabilitySymbolLibraryDeleteSymbolResponse>
             m_symbolLibraryDeleteReceipts;
+
+    struct SYMBOL_LIBRARY_REVISION
+    {
+        std::string epoch;
+        uint64_t sequence = 1;
+        std::string contentDigest;
+    };
+    std::map<std::string, SYMBOL_LIBRARY_REVISION> m_symbolLibraryRevisions;
+    std::map<std::string, kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedWriteResponse>
+            m_checkedSymbolLibraryReceipts;
 
     struct ERC_RECEIPT
     {

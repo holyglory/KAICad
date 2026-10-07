@@ -1352,6 +1352,42 @@ message NativeCapabilitySymbolLibraryCheckedWrite {
   kiapi.schematic.types.SchematicSymbol definition = 5;
   bool overwrite = 6;
   NativeCapabilitySymbolLibraryPinDisplay pin_display = 7;
+  // Required by the direct MCP symbol-file lane.  The old digest-only seam
+  // remains unavailable rather than treating a partial cursor as admission.
+  NativeCapabilitySymbolLibraryCheckedState expected_state = 8;
+}
+
+// Complete native checkpoint for one entry in an existing direct .kicad_sym
+// file.  This is scoped to mcp_direct_symbol_file: other application writers
+// are detected by forced byte capture but are not advertised as fully tracked.
+message NativeCapabilitySymbolLibraryCheckedState {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string process_epoch = 2;
+  DocumentRevision revision = 3;
+  string scope = 4;
+  string state_sha256 = 5;
+  string table_path = 6;
+  string table_scope = 7;
+  string raw_uri = 8;
+  string expanded_uri = 9;
+  string provider = 10;
+  string provider_options = 11;
+  repeated NativeCapabilityLibrarySnapshotDependencyBaseline dependency_baselines = 12;
+  bool entry_exists = 13;
+  string detached_definition_sha256 = 14;
+  bool state_complete = 15;
+  bool disk_baseline_checked = 16;
+  bool complete_change_tracking = 17;
+}
+
+enum NativeCapabilitySymbolLibraryCheckedReceiptStatus {
+  SLCWS_UNKNOWN = 0;
+  SLCWS_REJECTED = 1;
+  SLCWS_COMMITTED_POSTVERIFIED = 2;
+  SLCWS_ROLLED_BACK_VERIFIED = 3;
+  SLCWS_INDETERMINATE = 4;
+  SLCWS_UNAVAILABLE = 5;
+  SLCWS_NOT_FOUND = 6;
 }
 
 message NativeCapabilitySymbolLibraryCheckedWriteResponse {
@@ -1368,6 +1404,36 @@ message NativeCapabilitySymbolLibraryCheckedWriteResponse {
   bool complete_lifecycle = 11;
   string before_snapshot_sha256 = 12;
   string after_snapshot_sha256 = 13;
+  NativeCapabilitySymbolLibraryCheckedReceiptStatus receipt_status = 14;
+  string scope = 15;
+  string request_fingerprint_sha256 = 16;
+  bool expected_request_verified = 17;
+  bool native_write_started = 18;
+  bool postverified = 19;
+  bool target_verified = 20;
+  bool unrelated_entries_verified = 21;
+  bool rollback_attempted = 22;
+  NativeCapabilitySymbolLibraryCheckedState observed_before = 23;
+  NativeCapabilitySymbolLibraryCheckedState observed_after = 24;
+  NativeCapabilitySymbolLibraryCheckedState observed_rollback = 25;
+  // Explicitly separate this direct MCP lane from the unfinished shared
+  // tracking coverage of GUI, import/rescue, remote and folder writers.
+  bool complete_change_tracking = 26;
+  NativeCapabilitySymbolLibraryCheckedWrite request = 27;
+}
+
+message NativeCapabilitySymbolLibraryCheckedReadOperation {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string process_epoch = 2;
+  string operation_id = 3;
+  // Required: a found receipt must verify the exact original request.  This
+  // lookup is read-only and never executes or refreshes mutable library state.
+  NativeCapabilitySymbolLibraryCheckedWrite expected_request = 4;
+}
+
+message NativeCapabilitySymbolLibraryCheckedReadOperationResponse {
+  bool found = 1;
+  NativeCapabilitySymbolLibraryCheckedWriteResponse receipt = 2;
 }
 
 // Read-only, project-bound symbol/footprint-library lifecycle evidence. This
@@ -1390,6 +1456,9 @@ message NativeCapabilityLibrarySnapshotRead {
   string library_nickname = 3;
   string entry_name = 4;
   bool forced_refresh = 5;
+  // Captures a creation checkpoint in an existing direct symbol file without
+  // inventing a definition for an entry that is absent on disk.
+  bool allow_missing_entry = 6;
 }
 
 message NativeCapabilityLibrarySnapshotReadResponse {
@@ -1414,6 +1483,7 @@ message NativeCapabilityLibrarySnapshotReadResponse {
   bool disk_baseline_checked = 19;
   bool complete_change_tracking = 20;
   bool postverify = 21;
+  NativeCapabilitySymbolLibraryCheckedState checked_state = 22;
 }
 
 // Process-owned footprint editor receipts. The native editor retains these

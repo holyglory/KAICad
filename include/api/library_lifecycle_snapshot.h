@@ -38,12 +38,20 @@ struct KICOMMON_API LIBRARY_LIFECYCLE_SNAPSHOT
     // This is a detached, canonical definition captured after a forced provider refresh.  The
     // snapshot does not own a mutable library object, so a later caller cannot write through it.
     std::string           detachedDefinition;
+    // The direct KiCad symbol-file owner retains the exact bytes needed for a bounded rollback.
+    // This is never exposed through the read snapshot transport; it remains native transaction
+    // evidence and is intentionally empty for unsupported providers.
+    std::string           rawLibraryContents;
+    bool                  entryExists = true;
     std::vector<FILE_CONTENT_BASELINE> dependencyBaselines;
 
     bool forcedRefresh = false;
     bool providerObservable = false;
     bool contentSnapshotComplete = false;
     bool diskBaselineChecked = false;
+    // Explicit scope for the MCP direct .kicad_sym writer.  This does not claim that every
+    // application writer has joined the common lifecycle controller.
+    bool mcpDirectSymbolFile = false;
     // Other native writers (symbol editor, import/rescue and remote jobs) are not yet joined to
     // this owner.  Keep this false until a shared mutation event and rollback proof exist.
     bool completeChangeTracking = false;

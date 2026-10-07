@@ -186,7 +186,10 @@ LIBRARY_LIFECYCLE_RESULT ValidateLibraryLifecycleSnapshot(
     }
 
     if( !aSnapshot.forcedRefresh || !aSnapshot.providerObservable || !aSnapshot.contentSnapshotComplete
-            || !aSnapshot.diskBaselineChecked || aSnapshot.detachedDefinition.empty()
+            || !aSnapshot.diskBaselineChecked
+            || ( aSnapshot.detachedDefinition.empty()
+                 && !( isSymbol && aSnapshot.mcpDirectSymbolFile && !aSnapshot.entryExists
+                        && !aSnapshot.rawLibraryContents.empty() ) )
             || aSnapshot.dependencyBaselines.empty() )
     {
         return Error( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_SNAPSHOT,
@@ -270,7 +273,17 @@ LIBRARY_LIFECYCLE_RESULT AdmitLibraryLifecycleMutation(
     if( !valid )
         return valid;
 
-    return Error( LIBRARY_LIFECYCLE_ERROR_CODE::MUTATION_NOT_AVAILABLE,
-                      "checked library mutation is unavailable until every native writer has "
-                  "shared tracking and rollback proof" );
+    // The full native writer inventory remains incomplete, so this foundation must never turn
+    // into a general library mutation permission.  The checked MCP lane is a deliberately narrow
+    // exception: it is admitted only for a direct KiCad symbol file whose complete dependency
+    // baselines and rollback bytes were captured by the same native owner.
+    if( aSnapshot.document.type() != kiapi::common::types::DOCTYPE_SYMBOL
+            || aSnapshot.provider != "KiCad" || !aSnapshot.mcpDirectSymbolFile
+            || aSnapshot.rawLibraryContents.empty() )
+    {
+        return Error( LIBRARY_LIFECYCLE_ERROR_CODE::MUTATION_NOT_AVAILABLE,
+                      "checked library mutation is unavailable outside the direct MCP KiCad symbol-file scope" );
+    }
+
+    return {};
 }

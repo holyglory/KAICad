@@ -34,6 +34,8 @@
 #include <cmath>
 #include <limits>
 #include <google/protobuf/util/message_differencer.h>
+#include <google/protobuf/io/coded_stream.h>
+#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 #include <api/api_enums.h>
 #include <api/api_sch_utils.h>
 #include <api/api_sch_symbol_definition.h>
@@ -340,6 +342,9 @@ API_HANDLER_SCH::API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext,
     registerHandler<kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedWrite,
                     kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedWriteResponse>(
             &API_HANDLER_SCH::handleCheckedWriteSymbolLibrarySymbol );
+    registerHandler<kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedReadOperation,
+                    kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedReadOperationResponse>(
+            &API_HANDLER_SCH::handleReadCheckedSymbolLibraryOperation );
     registerHandler<kiapi::automation::v1::NativeCapabilitySymbolLibraryReadOperation,
                     kiapi::automation::v1::NativeCapabilitySymbolLibraryReadOperationResponse>(
             &API_HANDLER_SCH::handleReadSymbolLibraryOperation );
@@ -452,7 +457,9 @@ std::optional<ApiResponseStatus> API_HANDLER_SCH::checkRequestTarget(
     }
 
     if( aRequest.GetDescriptor()->full_name()
-            == kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedWrite::descriptor()->full_name() )
+            == kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedWrite::descriptor()->full_name()
+            || aRequest.GetDescriptor()->full_name()
+            == kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedReadOperation::descriptor()->full_name() )
     {
         // Checked symbol writes address an explicit project library document;
         // the handler performs identity validation before refusing the seam.
@@ -3238,7 +3245,8 @@ API_HANDLER_SCH::handleReadLibrarySnapshot(
 
         auto captured = adapter->CaptureLibrarySnapshot( wxString::FromUTF8( nickname ),
                                                          wxString::FromUTF8( entryName ),
-                                                         aCtx.Request.document(), project() );
+                                                         aCtx.Request.document(), project(),
+                                                         aCtx.Request.allow_missing_entry() );
         if( !captured )
             return fail( codeName( captured.error().code ), captured.error().message );
 
@@ -3274,6 +3282,7 @@ API_HANDLER_SCH::handleReadLibrarySnapshot(
         // oracle cannot mistake a future producer default for a completed guard.
         response.set_complete_change_tracking( false );
         response.set_postverify( snapshot.postverify );
+        response.mutable_checked_state()->CopyFrom( symbolLibraryCheckpoint( snapshot ) );
 
         for( const FILE_CONTENT_BASELINE& baseline : snapshot.dependencyBaselines )
         {
@@ -3294,43 +3303,293 @@ API_HANDLER_SCH::handleReadLibrarySnapshot(
 }
 
 
+namespace
+{
+std::string SymbolLibraryDeterministicBytes( const google::protobuf::Message& aMessage )
+{
+    std::string bytes;
+    google::protobuf::io::StringOutputStream output( &bytes );
+    google::protobuf::io::CodedOutputStream coded( &output );
+    coded.SetSerializationDeterministic( true );
+
+    if( !aMessage.SerializeToCodedStream( &coded ) || coded.HadError() )
+        THROW_IO_ERROR( "Could not serialize a checked symbol-library request" );
+
+    coded.Trim();
+    return bytes;
+}
+
+
+std::string SymbolLibrarySha256( std::string_view aContents )
+{
+    NATIVE_STATE_DIGEST digest;
+    digest.Append( aContents );
+    return digest.Hex();
+}
+
+
+bool SymbolLibraryIsDigest( const std::string& aDigest )
+{
+    return aDigest.size() == 64
+            && std::all_of( aDigest.begin(), aDigest.end(), []( char aCharacter )
+                    { return ( aCharacter >= '0' && aCharacter <= '9' )
+                              || ( aCharacter >= 'a' && aCharacter <= 'f' ); } );
+}
+}
+
+
+kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedState API_HANDLER_SCH::symbolLibraryCheckpoint(
+        const LIBRARY_LIFECYCLE_SNAPSHOT& aSnapshot, bool aAdvanceRevision )
+{
+    using namespace kiapi::automation::v1;
+    NativeCapabilitySymbolLibraryCheckedState state;
+    state.mutable_document()->CopyFrom( aSnapshot.document );
+    state.set_process_epoch( apiServer().Token() );
+    state.set_scope( "mcp_direct_symbol_file" );
+    state.set_table_path( aSnapshot.tablePath.ToStdString( wxConvUTF8 ) );
+    state.set_table_scope( aSnapshot.tableScope == LIBRARY_TABLE_SCOPE::PROJECT ? "PROJECT" : "GLOBAL" );
+    state.set_raw_uri( aSnapshot.rawUri.ToStdString( wxConvUTF8 ) );
+    state.set_expanded_uri( aSnapshot.expandedUri.ToStdString( wxConvUTF8 ) );
+    state.set_provider( aSnapshot.provider );
+    state.set_provider_options( aSnapshot.providerOptions );
+    state.set_entry_exists( aSnapshot.entryExists );
+    if( aSnapshot.entryExists )
+        state.set_detached_definition_sha256( SymbolLibrarySha256( aSnapshot.detachedDefinition ) );
+    state.set_state_complete( aSnapshot.mcpDirectSymbolFile && aSnapshot.contentSnapshotComplete );
+    state.set_disk_baseline_checked( aSnapshot.diskBaselineChecked );
+    state.set_complete_change_tracking( false );
+
+    for( const FILE_CONTENT_BASELINE& baseline : aSnapshot.dependencyBaselines )
+    {
+        auto* dependency = state.add_dependency_baselines();
+        dependency->set_path( baseline.Path().ToStdString( wxConvUTF8 ) );
+        dependency->set_exists( baseline.Exists() );
+        dependency->set_known( baseline.Known() );
+        dependency->set_sha256( baseline.Sha256() );
+        dependency->set_bytes( baseline.Bytes() );
+    }
+
+    // A file revision is shared by its entries.  The state digest still binds the requested
+    // entry, while the revision detects every observed byte/row change in the complete file.
+    NativeCapabilitySymbolLibraryCheckedState content = state;
+    content.mutable_document()->mutable_lib_id()->clear_entry_name();
+    content.clear_entry_exists();
+    content.clear_detached_definition_sha256();
+    const std::string contentDigest = SymbolLibrarySha256( SymbolLibraryDeterministicBytes( content ) );
+    const std::string key = state.table_path() + "\n" + state.table_scope() + "\n"
+            + state.document().project().path() + "\n" + state.document().project().name() + "\n"
+            + state.document().lib_id().library_nickname() + "\n" + state.expanded_uri();
+    auto [found, inserted] = m_symbolLibraryRevisions.try_emplace( key );
+    SYMBOL_LIBRARY_REVISION& revision = found->second;
+
+    if( inserted )
+    {
+        revision.epoch = apiServer().Token();
+        revision.sequence = 1;
+    }
+    else if( aAdvanceRevision || revision.contentDigest != contentDigest )
+    {
+        if( revision.sequence == std::numeric_limits<uint64_t>::max() )
+            THROW_IO_ERROR( "The symbol-library revision is exhausted; reopen the native process" );
+        ++revision.sequence;
+    }
+
+    revision.contentDigest = contentDigest;
+    state.mutable_revision()->set_epoch( revision.epoch );
+    state.mutable_revision()->set_sequence( revision.sequence );
+    state.set_state_sha256( SymbolLibrarySha256( SymbolLibraryDeterministicBytes( state ) ) );
+    return state;
+}
+
+
 HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedWriteResponse>
 API_HANDLER_SCH::handleCheckedWriteSymbolLibrarySymbol(
         const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedWrite>& aCtx )
 {
     using namespace kiapi::automation::v1;
+    using google::protobuf::util::MessageDifferencer;
+    const NativeCapabilitySymbolLibraryCheckedWrite& request = aCtx.Request;
     NativeCapabilitySymbolLibraryCheckedWriteResponse response;
-    response.mutable_document()->CopyFrom( aCtx.Request.document() );
+    response.mutable_document()->CopyFrom( request.document() );
     response.set_process_epoch( apiServer().Token() );
-    response.set_operation_id( aCtx.Request.operation_id() );
-    response.set_status( "unavailable" );
-    response.set_committed( false );
-    response.set_replayed( false );
-    response.set_rollback_completed( false );
-    response.set_revision_tracked( false );
-    response.set_complete_lifecycle( false );
+    response.set_operation_id( request.operation_id() );
+    response.set_status( "rejected" );
+    response.set_receipt_status( SLCWS_REJECTED );
+    response.set_scope( "mcp_direct_symbol_file" );
+    response.set_complete_change_tracking( false );
+    response.mutable_request()->CopyFrom( request );
 
-    auto refuse = [&]( const char* aCode, const std::string& aMessage )
+    auto refuse = [&]( const char* aCode, const std::string& aMessage,
+                       bool aUnavailable = false )
     {
         response.set_error_code( aCode );
         response.set_error_message( aMessage );
+        if( aUnavailable )
+        {
+            response.set_status( "unavailable" );
+            response.set_receipt_status( SLCWS_UNAVAILABLE );
+        }
+        if( response.expected_request_verified() )
+            m_checkedSymbolLibraryReceipts[request.operation_id()] = response;
         return response;
     };
-    if( !aCtx.Request.has_document() || aCtx.Request.document().type() != kiapi::common::types::DOCTYPE_SYMBOL
-            || !aCtx.Request.document().has_project() || !aCtx.Request.document().has_lib_id() )
-        return refuse( "invalid_library_document", "A checked symbol mutation requires an explicit project-bound symbol document." );
-    if( !ErcUuid( aCtx.Request.process_epoch() ) || aCtx.Request.process_epoch() != apiServer().Token() )
-        return refuse( "stale_process_epoch", "The checked symbol mutation belongs to another native process epoch." );
-    if( !ErcUuid( aCtx.Request.operation_id() ) )
-        return refuse( "invalid_operation_id", "A canonical operation UUID is required." );
-    const std::string& digest = aCtx.Request.expected_snapshot_sha256();
-    if( digest.size() != 64
-            || !std::all_of( digest.begin(), digest.end(), []( char c )
-                    { return ( c >= '0' && c <= '9' ) || ( c >= 'a' && c <= 'f' ); } ) )
-        return refuse( "invalid_library_snapshot", "expected_snapshot_sha256 must be a lowercase complete snapshot digest." );
 
-    return refuse( "library_mutation_unavailable",
-                   "Checked symbol-library mutation is not yet owned by the native lifecycle controller; no legacy writer was called." );
+    if( !request.has_document() || request.document().type() != kiapi::common::types::DOCTYPE_SYMBOL
+            || !request.document().has_project() || !request.document().has_lib_id() )
+        return refuse( "invalid_library_document", "A checked symbol mutation requires an explicit project-bound symbol document." );
+    if( !ErcUuid( request.process_epoch() ) || request.process_epoch() != apiServer().Token() )
+        return refuse( "stale_process_epoch", "The checked symbol mutation belongs to another native process epoch." );
+    if( !ErcUuid( request.operation_id() ) )
+        return refuse( "invalid_operation_id", "A canonical operation UUID is required." );
+
+    // Replay comes before mutable snapshots and admission.  A lost reply or MCP reconnect
+    // cannot execute the same native write a second time, even after the library changes.
+    if( auto retained = m_checkedSymbolLibraryReceipts.find( request.operation_id() );
+            retained != m_checkedSymbolLibraryReceipts.end() )
+    {
+        if( !MessageDifferencer::Equals( retained->second.request(), request ) )
+            return refuse( "operation_id_conflict", "The operation ID is already bound to a different checked symbol-library request." );
+
+        response = retained->second;
+        response.set_replayed( true );
+        return response;
+    }
+
+    response.set_request_fingerprint_sha256( SymbolLibrarySha256( SymbolLibraryDeterministicBytes( request ) ) );
+    response.set_expected_request_verified( true );
+    if( !request.has_expected_state() )
+        return refuse( "library_mutation_unavailable", "A complete native direct-file checkpoint is required; the digest-only legacy seam cannot write a library.", true );
+    if( !SymbolLibraryIsDigest( request.expected_snapshot_sha256() )
+            || request.expected_snapshot_sha256() != request.expected_state().state_sha256() )
+        return refuse( "invalid_library_snapshot", "expected_snapshot_sha256 must identify the complete expected native state." );
+    if( request.expected_state().scope() != "mcp_direct_symbol_file"
+            || !request.expected_state().state_complete() || !request.expected_state().disk_baseline_checked()
+            || request.expected_state().complete_change_tracking()
+            || !MessageDifferencer::Equals( request.expected_state().document(), request.document() )
+            || request.expected_state().process_epoch() != apiServer().Token()
+            || !ErcUuid( request.expected_state().revision().epoch() ) )
+        return refuse( "partial_library_state", "Only a complete project-bound native direct-symbol-file checkpoint can admit this writer." );
+    if( !request.has_definition() || !request.definition().has_id()
+            || request.definition().id().library_nickname() != request.document().lib_id().library_nickname()
+            || request.definition().id().entry_name() != request.document().lib_id().entry_name() )
+        return refuse( "symbol_library_definition_mismatch", "The symbol definition must identify the exact requested library entry." );
+    if( !request.has_pin_display() )
+        return refuse( "invalid_symbol_pin_display", "A checked definition requires complete explicit pin display settings." );
+
+    try
+    {
+        SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &project() );
+        if( !adapter )
+            return refuse( "library_provider_unknown", "The schematic has no symbol-library adapter.", true );
+
+        auto captured = adapter->CaptureLibrarySnapshot(
+                wxString::FromUTF8( request.document().lib_id().library_nickname() ),
+                wxString::FromUTF8( request.document().lib_id().entry_name() ),
+                request.document(), project(), true );
+        if( !captured )
+            return refuse( "library_mutation_unavailable", captured.error().message, true );
+
+        LIBRARY_LIFECYCLE_SNAPSHOT before = *captured;
+        auto checkpoint = symbolLibraryCheckpoint( before );
+        response.mutable_observed_before()->CopyFrom( checkpoint );
+        response.set_before_snapshot_sha256( checkpoint.state_sha256() );
+        if( !MessageDifferencer::Equals( checkpoint, request.expected_state() ) )
+            return refuse( "stale_library_state", "The complete library revision, contents or dependency baselines changed after observation." );
+
+        std::unique_ptr<LIB_SYMBOL> symbol = UnpackSymbolDefinition( request.definition() );
+        if( !symbol || !ApplySymbolLibraryPinDisplay( request.pin_display(), *symbol ) )
+            return refuse( "invalid_symbol_definition", "The native decoder rejected the complete symbol or pin display settings." );
+
+        SCH_KICAD_SEXPR_CHECKED_WRITE_RESULT write = adapter->SaveSymbolChecked(
+                before, project(), symbol.get(), request.overwrite() );
+        response.set_native_write_started( write.writeStarted );
+        response.set_postverified( write.postverified );
+        response.set_target_verified( write.targetVerified );
+        response.set_unrelated_entries_verified( write.unrelatedEntriesVerified );
+        response.set_rollback_attempted( write.rollbackAttempted );
+        response.set_rollback_completed( write.rollbackVerified );
+
+        if( write.committed )
+        {
+            LIBRARY_LIFECYCLE_SNAPSHOT after = before;
+            after.dependencyBaselines = write.afterBaselines;
+            after.detachedDefinition = write.afterDefinition;
+            after.entryExists = true;
+            auto state = symbolLibraryCheckpoint( after, true );
+            response.mutable_observed_after()->CopyFrom( state );
+            response.set_after_snapshot_sha256( state.state_sha256() );
+            response.set_status( "committed_postverified" );
+            response.set_receipt_status( SLCWS_COMMITTED_POSTVERIFIED );
+            response.set_committed( true );
+            response.set_revision_tracked( true );
+            response.set_complete_lifecycle( true );
+        }
+        else if( write.rollbackVerified )
+        {
+            LIBRARY_LIFECYCLE_SNAPSHOT restored = before;
+            restored.dependencyBaselines = write.rollbackBaselines;
+            restored.detachedDefinition = write.rollbackDefinition;
+            restored.entryExists = !write.rollbackDefinition.empty();
+            response.mutable_observed_rollback()->CopyFrom( symbolLibraryCheckpoint( restored, true ) );
+            response.set_status( "rolled_back_verified" );
+            response.set_receipt_status( SLCWS_ROLLED_BACK_VERIFIED );
+        }
+        else if( write.writeStarted )
+        {
+            response.set_status( "indeterminate" );
+            response.set_receipt_status( SLCWS_INDETERMINATE );
+        }
+
+        response.set_error_code( write.errorCode );
+        response.set_error_message( write.errorMessage );
+        m_checkedSymbolLibraryReceipts[request.operation_id()] = response;
+        return response;
+    }
+    catch( const std::exception& error )
+    {
+        if( response.native_write_started() )
+        {
+            response.set_status( "indeterminate" );
+            response.set_receipt_status( SLCWS_INDETERMINATE );
+        }
+        return refuse( "symbol_library_write_failed", error.what() );
+    }
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedReadOperationResponse>
+API_HANDLER_SCH::handleReadCheckedSymbolLibraryOperation(
+        const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedReadOperation>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    const auto& request = aCtx.Request;
+    auto reject = []( const std::string& aMessage )
+            -> HANDLER_RESULT<NativeCapabilitySymbolLibraryCheckedReadOperationResponse>
+    {
+        ApiResponseStatus status;
+        status.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        status.set_error_message( aMessage );
+        return tl::unexpected( status );
+    };
+    if( !ErcUuid( request.operation_id() ) || request.process_epoch() != apiServer().Token()
+            || !request.has_expected_request()
+            || request.expected_request().operation_id() != request.operation_id()
+            || request.expected_request().process_epoch() != request.process_epoch()
+            || !google::protobuf::util::MessageDifferencer::Equals( request.document(),
+                                                                    request.expected_request().document() ) )
+        return reject( "An exact original request, operation ID, symbol document and current process epoch are required." );
+
+    NativeCapabilitySymbolLibraryCheckedReadOperationResponse response;
+    auto retained = m_checkedSymbolLibraryReceipts.find( request.operation_id() );
+    if( retained == m_checkedSymbolLibraryReceipts.end() )
+        return response;
+    if( !google::protobuf::util::MessageDifferencer::Equals( retained->second.request(),
+                                                            request.expected_request() ) )
+        return reject( "The operation ID is bound to a different checked symbol-library request." );
+    response.set_found( true );
+    response.mutable_receipt()->CopyFrom( retained->second );
+    response.mutable_receipt()->set_replayed( true );
+    return response;
 }
 
 

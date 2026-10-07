@@ -24,6 +24,9 @@
 #define SCH_IO_KICAD_SEXPR_H_
 
 #include <memory>
+#include <string>
+#include <vector>
+#include <file_content_baseline.h>
 #include <sch_io/sch_io.h>
 #include <sch_io/sch_io_mgr.h>
 #include <sch_file_versions.h>
@@ -58,6 +61,25 @@ class LIBRARY_WRITE_ADMISSION;
 class LIB_SYMBOL;
 class LEGACY_SYMBOL_LIB;
 class BUS_ALIAS;
+
+struct KICOMMON_API SCH_KICAD_SEXPR_CHECKED_WRITE_RESULT
+{
+    bool writeStarted = false;
+    bool committed = false;
+    bool postverified = false;
+    bool targetVerified = false;
+    bool unrelatedEntriesVerified = false;
+    bool rollbackAttempted = false;
+    bool rollbackVerified = false;
+    bool rollbackIndeterminate = false;
+    std::string beforeDefinition;
+    std::string afterDefinition;
+    std::string rollbackDefinition;
+    std::vector<FILE_CONTENT_BASELINE> afterBaselines;
+    std::vector<FILE_CONTENT_BASELINE> rollbackBaselines;
+    std::string errorCode;
+    std::string errorMessage;
+};
 
 /**
  * A #SCH_IO derivation for loading schematic files using the new s-expression
@@ -149,6 +171,19 @@ public:
                                                      std::string  aSource,
                                                      int aFileVersion = SEXPR_SCHEMATIC_FILE_VERSION );
     static void FormatLibSymbol( LIB_SYMBOL* aPart, OUTPUTFORMATTER& aFormatter );
+
+    // Force a provider read from disk.  This deliberately bypasses the cache's timestamp check
+    // so same-size/same-mtime edits cannot pair a fresh file hash with an old in-memory definition.
+    void ForceReloadLibrary( const wxString& aLibraryPath,
+                             const std::map<std::string, UTF8>* aProperties = nullptr );
+
+    // Execute one checked direct-file write while holding one complete admission through the
+    // disk write, post-readback and rollback path.  Folder/legacy/HTTP providers never reach
+    // this method.  The caller remains responsible for project/table identity validation.
+    SCH_KICAD_SEXPR_CHECKED_WRITE_RESULT SaveSymbolChecked(
+            const wxString& aLibraryPath, const LIB_SYMBOL* aSymbol, bool aOverwrite,
+            const std::vector<FILE_CONTENT_BASELINE>& aExpectedBaselines,
+            const std::string& aBeforeLibraryContents, const wxString& aSymbolName );
 
 private:
     void loadHierarchy( const SCH_SHEET_PATH& aParentSheetPath, SCH_SHEET* aSheet );

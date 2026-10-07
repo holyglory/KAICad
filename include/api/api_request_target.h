@@ -17,7 +17,9 @@ inline bool RequestTargetsOtherDocument( const google::protobuf::Message& aReque
     // Library snapshots are routed by their explicit library DocumentSpecifier to the
     // schematic/footprint library owner, rather than to the currently open editor document.
     // Their handlers perform the project/row identity checks themselves.
-    if( descriptor->full_name() == "kiapi.automation.v1.NativeCapabilityLibrarySnapshotRead" )
+    if( descriptor->full_name() == "kiapi.automation.v1.NativeCapabilityLibrarySnapshotRead"
+            || descriptor->full_name() == "kiapi.automation.v1.NativeCapabilitySymbolLibraryCheckedWrite"
+            || descriptor->full_name() == "kiapi.automation.v1.NativeCapabilitySymbolLibraryCheckedReadOperation" )
         return false;
     for( int index = 0; index < descriptor->field_count(); ++index )
     {

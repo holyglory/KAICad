@@ -32,6 +32,7 @@
 
 class LIB_SYMBOL;
 class PROJECT;
+struct SCH_KICAD_SEXPR_CHECKED_WRITE_RESULT;
 
 
 /**
@@ -119,7 +120,13 @@ public:
     tl::expected<LIBRARY_LIFECYCLE_SNAPSHOT, LIBRARY_LIFECYCLE_ERROR> CaptureLibrarySnapshot(
             const wxString& aNickname, const wxString& aName,
             const kiapi::common::types::DocumentSpecifier& aDocument,
-            const PROJECT& aProject );
+            const PROJECT& aProject, bool aAllowMissingEntry = false );
+
+    // The exact direct-file checked lane.  It refuses providers/rows outside the snapshot
+    // owner, uses the provider's one held admission, and never delegates to a legacy writer.
+    SCH_KICAD_SEXPR_CHECKED_WRITE_RESULT SaveSymbolChecked(
+            const LIBRARY_LIFECYCLE_SNAPSHOT& aExpected, const PROJECT& aProject,
+            const LIB_SYMBOL* aSymbol, bool aOverwrite );
 
     /**
      * The set of return values from SaveSymbol() below.

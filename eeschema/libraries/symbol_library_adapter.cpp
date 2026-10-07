@@ -376,7 +376,8 @@ LIB_SYMBOL* SYMBOL_LIBRARY_ADAPTER::LoadSymbol( const wxString& aNickname, const
 tl::expected<LIBRARY_LIFECYCLE_SNAPSHOT, LIBRARY_LIFECYCLE_ERROR>
 SYMBOL_LIBRARY_ADAPTER::CaptureLibrarySnapshot(
         const wxString& aNickname, const wxString& aName,
-        const kiapi::common::types::DocumentSpecifier& aDocument, const PROJECT& aProject )
+        const kiapi::common::types::DocumentSpecifier& aDocument, const PROJECT& aProject,
+        bool aAllowMissingEntry )
 {
     using namespace kiapi::common::types;
 
@@ -461,7 +462,8 @@ SYMBOL_LIBRARY_ADAPTER::CaptureLibrarySnapshot(
 
     std::string tableContents;
     const FILE_CONTENT_BASELINE tableBefore = FILE_CONTENT_BASELINE::Read( table->Path(), &tableContents );
-    const FILE_CONTENT_BASELINE libraryBefore = FILE_CONTENT_BASELINE::Read( expandedUri );
+    std::string libraryContents;
+    const FILE_CONTENT_BASELINE libraryBefore = FILE_CONTENT_BASELINE::Read( expandedUri, &libraryContents );
 
     if( !tableBefore.Known() || !tableBefore.Exists() || !libraryBefore.Known() || !libraryBefore.Exists() )
     {
@@ -520,6 +522,16 @@ SYMBOL_LIBRARY_ADAPTER::CaptureLibrarySnapshot(
                                   "the refreshed symbol provider is not available" );
 
         std::map<std::string, UTF8> options = row->GetOptionsMap();
+        SCH_IO_KICAD_SEXPR* directProvider = dynamic_cast<SCH_IO_KICAD_SEXPR*>( schplugin( *loaded ) );
+
+        if( !directProvider || wxFileName::DirExists( expandedUri )
+                || wxFileName( expandedUri ).GetExt().CmpNoCase( wxS( "kicad_sym" ) ) != 0 )
+        {
+            return SnapshotError( LIBRARY_LIFECYCLE_ERROR_CODE::UNSUPPORTED_PROVIDER,
+                                  "only direct KiCad symbol files are covered by this snapshot owner" );
+        }
+
+        directProvider->ForceReloadLibrary( expandedUri, &options );
         // The adapter/plugin owns the returned cache symbol. Copy it while the provider lock is
         // held; never put the borrowed pointer in a unique_ptr or delete provider-owned state.
         if( LIB_SYMBOL* borrowed = schplugin( *loaded )->LoadSymbol( getUri( ( *loaded )->row ), aName,
@@ -532,7 +544,7 @@ SYMBOL_LIBRARY_ADAPTER::CaptureLibrarySnapshot(
                               "the symbol provider threw while reading: " + e.What().ToStdString() );
     }
 
-    if( !loadedSymbol )
+    if( !loadedSymbol && !aAllowMissingEntry )
     {
         return SnapshotError( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_SNAPSHOT,
                               "the requested symbol was not present in the refreshed library" );
@@ -541,22 +553,27 @@ SYMBOL_LIBRARY_ADAPTER::CaptureLibrarySnapshot(
     // A derived symbol is only a partial definition: its extends parent is another provider
     // entry, and this snapshot has no field for that parent identity or its dependency baseline.
     // Refuse it instead of silently serializing an incomplete detached definition.
-    if( loadedSymbol->IsDerived() )
+    if( loadedSymbol && loadedSymbol->IsDerived() )
     {
         return SnapshotError( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_SNAPSHOT,
                               "derived symbols require a parent definition and dependency baseline" );
     }
 
-    LIB_ID detachedId = loadedSymbol->GetLibId();
-    detachedId.SetLibNickname( row->Nickname() );
-    loadedSymbol->SetLibId( detachedId );
+    std::string detachedDefinition;
 
-    std::unique_ptr<LIB_SYMBOL> detachedSymbol = std::make_unique<LIB_SYMBOL>( *loadedSymbol );
-    STRING_FORMATTER         formatter;
-    SCH_IO_KICAD_SEXPR::FormatLibSymbol( detachedSymbol.get(), formatter );
-    const std::string detachedDefinition = formatter.GetString();
+    if( loadedSymbol )
+    {
+        LIB_ID detachedId = loadedSymbol->GetLibId();
+        detachedId.SetLibNickname( row->Nickname() );
+        loadedSymbol->SetLibId( detachedId );
 
-    if( detachedDefinition.empty() || detachedDefinition.find( "(symbol" ) == std::string::npos )
+        std::unique_ptr<LIB_SYMBOL> detachedSymbol = std::make_unique<LIB_SYMBOL>( *loadedSymbol );
+        STRING_FORMATTER formatter;
+        SCH_IO_KICAD_SEXPR::FormatLibSymbol( detachedSymbol.get(), formatter );
+        detachedDefinition = formatter.GetString();
+    }
+
+    if( loadedSymbol && ( detachedDefinition.empty() || detachedDefinition.find( "(symbol" ) == std::string::npos ) )
     {
         return SnapshotError( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_SNAPSHOT,
                               "the provider did not produce a complete detached symbol definition" );
@@ -581,14 +598,72 @@ SYMBOL_LIBRARY_ADAPTER::CaptureLibrarySnapshot(
     snapshot.provider = row->Type().ToStdString( wxConvUTF8 );
     snapshot.providerOptions = row->Options().ToStdString( wxConvUTF8 );
     snapshot.detachedDefinition = detachedDefinition;
+    snapshot.rawLibraryContents = libraryContents;
+    snapshot.entryExists = loadedSymbol != nullptr;
     snapshot.dependencyBaselines = { tableAfter, libraryAfter };
     snapshot.forcedRefresh = true;
     snapshot.providerObservable = true;
     snapshot.contentSnapshotComplete = true;
     snapshot.diskBaselineChecked = true;
+    snapshot.mcpDirectSymbolFile = true;
     snapshot.completeChangeTracking = false;
     snapshot.postverify = false;
     return snapshot;
+}
+
+
+SCH_KICAD_SEXPR_CHECKED_WRITE_RESULT SYMBOL_LIBRARY_ADAPTER::SaveSymbolChecked(
+        const LIBRARY_LIFECYCLE_SNAPSHOT& aExpected, const PROJECT& aProject,
+        const LIB_SYMBOL* aSymbol, bool aOverwrite )
+{
+    SCH_KICAD_SEXPR_CHECKED_WRITE_RESULT refused;
+    auto reject = [&]( const char* aCode, const std::string& aMessage )
+    {
+        refused.errorCode = aCode;
+        refused.errorMessage = aMessage;
+        return refused;
+    };
+
+    if( auto admitted = AdmitLibraryLifecycleMutation( aExpected, aProject.GetProjectName(),
+                                                       aProject.GetProjectDirectory() ); !admitted )
+        return reject( "library_mutation_unavailable", admitted.error().message );
+
+    const wxString nickname = aExpected.nickname;
+    const wxString name = wxString::FromUTF8( aExpected.document.lib_id().entry_name() );
+
+    if( !aSymbol || aSymbol->GetName() != name || aSymbol->IsDerived() )
+        return reject( "invalid_symbol_definition", "The checked direct-file symbol must be a complete definition for the requested entry." );
+
+    std::optional<LIBRARY_TABLE_ROW*> rowResult = Manager().GetRow( Type(), nickname,
+                                                                  LIBRARY_TABLE_SCOPE::BOTH );
+
+    if( !rowResult || !( *rowResult ) )
+        return reject( "library_table_row_mismatch", "The requested symbol row is no longer present." );
+
+    const LIBRARY_TABLE_ROW* row = *rowResult;
+
+    if( row->Scope() != aExpected.tableScope || row->Type().ToStdString( wxConvUTF8 ) != aExpected.provider
+            || row->URI() != aExpected.rawUri
+            || row->Options().ToStdString( wxConvUTF8 ) != aExpected.providerOptions
+            || LIBRARY_MANAGER::ExpandURI( row->URI(), aProject ) != aExpected.expandedUri )
+        return reject( "stale_library_state", "The library table row changed after the checked snapshot." );
+
+    LIBRARY_RESULT<LIB_DATA*> loaded = loadIfNeeded( nickname );
+
+    if( !loaded || !( *loaded ) )
+        return reject( "library_provider_unknown", "The direct symbol provider is no longer loaded." );
+
+    std::shared_lock<std::shared_mutex> tableLock(
+            row->Scope() == LIBRARY_TABLE_SCOPE::GLOBAL ? globalLibsMutex() : m_librariesMutex );
+    std::lock_guard pluginGuard( pluginMutex( nickname ) );
+    SCH_IO_KICAD_SEXPR* directProvider = dynamic_cast<SCH_IO_KICAD_SEXPR*>( schplugin( *loaded ) );
+
+    if( !directProvider )
+        return reject( "library_provider_unsupported", "The checked lane cannot call this symbol provider." );
+
+    return directProvider->SaveSymbolChecked( aExpected.expandedUri, aSymbol, aOverwrite,
+                                              aExpected.dependencyBaselines,
+                                              aExpected.rawLibraryContents, name );
 }
 
 

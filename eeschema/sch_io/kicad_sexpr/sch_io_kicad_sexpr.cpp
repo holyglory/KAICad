@@ -29,6 +29,7 @@
 #include <magic_enum.hpp>
 
 #include <wx/dir.h>
+#include <wx/ffile.h>
 #include <wx/log.h>
 #include <wx/mstream.h>
 
@@ -1987,6 +1988,251 @@ void SCH_IO_KICAD_SEXPR::releaseWriteAdmission()
     m_writeAdmission.reset();
     m_writeAdmissionPath.clear();
     m_writeAdmissionBuffered = false;
+}
+
+
+void SCH_IO_KICAD_SEXPR::ForceReloadLibrary(
+        const wxString& aLibraryPath, const std::map<std::string, UTF8>* aProperties )
+{
+    if( !isRegularLibraryPath( aLibraryPath ) )
+        THROW_IO_ERROR( "Forced symbol-library refresh is supported only for direct regular files" );
+
+    if( m_writeAdmission )
+        THROW_IO_ERROR( "Cannot force-refresh a symbol library while a buffered write is active" );
+
+    delete m_cache;
+    m_cache = nullptr;
+    std::unique_ptr<SCH_IO_KICAD_SEXPR_LIB_CACHE> fresh =
+            std::make_unique<SCH_IO_KICAD_SEXPR_LIB_CACHE>( aLibraryPath );
+
+    // IsFileChanged compares timestamps and can retain stale definitions when an external
+    // writer replaces bytes with the same size and timestamp.  Read unconditionally instead.
+    (void) aProperties;
+    fresh->Load();
+    m_cache = fresh.release();
+}
+
+
+namespace
+{
+std::string FormatCheckedSymbol( LIB_SYMBOL* aSymbol )
+{
+    if( !aSymbol )
+        return {};
+
+    STRING_FORMATTER formatter;
+    SCH_IO_KICAD_SEXPR::FormatLibSymbol( aSymbol, formatter );
+    return formatter.GetString();
+}
+
+
+bool RestoreCheckedLibrary( const wxString& aPath, const std::string& aContents )
+{
+    if( aContents.empty() )
+        return false;
+
+    wxFFile file( aPath, wxS( "wb" ) );
+
+    if( !file.IsOpened() )
+        return false;
+
+    if( file.Write( aContents.data(), aContents.size() ) != aContents.size() )
+        return false;
+
+    return file.Flush() && file.Close();
+}
+
+
+bool SameCheckedBaselines( const std::vector<FILE_CONTENT_BASELINE>& aExpected,
+                           const std::vector<FILE_CONTENT_BASELINE>& aObserved,
+                           const wxString& aChangedPath = wxEmptyString )
+{
+    if( aExpected.size() != aObserved.size() )
+        return false;
+
+    for( size_t index = 0; index < aExpected.size(); ++index )
+    {
+        const FILE_CONTENT_BASELINE& expected = aExpected[index];
+        const FILE_CONTENT_BASELINE& observed = aObserved[index];
+
+        if( !expected.Known() || !observed.Known()
+                || !FILE_CONTENT_BASELINE::SamePath( expected.Path(), observed.Path() ) )
+            return false;
+
+        if( !aChangedPath.empty() && FILE_CONTENT_BASELINE::SamePath( expected.Path(), aChangedPath ) )
+            continue;
+
+        if( expected.Exists() != observed.Exists() || expected.Sha256() != observed.Sha256()
+                || expected.Bytes() != observed.Bytes() )
+            return false;
+    }
+
+    return true;
+}
+}
+
+
+SCH_KICAD_SEXPR_CHECKED_WRITE_RESULT SCH_IO_KICAD_SEXPR::SaveSymbolChecked(
+        const wxString& aLibraryPath, const LIB_SYMBOL* aSymbol, bool aOverwrite,
+        const std::vector<FILE_CONTENT_BASELINE>& aExpectedBaselines,
+        const std::string& aBeforeLibraryContents, const wxString& aSymbolName )
+{
+    SCH_KICAD_SEXPR_CHECKED_WRITE_RESULT result;
+
+    if( !aSymbol || aSymbolName.empty() || aSymbol->GetName() != aSymbolName )
+    {
+        result.errorCode = "invalid_symbol_definition";
+        result.errorMessage = "The checked symbol name does not match the requested entry.";
+        return result;
+    }
+
+    if( !isRegularLibraryPath( aLibraryPath ) )
+    {
+        result.errorCode = "library_provider_unsupported";
+        result.errorMessage = "Checked symbol writes require one direct regular .kicad_sym file.";
+        return result;
+    }
+
+    std::unique_ptr<LIBRARY_WRITE_ADMISSION> admission;
+    std::map<wxString, std::string> beforeDefinitions;
+    std::vector<FILE_CONTENT_BASELINE> writtenBaselines;
+
+    try
+    {
+        // A complete baseline set locks the table as well as the library; stale state cannot
+        // be admitted from only the target file's cursor.  This one admission is held until
+        // post-readback or rollback is proved, and no SaveSymbol/SaveLibrary wrapper nests it.
+        admission = LIBRARY_WRITE_ADMISSION::Acquire( aExpectedBaselines );
+        admission->CheckUnchanged();
+
+        delete m_cache;
+        m_cache = nullptr;
+        std::unique_ptr<SCH_IO_KICAD_SEXPR_LIB_CACHE> fresh =
+                std::make_unique<SCH_IO_KICAD_SEXPR_LIB_CACHE>( aLibraryPath );
+        fresh->Load();
+        m_cache = fresh.release();
+
+        for( const auto& [name, symbol] : m_cache->m_symbols )
+            beforeDefinitions.emplace( name, FormatCheckedSymbol( symbol ) );
+
+        if( auto existing = m_cache->m_symbols.find( aSymbolName ); existing != m_cache->m_symbols.end() )
+        {
+            result.beforeDefinition = FormatCheckedSymbol( existing->second );
+
+            if( !aOverwrite )
+            {
+                result.errorCode = "symbol_exists";
+                result.errorMessage = "The requested symbol already exists and overwrite is disabled.";
+                delete m_cache;
+                m_cache = nullptr;
+                return result;
+            }
+        }
+
+        // AddSymbol takes ownership; the checked caller retains its input on every outcome.
+        m_cache->AddSymbol( new LIB_SYMBOL( *aSymbol ) );
+        admission->CheckUnchanged();
+        result.writeStarted = true;
+        m_cache->SetModified();
+        m_cache->Save();
+        writtenBaselines = admission->Observe();
+
+        if( !SameCheckedBaselines( aExpectedBaselines, writtenBaselines, aLibraryPath ) )
+            THROW_IO_ERROR( "An unrelated library dependency changed during the checked write" );
+
+        SCH_IO_KICAD_SEXPR_LIB_CACHE persisted( aLibraryPath );
+        persisted.Load();
+        auto persistedTarget = persisted.m_symbols.find( aSymbolName );
+        result.targetVerified = persistedTarget != persisted.m_symbols.end();
+        result.afterDefinition = result.targetVerified
+                ? FormatCheckedSymbol( persistedTarget->second ) : std::string{};
+        std::unique_ptr<LIB_SYMBOL> requested = std::make_unique<LIB_SYMBOL>( *aSymbol );
+        result.targetVerified = result.targetVerified
+                && result.afterDefinition == FormatCheckedSymbol( requested.get() );
+        result.unrelatedEntriesVerified = persisted.m_symbols.size() == beforeDefinitions.size()
+                + ( beforeDefinitions.contains( aSymbolName ) ? 0 : 1 );
+
+        for( const auto& [name, definition] : beforeDefinitions )
+        {
+            if( name == aSymbolName )
+                continue;
+
+            auto after = persisted.m_symbols.find( name );
+
+            if( after == persisted.m_symbols.end() || FormatCheckedSymbol( after->second ) != definition )
+            {
+                result.unrelatedEntriesVerified = false;
+                break;
+            }
+        }
+
+        result.afterBaselines = admission->Observe();
+        result.postverified = result.targetVerified && result.unrelatedEntriesVerified
+                && SameCheckedBaselines( writtenBaselines, result.afterBaselines );
+
+        if( !result.postverified )
+            THROW_IO_ERROR( "Checked symbol write did not verify the target and unrelated entries" );
+
+        result.committed = true;
+        delete m_cache;
+        m_cache = nullptr;
+        return result;
+    }
+    catch( const std::exception& error )
+    {
+        result.errorCode = "symbol_library_write_failed";
+        result.errorMessage = error.what();
+
+        if( result.writeStarted )
+        {
+            result.rollbackAttempted = true;
+
+            try
+            {
+                if( admission )
+                {
+                    const std::vector<FILE_CONTENT_BASELINE> current = admission->Observe();
+
+                    // Never overwrite bytes that cannot be attributed to this operation.  If
+                    // Save failed before emitting an observable result, only unchanged original
+                    // bytes are safe; a partially written or foreign state stays indeterminate.
+                    if( SameCheckedBaselines( aExpectedBaselines, current ) )
+                    {
+                        result.rollbackBaselines = current;
+                        result.rollbackVerified = true;
+                    }
+                    else if( !writtenBaselines.empty() && SameCheckedBaselines( writtenBaselines, current )
+                             && RestoreCheckedLibrary( aLibraryPath, aBeforeLibraryContents ) )
+                    {
+                        result.rollbackBaselines = admission->Observe();
+                        result.rollbackVerified = SameCheckedBaselines( aExpectedBaselines,
+                                                                        result.rollbackBaselines );
+                    }
+
+                    if( result.rollbackVerified )
+                    {
+                        SCH_IO_KICAD_SEXPR_LIB_CACHE restored( aLibraryPath );
+                        restored.Load();
+                        auto symbol = restored.m_symbols.find( aSymbolName );
+                        result.rollbackDefinition = symbol == restored.m_symbols.end()
+                                ? std::string{} : FormatCheckedSymbol( symbol->second );
+                        result.rollbackVerified = result.rollbackDefinition == result.beforeDefinition;
+                    }
+                }
+            }
+            catch( const std::exception& rollbackError )
+            {
+                result.errorMessage += "; rollback failed: ";
+                result.errorMessage += rollbackError.what();
+            }
+
+            result.rollbackIndeterminate = !result.rollbackVerified;
+        }
+
+        delete m_cache;
+        m_cache = nullptr;
+        return result;
+    }
 }
 
 

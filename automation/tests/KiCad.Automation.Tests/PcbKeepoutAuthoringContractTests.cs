@@ -163,6 +163,9 @@ public sealed class PcbKeepoutAuthoringContractTests
         var nativePlacementType = expected.Clone();
         nativePlacementType.RuleAreaSettings!.PlacementSourceType = PlacementRuleSourceType.PrstGroup;
         PcbKeepoutAuthoringContract.ValidateReadback(expected, nativePlacementType, BoardId);
+        nativePlacementType.Parent = new KIID { Value = BoardId };
+        nativePlacementType.FilledPolygons.Add(new ZoneFilledPolygons { Layer = BoardLayer.BlFCu, Shapes = new PolySet() });
+        PcbKeepoutAuthoringContract.ValidateExisting(nativePlacementType, BoardId);
     }
 
     [TestMethod]

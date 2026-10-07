@@ -54,7 +54,8 @@ internal static class PcbKeepoutAuthoringContract
     /// may populate Parent during readback; this method still rejects foreign
     /// item types, derived fill state and placement-owned rule areas.
     /// </summary>
-    internal static void ValidateExisting(Zone zone, string nativeIdentity) => ValidateZone(zone, requireIdentity: true, allowNativeParent: true, nativeIdentity, allowDerivedFill: true);
+    internal static void ValidateExisting(Zone zone, string nativeIdentity) => ValidateZone(zone, requireIdentity: true,
+        allowNativeParent: true, nativeIdentity, allowDerivedFill: true, allowNativePlacementMetadata: true);
 
     internal static void ValidateDeleteId(string keepoutId)
     {
@@ -67,7 +68,8 @@ internal static class PcbKeepoutAuthoringContract
         && id != Guid.Empty
         && string.Equals(id.ToString("D"), value, StringComparison.Ordinal);
 
-    private static void ValidateZone(Zone? zone, bool requireIdentity, bool allowNativeParent, string? nativeIdentity, bool allowDerivedFill = false)
+    private static void ValidateZone(Zone? zone, bool requireIdentity, bool allowNativeParent, string? nativeIdentity,
+        bool allowDerivedFill = false, bool allowNativePlacementMetadata = false)
     {
         if (zone is null)
             throw new AutomationException("invalid_pcb_keepout", "Supply one typed PCB keepout.");
@@ -116,8 +118,8 @@ internal static class PcbKeepoutAuthoringContract
             throw new AutomationException("invalid_pcb_keepout_settings", "A keepout must disallow at least one native object class.");
         if (!Enum.IsDefined(settings.PlacementSourceType))
             throw new AutomationException("invalid_pcb_keepout_settings", "RuleAreaSettings.PlacementSourceType must be a defined native enum value.");
-        if (settings.PlacementEnabled || !string.IsNullOrWhiteSpace(settings.PlacementSource)
-            || settings.PlacementSourceType != PlacementRuleSourceType.PrstUnknown)
+        if (!allowNativePlacementMetadata && (settings.PlacementEnabled || !string.IsNullOrWhiteSpace(settings.PlacementSource)
+            || settings.PlacementSourceType != PlacementRuleSourceType.PrstUnknown))
             throw new AutomationException("unsupported_pcb_keepout_placement", "Placement-owned rule areas are not accepted by this keepout authoring surface.");
         if (zone.Border is not null && !Enum.IsDefined(zone.Border.Style))
             throw new AutomationException("invalid_pcb_keepout_settings", "Keepout border style must be a defined native enum value.");

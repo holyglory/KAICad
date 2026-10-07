@@ -806,6 +806,31 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_schematic_read_connection_item");
             CollectionAssert.Contains(names, "kicad_schematic_update_connection_item");
             CollectionAssert.Contains(names, "kicad_schematic_delete_connection_item");
+            foreach (string hierarchyTool in new[]
+            {
+                "kicad_schematic_create_sheet_symbol", "kicad_schematic_read_sheet_symbol",
+                "kicad_schematic_update_sheet_symbol", "kicad_schematic_delete_sheet_symbol",
+                "kicad_schematic_create_sheet_pin", "kicad_schematic_read_sheet_pin",
+                "kicad_schematic_update_sheet_pin", "kicad_schematic_delete_sheet_pin",
+                "kicad_schematic_create_hierarchical_label", "kicad_schematic_read_hierarchical_label",
+                "kicad_schematic_update_hierarchical_label", "kicad_schematic_delete_hierarchical_label"
+            })
+                CollectionAssert.Contains(names, hierarchyTool);
+            // The compiled STDIO boundary must expose the complete typed family and reject
+            // malformed root state before looking up an instance or contacting native code.
+            var invalidHierarchyCalls = new[]
+            {
+                new { Name = "kicad_schematic_read_sheet_symbol", Arguments = (object)new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", sheetId = Guid.NewGuid().ToString("D"), expectedStateJson = "{}" } },
+                new { Name = "kicad_schematic_create_sheet_symbol", Arguments = (object)new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", targetDocumentJson = "{}", expectedStateJson = "{}", sheetJson = "{}", operationId = Guid.NewGuid().ToString("D") } },
+                new { Name = "kicad_schematic_read_sheet_pin", Arguments = (object)new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", parentSheetId = Guid.NewGuid().ToString("D"), pinId = Guid.NewGuid().ToString("D"), expectedStateJson = "{}" } },
+                new { Name = "kicad_schematic_create_hierarchical_label", Arguments = (object)new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", targetDocumentJson = "{}", expectedStateJson = "{}", labelJson = "{}", operationId = Guid.NewGuid().ToString("D") } }
+            };
+            int hierarchyRequestId = 9380;
+            foreach (var invocation in invalidHierarchyCalls)
+            {
+                var response = await Request(hierarchyRequestId++, "tools/call", new { name = invocation.Name, arguments = invocation.Arguments });
+                Assert.IsTrue(response.GetProperty("result").GetProperty("isError").GetBoolean(), response.GetRawText());
+            }
             CollectionAssert.Contains(names, "kicad_schematic_library_cache_replace");
             var invalidLibraryCache = await Request(9095, "tools/call", new { name = "kicad_schematic_library_cache_replace",
                 arguments = new

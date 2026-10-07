@@ -386,6 +386,97 @@ public sealed class SchematicTypedMutationTests
         Assert.IsEmpty(fixture.Batches); Assert.AreEqual(0, fixture.Captures);
     }
 
+    [TestMethod]
+    public async Task HierarchyToolsCreateSheetAndPinUseExplicitParentAndReplayReceipt()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var sheetId = Guid.NewGuid().ToString("D");
+        var sheet = new SheetSymbol
+        {
+            Id = new() { Value = sheetId }, Position = new() { XNm = 20_000, YNm = 30_000 },
+            Size = new() { XNm = 40_000, YNm = 30_000 }, Path = fixture.TargetDocument.SheetPath.Clone(),
+            ChildScreenId = new() { Value = fixture.ScreenId },
+            NameField = new() { Name = "Sheetname", Text = new() { Text_ = "Child" } },
+            FilenameField = new() { Name = "Sheetfile", Text = new() { Text_ = "child.kicad_sch" } },
+            Locked = LockedState.LsUnlocked
+        };
+        string before = fixture.ExpectedJson;
+        string operation = Guid.NewGuid().ToString("D");
+        var created = await fixture.HierarchyTools.CreateSheetSymbol(fixture.InstanceId, fixture.DocumentJson,
+            SchematicJson.Formatter.Format(fixture.TargetDocument), before,
+            SchematicJson.Formatter.Format(sheet), operation, default);
+        Assert.IsFalse(created.IsError ?? false, Data(created).GetRawText());
+        Assert.AreEqual(1, fixture.Batches.Count);
+        var sent = fixture.Batches[0].Batch.Operations.Single();
+        Assert.AreEqual(fixture.TargetDocument, sent.TargetDocument);
+        Assert.AreEqual(sheet, sent.Create.Unpack<SheetSymbol>());
+
+        var replay = await fixture.HierarchyTools.CreateSheetSymbol(fixture.InstanceId, fixture.DocumentJson,
+            SchematicJson.Formatter.Format(fixture.TargetDocument), before,
+            SchematicJson.Formatter.Format(sheet), operation, default);
+        Assert.IsFalse(replay.IsError ?? false, Data(replay).GetRawText());
+        Assert.IsTrue(Data(replay).GetProperty("replayed").GetBoolean());
+        Assert.AreEqual(1, fixture.Batches.Count);
+
+        var pin = new SheetPin
+        {
+            Id = new() { Value = Guid.NewGuid().ToString("D") }, Position = new() { XNm = 60_000, YNm = 40_000 },
+            Text = new() { Text_ = "DATA" }, Side = SheetSide.ShsRight,
+            Shape = SchematicLabelShape.SlshPassive, SpinStyle = SchematicLabelSpinStyle.SlssLeft,
+            Locked = LockedState.LsUnlocked
+        };
+        string afterSheet = fixture.ExpectedJson;
+        string pinOperation = Guid.NewGuid().ToString("D");
+        var pinResult = await fixture.HierarchyTools.CreateSheetPin(fixture.InstanceId, fixture.DocumentJson,
+            sheetId, afterSheet, SchematicJson.Formatter.Format(pin), pinOperation, default);
+        Assert.IsFalse(pinResult.IsError ?? false, Data(pinResult).GetRawText());
+        Assert.AreEqual(2, fixture.Batches.Count);
+        var parentReplacement = fixture.Batches[1].Batch.Operations.Single().Update.Unpack<SheetSymbol>();
+        Assert.AreEqual(sheetId, parentReplacement.Id.Value);
+        Assert.AreEqual(pin, parentReplacement.Pins.Single());
+        Assert.AreEqual(pin.Id.Value, Data(pinResult).GetProperty("itemId").GetString());
+
+        var pinReplay = await fixture.HierarchyTools.CreateSheetPin(fixture.InstanceId, fixture.DocumentJson,
+            sheetId, afterSheet, SchematicJson.Formatter.Format(pin), pinOperation, default);
+        Assert.IsFalse(pinReplay.IsError ?? false, Data(pinReplay).GetRawText());
+        Assert.IsTrue(Data(pinReplay).GetProperty("replayed").GetBoolean());
+        Assert.AreEqual(2, fixture.Batches.Count);
+    }
+
+    [TestMethod]
+    public async Task HierarchyToolsRejectRelinkAndStaleSheetPinWithoutDispatch()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var sheetId = Guid.NewGuid().ToString("D");
+        var sheet = new SheetSymbol
+        {
+            Id = new() { Value = sheetId }, Position = new() { XNm = 20_000, YNm = 30_000 },
+            Size = new() { XNm = 40_000, YNm = 30_000 }, Path = fixture.TargetDocument.SheetPath.Clone(),
+            ChildScreenId = new() { Value = fixture.ScreenId },
+            NameField = new() { Name = "Sheetname", Text = new() { Text_ = "Child" } },
+            FilenameField = new() { Name = "Sheetfile", Text = new() { Text_ = "child.kicad_sch" } },
+            Locked = LockedState.LsUnlocked
+        };
+        string before = fixture.ExpectedJson;
+        var created = await fixture.HierarchyTools.CreateSheetSymbol(fixture.InstanceId, fixture.DocumentJson,
+            SchematicJson.Formatter.Format(fixture.TargetDocument), before,
+            SchematicJson.Formatter.Format(sheet), Guid.NewGuid().ToString("D"), default);
+        Assert.IsFalse(created.IsError ?? false, Data(created).GetRawText());
+        string current = fixture.ExpectedJson;
+        var relink = sheet.Clone(); relink.FilenameField.Text.Text_ = "other.kicad_sch";
+        AssertError(await fixture.HierarchyTools.UpdateSheetSymbol(fixture.InstanceId, fixture.DocumentJson,
+            sheetId, current, SchematicJson.Formatter.Format(relink), Guid.NewGuid().ToString("D"), default),
+            "sheet_relink_requires_hierarchy_transaction");
+        Assert.AreEqual(1, fixture.Batches.Count);
+
+        fixture.State.State.Revision.Sequence++;
+        fixture.State.Electrical.Hierarchy.Revision.Sequence++;
+        AssertError(await fixture.HierarchyTools.DeleteSheetSymbol(fixture.InstanceId, fixture.DocumentJson,
+            sheetId, current, Guid.NewGuid().ToString("D"), default),
+            "stale_document_state");
+        Assert.AreEqual(1, fixture.Batches.Count);
+    }
+
     private static JsonElement Data(CallToolResult result) => JsonSerializer.SerializeToElement(result.StructuredContent);
     private static CheckedSchematicBatchReceipt Receipt(CallToolResult result) =>
         SchematicJson.Parser.Parse<CheckedSchematicBatchReceipt>(Data(result).GetProperty("receipt").GetRawText());
@@ -407,6 +498,7 @@ public sealed class SchematicTypedMutationTests
         internal Google.Protobuf.Collections.RepeatedField<Any> Items => State.Electrical.Hierarchy.Data.Instances[0].Items;
         internal SchematicTypedMutationTools Tools { get; }
         internal SchematicLibraryCacheTools CacheTools { get; }
+        internal SchematicHierarchyMutationTools HierarchyTools { get; }
         internal string InstanceId => Session.InstanceId;
         internal string DocumentJson => SchematicJson.Formatter.Format(State.State.Document);
         internal string ExpectedJson => SchematicJson.Formatter.Format(State);
@@ -424,6 +516,7 @@ public sealed class SchematicTypedMutationTests
         {
             Session.ProjectPath = Path.Combine(root, "fixture.kicad_pro");
             Registry = new(this, root); Tools = new(Registry); CacheTools = new(Registry);
+            HierarchyTools = new(Registry);
             var checkedRequest = CheckedSchematicToolTests.Request(root, Session.Epoch);
             State = new() { State = checkedRequest.ExpectedState.Clone(), Electrical = new()
                 { Hierarchy = new() { Data = new() { Document = checkedRequest.Batch.Document.Clone() },

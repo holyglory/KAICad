@@ -226,7 +226,7 @@ internal static class PcbRenderMetadataContract
         foreach (PcbRenderModelMetadata model in metadata.Models)
         {
             string key = GeometryKey(model.NativeUuid, model.ModelIndex);
-            if (string.IsNullOrWhiteSpace(model.NativeUuid) || !modelKeys.Add(key))
+            if (!CanonicalUuid(model.NativeUuid) || !modelKeys.Add(key))
                 failures.Add("model metadata must identify each native model exactly once");
             if (string.IsNullOrWhiteSpace(model.RequestedIdentity) || string.IsNullOrWhiteSpace(model.ResolvedIdentity))
                 failures.Add("model metadata must include requested and resolved asset identities");
@@ -242,7 +242,7 @@ internal static class PcbRenderMetadataContract
         foreach (PcbRenderObjectMetadata item in metadata.Objects)
         {
             string key = GeometryKey(item.NativeUuid, item.ModelIndex);
-            if (string.IsNullOrWhiteSpace(item.NativeUuid) || !objectKeys.Add(key) || !modelKeys.Contains(key))
+            if (!CanonicalUuid(item.NativeUuid) || !objectKeys.Add(key) || !modelKeys.Contains(key))
                 failures.Add("object metadata must map one-to-one to a declared native model");
             ValidateTransform(item.SceneTransformColumnMajor, "object", failures);
             ValidateBounds(item.NativeGeometryBounds, item.NativeGeometryBoundsAvailable, 6, "object native geometry", failures);
@@ -259,6 +259,10 @@ internal static class PcbRenderMetadataContract
     }
 
     private static string GeometryKey(string nativeUuid, uint modelIndex) => nativeUuid + "\u001f" + modelIndex;
+
+    private static bool CanonicalUuid(string value) =>
+        Guid.TryParseExact(value, "D", out Guid id) && id != Guid.Empty
+        && string.Equals(value, id.ToString("D"), StringComparison.Ordinal);
 
     private static void ValidateTransform(IReadOnlyList<double> values, string kind, List<string> failures)
     {

@@ -92,7 +92,7 @@ public sealed class PcbRenderContractTests
         PcbRenderMetadata metadata = CameraMetadata(stateHash, inputHash);
         metadata.Models.Add(new PcbRenderModelMetadata
         {
-            NativeUuid = "footprint-1",
+            NativeUuid = "11111111-1111-1111-1111-111111111111",
             ModelIndex = 0,
             RequestedIdentity = "${KICAD6_3DMODEL_DIR}/resistor.wrl",
             ResolvedIdentity = "/models/resistor.wrl",
@@ -105,7 +105,7 @@ public sealed class PcbRenderContractTests
         });
         metadata.Objects.Add(new PcbRenderObjectMetadata
         {
-            NativeUuid = "footprint-1",
+            NativeUuid = "11111111-1111-1111-1111-111111111111",
             ModelIndex = 0,
             SceneTransformColumnMajor = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, double.NaN, 1 },
             NativeGeometryBounds = { 0, 0, 0, 1, 1, 1 },
@@ -124,6 +124,36 @@ public sealed class PcbRenderContractTests
     }
 
     [TestMethod]
+    public void ModelAndObjectRowsRequireCanonicalNativeUuidIdentity()
+    {
+        const string stateHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const string inputHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        PcbRenderMetadata metadata = CameraMetadata(stateHash, inputHash);
+        string nonCanonical = "a2222222-2222-2222-2222-222222222222".ToUpperInvariant();
+        metadata.Models.Add(new PcbRenderModelMetadata
+        {
+            NativeUuid = nonCanonical, ModelIndex = 0,
+            RequestedIdentity = "${KICAD6_3DMODEL_DIR}/resistor.wrl",
+            ResolvedIdentity = "/models/resistor.wrl", ContentSha256 = new string('c', 64),
+            Loaded = true, SecondaryAssetsComplete = true, NativeGeometryBoundsAvailable = true,
+            SceneTransformColumnMajor = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 },
+            NativeGeometryBounds = { 0, 0, 0, 1, 1, 1 }
+        });
+        metadata.Objects.Add(new PcbRenderObjectMetadata
+        {
+            NativeUuid = nonCanonical, ModelIndex = 0, NativeGeometryBoundsAvailable = true,
+            SceneTransformColumnMajor = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 },
+            NativeGeometryBounds = { 0, 0, 0, 1, 1, 1 }
+        });
+
+        PcbRenderMetadataValidation validation = PcbRenderMetadataContract.Validate(
+            metadata, RenderRequest(), stateHash, inputHash);
+
+        Assert.IsFalse(validation.IsValid);
+        StringAssert.Contains(string.Join("; ", validation.Failures), "model metadata");
+    }
+
+    [TestMethod]
     public void SingularModelTransformCannotSupportLoadedAssetProvenance()
     {
         const string stateHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -131,7 +161,7 @@ public sealed class PcbRenderContractTests
         PcbRenderMetadata metadata = CameraMetadata(stateHash, inputHash);
         metadata.Models.Add(new PcbRenderModelMetadata
         {
-            NativeUuid = "footprint-1", ModelIndex = 0,
+            NativeUuid = "22222222-2222-2222-2222-222222222222", ModelIndex = 0,
             RequestedIdentity = "${KICAD6_3DMODEL_DIR}/resistor.wrl",
             ResolvedIdentity = "/models/resistor.wrl", ContentSha256 = new string('c', 64),
             Loaded = true, SecondaryAssetsComplete = true, NativeGeometryBoundsAvailable = true,
@@ -142,7 +172,7 @@ public sealed class PcbRenderContractTests
         });
         metadata.Objects.Add(new PcbRenderObjectMetadata
         {
-            NativeUuid = "footprint-1", ModelIndex = 0, NativeGeometryBoundsAvailable = true,
+            NativeUuid = "22222222-2222-2222-2222-222222222222", ModelIndex = 0, NativeGeometryBoundsAvailable = true,
             SceneTransformColumnMajor = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 },
             NativeGeometryBounds = { 0, 0, 0, 1, 1, 1 }
         });
@@ -183,7 +213,7 @@ public sealed class PcbRenderContractTests
         metadata.BoardNanometresToSceneColumnMajor[10] = 1e-12;
         metadata.Models.Add(new PcbRenderModelMetadata
         {
-            NativeUuid = "footprint-1", ModelIndex = 0,
+            NativeUuid = "33333333-3333-3333-3333-333333333333", ModelIndex = 0,
             RequestedIdentity = "${KICAD6_3DMODEL_DIR}/resistor.wrl",
             ResolvedIdentity = "/models/resistor.wrl", ContentSha256 = new string('c', 64),
             Loaded = true, SecondaryAssetsComplete = true, NativeGeometryBoundsAvailable = true,
@@ -192,7 +222,7 @@ public sealed class PcbRenderContractTests
         });
         metadata.Objects.Add(new PcbRenderObjectMetadata
         {
-            NativeUuid = "footprint-1", ModelIndex = 0, NativeGeometryBoundsAvailable = true,
+            NativeUuid = "33333333-3333-3333-3333-333333333333", ModelIndex = 0, NativeGeometryBoundsAvailable = true,
             SceneTransformColumnMajor = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 },
             NativeGeometryBounds = { 0, 0, 0, 1, 1, 0 },
             ProjectedBoundsAvailable = false

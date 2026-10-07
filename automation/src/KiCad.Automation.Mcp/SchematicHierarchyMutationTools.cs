@@ -120,34 +120,35 @@ public sealed class SchematicHierarchyMutationTools(InstanceRegistry registry)
 
     [McpServerTool(Name = "kicad_schematic_read_hierarchical_label", ReadOnly = true,
         UseStructuredContent = true),
-     Description("Read one exact HierarchicalLabel by UUID from the checked hierarchy, including its owning sheet. A complete state checkpoint is required and stale observations are refused."),
+     Description("Read one exact HierarchicalLabel by UUID from the checked hierarchy, including its owning sheet. A complete state checkpoint is required and stale observations are refused. When a repeated/shared child contains the UUID on more than one sheet instance, supply targetDocumentJson to select the exact sheet instance."),
      KiCadCapability("schematic-design", "compiled-mcp plus native-api", "explicit root and label UUID, complete checked hierarchy and process epoch"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TypedSchematicHierarchyAuthoringPersistsThroughMcp")]
     public Task<CallToolResult> ReadHierarchicalLabel(string instanceId, string documentJson,
-        string labelId, string expectedStateJson, CancellationToken cancellationToken) =>
+        string labelId, string expectedStateJson, CancellationToken cancellationToken,
+        string? targetDocumentJson = null) =>
         ExecuteRead(instanceId, documentJson, expectedStateJson, labelId, null, ReadKind.Label,
-            cancellationToken);
+            cancellationToken, targetDocumentJson);
 
     [McpServerTool(Name = "kicad_schematic_update_hierarchical_label", ReadOnly = false,
         UseStructuredContent = true),
-     Description("Replace one complete HierarchicalLabel identified by labelId while retaining its UUID and owning sheet. The checked state, native receipt and operationId prevent stale or duplicate edits; the result remains unsaved until kicad_document_save."),
+     Description("Replace one complete HierarchicalLabel identified by labelId while retaining its UUID and owning sheet. The checked state, native receipt and operationId prevent stale or duplicate edits; the result remains unsaved until kicad_document_save. When a repeated/shared child contains the UUID on more than one sheet instance, supply targetDocumentJson to select the exact sheet instance."),
      KiCadCapability("schematic-design", "compiled-mcp plus native-api", "explicit root and label UUID, complete replacement, checked hierarchy, process epoch, revision and operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TypedSchematicHierarchyAuthoringPersistsThroughMcp")]
     public Task<CallToolResult> UpdateHierarchicalLabel(string instanceId, string documentJson,
         string labelId, string expectedStateJson, string labelJson, string operationId,
-        CancellationToken cancellationToken) => Execute(instanceId, documentJson, null,
-            expectedStateJson, labelJson, labelId, null, operationId, Mutation.UpdateLabel,
+        CancellationToken cancellationToken, string? targetDocumentJson = null) => Execute(instanceId, documentJson,
+            targetDocumentJson, expectedStateJson, labelJson, labelId, null, operationId, Mutation.UpdateLabel,
             cancellationToken);
 
     [McpServerTool(Name = "kicad_schematic_delete_hierarchical_label", ReadOnly = false,
         UseStructuredContent = true),
-     Description("Delete one explicitly identified HierarchicalLabel from its checked sheet. The operation is atomic, revision guarded and replayable; use kicad_document_save to persist it."),
+     Description("Delete one explicitly identified HierarchicalLabel from its checked sheet. The operation is atomic, revision guarded and replayable; use kicad_document_save to persist it. When a repeated/shared child contains the UUID on more than one sheet instance, supply targetDocumentJson to select the exact sheet instance."),
      KiCadCapability("schematic-design", "compiled-mcp plus native-api", "explicit root and label UUID, checked hierarchy, process epoch, revision and operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TypedSchematicHierarchyAuthoringPersistsThroughMcp")]
     public Task<CallToolResult> DeleteHierarchicalLabel(string instanceId, string documentJson,
         string labelId, string expectedStateJson, string operationId,
-        CancellationToken cancellationToken) => Execute(instanceId, documentJson, null,
-            expectedStateJson, null, labelId, null, operationId, Mutation.DeleteLabel,
+        CancellationToken cancellationToken, string? targetDocumentJson = null) => Execute(instanceId, documentJson,
+            targetDocumentJson, expectedStateJson, null, labelId, null, operationId, Mutation.DeleteLabel,
             cancellationToken);
 
     private enum Mutation { CreateSheet, UpdateSheet, DeleteSheet, CreatePin, UpdatePin, DeletePin, CreateLabel, UpdateLabel, DeleteLabel }
@@ -241,16 +242,20 @@ public sealed class SchematicHierarchyMutationTools(InstanceRegistry registry)
     }
 
     private async Task<CallToolResult> ExecuteRead(string instanceId, string documentJson,
-        string expectedStateJson, string itemId, string? parentSheetId, ReadKind kind, CancellationToken token)
+        string expectedStateJson, string itemId, string? parentSheetId, ReadKind kind,
+        CancellationToken token, string? targetDocumentJson = null)
     {
         try
         {
             token.ThrowIfCancellationRequested();
             DocumentSpecifier root = ParseRoot(documentJson);
             ExpectedObservation expected = ParseExpected(expectedStateJson, root);
+            DocumentSpecifier? target = targetDocumentJson is null ? null
+                : ParseSheet(targetDocumentJson, "targetDocumentJson");
+            ValidateRequestedTarget(expected.Electrical.Hierarchy.Data, target);
             ValidateIdentity(itemId, "itemId");
             if (parentSheetId is not null) ValidateIdentity(parentSheetId, "parentSheetId");
-            Located located = Find(expected.Electrical, itemId, parentSheetId, kind);
+            Located located = Find(expected.Electrical, itemId, parentSheetId, kind, target);
             NativeClient client = registry.Client(instanceId);
             AutomationSession session = await client.HandshakeAsync(token);
             if (expected.State.ProcessEpoch != session.Epoch)
@@ -289,9 +294,11 @@ public sealed class SchematicHierarchyMutationTools(InstanceRegistry registry)
         string? payloadJson, string? itemId, string? parentSheetId, string operationId, Mutation mutation)
     {
         var hierarchy = expected.Electrical.Hierarchy.Data;
+        ValidateRequestedTarget(hierarchy, requestedTarget);
         Located? source = itemId is null ? null : Find(hierarchy, itemId, parentSheetId,
             mutation is Mutation.DeletePin or Mutation.UpdatePin or Mutation.CreatePin ? ReadKind.Pin
-                : mutation is Mutation.DeleteLabel or Mutation.UpdateLabel or Mutation.CreateLabel ? ReadKind.Label : ReadKind.Sheet);
+                : mutation is Mutation.DeleteLabel or Mutation.UpdateLabel or Mutation.CreateLabel ? ReadKind.Label : ReadKind.Sheet,
+            requestedTarget);
         DocumentSpecifier target;
         string id;
         switch (mutation)
@@ -377,7 +384,8 @@ public sealed class SchematicHierarchyMutationTools(InstanceRegistry registry)
         return plan with { ReplyItem = Any.Pack(pin) };
     }
 
-    private static Located Find(SchematicHierarchyData hierarchy, string id, string? parentSheetId, ReadKind kind)
+    private static Located Find(SchematicHierarchyData hierarchy, string id, string? parentSheetId,
+        ReadKind kind, DocumentSpecifier? targetDocument = null)
     {
         var matches = new List<Located>();
         foreach (var screen in hierarchy.Instances)
@@ -404,6 +412,8 @@ public sealed class SchematicHierarchyMutationTools(InstanceRegistry registry)
                 }
             }
         }
+        if (targetDocument is not null)
+            matches = matches.Where(match => match.Document.Equals(targetDocument)).ToList();
         return matches.Count switch
         {
             1 => matches[0],
@@ -413,8 +423,16 @@ public sealed class SchematicHierarchyMutationTools(InstanceRegistry registry)
         };
     }
 
-    private static Located Find( SchematicElectricalState electrical, string id, string? parentSheetId, ReadKind kind) =>
-        Find(electrical.Hierarchy.Data, id, parentSheetId, kind);
+    private static Located Find(SchematicElectricalState electrical, string id, string? parentSheetId,
+        ReadKind kind, DocumentSpecifier? targetDocument = null) =>
+        Find(electrical.Hierarchy.Data, id, parentSheetId, kind, targetDocument);
+
+    private static void ValidateRequestedTarget(SchematicHierarchyData hierarchy, DocumentSpecifier? target)
+    {
+        if (target is not null && !hierarchy.Instances.Any(screen =>
+            screen.Metadata?.Document?.Equals(target) == true))
+            throw new AutomationException("target_sheet_not_loaded", "targetDocumentJson is not a loaded sheet in the checked hierarchy.");
+    }
 
     private static SheetSymbol FindParent(SchematicHierarchyData hierarchy, string parentId, string pinId)
     {

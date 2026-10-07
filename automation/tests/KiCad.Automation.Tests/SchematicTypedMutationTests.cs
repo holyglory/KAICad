@@ -513,7 +513,7 @@ public sealed class SchematicTypedMutationTests
 
         string afterCreate = fixture.ExpectedJson;
         var read = await fixture.HierarchyTools.ReadHierarchicalLabel(fixture.InstanceId,
-            fixture.DocumentJson, Id, afterCreate, default);
+            fixture.DocumentJson, Id, afterCreate, default, targetJson);
         Assert.IsFalse(read.IsError ?? false, Data(read).GetRawText());
         Assert.AreEqual(Id, SchematicJson.Parser.Parse<Any>(Data(read).GetProperty("item").GetRawText())
             .Unpack<HierarchicalLabel>().Id.Value);
@@ -522,7 +522,7 @@ public sealed class SchematicTypedMutationTests
         string updateOperation = Guid.NewGuid().ToString("D");
         var changed = await fixture.HierarchyTools.UpdateHierarchicalLabel(fixture.InstanceId,
             fixture.DocumentJson, Id, afterCreate, SchematicJson.Formatter.Format(updated),
-            updateOperation, default);
+            updateOperation, default, targetJson);
         Assert.IsFalse(changed.IsError ?? false, Data(changed).GetRawText());
         Assert.AreEqual(2, fixture.Batches.Count);
         Assert.AreEqual("MCP_HIER_UPDATED", fixture.Batches[1].Batch.Operations.Single()
@@ -530,7 +530,7 @@ public sealed class SchematicTypedMutationTests
 
         var updateReplay = await fixture.HierarchyTools.UpdateHierarchicalLabel(fixture.InstanceId,
             fixture.DocumentJson, Id, afterCreate, SchematicJson.Formatter.Format(updated),
-            updateOperation, default);
+            updateOperation, default, targetJson);
         Assert.IsFalse(updateReplay.IsError ?? false, Data(updateReplay).GetRawText());
         Assert.IsTrue(Data(updateReplay).GetProperty("replayed").GetBoolean());
         Assert.AreEqual(2, fixture.Batches.Count);
@@ -538,17 +538,50 @@ public sealed class SchematicTypedMutationTests
         string afterUpdate = fixture.ExpectedJson;
         string deleteOperation = Guid.NewGuid().ToString("D");
         var deleted = await fixture.HierarchyTools.DeleteHierarchicalLabel(fixture.InstanceId,
-            fixture.DocumentJson, Id, afterUpdate, deleteOperation, default);
+            fixture.DocumentJson, Id, afterUpdate, deleteOperation, default, targetJson);
         Assert.IsFalse(deleted.IsError ?? false, Data(deleted).GetRawText());
         Assert.AreEqual(3, fixture.Batches.Count);
         Assert.AreEqual(Id, fixture.Batches[2].Batch.Operations.Single().Remove.Value);
         Assert.IsEmpty(fixture.Items);
 
         var deleteReplay = await fixture.HierarchyTools.DeleteHierarchicalLabel(fixture.InstanceId,
-            fixture.DocumentJson, Id, afterUpdate, deleteOperation, default);
+            fixture.DocumentJson, Id, afterUpdate, deleteOperation, default, targetJson);
         Assert.IsFalse(deleteReplay.IsError ?? false, Data(deleteReplay).GetRawText());
         Assert.IsTrue(Data(deleteReplay).GetProperty("replayed").GetBoolean());
         Assert.AreEqual(3, fixture.Batches.Count);
+    }
+
+    [TestMethod]
+    public async Task HierarchyToolsTargetDisambiguatesRepeatedChildLabelIdentity()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var first = fixture.State.Electrical.Hierarchy.Data.Instances[0];
+        var label = new HierarchicalLabel
+        {
+            Id = new() { Value = Id }, Position = new() { XNm = 30_000, YNm = 40_000 },
+            Text = new() { Text_ = "SHARED_LABEL" }, SpinStyle = SchematicLabelSpinStyle.SlssRight,
+            Shape = SchematicLabelShape.SlshPassive, Locked = LockedState.LsUnlocked,
+            FieldsAutoplaced = true
+        };
+        first.Items.Add(Any.Pack(label));
+        var second = first.Clone();
+        second.Metadata.Document.SheetPath.Path[^1].Value = Guid.NewGuid().ToString("D");
+        second.Metadata.ScreenId.Value = fixture.ScreenId;
+        second.Items.Clear(); second.Items.Add(Any.Pack(label));
+        fixture.State.Electrical.Hierarchy.Data.Instances.Add(second);
+        string expected = fixture.ExpectedJson;
+        var ambiguous = await fixture.HierarchyTools.ReadHierarchicalLabel(fixture.InstanceId,
+            fixture.DocumentJson, Id, expected, default);
+        AssertError(ambiguous, "ambiguous_schematic_hierarchy_item");
+
+        string targetJson = SchematicJson.Formatter.Format(second.Metadata.Document);
+        var selected = await fixture.HierarchyTools.ReadHierarchicalLabel(fixture.InstanceId,
+            fixture.DocumentJson, Id, expected, default, targetJson);
+        Assert.IsFalse(selected.IsError ?? false, Data(selected).GetRawText());
+        Assert.AreEqual(second.Metadata.Document,
+            SchematicJson.Parser.Parse<DocumentSpecifier>(Data(selected).GetProperty("targetDocument").GetRawText()));
+        Assert.AreEqual("SHARED_LABEL", SchematicJson.Parser.Parse<Any>(Data(selected).GetProperty("item").GetRawText())
+            .Unpack<HierarchicalLabel>().Text.Text_);
     }
 
     private static JsonElement Data(CallToolResult result) => JsonSerializer.SerializeToElement(result.StructuredContent);

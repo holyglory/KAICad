@@ -266,7 +266,8 @@ public sealed partial class NativeSessionTests
         JsonElement labelRead = await mcp.Tool("kicad_schematic_read_hierarchical_label", new
         {
             instanceId, documentJson, labelId,
-            expectedStateJson = SchematicJson.Formatter.Format(afterLabelCreate)
+            expectedStateJson = SchematicJson.Formatter.Format(afterLabelCreate),
+            targetDocumentJson = childJson
         });
         RequireToolSuccess(labelRead);
         Assert.AreEqual(labelId, Unpack<HierarchicalLabel>(labelRead, "item").Id.Value);
@@ -276,7 +277,8 @@ public sealed partial class NativeSessionTests
         {
             instanceId, documentJson, labelId,
             expectedStateJson = SchematicJson.Formatter.Format(afterLabelCreate),
-            labelJson = SchematicJson.Formatter.Format(updatedLabel), operationId = labelUpdateOperation
+            labelJson = SchematicJson.Formatter.Format(updatedLabel), operationId = labelUpdateOperation,
+            targetDocumentJson = childJson
         });
         RequireToolSuccess(labelUpdated);
         CheckedSchematicState afterLabelUpdate = await Capture();
@@ -285,7 +287,8 @@ public sealed partial class NativeSessionTests
         {
             instanceId, documentJson, labelId,
             expectedStateJson = SchematicJson.Formatter.Format(afterLabelCreate),
-            labelJson = SchematicJson.Formatter.Format(updatedLabel), operationId = labelUpdateOperation
+            labelJson = SchematicJson.Formatter.Format(updatedLabel), operationId = labelUpdateOperation,
+            targetDocumentJson = childJson
         });
         RequireToolSuccess(labelUpdateReplay);
         Assert.IsTrue(labelUpdateReplay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean(),
@@ -310,7 +313,8 @@ public sealed partial class NativeSessionTests
         JsonElement labelDeleted = await mcp.Tool("kicad_schematic_delete_hierarchical_label", new
         {
             instanceId, documentJson, labelId,
-            expectedStateJson = SchematicJson.Formatter.Format(reloaded), operationId = labelDeleteOperation
+            expectedStateJson = SchematicJson.Formatter.Format(reloaded), operationId = labelDeleteOperation,
+            targetDocumentJson = childJson
         });
         RequireToolSuccess(labelDeleted);
         CheckedSchematicState afterLabelDelete = await Capture();
@@ -318,7 +322,8 @@ public sealed partial class NativeSessionTests
         JsonElement labelDeleteReplay = await mcp.Tool("kicad_schematic_delete_hierarchical_label", new
         {
             instanceId, documentJson, labelId,
-            expectedStateJson = SchematicJson.Formatter.Format(reloaded), operationId = labelDeleteOperation
+            expectedStateJson = SchematicJson.Formatter.Format(reloaded), operationId = labelDeleteOperation,
+            targetDocumentJson = childJson
         });
         RequireToolSuccess(labelDeleteReplay);
         Assert.IsTrue(labelDeleteReplay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean(),

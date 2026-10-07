@@ -90,10 +90,11 @@ public sealed class SymbolLibraryCheckedContractTests
     {
         (DocumentSpecifier document, string epoch, string operation, string expected) = Fixture();
         var before = State(document, epoch, sequence: 7, expected);
+        string expectedSnapshot = before.StateSha256;
         var after = State(document, epoch, sequence: 8, new string('b', 64));
         NativeCapabilitySymbolLibraryCheckedWriteResponse response = Response(document, epoch, operation,
             status: "committed_postverified", committed: true, revisionTracked: true,
-            completeLifecycle: true, before: expected, after: new string('b', 64));
+            completeLifecycle: false, before: expectedSnapshot, after: after.StateSha256);
         response.ReceiptStatus = NativeCapabilitySymbolLibraryCheckedReceiptStatus.SlcwsCommittedPostverified;
         response.Scope = "mcp_direct_symbol_file";
         response.RequestFingerprintSha256 = new string('c', 64);
@@ -107,10 +108,11 @@ public sealed class SymbolLibraryCheckedContractTests
         response.Request = new NativeCapabilitySymbolLibraryCheckedWrite
         {
             Document = document.Clone(), ProcessEpoch = epoch, OperationId = operation,
-            ExpectedSnapshotSha256 = expected, ExpectedState = before
+            ExpectedSnapshotSha256 = expectedSnapshot, ExpectedState = before
         };
+        response.RequestFingerprintSha256 = SymbolLibraryCheckedContract.ComputeFingerprint(response.Request);
 
-        SymbolLibraryCheckedContract.ValidateResponse(response, document, epoch, operation, expected);
+        SymbolLibraryCheckedContract.ValidateResponse(response, response.Request);
     }
 
     [TestMethod]
@@ -130,9 +132,10 @@ public sealed class SymbolLibraryCheckedContractTests
             Document = document.Clone(), ProcessEpoch = epoch, OperationId = operation,
             ExpectedSnapshotSha256 = expected
         };
+        response.RequestFingerprintSha256 = SymbolLibraryCheckedContract.ComputeFingerprint(response.Request);
 
         AutomationException error = Assert.ThrowsExactly<AutomationException>(() =>
-            SymbolLibraryCheckedContract.ValidateResponse(response, document, epoch, operation, expected));
+            SymbolLibraryCheckedContract.ValidateResponse(response, response.Request));
 
         Assert.AreEqual("invalid_symbol_library_response", error.Code);
     }
@@ -177,11 +180,20 @@ public sealed class SymbolLibraryCheckedContractTests
     }
 
     private static NativeCapabilitySymbolLibraryCheckedState State(DocumentSpecifier document,
-        string epoch, ulong sequence, string stateSha) => new()
+        string epoch, ulong sequence, string stateSha)
+    {
+        var state = new NativeCapabilitySymbolLibraryCheckedState
         {
             Document = document.Clone(), ProcessEpoch = epoch,
             Revision = new() { Epoch = epoch, Sequence = sequence }, Scope = "mcp_direct_symbol_file",
-            StateSha256 = stateSha, StateComplete = true, DiskBaselineChecked = true,
-            CompleteChangeTracking = false
+            StateComplete = true, DiskBaselineChecked = true, CompleteChangeTracking = false,
+            DependencyBaselines = { new NativeCapabilityLibrarySnapshotDependencyBaseline
+            {
+                Path = "/tmp/fixture.kicad_sym", Exists = true, Known = true,
+                Sha256 = stateSha, Bytes = 7
+            } }
         };
+        state.StateSha256 = SymbolLibraryCheckedContract.ComputeStateDigest(state);
+        return state;
+    }
 }

@@ -24,6 +24,8 @@
 #include <digesting_file_line_reader.h>
 #include <api/library_write_admission.h>
 #include <file_content_baseline.h>
+#include <file_write_observer.h>
+#include <richio.h>
 
 #include <fmt/format.h>
 #include <magic_enum.hpp>
@@ -36,6 +38,7 @@
 #include <base_units.h>
 #include <bitmap_base.h>
 #include <common.h> // ExpandTextVars
+#include <kiplatform/io.h>
 #include <wildcards_and_files_ext.h>
 #include <build_version.h>
 #include <sch_selection.h>
@@ -2031,15 +2034,33 @@ bool RestoreCheckedLibrary( const wxString& aPath, const std::string& aContents 
     if( aContents.empty() )
         return false;
 
-    wxFFile file( aPath, wxS( "wb" ) );
-
-    if( !file.IsOpened() )
+    // FILE_OUTPUTFORMATTER writes a sibling temporary file and atomically replaces the resolved
+    // target.  This preserves the requested symlink and leaves the canonical library untouched
+    // when opening, writing or committing the replacement fails.
+    try
+    {
+        FILE_OUTPUTFORMATTER output( aPath, wxS( "wb" ) );
+        output.Print( "%s", aContents.c_str() );
+        FILE_WRITE_OBSERVER::BeforeWrite( aPath );
+        output.Finish();
+        FILE_WRITE_OBSERVER::AfterWrite( FILE_CONTENT_BASELINE::Read( aPath ) );
+        return true;
+    }
+    catch( const std::exception& )
+    {
         return false;
+    }
+}
 
-    if( file.Write( aContents.data(), aContents.size() ) != aContents.size() )
-        return false;
 
-    return file.Flush() && file.Close();
+wxString CheckedBaselinePath( const FILE_CONTENT_BASELINE& aBaseline )
+{
+    wxFileName path( aBaseline.Path() );
+
+    if( !path.Normalize( wxPATH_NORM_DOTS | wxPATH_NORM_ABSOLUTE ) )
+        return {};
+
+    return KIPLATFORM::IO::ResolveSymlinkTarget( path.GetFullPath() );
 }
 
 
@@ -2050,14 +2071,39 @@ bool SameCheckedBaselines( const std::vector<FILE_CONTENT_BASELINE>& aExpected,
     if( aExpected.size() != aObserved.size() )
         return false;
 
-    for( size_t index = 0; index < aExpected.size(); ++index )
-    {
-        const FILE_CONTENT_BASELINE& expected = aExpected[index];
-        const FILE_CONTENT_BASELINE& observed = aObserved[index];
+    std::vector<bool> matched( aObserved.size(), false );
 
-        if( !expected.Known() || !observed.Known()
-                || !FILE_CONTENT_BASELINE::SamePath( expected.Path(), observed.Path() ) )
+    for( const FILE_CONTENT_BASELINE& expected : aExpected )
+    {
+        if( !expected.Known() )
             return false;
+
+        const wxString expectedPath = CheckedBaselinePath( expected );
+        if( expectedPath.empty() )
+            return false;
+
+        size_t match = aObserved.size();
+
+        for( size_t index = 0; index < aObserved.size(); ++index )
+        {
+            const FILE_CONTENT_BASELINE& observed = aObserved[index];
+
+            if( matched[index] || !observed.Known()
+                    || CheckedBaselinePath( observed ) != expectedPath
+                    || !FILE_CONTENT_BASELINE::SamePath( expected.Path(), observed.Path() ) )
+                continue;
+
+            if( match != aObserved.size() )
+                return false;
+
+            match = index;
+        }
+
+        if( match == aObserved.size() )
+            return false;
+
+        matched[match] = true;
+        const FILE_CONTENT_BASELINE& observed = aObserved[match];
 
         if( !aChangedPath.empty() && FILE_CONTENT_BASELINE::SamePath( expected.Path(), aChangedPath ) )
             continue;
@@ -2090,6 +2136,16 @@ SCH_KICAD_SEXPR_CHECKED_WRITE_RESULT SCH_IO_KICAD_SEXPR::SaveSymbolChecked(
     {
         result.errorCode = "library_provider_unsupported";
         result.errorMessage = "Checked symbol writes require one direct regular .kicad_sym file.";
+        return result;
+    }
+
+    if( m_writeAdmission )
+    {
+        // A buffered SaveSymbol/DeleteSymbol call owns the provider cache and its admission.
+        // Refuse before reading or deleting that cache so the checked lane cannot discard the
+        // caller's unsaved work or create a nested admission.
+        result.errorCode = "library_write_conflict";
+        result.errorMessage = "A buffered symbol-library write is active; finalize or abandon it before starting a checked write.";
         return result;
     }
 
@@ -2174,8 +2230,11 @@ SCH_KICAD_SEXPR_CHECKED_WRITE_RESULT SCH_IO_KICAD_SEXPR::SaveSymbolChecked(
             THROW_IO_ERROR( "Checked symbol write did not verify the target and unrelated entries" );
 
         result.committed = true;
-        delete m_cache;
-        m_cache = nullptr;
+        if( admission || result.writeStarted )
+        {
+            delete m_cache;
+            m_cache = nullptr;
+        }
         return result;
     }
     catch( const std::exception& error )
@@ -2229,8 +2288,11 @@ SCH_KICAD_SEXPR_CHECKED_WRITE_RESULT SCH_IO_KICAD_SEXPR::SaveSymbolChecked(
             result.rollbackIndeterminate = !result.rollbackVerified;
         }
 
-        delete m_cache;
-        m_cache = nullptr;
+        if( admission || result.writeStarted )
+        {
+            delete m_cache;
+            m_cache = nullptr;
+        }
         return result;
     }
 }

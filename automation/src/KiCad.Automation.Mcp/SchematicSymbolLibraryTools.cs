@@ -141,8 +141,7 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
                 ExpectedRequest = expectedRequest
             }, cancellationToken);
         if (response.Found)
-            SymbolLibraryCheckedContract.ValidateResponse(response.Receipt, document, session.Epoch,
-                operationId, expectedRequest.ExpectedSnapshotSha256);
+            SymbolLibraryCheckedContract.ValidateResponse(response.Receipt, expectedRequest);
         return Data(new
         {
             instanceId,
@@ -258,7 +257,7 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
         if (issues.Count != 0)
             throw new AutomationException("invalid_symbol_definition", "The symbol definition is invalid: "
                 + string.Join("; ", issues.OrderBy(issue => issue.Path, StringComparer.Ordinal).Select(issue => issue.Code)));
-        NativeCapabilitySymbolLibraryPinDisplay? display = ParsePinDisplay(pinDisplayJson, required: false);
+        NativeCapabilitySymbolLibraryPinDisplay? display = ParsePinDisplay(pinDisplayJson, required: true);
         NativeCapabilitySymbolLibraryCheckedState? expectedState = null;
         if (!string.IsNullOrWhiteSpace(expectedStateJson))
         {
@@ -266,6 +265,10 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
             catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException)
             { throw new AutomationException("invalid_library_snapshot", "expectedStateJson is not valid checked symbol-library state: " + error.Message); }
         }
+        if (expectedState is null)
+            throw new AutomationException("invalid_library_snapshot", "expectedStateJson is required for checked direct-file mutation.");
+        if (!string.Equals(expectedState.StateSha256, expectedSnapshotSha256, StringComparison.Ordinal))
+            throw new AutomationException("stale_library_state", "expectedSnapshotSha256 must match the complete checked state digest.");
         NativeClient client = registry.Client(instanceId); AutomationSession session = await Handshake(client, expectedProcessEpoch, cancellationToken);
         NativeCapabilitySymbolLibraryCheckedWriteResponse response = await client.InvokeAsync<
             NativeCapabilitySymbolLibraryCheckedWrite, NativeCapabilitySymbolLibraryCheckedWriteResponse>(new()
@@ -274,8 +277,15 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
                 ExpectedSnapshotSha256 = expectedSnapshotSha256, Definition = definition,
                 Overwrite = overwrite, PinDisplay = display, ExpectedState = expectedState
             }, cancellationToken);
-        SymbolLibraryCheckedContract.ValidateResponse(
-            response, document, session.Epoch, operationId, expectedSnapshotSha256);
+        var expectedRequest = new NativeCapabilitySymbolLibraryCheckedWrite
+        {
+            Document = document.Clone(), ProcessEpoch = session.Epoch, OperationId = operationId,
+            ExpectedSnapshotSha256 = expectedSnapshotSha256, Definition = definition.Clone(),
+            Overwrite = overwrite, ExpectedState = expectedState.Clone()
+        };
+        if (display is not null)
+            expectedRequest.PinDisplay = display.Clone();
+        SymbolLibraryCheckedContract.ValidateResponse(response, expectedRequest);
         var data = new
         {
             instanceId, processEpoch = session.Epoch, document, operationId,

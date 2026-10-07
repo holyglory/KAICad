@@ -26,6 +26,7 @@
 #include <sch_file_versions.h>
 #include <project/project_file.h>
 #include <api/native_state_digest.h>
+#include <kiplatform/io.h>
 #include <api/sch_parity_netlist.h>
 #include <api/native_file_observation.h>
 #include <sch_io/kicad_sexpr/sch_io_kicad_sexpr.h>
@@ -3346,6 +3347,7 @@ kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedState API_HANDLER_SCH
         const LIBRARY_LIFECYCLE_SNAPSHOT& aSnapshot, bool aAdvanceRevision )
 {
     using namespace kiapi::automation::v1;
+    (void) aAdvanceRevision;
     NativeCapabilitySymbolLibraryCheckedState state;
     state.mutable_document()->CopyFrom( aSnapshot.document );
     state.set_process_epoch( apiServer().Token() );
@@ -3373,16 +3375,31 @@ kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedState API_HANDLER_SCH
         dependency->set_bytes( baseline.Bytes() );
     }
 
-    // A file revision is shared by its entries.  The state digest still binds the requested
-    // entry, while the revision detects every observed byte/row change in the complete file.
-    NativeCapabilitySymbolLibraryCheckedState content = state;
-    content.mutable_document()->mutable_lib_id()->clear_entry_name();
-    content.clear_entry_exists();
-    content.clear_detached_definition_sha256();
-    const std::string contentDigest = SymbolLibrarySha256( SymbolLibraryDeterministicBytes( content ) );
-    const std::string key = state.table_path() + "\n" + state.table_scope() + "\n"
-            + state.document().project().path() + "\n" + state.document().project().name() + "\n"
-            + state.document().lib_id().library_nickname() + "\n" + state.expanded_uri();
+    // The row/document fields above remain in the state digest so an alias, nickname or entry
+    // binding cannot be substituted.  Revision identity is deliberately physical-file scoped:
+    // aliases and symlinks that observe the same .kicad_sym bytes share one monotonic sequence.
+    const wxString physicalPath = KIPLATFORM::IO::ResolveSymlinkTarget( aSnapshot.expandedUri );
+    const std::string key = physicalPath.ToStdString( wxConvUTF8 );
+    NATIVE_STATE_DIGEST physicalDigest;
+    physicalDigest.Append( "kicad-direct-symbol-file-revision-v1" );
+    bool physicalBaselineFound = false;
+
+    for( const FILE_CONTENT_BASELINE& baseline : aSnapshot.dependencyBaselines )
+    {
+        if( FILE_CONTENT_BASELINE::SamePath( baseline.Path(), aSnapshot.expandedUri ) )
+        {
+            physicalBaselineFound = true;
+            physicalDigest.Append( baseline.Exists() ? "exists" : "absent" );
+            physicalDigest.Append( baseline.Sha256() );
+            physicalDigest.Append( std::to_string( baseline.Bytes() ) );
+            break;
+        }
+    }
+
+    if( !physicalBaselineFound )
+        THROW_IO_ERROR( "The direct symbol-file revision has no physical file baseline" );
+
+    const std::string contentDigest = physicalDigest.Hex();
     auto [found, inserted] = m_symbolLibraryRevisions.try_emplace( key );
     SYMBOL_LIBRARY_REVISION& revision = found->second;
 
@@ -3391,7 +3408,7 @@ kiapi::automation::v1::NativeCapabilitySymbolLibraryCheckedState API_HANDLER_SCH
         revision.epoch = apiServer().Token();
         revision.sequence = 1;
     }
-    else if( aAdvanceRevision || revision.contentDigest != contentDigest )
+    else if( revision.contentDigest != contentDigest )
     {
         if( revision.sequence == std::numeric_limits<uint64_t>::max() )
             THROW_IO_ERROR( "The symbol-library revision is exhausted; reopen the native process" );
@@ -3531,7 +3548,9 @@ API_HANDLER_SCH::handleCheckedWriteSymbolLibrarySymbol(
             response.set_receipt_status( SLCWS_COMMITTED_POSTVERIFIED );
             response.set_committed( true );
             response.set_revision_tracked( true );
-            response.set_complete_lifecycle( true );
+            // This is the checked MCP direct-file lane only.  GUI/editor/import/rescue/remote
+            // writers are outside the shared owner, so the global lifecycle claim stays false.
+            response.set_complete_lifecycle( false );
         }
         else if( write.rollbackVerified )
         {

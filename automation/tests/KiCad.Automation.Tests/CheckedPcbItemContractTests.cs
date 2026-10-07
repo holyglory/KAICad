@@ -60,6 +60,12 @@ public sealed class CheckedPcbItemContractTests
         });
 
         CheckedPcbItemContract.ValidateResult(request, receipt, inspect: true);
+
+        var unchangedAfter = receipt.Clone();
+        unchangedAfter.ObservedAfter = before.Clone();
+        Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedPcbItemContract.ValidateResult(request, unchangedAfter, inspect: true));
+
         var missing = receipt.Clone();
         missing.Results.RemoveAt(2);
         Assert.ThrowsExactly<AutomationException>(() => CheckedPcbItemContract.ValidateResult(request, missing, inspect: true));

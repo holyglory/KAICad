@@ -153,6 +153,9 @@ public static class CheckedPcbItemContract
             throw Invalid("A completed checked PCB item transaction lacks a consistent post-commit lifecycle state.");
         if (result.ObservedAfter.Revision!.Sequence < request.ExpectedState.Revision!.Sequence)
             throw Invalid("A completed checked PCB item transaction cannot move the native revision backwards.");
+        if (result.ObservedAfter.Revision.Sequence == request.ExpectedState.Revision.Sequence
+            && result.ObservedAfter.StateSha256 == request.ExpectedState.StateSha256)
+            throw Invalid("A completed checked PCB item transaction must prove a changed post-commit state.");
     }
 
     private static void ValidateRolledBack(CheckedPcbItemTransaction request,

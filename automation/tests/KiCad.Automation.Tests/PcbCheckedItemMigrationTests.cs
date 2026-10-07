@@ -79,6 +79,37 @@ public sealed partial class PcbCheckedItemMigrationTests
     }
 
     [TestMethod]
+    public async Task GroupDeleteRejectsDuplicateIdsBeforeDispatch()
+    {
+        string root = Directory.CreateTempSubdirectory("pcb-group-delete-guard-").FullName;
+        try
+        {
+            var transport = new MigrationTransport();
+            var registry = new InstanceRegistry(transport, root);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(root, "native.sock")), transport.InstanceId);
+            var tools = new PcbItemTools(registry);
+            var state = State(root, transport.Epoch, sequence: 5, digest: 'a');
+            string groupId = Guid.NewGuid().ToString("D");
+            var delete = new DeleteItems
+            {
+                Header = new() { Document = state.Document.Clone() },
+                ItemIds = { new KIID { Value = groupId }, new KIID { Value = groupId } }
+            };
+
+            var result = await tools.Delete(transport.InstanceId, BoardJson.Formatter.Format(delete),
+                SchematicJson.Formatter.Format(state), default, Guid.NewGuid().ToString("D"));
+
+            Assert.IsTrue(result.IsError ?? false, Text(result));
+            JsonElement data = JsonSerializer.SerializeToElement(result.StructuredContent);
+            Assert.AreEqual("invalid_pcb_item_request", data.GetProperty("errorCode").GetString());
+            Assert.AreEqual(0, transport.CheckedMutations,
+                "Duplicate group/member identities must be rejected before native transaction dispatch.");
+            Assert.AreEqual(0, transport.LegacyMutations);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
     public async Task RouteCleanupUsesCheckedDeleteDispatchAndReplayBeforeStaleRead()
     {
         string root = Directory.CreateTempSubdirectory("pcb-route-cleanup-migration-").FullName;

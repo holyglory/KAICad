@@ -174,6 +174,53 @@ public sealed class CheckedPcbItemContractTests
             CheckedPcbItemContract.ValidateRequest(unsupported, request.ProcessEpoch, inspect: true));
     }
 
+    [TestMethod]
+    public void GroupDeleteReceiptRequiresEveryExplicitMemberIdentity()
+    {
+        var (baseRequest, _, _, _, before) = Request();
+        string groupId = Guid.NewGuid().ToString("D");
+        string memberId = Guid.NewGuid().ToString("D");
+        var request = baseRequest.Clone();
+        request.Operations.Clear();
+        request.Operations.Add(new PcbItemOperation
+        {
+            Delete = new DeleteItems
+            {
+                Header = new() { Document = request.ExpectedState.Document.Clone() },
+                ItemIds = { new KIID { Value = groupId }, new KIID { Value = memberId } }
+            }
+        });
+        CheckedPcbItemContract.ValidateRequest(request, request.ProcessEpoch, inspect: true);
+
+        var after = before.Clone();
+        after.Revision.Sequence++;
+        after.StateSha256 = new string('b', 64);
+        var receipt = new CheckedPcbItemTransactionReceipt
+        {
+            Document = request.ExpectedState.Document.Clone(), ProcessEpoch = request.ProcessEpoch,
+            OperationId = request.OperationId, State = CheckedPcbItemTransactionState.CpbtsCompleted,
+            RequestVerified = true, Phase = CheckedPcbItemTransactionPhase.CpbtpComplete,
+            RollbackState = CheckedPcbItemRollbackState.CpbrsNotAttempted,
+            PostCommitState = CheckedPcbItemPostCommitState.CpbpsConfirmed,
+            ObservedBefore = before, ObservedAfter = after
+        };
+        var deleted = new DeleteItemsResponse { Status = ItemRequestStatus.IrsOk };
+        deleted.DeletedItems.Add(new ItemDeletionResult { Id = new() { Value = groupId }, Status = ItemDeletionStatus.IdsOk });
+        deleted.DeletedItems.Add(new ItemDeletionResult { Id = new() { Value = memberId }, Status = ItemDeletionStatus.IdsOk });
+        receipt.Results.Add(new PcbItemOperationResult { Delete = deleted });
+        CheckedPcbItemContract.ValidateResult(request, receipt, inspect: true);
+
+        var missingMember = receipt.Clone();
+        missingMember.Results[0].Delete.DeletedItems.RemoveAt(1);
+        Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedPcbItemContract.ValidateResult(request, missingMember, inspect: true));
+
+        var duplicateMember = request.Clone();
+        duplicateMember.Operations[0].Delete.ItemIds.Add(new KIID { Value = memberId });
+        Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedPcbItemContract.ValidateRequest(duplicateMember, duplicateMember.ProcessEpoch, inspect: true));
+    }
+
     private static (CheckedPcbItemTransaction Request, Track Create, Track Update, KIID Delete,
         DocumentLifecycleState State) Request()
     {

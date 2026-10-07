@@ -66,7 +66,7 @@ public sealed class PcbItemTools(InstanceRegistry registry)
         Mutate<UpdateItems, UpdateItemsResponse>(instanceId, requestJson, expectedStateJson, cancellationToken, operationId);
 
     [McpServerTool(Name = "kicad_pcb_items_delete"),
-     Description("Delete explicitly identified native PCB items in one undoable lifecycle-guarded transaction. requestJson is DeleteItems protobuf JSON with an explicit PCB ItemHeader and KIID item_ids; expectedStateJson is the matching kicad_document_state observation. The native result is retained under operationId for exact replay. If operationId is omitted, the generated UUID is returned but cannot be recovered after a lost reply. Every deletion must be acknowledged by KiCad before the transaction commits; stale state, nonexistent items or transport loss never reports success."),
+     Description("Delete explicitly identified native PCB items in one undoable lifecycle-guarded transaction. requestJson is DeleteItems protobuf JSON with an explicit PCB ItemHeader and distinct canonical KIID item_ids; expectedStateJson is the matching kicad_document_state observation. Deleting a populated PCB group follows KiCad's native recursive delete semantics and removes the group's contents in the same undo transaction; this is distinct from ungrouping. The native result is retained under operationId for exact replay. If operationId is omitted, the generated UUID is returned but cannot be recovered after a lost reply. Every deletion must be acknowledged by KiCad before the transaction commits; stale state, nonexistent items or transport loss never reports success."),
      KiCadCapability("pcb", "native-board-api", "board lifecycle state, typed item IDs, native undo transaction"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Delete(string instanceId, string requestJson, string expectedStateJson,
@@ -364,9 +364,14 @@ public sealed class PcbItemTools(InstanceRegistry registry)
             || request is UpdateItems updateRequest && updateRequest.Items.Count == 0
             || request is DeleteItems deleteRequest && deleteRequest.ItemIds.Count == 0)
             throw new AutomationException("invalid_pcb_item_request", "Supply at least one typed board item or item ID.");
-        if (request is DeleteItems deleteRequestWithIds
-            && deleteRequestWithIds.ItemIds.Any(id => !Guid.TryParseExact(id.Value, "D", out var value) || value == Guid.Empty))
-            throw new AutomationException("invalid_pcb_item_request", "Supply one or more canonical PCB item KIIDs to delete.");
+        if (request is DeleteItems deleteRequestWithIds)
+        {
+            if (deleteRequestWithIds.ItemIds.Any(id => !CanonicalPcbItemId(id.Value)))
+                throw new AutomationException("invalid_pcb_item_request", "Supply one or more canonical PCB item KIIDs to delete.");
+            if (deleteRequestWithIds.ItemIds.Select(id => id.Value).Distinct(StringComparer.Ordinal).Count()
+                != deleteRequestWithIds.ItemIds.Count)
+                throw new AutomationException("invalid_pcb_item_request", "Delete item IDs must be distinct so a group and its members have one deterministic transaction identity.");
+        }
         var expected = SchematicJson.Parser.Parse<DocumentLifecycleState>(expectedStateJson);
         if (expected.Scope != DocumentLifecycleScope.DlsPcb
             || expected.Document is null || !expected.Document.Equals(header.Document))
@@ -458,6 +463,11 @@ public sealed class PcbItemTools(InstanceRegistry registry)
             _ = hasItems;
         }
     }
+
+    private static bool CanonicalPcbItemId(string value) =>
+        Guid.TryParseExact(value, "D", out var id)
+        && id != Guid.Empty
+        && id.ToString("D") == value;
 
     private static void ValidateGuideLayer(BoardLayer layer)
     {

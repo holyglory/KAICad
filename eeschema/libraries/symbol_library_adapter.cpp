@@ -40,6 +40,7 @@
 #include <thread_pool.h>
 #include <trace_helpers.h>
 #include <settings/settings_manager.h>
+#include <sch_io/kicad_legacy/sch_io_kicad_legacy.h>
 #include <sch_io/kicad_sexpr/sch_io_kicad_sexpr.h>
 #include <sch_io/sch_io_mgr.h>
 
@@ -594,57 +595,64 @@ SYMBOL_LIBRARY_ADAPTER::CaptureLibrarySnapshot(
 SYMBOL_LIBRARY_ADAPTER::SAVE_T SYMBOL_LIBRARY_ADAPTER::SaveSymbol( const wxString& aNickname,
                                                                    const LIB_SYMBOL* aSymbol, bool aOverwrite )
 {
-    wxCHECK( aSymbol, SAVE_SKIPPED );
+    if( !aSymbol )
+        THROW_IO_ERROR( "A symbol is required to save to a library" );
+
+    // Clone before any provider access: aSymbol itself may be a borrowed entry whose cache is
+    // about to be refreshed. Caller-owned inputs remain untouched on every outcome.
+    std::unique_ptr<LIB_SYMBOL> copy = std::make_unique<LIB_SYMBOL>( *aSymbol );
 
     LIBRARY_RESULT<LIB_DATA*> libResult = loadIfNeeded( aNickname );
 
     if( !libResult.has_value() )
     {
-        wxLogTrace( traceLibraries, "SaveSymbol: unable to load library %s: %s", aNickname,
-                    libResult.error().message );
-        return SAVE_SKIPPED;
+        THROW_IO_ERROR( libResult.error().message );
     }
 
     LIB_DATA* lib = *libResult;
 
-    if( !lib )
-    {
-        wxLogTrace( traceLibraries, "SaveSymbol: library %s not found", aNickname );
-        return SAVE_SKIPPED;
-    }
+    if( !lib || !lib->row )
+        THROW_IO_ERRORF( "Unable to load symbol library '%s'", aNickname );
+
+    std::lock_guard pluginGuard( pluginMutex( aNickname ) );
 
     SCH_IO* plugin = schplugin( lib );
-    wxCHECK( plugin, SAVE_SKIPPED );
+
+    if( !plugin )
+        THROW_IO_ERRORF( "Symbol library '%s' has no schematic plugin", aNickname );
+
+    // These are the writable symbol providers. Both adopt the symbol into their cache before
+    // writing it, and both support buffering so ownership can be handed off without a disk write.
+    const char* buffering;
+
+    switch( SCH_IO_MGR::EnumFromStr( lib->row->Type() ) )
+    {
+    case SCH_IO_MGR::SCH_KICAD: buffering = SCH_IO_KICAD_SEXPR::PropBuffering; break;
+    case SCH_IO_MGR::SCH_LEGACY: buffering = SCH_IO_KICAD_LEGACY::PropBuffering; break;
+    default:
+        THROW_IO_ERRORF( "Symbol library provider '%s' does not support saving symbols", lib->row->Type() );
+    }
 
     std::map<std::string, UTF8> options = lib->row->GetOptionsMap();
+    const wxString uri = getUri( lib->row );
 
-    if( !aOverwrite )
-    {
-        try
-        {
-            std::unique_ptr<LIB_SYMBOL> existing( plugin->LoadSymbol( getUri( lib->row ), aSymbol->GetName(),
-                                                                      &options ) );
+    // LoadSymbol returns a borrowed cache entry. Refresh with the original options even when
+    // overwriting, before enabling buffering (which suppresses loading an existing file).
+    LIB_SYMBOL* existing = plugin->LoadSymbol( uri, copy->GetName(), &options );
 
-            if( existing )
-                return SAVE_SKIPPED;
-        }
-        catch( const IO_ERROR& e )
-        {
-            wxLogTrace( traceLibraries, "SaveSymbol: error checking for existing symbol %s:%s: %s", aNickname,
-                        aSymbol->GetName(), e.What() );
-            return SAVE_SKIPPED;
-        }
-    }
-
-    try
-    {
-        plugin->SaveSymbol( getUri( lib->row ), aSymbol, &options );
-    }
-    catch( const IO_ERROR& e )
-    {
-        wxLogTrace( traceLibraries, "SaveSymbol: error saving %s:%s: %s", aNickname, aSymbol->GetName(), e.What() );
+    if( !aOverwrite && existing )
         return SAVE_SKIPPED;
-    }
+
+    std::map<std::string, UTF8> bufferedOptions = options;
+    bufferedOptions.emplace( buffering, "" );
+
+    plugin->SaveSymbol( uri, copy.get(), &bufferedOptions );
+    copy.release(); // The provider owns the copy once the buffered call succeeds.
+
+    // A failed disk write may leave the provider cache changed, but never transfers ownership
+    // of the caller's symbol or masquerades as a skipped collision. This is not a transaction.
+    if( !options.contains( buffering ) )
+        plugin->SaveLibrary( uri, &options );
 
     return SAVE_OK;
 }

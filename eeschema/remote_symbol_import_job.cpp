@@ -294,15 +294,21 @@ bool REMOTE_SYMBOL_IMPORT_JOB::Import( const REMOTE_PROVIDER_METADATA& aProvider
 
             SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &m_frame->Prj() );
 
-            if( !adapter
-                || adapter->SaveSymbol( nickname, loaded.get(), true )
-                           != SYMBOL_LIBRARY_ADAPTER::SAVE_OK )
+            try
+            {
+                if( !adapter
+                    || adapter->SaveSymbol( nickname, loaded.get(), true )
+                               != SYMBOL_LIBRARY_ADAPTER::SAVE_OK )
+                {
+                    aError = _( "Unable to save the downloaded symbol." );
+                    return false;
+                }
+            }
+            catch( const IO_ERROR& )
             {
                 aError = _( "Unable to save the downloaded symbol." );
                 return false;
             }
-
-            (void) loaded.release();   // ownership transferred to library cache
 
             LIBRARY_MANAGER& libMgr = Pgm().GetLibraryManager();
             libMgr.ReloadLibraryEntry( LIBRARY_TABLE_TYPE::SYMBOL, nickname, scope );

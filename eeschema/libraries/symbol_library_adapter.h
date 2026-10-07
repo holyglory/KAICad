@@ -139,12 +139,17 @@ public:
      * the caller to check the library for conflicts before saving.
      *
      * @param aNickname is a locator for the "library", it is a "name" in LIB_TABLE_ROW
-     * @param aSymbol is what to store in the library. The library owns the symbol after this
-     *                call.
+     * @param aSymbol is what to store in the library. This method does not take ownership;
+     *                the provider stores its own copy. Caller-owned inputs remain owned by
+     *                the caller on every outcome. Borrowed cache entries may be invalidated
+     *                by a provider refresh or replacement.
      * @param aOverwrite when true means overwrite any existing symbol by the same name,
      *                   else if false means skip the write and return SAVE_SKIPPED.
-     * @return SAVE_T - SAVE_OK or SAVE_SKIPPED.  If error saving, then IO_ERROR is thrown.
-     * @throw IO_ERROR if there is a problem saving the symbol.
+     * @return SAVE_OK on success, or SAVE_SKIPPED only when the symbol already exists and
+     *         overwrite is disabled. Table options requesting buffering defer the disk write.
+     * @throw IO_ERROR for invalid input, unsupported providers, or load/read/write failures.
+     *        A write failure may leave the provider cache changed; reload from disk to discard
+     *        that state. No rollback or checked library lifecycle is promised by this method.
      */
     SAVE_T SaveSymbol( const wxString& aNickname, const LIB_SYMBOL* aSymbol,
                        bool aOverwrite = true );

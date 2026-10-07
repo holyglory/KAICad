@@ -19,11 +19,19 @@
 
 #include <qa_utils/wx_utils/unit_test_utils.h>
 
+#include <file_content_baseline.h>
+#include <file_write_observer.h>
+#include <ki_exception.h>
+#include <lib_symbol.h>
 #include <libraries/symbol_library_adapter.h>
 #include <libraries/library_manager.h>
+#include <sch_io/sch_io.h>
+#include <sch_io/sch_io_mgr.h>
 
+#include <wx/filename.h>
 #include <wx/textfile.h>
 
+#include <chrono>
 #include <filesystem>
 
 
@@ -65,7 +73,10 @@ public:
 class SCOPED_SYM_LIB_TABLE
 {
 public:
-    SCOPED_SYM_LIB_TABLE( const std::vector<wxString>& aNicknamesInTableOrder )
+    SCOPED_SYM_LIB_TABLE( const std::vector<wxString>& aNicknamesInTableOrder,
+                         SCH_IO_MGR::SCH_FILE_T aProvider = SCH_IO_MGR::SCH_KICAD,
+                         bool aBuffering = false ) :
+            m_extension( aProvider == SCH_IO_MGR::SCH_LEGACY ? wxS( ".lib" ) : wxS( ".kicad_sym" ) )
     {
         std::error_code ec;
         m_dir = std::filesystem::temp_directory_path( ec )
@@ -81,8 +92,9 @@ public:
         for( const wxString& nickname : aNicknamesInTableOrder )
         {
             file.AddLine( wxString::Format(
-                    wxS( "  (lib (name \"%s\")(type \"KiCad\")(uri \"${KIPRJMOD}/%s.kicad_sym\")(options \"\")(descr \"\"))" ),
-                    nickname, nickname ) );
+                    wxS( "  (lib (name \"%s\")(type \"%s\")(uri \"%s\")(options \"%s\")(descr \"\"))" ),
+                    nickname, SCH_IO_MGR::ShowType( aProvider ), LibraryPath( nickname ),
+                    aBuffering ? wxS( "buffering" ) : wxS( "" ) ) );
         }
 
         file.AddLine( wxS( ")" ) );
@@ -98,8 +110,14 @@ public:
 
     wxString Path() const { return wxString( m_dir.string() ); }
 
+    wxString LibraryPath( const wxString& aNickname ) const
+    {
+        return wxFileName( Path(), aNickname + m_extension ).GetFullPath();
+    }
+
 private:
     std::filesystem::path m_dir;
+    wxString m_extension;
 };
 
 } // namespace
@@ -204,6 +222,214 @@ BOOST_AUTO_TEST_CASE( PartiallyLoadedTableReportsNoSpuriousErrors )
     // The genuine failure must still be reported.
     BOOST_CHECK( errors.Contains( wxS( "BadLib" ) ) );
     BOOST_CHECK( errors.Contains( wxS( "File is corrupt" ) ) );
+}
+
+
+// Exercise the adapter through the actual writable providers and disposable project tables.
+// These tests include file readback and cache destruction, rather than substituting fake writers.
+BOOST_AUTO_TEST_CASE( SaveSymbolCollisionPreservesCacheAndCreatePersists )
+{
+    for( SCH_IO_MGR::SCH_FILE_T provider : { SCH_IO_MGR::SCH_KICAD, SCH_IO_MGR::SCH_LEGACY } )
+    {
+        BOOST_TEST_CONTEXT( SCH_IO_MGR::ShowType( provider ).ToStdString() )
+        {
+            const wxString nickname = wxS( "Writable" );
+            SCOPED_SYM_LIB_TABLE tableFile( { nickname }, provider );
+            const wxString path = tableFile.LibraryPath( nickname );
+            {
+                IO_RELEASER<SCH_IO> plugin( SCH_IO_MGR::FindPlugin( provider ) );
+                plugin->CreateLibrary( path );
+            }
+
+            {
+                LIBRARY_MANAGER manager;
+                manager.LoadProjectTables( tableFile.Path(), { LIBRARY_TABLE_TYPE::SYMBOL } );
+                TEST_SYMBOL_LIBRARY_ADAPTER adapter( manager );
+                const auto loaded = adapter.LoadOne( nickname );
+                BOOST_REQUIRE( loaded && loaded->load_status == LOAD_STATUS::LOADED );
+
+                LIB_SYMBOL original( wxS( "Existing" ) );
+                original.GetValueField().SetText( original.GetName() );
+                original.GetReferenceField().SetText( wxS( "U" ) );
+                BOOST_REQUIRE( adapter.SaveSymbol( nickname, &original ) == SYMBOL_LIBRARY_ADAPTER::SAVE_OK );
+                LIB_SYMBOL* cached = adapter.LoadSymbol( nickname, original.GetName() );
+                BOOST_REQUIRE( cached );
+                BOOST_CHECK( cached != &original );
+                const auto baseline = FILE_CONTENT_BASELINE::Read( path );
+                BOOST_REQUIRE( baseline.Known() );
+
+                LIB_SYMBOL replacement( original );
+                replacement.GetReferenceField().SetText( wxS( "R" ) );
+                BOOST_CHECK( adapter.SaveSymbol( nickname, &replacement, false )
+                             == SYMBOL_LIBRARY_ADAPTER::SAVE_SKIPPED );
+                LIB_SYMBOL* afterSkip = adapter.LoadSymbol( nickname, original.GetName() );
+                BOOST_REQUIRE( afterSkip );
+                BOOST_CHECK( afterSkip == cached );
+                BOOST_CHECK_EQUAL( afterSkip->GetReferenceField().GetText().ToStdString(), "U" );
+                BOOST_CHECK( baseline.Check( path ) == FILE_BASELINE_CHECK::UNCHANGED );
+
+                // Borrowed input is cloned before refreshing or replacing the provider cache.
+                const std::filesystem::path libraryFile( path.ToStdString() );
+                std::filesystem::last_write_time(
+                        libraryFile, std::filesystem::last_write_time( libraryFile ) + std::chrono::seconds( 2 ) );
+                BOOST_REQUIRE( adapter.SaveSymbol( nickname, afterSkip ) == SYMBOL_LIBRARY_ADAPTER::SAVE_OK );
+                LIB_SYMBOL* afterCopy = adapter.LoadSymbol( nickname, original.GetName() );
+                BOOST_REQUIRE( afterCopy );
+                BOOST_CHECK_EQUAL( afterCopy->GetReferenceField().GetText().ToStdString(), "U" );
+
+                LIB_SYMBOL created( wxS( "Created" ) );
+                created.GetValueField().SetText( created.GetName() );
+                created.GetReferenceField().SetText( wxS( "Q" ) );
+                BOOST_REQUIRE( adapter.SaveSymbol( nickname, &created, false )
+                               == SYMBOL_LIBRARY_ADAPTER::SAVE_OK );
+                BOOST_CHECK_EQUAL( created.GetReferenceField().GetText().ToStdString(), "Q" );
+            } // Destroys the provider cache: skipped and saved entries must remain provider-owned.
+
+            IO_RELEASER<SCH_IO> reopened( SCH_IO_MGR::FindPlugin( provider ) );
+            LIB_SYMBOL* existing = reopened->LoadSymbol( path, wxS( "Existing" ) );
+            LIB_SYMBOL* created = reopened->LoadSymbol( path, wxS( "Created" ) );
+            BOOST_REQUIRE( existing && created );
+            BOOST_CHECK_EQUAL( existing->GetReferenceField().GetText().ToStdString(), "U" );
+            BOOST_CHECK_EQUAL( created->GetReferenceField().GetText().ToStdString(), "Q" );
+        }
+    }
+}
+
+
+BOOST_AUTO_TEST_CASE( SaveSymbolPreservesExplicitBuffering )
+{
+    for( SCH_IO_MGR::SCH_FILE_T provider : { SCH_IO_MGR::SCH_KICAD, SCH_IO_MGR::SCH_LEGACY } )
+    {
+        BOOST_TEST_CONTEXT( SCH_IO_MGR::ShowType( provider ).ToStdString() )
+        {
+            const wxString nickname = wxS( "Buffered" );
+            SCOPED_SYM_LIB_TABLE tableFile( { nickname }, provider, true );
+            const wxString path = tableFile.LibraryPath( nickname );
+            {
+                IO_RELEASER<SCH_IO> plugin( SCH_IO_MGR::FindPlugin( provider ) );
+                plugin->CreateLibrary( path );
+            }
+            const auto baseline = FILE_CONTENT_BASELINE::Read( path );
+            BOOST_REQUIRE( baseline.Known() );
+            {
+                LIBRARY_MANAGER manager;
+                manager.LoadProjectTables( tableFile.Path(), { LIBRARY_TABLE_TYPE::SYMBOL } );
+                TEST_SYMBOL_LIBRARY_ADAPTER adapter( manager );
+                const auto loaded = adapter.LoadOne( nickname );
+                BOOST_REQUIRE( loaded && loaded->load_status == LOAD_STATUS::LOADED );
+                LIB_SYMBOL created( wxS( "Pending" ) );
+                created.GetValueField().SetText( created.GetName() );
+                BOOST_REQUIRE( adapter.SaveSymbol( nickname, &created, false )
+                               == SYMBOL_LIBRARY_ADAPTER::SAVE_OK );
+                LIB_SYMBOL* cached = adapter.LoadSymbol( nickname, created.GetName() );
+                BOOST_REQUIRE( cached );
+                BOOST_CHECK( cached != &created );
+                BOOST_CHECK( baseline.Check( path ) == FILE_BASELINE_CHECK::UNCHANGED );
+            }
+            IO_RELEASER<SCH_IO> reopened( SCH_IO_MGR::FindPlugin( provider ) );
+            BOOST_CHECK( reopened->LoadSymbol( path, wxS( "Pending" ) ) == nullptr );
+        }
+    }
+}
+
+
+BOOST_AUTO_TEST_CASE( SaveSymbolWriteRefusalPropagatesAndReloadDiscardsFailedCache )
+{
+    const wxString nickname = wxS( "Writable" );
+    SCOPED_SYM_LIB_TABLE tableFile( { nickname } );
+    const wxString path = tableFile.LibraryPath( nickname );
+    {
+        IO_RELEASER<SCH_IO> plugin( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
+        plugin->CreateLibrary( path );
+    }
+    LIBRARY_MANAGER manager;
+    manager.LoadProjectTables( tableFile.Path(), { LIBRARY_TABLE_TYPE::SYMBOL } );
+    TEST_SYMBOL_LIBRARY_ADAPTER adapter( manager );
+    const auto loaded = adapter.LoadOne( nickname );
+    BOOST_REQUIRE( loaded && loaded->load_status == LOAD_STATUS::LOADED );
+    LIB_SYMBOL original( wxS( "Existing" ) );
+    original.GetValueField().SetText( original.GetName() );
+    original.GetReferenceField().SetText( wxS( "U" ) );
+    BOOST_REQUIRE( adapter.SaveSymbol( nickname, &original ) == SYMBOL_LIBRARY_ADAPTER::SAVE_OK );
+    const auto baseline = FILE_CONTENT_BASELINE::Read( path );
+    BOOST_REQUIRE( baseline.Known() );
+
+    auto replacement = std::make_unique<LIB_SYMBOL>( original );
+    replacement->GetReferenceField().SetText( wxS( "R" ) );
+    unsigned refused = 0, committed = 0;
+    {
+        FILE_WRITE_OBSERVER observer(
+                [&]( const wxString& aPath )
+                {
+                    BOOST_CHECK( FILE_CONTENT_BASELINE::SamePath( path, aPath ) );
+                    ++refused;
+                    THROW_IO_ERROR( "Controlled symbol-library write refusal" );
+                },
+                [&]( const FILE_CONTENT_BASELINE& ) { ++committed; } );
+        BOOST_CHECK_EXCEPTION( adapter.SaveSymbol( nickname, replacement.get() ), IO_ERROR,
+                               []( const IO_ERROR& aError )
+                               {
+                                   return aError.What().Contains( wxS( "Controlled symbol-library write refusal" ) );
+                               } );
+    }
+    BOOST_CHECK_EQUAL( refused, 1 );
+    BOOST_CHECK_EQUAL( committed, 0 );
+    BOOST_CHECK( baseline.Check( path ) == FILE_BASELINE_CHECK::UNCHANGED );
+    LIB_SYMBOL* failedCache = adapter.LoadSymbol( nickname, original.GetName() );
+    BOOST_REQUIRE( failedCache );
+    BOOST_CHECK( failedCache != replacement.get() );
+    BOOST_CHECK_EQUAL( failedCache->GetReferenceField().GetText().ToStdString(), "R" );
+    BOOST_CHECK_EQUAL( replacement->GetReferenceField().GetText().ToStdString(), "R" );
+    replacement.reset(); // Failure did not transfer caller ownership into the changed cache.
+    BOOST_CHECK_EQUAL( failedCache->GetReferenceField().GetText().ToStdString(), "R" );
+
+    // The failed write is not a rollback. Explicit reload destroys the clone and restores disk state.
+    adapter.ReloadLibraryEntry( nickname, LIBRARY_TABLE_SCOPE::PROJECT );
+    const auto reloaded = adapter.LoadOne( nickname );
+    BOOST_REQUIRE( reloaded && reloaded->load_status == LOAD_STATUS::LOADED );
+    LIB_SYMBOL* restored = adapter.LoadSymbol( nickname, original.GetName() );
+    BOOST_REQUIRE( restored );
+    BOOST_CHECK_EQUAL( restored->GetReferenceField().GetText().ToStdString(), "U" );
+    BOOST_CHECK( baseline.Check( path ) == FILE_BASELINE_CHECK::UNCHANGED );
+    BOOST_CHECK( adapter.SaveSymbol( nickname, &original, false ) == SYMBOL_LIBRARY_ADAPTER::SAVE_SKIPPED );
+}
+
+
+BOOST_AUTO_TEST_CASE( SaveSymbolRejectsInvalidInputAndReadFailures )
+{
+    const wxString nickname = wxS( "Broken" );
+    SCOPED_SYM_LIB_TABLE tableFile( { nickname } );
+    wxTextFile malformed( tableFile.LibraryPath( nickname ) );
+    BOOST_REQUIRE( malformed.Create() );
+    malformed.AddLine( wxS( "(kicad_symbol_lib (invalid" ) );
+    BOOST_REQUIRE( malformed.Write() );
+    malformed.Close();
+
+    LIBRARY_MANAGER manager;
+    manager.LoadProjectTables( tableFile.Path(), { LIBRARY_TABLE_TYPE::SYMBOL } );
+    TEST_SYMBOL_LIBRARY_ADAPTER adapter( manager );
+    LIB_SYMBOL source( wxS( "Source" ) );
+    BOOST_CHECK_THROW( adapter.SaveSymbol( nickname, nullptr ), IO_ERROR );
+    BOOST_CHECK_THROW( adapter.SaveSymbol( wxS( "Missing" ), &source, false ), IO_ERROR );
+    BOOST_CHECK_THROW( adapter.SaveSymbol( nickname, &source, false ), IO_ERROR );
+    BOOST_CHECK_EQUAL( source.GetName().ToStdString(), "Source" );
+}
+
+
+BOOST_AUTO_TEST_CASE( SaveSymbolRejectsUnsupportedProvider )
+{
+    const wxString nickname = wxS( "ReadOnly" );
+    SCOPED_SYM_LIB_TABLE tableFile( { nickname }, SCH_IO_MGR::SCH_HTTP );
+    LIBRARY_MANAGER manager;
+    manager.LoadProjectTables( tableFile.Path(), { LIBRARY_TABLE_TYPE::SYMBOL } );
+    TEST_SYMBOL_LIBRARY_ADAPTER adapter( manager );
+    LIB_SYMBOL source( wxS( "Source" ) );
+    BOOST_CHECK_EXCEPTION( adapter.SaveSymbol( nickname, &source ), IO_ERROR,
+                           []( const IO_ERROR& aError )
+                           {
+                               return aError.What().Contains( wxS( "does not support saving symbols" ) );
+                           } );
+    BOOST_CHECK_EQUAL( source.GetName().ToStdString(), "Source" );
 }
 
 

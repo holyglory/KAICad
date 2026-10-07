@@ -3379,7 +3379,6 @@ HANDLER_RESULT<kiapi::automation::v1::NativeCapabilitySymbolLibraryWriteSymbolRe
         response.set_operation_id( operationId ); response.set_before_modify_hash( before ); response.set_completed( true );
         PackSymbolDefinition( *response.mutable_definition(), *symbol, true );
         PackSymbolLibraryPinDisplay( *response.mutable_pin_display(), *symbol );
-        symbol.release();
         response.set_after_modify_hash( adapter->GetLibraryModifyHash( wxString::FromUTF8( nickname ) ).value_or( before ) );
         m_symbolLibraryOperationFingerprints[operationId] = fingerprint;
         m_symbolLibraryWriteReceipts[operationId] = response;

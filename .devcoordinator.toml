@@ -2193,7 +2193,6 @@ name="managed-contracts"
 tier="development"
 role="preflight"
 requires=["managed-build"]
-invalidates=["native-build","identity","native-symbol-library"]
 command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~SymbolLibraryCheckedContractTests|FullyQualifiedName~LibraryLifecycleSnapshotContractTests|FullyQualifiedName~LibraryTransactionAdmissionContractTests|FullyQualifiedName~CapabilityCatalogTests|FullyQualifiedName~McpProcessTests|FullyQualifiedName~SharedProtoBandTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-symbol-library-managed-contracts"]
 retained_artifacts=[{name="managed-contracts",path="automation/artifacts/native-symbol-library-managed-contracts",max_bytes=16777216}]
 [[test.native-symbol-library-identity.check]]

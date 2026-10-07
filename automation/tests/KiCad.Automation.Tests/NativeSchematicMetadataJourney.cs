@@ -178,9 +178,16 @@ public sealed partial class NativeSessionTests
         // Reuse the established electrical and XML persistence assertions so
         // this lane proves the project metadata is meaningful to KiCad's bus
         // connectivity and variant persistence, not only visible in a snapshot.
+        string projectPath = (await client.HandshakeAsync(token)).ProjectPath;
+        using (var project = JsonDocument.Parse(await File.ReadAllTextAsync(projectPath, token)))
+        {
+            var persisted = project.RootElement.GetProperty("schematic").GetProperty("variants")
+                .EnumerateArray().ToDictionary(v => v.GetProperty("name").GetString()!,
+                    v => v.TryGetProperty("description", out var description) ? description.GetString() ?? "" : "");
+            Assert.AreEqual("Typed MCP metadata journey", persisted["MCP_Assembly"]);
+            Assert.AreEqual("", persisted["MCP_Tooling"]);
+        }
         await VerifyBusAliasConnectivity(client, document, processId, display, token);
-        string schematicPath = Path.ChangeExtension((await client.HandshakeAsync(token)).ProjectPath, ".kicad_sch");
-        await VerifyVariantRegistryXml(client, document, schematicPath, processId, display, token);
         await client.InvokeAsync<SaveDocument, Empty>(new() { Document = document.Clone() }, token);
         await client.InvokeAsync<RevertDocument, Empty>(new() { Document = document.Clone() }, token);
     }

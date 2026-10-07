@@ -51,6 +51,9 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeSchematicExport")]
     public Task NativeSchematicSvgExportUsesRealContentAndPreservesState() => RunNativeSessions(NativeJourney.SchematicExport);
 
+    [TestMethod, TestCategory("NativeSchematicCrossProbe")]
+    public Task NativeSchematicCrossProbeBindsLifecycleAndPreservesDesign() => RunNativeSessions(NativeJourney.SchematicCrossProbe);
+
     [TestMethod, TestCategory("NativeSchematicHierarchy")]
     public Task TypedSchematicHierarchyAuthoringPersistsThroughMcp() => RunNativeSessions(NativeJourney.SchematicHierarchy);
 
@@ -148,7 +151,7 @@ public sealed partial class NativeSessionTests
 
     private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, RecursiveEditor, Simulation, PcbItems, PcbConnectivity, CrossProbe,
         PsuCpuSeed, PsuCpuComponentCreation, ConnectedRealization, DiagramCanvas, XmlRebuild, RepeatedSheetRebuild, ProjectRecovery, ProjectRecoveryContainer, OwnershipSync, NativeCrash, NativeCrashRelease,
-        ObserveApplyStress, RepeatedSheetOwnership, ComponentRebind, SymbolLibrary, RasterTrace, RasterTraceSchematic, Cache, SchematicMetadata, SchematicExport, SchematicHierarchy }
+        ObserveApplyStress, RepeatedSheetOwnership, ComponentRebind, SymbolLibrary, RasterTrace, RasterTraceSchematic, Cache, SchematicMetadata, SchematicExport, SchematicCrossProbe, SchematicHierarchy }
 
     private async Task RunNativeSessions(NativeJourney journey, string theme = "light")
     {
@@ -167,6 +170,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.Cache => "native-cache",
                 NativeJourney.SchematicMetadata => "native-schematic-metadata",
                 NativeJourney.SchematicExport => "native-schematic-export",
+                NativeJourney.SchematicCrossProbe => "native-schematic-cross-probe",
                 NativeJourney.SchematicHierarchy => "native-schematic-metadata",
                 NativeJourney.OffscreenMove => "native-offscreen-move",
                 NativeJourney.TransformSync => "native-transform-sync",
@@ -202,6 +206,7 @@ public sealed partial class NativeSessionTests
             NativeJourney.CrossProbe => nameof(NativePcbCrossProbeBindsTheLiveBoardWithoutMutation),
             NativeJourney.SchematicMetadata => nameof(TypedSchematicMetadataPersistsThroughMcp),
             NativeJourney.SchematicExport => nameof(NativeSchematicSvgExportUsesRealContentAndPreservesState),
+            NativeJourney.SchematicCrossProbe => nameof(NativeSchematicCrossProbeBindsLifecycleAndPreservesDesign),
             NativeJourney.SchematicHierarchy => nameof(TypedSchematicHierarchyAuthoringPersistsThroughMcp),
             _ => ""
         };
@@ -651,6 +656,9 @@ public sealed partial class NativeSessionTests
                             ":" + displayNumber, evidence, target.Id, deadline.Token);
                     else if (journey == NativeJourney.SchematicExport)
                         await VerifyNativeSchematicExport(client, opened.Document, schematic, fixtureText,
+                            evidence, target.Id, deadline.Token);
+                    else if (journey == NativeJourney.SchematicCrossProbe)
+                        await VerifyNativeSchematicCrossProbe(client, opened.Document, schematic, registry, launched,
                             evidence, target.Id, deadline.Token);
                     else if (journey == NativeJourney.SchematicHierarchy)
                         await VerifyNativeSchematicHierarchy(client, opened.Document, hierarchyFixture, focusProcessId,

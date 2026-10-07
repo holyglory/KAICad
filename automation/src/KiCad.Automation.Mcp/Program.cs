@@ -131,6 +131,7 @@ builder.Services.AddMcpServer(options =>
     .WithTools<PcbVectorTools>()
     .WithTools<PcbArtworkTools>()
     .WithTools<PcbJobTools>()
+    .WithTools<SchematicJobTools>()
     .WithTools<PcbHeadlessRoutingTools>()
     .WithTools<PcbRouteOptimizationTools>()
     .WithTools<PcbViaMinimizationTools>()

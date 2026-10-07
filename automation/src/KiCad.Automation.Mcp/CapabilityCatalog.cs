@@ -315,7 +315,7 @@ public static class CapabilityCatalog
         "document-lifecycle" => ["schematic", "pcb"],
         "schematic-design" => ["schematic"],
         "symbol-library" or "footprint-library" => ["library"],
-        "simulation" => ["schematic", "simulation"],
+        "simulation" or "schematic-manufacturing" => ["schematic", "job"],
         "pcb-manufacturing" => ["pcb", "job"],
         // Artwork projection accepts several target kinds under one scope, so do not turn its
         // mixed target enum into a false per-tool claim.

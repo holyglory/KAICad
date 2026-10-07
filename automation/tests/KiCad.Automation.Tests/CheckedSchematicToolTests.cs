@@ -76,6 +76,42 @@ public sealed class CheckedSchematicToolTests
     }
 
     [TestMethod]
+    public async Task TypedEmbeddedFileReplacementUsesCheckedReceiptAndNeverLegacyDispatch()
+    {
+        string root = Directory.CreateTempSubdirectory("checked-embedded-files-").FullName;
+        try
+        {
+            var transport = new Transport();
+            transport.Session.ProjectPath = Path.Combine(root, "fixture.kicad_pro");
+            var registry = new InstanceRegistry(transport, root);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(root, "native.sock")), transport.Session.InstanceId);
+            var tool = new CheckedSchematicTools(registry);
+            var request = Request(root, transport.Session.Epoch);
+            var files = new EmbeddedFiles();
+            files.Files.Add(new EmbeddedFile
+            {
+                Name = "fixture.bin", Type = EmbeddedFileType.EftOther,
+                Data = ByteString.CopyFromUtf8("fixture bytes")
+            });
+
+            var response = await tool.ReplaceEmbeddedFiles(transport.Session.InstanceId,
+                SchematicJson.Formatter.Format(request.Batch.Document),
+                SchematicJson.Formatter.Format(request.ExpectedState),
+                SchematicJson.Formatter.Format(files), request.Batch.OperationId, embeddedFonts: true, default);
+
+            Assert.IsFalse(response.IsError ?? false, JsonSerializer.Serialize(response.StructuredContent));
+            Assert.AreEqual(1, transport.Mutations);
+            Assert.AreEqual(0, transport.LegacyMutations);
+            var data = JsonSerializer.SerializeToElement(response.StructuredContent);
+            var receipt = SchematicJson.Parser.Parse<CheckedSchematicBatchReceipt>(data.GetProperty("receipt").GetRawText());
+            Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, receipt.Status);
+            Assert.AreEqual(SchematicItemOperation.OperationOneofCase.ReplaceEmbeddedFiles,
+                transport.LastCheckedRequest!.Batch.Operations[0].OperationCase);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
     public void CompletedRepliesRequireConsistentStateAndCompleteDiskCoverage()
     {
         string root = Path.GetTempPath(); var request = Request(root, Guid.NewGuid().ToString("D"));
@@ -310,6 +346,7 @@ public sealed class CheckedSchematicToolTests
         internal NativeClientTests.FixtureTransport Session { get; } = new() { Epoch = Guid.NewGuid().ToString("D") };
         internal int Mutations { get; private set; }
         internal int LegacyMutations { get; private set; }
+        internal CheckedSchematicBatch? LastCheckedRequest { get; private set; }
         internal bool Unsupported { get; init; }
         internal CheckedSchematicBatchStatus Status { get; set; } = CheckedSchematicBatchStatus.CsbsCompleted;
         // What KiCad answers to a checked view request, and the requests it received.
@@ -331,6 +368,7 @@ public sealed class CheckedSchematicToolTests
             if (envelope.Message.Is(CheckedSchematicBatch.Descriptor))
             {
                 Mutations++;
+                LastCheckedRequest = envelope.Message.Unpack<CheckedSchematicBatch>();
                 if (Unsupported) return Task.FromResult(new ApiResponse { Header = new() { KicadToken = Session.Epoch },
                     Status = new() { Status = (ApiStatusCode)5, ErrorMessage = "Unsupported checked command" } }.ToByteArray());
                 receipt = Result(envelope.Message.Unpack<CheckedSchematicBatch>(), Status);

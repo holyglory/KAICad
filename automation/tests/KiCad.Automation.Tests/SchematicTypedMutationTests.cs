@@ -441,6 +441,20 @@ public sealed class SchematicTypedMutationTests
         Assert.IsFalse(pinReplay.IsError ?? false, Data(pinReplay).GetRawText());
         Assert.IsTrue(Data(pinReplay).GetProperty("replayed").GetBoolean());
         Assert.AreEqual(2, fixture.Batches.Count);
+
+        string beforeDelete = fixture.ExpectedJson;
+        string deleteOperation = Guid.NewGuid().ToString("D");
+        var deleted = await fixture.HierarchyTools.DeleteSheetPin(fixture.InstanceId, fixture.DocumentJson,
+            sheetId, pin.Id.Value, beforeDelete, deleteOperation, default);
+        Assert.IsFalse(deleted.IsError ?? false, Data(deleted).GetRawText());
+        Assert.AreEqual(3, fixture.Batches.Count);
+        Assert.IsEmpty(fixture.Batches[2].Batch.Operations.Single().Update.Unpack<SheetSymbol>().Pins);
+
+        var deleteReplay = await fixture.HierarchyTools.DeleteSheetPin(fixture.InstanceId, fixture.DocumentJson,
+            sheetId, pin.Id.Value, beforeDelete, deleteOperation, default);
+        Assert.IsFalse(deleteReplay.IsError ?? false, Data(deleteReplay).GetRawText());
+        Assert.IsTrue(Data(deleteReplay).GetProperty("replayed").GetBoolean());
+        Assert.AreEqual(3, fixture.Batches.Count);
     }
 
     [TestMethod]

@@ -104,7 +104,7 @@ public sealed class SchematicHierarchyMutationTools(InstanceRegistry registry)
     public Task<CallToolResult> DeleteSheetPin(string instanceId, string documentJson,
         string parentSheetId, string pinId, string expectedStateJson, string operationId,
         CancellationToken cancellationToken) => Execute(instanceId, documentJson, null,
-            expectedStateJson, pinId, null, parentSheetId, operationId, Mutation.DeletePin,
+            expectedStateJson, null, pinId, parentSheetId, operationId, Mutation.DeletePin,
             cancellationToken);
 
     [McpServerTool(Name = "kicad_schematic_create_hierarchical_label", ReadOnly = false,
@@ -331,7 +331,8 @@ public sealed class SchematicHierarchyMutationTools(InstanceRegistry registry)
                 target = source.Document; id = itemId!;
                 var parent = FindParent(hierarchy, parentSheetId!, itemId!);
                 var removed = parent.Clone(); removed.Pins.Remove(removed.Pins.Single(p => p.Id.Value == id));
-                return NewPlan(expected.State, target, Any.Pack(removed), id, parentSheetId, "delete");
+                var deletePin = NewPlan(expected.State, target, Any.Pack(removed), id, parentSheetId, "update");
+                return deletePin with { ReplyItem = null };
             case Mutation.CreateLabel:
                 target = RequireTarget(requestedTarget, hierarchy, "targetDocumentJson");
                 var newLabel = Parse<HierarchicalLabel>(payloadJson, "invalid_hierarchical_label");

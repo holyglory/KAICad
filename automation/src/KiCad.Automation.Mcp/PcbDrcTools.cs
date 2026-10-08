@@ -243,7 +243,7 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                 throw new AutomationException("invalid_drc_operation_result",
                     "Native DRC operation lookup reported found=false with a job state.");
             if (!native.Found)
-                return new
+                return JsonSerializer.SerializeToElement(new
                 {
                     instanceId,
                     processEpoch = epoch,
@@ -252,7 +252,7 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                     found = false,
                     lookupSupported = true,
                     retrySafety = "unknown-native-outcome"
-                };
+                });
             if (native.Job is null)
                 throw new AutomationException("invalid_drc_operation_result",
                     "Native DRC operation lookup reported found=true without a job state.");
@@ -261,7 +261,7 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                 throw new AutomationException("invalid_drc_operation_result",
                     "Native DRC operation lookup returned a job for a different operation.");
             using var jobJson = JsonDocument.Parse(SchematicJson.Formatter.Format(native.Job));
-            return new
+            return JsonSerializer.SerializeToElement(new
             {
                 instanceId,
                 processEpoch = epoch,
@@ -270,7 +270,7 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                 found = true,
                 lookupSupported = true,
                 job = jobJson.RootElement.Clone()
-            };
+            });
         });
 
     [McpServerTool(Name = "kicad_pcb_drc_cancel"),

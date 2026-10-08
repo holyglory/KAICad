@@ -2244,16 +2244,36 @@ public sealed partial class NativeSessionTests
                 Width = new() { ValueNm = 250_000 }, Layer = BoardLayer.BlFCu,
                 Net = new() { Name = "POWER_RAIL" }
             }));
+            string cleanDrcOperationId = Guid.NewGuid().ToString("D");
             var cleanDrcReply = await mcp.Tool("kicad_pcb_drc_start", new
             {
                 instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard),
-                operationId = Guid.NewGuid().ToString("D"), refillZones = false,
+                operationId = cleanDrcOperationId, refillZones = false,
                 reportAllTrackErrors = true, testFootprints = false,
                 expectedRevisionJson = SchematicJson.Formatter.Format(cleanState.Revision),
                 processEpoch = client.Epoch, candidateRequestJson = BoardJson.Formatter.Format(cleanCandidate)
             });
             Assert.IsFalse(cleanDrcReply.TryGetProperty("isError", out var cleanDrcError) && cleanDrcError.GetBoolean(), cleanDrcReply.GetRawText());
             var cleanDrc = SchematicJson.Parser.Parse<PcbDrcJobState>(cleanDrcReply.GetProperty("content")[0].GetProperty("text").GetString()!);
+            var operationLookup = await mcp.Tool("kicad_pcb_drc_operation", new
+            {
+                instanceId,
+                document = new
+                {
+                    type = "DOCTYPE_PCB",
+                    project = new { name = cleanBoard.Project.Name, path = cleanBoard.Project.Path },
+                    boardFilename = cleanBoard.BoardFilename
+                },
+                operationId = cleanDrcOperationId,
+                processEpoch = client.Epoch
+            });
+            Assert.IsFalse(operationLookup.TryGetProperty("isError", out var operationLookupError)
+                && operationLookupError.GetBoolean(), operationLookup.GetRawText());
+            Assert.IsTrue(operationLookup.GetProperty("structuredContent").GetProperty("found").GetBoolean(),
+                operationLookup.GetRawText());
+            Assert.AreEqual(cleanDrcOperationId,
+                operationLookup.GetProperty("structuredContent").GetProperty("operationId").GetString(),
+                operationLookup.GetRawText());
             for (int attempt = 0; attempt < 60 && !cleanDrc.WorkerFinished; ++attempt)
             {
                 await Task.Delay(100, token);

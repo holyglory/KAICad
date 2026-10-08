@@ -36,6 +36,7 @@ public sealed partial class NativeSessionTests
         string cleanJson = SchematicJson.Formatter.Format(clean);
         byte[] sourceBefore = await File.ReadAllBytesAsync(schematicPath, token);
         string instanceOutputRoot = Path.Combine(evidence, instanceId, "export-output");
+        string svgOperationId = Guid.NewGuid().ToString("D");
 
         SchematicPlotSettings PlotSettings() => new() { PlotAll = true, PlotDrawingSheet = false };
         RunJobSettings JobSettings(string outputPath) => new()
@@ -69,13 +70,13 @@ public sealed partial class NativeSessionTests
         };
 
         async Task<JsonElement> Export(string kind, IMessage request, string requestedPath,
-            Func<string, byte[], string> contentCheck)
+            Func<string, byte[], string> contentCheck, string? operationId = null)
         {
             JsonElement reply = await mcp.Tool("kicad_schematic_export_" + kind, new
             {
                 instanceId,
                 requestJson = SchematicJson.Formatter.Format(request),
-                expectedStateJson = cleanJson
+                expectedStateJson = cleanJson, operationId
             });
             RequireToolSuccess(reply);
             JsonElement structured = reply.GetProperty("structuredContent");
@@ -127,7 +128,7 @@ public sealed partial class NativeSessionTests
             string value = Encoding.UTF8.GetString(bytes);
             return value.Contains("<svg", StringComparison.Ordinal)
                 ? "" : "SVG signature missing";
-        });
+        }, svgOperationId);
         Assert.IsTrue(svgReply.GetProperty("outputs").EnumerateArray()
             .Select(output => File.ReadAllText(output.GetProperty("path").GetString()!))
             .Any(value => value.Contains(marker, StringComparison.Ordinal)),
@@ -164,6 +165,15 @@ public sealed partial class NativeSessionTests
                 && value.Contains("Probe", StringComparison.Ordinal)
                 ? "" : "BOM CSV is missing TP1/TP2 or Probe";
         });
+
+        JsonElement svgReplay = await Export("svg", SvgRequest(SvgDirectory), SvgDirectory, (_, bytes) =>
+            Encoding.UTF8.GetString(bytes).Contains("<svg", StringComparison.Ordinal) ? "" : "SVG signature missing",
+            svgOperationId);
+        RequireToolSuccess(svgReplay);
+        JsonElement receipt = await mcp.Tool("kicad_schematic_export_receipt", new
+        { instanceId, operationId = svgOperationId, processEpoch = clean.ProcessEpoch });
+        Assert.IsFalse(receipt.TryGetProperty("isError", out var receiptError) && receiptError.GetBoolean(), receipt.GetRawText());
+        Assert.IsTrue(receipt.GetProperty("structuredContent").GetProperty("found").GetBoolean(), receipt.GetRawText());
 
         Assert.AreEqual(clean, await ObserveLifecycleState(client, document, token),
             "Export must not change the live native lifecycle state.");

@@ -9,6 +9,82 @@ namespace KiCad.Automation.Tests;
 public sealed class PcbRenderContractTests
 {
     [TestMethod]
+    public void GeometryObservationStatusIsExplicitlyIncompleteAndNeverClaimsRasterCoverage()
+    {
+        Assert.AreEqual("incomplete", PcbRenderObservationContract.Status(true));
+        Assert.AreEqual("unavailable", PcbRenderObservationContract.Status(false));
+        CollectionAssert.Contains(PcbRenderObservationContract.Limitations.ToArray(),
+            "3D geometry covers shown footprint-model instances only; mesh vertices and PCB layer geometry are unavailable");
+        CollectionAssert.Contains(PcbRenderObservationContract.Limitations.ToArray(),
+            "projected bounds are conservative and do not prove exact visible pixels or occlusion depth");
+    }
+
+    [TestMethod]
+    public void CoverageNotesCannotUpgradeTheTypedBoardGeometryBoundary()
+    {
+        const string stateHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const string inputHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        PcbRenderMetadata metadata = CameraMetadata(stateHash, inputHash);
+        metadata.CoverageNotes.Add("board geometry are enumerated");
+        metadata.Models.Add(new PcbRenderModelMetadata
+        {
+            NativeUuid = "44444444-4444-4444-4444-444444444444", ModelIndex = 0,
+            RequestedIdentity = "${KICAD6_3DMODEL_DIR}/resistor.wrl",
+            ResolvedIdentity = "/models/resistor.wrl", ContentSha256 = new string('d', 64),
+            Loaded = true, SecondaryAssetsComplete = true, NativeGeometryBoundsAvailable = true,
+            SceneTransformColumnMajor = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 },
+            NativeGeometryBounds = { 0, 0, 0, 1, 1, 1 }
+        });
+        metadata.Objects.Add(new PcbRenderObjectMetadata
+        {
+            NativeUuid = "44444444-4444-4444-4444-444444444444", ModelIndex = 0,
+            NativeGeometryBoundsAvailable = true,
+            SceneTransformColumnMajor = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 },
+            NativeGeometryBounds = { 0, 0, 0, 1, 1, 1 }
+        });
+
+        PcbRenderCoverage coverage = PcbRenderCoverageContract.Evaluate(metadata, true, true);
+
+        Assert.IsTrue(coverage.ModelInstancesComplete);
+        Assert.IsTrue(coverage.SecondaryAssetIdentitiesComplete);
+        Assert.IsFalse(coverage.BoardGeometryComplete,
+            "A prose coverage note must not claim typed board-layer geometry that the native hook does not enumerate.");
+        Assert.IsFalse(coverage.ExactVisiblePixels);
+        Assert.IsFalse(coverage.OcclusionDepth);
+    }
+
+    [TestMethod]
+    public void IncompleteNativeMetadataCannotClaimCompleteAssetCoverage()
+    {
+        const string stateHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const string inputHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        PcbRenderMetadata metadata = CameraMetadata(stateHash, inputHash);
+        metadata.Models.Add(new PcbRenderModelMetadata
+        {
+            NativeUuid = "55555555-5555-5555-5555-555555555555", ModelIndex = 0,
+            RequestedIdentity = "${KICAD6_3DMODEL_DIR}/resistor.wrl",
+            ResolvedIdentity = "/models/resistor.wrl", ContentSha256 = new string('e', 64),
+            Loaded = true, SecondaryAssetsComplete = true, NativeGeometryBoundsAvailable = true,
+            SceneTransformColumnMajor = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 },
+            NativeGeometryBounds = { 0, 0, 0, 1, 1, 1 }
+        });
+        metadata.Objects.Add(new PcbRenderObjectMetadata
+        {
+            NativeUuid = "55555555-5555-5555-5555-555555555555", ModelIndex = 0,
+            NativeGeometryBoundsAvailable = true,
+            SceneTransformColumnMajor = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 },
+            NativeGeometryBounds = { 0, 0, 0, 1, 1, 1 }
+        });
+
+        PcbRenderCoverage coverage = PcbRenderCoverageContract.Evaluate(metadata, true, false);
+
+        Assert.IsFalse(coverage.ModelInstancesComplete);
+        Assert.IsFalse(coverage.SecondaryAssetIdentitiesComplete,
+            "Asset coverage depends on the native complete signal as well as row fields.");
+        Assert.IsFalse(coverage.BoardGeometryComplete);
+    }
+
+    [TestMethod]
     public void CompleteCameraMetadataIsBoundToTheTypedRenderInput()
     {
         var request = RenderRequest();

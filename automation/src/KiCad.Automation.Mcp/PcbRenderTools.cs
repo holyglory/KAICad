@@ -21,7 +21,19 @@ public sealed class PcbRenderTools(InstanceRegistry registry)
      KiCadCapability("pcb-observation", "compiled-mcp plus native-board-job-renderer", "board lifecycle state, native image snapshot"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public Task<CallToolResult> Render3D(string instanceId, string requestJson, string expectedStateJson,
-        CancellationToken cancellationToken) => Execute(async () =>
+        CancellationToken cancellationToken) => Observe3D(instanceId, requestJson, expectedStateJson, true,
+            cancellationToken);
+
+    [McpServerTool(Name = "kicad_pcb_render_3d_geometry", ReadOnly = true),
+     Description("Read lifecycle-bound native 3D geometry metadata for one typed RunBoardJobExportRender request and expected PCB state. This invokes the same native renderer as kicad_pcb_render_3d, including its temporary PNG rendering cost, but returns text only. It exposes the camera matrices, shown footprint-model identities and content hashes, native model/object transforms and conservative scene/projected bounds. The current handler does not expose mesh vertices, board copper/pads/tracks/zones or layer overlays, secondary texture identities, exact visible pixels or occlusion depth; the whole-scene result is explicitly incomplete. An older peer without the inspection handler is refused rather than substituting image-only output."),
+     KiCadCapability("pcb-observation", "compiled-mcp plus native-board-job-renderer", "exact PCB lifecycle state, native camera/model transforms, conservative model bounds and asset coverage"),
+     KiCadVerification(KiCadVerificationLevel.InProcess, "PcbRenderContractTests.GeometryObservationStatusIsExplicitlyIncompleteAndNeverClaimsRasterCoverage")]
+    public Task<CallToolResult> Read3DGeometry(string instanceId, string requestJson, string expectedStateJson,
+        CancellationToken cancellationToken) => Observe3D(instanceId, requestJson, expectedStateJson, false,
+            cancellationToken);
+
+    private Task<CallToolResult> Observe3D(string instanceId, string requestJson, string expectedStateJson,
+        bool includeImage, CancellationToken cancellationToken) => Execute(async () =>
     {
         cancellationToken.ThrowIfCancellationRequested();
         var request = JsonParser.Default.Parse<RunBoardJobExportRender>(requestJson);
@@ -38,7 +50,8 @@ public sealed class PcbRenderTools(InstanceRegistry registry)
             throw new AutomationException("invalid_render_dimensions", "Render dimensions must be 64..2048 pixels with at most 8,388,608 pixels.");
 
         var expected = SchematicJson.Parser.Parse<DocumentLifecycleState>(expectedStateJson);
-        if (expected.Scope != DocumentLifecycleScope.DlsPcb || !expected.Document.Equals(document)
+        if (expected.Scope != DocumentLifecycleScope.DlsPcb || expected.Document is null
+            || !expected.Document.Equals(document)
             || string.IsNullOrWhiteSpace(expected.ProcessEpoch))
             throw new AutomationException("invalid_render_state", "The expected observation must identify the same PCB and native process epoch.");
         var client = registry.Client(instanceId);
@@ -77,6 +90,9 @@ public sealed class PcbRenderTools(InstanceRegistry registry)
             }
             else
             {
+                if (!includeImage)
+                    throw new AutomationException("pcb_render_metadata_unavailable",
+                        "The native peer does not implement PcbRenderInspectionRequest; 3D geometry metadata is unavailable.");
                 limitations.Add("native peer does not implement PcbRenderInspectionRequest; renderer metadata is unavailable");
             }
 
@@ -107,9 +123,12 @@ public sealed class PcbRenderTools(InstanceRegistry registry)
             if (inspection is not null)
                 limitations.AddRange(inspection.Limitations);
             limitations.AddRange(metadataValidation.Failures.Select(failure => "renderer metadata contract: " + failure));
+            limitations.AddRange(PcbRenderObservationContract.Limitations);
             var structured = JsonSerializer.SerializeToElement(new
             {
                 instanceId, processEpoch = session.Epoch, document,
+                status = PcbRenderObservationContract.Status(inspection is not null),
+                complete = PcbRenderObservationContract.Complete,
                 inputIdentity = new
                 {
                     boardDocument = document,
@@ -136,13 +155,24 @@ public sealed class PcbRenderTools(InstanceRegistry registry)
                     exactVisiblePixels = coverage.ExactVisiblePixels,
                     occlusionDepth = coverage.OcclusionDepth
                 },
+                geometryScope = new
+                {
+                    objectKind = "shown-footprint-model-instances",
+                    transformSource = "native-renderer",
+                    boundsKind = "conservative-scene-and-projected-aabb",
+                    meshVerticesAvailable = false,
+                    layerGeometryAvailable = false
+                },
                 metadata,
                 limitations,
-                nativeRender = true, boardMutation = false, electricalValidation = false
+                nativeRender = true, rasterImageIncluded = includeImage,
+                boardMutation = false, electricalValidation = false
             });
             return new CallToolResult
             {
-                Content = [ImageContentBlock.FromBytes(bytes, "image/png"), new TextContentBlock { Text = structured.GetRawText() }],
+                Content = includeImage
+                    ? [ImageContentBlock.FromBytes(bytes, "image/png"), new TextContentBlock { Text = structured.GetRawText() }]
+                    : [new TextContentBlock { Text = structured.GetRawText() }],
                 StructuredContent = structured
             };
         }
@@ -192,6 +222,18 @@ internal static class PcbRenderInspectionContract
     }
 }
 
+internal static class PcbRenderObservationContract
+{
+    internal static bool Complete => false;
+    internal static IReadOnlyList<string> Limitations { get; } =
+    [
+        "3D geometry covers shown footprint-model instances only; mesh vertices and PCB layer geometry are unavailable",
+        "projected bounds are conservative and do not prove exact visible pixels or occlusion depth"
+    ];
+
+    internal static string Status(bool metadataAvailable) => metadataAvailable ? "incomplete" : "unavailable";
+}
+
 internal readonly record struct PcbRenderCoverage(
     bool ModelInstancesComplete,
     bool BoardGeometryComplete,
@@ -204,25 +246,21 @@ internal readonly record struct PcbRenderCoverage(
 
 internal static class PcbRenderCoverageContract
 {
-    private const string BoardGeometryEnumerated = "board geometry are enumerated";
-    private const string BoardGeometryNotEnumerated = "board geometry are not enumerated";
-
     internal static PcbRenderCoverage Evaluate(PcbRenderMetadata metadata,
         bool metadataValidated, bool nativeMetadataComplete)
     {
-        bool boardGeometryComplete = metadata.CoverageNotes.Any(note =>
-            note.Contains(BoardGeometryEnumerated, StringComparison.OrdinalIgnoreCase)
-            && !note.Contains(BoardGeometryNotEnumerated, StringComparison.OrdinalIgnoreCase));
-        bool secondaryAssetsComplete = metadata.Models.Count > 0
-            && metadata.Models.All(model => model.SecondaryAssetsComplete);
         bool modelInstancesComplete = nativeMetadataComplete
             && metadataValidated
             && metadata.Models.Count > 0
             && metadata.Models.All(HasCompleteModelIdentityAndGeometry);
+        bool secondaryAssetsComplete = modelInstancesComplete
+            && metadata.Models.All(model => model.SecondaryAssetsComplete);
 
         // The current native hook deliberately emits conservative mesh bounds;
         // it does not inspect raster visibility, depth, or board copper geometry.
-        return new(modelInstancesComplete, boardGeometryComplete, secondaryAssetsComplete, false, false);
+        // Coverage notes are descriptive evidence, not a typed claim that can
+        // extend the current protocol's footprint-model-only boundary.
+        return new(modelInstancesComplete, false, secondaryAssetsComplete, false, false);
     }
 
     private static bool HasCompleteModelIdentityAndGeometry(PcbRenderModelMetadata model) =>

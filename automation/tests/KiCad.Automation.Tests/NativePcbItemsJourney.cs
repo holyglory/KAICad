@@ -1228,6 +1228,79 @@ public sealed partial class NativeSessionTests
             if (missingObject.TryGetProperty("nativeGeometryBoundsAvailable", out var missingBoundsAvailable))
                 Assert.IsFalse(missingBoundsAvailable.GetBoolean(), missingRenderData.GetRawText());
             Assert.AreEqual(svgState, missingRenderData.GetProperty("afterState").GetString(), missingRenderData.GetRawText());
+
+            // Inspect the same revision through the native item/bounds manifest;
+            // layer aliases must preserve selection and invalid names must not
+            // become a successful empty result or alter the board checkpoint.
+            static string RenderGeometryRequest(string layer) => JsonSerializer.Serialize(new
+            {
+                viewport = new { minXNm = -1_000_000L, minYNm = -1_000_000L,
+                    maxXNm = 40_000_000L, maxYNm = 40_000_000L },
+                width = 320, height = 240, layers = new[] { layer },
+                objectTypes = new[] { "track", "pad", "footprint" }, includeGeometry = true, maxObjects = 512
+            });
+            var renderGeometryReply = await mcp.Tool("kicad_pcb_render_geometry", new
+            {
+                instanceId, documentJson = SchematicJson.Formatter.Format(board), expectedStateJson = svgState,
+                requestJson = RenderGeometryRequest("F.Cu")
+            });
+            Assert.IsFalse(renderGeometryReply.TryGetProperty("isError", out var renderGeometryError)
+                && renderGeometryError.GetBoolean(), renderGeometryReply.GetRawText());
+            var renderGeometryData = renderGeometryReply.GetProperty("structuredContent");
+            Assert.IsTrue(renderGeometryData.GetProperty("nativeQuery").GetBoolean(), renderGeometryData.GetRawText());
+            Assert.IsTrue(renderGeometryData.GetProperty("nativeBounds").GetBoolean(), renderGeometryData.GetRawText());
+            Assert.IsFalse(renderGeometryData.GetProperty("boardMutation").GetBoolean(), renderGeometryData.GetRawText());
+            Assert.AreEqual(svgState, renderGeometryData.GetProperty("beforeState").GetString(), renderGeometryData.GetRawText());
+            Assert.AreEqual(svgState, renderGeometryData.GetProperty("afterState").GetString(), renderGeometryData.GetRawText());
+            var geometryTransform = renderGeometryData.GetProperty("coordinateTransform");
+            Assert.AreEqual("nm", geometryTransform.GetProperty("units").GetString(), renderGeometryData.GetRawText());
+            Assert.AreEqual("down", geometryTransform.GetProperty("yAxis").GetString(), renderGeometryData.GetRawText());
+            Assert.AreEqual(320, geometryTransform.GetProperty("width").GetInt32(), renderGeometryData.GetRawText());
+            Assert.AreEqual(240, geometryTransform.GetProperty("height").GetInt32(), renderGeometryData.GetRawText());
+            var geometryItems = renderGeometryData.GetProperty("items").EnumerateArray().ToArray();
+            Assert.IsTrue(geometryItems.Length > 0 && geometryItems.Length <= 512, renderGeometryData.GetRawText());
+            Assert.AreEqual(geometryItems.Length, renderGeometryData.GetProperty("itemCount").GetInt32(), renderGeometryData.GetRawText());
+            Assert.IsTrue(geometryItems.Any(item => item.GetProperty("id").GetString() == track.Id.Value),
+                "The live copper selection must contain the existing native route identity.");
+            foreach (var geometryItem in geometryItems)
+            {
+                Assert.IsTrue(geometryItem.GetProperty("boundsExact").GetBoolean(), geometryItem.GetRawText());
+                Assert.AreEqual("native-get-bounding-box", geometryItem.GetProperty("boundsSource").GetString(), geometryItem.GetRawText());
+                Assert.IsTrue(geometryItem.GetProperty("layers").EnumerateArray()
+                    .Any(layer => layer.GetString() == nameof(BoardLayer.BlFCu)), geometryItem.GetRawText());
+                Assert.AreEqual(JsonValueKind.Object, geometryItem.GetProperty("boundsNm").ValueKind, geometryItem.GetRawText());
+                Assert.AreEqual(JsonValueKind.Object, geometryItem.GetProperty("pixelBounds").ValueKind, geometryItem.GetRawText());
+                Assert.AreEqual(JsonValueKind.Object, geometryItem.GetProperty("geometry").ValueKind, geometryItem.GetRawText());
+            }
+            var protoRenderGeometryReply = await mcp.Tool("kicad_pcb_render_geometry", new
+            {
+                instanceId, documentJson = SchematicJson.Formatter.Format(board), expectedStateJson = svgState,
+                requestJson = RenderGeometryRequest("BL_F_Cu")
+            });
+            Assert.IsFalse(protoRenderGeometryReply.TryGetProperty("isError", out var protoRenderGeometryError)
+                && protoRenderGeometryError.GetBoolean(), protoRenderGeometryReply.GetRawText());
+            var protoRenderGeometryData = protoRenderGeometryReply.GetProperty("structuredContent");
+            CollectionAssert.AreEquivalent(geometryItems.Select(item => item.GetProperty("id").GetString()!).ToArray(),
+                protoRenderGeometryData.GetProperty("items").EnumerateArray()
+                    .Select(item => item.GetProperty("id").GetString()!).ToArray(),
+                "Friendly and protobuf copper layer names must select the same native object identities.");
+            Assert.AreEqual(svgState, protoRenderGeometryData.GetProperty("afterState").GetString(), protoRenderGeometryData.GetRawText());
+            var unknownRenderGeometryReply = await mcp.Tool("kicad_pcb_render_geometry", new
+            {
+                instanceId, documentJson = SchematicJson.Formatter.Format(board), expectedStateJson = svgState,
+                requestJson = RenderGeometryRequest("F.NotARealLayer")
+            });
+            Assert.IsTrue(unknownRenderGeometryReply.TryGetProperty("isError", out var unknownRenderGeometryError)
+                && unknownRenderGeometryError.GetBoolean(), unknownRenderGeometryReply.GetRawText());
+            Assert.AreEqual("invalid_pcb_render_geometry",
+                unknownRenderGeometryReply.GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+                unknownRenderGeometryReply.GetRawText());
+            Assert.AreEqual(svgState, SchematicJson.Formatter.Format(await ObserveLifecycleState(client, board, token)),
+                "An unknown render geometry layer must be rejected without mutating the board.");
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-render-geometry.json"),
+                JsonSerializer.Serialize(new { requestJson = RenderGeometryRequest("F.Cu"), friendly = renderGeometryReply,
+                    protobuf = protoRenderGeometryReply, unknown = unknownRenderGeometryReply }), token);
+
             var routeGeometry = await mcp.Tool("kicad_pcb_route_geometry", new
             {
                 instanceId, documentJson = SchematicJson.Formatter.Format(board), expectedStateJson = svgState,

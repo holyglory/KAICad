@@ -1535,14 +1535,14 @@ public sealed partial class NativeSessionTests
                 .Where(item => item.Is(Track.Descriptor))
                 .Select(item => item.Unpack<Track>())
                 .Where(track => track.Net.Name == "USB_D+")
-                .OrderBy(track => track.Id.Value, StringComparer.Ordinal)
-                .Take(1).Select(Any.Pack));
+                .OrderByDescending(track => track.End.XNm - track.Start.XNm + track.End.YNm - track.Start.YNm)
+                .FirstOrDefault() is { } positiveTrack ? Any.Pack(positiveTrack) : null);
             differentialApplyCandidate.Items.Add(differentialCandidate.Items
                 .Where(item => item.Is(Track.Descriptor))
                 .Select(item => item.Unpack<Track>())
                 .Where(track => track.Net.Name == "USB_D-")
-                .OrderBy(track => track.Id.Value, StringComparer.Ordinal)
-                .Take(1).Select(Any.Pack));
+                .OrderByDescending(track => track.End.XNm - track.Start.XNm + track.End.YNm - track.Start.YNm)
+                .FirstOrDefault() is { } negativeTrack ? Any.Pack(negativeTrack) : null);
             Assert.AreEqual(2, differentialApplyCandidate.Items.Count, differentialData.GetRawText());
             differentialCandidate = differentialApplyCandidate;
             var differentialNets = differentialCandidate.Items

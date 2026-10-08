@@ -87,7 +87,7 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
             || !string.Equals(processEpoch, epoch.ToString("D"), StringComparison.Ordinal))
             return Task.FromResult(Error("invalid_process_epoch", "processEpoch must be a canonical UUID."));
         string key = ReceiptKey(instanceId, operationId);
-        if (!Receipts.TryGetValue(key, out var receipt))
+        if (!TryReadReceipt(key, out var receipt))
             return Task.FromResult(Data(new { instanceId, processEpoch, operationId, found = false,
                 receiptScope = "mcp-process", retrySafety = "unknown-native-outcome" }));
         if (!string.Equals(receipt.ProcessEpoch, processEpoch, StringComparison.Ordinal))
@@ -117,7 +117,7 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
             string fingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
                 instanceId + "\n" + jobKind + "\n" + requestJson + "\n" + expectedStateJson)));
             string? receiptKey = canonicalOperationId is null ? null : ReceiptKey(instanceId, canonicalOperationId);
-            if (receiptKey is not null && Receipts.TryGetValue(receiptKey, out var prior))
+            if (receiptKey is not null && TryReadReceipt(receiptKey, out var prior))
             {
                 if (!string.Equals(prior.Fingerprint, fingerprint, StringComparison.Ordinal))
                     throw new AutomationException("operation_id_reused", "The operation ID is already bound to a different schematic export request.");
@@ -194,7 +194,7 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
             var completed = new CallToolResult { StructuredContent = structured,
                 Content = [new TextContentBlock { Text = structured.GetRawText() }] };
             if (receiptKey is not null)
-                Receipts.TryAdd(receiptKey, new(fingerprint, session.Epoch, structured));
+                WriteReceipt(receiptKey, new(fingerprint, session.Epoch, structured));
             return completed;
         }
         catch (Exception error) when (error is AutomationException or NativeApiException or NngException
@@ -344,6 +344,45 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
     private static string ReceiptKey(string instanceId, string operationId) => instanceId + "\n" + operationId;
 
     private sealed record ExportReceipt(string Fingerprint, string ProcessEpoch, JsonElement Result);
+
+    private bool TryReadReceipt(string key, out ExportReceipt receipt)
+    {
+        if (Receipts.TryGetValue(key, out receipt!)) return true;
+        string path = Path.Combine(registry.StateDirectory, "schematic-export-receipts.json");
+        try
+        {
+            if (!File.Exists(path)) { receipt = null!; return false; }
+            var all = JsonSerializer.Deserialize<Dictionary<string, ExportReceipt>>(File.ReadAllText(path));
+            if (all is not null && all.TryGetValue(key, out receipt!))
+            {
+                Receipts[key] = receipt;
+                return true;
+            }
+        }
+        catch (JsonException) { }
+        receipt = null!;
+        return false;
+    }
+
+    private void WriteReceipt(string key, ExportReceipt receipt)
+    {
+        Receipts[key] = receipt;
+        try
+        {
+            Directory.CreateDirectory(registry.StateDirectory);
+            string path = Path.Combine(registry.StateDirectory, "schematic-export-receipts.json");
+            var all = File.Exists(path)
+                ? JsonSerializer.Deserialize<Dictionary<string, ExportReceipt>>(File.ReadAllText(path))
+                    ?? new(StringComparer.Ordinal)
+                : new(StringComparer.Ordinal);
+            all[key] = receipt;
+            string temporary = path + ".tmp-" + Guid.NewGuid().ToString("N");
+            File.WriteAllText(temporary, JsonSerializer.Serialize(all));
+            File.Move(temporary, path, true);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
 
     private static CallToolResult Data(object value)
     {

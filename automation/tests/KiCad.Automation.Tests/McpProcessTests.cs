@@ -69,6 +69,7 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_schematic_delete_image");
             CollectionAssert.Contains(names, "kicad_schematic_set_title_block");
             CollectionAssert.Contains(names, "kicad_schematic_set_page_settings");
+            CollectionAssert.Contains(names, "kicad_schematic_set_net_settings");
             CollectionAssert.Contains(names, "kicad_schematic_export_svg");
             CollectionAssert.Contains(names, "kicad_schematic_export_dxf");
             CollectionAssert.Contains(names, "kicad_schematic_export_pdf");

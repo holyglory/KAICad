@@ -28,7 +28,7 @@ public sealed class SchematicMetadataMutationTools(InstanceRegistry registry)
     public Task<CallToolResult> ReplaceBusAliases(string instanceId, string documentJson,
         string expectedStateJson, SchematicBusAliasInput[] aliases, string operationId,
         CancellationToken cancellationToken) => Execute(instanceId, documentJson, expectedStateJson,
-            operationId, MetadataMutation.BusAliases, aliases, null, cancellationToken);
+            operationId, MetadataMutation.BusAliases, aliases, null, null, cancellationToken);
 
     [McpServerTool(Name = "kicad_schematic_replace_variant_registry", ReadOnly = false,
         UseStructuredContent = true),
@@ -36,7 +36,15 @@ public sealed class SchematicMetadataMutationTools(InstanceRegistry registry)
     public Task<CallToolResult> ReplaceVariantRegistry(string instanceId, string documentJson,
         string expectedStateJson, SchematicVariantDescriptionInput[] entries, string operationId,
         CancellationToken cancellationToken) => Execute(instanceId, documentJson, expectedStateJson,
-            operationId, MetadataMutation.VariantRegistry, null, entries, cancellationToken);
+            operationId, MetadataMutation.VariantRegistry, null, entries, null, cancellationToken);
+
+    [McpServerTool(Name = "kicad_schematic_set_net_settings", ReadOnly = false,
+        UseStructuredContent = true),
+     Description("Replace the complete project schematic net settings through the checked native batch path. netSettingsJson is a typed SchematicNetSettings payload with an explicit Default class; documentJson and expectedStateJson bind the explicit root revision, and operationId provides receipt replay. Map keys must be nonempty, NUL-free and bounded. The edit is undoable and remains unsaved until kicad_document_save.")]
+    public Task<CallToolResult> SetNetSettings(string instanceId, string documentJson,
+        string expectedStateJson, string netSettingsJson, string operationId,
+        CancellationToken cancellationToken) => Execute(instanceId, documentJson, expectedStateJson,
+            operationId, MetadataMutation.NetSettings, null, null, netSettingsJson, cancellationToken);
 
     public sealed record SchematicBusAliasInput(string Name, string[] Members);
     public sealed record SchematicVariantDescriptionInput(string Name, string Description);
@@ -44,7 +52,8 @@ public sealed class SchematicMetadataMutationTools(InstanceRegistry registry)
     private enum MetadataMutation
     {
         BusAliases,
-        VariantRegistry
+        VariantRegistry,
+        NetSettings
     }
 
     private sealed record ExpectedObservation(DocumentLifecycleState State,
@@ -53,6 +62,7 @@ public sealed class SchematicMetadataMutationTools(InstanceRegistry registry)
     private async Task<CallToolResult> Execute(string instanceId, string documentJson,
         string expectedStateJson, string operationId, MetadataMutation mutation,
         SchematicBusAliasInput[]? aliases, SchematicVariantDescriptionInput[]? entries,
+        string? netSettingsJson,
         CancellationToken cancellationToken)
     {
         bool submitted = false;
@@ -63,7 +73,7 @@ public sealed class SchematicMetadataMutationTools(InstanceRegistry registry)
             ValidateRootDocument(document);
             ExpectedObservation expected = ParseExpectedObservation(expectedStateJson, document);
             ValidateIdentity(operationId, "operationId");
-            SchematicItemOperation operation = BuildOperation(mutation, aliases, entries);
+            SchematicItemOperation operation = BuildOperation(mutation, aliases, entries, netSettingsJson);
 
             NativeClient client = registry.Client(instanceId);
             AutomationSession session = await client.HandshakeAsync(cancellationToken);
@@ -130,7 +140,8 @@ public sealed class SchematicMetadataMutationTools(InstanceRegistry registry)
     }
 
     private static SchematicItemOperation BuildOperation(MetadataMutation mutation,
-        SchematicBusAliasInput[]? aliases, SchematicVariantDescriptionInput[]? entries)
+        SchematicBusAliasInput[]? aliases, SchematicVariantDescriptionInput[]? entries,
+        string? netSettingsJson)
     {
         return mutation switch
         {
@@ -144,8 +155,47 @@ public sealed class SchematicMetadataMutationTools(InstanceRegistry registry)
                 TargetDocument = null,
                 ReplaceVariantRegistry = BuildVariantRegistry(entries)
             },
+            MetadataMutation.NetSettings => new SchematicItemOperation
+            {
+                TargetDocument = null,
+                SetNetSettings = BuildNetSettings(netSettingsJson)
+            },
             _ => throw new AutomationException("invalid_schematic_metadata", "The metadata operation is unsupported.")
         };
+    }
+
+    private const int MaximumNetSettingsMapEntries = 4096;
+
+    private static SchematicNetSettings BuildNetSettings(string? json)
+    {
+        if (json is null)
+            throw new AutomationException("invalid_net_settings", "netSettingsJson is required.");
+
+        SchematicNetSettings value = Parse<SchematicNetSettings>(json, "invalid_net_settings");
+        if (value.DefaultClass is null || value.DefaultClass.Name != "Default")
+            throw new AutomationException("invalid_net_settings",
+                "Net settings require an explicit Default class.");
+
+        ValidateNetSettingsMap(value.LabelAssignments, "labelAssignments");
+        ValidateNetSettingsMap(value.NetColors, "netColors");
+        ValidateNetSettingsMap(value.ChainNetclasses, "chainNetclasses");
+        try
+        {
+            SchematicNetSettingsState.Validate(value);
+        }
+        catch (AutomationException error)
+        {
+            throw new AutomationException("invalid_net_settings", error.Message);
+        }
+        return value;
+    }
+
+    private static void ValidateNetSettingsMap<T>(IReadOnlyDictionary<string, T> map, string name)
+    {
+        if (map is null || map.Count > MaximumNetSettingsMapEntries
+            || map.Keys.Any(key => string.IsNullOrEmpty(key) || key.Contains('\0')))
+            throw new AutomationException("invalid_net_settings",
+                $"{name} must contain at most {MaximumNetSettingsMapEntries} entries with nonempty, NUL-free keys.");
     }
 
     private static SchematicBusAliasState BuildBusAliases(SchematicBusAliasInput[]? aliases)
@@ -205,9 +255,13 @@ public sealed class SchematicMetadataMutationTools(InstanceRegistry registry)
             DocumentEpoch = state.Revision.Epoch,
             ExpectedRevision = state.Revision.Clone(),
             OperationId = operationId,
-            Description = mutation == MetadataMutation.BusAliases
-                ? "Replace checked schematic bus aliases"
-                : "Replace checked schematic variant registry"
+            Description = mutation switch
+            {
+                MetadataMutation.BusAliases => "Replace checked schematic bus aliases",
+                MetadataMutation.VariantRegistry => "Replace checked schematic variant registry",
+                MetadataMutation.NetSettings => "Set checked schematic net settings",
+                _ => "Apply checked schematic metadata mutation"
+            }
         };
         batch.Operations.Add(operation);
         return new CheckedSchematicBatch { Batch = batch, ExpectedState = state.Clone() };

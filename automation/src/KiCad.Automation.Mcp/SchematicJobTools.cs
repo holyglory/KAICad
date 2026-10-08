@@ -75,6 +75,7 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
         where TRequest : class, IMessage<TRequest>, new()
     {
         bool nativeDispatchStarted = false;
+        bool exportReplyReceived = false;
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -124,6 +125,7 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
 
             nativeDispatchStarted = true;
             RunJobResponse result = await client.InvokeAsync<TRequest, RunJobResponse>(request, cancellationToken);
+            exportReplyReceived = true;
             if (result.Status != JobStatus.JsSuccess)
                 throw new AutomationException("schematic_export_failed", string.IsNullOrWhiteSpace(result.Message)
                     ? $"KiCad did not complete the schematic {jobKind} export." : result.Message);
@@ -140,7 +142,7 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
                 instanceId, processEpoch = session.Epoch, job = jobKind, document = job.Document,
                 beforeState = SchematicJson.Formatter.Format(before), afterState = SchematicJson.Formatter.Format(after),
                 outputs, nativeJob = true, boardMutation = false, schematicMutation = false,
-                nativeDispatch = true, dispatchOutcome = "confirmed",
+                nativeDispatch = true, dispatchOutcome = "confirmed", outputVerification = "complete",
                 outcome = "completed"
             });
             return new CallToolResult { StructuredContent = structured,
@@ -152,6 +154,10 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
         {
             bool transportDelivered = nativeDispatchStarted && error is NngException deliveredTransport
                 && deliveredTransport.RequestDelivered;
+            bool ambiguousDispatch = nativeDispatchStarted && !exportReplyReceived
+                && (error is NngException or NativeApiException
+                    || error is AutomationException ambiguousKnown
+                    && ambiguousKnown.Code is ("instance_exited" or "instance_changed" or "operation_outcome_unknown"));
             bool nativeDispatch = nativeDispatchStarted && (error is not NngException
                 || ((NngException)error).RequestDelivered);
             string code = error is AutomationException known ? known.Code
@@ -162,8 +168,9 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
             {
                 errorCode = code, errorMessage = error.Message, job = jobKind,
                 nativeDispatch,
-                dispatchOutcome = transportDelivered ? "indeterminate" : nativeDispatch ? "confirmed" : "unsubmitted",
-                outcome = transportDelivered ? "unknown" : "failed"
+                dispatchOutcome = ambiguousDispatch || transportDelivered ? "indeterminate" : nativeDispatch ? "confirmed" : "unsubmitted",
+                outputVerification = exportReplyReceived ? "incomplete" : "not_attempted",
+                outcome = ambiguousDispatch || transportDelivered ? "unknown" : "failed"
             });
             return new CallToolResult { IsError = true, StructuredContent = structured,
                 Content = [new TextContentBlock { Text = structured.GetRawText() }] };

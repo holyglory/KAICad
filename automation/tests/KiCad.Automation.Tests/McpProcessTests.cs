@@ -478,6 +478,8 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_pcb_route_via_minimize_plan");
             CollectionAssert.Contains(names, "kicad_pcb_route_via_minimize_apply");
             CollectionAssert.Contains(names, "kicad_pcb_route_via_minimize_receipt");
+            CollectionAssert.Contains(names, "kicad_pcb_diff_pair_apply");
+            CollectionAssert.Contains(names, "kicad_pcb_diff_pair_receipt");
             CollectionAssert.Contains(names, "kicad_pcb_footprint_place_plan");
             CollectionAssert.Contains(names, "kicad_pcb_route_receipt");
             var invalidRouteReceipt = await Request(9321, "tools/call", new { name = "kicad_pcb_route_receipt", arguments = new
@@ -652,6 +654,8 @@ public sealed class McpProcessTests
                 nullProjectTextVariablesSet.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(),
                 nullProjectTextVariablesSet.GetRawText());
             CollectionAssert.Contains(names, "kicad_pcb_diff_pair_validate");
+            CollectionAssert.Contains(names, "kicad_pcb_diff_pair_apply");
+            CollectionAssert.Contains(names, "kicad_pcb_diff_pair_receipt");
             var invalidDiffPairValidation = await Request(9369, "tools/call", new
             {
                 name = "kicad_pcb_diff_pair_validate",
@@ -666,6 +670,18 @@ public sealed class McpProcessTests
             Assert.AreEqual("invalid_diff_pair_validation_state",
                 invalidDiffPairValidation.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(),
                 invalidDiffPairValidation.GetRawText());
+            var invalidDiffPairApply = await Request(9375, "tools/call", new
+            {
+                name = "kicad_pcb_diff_pair_apply",
+                arguments = new
+                {
+                    instanceId = Guid.NewGuid().ToString("D"), deleteRequestJson = "{}", createRequestJson = "{}",
+                    expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D"),
+                    requestJson = "{\"positiveNet\":\"P\",\"negativeNet\":\"N\"}", drcJobStateJson = "{}"
+                }
+            });
+            Assert.IsTrue(invalidDiffPairApply.GetProperty("result").GetProperty("isError").GetBoolean(),
+                invalidDiffPairApply.GetRawText());
             foreach (string operationTool in new[]
             {
                 "kicad_pcb_import_netlist", "kicad_pcb_refill_zones", "kicad_pcb_operation_receipt",
@@ -781,6 +797,20 @@ public sealed class McpProcessTests
                 instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = Guid.NewGuid().ToString("D"), operationId = Guid.NewGuid().ToString("D")
             } });
             Assert.IsFalse(emptyViaMinimizeReceipt.GetProperty("result").GetProperty("structuredContent").GetProperty("found").GetBoolean(), emptyViaMinimizeReceipt.GetRawText());
+            var missingDiffPairDrc = await Request(9402, "tools/call", new { name = "kicad_pcb_diff_pair_apply", arguments = new
+            {
+                instanceId = Guid.NewGuid().ToString("D"), deleteRequestJson = "{}", createRequestJson = "{}",
+                expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D"), requestJson = "{}", drcJobStateJson = ""
+            } });
+            Assert.IsTrue(missingDiffPairDrc.GetProperty("result").GetProperty("isError").GetBoolean(), missingDiffPairDrc.GetRawText());
+            Assert.AreEqual("diff_pair_apply_requires_drc", missingDiffPairDrc.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(), missingDiffPairDrc.GetRawText());
+            var malformedDiffPairCreate = await Request(9403, "tools/call", new { name = "kicad_pcb_diff_pair_apply", arguments = new
+            {
+                instanceId = Guid.NewGuid().ToString("D"), deleteRequestJson = "{}", createRequestJson = "{}",
+                expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D"), requestJson = "{\"positiveNet\":\"P\",\"negativeNet\":\"N\"}", drcJobStateJson = "{}"
+            } });
+            Assert.IsTrue(malformedDiffPairCreate.GetProperty("result").GetProperty("isError").GetBoolean(), malformedDiffPairCreate.GetRawText());
+            Assert.AreEqual("invalid_diff_pair_apply_create", malformedDiffPairCreate.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(), malformedDiffPairCreate.GetRawText());
             await Request(9325, "tools/call", new { name = "kicad_pcb_footprint_place_plan", arguments = new { documentJson = "{}", expectedStateJson = "{}", footprintJson = "{}" } });
             await Request(9322, "tools/call", new { name = "kicad_pcb_route_constraints", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", expectedStateJson = "{}", requestJson = "{}" } });
             await Request(9326, "tools/call", new { name = "kicad_pcb_route_cleanup_plan", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", expectedStateJson = "{}", requestJson = "{}" } });

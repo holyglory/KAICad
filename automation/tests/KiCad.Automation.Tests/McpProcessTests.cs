@@ -490,13 +490,15 @@ public sealed class McpProcessTests
                 instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = Guid.NewGuid().ToString("D"), operationId = Guid.NewGuid().ToString("D")
             } });
             var emptyDiffPairResult = emptyDiffPairReceipt.GetProperty("result");
-            bool emptyDiffPairError = emptyDiffPairResult.TryGetProperty("isError", out var emptyDiffPairIsError)
-                && emptyDiffPairIsError.GetBoolean();
-            bool emptyDiffPairFound = !emptyDiffPairError
-                && emptyDiffPairResult.TryGetProperty("structuredContent", out var emptyDiffPairStructured)
-                && emptyDiffPairStructured.TryGetProperty("found", out var emptyDiffPairFoundValue)
-                && emptyDiffPairFoundValue.GetBoolean();
-            Assert.IsFalse(emptyDiffPairFound, emptyDiffPairReceipt.GetRawText());
+            Assert.IsFalse(emptyDiffPairResult.TryGetProperty("isError", out var emptyDiffPairIsError)
+                && emptyDiffPairIsError.GetBoolean(), emptyDiffPairReceipt.GetRawText());
+            Assert.IsTrue(emptyDiffPairResult.TryGetProperty("structuredContent", out var emptyDiffPairStructured),
+                emptyDiffPairReceipt.GetRawText());
+            Assert.IsTrue(emptyDiffPairStructured.TryGetProperty("found", out var emptyDiffPairFoundValue),
+                emptyDiffPairReceipt.GetRawText());
+            Assert.IsFalse(emptyDiffPairFoundValue.GetBoolean(), emptyDiffPairReceipt.GetRawText());
+            Assert.AreEqual("mcp-process", emptyDiffPairStructured.GetProperty("receiptScope").GetString(),
+                emptyDiffPairReceipt.GetRawText());
             CollectionAssert.Contains(names, "kicad_pcb_footprint_place_plan");
             CollectionAssert.Contains(names, "kicad_pcb_route_receipt");
             var invalidRouteReceipt = await Request(9321, "tools/call", new { name = "kicad_pcb_route_receipt", arguments = new
@@ -820,7 +822,16 @@ public sealed class McpProcessTests
                 expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D")
             } });
             Assert.IsTrue(invalidViaMinimizeApply.GetProperty("result").GetProperty("isError").GetBoolean(), invalidViaMinimizeApply.GetRawText());
-            Assert.AreEqual("invalid_pcb_via_minimize_apply_create", invalidViaMinimizeApply.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(), invalidViaMinimizeApply.GetRawText());
+            Assert.AreEqual("via_minimize_apply_requires_drc", invalidViaMinimizeApply.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(), invalidViaMinimizeApply.GetRawText());
+            var malformedViaMinimizeApply = await Request(9402, "tools/call", new { name = "kicad_pcb_route_via_minimize_apply", arguments = new
+            {
+                instanceId = Guid.NewGuid().ToString("D"), deleteRequestJson = "{}", createRequestJson = "{}",
+                expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D"), drcJobStateJson = "{}"
+            } });
+            Assert.IsTrue(malformedViaMinimizeApply.GetProperty("result").GetProperty("isError").GetBoolean(), malformedViaMinimizeApply.GetRawText());
+            Assert.AreEqual("invalid_pcb_via_minimize_apply_create",
+                malformedViaMinimizeApply.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+                malformedViaMinimizeApply.GetRawText());
             var emptyViaMinimizeReceipt = await Request(9401, "tools/call", new { name = "kicad_pcb_route_via_minimize_receipt", arguments = new
             {
                 instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = Guid.NewGuid().ToString("D"), operationId = Guid.NewGuid().ToString("D")

@@ -2617,6 +2617,9 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(multilayerWallReply.TryGetProperty("isError", out var multilayerWallError)
                 && multilayerWallError.GetBoolean(), multilayerWallReply.GetRawText());
             var multilayerBefore = await ObserveLifecycleState(client, cleanBoard, token);
+            var multilayerWallSnapshot = (await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Items = { multilayerWall.Id } }, token)).Items.Single()
+                .Unpack<Track>().Clone();
 
             async Task<string[]> MultilayerConnectedIds(DocumentLifecycleState checkpoint)
             {
@@ -2695,10 +2698,9 @@ public sealed partial class NativeSessionTests
                 Assert.AreEqual(BoardLayer.BlBCu, via.PadStack.Drill.EndLayer);
                 Assert.AreEqual(new Vector2 { XNm = 300_000, YNm = 300_000 }, via.PadStack.Drill.Diameter);
             }
-            // The checked multilayer wrapper is a replacement transaction, so
-            // remove the deterministic foreign wall while adding the planned
-            // Track/Via candidate. Undo restores the wall with the fixture.
-            var multilayerDelete = new DeleteItems { Header = new() { Document = cleanBoard }, ItemIds = { multilayerWall.Id.Clone() } };
+            // Add the planned cross-layer copper without altering the obstacle
+            // it was planned to avoid. Empty removals are an additive transaction.
+            var multilayerDelete = new DeleteItems { Header = new() { Document = cleanBoard } };
             var multilayerPlanReplay = await mcp.Tool("kicad_pcb_route_plan_multilayer", multilayerPlanArguments);
             Assert.IsFalse(multilayerPlanReplay.TryGetProperty("isError", out var multilayerPlanReplayError)
                 && multilayerPlanReplayError.GetBoolean(), multilayerPlanReplay.GetRawText());
@@ -2742,7 +2744,7 @@ public sealed partial class NativeSessionTests
             // assertion so a later case cannot overwrite the only geometry.
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-multilayer-input.json"), multilayerDiagnosticJson, token);
             Assert.AreEqual(multilayerBefore, await ObserveLifecycleState(client, cleanBoard, token));
-            var multilayerDrc = await RouteDrc(multilayerCandidateJson, BoardJson.Formatter.Format(multilayerDelete), multilayerBefore,
+            var multilayerDrc = await RouteDrc(multilayerCandidateJson, null, multilayerBefore,
                 diagnosticJson: multilayerDiagnosticJson);
             CollectionAssert.AreEqual(multilayerCommitCandidate.Items.Select(RouteIdentity).ToArray(), multilayerDrc.CandidateItemIds.ToArray());
             Assert.AreEqual(multilayerBefore, await ObserveLifecycleState(client, cleanBoard, token));
@@ -2751,7 +2753,7 @@ public sealed partial class NativeSessionTests
             {
                 Candidate = multilayerCommitCandidate, ExpectedState = multilayerBefore, DrcJobId = multilayerDrc.JobId,
                 OperationId = multilayerOperationId, MaximumResultBytes = 4 * 1024 * 1024,
-                Removals = multilayerDelete
+                Removals = null
             };
             var multilayerApplyArguments = new
             {
@@ -2782,6 +2784,10 @@ public sealed partial class NativeSessionTests
             var multilayerSnapshot = multilayerNativeReadback.Items.ToDictionary(RouteIdentity, item => item.Clone(), StringComparer.Ordinal);
             foreach (var created in multilayerReceipt.Created.CreatedItems)
                 Assert.AreEqual(created.Item, multilayerSnapshot[RouteIdentity(created.Item)], "Receipt geometry must match native readback.");
+            var multilayerWallAfterApply = (await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Items = { multilayerWall.Id } }, token)).Items.Single().Unpack<Track>();
+            Assert.AreEqual(multilayerWallSnapshot, multilayerWallAfterApply,
+                "The foreign obstacle must remain unchanged after the additive route apply.");
             CollectionAssert.AreEqual(multilayerExpectedConnected, await MultilayerConnectedIds(multilayerAfter));
             var multilayerApplyReplay = await mcp.Tool("kicad_pcb_route_multilayer_apply", multilayerApplyArguments);
             Assert.IsFalse(multilayerApplyReplay.TryGetProperty("isError", out var multilayerApplyReplayError)
@@ -2791,6 +2797,10 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(multilayerApplyData.GetProperty("operationId").GetString(), multilayerApplyReplayData.GetProperty("operationId").GetString());
             Assert.AreEqual(multilayerApplyData.GetProperty("beforeState").GetString(), multilayerApplyReplayData.GetProperty("beforeState").GetString());
             Assert.AreEqual(multilayerApplyData.GetProperty("afterState").GetString(), multilayerApplyReplayData.GetProperty("afterState").GetString());
+            var multilayerWallAfterReplay = (await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Items = { multilayerWall.Id } }, token)).Items.Single().Unpack<Track>();
+            Assert.AreEqual(multilayerWallSnapshot, multilayerWallAfterReplay,
+                "A replayed route apply must not alter the foreign obstacle.");
             var multilayerReceiptRead = await mcp.Tool("kicad_pcb_route_multilayer_receipt", new
             { instanceId, expectedProcessEpoch = client.Epoch, operationId = multilayerOperationId });
             Assert.IsFalse(multilayerReceiptRead.TryGetProperty("isError", out var multilayerReceiptReadError)
@@ -2801,6 +2811,10 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(client.Epoch, multilayerReceiptReadData.GetProperty("processEpoch").GetString());
             Assert.IsTrue(multilayerReceiptReadData.GetProperty("nativeReceiptAvailable").GetBoolean());
             Assert.AreEqual(multilayerApplyReplayData.GetRawText(), multilayerReceiptReadData.GetProperty("receipt").GetRawText());
+            var multilayerWallAfterReceipt = (await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Items = { multilayerWall.Id } }, token)).Items.Single().Unpack<Track>();
+            Assert.AreEqual(multilayerWallSnapshot, multilayerWallAfterReceipt,
+                "Reading the route receipt must leave the foreign obstacle unchanged.");
             Assert.AreEqual(multilayerAfter, await ObserveLifecycleState(client, cleanBoard, token));
 
             // Undo removes the entire cross-layer route but preserves its pads
@@ -2825,7 +2839,8 @@ public sealed partial class NativeSessionTests
                 await MultilayerConnectedIds(await ObserveLifecycleState(client, cleanBoard, token)));
             var multilayerWallRead = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
             { Header = new() { Document = cleanBoard }, Items = { multilayerWall.Id } }, token);
-            Assert.AreEqual(multilayerWall.Id.Value, multilayerWallRead.Items.Single().Unpack<Track>().Id.Value);
+            Assert.AreEqual(multilayerWallSnapshot, multilayerWallRead.Items.Single().Unpack<Track>(),
+                "Undo must preserve the exact foreign obstacle.");
             NativeKeyboard.SchematicShortcut(display, focusProcessId, "y", "PCB Editor", true, true,
                 clickFromLeft: 500, clickFromTop: 500);
             using (var multilayerRedoDeadline = CancellationTokenSource.CreateLinkedTokenSource(token))
@@ -2847,6 +2862,10 @@ public sealed partial class NativeSessionTests
             }
             var multilayerRedoState = await ObserveLifecycleState(client, cleanBoard, token);
             CollectionAssert.AreEqual(multilayerExpectedConnected, await MultilayerConnectedIds(multilayerRedoState));
+            var multilayerWallAfterRedo = (await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Items = { multilayerWall.Id } }, token)).Items.Single().Unpack<Track>();
+            Assert.AreEqual(multilayerWallSnapshot, multilayerWallAfterRedo,
+                "Redo must preserve the exact foreign obstacle.");
             var multilayerSave = await mcp.Tool("kicad_document_save", new
             { instanceId, expectedStateJson = SchematicJson.Formatter.Format(multilayerRedoState), operationId = Guid.NewGuid().ToString("D") });
             Assert.IsFalse(multilayerSave.TryGetProperty("isError", out var multilayerSaveError)
@@ -2863,6 +2882,9 @@ public sealed partial class NativeSessionTests
             CollectionAssert.AreEqual(multilayerIds, multilayerPersisted.Items.Select(RouteIdentity).Order(StringComparer.Ordinal).ToArray());
             foreach (var item in multilayerPersisted.Items)
                 AssertPersistedRouteState(multilayerSnapshot[RouteIdentity(item)], item);
+            var multilayerPersistedWall = (await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Items = { multilayerWall.Id } }, token)).Items.Single().Unpack<Track>();
+            AssertPersistedRouteState(Any.Pack(multilayerWallSnapshot), Any.Pack(multilayerPersistedWall));
             var multilayerPersistedConnected = await MultilayerConnectedIds(await ObserveLifecycleState(client, cleanBoard, token));
             CollectionAssert.AreEqual(multilayerExpectedConnected, multilayerPersistedConnected);
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-multilayer-route.json"), JsonSerializer.Serialize(new

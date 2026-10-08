@@ -2725,6 +2725,7 @@ public sealed partial class NativeSessionTests
                 nativeNetClassesJson = BoardJson.Formatter.Format(multilayerNativeClasses),
                 nativeNetsJson = BoardJson.Formatter.Format(multilayerNativeNets),
                 candidateRequestJson = multilayerCandidateJson,
+                removalsJson = BoardJson.Formatter.Format(multilayerDelete),
                 candidateGeometry = multilayerCommitCandidate.Items.Select(DescribeRouteItem).ToArray(),
                 routePoints = multilayerPlanData.GetProperty("routePoints"),
                 obstacleReport = multilayerPlanData.GetProperty("obstacleReport"),
@@ -2870,7 +2871,7 @@ public sealed partial class NativeSessionTests
                 drc = SchematicJson.Formatter.Format(multilayerDrc), receipt = SchematicJson.Formatter.Format(multilayerReceipt),
                 endpointPadIds = new[] { multilayerStartPad.Id.Value, multilayerEndPad.Id.Value }, connectedItemIds = multilayerPersistedConnected,
                 nativeReadback = BoardJson.Formatter.Format(multilayerNativeReadback), persistedReadback = BoardJson.Formatter.Format(multilayerPersisted),
-                deterministicReplayVerified = true, commitReplayVerified = true, undoRedoVerified = true, saveReopenVerified = true
+                deterministicReplayVerified = true, multilayerApplyReplayVerified = true, undoRedoVerified = true, saveReopenVerified = true
             }), token);
 
             // A checked route DRC is tied to one exact lifecycle checkpoint.

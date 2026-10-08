@@ -1,3 +1,4 @@
+using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
@@ -5,6 +6,7 @@ using Kiapi.Schematic.Types;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using System.Text.Json;
 
 namespace KiCad.Automation.Tests;
 
@@ -186,6 +188,8 @@ public sealed partial class NativeSessionTests
         DocumentSpecifier document, string instanceId, SchematicMetadata original, CancellationToken token)
     {
         string documentJson = SchematicJson.Formatter.Format(document);
+        Task<SchematicScreenDataSnapshot> Read() => client.InvokeAsync<ReadSchematicScreenData,
+            SchematicScreenDataSnapshot>(new() { Document = document }, token);
         async Task<DocumentLifecycleState> State() => await client.InvokeAsync<ReadDocumentLifecycleState,
             DocumentLifecycleState>(new() { Document = document }, token);
         async Task<SchematicMetadataSnapshot> Metadata() => await client.InvokeAsync<ReadSchematicMetadata,
@@ -221,5 +225,70 @@ public sealed partial class NativeSessionTests
         await client.InvokeAsync<RevertDocument, Empty>(new() { Document = document }, token);
         Assert.AreEqual(original.EmbeddedFiles, (await Metadata()).Metadata.EmbeddedFiles,
             "The typed MCP embedded-file replacement must survive save/reload.");
+
+        var originalTitle = await client.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(
+            new() { Document = document }, token);
+        var originalPage = await client.InvokeAsync<GetPageSettings, PageSettings>(
+            new() { Document = document }, token);
+        DocumentLifecycleState imageBefore = await State();
+        var image = new SchematicImage
+        {
+            Id = new() { Value = Guid.NewGuid().ToString("D") },
+            Position = new() { XNm = 1_000, YNm = 2_000 },
+            ImageScale = new() { Value = 1 },
+            ImageData = ByteString.CopyFromUtf8("native setup image")
+        };
+        JsonElement imageCreated = await mcp.Tool("kicad_schematic_create_image", new
+        {
+            instanceId, documentJson, expectedStateJson = SchematicJson.Formatter.Format(imageBefore),
+            imageJson = SchematicJson.Formatter.Format(image), operationId = Guid.NewGuid().ToString("D")
+        });
+        RequireToolSuccess(imageCreated);
+        Assert.IsTrue((await Read()).Data.Items.Any(item => item.Is(SchematicImage.Descriptor)
+            && item.Unpack<SchematicImage>().Id.Value == image.Id.Value), imageCreated.GetRawText());
+        var imageAfterCreate = await State();
+        image.Position.XNm += 1_000;
+        JsonElement imageUpdated = await mcp.Tool("kicad_schematic_update_image", new
+        {
+            instanceId, documentJson, expectedStateJson = SchematicJson.Formatter.Format(imageAfterCreate),
+            imageJson = SchematicJson.Formatter.Format(image), operationId = Guid.NewGuid().ToString("D")
+        });
+        RequireToolSuccess(imageUpdated);
+        var imageAfterUpdate = await State();
+        JsonElement imageDeleted = await mcp.Tool("kicad_schematic_delete_image", new
+        {
+            instanceId, documentJson, expectedStateJson = SchematicJson.Formatter.Format(imageAfterUpdate),
+            imageId = image.Id.Value, operationId = Guid.NewGuid().ToString("D")
+        });
+        RequireToolSuccess(imageDeleted);
+        Assert.IsFalse((await Read()).Data.Items.Any(item => item.Is(SchematicImage.Descriptor)
+            && item.Unpack<SchematicImage>().Id.Value == image.Id.Value), imageDeleted.GetRawText());
+        var titleChanged = await mcp.Tool("kicad_schematic_set_title_block", new
+        {
+            instanceId, documentJson, expectedStateJson = SchematicJson.Formatter.Format(await State()),
+            titleBlockJson = SchematicJson.Formatter.Format(new TitleBlockInfo { Title = "MCP setup title" }),
+            operationId = Guid.NewGuid().ToString("D")
+        });
+        RequireToolSuccess(titleChanged);
+        Assert.AreEqual("MCP setup title", (await client.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(
+            new() { Document = document }, token)).Title, titleChanged.GetRawText());
+        var pageChanged = await mcp.Tool("kicad_schematic_set_page_settings", new
+        {
+            instanceId, documentJson, expectedStateJson = SchematicJson.Formatter.Format(await State()),
+            pageSettingsJson = SchematicJson.Formatter.Format(new PageSettings { Orientation = PageOrientation.PoLandscape }),
+            operationId = Guid.NewGuid().ToString("D")
+        });
+        RequireToolSuccess(pageChanged);
+        Assert.AreEqual(PageOrientation.PoLandscape, (await client.InvokeAsync<GetPageSettings, PageSettings>(
+            new() { Document = document }, token)).Orientation, pageChanged.GetRawText());
+        await client.InvokeAsync<SaveDocument, Empty>(new() { Document = document }, token);
+        await client.InvokeAsync<RevertDocument, Empty>(new() { Document = document }, token);
+        Assert.AreEqual("MCP setup title", (await client.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(
+            new() { Document = document }, token)).Title);
+        Assert.AreEqual(PageOrientation.PoLandscape, (await client.InvokeAsync<GetPageSettings, PageSettings>(
+            new() { Document = document }, token)).Orientation);
+        await client.InvokeAsync<SetTitleBlockInfo, Empty>(new() { Document = document, TitleBlock = originalTitle }, token);
+        await client.InvokeAsync<SetPageSettings, PageSettings>(new() { Document = document, PageSettings = originalPage }, token);
+        await client.InvokeAsync<SaveDocument, Empty>(new() { Document = document }, token);
     }
 }

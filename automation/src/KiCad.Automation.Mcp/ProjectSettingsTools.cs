@@ -220,6 +220,7 @@ public sealed class ProjectSettingsTools(InstanceRegistry registry)
         // successful write advanced the document observation.
         Kiapi.Common.Project.TextVariables current = await client.InvokeAsync<GetTextVariables,
             Kiapi.Common.Project.TextVariables>(new() { Document = projectDocument }, cancellationToken);
+        ValidateTextVariableMap(current, "current");
         string expectedVariablesDigest = string.IsNullOrWhiteSpace(expectedVariablesSha256)
             ? Digest(current.Variables) : expectedVariablesSha256;
         if (expectedVariablesDigest.Length != 64 || !expectedVariablesDigest.All(char.IsAsciiHexDigitLower))
@@ -245,18 +246,21 @@ public sealed class ProjectSettingsTools(InstanceRegistry registry)
             throw new AutomationException("project_text_variables_mutation_unavailable",
                 "The connected native peer does not provide checked project text-variable mutation.");
         }
-        if (response.Project is null || !response.Project.Equals(projectDocument)
-            || response.Document is null || !response.Document.Equals(target)
-            || response.OperationId != operationId.ToString("D") || response.ProcessEpoch != session.Epoch
-            || response.BeforeVariablesSha256 != expectedVariablesDigest)
-            throw new AutomationException("invalid_project_text_variables_response",
-                "Native checked text-variable mutation did not preserve its project, document, operation or map identity.");
+        string normalizedOperationId = operationId.ToString("D");
+        ValidateTextVariableMutationResponse(response, projectDocument, target, normalizedOperationId,
+            session.Epoch, expectedVariablesDigest, variables, mergeMode);
         var structured = new
         {
             instanceId, processEpoch = session.Epoch, project = projectDocument, document = target,
             operationId = response.OperationId, committed = response.Committed, replayed = response.Replayed,
             rollbackCompleted = response.RollbackCompleted, beforeVariablesSha256 = response.BeforeVariablesSha256,
             afterVariablesSha256 = response.AfterVariablesSha256,
+            // Keep the owner admission digest under an explicit name as well as
+            // the historical beforeVariablesSha256 field. Callers can retain
+            // the exact digest used by the native project owner when replaying
+            // an operation after a lost MCP reply.
+            ownerDigest = response.BeforeVariablesSha256,
+            expectedVariablesSha256 = expectedVariablesDigest,
             revisionTracked = response.RevisionTracked, completeLifecycle = response.CompleteLifecycle,
             beforeVariables = response.BeforeVariables.Variables.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
             afterVariables = response.AfterVariables.Variables.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
@@ -264,6 +268,67 @@ public sealed class ProjectSettingsTools(InstanceRegistry registry)
         };
         return Data(structured, !response.Committed);
     });
+
+    private static void ValidateTextVariableMutationResponse(SetTextVariablesCheckedResponse response,
+        DocumentSpecifier project, DocumentSpecifier document, string operationId, string processEpoch,
+        string expectedVariablesDigest, IReadOnlyDictionary<string, string> requestedVariables, string mergeMode)
+    {
+        if (response.Project is null || !response.Project.Equals(project)
+            || response.Document is null || !response.Document.Equals(document)
+            || response.OperationId != operationId || response.ProcessEpoch != processEpoch
+            || response.BeforeVariablesSha256 != expectedVariablesDigest)
+            throw new AutomationException("invalid_project_text_variables_response",
+                "Native checked text-variable mutation did not preserve its project, document, operation or owner digest.");
+
+        ValidateTextVariableMap(response.BeforeVariables, "beforeVariables");
+        ValidateTextVariableMap(response.AfterVariables, "afterVariables");
+        string beforeDigest = Digest(response.BeforeVariables.Variables);
+        string afterDigest = Digest(response.AfterVariables.Variables);
+        if (beforeDigest != response.BeforeVariablesSha256 || !IsDigest(response.AfterVariablesSha256)
+            || afterDigest != response.AfterVariablesSha256)
+            throw new AutomationException("invalid_project_text_variables_response",
+                "Native checked text-variable mutation returned a map whose owner digest does not match its contents.");
+
+        var requestedAfter = mergeMode == "MMM_REPLACE"
+            ? new Dictionary<string, string>(StringComparer.Ordinal)
+            : response.BeforeVariables.Variables.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+        foreach (var pair in requestedVariables)
+            requestedAfter[pair.Key] = pair.Value;
+        if (response.Committed && (requestedAfter.Count != response.AfterVariables.Variables.Count
+                || requestedAfter.Any(pair => !response.AfterVariables.Variables.TryGetValue(pair.Key, out string? value)
+                    || !string.Equals(pair.Value, value, StringComparison.Ordinal))))
+            throw new AutomationException("invalid_project_text_variables_response",
+                "Native checked text-variable commit did not return the complete requested merge or replacement map.");
+
+        // A committed receipt is the only success state. Rollback is a
+        // failure-path fact; reporting both committed and rollbackCompleted
+        // would claim two incompatible outcomes. Replays must preserve the
+        // original successful outcome and cannot become a new failure.
+        if (response.Committed && response.RollbackCompleted)
+            throw new AutomationException("invalid_project_text_variables_response",
+                "Native checked text-variable mutation reported both commit and rollback completion.");
+        if (response.Committed && (!string.IsNullOrWhiteSpace(response.ErrorCode)
+                || !string.IsNullOrWhiteSpace(response.ErrorMessage)))
+            throw new AutomationException("invalid_project_text_variables_response",
+                "Native checked text-variable mutation reported an error alongside a committed receipt.");
+        if (response.Replayed && !response.Committed)
+            throw new AutomationException("invalid_project_text_variables_response",
+                "Native checked text-variable replay did not preserve its committed receipt.");
+        if (!response.Committed && string.IsNullOrWhiteSpace(response.ErrorCode))
+            throw new AutomationException("invalid_project_text_variables_response",
+                "Native checked text-variable failure did not include an error code.");
+    }
+
+    private static void ValidateTextVariableMap(Kiapi.Common.Project.TextVariables variables, string name)
+    {
+        if (variables is null || variables.Variables.Count > 4096
+            || variables.Variables.Keys.Any(string.IsNullOrWhiteSpace)
+            || variables.Variables.Values.Any(value => value is null || value.Contains('\0')))
+            throw new AutomationException("invalid_project_text_variables_response",
+                $"Native checked text-variable mutation returned an invalid {name} map.");
+    }
+
+    private static bool IsDigest(string value) => value.Length == 64 && value.All(char.IsAsciiHexDigitLower);
 
     private static string Digest(IReadOnlyDictionary<string, string> variables)
     {

@@ -117,7 +117,7 @@ public sealed class PcbDrcToolTests
                 "A malformed delete retry must fail before native dispatch.");
             Assert.AreEqual(5, transport.Calls);
             var valid = transport.State.Clone();
-            for (int variant = 0; variant < 12; ++variant)
+            for (int variant = 0; variant < 15; ++variant)
             {
                 transport.State = valid.Clone();
                 switch (variant)
@@ -148,6 +148,15 @@ public sealed class PcbDrcToolTests
                         transport.State.CancellationRequested = false;
                         transport.State.ErrorCode = "document_changed";
                         transport.State.ErrorMessage = "The live PCB changed while DRC was running";
+                        break;
+                    case 12:
+                        transport.State.JobId = "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA";
+                        break;
+                    case 13:
+                        transport.State.OperationId = "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB";
+                        break;
+                    case 14:
+                        transport.State.CheckedRevision.Epoch = "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC";
                         break;
                 }
                 Assert.IsTrue((await tool.Job(transport.Session.InstanceId, json, valid.JobId,
@@ -231,7 +240,7 @@ public sealed class PcbDrcToolTests
             Assert.IsFalse(result.IsError ?? false);
             Assert.AreEqual(state, SchematicJson.Parser.Parse<PcbDrcState>(((TextContentBlock)result.Content.Single()).Text));
             Assert.IsFalse(state.ResultsFreshnessKnown);
-            foreach (int variant in Enumerable.Range(0, 5))
+            foreach (int variant in Enumerable.Range(0, 6))
             {
                 transport.State = state.Clone();
                 switch (variant)
@@ -241,6 +250,7 @@ public sealed class PcbDrcToolTests
                     case 2: transport.State.Running = true; break;
                     case 3: transport.State.Findings[0].NativeId = "bad"; break;
                     case 4: transport.State.Findings.Add(transport.State.Findings[0].Clone()); break;
+                    case 5: transport.State.Revision.Epoch = "DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD"; break;
                 }
                 Assert.IsTrue((await tool.Read(transport.Session.InstanceId, json, default)).IsError);
             }

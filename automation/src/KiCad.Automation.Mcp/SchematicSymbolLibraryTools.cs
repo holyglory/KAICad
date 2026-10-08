@@ -24,9 +24,11 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
     private const int MaximumPins = 2048;
     private const int MaximumGraphics = 4096;
     private const int MaximumTextLength = 16 * 1024;
+    private const int MaximumMetadataEntries = 512;
+    private const int MaximumPinMapEntries = 4096;
 
     [McpServerTool(Name = "kicad_symbol_library_validate", ReadOnly = true),
-     Description("Validate one complete SchematicSymbol protobuf-JSON definition without contacting KiCad. libraryNickname is the explicit library identity and must match definition.id.libraryNickname. The deterministic result reports bounded item/field counts, pin identity/name/number/length/orientation checks, supported graphics Any types, unit/body-style references and a SHA-256 of canonical protobuf JSON. This is a managed read-only check; it does not resolve a library, mutate a file or claim native persistence."),
+     Description("Validate one complete SchematicSymbol protobuf-JSON definition without contacting KiCad. libraryNickname is the explicit library identity and must match definition.id.libraryNickname. The deterministic result reports bounded item/field counts, pin identity/name/number/length/orientation checks, named pin maps and associated footprint references, supported graphics Any types, unit/body-style references and a SHA-256 of canonical protobuf JSON. Pin maps may be sparse, and an empty associated map name uses native identity mapping; repeated symbol pin numbers and bracketed multi-pad entries are preserved. This is a managed read-only check; it does not resolve a footprint library, compare actual pad inventories, mutate a file or claim native persistence."),
      KiCadCapability("symbol-library", "compiled-mcp", "managed SchematicSymbol structure, pins, graphics Any types, units/body styles and canonical content SHA-256"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public CallToolResult Validate(string libraryNickname, string definitionJson,
@@ -503,6 +505,7 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
 
         var ids = new HashSet<string>(StringComparer.Ordinal);
         var pinIds = new HashSet<string>(StringComparer.Ordinal);
+        var pinNumbers = new HashSet<string>(StringComparer.Ordinal);
         int pins = 0, graphics = 0;
         for (int i = 0; i < definition.Items.Count; i++)
         {
@@ -536,7 +539,9 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
             if (child.Item.Is(SchematicPin.Descriptor))
             {
                 pins++;
-                ValidatePin(child.Item.Unpack<SchematicPin>(), path, pinIds, issues);
+                var pin = child.Item.Unpack<SchematicPin>();
+                if (!string.IsNullOrWhiteSpace(pin.Number)) pinNumbers.Add(pin.Number);
+                ValidatePin(pin, path, pinIds, issues);
             }
             else if (child.Item.Is(SchematicField.Descriptor))
                 ValidateUserField(child.Item.Unpack<SchematicField>(), path, issues);
@@ -559,6 +564,70 @@ public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
             if (name.Unit < 1 || name.Unit > definition.UnitCount || string.IsNullOrWhiteSpace(name.Name) || name.Name.Length > 255)
                 Issue(issues, "invalid_unit_display_name", $"unitDisplayNames[{i}]", "Unit display names must reference an existing unit and contain bounded text.");
         }
+
+        ValidatePinMapMetadata(definition.PinMaps, pinNumbers, issues, token);
+    }
+
+    private static void ValidatePinMapMetadata(SymbolPinMaps? maps,
+        HashSet<string> pinNumbers, List<SymbolValidationIssue> issues, CancellationToken token)
+    {
+        if (maps is null) return;
+            if (maps.PinMaps.Count > MaximumMetadataEntries)
+                Issue(issues, "too_many_pin_maps", "pinMaps.pinMaps", $"A symbol may contain at most {MaximumMetadataEntries} named pin maps.");
+            if (maps.AssociatedFootprints.Count > MaximumMetadataEntries)
+                Issue(issues, "too_many_associated_footprints", "pinMaps.associatedFootprints", $"A symbol may contain at most {MaximumMetadataEntries} associated footprints.");
+
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            var declaredMaps = new HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < maps.PinMaps.Count; i++)
+            {
+                token.ThrowIfCancellationRequested();
+                PinMap map = maps.PinMaps[i];
+                string mapPath = $"pinMaps.pinMaps[{i}]";
+                if (string.IsNullOrWhiteSpace(map.Name) || map.Name.Length > 255 || HasControl(map.Name))
+                    Issue(issues, "invalid_pin_map_name", mapPath + ".name", "Pin-map names must be bounded, nonempty text without control characters.");
+                else if (!names.Add(map.Name))
+                    Issue(issues, "duplicate_pin_map_name", mapPath + ".name", "Pin-map names must be distinct within one symbol.");
+                else
+                    declaredMaps.Add(map.Name);
+                if (map.Entries.Count > MaximumPinMapEntries)
+                    Issue(issues, "too_many_pin_map_entries", mapPath + ".entries", $"A pin map may contain at most {MaximumPinMapEntries} entries.");
+                var mapPins = new HashSet<string>(StringComparer.Ordinal);
+                for (int j = 0; j < map.Entries.Count; j++)
+                {
+                    token.ThrowIfCancellationRequested();
+                    PinMapEntry entry = map.Entries[j];
+                    string entryPath = $"{mapPath}.entries[{j}]";
+                    if (string.IsNullOrWhiteSpace(entry.PinNumber) || entry.PinNumber.Length > 255 || HasControl(entry.PinNumber))
+                        Issue(issues, "invalid_pin_map_pin", entryPath + ".pinNumber", "Pin-map entries require bounded, nonempty pin numbers without control characters.");
+                    else if (!mapPins.Add(entry.PinNumber))
+                        Issue(issues, "duplicate_pin_map_pin", entryPath + ".pinNumber", "A pin number may occur only once in one pin map.");
+                    else if (!pinNumbers.Contains(entry.PinNumber))
+                        Issue(issues, "unknown_pin_map_pin", entryPath + ".pinNumber", "Pin-map entries must reference a pin number declared by the symbol.");
+                    if (string.IsNullOrWhiteSpace(entry.PadNumber) || entry.PadNumber.Length > 255 || HasControl(entry.PadNumber))
+                        Issue(issues, "invalid_pin_map_pad", entryPath + ".padNumber", "Pin-map entries require bounded, nonempty pad numbers without control characters.");
+                }
+            }
+
+            var associated = new HashSet<(string Library, string Entry, string Map)>();
+            for (int i = 0; i < maps.AssociatedFootprints.Count; i++)
+            {
+                token.ThrowIfCancellationRequested();
+                AssociatedFootprint item = maps.AssociatedFootprints[i];
+                string path = $"pinMaps.associatedFootprints[{i}]";
+                if (item.Footprint is null || string.IsNullOrWhiteSpace(item.Footprint.LibraryNickname)
+                    || string.IsNullOrWhiteSpace(item.Footprint.EntryName) || item.Footprint.LibraryNickname.Length > 255
+                    || item.Footprint.EntryName.Length > 255 || item.Footprint.LibraryNickname.Contains(':')
+                    || item.Footprint.EntryName.Contains(':') || HasControl(item.Footprint.LibraryNickname)
+                    || HasControl(item.Footprint.EntryName))
+                    Issue(issues, "invalid_associated_footprint", path + ".footprint", "Associated footprints require an explicit bounded library and entry identity without separators or control characters.");
+                string mapName = item.MapName;
+                if (mapName.Length != 0 && !declaredMaps.Contains(mapName))
+                    Issue(issues, "unknown_associated_pin_map", path + ".mapName", "An associated footprint mapName must reference a declared pin map.");
+                var key = (item.Footprint?.LibraryNickname ?? "", item.Footprint?.EntryName ?? "", mapName);
+                if (!associated.Add(key))
+                    Issue(issues, "duplicate_associated_footprint", path, "Associated footprint/library-map pairs must be distinct.");
+            }
     }
 
     private static void ValidatePin(SchematicPin pin, string path,

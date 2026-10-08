@@ -75,6 +75,7 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_schematic_export_ps");
             CollectionAssert.Contains(names, "kicad_schematic_export_netlist");
             CollectionAssert.Contains(names, "kicad_schematic_export_bom");
+            CollectionAssert.Contains(names, "kicad_schematic_export_receipt");
             CollectionAssert.Contains(names, "kicad_pcb_zone_read");
             CollectionAssert.Contains(names, "kicad_pcb_zone_create");
             CollectionAssert.Contains(names, "kicad_pcb_zone_update");
@@ -203,6 +204,14 @@ public sealed class McpProcessTests
             Assert.AreEqual("invalid_schematic_export_target",
                 invalidSchematicExportBom.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(),
                 invalidSchematicExportBom.GetRawText());
+            JsonElement missingSchematicExportReceipt = await Request(90918, "tools/call", new
+            { name = "kicad_schematic_export_receipt", arguments = new
+                { instanceId = unknownInstance, operationId = unknownOperation, processEpoch = Guid.NewGuid().ToString("D") } });
+            Assert.IsFalse(missingSchematicExportReceipt.GetProperty("result")
+                .TryGetProperty("isError", out var receiptError) && receiptError.GetBoolean(),
+                missingSchematicExportReceipt.GetRawText());
+            Assert.IsFalse(missingSchematicExportReceipt.GetProperty("result").GetProperty("structuredContent")
+                .GetProperty("found").GetBoolean(), missingSchematicExportReceipt.GetRawText());
 
             // Export admission must distinguish an absent/malformed job target from a malformed
             // lifecycle observation before it ever looks up an instance or reaches native KiCad.

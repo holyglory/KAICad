@@ -1,5 +1,7 @@
 using System.ComponentModel;
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Google.Protobuf;
 using Kiapi.Common.Types;
@@ -15,63 +17,88 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class SchematicJobTools(InstanceRegistry registry)
 {
+    private static readonly ConcurrentDictionary<string, ExportReceipt> Receipts = new(StringComparer.Ordinal);
+
     [McpServerTool(Name = "kicad_schematic_export_svg", ReadOnly = false),
      Description("Export an explicitly identified schematic to SVG through KiCad's native schematic job handler. requestJson is RunSchematicJobExportSvg protobuf JSON with an absolute output path and explicit schematic root; expectedStateJson is the matching lifecycle observation used for admission and post-export verification. Returns bounded output paths, byte counts and SHA-256 hashes; the schematic is never mutated."),
      KiCadCapability("schematic-manufacturing", "compiled-mcp plus native-schematic-job", "explicit schematic root, lifecycle state and hashed SVG output manifest"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> ExportSvg(string instanceId, string requestJson, string expectedStateJson,
-        CancellationToken cancellationToken) =>
+        CancellationToken cancellationToken, string? operationId = null) =>
         ExportJob<RunSchematicJobExportSvg>(instanceId, requestJson, expectedStateJson, "svg",
-            request => request.JobSettings, outputIsDirectory: true, cancellationToken);
+            request => request.JobSettings, outputIsDirectory: true, operationId, cancellationToken);
 
     [McpServerTool(Name = "kicad_schematic_export_dxf", ReadOnly = false),
      Description("Export an explicitly identified schematic to DXF through KiCad's native schematic job handler. requestJson is RunSchematicJobExportDxf protobuf JSON with an absolute output path and explicit schematic root; expectedStateJson is the matching lifecycle observation used for admission and post-export verification. Returns bounded output paths, byte counts and SHA-256 hashes; the schematic is never mutated."),
      KiCadCapability("schematic-manufacturing", "compiled-mcp plus native-schematic-job", "explicit schematic root, lifecycle state and hashed DXF output manifest"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> ExportDxf(string instanceId, string requestJson, string expectedStateJson,
-        CancellationToken cancellationToken) =>
+        CancellationToken cancellationToken, string? operationId = null) =>
         ExportJob<RunSchematicJobExportDxf>(instanceId, requestJson, expectedStateJson, "dxf",
-            request => request.JobSettings, outputIsDirectory: true, cancellationToken);
+            request => request.JobSettings, outputIsDirectory: true, operationId, cancellationToken);
 
     [McpServerTool(Name = "kicad_schematic_export_pdf", ReadOnly = false),
      Description("Export an explicitly identified schematic to PDF through KiCad's native schematic job handler. requestJson is RunSchematicJobExportPdf protobuf JSON with an absolute output path and explicit schematic root; expectedStateJson is the matching lifecycle observation used for admission and post-export verification. Returns bounded output paths, byte counts and SHA-256 hashes; the schematic is never mutated."),
      KiCadCapability("schematic-manufacturing", "compiled-mcp plus native-schematic-job", "explicit schematic root, lifecycle state and hashed PDF output manifest"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> ExportPdf(string instanceId, string requestJson, string expectedStateJson,
-        CancellationToken cancellationToken) =>
+        CancellationToken cancellationToken, string? operationId = null) =>
         ExportJob<RunSchematicJobExportPdf>(instanceId, requestJson, expectedStateJson, "pdf",
-            request => request.JobSettings, outputIsDirectory: false, cancellationToken);
+            request => request.JobSettings, outputIsDirectory: false, operationId, cancellationToken);
 
     [McpServerTool(Name = "kicad_schematic_export_ps", ReadOnly = false),
      Description("Export an explicitly identified schematic to PostScript through KiCad's native schematic job handler. requestJson is RunSchematicJobExportPs protobuf JSON with an absolute output path and explicit schematic root; expectedStateJson is the matching lifecycle observation used for admission and post-export verification. Returns bounded output paths, byte counts and SHA-256 hashes; the schematic is never mutated."),
      KiCadCapability("schematic-manufacturing", "compiled-mcp plus native-schematic-job", "explicit schematic root, lifecycle state and hashed PostScript output manifest"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> ExportPs(string instanceId, string requestJson, string expectedStateJson,
-        CancellationToken cancellationToken) =>
+        CancellationToken cancellationToken, string? operationId = null) =>
         ExportJob<RunSchematicJobExportPs>(instanceId, requestJson, expectedStateJson, "ps",
-            request => request.JobSettings, outputIsDirectory: true, cancellationToken);
+            request => request.JobSettings, outputIsDirectory: true, operationId, cancellationToken);
 
     [McpServerTool(Name = "kicad_schematic_export_netlist", ReadOnly = false),
      Description("Export an explicitly identified schematic netlist through KiCad's native schematic job handler. requestJson is RunSchematicJobExportNetlist protobuf JSON with a valid SchematicNetlistFormat, absolute output path and explicit schematic root; expectedStateJson is the matching lifecycle observation used for admission and post-export verification. Returns bounded output paths, byte counts and SHA-256 hashes; the schematic is never mutated."),
      KiCadCapability("schematic-manufacturing", "compiled-mcp plus native-schematic-job", "explicit schematic root, lifecycle state and hashed netlist output manifest"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> ExportNetlist(string instanceId, string requestJson, string expectedStateJson,
-        CancellationToken cancellationToken) =>
+        CancellationToken cancellationToken, string? operationId = null) =>
         ExportJob<RunSchematicJobExportNetlist>(instanceId, requestJson, expectedStateJson, "netlist",
-            request => request.JobSettings, outputIsDirectory: false, cancellationToken);
+            request => request.JobSettings, outputIsDirectory: false, operationId, cancellationToken);
 
     [McpServerTool(Name = "kicad_schematic_export_bom", ReadOnly = false),
      Description("Export an explicitly identified schematic bill of materials through KiCad's native schematic job handler. requestJson is RunSchematicJobExportBOM protobuf JSON with an absolute output path, explicit schematic root and optional format/field, variant, grouping and do-not-populate settings; expectedStateJson is the matching lifecycle observation used for admission and post-export verification. Returns bounded output paths, byte counts and SHA-256 hashes; the schematic is never mutated."),
      KiCadCapability("schematic-manufacturing", "compiled-mcp plus native-schematic-job", "explicit schematic root, lifecycle state and hashed BOM output manifest"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> ExportBom(string instanceId, string requestJson, string expectedStateJson,
-        CancellationToken cancellationToken) =>
+        CancellationToken cancellationToken, string? operationId = null) =>
         ExportJob<RunSchematicJobExportBOM>(instanceId, requestJson, expectedStateJson, "bom",
-            request => request.JobSettings, outputIsDirectory: false, cancellationToken);
+            request => request.JobSettings, outputIsDirectory: false, operationId, cancellationToken);
+
+    [McpServerTool(Name = "kicad_schematic_export_receipt", ReadOnly = true),
+     Description("Read an MCP-process schematic export receipt by operation ID without contacting KiCad. A missing receipt is found=false with unknown-native-outcome; receipts do not survive MCP restart and never authorize an automatic retry."),
+     KiCadCapability("schematic-manufacturing", "mcp-process-receipt", "operation ID, instance identity and process epoch")]
+    public Task<CallToolResult> Receipt(string instanceId, string operationId, string processEpoch,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!Guid.TryParseExact(operationId, "D", out var id) || id == Guid.Empty
+            || !string.Equals(operationId, id.ToString("D"), StringComparison.Ordinal))
+            return Task.FromResult(Error("invalid_operation_id", "operationId must be a canonical UUID."));
+        if (!Guid.TryParseExact(processEpoch, "D", out var epoch) || epoch == Guid.Empty
+            || !string.Equals(processEpoch, epoch.ToString("D"), StringComparison.Ordinal))
+            return Task.FromResult(Error("invalid_process_epoch", "processEpoch must be a canonical UUID."));
+        string key = ReceiptKey(instanceId, operationId);
+        if (!Receipts.TryGetValue(key, out var receipt))
+            return Task.FromResult(Data(new { instanceId, processEpoch, operationId, found = false,
+                receiptScope = "mcp-process", retrySafety = "unknown-native-outcome" }));
+        if (!string.Equals(receipt.ProcessEpoch, processEpoch, StringComparison.Ordinal))
+            return Task.FromResult(Error("stale_process_epoch", "The receipt belongs to another native process epoch."));
+        return Task.FromResult(Data(new { instanceId, processEpoch, operationId, found = true,
+            receiptScope = "mcp-process", replayableWithinProcess = true, receipt = receipt.Result }));
+    }
 
     private async Task<CallToolResult> ExportJob<TRequest>(string instanceId, string requestJson,
         string expectedStateJson, string jobKind, Func<TRequest, RunJobSettings?> settings,
-        bool outputIsDirectory, CancellationToken cancellationToken)
+        bool outputIsDirectory, string? operationId, CancellationToken cancellationToken)
         where TRequest : class, IMessage<TRequest>, new()
     {
         bool nativeDispatchStarted = false;
@@ -79,6 +106,24 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
+            string? canonicalOperationId = null;
+            if (!string.IsNullOrWhiteSpace(operationId))
+            {
+                if (!Guid.TryParseExact(operationId, "D", out var parsed) || parsed == Guid.Empty
+                    || !string.Equals(operationId, parsed.ToString("D"), StringComparison.Ordinal))
+                    throw new AutomationException("invalid_operation_id", "operationId must be a canonical UUID.");
+                canonicalOperationId = parsed.ToString("D");
+            }
+            string fingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+                instanceId + "\n" + jobKind + "\n" + requestJson + "\n" + expectedStateJson)));
+            string? receiptKey = canonicalOperationId is null ? null : ReceiptKey(instanceId, canonicalOperationId);
+            if (receiptKey is not null && Receipts.TryGetValue(receiptKey, out var prior))
+            {
+                if (!string.Equals(prior.Fingerprint, fingerprint, StringComparison.Ordinal))
+                    throw new AutomationException("operation_id_reused", "The operation ID is already bound to a different schematic export request.");
+                return new CallToolResult { StructuredContent = prior.Result,
+                    Content = [new TextContentBlock { Text = prior.Result.GetRawText() }] };
+            }
             TRequest request;
             try { request = JsonParser.Default.Parse<TRequest>(requestJson); }
             catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException or InvalidOperationException)
@@ -143,10 +188,14 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
                 beforeState = SchematicJson.Formatter.Format(before), afterState = SchematicJson.Formatter.Format(after),
                 outputs, nativeJob = true, boardMutation = false, schematicMutation = false,
                 nativeDispatch = true, dispatchOutcome = "confirmed", outputVerification = "complete",
+                operationId = canonicalOperationId, receiptScope = canonicalOperationId is null ? null : "mcp-process",
                 outcome = "completed"
             });
-            return new CallToolResult { StructuredContent = structured,
+            var completed = new CallToolResult { StructuredContent = structured,
                 Content = [new TextContentBlock { Text = structured.GetRawText() }] };
+            if (receiptKey is not null)
+                Receipts.TryAdd(receiptKey, new(fingerprint, session.Epoch, structured));
+            return completed;
         }
         catch (Exception error) when (error is AutomationException or NativeApiException or NngException
             or IOException or UnauthorizedAccessException or ArgumentException or InvalidProtocolBufferException
@@ -291,6 +340,25 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
 
     private static bool PathEquals(string left, string right) =>
         string.Equals(left, right, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+
+    private static string ReceiptKey(string instanceId, string operationId) => instanceId + "\n" + operationId;
+
+    private sealed record ExportReceipt(string Fingerprint, string ProcessEpoch, JsonElement Result);
+
+    private static CallToolResult Data(object value)
+    {
+        JsonElement structured = JsonSerializer.SerializeToElement(value,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        return new CallToolResult { StructuredContent = structured,
+            Content = [new TextContentBlock { Text = structured.GetRawText() }] };
+    }
+
+    private static CallToolResult Error(string code, string message)
+    {
+        JsonElement structured = JsonSerializer.SerializeToElement(new { errorCode = code, errorMessage = message });
+        return new CallToolResult { IsError = true, StructuredContent = structured,
+            Content = [new TextContentBlock { Text = structured.GetRawText() }] };
+    }
 
     private static async Task<CallToolResult> Execute(Func<Task<CallToolResult>> operation)
     {

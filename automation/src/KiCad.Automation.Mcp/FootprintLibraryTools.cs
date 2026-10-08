@@ -438,6 +438,106 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
             });
         }));
 
+    [McpServerTool(Name = "kicad_footprint_library_write_checked"),
+     Description("Write one complete FootprintInstance into an explicitly identified direct KiCad .pretty library entry. expectedStateJson and expectedSnapshotSha256 must come from kicad_library_snapshot_read; the native owner locks the table and every sibling .kicad_mod baseline, verifies persisted readback and retains rollback evidence. The operation UUID is exact-replay safe; unsupported providers or incomplete definitions are refused before the writer.")]
+    public Task<CallToolResult> WriteChecked(string instanceId, string expectedProcessEpoch,
+        string documentJson, string footprintJson, string operationId, string expectedSnapshotSha256,
+        string expectedStateJson, CancellationToken cancellationToken, bool overwrite = true) =>
+        Execute(async () =>
+        {
+            ValidateOperationId(operationId);
+            ValidateEpoch(expectedProcessEpoch);
+            if (expectedSnapshotSha256.Length != 64 || !expectedSnapshotSha256.All(char.IsAsciiHexDigitLower))
+                throw new AutomationException("invalid_library_snapshot", "expectedSnapshotSha256 must be a lowercase complete snapshot digest.");
+            DocumentSpecifier document = ParseFootprintDocument(documentJson);
+            if (string.IsNullOrWhiteSpace(expectedStateJson))
+                throw new AutomationException("invalid_library_snapshot", "expectedStateJson is required for checked footprint mutation.");
+            NativeCapabilityFootprintLibraryCheckedState expectedState;
+            try { expectedState = SchematicJson.Parser.Parse<NativeCapabilityFootprintLibraryCheckedState>(expectedStateJson); }
+            catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException)
+            { throw new AutomationException("invalid_library_snapshot", "expectedStateJson is not valid checked footprint-library state: " + error.Message); }
+            if (expectedState.StateSha256 != expectedSnapshotSha256)
+                throw new AutomationException("stale_library_state", "expectedSnapshotSha256 must match the complete checked state digest.");
+            FootprintInstance footprint;
+            try { footprint = BoardJson.Parser.Parse<FootprintInstance>(footprintJson); }
+            catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException)
+            { throw new AutomationException("invalid_footprint_definition", "footprintJson is not valid FootprintInstance protobuf JSON: " + error.Message); }
+            if (footprint.Definition?.Id is null
+                || footprint.Definition.Id.LibraryNickname != document.LibId.LibraryNickname
+                || footprint.Definition.Id.EntryName != document.LibId.EntryName)
+                throw new AutomationException("footprint_library_definition_mismatch", "The footprint definition identity must match the requested document.");
+
+            NativeClient client = registry.Client(instanceId);
+            AutomationSession session = await client.HandshakeAsync(cancellationToken);
+            if (session.Epoch != expectedProcessEpoch)
+                throw new AutomationException("stale_process_epoch", "The expected process epoch is stale; inspect the instance again.");
+            NativeCapabilityFootprintLibraryCheckedWriteResponse response = await client.InvokeAsync<
+                NativeCapabilityFootprintLibraryCheckedWrite, NativeCapabilityFootprintLibraryCheckedWriteResponse>(new()
+                {
+                    Document = document, ProcessEpoch = session.Epoch, OperationId = operationId,
+                    ExpectedSnapshotSha256 = expectedSnapshotSha256, Footprint = footprint,
+                    Overwrite = overwrite, ExpectedState = expectedState
+                }, cancellationToken);
+            NativeCapabilityFootprintLibraryCheckedWrite expectedRequest = new()
+            {
+                Document = document.Clone(), ProcessEpoch = session.Epoch, OperationId = operationId,
+                ExpectedSnapshotSha256 = expectedSnapshotSha256, Footprint = footprint.Clone(),
+                Overwrite = overwrite, ExpectedState = expectedState.Clone()
+            };
+            FootprintLibraryCheckedContract.ValidateResponse(response, expectedRequest);
+            return Data(new
+            {
+                instanceId, processEpoch = session.Epoch, document, operationId,
+                status = response.Status, committed = response.Committed, replayed = response.Replayed,
+                rollbackCompleted = response.RollbackCompleted, revisionTracked = response.RevisionTracked,
+                completeLifecycle = response.CompleteLifecycle, beforeSnapshotSha256 = response.BeforeSnapshotSha256,
+                afterSnapshotSha256 = response.AfterSnapshotSha256, errorCode = response.ErrorCode,
+                errorMessage = response.ErrorMessage, nativeReceiptAvailable = true, receiptVerified = true,
+                persistenceVerified = response.Committed, requestFingerprintSha256 = response.RequestFingerprintSha256,
+                expectedRequestVerified = response.ExpectedRequestVerified, nativeWriteStarted = response.NativeWriteStarted,
+                postverified = response.Postverified, targetVerified = response.TargetVerified,
+                unrelatedEntriesVerified = response.UnrelatedEntriesVerified, rollbackAttempted = response.RollbackAttempted,
+                receiptStatus = response.ReceiptStatus.ToString(), scope = response.Scope,
+                beforeRevision = response.ObservedBefore?.Revision, afterRevision = response.ObservedAfter?.Revision,
+                rollbackRevision = response.ObservedRollback?.Revision,
+                persistenceSource = response.Committed ? "native-footprint-lifecycle-receipt" : null,
+                transportRetrySafe = !response.Committed || response.Replayed
+            }, !response.Committed || !string.IsNullOrEmpty(response.ErrorCode));
+        });
+
+    [McpServerTool(Name = "kicad_footprint_library_checked_receipt", ReadOnly = true),
+     Description("Read one exact process-owned checked footprint-library receipt after a lost reply or MCP reconnect. The original request, document, process epoch and operation identity must match; lookup never dispatches a writer.")]
+    public Task<CallToolResult> CheckedReceipt(string instanceId, string expectedProcessEpoch,
+        string documentJson, string operationId, string expectedRequestJson,
+        CancellationToken cancellationToken) => Execute(async () =>
+        {
+            ValidateOperationId(operationId); ValidateEpoch(expectedProcessEpoch);
+            DocumentSpecifier document = ParseFootprintDocument(documentJson);
+            NativeCapabilityFootprintLibraryCheckedWrite expectedRequest;
+            try { expectedRequest = SchematicJson.Parser.Parse<NativeCapabilityFootprintLibraryCheckedWrite>(expectedRequestJson); }
+            catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException)
+            { throw new AutomationException("invalid_library_request", "expectedRequestJson is not valid checked footprint request: " + error.Message); }
+            if (!expectedRequest.Document.Equals(document) || expectedRequest.ProcessEpoch != expectedProcessEpoch
+                || expectedRequest.OperationId != operationId)
+                throw new AutomationException("invalid_library_request", "expectedRequestJson must retain the same document, process epoch and operation UUID.");
+            NativeClient client = registry.Client(instanceId);
+            AutomationSession session = await client.HandshakeAsync(cancellationToken);
+            NativeCapabilityFootprintLibraryCheckedReadOperationResponse response = await client.InvokeAsync<
+                NativeCapabilityFootprintLibraryCheckedReadOperation, NativeCapabilityFootprintLibraryCheckedReadOperationResponse>(new()
+                {
+                    Document = document, ProcessEpoch = session.Epoch, OperationId = operationId,
+                    ExpectedRequest = expectedRequest
+                }, cancellationToken);
+            if (response.Found)
+                FootprintLibraryCheckedContract.ValidateResponse(response.Receipt, expectedRequest);
+            return Data(new
+            {
+                instanceId, processEpoch = session.Epoch, operationId, found = response.Found,
+                receipt = response.Found ? JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(response.Receipt)) : (JsonElement?)null,
+                nativeReceiptAvailable = response.Found, retryDispatched = false
+            });
+        });
+
     [McpServerTool(Name = "kicad_footprint_revert"),
      Description("Revert the explicitly identified footprint in the attached native footprint editor to its library copy. documentJson must identify the open footprint; expectedProcessEpoch pins the request; operationId correlates it. The MCP process retains an exact replay receipt and KiCad retains a process-owned receipt that kicad_footprint_receipt can read after an MCP reconnect. The native command has no lifecycle revision snapshot, so a lost reply is indeterminate until reconciled. This can discard unsaved editor changes."),
      KiCadCapability("footprint-library", "compiled-mcp plus native-footprint-api", "explicit footprint document, process epoch, operation ID, native process receipt; no lifecycle revision token"),
@@ -799,6 +899,13 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
             new JsonSerializerOptions(JsonSerializerDefaults.Web));
         return new() { StructuredContent = structured,
             Content = [new TextContentBlock { Text = structured.GetRawText() }] };
+    }
+
+    private static CallToolResult Data(object value, bool isError)
+    {
+        CallToolResult result = Data(value);
+        result.IsError = isError;
+        return result;
     }
 
     private static CallToolResult Failure(string code, string message)

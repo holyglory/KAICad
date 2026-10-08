@@ -23,6 +23,7 @@
 
 #include <api/api_handler_board.h>
 #include <api/footprint_context.h>
+#include <api/library_lifecycle_snapshot.h>
 #include <api/common/commands/project_commands.pb.h>
 #include <api/common/commands/automation_commands.pb.h>
 #include <api/common/commands/footprint_definition_commands.pb.h>
@@ -70,6 +71,14 @@ private:
             handleReadLibraryOperation(
                     const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityFootprintLibraryReadOperation>& aCtx );
 
+    HANDLER_RESULT<kiapi::automation::v1::NativeCapabilityFootprintLibraryCheckedWriteResponse>
+            handleCheckedWriteLibraryFootprint(
+                    const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityFootprintLibraryCheckedWrite>& aCtx );
+
+    HANDLER_RESULT<kiapi::automation::v1::NativeCapabilityFootprintLibraryCheckedReadOperationResponse>
+            handleReadCheckedLibraryOperation(
+                    const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityFootprintLibraryCheckedReadOperation>& aCtx );
+
     HANDLER_RESULT<kiapi::automation::v1::NativeCapabilityFootprintReadDefinitionResponse>
             handleReadDefinition(
                     const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityFootprintReadDefinition>& aCtx );
@@ -80,6 +89,9 @@ private:
 
     HANDLER_RESULT<commands::GetItemsResponse> handleGetItems(
             const HANDLER_CONTEXT<commands::GetItems>& aCtx );
+
+    kiapi::automation::v1::NativeCapabilityFootprintLibraryCheckedState footprintLibraryCheckpoint(
+            const LIBRARY_LIFECYCLE_SNAPSHOT& aSnapshot, bool aAdvanceRevision = false );
 
 protected:
     kiapi::common::types::DocumentType thisDocumentType() const override
@@ -118,6 +130,15 @@ private:
     std::map<std::string, std::string> m_libraryOperationFingerprints;
     std::map<std::string, kiapi::automation::v1::NativeCapabilityFootprintLibraryDeleteResponse>
             m_libraryDeleteReceipts;
+    std::map<std::string, kiapi::automation::v1::NativeCapabilityFootprintLibraryCheckedWriteResponse>
+            m_checkedLibraryReceipts;
+    struct FOOTPRINT_LIBRARY_REVISION
+    {
+        std::string epoch;
+        uint64_t sequence = 1;
+        std::string contentDigest;
+    };
+    std::map<std::string, FOOTPRINT_LIBRARY_REVISION> m_libraryRevisions;
 };
 
 

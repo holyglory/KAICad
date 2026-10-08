@@ -1484,6 +1484,7 @@ message NativeCapabilityLibrarySnapshotReadResponse {
   bool complete_change_tracking = 20;
   bool postverify = 21;
   NativeCapabilitySymbolLibraryCheckedState checked_state = 22;
+  NativeCapabilityFootprintLibraryCheckedState footprint_checked_state = 23;
 }
 
 // Process-owned footprint editor receipts. The native editor retains these
@@ -1537,6 +1538,94 @@ message NativeCapabilityFootprintLibraryReadOperationResponse {
   string operation_id = 1;
   bool found = 2;
   NativeCapabilityFootprintLibraryDeleteResponse delete_response = 3;
+}
+
+// Checked direct KiCad footprint-file mutation.  The request is admitted only
+// from a complete project-bound snapshot and retains the exact request for
+// replay/reconciliation.  The native owner currently covers the direct
+// .pretty/.kicad_mod provider; other providers return an explicit refusal.
+message NativeCapabilityFootprintLibraryCheckedWrite {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string process_epoch = 2;
+  string operation_id = 3;
+  string expected_snapshot_sha256 = 4;
+  kiapi.board.types.FootprintInstance footprint = 5;
+  bool overwrite = 6;
+  NativeCapabilityFootprintLibraryCheckedState expected_state = 7;
+}
+
+message NativeCapabilityFootprintLibraryCheckedState {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string process_epoch = 2;
+  DocumentRevision revision = 3;
+  string scope = 4;
+  string state_sha256 = 5;
+  string table_path = 6;
+  string table_scope = 7;
+  string raw_uri = 8;
+  string expanded_uri = 9;
+  string provider = 10;
+  string provider_options = 11;
+  repeated NativeCapabilityLibrarySnapshotDependencyBaseline dependency_baselines = 12;
+  bool entry_exists = 13;
+  string detached_definition_sha256 = 14;
+  bool state_complete = 15;
+  bool disk_baseline_checked = 16;
+  bool complete_change_tracking = 17;
+}
+
+enum NativeCapabilityFootprintLibraryCheckedReceiptStatus {
+  NCP_FLCS_UNKNOWN = 0;
+  NCP_FLCS_REJECTED = 1;
+  NCP_FLCS_COMMITTED_POSTVERIFIED = 2;
+  NCP_FLCS_ROLLED_BACK_VERIFIED = 3;
+  NCP_FLCS_INDETERMINATE = 4;
+  NCP_FLCS_UNAVAILABLE = 5;
+  NCP_FLCS_NOT_FOUND = 6;
+}
+
+message NativeCapabilityFootprintLibraryCheckedWriteResponse {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string process_epoch = 2;
+  string operation_id = 3;
+  string status = 4;
+  string error_code = 5;
+  string error_message = 6;
+  bool committed = 7;
+  bool replayed = 8;
+  bool rollback_completed = 9;
+  bool revision_tracked = 10;
+  bool complete_lifecycle = 11;
+  string before_snapshot_sha256 = 12;
+  string after_snapshot_sha256 = 13;
+  NativeCapabilityFootprintLibraryCheckedReceiptStatus receipt_status = 14;
+  string scope = 15;
+  string request_fingerprint_sha256 = 16;
+  bool expected_request_verified = 17;
+  bool native_write_started = 18;
+  bool postverified = 19;
+  bool target_verified = 20;
+  bool unrelated_entries_verified = 21;
+  bool rollback_attempted = 22;
+  NativeCapabilityFootprintLibraryCheckedState observed_before = 23;
+  NativeCapabilityFootprintLibraryCheckedState observed_after = 24;
+  NativeCapabilityFootprintLibraryCheckedState observed_rollback = 25;
+  bool complete_change_tracking = 26;
+  NativeCapabilityFootprintLibraryCheckedWrite request = 27;
+  string before_definition_sha256 = 28;
+  string after_definition_sha256 = 29;
+}
+
+message NativeCapabilityFootprintLibraryCheckedReadOperation {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string process_epoch = 2;
+  string operation_id = 3;
+  NativeCapabilityFootprintLibraryCheckedWrite expected_request = 4;
+}
+
+message NativeCapabilityFootprintLibraryCheckedReadOperationResponse {
+  bool found = 1;
+  NativeCapabilityFootprintLibraryCheckedWriteResponse receipt = 2;
 }
 
 // Persistent, preview-only native PNS route sessions. The operation ID is the

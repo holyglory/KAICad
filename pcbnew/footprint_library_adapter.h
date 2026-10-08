@@ -105,7 +105,29 @@ public:
     tl::expected<LIBRARY_LIFECYCLE_SNAPSHOT, LIBRARY_LIFECYCLE_ERROR> CaptureLibrarySnapshot(
             const wxString& aNickname, const wxString& aName,
             const kiapi::common::types::DocumentSpecifier& aDocument,
-            const PROJECT& aProject );
+            const PROJECT& aProject, bool aAllowMissingEntry = false );
+
+    struct CHECKED_WRITE_RESULT
+    {
+        bool writeStarted = false;
+        bool committed = false;
+        bool postverified = false;
+        bool targetVerified = false;
+        bool unrelatedEntriesVerified = false;
+        bool rollbackAttempted = false;
+        bool rollbackVerified = false;
+        std::vector<FILE_CONTENT_BASELINE> afterBaselines;
+        std::vector<FILE_CONTENT_BASELINE> rollbackBaselines;
+        std::string beforeDefinition;
+        std::string afterDefinition;
+        std::string rollbackDefinition;
+        std::string errorCode;
+        std::string errorMessage;
+    };
+
+    CHECKED_WRITE_RESULT SaveFootprintChecked(
+            const LIBRARY_LIFECYCLE_SNAPSHOT& aExpected, const PROJECT& aProject,
+            const FOOTPRINT* aFootprint, bool aOverwrite );
 
     bool FootprintExists( const wxString& aNickname, const wxString& aName );
 

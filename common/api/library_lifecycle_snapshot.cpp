@@ -189,7 +189,8 @@ LIBRARY_LIFECYCLE_RESULT ValidateLibraryLifecycleSnapshot(
             || !aSnapshot.diskBaselineChecked
             || ( aSnapshot.detachedDefinition.empty()
                  && !( isSymbol && aSnapshot.mcpDirectSymbolFile && !aSnapshot.entryExists
-                        && !aSnapshot.rawLibraryContents.empty() ) )
+                        && !aSnapshot.rawLibraryContents.empty() )
+                 && !( isFootprint && aSnapshot.mcpDirectFootprintFile && !aSnapshot.entryExists ) )
             || aSnapshot.dependencyBaselines.empty() )
     {
         return Error( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_SNAPSHOT,
@@ -223,14 +224,22 @@ LIBRARY_LIFECYCLE_RESULT ValidateLibraryLifecycleSnapshot(
         const bool isTable = FILE_CONTENT_BASELINE::SamePath( baseline.Path(), aSnapshot.tablePath );
         const bool isLibrary = FILE_CONTENT_BASELINE::SamePath( baseline.Path(), aSnapshot.expandedUri );
 
-        if( ( isTable || isLibrary ) && !baseline.Exists() )
+        if( isTable && !baseline.Exists() )
         {
             return Error( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_BASELINE,
                           "the table and expanded library URI each need an existing content baseline" );
         }
 
+        if( isLibrary && !baseline.Exists()
+                && !( isFootprint && aSnapshot.mcpDirectFootprintFile && !aSnapshot.entryExists ) )
+        {
+            return Error( LIBRARY_LIFECYCLE_ERROR_CODE::INCOMPLETE_BASELINE,
+                          "the expanded library URI needs an existing content baseline unless this is an admitted new footprint entry" );
+        }
+
         hasTableBaseline = hasTableBaseline || ( isTable && baseline.Exists() );
-        hasLibraryBaseline = hasLibraryBaseline || ( isLibrary && baseline.Exists() );
+        hasLibraryBaseline = hasLibraryBaseline || ( isLibrary && ( baseline.Exists()
+                || ( isFootprint && aSnapshot.mcpDirectFootprintFile && !aSnapshot.entryExists ) ) );
 
         if( baseline.Exists() && !IsSha256( baseline.Sha256() ) )
         {
@@ -277,9 +286,14 @@ LIBRARY_LIFECYCLE_RESULT AdmitLibraryLifecycleMutation(
     // into a general library mutation permission.  The checked MCP lane is a deliberately narrow
     // exception: it is admitted only for a direct KiCad symbol file whose complete dependency
     // baselines and rollback bytes were captured by the same native owner.
-    if( aSnapshot.document.type() != kiapi::common::types::DOCTYPE_SYMBOL
-            || aSnapshot.provider != "KiCad" || !aSnapshot.mcpDirectSymbolFile
-            || aSnapshot.rawLibraryContents.empty() )
+    if( ( aSnapshot.document.type() != kiapi::common::types::DOCTYPE_SYMBOL
+          && aSnapshot.document.type() != kiapi::common::types::DOCTYPE_FOOTPRINT )
+            || ( aSnapshot.document.type() == kiapi::common::types::DOCTYPE_SYMBOL
+                 && ( aSnapshot.provider != "KiCad" || !aSnapshot.mcpDirectSymbolFile
+                      || aSnapshot.rawLibraryContents.empty() ) )
+            || ( aSnapshot.document.type() == kiapi::common::types::DOCTYPE_FOOTPRINT
+                 && ( aSnapshot.provider != "kicad-footprint-file"
+                      || !aSnapshot.mcpDirectFootprintFile ) ) )
     {
         return Error( LIBRARY_LIFECYCLE_ERROR_CODE::MUTATION_NOT_AVAILABLE,
                       "checked library mutation is unavailable outside the direct MCP KiCad symbol-file scope" );

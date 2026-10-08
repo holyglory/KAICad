@@ -26,6 +26,7 @@
 #include <ctl_flags.h>
 
 #include <richio.h>
+#include <file_content_baseline.h>
 #include <string>
 #include <memory>
 #include <optional>
@@ -43,6 +44,24 @@ class FP_CACHE;
 class LSET;
 class PCB_IO_KICAD_SEXPR_PARSER;
 class LIBRARY_WRITE_ADMISSION;
+
+struct PCB_KICAD_SEXPR_CHECKED_WRITE_RESULT
+{
+    bool writeStarted = false;
+    bool committed = false;
+    bool postverified = false;
+    bool targetVerified = false;
+    bool unrelatedEntriesVerified = false;
+    bool rollbackAttempted = false;
+    bool rollbackVerified = false;
+    std::vector<FILE_CONTENT_BASELINE> afterBaselines;
+    std::vector<FILE_CONTENT_BASELINE> rollbackBaselines;
+    std::string beforeDefinition;
+    std::string afterDefinition;
+    std::string rollbackDefinition;
+    std::string errorCode;
+    std::string errorMessage;
+};
 class BOARD_DESIGN_SETTINGS;
 class PCB_DIMENSION_BASE;
 class PCB_POINT;
@@ -411,6 +430,11 @@ public:
 
     void FootprintSave( const wxString& aLibraryPath, const FOOTPRINT* aFootprint,
                         const std::map<std::string, UTF8>* aProperties = nullptr ) override;
+
+    PCB_KICAD_SEXPR_CHECKED_WRITE_RESULT FootprintSaveChecked(
+            const wxString& aTargetPath, const FOOTPRINT* aFootprint, bool aOverwrite,
+            const std::vector<FILE_CONTENT_BASELINE>& aExpectedBaselines,
+            const std::string& aBeforeContents, const wxString& aFootprintName );
 
     void FootprintDelete( const wxString& aLibraryPath, const wxString& aFootprintName,
                           const std::map<std::string, UTF8>* aProperties = nullptr ) override;

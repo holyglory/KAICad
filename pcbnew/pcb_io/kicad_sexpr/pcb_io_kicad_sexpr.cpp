@@ -3940,6 +3940,8 @@ void PCB_IO_KICAD_SEXPR::FootprintSave( const wxString& aLibraryPath, const FOOT
     if( !fn.IsOk() || ( fn.FileExists() && !fn.IsFileWritable() ) )
         THROW_IO_ERRORF( _( "Footprint file name '%s' is not writable." ), fn.GetFullPath() );
 
+    const bool ownsAdmission = !m_writeAdmission;
+
     try
     {
         acquireFootprintWriteAdmission( requestedTargetPath );
@@ -3991,12 +3993,226 @@ void PCB_IO_KICAD_SEXPR::FootprintSave( const wxString& aLibraryPath, const FOOT
                                                              WX_FILENAME( fn.GetPath(), fullName ) ) );
         m_cache->Save( footprint );
         m_writeAdmission->Observe();
-        releaseFootprintWriteAdmission();
+        if( ownsAdmission )
+            releaseFootprintWriteAdmission();
     }
     catch( ... )
     {
-        abandonFootprintWriteAdmission();
+        if( ownsAdmission )
+            abandonFootprintWriteAdmission();
+        else
+        {
+            delete m_cache;
+            m_cache = nullptr;
+        }
         throw;
+    }
+}
+
+
+PCB_KICAD_SEXPR_CHECKED_WRITE_RESULT PCB_IO_KICAD_SEXPR::FootprintSaveChecked(
+        const wxString& aTargetPath, const FOOTPRINT* aFootprint, bool aOverwrite,
+        const std::vector<FILE_CONTENT_BASELINE>& aExpectedBaselines,
+        const std::string& aBeforeContents, const wxString& aFootprintName )
+{
+    PCB_KICAD_SEXPR_CHECKED_WRITE_RESULT result;
+    auto same = []( const FILE_CONTENT_BASELINE& aLeft, const FILE_CONTENT_BASELINE& aRight )
+    {
+        return aLeft.Known() && aRight.Known() && aLeft.Exists() == aRight.Exists()
+               && aLeft.Bytes() == aRight.Bytes() && aLeft.Sha256() == aRight.Sha256()
+               && FILE_CONTENT_BASELINE::SamePath( aLeft.Path(), aRight.Path() );
+    };
+    auto allSame = [&]( const std::vector<FILE_CONTENT_BASELINE>& aLeft,
+                        const std::vector<FILE_CONTENT_BASELINE>& aRight )
+    {
+        if( aLeft.size() != aRight.size() )
+            return false;
+
+        for( size_t index = 0; index < aLeft.size(); ++index )
+        {
+            if( !same( aLeft[index], aRight[index] ) )
+                return false;
+        }
+        return true;
+    };
+    auto targetBaseline = [&]( const std::vector<FILE_CONTENT_BASELINE>& aBaselines )
+            -> std::optional<FILE_CONTENT_BASELINE>
+    {
+        for( const FILE_CONTENT_BASELINE& baseline : aBaselines )
+        {
+            if( FILE_CONTENT_BASELINE::SamePath( baseline.Path(), aTargetPath ) )
+                return baseline;
+        }
+        return std::nullopt;
+    };
+
+    if( !aFootprint || aFootprintName.empty()
+            || aFootprint->GetFPID().GetUniStringLibItemName() != aFootprintName )
+    {
+        result.errorCode = "invalid_footprint_definition";
+        result.errorMessage = "The checked footprint name does not match the requested entry.";
+        return result;
+    }
+
+    if( aExpectedBaselines.empty() )
+    {
+        result.errorCode = "partial_library_state";
+        result.errorMessage = "A checked footprint write requires complete dependency baselines.";
+        return result;
+    }
+
+    std::unique_ptr<LIBRARY_WRITE_ADMISSION> admission;
+    std::vector<FILE_CONTENT_BASELINE> attributableBaselines;
+
+    try
+    {
+        const wxString temporaryDirectory = wxFileName::GetTempDir() + wxFileName::GetPathSeparator()
+                + wxS( "kicad-checked-footprint-" ) + wxString::FromUTF8( KIID().AsStdString() );
+        if( !wxFileName::Mkdir( temporaryDirectory, 0700, wxPATH_MKDIR_FULL ) )
+            THROW_IO_ERROR( "Could not allocate a private footprint staging directory" );
+        struct TEMP_DIRECTORY
+        {
+            wxString path;
+            ~TEMP_DIRECTORY() { wxFileName::Rmdir( path, wxPATH_RMDIR_RECURSIVE ); }
+        } temporary{ temporaryDirectory };
+
+        PCB_IO_KICAD_SEXPR canonicalWriter;
+        canonicalWriter.FootprintSave( temporaryDirectory, aFootprint, nullptr );
+        wxString canonicalName = aFootprintName;
+        ReplaceIllegalFileNameChars( canonicalName, '_' );
+        const wxString expectedPath = wxFileName( temporaryDirectory, canonicalName,
+                FILEEXT::KiCadFootprintFileExtension ).GetFullPath();
+        std::string expectedContents;
+        const FILE_CONTENT_BASELINE expectedDefinition = FILE_CONTENT_BASELINE::Read( expectedPath, &expectedContents );
+        if( !expectedDefinition.Known() || !expectedDefinition.Exists() || expectedContents.empty() )
+            THROW_IO_ERROR( "The native footprint writer did not produce complete candidate bytes" );
+
+        admission = LIBRARY_WRITE_ADMISSION::Acquire( aExpectedBaselines );
+        m_writeAdmission = std::move( admission );
+        m_writeAdmissionPath = aTargetPath;
+        m_writeAdmission->CheckUnchanged();
+
+        const auto before = targetBaseline( m_writeAdmission->Before() );
+        if( !before )
+            THROW_IO_ERROR( "The checked footprint target is missing from its dependency baseline" );
+
+        if( !aOverwrite && before->Exists() )
+        {
+            result.errorCode = "footprint_exists";
+            result.errorMessage = "The requested footprint already exists and overwrite is disabled.";
+            delete m_cache;
+            m_cache = nullptr;
+            releaseFootprintWriteAdmission();
+            return result;
+        }
+
+        result.beforeDefinition = aBeforeContents;
+        {
+            FILE_WRITE_OBSERVER observer(
+                    [&]( const wxString& aPath )
+                    {
+                        if( !FILE_CONTENT_BASELINE::SamePath( aPath, aTargetPath ) )
+                            THROW_IO_ERROR( "The checked footprint writer attempted a different target" );
+                        m_writeAdmission->CheckUnchanged();
+                        result.writeStarted = true;
+                    },
+                    [&]( const FILE_CONTENT_BASELINE& aWritten )
+                    {
+                        if( !FILE_CONTENT_BASELINE::SamePath( aWritten.Path(), aTargetPath ) )
+                            THROW_IO_ERROR( "The checked footprint writer reported a different target" );
+                        attributableBaselines = m_writeAdmission->Observe();
+                    } );
+            FootprintSave( aTargetPath, aFootprint, nullptr );
+        }
+        result.afterBaselines = m_writeAdmission->Observe();
+        const auto after = targetBaseline( result.afterBaselines );
+        result.targetVerified = after.has_value() && after->Exists()
+                && after->Sha256() == expectedDefinition.Sha256()
+                && after->Bytes() == expectedDefinition.Bytes();
+
+        if( result.targetVerified )
+        {
+            std::string bytes;
+            FILE_CONTENT_BASELINE::Read( aTargetPath, &bytes );
+            result.afterDefinition = std::move( bytes );
+            wxString importedName;
+            std::unique_ptr<FOOTPRINT> parsed( ImportFootprint( aTargetPath, importedName, nullptr ) );
+            result.targetVerified = parsed && importedName == canonicalName
+                    && result.afterDefinition == expectedContents;
+        }
+
+        result.unrelatedEntriesVerified = true;
+        for( size_t index = 0; index < m_writeAdmission->Before().size(); ++index )
+        {
+            const FILE_CONTENT_BASELINE& expected = m_writeAdmission->Before()[index];
+            if( FILE_CONTENT_BASELINE::SamePath( expected.Path(), aTargetPath ) )
+                continue;
+
+            if( !same( expected, result.afterBaselines[index] ) )
+            {
+                result.unrelatedEntriesVerified = false;
+                break;
+            }
+        }
+
+        result.postverified = result.targetVerified && result.unrelatedEntriesVerified
+                && allSame( result.afterBaselines, m_writeAdmission->Observe() );
+        if( !result.postverified )
+            THROW_IO_ERROR( "Checked footprint write did not verify the target and unrelated entries" );
+
+        result.committed = true;
+        delete m_cache;
+        m_cache = nullptr;
+        releaseFootprintWriteAdmission();
+        return result;
+    }
+    catch( const std::exception& error )
+    {
+        result.errorCode = "footprint_library_write_failed";
+        result.errorMessage = error.what();
+        if( result.writeStarted && m_writeAdmission )
+        {
+            result.rollbackAttempted = true;
+            try
+            {
+                const std::vector<FILE_CONTENT_BASELINE> current = m_writeAdmission->Observe();
+                if( allSame( m_writeAdmission->Before(), current ) )
+                {
+                    result.rollbackBaselines = current;
+                    result.rollbackVerified = true;
+                    result.rollbackDefinition = aBeforeContents;
+                }
+                else if( !attributableBaselines.empty() && allSame( attributableBaselines, current ) )
+                {
+                    const auto before = targetBaseline( m_writeAdmission->Before() );
+                    if( before && before->Exists() )
+                    {
+                        FILE_WRITE_OBSERVER suppressRecoveryObserver(
+                                []( const wxString& ) {}, []( const FILE_CONTENT_BASELINE& ) {} );
+                        FILE_OUTPUTFORMATTER output( aTargetPath, wxS( "wb" ) );
+                        output.Print( "%s", aBeforeContents.c_str() );
+                        output.Finish();
+                    }
+                    else if( wxFileExists( aTargetPath ) && !wxRemoveFile( aTargetPath ) )
+                        THROW_IO_ERROR( "Could not remove the newly-created footprint" );
+
+                    result.rollbackBaselines = m_writeAdmission->Observe();
+                    result.rollbackVerified = allSame( m_writeAdmission->Before(), result.rollbackBaselines );
+                    if( result.rollbackVerified && before && before->Exists() )
+                        result.rollbackDefinition = aBeforeContents;
+                }
+            }
+            catch( const std::exception& rollbackError )
+            {
+                result.errorMessage += "; rollback failed: ";
+                result.errorMessage += rollbackError.what();
+            }
+        }
+
+        delete m_cache;
+        m_cache = nullptr;
+        releaseFootprintWriteAdmission();
+        return result;
     }
 }
 

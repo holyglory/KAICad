@@ -19,7 +19,9 @@ inline bool RequestTargetsOtherDocument( const google::protobuf::Message& aReque
     // Their handlers perform the project/row identity checks themselves.
     if( descriptor->full_name() == "kiapi.automation.v1.NativeCapabilityLibrarySnapshotRead"
             || descriptor->full_name() == "kiapi.automation.v1.NativeCapabilitySymbolLibraryCheckedWrite"
-            || descriptor->full_name() == "kiapi.automation.v1.NativeCapabilitySymbolLibraryCheckedReadOperation" )
+            || descriptor->full_name() == "kiapi.automation.v1.NativeCapabilitySymbolLibraryCheckedReadOperation"
+            || descriptor->full_name() == "kiapi.automation.v1.NativeCapabilityFootprintLibraryCheckedWrite"
+            || descriptor->full_name() == "kiapi.automation.v1.NativeCapabilityFootprintLibraryCheckedReadOperation" )
         return false;
     for( int index = 0; index < descriptor->field_count(); ++index )
     {

@@ -52,6 +52,7 @@ struct KICOMMON_API LIBRARY_LIFECYCLE_SNAPSHOT
     // Explicit scope for the MCP direct .kicad_sym writer.  This does not claim that every
     // application writer has joined the common lifecycle controller.
     bool mcpDirectSymbolFile = false;
+    bool mcpDirectFootprintFile = false;
     // Other native writers (symbol editor, import/rescue and remote jobs) are not yet joined to
     // this owner.  Keep this false until a shared mutation event and rollback proof exist.
     bool completeChangeTracking = false;

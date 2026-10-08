@@ -43,10 +43,13 @@
 #include <wildcards_and_files_ext.h>
 #include <wx/filefn.h>
 #include <wx/filename.h>
+#include <google/protobuf/util/message_differencer.h>
 
 #include <api/common/types/base_types.pb.h>
 
 #include <memory>
+#include <cctype>
+#include <limits>
 #include <wx/file.h>
 
 using namespace kiapi::common::commands;
@@ -107,6 +110,31 @@ std::string ProviderDigest( FOOTPRINT_LIBRARY_ADAPTER* aAdapter, const LIB_ID& a
     part( ( *row )->Options().utf8_string() );
     part( std::to_string( static_cast<int>( ( *row )->Scope() ) ) );
     part( ( *row )->Disabled() ? "disabled" : "enabled" );
+    return digest.Hex();
+}
+
+bool NativeUuid( const std::string& aValue )
+{
+    if( aValue.size() != 36 )
+        return false;
+
+    for( size_t index = 0; index < aValue.size(); ++index )
+    {
+        if( index == 8 || index == 13 || index == 18 || index == 23 )
+        {
+            if( aValue[index] != '-' )
+                return false;
+        }
+        else if( !std::isxdigit( static_cast<unsigned char>( aValue[index] ) ) )
+            return false;
+    }
+    return true;
+}
+
+std::string ProtoDigest( const google::protobuf::Message& aMessage )
+{
+    NATIVE_STATE_DIGEST digest;
+    digest.Append( aMessage.SerializeAsString() );
     return digest.Hex();
 }
 
@@ -396,6 +424,12 @@ API_HANDLER_FOOTPRINT::API_HANDLER_FOOTPRINT( std::shared_ptr<FOOTPRINT_CONTEXT>
     registerHandler<kiapi::automation::v1::NativeCapabilityFootprintLibraryReadOperation,
                     kiapi::automation::v1::NativeCapabilityFootprintLibraryReadOperationResponse>(
             &API_HANDLER_FOOTPRINT::handleReadLibraryOperation );
+    registerHandler<kiapi::automation::v1::NativeCapabilityFootprintLibraryCheckedWrite,
+                    kiapi::automation::v1::NativeCapabilityFootprintLibraryCheckedWriteResponse>(
+            &API_HANDLER_FOOTPRINT::handleCheckedWriteLibraryFootprint );
+    registerHandler<kiapi::automation::v1::NativeCapabilityFootprintLibraryCheckedReadOperation,
+                    kiapi::automation::v1::NativeCapabilityFootprintLibraryCheckedReadOperationResponse>(
+            &API_HANDLER_FOOTPRINT::handleReadCheckedLibraryOperation );
     registerHandler<kiapi::automation::v1::NativeCapabilityFootprintReadDefinition,
                     kiapi::automation::v1::NativeCapabilityFootprintReadDefinitionResponse>(
             &API_HANDLER_FOOTPRINT::handleReadDefinition );
@@ -859,6 +893,265 @@ API_HANDLER_FOOTPRINT::handleReadLibraryOperation(
 }
 
 
+kiapi::automation::v1::NativeCapabilityFootprintLibraryCheckedState
+API_HANDLER_FOOTPRINT::footprintLibraryCheckpoint( const LIBRARY_LIFECYCLE_SNAPSHOT& aSnapshot,
+                                                    bool aAdvanceRevision )
+{
+    using namespace kiapi::automation::v1;
+    NativeCapabilityFootprintLibraryCheckedState state;
+    state.mutable_document()->CopyFrom( aSnapshot.document );
+    state.set_process_epoch( apiServer().Token() );
+    state.set_scope( "mcp_direct_footprint_file" );
+    state.set_table_path( aSnapshot.tablePath.ToStdString( wxConvUTF8 ) );
+    state.set_table_scope( aSnapshot.tableScope == LIBRARY_TABLE_SCOPE::PROJECT ? "PROJECT" : "GLOBAL" );
+    state.set_raw_uri( aSnapshot.rawUri.ToStdString( wxConvUTF8 ) );
+    state.set_expanded_uri( aSnapshot.expandedUri.ToStdString( wxConvUTF8 ) );
+    state.set_provider( aSnapshot.provider );
+    state.set_provider_options( aSnapshot.providerOptions );
+    state.set_entry_exists( aSnapshot.entryExists );
+    state.set_detached_definition_sha256( DigestText( aSnapshot.detachedDefinition ) );
+    state.set_state_complete( aSnapshot.contentSnapshotComplete && aSnapshot.diskBaselineChecked
+                              && aSnapshot.mcpDirectFootprintFile );
+    state.set_disk_baseline_checked( aSnapshot.diskBaselineChecked );
+    state.set_complete_change_tracking( aSnapshot.completeChangeTracking );
+
+    NATIVE_STATE_DIGEST content;
+    content.Append( aSnapshot.detachedDefinition );
+    for( const FILE_CONTENT_BASELINE& baseline : aSnapshot.dependencyBaselines )
+    {
+        auto* output = state.add_dependency_baselines();
+        output->set_path( baseline.Path().ToStdString( wxConvUTF8 ) );
+        output->set_exists( baseline.Exists() );
+        output->set_known( baseline.Known() );
+        output->set_sha256( baseline.Sha256() );
+        output->set_bytes( baseline.Bytes() );
+        content.Append( baseline.Path().ToStdString( wxConvUTF8 ) );
+        content.Append( baseline.Sha256() );
+        content.Append( std::to_string( baseline.Bytes() ) );
+    }
+
+    const std::string key = aSnapshot.expandedUri.ToStdString( wxConvUTF8 );
+    auto [found, inserted] = m_libraryRevisions.try_emplace( key );
+    FOOTPRINT_LIBRARY_REVISION& revision = found->second;
+    const std::string contentDigest = content.Hex();
+    if( inserted )
+    {
+        revision.epoch = apiServer().Token();
+        revision.sequence = 1;
+    }
+    else if( revision.contentDigest != contentDigest || aAdvanceRevision )
+    {
+        if( revision.sequence == std::numeric_limits<uint64_t>::max() )
+            THROW_IO_ERROR( "The footprint-library revision is exhausted; reopen the native process" );
+        ++revision.sequence;
+    }
+    revision.contentDigest = contentDigest;
+    state.mutable_revision()->set_epoch( revision.epoch );
+    state.mutable_revision()->set_sequence( revision.sequence );
+    auto unsignedState = state;
+    unsignedState.clear_state_sha256();
+    state.set_state_sha256( ProtoDigest( unsignedState ) );
+    return state;
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::NativeCapabilityFootprintLibraryCheckedWriteResponse>
+API_HANDLER_FOOTPRINT::handleCheckedWriteLibraryFootprint(
+        const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityFootprintLibraryCheckedWrite>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    using google::protobuf::util::MessageDifferencer;
+    const NativeCapabilityFootprintLibraryCheckedWrite& request = aCtx.Request;
+    NativeCapabilityFootprintLibraryCheckedWriteResponse response;
+    response.mutable_document()->CopyFrom( request.document() );
+    response.set_process_epoch( apiServer().Token() );
+    response.set_operation_id( request.operation_id() );
+    response.set_status( "rejected" );
+    response.set_receipt_status( NCP_FLCS_UNKNOWN );
+    response.set_scope( "mcp_direct_footprint_file" );
+    response.set_complete_change_tracking( false );
+    response.mutable_request()->CopyFrom( request );
+
+    auto refuse = [&]( const char* aCode, const std::string& aMessage, bool aUnavailable = false )
+    {
+        response.set_error_code( aCode );
+        response.set_error_message( aMessage );
+        if( aUnavailable )
+        {
+            response.set_status( "unavailable" );
+            response.set_receipt_status( NCP_FLCS_UNAVAILABLE );
+        }
+        if( response.expected_request_verified() && !request.operation_id().empty() )
+            m_checkedLibraryReceipts[request.operation_id()] = response;
+        return response;
+    };
+
+    if( !request.has_document() || request.document().type() != kiapi::common::types::DOCTYPE_FOOTPRINT
+            || !request.document().has_project() || !request.document().has_lib_id() )
+        return refuse( "invalid_library_document", "A checked footprint mutation requires an explicit project-bound document." );
+    if( request.process_epoch() != apiServer().Token() || !NativeUuid( request.process_epoch() ) )
+        return refuse( "stale_process_epoch", "The checked footprint mutation belongs to another native process epoch." );
+    if( !NativeUuid( request.operation_id() ) )
+        return refuse( "invalid_operation_id", "A canonical operation UUID is required." );
+
+    if( auto retained = m_checkedLibraryReceipts.find( request.operation_id() ); retained != m_checkedLibraryReceipts.end() )
+    {
+        if( !MessageDifferencer::Equals( retained->second.request(), request ) )
+            return refuse( "operation_id_conflict", "The operation ID is already bound to a different checked footprint request." );
+        response = retained->second;
+        response.set_replayed( true );
+        return response;
+    }
+
+    response.set_request_fingerprint_sha256( ProtoDigest( request ) );
+    response.set_expected_request_verified( true );
+    response.set_receipt_status( NCP_FLCS_REJECTED );
+    if( !request.has_expected_state() )
+        return refuse( "library_mutation_unavailable", "A complete native footprint checkpoint is required before writing.", true );
+    if( request.expected_snapshot_sha256().size() != 64
+            || request.expected_snapshot_sha256() != request.expected_state().state_sha256() )
+        return refuse( "invalid_library_snapshot", "expected_snapshot_sha256 must identify the complete expected native state." );
+    if( request.expected_state().scope() != "mcp_direct_footprint_file"
+            || !request.expected_state().state_complete() || !request.expected_state().disk_baseline_checked()
+            || request.expected_state().complete_change_tracking()
+            || !MessageDifferencer::Equals( request.expected_state().document(), request.document() )
+            || request.expected_state().process_epoch() != apiServer().Token()
+            || !NativeUuid( request.expected_state().revision().epoch() ) )
+        return refuse( "partial_library_state", "Only a complete project-bound direct footprint-file checkpoint can admit this writer." );
+    if( !request.has_footprint() || !request.footprint().has_definition()
+            || !request.footprint().definition().has_id()
+            || request.footprint().definition().id().library_nickname()
+                    != request.document().lib_id().library_nickname()
+            || request.footprint().definition().id().entry_name()
+                    != request.document().lib_id().entry_name() )
+        return refuse( "footprint_library_definition_mismatch", "The complete footprint definition must identify the exact requested entry." );
+
+    try
+    {
+        google::protobuf::Any packed;
+        packed.PackFrom( request.footprint() );
+        std::unique_ptr<FOOTPRINT> candidate( new FOOTPRINT( nullptr ) );
+        if( !candidate->Deserialize( packed ) )
+            return refuse( "invalid_footprint_definition", "The native decoder rejected the complete footprint definition." );
+        candidate->SetParent( nullptr );
+        candidate->SetParentGroup( nullptr );
+        candidate->ClearAllNets();
+        candidate->SetFPID( LIB_ID( wxString::FromUTF8( request.document().lib_id().library_nickname() ),
+                                    wxString::FromUTF8( request.document().lib_id().entry_name() ) ) );
+        FOOTPRINT_DEFINITION_CAPTURE candidateCapture = CaptureCanonicalDefinition(
+                *candidate, candidate->GetFPID() );
+        if( !candidateCapture.canonicalComplete || candidateCapture.canonicalSha256.empty() )
+            return refuse( "invalid_footprint_definition", "The native writer could not prove a complete footprint definition." );
+
+        FOOTPRINT_LIBRARY_ADAPTER* adapter = PROJECT_PCB::FootprintLibAdapter( &project() );
+        if( !adapter )
+            return refuse( "library_provider_unknown", "The board editor has no footprint-library adapter.", true );
+        const wxString nickname = wxString::FromUTF8( request.document().lib_id().library_nickname() );
+        const wxString name = wxString::FromUTF8( request.document().lib_id().entry_name() );
+        auto captured = adapter->CaptureLibrarySnapshot( nickname, name, request.document(), project(), true );
+        if( !captured )
+            return refuse( "library_mutation_unavailable", captured.error().message, true );
+        LIBRARY_LIFECYCLE_SNAPSHOT before = *captured;
+        auto beforeState = footprintLibraryCheckpoint( before );
+        response.mutable_observed_before()->CopyFrom( beforeState );
+        response.set_before_snapshot_sha256( beforeState.state_sha256() );
+        if( !MessageDifferencer::Equals( beforeState, request.expected_state() ) )
+            return refuse( "stale_library_state", "The complete footprint revision, contents or dependency baselines changed after observation." );
+
+        FOOTPRINT_LIBRARY_ADAPTER::CHECKED_WRITE_RESULT write = adapter->SaveFootprintChecked(
+                before, project(), candidate.get(), request.overwrite() );
+        response.set_native_write_started( write.writeStarted );
+        response.set_postverified( write.postverified );
+        response.set_target_verified( write.targetVerified );
+        response.set_unrelated_entries_verified( write.unrelatedEntriesVerified );
+        response.set_rollback_attempted( write.rollbackAttempted );
+        response.set_rollback_completed( write.rollbackVerified );
+        response.set_before_definition_sha256( DigestText( write.beforeDefinition ) );
+        response.set_after_definition_sha256( DigestText( write.afterDefinition ) );
+
+        if( write.committed )
+        {
+            auto afterCaptured = adapter->CaptureLibrarySnapshot( nickname, name, request.document(), project() );
+            if( !afterCaptured )
+                return refuse( "footprint_persistence_unverified", afterCaptured.error().message );
+            auto afterState = footprintLibraryCheckpoint( *afterCaptured, true );
+            response.mutable_observed_after()->CopyFrom( afterState );
+            response.set_after_snapshot_sha256( afterState.state_sha256() );
+            response.set_status( "committed_postverified" );
+            response.set_receipt_status( NCP_FLCS_COMMITTED_POSTVERIFIED );
+            response.set_committed( true );
+            response.set_revision_tracked( true );
+            response.set_complete_lifecycle( false );
+        }
+        else if( write.rollbackVerified )
+        {
+            response.mutable_observed_rollback()->CopyFrom( beforeState );
+            response.set_status( "rolled_back_verified" );
+            response.set_receipt_status( NCP_FLCS_ROLLED_BACK_VERIFIED );
+        }
+        else if( write.writeStarted )
+        {
+            response.set_status( "indeterminate" );
+            response.set_receipt_status( NCP_FLCS_INDETERMINATE );
+        }
+        response.set_error_code( write.errorCode );
+        response.set_error_message( write.errorMessage );
+        m_checkedLibraryReceipts[request.operation_id()] = response;
+        return response;
+    }
+    catch( const std::exception& error )
+    {
+        response.set_error_code( "footprint_library_write_failed" );
+        response.set_error_message( error.what() );
+        if( response.native_write_started() )
+        {
+            response.set_status( "indeterminate" );
+            response.set_receipt_status( NCP_FLCS_INDETERMINATE );
+        }
+        m_checkedLibraryReceipts[request.operation_id()] = response;
+        return response;
+    }
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::NativeCapabilityFootprintLibraryCheckedReadOperationResponse>
+API_HANDLER_FOOTPRINT::handleReadCheckedLibraryOperation(
+        const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityFootprintLibraryCheckedReadOperation>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    const auto& request = aCtx.Request;
+    if( !NativeUuid( request.operation_id() ) || request.process_epoch() != apiServer().Token()
+            || !request.has_expected_request()
+            || request.expected_request().operation_id() != request.operation_id()
+            || request.expected_request().process_epoch() != request.process_epoch()
+            || !google::protobuf::util::MessageDifferencer::Equals( request.document(),
+                                                                    request.expected_request().document() ) )
+    {
+        ApiResponseStatus status;
+        status.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        status.set_error_message( "An exact original request, operation ID, footprint document and current process epoch are required." );
+        return tl::unexpected( status );
+    }
+
+    NativeCapabilityFootprintLibraryCheckedReadOperationResponse response;
+    auto retained = m_checkedLibraryReceipts.find( request.operation_id() );
+    if( retained == m_checkedLibraryReceipts.end() )
+        return response;
+    if( !google::protobuf::util::MessageDifferencer::Equals( retained->second.request(),
+                                                              request.expected_request() ) )
+    {
+        ApiResponseStatus status;
+        status.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        status.set_error_message( "The operation ID is bound to a different checked footprint request." );
+        return tl::unexpected( status );
+    }
+    response.set_found( true );
+    response.mutable_receipt()->CopyFrom( retained->second );
+    response.mutable_receipt()->set_replayed( true );
+    return response;
+}
+
+
 HANDLER_RESULT<kiapi::automation::v1::NativeCapabilityFootprintReadDefinitionResponse>
 API_HANDLER_FOOTPRINT::handleReadDefinition(
         const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityFootprintReadDefinition>& aCtx )
@@ -1147,7 +1440,8 @@ API_HANDLER_FOOTPRINT::handleReadLibrarySnapshot(
 
         auto captured = adapter->CaptureLibrarySnapshot( wxString::FromUTF8( nickname ),
                                                          wxString::FromUTF8( entryName ),
-                                                         aCtx.Request.document(), project() );
+                                                         aCtx.Request.document(), project(),
+                                                         aCtx.Request.allow_missing_entry() );
         if( !captured )
             return fail( codeName( captured.error().code ), captured.error().message );
 
@@ -1182,6 +1476,7 @@ API_HANDLER_FOOTPRINT::handleReadLibrarySnapshot(
         response.set_disk_baseline_checked( snapshot.diskBaselineChecked );
         response.set_complete_change_tracking( snapshot.completeChangeTracking );
         response.set_postverify( snapshot.postverify );
+        response.mutable_footprint_checked_state()->CopyFrom( footprintLibraryCheckpoint( snapshot ) );
 
         for( const FILE_CONTENT_BASELINE& baseline : snapshot.dependencyBaselines )
         {

@@ -148,6 +148,64 @@ public sealed class FootprintLibraryContractTests
     }
 
     [TestMethod]
+    public void CheckedFootprintContractRejectsForgedCommitAndAcceptsUnavailableReceipt()
+    {
+        var document = Document("Probe");
+        var state = new NativeCapabilityFootprintLibraryCheckedState
+        {
+            Document = document.Clone(), ProcessEpoch = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            Scope = "mcp_direct_footprint_file", StateComplete = true, DiskBaselineChecked = true,
+            Revision = new() { Epoch = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", Sequence = 1 },
+            StateSha256 = new string('a', 64)
+        };
+        var request = new NativeCapabilityFootprintLibraryCheckedWrite
+        {
+            Document = document.Clone(), ProcessEpoch = state.ProcessEpoch,
+            OperationId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", ExpectedSnapshotSha256 = state.StateSha256,
+            ExpectedState = state.Clone(), Footprint = new() { Definition = new() { Id = document.LibId.Clone() } }
+        };
+        var unavailable = new NativeCapabilityFootprintLibraryCheckedWriteResponse
+        {
+            Document = document.Clone(), ProcessEpoch = state.ProcessEpoch, OperationId = request.OperationId,
+            Status = "unavailable", ErrorCode = "library_mutation_unavailable", ErrorMessage = "provider unavailable",
+            ReceiptStatus = NativeCapabilityFootprintLibraryCheckedReceiptStatus.NcpFlcsUnavailable,
+            Scope = "mcp_direct_footprint_file", ExpectedRequestVerified = true, Request = request.Clone(),
+            RequestFingerprintSha256 = new string('c', 64)
+        };
+        FootprintLibraryCheckedContract.ValidateResponse(unavailable, request);
+
+        var forged = unavailable.Clone();
+        forged.Status = "committed_postverified";
+        forged.Committed = true;
+        Assert.ThrowsExactly<AutomationException>(() => FootprintLibraryCheckedContract.ValidateResponse(forged, request));
+    }
+
+    [TestMethod]
+    public void CheckedFootprintContractRejectsOperationOrDocumentMismatch()
+    {
+        var document = Document("Probe");
+        var request = new NativeCapabilityFootprintLibraryCheckedWrite
+        {
+            Document = document.Clone(), ProcessEpoch = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            OperationId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", ExpectedSnapshotSha256 = new string('a', 64),
+            ExpectedState = new() { Document = document.Clone(), ProcessEpoch = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                Scope = "mcp_direct_footprint_file", StateComplete = true, DiskBaselineChecked = true,
+                StateSha256 = new string('a', 64), Revision = new() { Epoch = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" } }
+        };
+        var response = new NativeCapabilityFootprintLibraryCheckedWriteResponse
+        {
+            Document = document.Clone(), ProcessEpoch = request.ProcessEpoch, OperationId = request.OperationId,
+            Status = "unavailable", ErrorCode = "library_mutation_unavailable", ErrorMessage = "provider unavailable",
+            ReceiptStatus = NativeCapabilityFootprintLibraryCheckedReceiptStatus.NcpFlcsUnavailable,
+            Scope = "mcp_direct_footprint_file", ExpectedRequestVerified = true, Request = request.Clone(),
+            RequestFingerprintSha256 = new string('c', 64)
+        };
+        var wrong = response.Clone();
+        wrong.OperationId = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+        Assert.ThrowsExactly<AutomationException>(() => FootprintLibraryCheckedContract.ValidateResponse(wrong, request));
+    }
+
+    [TestMethod]
     public void DefinitionReadbackRequiresExactSourceDestinationAndProcessIdentity()
     {
         string processEpoch = "11111111-1111-1111-1111-111111111111";

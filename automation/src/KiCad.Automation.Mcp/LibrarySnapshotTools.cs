@@ -15,7 +15,7 @@ namespace KiCad.Automation.Mcp;
 public sealed class LibrarySnapshotTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_library_snapshot_read", ReadOnly = true),
-     Description("Read compact, project-bound lifecycle evidence for one explicitly identified symbol library entry. The native owner forces a disk refresh, captures the complete direct KiCad symbol-file checkpoint, revision and dependency baselines, and returns the state envelope required by kicad_symbol_library_write_checked. This never exposes the detached definition or claims complete tracking for GUI, folder, legacy, database or HTTP writers. Footprint documents receive an explicit unsupported status until their producer is covered."),
+     Description("Read compact, project-bound lifecycle evidence for one explicitly identified symbol or footprint library entry. The native owner forces a disk refresh, captures the complete direct KiCad checkpoint, revision and dependency baselines, and returns the state envelope required by the matching checked writer. Unsupported providers remain explicit refusals."),
      KiCadCapability("library-snapshot", "native-symbol-library-adapter", "explicit project/document identity, direct provider row, checked revision/state digest and dependency baselines"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Read(string instanceId, string expectedProcessEpoch, string documentJson,
@@ -54,6 +54,12 @@ public sealed class LibrarySnapshotTools(InstanceRegistry registry)
                     string.IsNullOrWhiteSpace(response.ErrorCode) ? "library_snapshot_failed" : response.ErrorCode,
                     string.IsNullOrWhiteSpace(response.ErrorMessage) ? "The native owner did not complete the library snapshot." : response.ErrorMessage);
 
+            JsonElement checkedState = document.Type == DocumentType.DoctypeFootprint
+                ? JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(response.FootprintCheckedState))
+                : JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(response.CheckedState));
+            bool mutationAvailable = document.Type == DocumentType.DoctypeFootprint
+                ? response.FootprintCheckedState.StateComplete
+                : response.CheckedState.StateComplete;
             return Data(new
             {
                 instanceId,
@@ -83,9 +89,9 @@ public sealed class LibrarySnapshotTools(InstanceRegistry registry)
                 diskBaselineChecked = response.DiskBaselineChecked,
                 completeChangeTracking = response.CompleteChangeTracking,
                 postverify = response.Postverify,
-                checkedState = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(response.CheckedState)),
+                checkedState,
                 readOnly = true,
-                mutationAvailable = response.CheckedState.StateComplete
+                mutationAvailable
             });
         });
 

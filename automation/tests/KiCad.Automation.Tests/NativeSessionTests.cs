@@ -169,8 +169,8 @@ public sealed partial class NativeSessionTests
                 NativeJourney.CheckedBatch => "native-checked-batch",
                 NativeJourney.Cache => "native-cache",
                 NativeJourney.SchematicMetadata => "native-schematic-metadata",
-                NativeJourney.SchematicExport => "native-setup-draft",
-                NativeJourney.SchematicCrossProbe => "native-setup-draft",
+                NativeJourney.SchematicExport => "native-schematic-export",
+                NativeJourney.SchematicCrossProbe => "native-schematic-cross-probe",
                 NativeJourney.SchematicHierarchy => "native-schematic-metadata",
                 NativeJourney.OffscreenMove => "native-offscreen-move",
                 NativeJourney.TransformSync => "native-transform-sync",
@@ -415,7 +415,7 @@ public sealed partial class NativeSessionTests
                 var electrical = MakeElectricalFixture(rootId);
                 var hierarchyFixture = await MakeHierarchyFixture(rootId, Path.GetDirectoryName(schematic)!, deadline.Token);
                 string fixtureText = journey == NativeJourney.SchematicExport
-                    ? "Native SVG export fixture " + textId
+                    ? "Native schematic export fixture " + textId
                     : "Native automation fixture";
                 if (journey == NativeJourney.OffscreenMove)
                 {

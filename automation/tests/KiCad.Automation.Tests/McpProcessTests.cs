@@ -183,6 +183,35 @@ public sealed class McpProcessTests
             Assert.AreEqual("invalid_schematic_export_target",
                 invalidSchematicExportBom.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(),
                 invalidSchematicExportBom.GetRawText());
+
+            // Export admission must distinguish an absent/malformed job target from a malformed
+            // lifecycle observation before it ever looks up an instance or reaches native KiCad.
+            string rootIdentity = "00000000-0000-0000-0000-000000000001";
+            string exportDocument = "{\"type\":\"DOCTYPE_SCHEMATIC\",\"project\":{\"name\":\"fixture\",\"path\":"
+                + JsonSerializer.Serialize(state) + "},\"sheetPath\":{\"path\":[{\"value\":\"" + rootIdentity + "\"}]}}";
+            string exportRequest = "{\"jobSettings\":{\"document\":" + exportDocument
+                + ",\"outputPath\":" + JsonSerializer.Serialize(Path.Combine(state, "exports")) + "}}";
+            foreach (string malformedRequest in new[] { "{\"jobSettings\":null}", "{\"jobSettings\":{\"document\":null}}" })
+            {
+                JsonElement refused = await Request(90915 + Array.IndexOf(new[] { "{\"jobSettings\":null}", "{\"jobSettings\":{\"document\":null}}" }, malformedRequest), "tools/call", new
+                {
+                    name = "kicad_schematic_export_svg",
+                    arguments = new { instanceId = unknownInstance, requestJson = malformedRequest, expectedStateJson = "{}" }
+                });
+                Assert.IsTrue(refused.GetProperty("result").GetProperty("isError").GetBoolean(), refused.GetRawText());
+                Assert.AreEqual("invalid_schematic_export_target",
+                    refused.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+                    refused.GetRawText());
+            }
+            JsonElement malformedState = await Request(90917, "tools/call", new
+            {
+                name = "kicad_schematic_export_svg",
+                arguments = new { instanceId = unknownInstance, requestJson = exportRequest, expectedStateJson = "{" }
+            });
+            Assert.IsTrue(malformedState.GetProperty("result").GetProperty("isError").GetBoolean(), malformedState.GetRawText());
+            Assert.AreEqual("invalid_schematic_export_state",
+                malformedState.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+                malformedState.GetRawText());
             var rasterTraceSchema = listed.GetProperty("result").GetProperty("tools").EnumerateArray()
                 .Single(tool => tool.GetProperty("name").GetString() == "kicad_artwork_raster_trace")
                 .GetProperty("inputSchema").GetProperty("properties").GetProperty("input");

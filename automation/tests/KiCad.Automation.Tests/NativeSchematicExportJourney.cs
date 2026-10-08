@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Google.Protobuf;
 using Kiapi.Common.Commands;
 using Google.Protobuf.WellKnownTypes;
 using Kiapi.Common.Types;
@@ -25,7 +26,8 @@ public sealed partial class NativeSessionTests
         var names = listed.GetProperty("tools").EnumerateArray()
             .Select(tool => tool.GetProperty("name").GetString()!)
             .ToHashSet(StringComparer.Ordinal);
-        CollectionAssert.Contains(names.ToArray(), "kicad_schematic_export_svg");
+        foreach (string tool in new[] { "svg", "dxf", "pdf", "ps", "netlist", "bom" })
+            CollectionAssert.Contains(names.ToArray(), "kicad_schematic_export_" + tool);
         RequireToolSuccess(await mcp.Tool("kicad_instance_attach",
             new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
 
@@ -33,47 +35,136 @@ public sealed partial class NativeSessionTests
         Assert.IsFalse(clean.NativeContentDirty, "The export baseline must be a saved native schematic.");
         string cleanJson = SchematicJson.Formatter.Format(clean);
         byte[] sourceBefore = await File.ReadAllBytesAsync(schematicPath, token);
-        string outputRoot = Path.Combine(evidence, "svg-output");
+        string instanceOutputRoot = Path.Combine(evidence, instanceId, "export-output");
 
-        RunSchematicJobExportSvg Request(string outputPath) => new()
+        SchematicPlotSettings PlotSettings() => new() { PlotAll = true, PlotDrawingSheet = false };
+        RunJobSettings JobSettings(string outputPath) => new()
         {
-            JobSettings = new() { Document = document.Clone(), OutputPath = outputPath },
-            PlotSettings = new() { PlotAll = true, PlotDrawingSheet = false }
+            Document = document.Clone(), OutputPath = outputPath
+        };
+        RunSchematicJobExportSvg SvgRequest(string outputPath) => new()
+        {
+            JobSettings = JobSettings(outputPath), PlotSettings = PlotSettings()
+        };
+        RunSchematicJobExportDxf DxfRequest(string outputPath) => new()
+        {
+            JobSettings = JobSettings(outputPath), PlotSettings = PlotSettings()
+        };
+        RunSchematicJobExportPdf PdfRequest(string outputPath) => new()
+        {
+            JobSettings = JobSettings(outputPath), PlotSettings = PlotSettings(), IncludeMetadata = true
+        };
+        RunSchematicJobExportPs PsRequest(string outputPath) => new()
+        {
+            JobSettings = JobSettings(outputPath), PlotSettings = PlotSettings()
+        };
+        RunSchematicJobExportNetlist NetlistRequest(string outputPath) => new()
+        {
+            JobSettings = JobSettings(outputPath), Format = SchematicNetlistFormat.SnfKicadXml
+        };
+        RunSchematicJobExportBOM BomRequest(string outputPath) => new()
+        {
+            JobSettings = JobSettings(outputPath), Format = new() { PresetName = "CSV" },
+            Fields = new() { PresetName = "Default Editing" }
         };
 
-        JsonElement completed = await mcp.Tool("kicad_schematic_export_svg", new
+        async Task<JsonElement> Export(string kind, IMessage request, string requestedPath,
+            Func<string, byte[], string> contentCheck)
         {
-            instanceId,
-            requestJson = SchematicJson.Formatter.Format(Request(outputRoot)),
-            expectedStateJson = cleanJson
-        });
-        RequireToolSuccess(completed);
-        JsonElement structured = completed.GetProperty("structuredContent");
-        Assert.AreEqual(instanceId, structured.GetProperty("instanceId").GetString());
-        Assert.IsTrue(structured.GetProperty("nativeJob").GetBoolean(), completed.GetRawText());
-        Assert.IsFalse(structured.GetProperty("boardMutation").GetBoolean(), completed.GetRawText());
-        Assert.IsFalse(structured.GetProperty("schematicMutation").GetBoolean(), completed.GetRawText());
-        Assert.AreEqual(cleanJson, structured.GetProperty("beforeState").GetString());
-        Assert.AreEqual(cleanJson, structured.GetProperty("afterState").GetString());
+            JsonElement reply = await mcp.Tool("kicad_schematic_export_" + kind, new
+            {
+                instanceId,
+                requestJson = SchematicJson.Formatter.Format(request),
+                expectedStateJson = cleanJson
+            });
+            RequireToolSuccess(reply);
+            JsonElement structured = reply.GetProperty("structuredContent");
+            Assert.AreEqual(instanceId, structured.GetProperty("instanceId").GetString(), reply.GetRawText());
+            Assert.IsTrue(structured.GetProperty("nativeJob").GetBoolean(), reply.GetRawText());
+            Assert.IsFalse(structured.GetProperty("boardMutation").GetBoolean(), reply.GetRawText());
+            Assert.IsFalse(structured.GetProperty("schematicMutation").GetBoolean(), reply.GetRawText());
+            Assert.AreEqual(cleanJson, structured.GetProperty("beforeState").GetString(), reply.GetRawText());
+            Assert.AreEqual(cleanJson, structured.GetProperty("afterState").GetString(), reply.GetRawText());
 
-        JsonElement[] outputs = structured.GetProperty("outputs").EnumerateArray().ToArray();
-        Assert.IsGreaterThan(0, outputs.Length, completed.GetRawText());
-        bool markerFound = false;
-        string outputRootFull = Path.GetFullPath(outputRoot) + Path.DirectorySeparatorChar;
-        foreach (JsonElement output in outputs)
-        {
-            string path = output.GetProperty("path").GetString()!;
-            Assert.IsTrue(path.StartsWith(outputRootFull, StringComparison.Ordinal), completed.GetRawText());
-            Assert.AreEqual(".svg", Path.GetExtension(path), true, completed.GetRawText());
-            byte[] bytes = await File.ReadAllBytesAsync(path, token);
-            Assert.AreEqual(bytes.LongLength, output.GetProperty("bytes").GetInt64(), completed.GetRawText());
-            Assert.AreEqual(Convert.ToHexStringLower(SHA256.HashData(bytes)),
-                output.GetProperty("sha256").GetString(), completed.GetRawText());
-            string svg = Encoding.UTF8.GetString(bytes);
-            StringAssert.Contains(svg, "<svg", completed.GetRawText());
-            markerFound |= svg.Contains(marker, StringComparison.Ordinal);
+            JsonElement[] outputs = structured.GetProperty("outputs").EnumerateArray().ToArray();
+            Assert.IsGreaterThan(0, outputs.Length, reply.GetRawText());
+            string requestedFull = Path.GetFullPath(requestedPath);
+            bool requestedDirectory = string.IsNullOrEmpty(Path.GetExtension(requestedFull));
+            string outputRootFull = requestedFull + Path.DirectorySeparatorChar;
+            foreach (JsonElement output in outputs)
+            {
+                string path = output.GetProperty("path").GetString()!;
+                Assert.IsTrue(Path.IsPathFullyQualified(path), reply.GetRawText());
+                Assert.IsTrue(requestedDirectory
+                    ? path.StartsWith(outputRootFull, StringComparison.Ordinal)
+                    : string.Equals(path, requestedFull, StringComparison.Ordinal), reply.GetRawText());
+                byte[] bytes = await File.ReadAllBytesAsync(path, token);
+                Assert.IsGreaterThan(0L, bytes.LongLength, reply.GetRawText());
+                Assert.AreEqual(bytes.LongLength, output.GetProperty("bytes").GetInt64(), reply.GetRawText());
+                Assert.AreEqual(Convert.ToHexStringLower(SHA256.HashData(bytes)),
+                    output.GetProperty("sha256").GetString(), reply.GetRawText());
+                Assert.AreEqual(64, output.GetProperty("sha256").GetString()!.Length, reply.GetRawText());
+                string expectedExtension = kind switch
+                {
+                    "svg" => ".svg", "dxf" => ".dxf", "pdf" => ".pdf", "ps" => ".ps",
+                    "netlist" => ".xml", "bom" => ".csv", _ => ""
+                };
+                Assert.AreEqual(expectedExtension, Path.GetExtension(path), true, reply.GetRawText());
+                string detail = contentCheck(path, bytes);
+                Assert.IsTrue(detail.Length == 0, kind + " content check failed: " + detail + "\n" + reply.GetRawText());
+            }
+            return structured;
         }
-        Assert.IsTrue(markerFound, "The native SVG must contain the unique text from this schematic fixture.");
+
+        string SvgDirectory = Path.Combine(instanceOutputRoot, "svg");
+        string DxfDirectory = Path.Combine(instanceOutputRoot, "dxf");
+        string PdfFile = Path.Combine(instanceOutputRoot, "pdf", "fixture.pdf");
+        string PsDirectory = Path.Combine(instanceOutputRoot, "ps");
+        string NetlistFile = Path.Combine(instanceOutputRoot, "netlist", "fixture.xml");
+        string BomFile = Path.Combine(instanceOutputRoot, "bom", "fixture.csv");
+        JsonElement svgReply = await Export("svg", SvgRequest(SvgDirectory), SvgDirectory, (_, bytes) =>
+        {
+            string value = Encoding.UTF8.GetString(bytes);
+            return value.Contains("<svg", StringComparison.Ordinal)
+                ? "" : "SVG signature missing";
+        });
+        Assert.IsTrue(svgReply.GetProperty("outputs").EnumerateArray()
+            .Select(output => File.ReadAllText(output.GetProperty("path").GetString()!))
+            .Any(value => value.Contains(marker, StringComparison.Ordinal)),
+            "The native SVG must contain the unique text from this schematic fixture.");
+        await Export("dxf", DxfRequest(DxfDirectory), DxfDirectory, (_, bytes) =>
+        {
+            string value = Encoding.UTF8.GetString(bytes);
+            return value.Contains("SECTION", StringComparison.Ordinal) && value.Contains("EOF", StringComparison.Ordinal)
+                ? "" : "DXF section or EOF marker missing";
+        });
+        await Export("pdf", PdfRequest(PdfFile), PdfFile, (_, bytes) =>
+        {
+            string value = Encoding.UTF8.GetString(bytes);
+            return value.StartsWith("%PDF-", StringComparison.Ordinal) && value.Contains("KiCad PDF", StringComparison.Ordinal)
+                ? "" : "PDF signature or KiCad producer missing";
+        });
+        await Export("ps", PsRequest(PsDirectory), PsDirectory, (_, bytes) =>
+        {
+            string value = Encoding.UTF8.GetString(bytes);
+            return value.StartsWith("%!PS-Adobe", StringComparison.Ordinal) && value.Contains("Eeschema-PS", StringComparison.Ordinal)
+                ? "" : "PostScript signature or KiCad creator missing";
+        });
+        await Export("netlist", NetlistRequest(NetlistFile), NetlistFile, (_, bytes) =>
+        {
+            string value = Encoding.UTF8.GetString(bytes);
+            return value.Contains("<export", StringComparison.Ordinal) && value.Contains("TP1", StringComparison.Ordinal)
+                && value.Contains("TP2", StringComparison.Ordinal) && value.Contains("SIGNAL", StringComparison.Ordinal)
+                ? "" : "netlist XML is missing the fixture identities";
+        });
+        await Export("bom", BomRequest(BomFile), BomFile, (_, bytes) =>
+        {
+            string value = Encoding.UTF8.GetString(bytes);
+            return value.Contains("TP1", StringComparison.Ordinal) && value.Contains("TP2", StringComparison.Ordinal)
+                && value.Contains("Probe", StringComparison.Ordinal)
+                ? "" : "BOM CSV is missing TP1/TP2 or Probe";
+        });
+
         Assert.AreEqual(clean, await ObserveLifecycleState(client, document, token),
             "Export must not change the live native lifecycle state.");
         CollectionAssert.AreEqual(sourceBefore, await File.ReadAllBytesAsync(schematicPath, token),
@@ -90,7 +181,7 @@ public sealed partial class NativeSessionTests
         JsonElement stale = await mcp.Tool("kicad_schematic_export_svg", new
         {
             instanceId,
-            requestJson = SchematicJson.Formatter.Format(Request(staleOutput)),
+            requestJson = SchematicJson.Formatter.Format(SvgRequest(staleOutput)),
             expectedStateJson = cleanJson
         });
         Assert.IsTrue(stale.GetProperty("isError").GetBoolean(), stale.GetRawText());
@@ -103,7 +194,7 @@ public sealed partial class NativeSessionTests
         JsonElement dirtyReply = await mcp.Tool("kicad_schematic_export_svg", new
         {
             instanceId,
-            requestJson = SchematicJson.Formatter.Format(Request(dirtyOutput)),
+            requestJson = SchematicJson.Formatter.Format(SvgRequest(dirtyOutput)),
             expectedStateJson = SchematicJson.Formatter.Format(dirty)
         });
         Assert.IsTrue(dirtyReply.GetProperty("isError").GetBoolean(), dirtyReply.GetRawText());

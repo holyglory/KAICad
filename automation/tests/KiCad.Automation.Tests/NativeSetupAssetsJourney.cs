@@ -277,7 +277,11 @@ public sealed partial class NativeSessionTests
         var pageChanged = await mcp.Tool("kicad_schematic_set_page_settings", new
         {
             instanceId, documentJson, expectedStateJson = SchematicJson.Formatter.Format(await State()),
-            pageSettingsJson = SchematicJson.Formatter.Format(new PageSettings { Orientation = PageOrientation.PoLandscape }),
+            pageSettingsJson = SchematicJson.Formatter.Format(new PageSettings
+            {
+                PageSize = PageSize.PsA4,
+                Orientation = PageOrientation.PoLandscape
+            }),
             operationId = Guid.NewGuid().ToString("D")
         });
         RequireToolSuccess(pageChanged);

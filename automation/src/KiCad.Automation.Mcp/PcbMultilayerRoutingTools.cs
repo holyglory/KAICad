@@ -156,6 +156,113 @@ public sealed class PcbMultilayerRoutingTools(InstanceRegistry registry)
         return Result(result);
     });
 
+    [McpServerTool(Name = "kicad_pcb_route_multilayer_apply"),
+     Description("Apply the exact Track/Via CreateItems candidate emitted by kicad_pcb_route_plan_multilayer through the checked route-replacement transaction. The candidate must identify the same PCB as the delete request, contain at least one valid Track and only Via objects in addition to tracks, and include real endpoint, net, width and copper-layer data. A completed detached DRC receipt is required; native undo, operation replay and indeterminate outcomes remain authoritative."),
+     KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "exact multilayer Track/Via candidate, detached DRC receipt, checked native transaction and operation UUID"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> Apply(string instanceId, string deleteRequestJson, string createRequestJson,
+        string expectedStateJson, string operationId, string drcJobStateJson,
+        CancellationToken cancellationToken) => Execute(async () =>
+    {
+        if (string.IsNullOrWhiteSpace(drcJobStateJson))
+            throw new AutomationException("multilayer_route_apply_requires_drc",
+                "Multilayer route apply requires a completed detached DRC receipt for the exact replacement geometry.");
+
+        ValidateMultilayerApplyCandidate(deleteRequestJson, createRequestJson);
+        return await new PcbRouteOptimizationTools(registry).Apply(
+            instanceId, deleteRequestJson, createRequestJson, expectedStateJson,
+            operationId, cancellationToken, drcJobStateJson);
+    });
+
+    [McpServerTool(Name = "kicad_pcb_route_multilayer_receipt", ReadOnly = true),
+     Description("Read the process-owned receipt for a multilayer route apply after a lost reply. This delegates to the checked route receipt store, never resubmits geometry and does not replace a native cross-process receipt."),
+     KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "operation UUID and process-owned multilayer route receipt"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> Receipt(string instanceId, string expectedProcessEpoch, string operationId,
+        CancellationToken cancellationToken)
+        => new PcbRouteOptimizationTools(registry).Receipt(
+            instanceId, expectedProcessEpoch, operationId, cancellationToken);
+
+    private static void ValidateMultilayerApplyCandidate(string deleteRequestJson, string createRequestJson)
+    {
+        DeleteItems delete = ParseBoard<DeleteItems>(deleteRequestJson, "invalid_pcb_route_multilayer_delete");
+        CreateItems create = ParseBoard<CreateItems>(createRequestJson, "invalid_pcb_route_multilayer_create");
+        if (delete.Header?.Document is null || create.Header?.Document is null
+            || !delete.Header.Document.Equals(create.Header.Document))
+            throw new AutomationException("invalid_pcb_route_multilayer_create",
+                "Delete and create requests must identify the same explicit PCB document.");
+        DocumentStateTools.ValidateTarget(create.Header.Document);
+        if (create.Header.Document.Type != DocumentType.DoctypePcb)
+            throw new AutomationException("invalid_pcb_route_multilayer_create",
+                "A multilayer route candidate requires an explicit PCB document.");
+        if (create.Items.Count == 0 || !create.Items.Any(item => item.Is(Track.Descriptor)))
+            throw new AutomationException("invalid_pcb_route_multilayer_create",
+                "A multilayer route candidate must contain at least one Track.");
+
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        foreach (ProtoAny packed in create.Items)
+        {
+            if (!packed.Is(Track.Descriptor) && !packed.Is(Via.Descriptor))
+                throw new AutomationException("invalid_pcb_route_multilayer_create",
+                    "A multilayer route candidate accepts only Track and Via objects.");
+
+            string id;
+            if (packed.Is(Track.Descriptor))
+            {
+                Track track = packed.Unpack<Track>();
+                ValidateMultilayerTrack(track);
+                id = track.Id.Value;
+            }
+            else
+            {
+                Via via = packed.Unpack<Via>();
+                ValidateMultilayerVia(via);
+                id = via.Id.Value;
+            }
+
+            if (!ids.Add(id))
+                throw new AutomationException("invalid_pcb_route_multilayer_create",
+                    "Multilayer route replacement IDs must be distinct canonical UUIDs.");
+        }
+    }
+
+    private static void ValidateMultilayerTrack(Track track)
+    {
+        if (track.Id is null || !Guid.TryParseExact(track.Id.Value, "D", out var id) || id == Guid.Empty
+            || track.Net is null || string.IsNullOrWhiteSpace(track.Net.Name)
+            || track.Start is null || track.End is null || track.Width is null || track.Width.ValueNm <= 0
+            || track.Start.Equals(track.End))
+            throw new AutomationException("invalid_pcb_route_multilayer_create",
+                "Every Track must have a canonical ID, explicit net, endpoints, positive width and nonzero geometry.");
+        if (!MultilayerRoutePlanner.IsCopperLayer(track.Layer))
+            throw new AutomationException("invalid_pcb_route_multilayer_create",
+                "Tracks must use known copper layers.");
+    }
+
+    private static void ValidateMultilayerVia(Via via)
+    {
+        if (via.Id is null || !Guid.TryParseExact(via.Id.Value, "D", out var id) || id == Guid.Empty
+            || via.Position is null || via.Net is null || string.IsNullOrWhiteSpace(via.Net.Name)
+            || via.PadStack is null || via.PadStack.Layers.Count < 2)
+            throw new AutomationException("invalid_pcb_route_multilayer_create",
+                "Every Via must have a canonical ID, position, explicit net and at least two pad-stack layers.");
+
+        int[] layers = via.PadStack.Layers.Select(layer => (int)layer).ToArray();
+        if (layers.Any(layer => !MultilayerRoutePlanner.IsCopperLayer((BoardLayer)layer))
+            || layers.Distinct().Count() != layers.Length || layers.Min() == layers.Max())
+            throw new AutomationException("invalid_pcb_route_multilayer_create",
+                "Via pad-stack layers must be distinct known copper layers spanning at least two levels.");
+        if (via.PadStack.CopperLayers.Any(layer => !MultilayerRoutePlanner.IsCopperLayer(layer.Layer))
+            || via.PadStack.CopperLayers.Select(layer => layer.Layer).Distinct().Count() != via.PadStack.CopperLayers.Count)
+            throw new AutomationException("invalid_pcb_route_multilayer_create",
+                "Via pad-stack copper definitions must use known copper layers.");
+        if (via.PadStack.Drill is { } drill
+            && (drill.StartLayer != (BoardLayer)layers.Min() || drill.EndLayer != (BoardLayer)layers.Max()
+                || drill.Diameter is null || drill.Diameter.XNm <= 0 || drill.Diameter.YNm <= 0))
+            throw new AutomationException("invalid_pcb_route_multilayer_create",
+                "Via drill layers must match the pad-stack span and use a positive diameter.");
+    }
+
     private static MultilayerRoutePlanner.MultilayerRouteRequest ParseRequest(string value)
         => JsonSerializer.Deserialize<MultilayerRoutePlanner.MultilayerRouteRequest>(value, JsonOptions)
            ?? throw new AutomationException("invalid_multilayer_route_plan", "requestJson must be a JSON object.");
@@ -165,6 +272,14 @@ public sealed class PcbMultilayerRoutingTools(InstanceRegistry registry)
     {
         try { return SchematicJson.Parser.Parse<T>(value); }
         catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException)
+        { throw new AutomationException(code, "Invalid protobuf JSON: " + error.Message); }
+    }
+
+    private static T ParseBoard<T>(string value, string code)
+        where T : class, IMessage<T>, new()
+    {
+        try { return BoardJson.Parser.Parse<T>(value); }
+        catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException or InvalidOperationException)
         { throw new AutomationException(code, "Invalid protobuf JSON: " + error.Message); }
     }
 

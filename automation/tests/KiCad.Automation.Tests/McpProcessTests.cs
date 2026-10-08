@@ -465,6 +465,8 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_pcb_route_commit");
             CollectionAssert.Contains(names, "kicad_pcb_route_plan");
             CollectionAssert.Contains(names, "kicad_pcb_route_plan_multilayer");
+            CollectionAssert.Contains(names, "kicad_pcb_route_multilayer_apply");
+            CollectionAssert.Contains(names, "kicad_pcb_route_multilayer_receipt");
             CollectionAssert.Contains(names, "kicad_pcb_route_preview_continue");
             CollectionAssert.Contains(names, "kicad_pcb_route_preview_cancel");
             CollectionAssert.Contains(names, "kicad_pcb_route_preview_read");
@@ -778,6 +780,18 @@ public sealed class McpProcessTests
             await Request(9336, "tools/call", new { name = "kicad_pcb_route_corner_optimize_apply", arguments = new { instanceId = Guid.NewGuid().ToString("D"), deleteRequestJson = "{}", createRequestJson = "{}", expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D") } });
             var emptyRouteOptimizeReceipt = await Request(9337, "tools/call", new { name = "kicad_pcb_route_corner_optimize_receipt", arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = Guid.NewGuid().ToString("D"), operationId = Guid.NewGuid().ToString("D") } });
             Assert.IsFalse(emptyRouteOptimizeReceipt.GetProperty("result").GetProperty("structuredContent").GetProperty("found").GetBoolean());
+            var missingMultilayerDrc = await Request(9340, "tools/call", new { name = "kicad_pcb_route_multilayer_apply", arguments = new
+            {
+                instanceId = Guid.NewGuid().ToString("D"), deleteRequestJson = "{}", createRequestJson = "{}",
+                expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D"), drcJobStateJson = ""
+            } });
+            Assert.IsTrue(missingMultilayerDrc.GetProperty("result").GetProperty("isError").GetBoolean(), missingMultilayerDrc.GetRawText());
+            Assert.AreEqual("multilayer_route_apply_requires_drc", missingMultilayerDrc.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(), missingMultilayerDrc.GetRawText());
+            var emptyMultilayerReceipt = await Request(9341, "tools/call", new { name = "kicad_pcb_route_multilayer_receipt", arguments = new
+            {
+                instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = Guid.NewGuid().ToString("D"), operationId = Guid.NewGuid().ToString("D")
+            } });
+            Assert.IsFalse(emptyMultilayerReceipt.GetProperty("result").GetProperty("structuredContent").GetProperty("found").GetBoolean(), emptyMultilayerReceipt.GetRawText());
             await Request(9338, "tools/call", new { name = "kicad_pcb_route_reroute_apply", arguments = new { instanceId = Guid.NewGuid().ToString("D"), deleteRequestJson = "{}", createRequestJson = "{}", expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D") } });
             var emptyRerouteReceipt = await Request(9339, "tools/call", new { name = "kicad_pcb_route_reroute_receipt", arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = Guid.NewGuid().ToString("D"), operationId = Guid.NewGuid().ToString("D") } });
             Assert.IsFalse(emptyRerouteReceipt.GetProperty("result").GetProperty("structuredContent").GetProperty("found").GetBoolean());

@@ -476,6 +476,8 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_pcb_route_tune_apply");
             CollectionAssert.Contains(names, "kicad_pcb_route_tune_receipt");
             CollectionAssert.Contains(names, "kicad_pcb_route_via_minimize_plan");
+            CollectionAssert.Contains(names, "kicad_pcb_route_via_minimize_apply");
+            CollectionAssert.Contains(names, "kicad_pcb_route_via_minimize_receipt");
             CollectionAssert.Contains(names, "kicad_pcb_footprint_place_plan");
             CollectionAssert.Contains(names, "kicad_pcb_route_receipt");
             var invalidRouteReceipt = await Request(9321, "tools/call", new { name = "kicad_pcb_route_receipt", arguments = new
@@ -767,6 +769,18 @@ public sealed class McpProcessTests
             var emptyTuneReceipt = await Request(9351, "tools/call", new { name = "kicad_pcb_route_tune_receipt", arguments = new { instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = Guid.NewGuid().ToString("D"), operationId = Guid.NewGuid().ToString("D") } });
             Assert.IsFalse(emptyTuneReceipt.GetProperty("result").GetProperty("structuredContent").GetProperty("found").GetBoolean());
             await Request(9346, "tools/call", new { name = "kicad_pcb_route_via_minimize_plan", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", expectedStateJson = "{}", candidateRequestJson = "{}", requestJson = "{}" } });
+            var invalidViaMinimizeApply = await Request(9400, "tools/call", new { name = "kicad_pcb_route_via_minimize_apply", arguments = new
+            {
+                instanceId = Guid.NewGuid().ToString("D"), deleteRequestJson = "{}", createRequestJson = "{}",
+                expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D")
+            } });
+            Assert.IsTrue(invalidViaMinimizeApply.GetProperty("result").GetProperty("isError").GetBoolean(), invalidViaMinimizeApply.GetRawText());
+            Assert.AreEqual("invalid_pcb_via_minimize_apply_create", invalidViaMinimizeApply.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString(), invalidViaMinimizeApply.GetRawText());
+            var emptyViaMinimizeReceipt = await Request(9401, "tools/call", new { name = "kicad_pcb_route_via_minimize_receipt", arguments = new
+            {
+                instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = Guid.NewGuid().ToString("D"), operationId = Guid.NewGuid().ToString("D")
+            } });
+            Assert.IsFalse(emptyViaMinimizeReceipt.GetProperty("result").GetProperty("structuredContent").GetProperty("found").GetBoolean(), emptyViaMinimizeReceipt.GetRawText());
             await Request(9325, "tools/call", new { name = "kicad_pcb_footprint_place_plan", arguments = new { documentJson = "{}", expectedStateJson = "{}", footprintJson = "{}" } });
             await Request(9322, "tools/call", new { name = "kicad_pcb_route_constraints", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", expectedStateJson = "{}", requestJson = "{}" } });
             await Request(9326, "tools/call", new { name = "kicad_pcb_route_cleanup_plan", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", expectedStateJson = "{}", requestJson = "{}" } });

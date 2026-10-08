@@ -256,10 +256,28 @@ public sealed partial class NativeSessionTests
             imageJson = SchematicJson.Formatter.Format(image), operationId = Guid.NewGuid().ToString("D")
         });
         RequireToolSuccess(imageUpdated);
-        var imageAfterUpdate = await State();
+        async Task<SchematicImage> ReadImage() => (await Read()).Data.Items
+            .Where(item => item.Is(SchematicImage.Descriptor)
+                && item.Unpack<SchematicImage>().Id.Value == image.Id.Value)
+            .Select(item => item.Unpack<SchematicImage>())
+            .Single();
+        var updatedImage = await ReadImage();
+        Assert.AreEqual(image.Position.XNm, updatedImage.Position.XNm, "The typed MCP update must move the image.");
+        Assert.AreEqual(image.Position.YNm, updatedImage.Position.YNm);
+        CollectionAssert.AreEqual(image.ImageData.ToByteArray(), updatedImage.ImageData.ToByteArray(),
+            "The typed MCP update must preserve the image payload.");
+        await client.InvokeAsync<SaveDocument, Empty>(new() { Document = document }, token);
+        await client.InvokeAsync<RevertDocument, Empty>(new() { Document = document }, token);
+        var reloadedImage = await ReadImage();
+        Assert.AreEqual(image.Position.XNm, reloadedImage.Position.XNm,
+            "The updated image position must survive save/reload.");
+        Assert.AreEqual(image.Position.YNm, reloadedImage.Position.YNm);
+        CollectionAssert.AreEqual(image.ImageData.ToByteArray(), reloadedImage.ImageData.ToByteArray(),
+            "The updated image payload must survive save/reload.");
+        var imageAfterReload = await State();
         JsonElement imageDeleted = await mcp.Tool("kicad_schematic_delete_image", new
         {
-            instanceId, documentJson, expectedStateJson = SchematicJson.Formatter.Format(imageAfterUpdate),
+            instanceId, documentJson, expectedStateJson = SchematicJson.Formatter.Format(imageAfterReload),
             imageId = image.Id.Value, operationId = Guid.NewGuid().ToString("D")
         });
         RequireToolSuccess(imageDeleted);

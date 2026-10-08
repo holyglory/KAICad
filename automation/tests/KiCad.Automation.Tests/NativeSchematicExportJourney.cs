@@ -174,6 +174,15 @@ public sealed partial class NativeSessionTests
         { instanceId, operationId = svgOperationId, processEpoch = clean.ProcessEpoch });
         Assert.IsFalse(receipt.TryGetProperty("isError", out var receiptError) && receiptError.GetBoolean(), receipt.GetRawText());
         Assert.IsTrue(receipt.GetProperty("structuredContent").GetProperty("found").GetBoolean(), receipt.GetRawText());
+        string reconnectStderr = Path.Combine(evidence, instanceId + "-export-mcp-reconnect.stderr.log");
+        await using var reconnectMcp = await StdioMcpFixture.StartAsync(
+            SyncHarnessProcessTests.ProductionStartInfo(), statePath, reconnectStderr, token);
+        RequireToolSuccess(await reconnectMcp.Tool("kicad_instance_attach",
+            new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
+        JsonElement persistedReceipt = await reconnectMcp.Tool("kicad_schematic_export_receipt", new
+        { instanceId, operationId = svgOperationId, processEpoch = clean.ProcessEpoch });
+        Assert.IsFalse(persistedReceipt.TryGetProperty("isError", out var persistedError) && persistedError.GetBoolean(), persistedReceipt.GetRawText());
+        Assert.IsTrue(persistedReceipt.GetProperty("structuredContent").GetProperty("found").GetBoolean(), persistedReceipt.GetRawText());
 
         Assert.AreEqual(clean, await ObserveLifecycleState(client, document, token),
             "Export must not change the live native lifecycle state.");

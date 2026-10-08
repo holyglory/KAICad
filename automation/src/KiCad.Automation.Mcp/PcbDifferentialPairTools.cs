@@ -85,6 +85,50 @@ public sealed class PcbDifferentialPairTools(InstanceRegistry registry)
         return new CallToolResult { StructuredContent = structured, Content = [new TextContentBlock { Text = structured.GetRawText() }] };
     });
 
+    [McpServerTool(Name = "kicad_pcb_diff_pair_apply"),
+     Description("Apply the exact two-track differential-pair candidate from kicad_pcb_diff_pair_plan through the checked route-replacement transaction. requestJson names positiveNet and negativeNet; the candidate must contain exactly one Track for each named net on the same copper layer. A completed detached DRC receipt is required, and native undo, operation replay and indeterminate outcomes remain authoritative."),
+     KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "exact differential-pair candidate, lifecycle checkpoint, detached DRC receipt, checked native transaction and operation UUID"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> Apply(string instanceId, string deleteRequestJson, string createRequestJson,
+        string expectedStateJson, string operationId, string requestJson, string drcJobStateJson,
+        CancellationToken cancellationToken) => Execute(async () =>
+    {
+        if (string.IsNullOrWhiteSpace(drcJobStateJson))
+            throw new AutomationException("diff_pair_apply_requires_drc",
+                "Differential-pair apply requires a completed detached DRC receipt for the exact replacement geometry.");
+        PairApplyRequest pair = JsonSerializer.Deserialize<PairApplyRequest>(requestJson, JsonOptions)
+            ?? throw new AutomationException("invalid_diff_pair_apply", "requestJson must name positiveNet and negativeNet.");
+        Validate(pair);
+        CreateItems create = Parse<CreateItems>(createRequestJson, "invalid_diff_pair_apply_create");
+        if (create.Items.Count != 2 || create.Items.Any(item => !item.Is(BoardTrack.Descriptor)))
+            throw new AutomationException("invalid_diff_pair_apply_create",
+                "A differential-pair apply candidate must contain exactly two Track objects.");
+        BoardTrack[] tracks = create.Items.Select(item => item.Unpack<BoardTrack>()).ToArray();
+        if (tracks.Any(track => track.Id is null || !CanonicalUuid(track.Id.Value)
+            || track.Net is null || string.IsNullOrWhiteSpace(track.Net.Name)
+            || track.Start is null || track.End is null || track.Width is null || track.Width.ValueNm <= 0))
+            throw new AutomationException("invalid_diff_pair_apply_create",
+                "Each differential-pair Track needs a canonical ID, net, endpoints and positive width.");
+        if (tracks.Select(track => track.Net.Name).Distinct(StringComparer.Ordinal).Count() != 2
+            || !tracks.Any(track => track.Net.Name == pair.PositiveNet)
+            || !tracks.Any(track => track.Net.Name == pair.NegativeNet)
+            || tracks[0].Layer != tracks[1].Layer)
+            throw new AutomationException("invalid_diff_pair_apply_create",
+                "The candidate must contain one positive and one negative net Track on the same copper layer.");
+        return await new PcbRouteOptimizationTools(registry).Apply(
+            instanceId, deleteRequestJson, createRequestJson, expectedStateJson, operationId,
+            cancellationToken, drcJobStateJson);
+    });
+
+    [McpServerTool(Name = "kicad_pcb_diff_pair_receipt", ReadOnly = true),
+     Description("Read the process-owned receipt for a differential-pair apply after a lost reply. This delegates to the checked route receipt store, never resubmits geometry and does not replace a native cross-process receipt."),
+     KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "operation UUID and process-owned differential-pair receipt"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> Receipt(string instanceId, string expectedProcessEpoch, string operationId,
+        CancellationToken cancellationToken)
+        => new PcbRouteOptimizationTools(registry).Receipt(
+            instanceId, expectedProcessEpoch, operationId, cancellationToken);
+
     [McpServerTool(Name = "kicad_pcb_diff_pair_validate", ReadOnly = true),
      Description("Validate one supported straight differential-pair route at one lifecycle checkpoint. requestJson contains positiveNet, negativeNet, widthNm, minimumGapNm, optional targetGapNm, maxSkewNm, toleranceNm, parallelTolerance and netClassName. The validator reports exact straight-segment lengths, skew, copper edge gap, endpoint correspondence, layer agreement and parallelism. Arcs, vias, multi-segment routes and unknown geometry are explicit incomplete results; the tool never mutates the board or claims DRC, impedance or manufacturing validity."),
      KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "explicit PCB lifecycle state, paired native route geometry, spacing/parallelism/skew validation")]
@@ -232,6 +276,12 @@ public sealed class PcbDifferentialPairTools(InstanceRegistry registry)
         public double ParallelTolerance { get; set; } = 1e-6;
     }
 
+    private sealed class PairApplyRequest
+    {
+        public string PositiveNet { get; set; } = "";
+        public string NegativeNet { get; set; } = "";
+    }
+
     internal sealed record PairValidationIssue(string Code, string Message, string? PositiveItemId = null, string? NegativeItemId = null);
     internal sealed record PairRouteSummary(string NetName, int ItemCount, int TrackCount, int ArcCount, int ViaCount,
         double? LengthNm, double? PartialStraightLengthNm, string[] Layers);
@@ -274,12 +324,24 @@ public sealed class PcbDifferentialPairTools(InstanceRegistry registry)
             throw new AutomationException("invalid_diff_pair_validation", "netClassName must be at most 512 characters.");
         if (request.WidthNm <= 0 || request.MinimumGapNm < 0 || request.WidthNm > long.MaxValue - request.MinimumGapNm
             || request.TargetGapNm is < 0 || request.TargetGapNm is { } targetGap && targetGap < request.MinimumGapNm)
-            throw new AutomationException("invalid_diff_pair_validation", "widthNm must be positive, minimumGapNm must be nonnegative, and targetGapNm cannot be below minimumGapNm.");
+                    throw new AutomationException("invalid_diff_pair_validation", "widthNm must be positive, minimumGapNm must be nonnegative, and targetGapNm cannot be below minimumGapNm.");
         if (!double.IsFinite(request.ToleranceNm) || request.ToleranceNm < 0
             || request.MaxSkewNm is { } maxSkew && (!double.IsFinite(maxSkew) || maxSkew < 0)
             || !double.IsFinite(request.ParallelTolerance) || request.ParallelTolerance < 0 || request.ParallelTolerance > 0.25)
             throw new AutomationException("invalid_diff_pair_validation", "tolerance, maxSkewNm and parallelTolerance must be finite and nonnegative; parallelTolerance cannot exceed 0.25.");
     }
+
+    private static void Validate(PairApplyRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.PositiveNet) || string.IsNullOrWhiteSpace(request.NegativeNet)
+            || request.PositiveNet.Length > 512 || request.NegativeNet.Length > 512
+            || request.PositiveNet == request.NegativeNet)
+            throw new AutomationException("invalid_diff_pair_apply", "positiveNet and negativeNet must be distinct nonempty names of at most 512 characters.");
+    }
+
+    private static bool CanonicalUuid(string value) =>
+        Guid.TryParseExact(value, "D", out Guid id) && id != Guid.Empty
+        && string.Equals(value, id.ToString("D"), StringComparison.Ordinal);
 
     internal static PairValidationSummary ValidateGeometry(PairValidationRequest request, IEnumerable<ProtoAny> packedItems)
     {

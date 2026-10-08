@@ -236,7 +236,9 @@ public sealed partial class NativeSessionTests
             Id = new() { Value = Guid.NewGuid().ToString("D") },
             Position = new() { XNm = 1_000, YNm = 2_000 },
             ImageScale = new() { Value = 1 },
-            ImageData = ByteString.CopyFromUtf8("native setup image")
+            ImageData = ByteString.CopyFrom(await File.ReadAllBytesAsync(
+                Path.Combine(FindRoot(), "qa", "data", "pcbnew", "plugins", "eagle",
+                    "Adafruit-AHT20-PCB", "assets", "4566.jpg"), token))
         };
         JsonElement imageCreated = await mcp.Tool("kicad_schematic_create_image", new
         {

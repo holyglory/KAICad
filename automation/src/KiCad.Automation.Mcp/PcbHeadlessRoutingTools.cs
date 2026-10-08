@@ -152,7 +152,7 @@ public sealed class PcbHeadlessRoutingTools(InstanceRegistry registry)
                 drcValidated = false, nativeCommit = false
             });
 
-        string planId = PlanIdentity(request, expected, obstacles);
+        string planId = PlanIdentity(request, expected, obstacles, ripUp);
         CreateItems candidate = BuildCandidate(document, request, grid, search.Path.Value, planId);
         var points = search.Path.Value.Select(node => grid.Point(node)).ToArray();
         int bends = points.Length <= 2 ? 0 : points.Zip(points.Skip(1), (left, right) => (left, right))
@@ -444,7 +444,7 @@ public sealed class PcbHeadlessRoutingTools(InstanceRegistry registry)
     private static DeleteItems BuildRipUpCandidate(DocumentSpecifier document, string netName,
         IEnumerable<ProtoAny> items)
     {
-        var candidate = new DeleteItems { Header = new() { Document = document } };
+        var ids = new HashSet<string>(StringComparer.Ordinal);
         foreach (ProtoAny packed in items)
         {
             string? id = packed.Is(Track.Descriptor) && SameNet(packed.Unpack<Track>().Net, netName)
@@ -454,15 +454,26 @@ public sealed class PcbHeadlessRoutingTools(InstanceRegistry registry)
                     : packed.Is(Via.Descriptor) && SameNet(packed.Unpack<Via>().Net, netName)
                         ? packed.Unpack<Via>().Id.Value : null;
             if (!string.IsNullOrWhiteSpace(id) && Guid.TryParseExact(id, "D", out var identity) && identity != Guid.Empty)
-                candidate.ItemIds.Add(new KIID { Value = id });
+                ids.Add(id);
         }
+
+        var candidate = new DeleteItems { Header = new() { Document = document } };
+        candidate.ItemIds.Add(ids.Order(StringComparer.Ordinal).Select(id => new KIID { Value = id }));
         return candidate;
     }
 
-    private static string PlanIdentity(RoutePlanRequest request, DocumentLifecycleState state, ImmutableArray<Obstacle> obstacles)
+    private static string PlanIdentity(RoutePlanRequest request, DocumentLifecycleState state,
+        ImmutableArray<Obstacle> obstacles, DeleteItems ripUp)
     {
-        string canonical = JsonSerializer.Serialize(request, JsonOptions) + "\n" + state.StateSha256 + "\n"
-            + string.Join("\n", obstacles.Select(o => $"{o.Kind}|{o.Id}|{o.Layer}|{o.Bounds.MinXNm},{o.Bounds.MinYNm},{o.Bounds.MaxXNm},{o.Bounds.MaxYNm}"));
+        // Bind the proposal identity to the complete lifecycle observation and
+        // every emitted route delta. A state digest alone is insufficient when
+        // a native process restarts or tracking is incomplete.
+        string canonical = "kicad-pcb-route-plan-v2\n"
+            + JsonSerializer.Serialize(request, JsonOptions) + "\n"
+            + SchematicJson.Formatter.Format(state) + "\n"
+            + BoardJson.Formatter.Format(ripUp) + "\n"
+            + string.Join("\n", obstacles.Select(o =>
+                $"{o.Kind}|{o.Id}|{o.NetName}|{o.Layer}|{o.Bounds.MinXNm},{o.Bounds.MinYNm},{o.Bounds.MaxXNm},{o.Bounds.MaxYNm}"));
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
     }
 

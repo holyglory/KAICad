@@ -22,6 +22,18 @@ public sealed class PcbFootprintValidationTools
     private const int MaximumItems = 16_384;
     private const int MaximumPayloadBytes = 16 * 1024 * 1024;
 
+    internal static IReadOnlyList<string> ValidateCompleteCandidate(FootprintInstance footprint,
+        CancellationToken cancellationToken)
+    {
+        var issues = new List<ValidationIssue>();
+        ValidateFootprint(footprint, issues, cancellationToken);
+        return issues.OrderBy(issue => issue.Path, StringComparer.Ordinal)
+            .ThenBy(issue => issue.Code, StringComparer.Ordinal)
+            .ThenBy(issue => issue.Message, StringComparer.Ordinal)
+            .Select(issue => issue.Code + ":" + issue.Path)
+            .ToArray();
+    }
+
     [McpServerTool(Name = "kicad_pcb_footprint_validate", ReadOnly = true),
      Description("Validate one complete FootprintInstance protobuf-JSON candidate without contacting KiCad. The check covers explicit instance/library identity, bounded Any-packed child content, unique pad identities and numbers, pad-stack layers and positive pad sizes, graphic identities/layers, 3D model filenames/transforms and supported footprint child types. It returns deterministic issues and a canonical content SHA-256; it does not run board DRC, resolve a library, or claim manufacturing validity."),
      KiCadCapability("pcb-placement", "compiled-mcp", "managed footprint identity, pads, padstacks, graphics, 3D model transforms and canonical content SHA-256"),

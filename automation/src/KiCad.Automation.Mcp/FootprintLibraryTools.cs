@@ -466,6 +466,12 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
                 || footprint.Definition.Id.LibraryNickname != document.LibId.LibraryNickname
                 || footprint.Definition.Id.EntryName != document.LibId.EntryName)
                 throw new AutomationException("footprint_library_definition_mismatch", "The footprint definition identity must match the requested document.");
+            IReadOnlyList<string> structuralIssues = PcbFootprintValidationTools.ValidateCompleteCandidate(
+                footprint, cancellationToken);
+            if (structuralIssues.Count != 0)
+                throw new AutomationException("invalid_footprint_definition",
+                    "The complete footprint definition is structurally invalid: "
+                    + string.Join(", ", structuralIssues.Take(16)));
 
             NativeClient client = registry.Client(instanceId);
             AutomationSession session = await client.HandshakeAsync(cancellationToken);

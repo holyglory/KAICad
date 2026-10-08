@@ -1530,9 +1530,105 @@ public sealed partial class NativeSessionTests
                 .Select(item => item.Unpack<Track>().Net.Name).ToHashSet(StringComparer.Ordinal);
             Assert.IsTrue(differentialNets.Contains("USB_D+"), differentialData.GetRawText());
             Assert.IsTrue(differentialNets.Contains("USB_D-"), differentialData.GetRawText());
-            Assert.IsGreaterThanOrEqualTo(2, differentialCandidate.Items.Count);
+            Assert.AreEqual(2, differentialCandidate.Items.Count,
+                "The differential-pair apply contract requires exactly one Track per named net.");
+            Assert.IsTrue(differentialCandidate.Items.All(item => item.Is(Track.Descriptor)), differentialData.GetRawText());
+            Assert.AreEqual(2, differentialCandidate.Items.Select(item => item.Unpack<Track>().Net.Name)
+                .Distinct(StringComparer.Ordinal).Count(), differentialData.GetRawText());
             Assert.AreEqual(SchematicJson.Formatter.Format(cleanState), SchematicJson.Formatter.Format(
                 await ObserveLifecycleState(client, cleanBoard, token)));
+
+            // Apply the exact two-track proposal through the differential-pair
+            // wrapper.  The detached DRC is bound to this candidate and the
+            // empty DeleteItems request makes this an additive transaction.
+            var differentialDelete = new DeleteItems { Header = new() { Document = cleanBoard } };
+            var differentialBeforeApply = await ObserveLifecycleState(client, cleanBoard, token);
+            var differentialDrc = await RouteDrc(BoardJson.Formatter.Format(differentialCandidate), null,
+                differentialBeforeApply);
+            string differentialOperationId = Guid.NewGuid().ToString("D");
+            string differentialPairRequestJson = JsonSerializer.Serialize(new
+            {
+                positiveNet = "USB_D+", negativeNet = "USB_D-"
+            });
+            var differentialApplyArguments = new
+            {
+                instanceId, deleteRequestJson = BoardJson.Formatter.Format(differentialDelete),
+                createRequestJson = BoardJson.Formatter.Format(differentialCandidate),
+                expectedStateJson = SchematicJson.Formatter.Format(differentialBeforeApply),
+                operationId = differentialOperationId, requestJson = differentialPairRequestJson,
+                drcJobStateJson = SchematicJson.Formatter.Format(differentialDrc)
+            };
+            var differentialApply = await mcp.Tool("kicad_pcb_diff_pair_apply", differentialApplyArguments);
+            Assert.IsFalse(differentialApply.TryGetProperty("isError", out var differentialApplyError)
+                && differentialApplyError.GetBoolean(), differentialApply.GetRawText());
+            var differentialApplyData = differentialApply.GetProperty("structuredContent");
+            Assert.IsTrue(differentialApplyData.GetProperty("mutationConfirmed").GetBoolean(), differentialApply.GetRawText());
+            Assert.IsTrue(differentialApplyData.GetProperty("nativeReceiptAvailable").GetBoolean(), differentialApply.GetRawText());
+            Assert.AreEqual("native-process", differentialApplyData.GetProperty("receiptScope").GetString());
+            Assert.IsTrue(differentialApplyData.GetProperty("drcValidated").GetBoolean(), differentialApply.GetRawText());
+            Assert.IsFalse(differentialApplyData.GetProperty("replayed").GetBoolean(), differentialApply.GetRawText());
+            var differentialReceipt = SchematicJson.Parser.Parse<CheckedPcbRouteReceipt>(
+                differentialApplyData.GetProperty("receipt").GetRawText());
+            Assert.AreEqual(CheckedPcbRouteReceipt.Types.State.Completed, differentialReceipt.State);
+            Assert.AreEqual(2, differentialReceipt.Created.CreatedItems.Count);
+            var differentialCheckedRequest = new CheckedPcbRouteCommit
+            {
+                Candidate = differentialCandidate, ExpectedState = differentialBeforeApply,
+                DrcJobId = differentialDrc.JobId, OperationId = differentialOperationId,
+                MaximumResultBytes = 4 * 1024 * 1024, Removals = null
+            };
+            CheckedPcbRouteContract.ValidateResult(differentialCheckedRequest, differentialReceipt, inspect: false);
+            var differentialIds = differentialCandidate.Items.Select(RouteIdentity).Order(StringComparer.Ordinal).ToArray();
+            var differentialReadback = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Items = { differentialIds.Select(id => new KIID { Value = id }) } }, token);
+            CollectionAssert.AreEqual(differentialIds,
+                differentialReadback.Items.Select(RouteIdentity).Order(StringComparer.Ordinal).ToArray());
+            foreach (var created in differentialReceipt.Created.CreatedItems)
+                Assert.AreEqual(created.Item,
+                    differentialReadback.Items.Single(item => RouteIdentity(item) == RouteIdentity(created.Item)),
+                    "Differential-pair receipt geometry must match native readback.");
+
+            var differentialReplay = await mcp.Tool("kicad_pcb_diff_pair_apply", differentialApplyArguments);
+            Assert.IsFalse(differentialReplay.TryGetProperty("isError", out var differentialReplayError)
+                && differentialReplayError.GetBoolean(), differentialReplay.GetRawText());
+            var differentialReplayData = differentialReplay.GetProperty("structuredContent");
+            Assert.IsTrue(differentialReplayData.GetProperty("replayed").GetBoolean(), differentialReplay.GetRawText());
+            Assert.AreEqual(differentialOperationId, differentialReplayData.GetProperty("operationId").GetString());
+            Assert.AreEqual(differentialApplyData.GetProperty("afterState").GetString(),
+                differentialReplayData.GetProperty("afterState").GetString());
+            var differentialReceiptRead = await mcp.Tool("kicad_pcb_diff_pair_receipt", new
+            { instanceId, expectedProcessEpoch = client.Epoch, operationId = differentialOperationId });
+            Assert.IsFalse(differentialReceiptRead.TryGetProperty("isError", out var differentialReceiptReadError)
+                && differentialReceiptReadError.GetBoolean(), differentialReceiptRead.GetRawText());
+            var differentialReceiptReadData = differentialReceiptRead.GetProperty("structuredContent");
+            Assert.IsTrue(differentialReceiptReadData.GetProperty("found").GetBoolean(), differentialReceiptRead.GetRawText());
+            Assert.AreEqual("native-process", differentialReceiptReadData.GetProperty("receiptScope").GetString());
+            Assert.IsTrue(differentialReceiptReadData.GetProperty("nativeReceiptAvailable").GetBoolean());
+            Assert.AreEqual(differentialReplayData.GetRawText(), differentialReceiptReadData.GetProperty("receipt").GetRawText());
+
+            // The checked pair apply is one native undo entry.  Undo it before
+            // continuing with the remaining preview cases so they keep the
+            // original clean lifecycle checkpoint and no copper is leaked.
+            NativeKeyboard.SchematicShortcut(display, focusProcessId, "z", "PCB Editor", true, true,
+                clickFromLeft: 500, clickFromTop: 500);
+            using (var differentialUndoDeadline = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                differentialUndoDeadline.CancelAfter(TimeSpan.FromSeconds(8));
+                while (true)
+                {
+                    var undone = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+                    { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbTrace, KiCadObjectType.KotPcbArc, KiCadObjectType.KotPcbVia } },
+                        differentialUndoDeadline.Token);
+                    if (!undone.Items.Any(item => differentialIds.Contains(RouteIdentity(item), StringComparer.Ordinal))) break;
+                    await Task.Delay(100, differentialUndoDeadline.Token);
+                }
+            }
+            cleanState = await ObserveLifecycleState(client, cleanBoard, token);
+            differentialPreviewRequest.ExpectedRevision = cleanState.Revision.Clone();
+            Assert.AreEqual(0, (await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbTrace } }, token)).Items
+                .Count(item => differentialIds.Contains(RouteIdentity(item), StringComparer.Ordinal)),
+                "Differential-pair cleanup must remove both applied tracks.");
 
             // Differential-pair placement commits each fixed waypoint inside
             // the native placer. The preview must retain all committed pieces

@@ -84,6 +84,48 @@ public sealed class SimulationDeckAdmissionTests
     }
 
     [TestMethod]
+    public void ExtractsNamedVectorSlicesWithoutSplittingComplexPairs()
+    {
+        var fixture = SimulationFixture();
+        fixture.Result.Vectors.Add(new SimulationVector
+        {
+            Name = "v(out)", Complex = true, Values = { 1.0, 0.0, 0.5, -0.25, 0.25, -0.5 }
+        });
+        fixture.Result.Vectors.Add(new SimulationVector
+        {
+            Name = "frequency", Complex = false, Values = { 100.0, 200.0, 300.0 }
+        });
+
+        var complex = SimulationJobContract.ExtractVector(fixture.Result, "v(out)", 1, 2);
+        Assert.IsTrue(complex.Complex);
+        Assert.AreEqual(1, complex.SampleStart);
+        Assert.AreEqual(2, complex.SampleCount);
+        Assert.AreEqual(3, complex.TotalSampleCount);
+        CollectionAssert.AreEqual(new[] { 0.5, -0.25, 0.25, -0.5 }, complex.Values);
+        CollectionAssert.AreEqual(new[] { 0.5, 0.25 }, complex.RealValues);
+        CollectionAssert.AreEqual(new[] { -0.25, -0.5 }, complex.ImaginaryValues);
+
+        var zeroImaginary = fixture.Result.Clone();
+        zeroImaginary.Vectors[0].Values[1] = 0.0;
+        var zero = SimulationJobContract.ExtractVector(zeroImaginary, "v(out)", 0, 1);
+        Assert.IsTrue(zero.Complex, "A zero imaginary sample must not change the native complex type.");
+        CollectionAssert.AreEqual(new[] { 1.0, 0.0 }, zero.Values);
+
+        var real = SimulationJobContract.ExtractVector(fixture.Result, "frequency");
+        Assert.IsFalse(real.Complex);
+        CollectionAssert.AreEqual(new[] { 100.0, 200.0, 300.0 }, real.Values);
+        CollectionAssert.AreEqual(new[] { 100.0, 200.0, 300.0 }, real.RealValues);
+        Assert.IsEmpty(real.ImaginaryValues);
+
+        var missing = Assert.ThrowsExactly<AutomationException>(() =>
+            SimulationJobContract.ExtractVector(fixture.Result, "missing"));
+        Assert.AreEqual("simulation_vector_not_found", missing.Code);
+        var split = Assert.ThrowsExactly<AutomationException>(() =>
+            SimulationJobContract.ExtractVector(fixture.Result, "v(out)", 2, 2));
+        Assert.AreEqual("invalid_simulation_vector_request", split.Code);
+    }
+
+    [TestMethod]
     public void SimulationDependencyEvidenceBindsIdentityAndDeckProvenance()
     {
         var fixture = SimulationFixture();

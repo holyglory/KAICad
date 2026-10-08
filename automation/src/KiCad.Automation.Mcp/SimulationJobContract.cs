@@ -13,6 +13,9 @@ namespace KiCad.Automation.Mcp;
 /// </summary>
 internal static class SimulationJobContract
 {
+    internal sealed record VectorSlice(string Name, bool Complex, int SampleStart, int SampleCount,
+        int TotalSampleCount, double[] Values, double[] RealValues, double[] ImaginaryValues);
+
     public static void ValidateArchive(SimulationTerminalReceipt receipt, DocumentSpecifier document, string processEpoch, string jobId)
     {
         var operation = receipt.Operation; var job = receipt.Job;
@@ -80,6 +83,46 @@ internal static class SimulationJobContract
             throw Invalid("Complete native simulation dependency evidence cannot carry warnings.");
         if (!result.DependencyCaptureComplete && result.Warnings.Count == 0)
             throw Invalid("Incomplete native simulation dependency evidence must retain an explicit warning.");
+    }
+
+    public static VectorSlice ExtractVector(SimulationJobState result, string vectorName,
+        int sampleStart = 0, int sampleCount = -1)
+    {
+        if (result is null) throw Invalid("A native simulation result is required.");
+        ValidateState(result);
+        if (result.Status != SimulationJobStatus.SimjsCompleted)
+            throw new AutomationException("simulation_vector_unavailable",
+                "Simulation vectors are available only after the native job completes successfully.");
+        if (string.IsNullOrWhiteSpace(vectorName))
+            throw new AutomationException("invalid_simulation_vector_request", "A nonempty simulation vector name is required.");
+        if (sampleStart < 0 || sampleCount < -1)
+            throw new AutomationException("invalid_simulation_vector_request",
+                "Simulation vector sampleStart must be nonnegative and sampleCount must be -1 or nonnegative.");
+
+        var vector = result.Vectors.SingleOrDefault(value =>
+            string.Equals(value.Name, vectorName, StringComparison.Ordinal));
+        if (vector is null)
+            throw new AutomationException("simulation_vector_not_found",
+                $"Completed simulation job {result.JobId} has no vector named '{vectorName}'.");
+
+        int stride = vector.Complex ? 2 : 1;
+        int totalSamples = vector.Values.Count / stride;
+        if (sampleStart > totalSamples || sampleCount > totalSamples - sampleStart)
+            throw new AutomationException("invalid_simulation_vector_request",
+                $"Simulation vector sample range [{sampleStart}, {sampleCount}] exceeds {totalSamples} samples.");
+        int selectedSamples = sampleCount < 0 ? totalSamples - sampleStart : sampleCount;
+        int rawStart = checked(sampleStart * stride);
+        int rawCount = checked(selectedSamples * stride);
+        double[] raw = vector.Values.Skip(rawStart).Take(rawCount).ToArray();
+        double[] real = new double[selectedSamples];
+        double[] imaginary = vector.Complex ? new double[selectedSamples] : Array.Empty<double>();
+        for (int index = 0; index < selectedSamples; index++)
+        {
+            real[index] = raw[index * stride];
+            if (vector.Complex) imaginary[index] = raw[index * stride + 1];
+        }
+        return new VectorSlice(vector.Name, vector.Complex, sampleStart, selectedSamples, totalSamples,
+            raw, real, imaginary);
     }
 
     private static void ValidateIdentity(SimulationJobState result, DocumentSpecifier document,

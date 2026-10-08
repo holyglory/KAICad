@@ -58,6 +58,7 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_simulation_start");
             CollectionAssert.Contains(names, "kicad_simulation_result");
             CollectionAssert.Contains(names, "kicad_simulation_job");
+            CollectionAssert.Contains(names, "kicad_simulation_vector");
             CollectionAssert.Contains(names, "kicad_simulation_operation");
             CollectionAssert.Contains(names, "kicad_simulation_wait");
             CollectionAssert.Contains(names, "kicad_simulation_cancel");
@@ -297,7 +298,7 @@ public sealed class McpProcessTests
             } });
             Assert.IsTrue(malformedProjection.GetProperty("result").GetProperty("isError").GetBoolean(), malformedProjection.GetRawText());
             Assert.AreEqual("invalid_raster_trace_proposal", malformedProjection.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
-            string[] simulationTools = ["kicad_simulation_start", "kicad_simulation_job", "kicad_simulation_operation", "kicad_simulation_wait", "kicad_simulation_cancel", "kicad_simulation_result"];
+            string[] simulationTools = ["kicad_simulation_start", "kicad_simulation_job", "kicad_simulation_vector", "kicad_simulation_operation", "kicad_simulation_wait", "kicad_simulation_cancel", "kicad_simulation_result"];
             foreach (string simulationTool in simulationTools)
             {
                 var descriptor = listed.GetProperty("result").GetProperty("tools").EnumerateArray()
@@ -342,7 +343,7 @@ public sealed class McpProcessTests
                     else target["identifierCase"] = 3;
                     var validBinding = await Request(simulationRequest++, "tools/call", new
                     { name = simulationTool, arguments = SimulationArguments(simulationTool, target) });
-                    AssertSimulationError(validBinding, simulationTool == "kicad_simulation_result" ? "simulation_result_not_found" : "unknown_instance");
+                    AssertSimulationError(validBinding, simulationTool is "kicad_simulation_result" or "kicad_simulation_vector" ? "simulation_result_not_found" : "unknown_instance");
                 }
                 var emptySimulationIdentity = SimulationArguments(simulationTool, simulationTarget);
                 emptySimulationIdentity[simulationTool is "kicad_simulation_start" or "kicad_simulation_operation" ? "operationId" : "jobId"] = Guid.Empty.ToString("D");
@@ -436,7 +437,7 @@ public sealed class McpProcessTests
                     ["instanceId"] = Guid.NewGuid().ToString("D"),
                     ["document"] = target
                 };
-                arguments[name == "kicad_simulation_result" ? "processEpoch" : "expectedInstanceEpoch"] = Guid.NewGuid().ToString("D");
+                arguments[name is "kicad_simulation_result" or "kicad_simulation_vector" ? "processEpoch" : "expectedInstanceEpoch"] = Guid.NewGuid().ToString("D");
                 if (name is "kicad_simulation_start" or "kicad_simulation_operation")
                 {
                     if (name == "kicad_simulation_start")
@@ -445,6 +446,12 @@ public sealed class McpProcessTests
                 }
                 else arguments["jobId"] = Guid.NewGuid().ToString("D");
                 if (name == "kicad_simulation_wait") arguments["afterSequence"] = 0UL;
+                if (name == "kicad_simulation_vector")
+                {
+                    arguments["vectorName"] = "v(out)";
+                    arguments["sampleStart"] = 0;
+                    arguments["sampleCount"] = -1;
+                }
                 return arguments;
             }
 

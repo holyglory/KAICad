@@ -107,6 +107,50 @@ public sealed class SimulationTools(InstanceRegistry instances)
         return Data(new { instanceId, instanceEpoch = session.Epoch, document = target, deck = DescribeDeck(operation), job = Describe(result) });
     });
 
+    [McpServerTool(Name = "kicad_simulation_vector", ReadOnly = true),
+     Description("Read one exact named vector from a completed native or archived simulation job. Supply the original process epoch, schematic document and job ID. Complex vectors preserve their native complex=true type and return ordered real/imaginary pairs plus separate realValues and imaginaryValues; real vectors remain flat samples with an empty imaginaryValues array. sampleStart and sampleCount address logical samples, so a complex pair can never be split. An archived result is read without contacting KiCad and remains available after native or MCP restart."),
+     KiCadCapability("simulation", "durable-results", "original instance, process epoch, document, job ID, vector name"),
+     KiCadVerification(KiCadVerificationLevel.InProcess, "SimulationDeckAdmissionTests.ExtractsNamedVectorSlicesWithoutSplittingComplexPairs")]
+    public Task<CallToolResult> Vector(string instanceId, string processEpoch, SimulationDocumentInput document,
+        Guid jobId, string vectorName, int sampleStart = 0, int sampleCount = -1,
+        CancellationToken cancellationToken = default) => Execute(async () =>
+    {
+        ValidateId(jobId, "job");
+        if (string.IsNullOrWhiteSpace(processEpoch))
+            throw new AutomationException("invalid_simulation_request", "A nonempty simulation process epoch is required.");
+        var target = SimulationDocumentInput.ToNative(document);
+        using var ownership = receipts.AcquireSession(instanceId);
+        if (receipts.ReadTerminal(instanceId, processEpoch, jobId) is { } archive)
+            return VectorData(archive, target, vectorName, sampleStart, sampleCount);
+
+        NativeClient client;
+        try { client = instances.Client(instanceId); }
+        catch (AutomationException)
+        {
+            throw new AutomationException("simulation_result_not_found",
+                "No native or archived simulation result matches the original instance, process epoch, document and job.");
+        }
+        var session = await client.HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId)
+            throw new AutomationException("simulation_instance_changed", "The native instance identity changed; inspect it again.");
+        if (session.Epoch != processEpoch)
+        {
+            if (receipts.HasEarlierEpoch(instanceId, session.Epoch, jobId))
+                throw ResultLostAfterRestart(jobId.ToString("D"));
+            throw new AutomationException("simulation_result_not_found",
+                "No native or archived simulation result matches the requested process epoch.");
+        }
+        var result = await ReadNative(client, instanceId, session.Epoch, target, jobId.ToString("D"), cancellationToken);
+        var operation = OperationFor(instanceId, target, session.Epoch, result.OperationId);
+        var slice = SimulationJobContract.ExtractVector(result, vectorName, sampleStart, sampleCount);
+        return Data(new
+        {
+            instanceId, instanceEpoch = session.Epoch, document = target, source = "native",
+            receiptSha256 = (string?)null, operationId = result.OperationId, jobId = result.JobId,
+            deck = DescribeDeck(operation), vector = DescribeVector(slice)
+        });
+    });
+
     [McpServerTool(Name = "kicad_simulation_operation", ReadOnly = true),
      Description("Look up one process-owned native simulation by its original operation ID after a lost start reply. The lookup is bound to the current instance epoch and complete schematic document, returns found=false when the native process has no authoritative record, and never starts or replays a simulation."),
      KiCadCapability("simulation", "native-ngspice", "instance epoch, document, operation ID"),
@@ -381,6 +425,20 @@ public sealed class SimulationTools(InstanceRegistry instances)
         });
     }
 
+    private static CallToolResult VectorData(SimulationTerminalReceipt receipt, DocumentSpecifier document,
+        string vectorName, int sampleStart, int sampleCount)
+    {
+        var operation = receipt.Operation;
+        SimulationJobContract.ValidateArchive(receipt, document, operation.ProcessEpoch, receipt.Job.JobId);
+        var slice = SimulationJobContract.ExtractVector(receipt.Job, vectorName, sampleStart, sampleCount);
+        return Data(new
+        {
+            instanceId = operation.InstanceId, instanceEpoch = operation.ProcessEpoch, document,
+            source = "archive", receiptSha256 = receipt.Sha256, operationId = operation.OperationId,
+            jobId = receipt.Job.JobId, deck = DescribeDeck(operation), vector = DescribeVector(slice)
+        });
+    }
+
     private static object Describe(SimulationJobState value) => new
     {
         jobId = value.JobId, operationId = value.OperationId, status = value.Status.ToString(), sequence = value.Sequence,
@@ -395,6 +453,15 @@ public sealed class SimulationTools(InstanceRegistry instances)
                 selfContained = operation.DeckSource == "inline-caller-deck", dependenciesKnown = operation.DeckSource == "inline-caller-deck",
                 operationId = operation.OperationId }
             : null;
+
+    private static object DescribeVector(SimulationJobContract.VectorSlice slice) => new
+    {
+        name = slice.Name, complex = slice.Complex,
+        encoding = slice.Complex ? "real-imaginary-pairs" : "real-samples",
+        sampleStart = slice.SampleStart, sampleCount = slice.SampleCount,
+        totalSampleCount = slice.TotalSampleCount,
+        values = slice.Values, realValues = slice.RealValues, imaginaryValues = slice.ImaginaryValues
+    };
 
 
     private static bool IsMissingJob(NativeApiException error)

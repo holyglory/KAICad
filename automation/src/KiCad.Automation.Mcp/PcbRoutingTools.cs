@@ -314,6 +314,13 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
             DocumentStateTools.ValidateTarget(expected.Document);
             if (expected.Document.Type != DocumentType.DoctypePcb)
                 throw new AutomationException("invalid_route_commit", "Route commits require a PCB document.");
+            if (removals?.ItemIds.Count == 0)
+            {
+                if (removals.Header?.Document is null || !removals.Header.Document.Equals(expected.Document)
+                    || removals.Header.Container is not null || removals.Header.FieldMask is not null)
+                    throw new AutomationException("invalid_route_commit", "Route removals must identify existing copper on the same board.");
+                removals = null;
+            }
             var client = registry.Client(instanceId);
             if (client.Epoch != expected.ProcessEpoch)
                 throw new AutomationException("pcb_instance_changed", "The candidate belongs to another native process epoch.");

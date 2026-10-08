@@ -124,6 +124,16 @@ public sealed class PcbRouteOptimizationTests
             CheckedPcbRouteContract.ValidateResult(request, receipt, inspect: false);
             receipt.Replayed = true;
             CheckedPcbRouteContract.ValidateResult(request, receipt, inspect: false);
+
+            var emptyDelete = new DeleteItems { Header = delete.Header.Clone() };
+            var additive = PcbRouteOptimizationTools.BuildCheckedRequest(
+                create, emptyDelete, expected, request.DrcJobId, request.OperationId);
+            Assert.IsNull(additive.Removals, "An additive DRC candidate must omit native removals.");
+            CheckedPcbRouteContract.ValidateRequest(additive, epoch);
+            var additiveReceipt = receipt.Clone();
+            additiveReceipt.Removals = null;
+            additiveReceipt.RemovedResult = null;
+            CheckedPcbRouteContract.ValidateResult(additive, additiveReceipt, inspect: false);
         }
         finally { Directory.Delete(root, true); }
     }

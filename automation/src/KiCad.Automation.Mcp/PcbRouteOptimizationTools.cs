@@ -89,10 +89,16 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
         DeleteItems delete = Parse<DeleteItems>(deleteRequestJson, "invalid_pcb_route_optimize_delete");
         CreateItems create = Parse<CreateItems>(createRequestJson, "invalid_pcb_route_optimize_create");
         if (delete.Header?.Document is null || create.Header?.Document is null
-            || !delete.Header.Document.Equals(create.Header.Document))
+            || !delete.Header.Document.Equals(create.Header.Document)
+            || delete.Header.Container is not null || delete.Header.FieldMask is not null)
             throw new AutomationException("invalid_pcb_route_optimize_candidate", "Delete and create requests must target the same explicit PCB document.");
         DocumentStateTools.ValidateTarget(delete.Header.Document);
-        if (delete.ItemIds.Count == 0 || create.Items.Count == 0)
+        PcbDrcJobState? drc = null;
+        if (!string.IsNullOrWhiteSpace(drcJobStateJson))
+        {
+            drc = Parse<PcbDrcJobState>(drcJobStateJson, "invalid_route_replacement_drc");
+        }
+        if ((drc is null && delete.ItemIds.Count == 0) || create.Items.Count == 0)
             throw new AutomationException("invalid_pcb_route_optimize_candidate", "Supply at least one removed item and one replacement route object.");
         if (delete.ItemIds.Any(item => string.IsNullOrWhiteSpace(item.Value)
             || !Guid.TryParseExact(item.Value, "D", out var deleteId) || deleteId == Guid.Empty
@@ -115,11 +121,6 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
         if (expected.Scope != DocumentLifecycleScope.DlsPcb || !expected.Document.Equals(delete.Header.Document)
             || string.IsNullOrWhiteSpace(expected.ProcessEpoch))
             throw new AutomationException("invalid_pcb_route_optimize_state", "expectedStateJson must identify the same PCB and native process epoch.");
-        PcbDrcJobState? drc = null;
-        if (!string.IsNullOrWhiteSpace(drcJobStateJson))
-        {
-            drc = Parse<PcbDrcJobState>(drcJobStateJson, "invalid_route_replacement_drc");
-        }
         string canonicalDelete = BoardJson.Formatter.Format(delete);
         string canonicalCreate = BoardJson.Formatter.Format(create);
         string canonicalExpected = SchematicJson.Formatter.Format(expected);
@@ -140,7 +141,8 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
                     instanceId, BoardJson.Formatter.Format(checkedRequest.Candidate),
                     SchematicJson.Formatter.Format(checkedRequest.ExpectedState),
                     canonicalDrc,
-                    checkedRequest.OperationId, removalsJson: BoardJson.Formatter.Format(checkedRequest.Removals),
+                    checkedRequest.OperationId,
+                    removalsJson: checkedRequest.Removals is null ? "" : BoardJson.Formatter.Format(checkedRequest.Removals),
                     cancellationToken: cancellationToken);
                 return CheckedRouteResult(checkedResult, drc);
             });
@@ -277,7 +279,11 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
         => new()
         {
             Candidate = create.Clone(),
-            Removals = delete.Clone(),
+            // The native checked route controller represents an additive
+            // route by omitting the removals field.  Keep validating the
+            // caller's explicit, same-document DeleteItems header above, but
+            // do not send an empty deletion message to native admission.
+            Removals = delete.ItemIds.Count == 0 ? null : delete.Clone(),
             ExpectedState = expected.Clone(),
             DrcJobId = drcJobId,
             OperationId = operationId,

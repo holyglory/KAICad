@@ -65,13 +65,16 @@ public sealed class PcbViaMinimizationTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_pcb_route_via_minimize_apply"),
-     Description("Apply the exact DeleteItems/CreateItems pair emitted by kicad_pcb_route_via_minimize_plan. The replacement request must contain only Via objects and both requests must identify the same PCB lifecycle checkpoint. The operation delegates to the checked route-replacement transaction, including detached DRC freshness/completeness checks when drcJobStateJson is supplied, native undo, operation UUID replay and indeterminate-outcome handling; it never performs an unvalidated direct native edit."),
+     Description("Apply the exact DeleteItems/CreateItems pair emitted by kicad_pcb_route_via_minimize_plan. The replacement request must contain only Via objects and both requests must identify the same PCB lifecycle checkpoint. A completed detached DRC receipt is required for the exact replacement geometry; the operation delegates to the checked route-replacement transaction with native undo, operation UUID replay and indeterminate-outcome handling, and never performs an unvalidated direct native edit."),
      KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "exact via-minimization delete/create pair, lifecycle checkpoint, checked native transaction, operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Apply(string instanceId, string deleteRequestJson, string createRequestJson,
         string expectedStateJson, string operationId, CancellationToken cancellationToken, string? drcJobStateJson = null)
         => Execute(async () =>
         {
+            if (string.IsNullOrWhiteSpace(drcJobStateJson))
+                throw new AutomationException("via_minimize_apply_requires_drc",
+                    "Via minimization apply requires a completed detached DRC receipt for the exact replacement geometry.");
             ValidateViaApplyCreateRequest(createRequestJson);
             return await new PcbRouteOptimizationTools(registry).Apply(
                 instanceId, deleteRequestJson, createRequestJson, expectedStateJson,

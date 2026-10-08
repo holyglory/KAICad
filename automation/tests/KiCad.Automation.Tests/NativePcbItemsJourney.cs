@@ -2695,6 +2695,10 @@ public sealed partial class NativeSessionTests
                 Assert.AreEqual(BoardLayer.BlBCu, via.PadStack.Drill.EndLayer);
                 Assert.AreEqual(new Vector2 { XNm = 300_000, YNm = 300_000 }, via.PadStack.Drill.Diameter);
             }
+            // The checked multilayer wrapper is a replacement transaction, so
+            // remove the deterministic foreign wall while adding the planned
+            // Track/Via candidate. Undo restores the wall with the fixture.
+            var multilayerDelete = new DeleteItems { Header = new() { Document = cleanBoard }, ItemIds = { multilayerWall.Id.Clone() } };
             var multilayerPlanReplay = await mcp.Tool("kicad_pcb_route_plan_multilayer", multilayerPlanArguments);
             Assert.IsFalse(multilayerPlanReplay.TryGetProperty("isError", out var multilayerPlanReplayError)
                 && multilayerPlanReplayError.GetBoolean(), multilayerPlanReplay.GetRawText());
@@ -2737,30 +2741,35 @@ public sealed partial class NativeSessionTests
             // assertion so a later case cannot overwrite the only geometry.
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-multilayer-input.json"), multilayerDiagnosticJson, token);
             Assert.AreEqual(multilayerBefore, await ObserveLifecycleState(client, cleanBoard, token));
-            var multilayerDrc = await RouteDrc(multilayerCandidateJson, null, multilayerBefore, diagnosticJson: multilayerDiagnosticJson);
+            var multilayerDrc = await RouteDrc(multilayerCandidateJson, BoardJson.Formatter.Format(multilayerDelete), multilayerBefore,
+                diagnosticJson: multilayerDiagnosticJson);
             CollectionAssert.AreEqual(multilayerCommitCandidate.Items.Select(RouteIdentity).ToArray(), multilayerDrc.CandidateItemIds.ToArray());
             Assert.AreEqual(multilayerBefore, await ObserveLifecycleState(client, cleanBoard, token));
             string multilayerOperationId = Guid.NewGuid().ToString("D");
             var multilayerCheckedRequest = new CheckedPcbRouteCommit
             {
                 Candidate = multilayerCommitCandidate, ExpectedState = multilayerBefore, DrcJobId = multilayerDrc.JobId,
-                OperationId = multilayerOperationId, MaximumResultBytes = 4 * 1024 * 1024
+                OperationId = multilayerOperationId, MaximumResultBytes = 4 * 1024 * 1024,
+                Removals = multilayerDelete
             };
-            var multilayerCommitArguments = new
+            var multilayerApplyArguments = new
             {
-                instanceId, requestJson = multilayerCandidateJson,
+                instanceId, deleteRequestJson = BoardJson.Formatter.Format(multilayerDelete),
+                createRequestJson = multilayerCandidateJson,
                 expectedStateJson = SchematicJson.Formatter.Format(multilayerBefore),
                 drcJobStateJson = SchematicJson.Formatter.Format(multilayerDrc), operationId = multilayerOperationId
             };
-            var multilayerCommitReply = await mcp.Tool("kicad_pcb_route_commit", multilayerCommitArguments);
-            Assert.IsFalse(multilayerCommitReply.TryGetProperty("isError", out var multilayerCommitError)
-                && multilayerCommitError.GetBoolean(), multilayerCommitReply.GetRawText());
-            var multilayerCommitData = multilayerCommitReply.GetProperty("structuredContent");
-            Assert.IsTrue(multilayerCommitData.GetProperty("mutationConfirmed").GetBoolean());
-            Assert.IsTrue(multilayerCommitData.GetProperty("nativeReceipt").GetBoolean());
-            var multilayerAfter = SchematicJson.Parser.Parse<DocumentLifecycleState>(multilayerCommitData.GetProperty("afterState").GetString()!);
+            var multilayerApplyReply = await mcp.Tool("kicad_pcb_route_multilayer_apply", multilayerApplyArguments);
+            Assert.IsFalse(multilayerApplyReply.TryGetProperty("isError", out var multilayerApplyError)
+                && multilayerApplyError.GetBoolean(), multilayerApplyReply.GetRawText());
+            var multilayerApplyData = multilayerApplyReply.GetProperty("structuredContent");
+            Assert.IsTrue(multilayerApplyData.GetProperty("mutationConfirmed").GetBoolean());
+            Assert.IsTrue(multilayerApplyData.GetProperty("nativeReceiptAvailable").GetBoolean());
+            Assert.AreEqual("native-process", multilayerApplyData.GetProperty("receiptScope").GetString());
+            Assert.IsFalse(multilayerApplyData.GetProperty("replayed").GetBoolean());
+            var multilayerAfter = SchematicJson.Parser.Parse<DocumentLifecycleState>(multilayerApplyData.GetProperty("afterState").GetString()!);
             Assert.IsGreaterThan(multilayerBefore.Revision.Sequence, multilayerAfter.Revision.Sequence);
-            var multilayerReceipt = SchematicJson.Parser.Parse<CheckedPcbRouteReceipt>(multilayerCommitData.GetProperty("receipt").GetRawText());
+            var multilayerReceipt = SchematicJson.Parser.Parse<CheckedPcbRouteReceipt>(multilayerApplyData.GetProperty("receipt").GetRawText());
             Assert.AreEqual(CheckedPcbRouteReceipt.Types.State.Completed, multilayerReceipt.State);
             CheckedPcbRouteContract.ValidateResult(multilayerCheckedRequest, multilayerReceipt, inspect: false);
             var multilayerIds = multilayerCommitCandidate.Items.Select(RouteIdentity).Order(StringComparer.Ordinal).ToArray();
@@ -2773,10 +2782,24 @@ public sealed partial class NativeSessionTests
             foreach (var created in multilayerReceipt.Created.CreatedItems)
                 Assert.AreEqual(created.Item, multilayerSnapshot[RouteIdentity(created.Item)], "Receipt geometry must match native readback.");
             CollectionAssert.AreEqual(multilayerExpectedConnected, await MultilayerConnectedIds(multilayerAfter));
-            var multilayerCommitReplay = await mcp.Tool("kicad_pcb_route_commit", multilayerCommitArguments);
-            Assert.IsFalse(multilayerCommitReplay.TryGetProperty("isError", out var multilayerCommitReplayError)
-                && multilayerCommitReplayError.GetBoolean(), multilayerCommitReplay.GetRawText());
-            Assert.IsTrue(multilayerCommitReplay.GetProperty("structuredContent").GetProperty("receipt").GetProperty("replayed").GetBoolean());
+            var multilayerApplyReplay = await mcp.Tool("kicad_pcb_route_multilayer_apply", multilayerApplyArguments);
+            Assert.IsFalse(multilayerApplyReplay.TryGetProperty("isError", out var multilayerApplyReplayError)
+                && multilayerApplyReplayError.GetBoolean(), multilayerApplyReplay.GetRawText());
+            var multilayerApplyReplayData = multilayerApplyReplay.GetProperty("structuredContent");
+            Assert.IsTrue(multilayerApplyReplayData.GetProperty("replayed").GetBoolean());
+            Assert.AreEqual(multilayerApplyData.GetProperty("operationId").GetString(), multilayerApplyReplayData.GetProperty("operationId").GetString());
+            Assert.AreEqual(multilayerApplyData.GetProperty("beforeState").GetString(), multilayerApplyReplayData.GetProperty("beforeState").GetString());
+            Assert.AreEqual(multilayerApplyData.GetProperty("afterState").GetString(), multilayerApplyReplayData.GetProperty("afterState").GetString());
+            var multilayerReceiptRead = await mcp.Tool("kicad_pcb_route_multilayer_receipt", new
+            { instanceId, expectedProcessEpoch = client.Epoch, operationId = multilayerOperationId });
+            Assert.IsFalse(multilayerReceiptRead.TryGetProperty("isError", out var multilayerReceiptReadError)
+                && multilayerReceiptReadError.GetBoolean(), multilayerReceiptRead.GetRawText());
+            var multilayerReceiptReadData = multilayerReceiptRead.GetProperty("structuredContent");
+            Assert.IsTrue(multilayerReceiptReadData.GetProperty("found").GetBoolean());
+            Assert.AreEqual(multilayerOperationId, multilayerReceiptReadData.GetProperty("operationId").GetString());
+            Assert.AreEqual(client.Epoch, multilayerReceiptReadData.GetProperty("processEpoch").GetString());
+            Assert.IsTrue(multilayerReceiptReadData.GetProperty("nativeReceiptAvailable").GetBoolean());
+            Assert.AreEqual(multilayerApplyReplayData.GetRawText(), multilayerReceiptReadData.GetProperty("receipt").GetRawText());
             Assert.AreEqual(multilayerAfter, await ObserveLifecycleState(client, cleanBoard, token));
 
             // Undo removes the entire cross-layer route but preserves its pads

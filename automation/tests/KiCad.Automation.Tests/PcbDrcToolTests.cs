@@ -303,6 +303,7 @@ public sealed class PcbDrcToolTests
             var missingJson = missingDocument.RootElement;
             Assert.IsFalse(missingJson.GetProperty("found").GetBoolean());
             Assert.AreEqual("unknown-native-outcome", missingJson.GetProperty("retrySafety").GetString());
+            Assert.IsFalse(missingJson.TryGetProperty("job", out _), "found=false must omit a fabricated job state.");
             Assert.AreEqual(document, transport.LastOperation!.Document);
             Assert.AreEqual(operationId, transport.LastOperation.OperationId);
             Assert.AreEqual(transport.Session.Epoch, transport.LastOperation.ProcessEpoch);

@@ -239,32 +239,37 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
             if (!target.Equals(native.Document) || native.OperationId != id || native.ProcessEpoch != epoch)
                 throw new AutomationException("invalid_drc_operation_result",
                     "Native DRC operation lookup returned a different document, operation or process epoch.");
-            JsonElement? job = null;
             if (!native.Found && native.Job is not null)
                 throw new AutomationException("invalid_drc_operation_result",
                     "Native DRC operation lookup reported found=false with a job state.");
-            if (native.Found && native.Job is null)
+            if (!native.Found)
+                return new
+                {
+                    instanceId,
+                    processEpoch = epoch,
+                    document = target,
+                    operationId = id,
+                    found = false,
+                    lookupSupported = true,
+                    retrySafety = "unknown-native-outcome"
+                };
+            if (native.Job is null)
                 throw new AutomationException("invalid_drc_operation_result",
                     "Native DRC operation lookup reported found=true without a job state.");
-            if (native.Found)
-            {
-                ValidateJobState(native.Job!, target, epoch);
-                if (native.Job!.OperationId != id)
-                    throw new AutomationException("invalid_drc_operation_result",
-                        "Native DRC operation lookup returned a job for a different operation.");
-                using var jobJson = JsonDocument.Parse(SchematicJson.Formatter.Format(native.Job));
-                job = jobJson.RootElement.Clone();
-            }
+            ValidateJobState(native.Job, target, epoch);
+            if (native.Job.OperationId != id)
+                throw new AutomationException("invalid_drc_operation_result",
+                    "Native DRC operation lookup returned a job for a different operation.");
+            using var jobJson = JsonDocument.Parse(SchematicJson.Formatter.Format(native.Job));
             return new
             {
                 instanceId,
                 processEpoch = epoch,
                 document = target,
                 operationId = id,
-                found = native.Found,
+                found = true,
                 lookupSupported = true,
-                retrySafety = native.Found ? null : "unknown-native-outcome",
-                job
+                job = jobJson.RootElement.Clone()
             };
         });
 

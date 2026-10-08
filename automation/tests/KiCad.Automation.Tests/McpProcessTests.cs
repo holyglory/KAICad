@@ -483,6 +483,20 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_pcb_route_via_minimize_receipt");
             CollectionAssert.Contains(names, "kicad_pcb_diff_pair_apply");
             CollectionAssert.Contains(names, "kicad_pcb_diff_pair_receipt");
+            // Exercise the receipt lookup through this same STDIO method so
+            // the declared MCP-process verification remains a real call-site.
+            var emptyDiffPairReceipt = await Request(9404, "tools/call", new { name = "kicad_pcb_diff_pair_receipt", arguments = new
+            {
+                instanceId = Guid.NewGuid().ToString("D"), expectedProcessEpoch = Guid.NewGuid().ToString("D"), operationId = Guid.NewGuid().ToString("D")
+            } });
+            var emptyDiffPairResult = emptyDiffPairReceipt.GetProperty("result");
+            bool emptyDiffPairError = emptyDiffPairResult.TryGetProperty("isError", out var emptyDiffPairIsError)
+                && emptyDiffPairIsError.GetBoolean();
+            bool emptyDiffPairFound = !emptyDiffPairError
+                && emptyDiffPairResult.TryGetProperty("structuredContent", out var emptyDiffPairStructured)
+                && emptyDiffPairStructured.TryGetProperty("found", out var emptyDiffPairFoundValue)
+                && emptyDiffPairFoundValue.GetBoolean();
+            Assert.IsFalse(emptyDiffPairFound, emptyDiffPairReceipt.GetRawText());
             CollectionAssert.Contains(names, "kicad_pcb_footprint_place_plan");
             CollectionAssert.Contains(names, "kicad_pcb_route_receipt");
             var invalidRouteReceipt = await Request(9321, "tools/call", new { name = "kicad_pcb_route_receipt", arguments = new

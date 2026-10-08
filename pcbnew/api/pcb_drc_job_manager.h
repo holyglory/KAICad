@@ -50,6 +50,15 @@ public:
             const std::string& aProcessEpoch, const SCHEMATIC_OBSERVER& aObserveSchematic = {},
             const LIBRARY_OBSERVER& aObserveLibraries = {} ) const;
 
+    // Lookup a retained receipt by its original operation identity. A missing
+    // operation is an honest empty result; a found operation is read through the
+    // normal document, process-epoch and freshness checks without starting again.
+    tl::expected<std::optional<kiapi::automation::v1::PcbDrcJobState>, std::string> ReadOperationById(
+            const kiapi::automation::v1::NativeCapabilityPcbDrcReadOperation& aRequest,
+            BOARD& aBoard, const std::string& aProcessEpoch,
+            const SCHEMATIC_OBSERVER& aObserveSchematic = {},
+            const LIBRARY_OBSERVER& aObserveLibraries = {} );
+
     tl::expected<kiapi::automation::v1::PcbDrcJobState, std::string> Start(
             const kiapi::automation::v1::StartPcbDrcJob& aRequest, BOARD& aBoard,
             const std::string& aProcessEpoch, const PCB_DRC_CAPTURE_CONTEXT& aCaptureContext );

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using Kiapi.Board.Types;
@@ -267,6 +268,133 @@ public sealed class PcbDrcToolTests
         finally { Directory.Delete(directory, true); }
     }
 
+    [TestMethod]
+    public async Task OperationLookupReportsUnknownNativeOutcomeAndValidatesFoundIdentity()
+    {
+        string directory = Directory.CreateTempSubdirectory("drc-operation-contract-").FullName;
+        try
+        {
+            var transport = new JobTransport();
+            transport.Session.Epoch = Guid.NewGuid().ToString("D");
+            transport.Session.ProjectPath = Path.Combine(directory, "fixture.kicad_pro");
+            var registry = new InstanceRegistry(transport, directory);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "native.sock")), transport.Session.InstanceId);
+            var tool = new PcbDrcTools(registry);
+            var document = new DocumentSpecifier { Type = (DocumentType)3, BoardFilename = "fixture.kicad_pcb",
+                Project = new() { Name = "fixture", Path = directory } };
+            var input = new NativeDocumentInput
+            {
+                Type = NativeDocumentType.Pcb,
+                Project = new NativeProjectInput { Name = "fixture", Path = directory },
+                BoardFilename = "fixture.kicad_pcb"
+            };
+            string operationId = Guid.NewGuid().ToString("D");
+            transport.OperationResponse = new NativeCapabilityPcbDrcReadOperationResponse
+            {
+                Document = document.Clone(), OperationId = operationId, ProcessEpoch = transport.Session.Epoch,
+                Found = false
+            };
+
+            var missing = await tool.Operation(transport.Session.InstanceId, input, operationId,
+                transport.Session.Epoch, default);
+            Assert.IsFalse(missing.IsError ?? false,
+                missing.StructuredContent?.GetRawText() ?? missing.ToString());
+            using var missingDocument = JsonDocument.Parse(((TextContentBlock)missing.Content.Single()).Text);
+            var missingJson = missingDocument.RootElement;
+            Assert.IsFalse(missingJson.GetProperty("found").GetBoolean());
+            Assert.AreEqual("unknown-native-outcome", missingJson.GetProperty("retrySafety").GetString());
+            Assert.AreEqual(document, transport.LastOperation!.Document);
+            Assert.AreEqual(operationId, transport.LastOperation.OperationId);
+            Assert.AreEqual(transport.Session.Epoch, transport.LastOperation.ProcessEpoch);
+            Assert.AreEqual(1, transport.Calls);
+
+            // Malformed or stale caller identities fail before lookup dispatch.
+            foreach (var invalid in new (string Operation, string Epoch, string Code)[]
+            {
+                (Guid.Empty.ToString("D"), transport.Session.Epoch, "invalid_operation_id"),
+                ("AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA", transport.Session.Epoch, "invalid_operation_id"),
+                (operationId, Guid.Empty.ToString("D"), "invalid_process_epoch"),
+                (operationId, "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB", "invalid_process_epoch"),
+                (operationId, Guid.NewGuid().ToString("D"), "stale_process_epoch")
+            })
+            {
+                var rejected = await tool.Operation(transport.Session.InstanceId, input,
+                    invalid.Operation, invalid.Epoch, default);
+                Assert.IsTrue(rejected.IsError ?? false, rejected.ToString());
+                Assert.AreEqual(invalid.Code, rejected.StructuredContent!.Value.GetProperty("code").GetString());
+            }
+            Assert.AreEqual(1, transport.Calls);
+
+            var job = new PcbDrcJobState
+            {
+                Document = document.Clone(), JobId = Guid.NewGuid().ToString("D"), OperationId = operationId,
+                ProcessEpoch = transport.Session.Epoch,
+                CheckedRevision = new() { Epoch = Guid.NewGuid().ToString("D"), Sequence = 8 },
+                Status = (PcbDrcJobStatus)3, Progress = 1, ResultsFresh = true,
+                WorkerFinished = true, SnapshotComplete = true
+            };
+            transport.OperationResponse.Found = true;
+            transport.OperationResponse.Job = job;
+            var found = await tool.Operation(transport.Session.InstanceId, input, operationId,
+                transport.Session.Epoch, default);
+            Assert.IsFalse(found.IsError ?? false, found.ToString());
+            using var foundDocument = JsonDocument.Parse(((TextContentBlock)found.Content.Single()).Text);
+            var foundJson = foundDocument.RootElement;
+            Assert.IsTrue(foundJson.GetProperty("found").GetBoolean());
+            Assert.AreEqual(operationId, foundJson.GetProperty("operationId").GetString());
+            Assert.AreEqual(job.JobId, foundJson.GetProperty("job").GetProperty("jobId").GetString());
+            Assert.AreEqual(2, transport.Calls);
+
+            var valid = transport.OperationResponse.Clone();
+            foreach (var invalid in new (Action<NativeCapabilityPcbDrcReadOperationResponse> Change, string Code)[]
+            {
+                (response => response.Document = null, "invalid_drc_operation_result"),
+                (response => response.Document.BoardFilename = "other.kicad_pcb", "invalid_drc_operation_result"),
+                (response => response.OperationId = Guid.NewGuid().ToString("D"), "invalid_drc_operation_result"),
+                (response => response.ProcessEpoch = Guid.NewGuid().ToString("D"), "invalid_drc_operation_result"),
+                (response => response.Found = false, "invalid_drc_operation_result"),
+                (response => response.Job = null, "invalid_drc_operation_result"),
+                (response => response.Job.Document.BoardFilename = "other.kicad_pcb", "invalid_drc_job_state"),
+                (response => response.Job.ProcessEpoch = Guid.NewGuid().ToString("D"), "invalid_drc_job_state"),
+                (response => response.Job.OperationId = Guid.NewGuid().ToString("D"), "invalid_drc_operation_result"),
+                (response => response.Job.JobId = "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA", "invalid_drc_job_state"),
+                (response => response.Job.CheckedRevision.Epoch = Guid.Empty.ToString("D"), "invalid_drc_job_state"),
+                (response => response.Job.WorkerFinished = false, "invalid_drc_job_state"),
+                (response => response.Job.SnapshotComplete = false, "invalid_drc_job_state")
+            })
+            {
+                transport.OperationResponse = valid.Clone();
+                invalid.Change(transport.OperationResponse);
+                var rejected = await tool.Operation(transport.Session.InstanceId, input, operationId,
+                    transport.Session.Epoch, default);
+                Assert.IsTrue(rejected.IsError ?? false, rejected.ToString());
+                Assert.AreEqual(invalid.Code, rejected.StructuredContent!.Value.GetProperty("code").GetString());
+            }
+
+            // The lookup uses normal job-state semantics: it can report a running
+            // or stale check without promoting it to complete or fresh.
+            transport.OperationResponse = valid.Clone();
+            transport.OperationResponse.Job.Status = (PcbDrcJobStatus)2;
+            transport.OperationResponse.Job.WorkerFinished = false;
+            transport.OperationResponse.Job.Progress = 0.2;
+            transport.OperationResponse.Job.ResultsFresh = false;
+            transport.OperationResponse.Job.SnapshotComplete = false;
+            transport.OperationResponse.Job.InputWarnings.Add("snapshot_incomplete: finding_identity_pending: native fixture check is running.");
+            Assert.IsFalse((await tool.Operation(transport.Session.InstanceId, input, operationId,
+                transport.Session.Epoch, default)).IsError ?? false);
+            transport.OperationResponse = valid.Clone();
+            transport.OperationResponse.Job.Status = (PcbDrcJobStatus)6;
+            transport.OperationResponse.Job.ResultsFresh = false;
+            transport.OperationResponse.Job.CancellationRequested = true;
+            transport.OperationResponse.Job.ErrorCode = "document_changed";
+            transport.OperationResponse.Job.ErrorMessage = "The live PCB changed.";
+            Assert.IsFalse((await tool.Operation(transport.Session.InstanceId, input, operationId,
+                transport.Session.Epoch, default)).IsError ?? false);
+            Assert.IsNull(transport.LastStart, "A read-only lookup must never submit a start or replay request.");
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
     private sealed class MarkerTransport : INativeTransport
     {
         public NativeClientTests.FixtureTransport Session { get; } = new();
@@ -286,17 +414,22 @@ public sealed class PcbDrcToolTests
     {
         public NativeClientTests.FixtureTransport Session { get; } = new();
         public PcbDrcJobState State { get; set; } = new();
+        public NativeCapabilityPcbDrcReadOperationResponse OperationResponse { get; set; } = new();
         public int Calls { get; private set; }
         public StartPcbDrcJob? LastStart { get; private set; }
+        public NativeCapabilityPcbDrcReadOperation? LastOperation { get; private set; }
         public Task<byte[]> ExchangeAsync(string endpoint, byte[] request, TimeSpan timeout, CancellationToken cancellationToken = default)
         {
             var message = ApiRequest.Parser.ParseFrom(request).Message;
             if (!message.Is(StartPcbDrcJob.Descriptor) && !message.Is(ReadPcbDrcJob.Descriptor)
                 && !message.Is(CancelPcbDrcJob.Descriptor)
+                && !message.Is(NativeCapabilityPcbDrcReadOperation.Descriptor)
                 && !message.Is(NativeCapabilityPcbDrcReplacementJob.Descriptor))
                 return Session.ExchangeAsync(endpoint, request, timeout, cancellationToken);
             ++Calls;
             if (message.Is(StartPcbDrcJob.Descriptor)) LastStart = message.Unpack<StartPcbDrcJob>();
+            if (message.Is(NativeCapabilityPcbDrcReadOperation.Descriptor))
+                LastOperation = message.Unpack<NativeCapabilityPcbDrcReadOperation>();
             if (message.Is(NativeCapabilityPcbDrcReplacementJob.Descriptor))
             {
                 // The native replacement read is the receipt boundary for a
@@ -304,8 +437,11 @@ public sealed class PcbDrcToolTests
                 // payload and returns the state with this bit set.
                 State.CandidatePayloadVerified = true;
             }
+            var result = message.Is(NativeCapabilityPcbDrcReadOperation.Descriptor)
+                ? Any.Pack(OperationResponse)
+                : Any.Pack(State);
             return Task.FromResult(new ApiResponse { Header = new() { KicadToken = Session.Epoch },
-                Status = new() { Status = (ApiStatusCode)1 }, Message = Any.Pack(State) }.ToByteArray());
+                Status = new() { Status = (ApiStatusCode)1 }, Message = result }.ToByteArray());
         }
     }
 }

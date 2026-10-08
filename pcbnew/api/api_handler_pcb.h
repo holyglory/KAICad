@@ -97,6 +97,9 @@ private:
             const HANDLER_CONTEXT<kiapi::automation::v1::StartPcbDrcJob>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> handleReadDrcJob(
             const HANDLER_CONTEXT<kiapi::automation::v1::ReadPcbDrcJob>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::NativeCapabilityPcbDrcReadOperationResponse>
+    handleReadDrcOperation(
+            const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityPcbDrcReadOperation>& aCtx );
     HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> handleReadDrcReplacementJob(
             const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityPcbDrcReplacementJob>& aCtx );
     tl::expected<kiapi::automation::v1::DocumentLifecycleState, std::string> observeDrcSchematic(

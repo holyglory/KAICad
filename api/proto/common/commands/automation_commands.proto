@@ -1634,6 +1634,23 @@ message NativeCapabilitySchematicRunErcResponse {
   string error_message = 9;
 }
 
+// Read a process-owned PCB DRC operation by its original operation identity.
+// This lookup is read-only: it never starts, replays or adopts a replacement
+// job. A missing native receipt is reported explicitly with found=false.
+message NativeCapabilityPcbDrcReadOperation {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  string process_epoch = 3;
+}
+
+message NativeCapabilityPcbDrcReadOperationResponse {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  string process_epoch = 3;
+  bool found = 4;
+  PcbDrcJobState job = 5;
+}
+
 // Exact DRC read for a checked route replacement. This is a new lane-2D seam
 // because ReadPcbDrcJob's numbered declarations are frozen.
 message NativeCapabilityPcbDrcReplacementJob {

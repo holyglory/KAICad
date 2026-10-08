@@ -497,6 +497,9 @@ API_HANDLER_PCB::API_HANDLER_PCB( std::shared_ptr<PCB_CONTEXT> aContext, PCB_EDI
             &API_HANDLER_PCB::handleStartDrcJob );
     registerHandler<kiapi::automation::v1::ReadPcbDrcJob, kiapi::automation::v1::PcbDrcJobState>(
             &API_HANDLER_PCB::handleReadDrcJob );
+    registerHandler<kiapi::automation::v1::NativeCapabilityPcbDrcReadOperation,
+                    kiapi::automation::v1::NativeCapabilityPcbDrcReadOperationResponse>(
+            &API_HANDLER_PCB::handleReadDrcOperation );
     registerHandler<kiapi::automation::v1::NativeCapabilityPcbDrcReplacementJob, kiapi::automation::v1::PcbDrcJobState>(
             &API_HANDLER_PCB::handleReadDrcReplacementJob );
     registerHandler<kiapi::automation::v1::CancelPcbDrcJob, kiapi::automation::v1::PcbDrcJobState>(
@@ -988,6 +991,39 @@ HANDLER_RESULT<kiapi::automation::v1::PcbDrcJobState> API_HANDLER_PCB::handleRea
         return tl::unexpected( error );
     }
     return *read;
+}
+
+HANDLER_RESULT<kiapi::automation::v1::NativeCapabilityPcbDrcReadOperationResponse>
+API_HANDLER_PCB::handleReadDrcOperation(
+        const HANDLER_CONTEXT<kiapi::automation::v1::NativeCapabilityPcbDrcReadOperation>& aCtx )
+{
+    if( auto valid = validateDocument( aCtx.Request.document() ); !valid )
+        return tl::unexpected( valid.error() );
+
+    kiapi::automation::v1::NativeCapabilityPcbDrcReadOperationResponse response;
+    response.mutable_document()->CopyFrom( aCtx.Request.document() );
+    response.set_operation_id( aCtx.Request.operation_id() );
+    response.set_process_epoch( aCtx.Request.process_epoch() );
+
+    auto read = m_drcJobs.ReadOperationById( aCtx.Request, *board(), drcApiServer().Token(),
+            [this]( const auto& document ) { return observeDrcSchematic( document ); },
+            [this]( BOARD& source ) { return observeDrcLibraries( source ); } );
+    if( !read )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( read.error() );
+        return tl::unexpected( error );
+    }
+    if( !read->has_value() )
+    {
+        response.set_found( false );
+        return response;
+    }
+
+    response.set_found( true );
+    response.mutable_job()->CopyFrom( **read );
+    return response;
 }
 
 

@@ -51,6 +51,7 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_service_capabilities");
             CollectionAssert.Contains(names, "kicad_pcb_drc_start");
             CollectionAssert.Contains(names, "kicad_pcb_drc_job");
+            CollectionAssert.Contains(names, "kicad_pcb_drc_operation");
             CollectionAssert.Contains(names, "kicad_pcb_drc_cancel");
             CollectionAssert.Contains(names, "kicad_diagram_physical_allocation");
             CollectionAssert.Contains(names, "kicad_diagram_physical_allocation_set");
@@ -97,6 +98,25 @@ public sealed class McpProcessTests
             }
             string unknownInstance = Guid.NewGuid().ToString("D");
             string unknownOperation = Guid.NewGuid().ToString("D");
+            var unknownDrcOperation = await Request(9000, "tools/call", new
+            {
+                name = "kicad_pcb_drc_operation", arguments = new
+                {
+                    instanceId = unknownInstance,
+                    document = new
+                    {
+                        type = "DOCTYPE_PCB",
+                        project = new { name = "pcb-fixture", path = state },
+                        boardFilename = "fixture.kicad_pcb"
+                    },
+                    operationId = unknownOperation,
+                    processEpoch = Guid.NewGuid().ToString("D")
+                }
+            });
+            Assert.IsTrue(unknownDrcOperation.GetProperty("result").GetProperty("isError").GetBoolean(),
+                unknownDrcOperation.GetRawText());
+            Assert.AreEqual("unknown_instance", unknownDrcOperation.GetProperty("result")
+                .GetProperty("structuredContent").GetProperty("code").GetString(), unknownDrcOperation.GetRawText());
             var typedZone = new
             {
                 id = unknownInstance,

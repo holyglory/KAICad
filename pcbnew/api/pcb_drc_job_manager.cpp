@@ -1022,6 +1022,45 @@ tl::expected<std::optional<PcbDrcJobState>, std::string> PCB_DRC_JOB_MANAGER::Re
     return std::optional<PcbDrcJobState>( *result );
 }
 
+tl::expected<std::optional<PcbDrcJobState>, std::string> PCB_DRC_JOB_MANAGER::ReadOperationById(
+        const NativeCapabilityPcbDrcReadOperation& aRequest, BOARD& aBoard,
+        const std::string& aProcessEpoch, const SCHEMATIC_OBSERVER& aObserveSchematic,
+        const LIBRARY_OBSERVER& aObserveLibraries )
+{
+    if( aRequest.operation_id().empty() )
+        return tl::unexpected( "A PCB DRC operation lookup requires a nonempty operation ID" );
+    if( aRequest.process_epoch() != aProcessEpoch )
+        return tl::unexpected( "PCB DRC process epoch mismatch" );
+
+    std::shared_ptr<JOB> existing;
+    {
+        std::lock_guard lock( m_mutex );
+        for( const auto& [id, job] : m_jobs )
+        {
+            if( job->operationId != aRequest.operation_id() )
+                continue;
+            existing = job;
+            std::lock_guard jobLock( existing->mutex );
+            if( !SameDocument( existing->document, aRequest.document() ) )
+                return tl::unexpected( "The PCB DRC operation belongs to another document" );
+            break;
+        }
+    }
+
+    // The operation is process-owned. If this owner has no retained receipt,
+    // preserve the caller's uncertainty rather than replaying or fabricating a
+    // replacement job.
+    if( !existing ) return std::optional<PcbDrcJobState>();
+
+    ReadPcbDrcJob read;
+    read.mutable_document()->CopyFrom( aRequest.document() );
+    read.set_job_id( existing->id );
+    read.set_process_epoch( aProcessEpoch );
+    auto result = Read( read, aBoard, aProcessEpoch, aObserveSchematic, aObserveLibraries );
+    if( !result ) return tl::unexpected( result.error() );
+    return std::optional<PcbDrcJobState>( *result );
+}
+
 tl::expected<PcbDrcJobState, std::string> PCB_DRC_JOB_MANAGER::Start(
         const StartPcbDrcJob& aRequest, BOARD& aBoard, const std::string& aProcessEpoch,
         const PCB_DRC_CAPTURE_CONTEXT& aCaptureContext )

@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using Google.Protobuf;
 using Kiapi.Board.Types;
+using Kiapi.Common;
 using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
 using KiCad.Automation.Model;
@@ -199,6 +200,74 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
         return WithStructuredState(response, state);
     }
 
+    [McpServerTool(Name = "kicad_pcb_drc_operation", ReadOnly = true),
+     Description("Look up one process-owned native PCB DRC job by its original canonical operation ID after a lost start reply or MCP reconnect. Supply an explicit PCB document and the current canonical process epoch. The lookup validates the response identity and normal PCB DRC job state, never starts or replays a job, and returns found=false with retrySafety=unknown-native-outcome when this native process has no authoritative receipt."),
+     KiCadCapability("pcb", "compiled-mcp plus native-api", "process epoch, document and operation ID"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> Operation(string instanceId, NativeDocumentInput document,
+        string operationId, string processEpoch, CancellationToken cancellationToken) =>
+        InstanceToolBoundary.Run(async () =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            string id = OperationId(operationId);
+            string epoch = ProcessEpoch(processEpoch);
+            DocumentSpecifier target = NativeDocumentInput.ToNative(document);
+            ValidatePcb(target);
+            var client = registry.Client(instanceId);
+            var session = await client.HandshakeAsync(cancellationToken);
+            if (session.InstanceId != instanceId || session.Epoch != epoch)
+                throw new AutomationException("stale_process_epoch", "The DRC operation belongs to another native process epoch.");
+
+            NativeCapabilityPcbDrcReadOperationResponse native;
+            try
+            {
+                native = await client.InvokeAsync<NativeCapabilityPcbDrcReadOperation,
+                    NativeCapabilityPcbDrcReadOperationResponse>(new()
+                    {
+                        Document = target,
+                        OperationId = id,
+                        ProcessEpoch = epoch
+                    }, cancellationToken);
+            }
+            catch (NativeApiException error) when (error.Status == (int)ApiStatusCode.AsUnhandled
+                    || error.Status == (int)ApiStatusCode.AsUnimplemented)
+            {
+                throw new AutomationException("drc_operation_lookup_unavailable",
+                    "The connected KiCad peer does not provide native PCB DRC operation lookup.");
+            }
+
+            if (!target.Equals(native.Document) || native.OperationId != id || native.ProcessEpoch != epoch)
+                throw new AutomationException("invalid_drc_operation_result",
+                    "Native DRC operation lookup returned a different document, operation or process epoch.");
+            JsonElement? job = null;
+            if (!native.Found && native.Job is not null)
+                throw new AutomationException("invalid_drc_operation_result",
+                    "Native DRC operation lookup reported found=false with a job state.");
+            if (native.Found && native.Job is null)
+                throw new AutomationException("invalid_drc_operation_result",
+                    "Native DRC operation lookup reported found=true without a job state.");
+            if (native.Found)
+            {
+                ValidateJobState(native.Job!, target, epoch);
+                if (native.Job!.OperationId != id)
+                    throw new AutomationException("invalid_drc_operation_result",
+                        "Native DRC operation lookup returned a job for a different operation.");
+                using var jobJson = JsonDocument.Parse(SchematicJson.Formatter.Format(native.Job));
+                job = jobJson.RootElement.Clone();
+            }
+            return new
+            {
+                instanceId,
+                processEpoch = epoch,
+                document = target,
+                operationId = id,
+                found = native.Found,
+                lookupSupported = true,
+                retrySafety = native.Found ? null : "unknown-native-outcome",
+                job
+            };
+        });
+
     [McpServerTool(Name = "kicad_pcb_drc_cancel"),
      Description("Cancel one exact native PCB DRC job by process epoch, document and canonical lowercase job ID. Returns at once with cancellationRequested; the job reports cancelled only after its worker has stopped, and a cancelled job never carries findings or becomes completed. Read it with kicad_pcb_drc_job until workerFinished. A job that already finished keeps its terminal state."),
      KiCadCapability("pcb", "compiled-mcp plus native-api", "process epoch, document and job ID"),
@@ -288,6 +357,14 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
     }
 
     private static string OperationId(string value) => Identifier(value, "operation");
+
+    private static string ProcessEpoch(string value)
+    {
+        if (!Guid.TryParseExact(value, "D", out var id) || id == Guid.Empty
+            || !string.Equals(value, id.ToString("D"), StringComparison.Ordinal))
+            throw new AutomationException("invalid_process_epoch", "Provide the canonical native process epoch.");
+        return id.ToString("D");
+    }
 
     private static string Identifier(string value, string kind)
     {

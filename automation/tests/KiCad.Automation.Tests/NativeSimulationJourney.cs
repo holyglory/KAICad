@@ -299,6 +299,77 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(ac, await Start(acNetlist, acOperation), "Complex pairs must survive exact operation replay.");
             var complexArchive = await ArchiveResult(mcp, ac.JobId, originalEpoch);
             Assert.AreEqual(ac, JobResult(complexArchive, originalEpoch));
+
+            // Read the archived AC vector through the public bounded vector
+            // tool.  The range is expressed in logical samples, so this also
+            // proves that a complex pair cannot be split by the MCP slice.
+            var complexVector = await VectorResult(mcp, ac.JobId, originalEpoch, acOutput.Name, 1, 2);
+            Assert.AreEqual("archive", complexVector.GetProperty("source").GetString());
+            Assert.AreEqual(complexArchive.GetProperty("structuredContent").GetProperty("receiptSha256").GetString(),
+                complexVector.GetProperty("receiptSha256").GetString(),
+                "The vector read must retain the immutable terminal archive identity.");
+            Assert.AreEqual(acOperation, complexVector.GetProperty("operationId").GetString());
+            var complexSlice = complexVector.GetProperty("vector");
+            Assert.AreEqual(acOutput.Name, complexSlice.GetProperty("name").GetString());
+            Assert.IsTrue(complexSlice.GetProperty("complex").GetBoolean());
+            Assert.AreEqual("real-imaginary-pairs", complexSlice.GetProperty("encoding").GetString());
+            Assert.AreEqual(1, complexSlice.GetProperty("sampleStart").GetInt32());
+            Assert.AreEqual(2, complexSlice.GetProperty("sampleCount").GetInt32());
+            Assert.AreEqual(pointCount, complexSlice.GetProperty("totalSampleCount").GetInt32());
+            var complexRaw = complexSlice.GetProperty("values").EnumerateArray().Select(value => value.GetDouble()).ToArray();
+            var complexReal = complexSlice.GetProperty("realValues").EnumerateArray().Select(value => value.GetDouble()).ToArray();
+            var complexImaginary = complexSlice.GetProperty("imaginaryValues").EnumerateArray().Select(value => value.GetDouble()).ToArray();
+            Assert.AreEqual(4, complexRaw.Length);
+            Assert.AreEqual(2, complexReal.Length);
+            Assert.AreEqual(2, complexImaginary.Length);
+            for (int sample = 0; sample < 2; sample++)
+            {
+                int point = sample + 1;
+                Assert.AreEqual(acOutput.Values[2 * point], complexRaw[2 * sample], 1e-12);
+                Assert.AreEqual(acOutput.Values[2 * point + 1], complexRaw[2 * sample + 1], 1e-12);
+                Assert.AreEqual(complexRaw[2 * sample], complexReal[sample], 1e-12);
+                Assert.AreEqual(complexRaw[2 * sample + 1], complexImaginary[sample], 1e-12);
+            }
+
+            // Keep the real-vector contract visible beside the AC assertion:
+            // real samples stay flat and expose no imaginary component array.
+            string realVectorName = current.Vectors.First(vector => !vector.Complex
+                && vector.Name.Contains("out", StringComparison.OrdinalIgnoreCase)).Name;
+            var realVector = await VectorResult(mcp, current.JobId, originalEpoch, realVectorName, 0, 1);
+            var realSlice = realVector.GetProperty("vector");
+            Assert.IsFalse(realSlice.GetProperty("complex").GetBoolean());
+            Assert.AreEqual("real-samples", realSlice.GetProperty("encoding").GetString());
+            Assert.AreEqual(1, realSlice.GetProperty("values").GetArrayLength());
+            Assert.AreEqual(1, realSlice.GetProperty("realValues").GetArrayLength());
+            Assert.AreEqual(0, realSlice.GetProperty("imaginaryValues").GetArrayLength());
+            Assert.AreEqual(realSlice.GetProperty("values")[0].GetDouble(),
+                realSlice.GetProperty("realValues")[0].GetDouble(), 1e-12);
+
+            // Refuse missing vectors, pair-splitting ranges, and noncompleted
+            // jobs with truthful typed errors instead of fabricated samples.
+            AssertFailure(await mcp.Tool("kicad_simulation_vector", new
+            {
+                instanceId, processEpoch = originalEpoch, document = Target(simulationDocument),
+                jobId = ac.JobId, vectorName = "does-not-exist", sampleStart = 0, sampleCount = -1
+            }), "simulation_vector_not_found");
+            AssertFailure(await mcp.Tool("kicad_simulation_vector", new
+            {
+                instanceId, processEpoch = originalEpoch, document = Target(simulationDocument),
+                jobId = ac.JobId, vectorName = acOutput.Name, sampleStart = pointCount - 1, sampleCount = 2
+            }), "invalid_simulation_vector_request");
+            AssertFailure(await mcp.Tool("kicad_simulation_vector", new
+            {
+                instanceId, processEpoch = originalEpoch, document = Target(simulationDocument),
+                jobId = failed.JobId, vectorName = "out", sampleStart = 0, sampleCount = -1
+            }), "simulation_vector_unavailable");
+            var wrongAcDocument = simulationDocument.Clone();
+            wrongAcDocument.Project.Path = Path.Combine(wrongAcDocument.Project.Path, "different-project");
+            AssertFailure(await mcp.Tool("kicad_simulation_vector", new
+            {
+                instanceId, processEpoch = originalEpoch, document = Target(wrongAcDocument),
+                jobId = ac.JobId, vectorName = acOutput.Name, sampleStart = 0, sampleCount = 1
+            }), "simulation_result_not_found");
+
             var laterReal = await WaitForTerminal(await Start(netlist, Guid.NewGuid().ToString("D")));
             Assert.IsTrue(laterReal.Vectors.All(vector => !vector.Complex));
             Assert.IsTrue(JsonElement.DeepEquals(complexArchive.GetProperty("structuredContent"),
@@ -314,6 +385,9 @@ public sealed partial class NativeSessionTests
                 Assert.IsTrue(JsonElement.DeepEquals(complexArchive.GetProperty("structuredContent"),
                     (await ArchiveResult(complexReconnect, ac.JobId, originalEpoch)).GetProperty("structuredContent")),
                     "A fresh MCP process must retain both components and the native complex type.");
+                Assert.IsTrue(JsonElement.DeepEquals(complexVector,
+                    await VectorResult(complexReconnect, ac.JobId, originalEpoch, acOutput.Name, 1, 2)),
+                    "A fresh MCP process must retain the exact archived complex slice and receipt identity.");
             }
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-simulation-complex.json"),
                 JsonSerializer.Serialize(complexArchive.GetProperty("structuredContent")), token);
@@ -382,6 +456,9 @@ public sealed partial class NativeSessionTests
                 AssertFailure(await archiveHost.Tool("kicad_simulation_result", new
                 { instanceId, processEpoch = restartedEpoch, document = Target(simulationDocument), jobId = current.JobId }),
                     "simulation_result_not_found");
+                AssertFailure(await archiveHost.Tool("kicad_simulation_vector", new
+                { instanceId, processEpoch = restartedEpoch, document = Target(simulationDocument), jobId = ac.JobId,
+                    vectorName = acOutput.Name, sampleStart = 0, sampleCount = 1 }), "simulation_result_not_found");
             }
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-simulation-restart.json"),
                 JsonSerializer.Serialize(new
@@ -436,6 +513,22 @@ public sealed partial class NativeSessionTests
                 Assert.IsFalse(reply.TryGetProperty("isError", out var error) && error.GetBoolean(), reply.GetRawText());
                 Assert.AreEqual("archive", reply.GetProperty("structuredContent").GetProperty("source").GetString());
                 return reply;
+            }
+
+            async Task<JsonElement> VectorResult(StdioMcpFixture host, string jobId, string processEpoch,
+                string vectorName, int sampleStart, int sampleCount)
+            {
+                var reply = await host.Tool("kicad_simulation_vector", new
+                {
+                    instanceId, processEpoch, document = Target(simulationDocument), jobId,
+                    vectorName, sampleStart, sampleCount
+                });
+                Assert.IsFalse(reply.TryGetProperty("isError", out var error) && error.GetBoolean(), reply.GetRawText());
+                var data = reply.GetProperty("structuredContent");
+                Assert.AreEqual(instanceId, data.GetProperty("instanceId").GetString());
+                Assert.AreEqual(processEpoch, data.GetProperty("instanceEpoch").GetString());
+                Assert.AreEqual(jobId, data.GetProperty("jobId").GetString());
+                return data;
             }
 
             SimulationJobState JobResult(JsonElement reply, string? expectedEpoch = null)

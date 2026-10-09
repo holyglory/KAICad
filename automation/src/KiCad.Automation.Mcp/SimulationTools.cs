@@ -121,7 +121,12 @@ public sealed class SimulationTools(InstanceRegistry instances)
         var target = SimulationDocumentInput.ToNative(document);
         using var ownership = receipts.AcquireSession(instanceId);
         if (receipts.ReadTerminal(instanceId, processEpoch, jobId) is { } archive)
+        {
+            if (!archive.Operation.Document.Equals(target))
+                throw new AutomationException("simulation_result_not_found",
+                    "No native or archived simulation result matches the original schematic document.");
             return VectorData(archive, target, vectorName, sampleStart, sampleCount);
+        }
 
         NativeClient client;
         try { client = instances.Client(instanceId); }

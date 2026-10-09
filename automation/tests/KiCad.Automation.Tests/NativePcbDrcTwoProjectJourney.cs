@@ -460,10 +460,35 @@ public sealed partial class NativeSessionTests
                 "Instance B must not check project A's board.", code: "native_status_3", containing: WrongProject);
             Refused(await mcp.Tool("kicad_pcb_drc_job", new { instanceId = a.InstanceId, documentJson = Json(a.Board), jobId = a1.JobId, processEpoch = Guid.NewGuid().ToString("D") }),
                 "A read with an epoch no process has must be refused.", code: "stale_process_epoch");
+            // An automation instance serves one project, so project A's rendered editor refuses a board request that names
+            // no project for that reason and names the project it has open; and a closed board of its own project is only
+            // not open there, never said to belong to another instance (ledger p3865669bf8f25214).
+            async Task RefusedByA<TRequest, TResponse>(TRequest request, string expected, string because)
+                where TRequest : Google.Protobuf.IMessage<TRequest>
+                where TResponse : Google.Protobuf.IMessage<TResponse>, new()
+            {
+                var refusal = await Assert.ThrowsExactlyAsync<NativeApiException>(() =>
+                    a.Native.InvokeAsync<TRequest, TResponse>(request, token));
+                Assert.AreEqual(3, refusal.Status, because + " " + refusal.Message);
+                Assert.AreEqual(expected, refusal.Message, because);
+            }
+            var unnamed = a.Board.Clone(); unnamed.Project = null;
+            await RefusedByA<Kiapi.Board.Commands.GetBoardOrigin, Vector2>(
+                new() { Board = unnamed, Type = Kiapi.Board.Commands.BoardOriginType.BotGrid },
+                $"the requested document {a.Board.BoardFilename} names no project; this KiCad instance has project " +
+                $"'{a.Board.Project.Name}' at '{a.Board.Project.Path}' open and accepts a board request only with its project " +
+                "named by its absolute folder path",
+                "Project A's automation editor must refuse a board request that names no project, naming its own project.");
+            var closedInA = a.Board.Clone(); closedInA.BoardFilename = "closed.kicad_pcb";
+            Assert.IsFalse(File.Exists(Path.Combine(a.Board.Project.Path, closedInA.BoardFilename)), "No board of that name exists in project A.");
+            await RefusedByA<ReadDocumentLifecycleState, DocumentLifecycleState>(new() { Document = closedInA },
+                "the requested document closed.kicad_pcb is not open",
+                "A closed board of project A's own project is not open in its editor; it belongs to no other instance.");
+            Console.WriteLine($"Two-project PCB checks: project A's editor refused an unnamed project and a closed board at {clock.Elapsed.TotalSeconds:F1}s.");
             // KiCad without a window (kicad-cli api-server) refuses requests for these boards the same way.
             await VerifyHeadlessWrongProjectRefusal(a.Board, b.Board, display, evidence, token);
             Console.WriteLine($"Two-project PCB checks: headless KiCad refused both projects' boards at {clock.Elapsed.TotalSeconds:F1}s.");
-            await Unchanged(boards2, "Refused stale, wrong-target and headless requests must leave both boards alone.");
+            await Unchanged(boards2, "Refused stale, wrong-target, unnamed-project and headless requests must leave both boards alone.");
 
             // 3. Project B's check is cancelled after its copper clearance checks, while project A's check runs beside it and
             //    completes with its first findings. The cancelled check ends cancelled, never completed, only once its
@@ -720,9 +745,21 @@ public sealed partial class NativeSessionTests
         }
         finally
         {
-            // This process and its folder exist only for this step.
-            if (!process.HasExited) process.Kill();
+            // This process and its folder exist only for this step. The server is asked to stop as a person stops it
+            // (SIGTERM), so it closes its board and flushes its output into the evidence logs; it is killed only if it
+            // has not stopped within 30 seconds.
+            if (!process.HasExited && SignalProcess(process.Id, 15) == 0)
+            {
+                using var stopping = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                try { await process.WaitForExitAsync(stopping.Token); }
+                catch (OperationCanceledException) { }
+            }
+            bool stopped = process.HasExited;
+            if (!stopped) process.Kill();
             await process.WaitForExitAsync(CancellationToken.None);
+            Console.WriteLine(stopped
+                ? $"Two-project PCB checks: headless KiCad stopped on request with exit code {process.ExitCode}."
+                : "Two-project PCB checks: headless KiCad did not stop within 30 s of SIGTERM and was killed.");
             await Task.WhenAll(stdout, stderr);
             Directory.Delete(directory, true);
         }

@@ -23,20 +23,33 @@ public sealed partial class NativeSessionTests
         DocumentSpecifier schematic, string evidence, string instanceId, int focusProcessId,
         string display, CancellationToken token)
     {
-        string boardPath = Path.Combine(schematic.Project.Path, "via-minimization.kicad_pcb");
-        await File.WriteAllTextAsync(boardPath, ViaMinimizationBoard(), token);
-        var opened = await CreateRootThroughMcp(client.Endpoint, instanceId, boardPath, evidence, token,
-            toolName: "kicad_pcb_open");
-        DocumentSpecifier board = opened.Document;
+        // KiCad opens only the board matching the attached project root.
+        // Preserve that board and project baseline while this fixture runs.
+        string boardPath = Path.GetFullPath(Path.Combine(schematic.Project.Path,
+            schematic.Project.Name + ".kicad_pcb"));
+        string projectPath = Path.GetFullPath(Path.Combine(schematic.Project.Path,
+            schematic.Project.Name + ".kicad_pro"));
+        bool originalBoardExists = File.Exists(boardPath);
+        bool originalProjectExists = File.Exists(projectPath);
+        byte[]? originalBoardBytes = originalBoardExists
+            ? await File.ReadAllBytesAsync(boardPath, token) : null;
+        byte[]? originalProjectBytes = originalProjectExists
+            ? await File.ReadAllBytesAsync(projectPath, token) : null;
         string stateDirectory = Directory.CreateTempSubdirectory("kicad-pcb-via-minimize-mcp-").FullName;
         string retained = Path.Combine(evidence, instanceId + "-via-minimization");
         Directory.CreateDirectory(retained);
+        await using var mcp = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.ProductionStartInfo(),
+            stateDirectory, Path.Combine(retained, "mcp.stderr.log"), token);
+        RequireToolSuccess(await mcp.Tool("kicad_instance_attach",
+            new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
+        DocumentSpecifier? viaBoard = null;
         try
         {
-            await using var mcp = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.ProductionStartInfo(),
-                stateDirectory, Path.Combine(retained, "mcp.stderr.log"), token);
-            RequireToolSuccess(await mcp.Tool("kicad_instance_attach",
-                new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
+            await File.WriteAllTextAsync(boardPath, ViaMinimizationBoard(), token);
+            var opened = await CreateRootThroughMcp(client.Endpoint, instanceId, boardPath, evidence, token,
+                toolName: "kicad_pcb_open");
+            DocumentSpecifier board = opened.Document;
+            viaBoard = board;
 
             await SaveCheckedThroughMcp(client, board, evidence, token, verifyReconnect: false);
             DocumentLifecycleState before = await ObserveLifecycleState(client, board, token);
@@ -164,9 +177,11 @@ public sealed partial class NativeSessionTests
             JsonElement close = await mcp.Tool("kicad_document_close", new
             { instanceId, expectedStateJson = SchematicJson.Formatter.Format(saved), operationId = Guid.NewGuid().ToString("D") });
             RequireToolSuccess(close);
+            viaBoard = null;
             var reopened = await CreateRootThroughMcp(client.Endpoint, instanceId, boardPath, evidence, token,
                 toolName: "kicad_pcb_open");
             board = reopened.Document;
+            viaBoard = board;
             var persistedState = await ObserveLifecycleState(client, board, token);
             var persisted = await ReadRoutes(persistedState);
             Assert.IsTrue(persisted.Items.Items.Any(item => RouteIdentity(item) == merged.Id.Value),
@@ -264,6 +279,28 @@ public sealed partial class NativeSessionTests
         }
         finally
         {
+            if (viaBoard is not null)
+            {
+                try
+                {
+                    RequireToolSuccess(await mcp.Tool("kicad_document_close", new
+                    {
+                        instanceId,
+                        expectedStateJson = SchematicJson.Formatter.Format(
+                            await ObserveLifecycleState(client, viaBoard, token)),
+                        operationId = Guid.NewGuid().ToString("D")
+                    }));
+                }
+                catch (Exception) { /* Restore the original bytes before reporting the journey failure. */ }
+            }
+            if (originalBoardExists)
+                await File.WriteAllBytesAsync(boardPath, originalBoardBytes!, CancellationToken.None);
+            else if (File.Exists(boardPath))
+                File.Delete(boardPath);
+            if (originalProjectExists)
+                await File.WriteAllBytesAsync(projectPath, originalProjectBytes!, CancellationToken.None);
+            else if (File.Exists(projectPath))
+                File.Delete(projectPath);
             Directory.Delete(stateDirectory, true);
         }
 

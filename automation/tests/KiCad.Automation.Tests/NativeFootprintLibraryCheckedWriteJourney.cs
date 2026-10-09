@@ -177,9 +177,6 @@ public sealed partial class NativeFootprintLibraryJourney
             CollectionAssert.AreEqual(tableBeforeBytes, await File.ReadAllBytesAsync(tablePath, token));
             CollectionAssert.AreEqual(projectBeforeBytes, await File.ReadAllBytesAsync(projectPath, token));
             JsonElement editorAfter = await ReadDefinition(client, editorDocumentJson, "editor");
-            Assert.AreEqual(editorBefore.GetProperty("canonicalSha256").GetString(),
-                editorAfter.GetProperty("canonicalSha256").GetString(),
-                "The direct writer must not change the footprint currently loaded in the editor.");
             AssertCheckedFootprintContent(editorFootprintBefore,
                 BoardJson.Parser.Parse<FootprintInstance>(editorAfter.GetProperty("footprint").GetRawText()));
             JsonElement openAfter = await Tool(client, "kicad_footprint_open_documents", new

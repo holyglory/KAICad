@@ -240,13 +240,15 @@ public sealed class PcbViaMinimizationTools(InstanceRegistry registry)
         var layers = left.CopperLayers.Concat(right.CopperLayers)
             .GroupBy(layer => layer.Layer)
             .ToArray();
-        if (layers.Any(group => group.Skip(1).Any(layer => !CopperLayerGeometryEqual(group.First(), layer))))
+        if (layers.Any(group => group.Where(layer => !IsEmptyCopperLayer(layer)).Skip(1)
+            .Any(layer => !CopperLayerGeometryEqual(group.First(nonEmpty => !IsEmptyCopperLayer(nonEmpty)), layer))))
             return false;
 
-        var leftJunction = left.CopperLayers.Where(layer => layer.Layer == junction).ToArray();
-        var rightJunction = right.CopperLayers.Where(layer => layer.Layer == junction).ToArray();
-        return leftJunction.Length == rightJunction.Length
-            && leftJunction.Zip(rightJunction).All(pair => CopperLayerGeometryEqual(pair.First, pair.Second));
+        var leftJunction = left.CopperLayers.Where(layer => layer.Layer == junction && !IsEmptyCopperLayer(layer)).ToArray();
+        var rightJunction = right.CopperLayers.Where(layer => layer.Layer == junction && !IsEmptyCopperLayer(layer)).ToArray();
+        return leftJunction.Length == 0 || rightJunction.Length == 0
+            || leftJunction.Length == rightJunction.Length
+                && leftJunction.Zip(rightJunction).All(pair => CopperLayerGeometryEqual(pair.First, pair.Second));
     }
 
     private static bool TryBuildCopperLayers(PadStack left, PadStack right,
@@ -261,7 +263,7 @@ public sealed class PcbViaMinimizationTools(InstanceRegistry registry)
             return false;
         }
 
-        PadStackLayer? template = profiles.Values.FirstOrDefault();
+        PadStackLayer? template = profiles.Values.FirstOrDefault(layer => !IsEmptyCopperLayer(layer));
         if (template is null)
         {
             result = [];
@@ -269,7 +271,8 @@ public sealed class PcbViaMinimizationTools(InstanceRegistry registry)
         }
 
         if (spanLayers.Any(layer => !profiles.ContainsKey(layer))
-            && profiles.Values.Any(layer => !CopperLayerGeometryEqual(template, layer)))
+            && profiles.Values.Any(layer => !IsEmptyCopperLayer(layer)
+                && !CopperLayerGeometryEqual(template, layer)))
         {
             result = [];
             return false;
@@ -279,7 +282,7 @@ public sealed class PcbViaMinimizationTools(InstanceRegistry registry)
         foreach (BoardLayer layer in spanLayers)
         {
             PadStackLayer copy = profiles.TryGetValue(layer, out PadStackLayer? existing)
-                ? existing.Clone() : template.Clone();
+                && !IsEmptyCopperLayer(existing) ? existing.Clone() : template.Clone();
             copy.Layer = layer;
             result.Add(copy);
         }
@@ -294,6 +297,9 @@ public sealed class PcbViaMinimizationTools(InstanceRegistry registry)
         rightCopy.Layer = BoardLayer.BlUnknown;
         return leftCopy.Equals(rightCopy);
     }
+
+    private static bool IsEmptyCopperLayer(PadStackLayer layer)
+        => layer.Size is null || (layer.Size.XNm == 0 && layer.Size.YNm == 0);
 
     private static ViaType DeriveViaType(ViaType source, IReadOnlyList<BoardLayer> spanLayers,
         IReadOnlyList<BoardLayer>? enabledCopper)

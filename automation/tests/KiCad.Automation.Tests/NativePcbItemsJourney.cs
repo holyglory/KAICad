@@ -3696,8 +3696,11 @@ public sealed partial class NativeSessionTests
         string p5 = Guid.NewGuid().ToString("D"), p6 = Guid.NewGuid().ToString("D");
         string f7 = Guid.NewGuid().ToString("D"), p7 = Guid.NewGuid().ToString("D");
         string f8 = Guid.NewGuid().ToString("D"), p8 = Guid.NewGuid().ToString("D");
+        string f9 = Guid.NewGuid().ToString("D"), p9 = Guid.NewGuid().ToString("D");
+        string f10 = Guid.NewGuid().ToString("D"), p10 = Guid.NewGuid().ToString("D");
         string obstacle = Guid.NewGuid().ToString("D");
         string viaSupport = Guid.NewGuid().ToString("D");
+        string viaBridge = Guid.NewGuid().ToString("D");
         string edge = Guid.NewGuid().ToString("D");
         // Keep the candidate deliberately small and deterministic: the native
         // shove preview starts at the USB_D+ pad (40.1,40.1) and runs vertically
@@ -3741,8 +3744,15 @@ public sealed partial class NativeSessionTests
   (footprint "POWER_RAIL_B_SUPPORT" (layer "B.Cu") (at 40.875 43) (uuid "{f7}")
     (attr smd)
     (pad "1" smd circle (at 0 0) (size 0.7 0.7) (layers "B.Cu" "B.Paste" "B.Mask") (net 1 "POWER_RAIL") (uuid "{p7}")))
+  (footprint "POWER_RAIL_LEFT" (layer "F.Cu") (at 39 42) (uuid "{f9}")
+    (attr smd)
+    (pad "1" smd circle (at 0 0) (size 0.7 0.7) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "POWER_RAIL") (uuid "{p9}")))
+  (footprint "POWER_RAIL_RIGHT" (layer "F.Cu") (at 41 42) (uuid "{f10}")
+    (attr smd)
+    (pad "1" smd circle (at 0 0) (size 0.7 0.7) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "POWER_RAIL") (uuid "{p10}")))
   (segment (start 39 42) (end 41 42) (width 0.25) (layer "F.Cu") (net 1) (uuid "{obstacle}"))
   (segment (start 40.875 42) (end 40.875 43) (width 0.7) (layer "B.Cu") (net 1) (uuid "{viaSupport}"))
+  (via (at 40.875 42) (size 0.7) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1) (uuid "{viaBridge}"))
 )
 """;
     }

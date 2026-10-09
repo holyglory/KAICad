@@ -1,6 +1,7 @@
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Kiapi.Board.Commands;
 using Kiapi.Board.Jobs;
 using Kiapi.Board.Types;
@@ -45,6 +46,7 @@ public sealed partial class NativeSessionTests
         DocumentSpecifier? viaBoard = null;
         try
         {
+            await TuneViaRules(projectPath, token);
             await File.WriteAllTextAsync(boardPath, ViaMinimizationBoard(), token);
             var opened = await CreateRootThroughMcp(client.Endpoint, instanceId, boardPath, evidence, token,
                 toolName: "kicad_pcb_open");
@@ -313,6 +315,37 @@ public sealed partial class NativeSessionTests
                 .GetProperty("afterState").GetString()!);
     }
 
+
+    private static async Task TuneViaRules(string projectPath, CancellationToken token)
+    {
+        if (!File.Exists(projectPath)) return;
+        JsonNode root = JsonNode.Parse(await File.ReadAllTextAsync(projectPath, token))
+            ?? throw new InvalidOperationException("The fixture project file is not valid JSON.");
+        void Visit(JsonNode? node)
+        {
+            if (node is JsonObject obj)
+            {
+                foreach (var property in obj.ToArray())
+                {
+                    if (property.Value is JsonNode child)
+                    {
+                        if (property.Key == "min_via_diameter") obj[property.Key] = 0.5;
+                        else if (property.Key == "min_via_annular_width") obj[property.Key] = 0.0;
+                        else if (property.Key == "via_diameter") obj[property.Key] = 1.0;
+                        else if (property.Key == "via_drill") obj[property.Key] = 0.3;
+                        else Visit(child);
+                    }
+                }
+            }
+            else if (node is JsonArray array)
+            {
+                foreach (JsonNode? child in array) Visit(child);
+            }
+        }
+        Visit(root);
+        await File.WriteAllTextAsync(projectPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), token);
+    }
+
     private static Via BuildVia(string id, Vector2 position, BoardLayer start, BoardLayer end, long drill) => new()
     {
         Id = new() { Value = id }, Position = position.Clone(), Net = new() { Name = "VIA_MAIN" },
@@ -337,7 +370,7 @@ public sealed partial class NativeSessionTests
         (kicad_pcb (version 20260206) (generator "pcbnew")
           (general (thickness 1.6)) (paper "A4")
           (layers (0 "F.Cu" signal) (4 "In1.Cu" signal) (6 "In2.Cu" signal) (2 "B.Cu" signal) (25 "Edge.Cuts" user))
-          (setup (pad_to_mask_clearance 0))
+          (setup (pad_to_mask_clearance 0) (defaults (edge_clearance 0.5) (courtyard_clearance 0.25) (thread 0.15) (via_diameter 1.0) (via_drill 0.3) (uvia_diameter 0.3) (uvia_drill 0.1) (user_trace_width 0.25) (user_via 1.0) (user_via_dia 1.0) (user_via_drill 0.3)))
           (net 0 "") (net 1 "VIA_MAIN")
           (gr_rect (start 0 0) (end 40 30) (stroke (width 0.05) (type default)) (fill none)
             (layer "Edge.Cuts") (uuid "10000000-0000-4000-8000-000000000020"))

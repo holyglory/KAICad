@@ -66,7 +66,8 @@ public sealed partial class NativeSessionTests
             string pairProjectText = DifferentialPairRouteFixture.ProjectText.Replace(
                 "pair-apply.kicad_pro", Path.GetFileName(originalProjectPath), StringComparison.Ordinal);
             await File.WriteAllTextAsync(boardPath, DifferentialPairRouteFixture.BoardText(), token);
-            await File.WriteAllTextAsync(originalProjectPath, pairProjectText, token);
+            // Retain the intended fixture rules as input evidence only; the
+            // attached native project and its file baseline remain unchanged.
             var opened = await CreateRootThroughMcp(client.Endpoint, instanceId, boardPath, evidence, token,
                 toolName: "kicad_pcb_open");
             DocumentSpecifier board = opened.Document;

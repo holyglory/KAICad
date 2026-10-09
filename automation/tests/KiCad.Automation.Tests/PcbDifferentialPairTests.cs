@@ -1,4 +1,6 @@
+using Kiapi.Board.Commands;
 using Kiapi.Board.Types;
+using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
 using KiCad.Automation.Mcp;
 
@@ -30,6 +32,24 @@ public sealed class PcbDifferentialPairTests
         Assert.AreEqual(tracks[0].Start.XNm, tracks[1].Start.XNm);
         Assert.AreEqual(tracks[0].End.XNm, tracks[1].End.XNm);
         Assert.AreEqual(330_000, Math.Abs(tracks[0].Start.YNm - tracks[1].Start.YNm));
+    }
+
+    [TestMethod]
+    public void ApplyCandidateAcceptsCompleteMultiSegmentTrackGeometry()
+    {
+        var document = new DocumentSpecifier { Type = DocumentType.DoctypePcb, BoardFilename = "pair.kicad_pcb",
+            Project = new() { Name = "pair", Path = Path.GetTempPath() } };
+        var candidate = new CreateItems { Header = new() { Document = document } };
+        candidate.Items.Add(Google.Protobuf.WellKnownTypes.Any.Pack(
+            Track("00000000-0000-0000-0000-000000000031", "USB_D_P", BoardLayer.BlFCu, 0, 1_000_000)));
+        candidate.Items.Add(Google.Protobuf.WellKnownTypes.Any.Pack(
+            Track("00000000-0000-0000-0000-000000000032", "USB_D_P", BoardLayer.BlFCu, 0, 2_000_000, startX: 1_000_000)));
+        candidate.Items.Add(Google.Protobuf.WellKnownTypes.Any.Pack(
+            Track("00000000-0000-0000-0000-000000000033", "USB_D_N", BoardLayer.BlFCu, 500_000, 1_000_000)));
+        candidate.Items.Add(Google.Protobuf.WellKnownTypes.Any.Pack(
+            Track("00000000-0000-0000-0000-000000000034", "USB_D_N", BoardLayer.BlFCu, 500_000, 2_000_000, startX: 1_000_000)));
+
+        PcbDifferentialPairTools.ValidateApplyCandidate("USB_D_P", "USB_D_N", candidate);
     }
 
     [TestMethod]

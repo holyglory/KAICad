@@ -86,7 +86,7 @@ public sealed class PcbDifferentialPairTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_pcb_diff_pair_apply"),
-     Description("Apply the exact two-track differential-pair candidate from kicad_pcb_diff_pair_plan through the checked route-replacement transaction. requestJson names positiveNet and negativeNet; the candidate must contain exactly one Track for each named net on the same copper layer. A completed detached DRC receipt is required, and native undo, operation replay and indeterminate outcomes remain authoritative."),
+     Description("Apply the complete Track-only differential-pair candidate from kicad_pcb_diff_pair_plan through the checked route-replacement transaction. requestJson names positiveNet and negativeNet; the candidate must contain at least two Tracks, distinct canonical IDs, explicit positive widths and endpoints, exactly those two net names, and one copper layer. A completed detached DRC receipt is required, and native undo, operation replay and indeterminate outcomes remain authoritative."),
      KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "exact differential-pair candidate, lifecycle checkpoint, detached DRC receipt, checked native transaction and operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Apply(string instanceId, string deleteRequestJson, string createRequestJson,
@@ -100,21 +100,7 @@ public sealed class PcbDifferentialPairTools(InstanceRegistry registry)
             ?? throw new AutomationException("invalid_diff_pair_apply", "requestJson must name positiveNet and negativeNet.");
         Validate(pair);
         CreateItems create = Parse<CreateItems>(createRequestJson, "invalid_diff_pair_apply_create");
-        if (create.Items.Count != 2 || create.Items.Any(item => !item.Is(BoardTrack.Descriptor)))
-            throw new AutomationException("invalid_diff_pair_apply_create",
-                "A differential-pair apply candidate must contain exactly two Track objects.");
-        BoardTrack[] tracks = create.Items.Select(item => item.Unpack<BoardTrack>()).ToArray();
-        if (tracks.Any(track => track.Id is null || !CanonicalUuid(track.Id.Value)
-            || track.Net is null || string.IsNullOrWhiteSpace(track.Net.Name)
-            || track.Start is null || track.End is null || track.Width is null || track.Width.ValueNm <= 0))
-            throw new AutomationException("invalid_diff_pair_apply_create",
-                "Each differential-pair Track needs a canonical ID, net, endpoints and positive width.");
-        if (tracks.Select(track => track.Net.Name).Distinct(StringComparer.Ordinal).Count() != 2
-            || !tracks.Any(track => track.Net.Name == pair.PositiveNet)
-            || !tracks.Any(track => track.Net.Name == pair.NegativeNet)
-            || tracks[0].Layer != tracks[1].Layer)
-            throw new AutomationException("invalid_diff_pair_apply_create",
-                "The candidate must contain one positive and one negative net Track on the same copper layer.");
+        ValidateApplyCandidate(pair.PositiveNet, pair.NegativeNet, create);
         return await new PcbRouteOptimizationTools(registry).Apply(
             instanceId, deleteRequestJson, createRequestJson, expectedStateJson, operationId,
             cancellationToken, drcJobStateJson);
@@ -337,6 +323,38 @@ public sealed class PcbDifferentialPairTools(InstanceRegistry registry)
             || request.PositiveNet.Length > 512 || request.NegativeNet.Length > 512
             || request.PositiveNet == request.NegativeNet)
             throw new AutomationException("invalid_diff_pair_apply", "positiveNet and negativeNet must be distinct nonempty names of at most 512 characters.");
+    }
+
+    internal static void ValidateApplyCandidate(string positiveNet, string negativeNet, CreateItems create)
+    {
+        if (create.Items.Count < 2 || create.Items.Any(item => item is null || !item.Is(BoardTrack.Descriptor)))
+            throw new AutomationException("invalid_diff_pair_apply_create",
+                "A differential-pair apply candidate must contain at least two Track objects and no other object types.");
+
+        BoardTrack[] tracks = create.Items.Select(item => item.Unpack<BoardTrack>()).ToArray();
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        foreach (BoardTrack track in tracks)
+        {
+            if (track.Id is null || !CanonicalUuid(track.Id.Value) || !ids.Add(track.Id.Value)
+                || track.Net is null || string.IsNullOrWhiteSpace(track.Net.Name)
+                || track.Start is null || track.End is null || track.Start.Equals(track.End)
+                || track.Width is null || track.Width.ValueNm <= 0)
+                throw new AutomationException("invalid_diff_pair_apply_create",
+                    "Each differential-pair Track needs a distinct canonical ID, explicit nonzero endpoints and positive width.");
+            if (!MultilayerRoutePlanner.IsCopperLayer(track.Layer))
+                throw new AutomationException("invalid_diff_pair_apply_create",
+                    "Differential-pair Tracks must use the same copper layer.");
+        }
+
+        var netNames = tracks.Select(track => track.Net.Name).ToHashSet(StringComparer.Ordinal);
+        if (netNames.Count != 2 || !netNames.SetEquals(new[] { positiveNet, negativeNet }))
+            throw new AutomationException("invalid_diff_pair_apply_create",
+                "The candidate must contain exactly the requested positive and negative net names.");
+
+        BoardLayer layer = tracks[0].Layer;
+        if (tracks.Any(track => track.Layer != layer))
+            throw new AutomationException("invalid_diff_pair_apply_create",
+                "All differential-pair Tracks must use the same copper layer.");
     }
 
     private static bool CanonicalUuid(string value) =>

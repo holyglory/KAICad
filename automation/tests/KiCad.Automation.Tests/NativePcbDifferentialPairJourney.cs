@@ -381,8 +381,7 @@ public sealed partial class NativeSessionTests
             Directory.Delete(stateDirectory, true);
         }
 
-        return (await CreateRootThroughMcp(client.Endpoint, instanceId, originalPath, evidence, token,
-            toolName: "kicad_pcb_open")).Document;
+        return currentBoard;
 
         static void RequireToolSuccess(JsonElement reply) => Assert.IsFalse(
             reply.TryGetProperty("isError", out var error) && error.GetBoolean(), reply.GetRawText());

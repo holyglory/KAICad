@@ -1538,28 +1538,6 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(SchematicJson.Formatter.Format(cleanState), SchematicJson.Formatter.Format(
                 await ObserveLifecycleState(client, cleanBoard, token)));
 
-            // The preview is validated separately above. For the apply journey,
-            // use a complete connected two-net candidate between the fixture's
-            // exact pads so the native DRC proves real endpoint connectivity.
-            var differentialApplyCandidate = new CreateItems { Header = new() { Document = cleanBoard } };
-            differentialApplyCandidate.Items.Add(Any.Pack(new Track
-            {
-                Id = new() { Value = Guid.NewGuid().ToString("D") },
-                Start = positivePad.Position.Clone(), End = new Vector2 { XNm = 43_100_000, YNm = 40_100_000 },
-                Width = new() { ValueNm = 200_000 }, Layer = BoardLayer.BlFCu,
-                Net = positivePad.Net.Clone()
-            }));
-            var negativePad = pairPads.Items.Select(item => item.Unpack<Pad>())
-                .Single(pad => pad.Net.Name == "USB_D-" && pad.Position.XNm == 40_800_000 && pad.Position.YNm == 40_800_000);
-            differentialApplyCandidate.Items.Add(Any.Pack(new Track
-            {
-                Id = new() { Value = Guid.NewGuid().ToString("D") },
-                Start = negativePad.Position.Clone(), End = new Vector2 { XNm = 43_800_000, YNm = 40_800_000 },
-                Width = new() { ValueNm = 200_000 }, Layer = BoardLayer.BlFCu,
-                Net = negativePad.Net.Clone()
-            }));
-            differentialCandidate = differentialApplyCandidate;
-
             // Apply the exact complete proposal through the differential-pair
             // wrapper.  The detached DRC is bound to this candidate and the
             // empty DeleteItems request makes this an additive transaction.

@@ -71,6 +71,7 @@ public sealed partial class NativeSessionTests
                 toolName: "kicad_pcb_open");
             DocumentSpecifier board = opened.Document;
             pairBoard = board;
+            await SaveCheckedThroughMcp(client, board, evidence, token, verifyReconnect: false);
             var before = await ObserveLifecycleState(client, board, token);
             var padReply = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
             { Header = new() { Document = board }, Types_ = { KiCadObjectType.KotPcbPad } }, token);

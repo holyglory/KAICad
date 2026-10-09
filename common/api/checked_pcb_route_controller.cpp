@@ -184,7 +184,10 @@ void NormalizeRoute( Via& value )
         if( layer.custom_anchor_shape() == PSS_UNKNOWN ) layer.set_custom_anchor_shape( PSS_CIRCLE );
     }
 
-    std::vector<BoardLayer> activeLayers( stack->layers().begin(), stack->layers().end() );
+    std::vector<BoardLayer> activeLayers;
+    activeLayers.reserve( stack->layers_size() );
+    for( int rawLayer : stack->layers() )
+        activeLayers.push_back( static_cast<BoardLayer>( rawLayer ) );
     std::sort( activeLayers.begin(), activeLayers.end(), []( BoardLayer left, BoardLayer right )
     { return LayerOrder( left ) < LayerOrder( right ); } );
     stack->clear_layers();

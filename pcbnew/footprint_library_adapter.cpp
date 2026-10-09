@@ -794,6 +794,10 @@ FOOTPRINT_LIBRARY_ADAPTER::CHECKED_WRITE_RESULT FOOTPRINT_LIBRARY_ADAPTER::SaveF
         return reject( "invalid_footprint_definition",
                        "The checked footprint must identify the exact requested entry." );
 
+    if( !aFootprint->Models().empty() )
+        return reject( "unsupported_footprint_dependency",
+                       "External footprint model dependencies are not covered by the direct-file checkpoint." );
+
     std::optional<LIBRARY_TABLE_ROW*> rowResult = GetRow( nickname, LIBRARY_TABLE_SCOPE::BOTH );
     if( !rowResult || !( *rowResult ) )
         return reject( "library_table_row_mismatch", "The requested footprint row is no longer present." );
@@ -816,7 +820,7 @@ FOOTPRINT_LIBRARY_ADAPTER::CHECKED_WRITE_RESULT FOOTPRINT_LIBRARY_ADAPTER::SaveF
 
     PCB_KICAD_SEXPR_CHECKED_WRITE_RESULT native = directProvider->FootprintSaveChecked(
             aExpected.expandedUri, aFootprint, aOverwrite, aExpected.dependencyBaselines,
-            aExpected.rawLibraryContents, name );
+            aExpected.rawLibraryContents, name, aExpected.detachedDefinition );
     result.writeStarted = native.writeStarted;
     result.committed = native.committed;
     result.postverified = native.postverified;

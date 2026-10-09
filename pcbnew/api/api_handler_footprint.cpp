@@ -44,10 +44,13 @@
 #include <wx/filefn.h>
 #include <wx/filename.h>
 #include <google/protobuf/util/message_differencer.h>
+#include <google/protobuf/io/coded_stream.h>
+#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 
 #include <api/common/types/base_types.pb.h>
 
 #include <memory>
+#include <algorithm>
 #include <cctype>
 #include <limits>
 #include <wx/file.h>
@@ -133,9 +136,16 @@ bool NativeUuid( const std::string& aValue )
 
 std::string ProtoDigest( const google::protobuf::Message& aMessage )
 {
-    NATIVE_STATE_DIGEST digest;
-    digest.Append( aMessage.SerializeAsString() );
-    return digest.Hex();
+    std::string bytes;
+    google::protobuf::io::StringOutputStream output( &bytes );
+    google::protobuf::io::CodedOutputStream coded( &output );
+    coded.SetSerializationDeterministic( true );
+
+    if( !aMessage.SerializeToCodedStream( &coded ) || coded.HadError() )
+        THROW_IO_ERROR( "Could not serialize a checked footprint-library request" );
+
+    coded.Trim();
+    return DigestText( bytes );
 }
 
 std::optional<wxString> LibraryUri( FOOTPRINT_LIBRARY_ADAPTER* aAdapter,
@@ -915,9 +925,11 @@ API_HANDLER_FOOTPRINT::footprintLibraryCheckpoint( const LIBRARY_LIFECYCLE_SNAPS
     state.set_disk_baseline_checked( aSnapshot.diskBaselineChecked );
     state.set_complete_change_tracking( aSnapshot.completeChangeTracking );
 
-    NATIVE_STATE_DIGEST content;
-    content.Append( aSnapshot.detachedDefinition );
-    for( const FILE_CONTENT_BASELINE& baseline : aSnapshot.dependencyBaselines )
+    auto baselines = aSnapshot.dependencyBaselines;
+    std::sort( baselines.begin(), baselines.end(),
+               []( const auto& aLeft, const auto& aRight )
+               { return aLeft.Path() < aRight.Path(); } );
+    for( const FILE_CONTENT_BASELINE& baseline : baselines )
     {
         auto* output = state.add_dependency_baselines();
         output->set_path( baseline.Path().ToStdString( wxConvUTF8 ) );
@@ -925,15 +937,15 @@ API_HANDLER_FOOTPRINT::footprintLibraryCheckpoint( const LIBRARY_LIFECYCLE_SNAPS
         output->set_known( baseline.Known() );
         output->set_sha256( baseline.Sha256() );
         output->set_bytes( baseline.Bytes() );
-        content.Append( baseline.Path().ToStdString( wxConvUTF8 ) );
-        content.Append( baseline.Sha256() );
-        content.Append( std::to_string( baseline.Bytes() ) );
     }
 
     const std::string key = aSnapshot.expandedUri.ToStdString( wxConvUTF8 );
     auto [found, inserted] = m_libraryRevisions.try_emplace( key );
     FOOTPRINT_LIBRARY_REVISION& revision = found->second;
-    const std::string contentDigest = content.Hex();
+    auto contentState = state;
+    contentState.clear_state_sha256();
+    contentState.clear_revision();
+    const std::string contentDigest = ProtoDigest( contentState );
     if( inserted )
     {
         revision.epoch = apiServer().Token();
@@ -967,10 +979,13 @@ API_HANDLER_FOOTPRINT::handleCheckedWriteLibraryFootprint(
     response.set_process_epoch( apiServer().Token() );
     response.set_operation_id( request.operation_id() );
     response.set_status( "rejected" );
-    response.set_receipt_status( NCP_FLCS_UNKNOWN );
+    response.set_receipt_status( NCP_FLCS_REJECTED );
     response.set_scope( "mcp_direct_footprint_file" );
     response.set_complete_change_tracking( false );
     response.mutable_request()->CopyFrom( request );
+    response.set_request_fingerprint_sha256( ProtoDigest( request ) );
+    response.set_expected_request_verified( true );
+    bool retainReceipt = false;
 
     auto refuse = [&]( const char* aCode, const std::string& aMessage, bool aUnavailable = false )
     {
@@ -981,7 +996,7 @@ API_HANDLER_FOOTPRINT::handleCheckedWriteLibraryFootprint(
             response.set_status( "unavailable" );
             response.set_receipt_status( NCP_FLCS_UNAVAILABLE );
         }
-        if( response.expected_request_verified() && !request.operation_id().empty() )
+        if( retainReceipt )
             m_checkedLibraryReceipts[request.operation_id()] = response;
         return response;
     };
@@ -1003,20 +1018,22 @@ API_HANDLER_FOOTPRINT::handleCheckedWriteLibraryFootprint(
         return response;
     }
 
-    response.set_request_fingerprint_sha256( ProtoDigest( request ) );
-    response.set_expected_request_verified( true );
-    response.set_receipt_status( NCP_FLCS_REJECTED );
+    retainReceipt = true;
     if( !request.has_expected_state() )
         return refuse( "library_mutation_unavailable", "A complete native footprint checkpoint is required before writing.", true );
+    auto unsignedExpected = request.expected_state();
+    unsignedExpected.clear_state_sha256();
     if( request.expected_snapshot_sha256().size() != 64
-            || request.expected_snapshot_sha256() != request.expected_state().state_sha256() )
+            || request.expected_snapshot_sha256() != request.expected_state().state_sha256()
+            || request.expected_snapshot_sha256() != ProtoDigest( unsignedExpected ) )
         return refuse( "invalid_library_snapshot", "expected_snapshot_sha256 must identify the complete expected native state." );
     if( request.expected_state().scope() != "mcp_direct_footprint_file"
             || !request.expected_state().state_complete() || !request.expected_state().disk_baseline_checked()
             || request.expected_state().complete_change_tracking()
             || !MessageDifferencer::Equals( request.expected_state().document(), request.document() )
             || request.expected_state().process_epoch() != apiServer().Token()
-            || !NativeUuid( request.expected_state().revision().epoch() ) )
+            || request.expected_state().revision().epoch() != apiServer().Token()
+            || request.expected_state().revision().sequence() == 0 )
         return refuse( "partial_library_state", "Only a complete project-bound direct footprint-file checkpoint can admit this writer." );
     if( !request.has_footprint() || !request.footprint().has_definition()
             || !request.footprint().definition().has_id()
@@ -1026,11 +1043,56 @@ API_HANDLER_FOOTPRINT::handleCheckedWriteLibraryFootprint(
                     != request.document().lib_id().entry_name() )
         return refuse( "footprint_library_definition_mismatch", "The complete footprint definition must identify the exact requested entry." );
 
+    const auto& definition = request.footprint().definition();
+    if( !request.footprint().has_id() || !NativeUuid( request.footprint().id().value() )
+            || !request.footprint().has_position() || !request.footprint().has_orientation()
+            || !request.footprint().has_attributes() || !request.footprint().has_overrides()
+            || !request.footprint().has_reference_field() || !request.footprint().has_value_field()
+            || !request.footprint().has_datasheet_field() || !request.footprint().has_description_field()
+            || !definition.has_attributes() || !definition.has_overrides() || !definition.has_anchor()
+            || !definition.has_reference_field() || !definition.has_value_field()
+            || !definition.has_datasheet_field() || !definition.has_description_field() )
+        return refuse( "invalid_footprint_definition", "A checked write requires the complete explicit footprint envelope and mandatory library fields." );
+
+    // The native decoder reads instance fields/overrides but library description/keywords from
+    // the definition.  Refuse contradictory copies rather than silently discarding one of them.
+    auto instanceAttributes = request.footprint().attributes();
+    auto libraryAttributes = definition.attributes();
+    instanceAttributes.clear_description();
+    instanceAttributes.clear_keywords();
+    libraryAttributes.clear_description();
+    libraryAttributes.clear_keywords();
+    if( !MessageDifferencer::Equals( instanceAttributes, libraryAttributes )
+            || !MessageDifferencer::Equals( request.footprint().overrides(), definition.overrides() )
+            || !MessageDifferencer::Equals( request.footprint().reference_field(), definition.reference_field() )
+            || !MessageDifferencer::Equals( request.footprint().value_field(), definition.value_field() )
+            || !MessageDifferencer::Equals( request.footprint().datasheet_field(), definition.datasheet_field() )
+            || !MessageDifferencer::Equals( request.footprint().description_field(), definition.description_field() )
+            || definition.anchor().x_nm() != 0 || definition.anchor().y_nm() != 0 )
+        return refuse( "invalid_footprint_definition", "The instance and library fields must agree, with a zero library anchor." );
+
+    for( const auto& item : definition.items() )
+    {
+        if( item.Is<kiapi::board::types::Footprint3DModel>() )
+            return refuse( "unsupported_footprint_dependency", "External footprint model dependencies are not covered by the direct-file checkpoint." );
+    }
+
     try
     {
         google::protobuf::Any packed;
         packed.PackFrom( request.footprint() );
         std::unique_ptr<FOOTPRINT> candidate( new FOOTPRINT( nullptr ) );
+        // FOOTPRINT::Deserialize historically skips unknown or malformed children.  A checked
+        // writer cannot acknowledge a definition after silently dropping one of its items.
+        for( const auto& item : definition.items() )
+        {
+            const auto type = kiapi::common::TypeNameFromAny( item );
+            if( !type )
+                return refuse( "invalid_footprint_definition", "The complete definition contains an unsupported child type." );
+            std::unique_ptr<BOARD_ITEM> child = CreateItemForType( *type, candidate.get() );
+            if( !child || !child->Deserialize( item ) )
+                return refuse( "invalid_footprint_definition", "The complete definition contains a malformed child payload." );
+        }
         if( !candidate->Deserialize( packed ) )
             return refuse( "invalid_footprint_definition", "The native decoder rejected the complete footprint definition." );
         candidate->SetParent( nullptr );
@@ -1071,10 +1133,11 @@ API_HANDLER_FOOTPRINT::handleCheckedWriteLibraryFootprint(
 
         if( write.committed )
         {
-            auto afterCaptured = adapter->CaptureLibrarySnapshot( nickname, name, request.document(), project() );
-            if( !afterCaptured )
-                return refuse( "footprint_persistence_unverified", afterCaptured.error().message );
-            auto afterState = footprintLibraryCheckpoint( *afterCaptured, true );
+            LIBRARY_LIFECYCLE_SNAPSHOT after = before;
+            after.dependencyBaselines = write.afterBaselines;
+            after.detachedDefinition = write.afterDefinition;
+            after.entryExists = true;
+            auto afterState = footprintLibraryCheckpoint( after, true );
             response.mutable_observed_after()->CopyFrom( afterState );
             response.set_after_snapshot_sha256( afterState.state_sha256() );
             response.set_status( "committed_postverified" );
@@ -1085,7 +1148,11 @@ API_HANDLER_FOOTPRINT::handleCheckedWriteLibraryFootprint(
         }
         else if( write.rollbackVerified )
         {
-            response.mutable_observed_rollback()->CopyFrom( beforeState );
+            LIBRARY_LIFECYCLE_SNAPSHOT restored = before;
+            restored.dependencyBaselines = write.rollbackBaselines;
+            restored.detachedDefinition = write.rollbackDefinition;
+            restored.entryExists = before.entryExists;
+            response.mutable_observed_rollback()->CopyFrom( footprintLibraryCheckpoint( restored ) );
             response.set_status( "rolled_back_verified" );
             response.set_receipt_status( NCP_FLCS_ROLLED_BACK_VERIFIED );
         }

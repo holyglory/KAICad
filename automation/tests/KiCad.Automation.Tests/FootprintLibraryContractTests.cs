@@ -151,26 +151,15 @@ public sealed class FootprintLibraryContractTests
     public void CheckedFootprintContractRejectsForgedCommitAndAcceptsUnavailableReceipt()
     {
         var document = Document("Probe");
-        var state = new NativeCapabilityFootprintLibraryCheckedState
-        {
-            Document = document.Clone(), ProcessEpoch = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-            Scope = "mcp_direct_footprint_file", StateComplete = true, DiskBaselineChecked = true,
-            Revision = new() { Epoch = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", Sequence = 1 },
-            StateSha256 = new string('a', 64)
-        };
-        var request = new NativeCapabilityFootprintLibraryCheckedWrite
-        {
-            Document = document.Clone(), ProcessEpoch = state.ProcessEpoch,
-            OperationId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", ExpectedSnapshotSha256 = state.StateSha256,
-            ExpectedState = state.Clone(), Footprint = new() { Definition = new() { Id = document.LibId.Clone() } }
-        };
+        var state = CheckedState(document, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", 1);
+        var request = CheckedRequest(document, state);
         var unavailable = new NativeCapabilityFootprintLibraryCheckedWriteResponse
         {
             Document = document.Clone(), ProcessEpoch = state.ProcessEpoch, OperationId = request.OperationId,
             Status = "unavailable", ErrorCode = "library_mutation_unavailable", ErrorMessage = "provider unavailable",
             ReceiptStatus = NativeCapabilityFootprintLibraryCheckedReceiptStatus.NcpFlcsUnavailable,
             Scope = "mcp_direct_footprint_file", ExpectedRequestVerified = true, Request = request.Clone(),
-            RequestFingerprintSha256 = new string('c', 64)
+            RequestFingerprintSha256 = FootprintLibraryCheckedContract.ComputeFingerprint(request)
         };
         FootprintLibraryCheckedContract.ValidateResponse(unavailable, request);
 
@@ -184,25 +173,63 @@ public sealed class FootprintLibraryContractTests
     public void CheckedFootprintContractRejectsOperationOrDocumentMismatch()
     {
         var document = Document("Probe");
-        var request = new NativeCapabilityFootprintLibraryCheckedWrite
-        {
-            Document = document.Clone(), ProcessEpoch = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-            OperationId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", ExpectedSnapshotSha256 = new string('a', 64),
-            ExpectedState = new() { Document = document.Clone(), ProcessEpoch = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-                Scope = "mcp_direct_footprint_file", StateComplete = true, DiskBaselineChecked = true,
-                StateSha256 = new string('a', 64), Revision = new() { Epoch = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" } }
-        };
+        var request = CheckedRequest(document,
+            CheckedState(document, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", 1));
         var response = new NativeCapabilityFootprintLibraryCheckedWriteResponse
         {
             Document = document.Clone(), ProcessEpoch = request.ProcessEpoch, OperationId = request.OperationId,
             Status = "unavailable", ErrorCode = "library_mutation_unavailable", ErrorMessage = "provider unavailable",
             ReceiptStatus = NativeCapabilityFootprintLibraryCheckedReceiptStatus.NcpFlcsUnavailable,
             Scope = "mcp_direct_footprint_file", ExpectedRequestVerified = true, Request = request.Clone(),
-            RequestFingerprintSha256 = new string('c', 64)
+            RequestFingerprintSha256 = FootprintLibraryCheckedContract.ComputeFingerprint(request)
         };
         var wrong = response.Clone();
         wrong.OperationId = "cccccccc-cccc-cccc-cccc-cccccccccccc";
         Assert.ThrowsExactly<AutomationException>(() => FootprintLibraryCheckedContract.ValidateResponse(wrong, request));
+    }
+
+    [TestMethod]
+    public void CheckedFootprintContractAcceptsExactCommittedReceiptAndRejectsForgedEvidence()
+    {
+        var document = Document("Probe");
+        var expected = CheckedState(document, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", 3);
+        var request = CheckedRequest(document, expected);
+        var after = expected.Clone();
+        after.Revision.Sequence++;
+        after.DetachedDefinitionSha256 = new string('c', 64);
+        after.StateSha256 = FootprintLibraryCheckedContract.ComputeStateDigest(after);
+        var response = new NativeCapabilityFootprintLibraryCheckedWriteResponse
+        {
+            Document = document.Clone(), ProcessEpoch = request.ProcessEpoch, OperationId = request.OperationId,
+            Status = "committed_postverified", Committed = true, RevisionTracked = true,
+            NativeWriteStarted = true, Postverified = true, TargetVerified = true,
+            UnrelatedEntriesVerified = true, Scope = "mcp_direct_footprint_file",
+            ExpectedRequestVerified = true, Request = request.Clone(),
+            RequestFingerprintSha256 = FootprintLibraryCheckedContract.ComputeFingerprint(request),
+            ReceiptStatus = NativeCapabilityFootprintLibraryCheckedReceiptStatus.NcpFlcsCommittedPostverified,
+            BeforeSnapshotSha256 = expected.StateSha256, AfterSnapshotSha256 = after.StateSha256,
+            BeforeDefinitionSha256 = expected.DetachedDefinitionSha256,
+            AfterDefinitionSha256 = after.DetachedDefinitionSha256,
+            ObservedBefore = expected, ObservedAfter = after
+        };
+
+        FootprintLibraryCheckedContract.ValidateResponse(response, request);
+
+        var unknownStatus = response.Clone();
+        unknownStatus.ReceiptStatus = NativeCapabilityFootprintLibraryCheckedReceiptStatus.NcpFlcsUnknown;
+        Assert.ThrowsExactly<AutomationException>(() => FootprintLibraryCheckedContract.ValidateResponse(unknownStatus, request));
+
+        var wrongFingerprint = response.Clone();
+        wrongFingerprint.RequestFingerprintSha256 = new string('d', 64);
+        Assert.ThrowsExactly<AutomationException>(() => FootprintLibraryCheckedContract.ValidateResponse(wrongFingerprint, request));
+
+        var wrongAfterDigest = response.Clone();
+        wrongAfterDigest.AfterSnapshotSha256 = new string('e', 64);
+        Assert.ThrowsExactly<AutomationException>(() => FootprintLibraryCheckedContract.ValidateResponse(wrongAfterDigest, request));
+
+        var forgedRollback = response.Clone();
+        forgedRollback.RollbackAttempted = true;
+        Assert.ThrowsExactly<AutomationException>(() => FootprintLibraryCheckedContract.ValidateResponse(forgedRollback, request));
     }
 
     [TestMethod]
@@ -330,6 +357,34 @@ public sealed class FootprintLibraryContractTests
         Type = DocumentType.DoctypeFootprint,
         LibId = new() { LibraryNickname = "Fixture", EntryName = entryName }
     };
+
+    private static NativeCapabilityFootprintLibraryCheckedState CheckedState(
+        DocumentSpecifier document, string processEpoch, ulong sequence)
+    {
+        var state = new NativeCapabilityFootprintLibraryCheckedState
+        {
+            Document = document.Clone(), ProcessEpoch = processEpoch,
+            Scope = "mcp_direct_footprint_file", StateComplete = true, DiskBaselineChecked = true,
+            Revision = new() { Epoch = processEpoch, Sequence = sequence }
+        };
+        state.DetachedDefinitionSha256 = new string('b', 64);
+        state.DependencyBaselines.Add(new()
+        {
+            Path = "/tmp/Fixture.kicad_mod", Known = true, Exists = true,
+            Sha256 = new string('f', 64), Bytes = 42
+        });
+        state.StateSha256 = FootprintLibraryCheckedContract.ComputeStateDigest(state);
+        return state;
+    }
+
+    private static NativeCapabilityFootprintLibraryCheckedWrite CheckedRequest(
+        DocumentSpecifier document, NativeCapabilityFootprintLibraryCheckedState state) => new()
+        {
+            Document = document.Clone(), ProcessEpoch = state.ProcessEpoch,
+            OperationId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            ExpectedSnapshotSha256 = state.StateSha256, ExpectedState = state.Clone(),
+            Footprint = new() { Definition = new() { Id = document.LibId.Clone() } }
+        };
 
     private static NativeCapabilityFootprintReadDefinitionResponse CompleteDefinition(
         DocumentSpecifier document, string processEpoch)

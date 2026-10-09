@@ -1,5 +1,7 @@
+using System.Security.Cryptography;
 using Google.Protobuf;
-using Kiapi.Common.Types;
+using Google.Protobuf.WellKnownTypes;
+using Kiapi.Board.Types;
 using KiCad.Automation.Model;
 using KiCad.Automation.Protocol;
 
@@ -10,6 +12,48 @@ internal static class FootprintLibraryCheckedContract
 {
     private static readonly string[] TerminalStatuses =
         ["committed_postverified", "rejected", "unavailable", "rolled_back_verified", "indeterminate"];
+
+    internal static IReadOnlyList<string> ValidateCandidate(FootprintInstance footprint,
+        CancellationToken token)
+    {
+        var definition = footprint.Definition;
+        if (definition is null)
+            return ["missing_library_definition:definition"];
+
+        // Library footprints legitimately contain unnumbered mounting holes, repeated electrical
+        // numbers and typed fields/points/zones.  The board-assignment checker intentionally has
+        // a different boundary, so use the detached definition's own typed coverage here.
+        var coverage = FootprintLibraryContract.InspectDefinitionCoverage(new() { Footprint = footprint });
+        var issues = new List<string>();
+        if (!coverage.NestedItemsDecoded || !coverage.PadsDecoded || !coverage.PropertiesPresent)
+            issues.Add("incomplete_library_definition:definition");
+        if (footprint.Id is null || !Guid.TryParseExact(footprint.Id.Value, "D", out _))
+            issues.Add("missing_instance_id:id");
+
+        foreach (Any item in definition.Items)
+        {
+            token.ThrowIfCancellationRequested();
+            if (!item.Is(Pad.Descriptor))
+                continue;
+            try
+            {
+                Pad pad = item.Unpack<Pad>();
+                if (pad.Number.Length > 128 || pad.Number.Contains('\0'))
+                    issues.Add("invalid_pad_number:definition.items");
+                if (pad.PadStack is null || pad.PadStack.Layers.Count == 0
+                    || pad.PadStack.CopperLayers.Count == 0
+                    || pad.PadStack.CopperLayers.Any(layer =>
+                    layer.Shape == PadStackShape.PssUnknown || layer.Size is null
+                    || layer.Size.XNm <= 0 || layer.Size.YNm <= 0))
+                    issues.Add("invalid_pad_shape:definition.items");
+            }
+            catch (InvalidProtocolBufferException)
+            {
+                issues.Add("malformed_child_payload:definition.items");
+            }
+        }
+        return issues;
+    }
 
     internal static void ValidateResponse(
         NativeCapabilityFootprintLibraryCheckedWriteResponse response,
@@ -31,24 +75,30 @@ internal static class FootprintLibraryCheckedContract
         bool committed = response.Status == "committed_postverified";
         if (response.Committed != committed)
             throw Invalid("The checked native footprint status and committed flag disagree.");
-        if (response.ReceiptStatus != NativeCapabilityFootprintLibraryCheckedReceiptStatus.NcpFlcsUnknown)
-        {
-            if (response.Scope != "mcp_direct_footprint_file" || !response.ExpectedRequestVerified
-                || response.CompleteChangeTracking || response.Request is null
-                || !response.Request.Equals(request) || response.RequestFingerprintSha256.Length != 64
-                || !response.RequestFingerprintSha256.All(char.IsAsciiHexDigitLower))
-                throw Invalid("The checked native footprint receipt must retain the exact request and direct-file scope.");
-        }
+        if (response.ReceiptStatus == NativeCapabilityFootprintLibraryCheckedReceiptStatus.NcpFlcsUnknown
+            || response.Scope != "mcp_direct_footprint_file" || !response.ExpectedRequestVerified
+            || response.CompleteChangeTracking || response.Request is null
+            || !response.Request.Equals(request) || response.RequestFingerprintSha256.Length != 64
+            || !response.RequestFingerprintSha256.All(char.IsAsciiHexDigitLower)
+            || response.RequestFingerprintSha256 != ComputeFingerprint(request))
+            throw Invalid("The checked native footprint receipt must retain the exact request and deterministic fingerprint.");
 
         if (committed)
         {
-            if (!response.RevisionTracked || response.CompleteLifecycle || !response.NativeWriteStarted
+            if (response.ReceiptStatus != NativeCapabilityFootprintLibraryCheckedReceiptStatus.NcpFlcsCommittedPostverified
+                || !response.RevisionTracked || response.CompleteLifecycle || !response.NativeWriteStarted
                 || !response.Postverified || !response.TargetVerified || !response.UnrelatedEntriesVerified
                 || response.RollbackAttempted || response.ObservedBefore is null || response.ObservedAfter is null
-                || response.ObservedBefore.StateSha256 != request.ExpectedState.StateSha256
+                || !ValidateState(response.ObservedBefore, request.ExpectedState)
+                || !response.ObservedBefore.Equals(request.ExpectedState)
+                || !ValidateState(response.ObservedAfter, request.ExpectedState)
                 || response.AfterSnapshotSha256 != response.ObservedAfter.StateSha256
                 || response.ObservedAfter.Revision is null
-                || response.ObservedAfter.Revision.Sequence <= response.ObservedBefore.Revision.Sequence)
+                || response.ObservedAfter.Revision.Sequence <= response.ObservedBefore.Revision.Sequence
+                || !ValidDigest(response.BeforeDefinitionSha256)
+                || !ValidDigest(response.AfterDefinitionSha256)
+                || response.BeforeDefinitionSha256 != response.ObservedBefore.DetachedDefinitionSha256
+                || response.AfterDefinitionSha256 != response.ObservedAfter.DetachedDefinitionSha256)
                 throw Invalid("A committed checked footprint receipt requires complete target, sibling and advancing revision evidence.");
             RequireDigest(response.BeforeSnapshotSha256, "before snapshot");
             RequireDigest(response.AfterSnapshotSha256, "after snapshot");
@@ -62,8 +112,17 @@ internal static class FootprintLibraryCheckedContract
         if (response.Status == "rolled_back_verified"
             && (response.ReceiptStatus != NativeCapabilityFootprintLibraryCheckedReceiptStatus.NcpFlcsRolledBackVerified
                 || !response.NativeWriteStarted || !response.RollbackAttempted || !response.RollbackCompleted
-                || response.ObservedRollback is null))
+                || response.ObservedRollback is null
+                || !ValidateState(response.ObservedRollback, request.ExpectedState)
+                || !response.ObservedRollback.Equals(request.ExpectedState)))
             throw Invalid("A rolled-back checked footprint receipt requires native rollback evidence.");
+
+        if (response.Status != "rolled_back_verified" && response.RollbackCompleted)
+            throw Invalid("Rollback completion is only valid for a rolled-back checked footprint response.");
+        if (!string.IsNullOrEmpty(response.BeforeSnapshotSha256))
+            RequireDigest(response.BeforeSnapshotSha256, "before snapshot");
+        if (!string.IsNullOrEmpty(response.AfterSnapshotSha256))
+            RequireDigest(response.AfterSnapshotSha256, "after snapshot");
     }
 
     private static void RequireDigest(string value, string name)
@@ -71,6 +130,62 @@ internal static class FootprintLibraryCheckedContract
         if (value.Length != 64 || !value.All(char.IsAsciiHexDigitLower))
             throw Invalid($"The checked native footprint response has an invalid {name} digest.");
     }
+
+    internal static string ComputeFingerprint(NativeCapabilityFootprintLibraryCheckedWrite request)
+    {
+        using var stream = new MemoryStream();
+        var coded = new CodedOutputStream(stream, leaveOpen: true) { Deterministic = true };
+        request.WriteTo(coded);
+        coded.Flush();
+        return Convert.ToHexStringLower(SHA256.HashData(stream.ToArray()));
+    }
+
+    internal static string ComputeStateDigest(NativeCapabilityFootprintLibraryCheckedState state)
+    {
+        var content = state.Clone();
+        content.StateSha256 = string.Empty;
+        using var stream = new MemoryStream();
+        var coded = new CodedOutputStream(stream, leaveOpen: true) { Deterministic = true };
+        content.WriteTo(coded);
+        coded.Flush();
+        return Convert.ToHexStringLower(SHA256.HashData(stream.ToArray()));
+    }
+
+    private static bool ValidateState(
+        NativeCapabilityFootprintLibraryCheckedState state,
+        NativeCapabilityFootprintLibraryCheckedState expected)
+    {
+        if (state is null || expected is null || !state.Document.Equals(expected.Document)
+            || state.ProcessEpoch != expected.ProcessEpoch || state.Scope != "mcp_direct_footprint_file"
+            || !state.StateComplete || !state.DiskBaselineChecked || state.CompleteChangeTracking
+            || state.Revision is null || state.Revision.Epoch != expected.ProcessEpoch
+            || !ValidDigest(state.StateSha256) || state.StateSha256 != ComputeStateDigest(state))
+            return false;
+
+        var paths = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var baseline in state.DependencyBaselines)
+        {
+            if (!baseline.Known || string.IsNullOrWhiteSpace(baseline.Path) || !paths.Add(baseline.Path)
+                || (baseline.Exists && (!ValidDigest(baseline.Sha256) || baseline.Bytes == 0))
+                || (!baseline.Exists && (baseline.Sha256.Length != 0 || baseline.Bytes != 0)))
+                return false;
+        }
+        if (paths.Count == 0)
+            return false;
+
+        var expectedPaths = expected.DependencyBaselines.Select(item => item.Path)
+            .ToHashSet(StringComparer.Ordinal);
+        return paths.SetEquals(expectedPaths)
+            && state.TablePath == expected.TablePath
+            && state.TableScope == expected.TableScope
+            && state.RawUri == expected.RawUri
+            && state.ExpandedUri == expected.ExpandedUri
+            && state.Provider == expected.Provider
+            && state.ProviderOptions == expected.ProviderOptions;
+    }
+
+    private static bool ValidDigest(string value) =>
+        value.Length == 64 && value.All(char.IsAsciiHexDigitLower);
 
     private static AutomationException Invalid(string message) =>
         new("invalid_footprint_library_response", message);

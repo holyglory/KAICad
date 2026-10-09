@@ -434,7 +434,8 @@ public:
     PCB_KICAD_SEXPR_CHECKED_WRITE_RESULT FootprintSaveChecked(
             const wxString& aTargetPath, const FOOTPRINT* aFootprint, bool aOverwrite,
             const std::vector<FILE_CONTENT_BASELINE>& aExpectedBaselines,
-            const std::string& aBeforeContents, const wxString& aFootprintName );
+            const std::string& aBeforeContents, const wxString& aFootprintName,
+            const std::string& aBeforeDefinition = {} );
 
     void FootprintDelete( const wxString& aLibraryPath, const wxString& aFootprintName,
                           const std::map<std::string, UTF8>* aProperties = nullptr ) override;

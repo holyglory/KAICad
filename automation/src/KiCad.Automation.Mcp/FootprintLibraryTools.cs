@@ -466,7 +466,7 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
                 || footprint.Definition.Id.LibraryNickname != document.LibId.LibraryNickname
                 || footprint.Definition.Id.EntryName != document.LibId.EntryName)
                 throw new AutomationException("footprint_library_definition_mismatch", "The footprint definition identity must match the requested document.");
-            IReadOnlyList<string> structuralIssues = PcbFootprintValidationTools.ValidateCompleteCandidate(
+            IReadOnlyList<string> structuralIssues = FootprintLibraryCheckedContract.ValidateCandidate(
                 footprint, cancellationToken);
             if (structuralIssues.Count != 0)
                 throw new AutomationException("invalid_footprint_definition",
@@ -528,6 +528,8 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
                 throw new AutomationException("invalid_library_request", "expectedRequestJson must retain the same document, process epoch and operation UUID.");
             NativeClient client = registry.Client(instanceId);
             AutomationSession session = await client.HandshakeAsync(cancellationToken);
+            if (session.Epoch != expectedProcessEpoch)
+                throw new AutomationException("stale_process_epoch", "The expected process epoch is stale; inspect the instance again.");
             NativeCapabilityFootprintLibraryCheckedReadOperationResponse response = await client.InvokeAsync<
                 NativeCapabilityFootprintLibraryCheckedReadOperation, NativeCapabilityFootprintLibraryCheckedReadOperationResponse>(new()
                 {

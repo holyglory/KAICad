@@ -24,6 +24,7 @@
 #include <wx/log.h>
 #include <wx/msgdlg.h>
 #include <wx/mstream.h>
+#include <set>
 
 #include <api/library_write_admission.h>
 #include <board.h>
@@ -4013,7 +4014,8 @@ void PCB_IO_KICAD_SEXPR::FootprintSave( const wxString& aLibraryPath, const FOOT
 PCB_KICAD_SEXPR_CHECKED_WRITE_RESULT PCB_IO_KICAD_SEXPR::FootprintSaveChecked(
         const wxString& aTargetPath, const FOOTPRINT* aFootprint, bool aOverwrite,
         const std::vector<FILE_CONTENT_BASELINE>& aExpectedBaselines,
-        const std::string& aBeforeContents, const wxString& aFootprintName )
+        const std::string& aBeforeContents, const wxString& aFootprintName,
+        const std::string& aBeforeDefinition )
 {
     PCB_KICAD_SEXPR_CHECKED_WRITE_RESULT result;
     auto same = []( const FILE_CONTENT_BASELINE& aLeft, const FILE_CONTENT_BASELINE& aRight )
@@ -4054,16 +4056,50 @@ PCB_KICAD_SEXPR_CHECKED_WRITE_RESULT PCB_IO_KICAD_SEXPR::FootprintSaveChecked(
         return result;
     }
 
-    if( aExpectedBaselines.empty() )
+    const wxFileName targetFile( aTargetPath );
+    if( !targetFile.IsAbsolute() || targetFile.GetExt() != FILEEXT::KiCadFootprintFileExtension
+            || !wxDir::Exists( targetFile.GetPath() ) || aExpectedBaselines.empty() )
     {
         result.errorCode = "partial_library_state";
-        result.errorMessage = "A checked footprint write requires complete dependency baselines.";
+        result.errorMessage = "A checked footprint write requires a direct target and complete dependency baselines.";
+        return result;
+    }
+    if( !aFootprint->Models().empty() )
+    {
+        result.errorCode = "unsupported_footprint_dependency";
+        result.errorMessage = "External footprint model dependencies are not covered by the direct-file checkpoint.";
+        return result;
+    }
+    if( m_writeAdmission )
+    {
+        result.errorCode = "library_write_conflict";
+        result.errorMessage = "Another footprint write owns this provider; finish it before starting a checked write.";
         return result;
     }
 
-    std::unique_ptr<LIBRARY_WRITE_ADMISSION> admission;
-    std::vector<FILE_CONTENT_BASELINE> attributableBaselines;
+    // A fixed set of admitted file paths also needs a directory-membership check.  Otherwise a
+    // newly-created sibling would be invisible to Observe() and a disappeared sibling could be
+    // mistaken for a complete provider snapshot.
+    auto sameEntrySet = [&]( const std::vector<FILE_CONTENT_BASELINE>& aBaselines )
+    {
+        std::set<wxString> expected;
+        for( const auto& baseline : aBaselines )
+        {
+            const wxFileName file( baseline.Path() );
+            if( file.GetExt() == FILEEXT::KiCadFootprintFileExtension
+                    && FILE_CONTENT_BASELINE::SamePath( file.GetPath(), targetFile.GetPath() )
+                    && baseline.Exists() )
+                expected.insert( file.GetFullPath() );
+        }
+        wxArrayString paths;
+        wxDir::GetAllFiles( targetFile.GetPath(), &paths, wxS( "*.kicad_mod" ), wxDIR_FILES );
+        std::set<wxString> actual;
+        for( const auto& path : paths )
+            actual.insert( wxFileName( path ).GetFullPath() );
+        return actual == expected;
+    };
 
+    std::vector<FILE_CONTENT_BASELINE> attributableBaselines;
     try
     {
         const wxString temporaryDirectory = wxFileName::GetTempDir() + wxFileName::GetPathSeparator()
@@ -4087,14 +4123,35 @@ PCB_KICAD_SEXPR_CHECKED_WRITE_RESULT PCB_IO_KICAD_SEXPR::FootprintSaveChecked(
         if( !expectedDefinition.Known() || !expectedDefinition.Exists() || expectedContents.empty() )
             THROW_IO_ERROR( "The native footprint writer did not produce complete candidate bytes" );
 
-        admission = LIBRARY_WRITE_ADMISSION::Acquire( aExpectedBaselines );
-        m_writeAdmission = std::move( admission );
+        m_writeAdmission = LIBRARY_WRITE_ADMISSION::Acquire( aExpectedBaselines );
         m_writeAdmissionPath = aTargetPath;
         m_writeAdmission->CheckUnchanged();
+        if( !sameEntrySet( m_writeAdmission->Before() ) )
+            THROW_IO_ERROR( "The footprint library entry set changed after observation" );
 
         const auto before = targetBaseline( m_writeAdmission->Before() );
         if( !before )
             THROW_IO_ERROR( "The checked footprint target is missing from its dependency baseline" );
+        if( before->Exists() )
+        {
+            std::string admittedContents;
+            const FILE_CONTENT_BASELINE admittedBaseline =
+                    FILE_CONTENT_BASELINE::Read( aTargetPath, &admittedContents );
+            if( !same( *before, admittedBaseline ) || admittedContents != aBeforeContents )
+                THROW_IO_ERROR( "The rollback bytes do not match the admitted footprint baseline" );
+            wxString importedName;
+            std::unique_ptr<FOOTPRINT> parsed( ImportFootprint( aTargetPath, importedName, nullptr ) );
+            if( !parsed || importedName != canonicalName )
+                THROW_IO_ERROR( "The admitted footprint could not be read back completely" );
+            parsed->SetFPID( aFootprint->GetFPID() );
+            canonicalWriter.FootprintSave( temporaryDirectory, parsed.get(), nullptr );
+            const auto canonicalBefore = FILE_CONTENT_BASELINE::Read( expectedPath, &result.beforeDefinition );
+            if( !canonicalBefore.Known() || !canonicalBefore.Exists()
+                    || ( !aBeforeDefinition.empty() && result.beforeDefinition != aBeforeDefinition ) )
+                THROW_IO_ERROR( "The complete admitted definition changed before the checked write" );
+        }
+        else if( !aBeforeContents.empty() || !aBeforeDefinition.empty() )
+            THROW_IO_ERROR( "An absent footprint cannot have rollback or definition bytes" );
 
         if( !aOverwrite && before->Exists() )
         {
@@ -4106,8 +4163,13 @@ PCB_KICAD_SEXPR_CHECKED_WRITE_RESULT PCB_IO_KICAD_SEXPR::FootprintSaveChecked(
             return result;
         }
 
-        result.beforeDefinition = aBeforeContents;
+        m_writeAdmission->CheckUnchanged();
+        if( !sameEntrySet( m_writeAdmission->Before() ) )
+            THROW_IO_ERROR( "The footprint library entry set changed before writing" );
+
         {
+            // The formatter supplies the digest of the bytes it actually committed.  Never
+            // attribute a later disk observation (which may be foreign) to this operation.
             FILE_WRITE_OBSERVER observer(
                     [&]( const wxString& aPath )
                     {
@@ -4118,45 +4180,49 @@ PCB_KICAD_SEXPR_CHECKED_WRITE_RESULT PCB_IO_KICAD_SEXPR::FootprintSaveChecked(
                     },
                     [&]( const FILE_CONTENT_BASELINE& aWritten )
                     {
-                        if( !FILE_CONTENT_BASELINE::SamePath( aWritten.Path(), aTargetPath ) )
-                            THROW_IO_ERROR( "The checked footprint writer reported a different target" );
-                        attributableBaselines = m_writeAdmission->Observe();
+                        if( !aWritten.Known() || !aWritten.Exists()
+                                || !FILE_CONTENT_BASELINE::SamePath( aWritten.Path(), aTargetPath ) )
+                            THROW_IO_ERROR( "The checked footprint writer reported an unobservable target" );
+                        if( aWritten.Bytes() != expectedDefinition.Bytes()
+                                || aWritten.Sha256() != expectedDefinition.Sha256() )
+                        {
+                            attributableBaselines.clear();
+                            THROW_IO_ERROR( "The native footprint output does not match the complete requested definition" );
+                        }
+                        attributableBaselines = m_writeAdmission->Before();
+                        for( auto& baseline : attributableBaselines )
+                        {
+                            if( FILE_CONTENT_BASELINE::SamePath( baseline.Path(), aTargetPath ) )
+                                baseline = aWritten;
+                        }
                     } );
             FootprintSave( aTargetPath, aFootprint, nullptr );
         }
-        result.afterBaselines = m_writeAdmission->Observe();
-        const auto after = targetBaseline( result.afterBaselines );
-        result.targetVerified = after.has_value() && after->Exists()
-                && after->Sha256() == expectedDefinition.Sha256()
-                && after->Bytes() == expectedDefinition.Bytes();
 
+        if( attributableBaselines.empty() )
+            THROW_IO_ERROR( "The checked footprint writer did not report its committed bytes" );
+        result.afterBaselines = m_writeAdmission->Observe();
+        if( !allSame( attributableBaselines, result.afterBaselines )
+                || !sameEntrySet( result.afterBaselines ) )
+            THROW_IO_ERROR( "The target or an unrelated footprint dependency changed during the checked write" );
+
+        std::string bytes;
+        const FILE_CONTENT_BASELINE readback = FILE_CONTENT_BASELINE::Read( aTargetPath, &bytes );
+        wxString importedName;
+        std::unique_ptr<FOOTPRINT> parsed( ImportFootprint( aTargetPath, importedName, nullptr ) );
+        result.targetVerified = parsed && importedName == canonicalName
+                && same( *targetBaseline( attributableBaselines ), readback ) && bytes == expectedContents;
         if( result.targetVerified )
         {
-            std::string bytes;
-            FILE_CONTENT_BASELINE::Read( aTargetPath, &bytes );
-            result.afterDefinition = std::move( bytes );
-            wxString importedName;
-            std::unique_ptr<FOOTPRINT> parsed( ImportFootprint( aTargetPath, importedName, nullptr ) );
-            result.targetVerified = parsed && importedName == canonicalName
+            parsed->SetFPID( aFootprint->GetFPID() );
+            canonicalWriter.FootprintSave( temporaryDirectory, parsed.get(), nullptr );
+            const auto canonicalAfter = FILE_CONTENT_BASELINE::Read( expectedPath, &result.afterDefinition );
+            result.targetVerified = canonicalAfter.Known() && canonicalAfter.Exists()
                     && result.afterDefinition == expectedContents;
         }
-
-        result.unrelatedEntriesVerified = true;
-        for( size_t index = 0; index < m_writeAdmission->Before().size(); ++index )
-        {
-            const FILE_CONTENT_BASELINE& expected = m_writeAdmission->Before()[index];
-            if( FILE_CONTENT_BASELINE::SamePath( expected.Path(), aTargetPath ) )
-                continue;
-
-            if( !same( expected, result.afterBaselines[index] ) )
-            {
-                result.unrelatedEntriesVerified = false;
-                break;
-            }
-        }
-
-        result.postverified = result.targetVerified && result.unrelatedEntriesVerified
-                && allSame( result.afterBaselines, m_writeAdmission->Observe() );
+        result.unrelatedEntriesVerified = allSame( attributableBaselines, m_writeAdmission->Observe() )
+                && sameEntrySet( attributableBaselines );
+        result.postverified = result.targetVerified && result.unrelatedEntriesVerified;
         if( !result.postverified )
             THROW_IO_ERROR( "Checked footprint write did not verify the target and unrelated entries" );
 
@@ -4170,36 +4236,67 @@ PCB_KICAD_SEXPR_CHECKED_WRITE_RESULT PCB_IO_KICAD_SEXPR::FootprintSaveChecked(
     {
         result.errorCode = "footprint_library_write_failed";
         result.errorMessage = error.what();
+        result.postverified = false;
         if( result.writeStarted && m_writeAdmission )
         {
             result.rollbackAttempted = true;
             try
             {
                 const std::vector<FILE_CONTENT_BASELINE> current = m_writeAdmission->Observe();
-                if( allSame( m_writeAdmission->Before(), current ) )
-                {
+                if( sameEntrySet( current ) && allSame( m_writeAdmission->Before(), current ) )
                     result.rollbackBaselines = current;
-                    result.rollbackVerified = true;
-                    result.rollbackDefinition = aBeforeContents;
-                }
-                else if( !attributableBaselines.empty() && allSame( attributableBaselines, current ) )
+                else if( !attributableBaselines.empty() && sameEntrySet( attributableBaselines )
+                         && allSame( attributableBaselines, current ) )
                 {
                     const auto before = targetBaseline( m_writeAdmission->Before() );
                     if( before && before->Exists() )
                     {
                         FILE_WRITE_OBSERVER suppressRecoveryObserver(
                                 []( const wxString& ) {}, []( const FILE_CONTENT_BASELINE& ) {} );
-                        FILE_OUTPUTFORMATTER output( aTargetPath, wxS( "wb" ) );
-                        output.Print( "%s", aBeforeContents.c_str() );
-                        output.Finish();
+                        wxFileName recoveryTarget( aTargetPath );
+                        WX_FILENAME::ResolvePossibleSymlinks( recoveryTarget );
+                        const wxString stagingPath = recoveryTarget.GetFullPath()
+                                + wxS( ".checked-rollback-" ) + wxString::FromUTF8( KIID().AsStdString() );
+                        struct RECOVERY_FILE
+                        {
+                            wxString path;
+                            ~RECOVERY_FILE() { if( wxFileExists( path ) ) wxRemoveFile( path ); }
+                        } recovery{ stagingPath };
+                        {
+                            FILE_OUTPUTFORMATTER output( stagingPath, wxS( "wb" ) );
+                            output.Print( "%s", aBeforeContents.c_str() );
+                            output.Finish();
+                        }
+                        std::string stagedBytes;
+                        const auto stagedBaseline = FILE_CONTENT_BASELINE::Read( stagingPath, &stagedBytes );
+                        if( !stagedBaseline.Known() || !stagedBaseline.Exists()
+                                || stagedBytes != aBeforeContents
+                                || !allSame( attributableBaselines, m_writeAdmission->Observe() )
+                                || !sameEntrySet( attributableBaselines )
+                                || !wxRenameFile( stagingPath, recoveryTarget.GetFullPath(), true ) )
+                            THROW_IO_ERROR( "Could not atomically restore the admitted footprint bytes" );
                     }
-                    else if( wxFileExists( aTargetPath ) && !wxRemoveFile( aTargetPath ) )
-                        THROW_IO_ERROR( "Could not remove the newly-created footprint" );
-
+                    else
+                    {
+                        if( !allSame( attributableBaselines, m_writeAdmission->Observe() )
+                                || !sameEntrySet( attributableBaselines )
+                                || !wxRemoveFile( aTargetPath ) )
+                            THROW_IO_ERROR( "Could not remove the attributable newly-created footprint" );
+                    }
                     result.rollbackBaselines = m_writeAdmission->Observe();
-                    result.rollbackVerified = allSame( m_writeAdmission->Before(), result.rollbackBaselines );
-                    if( result.rollbackVerified && before && before->Exists() )
-                        result.rollbackDefinition = aBeforeContents;
+                }
+
+                result.rollbackVerified = !result.rollbackBaselines.empty()
+                        && allSame( m_writeAdmission->Before(), result.rollbackBaselines )
+                        && sameEntrySet( result.rollbackBaselines );
+                if( result.rollbackVerified )
+                {
+                    std::string restored;
+                    const auto restoredBaseline = FILE_CONTENT_BASELINE::Read( aTargetPath, &restored );
+                    result.rollbackVerified = same( *targetBaseline( m_writeAdmission->Before() ), restoredBaseline )
+                            && restored == aBeforeContents;
+                    if( result.rollbackVerified )
+                        result.rollbackDefinition = result.beforeDefinition;
                 }
             }
             catch( const std::exception& rollbackError )
@@ -4209,6 +4306,9 @@ PCB_KICAD_SEXPR_CHECKED_WRITE_RESULT PCB_IO_KICAD_SEXPR::FootprintSaveChecked(
             }
         }
 
+        // These flags describe a committed result, not a successful substep of a failed write.
+        result.targetVerified = false;
+        result.unrelatedEntriesVerified = false;
         delete m_cache;
         m_cache = nullptr;
         releaseFootprintWriteAdmission();

@@ -33,7 +33,7 @@ public sealed class PcbRoutingContractTests
             Start = new() { XNm = 1_000, YNm = 2_000 }, Layer = BoardLayer.BlFCu,
             ForceFinish = true, DifferentialPair = true, MaximumCompleteDeltaVersion = 2
         };
-        request.Waypoints.Add(new() { XNm = 10_000, YNm = 2_000 });
+        request.Waypoints.Add(new Vector2 { XNm = 10_000, YNm = 2_000 });
 
         var parsed = SchematicJson.Parser.Parse<StartPcbRoutePreview>(SchematicJson.Formatter.Format(request));
         Assert.AreEqual(request, parsed);

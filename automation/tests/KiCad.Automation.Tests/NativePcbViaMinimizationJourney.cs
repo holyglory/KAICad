@@ -255,8 +255,15 @@ public sealed partial class NativeSessionTests
             var persisted = await ReadRoutes(persistedState);
             Assert.IsTrue(persisted.Items.Items.Any(item => RouteIdentity(item) == merged.Id.Value),
                 "The checked replacement must persist across save and reopen.");
-            foreach (var (id, expectedItem) in trackSnapshot)
-                Assert.AreEqual(expectedItem, persisted.Items.Items.Single(item => RouteIdentity(item) == id),
+            // A reopened board receives a fresh runtime container UUID.  Keep
+            // route UUIDs and authored fields strict while rebinding only that
+            // native ownership metadata before comparing persisted tracks.
+            var expectedTracks = new GetItemsResponse();
+            expectedTracks.Items.AddRange(trackSnapshot.Values);
+            var reboundTracks = NativeBoardReloadComparison.RebindRuntimeContainer(expectedTracks, persisted.Items);
+            foreach (var (id, _) in trackSnapshot)
+                Assert.AreEqual(reboundTracks.Items.Single(item => RouteIdentity(item) == id),
+                    persisted.Items.Items.Single(item => RouteIdentity(item) == id),
                     "Save/reopen must preserve every original track exactly.");
 
             // The planner intentionally refuses incompatible profiles by leaving

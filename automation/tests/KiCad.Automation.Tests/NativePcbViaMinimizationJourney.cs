@@ -370,7 +370,7 @@ public sealed partial class NativeSessionTests
         (kicad_pcb (version 20260206) (generator "pcbnew")
           (general (thickness 1.6)) (paper "A4")
           (layers (0 "F.Cu" signal) (4 "In1.Cu" signal) (6 "In2.Cu" signal) (2 "B.Cu" signal) (25 "Edge.Cuts" user))
-          (setup (pad_to_mask_clearance 0) (defaults (edge_clearance 0.5) (courtyard_clearance 0.25) (thread 0.15) (via_diameter 1.0) (via_drill 0.3) (uvia_diameter 0.3) (uvia_drill 0.1) (user_trace_width 0.25) (user_via 1.0) (user_via_dia 1.0) (user_via_drill 0.3)))
+          (setup (pad_to_mask_clearance 0))
           (net 0 "") (net 1 "VIA_MAIN")
           (gr_rect (start 0 0) (end 40 30) (stroke (width 0.05) (type default)) (fill none)
             (layer "Edge.Cuts") (uuid "10000000-0000-4000-8000-000000000020"))

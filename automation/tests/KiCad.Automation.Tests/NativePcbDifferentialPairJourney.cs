@@ -22,26 +22,55 @@ public sealed partial class NativeSessionTests
         // Keep the shove/split fixture intact. Its deliberately incomplete
         // POWER_RAIL copper is not an acceptance board for a clean pair apply.
         string originalPath = Path.GetFullPath(Path.Combine(currentBoard.Project.Path, currentBoard.BoardFilename));
+        string originalProjectPath = Path.Combine(currentBoard.Project.Path, currentBoard.Project.Name + ".kicad_pro");
+        bool originalBoardExists = File.Exists(originalPath);
+        bool originalProjectExists = File.Exists(originalProjectPath);
+        byte[]? originalBoardBytes = originalBoardExists
+            ? await File.ReadAllBytesAsync(originalPath, token) : null;
+        byte[]? originalProjectBytes = originalProjectExists
+            ? await File.ReadAllBytesAsync(originalProjectPath, token) : null;
         await SaveCheckedThroughMcp(client, currentBoard, evidence, token, verifyReconnect: false);
         // KiCad's root-board opener requires the board and matching project
-        // file to live directly under the attached project root; a nested
-        // directory is a different project boundary and is rejected.
-        string boardPath = Path.Combine(currentBoard.Project.Path, "pair-apply.kicad_pcb");
-        await File.WriteAllTextAsync(boardPath, DifferentialPairRouteFixture.BoardText(), token);
-        await File.WriteAllTextAsync(Path.ChangeExtension(boardPath, ".kicad_pro"),
-            DifferentialPairRouteFixture.ProjectText, token);
+        // file to live directly under the attached project root. Replace the
+        // current board in place so its project identity remains unchanged.
+        string boardPath = originalPath;
         string retained = Directory.CreateDirectory(Path.Combine(evidence, instanceId + "-differential-pair")).FullName;
         string stateDirectory = Directory.CreateTempSubdirectory("kicad-pcb-pair-apply-mcp-").FullName;
+        await using var mcp = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.ProductionStartInfo(),
+            stateDirectory, Path.Combine(retained, "mcp.stderr.log"), token);
+        RequireToolSuccess(await mcp.Tool("kicad_instance_attach",
+            new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
+        DocumentSpecifier? pairBoard = null;
+        async Task CloseBoard(DocumentSpecifier target)
+        {
+            RequireToolSuccess(await mcp.Tool("kicad_document_close", new
+            {
+                instanceId, expectedStateJson = SchematicJson.Formatter.Format(await ObserveLifecycleState(client, target, token)),
+                operationId = Guid.NewGuid().ToString("D")
+            }));
+        }
+        async Task RestoreOriginalFiles()
+        {
+            if (originalBoardExists)
+                await File.WriteAllBytesAsync(originalPath, originalBoardBytes!, CancellationToken.None);
+            else if (File.Exists(originalPath))
+                File.Delete(originalPath);
+            if (originalProjectExists)
+                await File.WriteAllBytesAsync(originalProjectPath, originalProjectBytes!, CancellationToken.None);
+            else if (File.Exists(originalProjectPath))
+                File.Delete(originalProjectPath);
+        }
         try
         {
-            await using var mcp = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.ProductionStartInfo(),
-                stateDirectory, Path.Combine(retained, "mcp.stderr.log"), token);
-            RequireToolSuccess(await mcp.Tool("kicad_instance_attach",
-                new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
             await CloseBoard(currentBoard);
+            string pairProjectText = DifferentialPairRouteFixture.ProjectText.Replace(
+                "pair-apply.kicad_pro", Path.GetFileName(originalProjectPath), StringComparison.Ordinal);
+            await File.WriteAllTextAsync(boardPath, DifferentialPairRouteFixture.BoardText(), token);
+            await File.WriteAllTextAsync(originalProjectPath, pairProjectText, token);
             var opened = await CreateRootThroughMcp(client.Endpoint, instanceId, boardPath, evidence, token,
                 toolName: "kicad_pcb_open");
             DocumentSpecifier board = opened.Document;
+            pairBoard = board;
             var before = await ObserveLifecycleState(client, board, token);
             var padReply = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
             { Header = new() { Document = board }, Types_ = { KiCadObjectType.KotPcbPad } }, token);
@@ -88,7 +117,7 @@ public sealed partial class NativeSessionTests
             await File.WriteAllTextAsync(Path.Combine(retained, "input.json"), JsonSerializer.Serialize(new
             {
                 fixture = "isolated-two-net-native-pns", processEpoch = client.Epoch,
-                boardPath, boardText = DifferentialPairRouteFixture.BoardText(), projectText = DifferentialPairRouteFixture.ProjectText,
+                boardPath, boardText = DifferentialPairRouteFixture.BoardText(), projectText = pairProjectText,
                 beforeState = SchematicJson.Formatter.Format(before),
                 requestJson = SchematicJson.Formatter.Format(previewRequest),
                 padsJson = BoardJson.Formatter.Format(padReply), netClassesJson = BoardJson.Formatter.Format(netClasses)
@@ -235,6 +264,7 @@ public sealed partial class NativeSessionTests
             await CloseBoard(board);
             board = (await CreateRootThroughMcp(client.Endpoint, instanceId, boardPath, evidence, token,
                 toolName: "kicad_pcb_open")).Document;
+            pairBoard = board;
             var persisted = await ReadRoutes();
             CollectionAssert.AreEqual(ids, persisted.Items.Select(RouteIdentity).Order(StringComparer.Ordinal).ToArray());
             foreach (var item in persisted.Items) AssertPersistedRouteState(snapshots[RouteIdentity(item)], item);
@@ -252,8 +282,7 @@ public sealed partial class NativeSessionTests
                 replayVerified = true, receiptLookupScope = "mcp-process", undoRedoVerified = true, saveReopenVerified = true
             }), token);
             await CloseBoard(board);
-            return (await CreateRootThroughMcp(client.Endpoint, instanceId, originalPath, evidence, token,
-                toolName: "kicad_pcb_open")).Document;
+            pairBoard = null;
 
             async Task<GetItemsResponse> ReadRoutes() => await client.InvokeAsync<GetItems, GetItemsResponse>(new()
             { Header = new() { Document = board }, Types_ = { KiCadObjectType.KotPcbTrace, KiCadObjectType.KotPcbArc, KiCadObjectType.KotPcbVia } }, token);
@@ -310,16 +339,21 @@ public sealed partial class NativeSessionTests
                 }
             }
 
-            async Task CloseBoard(DocumentSpecifier target)
-            {
-                RequireToolSuccess(await mcp.Tool("kicad_document_close", new
-                {
-                    instanceId, expectedStateJson = SchematicJson.Formatter.Format(await ObserveLifecycleState(client, target, token)),
-                    operationId = Guid.NewGuid().ToString("D")
-                }));
-            }
         }
-        finally { Directory.Delete(stateDirectory, true); }
+        finally
+        {
+            if (pairBoard is not null)
+            {
+                try { await CloseBoard(pairBoard); }
+                catch (Exception) { /* Preserve the original file bytes before reporting the journey failure. */ }
+                pairBoard = null;
+            }
+            await RestoreOriginalFiles();
+            Directory.Delete(stateDirectory, true);
+        }
+
+        return (await CreateRootThroughMcp(client.Endpoint, instanceId, originalPath, evidence, token,
+            toolName: "kicad_pcb_open")).Document;
 
         static void RequireToolSuccess(JsonElement reply) => Assert.IsFalse(
             reply.TryGetProperty("isError", out var error) && error.GetBoolean(), reply.GetRawText());

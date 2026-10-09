@@ -103,12 +103,20 @@ private:
     std::string selectedName() const;
     kiapi::automation::diagrams::v1::DiagramPresentationViewData* presentation();
     RECURSIVE_DIAGRAM::LEVEL_LAYOUT layout( const REVISION* aScope, bool aWithDraft ) const;
+    /// aScope laid out as aLevel holds it when aLevel is that level's draft, otherwise as saved (aLevel may be null).
+    RECURSIVE_DIAGRAM::LEVEL_LAYOUT layoutOf( const LEVEL* aLevel, const REVISION* aScope ) const;
     void materialize();
     void materializeFrame();
     void encloseInFrame( const RECURSIVE_DIAGRAM::RECT& aRect );
     /// Keeps each unlocked channel route level with its ends' current heights, and its offset from the middle
     /// when its ends moved since aBefore.
     void followRoutes( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aBefore );
+    /// The same for aLevel, a copy of the level draft.
+    void followRoutes( LEVEL& aLevel, const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aBefore ) const;
+    /// aLevel with a new connection aId from aFrom to aTo drawn in it, as commitNewConnection draws one (its channel routes
+    /// following their ends), so the Connect preview is the path the finished connection takes.
+    LEVEL withConnection( const LEVEL& aLevel, const std::string& aId, const kiapi::automation::diagrams::v1::DiagramEndpointBindingData& aFrom,
+                          const kiapi::automation::diagrams::v1::DiagramEndpointBindingData& aTo ) const;
 
     // Selection and navigation.
     void select( const std::string& aBlockId );
@@ -288,14 +296,31 @@ private:
     /// name or another caption, and those before a block). clear is false only in that last case.
     struct CAPTION_PLACE { std::string connection; wxString text, full; wxRect rect; bool shown = false, clear = true; };
     std::vector<CAPTION_PLACE> connectionCaptions( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout, const wxSize& aArea ) const;
+    /// The dashed leader drawn from aNote (the aIndex-th note of the level) to the block or connection it comments on, in canvas
+    /// pixels, as (a point on the note's border, a point on the element): mockup audit M1-14, approved walkthrough 03. Only a
+    /// comment with its own place on the canvas (a position) is drawn there. Its leader ends at the nearest point of its
+    /// connection's caption as aCaptions places it, of the connection's own path, or of its block's outline, that it reaches
+    /// through free space (6 pixels or more from every other wire, off its own connection but at its end, 3 pixels or more from
+    /// every block, port, port name, other note and other caption); where no such point exists, on the caption (the path's
+    /// nearest point, the block's) under the wires. Nothing for a free-space note, an unresolved comment, an element not drawn
+    /// on this level, or a note touching its element.
+    std::optional<std::pair<wxPoint, wxPoint>> noteLeader( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout,
+            const std::vector<CAPTION_PLACE>& aCaptions, const kiapi::automation::diagrams::v1::DiagramAnnotationData& aNote,
+            int aIndex ) const;
     /// The Connect tool's preview of the connection in progress, in canvas pixels, from its first end to the pointer or to the
-    /// port or block the pointer is on: the path the committed connection's router would draw, or, where that path would run
-    /// through a block or across a port's name, the way around (design QA round 2, R2-P2-2); empty when none is in progress.
-    /// The finished connection does not go around: it keeps rule F4's three-segment path until that contract changes.
+    /// port or block the pointer is on: the path the finished connection takes (rule F4 and the CN-2 erratum 2026-09-26: its
+    /// three-segment path, or its way around the blocks where that would run through a block or leave the level), laid out with
+    /// the level as Save lays it out (design QA round 2, R2-P2-2); empty when none is in progress.
     std::vector<wxPoint> connectPreview( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
-    /// What the canvas shows on hover at aPoint: the whole caption of a shortened connection caption, or the choices behind a
-    /// "+N more" chip; empty elsewhere.
+    /// The selected connection's end handles as drawn, in canvas pixels (owner default n7fb0ee3089916669); empty when no
+    /// connection is selected.
+    std::vector<wxRect> connectionHandles( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout ) const;
+    /// What the canvas shows on hover at aPoint: the whole caption of a shortened connection caption, the choices behind a
+    /// "+N more" chip, or the whole text of a note drawn shortened; empty elsewhere.
     wxString canvasTipAt( const RECURSIVE_DIAGRAM::LEVEL_LAYOUT& aLayout, const wxPoint& aPoint ) const;
+    /// The whole text of the canvas note drawn topmost at aPoint, in canvas pixels, when that note is too small to show all of
+    /// it (it ends in "…"); nothing when no note is there or the note shows its whole text.
+    std::optional<wxString> shortenedNoteAt( const wxPoint& aPoint ) const;
     /// Sets the canvas's tooltip to what lies under the pointer now (canvasTipAt), or none while the pointer is off the canvas,
     /// a drag is under way or no level is shown. Called on every pointer motion, when the pointer leaves, and after every
     /// repaint, so the tooltip follows a canvas that changes under a pointer that stays still (review of design QA round 2).
@@ -439,6 +464,8 @@ private:
     wxString m_facetProblem;
     std::vector<std::string> m_commentIds;
     std::string m_commentId;
+    /// Set when a note is pressed on the canvas: the next inspector refresh scrolls Comments into view (mockup audit M1-14).
+    bool m_revealComments = false;
     bool m_newComment = false;
     TOOL m_tool = TOOL::SELECT;
     enum class DRAG { NONE, NOTE, MOVE, RESIZE, PORT, CONNECT };
@@ -464,10 +491,12 @@ private:
     std::array<wxSizer*, 3> m_fieldHeadings;
     wxToolBar* m_toolbar;
     double m_scale = 1.0;
-    /// The view is the one fit() chose, not a restored per-level or history view.
+    /// The view is the one fit() chose (also when a level's fitted view is restored), not a history view or a view fit() did
+    /// not choose.
     bool m_fitted = false;
     wxPoint2DDouble m_origin{ 0, 0 };
-    struct VIEW { double scale; wxPoint2DDouble origin; std::string selected; };
+    /// A level's view as it was left: its scale, origin and selection, whether it was the fitted view, and the canvas size then.
+    struct VIEW { double scale; wxPoint2DDouble origin; std::string selected; bool fitted = false; wxSize canvas; };
     std::optional<VIEW> m_historyView;
     std::map<std::string, VIEW> m_views;
     std::unique_ptr<wxProcess> m_process;

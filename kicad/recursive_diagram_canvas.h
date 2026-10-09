@@ -65,6 +65,12 @@ struct CANVAS_COLOURS
 };
 CANVAS_COLOURS CanvasColours();
 
+/// How an unselected connection of aDomain is drawn (owner default n7fb0ee3089916669, the colours of the approved sketches):
+/// power red, data blue and analog (the sketches' sense connections) dashed grey, each 4.5:1 or more on the canvas, lightened
+/// in the dark theme as the accent is; Control, Mechanical and a connection without a domain in the neutral wire colour.
+struct WIRE_LOOK { wxColour colour; bool dashed = false; };
+WIRE_LOOK WireLook( D::DiagramDomain aDomain, const CANVAS_COLOURS& aColours );
+
 // ---- Tool glyphs (design QA P2-2, P2-3; owner default n46bd6c44b42d5a61: a hollow square port) --------------
 
 /// Keeps a text entry's text 8 DIP (aHorizontal) and 6 DIP (aVertical) inside its box (design QA P2-9). wxGTK does not set
@@ -177,8 +183,9 @@ BLOCK_CHIPS LayoutChips( wxDC& aDC, const NODE& aNode, const wxRect& aBox, const
 wxRect PortNameRect( wxDC& aDC, const wxString& aName, D::DiagramPortSide aSide, const wxPoint& aAt );
 /// The lines a canvas note shows in a text area of aWidth by aHeight pixels with aDC's font. Lines break between
 /// words (only a word wider than the note breaks inside it), the note's own line breaks are kept, and text that
-/// does not fit ends its last shown line with "…".
-std::vector<wxString> NoteLines( wxDC& aDC, const wxString& aText, int aWidth, int aHeight );
+/// does not fit ends its last shown line with "…". When aShortened is given, it tells whether any of the text is left
+/// out, so the note shows its whole text on hover.
+std::vector<wxString> NoteLines( wxDC& aDC, const wxString& aText, int aWidth, int aHeight, bool* aShortened = nullptr );
 /// What the "+N more" chip shows on hover: each choice behind it with its value and its state, one per line, for example
 /// "Family: TLV755P (candidate)" (design QA round 2, R2-P2-6).
 wxString MoreToolTip( const NODE& aNode, const BLOCK_CHIPS& aChips );
@@ -197,6 +204,8 @@ struct LINK
     std::vector<D::DiagramEndpointBindingData> endpoints;
     /// Its direction detail (Round A3); the canvas draws arrowheads for it.
     D::DiagramConnectionDirection direction = D::DCDR_UNSPECIFIED;
+    /// Its domain detail; the canvas draws the connection in the domain's colour (see WireLook).
+    D::DiagramDomain domain = D::DD_UNSPECIFIED;
 };
 
 /// One end of a computed leg (rule F4): where it attaches, which way the leg leaves it, (±1, 0) to the right or left
@@ -209,16 +218,28 @@ struct ROUTE_END
 };
 struct ROUTE_LEG { ROUTE_END from, to; };
 /// Lays out computed legs (rule F4 as revised for design QA P2-5) against aStored, the paths already drawn, and aBlocks,
-/// the level's child blocks. Returns each leg's points in order.
+/// the level's child blocks, inside aArea, the level (LEVEL_LAYOUT::Area). A leg whose three-segment path would run through a
+/// block or leave the level, where the names of the level's ports are drawn, goes around the blocks instead (AroundBlocks;
+/// CN-2 erratum 2026-09-26, decision n7fb0ee3089916669). Returns each leg's points in order.
 std::vector<std::vector<POINT>> RouteLegs( const std::vector<RECT>& aBlocks, const std::vector<std::vector<POINT>>& aStored,
-                                           const std::vector<ROUTE_LEG>& aLegs );
-/// An orthogonal path in canvas pixels from aStart to aGoal that passes through none of aObstacles and stays inside aArea,
-/// with as few turns as it can and then as short as it can: the Connect preview's way around a block that stands between
-/// the connection's ends (design QA round 2, R2-P2-2). aStartDirection is the way the path must leave aStart and
-/// aGoalDirection the way it must arrive at aGoal, each (±1, 0) or (0, ±1), or (0, 0) for any way. Returns the path's
-/// corners from aStart to aGoal, or nothing when no such path exists (an end inside an obstacle, or no way between).
-std::vector<wxPoint> OrthogonalDetour( const std::vector<wxRect>& aObstacles, const wxPoint& aStart, const wxPoint& aStartDirection,
-                                       const wxPoint& aGoal, const wxPoint& aGoalDirection, const wxRect& aArea );
+                                           const std::vector<ROUTE_LEG>& aLegs, const RECT& aArea );
+/// Whether aPath runs through the inside of one of aBlocks (running along an edge is not inside) or has a point outside
+/// aArea, the level: the names of a block's ports are drawn inside its edge and the names of the level's own ports outside
+/// the level, so such a path crosses a block or a port's name.
+bool CrossesLevel( const std::vector<RECT>& aBlocks, const RECT& aArea, const std::vector<POINT>& aPath );
+/// The way around the blocks for aLeg (CN-2 erratum 2026-09-26, "Finished connections around blocks"): from its first end
+/// 20 units out along the way that end leaves (rules F4c and F4d), then on horizontal and vertical runs that never pass
+/// through a block expanded by 10 units on each side (they may run along that outline) and stay inside aArea, to the point
+/// 20 units out from its other end, which it enters from the side that end faces; a free other end (dx = dy = 0, the Connect
+/// preview's pointer) is reached from any side. Of those ways it takes the one with the fewest turns (leaving the first lead
+/// in another direction, and arriving at the second in another direction than into its end, count as turns), then the
+/// shortest length that runs beside the other legs of aOthers (level runs less than 10 units apart in height, or upright
+/// runs less than 10 units apart, over the length they overlap; a run of another leg that touches an end aLeg shares is left
+/// out), then the shortest length, then the first a best-first search reaches when it takes points in order of height,
+/// then of x, then of the move that reached them (right, left, down, up). Returns every corner from the first end to the
+/// other, or nothing when there is no such way (a lead that ends within 10 units of a block, or outside aArea).
+std::vector<POINT> AroundBlocks( const std::vector<RECT>& aBlocks, const ROUTE_LEG& aLeg, const RECT& aArea,
+                                 const std::vector<std::vector<POINT>>& aOthers );
 /// How often the editor laid out computed paths since it started, and how long the slowest and the latest layout took.
 /// A level is laid out once per change of its geometry: an unchanged level reuses its last layout.
 struct ROUTE_STATS
@@ -282,6 +303,9 @@ public:
     std::optional<RECT> Frame() const { return m_frame; }
     /// Rule F3: the bounding box of the drawn children, notes and boundary anchors, expanded by 40.
     RECT FallbackFrame() const;
+    /// The level, where computed connections run (CN-2 erratum 2026-09-26): its stored frame, or else the fallback frame, whose
+    /// left side is the fallback column at x 40 while a boundary port has no placement (its name is drawn left of that column).
+    RECT Area() const;
     /// Everything drawn, for fitting the view.
     RECT Bounds() const;
     unsigned Dormant() const { return m_dormant; }

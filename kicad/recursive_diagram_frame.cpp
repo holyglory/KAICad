@@ -1180,6 +1180,21 @@ void RECURSIVE_DIAGRAM_FRAME::refresh()
     showStatus();
     fillComments(); m_owner->GetParent()->Layout(); m_owner->GetParent()->GetParent()->Layout();
     m_inspectorScroll->Layout(); m_inspectorScroll->FitInside();
+    if( m_revealComments )
+    {
+        // A note pressed on the canvas opens its comment in Comments (mockup audit M1-14): the inspector scrolls just far enough
+        // to show the Comments heading and box whole, keeping everything above them where it fits.
+        m_revealComments = false;
+        int unitX = 0, unitY = 0, startX = 0, startY = 0;
+        m_inspectorScroll->GetScrollPixelsPerUnit( &unitX, &unitY ); m_inspectorScroll->GetViewStart( &startX, &startY );
+        const wxRect box( m_inspectorScroll->CalcUnscrolledPosition( m_comments->GetPosition() ), m_comments->GetSize() );
+        const int shown = m_inspectorScroll->GetClientSize().y, top = startY * unitY, heading = FromDIP( 40 ), margin = FromDIP( 12 );
+        if( unitY > 0 && ( box.y - heading < top || box.GetBottom() + margin > top + shown ) )
+        {
+            const int wanted = std::max( 0, std::min( box.y - heading, box.GetBottom() + margin - shown ) );
+            m_inspectorScroll->Scroll( -1, ( wanted + unitY - 1 ) / unitY );
+        }
+    }
     m_updating = false; m_rendered = false; m_canvas->Refresh();
 }
 void RECURSIVE_DIAGRAM_FRAME::enableSave( bool save, bool decline )
@@ -1272,12 +1287,18 @@ void RECURSIVE_DIAGRAM_FRAME::navigate( std::string id, bool remember )
     m_pendingConnection = "";
     if( !confirmChange() ) return;
     if( remember ) m_back.push_back( current()->selection().block_id() );
-    m_views[current()->selection().block_id()] = { m_scale, m_origin, m_selected };
+    m_views[current()->selection().block_id()] = { m_scale, m_origin, m_selected, m_fitted, m_canvas->GetClientSize() };
     m_path = std::move( path ); m_selected.clear(); m_connectionId.clear(); m_portOwner.clear(); m_portId.clear();
     m_pendingScope.clear(); m_pendingSelected.clear(); m_pendingConnection.reset(); m_connectFrom.reset();
     resetLevel(); m_dirty = false;
     select( id );
-    if( auto saved = m_views.find( id ); saved != m_views.end() ) { m_scale = saved->second.scale; m_origin = saved->second.origin; m_fitted = false; select( saved->second.selected ); }
+    if( auto saved = m_views.find( id ); saved != m_views.end() )
+    {
+        m_scale = saved->second.scale; m_origin = saved->second.origin; m_fitted = saved->second.fitted; select( saved->second.selected );
+        // The canvas has no scrolling: a level whose fitted view was left in a canvas of another size (the window was resized
+        // since), or that would be partly out of view, is fitted again, as the size handler fits the level shown.
+        if( ( m_fitted && saved->second.canvas != m_canvas->GetClientSize() ) || !drawingFits() ) fit();
+    }
     else fit();
     ++m_viewRevision; refresh();
     CallAfter( [this] { if( !m_closing ) m_canvas->SetFocus(); } );
@@ -2779,17 +2800,29 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
                 auto* row = result.add_boundary_port_names(); place( row, "DiagramBoundaryPortName", name.rect, false ); row->set_label( name.name );
                 row->set_object_id( name.owner + "/" + name.id );
             }
-            // Each canvas note with the lines it shows, measured as the canvas paints them.
+            // Each canvas note with the lines it shows, measured as the canvas paints them, and a placed comment's element and
+            // leader (mockup audit M1-14).
             wxClientDC dc( m_canvas ); dc.SetFont( GetFont() );
             const auto& notes = visibleNotes();
+            const auto captions = connectionCaptions( drawn, m_canvas->GetClientSize() );
             for( int i = 0; i < notes.size(); ++i )
             {
                 const auto& note = notes.Get( i );
                 if( note.target_kind() != D::DAT_CANVAS && !note.has_position() ) continue;
                 wxRect box = noteRect( note, i );
                 auto* row = result.add_canvas_notes(); row->set_annotation_id( note.id() ); place( row->mutable_rect(), "DiagramCanvasNote", box, false );
-                box.Deflate( 8 );
-                for( const wxString& line : R::NoteLines( dc, R::Text( note.text() ), box.width, box.GetBottom() - box.y ) ) row->add_lines( R::Utf8( line ) );
+                if( note.target_kind() != D::DAT_CANVAS && note.has_target_id() ) row->set_target_id( note.target_id() );
+                if( auto leader = noteLeader( drawn, captions, note, i ) )
+                {
+                    auto* line = row->mutable_leader();
+                    line->set_from_x( origin.x + leader->first.x ); line->set_from_y( origin.y + leader->first.y );
+                    line->set_to_x( origin.x + leader->second.x ); line->set_to_y( origin.y + leader->second.y );
+                }
+                box.Deflate( 8 ); bool shortened = false;
+                for( const wxString& line : R::NoteLines( dc, R::Text( note.text() ), box.width, box.GetBottom() - box.y, &shortened ) )
+                    row->add_lines( R::Utf8( line ) );
+                // A note drawn shortened shows its whole text on hover (M1-13), as a shortened connection caption does.
+                if( shortened ) row->mutable_rect()->set_tooltip( note.text() );
             }
             // Design QA fixes, as drawn: every port's square and the Connect tool's highlight (P2-6), every connection caption
             // (P2-7), every block's caption and version line (P2-7) and the selected block's handles (P1-1).
@@ -2801,7 +2834,7 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
                 row->set_active( target && target->port && target->owner == port.owner && target->id == port.id );
             }
             if( target ) { place( result.mutable_connect_target(), "DiagramConnectTarget", target->rect, false ); result.mutable_connect_target()->set_label( R::Utf8( target->name ) ); }
-            for( const auto& caption : connectionCaptions( drawn, m_canvas->GetClientSize() ) )
+            for( const auto& caption : captions )
             {
                 auto* row = result.add_connection_captions(); place( row, "DiagramConnectionCaption", caption.rect, false );
                 row->set_shown( caption.shown && visible.Contains( caption.rect ) ); row->set_label( R::Utf8( caption.text ) );
@@ -2829,6 +2862,11 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
                 }
             }
             for( const auto& handle : selectionHandles( drawn ) ) place( result.add_selection_handles(), "DiagramSelectionHandle", handle, false );
+            for( const auto& handle : connectionHandles( drawn ) )
+            {
+                auto* row = result.add_connection_handles(); place( row, "DiagramConnectionHandle", handle, false );
+                row->set_object_id( m_connectionId );
+            }
             // The Connect tool's preview and hint as drawn (design QA round 2, R2-P2-2 and P3 1).
             const auto preview = connectPreview( drawn );
             for( const wxPoint& point : preview ) { auto* row = result.add_connect_preview(); row->set_x( origin.x + point.x ); row->set_y( origin.y + point.y ); }
@@ -2871,6 +2909,23 @@ D::RecursiveDiagramEditorState RECURSIVE_DIAGRAM_FRAME::State() const
         history->set_loading( m_historyDialog->IsLoading() ); history->set_error_message( Utf8( m_historyDialog->PageError() ) );
         for( const wxString& row : m_historyDialog->RowLabels() ) history->add_row_labels( Utf8( row ) );
         for( const wxString& row : m_historyDialog->ShownRowLabels() ) history->add_shown_row_labels( Utf8( row ) );
+        // Every row as the list draws it, relative to the history dialog's window (mockup audit M1-12).
+        const wxPoint dialog = m_historyDialog->GetScreenPosition();
+        history->set_dialog_width( static_cast<unsigned>( std::max( 0, m_historyDialog->GetClientSize().x ) ) );
+        history->set_dialog_height( static_cast<unsigned>( std::max( 0, m_historyDialog->GetClientSize().y ) ) );
+        auto rect = [&]( D::DiagramControlRect* out, const std::string& name, const wxRect& screen, bool shown )
+        {
+            out->set_name( name ); out->set_x( screen.x - dialog.x ); out->set_y( screen.y - dialog.y );
+            out->set_width( screen.width ); out->set_height( screen.height ); out->set_shown( shown );
+        };
+        for( const auto& row : m_historyDialog->ShownRows() )
+        {
+            auto* out = history->add_shown_rows(); out->set_version( Utf8( row.version ) ); out->set_fits( row.fits );
+            for( const wxString& line : row.lines ) out->add_lines( Utf8( line ) );
+            rect( out->mutable_rect(), "DiagramFieldHistoryRow", row.rect, row.shown );
+            rect( out->mutable_version_rect(), "DiagramFieldHistoryRowVersion", row.versionRect, row.shown );
+            for( const wxRect& line : row.lineRects ) rect( out->add_line_rects(), "DiagramFieldHistoryRowLine", line, row.shown );
+        }
     }
     if( m_preview ) *result.mutable_preview_selection() = *m_preview;
     // Rendered controls, so journeys drive the real toolbar strip, palette and inspector.

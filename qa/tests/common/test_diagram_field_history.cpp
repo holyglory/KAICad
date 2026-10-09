@@ -15,7 +15,6 @@
 #include <wx/dcscreen.h>
 #include <wx/evtloop.h>
 #include <wx/image.h>
-#include <wx/listbox.h>
 #include <wx/stopwatch.h>
 #include <wx/stattext.h>
 #include <wx/sizer.h>
@@ -180,67 +179,43 @@ int textInset( const SHOT& aShot, wxWindow* aWindow, wxTextCtrl* aBox )
     return -1;
 }
 
-/// Whether the list's rows end in "…" when they are wider than the list (mockup audit M1-3), read back from GTK: its text
-/// renderer ellipsizes at the end, in a fixed column no wider than the list.
-bool rowsEllipsize( wxListBox* aList )
+/// Mockup audit M1-12, measured in a capture of aDialog: every row of the history list as the dialog reports it drawn (its
+/// version and its lines, in the approved diagram history's two-line pattern) lies whole inside its row and inside the list's
+/// visible width, and each row shown has ink in its version's and each line's rectangle, so the text is drawn where it is
+/// reported. aRows receives each row's version, lines and fit.
+bool rowsFit( const SHOT& aShot, DIALOG_DIAGRAM_FIELD_HISTORY* aDialog, nlohmann::json& aRows )
 {
-    GtkWidget* view = gtk_bin_get_child( GTK_BIN( aList->GetHandle() ) );
-    if( !GTK_IS_TREE_VIEW( view ) ) return false;
-    GtkTreeViewColumn* column = gtk_tree_view_get_column( GTK_TREE_VIEW( view ), 0 );
-    if( !column ) return false;
-    bool ellipsized = false;
-    GList* cells = gtk_cell_layout_get_cells( GTK_CELL_LAYOUT( column ) );
-    for( GList* item = cells; item; item = item->next )
-        if( GTK_IS_CELL_RENDERER_TEXT( item->data ) )
-        {
-            PangoEllipsizeMode mode = PANGO_ELLIPSIZE_NONE; g_object_get( item->data, "ellipsize", &mode, nullptr );
-            ellipsized = mode == PANGO_ELLIPSIZE_END;
-        }
-    g_list_free( cells );
-    return ellipsized && gtk_tree_view_column_get_sizing( column ) == GTK_TREE_VIEW_COLUMN_FIXED
-        && gtk_tree_view_column_get_fixed_width( column ) <= aList->GetClientSize().x;
-}
-
-/// Whether GTK draws every row of the list whole, without its own "…" (mockup audit M1-3), read back from GTK: each row is
-/// displayed, and its text as the list shows it, laid out in the font the list's text renderer draws with, fits the row's
-/// cell (the part of it inside the list) less the renderer's padding and focus line on both sides.
-bool rowsFit( wxListBox* aList )
-{
-    GtkWidget* view = gtk_bin_get_child( GTK_BIN( aList->GetHandle() ) );
-    if( !GTK_IS_TREE_VIEW( view ) || aList->GetCount() == 0 ) return false;
-    GtkTreeViewColumn* column = gtk_tree_view_get_column( GTK_TREE_VIEW( view ), 0 );
-    if( !column ) return false;
-    GtkCellRenderer* renderer = nullptr;
-    GList* cells = gtk_cell_layout_get_cells( GTK_CELL_LAYOUT( column ) );
-    for( GList* item = cells; item; item = item->next )
-        if( GTK_IS_CELL_RENDERER_TEXT( item->data ) ) renderer = GTK_CELL_RENDERER( item->data );
-    g_list_free( cells );
-    if( !renderer ) return false;
-    gint xpad = 0, ypad = 0, focus = 0;
-    gtk_cell_renderer_get_padding( renderer, &xpad, &ypad );
-    gtk_widget_style_get( view, "focus-line-width", &focus, nullptr );
-    gboolean fontSet = FALSE; PangoFontDescription* font = nullptr;
-    g_object_get( renderer, "font-set", &fontSet, nullptr );
-    if( fontSet ) g_object_get( renderer, "font-desc", &font, nullptr );
-    const int visible = gtk_widget_get_allocated_width( view );
-    bool fits = true;
-    for( unsigned row = 0; row < aList->GetCount() && fits; ++row )
+    const wxPoint origin = aDialog->ClientToScreen( wxPoint( 0, 0 ) );
+    auto local = [&]( wxRect rect ) { rect.Offset( -origin.x, -origin.y ); return rect; };
+    bool fits = !aDialog->ShownRows().empty();
+    for( const auto& row : aDialog->ShownRows() )
     {
-        GtkTreePath* path = gtk_tree_path_new_from_indices( static_cast<gint>( row ), -1 );
-        GdkRectangle cell{}; gtk_tree_view_get_cell_area( GTK_TREE_VIEW( view ), path, column, &cell );
-        gtk_tree_path_free( path );
-        PangoLayout* layout = gtk_widget_create_pango_layout( view, aList->GetString( row ).utf8_string().c_str() );
-        if( font ) pango_layout_set_font_description( layout, font );
-        int width = 0, height = 0; pango_layout_get_pixel_size( layout, &width, &height );
-        g_object_unref( layout );
-        const int room = std::min( cell.x + cell.width, visible ) - cell.x - 2 * xpad - 2 * focus;
-        fits = cell.height > 0 && width <= room;
-        if( !fits )
-            BOOST_TEST_MESSAGE( "Row '" << aList->GetString( row ).utf8_string() << "' is " << width << " pixels wide; its cell leaves " << room );
+        nlohmann::json lines = nlohmann::json::array();
+        for( const wxString& line : row.lines ) lines.push_back( line.utf8_string() );
+        bool inked = true;
+        if( row.shown )
+        {
+            const wxRect box = local( row.rect );
+            const wxColour background = aShot.At( box.GetRight() - 3, box.y + 2 );
+            auto ink = [&]( const wxRect& area )
+            {
+                const wxRect where = local( area );
+                for( int y = where.y; y < where.y + where.height; ++y )
+                    for( int x = where.x; x < where.x + where.width; ++x )
+                        if( DIAGRAM_LOOK::Contrast( aShot.At( x, y ), background ) >= 2.0 ) return true;
+                return false;
+            };
+            inked = ink( row.versionRect );
+            for( const wxRect& line : row.lineRects ) inked = inked && ( line.width == 0 || ink( line ) );
+        }
+        const bool whole = row.fits && inked;
+        if( !whole ) BOOST_TEST_MESSAGE( "Row " << row.version.utf8_string() << " is not drawn whole (fits " << row.fits << ", ink " << inked << ")" );
+        aRows.push_back( { { "version", row.version.utf8_string() }, { "lines", lines }, { "fits", whole }, { "shown", row.shown } } );
+        fits = fits && whole;
     }
-    if( font ) pango_font_description_free( font );
     return fits;
 }
+
 
 /// The pixels of aBox drawn in aFill (within a colour distance of 12), and the contrast of the text drawn on them with the
 /// fill: the marks of the words that differ (mockup audit M1-6).
@@ -358,14 +333,27 @@ BOOST_AUTO_TEST_CASE( RenderedPagingPreservesInspectionFailureAndCancellation )
     BOOST_REQUIRE_EQUAL( first.entries_size(), 200 ); BOOST_REQUIRE_EQUAL( first.total(), 206 );
     // The editor's own row builder: every row of this single implementation's history shows its version alone.
     auto rows = [&]( const D::FieldHistoryPageData& page ) { return DiagramFieldHistoryRows( longGraph, page, false ); };
+    // The older page's rows read as saved in an earlier implementation with a long name, so after "Load older" the list, now
+    // with its scroll bar, holds two-line rows whose names must be shortened to the list's visible width (review of 6b528e157a).
+    auto earlier = [&]( const D::FieldHistoryPageData& page )
+    {
+        auto result = rows( page );
+        for( auto& row : result )
+        {
+            row.implementation = wxS( "Initial approach with a longer implementation name" );
+            row.revisionLabel = row.implementation + wxS( " · " ) + row.revisionLabel;
+        }
+        return result;
+    };
     auto makeDialog = [&]()
     {
         return new DIALOG_DIAGRAM_FIELD_HISTORY( nullptr, "General requirements", "System", "v206",
                 wxString::FromUTF8( first.saved_text() ), rows( first ) );
     };
-    auto* dialog = makeDialog(); size_t requested = 0; bool preserved = false, failurePreserved = false, rejected = false;
+    auto* dialog = makeDialog(); size_t requested = 0; bool preserved = false, failurePreserved = false, rejected = false, olderRowsFit = false;
+    nlohmann::json olderRows = nlohmann::json::array();
     dialog->ConfigurePaging( first.total(), [&]( size_t offset ) { requested = offset; } );
-    auto* list = control<wxListBox>( dialog, "DiagramFieldHistoryRevisions" );
+    auto* list = control<wxVListBox>( dialog, "DiagramFieldHistoryRevisions" );
     auto* more = control<wxButton>( dialog, "DiagramFieldHistoryOlder" );
     auto* restore = control<wxButton>( dialog, "DiagramFieldHistoryRestore" );
     auto* close = control<wxButton>( dialog, "DiagramFieldHistoryClose" );
@@ -374,7 +362,8 @@ BOOST_AUTO_TEST_CASE( RenderedPagingPreservesInspectionFailureAndCancellation )
     {
         list->SetFocus(); key( WXK_DOWN );
         waitFor( [&] { return list->GetSelection() == 1; } );
-        BOOST_CHECK( list->GetString( 0 ).StartsWith( "v206 · Saved · " ) );
+        BOOST_CHECK( dialog->RowLabels().front().StartsWith( "v206 · Saved · " ) );
+        BOOST_CHECK( dialog->ShownRows().front().version == "v206" && dialog->ShownRows().front().lines.front().StartsWith( "Saved · " ) );
         auto inspected = dialog->InspectedRevision();
         click( more ); BOOST_CHECK_EQUAL( requested, 200 );
         BOOST_CHECK( dialog->IsLoading() ); BOOST_CHECK( !more->IsEnabled() );
@@ -394,7 +383,7 @@ BOOST_AUTO_TEST_CASE( RenderedPagingPreservesInspectionFailureAndCancellation )
         click( more ); auto duplicate = rows( older ); duplicate[0] = rows( first )[0];
         BOOST_CHECK( !dialog->AppendPage( 200, first.total(), duplicate ) );
         BOOST_CHECK_EQUAL( dialog->LoadedCount(), 200 );
-        click( more ); BOOST_CHECK( dialog->AppendPage( 200, first.total(), rows( older ) ) );
+        click( more ); BOOST_CHECK( dialog->AppendPage( 200, first.total(), earlier( older ) ) );
         preserved = dialog->InspectedRevision() == inspected && list->GetSelection() == 1;
         BOOST_CHECK( preserved ); BOOST_CHECK_EQUAL( dialog->LoadedCount(), 206 ); BOOST_CHECK( !more->IsShown() );
         BOOST_CHECK( dialog->PageError().IsEmpty() );
@@ -402,7 +391,11 @@ BOOST_AUTO_TEST_CASE( RenderedPagingPreservesInspectionFailureAndCancellation )
         waitFor( [&] { return dialog->InspectedRevision() == older.entries( older.entries_size() - 1 ).requirement_revision_id(); } );
         BOOST_CHECK_EQUAL( control<wxTextCtrl>( dialog, "DiagramFieldHistorySavedText" )->GetValue(), wxString::FromUTF8( first.saved_text() ) );
         dialog->SetClientSize( dialog->FromDIP( wxSize( 740, 520 ) ) ); dialog->Layout();
-        capture( dialog, evidence, "08-history-oldest.png" ); click( restore );
+        SHOT oldest = capture( dialog, evidence, "08-history-oldest.png" );
+        // Every row, the older ones with their long implementation name too, lies whole inside the list beside its scroll bar.
+        olderRowsFit = rowsFit( oldest, dialog, olderRows );
+        BOOST_CHECK_MESSAGE( olderRowsFit, "Every row loaded with Load older is drawn whole beside the scroll bar." );
+        click( restore );
     } ), wxID_OK );
     BOOST_REQUIRE( dialog->RestoredEntry() );
     std::string restored = dialog->RestoredEntry()->revisionId;
@@ -420,7 +413,8 @@ BOOST_AUTO_TEST_CASE( RenderedPagingPreservesInspectionFailureAndCancellation )
     std::ofstream receipt( evidence / "paging-interaction.json" );
     receipt << nlohmann::json( { { "selection_preserved", preserved }, { "failure_preserved_rows", failurePreserved },
         { "malformed_page_rejected", rejected }, { "cancelled_load_without_restore", noRestore },
-        { "loaded_count", loaded }, { "oldest_revision_id", restored } } ).dump( 2 );
+        { "loaded_count", loaded }, { "oldest_revision_id", restored }, { "older_rows_fit", olderRowsFit },
+        { "older_rows", olderRows } } ).dump( 2 );
 }
 
 BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
@@ -452,7 +446,7 @@ BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
     auto* dialog = new DIALOG_DIAGRAM_FIELD_HISTORY( nullptr, "Routing requirements", "PSU",
             wxString::Format( "v%u", page.context_version() ), text( page.saved_text() ), rows );
     dialog->Move( wxPoint( 60, 60 ) );
-    auto* list = control<wxListBox>( dialog, "DiagramFieldHistoryRevisions" );
+    auto* list = control<wxVListBox>( dialog, "DiagramFieldHistoryRevisions" );
     auto* selected = control<wxTextCtrl>( dialog, "DiagramFieldHistorySelectedText" );
     auto* saved = control<wxTextCtrl>( dialog, "DiagramFieldHistorySavedText" );
     auto* restore = control<wxButton>( dialog, "DiagramFieldHistoryRestore" );
@@ -460,12 +454,8 @@ BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
     dialog->ConfigurePaging( rows.size(), []( size_t ) { BOOST_FAIL( "A complete short history needs no further request." ); } );
     nlohmann::json rowLabels = nlohmann::json::array(), shownRows = nlohmann::json::array(), compactShownRows = nlohmann::json::array();
     std::string selectedHeading, restoreLabel;
-    double restoreFill = 0, restoreInk = 0; int selectedInset = -1, savedInset = -1; bool ellipsized = false, fit = false, compactFit = false;
-    auto collectShown = [&]( nlohmann::json& aRows )
-    {
-        for( const wxString& row : dialog->ShownRowLabels() ) aRows.push_back( row.utf8_string() );
-        BOOST_CHECK_EQUAL( dialog->ShownRowLabels().size(), list->GetCount() );
-    };
+    double restoreFill = 0, restoreInk = 0; int selectedInset = -1, savedInset = -1; bool fit = false, compactFit = false;
+    std::string accessibleRow;
     int cancelled = show( dialog, [&]
     {
         BOOST_CHECK( !control<wxStaticText>( dialog, "DiagramFieldHistoryPageStatus" )->IsShown() );
@@ -482,10 +472,14 @@ BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
         SHOT shot = capture( dialog, evidence, "02-earlier-text.png" );
         std::tie( restoreFill, restoreInk ) = primaryContrast( shot, dialog, restore );
         selectedInset = textInset( shot, dialog, selected ); savedInset = textInset( shot, dialog, saved );
-        ellipsized = dialog->RowsEllipsize() && rowsEllipsize( list );
-        // Mockup audit M1-3: every row as drawn, and whether GTK draws each whole (its version and author never cut).
-        collectShown( shownRows ); fit = rowsFit( list );
-        BOOST_CHECK_MESSAGE( fit, "Every history row fits the list as drawn." );
+        // Mockup audit M1-3 and M1-12: every row as drawn, in the diagram history's two-line pattern, and whether each lies
+        // whole in the list (its version, saved marker and author never cut), measured in the capture.
+        BOOST_CHECK_EQUAL( dialog->ShownRows().size(), list->GetItemCount() );
+        fit = rowsFit( shot, dialog, shownRows );
+        BOOST_CHECK_MESSAGE( fit, "Every history row is drawn whole in the list." );
+        // The list draws its rows itself; assistive technology reads the selected row whole from the list's name.
+        if( AtkObject* accessible = gtk_widget_get_accessible( GTK_WIDGET( list->GetHandle() ) ) )
+            if( const char* name = atk_object_get_name( accessible ) ) accessibleRow = name;
         key( WXK_ESCAPE );
     } );
     BOOST_CHECK_EQUAL( cancelled, wxID_CANCEL );
@@ -515,9 +509,9 @@ BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
         compactAuthorShown = heading->IsShownOnScreen() && client.Contains( heading->GetScreenRect() ) && shown.EndsWith( versionAndAuthor )
             && heading->GetTextExtent( shown ).x <= heading->GetClientSize().x;
         BOOST_CHECK_MESSAGE( compactAuthorShown, "The compact heading '" << compactHeading << "' shows its version and author whole." );
-        capture( dialog, evidence, "03-compact.png" );
-        collectShown( compactShownRows ); compactFit = rowsFit( list );
-        BOOST_CHECK_MESSAGE( compactFit, "Every history row fits the list as drawn in the compact dialog." );
+        SHOT compactShot = capture( dialog, evidence, "03-compact.png" );
+        compactFit = rowsFit( compactShot, dialog, compactShownRows );
+        BOOST_CHECK_MESSAGE( compactFit, "Every history row is drawn whole in the list of the compact dialog." );
         dialog->SetClientSize( dialog->FromDIP( wxSize( 740, 520 ) ) ); dialog->Layout();
         click( restore );
     } ), wxID_OK );
@@ -568,7 +562,7 @@ BOOST_AUTO_TEST_CASE( RenderedCompareCancelRestoreAndScopeIsolation )
         { "row_labels", rowLabels }, { "shown_rows", shownRows }, { "rows_fit", fit }, { "compact_shown_rows", compactShownRows },
         { "compact_rows_fit", compactFit }, { "selected_heading", selectedHeading }, { "restore_label", restoreLabel },
         { "ampersand_restore_label", ampersandLabel }, { "restore_fill_on_dialog", restoreFill }, { "restore_label_on_fill", restoreInk },
-        { "selected_text_inset", selectedInset }, { "saved_text_inset", savedInset }, { "rows_ellipsize", ellipsized } } ).dump( 2 );
+        { "selected_text_inset", selectedInset }, { "saved_text_inset", savedInset }, { "selected_row_accessible_name", accessibleRow } } ).dump( 2 );
     BOOST_REQUIRE( receipt.good() );
 }
 

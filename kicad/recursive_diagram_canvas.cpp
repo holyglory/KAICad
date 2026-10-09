@@ -8,6 +8,7 @@
 #include <chrono>
 #include <climits>
 #include <cmath>
+#include <limits>
 #include <cstdlib>
 #include <wx/control.h>
 #include <wx/dc.h>
@@ -99,6 +100,20 @@ CANVAS_COLOURS CanvasColours()
     // White handles with an accent outline, as the sketch; on a dark canvas the handles take the canvas's foreground.
     colours.handleFill = colours.dark ? colours.foreground : colours.background;
     return colours;
+}
+
+WIRE_LOOK WireLook( D::DiagramDomain domain, const CANVAS_COLOURS& colours )
+{
+    // The approved sketches' own colours, read from their line pixels: power (208, 2, 6), data (8, 90, 248) and the dashed sense
+    // lines (92, 92, 95). Each keeps 4.5:1 or more on the canvas; on the dark canvas it is lightened until it does, as the
+    // accent is (owner default n7fb0ee3089916669).
+    switch( domain )
+    {
+    case D::DD_POWER: return { Readable( wxColour( 208, 2, 6 ), { colours.background }, 4.5 ), false };
+    case D::DD_DATA: return { Readable( wxColour( 8, 90, 248 ), { colours.background }, 4.5 ), false };
+    case D::DD_ANALOG: return { Readable( wxColour( 92, 92, 95 ), { colours.background }, 4.5 ), true };
+    default: return { colours.muted, false };
+    }
 }
 
 void PadTextBox( wxTextCtrl* control, int horizontal, int vertical ) { DIAGRAM_LOOK::PadTextBox( control, horizontal, vertical ); }
@@ -500,10 +515,11 @@ ROUTE_STATS g_routeStats;
 /// The computed legs of one level geometry, laid out once: an unchanged level (a repaint, a state report, the geometry
 /// before and after a drag step) reuses its layout instead of laying it out again.
 std::vector<std::vector<POINT>> cachedRoutes( const std::vector<RECT>& blocks, const std::vector<std::vector<POINT>>& stored,
-                                              const std::vector<ROUTE_LEG>& legs )
+                                              const std::vector<ROUTE_LEG>& legs, const RECT& area )
 {
     std::string key;
     auto put = [&key]( int64_t value ) { key.append( reinterpret_cast<const char*>( &value ), sizeof value ); };
+    put( area.x ); put( area.y ); put( area.w ); put( area.h );
     put( static_cast<int64_t>( blocks.size() ) );
     for( const RECT& rect : blocks ) { put( rect.x ); put( rect.y ); put( rect.w ); put( rect.h ); }
     put( static_cast<int64_t>( stored.size() ) );
@@ -520,7 +536,7 @@ std::vector<std::vector<POINT>> cachedRoutes( const std::vector<RECT>& blocks, c
             return recent.front().paths;
         }
     const auto started = std::chrono::steady_clock::now();
-    auto paths = RouteLegs( blocks, stored, legs );
+    auto paths = RouteLegs( blocks, stored, legs, area );
     const auto micros = static_cast<uint64_t>( std::chrono::duration_cast<std::chrono::microseconds>( std::chrono::steady_clock::now() - started ).count() );
     ++g_routeStats.layouts; g_routeStats.latestMicros = micros; g_routeStats.slowestMicros = std::max( g_routeStats.slowestMicros, micros );
     recent.insert( recent.begin(), ENTRY{ std::move( key ), paths } );
@@ -532,7 +548,7 @@ std::vector<std::vector<POINT>> cachedRoutes( const std::vector<RECT>& blocks, c
 ROUTE_STATS RouteStats() { return g_routeStats; }
 
 std::vector<std::vector<POINT>> RouteLegs( const std::vector<RECT>& blocks, const std::vector<std::vector<POINT>>& stored,
-                                           const std::vector<ROUTE_LEG>& legs )
+                                           const std::vector<ROUTE_LEG>& legs, const RECT& area )
 {
     // Rule F4 for computed legs, as revised for design QA P2-5 and its review. A leg runs from its first end to a channel (a
     // vertical line at x) and on to its other end:
@@ -867,104 +883,193 @@ std::vector<std::vector<POINT>> RouteLegs( const std::vector<RECT>& blocks, cons
     }
     std::vector<PATH> result;
     for( size_t i = 0; i < legs.size(); ++i ) result.push_back( candidates[i][chosen[i]].drawn.path );
+    // CN-2 erratum 2026-09-26, "Finished connections around blocks" (decision n7fb0ee3089916669): a leg whose three-segment path
+    // runs through a block or leaves the level, where the names of the level's ports are drawn, goes around the blocks instead,
+    // against every other path as it is then (the stored routes, the other legs' paths and the ways around found before it).
+    // Legs whose three-segment path crosses nothing keep it.
+    for( size_t i = 0; i < legs.size(); ++i )
+    {
+        if( !CrossesLevel( blocks, area, result[i] ) ) continue;
+        std::vector<PATH> others( stored );
+        for( size_t j = 0; j < legs.size(); ++j ) if( j != i ) others.push_back( result[j] );
+        PATH around = AroundBlocks( blocks, legs[i], area, others );
+        if( !around.empty() ) result[i] = std::move( around );
+    }
     return result;
 }
 
-std::vector<wxPoint> OrthogonalDetour( const std::vector<wxRect>& obstacles, const wxPoint& start, const wxPoint& startDirection,
-                                       const wxPoint& goal, const wxPoint& goalDirection, const wxRect& area )
+bool CrossesLevel( const std::vector<RECT>& blocks, const RECT& area, const std::vector<POINT>& path )
 {
-    // A route on the lines through the two ends and one pixel outside each obstacle's sides (every turn a shortest orthogonal
-    // way around rectangles needs lies on them), searched for the fewest turns and then the shortest length. A run between
-    // two neighbouring lines is open unless it passes through an obstacle.
-    auto inside = [&]( const wxPoint& p )
-    { return std::any_of( obstacles.begin(), obstacles.end(), [&]( const wxRect& r ) { return r.Contains( p ); } ); };
-    if( inside( start ) || inside( goal ) || !area.Contains( start ) || !area.Contains( goal ) ) return {};
-    std::vector<int> xs{ start.x, goal.x }, ys{ start.y, goal.y };
-    for( const wxRect& r : obstacles )
-    { xs.push_back( r.x - 1 ); xs.push_back( r.GetRight() + 1 ); ys.push_back( r.y - 1 ); ys.push_back( r.GetBottom() + 1 ); }
-    auto tidy = []( std::vector<int>& lines, int low, int high )
+    for( const POINT& p : path )
+        if( p.x < area.x || p.x > area.Right() || p.y < area.y || p.y > area.Bottom() ) return true;
+    for( size_t j = 1; j < path.size(); ++j )
     {
-        lines.erase( std::remove_if( lines.begin(), lines.end(), [&]( int v ) { return v < low || v > high; } ), lines.end() );
+        const POINT &a = path[j - 1], &b = path[j];
+        const int64_t left = std::min( a.x, b.x ), right = std::max( a.x, b.x ), top = std::min( a.y, b.y ), bottom = std::max( a.y, b.y );
+        for( const RECT& r : blocks )
+        {
+            // Through the inside: the run's own line lies strictly inside the block across it, and the two overlap along it.
+            if( a.y == b.y && r.y < a.y && a.y < r.Bottom() && std::max( left, r.x ) < std::min( right, r.Right() ) ) return true;
+            if( a.x == b.x && r.x < a.x && a.x < r.Right() && std::max( top, r.y ) < std::min( bottom, r.Bottom() ) ) return true;
+            // A slanted run (a stored route drawn as stored) through a block's inside.
+            if( a.x != b.x && a.y != b.y && std::max( left, r.x ) < std::min( right, r.Right() ) && std::max( top, r.y ) < std::min( bottom, r.Bottom() ) )
+                return true;
+        }
+    }
+    return false;
+}
+
+std::vector<POINT> AroundBlocks( const std::vector<RECT>& blocks, const ROUTE_LEG& leg, const RECT& area,
+                                 const std::vector<std::vector<POINT>>& others )
+{
+    const int64_t lead = 20 * QUANTUM, clearance = 10 * QUANTUM, apart = 10 * QUANTUM;
+    auto same = []( const POINT& a, const POINT& b ) { return a.x == b.x && a.y == b.y; };
+    const bool freeEnd = leg.to.dx == 0 && leg.to.dy == 0;
+    const POINT start{ leg.from.at.x + leg.from.dx * lead, leg.from.at.y + leg.from.dy * lead };
+    const POINT goal = freeEnd ? leg.to.at : POINT{ leg.to.at.x + leg.to.dx * lead, leg.to.at.y + leg.to.dy * lead };
+    // Every block expanded by 10 units on each side; a run may lie along such an outline but never inside it.
+    std::vector<RECT> obstacles;
+    for( const RECT& r : blocks ) obstacles.push_back( { r.x - clearance, r.y - clearance, r.w + 2 * clearance, r.h + 2 * clearance } );
+    auto inside = [&]( const POINT& p )
+    {
+        return std::any_of( obstacles.begin(), obstacles.end(), [&]( const RECT& o )
+                            { return o.x < p.x && p.x < o.Right() && o.y < p.y && p.y < o.Bottom(); } );
+    };
+    auto inArea = [&]( const POINT& p ) { return p.x >= area.x && p.x <= area.Right() && p.y >= area.y && p.y <= area.Bottom(); };
+    if( inside( start ) || inside( goal ) || !inArea( start ) || !inArea( goal ) ) return {};
+    // Every turn a fewest-turn way around rectangles needs lies on the lines through the two leads and along the expanded
+    // outlines, so the search runs on the points where those lines cross, inside the level.
+    std::vector<int64_t> xs{ start.x, goal.x }, ys{ start.y, goal.y };
+    for( const RECT& o : obstacles ) { xs.push_back( o.x ); xs.push_back( o.Right() ); ys.push_back( o.y ); ys.push_back( o.Bottom() ); }
+    auto tidy = []( std::vector<int64_t>& lines, int64_t low, int64_t high )
+    {
+        lines.erase( std::remove_if( lines.begin(), lines.end(), [&]( int64_t v ) { return v < low || v > high; } ), lines.end() );
         std::sort( lines.begin(), lines.end() ); lines.erase( std::unique( lines.begin(), lines.end() ), lines.end() );
     };
-    tidy( xs, area.x, area.GetRight() ); tidy( ys, area.y, area.GetBottom() );
+    tidy( xs, area.x, area.Right() ); tidy( ys, area.y, area.Bottom() );
     const int columns = static_cast<int>( xs.size() ), rows = static_cast<int>( ys.size() );
-    // Whether the run from (a, at) to (b, at) along x (or, with aAlongY, along y) passes through an obstacle between its ends.
-    auto blocked = [&]( int a, int b, int at, bool alongY )
+    // The other legs' straight runs, level ones by height and upright ones by x. A run that touches an end this leg shares is
+    // left out: two connections of one port share the run at that port (rule F4a).
+    struct RUN { int64_t at, from, to; };
+    std::vector<RUN> levelRuns, uprightRuns;
+    auto shared = [&]( const POINT& p ) { return same( p, leg.from.at ) || ( !freeEnd && same( p, leg.to.at ) ); };
+    for( const auto& path : others )
     {
-        const int low = std::min( a, b ) + 1, high = std::max( a, b ) - 1;
-        for( const wxRect& r : obstacles )
+        for( size_t j = 1; j < path.size(); ++j )
         {
-            const int from = alongY ? r.y : r.x, to = alongY ? r.GetBottom() : r.GetRight();
-            const int acrossFrom = alongY ? r.x : r.y, acrossTo = alongY ? r.GetRight() : r.GetBottom();
-            if( at >= acrossFrom && at <= acrossTo && std::max( low, from ) <= std::min( high, to ) ) return true;
+            const POINT &a = path[j - 1], &b = path[j];
+            if( same( a, b ) || shared( a ) || shared( b ) ) continue;
+            if( a.y == b.y ) levelRuns.push_back( { a.y, std::min( a.x, b.x ), std::max( a.x, b.x ) } );
+            else if( a.x == b.x ) uprightRuns.push_back( { a.x, std::min( a.y, b.y ), std::max( a.y, b.y ) } );
+        }
+    }
+    auto byLine = []( const RUN& a, const RUN& b ) { return a.at < b.at; };
+    std::sort( levelRuns.begin(), levelRuns.end(), byLine ); std::sort( uprightRuns.begin(), uprightRuns.end(), byLine );
+    // How far a run on line aAt from aFrom to aTo runs beside the runs of aRuns (less than 10 units across, overlapping along).
+    auto beside = [&]( const std::vector<RUN>& runs, int64_t at, int64_t from, int64_t to ) -> int64_t
+    {
+        int64_t total = 0;
+        auto it = std::lower_bound( runs.begin(), runs.end(), RUN{ at - apart + 1, 0, 0 }, byLine );
+        for( ; it != runs.end() && it->at < at + apart; ++it ) total += std::max<int64_t>( 0, std::min( to, it->to ) - std::max( from, it->from ) );
+        return total;
+    };
+    // Whether the run between two neighbouring points passes through an expanded block's inside. No outline lies strictly
+    // between neighbouring lines, so a block the run overlaps covers it whole.
+    auto blocked = [&]( const POINT& a, const POINT& b )
+    {
+        const int64_t left = std::min( a.x, b.x ), right = std::max( a.x, b.x ), top = std::min( a.y, b.y ), bottom = std::max( a.y, b.y );
+        for( const RECT& o : obstacles )
+        {
+            if( a.y == b.y && o.y < a.y && a.y < o.Bottom() && std::max( left, o.x ) < std::min( right, o.Right() ) ) return true;
+            if( a.x == b.x && o.x < a.x && a.x < o.Right() && std::max( top, o.y ) < std::min( bottom, o.Bottom() ) ) return true;
         }
         return false;
     };
-    const int column0 = static_cast<int>( std::find( xs.begin(), xs.end(), start.x ) - xs.begin() );
-    const int row0 = static_cast<int>( std::find( ys.begin(), ys.end(), start.y ) - ys.begin() );
-    const int column1 = static_cast<int>( std::find( xs.begin(), xs.end(), goal.x ) - xs.begin() );
-    const int row1 = static_cast<int>( std::find( ys.begin(), ys.end(), goal.y ) - ys.begin() );
     // Directions: 0 right, 1 left, 2 down, 3 up.
     const int dx[] = { 1, -1, 0, 0 }, dy[] = { 0, 0, 1, -1 };
-    auto directionOf = []( const wxPoint& d ) { return d.x > 0 ? 0 : d.x < 0 ? 1 : d.y > 0 ? 2 : d.y < 0 ? 3 : -1; };
-    const int first = directionOf( startDirection ), last = directionOf( goalDirection );
-    constexpr int64_t TURN = 1000000;
+    auto directionOf = []( int x, int y ) { return x > 0 ? 0 : x < 0 ? 1 : y > 0 ? 2 : y < 0 ? 3 : -1; };
+    auto opposite = []( int direction ) { return direction ^ 1; };
+    const int first = directionOf( leg.from.dx, leg.from.dy ), last = freeEnd ? -1 : directionOf( -leg.to.dx, -leg.to.dy );
+    struct SCORE
+    {
+        int64_t turns = 0, beside = 0, length = 0;
+        bool operator<( const SCORE& other ) const
+        { return std::tie( turns, beside, length ) < std::tie( other.turns, other.beside, other.length ); }
+        bool operator>( const SCORE& other ) const { return other < *this; }
+    };
+    const int column0 = static_cast<int>( std::lower_bound( xs.begin(), xs.end(), start.x ) - xs.begin() );
+    const int row0 = static_cast<int>( std::lower_bound( ys.begin(), ys.end(), start.y ) - ys.begin() );
+    const int column1 = static_cast<int>( std::lower_bound( xs.begin(), xs.end(), goal.x ) - xs.begin() );
+    const int row1 = static_cast<int>( std::lower_bound( ys.begin(), ys.end(), goal.y ) - ys.begin() );
+    if( column0 == column1 && row0 == row1 ) return {};
+    // A state is a point and the move that reached it; states are numbered by height, then x, then that move, which is the
+    // order the search takes among equal scores.
     const int states = columns * rows * 4;
-    std::vector<int64_t> cost( states, INT64_MAX );
-    std::vector<int> previous( states, -1 );
-    using ENTRY = std::pair<int64_t, int>;
-    std::priority_queue<ENTRY, std::vector<ENTRY>, std::greater<ENTRY>> open;
     auto state = [&]( int column, int row, int direction ) { return ( row * columns + column ) * 4 + direction; };
+    std::vector<std::optional<SCORE>> cost( static_cast<size_t>( states ) );
+    std::vector<int> previous( static_cast<size_t>( states ), -1 );
+    using ENTRY = std::pair<SCORE, int>;
+    auto later = []( const ENTRY& a, const ENTRY& b ) { return b.first < a.first || ( !( a.first < b.first ) && a.second > b.second ); };
+    std::priority_queue<ENTRY, std::vector<ENTRY>, decltype( later )> open( later );
     for( int direction = 0; direction < 4; ++direction )
     {
-        // Leaving the start another way than it must costs a turn; with no way given, any way is free.
-        const int64_t initial = first < 0 || direction == first ? 0 : TURN;
+        // The way leaves the first lead straight on, or turns there; it never turns back along the lead.
+        if( first >= 0 && direction == opposite( first ) ) continue;
+        SCORE initial; initial.turns = first >= 0 && direction != first ? 1 : 0;
         const int at = state( column0, row0, direction );
         cost[at] = initial; open.push( { initial, at } );
     }
-    int reached = -1; int64_t best = INT64_MAX;
+    int reached = -1; std::optional<SCORE> best;
     while( !open.empty() )
     {
         auto [here, at] = open.top(); open.pop();
-        if( here != cost[at] ) continue;
+        if( !cost[at] || here < *cost[at] || *cost[at] < here ) continue;
+        if( best && !( here < *best ) ) break;
         const int direction = at % 4, node = at / 4, column = node % columns, row = node / columns;
         if( column == column1 && row == row1 )
         {
-            const int64_t total = here + ( last < 0 || direction == last ? 0 : TURN );
-            if( total < best ) { best = total; reached = at; }
+            // It enters its other end's lead from the side that end faces: arriving another way costs a turn, arriving from
+            // the end's own side (turning back along the lead) is not a way.
+            if( last >= 0 && direction == opposite( last ) ) continue;
+            SCORE total = here; total.turns += last >= 0 && direction != last ? 1 : 0;
+            if( !best || total < *best ) { best = total; reached = at; }
             continue;
         }
-        if( here >= best ) continue;
         for( int next = 0; next < 4; ++next )
         {
-            if( ( next ^ 1 ) == direction && ( next >> 1 ) == ( direction >> 1 ) ) continue;
+            if( next == opposite( direction ) ) continue;
             const int c = column + dx[next], r = row + dy[next];
             if( c < 0 || c >= columns || r < 0 || r >= rows ) continue;
-            const wxPoint to( xs[c], ys[r] );
-            if( inside( to ) ) continue;
-            if( next < 2 ? blocked( xs[column], to.x, ys[row], false ) : blocked( ys[row], to.y, xs[column], true ) ) continue;
-            const int64_t step = std::abs( to.x - xs[column] ) + std::abs( to.y - ys[row] ) + ( next == direction ? 0 : TURN );
+            const POINT from{ xs[column], ys[row] }, to{ xs[c], ys[r] };
+            if( blocked( from, to ) ) continue;
+            SCORE step = here;
+            step.turns += next == direction ? 0 : 1;
+            step.length += std::llabs( to.x - from.x ) + std::llabs( to.y - from.y );
+            step.beside += next < 2 ? beside( levelRuns, from.y, std::min( from.x, to.x ), std::max( from.x, to.x ) )
+                                    : beside( uprightRuns, from.x, std::min( from.y, to.y ), std::max( from.y, to.y ) );
             const int target = state( c, r, next );
-            if( here + step < cost[target] ) { cost[target] = here + step; previous[target] = at; open.push( { cost[target], target } ); }
+            if( !cost[target] || step < *cost[target] ) { cost[target] = step; previous[target] = at; open.push( { step, target } ); }
         }
     }
     if( reached < 0 ) return {};
-    std::vector<wxPoint> points;
+    std::vector<POINT> points;
     for( int at = reached; at >= 0; at = previous[at] )
     {
         const int node = at / 4;
-        const wxPoint point( xs[node % columns], ys[node / columns] );
-        if( points.empty() || points.back() != point ) points.push_back( point );
+        const POINT point{ xs[node % columns], ys[node / columns] };
+        if( points.empty() || !same( points.back(), point ) ) points.push_back( point );
     }
     std::reverse( points.begin(), points.end() );
-    // Only the corners stay.
-    std::vector<wxPoint> corners;
-    for( const wxPoint& point : points )
+    points.insert( points.begin(), leg.from.at );
+    if( !freeEnd ) points.push_back( leg.to.at );
+    // Only the corners stay: a point in the middle of a straight run goes.
+    std::vector<POINT> corners;
+    for( const POINT& point : points )
     {
+        if( !corners.empty() && same( corners.back(), point ) ) continue;
         if( corners.size() >= 2 )
         {
-            const wxPoint &a = corners[corners.size() - 2], &b = corners.back();
+            const POINT &a = corners[corners.size() - 2], &b = corners.back();
             if( ( a.x == b.x && b.x == point.x ) || ( a.y == b.y && b.y == point.y ) ) corners.pop_back();
         }
         corners.push_back( point );
@@ -1007,8 +1112,17 @@ void LEVEL_LAYOUT::placePaths()
             legs.push_back( { { from, fromDx, fromDy, ownBlock( link.endpoints[0] ) }, { to, toDx, toDy, ownBlock( link.endpoints[leg] ) } } );
             keys.emplace_back( link.id, leg );
         }
-    const auto paths = cachedRoutes( m_rects, stored, legs );
+    const auto paths = cachedRoutes( m_rects, stored, legs, Area() );
     for( size_t i = 0; i < keys.size(); ++i ) m_paths[keys[i]] = paths[i];
+}
+RECT LEVEL_LAYOUT::Area() const
+{
+    if( m_frame ) return *m_frame;
+    RECT area = FallbackFrame();
+    // Rule F3 puts a boundary port without a placement at x 40 and its name left of it, outside the level.
+    const bool column = std::any_of( m_ports.begin(), m_ports.end(), []( const PORT& port ) { return port.boundary && !port.placed; } );
+    if( column && area.x < 40 * QUANTUM ) { const int64_t right = area.Right(); area.x = 40 * QUANTUM; area.w = std::max<int64_t>( 0, right - area.x ); }
+    return area;
 }
 bool LEVEL_LAYOUT::HasRoute( const std::string& id, int endpoint ) const
 {
@@ -1249,7 +1363,7 @@ wxRect VersionRect( wxDC& dc, const wxString& text, const wxRect& inner, const w
     return inner.Contains( line ) ? line : wxRect();
 }
 
-std::vector<wxString> NoteLines( wxDC& dc, const wxString& text, int width, int height )
+std::vector<wxString> NoteLines( wxDC& dc, const wxString& text, int width, int height, bool* shortened )
 {
     std::vector<wxString> lines;
     wxString value = text; int y = 0;
@@ -1275,6 +1389,7 @@ std::vector<wxString> NoteLines( wxDC& dc, const wxString& text, int width, int 
         { while( !line.empty() && dc.GetTextExtent( line + wxS( "…" ) ).x > width ) line.RemoveLast(); line += wxS( "…" ); }
         lines.push_back( line ); y += dc.GetCharHeight();
     }
+    if( shortened ) *shortened = !value.empty();
     return lines;
 }
 
@@ -1922,7 +2037,8 @@ CHOICE_BUTTON::LOOK CHOICE_BUTTON::Look( const wxColour& surface, bool chosen, b
         // The strip's active tool (design QA P2-1): a pale accent tile, an accent border 3:1 or more from the inspector and
         // the tile, and an accent label 4.5:1 or more on the tile.
         look.fill = mix( highlight, surface, dark ? 0.30 : 0.14 );
-        look.border = Readable( highlight, { surface, look.fill }, 3.0 );
+        // 3:1 with a little to spare, so the drawn border never lands just under it (review of design QA round 2: 3.0011 in dark).
+        look.border = Readable( highlight, { surface, look.fill }, 3.2 );
         look.text = enabled ? Readable( highlight, { look.fill }, 4.5 ) : grey;
         return look;
     }
@@ -2093,9 +2209,58 @@ void encodePoint( const R::POINT& point, D::DiagramAnnotationPointData* out )
 {
     out->set_x( R::FormatUnits( point.x ) ); out->set_y( R::FormatUnits( point.y ) );
 }
+// Plane geometry in canvas pixels for a comment's leader (mockup audit M1-14 and its review).
+double pointToSegment( double px, double py, const wxPoint& a, const wxPoint& b )
+{
+    double dx = b.x - a.x, dy = b.y - a.y, length = dx * dx + dy * dy;
+    double t = length > 0 ? std::clamp( ( ( px - a.x ) * dx + ( py - a.y ) * dy ) / length, 0.0, 1.0 ) : 0.0;
+    return std::hypot( px - ( a.x + t * dx ), py - ( a.y + t * dy ) );
+}
+bool segmentsCross( const wxPoint& a, const wxPoint& b, const wxPoint& c, const wxPoint& d )
+{
+    auto side = []( const wxPoint& p, const wxPoint& q, const wxPoint& r )
+    { int64_t value = int64_t( q.x - p.x ) * ( r.y - p.y ) - int64_t( q.y - p.y ) * ( r.x - p.x ); return ( value > 0 ) - ( value < 0 ); };
+    int d1 = side( c, d, a ), d2 = side( c, d, b ), d3 = side( a, b, c ), d4 = side( a, b, d );
+    return d1 * d2 < 0 && d3 * d4 < 0;
+}
+/// The shortest distance between the segments ab and cd (0 where they cross).
+double segmentToSegment( const wxPoint& a, const wxPoint& b, const wxPoint& c, const wxPoint& d )
+{
+    if( segmentsCross( a, b, c, d ) ) return 0;
+    return std::min( { pointToSegment( a.x, a.y, c, d ), pointToSegment( b.x, b.y, c, d ), pointToSegment( c.x, c.y, a, b ),
+                       pointToSegment( d.x, d.y, a, b ) } );
+}
+/// The shortest distance between the segment ab and the rectangle r (0 where it enters r).
+double segmentToRect( const wxPoint& a, const wxPoint& b, const wxRect& r )
+{
+    if( r.Contains( a ) || r.Contains( b ) ) return 0;
+    const wxPoint corners[] = { r.GetTopLeft(), r.GetTopRight(), r.GetBottomRight(), r.GetBottomLeft() };
+    double best = std::numeric_limits<double>::max();
+    for( int k = 0; k < 4; ++k ) best = std::min( best, segmentToSegment( a, b, corners[k], corners[( k + 1 ) % 4] ) );
+    return best;
+}
+/// The point of aRect nearest to aPoint.
+wxPoint nearestIn( const wxRect& rect, const wxPoint& point )
+{
+    return wxPoint( std::clamp( point.x, rect.x, rect.GetRight() ), std::clamp( point.y, rect.y, rect.GetBottom() ) );
+}
+/// Points along the segment ab every aStep pixels, both ends included.
+std::vector<wxPoint> alongSegment( const wxPoint& a, const wxPoint& b, int step )
+{
+    std::vector<wxPoint> points;
+    const double length = std::hypot( b.x - a.x, b.y - a.y );
+    const int count = std::max( 1, static_cast<int>( std::ceil( length / std::max( 1, step ) ) ) );
+    for( int k = 0; k <= count; ++k )
+        points.emplace_back( KiROUND( a.x + ( b.x - a.x ) * double( k ) / count ), KiROUND( a.y + ( b.y - a.y ) * double( k ) / count ) );
+    return points;
+}
 }
 
 void RECURSIVE_DIAGRAM_FRAME::followRoutes( const R::LEVEL_LAYOUT& before )
+{
+    followRoutes( m_level, before );
+}
+void RECURSIVE_DIAGRAM_FRAME::followRoutes( LEVEL& level, const R::LEVEL_LAYOUT& before ) const
 {
     // A channel route (two unlocked waypoints on one vertical line) always runs level from each end to its channel:
     // its two heights are the current heights of its ends, even when a merge or an earlier writer left them out of
@@ -2105,9 +2270,9 @@ void RECURSIVE_DIAGRAM_FRAME::followRoutes( const R::LEVEL_LAYOUT& before )
     // its channel; only its heights follow the ends. A locked route, a route with an end on a top or bottom side (its leg
     // leaves that end upright, so a level run from it would lie along the block's outline), and any other stored route are
     // kept exactly as drawn.
-    if( !m_level.scope().local_diagram().has_presentation() ) return;
-    auto after = layout( current(), true );
-    for( auto& row : *m_level.mutable_scope()->mutable_local_diagram()->mutable_presentation()->mutable_routes() )
+    if( !level.scope().local_diagram().has_presentation() ) return;
+    auto after = layoutOf( &level, current() );
+    for( auto& row : *level.mutable_scope()->mutable_local_diagram()->mutable_presentation()->mutable_routes() )
     {
         if( row.locked() || row.waypoints_size() != 2 ) continue;
         const R::LINK* now = after.Link( row.connection_id() );
@@ -2137,16 +2302,36 @@ void RECURSIVE_DIAGRAM_FRAME::followRoutes( const R::LEVEL_LAYOUT& before )
 
 R::LEVEL_LAYOUT RECURSIVE_DIAGRAM_FRAME::layout( const REVISION* scope, bool withDraft ) const
 {
+    return layoutOf( withDraft && m_ready ? &m_level : nullptr, scope );
+}
+R::LEVEL_LAYOUT RECURSIVE_DIAGRAM_FRAME::layoutOf( const LEVEL* level, const REVISION* scope ) const
+{
     if( !scope ) return R::LEVEL_LAYOUT( "", {}, {}, {}, nullptr, {} );
-    bool draft = withDraft && m_ready && sameSelection( m_level.scope().baseline(), scope->selection() );
-    const auto& local = draft ? m_level.scope().local_diagram() : scope->local_diagram();
-    const auto& children = draft ? m_level.scope().children() : scope->children();
+    bool draft = level && sameSelection( level->scope().baseline(), scope->selection() );
+    // What aLevel holds for a block or connection drawn in it, or edited in it.
+    auto addedChild = [&]( const std::string& id ) -> const D::NewBlockOccurrenceData*
+    {
+        if( draft ) for( const auto& child : level->new_children() ) if( child.selection().block_id() == id ) return &child;
+        return nullptr;
+    };
+    auto addedLink = [&]( const std::string& id ) -> const D::NewConnectionData*
+    {
+        if( draft ) for( const auto& link : level->new_connections() ) if( link.selection().connection_id() == id ) return &link;
+        return nullptr;
+    };
+    auto editedLink = [&]( const std::string& id ) -> const LINK_DRAFT*
+    {
+        if( draft ) for( const auto& link : level->connection_drafts() ) if( link.baseline().connection_id() == id ) return &link;
+        return nullptr;
+    };
+    const auto& local = draft ? level->scope().local_diagram() : scope->local_diagram();
+    const auto& children = draft ? level->scope().children() : scope->children();
     std::vector<R::BOUNDARY> own;
     for( const auto& port : local.interfaces() ) own.push_back( { port.id(), port.name() } );
     std::vector<R::NODE> nodes;
     for( const auto& child : children )
     {
-        if( const auto* added = draft ? newChild( child.block_id() ) : nullptr )
+        if( const auto* added = addedChild( child.block_id() ) )
         {
             R::NODE node{ added->selection().block_id(), added->name(), 0, true, {}, {} };
             for( const auto& port : added->interfaces() ) node.interfaces.push_back( { port.id(), port.name() } );
@@ -2155,7 +2340,7 @@ R::LEVEL_LAYOUT RECURSIVE_DIAGRAM_FRAME::layout( const REVISION* scope, bool wit
         }
         const REVISION* saved = revision( child ); if( !saved ) continue;
         const DRAFT* edited = nullptr;
-        if( draft ) for( const auto& item : m_level.child_drafts() ) if( item.baseline().block_id() == child.block_id() ) edited = &item;
+        if( draft ) for( const auto& item : level->child_drafts() ) if( item.baseline().block_id() == child.block_id() ) edited = &item;
         R::NODE node{ child.block_id(), edited ? edited->name() : saved->name(), version( *saved ), false, {}, {} };
         for( const auto& port : edited ? edited->local_diagram().interfaces() : saved->local_diagram().interfaces() )
             node.interfaces.push_back( { port.id(), port.name() } );
@@ -2165,23 +2350,23 @@ R::LEVEL_LAYOUT RECURSIVE_DIAGRAM_FRAME::layout( const REVISION* scope, bool wit
     std::vector<R::LINK> links;
     for( const auto& root : local.connections() )
     {
-        if( const auto* added = draft ? newConnection( root.connection_id() ) : nullptr )
+        if( const auto* added = addedLink( root.connection_id() ) )
         {
-            links.push_back( { root.connection_id(), added->name(), true, { added->endpoints().begin(), added->endpoints().end() }, added->direction() } );
+            links.push_back( { root.connection_id(), added->name(), true, { added->endpoints().begin(), added->endpoints().end() }, added->direction(),
+                               added->domain() } );
             continue;
         }
-        const LINK_DRAFT* edited = draft ? connectionDraft( root.connection_id() ) : nullptr;
+        const LINK_DRAFT* edited = editedLink( root.connection_id() );
         for( const auto& archive : m_document.graph().connection_archives() ) if( archive.owner_block_id() == scope->selection().block_id() )
             for( const auto& item : archive.revisions() ) if( sameLink( item.selection(), root ) )
             {
                 const auto& endpoints = edited ? edited->endpoints() : item.endpoints();
                 links.push_back( { root.connection_id(), edited ? edited->name() : item.name(), false, { endpoints.begin(), endpoints.end() },
-                                   edited ? edited->direction() : item.direction() } );
+                                   edited ? edited->direction() : item.direction(), edited ? edited->domain() : item.domain() } );
             }
     }
     return R::LEVEL_LAYOUT( scope->selection().block_id(), std::move( own ), std::move( nodes ), std::move( links ),
-                            local.has_presentation() ? &local.presentation() : nullptr, noteBoxes( draft ? m_level.scope().local_diagram().annotations()
-                                                                                                          : scope->local_diagram().annotations() ) );
+                            local.has_presentation() ? &local.presentation() : nullptr, noteBoxes( local.annotations() ) );
 }
 std::vector<R::RECT> RECURSIVE_DIAGRAM_FRAME::noteBoxes( const google::protobuf::RepeatedPtrField<D::DiagramAnnotationData>& notes ) const
 {
@@ -2281,6 +2466,114 @@ wxRect RECURSIVE_DIAGRAM_FRAME::noteRect( const D::DiagramAnnotationData& note, 
     if( note.has_position() ) { Text( note.position().x() ).ToDouble( &x ); Text( note.position().y() ).ToDouble( &y ); }
     return { static_cast<int>( ( x - m_origin.m_x ) * m_scale ), static_cast<int>( ( y - m_origin.m_y ) * m_scale ),
              static_cast<int>( 240 * m_scale ), static_cast<int>( 100 * m_scale ) };
+}
+std::optional<std::pair<wxPoint, wxPoint>> RECURSIVE_DIAGRAM_FRAME::noteLeader( const R::LEVEL_LAYOUT& drawn,
+        const std::vector<CAPTION_PLACE>& captions, const D::DiagramAnnotationData& note, int index ) const
+{
+    // Mockup audit M1-14: the approved walkthrough 03 draws the comment on Memory interface as a note beside the connection
+    // with a short dashed leader to its caption, while walkthroughs 01 and 02 keep the PSU's comment in Comments only. A comment
+    // with its own place on the canvas is drawn there, attached to its element by this leader, so it reads neither as a note
+    // in the level's free space nor as a comment on whatever it lies next to; a comment without a place stays in Comments.
+    // Review of the audit's pass 8 (M1-17): a straight leader to the caption crossed two wires once later edits had moved
+    // the caption, and ended beside another connection's wire, so the comment seemed to be about that connection. The leader
+    // now ends at the nearest point of its connection's caption or of the connection's own path (or of its block's outline)
+    // that it reaches through free space: 6 pixels or more from every other wire, off its own connection but at its end, and
+    // 3 pixels or more from every block, port, port name, other note and other caption. Where no such point exists it ends on
+    // the caption (or the nearest point of the path, or of the block), and the wires are drawn over it.
+    if( !note.has_position() || !note.has_target_id() || note.has_unresolved_reason() ) return std::nullopt;
+    const wxRect box = noteRect( note, index );
+    std::optional<wxRect> caption, block;
+    std::vector<std::pair<wxPoint, wxPoint>> own, others;
+    for( const auto& link : drawn.Links() )
+        for( int i = 1; i < static_cast<int>( link.endpoints.size() ); ++i )
+        {
+            auto route = drawn.Route( link, i );
+            bool mine = note.target_kind() == D::DAT_CONNECTION && link.id == note.target_id();
+            for( size_t j = 1; j < route.size(); ++j ) ( mine ? own : others ).emplace_back( toScreen( route[j - 1] ), toScreen( route[j] ) );
+        }
+    if( note.target_kind() == D::DAT_CONNECTION )
+    {
+        if( !drawn.Link( note.target_id() ) ) return std::nullopt;
+        for( const auto& place : captions )
+            if( place.shown && place.connection == note.target_id() ) { caption = place.rect; break; }
+        if( !caption && own.empty() ) return std::nullopt;
+        if( caption && box.Intersects( *caption ) ) return std::nullopt;
+        for( const auto& [a, b] : own ) if( segmentToRect( a, b, box ) == 0 ) return std::nullopt;
+    }
+    else if( note.target_kind() == D::DAT_BLOCK && drawn.Node( note.target_id() ) )
+    {
+        block = toScreen( drawn.Rect( note.target_id() ) );
+        if( box.Intersects( *block ) ) return std::nullopt;
+    }
+    else return std::nullopt;
+    // What the leader keeps clear of.
+    std::vector<wxRect> rects;
+    for( const auto& node : drawn.Nodes() )
+        if( !( note.target_kind() == D::DAT_BLOCK && node.id == note.target_id() ) ) rects.push_back( toScreen( drawn.Rect( node.id ) ) );
+    for( const auto& port : portMarks( drawn ) ) rects.push_back( port.rect );
+    for( const auto& name : boundaryNames( drawn ) ) rects.push_back( name.rect );
+    for( const auto& place : captions )
+        if( place.shown && !( note.target_kind() == D::DAT_CONNECTION && place.connection == note.target_id() ) ) rects.push_back( place.rect );
+    const auto& notes = visibleNotes();
+    for( int k = 0; k < notes.size(); ++k )
+        if( k != index && ( notes.Get( k ).target_kind() == D::DAT_CANVAS || notes.Get( k ).has_position() ) ) rects.push_back( noteRect( notes.Get( k ), k ) );
+    const double wireClear = FromDIP( 6 ), rectClear = FromDIP( 3 ), touch = FromDIP( 8 );
+    auto clear = [&]( const wxPoint& from, const wxPoint& to, bool onPath )
+    {
+        for( const auto& [a, b] : others ) if( segmentToSegment( from, to, a, b ) < wireClear ) return false;
+        // Its own connection is met only where the leader ends on it: the last pixels before that end are not checked.
+        wxPoint near = to; const double length = std::hypot( to.x - from.x, to.y - from.y );
+        if( onPath )
+        {
+            if( length <= touch ) near = from;
+            else near = wxPoint( KiROUND( to.x - ( to.x - from.x ) * touch / length ), KiROUND( to.y - ( to.y - from.y ) * touch / length ) );
+        }
+        if( !( onPath && near == from ) )
+            for( const auto& [a, b] : own ) if( segmentToSegment( from, near, a, b ) < wireClear ) return false;
+        for( const wxRect& rect : rects ) if( segmentToRect( from, onPath ? near : to, rect ) < rectClear ) return false;
+        return true;
+    };
+    const wxPoint middle( box.x + box.width / 2, box.y + box.height / 2 );
+    const int step = FromDIP( 8 );
+    struct CANDIDATE { wxPoint to; bool onPath; };
+    std::vector<CANDIDATE> candidates;
+    auto outline = [&]( const wxRect& rect, bool onPath )
+    {
+        candidates.push_back( { nearestIn( rect, middle ), onPath } );
+        const wxPoint corners[] = { rect.GetTopLeft(), rect.GetTopRight(), rect.GetBottomRight(), rect.GetBottomLeft() };
+        for( int k = 0; k < 4; ++k ) for( const wxPoint& point : alongSegment( corners[k], corners[( k + 1 ) % 4], step ) ) candidates.push_back( { point, onPath } );
+    };
+    if( caption ) outline( *caption, false );
+    if( block ) outline( *block, false );
+    for( const auto& [a, b] : own )
+    {
+        double dx = b.x - a.x, dy = b.y - a.y, length = dx * dx + dy * dy;
+        double t = length > 0 ? std::clamp( ( ( middle.x - a.x ) * dx + ( middle.y - a.y ) * dy ) / length, 0.0, 1.0 ) : 0.0;
+        candidates.push_back( { wxPoint( KiROUND( a.x + t * dx ), KiROUND( a.y + t * dy ) ), true } );
+        for( const wxPoint& point : alongSegment( a, b, step ) ) candidates.push_back( { point, true } );
+    }
+    std::optional<std::pair<wxPoint, wxPoint>> best; double shortest = std::numeric_limits<double>::max();
+    for( const auto& candidate : candidates )
+    {
+        const wxPoint from = nearestIn( box, candidate.to );
+        const double length = std::hypot( candidate.to.x - from.x, candidate.to.y - from.y );
+        if( length < 1 || length >= shortest || !clear( from, candidate.to, candidate.onPath ) ) continue;
+        shortest = length; best = std::make_pair( from, candidate.to );
+    }
+    if( best ) return best;
+    // Nothing is reached through free space: the caption's (or block's) nearest point, else the path's.
+    std::optional<wxPoint> to;
+    if( caption ) to = nearestIn( *caption, middle );
+    else if( block ) to = nearestIn( *block, middle );
+    else
+    {
+        double nearest = std::numeric_limits<double>::max();
+        for( const auto& [a, b] : own )
+            for( const wxPoint& point : alongSegment( a, b, step ) )
+                if( double distance = std::hypot( point.x - middle.x, point.y - middle.y ); distance < nearest ) { nearest = distance; to = point; }
+    }
+    if( !to ) return std::nullopt;
+    return std::make_pair( nearestIn( box, *to ), *to );
 }
 
 namespace
@@ -2532,7 +2825,7 @@ std::optional<RECURSIVE_DIAGRAM_FRAME::TARGET> RECURSIVE_DIAGRAM_FRAME::connectT
 std::vector<RECURSIVE_DIAGRAM_FRAME::CAPTION_PLACE> RECURSIVE_DIAGRAM_FRAME::connectionCaptions( const R::LEVEL_LAYOUT& drawn, const wxSize& area ) const
 {
     // Every connection shows its caption (owner rule 1, design QA round 2, R2-P2-1 and R2-P2-8; the approved sketch A3 captions
-    // a connection to a boundary port as well, beside the port's own name). Text keeps its size while the drawing zooms out
+    // a connection to a boundary port as well, above its own wire). Text keeps its size while the drawing zooms out
     // (design QA P2-7), so each caption looks for a clear place beside its own connection, in this order:
     //  1. a stored route's caption position, then beside the middle of each leg, longest leg first: above or below a level leg,
     //     right or left of an upright one;
@@ -2541,10 +2834,11 @@ std::vector<RECURSIVE_DIAGRAM_FRAME::CAPTION_PLACE> RECURSIVE_DIAGRAM_FRAME::con
     //  3. the free space around the connection: the same places up to six steps further out from each leg.
     // Clear means inside the canvas, off the palette, and apart from every block by the handle size plus 4 pixels (so a resize
     // handle never covers a caption), from every port and its name, from every note, from every wire, from the level's dashed
-    // boundary and from the captions already placed. Only a caption whose whole text has no clear place is shortened with "…"
-    // (at least four characters kept) into the first clear place of 1 and 2, and shows its whole text on hover; one that has no
-    // clear place even so is drawn shortened to four characters where it covers least, on its knocked-out background, never
-    // left out.
+    // boundary and from the captions already placed; beside a boundary port's name or another caption on the same line, by a
+    // word space (mockup audit M1-15); and no other connection's wire clearly nearer than its own (M1-18). Only a caption
+    // whose whole text has no clear place is shortened with "…" (at least four characters kept) into the first clear place of
+    // 1 and 2, and shows its whole text on hover; one that has no clear place even so is drawn shortened to four characters
+    // where it covers least, on its knocked-out background, never left out.
     std::vector<CAPTION_PLACE> result;
     if( !m_ready || !current() ) return result;
     wxClientDC dc( m_canvas ); dc.SetFont( GetFont() );
@@ -2554,13 +2848,18 @@ std::vector<RECURSIVE_DIAGRAM_FRAME::CAPTION_PLACE> RECURSIVE_DIAGRAM_FRAME::con
     for( const auto& node : drawn.Nodes() ) obstacles.push_back( toScreen( drawn.Rect( node.id ) ).Inflate( clearance ) );
     auto screen = [this]( const R::POINT& p ) { return toScreen( p ); };
     for( const auto& port : drawnPorts( drawn, screen ) ) obstacles.push_back( portMark( port.at ).Inflate( FromDIP( 2 ) ) );
-    for( const auto& name : boundaryNames( drawn ) ) obstacles.push_back( wxRect( name.rect ).Inflate( FromDIP( 2 ) ) );
+    // Mockup audit M1-15: a caption beside another caption or a port's name on the same line keeps a word space (12 DIP) from
+    // it; 3 pixels apart, "Supply status / control" and "Memory interface" read as one caption in the compact window.
+    const int wordSpace = FromDIP( 12 );
+    for( const auto& name : boundaryNames( drawn ) ) obstacles.push_back( wxRect( name.rect ).Inflate( wordSpace, FromDIP( 2 ) ) );
     const auto& notes = visibleNotes();
     for( int i = 0; i < notes.size(); ++i )
         if( notes.Get( i ).target_kind() == D::DAT_CANVAS || notes.Get( i ).has_position() ) obstacles.push_back( noteRect( notes.Get( i ), i ) );
     // The palette covers the canvas's left edge; a caption under it could not be read.
     if( m_paletteShown && m_palette->IsShown() ) obstacles.push_back( wxRect( m_palette->GetRect() ).Inflate( FromDIP( 4 ) ) );
     std::vector<std::pair<wxPoint, wxPoint>> wires;
+    // The connection each run of wires belongs to (empty for the level's dashed boundary).
+    std::vector<std::string> wireOwners;
     std::string key;
     auto put = [&key]( int64_t value ) { key.append( reinterpret_cast<const char*>( &value ), sizeof value ); };
     for( const auto& link : drawn.Links() )
@@ -2570,15 +2869,15 @@ std::vector<RECURSIVE_DIAGRAM_FRAME::CAPTION_PLACE> RECURSIVE_DIAGRAM_FRAME::con
             key += link.id; key += '\0'; key += link.name; key += '\0'; put( i );
             if( auto label = drawn.RouteLabel( link.id, i ) ) { wxPoint at = toScreen( *label ); put( at.x ); put( at.y ); }
             for( const auto& point : route ) { wxPoint at = toScreen( point ); put( at.x ); put( at.y ); }
-            for( size_t j = 1; j < route.size(); ++j ) wires.emplace_back( toScreen( route[j - 1] ), toScreen( route[j] ) );
+            for( size_t j = 1; j < route.size(); ++j ) { wires.emplace_back( toScreen( route[j - 1] ), toScreen( route[j] ) ); wireOwners.push_back( link.id ); }
         }
     // The level's dashed boundary is kept clear as a wire is, so a caption lies wholly inside the frame or wholly outside it,
-    // as a connection to a boundary port may be captioned beside the port's own name (review of design QA round 2).
+    // as the caption of a connection to a boundary port may lie outside the frame (review of design QA round 2).
     if( auto frame = drawn.Frame() )
     {
         const wxRect outline = toScreen( *frame );
         const wxPoint corners[] = { outline.GetTopLeft(), outline.GetTopRight(), outline.GetBottomRight(), outline.GetBottomLeft() };
-        for( int k = 0; k < 4; ++k ) wires.emplace_back( corners[k], corners[( k + 1 ) % 4] );
+        for( int k = 0; k < 4; ++k ) { wires.emplace_back( corners[k], corners[( k + 1 ) % 4] ); wireOwners.emplace_back(); }
         put( outline.x ); put( outline.y ); put( outline.width ); put( outline.height );
     }
     put( area.x ); put( area.y ); put( GetFont().GetPointSize() );
@@ -2609,12 +2908,33 @@ std::vector<RECURSIVE_DIAGRAM_FRAME::CAPTION_PLACE> RECURSIVE_DIAGRAM_FRAME::con
             for( size_t k = 0; k < obstacles.size(); ++k )
                 if( obstacles[k].Intersects( reach ) ) ( k < drawn.Nodes().size() ? nearBlocks : nearby ).push_back( obstacles[k] );
             for( const wxRect& rect : placed ) if( rect.Intersects( reach ) ) nearby.push_back( rect );
-            std::vector<wxRect> nearWires;
-            for( const auto& [a, b] : wires )
+            std::vector<wxRect> nearWires, ownWires, otherWires;
+            for( size_t k = 0; k < wires.size(); ++k )
             {
+                const auto& [a, b] = wires[k];
                 wxRect segment( wxPoint( std::min( a.x, b.x ), std::min( a.y, b.y ) ), wxPoint( std::max( a.x, b.x ), std::max( a.y, b.y ) ) );
+                if( wireOwners[k] == link.id ) ownWires.push_back( segment );
+                else if( !wireOwners[k].empty() ) otherWires.push_back( segment );
                 if( segment.Intersects( reach ) ) nearWires.push_back( segment );
             }
+            // Mockup audit M1-18: a caption is the name of the connection whose wire lies nearest it. A place where another
+            // connection's wire lies nearer than its own by more than the 4 pixels a caption keeps from its own wire ("Memory
+            // interface" 4 pixels from Rail B and 49 from its own wire, "Rail B sense" 9 pixels from Telemetry's run and 19 from
+            // its own) would name the wrong connection, so it is not clear. Nearly equal distances stay clear: connections from
+            // one port share their first run, and another connection's run may pass a caption's end as close as it passes its
+            // own wire.
+            auto apart = []( const wxRect& a, const wxRect& b )
+            {
+                const int dx = std::max( { 0, b.x - a.GetRight(), a.x - b.GetRight() } ), dy = std::max( { 0, b.y - a.GetBottom(), a.y - b.GetBottom() } );
+                return std::hypot( dx, dy );
+            };
+            auto misnamed = [&]( const wxRect& candidate )
+            {
+                double own = std::numeric_limits<double>::max();
+                for( const wxRect& segment : ownWires ) own = std::min( own, apart( candidate, segment ) );
+                for( const wxRect& segment : otherWires ) if( apart( candidate, segment ) < own - FromDIP( 4 ) ) return true;
+                return false;
+            };
             auto collisions = [&]( const wxRect& candidate, bool stopAtFirst )
             {
                 // A place outside the canvas could not be seen at all: in the last resort it counts as worse than any overlap.
@@ -2624,6 +2944,7 @@ std::vector<RECURSIVE_DIAGRAM_FRAME::CAPTION_PLACE> RECURSIVE_DIAGRAM_FRAME::con
                 for( const wxRect& rect : nearBlocks ) if( rect.Intersects( candidate ) && ( count += 100 ) && stopAtFirst ) return count;
                 for( const wxRect& rect : nearby ) if( rect.Intersects( candidate ) && ( count += 10 ) && stopAtFirst ) return count;
                 for( const wxRect& segment : nearWires ) if( segment.Intersects( zone ) && ++count && stopAtFirst ) return count;
+                if( misnamed( candidate ) && ++count && stopAtFirst ) return count;
                 return count;
             };
             // The places for a text of aExtent (see above), up to aLevel.
@@ -2701,22 +3022,33 @@ std::vector<RECURSIVE_DIAGRAM_FRAME::CAPTION_PLACE> RECURSIVE_DIAGRAM_FRAME::con
                     if( int count = collisions( candidate, false ); count < fewest ) { fewest = count; place.rect = candidate; }
                 place.shown = true; place.clear = false;
             }
-            placed.push_back( wxRect( place.rect ).Inflate( FromDIP( 2 ) ) );
+            placed.push_back( wxRect( place.rect ).Inflate( wordSpace, FromDIP( 2 ) ) );
             result.push_back( std::move( place ) );
         }
     m_captionKey = std::move( key ); m_captionCache = result;
     return result;
 }
 
+RECURSIVE_DIAGRAM_FRAME::LEVEL RECURSIVE_DIAGRAM_FRAME::withConnection( const LEVEL& level, const std::string& id, const D::DiagramEndpointBindingData& from,
+                                                                        const D::DiagramEndpointBindingData& to ) const
+{
+    // The level as a new connection from aFrom to aTo joins it: drawn in this draft, after the level's other connections, with
+    // the channel routes that follow their ends following them (what commitNewConnection stores, up to its identities).
+    LEVEL result = level;
+    auto* link = result.add_new_connections();
+    link->mutable_selection()->set_connection_id( id ); link->mutable_selection()->set_state_id( id ); link->mutable_selection()->set_revision_id( id );
+    link->set_kind( D::DCK_ABSTRACT ); *link->add_endpoints() = from; *link->add_endpoints() = to;
+    *result.mutable_scope()->mutable_local_diagram()->add_connections() = link->selection();
+    followRoutes( result, layoutOf( &level, current() ) );
+    return result;
+}
 std::vector<wxPoint> RECURSIVE_DIAGRAM_FRAME::connectPreview( const R::LEVEL_LAYOUT& drawn ) const
 {
-    // Design QA round 2, R2-P2-2: the preview is the path the connection's router would draw for it (rule F4 as revised), from
-    // where its first end attaches and leaving it outward. Where that path would run through a block (the router's legs have
-    // three segments) or across a port's name, the preview leaves its first end outward for at least 12 pixels and goes around
-    // the blocks, 8 pixels clear of them, with as few turns as it can, into its target the way the target's edge faces.
-    // Only the preview goes around: the finished connection still takes rule F4's three-segment path, through the block when
-    // its target lies behind its source (Rail to DC input). Letting computed paths go around blocks too is a contract change
-    // of CN-2 F4 that awaits the integration owner (per-level-editor-design-qa.md, "Design QA round 2 fixes").
+    // Design QA round 2, R2-P2-2, and the CN-2 erratum 2026-09-26 (decision n7fb0ee3089916669): the preview is the path the
+    // finished connection will take. Aimed at a port or a block, it is that connection's path in the level laid out with it,
+    // exactly as Save lays it out: its three-segment path, or, where that would run through a block or leave the level, its way
+    // around the blocks (20 units out from its first end, 10 units clear of every block, into its target from the side the
+    // target's edge faces). Aimed at empty canvas, it is the same rule's path to the pointer.
     if( m_tool != TOOL::CONNECT || m_historyPreview || !m_connectFrom || !m_ready || !current() ) return {};
     std::optional<D::DiagramEndpointBindingData> toEndpoint = m_connectTo;
     if( !toEndpoint )
@@ -2726,76 +3058,63 @@ std::vector<wxPoint> RECURSIVE_DIAGRAM_FRAME::connectPreview( const R::LEVEL_LAY
             if( target->port ) { toEndpoint->set_kind( D::DEK_INTERFACE ); toEndpoint->set_interface_id( target->id ); }
             else toEndpoint->set_kind( D::DEK_UNRESOLVED );
         }
-    auto centreOf = [&]( const D::DiagramEndpointBindingData& endpoint ) -> int64_t
-    {
-        if( endpoint.has_interface_id() ) if( const R::PORT* port = drawn.Port( endpoint.block_id(), endpoint.interface_id() ) ) return port->anchor.x;
-        if( endpoint.block_id() == drawn.ScopeId() ) return drawn.Anchor( endpoint, 0 ).x;
-        R::RECT rect = drawn.Rect( endpoint.block_id() ); return rect.x + rect.w / 2;
-    };
-    const R::POINT pointer = toDiagram( m_pointer );
-    R::ROUTE_END from, to;
-    from.at = drawn.Anchor( *m_connectFrom, toEndpoint ? centreOf( *toEndpoint ) : pointer.x );
-    std::tie( from.dx, from.dy ) = drawn.Leaving( *m_connectFrom, from.at ); from.block = drawn.OwnBlock( *m_connectFrom );
+    std::vector<R::POINT> route;
     if( toEndpoint )
     {
-        to.at = drawn.Anchor( *toEndpoint, from.at.x );
-        std::tie( to.dx, to.dy ) = drawn.Leaving( *toEndpoint, to.at ); to.block = drawn.OwnBlock( *toEndpoint );
+        static const std::string PREVIEW = "connect-preview";
+        const LEVEL joined = withConnection( m_level, PREVIEW, *m_connectFrom, *toEndpoint );
+        const auto laid = layoutOf( &joined, current() );
+        if( const R::LINK* link = laid.Link( PREVIEW ) ) route = laid.Route( *link, 1 );
     }
-    else to.at = pointer;
-    std::vector<std::vector<R::POINT>> others;
-    for( const auto& link : drawn.Links() )
-        for( int i = 1; i < static_cast<int>( link.endpoints.size() ); ++i ) others.push_back( drawn.Route( link, i ) );
-    // The router's result is kept in a local: a range-for over a member of a temporary would outlive the temporary (C++20).
-    const auto routed = R::RouteLegs( drawn.Rects(), others, { R::ROUTE_LEG{ from, to } } );
+    else
+    {
+        const R::POINT pointer = toDiagram( m_pointer );
+        R::ROUTE_END from, to;
+        from.at = drawn.Anchor( *m_connectFrom, pointer.x );
+        std::tie( from.dx, from.dy ) = drawn.Leaving( *m_connectFrom, from.at ); from.block = drawn.OwnBlock( *m_connectFrom );
+        to.at = pointer;
+        std::vector<std::vector<R::POINT>> others;
+        for( const auto& link : drawn.Links() )
+            for( int i = 1; i < static_cast<int>( link.endpoints.size() ); ++i ) others.push_back( drawn.Route( link, i ) );
+        // The router's result is kept in a local: a range-for over a member of a temporary would outlive the temporary (C++20).
+        const auto routed = R::RouteLegs( drawn.Rects(), others, { R::ROUTE_LEG{ from, to } }, drawn.Area() );
+        if( !routed.empty() ) route = routed.front();
+    }
     std::vector<wxPoint> path;
-    if( !routed.empty() ) for( const auto& point : routed.front() ) path.push_back( toScreen( point ) );
-    if( path.size() < 2 ) return path;
-    std::vector<wxRect> blocks, names;
-    for( const auto& node : drawn.Nodes() ) blocks.push_back( toScreen( drawn.Rect( node.id ) ) );
+    for( const auto& point : route ) path.push_back( toScreen( point ) );
+    return path;
+}
+std::vector<wxRect> RECURSIVE_DIAGRAM_FRAME::connectionHandles( const R::LEVEL_LAYOUT& drawn ) const
+{
+    // A selected connection shows a handle at each of its ends (owner default n7fb0ee3089916669, sketch A3), so it stays apart
+    // from a data connection, which is drawn blue too: on the wire just outside a port's square, or on the block's edge for an
+    // end on a block itself. Handles are 9 DIP squares, like a selected block's.
+    std::vector<wxRect> result;
+    if( m_connectionId.empty() || !m_ready || !current() ) return result;
+    const R::LINK* link = drawn.Link( m_connectionId );
+    if( !link ) return result;
+    const int half = FromDIP( 4 ), beyond = FromDIP( 6 ) + half + 1;
+    std::vector<wxPoint> centres;
+    for( int i = 1; i < static_cast<int>( link->endpoints.size() ); ++i )
     {
-        wxClientDC dc( m_canvas );
-        for( const auto& node : drawn.Nodes() ) for( const wxRect& name : portNames( dc, drawn, node.id ) ) names.push_back( name );
-    }
-    for( const auto& name : boundaryNames( drawn ) ) names.push_back( name.rect );
-    auto crosses = [&]( const std::vector<wxPoint>& points )
-    {
-        for( size_t i = 1; i < points.size(); ++i )
+        std::vector<wxPoint> points;
+        for( const auto& point : drawn.Route( *link, i ) ) points.push_back( toScreen( point ) );
+        if( points.size() < 2 ) continue;
+        for( auto [end, endpoint] : { std::pair<size_t, int>{ 0, 0 }, std::pair<size_t, int>{ points.size() - 1, i } } )
         {
-            const wxRect run( wxPoint( std::min( points[i - 1].x, points[i].x ), std::min( points[i - 1].y, points[i].y ) ),
-                              wxPoint( std::max( points[i - 1].x, points[i].x ), std::max( points[i - 1].y, points[i].y ) ) );
-            for( const wxRect& block : blocks ) if( run.Intersects( wxRect( block ).Deflate( 1 ) ) ) return true;
-            for( const wxRect& name : names ) if( run.Intersects( name ) ) return true;
+            wxPoint at = points[end];
+            const wxPoint toward = points[end == 0 ? 1 : end - 1];
+            const auto& binding = link->endpoints[endpoint];
+            if( binding.has_interface_id() && drawn.Port( binding.block_id(), binding.interface_id() ) )
+            {
+                const int length = std::abs( toward.x - at.x ) + std::abs( toward.y - at.y ), step = std::min( beyond, length );
+                at.x += ( ( toward.x > at.x ) - ( toward.x < at.x ) ) * step; at.y += ( ( toward.y > at.y ) - ( toward.y < at.y ) ) * step;
+            }
+            if( std::find( centres.begin(), centres.end(), at ) == centres.end() ) centres.push_back( at );
         }
-        return false;
-    };
-    if( !crosses( path ) ) return path;
-    std::vector<wxRect> obstacles;
-    for( const wxRect& block : blocks ) obstacles.push_back( wxRect( block ).Inflate( FromDIP( 8 ) ) );
-    for( const wxRect& name : names ) obstacles.push_back( wxRect( name ).Inflate( FromDIP( 2 ) ) );
-    const int stub = FromDIP( 12 );
-    const wxPoint start = path.front(), goal = path.back();
-    const wxPoint startOut = start + wxPoint( from.dx * stub, from.dy * stub );
-    const bool fixedEnd = toEndpoint.has_value();
-    const wxPoint goalOut = fixedEnd ? goal + wxPoint( to.dx * stub, to.dy * stub ) : goal;
-    const wxRect around = wxRect( wxPoint( 0, 0 ), m_canvas->GetClientSize() ).Inflate( FromDIP( 200 ) );
-    auto middle = R::OrthogonalDetour( obstacles, startOut, wxPoint( from.dx, from.dy ), goalOut,
-                                       fixedEnd ? wxPoint( -to.dx, -to.dy ) : wxPoint(), around );
-    if( middle.empty() ) return path;
-    std::vector<wxPoint> detour{ start };
-    for( const wxPoint& point : middle ) if( detour.back() != point ) detour.push_back( point );
-    if( detour.back() != goal ) detour.push_back( goal );
-    // Only the corners stay.
-    std::vector<wxPoint> corners;
-    for( const wxPoint& point : detour )
-    {
-        if( corners.size() >= 2 )
-        {
-            const wxPoint &a = corners[corners.size() - 2], &b = corners.back();
-            if( ( a.x == b.x && b.x == point.x ) || ( a.y == b.y && b.y == point.y ) ) corners.pop_back();
-        }
-        corners.push_back( point );
     }
-    return corners;
+    for( const wxPoint& centre : centres ) result.emplace_back( centre.x - half, centre.y - half, 2 * half + 1, 2 * half + 1 );
+    return result;
 }
 
 void RECURSIVE_DIAGRAM_FRAME::updateCanvasTip()
@@ -2818,7 +3137,27 @@ wxString RECURSIVE_DIAGRAM_FRAME::canvasTipAt( const R::LEVEL_LAYOUT& drawn, con
     for( const auto& [block, chips] : drawnChips() )
         if( chips.more && chips.more->Contains( point ) )
             if( const R::NODE* node = drawn.Node( block ) ) return R::MoreToolTip( *node, chips );
+    // A note too small for its text, as in the compact window, shows its whole text, as a shortened caption does (review of the
+    // mockup audit's pass 5, M1-13). The note drawn last, on top, wins.
+    if( auto text = shortenedNoteAt( point ) ) return *text;
     return wxString();
+}
+
+std::optional<wxString> RECURSIVE_DIAGRAM_FRAME::shortenedNoteAt( const wxPoint& point ) const
+{
+    wxClientDC dc( m_canvas ); dc.SetFont( GetFont() );
+    const auto& notes = visibleNotes();
+    for( int i = notes.size() - 1; i >= 0; --i )
+    {
+        const auto& note = notes.Get( i );
+        if( note.target_kind() != D::DAT_CANVAS && !note.has_position() ) continue;
+        wxRect box = noteRect( note, i );
+        if( !box.Contains( point ) ) continue;
+        box.Deflate( 8 ); bool shortened = false;
+        R::NoteLines( dc, Text( note.text() ), box.width, box.GetBottom() - box.y, &shortened );
+        return shortened ? std::optional<wxString>( Text( note.text() ) ) : std::nullopt;
+    }
+    return std::nullopt;
 }
 
 std::optional<wxRect> RECURSIVE_DIAGRAM_FRAME::connectHint( const R::LEVEL_LAYOUT& drawn, const std::vector<wxPoint>& preview ) const
@@ -3104,10 +3443,36 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
     {
         dc.SetPen( wxPen( muted, 1, wxPENSTYLE_SHORT_DASH ) ); dc.SetBrush( *wxTRANSPARENT_BRUSH ); dc.DrawRectangle( toScreen( *frame ) );
     }
+    dc.SetFont( GetFont() );
+    const std::vector<CAPTION_PLACE> captions = connectionCaptions( drawn, dc.GetSize() );
+    const auto& notes = visibleNotes();
+    // A comment with its own place on the canvas is attached to its block or connection by a short dashed leader in the
+    // canvas's ink, as the approved walkthrough 03 draws the comment on Memory interface (mockup audit M1-14; M1-16: the review
+    // of pass 8 found the amber leader of the first repair an unapproved difference). Leaders are drawn first, under the wires,
+    // so a leader that finds no free way to its element never covers a connection.
+    for( int i = 0; i < notes.size(); ++i )
+    {
+        const auto& note = notes.Get( i );
+        if( note.target_kind() == D::DAT_CANVAS || !note.has_position() ) continue;
+        if( auto leader = noteLeader( drawn, captions, note, i ) )
+        {
+            dc.SetPen( wxPen( foreground, 1, wxPENSTYLE_SHORT_DASH ) );
+            dc.DrawLine( leader->first, leader->second );
+        }
+    }
     for( const auto& link : drawn.Links() )
     {
+        // A connection shows its domain (owner default n7fb0ee3089916669): power red, data blue, analog dashed grey, any other
+        // in the neutral wire colour; the selected one is drawn in the accent with a handle at each end.
         bool highlighted = link.id == m_connectionId;
-        dc.SetPen( wxPen( highlighted ? accent : muted, highlighted ? 2 : 1 ) );
+        const R::WIRE_LOOK look = R::WireLook( link.domain, colours );
+        wxPen pen( highlighted ? accent : look.colour, highlighted ? 2 : 1 );
+        if( !highlighted && look.dashed )
+        {
+            static const wxDash DASHES[] = { 6, 4 };
+            pen.SetStyle( wxPENSTYLE_USER_DASH ); pen.SetDashes( 2, DASHES );
+        }
+        dc.SetPen( pen );
         for( int i = 1; i < static_cast<int>( link.endpoints.size() ); ++i )
         {
             // Port side is a presentation choice toward the peer, not an inferred
@@ -3124,7 +3489,8 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
     for( const auto& arrow : arrows )
     {
         bool highlighted = arrow.connection == m_connectionId;
-        wxColour colour = highlighted ? accent : muted;
+        const R::LINK* owner = drawn.Link( arrow.connection );
+        wxColour colour = highlighted ? accent : owner ? R::WireLook( owner->domain, colours ).colour : muted;
         double dx = arrow.tip.x - arrow.from.x, dy = arrow.tip.y - arrow.from.y, length = std::hypot( dx, dy );
         if( length < 1 ) continue;
         double half = FromDIP( 5 ) / length;
@@ -3170,7 +3536,7 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
     // Connection captions are drawn after the blocks and their resize handles, each in a clear place beside its connection
     // on a knocked-out background (design QA P2-7).
     dc.SetFont( GetFont() ); dc.SetTextForeground( foreground );
-    for( const auto& place : connectionCaptions( drawn, dc.GetSize() ) )
+    for( const auto& place : captions )
     {
         if( !place.shown ) continue;
         dc.SetPen( *wxTRANSPARENT_PEN ); dc.SetBrush( wxBrush( background ) ); dc.DrawRectangle( wxRect( place.rect ).Inflate( 1 ) );
@@ -3203,7 +3569,9 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
             dc.SetFont( GetFont() );
         }
     }
-    const auto& notes = visibleNotes();
+    // The selected connection's end handles, drawn as a selected block's handles are (owner default n7fb0ee3089916669).
+    dc.SetPen( wxPen( accent, 1 ) ); dc.SetBrush( wxBrush( colours.handleFill ) );
+    for( const wxRect& handle : connectionHandles( drawn ) ) dc.DrawRectangle( handle );
     for( int i = 0; i < notes.size(); ++i )
     {
         const auto& note = notes.Get( i );
@@ -3219,8 +3587,13 @@ void RECURSIVE_DIAGRAM_FRAME::paint( wxDC& dc )
             }
         }
         if( note.target_kind() != D::DAT_CANVAS && !note.has_position() ) continue;
+        // A note in the level's free space is drawn in the accent while it is the comment being edited. A comment attached to its
+        // block or connection keeps the note's own colours while its element is selected, as walkthrough 03 draws the comment on
+        // the selected Memory interface: the element's own accent shows the selection (mockup audit M1-16).
+        const bool attached = note.target_kind() != D::DAT_CANVAS && !note.has_unresolved_reason();
+        const wxColour outline = note.id() == m_commentId && !attached ? accent : wxColour( 176, 142, 52 );
         wxRect box = noteRect( note, i );
-        dc.SetPen( wxPen( note.id() == m_commentId ? accent : wxColour( 176, 142, 52 ), 1 ) );
+        dc.SetPen( wxPen( outline, 1 ) );
         dc.SetBrush( wxBrush( dark ? wxColour( 76, 66, 34 ) : wxColour( 255, 247, 213 ) ) ); dc.DrawRectangle( box );
         box.Deflate( 8 ); dc.SetClippingRegion( box );
         int y = box.y;
@@ -3355,8 +3728,20 @@ void RECURSIVE_DIAGRAM_FRAME::click( wxMouseEvent& event )
     for( int i = notes.size() - 1; i >= 0; --i )
     {
         const auto& note = notes.Get( i );
-        if( note.target_kind() != D::DAT_CANVAS || !noteRect( note, i ).Contains( point ) ) continue;
-        select( scope ); m_commentId = note.id(); m_newComment = false; refresh();
+        if( ( note.target_kind() != D::DAT_CANVAS && !note.has_position() ) || !noteRect( note, i ).Contains( point ) ) continue;
+        // A comment drawn beside its block or connection (M1-14) selects that element, with Comments on this comment; a note
+        // in the level's free space, or a comment whose element is gone, belongs to the level.
+        bool level = note.target_kind() == D::DAT_CANVAS || note.has_unresolved_reason();
+        if( level ) select( scope );
+        else if( note.target_kind() == D::DAT_CONNECTION ) selectConnection( note.target_id() );
+        else select( note.target_id() );
+        // Comments lists this comment only while its element is the selection; otherwise the press selects the level.
+        if( !level && ( note.target_kind() == D::DAT_CONNECTION ? m_connectionId != note.target_id()
+                                                                : m_selected != note.target_id() || !m_connectionId.empty() ) )
+        { select( scope ); refresh(); return; }
+        // Comments, with this note's comment, is scrolled into view (M1-14): a connection with several details and three
+        // requirements puts it below the inspector's fold.
+        m_commentId = note.id(); m_newComment = false; m_revealComments = true; refresh();
         if( event.LeftDClick() ) { m_comments->SetFocus(); return; }
         wxRect box = noteRect( note, i ); m_noteStartX = box.x / m_scale + m_origin.m_x; m_noteStartY = box.y / m_scale + m_origin.m_y;
         m_dragStart = point; m_dragBefore = m_level; m_drag = DRAG::NOTE; m_dragMoved = false;
@@ -3423,8 +3808,9 @@ void RECURSIVE_DIAGRAM_FRAME::dragTo( const wxPoint& point )
     {
         for( auto& note : *m_level.mutable_scope()->mutable_local_diagram()->mutable_annotations() ) if( note.id() == m_commentId )
         {
-            note.mutable_position()->set_x( std::to_string( m_noteStartX + delta.x / m_scale ) );
-            note.mutable_position()->set_y( std::to_string( m_noteStartY + delta.y / m_scale ) );
+            // In canonical diagram units ("330", not "330.000000"), as every other stored coordinate is written.
+            note.mutable_position()->set_x( R::FormatUnits( std::llround( ( m_noteStartX + delta.x / m_scale ) * Q ) ) );
+            note.mutable_position()->set_y( R::FormatUnits( std::llround( ( m_noteStartY + delta.y / m_scale ) * Q ) ) );
         }
         m_rendered = false; m_canvas->Refresh(); return;
     }

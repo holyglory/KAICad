@@ -25,24 +25,28 @@ class DIAGRAM_HISTORY_ROWS : public wxVListBox
 {
 public:
     explicit DIAGRAM_HISTORY_ROWS( wxWindow* parent ) : wxVListBox( parent, wxID_ANY )
-    { SetName( "DiagramHistoryRevisions" ); SetMinSize( FromDIP( wxSize( 250, 120 ) ) ); }
+    {
+        SetName( "DiagramHistoryRevisions" ); SetMinSize( FromDIP( wxSize( 250, 120 ) ) );
+        // A row's height follows the list's width: the saved marker and the author continue on the next line rather than being
+        // cut (mockup audit M1-12), so a width change measures the rows again.
+        Bind( wxEVT_SIZE, [this]( wxSizeEvent& event ) { if( GetClientSize().x != m_width ) { m_width = GetClientSize().x; RefreshAll(); } event.Skip(); } );
+    }
     std::vector<D::DiagramHistoryEntryData> entries;
-protected:
-    wxCoord OnMeasureItem( size_t ) const override { return GetCharHeight() * 2 + FromDIP( 18 ); }
-    void OnDrawItem( wxDC& dc, const wxRect& bounds, size_t index ) const override
+    /// Row aIndex in the approved two-line pattern: the version, the saved marker and the author, and the first line of the
+    /// change summary.
+    DIAGRAM_HISTORY_ROW Row( size_t index ) const
     {
         const auto& entry = entries[index];
-        dc.SetTextForeground( wxSystemSettings::GetColour( IsSelected( index ) ? wxSYS_COLOUR_HIGHLIGHTTEXT : wxSYS_COLOUR_WINDOWTEXT ) );
-        wxRect row = bounds; row.Deflate( FromDIP( 10 ), FromDIP( 6 ) );
-        dc.SetFont( GetFont().Bold() );
-        wxString version = wxString::Format( "v%u", entry.version() ); dc.DrawText( version, row.GetTopLeft() );
-        int inset = std::max( FromDIP( 50 ), dc.GetTextExtent( version ).x + FromDIP( 12 ) );
-        dc.SetFont( GetFont() );
         wxString actor = entry.is_context() ? _( "Saved" ) + wxS( " · " ) : wxString(); actor += text( entry.origin().actor() );
-        dc.DrawText( wxControl::Ellipsize( actor, dc, wxELLIPSIZE_END, std::max( 1, row.width - inset ) ), row.x + inset, row.y );
-        dc.DrawText( wxControl::Ellipsize( text( entry.origin().summary() ).BeforeFirst( '\n' ), dc, wxELLIPSIZE_END,
-            std::max( 1, row.width - inset ) ), row.x + inset, row.y + GetCharHeight() + FromDIP( 3 ) );
+        return { wxString::Format( "v%u", entry.version() ), actor, text( entry.origin().summary() ).BeforeFirst( '\n' ) };
     }
+protected:
+    wxCoord OnMeasureItem( size_t index ) const override
+    { return index < entries.size() ? HistoryRowHeight( this, GetClientSize().x, Row( index ) ) : GetCharHeight() * 2 + FromDIP( 18 ); }
+    void OnDrawItem( wxDC& dc, const wxRect& bounds, size_t index ) const override
+    { if( index < entries.size() ) DrawHistoryRow( dc, this, LayHistoryRow( this, bounds, Row( index ) ), IsSelected( index ) ); }
+private:
+    int m_width = -1;
 };
 
 PANEL_DIAGRAM_HISTORY::PANEL_DIAGRAM_HISTORY( wxWindow* parent, ACTIONS actions ) :
@@ -156,6 +160,13 @@ bool PANEL_DIAGRAM_HISTORY::SetPage( const PAGE& page )
 void PANEL_DIAGRAM_HISTORY::select()
 {
     m_comparisonReady = false;
+    // The list draws its rows itself; assistive technology reads the selected row whole from the list's name.
+    if( int selected = m_rows->GetSelection(); selected >= 0 && static_cast<size_t>( selected ) < m_rows->entries.size() )
+    {
+        const DIAGRAM_HISTORY_ROW row = m_rows->Row( static_cast<size_t>( selected ) );
+        DIAGRAM_LOOK::NameForAssistiveTechnology( m_rows, row.version + wxS( " · " ) + row.first
+                                                  + ( row.second.IsEmpty() ? wxString() : wxS( " · " ) + row.second ) );
+    }
     if( auto selected = Inspected() ) { m_details->ChangeValue( _( "Loading comparison…" ) ); m_actions.inspect( *selected ); }
     updateActions();
 }

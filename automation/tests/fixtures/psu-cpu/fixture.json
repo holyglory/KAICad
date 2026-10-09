@@ -8,7 +8,7 @@
     "hardware.xml": "67e7a4c7653069edbc0b8891618acfa517005d52d9084e71e036dda6250a02e5",
     "design.engineering.xml": "76d652b344286013642a916140dbab2df1aaf2a6a5474d0cc486aa1eb0d8e8e4",
     "flat-structure.engineering.xml": "cc7996309d3d872a59a4cccc28830a1935a3f5038f914b15789512d67d84be81",
-    "system.blocks.xml": "008f91cfa59041c88b6a584be077b65707a0aefa68ab1c2390995658b77009b3",
+    "system.blocks.xml": "3d142b0e11487c10fed007ca16bcf594805ca4c570e10f2563408fbc715d1ce7",
     "expected-native.json": "6b47b0ad936bdae8cee0657cd892f32748c7a25a42ebaa98be8fe3bb926265fe",
     "expected-realization.json": "1f39d5c6627926981424efe8dbf754da34fc799f7bf1382aaf7983419b5574a1",
     "expected-migration.json": "2c5ec3376acaa1e325a4f7799dba0e000aceec62288adee676ba54b046501196"

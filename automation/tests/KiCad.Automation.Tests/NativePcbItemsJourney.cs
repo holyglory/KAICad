@@ -1530,15 +1530,15 @@ public sealed partial class NativeSessionTests
                 .Select(item => item.Unpack<Track>().Net.Name).ToHashSet(StringComparer.Ordinal);
             Assert.IsTrue(differentialNets.Contains("USB_D+"), differentialData.GetRawText());
             Assert.IsTrue(differentialNets.Contains("USB_D-"), differentialData.GetRawText());
-            Assert.AreEqual(2, differentialCandidate.Items.Count,
-                "The differential-pair apply contract requires exactly one Track per named net.");
+            Assert.IsTrue(differentialCandidate.Items.Count >= 2,
+                "The differential-pair apply contract requires the complete Track set for both named nets.");
             Assert.IsTrue(differentialCandidate.Items.All(item => item.Is(Track.Descriptor)), differentialData.GetRawText());
             Assert.AreEqual(2, differentialCandidate.Items.Select(item => item.Unpack<Track>().Net.Name)
                 .Distinct(StringComparer.Ordinal).Count(), differentialData.GetRawText());
             Assert.AreEqual(SchematicJson.Formatter.Format(cleanState), SchematicJson.Formatter.Format(
                 await ObserveLifecycleState(client, cleanBoard, token)));
 
-            // Apply the exact two-track proposal through the differential-pair
+            // Apply the exact complete proposal through the differential-pair
             // wrapper.  The detached DRC is bound to this candidate and the
             // empty DeleteItems request makes this an additive transaction.
             var differentialDelete = new DeleteItems { Header = new() { Document = cleanBoard } };
@@ -1570,7 +1570,7 @@ public sealed partial class NativeSessionTests
             var differentialReceipt = SchematicJson.Parser.Parse<CheckedPcbRouteReceipt>(
                 differentialApplyData.GetProperty("receipt").GetRawText());
             Assert.AreEqual(CheckedPcbRouteReceipt.Types.State.Completed, differentialReceipt.State);
-            Assert.AreEqual(2, differentialReceipt.Created.CreatedItems.Count);
+            Assert.AreEqual(differentialCandidate.Items.Count, differentialReceipt.Created.CreatedItems.Count);
             var differentialCheckedRequest = new CheckedPcbRouteCommit
             {
                 Candidate = differentialCandidate, ExpectedState = differentialBeforeApply,

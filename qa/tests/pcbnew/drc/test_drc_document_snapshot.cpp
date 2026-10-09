@@ -62,6 +62,18 @@ BOOST_AUTO_TEST_CASE( StandaloneBoardKeepsIdentityGeometryAndUnsavedRules )
     BOOST_CHECK_EQUAL( source.GetTimeStamp(), sequence );
 }
 
+BOOST_AUTO_TEST_CASE( ViaStitchSeveritySurvivesDetachedSettingsCopy )
+{
+    BOARD source;
+    source.SetFileName( "via-stitch-severity.kicad_pcb" );
+    BOOST_REQUIRE( source.GetDesignSettings().m_DRCSeverities.contains( DRCE_VIA_STITCH_OVERLAP ) );
+    const auto before = source.GetDesignSettings().CaptureCurrentState();
+
+    auto snapshot = PCB_DRC_DOCUMENT_SNAPSHOT::Capture( source );
+
+    BOOST_CHECK( snapshot->GetBoard().GetDesignSettings().CaptureCurrentState() == before );
+}
+
 BOOST_AUTO_TEST_CASE( ProjectBoardKeepsEffectiveExclusionsWithoutBorrowingItsOwner )
 {
     KI_TEST::TEMPORARY_DIRECTORY scratch( "drc_document_" + KIID().AsStdString(), "" );

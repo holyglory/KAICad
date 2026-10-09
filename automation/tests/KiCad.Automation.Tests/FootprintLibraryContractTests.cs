@@ -368,7 +368,7 @@ public sealed class FootprintLibraryContractTests
             Revision = new() { Epoch = processEpoch, Sequence = sequence }
         };
         state.DetachedDefinitionSha256 = new string('b', 64);
-        state.DependencyBaselines.Add(new()
+        state.DependencyBaselines.Add(new NativeCapabilityLibrarySnapshotDependencyBaseline
         {
             Path = "/tmp/Fixture.kicad_mod", Known = true, Exists = true,
             Sha256 = new string('f', 64), Bytes = 42

@@ -343,7 +343,8 @@ BOOST_AUTO_TEST_CASE( DesignRuleType )
                                 DRCE_UNMIRRORED_TEXT_ON_BACK_LAYER,
                                 DRCE_MISSING_TUNING_PROFILE,
                                 DRCE_TRACK_ON_POST_MACHINED_LAYER,
-                                DRCE_TRACK_NOT_CENTERED_ON_VIA } )
+                                DRCE_TRACK_NOT_CENTERED_ON_VIA,
+                                DRCE_VIA_STITCH_OVERLAP } )
     {
         ProtoType proto = ToProtoEnum<PCB_DRC_CODE, ProtoType>( value );
         BOOST_REQUIRE( proto != ProtoType::DRCET_UNKNOWN );

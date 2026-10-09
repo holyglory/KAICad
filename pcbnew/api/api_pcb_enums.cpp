@@ -2202,6 +2202,7 @@ DrcErrorType ToProtoEnum( PCB_DRC_CODE aValue )
     case DRCE_TUNING_PROFILE_IMPLICIT_RULES: return DrcErrorType::DRCET_TUNING_PROFILE_IMPLICIT_RULES;
     case DRCE_TRACK_ON_POST_MACHINED_LAYER:  return DrcErrorType::DRCET_TRACK_ON_POST_MACHINED_LAYER;
     case DRCE_TRACK_NOT_CENTERED_ON_VIA:     return DrcErrorType::DRCET_TRACK_NOT_CENTERED_ON_VIA;
+    case DRCE_VIA_STITCH_OVERLAP:             return DrcErrorType::DRCET_VIA_STITCH_OVERLAP;
     default:
         return DrcErrorType::DRCET_UNKNOWN;
     }
@@ -2289,6 +2290,7 @@ PCB_DRC_CODE FromProtoEnum( DrcErrorType aValue )
     case DrcErrorType::DRCET_TUNING_PROFILE_IMPLICIT_RULES:       return DRCE_TUNING_PROFILE_IMPLICIT_RULES;
     case DrcErrorType::DRCET_TRACK_ON_POST_MACHINED_LAYER:        return DRCE_TRACK_ON_POST_MACHINED_LAYER;
     case DrcErrorType::DRCET_TRACK_NOT_CENTERED_ON_VIA:           return DRCE_TRACK_NOT_CENTERED_ON_VIA;
+    case DrcErrorType::DRCET_VIA_STITCH_OVERLAP:                  return DRCE_VIA_STITCH_OVERLAP;
 
     case DrcErrorType::DRCET_UNKNOWN:
     default:

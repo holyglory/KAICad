@@ -66,6 +66,9 @@ public sealed partial class NativeSessionTests
             BoardDesignRulesResponse boardRules = await client.InvokeAsync<GetBoardDesignRules, BoardDesignRulesResponse>(
                 boardRulesRequest, token);
             originalBoardRules = boardRules.Rules.Clone();
+            DrcSeveritySetting originalViaStitch = originalBoardRules.Severities.SingleOrDefault(
+                setting => setting.RuleType == DrcErrorType.DrcetViaStitchOverlap)
+                ?? throw new AssertFailedException("GetBoardDesignRules must expose via-stitch overlap severity.");
             await WriteEvidence("board-rules-before.json", new
             {
                 request = BoardJson.Formatter.Format(boardRulesRequest),
@@ -79,6 +82,11 @@ public sealed partial class NativeSessionTests
             BoardDesignRulesResponse tunedRules = await client.InvokeAsync<SetBoardDesignRules, BoardDesignRulesResponse>(
                 tunedRulesRequest, token);
             boardRulesTuned = true;
+            DrcSeveritySetting tunedViaStitch = tunedRules.Rules.Severities.SingleOrDefault(
+                setting => setting.RuleType == DrcErrorType.DrcetViaStitchOverlap)
+                ?? throw new AssertFailedException("SetBoardDesignRules must retain via-stitch overlap severity.");
+            Assert.AreEqual(originalViaStitch.Severity, tunedViaStitch.Severity,
+                "A GetBoardDesignRules/SetBoardDesignRules round trip must preserve via-stitch overlap severity.");
             await WriteEvidence("board-rules-tuned.json", new
             {
                 request = BoardJson.Formatter.Format(tunedRulesRequest),

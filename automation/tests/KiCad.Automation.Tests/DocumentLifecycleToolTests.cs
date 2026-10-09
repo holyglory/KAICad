@@ -162,12 +162,77 @@ public sealed class DocumentLifecycleToolTests
         finally { Directory.Delete(directory, true); }
     }
 
+    [TestMethod]
+    public async Task RevertRequiresCompleteObservationAndVerifiesCleanState()
+    {
+        string directory = Directory.CreateTempSubdirectory("lifecycle-revert-").FullName;
+        try
+        {
+            var transport = new LifecycleTransport();
+            transport.Session.ProjectPath = Path.Combine(directory, "fixture.kicad_pro");
+            var registry = new InstanceRegistry(transport, directory);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "native.sock")), transport.Session.InstanceId);
+            var tool = new DocumentLifecycleTools(registry);
+            var incomplete = State(directory, transport.Session.Epoch);
+            incomplete.NativeContentDirty = true;
+            string operationId = Guid.NewGuid().ToString("D");
+            var refused = await tool.Revert(transport.Session.InstanceId, SchematicJson.Formatter.Format(incomplete), operationId, default);
+            Assert.IsTrue(refused.IsError);
+            Assert.AreEqual("incomplete_revert_observation", refused.StructuredContent!.Value.GetProperty("code").GetString());
+            Assert.AreEqual(0, transport.RevertCalls, "Incomplete observations must be refused before the legacy native revert command.");
+
+            var complete = CompleteState(directory, transport.Session.Epoch, dirty: true);
+            transport.LifecycleState = complete.Clone();
+            var reverted = await tool.Revert(transport.Session.InstanceId, SchematicJson.Formatter.Format(complete), operationId, default);
+            Assert.IsFalse(reverted.IsError, reverted.StructuredContent?.GetRawText());
+            Assert.IsTrue(reverted.StructuredContent!.Value.GetProperty("committed").GetBoolean());
+            Assert.IsTrue(reverted.StructuredContent.Value.GetProperty("postStateVerified").GetBoolean());
+            Assert.IsFalse(reverted.StructuredContent.Value.GetProperty("nativeReceiptAvailable").GetBoolean());
+            Assert.AreEqual(1, transport.RevertCalls);
+
+            var replay = await tool.Revert(transport.Session.InstanceId, SchematicJson.Formatter.Format(complete), operationId, default);
+            Assert.IsFalse(replay.IsError, replay.StructuredContent?.GetRawText());
+            Assert.IsTrue(replay.StructuredContent!.Value.GetProperty("replayed").GetBoolean());
+            Assert.AreEqual(1, transport.RevertCalls, "Exact replay must use the process-local receipt instead of dispatching a second destructive reload.");
+
+            var receipt = await tool.RevertReceipt(transport.Session.InstanceId, transport.Session.Epoch, operationId, default);
+            Assert.IsFalse(receipt.IsError, receipt.StructuredContent?.GetRawText());
+            Assert.IsTrue(receipt.StructuredContent!.Value.GetProperty("found").GetBoolean());
+            Assert.AreEqual("completed", receipt.StructuredContent.Value.GetProperty("outcome").GetString());
+
+            var changed = complete.Clone(); changed.StateSha256 = new string('b', 64);
+            var reused = await tool.Revert(transport.Session.InstanceId, SchematicJson.Formatter.Format(changed), operationId, default);
+            Assert.IsTrue(reused.IsError);
+            Assert.AreEqual("operation_reused", reused.StructuredContent!.Value.GetProperty("code").GetString());
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
     private static DocumentLifecycleState State(string directory, string epoch) => new()
     {
         Document = new() { Type = (DocumentType)3, BoardFilename = "fixture.kicad_pcb",
             Project = new() { Name = "fixture", Path = directory } },
         ProcessEpoch = epoch, NativeIdentity = Guid.NewGuid().ToString("D"),
         Revision = new() { Epoch = Guid.NewGuid().ToString("D"), Sequence = 5 }, StateSha256 = new string('a', 64)
+    };
+
+    private static DocumentLifecycleState CompleteState(string directory, string epoch, bool dirty) => new()
+    {
+        Document = new() { Type = (DocumentType)3, BoardFilename = "fixture.kicad_pcb",
+            Project = new() { Name = "fixture", Path = directory } },
+        ProcessEpoch = epoch, NativeIdentity = Guid.NewGuid().ToString("D"),
+        Revision = new() { Epoch = Guid.NewGuid().ToString("D"), Sequence = 5 }, StateSha256 = new string('a', 64),
+        Scope = DocumentLifecycleScope.DlsPcb, NativeContentDirty = dirty,
+        CompleteChangeTracking = true, DiskBaselineChecked = true,
+        NativeFiles = { Path.Combine(directory, "fixture.kicad_pcb") },
+        FileBaselines = { new NativeFileBaselineState
+        {
+            Path = Path.Combine(directory, "fixture.kicad_pcb"),
+            BaselinePath = Path.Combine(directory, "fixture.kicad_pcb"),
+            BaselineKnown = true, BaselineExists = true, BaselineSha256 = new string('c', 64), BaselineBytes = 10,
+            CurrentKnown = true, CurrentExists = true, CurrentSha256 = new string('c', 64), CurrentBytes = 10,
+            Status = NativeFileBaselineStatus.NfbsUnchanged
+        } }
     };
 
     private sealed class LifecycleTransport : INativeTransport
@@ -178,6 +243,8 @@ public sealed class DocumentLifecycleToolTests
         public bool WrongTarget { get; set; }
         public NngException? Failure { get; set; }
         public string? ReceiptError { get; set; }
+        public int RevertCalls { get; private set; }
+        public DocumentLifecycleState LifecycleState { get; set; } = new();
         private LifecycleOperationResult? result;
         public Task<byte[]> ExchangeAsync(string endpoint, byte[] request, TimeSpan timeout, CancellationToken cancellationToken = default)
         {
@@ -203,6 +270,18 @@ public sealed class DocumentLifecycleToolTests
                 result = new() { Document = close.Document.Clone(), OperationId = close.OperationId,
                     ProcessEpoch = Session.Epoch, Status = Status };
                 if (WrongTarget) result.Document.BoardFilename = "other.kicad_pcb";
+            }
+            else if (envelope.Message.Is(ReadDocumentLifecycleState.Descriptor))
+            {
+                return Task.FromResult(new ApiResponse { Header = new() { KicadToken = Session.Epoch },
+                    Status = new() { Status = (ApiStatusCode)1 }, Message = Any.Pack(LifecycleState.Clone()) }.ToByteArray());
+            }
+            else if (envelope.Message.Is(RevertDocument.Descriptor))
+            {
+                ++RevertCalls;
+                LifecycleState.NativeContentDirty = false;
+                return Task.FromResult(new ApiResponse { Header = new() { KicadToken = Session.Epoch },
+                    Status = new() { Status = (ApiStatusCode)1 }, Message = Any.Pack(new Empty()) }.ToByteArray());
             }
             else return Session.ExchangeAsync(endpoint, request, timeout, cancellationToken);
             return Task.FromResult(new ApiResponse { Header = new() { KicadToken = Session.Epoch },

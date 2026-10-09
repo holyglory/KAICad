@@ -1,6 +1,7 @@
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using Kiapi.Common;
+using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
 using KiCad.Automation.Mcp;
 using KiCad.Automation.Native;
@@ -276,7 +277,7 @@ public sealed class DocumentLifecycleToolTests
                 return Task.FromResult(new ApiResponse { Header = new() { KicadToken = Session.Epoch },
                     Status = new() { Status = (ApiStatusCode)1 }, Message = Any.Pack(LifecycleState.Clone()) }.ToByteArray());
             }
-            else if (envelope.Message.Is(RevertDocument.Descriptor))
+            else if (envelope.Message.TypeUrl == "type.googleapis.com/kiapi.common.commands.RevertDocument")
             {
                 ++RevertCalls;
                 LifecycleState.NativeContentDirty = false;

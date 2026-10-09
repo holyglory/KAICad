@@ -75,7 +75,8 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
 
     [McpServerTool(Name = "kicad_schematic_export_receipt", ReadOnly = true),
      Description("Read an MCP-process schematic export receipt by operation ID without contacting KiCad. A missing receipt is found=false with unknown-native-outcome; receipts do not survive MCP restart and never authorize an automatic retry."),
-     KiCadCapability("schematic-manufacturing", "mcp-process-receipt", "operation ID, instance identity and process epoch")]
+     KiCadCapability("schematic-manufacturing", "mcp-process-receipt", "operation ID, instance identity and process epoch"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Receipt(string instanceId, string operationId, string processEpoch,
         CancellationToken cancellationToken)
     {

@@ -1159,6 +1159,80 @@ public sealed partial class NativeSessionTests
             var renderAfter = SchematicJson.Parser.Parse<DocumentLifecycleState>(renderData.GetProperty("afterState").GetString()!);
             Assert.AreEqual(svgState, SchematicJson.Formatter.Format(renderAfter));
 
+            // The metadata-only peer path must exercise the same native
+            // renderer while keeping its contract honest: model/object rows
+            // remain lifecycle-bound, but board layers, raster visibility and
+            // occlusion are still outside the typed inspection boundary.
+            var renderGeometryOnlyReply = await mcp.Tool("kicad_pcb_render_3d_geometry", new
+            {
+                instanceId, requestJson = JsonFormatter.Default.Format(renderRequest), expectedStateJson = svgState
+            });
+            Assert.IsFalse(renderGeometryOnlyReply.TryGetProperty("isError", out var renderGeometryOnlyError)
+                && renderGeometryOnlyError.GetBoolean(), renderGeometryOnlyReply.GetRawText());
+            var renderGeometryOnlyData = renderGeometryOnlyReply.GetProperty("structuredContent");
+            Assert.AreEqual("incomplete", renderGeometryOnlyData.GetProperty("status").GetString(),
+                renderGeometryOnlyData.GetRawText());
+            Assert.IsFalse(renderGeometryOnlyData.GetProperty("complete").GetBoolean(),
+                renderGeometryOnlyData.GetRawText());
+            Assert.IsTrue(renderGeometryOnlyData.GetProperty("metadataAvailable").GetBoolean(),
+                renderGeometryOnlyData.GetRawText());
+            Assert.IsTrue(renderGeometryOnlyData.GetProperty("metadataValidated").GetBoolean(),
+                renderGeometryOnlyData.GetRawText());
+            Assert.IsFalse(renderGeometryOnlyData.GetProperty("rasterImageIncluded").GetBoolean(),
+                renderGeometryOnlyData.GetRawText());
+            Assert.IsFalse(renderGeometryOnlyData.GetProperty("boardMutation").GetBoolean(),
+                renderGeometryOnlyData.GetRawText());
+            Assert.AreEqual(svgState, renderGeometryOnlyData.GetProperty("beforeState").GetString(),
+                renderGeometryOnlyData.GetRawText());
+            Assert.AreEqual(svgState, renderGeometryOnlyData.GetProperty("afterState").GetString(),
+                renderGeometryOnlyData.GetRawText());
+            var metadataOnlyCoverage = renderGeometryOnlyData.GetProperty("metadataCoverage");
+            Assert.IsTrue(metadataOnlyCoverage.GetProperty("modelInstancesComplete").GetBoolean(),
+                renderGeometryOnlyData.GetRawText());
+            Assert.IsFalse(metadataOnlyCoverage.GetProperty("boardGeometryComplete").GetBoolean(),
+                renderGeometryOnlyData.GetRawText());
+            Assert.IsFalse(metadataOnlyCoverage.GetProperty("exactVisiblePixels").GetBoolean(),
+                renderGeometryOnlyData.GetRawText());
+            Assert.IsFalse(metadataOnlyCoverage.GetProperty("occlusionDepth").GetBoolean(),
+                renderGeometryOnlyData.GetRawText());
+            var metadataOnlyScope = renderGeometryOnlyData.GetProperty("geometryScope");
+            Assert.AreEqual("shown-footprint-model-instances", metadataOnlyScope.GetProperty("objectKind").GetString(),
+                renderGeometryOnlyData.GetRawText());
+            Assert.IsFalse(metadataOnlyScope.GetProperty("meshVerticesAvailable").GetBoolean(),
+                renderGeometryOnlyData.GetRawText());
+            Assert.IsFalse(metadataOnlyScope.GetProperty("layerGeometryAvailable").GetBoolean(),
+                renderGeometryOnlyData.GetRawText());
+            var metadataOnlyLimitations = renderGeometryOnlyData.GetProperty("limitations").EnumerateArray()
+                .Select(value => value.GetString() ?? "").ToArray();
+            Assert.IsTrue(metadataOnlyLimitations.Any(value => value.Contains("PCB layer geometry", StringComparison.Ordinal)),
+                renderGeometryOnlyData.GetRawText());
+            Assert.IsTrue(metadataOnlyLimitations.Any(value => value.Contains("exact visible pixels", StringComparison.Ordinal)),
+                renderGeometryOnlyData.GetRawText());
+            Assert.IsTrue(metadataOnlyLimitations.Any(value => value.Contains("occlusion depth", StringComparison.Ordinal)),
+                renderGeometryOnlyData.GetRawText());
+            var metadataOnlyContent = renderGeometryOnlyReply.GetProperty("content").EnumerateArray().ToArray();
+            Assert.IsTrue(metadataOnlyContent.Length > 0 && metadataOnlyContent.All(content =>
+                content.GetProperty("type").GetString() == "text"), renderGeometryOnlyReply.GetRawText());
+            var metadataOnly = renderGeometryOnlyData.GetProperty("metadata");
+            var metadataOnlyModel = metadataOnly.GetProperty("models").EnumerateArray()
+                .Single(row => row.GetProperty("nativeUuid").GetString() == renderFootprint.Id.Value);
+            var metadataOnlyObject = metadataOnly.GetProperty("objects").EnumerateArray()
+                .Single(row => row.GetProperty("nativeUuid").GetString() == renderFootprint.Id.Value);
+            Assert.AreEqual(metadataOnlyModel.GetProperty("nativeUuid").GetString(),
+                metadataOnlyObject.GetProperty("nativeUuid").GetString(), renderGeometryOnlyData.GetRawText());
+            if (metadataOnlyModel.TryGetProperty("modelIndex", out var metadataOnlyModelIndex)
+                && metadataOnlyObject.TryGetProperty("modelIndex", out var metadataOnlyObjectIndex))
+                Assert.AreEqual(metadataOnlyModelIndex.GetUInt32(), metadataOnlyObjectIndex.GetUInt32(),
+                    renderGeometryOnlyData.GetRawText());
+            Assert.AreEqual(metadataOnlyModel.GetProperty("sceneTransformColumnMajor").GetRawText(),
+                metadataOnlyObject.GetProperty("sceneTransformColumnMajor").GetRawText(),
+                "The native model and object rows must use the same scene transform.");
+            Assert.AreEqual(metadataOnlyModel.GetProperty("nativeGeometryBounds").GetRawText(),
+                metadataOnlyObject.GetProperty("nativeGeometryBounds").GetRawText(),
+                "The native model and object rows must use the same scene bounds.");
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-render-3d-geometry.json"),
+                JsonSerializer.Serialize(new { requestJson = JsonFormatter.Default.Format(renderRequest), response = renderGeometryOnlyReply }), token);
+
             foreach ((RenderSide side, bool perspective) in new[]
             {
                 (RenderSide.RsBottom, false), (RenderSide.RsTop, true)

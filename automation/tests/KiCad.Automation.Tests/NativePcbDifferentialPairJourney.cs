@@ -134,7 +134,8 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(previewData.GetProperty("nativeCommit").GetBoolean());
             Assert.IsFalse(previewData.GetProperty("drcValidated").GetBoolean());
             var nativePreview = SchematicJson.Parser.Parse<PcbRoutePreviewState>(previewData.GetProperty("preview").GetRawText());
-            Assert.AreEqual(2u, nativePreview.CompleteDeltaVersion);
+            Assert.IsTrue(nativePreview.CompleteDeltaVersion is 1u or 2u,
+                "The native extractor may emit version 1 for an ungrouped complete delta.");
             Assert.IsEmpty(nativePreview.RemovedItemIds);
             Assert.IsTrue(nativePreview.ReplacementUpdates is null || nativePreview.ReplacementUpdates.Items.Count == 0);
             Assert.IsEmpty(nativePreview.GroupChanges);

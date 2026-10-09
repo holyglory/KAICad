@@ -41,9 +41,9 @@ public sealed partial class NativeSessionTests
             await SaveCheckedThroughMcp(client, board, evidence, token, verifyReconnect: false);
             DocumentLifecycleState before = await ObserveLifecycleState(client, board, token);
             var position = new Vector2 { XNm = 20_000_000, YNm = 10_000_000 };
-            var first = Via("10000000-0000-4000-8000-000000000001", position,
+            var first = BuildVia("10000000-0000-4000-8000-000000000001", position,
                 BoardLayer.BlFCu, BoardLayer.BlIn1Cu, 300_000);
-            var second = Via("10000000-0000-4000-8000-000000000002", position,
+            var second = BuildVia("10000000-0000-4000-8000-000000000002", position,
                 BoardLayer.BlIn1Cu, BoardLayer.BlBCu, 300_000);
             var create = new CreateItems { Header = new() { Document = board } };
             create.Items.Add(Any.Pack(first));
@@ -153,8 +153,8 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(receiptData.GetProperty("found").GetBoolean(), receiptReply.GetRawText());
             Assert.AreEqual(operationId, receiptData.GetProperty("operationId").GetString(), receiptReply.GetRawText());
 
-            WaitForNativeHistory("undo", present: false);
-            WaitForNativeHistory("redo", present: true);
+            await WaitForNativeHistory("undo", present: false);
+            await WaitForNativeHistory("redo", present: true);
             DocumentLifecycleState redone = await ObserveLifecycleState(client, board, token);
             JsonElement save = await mcp.Tool("kicad_document_save", new
             { instanceId, expectedStateJson = SchematicJson.Formatter.Format(redone), operationId = Guid.NewGuid().ToString("D") });
@@ -178,9 +178,9 @@ public sealed partial class NativeSessionTests
             // The planner intentionally refuses incompatible profiles by leaving
             // both source vias untouched; an unsafe merged replacement is never
             // emitted and therefore cannot reach checked apply.
-            var incompatibleA = Via("10000000-0000-4000-8000-000000000011", position,
+            var incompatibleA = BuildVia("10000000-0000-4000-8000-000000000011", position,
                 BoardLayer.BlFCu, BoardLayer.BlIn1Cu, 300_000);
-            var incompatibleB = Via("10000000-0000-4000-8000-000000000012", position,
+            var incompatibleB = BuildVia("10000000-0000-4000-8000-000000000012", position,
                 BoardLayer.BlIn1Cu, BoardLayer.BlBCu, 350_000);
             var incompatible = new CreateItems { Header = new() { Document = board },
                 Items = { Any.Pack(incompatibleA), Any.Pack(incompatibleB) } };
@@ -276,7 +276,7 @@ public sealed partial class NativeSessionTests
                 .GetProperty("afterState").GetString()!);
     }
 
-    private static Via Via(string id, Vector2 position, BoardLayer start, BoardLayer end, long drill) => new()
+    private static Via BuildVia(string id, Vector2 position, BoardLayer start, BoardLayer end, long drill) => new()
     {
         Id = new() { Value = id }, Position = position.Clone(), Net = new() { Name = "VIA_MAIN" },
         Type = ViaType.VtBlindBuried, IsFree = false,

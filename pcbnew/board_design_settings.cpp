@@ -394,6 +394,11 @@ BOARD_DESIGN_SETTINGS::BOARD_DESIGN_SETTINGS( JSON_SETTINGS* aParent, const std:
                     if( aJson.contains( key ) )
                         m_DRCSeverities[item.GetErrorCode()] = SeverityFromString( aJson[key] );
                 }
+
+                // Keep the severity introduced after older project files were written.
+                // Detached settings copies require the live and loaded maps to agree even
+                // when the persisted rule_severities object predates this DRC item.
+                m_DRCSeverities.try_emplace( DRCE_VIA_STITCH_OVERLAP, RPT_SEVERITY_ERROR );
             }, {} ) );
 
     m_params.emplace_back( new PARAM_LAMBDA<nlohmann::json>( "drc_exclusions",

@@ -324,9 +324,9 @@ public sealed partial class NativeSessionTests
             CopperLayers =
             {
                 new PadStackLayer { Layer = start, Shape = PadStackShape.PssCircle,
-                    CustomAnchorShape = PadStackShape.PssCircle, Size = new() { XNm = 700_000, YNm = 700_000 } },
+                    CustomAnchorShape = PadStackShape.PssCircle, Size = new() { XNm = 1_000_000, YNm = 1_000_000 } },
                 new PadStackLayer { Layer = end, Shape = PadStackShape.PssCircle,
-                    CustomAnchorShape = PadStackShape.PssCircle, Size = new() { XNm = 700_000, YNm = 700_000 } }
+                    CustomAnchorShape = PadStackShape.PssCircle, Size = new() { XNm = 1_000_000, YNm = 1_000_000 } }
             }
         }
     };

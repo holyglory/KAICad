@@ -1512,7 +1512,7 @@ public sealed partial class NativeSessionTests
                 Start = new() { XNm = 40_100_000, YNm = 40_100_000 },
                 Layer = BoardLayer.BlFCu, ForceFinish = true, DifferentialPair = true
             };
-            differentialPreviewRequest.Waypoints.Add(new Vector2 { XNm = 45_000_000, YNm = 40_450_000 });
+            differentialPreviewRequest.Waypoints.Add(new Vector2 { XNm = 43_100_000, YNm = 40_100_000 });
             var differentialPreview = await mcp.Tool("kicad_pcb_route_preview", new
             {
                 instanceId, requestJson = SchematicJson.Formatter.Format(differentialPreviewRequest),

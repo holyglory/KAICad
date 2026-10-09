@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -17,8 +16,6 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class SchematicJobTools(InstanceRegistry registry)
 {
-    private static readonly ConcurrentDictionary<string, ExportReceipt> Receipts = new(StringComparer.Ordinal);
-
     [McpServerTool(Name = "kicad_schematic_export_svg", ReadOnly = false),
      Description("Export an explicitly identified schematic to SVG through KiCad's native schematic job handler. requestJson is RunSchematicJobExportSvg protobuf JSON with an absolute output path and explicit schematic root; expectedStateJson is the matching lifecycle observation used for admission and post-export verification. Returns bounded output paths, byte counts and SHA-256 hashes; the schematic is never mutated."),
      KiCadCapability("schematic-manufacturing", "compiled-mcp plus native-schematic-job", "explicit schematic root, lifecycle state and hashed SVG output manifest"),
@@ -74,8 +71,8 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
             request => request.JobSettings, outputIsDirectory: false, operationId, cancellationToken);
 
     [McpServerTool(Name = "kicad_schematic_export_receipt", ReadOnly = true),
-     Description("Read an MCP-process schematic export receipt by operation ID without contacting KiCad. A missing receipt is found=false with unknown-native-outcome; receipts do not survive MCP restart and never authorize an automatic retry."),
-     KiCadCapability("schematic-manufacturing", "mcp-process-receipt", "operation ID, instance identity and process epoch"),
+     Description("Read a durable MCP-state schematic export receipt by operation ID without contacting KiCad. A missing receipt is found=false with unknown-native-outcome; a retained receipt survives MCP restart but never authorizes an automatic retry or a replacement native process."),
+     KiCadCapability("schematic-manufacturing", "mcp-state-receipt", "operation ID, instance identity and process epoch"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Receipt(string instanceId, string operationId, string processEpoch,
         CancellationToken cancellationToken)
@@ -87,14 +84,17 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
         if (!Guid.TryParseExact(processEpoch, "D", out var epoch) || epoch == Guid.Empty
             || !string.Equals(processEpoch, epoch.ToString("D"), StringComparison.Ordinal))
             return Task.FromResult(Error("invalid_process_epoch", "processEpoch must be a canonical UUID."));
-        string key = ReceiptKey(instanceId, operationId);
-        if (!TryReadReceipt(key, out var receipt))
+        SchematicExportReceiptRecord? receipt;
+        try { receipt = new SchematicExportReceiptStore(registry.StateDirectory).Read(instanceId, operationId); }
+        catch (AutomationException error)
+        { return Task.FromResult(Error(error.Code, error.Message)); }
+        if (receipt is null)
             return Task.FromResult(Data(new { instanceId, processEpoch, operationId, found = false,
-                receiptScope = "mcp-process", retrySafety = "unknown-native-outcome" }));
+                receiptScope = "mcp-state", retrySafety = "unknown-native-outcome" }));
         if (!string.Equals(receipt.ProcessEpoch, processEpoch, StringComparison.Ordinal))
             return Task.FromResult(Error("stale_process_epoch", "The receipt belongs to another native process epoch."));
         return Task.FromResult(Data(new { instanceId, processEpoch, operationId, found = true,
-            receiptScope = "mcp-process", replayableWithinProcess = true, receipt = receipt.Result }));
+            receiptScope = "mcp-state", replayableWithinProcess = true, receipt = receipt.Result }));
     }
 
     private async Task<CallToolResult> ExportJob<TRequest>(string instanceId, string requestJson,
@@ -117,8 +117,10 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
             }
             string fingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
                 instanceId + "\n" + jobKind + "\n" + requestJson + "\n" + expectedStateJson)));
-            string? receiptKey = canonicalOperationId is null ? null : ReceiptKey(instanceId, canonicalOperationId);
-            if (receiptKey is not null && TryReadReceipt(receiptKey, out var prior))
+            SchematicExportReceiptStore receiptStore = new(registry.StateDirectory);
+            SchematicExportReceiptRecord? prior = canonicalOperationId is null
+                ? null : receiptStore.Read(instanceId, canonicalOperationId);
+            if (prior is not null)
             {
                 if (!string.Equals(prior.Fingerprint, fingerprint, StringComparison.Ordinal))
                     throw new AutomationException("operation_id_reused", "The operation ID is already bound to a different schematic export request.");
@@ -189,13 +191,13 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
                 beforeState = SchematicJson.Formatter.Format(before), afterState = SchematicJson.Formatter.Format(after),
                 outputs, nativeJob = true, boardMutation = false, schematicMutation = false,
                 nativeDispatch = true, dispatchOutcome = "confirmed", outputVerification = "complete",
-                operationId = canonicalOperationId, receiptScope = canonicalOperationId is null ? null : "mcp-process",
+                operationId = canonicalOperationId, receiptScope = canonicalOperationId is null ? null : "mcp-state",
                 outcome = "completed"
             });
             var completed = new CallToolResult { StructuredContent = structured,
                 Content = [new TextContentBlock { Text = structured.GetRawText() }] };
-            if (receiptKey is not null)
-                WriteReceipt(receiptKey, new(fingerprint, session.Epoch, structured));
+            if (canonicalOperationId is not null)
+                receiptStore.Write(new(1, instanceId, canonicalOperationId, fingerprint, session.Epoch, structured));
             return completed;
         }
         catch (Exception error) when (error is AutomationException or NativeApiException or NngException
@@ -341,49 +343,6 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
 
     private static bool PathEquals(string left, string right) =>
         string.Equals(left, right, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
-
-    private static string ReceiptKey(string instanceId, string operationId) => instanceId + "\n" + operationId;
-
-    private sealed record ExportReceipt(string Fingerprint, string ProcessEpoch, JsonElement Result);
-
-    private bool TryReadReceipt(string key, out ExportReceipt receipt)
-    {
-        if (Receipts.TryGetValue(key, out receipt!)) return true;
-        string path = Path.Combine(registry.StateDirectory, "schematic-export-receipts.json");
-        try
-        {
-            if (!File.Exists(path)) { receipt = null!; return false; }
-            var all = JsonSerializer.Deserialize<Dictionary<string, ExportReceipt>>(File.ReadAllText(path));
-            if (all is not null && all.TryGetValue(key, out receipt!))
-            {
-                Receipts[key] = receipt;
-                return true;
-            }
-        }
-        catch (JsonException) { }
-        receipt = null!;
-        return false;
-    }
-
-    private void WriteReceipt(string key, ExportReceipt receipt)
-    {
-        Receipts[key] = receipt;
-        try
-        {
-            Directory.CreateDirectory(registry.StateDirectory);
-            string path = Path.Combine(registry.StateDirectory, "schematic-export-receipts.json");
-            var all = File.Exists(path)
-                ? JsonSerializer.Deserialize<Dictionary<string, ExportReceipt>>(File.ReadAllText(path))
-                    ?? new(StringComparer.Ordinal)
-                : new(StringComparer.Ordinal);
-            all[key] = receipt;
-            string temporary = path + ".tmp-" + Guid.NewGuid().ToString("N");
-            File.WriteAllText(temporary, JsonSerializer.Serialize(all));
-            File.Move(temporary, path, true);
-        }
-        catch (IOException) { }
-        catch (UnauthorizedAccessException) { }
-    }
 
     private static CallToolResult Data(object value)
     {

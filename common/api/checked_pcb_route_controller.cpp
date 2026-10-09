@@ -39,6 +39,39 @@ bool Digest( const std::string& value )
     { return ( c >= '0' && c <= '9' ) || ( c >= 'a' && c <= 'f' ); } );
 }
 
+// KiCad's LSET uses the physical board order (front copper, back copper,
+// then inner copper), while PadStack's per-layer profiles are serialized from
+// an unordered map.  Route equality is about the layer set and each profile,
+// so neither repeated-field order nor the default profile that can remain in
+// a custom padstack is meaningful state.
+int LayerOrder( BoardLayer layer )
+{
+    if( layer == BL_F_Cu ) return 0;
+    if( layer == BL_B_Cu ) return 1;
+    if( layer >= BL_In1_Cu && layer <= BL_In30_Cu )
+        return 2 + static_cast<int>( layer ) - static_cast<int>( BL_In1_Cu );
+    return 1000 + static_cast<int>( layer );
+}
+
+bool ZeroVector( const Vector2& value )
+{
+    return value.x_nm() == 0 && value.y_nm() == 0;
+}
+
+bool EmptyCopperLayer( const PadStackLayer& layer )
+{
+    if( layer.shape() != PSS_CIRCLE || layer.custom_anchor_shape() != PSS_RECTANGLE
+        || !ZeroVector( layer.size() ) || !ZeroVector( layer.offset() )
+        || layer.corner_rounding_ratio() != 0.0 || layer.chamfer_ratio() != 0.0
+        || layer.chamfered_corners().top_left() || layer.chamfered_corners().top_right()
+        || layer.chamfered_corners().bottom_left() || layer.chamfered_corners().bottom_right()
+        || layer.custom_shapes_size() != 0 || layer.has_zone_settings()
+        || !ZeroVector( layer.trapezoid_delta() ) )
+        return false;
+
+    return true;
+}
+
 API_RESULT Error( const std::string& message )
 {
     ApiResponseStatus status; status.set_status( ApiStatusCode::AS_BAD_REQUEST );
@@ -150,6 +183,33 @@ void NormalizeRoute( Via& value )
         if( layer.shape() == PSS_UNKNOWN ) layer.set_shape( PSS_CIRCLE );
         if( layer.custom_anchor_shape() == PSS_UNKNOWN ) layer.set_custom_anchor_shape( PSS_CIRCLE );
     }
+
+    std::vector<BoardLayer> activeLayers( stack->layers().begin(), stack->layers().end() );
+    std::sort( activeLayers.begin(), activeLayers.end(), []( BoardLayer left, BoardLayer right )
+    { return LayerOrder( left ) < LayerOrder( right ); } );
+    stack->clear_layers();
+    for( BoardLayer layer : activeLayers )
+        stack->add_layers( layer );
+
+    std::vector<PadStackLayer> copperLayers( stack->copper_layers().begin(),
+                                             stack->copper_layers().end() );
+    std::set<int> activeLayerValues;
+    for( BoardLayer layer : activeLayers )
+        activeLayerValues.insert( static_cast<int>( layer ) );
+    copperLayers.erase( std::remove_if( copperLayers.begin(), copperLayers.end(),
+                                        [&]( const PadStackLayer& layer )
+                                        {
+                                            return activeLayerValues.count( static_cast<int>( layer.layer() ) ) == 0
+                                                   && EmptyCopperLayer( layer );
+                                        } ),
+                        copperLayers.end() );
+    std::stable_sort( copperLayers.begin(), copperLayers.end(),
+                      []( const PadStackLayer& left, const PadStackLayer& right )
+                      { return LayerOrder( left.layer() ) < LayerOrder( right.layer() ); } );
+    stack->clear_copper_layers();
+    for( const PadStackLayer& layer : copperLayers )
+        stack->add_copper_layers()->CopyFrom( layer );
+
     if( !stack->has_zone_settings() )
     {
         auto shape = stack->copper_layers_size() ? stack->copper_layers( 0 ).shape() : PSS_CIRCLE;

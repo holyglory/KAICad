@@ -164,6 +164,103 @@ public sealed class PcbRoutingContractTests
     }
 
     [TestMethod]
+    public void CheckedRouteContractCanonicalizesViaLayersButRejectsInactiveGeometry()
+    {
+        var (request, _, state) = CleanRoute();
+        var document = request.Candidate.Header.Document;
+        var via = new Via
+        {
+            Id = new() { Value = Guid.NewGuid().ToString("D") },
+            Position = new() { XNm = 20_000, YNm = 10_000 },
+            Type = ViaType.VtBlind,
+            Net = new() { Name = "VIA_MAIN" },
+            PadStack = new()
+            {
+                Type = PadStackType.PstCustom,
+                Layers = { BoardLayer.BlIn1Cu, BoardLayer.BlBCu },
+                Drill = new()
+                {
+                    Diameter = new() { XNm = 300, YNm = 300 },
+                    StartLayer = BoardLayer.BlIn1Cu,
+                    EndLayer = BoardLayer.BlBCu,
+                    Shape = DrillShape.DsCircle
+                },
+                CopperLayers =
+                {
+                    new PadStackLayer
+                    {
+                        Layer = BoardLayer.BlIn1Cu, Shape = PadStackShape.PssCircle,
+                        CustomAnchorShape = PadStackShape.PssRectangle,
+                        Size = new() { XNm = 1_600, YNm = 1_600 }
+                    },
+                    new PadStackLayer
+                    {
+                        Layer = BoardLayer.BlBCu, Shape = PadStackShape.PssCircle,
+                        CustomAnchorShape = PadStackShape.PssRectangle,
+                        Size = new() { XNm = 1_600, YNm = 1_600 }
+                    }
+                }
+            }
+        };
+
+        var native = via.Clone();
+        native.PadStack.Layers.Clear();
+        native.PadStack.Layers.Add(BoardLayer.BlBCu);
+        native.PadStack.Layers.Add(BoardLayer.BlIn1Cu);
+        native.PadStack.CopperLayers.Clear();
+        native.PadStack.CopperLayers.Add(new PadStackLayer
+        {
+            Layer = BoardLayer.BlBCu, Shape = PadStackShape.PssCircle,
+            CustomAnchorShape = PadStackShape.PssRectangle, Size = new() { XNm = 1_600, YNm = 1_600 }
+        });
+        native.PadStack.CopperLayers.Add(new PadStackLayer
+        {
+            Layer = BoardLayer.BlIn1Cu, Shape = PadStackShape.PssCircle,
+            CustomAnchorShape = PadStackShape.PssRectangle, Size = new() { XNm = 1_600, YNm = 1_600 }
+        });
+        // PCB_VIA retains the default front profile when a custom padstack
+        // starts on an inner layer.  This zero-size profile is serialization
+        // residue; a non-empty inactive profile must remain a mismatch.
+        native.PadStack.CopperLayers.Add(new PadStackLayer
+        {
+            Layer = BoardLayer.BlFCu, Shape = PadStackShape.PssCircle,
+            CustomAnchorShape = PadStackShape.PssRectangle
+        });
+
+        var requestVia = request.Clone();
+        requestVia.Candidate.Items.Clear();
+        requestVia.Candidate.Items.Add(Any.Pack(via));
+        var after = state.Clone();
+        after.Revision.Sequence++;
+        after.StateSha256 = new string('b', 64);
+        var created = new CreateItemsResponse { Status = ItemRequestStatus.IrsOk };
+        created.CreatedItems.Add(new ItemCreationResult
+        {
+            Status = new() { Code = ItemStatusCode.IscOk }, Item = Any.Pack(native)
+        });
+        var receipt = new CheckedPcbRouteReceipt
+        {
+            Document = document,
+            ProcessEpoch = state.ProcessEpoch,
+            OperationId = requestVia.OperationId,
+            State = CheckedPcbRouteReceipt.Types.State.Completed,
+            RequestVerified = true,
+            Before = state,
+            After = after,
+            Created = created
+        };
+
+        CheckedPcbRouteContract.ValidateResult(requestVia, receipt, inspect: false);
+
+        var invalid = native.Clone();
+        invalid.PadStack.CopperLayers.Single(layer => layer.Layer == BoardLayer.BlFCu).Size =
+            new() { XNm = 1, YNm = 1 };
+        receipt.Created.CreatedItems[0].Item = Any.Pack(invalid);
+        Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedPcbRouteContract.ValidateResult(requestVia, receipt, inspect: false));
+    }
+
+    [TestMethod]
     public void CheckedRouteContractAcceptsIdentityPreservingReplacementAndRejectsUuidOverlap()
     {
         var (request, track, state) = CleanRoute();

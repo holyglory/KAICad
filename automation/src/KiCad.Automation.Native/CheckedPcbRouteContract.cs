@@ -541,6 +541,25 @@ public static class CheckedPcbRouteContract
             if (layer.Shape == PadStackShape.PssUnknown) layer.Shape = PadStackShape.PssCircle;
             if (layer.CustomAnchorShape == PadStackShape.PssUnknown) layer.CustomAnchorShape = PadStackShape.PssCircle;
         }
+
+        // KiCad serializes the active layer set in LSET order (front, back,
+        // then inner copper), while custom copper profiles come from an
+        // unordered native map.  Canonicalize both collections before strict
+        // equality.  A custom padstack may also retain the default empty
+        // front profile when its active layer set starts elsewhere; remove
+        // only that provably empty inactive profile so real extra geometry
+        // still causes a mismatch.
+        var activeLayers = stack.Layers.OrderBy(LayerOrder).ToArray();
+        stack.Layers.Clear();
+        stack.Layers.Add(activeLayers);
+        var activeSet = activeLayers.ToHashSet();
+        var copperLayers = stack.CopperLayers
+            .Where(layer => activeSet.Contains(layer.Layer) || !IsEmptyCopperLayer(layer))
+            .OrderBy(layer => LayerOrder(layer.Layer))
+            .ToArray();
+        stack.CopperLayers.Clear();
+        stack.CopperLayers.Add(copperLayers);
+
         if (stack.ZoneSettings is null)
         {
             var shape = stack.CopperLayers.FirstOrDefault()?.Shape ?? PadStackShape.PssCircle;
@@ -558,6 +577,32 @@ public static class CheckedPcbRouteContract
             stack.ZoneSettings.ThermalSpokes ??= new() { Angle = new() { ValueDegrees = 45 } };
             stack.ZoneSettings.ThermalSpokes.Angle ??= new Angle();
         }
+    }
+
+    private static int LayerOrder(BoardLayer layer)
+    {
+        if (layer == BoardLayer.BlFCu) return 0;
+        if (layer == BoardLayer.BlBCu) return 1;
+        if (layer >= BoardLayer.BlIn1Cu && layer <= BoardLayer.BlIn30Cu)
+            return 2 + (int)layer - (int)BoardLayer.BlIn1Cu;
+        return 1000 + (int)layer;
+    }
+
+    private static bool IsEmptyCopperLayer(PadStackLayer layer)
+    {
+        return layer.Shape == PadStackShape.PssCircle
+            && layer.CustomAnchorShape == PadStackShape.PssRectangle
+            && (layer.Size is null || (layer.Size.XNm == 0 && layer.Size.YNm == 0))
+            && (layer.Offset is null || (layer.Offset.XNm == 0 && layer.Offset.YNm == 0))
+            && layer.CornerRoundingRatio == 0.0
+            && layer.ChamferRatio == 0.0
+            && (layer.ChamferedCorners is null
+                || (!layer.ChamferedCorners.TopLeft && !layer.ChamferedCorners.TopRight
+                    && !layer.ChamferedCorners.BottomLeft && !layer.ChamferedCorners.BottomRight))
+            && layer.CustomShapes.Count == 0
+            && layer.ZoneSettings is null
+            && (layer.TrapezoidDelta is null
+                || (layer.TrapezoidDelta.XNm == 0 && layer.TrapezoidDelta.YNm == 0));
     }
 
     private static CreateItems CanonicalCreate(CreateItems source)

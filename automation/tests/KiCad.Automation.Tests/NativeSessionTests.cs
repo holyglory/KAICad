@@ -149,7 +149,7 @@ public sealed partial class NativeSessionTests
     [TestMethod, TestCategory("NativeComponentRebind")]
     public Task NativeComponentReplacementKeepsExactInstructionsAndHistory() => RunNativeSessions(NativeJourney.ComponentRebind);
 
-    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, RecursiveEditor, Simulation, PcbItems, PcbConnectivity, CrossProbe,
+    private enum NativeJourney { Foundation, TableVariants, NetChains, Setup, BomSettings, NetSettings, HierarchyPolicy, SynchronizationPlan, CheckedBatch, OffscreenMove, TransformSync, SymbolSheets, ComponentCreation, RecursiveEditor, Simulation, PcbItems, PcbConnectivity, PcbDifferentialPair, CrossProbe,
         PsuCpuSeed, PsuCpuComponentCreation, ConnectedRealization, DiagramCanvas, XmlRebuild, RepeatedSheetRebuild, ProjectRecovery, ProjectRecoveryContainer, OwnershipSync, NativeCrash, NativeCrashRelease,
         ObserveApplyStress, RepeatedSheetOwnership, ComponentRebind, SymbolLibrary, RasterTrace, RasterTraceSchematic, Cache, SchematicMetadata, SchematicExport, SchematicCrossProbe, SchematicHierarchy }
 
@@ -181,6 +181,7 @@ public sealed partial class NativeSessionTests
                 NativeJourney.Simulation => "native-simulation",
                 NativeJourney.PcbItems => "native-pcb-items",
                 NativeJourney.PcbConnectivity => "native-pcb-items",
+                NativeJourney.PcbDifferentialPair => "native-pcb-items",
                 NativeJourney.CrossProbe => "native-pcb-items",
                 NativeJourney.SymbolLibrary => "native-symbol-library",
                 NativeJourney.RasterTrace => "native-raster-trace",
@@ -203,6 +204,7 @@ public sealed partial class NativeSessionTests
         {
             NativeJourney.PcbItems => nameof(NativePcbItemsAreCreatedAndUpdatedThroughMcp),
             NativeJourney.PcbConnectivity => nameof(NativePcbConnectivityQueryUsesTypedNativeSummaries),
+            NativeJourney.PcbDifferentialPair => nameof(NativeDifferentialPairApplyConnectsBothPadPairsThroughMcp),
             NativeJourney.CrossProbe => nameof(NativePcbCrossProbeBindsTheLiveBoardWithoutMutation),
             NativeJourney.SchematicMetadata => nameof(TypedSchematicMetadataPersistsThroughMcp),
             NativeJourney.SchematicExport => nameof(NativeSchematicSvgExportUsesRealContentAndPreservesState),
@@ -633,6 +635,15 @@ public sealed partial class NativeSessionTests
                         await VerifyNativePcbItems(client, opened.Document, evidence, target.Id, focusProcessId, ":" + displayNumber, deadline.Token);
                     else if (journey == NativeJourney.PcbConnectivity)
                         await VerifyNativePcbConnectivity(client, opened.Document, evidence, target.Id, deadline.Token);
+                    else if (journey == NativeJourney.PcbDifferentialPair)
+                    {
+                        string pairSeedPath = Path.Combine(opened.Document.Project.Path,
+                            opened.Document.Project.Name + ".kicad_pcb");
+                        var pairSeed = await CreateRootThroughMcp(client.Endpoint, target.Id, pairSeedPath, evidence,
+                            deadline.Token, toolName: "kicad_pcb_create");
+                        await VerifyNativePcbDifferentialPairApply(client, pairSeed.Document, evidence,
+                            target.Id, focusProcessId, ":" + displayNumber, deadline.Token);
+                    }
                     else if (journey == NativeJourney.CrossProbe)
                         await VerifyNativeCrossProbe(client, opened.Document, registry, launched, evidence,
                             target.Id, deadline.Token);

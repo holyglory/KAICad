@@ -32,6 +32,11 @@ def file_record(root, relative_path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--test",
+        default="pcb-simulation-checkpoint",
+        help="Coordinator test graph whose native-build command produced this candidate.",
+    )
     arguments = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     status = git(root, "status", "--porcelain=v1", "--untracked-files=normal")
@@ -51,8 +56,15 @@ def main():
         raise RuntimeError("Native build metadata reports unfrozen source.")
 
     configuration = tomllib.loads((root / ".devcoordinator.toml").read_text())
-    graph = configuration["test"]["pcb-simulation-checkpoint"]
-    build_check = next(check for check in graph["check"] if check["name"] == "native-build")
+    graph = configuration.get("test", {}).get(arguments.test)
+    if not isinstance(graph, dict):
+        raise RuntimeError(f"Unknown test graph: {arguments.test}")
+    build_check = next(
+        (check for check in graph.get("check", []) if check.get("name") == "native-build"),
+        None,
+    )
+    if build_check is None:
+        raise RuntimeError(f"Test graph has no native-build check: {arguments.test}")
     identity = {
         "schema": 1,
         "repository": str(root),
@@ -60,6 +72,7 @@ def main():
         "sourceTree": git(root, "rev-parse", "HEAD^{tree}"),
         "sourceStatus": "clean",
         "nativeBuildMode": "incremental",
+        "nativeBuildGraph": arguments.test,
         "nativeBuildCheck": "native-build",
         "nativeBuildCommand": build_check["command"],
         "nativeSourceDirectory": str(Path(source_match[1]).resolve()),
@@ -93,7 +106,8 @@ def main():
     output = arguments.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     (output / "identity.json").write_text(json.dumps(identity, sort_keys=True, indent=2) + "\n")
-    print(json.dumps({"sourceCommit": commit, "nativeBuildCheck": "native-build",
+    print(json.dumps({"sourceCommit": commit, "nativeBuildGraph": arguments.test,
+                      "nativeBuildCheck": "native-build",
                       "nativeBinaryCount": len(identity["nativeBinaries"])}))
 
 

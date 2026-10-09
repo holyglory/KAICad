@@ -26,6 +26,10 @@ class NativeCandidateIdentityTests(unittest.TestCase):
 [[test.pcb-simulation-checkpoint.check]]
 name="native-build"
 command=["cmake","--build","automation/artifacts/native","--target","kicad"]
+[test.footprint-library-focus]
+[[test.footprint-library-focus.check]]
+name="native-build"
+command=["cmake","--build","automation/artifacts/native","--target","pcbnew"]
 ''')
         self.git("init", "--quiet")
         self.git("add", ".")
@@ -75,14 +79,14 @@ command=["cmake","--build","automation/artifacts/native","--target","kicad"]
                    (f'#define KICAD_COMMIT_HASH "{commit}"\n'
                     f'#define KICAD_VERSION_FULL "10.99.0{suffix}"\n').encode())
 
-    def invoke(self):
+    def invoke(self, *arguments):
         return subprocess.run(
-            [sys.executable, str(self.helper), "--output", str(self.output)],
+            [sys.executable, str(self.helper), *arguments, "--output", str(self.output)],
             text=True, capture_output=True, timeout=20,
         )
 
-    def assert_rejected(self, expected):
-        result = self.invoke()
+    def assert_rejected(self, expected, *arguments):
+        result = self.invoke(*arguments)
         self.assertNotEqual(0, result.returncode, result.stdout)
         self.assertIn(expected, result.stderr)
         self.assertEqual("", result.stdout)
@@ -97,7 +101,13 @@ command=["cmake","--build","automation/artifacts/native","--target","kicad"]
         summary = json.loads(result.stdout)
         identity = json.loads((self.output / "identity.json").read_text())
         self.assertEqual(self.commit, summary["sourceCommit"])
+        self.assertEqual("pcb-simulation-checkpoint", summary["nativeBuildGraph"])
         self.assertEqual(self.commit, identity["generatedNativeCommit"])
+        self.assertEqual("pcb-simulation-checkpoint", identity["nativeBuildGraph"])
+        self.assertEqual(
+            ["cmake", "--build", "automation/artifacts/native", "--target", "kicad"],
+            identity["nativeBuildCommand"],
+        )
         self.assertEqual(self.git("rev-parse", "HEAD^{tree}"), identity["sourceTree"])
         self.assertEqual(str(self.root), identity["nativeSourceDirectory"])
         self.assertEqual("clean", identity["sourceStatus"])
@@ -108,6 +118,21 @@ command=["cmake","--build","automation/artifacts/native","--target","kicad"]
             data = (self.root / row["path"]).read_bytes()
             self.assertEqual(len(data), row["bytes"])
             self.assertEqual(hashlib.sha256(data).hexdigest(), row["sha256"])
+
+    def test_named_graph_selects_its_native_build_command(self):
+        result = self.invoke("--test", "footprint-library-focus")
+        self.assertEqual(0, result.returncode, result.stderr)
+        summary = json.loads(result.stdout)
+        identity = json.loads((self.output / "identity.json").read_text())
+        self.assertEqual("footprint-library-focus", summary["nativeBuildGraph"])
+        self.assertEqual("footprint-library-focus", identity["nativeBuildGraph"])
+        self.assertEqual(
+            ["cmake", "--build", "automation/artifacts/native", "--target", "pcbnew"],
+            identity["nativeBuildCommand"],
+        )
+
+    def test_unknown_graph_is_rejected(self):
+        self.assert_rejected("Unknown test graph: missing-graph", "--test", "missing-graph")
 
     def test_wrong_source_directory_is_rejected(self):
         self.write(self.build + "CMakeCache.txt",

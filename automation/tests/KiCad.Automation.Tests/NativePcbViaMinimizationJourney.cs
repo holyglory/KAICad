@@ -46,7 +46,6 @@ public sealed partial class NativeSessionTests
         DocumentSpecifier? viaBoard = null;
         try
         {
-            await TuneViaRules(projectPath, token);
             await File.WriteAllTextAsync(boardPath, ViaMinimizationBoard(), token);
             var opened = await CreateRootThroughMcp(client.Endpoint, instanceId, boardPath, evidence, token,
                 toolName: "kicad_pcb_open");
@@ -316,36 +315,6 @@ public sealed partial class NativeSessionTests
     }
 
 
-    private static async Task TuneViaRules(string projectPath, CancellationToken token)
-    {
-        if (!File.Exists(projectPath)) return;
-        JsonNode root = JsonNode.Parse(await File.ReadAllTextAsync(projectPath, token))
-            ?? throw new InvalidOperationException("The fixture project file is not valid JSON.");
-        void Visit(JsonNode? node)
-        {
-            if (node is JsonObject obj)
-            {
-                foreach (var property in obj.ToArray())
-                {
-                    if (property.Value is JsonNode child)
-                    {
-                        if (property.Key == "min_via_diameter") obj[property.Key] = 0.5;
-                        else if (property.Key == "min_via_annular_width") obj[property.Key] = 0.0;
-                        else if (property.Key == "via_diameter") obj[property.Key] = 1.0;
-                        else if (property.Key == "via_drill") obj[property.Key] = 0.3;
-                        else Visit(child);
-                    }
-                }
-            }
-            else if (node is JsonArray array)
-            {
-                foreach (JsonNode? child in array) Visit(child);
-            }
-        }
-        Visit(root);
-        await File.WriteAllTextAsync(projectPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), token);
-    }
-
     private static Via BuildVia(string id, Vector2 position, BoardLayer start, BoardLayer end, long drill) => new()
     {
         Id = new() { Value = id }, Position = position.Clone(), Net = new() { Name = "VIA_MAIN" },
@@ -357,9 +326,9 @@ public sealed partial class NativeSessionTests
             CopperLayers =
             {
                 new PadStackLayer { Layer = start, Shape = PadStackShape.PssCircle,
-                    CustomAnchorShape = PadStackShape.PssCircle, Size = new() { XNm = 1_000_000, YNm = 1_000_000 } },
+                    CustomAnchorShape = PadStackShape.PssCircle, Size = new() { XNm = 2_000_000, YNm = 2_000_000 } },
                 new PadStackLayer { Layer = end, Shape = PadStackShape.PssCircle,
-                    CustomAnchorShape = PadStackShape.PssCircle, Size = new() { XNm = 1_000_000, YNm = 1_000_000 } }
+                    CustomAnchorShape = PadStackShape.PssCircle, Size = new() { XNm = 2_000_000, YNm = 2_000_000 } }
             }
         }
     };

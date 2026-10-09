@@ -47,7 +47,17 @@ public sealed class PcbViaMinimizationTools(InstanceRegistry registry)
             throw new AutomationException("pcb_instance_changed", "The process epoch changed before via minimization planning.");
         DocumentLifecycleState before = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(new() { Document = document }, cancellationToken);
         if (!before.Equals(expected)) throw new AutomationException("pcb_state_changed", "The board changed before via minimization planning.");
-        ViaPlan plan = BuildPlan(candidate, request);
+        BoardEnabledLayersResponse enabledResponse = await client.InvokeAsync<GetBoardEnabledLayers, BoardEnabledLayersResponse>(
+            new() { Board = document }, cancellationToken);
+        IReadOnlyList<BoardLayer> enabledCopper = enabledResponse.Layers
+            .Where(layer => (int)layer >= (int)BoardLayer.BlFCu && (int)layer <= (int)BoardLayer.BlBCu)
+            .Distinct()
+            .OrderBy(layer => (int)layer)
+            .ToArray();
+        if (enabledCopper.Count == 0)
+            throw new AutomationException("pcb_via_minimize_no_copper", "The native PCB has no enabled copper layers.");
+
+        ViaPlan plan = BuildPlan(candidate, request, enabledCopper);
         DocumentLifecycleState after = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(new() { Document = document }, cancellationToken);
         if (!after.Equals(expected)) throw new AutomationException("pcb_via_minimize_changed", "The board changed while via minimization was planned.");
         JsonElement structured = JsonSerializer.SerializeToElement(new
@@ -97,7 +107,8 @@ public sealed class PcbViaMinimizationTools(InstanceRegistry registry)
             throw new AutomationException("invalid_pcb_via_minimize_apply_create", "Via minimization apply accepts only one or more Via replacement objects.");
     }
 
-    internal static ViaPlan BuildPlan(CreateItems candidate, ViaRequest request)
+    internal static ViaPlan BuildPlan(CreateItems candidate, ViaRequest request,
+        IReadOnlyList<BoardLayer>? enabledCopper = null)
     {
         request.Nets ??= [];
         string planId = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(BoardJson.Formatter.Format(candidate) + "\n" + JsonSerializer.Serialize(request, JsonOptions))));
@@ -126,7 +137,8 @@ public sealed class PcbViaMinimizationTools(InstanceRegistry registry)
             var pending = group.Select(pair => pair.Via.Clone()).ToList();
             var groupSources = pending.ToDictionary(via => via.Id.Value,
                 via => new HashSet<string>([via.Id.Value], StringComparer.Ordinal), StringComparer.Ordinal);
-            while (mergeCount < request.MaxMerges && TryCombine(pending, out Via? replacement, out Via first, out Via second))
+            while (mergeCount < request.MaxMerges && TryCombine(pending, enabledCopper,
+                out Via? replacement, out Via first, out Via second))
             {
                 var combinedSources = new HashSet<string>(groupSources[first.Id.Value], StringComparer.Ordinal);
                 combinedSources.UnionWith(groupSources[second.Id.Value]);
@@ -155,7 +167,8 @@ public sealed class PcbViaMinimizationTools(InstanceRegistry registry)
             removed.Order(StringComparer.Ordinal).ToArray(), finalReplacements.Select(via => via.Id.Value).Order(StringComparer.Ordinal).ToArray());
     }
 
-    private static bool TryCombine(List<Via> vias, out Via? replacement, out Via first, out Via second)
+    private static bool TryCombine(List<Via> vias, IReadOnlyList<BoardLayer>? enabledCopper,
+        out Via? replacement, out Via first, out Via second)
     {
         for (int i = 0; i < vias.Count; i++) for (int j = i + 1; j < vias.Count; j++)
         {
@@ -167,13 +180,19 @@ public sealed class PcbViaMinimizationTools(InstanceRegistry registry)
             if (!Compatible(a, b, (BoardLayer)(aMax == bMin ? aMax : bMax))) continue;
             first = a; second = b; replacement = a.Clone();
             int min = Math.Min(aMin, bMin), max = Math.Max(aMax, bMax);
-            replacement.PadStack.Layers.Clear(); replacement.PadStack.Layers.Add((BoardLayer)min); replacement.PadStack.Layers.Add((BoardLayer)max);
-            replacement.PadStack.CopperLayers.Clear();
-            foreach (BoardLayer layer in new[] { (BoardLayer)min, (BoardLayer)max })
+            IReadOnlyList<BoardLayer> spanLayers = SpanLayers(a, b, min, max, enabledCopper);
+            if (spanLayers.Count < 2 || !TryBuildCopperLayers(a.PadStack, b.PadStack, spanLayers,
+                out List<PadStackLayer> copperLayers))
             {
-                PadStackLayer? source = a.PadStack.CopperLayers.Concat(b.PadStack.CopperLayers).FirstOrDefault(item => item.Layer == layer);
-                if (source is not null) replacement.PadStack.CopperLayers.Add(source.Clone());
+                replacement = null;
+                continue;
             }
+
+            replacement.PadStack.Layers.Clear();
+            replacement.PadStack.Layers.Add(spanLayers);
+            replacement.PadStack.CopperLayers.Clear();
+            replacement.PadStack.CopperLayers.Add(copperLayers);
+            replacement.Type = DeriveViaType(a.Type, spanLayers, enabledCopper);
             if (replacement.PadStack.Drill is not null)
             { replacement.PadStack.Drill.StartLayer = (BoardLayer)min; replacement.PadStack.Drill.EndLayer = (BoardLayer)max; }
             return true;
@@ -197,10 +216,97 @@ public sealed class PcbViaMinimizationTools(InstanceRegistry registry)
             || !DrillProfilesEqual(left.Drill, right.Drill))
             return false;
 
+        return CopperLayerProfilesCompatible(left, right, junction);
+    }
+
+    private static IReadOnlyList<BoardLayer> SpanLayers(Via left, Via right, int min, int max,
+        IReadOnlyList<BoardLayer>? enabledCopper)
+    {
+        if (enabledCopper is not null)
+            return enabledCopper.Where(layer => (int)layer >= min && (int)layer <= max).ToArray();
+
+        return left.PadStack.Layers.Concat(right.PadStack.Layers)
+            .Concat(left.PadStack.CopperLayers.Select(layer => layer.Layer))
+            .Concat(right.PadStack.CopperLayers.Select(layer => layer.Layer))
+            .Where(layer => (int)layer >= min && (int)layer <= max)
+            .Distinct()
+            .OrderBy(layer => (int)layer)
+            .ToArray();
+    }
+
+    private static bool CopperLayerProfilesCompatible(PadStack left, PadStack right, BoardLayer junction)
+    {
+        var layers = left.CopperLayers.Concat(right.CopperLayers)
+            .GroupBy(layer => layer.Layer)
+            .ToArray();
+        if (layers.Any(group => group.Skip(1).Any(layer => !CopperLayerGeometryEqual(group.First(), layer))))
+            return false;
+
         var leftJunction = left.CopperLayers.Where(layer => layer.Layer == junction).ToArray();
         var rightJunction = right.CopperLayers.Where(layer => layer.Layer == junction).ToArray();
         return leftJunction.Length == rightJunction.Length
-            && leftJunction.SequenceEqual(rightJunction);
+            && leftJunction.Zip(rightJunction).All(pair => CopperLayerGeometryEqual(pair.First, pair.Second));
+    }
+
+    private static bool TryBuildCopperLayers(PadStack left, PadStack right,
+        IReadOnlyList<BoardLayer> spanLayers, out List<PadStackLayer> result)
+    {
+        var profiles = left.CopperLayers.Concat(right.CopperLayers)
+            .GroupBy(layer => layer.Layer)
+            .ToDictionary(group => group.Key, group => group.First().Clone());
+        if (profiles.Keys.Any(layer => !spanLayers.Contains(layer)))
+        {
+            result = [];
+            return false;
+        }
+
+        PadStackLayer? template = profiles.Values.FirstOrDefault();
+        if (template is null)
+        {
+            result = [];
+            return false;
+        }
+
+        if (spanLayers.Any(layer => !profiles.ContainsKey(layer))
+            && profiles.Values.Any(layer => !CopperLayerGeometryEqual(template, layer)))
+        {
+            result = [];
+            return false;
+        }
+
+        result = [];
+        foreach (BoardLayer layer in spanLayers)
+        {
+            PadStackLayer copy = profiles.TryGetValue(layer, out PadStackLayer? existing)
+                ? existing.Clone() : template.Clone();
+            copy.Layer = layer;
+            result.Add(copy);
+        }
+        return true;
+    }
+
+    private static bool CopperLayerGeometryEqual(PadStackLayer left, PadStackLayer right)
+    {
+        PadStackLayer leftCopy = left.Clone();
+        PadStackLayer rightCopy = right.Clone();
+        leftCopy.Layer = BoardLayer.BlUnknown;
+        rightCopy.Layer = BoardLayer.BlUnknown;
+        return leftCopy.Equals(rightCopy);
+    }
+
+    private static ViaType DeriveViaType(ViaType source, IReadOnlyList<BoardLayer> spanLayers,
+        IReadOnlyList<BoardLayer>? enabledCopper)
+    {
+        if (source is ViaType.VtUnknown or ViaType.VtThrough or ViaType.VtMicro || enabledCopper is null)
+            return source;
+
+        bool startsOuter = spanLayers.First() == enabledCopper.First();
+        bool endsOuter = spanLayers.Last() == enabledCopper.Last();
+        if (startsOuter && endsOuter)
+            return ViaType.VtThrough;
+        if (!startsOuter && !endsOuter)
+            return ViaType.VtBuried;
+        return ViaType.VtBlind;
     }
 
     private static bool DrillProfilesEqual(DrillProperties? left, DrillProperties? right)

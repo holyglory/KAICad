@@ -23,7 +23,10 @@ public sealed class PcbViaMinimizationTests
         Assert.AreEqual(2, plan.RemovedItemIds.Count);
         Assert.AreEqual(1, plan.CreatedViaIds.Count);
         Via merged = plan.Create.Items.Single().Unpack<Via>();
-        CollectionAssert.AreEqual(new[] { BoardLayer.BlFCu, BoardLayer.BlBCu }, merged.PadStack.Layers.ToArray());
+        CollectionAssert.AreEqual(new[] { BoardLayer.BlFCu, BoardLayer.BlIn1Cu, BoardLayer.BlBCu },
+            merged.PadStack.Layers.ToArray());
+        CollectionAssert.AreEqual(new[] { BoardLayer.BlFCu, BoardLayer.BlIn1Cu, BoardLayer.BlBCu },
+            merged.PadStack.CopperLayers.Select(layer => layer.Layer).ToArray());
     }
 
     [TestMethod]
@@ -53,7 +56,10 @@ public sealed class PcbViaMinimizationTests
         StringAssert.Contains(merged.CustomProperties.Single(property => property.Key == "kicad.ai.via_minimize_sources").Value, ids[0]);
         StringAssert.Contains(merged.CustomProperties.Single(property => property.Key == "kicad.ai.via_minimize_sources").Value, ids[1]);
         StringAssert.Contains(merged.CustomProperties.Single(property => property.Key == "kicad.ai.via_minimize_sources").Value, ids[2]);
-        CollectionAssert.AreEqual(new[] { BoardLayer.BlFCu, BoardLayer.BlBCu }, merged.PadStack.Layers.ToArray());
+        CollectionAssert.AreEqual(new[] { BoardLayer.BlFCu, BoardLayer.BlIn1Cu, BoardLayer.BlIn2Cu, BoardLayer.BlBCu },
+            merged.PadStack.Layers.ToArray());
+        CollectionAssert.AreEqual(new[] { BoardLayer.BlFCu, BoardLayer.BlIn1Cu, BoardLayer.BlIn2Cu, BoardLayer.BlBCu },
+            merged.PadStack.CopperLayers.Select(layer => layer.Layer).ToArray());
     }
 
     [TestMethod]

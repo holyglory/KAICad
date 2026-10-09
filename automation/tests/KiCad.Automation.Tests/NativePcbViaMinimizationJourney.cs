@@ -2,6 +2,7 @@ using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Kiapi.Board;
 using Kiapi.Board.Commands;
 using Kiapi.Board.Jobs;
 using Kiapi.Board.Types;
@@ -39,11 +40,19 @@ public sealed partial class NativeSessionTests
         string stateDirectory = Directory.CreateTempSubdirectory("kicad-pcb-via-minimize-mcp-").FullName;
         string retained = Path.Combine(evidence, instanceId + "-via-minimization");
         Directory.CreateDirectory(retained);
+        var evidenceOptions = new JsonSerializerOptions { WriteIndented = true };
+        async Task WriteEvidence(string name, object value)
+            => await File.WriteAllTextAsync(Path.Combine(retained, name),
+                JsonSerializer.Serialize(value, evidenceOptions), token);
+        async Task WriteEvidenceText(string name, string value)
+            => await File.WriteAllTextAsync(Path.Combine(retained, name), value, token);
         await using var mcp = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.ProductionStartInfo(),
             stateDirectory, Path.Combine(retained, "mcp.stderr.log"), token);
         RequireToolSuccess(await mcp.Tool("kicad_instance_attach",
             new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
         DocumentSpecifier? viaBoard = null;
+        BoardDesignRules? originalBoardRules = null;
+        bool boardRulesTuned = false;
         try
         {
             await File.WriteAllTextAsync(boardPath, ViaMinimizationBoard(), token);
@@ -53,6 +62,28 @@ public sealed partial class NativeSessionTests
             viaBoard = board;
 
             await SaveCheckedThroughMcp(client, board, evidence, token, verifyReconnect: false);
+            var boardRulesRequest = new GetBoardDesignRules { Board = board };
+            BoardDesignRulesResponse boardRules = await client.InvokeAsync<GetBoardDesignRules, BoardDesignRulesResponse>(
+                boardRulesRequest, token);
+            originalBoardRules = boardRules.Rules.Clone();
+            await WriteEvidence("board-rules-before.json", new
+            {
+                request = BoardJson.Formatter.Format(boardRulesRequest),
+                response = BoardJson.Formatter.Format(boardRules)
+            });
+            BoardDesignRules tunedBoardRules = originalBoardRules.Clone();
+            Assert.IsNotNull(tunedBoardRules.Constraints, BoardJson.Formatter.Format(boardRules));
+            tunedBoardRules.Constraints.MinViaSize.ValueNm = 500_000;
+            tunedBoardRules.Constraints.MinViaAnnularWidth.ValueNm = 0;
+            var tunedRulesRequest = new SetBoardDesignRules { Board = board, Rules = tunedBoardRules };
+            BoardDesignRulesResponse tunedRules = await client.InvokeAsync<SetBoardDesignRules, BoardDesignRulesResponse>(
+                tunedRulesRequest, token);
+            boardRulesTuned = true;
+            await WriteEvidence("board-rules-tuned.json", new
+            {
+                request = BoardJson.Formatter.Format(tunedRulesRequest),
+                response = BoardJson.Formatter.Format(tunedRules)
+            });
             DocumentLifecycleState before = await ObserveLifecycleState(client, board, token);
             var position = new Vector2 { XNm = 20_000_000, YNm = 10_000_000 };
             var first = BuildVia("10000000-0000-4000-8000-000000000001", position,
@@ -63,12 +94,20 @@ public sealed partial class NativeSessionTests
             create.Items.Add(Any.Pack(first));
             create.Items.Add(Any.Pack(second));
             string createOperation = Guid.NewGuid().ToString("D");
+            await WriteEvidence("seed-create-request.json", new
+            {
+                instanceId,
+                request = BoardJson.Formatter.Format(create),
+                expectedState = SchematicJson.Formatter.Format(before),
+                operationId = createOperation
+            });
             JsonElement created = await mcp.Tool("kicad_pcb_items_create", new
             {
                 instanceId, requestJson = BoardJson.Formatter.Format(create),
                 expectedStateJson = SchematicJson.Formatter.Format(before), operationId = createOperation
             });
             RequireToolSuccess(created);
+            await WriteEvidenceText("seed-create-response.json", created.GetRawText());
             DocumentLifecycleState seeded = StateFromStructured(created);
             Assert.IsGreaterThan(before.Revision.Sequence, seeded.Revision.Sequence, created.GetRawText());
 
@@ -97,14 +136,17 @@ public sealed partial class NativeSessionTests
             var candidate = new CreateItems { Header = new() { Document = board } };
             candidate.Items.AddRange(seededRead.Items.Items.Select(item => item.Clone()));
 
-            JsonElement planReply = await mcp.Tool("kicad_pcb_route_via_minimize_plan", new
+            var planRequest = new
             {
                 instanceId, documentJson = SchematicJson.Formatter.Format(board),
                 expectedStateJson = SchematicJson.Formatter.Format(seeded),
                 candidateRequestJson = BoardJson.Formatter.Format(candidate),
                 requestJson = JsonSerializer.Serialize(new { nets = new[] { "VIA_MAIN" }, maxMerges = 4 })
-            });
+            };
+            await WriteEvidence("plan-request.json", planRequest);
+            JsonElement planReply = await mcp.Tool("kicad_pcb_route_via_minimize_plan", planRequest);
             RequireToolSuccess(planReply);
+            await WriteEvidenceText("plan-response.json", planReply.GetRawText());
             JsonElement plan = planReply.GetProperty("structuredContent");
             Assert.AreEqual(1, plan.GetProperty("mergedCount").GetInt32(), planReply.GetRawText());
             Assert.AreEqual(2, plan.GetProperty("viaCountBefore").GetInt32(), planReply.GetRawText());
@@ -115,6 +157,21 @@ public sealed partial class NativeSessionTests
             Assert.HasCount(1, replacement.Items);
             Assert.IsTrue(replacement.Items.All(item => item.Is(Via.Descriptor)), "Via minimization apply is Via-only.");
             Via merged = replacement.Items.Single().Unpack<Via>();
+            await WriteEvidence("replacement-summary.json", new
+            {
+                request = BoardJson.Formatter.Format(replacement),
+                delete = BoardJson.Formatter.Format(delete),
+                viaType = merged.Type.ToString(),
+                layers = merged.PadStack.Layers.Select(layer => layer.ToString()).ToArray(),
+                copperLayers = merged.PadStack.CopperLayers.Select(layer => new
+                {
+                    layer = layer.Layer.ToString(),
+                    shape = layer.Shape.ToString(),
+                    anchor = layer.CustomAnchorShape.ToString(),
+                    size = layer.Size is null ? null : new { xNm = layer.Size.XNm, yNm = layer.Size.YNm }
+                }).ToArray(),
+                drill = merged.PadStack.Drill
+            });
             Assert.AreEqual(BoardLayer.BlFCu, merged.PadStack.Drill.StartLayer);
             Assert.AreEqual(BoardLayer.BlBCu, merged.PadStack.Drill.EndLayer);
             Assert.AreEqual(first.PadStack.Drill.Diameter, merged.PadStack.Drill.Diameter);
@@ -226,6 +283,12 @@ public sealed partial class NativeSessionTests
             async Task<PcbDrcJobState> DetachedDrc(CreateItems candidateRequest, DeleteItems deleteRequest,
                 DocumentLifecycleState checkpoint)
             {
+                await WriteEvidence("drc-input.json", new
+                {
+                    candidateRequest = BoardJson.Formatter.Format(candidateRequest),
+                    deleteRequest = BoardJson.Formatter.Format(deleteRequest),
+                    checkpoint = SchematicJson.Formatter.Format(checkpoint)
+                });
                 JsonElement start = await mcp.Tool("kicad_pcb_drc_start", new
                 {
                     instanceId, documentJson = SchematicJson.Formatter.Format(board),
@@ -236,6 +299,7 @@ public sealed partial class NativeSessionTests
                     deleteRequestJson = BoardJson.Formatter.Format(deleteRequest)
                 });
                 RequireToolSuccess(start);
+                var rawReplies = new List<string> { start.GetRawText() };
                 PcbDrcJobState job = ParseJob(start);
                 for (int attempt = 0; attempt < 120 && !job.WorkerFinished; attempt++)
                 {
@@ -247,8 +311,10 @@ public sealed partial class NativeSessionTests
                         deleteRequestJson = BoardJson.Formatter.Format(deleteRequest)
                     });
                     RequireToolSuccess(update);
+                    rawReplies.Add(update.GetRawText());
                     job = ParseJob(update);
                 }
+                await WriteEvidenceText("drc-replies.json", "[\n" + string.Join(",\n", rawReplies) + "\n]");
                 Assert.IsTrue(job.WorkerFinished, SchematicJson.Formatter.Format(job));
                 Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, job.Status, job.ErrorMessage);
                 Assert.IsTrue(job.CandidateDryRun && job.CandidatePayloadVerified && job.SnapshotComplete && job.ResultsFresh,
@@ -280,6 +346,22 @@ public sealed partial class NativeSessionTests
         }
         finally
         {
+            if (boardRulesTuned && originalBoardRules is not null && viaBoard is not null)
+            {
+                try
+                {
+                    var restoreRequest = new SetBoardDesignRules { Board = viaBoard, Rules = originalBoardRules };
+                    BoardDesignRulesResponse restored = await client.InvokeAsync<SetBoardDesignRules, BoardDesignRulesResponse>(
+                        restoreRequest, CancellationToken.None);
+                    await File.WriteAllTextAsync(Path.Combine(retained, "board-rules-restored.json"),
+                        JsonSerializer.Serialize(new
+                        {
+                            request = BoardJson.Formatter.Format(restoreRequest),
+                            response = BoardJson.Formatter.Format(restored)
+                        }, evidenceOptions), CancellationToken.None);
+                }
+                catch (Exception) { /* Preserve the original file bytes before reporting the journey failure. */ }
+            }
             if (viaBoard is not null)
             {
                 try
@@ -318,7 +400,7 @@ public sealed partial class NativeSessionTests
     private static Via BuildVia(string id, Vector2 position, BoardLayer start, BoardLayer end, long drill) => new()
     {
         Id = new() { Value = id }, Position = position.Clone(), Net = new() { Name = "VIA_MAIN" },
-        Type = ViaType.VtBlindBuried, IsFree = false,
+        Type = ViaType.VtBlind, IsFree = false,
         PadStack = new()
         {
             Type = PadStackType.PstCustom, Layers = { start, end },
@@ -326,9 +408,9 @@ public sealed partial class NativeSessionTests
             CopperLayers =
             {
                 new PadStackLayer { Layer = start, Shape = PadStackShape.PssCircle,
-                    CustomAnchorShape = PadStackShape.PssCircle, Size = new() { XNm = 1_600_000, YNm = 1_600_000 } },
+                    CustomAnchorShape = PadStackShape.PssRectangle, Size = new() { XNm = 1_600_000, YNm = 1_600_000 } },
                 new PadStackLayer { Layer = end, Shape = PadStackShape.PssCircle,
-                    CustomAnchorShape = PadStackShape.PssCircle, Size = new() { XNm = 1_600_000, YNm = 1_600_000 } }
+                    CustomAnchorShape = PadStackShape.PssRectangle, Size = new() { XNm = 1_600_000, YNm = 1_600_000 } }
             }
         }
     };

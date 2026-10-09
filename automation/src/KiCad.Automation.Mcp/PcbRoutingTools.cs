@@ -17,6 +17,18 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class PcbRoutingTools(InstanceRegistry registry)
 {
+    internal static void ValidatePreviewCheckpoint(StartPcbRoutePreview request, DocumentLifecycleState expected)
+    {
+        if (request.Document is null || request.Document.Type != DocumentType.DoctypePcb
+            || request.ExpectedRevision is null || string.IsNullOrWhiteSpace(request.ProcessEpoch))
+            throw new AutomationException("invalid_route_preview", "Supply an explicit PCB, process epoch and expected revision.");
+        if (!expected.Document.Equals(request.Document) || expected.Scope != DocumentLifecycleScope.DlsPcb
+            || expected.ProcessEpoch != request.ProcessEpoch)
+            throw new AutomationException("invalid_route_preview", "The preview request and lifecycle checkpoint target different native state.");
+        if (expected.Revision is null || !expected.Revision.Equals(request.ExpectedRevision))
+            throw new AutomationException("invalid_route_preview", "The preview request lifecycle revision is stale; refresh the board checkpoint.");
+    }
+
     [McpServerTool(Name = "kicad_pcb_route_preview", ReadOnly = true),
      Description("Run KiCad's native router on an explicit start item and waypoint sequence, then return typed Track/Arc/Via candidates without committing copper. Set pushAndShove=true to force the detached router snapshot into KiCad's push-and-shove mode. Version 1 previews return the complete create/update/remove plan; removedItemIds are displacement diagnostics. Use drcCandidateRequestJson and drcDeleteRequestJson for DRC, then candidateRequestJson, replacementUpdatesJson and candidateDeleteRequestJson for one checked route commit. Set differentialPair=true for a bounded differential-pair preview. Set persistentSession=true for a single-ended preview session that can be continued, reconciled or cancelled by its operationId; persistent previews remain detached and read-only. Validate any candidates and run detached DRC before a separate route commit."),
      KiCadCapability("pcb-routing", "compiled-mcp plus native-pns-router", "board lifecycle state, start item, native PNS waypoint preview"),
@@ -26,13 +38,8 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
     {
         var request = SchematicJson.Parser.Parse<StartPcbRoutePreview>(requestJson);
         if (request.MaximumCompleteDeltaVersion == 0) request.MaximumCompleteDeltaVersion = 2;
-        if (request.Document is null || request.Document.Type != DocumentType.DoctypePcb
-            || request.ExpectedRevision is null || string.IsNullOrWhiteSpace(request.ProcessEpoch))
-            throw new AutomationException("invalid_route_preview", "Supply an explicit PCB, process epoch and expected revision.");
         var expected = SchematicJson.Parser.Parse<DocumentLifecycleState>(expectedStateJson);
-        if (!expected.Document.Equals(request.Document) || expected.Scope != DocumentLifecycleScope.DlsPcb
-            || expected.ProcessEpoch != request.ProcessEpoch)
-            throw new AutomationException("invalid_route_preview", "The preview request and lifecycle checkpoint target different native state.");
+        ValidatePreviewCheckpoint(request, expected);
         var result = await registry.Client(instanceId).InvokeAsync<StartPcbRoutePreview, PcbRoutePreviewState>(request, cancellationToken);
         await RequireCompletePreview(instanceId, request.Document, request.OperationId, request.ProcessEpoch,
             result, request.PersistentSession, cancellationToken);

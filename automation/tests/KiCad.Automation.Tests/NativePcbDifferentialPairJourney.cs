@@ -109,6 +109,7 @@ public sealed partial class NativeSessionTests
             {
                 Document = board, ProcessEpoch = client.Epoch, ExpectedRevision = before.Revision.Clone(),
                 OperationId = Guid.NewGuid().ToString("D"), StartItemId = positiveStart.Id.Value,
+                EndItemId = positiveEnd.Id.Value,
                 Start = positiveStart.Position.Clone(), Layer = BoardLayer.BlFCu,
                 DifferentialPair = true, ForceFinish = true, MaximumCompleteDeltaVersion = 2
             };

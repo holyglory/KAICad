@@ -1403,9 +1403,22 @@ HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> API_HANDLER_PCB::han
     BOARD_ITEM* startBoardItem = target->ResolveItem( KIID( request.start_item_id() ), true );
     if( !startBoardItem || !startBoardItem->IsConnected() )
         return tl::unexpected( RoutePreviewError( "The route preview start item is not a connected board object" ) );
+    BOARD_ITEM* endBoardItem = nullptr;
+    if( !request.end_item_id().empty() )
+    {
+        endBoardItem = target->ResolveItem( KIID( request.end_item_id() ), true );
+        if( !endBoardItem || !endBoardItem->IsConnected() )
+            return tl::unexpected( RoutePreviewError( "The route preview end item is not a connected board object" ) );
+        if( endBoardItem == startBoardItem )
+            return tl::unexpected( RoutePreviewError( "The route preview start and end items must be different" ) );
+    }
 
     if( request.persistent_session() )
     {
+        if( endBoardItem )
+            return tl::unexpected( RoutePreviewError(
+                    "Endpoint-bound persistent route preview sessions are unavailable; use the bounded preview",
+                    ApiStatusCode::AS_UNIMPLEMENTED ) );
         if( request.differential_pair() )
             return tl::unexpected( RoutePreviewError(
                     "Persistent differential-pair preview sessions are unavailable; use the bounded preview" ,
@@ -1502,6 +1515,9 @@ HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> API_HANDLER_PCB::han
     PNS::ITEM* startItem = router->GetWorld()->FindItemByParent( startBoardItem );
     if( !startItem )
         return tl::unexpected( RoutePreviewError( "The start item is not available in the native router world" ) );
+    PNS::ITEM* endItem = endBoardItem ? router->GetWorld()->FindItemByParent( endBoardItem ) : nullptr;
+    if( endBoardItem && !endItem )
+        return tl::unexpected( RoutePreviewError( "The end item is not available in the native router world" ) );
     const VECTOR2I start( request.start().x_nm(), request.start().y_nm() );
     const int pnsLayer = iface->GetPNSLayerFromBoardLayer( boardLayer );
     PNS::SIZES_SETTINGS sizes( router->Sizes() );
@@ -1520,15 +1536,15 @@ HANDLER_RESULT<kiapi::automation::v1::PcbRoutePreviewState> API_HANDLER_PCB::han
     for( int index = 0; index < request.waypoints_size(); ++index )
     {
         const VECTOR2I point( request.waypoints( index ).x_nm(), request.waypoints( index ).y_nm() );
-        if( !router->Move( point, nullptr ) )
+        const bool last = index == request.waypoints_size() - 1;
+        if( !router->Move( point, last ? endItem : nullptr ) )
         {
             failure = router->FailureReason().ToStdString();
             break;
         }
-        const bool last = index == request.waypoints_size() - 1;
         if( last && !request.force_finish() )
             continue;
-        if( last && !router->FixRoute( point, nullptr, true, false ) )
+        if( last && !router->FixRoute( point, endItem, true, false ) )
         {
             failure = router->FailureReason().ToStdString();
             break;

@@ -225,6 +225,10 @@ message StartPcbRoutePreview {
   // Maximum complete route-delta version the caller can consume.  Zero is
   // the legacy version-1 default; version 2 carries exact group ownership.
   uint32 maximum_complete_delta_version = 408;
+  // Optional connected destination board item. When present, the native
+  // placer snaps the final waypoint to this item; omitted preserves the
+  // historical free-space waypoint behavior.
+  string end_item_id = 409;
   // -- end lane 2D --
 }
 

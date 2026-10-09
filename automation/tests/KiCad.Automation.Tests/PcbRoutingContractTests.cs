@@ -4,6 +4,7 @@ using Kiapi.Board.Types;
 using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
 using KiCad.Automation.Model;
+using KiCad.Automation.Mcp;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
@@ -13,6 +14,38 @@ namespace KiCad.Automation.Tests;
 [TestClass]
 public sealed class PcbRoutingContractTests
 {
+    [TestMethod]
+    public void RoutePreviewEndpointIdentityRoundTripsAndStaleCheckpointIsRejected()
+    {
+        var document = new DocumentSpecifier { Type = DocumentType.DoctypePcb, BoardFilename = "route.kicad_pcb",
+            Project = new() { Name = "route", Path = "/tmp/kicad-route-contract" } };
+        string epoch = Guid.NewGuid().ToString("D");
+        var state = new DocumentLifecycleState
+        {
+            Document = document, Scope = DocumentLifecycleScope.DlsPcb, ProcessEpoch = epoch,
+            Revision = new() { Epoch = Guid.NewGuid().ToString("D"), Sequence = 7 }
+        };
+        var request = new StartPcbRoutePreview
+        {
+            Document = document, ProcessEpoch = epoch, ExpectedRevision = state.Revision.Clone(),
+            OperationId = Guid.NewGuid().ToString("D"),
+            StartItemId = Guid.NewGuid().ToString("D"), EndItemId = Guid.NewGuid().ToString("D"),
+            Start = new() { XNm = 1_000, YNm = 2_000 }, Layer = BoardLayer.BlFCu,
+            ForceFinish = true, DifferentialPair = true, MaximumCompleteDeltaVersion = 2
+        };
+        request.Waypoints.Add(new() { XNm = 10_000, YNm = 2_000 });
+
+        var parsed = SchematicJson.Parser.Parse<StartPcbRoutePreview>(SchematicJson.Formatter.Format(request));
+        Assert.AreEqual(request, parsed);
+        PcbRoutingTools.ValidatePreviewCheckpoint(parsed, state);
+
+        var stale = state.Clone();
+        stale.Revision.Sequence++;
+        var error = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbRoutingTools.ValidatePreviewCheckpoint(parsed, stale));
+        Assert.AreEqual("invalid_route_preview", error.Code);
+    }
+
     [TestMethod]
     public void CheckedRouteRequestRoundTripsAnyPackedGeometry()
     {

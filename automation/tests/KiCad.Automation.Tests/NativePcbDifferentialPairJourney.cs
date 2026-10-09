@@ -363,7 +363,8 @@ public sealed partial class NativeSessionTests
 internal static class DifferentialPairRouteFixture
 {
     internal const string PositiveNet = "USB_D+", NegativeNet = "USB_D-";
-    internal const long WidthNm = 200_000, GapNm = 200_000, EndXNm = 20_000_000, CenterYNm = 10_400_000;
+    internal const long WidthNm = 200_000, GapNm = 250_000, PadDiameterNm = 300_000,
+        MinimumClearanceNm = 200_000, EndXNm = 20_000_000, CenterYNm = 10_400_000;
     internal const string PositiveStartPadId = "7e57f1c5-1000-4000-8000-000000000001";
     internal const string NegativeStartPadId = "7e57f1c5-1000-4000-8000-000000000002";
     internal const string PositiveEndPadId = "7e57f1c5-1000-4000-8000-000000000003";
@@ -385,11 +386,11 @@ internal static class DifferentialPairRouteFixture
             (attr smd)
             (pad "1" smd circle (at 0 0) (size 0.3 0.3) (layers "F.Cu" "F.Paste" "F.Mask")
               (net 2 "USB_D-") (uuid "{NegativeStartPadId}")))
-          (footprint "DP_P_DESTINATION" (layer "F.Cu") (at 20 10.2) (uuid "7e57f1c5-1000-4000-8000-000000000013")
+          (footprint "DP_P_DESTINATION" (layer "F.Cu") (at 20 10.15) (uuid "7e57f1c5-1000-4000-8000-000000000013")
             (attr smd)
             (pad "1" smd circle (at 0 0) (size 0.3 0.3) (layers "F.Cu" "F.Paste" "F.Mask")
               (net 1 "USB_D+") (uuid "{PositiveEndPadId}")))
-          (footprint "DP_N_DESTINATION" (layer "F.Cu") (at 20 10.6) (uuid "7e57f1c5-1000-4000-8000-000000000014")
+          (footprint "DP_N_DESTINATION" (layer "F.Cu") (at 20 10.65) (uuid "7e57f1c5-1000-4000-8000-000000000014")
             (attr smd)
             (pad "1" smd circle (at 0 0) (size 0.3 0.3) (layers "F.Cu" "F.Paste" "F.Mask")
               (net 2 "USB_D-") (uuid "{NegativeEndPadId}")))
@@ -406,7 +407,7 @@ internal static class DifferentialPairRouteFixture
           "net_settings": {
             "meta": { "version": 5 },
             "classes": [{ "name": "Default", "clearance": 0.2, "track_width": 0.25,
-              "diff_pair_width": 0.2, "diff_pair_gap": 0.2, "diff_pair_via_gap": 0.2,
+              "diff_pair_width": 0.2, "diff_pair_gap": 0.25, "diff_pair_via_gap": 0.25,
               "via_diameter": 0.6, "via_drill": 0.3, "microvia_diameter": 0.3, "microvia_drill": 0.1,
               "bus_width": 12, "wire_width": 6, "line_style": 0, "priority": 2147483647 }],
             "netclass_patterns": [], "netclass_assignments": null

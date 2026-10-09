@@ -53,7 +53,12 @@ public sealed class NativePcbDifferentialPairFixtureTests
         Assert.IsTrue(nStart.Y - pStart.Y > spacing, "Source spacing must require real native fan-in segments.");
         Assert.AreEqual(DifferentialPairRouteFixture.EndXNm, pEnd.X);
         Assert.AreEqual(pEnd.X, nEnd.X);
-        Assert.AreEqual(spacing, nEnd.Y - pEnd.Y);
+        long endpointSpacing = nEnd.Y - pEnd.Y;
+        Assert.IsTrue(endpointSpacing >= spacing,
+            "Destination centerline spacing must meet the native differential-pair minimum.");
+        Assert.IsTrue(endpointSpacing >= DifferentialPairRouteFixture.PadDiameterNm
+            + DifferentialPairRouteFixture.MinimumClearanceNm,
+            "Destination pads must also satisfy pad diameter plus minimum clearance.");
         Assert.AreEqual(DifferentialPairRouteFixture.CenterYNm * 2, pEnd.Y + nEnd.Y);
         Assert.AreEqual(pStart.Y + nStart.Y, pEnd.Y + nEnd.Y);
         using var project = JsonDocument.Parse(DifferentialPairRouteFixture.ProjectText);

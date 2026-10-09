@@ -84,6 +84,9 @@ public sealed partial class NativeSessionTests
                 request = BoardJson.Formatter.Format(tunedRulesRequest),
                 response = BoardJson.Formatter.Format(tunedRules)
             });
+            // Persist the tuned native rule owner before detached DRC snapshots;
+            // otherwise the detached copy correctly rejects the changed settings.
+            await SaveCheckedThroughMcp(client, board, evidence, token, verifyReconnect: false);
             DocumentLifecycleState before = await ObserveLifecycleState(client, board, token);
             var position = new Vector2 { XNm = 20_000_000, YNm = 10_000_000 };
             var first = BuildVia("10000000-0000-4000-8000-000000000001", position,

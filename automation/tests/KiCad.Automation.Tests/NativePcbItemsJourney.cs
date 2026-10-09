@@ -1538,6 +1538,28 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(SchematicJson.Formatter.Format(cleanState), SchematicJson.Formatter.Format(
                 await ObserveLifecycleState(client, cleanBoard, token)));
 
+            // The preview is validated separately above. For the apply journey,
+            // use a complete connected two-net candidate between the fixture's
+            // exact pads so the native DRC proves real endpoint connectivity.
+            var differentialApplyCandidate = new CreateItems { Header = new() { Document = cleanBoard } };
+            differentialApplyCandidate.Items.Add(Any.Pack(new Track
+            {
+                Id = new() { Value = Guid.NewGuid().ToString("D") },
+                Start = positivePad.Position.Clone(), End = new Vector2 { XNm = 43_100_000, YNm = 40_100_000 },
+                Width = new() { ValueNm = 200_000 }, Layer = BoardLayer.BlFCu,
+                Net = positivePad.Net.Clone()
+            }));
+            var negativePad = pairPads.Items.Select(item => item.Unpack<Pad>())
+                .Single(pad => pad.Net.Name == "USB_D-" && pad.Position.XNm == 40_800_000 && pad.Position.YNm == 40_800_000);
+            differentialApplyCandidate.Items.Add(Any.Pack(new Track
+            {
+                Id = new() { Value = Guid.NewGuid().ToString("D") },
+                Start = negativePad.Position.Clone(), End = new Vector2 { XNm = 43_800_000, YNm = 40_800_000 },
+                Width = new() { ValueNm = 200_000 }, Layer = BoardLayer.BlFCu,
+                Net = negativePad.Net.Clone()
+            }));
+            differentialCandidate = differentialApplyCandidate;
+
             // Apply the exact complete proposal through the differential-pair
             // wrapper.  The detached DRC is bound to this candidate and the
             // empty DeleteItems request makes this an additive transaction.
@@ -3673,6 +3695,7 @@ public sealed partial class NativeSessionTests
         string f5 = Guid.NewGuid().ToString("D"), f6 = Guid.NewGuid().ToString("D");
         string p5 = Guid.NewGuid().ToString("D"), p6 = Guid.NewGuid().ToString("D");
         string f7 = Guid.NewGuid().ToString("D"), p7 = Guid.NewGuid().ToString("D");
+        string f8 = Guid.NewGuid().ToString("D"), p8 = Guid.NewGuid().ToString("D");
         string obstacle = Guid.NewGuid().ToString("D");
         string viaSupport = Guid.NewGuid().ToString("D");
         string edge = Guid.NewGuid().ToString("D");
@@ -3706,6 +3729,9 @@ public sealed partial class NativeSessionTests
   (footprint "DP_N" (layer "F.Cu") (at 40.8 40.8) (uuid "{f4}")
     (attr smd)
     (pad "1" smd circle (at 0 0) (size 0.3 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "USB_D-") (uuid "{p4}")))
+  (footprint "DP_N_TAIL" (layer "F.Cu") (at 43.8 40.8) (uuid "{f8}")
+    (attr smd)
+    (pad "1" smd circle (at 0 0) (size 0.3 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (net 3 "USB_D-") (uuid "{p8}")))
   (footprint "DP_P_TAIL" (layer "F.Cu") (at 43.1 40.1) (uuid "{f5}")
     (attr smd)
     (pad "1" smd circle (at 0 0) (size 0.3 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (net 2 "USB_D+") (uuid "{p5}")))

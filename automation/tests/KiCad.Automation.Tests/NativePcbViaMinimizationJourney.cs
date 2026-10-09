@@ -331,10 +331,12 @@ public sealed partial class NativeSessionTests
         }
     };
 
+    // KiCad's native parser requires an even copper-layer stack. In2.Cu is
+    // intentionally unused; the two source spans still meet at In1.Cu.
     private static string ViaMinimizationBoard() => """
         (kicad_pcb (version 20260206) (generator "pcbnew")
           (general (thickness 1.6)) (paper "A4")
-          (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "B.Cu" signal) (25 "Edge.Cuts" user))
+          (layers (0 "F.Cu" signal) (4 "In1.Cu" signal) (6 "In2.Cu" signal) (2 "B.Cu" signal) (25 "Edge.Cuts" user))
           (setup (pad_to_mask_clearance 0))
           (net 0 "") (net 1 "VIA_MAIN")
           (gr_rect (start 0 0) (end 40 30) (stroke (width 0.05) (type default)) (fill none)

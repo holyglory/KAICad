@@ -23,8 +23,10 @@ public sealed partial class NativeSessionTests
         // POWER_RAIL copper is not an acceptance board for a clean pair apply.
         string originalPath = Path.GetFullPath(Path.Combine(currentBoard.Project.Path, currentBoard.BoardFilename));
         await SaveCheckedThroughMcp(client, currentBoard, evidence, token, verifyReconnect: false);
-        string fixtureDirectory = Directory.CreateDirectory(Path.Combine(currentBoard.Project.Path, "pair-apply")).FullName;
-        string boardPath = Path.Combine(fixtureDirectory, "pair-apply.kicad_pcb");
+        // KiCad's root-board opener requires the board and matching project
+        // file to live directly under the attached project root; a nested
+        // directory is a different project boundary and is rejected.
+        string boardPath = Path.Combine(currentBoard.Project.Path, "pair-apply.kicad_pcb");
         await File.WriteAllTextAsync(boardPath, DifferentialPairRouteFixture.BoardText(), token);
         await File.WriteAllTextAsync(Path.ChangeExtension(boardPath, ".kicad_pro"),
             DifferentialPairRouteFixture.ProjectText, token);

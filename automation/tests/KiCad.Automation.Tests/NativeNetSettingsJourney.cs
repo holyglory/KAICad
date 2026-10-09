@@ -345,5 +345,111 @@ public sealed partial class NativeSessionTests
         }
         await Apply(Batch(await Read(), original.Data.Metadata.NetSettings));
         await Reopen(original.Data, "final-restored");
+
+        // Exercise the public task-oriented wrapper after the legacy checked-batch
+        // coverage has restored its fixture.  The wrapper deliberately receives the
+        // complete checked schematic observation, then must retain the same native
+        // receipt for an identical replay.  Keep this in one attached STDIO session
+        // so the exact public request/response boundary is the evidence under test.
+        string typedStateDirectory = Directory.CreateTempSubdirectory("kicad-net-settings-typed-mcp-").FullName;
+        try
+        {
+            await using var typedMcp = await StdioMcpFixture.StartAsync(
+                typedStateDirectory,
+                Prefix("typed-mcp.stderr.log"), token);
+            var typedSession = await client.HandshakeAsync(token);
+            string typedInstanceId = typedSession.InstanceId;
+            RequireToolSuccess(await typedMcp.Tool("kicad_instance_attach", new
+            {
+                endpoint = client.Endpoint,
+                expectedInstanceId = typedInstanceId
+            }));
+
+            string typedDocumentJson = SchematicJson.Formatter.Format(document);
+            async Task<CheckedSchematicState> ObserveTypedState()
+            {
+                var reply = await typedMcp.Tool("kicad_schematic_checked_state", new
+                { instanceId = typedInstanceId, documentJson = typedDocumentJson });
+                RequireToolSuccess(reply);
+                return SchematicJson.Parser.Parse<CheckedSchematicState>(
+                    reply.GetProperty("structuredContent").GetRawText());
+            }
+            static CheckedSchematicBatchReceipt TypedReceipt(JsonElement reply) =>
+                SchematicJson.Parser.Parse<CheckedSchematicBatchReceipt>(
+                    reply.GetProperty("structuredContent").GetProperty("receipt").GetRawText());
+
+            var typedDesired = original.Data.Clone();
+            long typedWireWidth = typedDesired.Metadata.NetSettings.DefaultClass.Schematic.WireWidth.ValueNm == 101600
+                ? 127000 : 101600;
+            long typedTrackWidth = typedDesired.Metadata.NetSettings.DefaultClass.Board.TrackWidth.ValueNm == 500000
+                ? 450000 : 500000;
+            typedDesired.Metadata.NetSettings.DefaultClass.Schematic.WireWidth = new() { ValueNm = typedWireWidth };
+            typedDesired.Metadata.NetSettings.DefaultClass.Board.TrackWidth = new() { ValueNm = typedTrackWidth };
+            typedDesired = (SchematicScreenData)SchematicDataXml.Read(SchematicDataXml.Write(typedDesired));
+            var typedBefore = await ObserveTypedState();
+            string typedSettingsJson = SchematicJson.Formatter.Format(typedDesired.Metadata.NetSettings);
+            string typedOperationId = Guid.NewGuid().ToString("D");
+            var typedArguments = new
+            {
+                instanceId = typedInstanceId,
+                documentJson = typedDocumentJson,
+                expectedStateJson = SchematicJson.Formatter.Format(typedBefore),
+                netSettingsJson = typedSettingsJson,
+                operationId = typedOperationId
+            };
+
+            var typedCommit = await typedMcp.Tool("kicad_schematic_set_net_settings", typedArguments);
+            RequireToolSuccess(typedCommit);
+            var typedCommitData = typedCommit.GetProperty("structuredContent");
+            Assert.IsTrue(typedCommitData.GetProperty("mutationSubmitted").GetBoolean(), typedCommit.GetRawText());
+            Assert.IsFalse(typedCommitData.GetProperty("replayed").GetBoolean(), typedCommit.GetRawText());
+            var typedReceipt = TypedReceipt(typedCommit);
+            Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, typedReceipt.Status, typedCommit.GetRawText());
+            Assert.AreEqual(typedBefore.State, typedReceipt.ObservedBefore, typedCommit.GetRawText());
+            await Same(typedDesired, (await Read()).Data, "typed-mcp-applied");
+            var typedAfter = await ObserveTypedState();
+            Assert.AreEqual(typedReceipt.ObservedAfter, typedAfter.State, typedCommit.GetRawText());
+
+            // Reusing every argument, including the operation ID and old checked
+            // state, must return the retained receipt without another native edit.
+            var typedReplay = await typedMcp.Tool("kicad_schematic_set_net_settings", typedArguments);
+            RequireToolSuccess(typedReplay);
+            var typedReplayData = typedReplay.GetProperty("structuredContent");
+            Assert.IsTrue(typedReplayData.GetProperty("replayed").GetBoolean(), typedReplay.GetRawText());
+            Assert.IsFalse(typedReplayData.GetProperty("mutationSubmitted").GetBoolean(), typedReplay.GetRawText());
+            Assert.AreEqual(typedReceipt, TypedReceipt(typedReplay), typedReplay.GetRawText());
+            Assert.AreEqual(typedAfter, await ObserveTypedState(), typedReplay.GetRawText());
+
+            // This journey already owns the checked save/reload path; use it to
+            // prove the typed wrapper's native edit is persisted before testing a
+            // stale checkpoint against a later legacy mutation.
+            await Reopen(typedDesired, "typed-mcp-reopened", verifyReconnect: false);
+            var typedSaved = await ObserveTypedState();
+            var typedRestore = Batch(await Read(), original.Data.Metadata.NetSettings);
+            var typedRestoreResult = await Apply(typedRestore);
+            Assert.IsTrue(typedRestoreResult.NetSettingsChanged, "The legacy restore must advance the native settings after the typed save/reload.");
+            await Same(original.Data, (await Read()).Data, "typed-mcp-legacy-restore");
+
+            var typedStale = await typedMcp.Tool("kicad_schematic_set_net_settings", new
+            {
+                instanceId = typedInstanceId,
+                documentJson = typedDocumentJson,
+                expectedStateJson = SchematicJson.Formatter.Format(typedSaved),
+                netSettingsJson = typedSettingsJson,
+                operationId = Guid.NewGuid().ToString("D")
+            });
+            Assert.IsTrue(typedStale.GetProperty("isError").GetBoolean(), typedStale.GetRawText());
+            Assert.AreEqual("stale_document_state",
+                typedStale.GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+                typedStale.GetRawText());
+            Assert.IsFalse(typedStale.GetProperty("structuredContent").GetProperty("mutationSubmitted").GetBoolean(),
+                typedStale.GetRawText());
+            await Same(original.Data, (await Read()).Data, "typed-mcp-stale-preserved");
+        }
+        finally
+        {
+            if (Directory.Exists(typedStateDirectory)) Directory.Delete(typedStateDirectory, recursive: true);
+        }
+        await Reopen(original.Data, "typed-mcp-final-restored", verifyReconnect: false);
     }
 }

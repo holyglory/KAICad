@@ -170,6 +170,7 @@ public sealed class DocumentLifecycleToolTests
         try
         {
             var transport = new LifecycleTransport();
+            transport.Session.Epoch = Guid.NewGuid().ToString("D");
             transport.Session.ProjectPath = Path.Combine(directory, "fixture.kicad_pro");
             var registry = new InstanceRegistry(transport, directory);
             await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "native.sock")), transport.Session.InstanceId);
@@ -185,19 +186,19 @@ public sealed class DocumentLifecycleToolTests
             var complete = CompleteState(directory, transport.Session.Epoch, dirty: true);
             transport.LifecycleState = complete.Clone();
             var reverted = await tool.Revert(transport.Session.InstanceId, SchematicJson.Formatter.Format(complete), operationId, default);
-            Assert.IsFalse(reverted.IsError, reverted.StructuredContent?.GetRawText());
+            Assert.IsFalse(reverted.IsError ?? false, reverted.StructuredContent?.GetRawText());
             Assert.IsTrue(reverted.StructuredContent!.Value.GetProperty("committed").GetBoolean());
             Assert.IsTrue(reverted.StructuredContent.Value.GetProperty("postStateVerified").GetBoolean());
             Assert.IsFalse(reverted.StructuredContent.Value.GetProperty("nativeReceiptAvailable").GetBoolean());
             Assert.AreEqual(1, transport.RevertCalls);
 
             var replay = await tool.Revert(transport.Session.InstanceId, SchematicJson.Formatter.Format(complete), operationId, default);
-            Assert.IsFalse(replay.IsError, replay.StructuredContent?.GetRawText());
+            Assert.IsFalse(replay.IsError ?? false, replay.StructuredContent?.GetRawText());
             Assert.IsTrue(replay.StructuredContent!.Value.GetProperty("replayed").GetBoolean());
             Assert.AreEqual(1, transport.RevertCalls, "Exact replay must use the process-local receipt instead of dispatching a second destructive reload.");
 
             var receipt = await tool.RevertReceipt(transport.Session.InstanceId, transport.Session.Epoch, operationId, default);
-            Assert.IsFalse(receipt.IsError, receipt.StructuredContent?.GetRawText());
+            Assert.IsFalse(receipt.IsError ?? false, receipt.StructuredContent?.GetRawText());
             Assert.IsTrue(receipt.StructuredContent!.Value.GetProperty("found").GetBoolean());
             Assert.AreEqual("completed", receipt.StructuredContent.Value.GetProperty("outcome").GetString());
 
@@ -205,6 +206,25 @@ public sealed class DocumentLifecycleToolTests
             var reused = await tool.Revert(transport.Session.InstanceId, SchematicJson.Formatter.Format(changed), operationId, default);
             Assert.IsTrue(reused.IsError);
             Assert.AreEqual("operation_reused", reused.StructuredContent!.Value.GetProperty("code").GetString());
+
+            // A new MCP tool/registry instance must recover the receipt from the state directory,
+            // rather than depending on the original process's static replay cache.
+            var restarted = new DocumentLifecycleTools(new InstanceRegistry(new LifecycleTransport(), directory));
+            var recovered = await restarted.RevertReceipt(transport.Session.InstanceId, transport.Session.Epoch, operationId, default);
+            Assert.IsFalse(recovered.IsError ?? false, recovered.StructuredContent?.GetRawText());
+            Assert.IsTrue(recovered.StructuredContent!.Value.GetProperty("found").GetBoolean());
+            Assert.AreEqual("completed", recovered.StructuredContent.Value.GetProperty("outcome").GetString());
+            Assert.IsTrue(recovered.StructuredContent.Value.GetProperty("receipt").GetProperty("postStateVerified").GetBoolean());
+
+            // A file entry whose embedded identity does not match its lookup key is rejected
+            // fail-closed instead of being treated as an absent receipt.
+            string corruptOperation = Guid.NewGuid().ToString("D");
+            string receiptPath = Path.Combine(directory, "document-revert-receipts.json");
+            await File.WriteAllTextAsync(receiptPath,
+                $"{{\"{corruptOperation}\":{{\"operationId\":\"{operationId}\"}}}}");
+            var corrupt = await restarted.RevertReceipt(transport.Session.InstanceId, transport.Session.Epoch, corruptOperation, default);
+            Assert.IsTrue(corrupt.IsError, corrupt.StructuredContent?.GetRawText());
+            Assert.AreEqual("revert_receipt_corrupt", corrupt.StructuredContent!.Value.GetProperty("code").GetString());
         }
         finally { Directory.Delete(directory, true); }
     }

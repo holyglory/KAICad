@@ -438,8 +438,10 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
             });
         }));
 
-    [McpServerTool(Name = "kicad_footprint_library_write_checked"),
-     Description("Write one complete FootprintInstance into an explicitly identified direct KiCad .pretty library entry. expectedStateJson and expectedSnapshotSha256 must come from kicad_library_snapshot_read; the native owner locks the table and every sibling .kicad_mod baseline, verifies persisted readback and retains rollback evidence. The operation UUID is exact-replay safe; unsupported providers or incomplete definitions are refused before the writer.")]
+    [McpServerTool(Name = "kicad_footprint_library_write_checked", ReadOnly = false),
+     Description("Write one complete FootprintInstance into an explicitly identified direct KiCad .pretty library entry. expectedStateJson and expectedSnapshotSha256 must come from kicad_library_snapshot_read; the native owner locks the table and every sibling .kicad_mod baseline, verifies persisted readback and retains rollback evidence. The operation UUID is exact-replay safe; unsupported providers or incomplete definitions are refused before the writer."),
+     KiCadCapability("footprint-library", "checked-native-direct-footprint-file", "project-bound footprint document, process epoch, complete checked state/revision, operation UUID, definition and typed receipt"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> WriteChecked(string instanceId, string expectedProcessEpoch,
         string documentJson, string footprintJson, string operationId, string expectedSnapshotSha256,
         string expectedStateJson, CancellationToken cancellationToken, bool overwrite = true) =>
@@ -512,7 +514,9 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
         });
 
     [McpServerTool(Name = "kicad_footprint_library_checked_receipt", ReadOnly = true),
-     Description("Read one exact process-owned checked footprint-library receipt after a lost reply or MCP reconnect. The original request, document, process epoch and operation identity must match; lookup never dispatches a writer.")]
+     Description("Read one exact process-owned checked footprint-library receipt after a lost reply or MCP reconnect. The original request, document, process epoch and operation identity must match; lookup never dispatches a writer."),
+     KiCadCapability("footprint-library", "checked-native-direct-footprint-file", "exact checked request, process-owned receipt, revision and rollback evidence"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> CheckedReceipt(string instanceId, string expectedProcessEpoch,
         string documentJson, string operationId, string expectedRequestJson,
         CancellationToken cancellationToken) => Execute(async () =>

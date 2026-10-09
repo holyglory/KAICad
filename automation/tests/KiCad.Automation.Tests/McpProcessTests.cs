@@ -64,6 +64,8 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_simulation_cancel");
             CollectionAssert.Contains(names, "kicad_artwork_raster_trace");
             CollectionAssert.Contains(names, "kicad_artwork_raster_project");
+            CollectionAssert.Contains(names, "kicad_footprint_library_write_checked");
+            CollectionAssert.Contains(names, "kicad_footprint_library_checked_receipt");
             CollectionAssert.Contains(names, "kicad_schematic_replace_embedded_files");
             CollectionAssert.Contains(names, "kicad_schematic_create_image");
             CollectionAssert.Contains(names, "kicad_schematic_update_image");
@@ -159,6 +161,37 @@ public sealed class McpProcessTests
             await Request(9075, "tools/call", new { name = "kicad_pcb_zone_create", arguments = new { instanceId = unknownInstance, documentJson = "{}", zone = typedZone, expectedStateJson = "{}", operationId = unknownOperation } });
             await Request(9076, "tools/call", new { name = "kicad_pcb_zone_update", arguments = new { instanceId = unknownInstance, documentJson = "{}", zone = typedZone, expectedStateJson = "{}", operationId = unknownOperation } });
             await Request(9077, "tools/call", new { name = "kicad_pcb_zone_delete", arguments = new { instanceId = unknownInstance, documentJson = "{}", zoneId = unknownInstance, expectedStateJson = "{}", operationId = unknownOperation } });
+            string footprintEpoch = Guid.NewGuid().ToString("D");
+            string checkedFootprintDocument = "{\"type\":\"DOCTYPE_FOOTPRINT\",\"project\":{\"name\":\"fixture\",\"path\":"
+                + JsonSerializer.Serialize(state)
+                + "},\"libId\":{\"libraryNickname\":\"Fixture\",\"entryName\":\"Probe\"}}";
+            JsonElement invalidCheckedFootprintWrite = await Request(9088, "tools/call", new
+            {
+                name = "kicad_footprint_library_write_checked",
+                arguments = new
+                {
+                    instanceId = unknownInstance, expectedProcessEpoch = footprintEpoch,
+                    documentJson = checkedFootprintDocument, footprintJson = "{}", operationId = unknownOperation,
+                    expectedSnapshotSha256 = new string('a', 64), expectedStateJson = "", overwrite = true
+                }
+            });
+            Assert.IsTrue(invalidCheckedFootprintWrite.GetProperty("result").GetProperty("isError").GetBoolean(),
+                invalidCheckedFootprintWrite.GetRawText());
+            Assert.AreEqual("invalid_library_snapshot", invalidCheckedFootprintWrite.GetProperty("result")
+                .GetProperty("structuredContent").GetProperty("errorCode").GetString(), invalidCheckedFootprintWrite.GetRawText());
+            JsonElement invalidCheckedFootprintReceipt = await Request(9089, "tools/call", new
+            {
+                name = "kicad_footprint_library_checked_receipt",
+                arguments = new
+                {
+                    instanceId = unknownInstance, expectedProcessEpoch = footprintEpoch,
+                    documentJson = checkedFootprintDocument, operationId = unknownOperation, expectedRequestJson = "{"
+                }
+            });
+            Assert.IsTrue(invalidCheckedFootprintReceipt.GetProperty("result").GetProperty("isError").GetBoolean(),
+                invalidCheckedFootprintReceipt.GetRawText());
+            Assert.AreEqual("invalid_library_request", invalidCheckedFootprintReceipt.GetProperty("result")
+                .GetProperty("structuredContent").GetProperty("errorCode").GetString(), invalidCheckedFootprintReceipt.GetRawText());
             await Request(9078, "tools/call", new { name = "kicad_schematic_replace_embedded_files", arguments = new
             {
                 instanceId = unknownInstance, documentJson = "{}", expectedStateJson = "{}",

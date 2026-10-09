@@ -27,7 +27,7 @@ public sealed class CapabilityCatalogTests
     // Lane 2D tool types: each of their tools declares its capability and its verification.
     private static readonly System.Type[] DeclaredToolTypes =
         [typeof(InstanceTools), typeof(InstanceUpdateTools), typeof(DocumentLifecycleTools), typeof(DocumentStateTools), typeof(CheckedSchematicTools),
-         typeof(ExitedOperationTools)];
+         typeof(ExitedOperationTools), typeof(FootprintLibraryTools)];
 
     [TestMethod]
     public async Task CompiledServerAdvertisesExactlyItsRegisteredTools()
@@ -56,6 +56,8 @@ public sealed class CapabilityCatalogTests
                 AssertKinds(entries["kicad_document_save"], "schematic", "pcb");
                 AssertKinds(entries["kicad_symbol_library_write"], "library");
                 AssertKinds(entries["kicad_footprint_library_delete"], "library");
+                AssertKinds(entries["kicad_footprint_library_write_checked"], "library");
+                AssertKinds(entries["kicad_footprint_library_checked_receipt"], "library");
                 AssertKinds(entries["kicad_pcb_export_3d"], "pcb", "job");
                 AssertKinds(entries["kicad_simulation_start"], "schematic", "job");
                 AssertKinds(entries["kicad_simulation_result"], "schematic", "job");

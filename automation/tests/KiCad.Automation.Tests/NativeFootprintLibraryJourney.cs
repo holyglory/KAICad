@@ -8,7 +8,7 @@ namespace KiCad.Automation.Tests;
 
 [TestClass]
 [TestCategory("NativeFootprintLibrary")]
-public sealed class NativeFootprintLibraryJourney
+public sealed partial class NativeFootprintLibraryJourney
 {
     [TestMethod]
     public async Task FootprintLibraryListDeleteUsesLiveEditorAndNativeReceipts()
@@ -30,6 +30,8 @@ public sealed class NativeFootprintLibraryJourney
         string richDefinition = await File.ReadAllTextAsync(sourceFootprint);
         richDefinition = richDefinition.Replace("\t(attr smd)\n", "\t(attr smd)\n\t(solder_mask_margin 0.01)\n\t(solder_paste_margin_ratio 0.15)\n\t(property \"FixtureProvenance\" \"rich\"\n\t\t(at 0 0 0)\n\t\t(layer \"F.Fab\")\n\t\t(hide yes)\n\t\t(uuid \"8b80d985-95fd-4c20-9fe8-b2a9e8733e60\")\n\t\t(effects (font (size 1.27 1.27)))\n\t)\n", StringComparison.Ordinal);
         await File.WriteAllTextAsync(fixtureFootprint, richDefinition);
+        string checkedFootprint = Path.Combine(library, CheckedFootprintName + ".kicad_mod");
+        await File.WriteAllTextAsync(checkedFootprint, CheckedFootprintFixture);
         await File.WriteAllTextAsync(project, "{\"meta\":{\"version\":3}}");
         await File.WriteAllTextAsync(Path.Combine(projectDirectory, "fp-lib-table"),
             $"(fp_lib_table (version 7) (lib (name \"Fixture\") (type \"KiCad\") (uri \"{library.Replace("\\", "/", StringComparison.Ordinal)}\") (options \"\") (descr \"\")))\n");
@@ -174,6 +176,13 @@ public sealed class NativeFootprintLibraryJourney
             Assert.AreEqual(1, openDocuments.GetProperty("structuredContent").GetProperty("usableDocumentCount").GetInt32(), openDocuments.GetRawText());
             Assert.AreEqual(footprintName, openDocuments.GetProperty("structuredContent").GetProperty("response")
                 .GetProperty("documents")[0].GetProperty("libId").GetProperty("entryName").GetString(), openDocuments.GetRawText());
+
+            await VerifyCheckedFootprintWrite(mcp, instanceId, epoch, "ipc://" + socket,
+                projectDirectory, checkedFootprint, fixtureFootprint, documentJson, scratch, evidence, deadline.Token);
+
+            listed = await mcp.Tool("kicad_footprint_library_list", new
+            { instanceId, expectedProcessEpoch = epoch, libraryNickname = "Fixture" });
+            RequireCheckedFootprintSuccess(listed);
 
             string deleteOperation = Guid.NewGuid().ToString("D");
             var deleted = await mcp.Tool("kicad_footprint_library_delete", new

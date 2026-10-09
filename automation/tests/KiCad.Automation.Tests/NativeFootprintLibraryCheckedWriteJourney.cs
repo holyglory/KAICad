@@ -177,7 +177,7 @@ public sealed partial class NativeFootprintLibraryJourney
             CollectionAssert.AreEqual(tableBeforeBytes, await File.ReadAllBytesAsync(tablePath, token));
             CollectionAssert.AreEqual(projectBeforeBytes, await File.ReadAllBytesAsync(projectPath, token));
             JsonElement editorAfter = await ReadDefinition(client, editorDocumentJson, "editor");
-            AssertCheckedFootprintContent(editorFootprintBefore,
+            AssertEditorCheckedFootprintContent(editorFootprintBefore,
                 BoardJson.Parser.Parse<FootprintInstance>(editorAfter.GetProperty("footprint").GetRawText()));
             JsonElement openAfter = await Tool(client, "kicad_footprint_open_documents", new
             { instanceId, expectedProcessEpoch = epoch });
@@ -407,39 +407,66 @@ public sealed partial class NativeFootprintLibraryJourney
         Assert.AreEqual((ulong)bytes.LongLength, baseline.Bytes, path);
     }
 
-    private static void AssertCheckedFootprintContent(FootprintInstance expected, FootprintInstance actual)
+    private static Footprint DetachedCheckedFootprint(Footprint definition, bool clearTransientTextIds)
     {
         // Library loads allocate a new container identity. Parent IDs are read-only API
         // references, not persisted library content; compare every other definition field.
-        static Footprint Detached(Footprint definition)
+        Footprint value = definition.Clone();
+        foreach (var field in new[] { value.ReferenceField, value.ValueField, value.DatasheetField, value.DescriptionField })
         {
-            Footprint value = definition.Clone();
-            foreach (var field in new[] { value.ReferenceField, value.ValueField, value.DatasheetField, value.DescriptionField })
-                field.Text.Parent = null;
-            for (int index = 0; index < value.Items.Count; index++)
-            {
-                Any item = value.Items[index];
-                if (item.Is(Pad.Descriptor))
-                {
-                    Pad pad = item.Unpack<Pad>(); pad.Parent = null; value.Items[index] = Any.Pack(pad);
-                }
-                else if (item.Is(BoardGraphicShape.Descriptor))
-                {
-                    BoardGraphicShape shape = item.Unpack<BoardGraphicShape>(); shape.Parent = null; value.Items[index] = Any.Pack(shape);
-                }
-                else if (item.Is(BoardText.Descriptor))
-                {
-                    BoardText text = item.Unpack<BoardText>(); text.Parent = null; value.Items[index] = Any.Pack(text);
-                }
-                else if (item.Is(Kiapi.Board.Types.Field.Descriptor))
-                {
-                    var field = item.Unpack<Kiapi.Board.Types.Field>(); field.Text.Parent = null; value.Items[index] = Any.Pack(field);
-                }
-            }
-            return value;
+            field.Text.Parent = null;
+            if (clearTransientTextIds)
+                field.Text.Id = null;
         }
-        Assert.AreEqual(Detached(expected.Definition), Detached(actual.Definition),
+        for (int index = 0; index < value.Items.Count; index++)
+        {
+            Any item = value.Items[index];
+            if (item.Is(Pad.Descriptor))
+            {
+                Pad pad = item.Unpack<Pad>(); pad.Parent = null; value.Items[index] = Any.Pack(pad);
+            }
+            else if (item.Is(BoardGraphicShape.Descriptor))
+            {
+                BoardGraphicShape shape = item.Unpack<BoardGraphicShape>(); shape.Parent = null; value.Items[index] = Any.Pack(shape);
+            }
+            else if (item.Is(BoardText.Descriptor))
+            {
+                BoardText text = item.Unpack<BoardText>();
+                text.Parent = null;
+                if (clearTransientTextIds)
+                    text.Id = null;
+                value.Items[index] = Any.Pack(text);
+            }
+            else if (item.Is(Kiapi.Board.Types.Field.Descriptor))
+            {
+                var field = item.Unpack<Kiapi.Board.Types.Field>();
+                field.Text.Parent = null;
+                if (clearTransientTextIds)
+                    field.Text.Id = null;
+                value.Items[index] = Any.Pack(field);
+            }
+        }
+        return value;
+    }
+
+    private static void AssertCheckedFootprintContent(FootprintInstance expected, FootprintInstance actual)
+    {
+        Assert.AreEqual(DetachedCheckedFootprint(expected.Definition, clearTransientTextIds: false),
+            DetachedCheckedFootprint(actual.Definition, clearTransientTextIds: false),
             "The entire persisted definition must match the supported fields, child identities and geometry of the exact candidate.");
+        Assert.AreEqual(expected.Attributes, actual.Attributes);
+        Assert.AreEqual(expected.Overrides, actual.Overrides);
+        Assert.AreEqual(expected.Layer, actual.Layer);
+        Assert.AreEqual(expected.Position, actual.Position);
+        Assert.AreEqual(expected.Orientation, actual.Orientation);
+        Assert.AreEqual(expected.Locked, actual.Locked);
+    }
+
+    private static void AssertEditorCheckedFootprintContent(FootprintInstance expected, FootprintInstance actual)
+    {
+        Assert.AreEqual(DetachedCheckedFootprint(expected.Definition, clearTransientTextIds: true),
+            DetachedCheckedFootprint(actual.Definition, clearTransientTextIds: true),
+            "The editor footprint content must remain unchanged apart from transient native text identities.");
         Assert.AreEqual(expected.Attributes, actual.Attributes);
         Assert.AreEqual(expected.Overrides, actual.Overrides);
         Assert.AreEqual(expected.Layer, actual.Layer);

@@ -1526,25 +1526,6 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(differentialData.GetProperty("drcValidated").GetBoolean());
             var differentialCandidate = BoardJson.Parser.Parse<CreateItems>(
                 differentialData.GetProperty("candidateRequestJson").GetString()!);
-            // The native differential preview may contain a multi-segment
-            // route. The typed apply contract intentionally accepts one
-            // straight Track per named net, so retain one deterministic
-            // segment from each net for this focused apply journey.
-            var differentialApplyCandidate = new CreateItems { Header = differentialCandidate.Header.Clone() };
-            differentialApplyCandidate.Items.Add(differentialCandidate.Items
-                .Where(item => item.Is(Track.Descriptor))
-                .Select(item => item.Unpack<Track>())
-                .Where(track => track.Net.Name == "USB_D+")
-                .OrderByDescending(track => track.End.XNm - track.Start.XNm + track.End.YNm - track.Start.YNm)
-                .FirstOrDefault() is { } positiveTrack ? Any.Pack(positiveTrack) : null);
-            differentialApplyCandidate.Items.Add(differentialCandidate.Items
-                .Where(item => item.Is(Track.Descriptor))
-                .Select(item => item.Unpack<Track>())
-                .Where(track => track.Net.Name == "USB_D-")
-                .OrderByDescending(track => track.End.XNm - track.Start.XNm + track.End.YNm - track.Start.YNm)
-                .FirstOrDefault() is { } negativeTrack ? Any.Pack(negativeTrack) : null);
-            Assert.AreEqual(2, differentialApplyCandidate.Items.Count, differentialData.GetRawText());
-            differentialCandidate = differentialApplyCandidate;
             var differentialNets = differentialCandidate.Items
                 .Select(item => item.Unpack<Track>().Net.Name).ToHashSet(StringComparer.Ordinal);
             Assert.IsTrue(differentialNets.Contains("USB_D+"), differentialData.GetRawText());

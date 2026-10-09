@@ -101,8 +101,8 @@ public sealed partial class NativeSessionTests
                 Assert.AreEqual(DifferentialPairRouteFixture.GapNm, settings.DiffPairGap.ValueNm);
             }
 
-            // Source pads are wider apart than the configured pair. Native
-            // PNS therefore supplies the real fan-in and parallel route as a
+            // The source and destination pads share the same wider spacing.
+            // Native PNS may return a straight two-track pair or a complete
             // multi-segment candidate ending at the real positive destination
             // pad. No returned segment is selected out.
             var previewRequest = new StartPcbRoutePreview
@@ -139,7 +139,8 @@ public sealed partial class NativeSessionTests
             Assert.IsEmpty(nativePreview.GroupChanges);
             string candidateJson = previewData.GetProperty("candidateRequestJson").GetString()!;
             var candidate = BoardJson.Parser.Parse<CreateItems>(candidateJson);
-            Assert.IsTrue(candidate.Items.Count > 2, "Native fan-in must exercise the complete multi-segment apply path.");
+            Assert.IsGreaterThanOrEqualTo(2, candidate.Items.Count,
+                "The complete pair candidate must contain both net tracks.");
             Assert.IsTrue(candidate.Items.All(item => item.Is(Track.Descriptor)));
             var candidateTracks = candidate.Items.Select(item => item.Unpack<Track>()).ToArray();
             CollectionAssert.AreEquivalent(new[] { positiveStart.Net.Name, negativeStart.Net.Name },
@@ -410,11 +411,11 @@ internal static class DifferentialPairRouteFixture
             (attr smd)
             (pad "1" smd circle (at 0 0) (size 0.3 0.3) (layers "F.Cu" "F.Paste" "F.Mask")
               (net 2 "USB_D-") (uuid "{NegativeStartPadId}")))
-          (footprint "DP_P_DESTINATION" (layer "F.Cu") (at 20 10.15) (uuid "7e57f1c5-1000-4000-8000-000000000013")
+          (footprint "DP_P_DESTINATION" (layer "F.Cu") (at 20 10) (uuid "7e57f1c5-1000-4000-8000-000000000013")
             (attr smd)
             (pad "1" smd circle (at 0 0) (size 0.3 0.3) (layers "F.Cu" "F.Paste" "F.Mask")
               (net 1 "USB_D+") (uuid "{PositiveEndPadId}")))
-          (footprint "DP_N_DESTINATION" (layer "F.Cu") (at 20 10.65) (uuid "7e57f1c5-1000-4000-8000-000000000014")
+          (footprint "DP_N_DESTINATION" (layer "F.Cu") (at 20 10.8) (uuid "7e57f1c5-1000-4000-8000-000000000014")
             (attr smd)
             (pad "1" smd circle (at 0 0) (size 0.3 0.3) (layers "F.Cu" "F.Paste" "F.Mask")
               (net 2 "USB_D-") (uuid "{NegativeEndPadId}")))

@@ -103,8 +103,8 @@ public sealed partial class NativeSessionTests
 
             // Source pads are wider apart than the configured pair. Native
             // PNS therefore supplies the real fan-in and parallel route as a
-            // multi-segment candidate. The cursor denotes the pair centerline,
-            // not either destination pad. No returned segment is selected out.
+            // multi-segment candidate ending at the real positive destination
+            // pad. No returned segment is selected out.
             var previewRequest = new StartPcbRoutePreview
             {
                 Document = board, ProcessEpoch = client.Epoch, ExpectedRevision = before.Revision.Clone(),
@@ -112,8 +112,7 @@ public sealed partial class NativeSessionTests
                 Start = positiveStart.Position.Clone(), Layer = BoardLayer.BlFCu,
                 DifferentialPair = true, ForceFinish = true, MaximumCompleteDeltaVersion = 2
             };
-            previewRequest.Waypoints.Add(new Vector2
-            { XNm = DifferentialPairRouteFixture.EndXNm, YNm = DifferentialPairRouteFixture.CenterYNm });
+            previewRequest.Waypoints.Add(positiveEnd.Position.Clone());
             await File.WriteAllTextAsync(Path.Combine(retained, "input.json"), JsonSerializer.Serialize(new
             {
                 fixture = "isolated-two-net-native-pns", processEpoch = client.Epoch,
@@ -147,6 +146,8 @@ public sealed partial class NativeSessionTests
                 candidateTracks.Select(track => track.Net.Name).Distinct(StringComparer.Ordinal).ToArray());
             Assert.AreEqual(candidate.Items.Count, candidateTracks.Select(track => track.Id.Value).Distinct(StringComparer.Ordinal).Count());
             Assert.IsTrue(candidateTracks.All(track => track.Layer == BoardLayer.BlFCu && track.Width.ValueNm == DifferentialPairRouteFixture.WidthNm));
+            AssertCandidateConnectsPads(positiveStart, positiveEnd);
+            AssertCandidateConnectsPads(negativeStart, negativeEnd);
             Assert.AreEqual(candidateJson, previewData.GetProperty("drcCandidateRequestJson").GetString(),
                 "Detached DRC must receive every unchanged native preview segment.");
             Assert.AreEqual(before, await ObserveLifecycleState(client, board, token));
@@ -290,6 +291,29 @@ public sealed partial class NativeSessionTests
             string[] ExpectedConnections(Pad source, Pad destination) => candidateTracks
                 .Where(track => track.Net.Name == source.Net.Name).Select(track => track.Id.Value)
                 .Concat(new[] { source.Id.Value, destination.Id.Value }).Order(StringComparer.Ordinal).ToArray();
+
+            void AssertCandidateConnectsPads(Pad source, Pad destination)
+            {
+                var reached = new HashSet<Vector2> { source.Position };
+                var remaining = candidateTracks.Where(track => track.Net.Name == source.Net.Name).ToList();
+                int previousCount;
+                do
+                {
+                    previousCount = remaining.Count;
+                    for (int index = remaining.Count - 1; index >= 0; --index)
+                    {
+                        Track segment = remaining[index];
+                        if (!reached.Contains(segment.Start) && !reached.Contains(segment.End)) continue;
+                        reached.Add(segment.Start);
+                        reached.Add(segment.End);
+                        remaining.RemoveAt(index);
+                    }
+                } while (remaining.Count < previousCount);
+                Assert.IsTrue(reached.Contains(destination.Position),
+                    $"The complete {source.Net.Name} candidate must join its actual source and destination pad anchors.");
+                Assert.IsEmpty(remaining,
+                    $"Every {source.Net.Name} candidate segment must belong to that connected route.");
+            }
 
             async Task<string[]> ConnectedIds(Pad source, DocumentLifecycleState checkpoint)
             {

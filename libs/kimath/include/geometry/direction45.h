@@ -233,7 +233,8 @@ public:
      */
     const SHAPE_LINE_CHAIN BuildInitialTrace( const VECTOR2I& aP0, const VECTOR2I& aP1,
                                               bool        aStartDiagonal = false,
-                                              CORNER_MODE aMode = CORNER_MODE::MITERED_45 ) const;
+                                              CORNER_MODE aMode = CORNER_MODE::MITERED_45,
+                                              int         aCornerRadius = 0 ) const;
 
     bool operator==( const DIRECTION_45& aOther ) const
     {

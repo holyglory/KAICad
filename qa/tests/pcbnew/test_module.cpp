@@ -31,6 +31,8 @@
 #include <wx/image.h>
 #include <wx/init.h>
 #include <wx/app.h>
+#include <wx/log.h>
+#include <cstdlib>
 
 using KI_TEST::STALE_DRU_SIDECAR_FIXTURE;
 
@@ -45,7 +47,10 @@ bool init_unit_test()
     KIPLATFORM::APP::Init();
     boost::unit_test::framework::master_test_suite().p_name.value = "Pcbnew module tests";
 
-    wxApp::SetInstance( new wxAppConsole );
+    if( std::getenv( "KICAD_UI_TEST" ) )
+        wxApp::SetInstance( new wxApp );
+    else
+        wxApp::SetInstance( new wxAppConsole );
 
     bool ok = wxInitialize( boost::unit_test::framework::master_test_suite().argc,
                             boost::unit_test::framework::master_test_suite().argv );
@@ -53,6 +58,11 @@ bool init_unit_test()
     if( ok )
     {
         wxSetAssertHandler( &KI_TEST::wxAssertThrower );
+
+        // Test diagnostics must go to the runner, including during wxWidgets teardown.
+        // wxLogGui would otherwise open a modal error dialog when the final log is flushed.
+        if( std::getenv( "KICAD_UI_TEST" ) )
+            delete wxLog::SetActiveTarget( new wxLogStderr );
 
         Pgm().InitPgm( true, true );
         Pgm().GetSettingsManager().RegisterSettings( new PCBNEW_SETTINGS, false );

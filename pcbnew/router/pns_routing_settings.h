@@ -155,6 +155,17 @@ public:
     bool GetRestrictAngles() const { return m_restrictAngles; }
     void SetRestrictAngles( bool aEnable ) { m_restrictAngles = aEnable; }
 
+    bool FlexibleRouting() const { return m_flexibleRouting; }
+    void SetFlexibleRouting( bool aEnable ) { m_flexibleRouting = aEnable; }
+
+    int CornerRadius() const { return m_cornerRadius; }
+    void SetCornerRadius( int aRadius ) { m_cornerRadius = aRadius; }
+    double CornerRadiusPercent() const { return m_cornerRadiusPercent; }
+    void SetCornerRadiusPercent( double aPercent ) { m_cornerRadiusPercent = aPercent; }
+    bool CornerRadiusUsesPercent() const { return m_cornerRadiusUsesPercent; }
+    void SetCornerRadiusUsesPercent( bool aUsePercent ) { m_cornerRadiusUsesPercent = aUsePercent; }
+    int EffectiveCornerRadius( int aTrackWidth ) const;
+
     double WalkaroundHugLengthThreshold() const { return m_walkaroundHugLengthThreshold; }
 
     int ViaForcePropIterationLimit() const { return m_viaForcePropIterationLimit; }
@@ -177,6 +188,10 @@ private:
     bool m_autoPosture;
     bool m_fixAllSegments;
     bool m_restrictAngles;
+    bool m_flexibleRouting;
+    int m_cornerRadius;
+    double m_cornerRadiusPercent;
+    bool m_cornerRadiusUsesPercent;
 
     DIRECTION_45::CORNER_MODE m_cornerMode;
 

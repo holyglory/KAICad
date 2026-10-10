@@ -1636,3 +1636,32 @@ name = "contracts"
 tier = "development"
 command = ["dotnet", "test", "automation/KiCad.Automation.slnx", "--configuration", "Release", "--no-build", "--no-restore", "--filter", "TestCategory=UpstreamRelease|FullyQualifiedName~HostedWindowsCheckpointTests|FullyQualifiedName~HostedDeliveryTests|FullyQualifiedName~HostedPreviewStagingTests|FullyQualifiedName~WindowsRequalifiedPreviewTests|FullyQualifiedName~LinuxPackageTests|FullyQualifiedName~DownloadPageTests", "--logger", "trx", "--results-directory", "automation/artifacts/upstream-release"]
 retained_artifacts = [{ name = "upstream-release", path = "automation/artifacts/upstream-release", max_bytes = 16777216 }]
+
+[test.router-connection]
+timeout_seconds = 1800
+env = { TMPDIR = "/mnt/build-storage/codex/kicad/t", KICAD_RUN_FROM_BUILD_DIR = "1" }
+
+[[test.router-connection.check]]
+name = "configure"
+tier = "development"
+role = "preflight"
+invalidates = ["build", "cases"]
+command = ["cmake", "-S", ".", "-B", "automation/artifacts/native", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DKICAD_USE_CMAKE_FINDPROTOBUF=ON", "-DKICAD_BUILD_QA_TESTS=ON"]
+
+[[test.router-connection.check]]
+name = "build"
+tier = "development"
+role = "preflight"
+invalidates = ["cases"]
+command = ["cmake", "--build", "automation/artifacts/native", "--target", "pcbnew_kiface", "qa_pcbnew"]
+
+[[test.router-connection.check]]
+name = "cases"
+tier = "development"
+command = ["automation/artifacts/native/qa/tests/pcbnew/qa_pcbnew", "--run_test=BoardDesignSettings/SmoothConnectionsRoundTrip:TrackConnectionModeRoundTrip:RoutingCornerRadiusUnits:RoundedInitialTraceUsesArc:SmoothConnectionBlendsWideTrackIntoThinPad:SmoothConnectionMergesUnequalTracks:FlexibleWalkaroundRoundsAConstrainedDetour", "--log_level=test_suite"]
+
+[[test.router-connection.check]]
+name = "ui-dialog"
+tier = "development"
+requires = ["build"]
+command = ["env", "KICAD_UI_TEST=1", "xvfb-run", "-a", "automation/artifacts/native/qa/tests/pcbnew/qa_pcbnew", "--run_test=NativeRouterSettingsDialogControls", "--log_level=test_suite"]

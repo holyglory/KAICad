@@ -24,14 +24,19 @@
 
 #include "dialog_pns_settings_base.h"
 
+#include <wx/spinctrl.h>
+
 namespace PNS {
 class ROUTING_SETTINGS;
 }
 
+class BOARD_DESIGN_SETTINGS;
+
 class DIALOG_PNS_SETTINGS : public DIALOG_PNS_SETTINGS_BASE
 {
 public:
-    DIALOG_PNS_SETTINGS( wxWindow* aParent, PNS::ROUTING_SETTINGS& aSettings );
+    DIALOG_PNS_SETTINGS( wxWindow* aParent, PNS::ROUTING_SETTINGS& aSettings,
+                         BOARD_DESIGN_SETTINGS* aBoardSettings = nullptr );
 
     bool TransferDataFromWindow() override;
 
@@ -40,6 +45,16 @@ private:
 
 private:
     PNS::ROUTING_SETTINGS& m_settings;
+    BOARD_DESIGN_SETTINGS* m_boardSettings;
+    wxCheckBox*            m_smoothConnections;
+    wxCheckBox*            m_smoothRadiusPercentMode;
+    wxSpinCtrlDouble*      m_smoothRadiusMm;
+    wxSpinCtrlDouble*      m_smoothRadiusPercent;
+    wxCheckBox*            m_flexibleRouting;
+    wxCheckBox*            m_roundCorners;
+    wxCheckBox*            m_cornerRadiusPercentMode;
+    wxSpinCtrlDouble*      m_cornerRadiusMm;
+    wxSpinCtrlDouble*      m_cornerRadiusPercent;
 };
 
 #endif // DIALOG_PNS_SETTINGS_H

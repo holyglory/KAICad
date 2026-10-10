@@ -35,7 +35,7 @@
 #include <project/project_file.h>
 #include <advanced_config.h>
 
-const int bdsSchemaVersion = 3;
+const int bdsSchemaVersion = 4;
 
 
 BOARD_DESIGN_SETTINGS::BOARD_DESIGN_SETTINGS( JSON_SETTINGS* aParent, const std::string& aPath ) :
@@ -65,6 +65,10 @@ BOARD_DESIGN_SETTINGS::BOARD_DESIGN_SETTINGS( JSON_SETTINGS* aParent, const std:
     SetUserDefinedLayerCount( 4 );
 
     m_CurrentViaType = VIATYPE::THROUGH;
+    m_SmoothConnections = false;
+    m_SmoothConnectionRadius = pcbIUScale.mmToIU( 0.2 );
+    m_SmoothConnectionRadiusPercent = 50.0;
+    m_SmoothConnectionRadiusUsesPercent = true;
 
     // if true, when creating a new track starting on an existing track, use this track width
     m_UseConnectedTrackWidth = false;
@@ -642,6 +646,15 @@ BOARD_DESIGN_SETTINGS::BOARD_DESIGN_SETTINGS( JSON_SETTINGS* aParent, const std:
             },
             {} ) );
 
+    m_params.emplace_back( new PARAM<bool>( "smooth_connections", &m_SmoothConnections, false ) );
+    m_params.emplace_back( new PARAM_SCALED<int>( "smooth_connection_radius", &m_SmoothConnectionRadius,
+                                                   pcbIUScale.mmToIU( 0.2 ), pcbIUScale.mmToIU( 0.001 ),
+                                                   pcbIUScale.mmToIU( 25.0 ), pcbIUScale.MM_PER_IU ) );
+    m_params.emplace_back( new PARAM<double>( "smooth_connection_radius_percent",
+                                               &m_SmoothConnectionRadiusPercent, 50.0, 0.0, 1000.0 ) );
+    m_params.emplace_back( new PARAM<bool>( "smooth_connection_radius_uses_percent",
+                                            &m_SmoothConnectionRadiusUsesPercent, true ) );
+
     // Handle options for teardrops (targets and some others):
     m_params.emplace_back( new PARAM_LAMBDA<nlohmann::json>( "teardrop_options",
             [&]() -> nlohmann::json
@@ -1198,6 +1211,7 @@ BOARD_DESIGN_SETTINGS::BOARD_DESIGN_SETTINGS( JSON_SETTINGS* aParent, const std:
             } );
 
     registerMigration( 2, 3, std::bind( &BOARD_DESIGN_SETTINGS::migrateSchema2to3, this ) );
+    registerMigration( 3, 4, std::bind( &BOARD_DESIGN_SETTINGS::migrateSchema3to4, this ) );
 }
 
 
@@ -1234,6 +1248,10 @@ void BOARD_DESIGN_SETTINGS::initFromOther( const BOARD_DESIGN_SETTINGS& aOther )
     m_ViasDimensionsList          = aOther.m_ViasDimensionsList;
     m_ViaStackPresets = aOther.m_ViaStackPresets;
     m_DiffPairDimensionsList      = aOther.m_DiffPairDimensionsList;
+    m_SmoothConnections            = aOther.m_SmoothConnections;
+    m_SmoothConnectionRadius      = aOther.m_SmoothConnectionRadius;
+    m_SmoothConnectionRadiusPercent = aOther.m_SmoothConnectionRadiusPercent;
+    m_SmoothConnectionRadiusUsesPercent = aOther.m_SmoothConnectionRadiusUsesPercent;
     m_CurrentViaType              = aOther.m_CurrentViaType;
     m_UseConnectedTrackWidth      = aOther.m_UseConnectedTrackWidth;
     m_TempOverrideTrackWidth      = aOther.m_TempOverrideTrackWidth;
@@ -1342,6 +1360,10 @@ bool BOARD_DESIGN_SETTINGS::operator==( const BOARD_DESIGN_SETTINGS& aOther ) co
     if( m_ViaStackPresets != aOther.m_ViaStackPresets )
         return false;
     if( m_DiffPairDimensionsList != aOther.m_DiffPairDimensionsList ) return false;
+    if( m_SmoothConnections != aOther.m_SmoothConnections ) return false;
+    if( m_SmoothConnectionRadius != aOther.m_SmoothConnectionRadius ) return false;
+    if( m_SmoothConnectionRadiusPercent != aOther.m_SmoothConnectionRadiusPercent ) return false;
+    if( m_SmoothConnectionRadiusUsesPercent != aOther.m_SmoothConnectionRadiusUsesPercent ) return false;
     if( m_CurrentViaType         != aOther.m_CurrentViaType ) return false;
     if( m_UseConnectedTrackWidth != aOther.m_UseConnectedTrackWidth ) return false;
     if( m_TempOverrideTrackWidth != aOther.m_TempOverrideTrackWidth ) return false;
@@ -1539,6 +1561,14 @@ bool BOARD_DESIGN_SETTINGS::migrateSchema2to3()
 
     Set( "drc_exclusions", migrated );
 
+    return true;
+}
+
+
+bool BOARD_DESIGN_SETTINGS::migrateSchema3to4()
+{
+    // Schema 3 to 4: introduce smooth connection defaults and linked radius units.
+    // Missing values retain the constructor defaults for existing boards.
     return true;
 }
 

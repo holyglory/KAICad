@@ -75,7 +75,7 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
     private static Task<CallToolResult> ExportStructured<T>(string instanceId, string? legacyJson, T? typed,
         string? expectedStateJson, DocumentLifecycleInput? expectedState, string? operationId,
         Func<T, string> convert,
-        Func<string, string, CancellationToken, string?, Task<CallToolResult>> legacy,
+        Func<string, string, string, CancellationToken, string?, Task<CallToolResult>> legacy,
         CancellationToken cancellationToken)
         where T : class
     {

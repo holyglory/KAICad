@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Kiapi.Common.Types;
+using KiCad.Automation.Model;
 using Kiapi.Schematic.Jobs;
 
 namespace KiCad.Automation.Mcp;

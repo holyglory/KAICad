@@ -557,6 +557,7 @@ public sealed partial class NativeSessionTests
                             ":" + displayNumber, evidence, deadline.Token);
                         await VerifySnapshotSchemaVersions(client, opened.Document, deadline.Token);
                         await VerifyParityNetlistCapture(client, opened.Document, electrical, evidence, deadline.Token);
+                        await VerifyNativeCheckedRevert(client, opened.Document, evidence, target.Id, deadline.Token);
                     }
                     else if (journey == NativeJourney.ComponentRebind)
                     {

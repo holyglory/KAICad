@@ -445,7 +445,7 @@ public sealed class DocumentLifecycleToolTests
         finally { Directory.Delete(directory, true); }
     }
 
-    [DataTestMethod]
+    [TestMethod]
     [DataRow("digest")]
     [DataRow("baseline")]
     public async Task RevertRejectsChangedIndependentState(string mismatch)

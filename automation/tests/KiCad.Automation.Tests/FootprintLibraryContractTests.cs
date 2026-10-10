@@ -1,4 +1,5 @@
 using Google.Protobuf.WellKnownTypes;
+using System.Text.Json;
 using Kiapi.Board.Types;
 using Kiapi.Common.Types;
 using KiCad.Automation.Mcp;
@@ -11,6 +12,59 @@ namespace KiCad.Automation.Tests;
 [TestClass]
 public sealed class FootprintLibraryContractTests
 {
+    [TestMethod]
+    public async Task CompiledStdioExposesTypedLibrarySnapshotDocumentAndRefusesMixedForms()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-library-snapshot-input-contract-").FullName;
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        try
+        {
+            await using var mcp = await StdioMcpFixture.StartAsync(
+                SyncHarnessProcessTests.ProductionStartInfo(), Path.Combine(root, "state"),
+                Path.Combine(root, "stderr.log"), deadline.Token);
+            JsonElement listed = await mcp.ListTools(null);
+            JsonElement tool = listed.GetProperty("tools").EnumerateArray()
+                .Single(item => item.GetProperty("name").GetString() == "kicad_library_snapshot_read");
+            JsonElement properties = tool.GetProperty("inputSchema").GetProperty("properties");
+            Assert.IsTrue(properties.TryGetProperty("documentJson", out _), tool.GetRawText());
+            Assert.IsTrue(properties.TryGetProperty("document", out JsonElement typedDocument), tool.GetRawText());
+            Assert.IsTrue(typedDocument.GetProperty("type").EnumerateArray()
+                .Any(item => item.GetString() == "object"), typedDocument.GetRawText());
+            JsonElement documentProperties = typedDocument.GetProperty("properties");
+            foreach (string property in new[] { "type", "project", "libId", "boardFilename", "sheetPath" })
+                Assert.IsTrue(documentProperties.TryGetProperty(property, out _), property);
+
+            JsonElement conflict = await mcp.Tool("kicad_library_snapshot_read", new
+            {
+                instanceId = Guid.NewGuid().ToString("D"),
+                expectedProcessEpoch = Guid.NewGuid().ToString("D"),
+                documentJson = "{}",
+                document = new { },
+                libraryNickname = "Fixture",
+                entryName = "Probe"
+            });
+            Assert.IsTrue(conflict.GetProperty("isError").GetBoolean(), conflict.GetRawText());
+            Assert.AreEqual("invalid_library_document_input", conflict.GetProperty("structuredContent")
+                .GetProperty("errorCode").GetString(), conflict.GetRawText());
+
+            JsonElement empty = await mcp.Tool("kicad_library_snapshot_read", new
+            {
+                instanceId = Guid.NewGuid().ToString("D"),
+                expectedProcessEpoch = Guid.NewGuid().ToString("D"),
+                documentJson = "",
+                libraryNickname = "Fixture",
+                entryName = "Probe"
+            });
+            Assert.IsTrue(empty.GetProperty("isError").GetBoolean(), empty.GetRawText());
+            Assert.AreEqual("invalid_library_document_input", empty.GetProperty("structuredContent")
+                .GetProperty("errorCode").GetString(), empty.GetRawText());
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, true);
+        }
+    }
+
     [TestMethod]
     public void NativeReceiptAvailabilityRequiresAFoundReceipt()
     {

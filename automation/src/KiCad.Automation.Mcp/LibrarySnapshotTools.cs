@@ -15,9 +15,17 @@ namespace KiCad.Automation.Mcp;
 public sealed class LibrarySnapshotTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_library_snapshot_read", ReadOnly = true),
-     Description("Read compact, project-bound lifecycle evidence for one explicitly identified symbol or footprint library entry. The native owner forces a disk refresh, captures the complete direct KiCad checkpoint, revision and dependency baselines, and returns the state envelope required by the matching checked writer. Unsupported providers remain explicit refusals."),
+     Description("Read compact, project-bound lifecycle evidence for one explicitly identified symbol or footprint library entry. Supply either legacy documentJson protobuf JSON or the typed document object, never both. The native owner forces a disk refresh, captures the complete direct KiCad checkpoint, revision and dependency baselines, and returns the state envelope required by the matching checked writer. Unsupported providers remain explicit refusals."),
      KiCadCapability("library-snapshot", "native-symbol-library-adapter", "explicit project/document identity, direct provider row, checked revision/state digest and dependency baselines"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> ReadStructured(string instanceId, string expectedProcessEpoch,
+        string libraryNickname, string entryName, CancellationToken cancellationToken,
+        string? documentJson = null, NativeDocumentInput? document = null,
+        bool forcedRefresh = true, bool allowMissingEntry = false)
+        => RunAdmission(cancellationToken, () => Read(instanceId, expectedProcessEpoch,
+            ResolveDocumentJson(documentJson, document), libraryNickname, entryName,
+            cancellationToken, forcedRefresh, allowMissingEntry), "invalid_library_document_input");
+
     public Task<CallToolResult> Read(string instanceId, string expectedProcessEpoch, string documentJson,
         string libraryNickname, string entryName, CancellationToken cancellationToken, bool forcedRefresh = true,
         bool allowMissingEntry = false)
@@ -94,6 +102,56 @@ public sealed class LibrarySnapshotTools(InstanceRegistry registry)
                 mutationAvailable
             });
         });
+
+    private static Task<CallToolResult> RunAdmission(CancellationToken cancellationToken,
+        Func<Task<CallToolResult>> operation, string invalidCode)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return RunAdmission(operation, invalidCode);
+    }
+
+    private static async Task<CallToolResult> RunAdmission(Func<Task<CallToolResult>> operation,
+        string invalidCode)
+    {
+        try { return await operation(); }
+        catch (AutomationException error)
+        {
+            return Error(error.Code, error.Message);
+        }
+        catch (JsonException error)
+        {
+            return Error(invalidCode, error.Message);
+        }
+        catch (ArgumentException error)
+        {
+            return Error(invalidCode, error.Message);
+        }
+    }
+
+    private static string ResolveDocumentJson(string? legacyJson, NativeDocumentInput? typed)
+    {
+        bool legacySupplied = legacyJson is not null;
+        if (legacySupplied && typed is not null)
+            throw new AutomationException("invalid_library_document_input",
+                "Provide exactly one library document: documentJson or document.");
+        if (typed is null && (!legacySupplied || string.IsNullOrWhiteSpace(legacyJson)))
+            throw new AutomationException("invalid_library_document_input",
+                "Provide exactly one library document: documentJson or document.");
+        return typed is not null
+            ? SchematicJson.Formatter.Format(NativeDocumentInput.ToNative(typed))
+            : legacyJson!;
+    }
+
+    private static CallToolResult Error(string code, string message)
+    {
+        JsonElement structured = JsonSerializer.SerializeToElement(new { errorCode = code, errorMessage = message });
+        return new CallToolResult
+        {
+            IsError = true,
+            StructuredContent = structured,
+            Content = [new TextContentBlock { Text = structured.GetRawText() }]
+        };
+    }
 
     private static DocumentSpecifier ParseDocument(string json)
     {

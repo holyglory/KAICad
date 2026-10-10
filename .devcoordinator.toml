@@ -3180,14 +3180,14 @@ command=["curl","--fail","--silent","--show-error","--max-time","20","--output",
 [[test.preview27-linux-receipt-repair.check]]
 name="updater"
 tier="development"
-requires=["managed-build","tls-preflight"]
+requires=["tls-preflight"]
 timeout_seconds=900
 command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=PublicCaptionMcpUpdate|TestCategory=EmptyCaptionUpdate","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/preview27-updater-tests","--","MSTest.MapInconclusiveToFailed=true","MSTest.Parallelize.Workers=1"]
 retained_artifacts=[{name="updater-tests",path="automation/artifacts/preview27-updater-tests",max_bytes=16777216},{name="updater-evidence",path="automation/artifacts/native-session-current",max_bytes=67108864}]
 [[test.preview27-linux-receipt-repair.check]]
 name="delivery-receipts"
 tier="development"
-requires=["managed-build","tls-preflight"]
+requires=["tls-preflight"]
 command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=DeliveryReceipts","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/preview27-repaired-delivery-tests"]
 retained_artifacts=[{name="delivery-receipt-tests",path="automation/artifacts/preview27-repaired-delivery-tests",max_bytes=16777216},{name="delivery-evidence",path="automation/artifacts/preview27-linux-receipt-repair",max_bytes=268435456}]
 [[test.preview27-linux-receipt-repair.check]]

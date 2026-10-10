@@ -690,13 +690,13 @@ public sealed partial class NativeSessionTests
         await SelectMode("Up", "mode-restored");
         var reverted = await agent.Read(board, again, token);
         await Evidence("pcb-drc-job-router-restored-stale.json", reverted);
-        AssertPcbDrcJobStale(reverted, "project_inputs_changed",
+        AssertPcbDrcJobStale(reverted, "auxiliary_inputs_changed",
             "Putting the router mode back in the rendered dialog must make the check of the changed mode stale.");
         var (_, restored) = await RunPcbDrcJob(client, board, await ObserveLifecycleState(client, board, token), token, agent: agent);
         await Evidence("pcb-drc-job-router-restored.json", restored);
         AssertPcbDrcJobCurrent(restored, "A new check with the original router mode must be complete and fresh.");
         Assert.AreEqual(check.Findings.Count, restored.Findings.Count, "Router settings do not change what a check without refill finds.");
-        AssertPcbDrcJobStale(await agent.Read(board, check, token), "project_inputs_changed",
+        AssertPcbDrcJobStale(await agent.Read(board, check, token), "auxiliary_inputs_changed",
             "The check before the change never becomes current again, even with the original mode back.");
     }
 

@@ -105,6 +105,11 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                 throw new AutomationException("invalid_drc_job_state", "Native DRC did not preserve the detached candidate identity contract.");
             if (candidate is not null)
             {
+                string startedJobId = state.JobId;
+                string startedOperationId = state.OperationId;
+                var startedRevision = state.CheckedRevision.Clone();
+                var startedSchematic = state.CheckedSchematicState?.Clone();
+                string[] startedCandidateIds = state.CandidateItemIds.ToArray();
                 // Starting a detached candidate check records the candidate in
                 // the native job, but the start reply itself is not the native
                 // payload-comparison receipt. Read it back with the complete
@@ -121,6 +126,15 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                 verificationRequest.ExpectedGroupChanges.Add(groupChanges);
                 var verified = await client.InvokeAsync<NativeCapabilityPcbDrcReplacementJob, PcbDrcJobState>(verificationRequest, cancellationToken);
                 ValidateJobState(verified, document, client.Epoch);
+                if (verified.JobId != startedJobId
+                    || verified.OperationId != startedOperationId
+                    || !startedRevision.Equals(verified.CheckedRevision)
+                    || !Equals(startedSchematic, verified.CheckedSchematicState)
+                    || !verified.CandidateDryRun
+                    || !verified.CandidatePayloadVerified
+                    || !verified.CandidateItemIds.SequenceEqual(startedCandidateIds, StringComparer.Ordinal))
+                    throw new AutomationException("invalid_drc_candidate_receipt",
+                        "Native DRC candidate verification returned a different job, operation, revision, source or candidate identity.");
                 state = verified;
                 CandidateReceipts[state.JobId] = new CandidateReceipt(
                     client.Epoch, document, expected.Clone(), CanonicalCandidate(candidate),

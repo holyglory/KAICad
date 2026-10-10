@@ -539,7 +539,7 @@ public sealed class DocumentLifecycleToolTests
             Project = new() { Name = "fixture", Path = directory },
             SheetPath = new()
         };
-        document.SheetPath.Path.Add(new() { Value = Guid.NewGuid().ToString("D") });
+        document.SheetPath.Path.Add(new Kiapi.Common.Types.KIID { Value = Guid.NewGuid().ToString("D") });
         string schematic = Path.Combine(directory, "fixture.kicad_sch");
         return new()
         {

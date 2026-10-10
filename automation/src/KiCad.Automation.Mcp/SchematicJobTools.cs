@@ -27,6 +27,7 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
     {
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             return ExportSvg(instanceId, ResolveRequestJson(requestJson, request),
                 ResolveExpectedStateJson(expectedStateJson, expectedState), cancellationToken, operationId);
         }
@@ -80,6 +81,7 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
     {
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             string requestJson = ResolveRequestJson(legacyJson, typed, convert);
             string stateJson = ResolveExpectedStateJson(expectedStateJson, expectedState);
             return legacy(instanceId, requestJson, stateJson, cancellationToken, operationId);

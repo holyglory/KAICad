@@ -17,13 +17,58 @@ namespace KiCad.Automation.Mcp;
 public sealed class SchematicJobTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_schematic_export_svg", ReadOnly = false),
-     Description("Export an explicitly identified schematic to SVG through KiCad's native schematic job handler. requestJson is RunSchematicJobExportSvg protobuf JSON with an absolute output path and explicit schematic root; expectedStateJson is the matching lifecycle observation used for admission and post-export verification. Returns bounded output paths, byte counts and SHA-256 hashes; the schematic is never mutated."),
+     Description("Export an explicitly identified schematic to SVG through KiCad's native schematic job handler. Provide exactly one of requestJson (legacy RunSchematicJobExportSvg protobuf JSON) or request (the strict structured SVG input), and exactly one of expectedStateJson or expectedState. Structured input exposes the explicit schematic root, absolute output path and every schematic plot setting. Returns bounded output paths, byte counts and SHA-256 hashes; the schematic is never mutated."),
      KiCadCapability("schematic-manufacturing", "compiled-mcp plus native-schematic-job", "explicit schematic root, lifecycle state and hashed SVG output manifest"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> ExportSvgStructured(string instanceId,
+        CancellationToken cancellationToken, string? requestJson = null,
+        SchematicExportSvgInput? request = null, string? expectedStateJson = null,
+        DocumentLifecycleInput? expectedState = null, string? operationId = null)
+    {
+        try
+        {
+            return ExportSvg(instanceId, ResolveRequestJson(requestJson, request),
+                ResolveExpectedStateJson(expectedStateJson, expectedState), cancellationToken, operationId);
+        }
+        catch (Exception error) when (error is AutomationException or JsonException
+            or InvalidOperationException or ArgumentException)
+        {
+            return Task.FromResult(Error(error is AutomationException known ? known.Code
+                : "invalid_schematic_export_input", error.Message));
+        }
+    }
+
+    // Kept as the direct legacy entry point for existing callers and tests.  MCP
+    // discovery uses ExportSvgStructured above, so old requestJson calls and
+    // operation receipt/replay still share the exact same ExportJob path.
     public Task<CallToolResult> ExportSvg(string instanceId, string requestJson, string expectedStateJson,
         CancellationToken cancellationToken, string? operationId = null) =>
         ExportJob<RunSchematicJobExportSvg>(instanceId, requestJson, expectedStateJson, "svg",
             request => request.JobSettings, outputIsDirectory: true, operationId, cancellationToken);
+
+    private static string ResolveRequestJson(string? legacyJson, SchematicExportSvgInput? typed)
+    {
+        bool hasLegacy = legacyJson is not null;
+        bool hasTyped = typed is not null;
+        if (hasLegacy == hasTyped)
+            throw new AutomationException("invalid_schematic_export_input",
+                "Provide exactly one SVG request: requestJson or request.");
+        if (typed is not null)
+            return SchematicJson.Formatter.Format(typed.ToNative());
+        return legacyJson!;
+    }
+
+    private static string ResolveExpectedStateJson(string? legacyJson, DocumentLifecycleInput? typed)
+    {
+        bool hasLegacy = legacyJson is not null;
+        bool hasTyped = typed is not null;
+        if (hasLegacy == hasTyped)
+            throw new AutomationException("invalid_schematic_export_input",
+                "Provide exactly one lifecycle observation: expectedStateJson or expectedState.");
+        if (typed is not null)
+            return SchematicJson.Formatter.Format(DocumentLifecycleInput.ToNative(typed));
+        return legacyJson!;
+    }
 
     [McpServerTool(Name = "kicad_schematic_export_dxf", ReadOnly = false),
      Description("Export an explicitly identified schematic to DXF through KiCad's native schematic job handler. requestJson is RunSchematicJobExportDxf protobuf JSON with an absolute output path and explicit schematic root; expectedStateJson is the matching lifecycle observation used for admission and post-export verification. Returns bounded output paths, byte counts and SHA-256 hashes; the schematic is never mutated."),

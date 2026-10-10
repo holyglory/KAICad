@@ -580,7 +580,7 @@ public sealed class SchematicExportSvgInputContractTests
                 return Run(message.Unpack<RunSchematicJobExportNetlist>(), "netlist", false);
             if (message.Is(RunSchematicJobExportBOM.Descriptor))
                 return Run(message.Unpack<RunSchematicJobExportBOM>(), "bom", false);
-            throw new InvalidOperationException("Unexpected fixture request: " + message.Descriptor.FullName);
+            throw new InvalidOperationException("Unexpected fixture request: " + message.GetType().FullName);
         }
 
         private Task<byte[]> Run(IMessage request, string kind, bool directoryOutput)

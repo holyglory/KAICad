@@ -5107,7 +5107,7 @@ API_HANDLER_SCH::handleRevertDocument( const HANDLER_CONTEXT<RevertDocument>& aC
         // project's settings, lock or editor/library registrations while it validates the file.
         std::unique_ptr<PROJECT> candidateProject = project().CloneForAnalysis();
         std::unique_ptr<SCHEMATIC> candidate( EESCHEMA_HELPERS::LoadSchematic(
-                fn.GetFullPath(), SCH_IO_MGR::SCH_KICAD, false, false, candidateProject.get(), false ) );
+                fn.GetFullPath(), false, false, candidateProject.get(), false ) );
         const auto& declaredSheets = candidateProject->GetProjectFile().GetTopLevelSheets();
         const bool allDeclaredFilesExist = std::all_of( declaredSheets.begin(), declaredSheets.end(),
                 [&]( const TOP_LEVEL_SHEET_INFO& sheet )

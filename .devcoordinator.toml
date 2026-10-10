@@ -2707,7 +2707,6 @@ env={TMPDIR="/tmp"}
 name="managed-build"
 tier="development"
 role="preflight"
-invalidates=["contracts"]
 command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--configuration","Debug"]
 [[test.typed-mcp-contracts.check]]
 name="contracts"

@@ -550,7 +550,7 @@ public sealed partial class NativeSessionTests
             seededSettings.Classes.Add(existing);
             seededSettings.Patterns.Add(new SchematicNetClassPattern
             { Pattern = "PUBLIC_DEFAULT*", NetClass = "Default" });
-            seededSettings.NetColors["/PUBLIC_UNRELATED"] = new() { R = 0.2, G = 0.3, B = 0.4, A = 1 };
+            seededSettings.NetColors["/PUBLIC_UNRELATED"] = new() { R = 1, G = 0, B = 0, A = 1 };
             seededSettings.ChainNetclasses["PUBLIC_UNRELATED_CHAIN"] = "Default";
             await Apply(Batch(seed, seededSettings));
             var seededSnapshot = await Read();

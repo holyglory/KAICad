@@ -112,7 +112,8 @@ public sealed class ProjectSettingsTools(InstanceRegistry registry)
     [McpServerTool(Name = "kicad_project_net_classes_set", ReadOnly = false),
      Description("Replace or merge the declared project netclasses through the existing checked schematic net-settings transaction. documentJson must identify the explicit schematic root, and expectedStateJson must be the complete kicad_schematic_checked_state result from that same root. netClassesJson is protobuf JSON for NetClassesResponse; mergeMode is MMM_MERGE or MMM_REPLACE; operationId is a new canonical UUID; expectedNetClassesSha256 must match the declared netclasses in the supplied checked state. The wrapper preserves every other project net-setting, uses the native checked receipt/replay path, and leaves saving explicit through kicad_document_save. PCB-only documents are refused because no equivalent checked project-settings transaction exists.") ,
      KiCadCapability("project-settings", "checked-native-schematic-net-settings", "explicit schematic root, complete checked state, netclass digest, operation ID"),
-     KiCadVerification(KiCadVerificationLevel.InProcess, "ProjectSettingsToolTests.SetNetClassesRequiresSchematicCheckedState")]
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney,
+         "NativeSessionTests.NetClassesRoundTripThroughXmlAndNativeEdits")]
     public Task<CallToolResult> SetNetClasses(string instanceId, string documentJson,
         string expectedStateJson, string netClassesJson, string mergeMode, Guid operationId,
         string expectedNetClassesSha256, CancellationToken cancellationToken) => Execute(async () =>

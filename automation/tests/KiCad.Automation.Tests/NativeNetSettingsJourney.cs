@@ -451,5 +451,269 @@ public sealed partial class NativeSessionTests
             if (Directory.Exists(typedStateDirectory)) Directory.Delete(typedStateDirectory, recursive: true);
         }
         await Reopen(original.Data, "typed-mcp-final-restored", verifyReconnect: false);
+
+        // Qualify the public project-level wrapper itself.  This is deliberately
+        // separate from the complete schematic-settings tool above: callers send
+        // only NetClassesResponse, while the wrapper must merge or replace those
+        // classes inside the checked native net-settings transaction and retain
+        // every other declared project setting.
+        string projectNetClassesStateDirectory = Directory.CreateTempSubdirectory(
+            "kicad-project-netclasses-public-mcp-").FullName;
+        try
+        {
+            await using var projectNetClassesMcp = await StdioMcpFixture.StartAsync(
+                projectNetClassesStateDirectory,
+                Prefix("project-netclasses-public-mcp.stderr.log"), token);
+            var projectNetClassesSession = await client.HandshakeAsync(token);
+            string projectNetClassesInstanceId = projectNetClassesSession.InstanceId;
+            RequireToolSuccess(await projectNetClassesMcp.Tool("kicad_instance_attach", new
+            {
+                endpoint = client.Endpoint,
+                expectedInstanceId = projectNetClassesInstanceId
+            }));
+            var publicTools = await projectNetClassesMcp.ListTools(null);
+            var publicToolNames = publicTools.GetProperty("tools").EnumerateArray()
+                .Select(tool => tool.GetProperty("name").GetString()!)
+                .ToHashSet(StringComparer.Ordinal);
+            CollectionAssert.Contains(publicToolNames.ToArray(), "kicad_project_net_classes_set");
+
+            string publicDocumentJson = SchematicJson.Formatter.Format(document);
+            async Task<CheckedSchematicState> CapturePublicState()
+            {
+                var reply = await projectNetClassesMcp.Tool("kicad_schematic_checked_state", new
+                {
+                    instanceId = projectNetClassesInstanceId,
+                    documentJson = publicDocumentJson
+                });
+                RequireToolSuccess(reply);
+                return SchematicJson.Parser.Parse<CheckedSchematicState>(
+                    reply.GetProperty("structuredContent").GetRawText());
+            }
+            async Task<JsonElement> ReadPublicNetClasses(CheckedSchematicState expected, string phase)
+            {
+                var reply = await projectNetClassesMcp.Tool("kicad_project_net_classes", new
+                {
+                    instanceId = projectNetClassesInstanceId,
+                    documentJson = publicDocumentJson,
+                    expectedStateJson = SchematicJson.Formatter.Format(expected.State)
+                });
+                RequireToolSuccess(reply);
+                var data = reply.GetProperty("structuredContent");
+                Assert.IsTrue(data.GetProperty("supported").GetBoolean(), phase);
+                Assert.IsTrue(data.GetProperty("nativeQuery").GetBoolean(), phase);
+                Assert.IsFalse(data.GetProperty("boardMutation").GetBoolean(), phase);
+                Assert.AreEqual(SchematicJson.Formatter.Format(expected.State),
+                    data.GetProperty("beforeState").GetString(), phase);
+                Assert.AreEqual(data.GetProperty("beforeState").GetString(),
+                    data.GetProperty("afterState").GetString(), phase);
+                return reply;
+            }
+            static NetClassesResponse PublicNetClasses(JsonElement reply) =>
+                SchematicJson.Parser.Parse<NetClassesResponse>(reply.GetProperty("structuredContent")
+                    .GetProperty("response").GetRawText());
+            static string PublicNetClassesDigest(JsonElement reply) =>
+                reply.GetProperty("structuredContent").GetProperty("netClassesSha256").GetString()!;
+            SchematicNetSettings PublicSettings(CheckedSchematicState state) =>
+                state.Electrical.Hierarchy.Data.Instances
+                    .Single(screen => screen.Metadata.Document.Equals(document)).Metadata.NetSettings;
+            static string[] PublicNetClassNames(CheckedSchematicState state) =>
+                state.Electrical.Hierarchy.Data.Instances
+                    .SelectMany(screen => screen.Metadata.NetSettings is null
+                        ? Array.Empty<string>()
+                        : screen.Metadata.NetSettings.Classes.Select(value => value.Name)
+                            .Append(screen.Metadata.NetSettings.DefaultClass.Name))
+                    .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+            static void AssertUnrelatedSettings(SchematicNetSettings expected,
+                SchematicNetSettings actual, string phase)
+            {
+                Assert.AreEqual(expected.Patterns, actual.Patterns,
+                    phase + ": netclass mutation changed unrelated pattern assignments.");
+                Assert.AreEqual(expected.NetColors, actual.NetColors,
+                    phase + ": netclass mutation changed unrelated net colors.");
+                Assert.AreEqual(expected.ChainNetclasses, actual.ChainNetclasses,
+                    phase + ": netclass mutation changed unrelated chain netclasses.");
+                Assert.AreEqual(expected.LabelAssignments, actual.LabelAssignments,
+                    phase + ": netclass mutation changed observed label assignments.");
+            }
+
+            // Seed one unrelated class and independent project settings through the
+            // existing checked native seam.  The public wrapper must retain these
+            // settings through both merge and replace, while replace removes only
+            // the old class by name.
+            var seed = await Read();
+            var seededSettings = seed.Data.Metadata.NetSettings.Clone();
+            seededSettings.LabelAssignments.Clear();
+            var existing = seededSettings.DefaultClass.Clone();
+            existing.Name = "AutomationExisting";
+            existing.Priority = 3;
+            existing.Schematic.WireWidth = new() { ValueNm = 88900 };
+            seededSettings.Classes.Add(existing);
+            seededSettings.Patterns.Add(new SchematicNetClassPattern
+            { Pattern = "PUBLIC_DEFAULT*", NetClass = "Default" });
+            seededSettings.NetColors["/PUBLIC_UNRELATED"] = new() { R = 0.2, G = 0.3, B = 0.4, A = 1 };
+            seededSettings.ChainNetclasses["PUBLIC_UNRELATED_CHAIN"] = "Default";
+            await Apply(Batch(seed, seededSettings));
+            var seededSnapshot = await Read();
+            var seededChecked = await CapturePublicState();
+            Assert.AreEqual(seededSnapshot.Revision.Sequence, seededChecked.State.Revision.Sequence,
+                "The public checked state must pair with the seeded native revision.");
+            var seededQuery = await ReadPublicNetClasses(seededChecked, "public-seeded-read");
+            string seededDigest = PublicNetClassesDigest(seededQuery);
+            CollectionAssert.AreEquivalent(new[] { "AutomationExisting", "Default" },
+                PublicNetClasses(seededQuery).NetClasses.Select(value => value.Name).ToArray());
+
+            var mergeDefault = seededSettings.DefaultClass.Clone();
+            mergeDefault.Schematic.WireWidth = new() { ValueNm = 123400 };
+            var mergeClass = seededSettings.DefaultClass.Clone();
+            mergeClass.Name = "AutomationMerge";
+            mergeClass.Priority = 4;
+            mergeClass.Schematic.WireWidth = new() { ValueNm = 234500 };
+            var mergeRequest = new NetClassesResponse();
+            mergeRequest.NetClasses.Add(mergeDefault);
+            mergeRequest.NetClasses.Add(mergeClass);
+            string mergeOperation = Guid.NewGuid().ToString("D");
+            object MergeArguments(string expectedState, string operation, string digest) => new
+            {
+                instanceId = projectNetClassesInstanceId,
+                documentJson = publicDocumentJson,
+                expectedStateJson = expectedState,
+                netClassesJson = SchematicJson.Formatter.Format(mergeRequest),
+                mergeMode = "MMM_MERGE",
+                operationId = operation,
+                expectedNetClassesSha256 = digest
+            };
+            var mergeReply = await projectNetClassesMcp.Tool("kicad_project_net_classes_set",
+                MergeArguments(SchematicJson.Formatter.Format(seededChecked), mergeOperation, seededDigest));
+            RequireToolSuccess(mergeReply);
+            var mergeData = mergeReply.GetProperty("structuredContent");
+            Assert.IsTrue(mergeData.GetProperty("mutationSubmitted").GetBoolean(), mergeReply.GetRawText());
+            Assert.IsFalse(mergeData.GetProperty("replayed").GetBoolean(), mergeReply.GetRawText());
+            Assert.IsFalse(mergeData.GetProperty("designFilesSaved").GetBoolean(), mergeReply.GetRawText());
+            var mergeReceipt = SchematicJson.Parser.Parse<CheckedSchematicBatchReceipt>(
+                mergeData.GetProperty("receipt").GetRawText());
+            Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, mergeReceipt.Status, mergeReply.GetRawText());
+            Assert.AreEqual(seededChecked.State, mergeReceipt.ObservedBefore, mergeReply.GetRawText());
+            var mergedChecked = await CapturePublicState();
+            var mergedSnapshot = await Read();
+            Assert.AreEqual(mergeReceipt.ObservedAfter, mergedChecked.State, mergeReply.GetRawText());
+            Assert.AreEqual(seededChecked.State.Revision.Sequence + 1, mergedChecked.State.Revision.Sequence);
+            CollectionAssert.AreEquivalent(new[] { "AutomationExisting", "AutomationMerge", "Default" },
+                PublicNetClassNames(mergedChecked), "MMM_MERGE must retain the unrelated existing class.");
+            Assert.AreEqual(123400L, PublicSettings(mergedChecked).DefaultClass.Schematic.WireWidth.ValueNm);
+            AssertUnrelatedSettings(seededSettings, PublicSettings(mergedChecked), "MMM_MERGE");
+            Assert.AreEqual(mergedChecked.Electrical.Hierarchy.Data.Instances
+                .Single(screen => screen.Metadata.Document.Equals(document)).Metadata.NetSettings,
+                mergedSnapshot.Data.Metadata.NetSettings);
+            string mergedDigest = PublicNetClassesDigest(
+                await ReadPublicNetClasses(mergedChecked, "public-merged-read"));
+
+            // A retry with every original argument must return the process-owned
+            // receipt and leave the revision unchanged.
+            var mergeReplay = await projectNetClassesMcp.Tool("kicad_project_net_classes_set",
+                MergeArguments(SchematicJson.Formatter.Format(seededChecked), mergeOperation, seededDigest));
+            RequireToolSuccess(mergeReplay);
+            Assert.IsTrue(mergeReplay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean(),
+                mergeReplay.GetRawText());
+            Assert.IsFalse(mergeReplay.GetProperty("structuredContent").GetProperty("mutationSubmitted").GetBoolean(),
+                mergeReplay.GetRawText());
+            Assert.AreEqual(mergedChecked, await CapturePublicState(),
+                "Exact project netclass replay must not create another native revision.");
+
+            var staleDigest = await projectNetClassesMcp.Tool("kicad_project_net_classes_set",
+                MergeArguments(SchematicJson.Formatter.Format(mergedChecked), Guid.NewGuid().ToString("D"),
+                    new string('0', 64)));
+            Assert.IsTrue(staleDigest.GetProperty("isError").GetBoolean(), staleDigest.GetRawText());
+            Assert.AreEqual("stale_project_net_classes", staleDigest.GetProperty("structuredContent")
+                .GetProperty("errorCode").GetString(), staleDigest.GetRawText());
+            Assert.AreEqual(mergedChecked, await CapturePublicState(),
+                "A stale netclass digest must not mutate the native project.");
+
+            // Advance the native state outside the public wrapper, then submit the
+            // old checked state with its valid digest.  This reaches the checked
+            // transaction's stale-state refusal rather than the digest guard.
+            await Apply(Batch(mergedSnapshot, seededSettings));
+            var restoredSeeded = await Read();
+            var staleState = await projectNetClassesMcp.Tool("kicad_project_net_classes_set",
+                MergeArguments(SchematicJson.Formatter.Format(mergedChecked), Guid.NewGuid().ToString("D"),
+                    mergedDigest));
+            Assert.IsTrue(staleState.GetProperty("isError").GetBoolean(), staleState.GetRawText());
+            Assert.AreEqual("stale_document_state", staleState.GetProperty("structuredContent")
+                .GetProperty("errorCode").GetString(), staleState.GetRawText());
+            Assert.IsFalse(staleState.GetProperty("structuredContent").GetProperty("mutationSubmitted").GetBoolean(),
+                staleState.GetRawText());
+            Assert.AreEqual(restoredSeeded, await Read(),
+                "A stale checked state must preserve the newer native settings.");
+
+            // Replace is exercised from a fresh checked checkpoint.  It removes
+            // AutomationExisting while keeping Default, the requested class, and
+            // every unrelated setting seeded above.
+            var replaceBefore = await Read();
+            var replaceBeforeChecked = await CapturePublicState();
+            var replaceBeforeQuery = await ReadPublicNetClasses(replaceBeforeChecked, "public-replace-read");
+            string replaceDigest = PublicNetClassesDigest(replaceBeforeQuery);
+            var replaceDefault = PublicSettings(replaceBeforeChecked).DefaultClass.Clone();
+            replaceDefault.Board.TrackWidth = new() { ValueNm = 654300 };
+            var replacement = replaceDefault.Clone();
+            replacement.Name = "AutomationReplacement";
+            replacement.Priority = 5;
+            var replaceRequest = new NetClassesResponse();
+            replaceRequest.NetClasses.Add(replaceDefault);
+            replaceRequest.NetClasses.Add(replacement);
+            string replaceOperation = Guid.NewGuid().ToString("D");
+            object ReplaceArguments(string expectedState, string operation, string digest) => new
+            {
+                instanceId = projectNetClassesInstanceId,
+                documentJson = publicDocumentJson,
+                expectedStateJson = expectedState,
+                netClassesJson = SchematicJson.Formatter.Format(replaceRequest),
+                mergeMode = "MMM_REPLACE",
+                operationId = operation,
+                expectedNetClassesSha256 = digest
+            };
+            var replaceReply = await projectNetClassesMcp.Tool("kicad_project_net_classes_set",
+                ReplaceArguments(SchematicJson.Formatter.Format(replaceBeforeChecked), replaceOperation, replaceDigest));
+            RequireToolSuccess(replaceReply);
+            var replaceData = replaceReply.GetProperty("structuredContent");
+            Assert.IsTrue(replaceData.GetProperty("mutationSubmitted").GetBoolean(), replaceReply.GetRawText());
+            Assert.IsFalse(replaceData.GetProperty("replayed").GetBoolean(), replaceReply.GetRawText());
+            var replaceAfterChecked = await CapturePublicState();
+            var replaceAfter = await Read();
+            CollectionAssert.AreEquivalent(new[] { "AutomationReplacement", "Default" },
+                PublicNetClassNames(replaceAfterChecked), "MMM_REPLACE must remove the old named class.");
+            Assert.AreEqual(654300L, PublicSettings(replaceAfterChecked).DefaultClass.Board.TrackWidth.ValueNm);
+            AssertUnrelatedSettings(seededSettings, PublicSettings(replaceAfterChecked), "MMM_REPLACE");
+            Assert.AreEqual(replaceAfterChecked.Electrical.Hierarchy.Data.Instances
+                .Single(screen => screen.Metadata.Document.Equals(document)).Metadata.NetSettings,
+                replaceAfter.Data.Metadata.NetSettings);
+
+            var replaceReplay = await projectNetClassesMcp.Tool("kicad_project_net_classes_set",
+                ReplaceArguments(SchematicJson.Formatter.Format(replaceBeforeChecked), replaceOperation, replaceDigest));
+            RequireToolSuccess(replaceReplay);
+            Assert.IsTrue(replaceReplay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean(),
+                replaceReplay.GetRawText());
+            Assert.IsFalse(replaceReplay.GetProperty("structuredContent").GetProperty("mutationSubmitted").GetBoolean(),
+                replaceReplay.GetRawText());
+            Assert.AreEqual(replaceAfterChecked, await CapturePublicState(),
+                "Exact replace replay must not create another native revision.");
+
+            // The same native history and checked-save path used by the rest of
+            // this journey proves the public wrapper is undoable and persisted.
+            await UndoRedo(replaceBefore.Data, replaceAfter.Data);
+            await Reopen(replaceAfter.Data, "public-netclasses-reopened", verifyReconnect: false);
+            var reloadedPublic = await CapturePublicState();
+            CollectionAssert.AreEquivalent(new[] { "AutomationReplacement", "Default" },
+                PublicNetClassNames(reloadedPublic), "The public replace must survive save/reload.");
+            var reloadedPublicQuery = await ReadPublicNetClasses(reloadedPublic, "public-netclasses-reloaded-read");
+            CollectionAssert.AreEquivalent(new[] { "AutomationReplacement", "Default" },
+                PublicNetClasses(reloadedPublicQuery).NetClasses.Select(value => value.Name).ToArray());
+            AssertUnrelatedSettings(seededSettings, PublicSettings(reloadedPublic), "public-netclasses-reload");
+        }
+        finally
+        {
+            if (Directory.Exists(projectNetClassesStateDirectory))
+                Directory.Delete(projectNetClassesStateDirectory, recursive: true);
+        }
+        await Apply(Batch(await Read(), original.Data.Metadata.NetSettings));
+        await Reopen(original.Data, "public-netclasses-final-restored", verifyReconnect: false);
     }
 }

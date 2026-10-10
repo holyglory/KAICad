@@ -33,7 +33,7 @@ public sealed class SchematicExportSvgInputContractTests
 
         try
         {
-            var cases = BuildExportCases(directory, state);
+            var cases = BuildExportCases(directory, state, instanceId);
             int expectedJobs = 0;
             foreach (ExportCase export in cases)
             {
@@ -335,9 +335,8 @@ public sealed class SchematicExportSvgInputContractTests
         Func<SchematicJobTools, string, DocumentLifecycleInput, CancellationToken, Task<CallToolResult>> Typed,
         Func<SchematicJobTools, string, string, string, CancellationToken, Task<CallToolResult>> Legacy);
 
-    private static IReadOnlyList<ExportCase> BuildExportCases(string directory, DocumentLifecycleState state)
+    private static IReadOnlyList<ExportCase> BuildExportCases(string directory, DocumentLifecycleState state, string instanceId)
     {
-        string instanceId = state.NativeIdentity;
         NativeDocumentInput Document() => new()
         {
             Type = NativeDocumentType.Schematic,
@@ -359,8 +358,6 @@ public sealed class SchematicExportSvgInputContractTests
             MinPenWidth = 5,
             Theme = "dark"
         };
-        DocumentLifecycleInput Checkpoint() => TypedState(state);
-        string StateJson() => SchematicJson.Formatter.Format(state);
         var result = new List<ExportCase>();
 
         void Add(string kind, string output, IMessage native, string operationId,
@@ -538,23 +535,29 @@ public sealed class SchematicExportSvgInputContractTests
         SaveStableStateSha256 = state.SaveStableStateSha256
     };
 
-    private sealed class SchematicExportTransport(string instanceId, string epoch) : INativeTransport
+    private sealed class SchematicExportTransport : INativeTransport
     {
         public readonly List<ApiRequest> Requests = [];
         public readonly List<byte[]> JobPayloads = [];
         public int LifecycleReads { get; private set; }
         public DocumentLifecycleState? LastLifecycleState { get; private set; }
         public DocumentLifecycleState State { set => state = value.Clone(); }
-        private readonly string instanceId = instanceId;
-        private readonly string epoch = epoch;
+        private readonly string instanceId;
+        private readonly string epoch;
         private DocumentLifecycleState? state;
+
+        public SchematicExportTransport(string instanceId, string epoch)
+        {
+            this.instanceId = instanceId;
+            this.epoch = epoch;
+        }
 
         public Task<byte[]> ExchangeAsync(string endpoint, byte[] request,
             TimeSpan timeout, CancellationToken cancellationToken = default)
         {
             ApiRequest envelope = ApiRequest.Parser.ParseFrom(request);
             Requests.Add(envelope);
-            IMessage message = envelope.Message;
+            Any message = envelope.Message;
             if (message.Is(GetAutomationSession.Descriptor))
                 return Reply(new AutomationSession { ProtocolVersion = 1, InstanceId = instanceId,
                     ProjectPath = "/fixture/fixture.kicad_pro", Epoch = epoch });

@@ -81,6 +81,12 @@ struct LIFECYCLE_FIXTURE
     }
     NativeCapabilityCheckedRevertDocument RevertRequest()
     {
+        // Seed the controller with the last persisted clean checkpoint. The live
+        // editor is dirty, but revert admission must still retain the clean
+        // digest that was observed at the previous save.
+        DocumentLifecycleState checkpoint = state;
+        checkpoint.set_native_content_dirty( false );
+        controller.RememberCleanState( checkpoint, false );
         controller.AnnotateCleanState( state );
         NativeCapabilityCheckedRevertDocument request;
         request.mutable_document()->CopyFrom( state.document() );

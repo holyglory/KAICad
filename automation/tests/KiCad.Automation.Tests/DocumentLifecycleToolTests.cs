@@ -281,6 +281,7 @@ public sealed class DocumentLifecycleToolTests
         Revision = new() { Epoch = Guid.NewGuid().ToString("D"), Sequence = 5 }, StateSha256 = new string('a', 64),
         Scope = DocumentLifecycleScope.DlsPcb, NativeContentDirty = dirty,
         ProjectSettingsIncluded = true,
+        CleanCheckpointSha256 = new string('a', 64),
         CompleteChangeTracking = true, DiskBaselineChecked = true,
         NativeFiles = { Path.Combine(directory, "fixture.kicad_pcb") },
         FileBaselines = { new NativeFileBaselineState
@@ -345,7 +346,7 @@ public sealed class DocumentLifecycleToolTests
                 var native = new LifecycleOperationResult
                 {
                     Document = revert.Document.Clone(), OperationId = revert.OperationId,
-                    ProcessEpoch = Session.Epoch, Status = LifecycleOperationStatus.LosSaved,
+                    ProcessEpoch = Session.Epoch, Status = LifecycleOperationStatus.LosReverted,
                     RevertCompleted = true,
                     ObservedState = LifecycleState.Clone()
                 };

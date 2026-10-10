@@ -140,13 +140,13 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
                 {
                     Document = expected.Document.Clone(), OperationId = id, ExpectedState = expected.Clone()
                 }, cancellationToken);
-                ValidateResult(nativeResult, expected.Document, id, client.Epoch, LifecycleOperationStatus.LosSaved);
+                ValidateResult(nativeResult, expected.Document, id, client.Epoch, LifecycleOperationStatus.LosReverted);
                 if (nativeResult.Status == LifecycleOperationStatus.LosRejected)
                 {
                     store.RemoveAdmission(instanceId, id, client.Epoch, fingerprint);
                     throw new AutomationException("native_revert_refused", nativeResult.ErrorMessage);
                 }
-                if (nativeResult.Status != LifecycleOperationStatus.LosSaved || !nativeResult.RevertCompleted)
+                if (nativeResult.Status != LifecycleOperationStatus.LosReverted || !nativeResult.RevertCompleted)
                 {
                     string message = $"KiCad admitted revert operation {id}, but its native receipt is {nativeResult.Status}: {nativeResult.ErrorMessage}. Inspect kicad_document_state before another action.";
                     RememberRevertUnknown(store, id, fingerprint, instanceId, client.Epoch, message);
@@ -507,8 +507,9 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
         if (!document.Equals(result.Document) || result.OperationId != id || result.ProcessEpoch != epoch
             || result.Status is not (LifecycleOperationStatus.LosSaved or LifecycleOperationStatus.LosRejected
                 or LifecycleOperationStatus.LosFailed or LifecycleOperationStatus.LosIndeterminate
-                or LifecycleOperationStatus.LosClosed)
-            || (expectedSuccess is not null && result.Status is (LifecycleOperationStatus.LosSaved or LifecycleOperationStatus.LosClosed)
+                or LifecycleOperationStatus.LosClosed or LifecycleOperationStatus.LosReverted)
+            || (expectedSuccess is not null && result.Status is (LifecycleOperationStatus.LosSaved
+                or LifecycleOperationStatus.LosClosed or LifecycleOperationStatus.LosReverted)
                 && result.Status != expectedSuccess))
             throw new AutomationException("invalid_lifecycle_result", "Native operation result did not match the requested target and identity.");
     }

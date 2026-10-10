@@ -572,7 +572,6 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::HandleRevert( ApiRequest& aEnvelope,
         if( !after )
             return fail( LOS_INDETERMINATE, "revert_state_not_confirmed",
                          "KiCad reloaded the document, but its post-revert lifecycle state could not be read; inspect the document before retrying" );
-        result.mutable_observed_state()->CopyFrom( *after );
         const bool identityOkay = before->scope() == DLS_PCB
                 ? Uuid( after->native_identity() ) && after->has_revision()
                     && after->revision().epoch() == after->native_identity()
@@ -580,12 +579,21 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::HandleRevert( ApiRequest& aEnvelope,
         if( !MessageDifferencer::Equals( after->document(), request.document() )
                 || after->process_epoch() != aProcessEpoch
                 || !identityOkay
-                || after->native_content_dirty() || !FileCoverage( *after, false )
+                || after->native_content_dirty() || !Digest( after->state_sha256() )
+                || !FileCoverage( *after, false )
+                || before->clean_checkpoint_sha256().empty()
+                || after->state_sha256() != before->clean_checkpoint_sha256()
                 || !matchingBaselines( *before, *after ) )
             return fail( LOS_INDETERMINATE, "revert_state_not_confirmed",
                          "KiCad reloaded the document, but the clean unchanged file baseline could not be confirmed" );
 
-        result.set_status( LOS_SAVED );
+        RememberCleanState( *after, false );
+        AnnotateCleanState( *after );
+        if( after->clean_checkpoint_sha256() != after->state_sha256() )
+            return fail( LOS_INDETERMINATE, "revert_state_not_confirmed",
+                         "KiCad reloaded the document, but its clean checkpoint could not be retained" );
+        result.mutable_observed_state()->CopyFrom( *after );
+        result.set_status( LOS_REVERTED );
         result.set_revert_completed( true );
         result.clear_error_code();
         result.clear_error_message();

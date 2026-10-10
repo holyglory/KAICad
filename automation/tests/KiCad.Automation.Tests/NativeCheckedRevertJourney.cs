@@ -66,7 +66,7 @@ public sealed partial class NativeSessionTests
                 });
                 RequireToolSuccess(nativeReceipt);
                 var nativeResult = LifecycleResult(nativeReceipt);
-                Assert.AreEqual(LifecycleOperationStatus.LosSaved, nativeResult.Status);
+                Assert.AreEqual(LifecycleOperationStatus.LosReverted, nativeResult.Status);
                 Assert.IsTrue(nativeResult.RevertCompleted);
 
                 var mcpReceipt = await mcp.Tool("kicad_document_revert_receipt", new
@@ -179,7 +179,7 @@ public sealed partial class NativeSessionTests
                 });
                 RequireToolSuccess(nativeReceipt);
                 var nativeResult = LifecycleResult(nativeReceipt);
-                Assert.AreEqual(LifecycleOperationStatus.LosSaved, nativeResult.Status);
+                Assert.AreEqual(LifecycleOperationStatus.LosReverted, nativeResult.Status);
                 Assert.IsTrue(nativeResult.RevertCompleted);
 
                 var mcpReceipt = await mcp.Tool("kicad_document_revert_receipt", new

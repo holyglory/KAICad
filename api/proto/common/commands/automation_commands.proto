@@ -388,6 +388,7 @@ enum LifecycleOperationStatus {
   LOS_FAILED = 3;
   LOS_INDETERMINATE = 4;
   LOS_CLOSED = 5;
+  LOS_REVERTED = 6;
 }
 
 message LifecycleOperationResult {

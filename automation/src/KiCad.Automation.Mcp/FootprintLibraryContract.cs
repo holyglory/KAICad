@@ -451,6 +451,8 @@ internal static class FootprintLibraryContract
     private static bool IsHex(char value) => value is >= '0' and <= '9'
         or >= 'a' and <= 'f' or >= 'A' and <= 'F';
 
+    internal static bool IsCanonicalUuid(string? value) => CanonicalUuid(value);
+
     private static bool CanonicalUuid(string? value) => value is not null
         && Guid.TryParseExact(value, "D", out Guid parsed)
         && parsed != Guid.Empty

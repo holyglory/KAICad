@@ -27,7 +27,7 @@ internal static class FootprintLibraryCheckedContract
         var issues = new List<string>();
         if (!coverage.NestedItemsDecoded || !coverage.PadsDecoded || !coverage.PropertiesPresent)
             issues.Add("incomplete_library_definition:definition");
-        if (footprint.Id is null || !Guid.TryParseExact(footprint.Id.Value, "D", out _))
+        if (footprint.Id is null || !FootprintLibraryContract.IsCanonicalUuid(footprint.Id.Value))
             issues.Add("missing_instance_id:id");
 
         foreach (Any item in definition.Items)

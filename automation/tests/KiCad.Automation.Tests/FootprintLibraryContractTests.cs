@@ -299,6 +299,29 @@ public sealed class FootprintLibraryContractTests
     }
 
     [TestMethod]
+    public void CheckedFootprintCandidateRequiresCanonicalNonEmptyInstanceIdentity()
+    {
+        const string epoch = "12121212-1212-1212-1212-121212121212";
+        DocumentSpecifier document = Document("Identity");
+        FootprintInstance candidate = CompleteDefinition(document, epoch).Footprint;
+        candidate.Id = new() { Value = Guid.Empty.ToString("D") };
+
+        IReadOnlyList<string> emptyIdentityIssues = FootprintLibraryCheckedContract.ValidateCandidate(
+            candidate, CancellationToken.None);
+        CollectionAssert.Contains(emptyIdentityIssues.ToList(), "missing_instance_id:id");
+
+        candidate.Id.Value = candidate.Id.Value.ToUpperInvariant();
+        IReadOnlyList<string> casingIssues = FootprintLibraryCheckedContract.ValidateCandidate(
+            candidate, CancellationToken.None);
+        CollectionAssert.Contains(casingIssues.ToList(), "missing_instance_id:id");
+
+        candidate.Id.Value = "12121212-1212-1212-1212-121212121212";
+        IReadOnlyList<string> validIssues = FootprintLibraryCheckedContract.ValidateCandidate(
+            candidate, CancellationToken.None);
+        CollectionAssert.DoesNotContain(validIssues.ToList(), "missing_instance_id:id");
+    }
+
+    [TestMethod]
     public void NativeNpthAndNonPadItemPayloadsRemainComplete()
     {
         const string epoch = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";

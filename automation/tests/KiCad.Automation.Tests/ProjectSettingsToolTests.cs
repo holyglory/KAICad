@@ -68,6 +68,20 @@ public sealed class ProjectSettingsToolTests
     }
 
     [TestMethod]
+    public async Task SetNetClassesRequiresSchematicCheckedState()
+    {
+        using var fixture = CreateFixture();
+        var result = await fixture.Tool.SetNetClasses(fixture.Session.InstanceId,
+            SchematicJson.Formatter.Format(fixture.Document), "{}",
+            SchematicJson.Formatter.Format(fixture.Transport.NetClasses), "MMM_MERGE",
+            Guid.NewGuid(), new string('a', 64), default);
+
+        Assert.IsTrue(result.IsError ?? false, Text(result));
+        Assert.AreEqual("project_net_classes_schematic_required",
+            result.StructuredContent!.Value.GetProperty("errorCode").GetString(), Text(result));
+    }
+
+    [TestMethod]
     public async Task SetTextVariablesPreservesOwnerIdentityDigestAndRollbackTruth()
     {
         using var fixture = CreateFixture();

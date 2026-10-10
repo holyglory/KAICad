@@ -6,6 +6,7 @@ using Google.Protobuf;
 using Kiapi.Common.Commands;
 using Kiapi.Common.Project;
 using Kiapi.Common.Types;
+using Kiapi.Schematic.Types;
 using KiCad.Automation.Model;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
@@ -102,10 +103,163 @@ public sealed class ProjectSettingsTools(InstanceRegistry registry)
             supported = true,
             unsupportedReason = (string?)null,
             response = (JsonElement?)parsed.RootElement.Clone(),
+            netClassesSha256 = NetClassesDigest(response),
             nativeQuery = true,
             boardMutation = false
         });
     });
+
+    [McpServerTool(Name = "kicad_project_net_classes_set", ReadOnly = false),
+     Description("Replace or merge the declared project netclasses through the existing checked schematic net-settings transaction. documentJson must identify the explicit schematic root, and expectedStateJson must be the complete kicad_schematic_checked_state result from that same root. netClassesJson is protobuf JSON for NetClassesResponse; mergeMode is MMM_MERGE or MMM_REPLACE; operationId is a new canonical UUID; expectedNetClassesSha256 must match the declared netclasses in the supplied checked state. The wrapper preserves every other project net-setting, uses the native checked receipt/replay path, and leaves saving explicit through kicad_document_save. PCB-only documents are refused because no equivalent checked project-settings transaction exists.") ,
+     KiCadCapability("project-settings", "checked-native-schematic-net-settings", "explicit schematic root, complete checked state, netclass digest, operation ID"),
+     KiCadVerification(KiCadVerificationLevel.InProcess, "ProjectSettingsToolTests.SetNetClassesRequiresSchematicCheckedState")]
+    public Task<CallToolResult> SetNetClasses(string instanceId, string documentJson,
+        string expectedStateJson, string netClassesJson, string mergeMode, Guid operationId,
+        string expectedNetClassesSha256, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (operationId == Guid.Empty)
+            throw new AutomationException("invalid_operation_id", "Provide a nonempty operation UUID for a project netclass mutation.");
+
+        DocumentSpecifier document = Parse<DocumentSpecifier>(documentJson,
+            "invalid_project_net_classes_target");
+        DocumentStateTools.ValidateTarget(document);
+        if (document.Type != DocumentType.DoctypeSchematic || document.SheetPath?.Path.Count != 1)
+            throw new AutomationException("project_net_classes_schematic_required",
+                "Project netclass mutation requires the explicit schematic root; PCB-only project settings have no checked mutation path.");
+
+        CheckedSchematicState expected = Parse<CheckedSchematicState>(expectedStateJson,
+            "invalid_project_net_classes_state");
+        CheckedSchematicContract.ValidateObservation(expected, document, expected.State.ProcessEpoch);
+        SchematicMetadata[] metadataMatches = expected.Electrical.Hierarchy.Data.Instances
+            .Select(screen => screen.Metadata)
+            .Where(value => value is not null && value.Document.Equals(document))
+            .Select(value => value!)
+            .ToArray();
+        if (metadataMatches.Length != 1)
+            throw new AutomationException("invalid_project_net_classes_state",
+                "The complete checked state must contain exactly one metadata record for the explicit schematic root.");
+        SchematicMetadata metadata = metadataMatches[0];
+        if (metadata.NetSettings is null)
+            throw new AutomationException("project_net_classes_unavailable",
+                "The checked state does not include declared project net settings.");
+
+        NetClassesResponse requested = Parse<NetClassesResponse>(netClassesJson,
+            "invalid_project_net_classes_request");
+        ValidateNetClasses(requested, "request");
+        if (mergeMode is not ("MMM_MERGE" or "MMM_REPLACE"))
+            throw new AutomationException("invalid_project_net_classes_merge_mode",
+                "mergeMode must be MMM_MERGE or MMM_REPLACE.");
+        if (!IsNetClassDigest(expectedNetClassesSha256))
+            throw new AutomationException("invalid_project_net_classes_revision",
+                "expectedNetClassesSha256 must be a lowercase SHA-256 digest.");
+        string observedDigest = NetClassesDigest(ToNetClasses(metadata.NetSettings));
+        if (!string.Equals(observedDigest, expectedNetClassesSha256, StringComparison.Ordinal))
+            throw new AutomationException("stale_project_net_classes",
+                "The supplied netclass digest does not match the complete checked schematic observation.");
+
+        SchematicNetSettings next = MergeNetClasses(metadata.NetSettings, requested, mergeMode);
+        CallToolResult native = await new SchematicMetadataMutationTools(registry).SetNetSettings(
+            instanceId, documentJson, expectedStateJson, SchematicJson.Formatter.Format(next),
+            operationId.ToString("D"), cancellationToken);
+        return WrapNetClassesResult(native, instanceId, operationId, expectedNetClassesSha256, requested);
+    });
+
+    private static void ValidateNetClasses(NetClassesResponse response, string name)
+    {
+        if (response is null || response.NetClasses.Count > 4096
+            || response.NetClasses.Any(netClass => string.IsNullOrWhiteSpace(netClass.Name)
+                || netClass.Name.Contains('\0') || netClass.Type != NetClassType.NctExplicit
+                || netClass.Constituents.Count != 0)
+            || response.NetClasses.Select(netClass => netClass.Name).Distinct(StringComparer.Ordinal).Count()
+                != response.NetClasses.Count)
+            throw new AutomationException("invalid_project_net_classes_response",
+                $"Native checked netclass mutation returned an invalid {name} list.");
+    }
+
+    private static SchematicNetSettings MergeNetClasses(SchematicNetSettings baseline,
+        NetClassesResponse requested, string mergeMode)
+    {
+        var result = baseline.Clone();
+        var classes = result.Classes.ToDictionary(netClass => netClass.Name, netClass => netClass.Clone(), StringComparer.Ordinal);
+        if (mergeMode == "MMM_REPLACE")
+            classes.Clear();
+
+        foreach (var netClass in requested.NetClasses)
+        {
+            if (netClass.Name == "Default")
+                result.DefaultClass = netClass.Clone();
+            else
+                classes[netClass.Name] = netClass.Clone();
+        }
+
+        result.Classes.Clear();
+        result.Classes.Add(classes.Values.OrderBy(netClass => netClass.Name, StringComparer.Ordinal));
+        return result;
+    }
+
+    private static NetClassesResponse ToNetClasses(SchematicNetSettings settings)
+    {
+        var result = new NetClassesResponse();
+        result.NetClasses.Add(settings.DefaultClass.Clone());
+        result.NetClasses.Add(settings.Classes.Select(netClass => netClass.Clone()));
+        return result;
+    }
+
+    private static bool IsNetClassDigest(string value) => value.Length == 64 && value.All(char.IsAsciiHexDigitLower);
+
+    private static string NetClassesDigest(NetClassesResponse response)
+    {
+        var bytes = new List<byte>();
+        foreach (var netClass in response.NetClasses.OrderBy(netClass => netClass.Name, StringComparer.Ordinal))
+        {
+            byte[] name = Encoding.UTF8.GetBytes(netClass.Name);
+            byte[] serialized = netClass.ToByteArray();
+            bytes.AddRange(Encoding.UTF8.GetBytes(name.Length.ToString())); bytes.Add((byte)'\n');
+            bytes.AddRange(name);
+            bytes.AddRange(Encoding.UTF8.GetBytes(serialized.Length.ToString())); bytes.Add((byte)'\n');
+            bytes.AddRange(serialized);
+        }
+        return Convert.ToHexStringLower(SHA256.HashData(bytes.ToArray()));
+    }
+
+    private static CallToolResult WrapNetClassesResult(CallToolResult native, string instanceId,
+        Guid operationId, string expectedDigest, NetClassesResponse requested)
+    {
+        if (native.StructuredContent is not JsonElement data)
+            return native;
+
+        JsonElement? receipt = data.TryGetProperty("receipt", out var receiptValue)
+            ? receiptValue.Clone() : null;
+        string? errorCode = data.TryGetProperty("errorCode", out var codeValue)
+            ? codeValue.GetString() : null;
+        string? errorMessage = data.TryGetProperty("errorMessage", out var messageValue)
+            ? messageValue.GetString() : null;
+        bool submitted = data.TryGetProperty("mutationSubmitted", out var submittedValue)
+            && submittedValue.ValueKind == JsonValueKind.True;
+        bool replayed = data.TryGetProperty("replayed", out var replayedValue)
+            && replayedValue.ValueKind == JsonValueKind.True;
+        var wrapped = JsonSerializer.SerializeToElement(new
+        {
+            instanceId,
+            operationId = operationId.ToString("D"),
+            expectedNetClassesSha256 = expectedDigest,
+            requestedNetClassCount = requested.NetClasses.Count,
+            mutationSubmitted = submitted,
+            replayed,
+            designFilesSaved = false,
+            receipt,
+            errorCode,
+            errorMessage,
+            nativeResult = data
+        });
+        return new CallToolResult
+        {
+            IsError = native.IsError,
+            StructuredContent = wrapped,
+            Content = [new TextContentBlock { Text = wrapped.GetRawText() }]
+        };
+    }
 
     [McpServerTool(Name = "kicad_project_text_variables", ReadOnly = true),
      Description("Read the native project text-variable map at one exact lifecycle checkpoint. project identifies the loaded project; document and expectedStateJson identify an open schematic or PCB in that project and its project-settings revision coverage. The native common API is project-wide, so the result is paired with the requested document only as an identity and revision guard. This never changes design data and reports supported=false when the connected peer lacks the command."),

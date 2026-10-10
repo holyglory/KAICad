@@ -29,18 +29,42 @@ public sealed class PcbOperationsTools(InstanceRegistry registry)
     private static readonly Dictionary<string, StoredReceipt> Receipts = new(StringComparer.Ordinal);
 
     [McpServerTool(Name = "kicad_pcb_import_netlist"),
-     Description("Import a schematic netlist into an explicitly identified PCB through KiCad's native netlist updater. requestJson is ImportNetlist protobuf JSON; expectedStateJson must be the matching lifecycle observation; operationId is a caller-owned correlation UUID. Dry runs are required for planning. Native receipts remain available while the KiCad process lives; interactive asynchronous work remains explicit."),
+     Description("Import a schematic netlist into an explicitly identified PCB through KiCad's native netlist updater. Provide exactly one of requestJson (legacy ImportNetlist protobuf JSON) or request (structured PCB netlist input), and exactly one of expectedStateJson or expectedState. operationId is a caller-owned correlation UUID. Dry runs are required for planning. Native receipts remain available while the KiCad process lives; interactive asynchronous work remains explicit."),
      KiCadCapability("pcb-operations", "compiled-mcp plus native-board-api", "explicit PCB document, process epoch, lifecycle state, operation correlation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> ImportNetlistStructured(string instanceId, string operationId,
+        CancellationToken cancellationToken, string? requestJson = null, PcbImportNetlistInput? request = null,
+        string? expectedStateJson = null, DocumentLifecycleInput? expectedState = null) => Execute(async () =>
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        string resolvedRequest = ResolveRequestJson(requestJson, request, operationId);
+        string resolvedState = ResolveExpectedStateJson(expectedStateJson, expectedState);
+        return await ImportNetlist(instanceId, resolvedRequest, resolvedState, operationId, cancellationToken);
+    });
+
+    // Legacy CLR entry point.  It intentionally remains callable by existing
+    // clients and tests, while MCP discovery exposes the structured wrapper.
     public Task<CallToolResult> ImportNetlist(string instanceId, string requestJson, string expectedStateJson,
         string operationId, CancellationToken cancellationToken) =>
         Execute(() => WithReceipt(instanceId, operationId, "netlist-import", requestJson, expectedStateJson,
             () => ImportNetlistCore(instanceId, requestJson, expectedStateJson, operationId, cancellationToken)));
 
     [McpServerTool(Name = "kicad_pcb_refill_zones"),
-     Description("Refill all or selected copper zones on an explicitly identified PCB through KiCad's native zone filler. requestJson is RefillZones protobuf JSON; expectedStateJson must be the matching lifecycle observation; operationId is a caller-owned correlation UUID. Selected zones and headless all-zone fills complete synchronously and retain native-process receipts; interactive all-zone fills remain explicitly asynchronous."),
+     Description("Refill all or selected copper zones on an explicitly identified PCB through KiCad's native zone filler. Provide exactly one of requestJson (legacy RefillZones protobuf JSON) or request (structured PCB refill input), and exactly one of expectedStateJson or expectedState. operationId is a caller-owned correlation UUID. Selected zones and headless all-zone fills complete synchronously and retain native-process receipts; interactive all-zone fills remain explicitly asynchronous."),
      KiCadCapability("pcb-operations", "compiled-mcp plus native-board-api", "explicit PCB document, process epoch, lifecycle state, operation correlation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> RefillZonesStructured(string instanceId, string operationId,
+        CancellationToken cancellationToken, string? requestJson = null, PcbRefillZonesInput? request = null,
+        string? expectedStateJson = null, DocumentLifecycleInput? expectedState = null) => Execute(async () =>
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        string resolvedRequest = ResolveRequestJson(requestJson, request, operationId);
+        string resolvedState = ResolveExpectedStateJson(expectedStateJson, expectedState);
+        return await RefillZones(instanceId, resolvedRequest, resolvedState, operationId, cancellationToken);
+    });
+
+    // Legacy CLR entry point retained for callers that already provide
+    // protobuf JSON.  It shares the exact receipt and native transaction path.
     public Task<CallToolResult> RefillZones(string instanceId, string requestJson, string expectedStateJson,
         string operationId, CancellationToken cancellationToken) =>
         Execute(() => WithReceipt(instanceId, operationId, "zone-refill", requestJson, expectedStateJson,
@@ -445,6 +469,59 @@ public sealed class PcbOperationsTools(InstanceRegistry registry)
         }
     }
 
+    private static string ResolveRequestJson(string? legacyJson, PcbImportNetlistInput? typed,
+        string operationId)
+    {
+        bool hasLegacy = legacyJson is not null;
+        bool hasTyped = typed is not null;
+        if (hasLegacy == hasTyped)
+            throw new AutomationException("invalid_pcb_operation_input",
+                "Provide exactly one PCB netlist request: requestJson or request.");
+        if (hasLegacy)
+        {
+            if (string.IsNullOrWhiteSpace(legacyJson))
+                throw new AutomationException("invalid_pcb_operation_input",
+                    "requestJson must be a nonempty protobuf JSON document.");
+            return legacyJson!;
+        }
+        return BoardJson.Formatter.Format(typed!.ToNative(operationId));
+    }
+
+    private static string ResolveRequestJson(string? legacyJson, PcbRefillZonesInput? typed,
+        string operationId)
+    {
+        bool hasLegacy = legacyJson is not null;
+        bool hasTyped = typed is not null;
+        if (hasLegacy == hasTyped)
+            throw new AutomationException("invalid_pcb_operation_input",
+                "Provide exactly one PCB refill request: requestJson or request.");
+        if (hasLegacy)
+        {
+            if (string.IsNullOrWhiteSpace(legacyJson))
+                throw new AutomationException("invalid_pcb_operation_input",
+                    "requestJson must be a nonempty protobuf JSON document.");
+            return legacyJson!;
+        }
+        return BoardJson.Formatter.Format(typed!.ToNative(operationId));
+    }
+
+    private static string ResolveExpectedStateJson(string? legacyJson, DocumentLifecycleInput? typed)
+    {
+        bool hasLegacy = legacyJson is not null;
+        bool hasTyped = typed is not null;
+        if (hasLegacy == hasTyped)
+            throw new AutomationException("invalid_pcb_operation_input",
+                "Provide exactly one PCB lifecycle observation: expectedStateJson or expectedState.");
+        if (hasLegacy)
+        {
+            if (string.IsNullOrWhiteSpace(legacyJson))
+                throw new AutomationException("invalid_pcb_operation_input",
+                    "expectedStateJson must be a nonempty lifecycle observation.");
+            return legacyJson!;
+        }
+        return SchematicJson.Formatter.Format(DocumentLifecycleInput.ToNative(typed));
+    }
+
     private async Task<(NativeClient Client, AutomationSession Session, DocumentLifecycleState Before)> Admit(
         string instanceId, DocumentSpecifier document, string expectedStateJson, string operation,
         CancellationToken cancellationToken)
@@ -586,9 +663,11 @@ public sealed class PcbOperationsTools(InstanceRegistry registry)
     {
         try { return await operation(); }
         catch (Exception error) when (error is AutomationException or NativeApiException or NngException
-            or InvalidProtocolBufferException or InvalidJsonException or InvalidOperationException or ArgumentException or IOException)
+            or InvalidProtocolBufferException or InvalidJsonException or JsonException or InvalidOperationException
+            or ArgumentException or IOException)
         {
             string code = error is AutomationException known ? known.Code
+                : error is JsonException ? "invalid_pcb_operation_input"
                 : error is NativeApiException native && native.Status == (int)Kiapi.Common.ApiStatusCode.AsTokenMismatch
                     ? "pcb_instance_changed"
                     : error is NativeApiException nativeError ? "native_status_" + nativeError.Status

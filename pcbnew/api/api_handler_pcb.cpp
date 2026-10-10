@@ -51,7 +51,6 @@
 #include <base_screen.h>
 #include <board_commit.h>
 #include <board_connected_item.h>
-#include <board_loader.h>
 #include <board_design_settings.h>
 #include <core/kicad_algo.h>
 #include <footprint.h>
@@ -1925,44 +1924,13 @@ HANDLER_RESULT<Empty> API_HANDLER_PCB::handleRevertDocument(
 
     wxFileName fn = project().AbsolutePath( board()->GetFileName() );
 
-    // Parse a detached board candidate before releasing the live editor.  The
-    // legacy reload path still owns the frame swap and cannot roll the old
-    // in-memory board back after a late GUI/project failure; this preflight
-    // keeps malformed or unreadable disk content from reaching that path.
-    try
-    {
-        // Use an analysis-only project copy so the detached parser cannot update the live
-        // project's settings, lock or editor/library registrations while it validates the file.
-        std::unique_ptr<PROJECT> candidateProject = project().CloneForAnalysis();
-        const PCB_IO_MGR::PCB_FILE_T format =
-                PCB_IO_MGR::FindPluginTypeFromBoardPath( fn.GetFullPath(), KICTL_KICAD_ONLY );
-        BOARD_LOADER::OPTIONS options;
-        options.initialize_after_load = false;
-        if( format == PCB_IO_MGR::FILE_TYPE_NONE
-                || !BOARD_LOADER::Load( fn.GetFullPath(), format, candidateProject.get(), options ) )
-        {
-            ApiResponseStatus error;
-            error.set_status( ApiStatusCode::AS_BAD_REQUEST );
-            error.set_error_message( "PCB detached reload preflight failed; the live document was preserved" );
-            return tl::unexpected( error );
-        }
-    }
-    catch( const std::exception& error )
-    {
-        ApiResponseStatus failure;
-        failure.set_status( ApiStatusCode::AS_BAD_REQUEST );
-        failure.set_error_message( "PCB detached reload preflight failed; the live document was preserved: "
-                                    + std::string( error.what() ) );
-        return tl::unexpected( failure );
-    }
-
     frame()->GetScreen()->SetContentModified( false );
     frame()->ReleaseFile();
     if( !frame()->OpenProjectFiles( std::vector<wxString>( 1, fn.GetFullPath() ), KICTL_REVERT ) )
     {
         ApiResponseStatus error;
         error.set_status( ApiStatusCode::AS_BAD_REQUEST );
-        error.set_error_message( "PCB reload failed after detached preflight; rollback_unavailable: inspect native diagnostics and reobserve the editor" );
+        error.set_error_message( "PCB reload failed; rollback_unavailable: inspect native diagnostics and reobserve the editor" );
         return tl::unexpected( error );
     }
 

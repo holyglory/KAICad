@@ -479,7 +479,11 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::HandleRevert( ApiRequest& aEnvelope,
     {
         if( !previous->second.revert || !MessageDifferencer::Equals( request, previous->second.revert_request ) )
             return Error( "Lifecycle operation ID was already used for another request" );
-        return Pack( previous->second.result );
+        // The retained receipt stays immutable; attest this exact direct request only on the
+        // response copy after the duplicate request matched the retained checked command.
+        LifecycleOperationResult replay = previous->second.result;
+        replay.set_expected_state_verified( true );
+        return Pack( replay );
     }
 
     constexpr size_t budget = 16 * 1024 * 1024;
@@ -598,7 +602,10 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::HandleRevert( ApiRequest& aEnvelope,
         result.set_revert_completed( true );
         result.clear_error_code();
         result.clear_error_message();
-        return Pack( result );
+        // Keep the stored receipt immutable and attest the exact checked request on its response.
+        LifecycleOperationResult response = result;
+        response.set_expected_state_verified( true );
+        return Pack( response );
     }
     catch( const std::exception& error )
     {
@@ -637,12 +644,17 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
                                                     : found->second.request.document();
         if( !MessageDifferencer::Equals( document, query.document() ) )
             return Error( "Lifecycle operation belongs to another document" );
-        if( query.has_expected_state()
-                && ( !found->second.revert
-                     || !MessageDifferencer::Equals( query.expected_state(),
-                                                     found->second.revert_request.expected_state() ) ) )
-            return Error( "Lifecycle operation belongs to another observed state" );
-        return Pack( found->second.result );
+        LifecycleOperationResult result = found->second.result;
+        result.clear_expected_state_verified();
+        if( query.has_expected_state() )
+        {
+            if( !found->second.revert
+                    || !MessageDifferencer::Equals( query.expected_state(),
+                                                    found->second.revert_request.expected_state() ) )
+                return Error( "Lifecycle operation belongs to another observed state" );
+            result.set_expected_state_verified( true );
+        }
+        return Pack( result );
     }
 
     CheckedSaveDocument request;

@@ -414,6 +414,7 @@ BOOST_AUTO_TEST_CASE( CheckedRevertRequiresCleanCheckpointAndReplaysItsNativeRec
     auto result = fixture.Result( request );
     BOOST_CHECK( result.status() == LOS_REVERTED );
     BOOST_CHECK( result.revert_completed() );
+    BOOST_CHECK( result.expected_state_verified() );
     BOOST_CHECK_EQUAL( fixture.reverts, 1 );
     BOOST_CHECK( result.has_observed_state() );
     BOOST_CHECK_EQUAL( result.observed_state().state_sha256(), result.observed_state().clean_checkpoint_sha256() );
@@ -446,6 +447,7 @@ BOOST_AUTO_TEST_CASE( CheckedRevertReceiptLookupRequiresOriginalObservedState )
     LifecycleOperationResult retained;
     BOOST_REQUIRE( receipt->message().UnpackTo( &retained ) );
     BOOST_CHECK( retained.status() == LOS_REVERTED );
+    BOOST_CHECK( retained.expected_state_verified() );
     BOOST_CHECK( google::protobuf::util::MessageDifferencer::Equals( result, retained ) );
 
     query.mutable_expected_state()->set_state_sha256( std::string( 64, 'c' ) );

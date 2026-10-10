@@ -154,9 +154,10 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
                 throw;
             }
 
+            LifecycleOperationResult nativeResult;
             try
             {
-                var nativeResult = await client.InvokeAsync<NativeCapabilityCheckedRevertDocument, LifecycleOperationResult>(new()
+                nativeResult = await client.InvokeAsync<NativeCapabilityCheckedRevertDocument, LifecycleOperationResult>(new()
                 {
                     Document = expected.Document.Clone(), OperationId = id, ExpectedState = expected.Clone()
                 }, cancellationToken);
@@ -231,16 +232,9 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
                 throw new AutomationException("revert_state_not_confirmed", message);
             }
 
-            if (!after.Document.Equals(expected.Document) || after.ProcessEpoch != client.Epoch)
+            if (!RevertReceiptStatesMatch(expected, nativeResult, after))
             {
-                string message = $"KiCad returned a post-revert state for a different document or process on operation {id}; inspect kicad_document_state before another action.";
-                RememberRevertUnknown(store, id, fingerprint, instanceId, client.Epoch, message);
-                throw new AutomationException("revert_state_not_confirmed", message);
-            }
-
-            if (!RevertStateIsClean(after))
-            {
-                string message = $"KiCad completed revert operation {id}, but the editor or its file baselines are not clean in the post-revert observation. Inspect kicad_document_state before another action.";
+                string message = $"KiCad completed revert operation {id}, but its retained native state and independent post-revert observation do not match the expected clean checkpoint. Inspect kicad_document_state before another action.";
                 RememberRevertUnknown(store, id, fingerprint, instanceId, client.Epoch, message);
                 throw new AutomationException("revert_state_not_confirmed", message);
             }
@@ -417,6 +411,39 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
             && file.BaselineKnown && file.CurrentKnown && file.BaselineExists.Equals(file.CurrentExists)
             && file.BaselineSha256 == file.CurrentSha256 && file.BaselineBytes == file.CurrentBytes);
 
+    private static bool RevertReceiptStatesMatch(DocumentLifecycleState expected,
+        LifecycleOperationResult native, DocumentLifecycleState after)
+    {
+        if (!native.ExpectedStateVerified || native.ObservedState is not { } observed
+            || !DocumentRevertReceiptRecord.Sha256(expected.CleanCheckpointSha256)
+            || !observed.Document.Equals(expected.Document) || observed.ProcessEpoch != expected.ProcessEpoch
+            || observed.Scope != expected.Scope || observed.StateSha256 != expected.CleanCheckpointSha256
+            || observed.CleanCheckpointSha256 != expected.CleanCheckpointSha256
+            || !RevertIdentityMatches(expected, observed)
+            || !observed.NativeFiles.SequenceEqual(expected.NativeFiles)
+            || observed.FileBaselines.Count != expected.FileBaselines.Count
+            || !observed.FileBaselines.Zip(expected.FileBaselines).All(pair => pair.First.Equals(pair.Second))
+            || !RevertStateIsClean(observed) || !observed.Equals(after) || !RevertStateIsClean(after))
+            return false;
+
+        return true;
+    }
+
+    private static bool RevertIdentityMatches(DocumentLifecycleState expected, DocumentLifecycleState state)
+    {
+        if (state.Revision is null || !Guid.TryParseExact(state.Revision.Epoch, "D", out var revisionEpoch)
+            || revisionEpoch == Guid.Empty)
+            return false;
+
+        if (expected.Scope == DocumentLifecycleScope.DlsPcb)
+            return Guid.TryParseExact(state.NativeIdentity, "D", out var identity) && identity != Guid.Empty
+                && state.Revision.Epoch == state.NativeIdentity;
+
+        return expected.Scope == DocumentLifecycleScope.DlsSchematicHierarchy
+            && state.NativeIdentity == expected.NativeIdentity
+            && expected.Revision is not null && state.Revision.Epoch == expected.Revision.Epoch;
+    }
+
     private static async Task<DocumentRevertResult?> ReconcileNativeReceipt(
         DocumentRevertReceiptStore store, DocumentRevertReceiptRecord persisted, string instanceId,
         string operationId, string fingerprint, DocumentLifecycleState expected, NativeClient client,
@@ -490,11 +517,7 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
             return null;
         }
 
-        bool cleanCheckpointMatches = DocumentRevertReceiptRecord.Sha256(expected.CleanCheckpointSha256)
-            && after.StateSha256 == expected.CleanCheckpointSha256
-            && after.CleanCheckpointSha256 == expected.CleanCheckpointSha256;
-        if (!after.Document.Equals(expected.Document) || after.ProcessEpoch != client.Epoch
-            || !RevertStateIsClean(after) || !cleanCheckpointMatches)
+        if (!RevertReceiptStatesMatch(expected, native, after))
         {
             return null;
         }
@@ -603,6 +626,14 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
                 || result.BeforeState.ProcessEpoch != processEpoch
                 || result.AfterState.ProcessEpoch != processEpoch
                 || !RevertStateIsClean(result.AfterState)
+                || !DocumentRevertReceiptRecord.Sha256(result.BeforeState.CleanCheckpointSha256)
+                || result.AfterState.StateSha256 != result.BeforeState.CleanCheckpointSha256
+                || result.AfterState.CleanCheckpointSha256 != result.BeforeState.CleanCheckpointSha256
+                || !RevertIdentityMatches(result.BeforeState, result.AfterState)
+                || !result.AfterState.NativeFiles.SequenceEqual(result.BeforeState.NativeFiles)
+                || result.AfterState.FileBaselines.Count != result.BeforeState.FileBaselines.Count
+                || !result.AfterState.FileBaselines.Zip(result.BeforeState.FileBaselines)
+                    .All(pair => pair.First.Equals(pair.Second))
                 || RevertFingerprint(instanceId, result.BeforeState, operationId) != fingerprint)
                 throw new InvalidDataException("The completed document-revert result does not cross-check against its receipt identity and state.");
             DocumentStateTools.ValidateTarget(result.Document);

@@ -412,6 +412,9 @@ message LifecycleOperationResult {
   repeated string blocked_files = 401;
   // Retained compatibility flag for a terminal LOS_REVERTED receipt.
   bool revert_completed = 402;
+  // True only when the exact checked-revert expected state was validated on
+  // this response, either at direct admission or during receipt lookup.
+  bool expected_state_verified = 403;
   // -- end lane 2D --
 }
 

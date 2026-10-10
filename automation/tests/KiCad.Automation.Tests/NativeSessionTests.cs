@@ -247,6 +247,11 @@ public sealed partial class NativeSessionTests
             // editors and their full history/reload paths share this ceiling.
             : journey is NativeJourney.RepeatedSheetOwnership ? 2400
             : journey is NativeJourney.XmlRebuild ? 1200
+            // The expanded public netclass wrapper journey completed its first
+            // editor at 363.8s and begins the second editor at that point. The
+            // prior 450s default therefore cancelled during the second editor;
+            // retain per-action limits and give this two-editor journey 900s.
+            : journey == NativeJourney.NetSettings ? 900
             : journey == NativeJourney.ProjectRecovery ? 2400 : 450;
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(aggregateSeconds));
         var elapsed = Stopwatch.StartNew();

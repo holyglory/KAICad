@@ -116,6 +116,38 @@ public sealed class SymbolLibraryCheckedContractTests
     }
 
     [TestMethod]
+    public void DirectFileReceiptRejectsACommitWithoutAnAdvancingRevision()
+    {
+        (DocumentSpecifier document, string epoch, string operation, string expected) = Fixture();
+        var before = State(document, epoch, sequence: 7, expected);
+        var after = State(document, epoch, sequence: 7, new string('b', 64));
+        var request = new NativeCapabilitySymbolLibraryCheckedWrite
+        {
+            Document = document.Clone(), ProcessEpoch = epoch, OperationId = operation,
+            ExpectedSnapshotSha256 = before.StateSha256, ExpectedState = before
+        };
+        var response = Response(document, epoch, operation,
+            status: "committed_postverified", committed: true, revisionTracked: true,
+            completeLifecycle: false, before: before.StateSha256, after: after.StateSha256);
+        response.ReceiptStatus = NativeCapabilitySymbolLibraryCheckedReceiptStatus.NcpSlcwsCommittedPostverified;
+        response.Scope = "mcp_direct_symbol_file";
+        response.ExpectedRequestVerified = true;
+        response.NativeWriteStarted = true;
+        response.Postverified = true;
+        response.TargetVerified = true;
+        response.UnrelatedEntriesVerified = true;
+        response.ObservedBefore = before;
+        response.ObservedAfter = after;
+        response.Request = request;
+        response.RequestFingerprintSha256 = SymbolLibraryCheckedContract.ComputeFingerprint(request);
+
+        AutomationException error = Assert.ThrowsExactly<AutomationException>(() =>
+            SymbolLibraryCheckedContract.ValidateResponse(response, request));
+
+        Assert.AreEqual("invalid_symbol_library_response", error.Code);
+    }
+
+    [TestMethod]
     public void DirectFileReceiptRejectsCommitWithoutPostverificationProof()
     {
         (DocumentSpecifier document, string epoch, string operation, string expected) = Fixture();

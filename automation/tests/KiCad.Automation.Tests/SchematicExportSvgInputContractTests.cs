@@ -48,7 +48,7 @@ public sealed class SchematicExportSvgInputContractTests
                 Assert.AreEqual(expectedJobs, transport.JobPayloads.Count, export.Kind + " replay must not redispatch");
 
                 string legacyRequest = export.LegacyRequestJson;
-                CallToolResult legacy = await export.Legacy(tools, legacyRequest, legacyState, Guid.NewGuid().ToString("D"));
+                CallToolResult legacy = await export.Legacy(tools, legacyRequest, legacyState, Guid.NewGuid().ToString("D"), default);
                 AssertSuccess(legacy, export.Kind + " legacy");
                 AssertManifest(legacy, state, export.ExpectedOutputPath);
                 Assert.AreEqual(++expectedJobs, transport.JobPayloads.Count, export.Kind + " legacy dispatch");

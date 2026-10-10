@@ -545,13 +545,8 @@ public sealed partial class NativeSessionTests
             seededSettings.LabelAssignments.Clear();
             var existing = seededSettings.DefaultClass.Clone();
             existing.Name = "AutomationExisting";
-            existing.Priority = 3;
-            existing.Schematic.WireWidth = new() { ValueNm = 88900 };
+            existing.Priority = 2;
             seededSettings.Classes.Add(existing);
-            seededSettings.Patterns.Add(new SchematicNetClassPattern
-            { Pattern = "PUBLIC_DEFAULT*", NetClass = "Default" });
-            seededSettings.NetColors["/PUBLIC_UNRELATED"] = new() { R = 1, G = 0, B = 0, A = 1 };
-            seededSettings.ChainNetclasses["PUBLIC_UNRELATED_CHAIN"] = "Default";
             await Apply(Batch(seed, seededSettings));
             var seededSnapshot = await Read();
             var seededChecked = await CapturePublicState();

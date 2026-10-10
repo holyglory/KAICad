@@ -17,10 +17,15 @@ namespace KiCad.Automation.Mcp;
 public sealed class DocumentLifecycleTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_document_save", ReadOnly = false),
-     Description("Save an explicit schematic hierarchy or PCB only if the supplied kicad_document_state observation still matches the native process, document, revision, content and loaded file versions. Supply a new operation UUID, and reuse that exact request after a timeout. Returns a retained operation result; failed or uncertain saves require inspection. A failed save is never reported as saved and the editor keeps the unsaved changes. Its errorMessage names every cause and the next step. Failed-save errorCodes: file_not_writable, the file system would not let KiCad write the files in blockedFiles (a read-only file or folder, a full disk); native_save_refused, KiCad refused for a reason that making the document's files writable does not fix, for example a project KiCad opened read-only or a project lock KiCad could not take (errorMessage says what to change instead, such as making the lock file writable or deleting it, then reopening the project); native_save_failed, writing failed and KiCad found no cause (check the disk and save again); partial_save, saving stopped after replacing the files in writtenFiles, so the disk mixes old and new files until a save succeeds; file_changed_during_save, another program changed a file during the save and KiCad kept that version; file_unreadable_during_save, KiCad could not read a file to confirm nobody changed it; save_outside_document, the save tried to write a design file that is not part of the observed document. If this call is cancelled or times out, call kicad_document_operation with the same operation ID to learn whether KiCad started it. Does not close editors or promise atomic multi-file persistence."),
-     KiCadCapability("document-lifecycle", "native-api", "document state observation, operation UUID"),
+     Description("Save an explicit schematic hierarchy or PCB only if the supplied kicad_document_state observation still matches the native process, document, revision, content and loaded file versions. Supply operationId and exactly one of expectedStateJson (legacy protobuf JSON) or expectedState (the structured lifecycle observation). Reuse the same complete request after a timeout. Returns a retained operation result; failed or uncertain saves require inspection. A failed save is never reported as saved and the editor keeps the unsaved changes. If this call is cancelled or times out, call kicad_document_operation with the same operation ID to learn whether KiCad started it. Does not close editors or promise atomic multi-file persistence."),
+     KiCadCapability("document-lifecycle", "native-api", "typed or legacy document state observation, operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NetClassesRoundTripThroughXmlAndNativeEdits", "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp",
          "NativeSessionTests.CheckedBatchesRejectChangedStateAndPreserveNativeUndo")]
+    public Task<CallToolResult> SaveStructured(string instanceId, string operationId,
+        CancellationToken cancellationToken, string? expectedStateJson = null,
+        DocumentLifecycleInput? expectedState = null) =>
+        Save(instanceId, ResolveLifecycleJson(expectedStateJson, expectedState), operationId, cancellationToken);
+
     public async Task<CallToolResult> Save(string instanceId, string expectedStateJson, string operationId,
         CancellationToken cancellationToken)
     {
@@ -51,10 +56,15 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
     }
 
     [McpServerTool(Name = "kicad_document_close", ReadOnly = false),
-     Description("Close an exact schematic or PCB only when its supplied native observation still matches a clean loaded/saved checkpoint. Dirty changes, pending dialogs and associated editors/viewers are refused. This never implicitly saves, discards, forces closure or stops the native process. Reuse the same operation UUID and request after a timeout; the operation receipt survives editor closure. If this call is cancelled or times out, call kicad_document_operation with the same operation ID to learn whether KiCad started it."),
-     KiCadCapability("document-lifecycle", "native-api", "clean document state observation, operation UUID"),
+     Description("Close an exact schematic or PCB only when its supplied native observation still matches a clean loaded/saved checkpoint. Supply operationId and exactly one of expectedStateJson (legacy protobuf JSON) or expectedState (the structured lifecycle observation). Dirty changes, pending dialogs and associated editors/viewers are refused. This never implicitly saves, discards, forces closure or stops the native process. Reuse the same operation UUID and request after a timeout; the operation receipt survives editor closure. If this call is cancelled or times out, call kicad_document_operation with the same operation ID to learn whether KiCad started it."),
+     KiCadCapability("document-lifecycle", "native-api", "typed or legacy clean document state observation, operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NetClassesRoundTripThroughXmlAndNativeEdits",
          "NativeSessionTests.CheckedBatchesRejectChangedStateAndPreserveNativeUndo")]
+    public Task<CallToolResult> CloseStructured(string instanceId, string operationId,
+        CancellationToken cancellationToken, string? expectedStateJson = null,
+        DocumentLifecycleInput? expectedState = null) =>
+        Close(instanceId, ResolveLifecycleJson(expectedStateJson, expectedState), operationId, cancellationToken);
+
     public async Task<CallToolResult> Close(string instanceId, string expectedStateJson, string operationId,
         CancellationToken cancellationToken)
     {
@@ -83,9 +93,14 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
     }
 
     [McpServerTool(Name = "kicad_document_revert", ReadOnly = false),
-     Description("Revert an explicitly observed schematic hierarchy or PCB to the files currently on disk. The native checked lifecycle controller admits the exact document digest and unchanged file baselines on KiCad's GUI thread, reserves the operation UUID, performs the reload, and retains a process-owned terminal receipt. The MCP also retains a per-instance durable receipt. Reload failure has no automatic rollback; cancellation or transport loss after native dispatch is operation_outcome_unknown and must be resolved by reading kicad_document_state before another action. An admitted receipt is fail-closed: if the caller exits before native dispatch, it remains operation_in_progress and is never dispatched a second time."),
-     KiCadCapability("document-lifecycle", "compiled-mcp plus native checked lifecycle plus durable receipt", "exact lifecycle observation digest/file baselines, process epoch, operation UUID and per-instance operation receipt"),
+     Description("Revert an explicitly observed schematic hierarchy or PCB to the files currently on disk. Supply operationId and exactly one of expectedStateJson (legacy protobuf JSON) or expectedState (the structured lifecycle observation). The native checked lifecycle controller admits the exact document digest and unchanged file baselines on KiCad's GUI thread, reserves the operation UUID, performs the reload, and retains a process-owned terminal receipt. The MCP also retains a per-instance durable receipt. Reload failure has no automatic rollback; cancellation or transport loss after native dispatch is operation_outcome_unknown and must be resolved by reading kicad_document_state before another action. An admitted receipt is fail-closed: if the caller exits before native dispatch, it remains operation_in_progress and is never dispatched a second time."),
+     KiCadCapability("document-lifecycle", "compiled-mcp plus native checked lifecycle plus durable receipt", "typed or legacy lifecycle observation, digest/file baselines, process epoch, operation UUID and per-instance receipt"),
      KiCadVerification(KiCadVerificationLevel.InProcess, "DocumentLifecycleToolTests.RevertRequiresCompleteObservationAndVerifiesCleanState")]
+    public Task<CallToolResult> RevertStructured(string instanceId, string operationId,
+        CancellationToken cancellationToken, string? expectedStateJson = null,
+        DocumentLifecycleInput? expectedState = null) =>
+        Revert(instanceId, ResolveLifecycleJson(expectedStateJson, expectedState), operationId, cancellationToken);
+
     public Task<CallToolResult> Revert(string instanceId, string expectedStateJson, string operationId,
         CancellationToken cancellationToken) => InstanceToolBoundary.Run(async () =>
         {
@@ -304,10 +319,15 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
         });
 
     [McpServerTool(Name = "kicad_document_operation", ReadOnly = true),
-     Description("Read the retained result of an exact document lifecycle operation in its original native process. This never retries a save, launches an editor or adopts a restarted process. Receipts survive editor closure and MCP reconnect while that native process remains alive. The error operation_not_started means KiCad has no record of starting that operation ID (for example the call was cancelled before KiCad received it), so it saved or closed nothing for it."),
-     KiCadCapability("document-lifecycle", "native-api", "document, operation UUID, process epoch"),
+     Description("Read the retained result of an exact document lifecycle operation in its original native process. Supply operationId, processEpoch and exactly one of documentJson (legacy protobuf JSON) or document (the structured native document identifier). This never retries a save, launches an editor or adopts a restarted process. Receipts survive editor closure and MCP reconnect while that native process remains alive. The error operation_not_started means KiCad has no record of starting that operation ID, so it saved or closed nothing for it."),
+     KiCadCapability("document-lifecycle", "native-api", "typed or legacy document, operation UUID, process epoch"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NetClassesRoundTripThroughXmlAndNativeEdits",
          "NativeSessionTests.CheckedBatchesRejectChangedStateAndPreserveNativeUndo")]
+    public Task<CallToolResult> OperationStructured(string instanceId, string operationId,
+        string processEpoch, CancellationToken cancellationToken, string? documentJson = null,
+        NativeDocumentInput? document = null) =>
+        Operation(instanceId, ResolveDocumentJson(documentJson, document), operationId, processEpoch, cancellationToken);
+
     public Task<CallToolResult> Operation(string instanceId, string documentJson, string operationId,
         string processEpoch, CancellationToken cancellationToken) => InstanceToolBoundary.Run(async () =>
         {
@@ -371,6 +391,30 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
         try { return SchematicJson.Parser.Parse<T>(json); }
         catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException)
         { throw new AutomationException("invalid_lifecycle_request", "Provide a valid native lifecycle observation or document descriptor: " + error.Message); }
+    }
+
+    private static string ResolveLifecycleJson(string? legacyJson, DocumentLifecycleInput? typed)
+    {
+        bool hasLegacy = !string.IsNullOrWhiteSpace(legacyJson);
+        bool hasTyped = typed is not null;
+        if (hasLegacy == hasTyped)
+            throw new AutomationException("invalid_lifecycle_input",
+                "Provide exactly one lifecycle observation: expectedStateJson or expectedState.");
+        if (typed is not null)
+            return SchematicJson.Formatter.Format(DocumentLifecycleInput.ToNative(typed));
+        return legacyJson!;
+    }
+
+    private static string ResolveDocumentJson(string? legacyJson, NativeDocumentInput? typed)
+    {
+        bool hasLegacy = !string.IsNullOrWhiteSpace(legacyJson);
+        bool hasTyped = typed is not null;
+        if (hasLegacy == hasTyped)
+            throw new AutomationException("invalid_document_input",
+                "Provide exactly one document descriptor: documentJson or document.");
+        if (typed is not null)
+            return SchematicJson.Formatter.Format(NativeDocumentInput.ToNative(typed));
+        return legacyJson!;
     }
 
     private static string OperationId(string value)

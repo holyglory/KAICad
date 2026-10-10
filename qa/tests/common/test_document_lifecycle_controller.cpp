@@ -429,6 +429,30 @@ BOOST_AUTO_TEST_CASE( CheckedRevertRequiresCleanCheckpointAndReplaysItsNativeRec
     BOOST_CHECK_EQUAL( withoutCheckpoint.reverts, 0 );
 }
 
+BOOST_AUTO_TEST_CASE( CheckedRevertReceiptLookupRequiresOriginalObservedState )
+{
+    LIFECYCLE_FIXTURE fixture;
+    auto request = fixture.RevertRequest();
+    auto result = fixture.Result( request );
+    BOOST_CHECK( result.status() == LOS_REVERTED );
+
+    ReadLifecycleOperation query;
+    query.mutable_document()->CopyFrom( request.document() );
+    query.set_operation_id( request.operation_id() );
+    query.set_process_epoch( fixture.epoch );
+    query.mutable_expected_state()->CopyFrom( request.expected_state() );
+    auto receipt = fixture.Call( query );
+    BOOST_REQUIRE( receipt );
+    LifecycleOperationResult retained;
+    BOOST_REQUIRE( receipt->message().UnpackTo( &retained ) );
+    BOOST_CHECK( retained.status() == LOS_REVERTED );
+    BOOST_CHECK( google::protobuf::util::MessageDifferencer::Equals( result, retained ) );
+
+    query.mutable_expected_state()->set_state_sha256( std::string( 64, 'c' ) );
+    BOOST_CHECK( !fixture.Call( query ) );
+    BOOST_CHECK_EQUAL( fixture.reverts, 1 );
+}
+
 BOOST_AUTO_TEST_CASE( StaleIdentityRevisionContentAndDiskNeverSave )
 {
     for( int variant = 0; variant < 5; ++variant )

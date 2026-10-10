@@ -506,7 +506,7 @@ public sealed partial class SharedProtoBandTests
         DocumentLifecycleState 13 fd4f34e8fea06f1b 2C 2D
         CheckedSaveDocument 3 85bdd5ff029b4e3d 2D
         CheckedCloseDocument 3 85bdd5ff029b4e3d 2D
-        ReadLifecycleOperation 3 8c11d6117b788005
+        ReadLifecycleOperation 4 13899fa05474928c
         LifecycleOperationStatus 6 c21f3a499d99f6e4
         LifecycleOperationResult 7 f092b9b0d70901e3 2D
         SchematicSaveState 6 79d6837dd0bff864

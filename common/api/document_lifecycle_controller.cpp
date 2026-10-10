@@ -637,6 +637,11 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
                                                     : found->second.request.document();
         if( !MessageDifferencer::Equals( document, query.document() ) )
             return Error( "Lifecycle operation belongs to another document" );
+        if( query.has_expected_state()
+                && ( !found->second.revert
+                     || !MessageDifferencer::Equals( query.expected_state(),
+                                                     found->second.revert_request.expected_state() ) ) )
+            return Error( "Lifecycle operation belongs to another observed state" );
         return Pack( found->second.result );
     }
 

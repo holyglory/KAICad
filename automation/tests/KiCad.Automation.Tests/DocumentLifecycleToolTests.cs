@@ -307,12 +307,15 @@ public sealed class DocumentLifecycleToolTests
                 ProcessEpoch = transport.Session.Epoch, Status = LifecycleOperationStatus.LosReverted,
                 RevertCompleted = true
             };
+            transport.RevertReceiptExpectedState = complete.Clone();
 
             var reconciled = await tool.Revert(transport.Session.InstanceId,
                 SchematicJson.Formatter.Format(complete), operationId, default);
             Assert.IsFalse(reconciled.IsError ?? false, reconciled.StructuredContent?.GetRawText());
             Assert.IsTrue(reconciled.StructuredContent!.Value.GetProperty("replayed").GetBoolean());
             Assert.IsTrue(reconciled.StructuredContent.Value.GetProperty("nativeReceiptAvailable").GetBoolean());
+            Assert.AreEqual(complete, transport.LastReceiptQuery?.ExpectedState,
+                "Receipt reconciliation must name the original observed state.");
             Assert.AreEqual(0, transport.RevertCalls, "Receipt reconciliation must never dispatch a second reload.");
 
             var receipt = await tool.RevertReceipt(transport.Session.InstanceId, transport.Session.Epoch, operationId, default);
@@ -323,7 +326,7 @@ public sealed class DocumentLifecycleToolTests
     }
 
     [TestMethod]
-    public async Task AdmittedRevertWithoutNativeReceiptBecomesUnknownWithoutDispatch()
+    public async Task AdmittedRevertWithoutNativeDispatchStaysInProgressWithoutDispatch()
     {
         string directory = Directory.CreateTempSubdirectory("lifecycle-revert-admitted-").FullName;
         try
@@ -344,11 +347,55 @@ public sealed class DocumentLifecycleToolTests
             var refused = await tool.Revert(transport.Session.InstanceId,
                 SchematicJson.Formatter.Format(complete), operationId, default);
             Assert.IsTrue(refused.IsError, refused.StructuredContent?.GetRawText());
-            Assert.AreEqual("operation_outcome_unknown", refused.StructuredContent!.Value.GetProperty("code").GetString());
+            Assert.AreEqual("operation_in_progress", refused.StructuredContent!.Value.GetProperty("code").GetString());
             Assert.AreEqual(0, transport.RevertCalls);
+            Assert.IsNull(transport.LastReceiptQuery, "An admitted reservation is not proof that native dispatch began.");
 
             var receipt = await tool.RevertReceipt(transport.Session.InstanceId, transport.Session.Epoch, operationId, default);
             Assert.IsFalse(receipt.IsError ?? false, receipt.StructuredContent?.GetRawText());
+            Assert.AreEqual("admitted", receipt.StructuredContent!.Value.GetProperty("outcome").GetString());
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [TestMethod]
+    public async Task RevertRetryRefusesNativeReceiptFromAnotherObservedState()
+    {
+        string directory = Directory.CreateTempSubdirectory("lifecycle-revert-state-binding-").FullName;
+        try
+        {
+            var transport = new LifecycleTransport();
+            transport.Session.Epoch = Guid.NewGuid().ToString("D");
+            transport.Session.ProjectPath = Path.Combine(directory, "fixture.kicad_pro");
+            var registry = new InstanceRegistry(transport, directory);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "native.sock")), transport.Session.InstanceId);
+            var tool = new DocumentLifecycleTools(registry);
+            var expected = CompleteState(directory, transport.Session.Epoch, dirty: true);
+            transport.LifecycleState = expected.Clone();
+            string operationId = Guid.NewGuid().ToString("D");
+            transport.RevertFailure = new NngOperationCanceledException(8, "reply lost", true, false);
+            var interrupted = await tool.Revert(transport.Session.InstanceId,
+                SchematicJson.Formatter.Format(expected), operationId, default);
+            Assert.IsTrue(interrupted.IsError);
+
+            transport.RevertFailure = null;
+            transport.LifecycleState.NativeContentDirty = false;
+            transport.RevertReceiptResult = new LifecycleOperationResult
+            {
+                Document = expected.Document.Clone(), OperationId = operationId,
+                ProcessEpoch = transport.Session.Epoch, Status = LifecycleOperationStatus.LosReverted,
+                RevertCompleted = true
+            };
+            transport.RevertReceiptExpectedState = expected.Clone();
+            transport.RevertReceiptExpectedState!.StateSha256 = new string('b', 64);
+
+            var refused = await tool.Revert(transport.Session.InstanceId,
+                SchematicJson.Formatter.Format(expected), operationId, default);
+            Assert.IsTrue(refused.IsError, refused.StructuredContent?.GetRawText());
+            Assert.AreEqual("revert_receipt_conflict", refused.StructuredContent!.Value.GetProperty("code").GetString());
+            Assert.AreEqual(expected, transport.LastReceiptQuery?.ExpectedState);
+            Assert.AreEqual(0, transport.RevertCalls, "Receipt mismatch must not dispatch a reload.");
+            var receipt = await tool.RevertReceipt(transport.Session.InstanceId, transport.Session.Epoch, operationId, default);
             Assert.AreEqual("indeterminate", receipt.StructuredContent!.Value.GetProperty("outcome").GetString());
         }
         finally { Directory.Delete(directory, true); }
@@ -392,6 +439,8 @@ public sealed class DocumentLifecycleToolTests
         public NngException? Failure { get; set; }
         public Exception? RevertFailure { get; set; }
         public LifecycleOperationResult? RevertReceiptResult { get; set; }
+        public DocumentLifecycleState? RevertReceiptExpectedState { get; set; }
+        public ReadLifecycleOperation? LastReceiptQuery { get; private set; }
         public string? ReceiptError { get; set; }
         public int RevertCalls { get; private set; }
         public DocumentLifecycleState LifecycleState { get; set; } = new();
@@ -417,6 +466,11 @@ public sealed class DocumentLifecycleToolTests
             else if (envelope.Message.Is(ReadLifecycleOperation.Descriptor))
             {
                 ++LifecycleCalls;
+                LastReceiptQuery = envelope.Message.Unpack<ReadLifecycleOperation>();
+                if (RevertReceiptExpectedState is not null && !RevertReceiptExpectedState.Equals(LastReceiptQuery.ExpectedState))
+                    return Task.FromResult(new ApiResponse { Header = new() { KicadToken = Session.Epoch },
+                        Status = new() { Status = (ApiStatusCode)3,
+                            ErrorMessage = "Lifecycle operation belongs to another observed state" } }.ToByteArray());
                 if (RevertReceiptResult is not null)
                     return Task.FromResult(new ApiResponse { Header = new() { KicadToken = Session.Epoch },
                         Status = new() { Status = (ApiStatusCode)1 }, Message = Any.Pack(RevertReceiptResult.Clone()) }.ToByteArray());

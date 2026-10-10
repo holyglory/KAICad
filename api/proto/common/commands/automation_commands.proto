@@ -379,6 +379,9 @@ message ReadLifecycleOperation {
   kiapi.common.types.DocumentSpecifier document = 1;
   string operation_id = 2;
   string process_epoch = 3;
+  // Optional original checked-revert observation. When present, the native
+  // peer compares it with the retained request before returning the receipt.
+  DocumentLifecycleState expected_state = 4;
 }
 
 enum LifecycleOperationStatus {

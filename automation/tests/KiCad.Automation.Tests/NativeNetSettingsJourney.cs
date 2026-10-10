@@ -558,11 +558,15 @@ public sealed partial class NativeSessionTests
                 PublicNetClasses(seededQuery).NetClasses.Select(value => value.Name).ToArray());
 
             var mergeDefault = seededSettings.DefaultClass.Clone();
-            mergeDefault.Schematic.WireWidth = new() { ValueNm = 123400 };
+            // KiCad persists schematic widths in integer mils.  Keep the public
+            // netclass fixture on values that survive the native JSON
+            // save/load boundary exactly; arbitrary nanometre distances are
+            // correctly rejected by the checked native adapter.
+            mergeDefault.Schematic.WireWidth = new() { ValueNm = 127000 };
             var mergeClass = seededSettings.DefaultClass.Clone();
             mergeClass.Name = "AutomationMerge";
             mergeClass.Priority = 4;
-            mergeClass.Schematic.WireWidth = new() { ValueNm = 234500 };
+            mergeClass.Schematic.WireWidth = new() { ValueNm = 254000 };
             var mergeRequest = new NetClassesResponse();
             mergeRequest.NetClasses.Add(mergeDefault);
             mergeRequest.NetClasses.Add(mergeClass);
@@ -594,7 +598,7 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(seededChecked.State.Revision.Sequence + 1, mergedChecked.State.Revision.Sequence);
             CollectionAssert.AreEquivalent(new[] { "AutomationExisting", "AutomationMerge", "Default" },
                 PublicNetClassNames(mergedChecked), "MMM_MERGE must retain the unrelated existing class.");
-            Assert.AreEqual(123400L, PublicSettings(mergedChecked).DefaultClass.Schematic.WireWidth.ValueNm);
+            Assert.AreEqual(127000L, PublicSettings(mergedChecked).DefaultClass.Schematic.WireWidth.ValueNm);
             AssertUnrelatedSettings(seededSettings, PublicSettings(mergedChecked), "MMM_MERGE");
             Assert.AreEqual(mergedChecked.Electrical.Hierarchy.Data.Instances
                 .Single(screen => screen.Metadata.Document.Equals(document)).Metadata.NetSettings,

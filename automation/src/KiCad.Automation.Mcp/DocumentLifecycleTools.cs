@@ -153,6 +153,12 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
                     throw new AutomationException("operation_outcome_unknown", message);
                 }
             }
+            catch (AutomationException)
+            {
+                // A terminal native refusal/indeterminate receipt was already retained above.
+                // Do not try to replace it with a second terminal result while unwinding.
+                throw;
+            }
             catch (NngOperationCanceledException error) when (error.RequestDelivered)
             {
                 string message = $"KiCad received checked revert operation {id} but cancellation stopped the reply ({error.Message}). Inspect kicad_document_state before another action; the native receipt may be terminal.";

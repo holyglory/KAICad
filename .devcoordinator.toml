@@ -3146,13 +3146,13 @@ command=["curl","--fail","--silent","--show-error","--max-time","20","--output",
 name="signed-linux-download"
 tier="development"
 requires=["tls-preflight"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=PublicDownloads","--logger","trx;LogFileName=results.trx","--results-directory","/home/holyglory/.codex/worktrees/0761/kicad/automation/artifacts/preview27-public-download-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=PublicDownloads","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/preview27-public-download-tests"]
 retained_artifacts=[{name="public-download-tests",path="automation/artifacts/preview27-public-download-tests",max_bytes=16777216},{name="public-download-evidence",path="automation/artifacts/preview27-public-downloads",max_bytes=67108864}]
 [[test.preview27-linux-public.check]]
 name="delivery-receipts"
 tier="development"
 requires=["signed-linux-download"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=DeliveryReceipts","--logger","trx;LogFileName=results.trx","--results-directory","/home/holyglory/.codex/worktrees/0761/kicad/automation/artifacts/preview27-delivery-receipt-tests"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=DeliveryReceipts","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/preview27-delivery-receipt-tests"]
 retained_artifacts=[{name="delivery-receipt-tests",path="automation/artifacts/preview27-delivery-receipt-tests",max_bytes=16777216},{name="delivery-evidence",path="automation/artifacts/preview27-linux-delivery",max_bytes=268435456}]
 [[test.preview27-linux-public.check]]
 name="observe"

@@ -215,10 +215,15 @@ public sealed class CheckedPcbItemContractTests
         Assert.ThrowsExactly<AutomationException>(() =>
             CheckedPcbItemContract.ValidateResult(request, missingMember, inspect: true));
 
-        var duplicateMember = request.Clone();
-        duplicateMember.Operations[0].Delete.ItemIds.Add(new KIID { Value = memberId });
+        var duplicateMember = receipt.Clone();
+        duplicateMember.Results[0].Delete.DeletedItems[1].Id = new() { Value = groupId };
         Assert.ThrowsExactly<AutomationException>(() =>
-            CheckedPcbItemContract.ValidateRequest(duplicateMember, duplicateMember.ProcessEpoch, inspect: true));
+            CheckedPcbItemContract.ValidateResult(request, duplicateMember, inspect: true));
+
+        var duplicateRequestMember = request.Clone();
+        duplicateRequestMember.Operations[0].Delete.ItemIds.Add(new KIID { Value = memberId });
+        Assert.ThrowsExactly<AutomationException>(() =>
+            CheckedPcbItemContract.ValidateRequest(duplicateRequestMember, duplicateRequestMember.ProcessEpoch, inspect: true));
     }
 
     private static (CheckedPcbItemTransaction Request, Track Create, Track Update, KIID Delete,

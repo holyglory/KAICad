@@ -266,9 +266,25 @@ public static class CheckedPcbItemContract
                 case PcbItemOperation.ActionOneofCase.Delete:
                     if (operationResult.ResultCase != PcbItemOperationResult.ResultOneofCase.Delete
                         || operationResult.Delete.Status != ItemRequestStatus.IrsOk
-                        || operationResult.Delete.DeletedItems.Count != operation.Delete.ItemIds.Count
-                        || operationResult.Delete.DeletedItems.Any(item => item.Status != ItemDeletionStatus.IdsOk
-                            || item.Id is null || !operation.Delete.ItemIds.Any(id => id.Equals(item.Id))))
+                        || operationResult.Delete.DeletedItems.Count != operation.Delete.ItemIds.Count)
+                        throw Invalid("The native PCB item receipt does not preserve the exact delete response.");
+
+                    // A response with the right count can still repeat one
+                    // requested identity and omit another.  Treat the
+                    // deletion result as a set so a receipt cannot claim that
+                    // an item was removed when its ID never appeared in the
+                    // native response.
+                    var expectedIds = operation.Delete.ItemIds
+                        .Select(id => id.Value)
+                        .ToHashSet(StringComparer.Ordinal);
+                    var actualIds = new HashSet<string>(StringComparer.Ordinal);
+                    foreach (var item in operationResult.Delete.DeletedItems)
+                    {
+                        if (item.Status != ItemDeletionStatus.IdsOk || item.Id is null
+                            || !expectedIds.Contains(item.Id.Value) || !actualIds.Add(item.Id.Value))
+                            throw Invalid("The native PCB item receipt does not preserve the exact delete response.");
+                    }
+                    if (!actualIds.SetEquals(expectedIds))
                         throw Invalid("The native PCB item receipt does not preserve the exact delete response.");
                     break;
                 default:

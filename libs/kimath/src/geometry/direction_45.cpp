@@ -23,7 +23,8 @@
 
 const SHAPE_LINE_CHAIN DIRECTION_45::BuildInitialTrace( const VECTOR2I& aP0, const VECTOR2I& aP1,
                                                         bool        aStartDiagonal,
-                                                        CORNER_MODE aMode ) const
+                                                        CORNER_MODE aMode,
+                                                        int         aCornerRadius ) const
 
 {
     bool startDiagonal;
@@ -40,6 +41,29 @@ const SHAPE_LINE_CHAIN DIRECTION_45::BuildInitialTrace( const VECTOR2I& aP0, con
 
     bool is90mode = aMode == CORNER_MODE::ROUNDED_90 || aMode == CORNER_MODE::MITERED_90;
     SHAPE_LINE_CHAIN pl;
+
+    if( aCornerRadius > 0
+        && ( aMode == CORNER_MODE::ROUNDED_45 || aMode == CORNER_MODE::ROUNDED_90 ) )
+    {
+        CORNER_MODE miterMode = aMode == CORNER_MODE::ROUNDED_90
+                                        ? CORNER_MODE::MITERED_90
+                                        : CORNER_MODE::MITERED_45;
+        SHAPE_LINE_CHAIN miter = BuildInitialTrace( aP0, aP1, aStartDiagonal, miterMode, 0 );
+
+        if( miter.PointCount() == 3 )
+        {
+            const SEG first( miter.CPoint( 0 ), miter.CPoint( 1 ) );
+            const SEG second( miter.CPoint( 1 ), miter.CPoint( 2 ) );
+            const int maxRadius = std::max( 1, std::min( first.Length(), second.Length() ) / 2 );
+            SHAPE_ARC arc( first, second, std::min( aCornerRadius, maxRadius ) );
+            SHAPE_LINE_CHAIN result;
+            result.Append( aP0 );
+            result.Append( arc );
+            result.Append( aP1 );
+            result.Simplify();
+            return result;
+        }
+    }
 
     // Shortcut where we can generate just one segment and quit.  Avoids more complicated handling
     // of precision errors if filleting is enabled

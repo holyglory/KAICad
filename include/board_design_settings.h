@@ -306,6 +306,15 @@ public:
         return &m_TeardropParamsList;
     }
 
+    bool SmoothConnections() const { return m_SmoothConnections; }
+    void SetSmoothConnections( bool aEnable ) { m_SmoothConnections = aEnable; }
+    int SmoothConnectionRadius() const { return m_SmoothConnectionRadius; }
+    void SetSmoothConnectionRadius( int aRadius ) { m_SmoothConnectionRadius = aRadius; }
+    double SmoothConnectionRadiusPercent() const { return m_SmoothConnectionRadiusPercent; }
+    void SetSmoothConnectionRadiusPercent( double aPercent ) { m_SmoothConnectionRadiusPercent = aPercent; }
+    bool SmoothConnectionRadiusUsesPercent() const { return m_SmoothConnectionRadiusUsesPercent; }
+    void SetSmoothConnectionRadiusUsesPercent( bool aUsePercent ) { m_SmoothConnectionRadiusUsesPercent = aUsePercent; }
+
     SEVERITY GetSeverity( int aDRCErrorCode );
 
     /**
@@ -690,6 +699,7 @@ private:
 
     bool migrateSchema0to1();
     bool migrateSchema2to3();
+    bool migrateSchema3to4();
 
 public:
     // Note: the first value in each dimensions list is the current netclass value
@@ -704,6 +714,10 @@ public:
      * 3 set of parameters always exist: for round shapes, for rect shapes, for track ends.
      */
     TEARDROP_PARAMETERS_LIST         m_TeardropParamsList;
+    bool                             m_SmoothConnections;
+    int                              m_SmoothConnectionRadius;
+    double                           m_SmoothConnectionRadiusPercent;
+    bool                             m_SmoothConnectionRadiusUsesPercent;
 
     PNS::MEANDER_SETTINGS            m_SingleTrackMeanderSettings;
     PNS::MEANDER_SETTINGS            m_DiffPairMeanderSettings;

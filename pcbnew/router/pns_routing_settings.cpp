@@ -21,6 +21,7 @@
 
 #include <geometry/direction45.h>
 #include <settings/parameters.h>
+#include <base_units.h>
 
 #include "pns_routing_settings.h"
 
@@ -55,6 +56,10 @@ ROUTING_SETTINGS::ROUTING_SETTINGS( JSON_SETTINGS* aParent, const std::string& a
     m_autoPosture = true;
     m_fixAllSegments = true;
     m_restrictAngles = false;
+    m_flexibleRouting = false;
+    m_cornerRadius = pcbIUScale.mmToIU( 0.2 );
+    m_cornerRadiusPercent = 50.0;
+    m_cornerRadiusUsesPercent = true;
     m_viaForcePropIterationLimit = 40;
 
     m_params.emplace_back( new PARAM<int>( "mode", reinterpret_cast<int*>( &m_routingMode ),
@@ -98,6 +103,12 @@ ROUTING_SETTINGS::ROUTING_SETTINGS( JSON_SETTINGS* aParent, const std::string& a
     m_params.emplace_back( new PARAM<bool>( "auto_posture",     &m_autoPosture,       true ) );
     m_params.emplace_back( new PARAM<bool>( "fix_all_segments", &m_fixAllSegments,    true ) );
     m_params.emplace_back( new PARAM<bool>( "restrict_angles",  &m_restrictAngles,    false ) );
+    m_params.emplace_back( new PARAM<bool>( "flexible_routing", &m_flexibleRouting, false ) );
+    m_params.emplace_back( new PARAM_SCALED<int>( "corner_radius", &m_cornerRadius,
+                                                   pcbIUScale.mmToIU( 0.2 ), pcbIUScale.mmToIU( 0.001 ),
+                                                   pcbIUScale.mmToIU( 25.0 ), pcbIUScale.MM_PER_IU ) );
+    m_params.emplace_back( new PARAM<double>( "corner_radius_percent", &m_cornerRadiusPercent, 50.0, 0.0, 1000.0 ) );
+    m_params.emplace_back( new PARAM<bool>( "corner_radius_uses_percent", &m_cornerRadiusUsesPercent, true ) );
 
     m_params.emplace_back( new PARAM_ENUM<DIRECTION_45::CORNER_MODE>(
             "corner_mode", &m_cornerMode, DIRECTION_45::CORNER_MODE::MITERED_45,
@@ -121,6 +132,15 @@ const DIRECTION_45 ROUTING_SETTINGS::InitialDirection() const
 TIME_LIMIT ROUTING_SETTINGS::ShoveTimeLimit() const
 {
     return TIME_LIMIT ( m_shoveTimeLimit );
+}
+
+
+int ROUTING_SETTINGS::EffectiveCornerRadius( int aTrackWidth ) const
+{
+    if( m_cornerRadiusUsesPercent )
+        return KiROUND( aTrackWidth * m_cornerRadiusPercent / 100.0 );
+
+    return m_cornerRadius;
 }
 
 

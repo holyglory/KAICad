@@ -25,6 +25,7 @@
 #include <wx/log.h>
 
 #include <board_item.h>
+#include <geometry/shape_arc.h>
 
 #include "pns_arc.h"
 #include "pns_debug_decorator.h"
@@ -789,6 +790,8 @@ bool LINE_PLACER::rhWalkOnly( const VECTOR2I& aP, LINE& aNewHead, LINE& aNewTail
     if( ! splitHeadTail( walkFull, m_tail, aNewHead, aNewTail ) )
         return false;
 
+    roundFlexiblePath( aNewHead );
+
     if( m_placingVia && viaOk )
     {
         PNS_DBG( Dbg(), AddPoint, aNewHead.CLastPoint(), RED, 1000000, wxString::Format( "VIA" ) );
@@ -918,6 +921,66 @@ bool LINE_PLACER::splitHeadTail( const LINE& aNewLine, const LINE& aOldTail, LIN
 }
 
 
+bool LINE_PLACER::roundFlexiblePath( LINE& aLine )
+{
+    if( !Settings().FlexibleRouting() || aLine.ArcCount() > 0 || aLine.PointCount() < 3 )
+        return false;
+
+    const int radius = Settings().EffectiveCornerRadius( aLine.Width() );
+
+    if( radius <= 0 )
+        return false;
+
+    const SHAPE_LINE_CHAIN& source = aLine.CLine();
+    SHAPE_LINE_CHAIN         rounded;
+    rounded.Append( source.CPoint( 0 ) );
+    bool changed = false;
+
+    for( int i = 1; i + 1 < source.PointCount(); ++i )
+    {
+        const VECTOR2I& previous = source.CPoint( i - 1 );
+        const VECTOR2I& corner = source.CPoint( i );
+        const VECTOR2I& next = source.CPoint( i + 1 );
+        SEG             first( previous, corner );
+        SEG             second( corner, next );
+        const int       usableRadius = std::min( radius,
+                                           std::min( first.Length(), second.Length() ) / 2 );
+
+        if( usableRadius <= 0 )
+        {
+            rounded.Append( corner );
+            continue;
+        }
+
+        SHAPE_ARC arc( first, second, usableRadius, aLine.Width() );
+
+        if( arc.GetP0() == corner || arc.GetP1() == corner || arc.GetP0() == arc.GetP1() )
+        {
+            rounded.Append( corner );
+            continue;
+        }
+
+        rounded.Append( arc.GetP0() );
+        rounded.Append( arc );
+        changed = true;
+    }
+
+    rounded.Append( source.CLastPoint() );
+
+    if( !changed )
+        return false;
+
+    LINE candidate( aLine );
+    candidate.SetShape( rounded );
+
+    if( m_currentNode && m_currentNode->CheckColliding( &candidate ) )
+        return false;
+
+    aLine.SetShape( rounded );
+    return true;
+}
+
+
 bool LINE_PLACER::rhShoveOnly( const VECTOR2I& aP, LINE& aNewHead, LINE& aNewTail )
 {
     LINE walkSolids;
@@ -999,6 +1062,8 @@ bool LINE_PLACER::rhShoveOnly( const VECTOR2I& aP, LINE& aNewHead, LINE& aNewTai
 
         if( ! splitHeadTail( newHead, m_tail, aNewHead, aNewTail ) )
             return false;
+
+        roundFlexiblePath( aNewHead );
 
         if( newHead.EndsWithVia() )
             aNewHead.AppendVia( newHead.Via() );
@@ -2072,16 +2137,19 @@ bool LINE_PLACER::buildInitialLine( const VECTOR2I& aP, LINE& aHead, PNS::PNS_MO
     }
     else
     {
-        if( Settings().GetFreeAngleMode() && Settings().Mode() == RM_MarkObstacles )
+        if( Settings().FlexibleRouting()
+            || ( Settings().GetFreeAngleMode() && Settings().Mode() == RM_MarkObstacles ) )
         {
             l = SHAPE_LINE_CHAIN( { m_p_start, aP } );
         }
         else
         {
             if( !m_tail.PointCount() )
-                l = guessedDir.BuildInitialTrace( m_p_start, aP, false, cornerMode );
+                l = guessedDir.BuildInitialTrace( m_p_start, aP, false, cornerMode,
+                                                  Settings().EffectiveCornerRadius( m_sizes.TrackWidth() ) );
             else
-                l = m_direction.BuildInitialTrace( m_p_start, aP, false, cornerMode );
+                l = m_direction.BuildInitialTrace( m_p_start, aP, false, cornerMode,
+                                                   Settings().EffectiveCornerRadius( m_sizes.TrackWidth() ) );
         }
 
         if( l.SegmentCount() > 1 && m_orthoMode )

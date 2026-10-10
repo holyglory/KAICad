@@ -86,6 +86,29 @@ BOOST_AUTO_TEST_CASE( NegativeSilkClearanceRoundTrip )
 }
 
 
+BOOST_AUTO_TEST_CASE( SmoothConnectionsRoundTrip )
+{
+    BOARD_DESIGN_SETTINGS& bds = m_board->GetDesignSettings();
+
+    bds.SetSmoothConnections( true );
+    bds.SetSmoothConnectionRadius( pcbIUScale.mmToIU( 0.3 ) );
+    bds.SetSmoothConnectionRadiusPercent( 62.5 );
+    bds.SetSmoothConnectionRadiusUsesPercent( false );
+    bds.Store();
+
+    bds.SetSmoothConnections( false );
+    bds.SetSmoothConnectionRadius( 0 );
+    bds.SetSmoothConnectionRadiusPercent( 0.0 );
+    bds.SetSmoothConnectionRadiusUsesPercent( true );
+    bds.Load();
+
+    BOOST_CHECK( bds.SmoothConnections() );
+    BOOST_CHECK_EQUAL( bds.SmoothConnectionRadius(), pcbIUScale.mmToIU( 0.3 ) );
+    BOOST_CHECK_CLOSE( bds.SmoothConnectionRadiusPercent(), 62.5, 0.001 );
+    BOOST_CHECK( !bds.SmoothConnectionRadiusUsesPercent() );
+}
+
+
 /**
  * Regression test: physical_hole_clearance must count toward the worst-case clearance.
  *

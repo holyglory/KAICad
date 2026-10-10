@@ -293,6 +293,21 @@ private:
                                  PCB_TRACK* aSourceTrack, BOARD_ITEM* aCandidate,
                                  const VECTOR2I& aPos, const KIID& aUuid );
 
+    bool tryCreateSmoothConnection( BOARD_COMMIT& aCommit, TEARDROP_VARIANT aTeardropVariant,
+                                    PCB_TRACK* aTrack, PCB_TRACK* aSourceTrack,
+                                    BOARD_ITEM* aCandidate, const VECTOR2I& aPos,
+                                    const KIID& aUuid );
+
+    bool smoothConnectionsEnabled( const PCB_TRACK* aTrack ) const;
+
+    bool computeSmoothConnectionPolygon( std::vector<VECTOR2I>& aPoints, PCB_TRACK* aTrack,
+                                         PCB_TRACK* aSourceTrack, BOARD_ITEM* aCandidate,
+                                         const VECTOR2I& aPos ) const;
+
+    bool shortenTrackForSmoothConnection( PCB_TRACK* aTrack, BOARD_ITEM* aCandidate,
+                                         const VECTOR2I& aPos );
+    bool restoreSmoothConnectionEndpoints( PCB_TRACK* aTrack );
+
     /**
      * Set priority of created teardrops. smaller have bigger priority
      */

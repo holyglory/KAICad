@@ -35,6 +35,7 @@
 #include <bezier_curves.h>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <unordered_map>
 #include <unordered_set>
@@ -43,6 +44,32 @@
 
 // The first priority level of a teardrop area (arbitrary value)
 #define MAGIC_TEARDROP_ZONE_ID 30000
+
+namespace
+{
+constexpr const char* SMOOTH_START_PROPERTY = "ki_smooth_original_start";
+constexpr const char* SMOOTH_END_PROPERTY = "ki_smooth_original_end";
+
+bool parsePoint( const wxString& aValue, VECTOR2I& aPoint )
+{
+    wxString xText = aValue.BeforeFirst( ',' );
+    wxString yText = aValue.AfterFirst( ',' );
+    long x = 0;
+    long y = 0;
+
+    if( xText.IsEmpty() || yText.IsEmpty() || !xText.ToLong( &x ) || !yText.ToLong( &y ) )
+        return false;
+
+    aPoint = VECTOR2I( x, y );
+    return true;
+}
+
+
+wxString formatPoint( const VECTOR2I& aPoint )
+{
+    return wxString::Format( "%d,%d", aPoint.x, aPoint.y );
+}
+}
 
 
 TEARDROP_MANAGER::TEARDROP_MANAGER( BOARD* aBoard, TOOL_MANAGER* aToolManager ) :
@@ -191,8 +218,8 @@ void TEARDROP_MANAGER::createAndAddTeardropWithMask( BOARD_COMMIT& aCommit,
     m_createdTdList.push_back( new_teardrop );
 
     // The next teardrop has to see this one, or two of them flare into the same gap.
-    ensureCopperIndex();
-    m_copperRTree.Insert( new_teardrop, new_teardrop->GetLayer(), CLEARANCE_CONSTRAINT );
+    m_copperRTree.clear();
+    m_copperIndexed = false;
 
     aCommit.Added( new_teardrop );
 
@@ -222,6 +249,260 @@ bool TEARDROP_MANAGER::tryCreateTrackTeardrop( BOARD_COMMIT& aCommit,
     }
 
     return false;
+}
+
+
+bool TEARDROP_MANAGER::smoothConnectionsEnabled( const PCB_TRACK* aTrack ) const
+{
+    if( !aTrack )
+        return false;
+
+    switch( aTrack->GetConnectionMode() )
+    {
+    case TRACK_CONNECTION_MODE::SMOOTH:
+        return true;
+    case TRACK_CONNECTION_MODE::ORDINARY:
+        return false;
+    case TRACK_CONNECTION_MODE::INHERIT:
+        return m_board->GetDesignSettings().SmoothConnections();
+    }
+
+    return false;
+}
+
+
+bool TEARDROP_MANAGER::shortenTrackForSmoothConnection( PCB_TRACK* aTrack,
+                                                        BOARD_ITEM* aCandidate,
+                                                        const VECTOR2I& aPos )
+{
+    if( !aTrack || aTrack->GetLength() <= 0 )
+        return false;
+
+    const bool start = ( aTrack->GetStart() - aPos ).EuclideanNorm()
+                       <= ( aTrack->GetEnd() - aPos ).EuclideanNorm();
+    const char* originalKey = start ? SMOOTH_START_PROPERTY : SMOOTH_END_PROPERTY;
+    wxString    previous;
+
+    if( aTrack->GetCustomProperty( originalKey, previous ) )
+        return false;
+
+    const VECTOR2I endpoint = start ? aTrack->GetStart() : aTrack->GetEnd();
+    const VECTOR2I other = start ? aTrack->GetEnd() : aTrack->GetStart();
+    const int      sourceWidth = aTrack->GetWidth();
+    VECTOR2D axis( aPos - endpoint );
+    double   length = axis.EuclideanNorm();
+    const BOARD_DESIGN_SETTINGS& settings = m_board->GetDesignSettings();
+    const int configuredRadius = settings.SmoothConnectionRadiusUsesPercent()
+                                         ? KiROUND( aTrack->GetWidth()
+                                                    * settings.SmoothConnectionRadiusPercent() / 100.0 )
+                                         : settings.SmoothConnectionRadius();
+    int move = std::max( configuredRadius, sourceWidth / 2 );
+
+    // Connectivity commonly reports a track endpoint at the centre of a pad or via.  In that
+    // case the candidate position is exactly the endpoint and there is no vector to normalize;
+    // use the track direction so the endpoint can still be pulled back before the blend.
+    if( length < 1.0 )
+    {
+        axis = VECTOR2D( endpoint - other );
+        length = axis.EuclideanNorm();
+    }
+
+    if( length <= move || ( other - endpoint ).EuclideanNorm() <= move * 2 )
+        return false;
+
+    axis = axis / length;
+
+    // Keep the original rounded cap outside the connected object's source-side edge.  A
+    // configured radius alone is insufficient when a wide track enters the centre of a thin
+    // pad: the cap would still occupy the pad's narrow sides.  The candidate bounding box is a
+    // conservative envelope for pads, vias, and custom copper, so this remains safe for rotated
+    // or non-rectangular anchors as well.
+    if( aCandidate )
+    {
+        if( std::shared_ptr<SHAPE> candidateShape =
+                    aCandidate->GetEffectiveShape( aTrack->GetLayer() ) )
+        {
+            const BOX2I box = candidateShape->BBox();
+            const VECTOR2I corners[] = { VECTOR2I( box.GetLeft(), box.GetTop() ),
+                                         VECTOR2I( box.GetRight(), box.GetTop() ),
+                                         VECTOR2I( box.GetRight(), box.GetBottom() ),
+                                         VECTOR2I( box.GetLeft(), box.GetBottom() ) };
+            double sourceSide = 0.0;
+
+            for( const VECTOR2I& corner : corners )
+            {
+                const VECTOR2D delta( corner.x - endpoint.x, corner.y - endpoint.y );
+                sourceSide = std::min( sourceSide, delta.x * axis.x + delta.y * axis.y );
+            }
+
+            move = std::max( move, KiROUND( -sourceSide ) + sourceWidth / 2 );
+        }
+    }
+
+    move = std::max( move, GEOMETRY_MIN_SIZE );
+    const VECTOR2I shortened( KiROUND( endpoint.x - axis.x * move ),
+                              KiROUND( endpoint.y - axis.y * move ) );
+
+    aTrack->SetCustomProperty( originalKey, formatPoint( endpoint ) );
+
+    if( start )
+        aTrack->SetStart( shortened );
+    else
+        aTrack->SetEnd( shortened );
+
+    return true;
+}
+
+
+bool TEARDROP_MANAGER::restoreSmoothConnectionEndpoints( PCB_TRACK* aTrack )
+{
+    if( !aTrack )
+        return false;
+
+    bool changed = false;
+
+    auto restore = [&]( const char* aKey, bool aStart )
+    {
+        wxString value;
+        VECTOR2I point;
+
+        if( aTrack->GetCustomProperty( aKey, value ) && parsePoint( value, point ) )
+        {
+            if( aStart )
+                aTrack->SetStart( point );
+            else
+                aTrack->SetEnd( point );
+
+            aTrack->RemoveCustomProperty( aKey );
+            changed = true;
+        }
+    };
+
+    restore( SMOOTH_START_PROPERTY, true );
+    restore( SMOOTH_END_PROPERTY, false );
+    return changed;
+}
+
+
+bool TEARDROP_MANAGER::computeSmoothConnectionPolygon( std::vector<VECTOR2I>& aPoints,
+                                                       PCB_TRACK* aTrack,
+                                                       PCB_TRACK* aSourceTrack,
+                                                       BOARD_ITEM* aCandidate,
+                                                       const VECTOR2I& aPos ) const
+{
+    if( !aTrack || !aSourceTrack || !aCandidate )
+        return false;
+
+    const PCB_LAYER_ID layer = aSourceTrack->GetLayer();
+    const int          sourceWidth = aSourceTrack->GetWidth();
+    const int          targetWidth = std::max( GEOMETRY_MIN_SIZE,
+                                               std::min( sourceWidth, GetWidth( aCandidate, layer ) ) );
+
+    if( sourceWidth <= 0 || targetWidth <= 0 )
+        return false;
+
+    VECTOR2I trackEnd = aTrack->GetStart();
+
+    if( ( aTrack->GetEnd() - aPos ).EuclideanNorm()
+        < ( aTrack->GetStart() - aPos ).EuclideanNorm() )
+    {
+        trackEnd = aTrack->GetEnd();
+    }
+
+    VECTOR2D axis( aPos - trackEnd );
+    const double axisLength = axis.EuclideanNorm();
+
+    if( axisLength < 1.0 )
+        return false;
+
+    axis = axis / axisLength;
+    const VECTOR2D normal( -axis.y, axis.x );
+    const int      maxError = m_board->GetDesignSettings().m_MaxError;
+    const BOARD_DESIGN_SETTINGS& settings = m_board->GetDesignSettings();
+    const int configuredRadius = settings.SmoothConnectionRadiusUsesPercent()
+                                         ? KiROUND( sourceWidth * settings.SmoothConnectionRadiusPercent() / 100.0 )
+                                         : settings.SmoothConnectionRadius();
+    const int      capReach = std::max( configuredRadius, sourceWidth / 2 );
+    const int      transitionLength = std::max( capReach,
+                                                KiROUND( std::min( axisLength,
+                                                                  axisLength + targetWidth ) ) );
+
+    auto toVector = []( const VECTOR2D& aValue )
+    {
+        return VECTOR2I( KiROUND( aValue.x ), KiROUND( aValue.y ) );
+    };
+
+    const VECTOR2D outer( trackEnd.x - axis.x * capReach,
+                          trackEnd.y - axis.y * capReach );
+    const VECTOR2D target( aPos.x, aPos.y );
+    const double   sourceHalf = sourceWidth * 0.5;
+    const double   targetHalf = targetWidth * 0.5;
+
+    const VECTOR2I outerLeft = toVector( outer + normal * sourceHalf );
+    const VECTOR2I outerRight = toVector( outer - normal * sourceHalf );
+    const VECTOR2I targetLeft = toVector( target + normal * targetHalf );
+    const VECTOR2I targetRight = toVector( target - normal * targetHalf );
+
+    const VECTOR2I leftCtrl1 = toVector( VECTOR2D( outerLeft ) + axis * ( transitionLength * 0.45 ) );
+    const VECTOR2I leftCtrl2 = toVector( VECTOR2D( targetLeft ) - axis * ( transitionLength * 0.45 ) );
+    const VECTOR2I rightCtrl1 = toVector( VECTOR2D( targetRight ) - axis * ( transitionLength * 0.45 ) );
+    const VECTOR2I rightCtrl2 = toVector( VECTOR2D( outerRight ) + axis * ( transitionLength * 0.45 ) );
+
+    std::vector<VECTOR2I> left;
+    std::vector<VECTOR2I> right;
+
+    BEZIER_POLY( outerLeft, leftCtrl1, leftCtrl2, targetLeft ).GetPoly( left, maxError );
+    BEZIER_POLY( targetRight, rightCtrl1, rightCtrl2, outerRight ).GetPoly( right, maxError );
+
+    if( left.size() < 2 || right.size() < 2 )
+        return false;
+
+    aPoints = std::move( left );
+    aPoints.insert( aPoints.end(), right.begin(), right.end() );
+
+    // Include the entire remaining rounded cap in the generated copper envelope.  The track
+    // primitive still owns that short cap until the next commit, so omitting these points lets
+    // it protrude outside a thin pad even though the Bezier sides themselves are narrow.
+    constexpr int capSteps = 12;
+
+    for( int ii = 0; ii <= capSteps; ++ii )
+    {
+        const double theta = -M_PI / 2.0 + M_PI * ii / capSteps;
+        const VECTOR2D capPoint( trackEnd.x + axis.x * sourceHalf * std::cos( theta )
+                                         + normal.x * sourceHalf * std::sin( theta ),
+                                 trackEnd.y + axis.y * sourceHalf * std::cos( theta )
+                                         + normal.y * sourceHalf * std::sin( theta ) );
+        aPoints.push_back( toVector( capPoint ) );
+    }
+
+    const std::vector<const BOARD_ITEM*> exempt = { aCandidate, aSourceTrack, aTrack };
+    return !collidesWithOtherNets( aPoints, aSourceTrack, exempt );
+}
+
+
+bool TEARDROP_MANAGER::tryCreateSmoothConnection( BOARD_COMMIT& aCommit,
+                                                  TEARDROP_VARIANT aTeardropVariant,
+                                                  PCB_TRACK* aTrack, PCB_TRACK* aSourceTrack,
+                                                  BOARD_ITEM* aCandidate, const VECTOR2I& aPos,
+                                                  const KIID& aUuid )
+{
+    const bool shortened = shortenTrackForSmoothConnection( aSourceTrack, aCandidate, aPos );
+
+    if( shortened )
+        aCommit.Modify( aSourceTrack );
+
+    std::vector<VECTOR2I> points;
+
+    if( !computeSmoothConnectionPolygon( points, aTrack, aSourceTrack, aCandidate, aPos ) )
+    {
+        if( shortened )
+            restoreSmoothConnectionEndpoints( aSourceTrack );
+
+        return false;
+    }
+
+    createAndAddTeardropWithMask( aCommit, aTeardropVariant, points, aSourceTrack, aUuid );
+    return true;
 }
 
 
@@ -443,6 +724,24 @@ void TEARDROP_MANAGER::UpdateTeardrops( BOARD_COMMIT& aCommit,
         m_board->BulkRemoveStaleTeardrops( aCommit );
     }
 
+    // Smooth transitions are derived geometry.  Restore any endpoint pull-back left by a
+    // previous pass before rebuilding caches, even when smooth mode is still enabled.  This
+    // prevents a saved or edited track from retaining a stale custom endpoint property.
+    bool restoredSmoothEndpoints = false;
+
+    for( PCB_TRACK* track : m_board->Tracks() )
+    {
+        if( ( track->Type() == PCB_TRACE_T || track->Type() == PCB_ARC_T )
+            && restoreSmoothConnectionEndpoints( track ) )
+        {
+            aCommit.Modify( track );
+            restoredSmoothEndpoints = true;
+        }
+    }
+
+    if( restoredSmoothEndpoints )
+        m_board->BuildConnectivity();
+
     BuildTrackCaches();
 
     std::shared_ptr<CONNECTIVITY_DATA> connectivity = m_board->GetConnectivity();
@@ -461,12 +760,20 @@ void TEARDROP_MANAGER::UpdateTeardrops( BOARD_COMMIT& aCommit,
 
         connectivity->GetConnectedPadsAndVias( track, &connectedPads, &connectedVias );
 
-        bool forceUpdate = aForceFullUpdate || dirtyTracks->contains( track );
+        bool forceUpdate = aForceFullUpdate || ( dirtyTracks && dirtyTracks->contains( track ) );
 
         for( PAD* pad : connectedPads )
         {
             if( !forceUpdate && !dirtyPadViaSet.count( pad ) )
                 continue;
+
+            if( smoothConnectionsEnabled( track ) )
+            {
+                tryCreateSmoothConnection( aCommit, TEARDROP_MANAGER::TD_TYPE_PADVIA, track,
+                                            track, pad, pad->GetPosition(),
+                                            teardropUuid( track, pad, 0 ) );
+                continue;
+            }
 
             TEARDROP_PARAMETERS& tdParams = pad->GetTeardropParams();
             VECTOR2I padSize = pad->GetSize( track->GetLayer() );
@@ -534,6 +841,14 @@ void TEARDROP_MANAGER::UpdateTeardrops( BOARD_COMMIT& aCommit,
             if( !forceUpdate && !dirtyPadViaSet.count( via ) )
                 continue;
 
+            if( smoothConnectionsEnabled( track ) )
+            {
+                tryCreateSmoothConnection( aCommit, TEARDROP_MANAGER::TD_TYPE_PADVIA, track,
+                                            track, via, via->GetPosition(),
+                                            teardropUuid( track, via, 0 ) );
+                continue;
+            }
+
             TEARDROP_PARAMETERS tdParams = via->GetTeardropParams();
             int                 annularWidth = via->GetWidth( track->GetLayer() );
 
@@ -590,8 +905,22 @@ void TEARDROP_MANAGER::UpdateTeardrops( BOARD_COMMIT& aCommit,
         }
     }
 
-    if( ( aForceFullUpdate || !dirtyTracks->empty() )
-        && m_prmsList->GetParameters( TARGET_TRACK )->m_Enabled )
+    bool anySmoothTrack = m_board->GetDesignSettings().SmoothConnections();
+
+    if( !anySmoothTrack )
+    {
+        for( PCB_TRACK* track : m_board->Tracks() )
+        {
+            if( smoothConnectionsEnabled( track ) )
+            {
+                anySmoothTrack = true;
+                break;
+            }
+        }
+    }
+
+    if( ( aForceFullUpdate || ( dirtyTracks && !dirtyTracks->empty() ) )
+        && ( m_prmsList->GetParameters( TARGET_TRACK )->m_Enabled || anySmoothTrack ) )
     {
         AddTeardropsOnTracks( aCommit, dirtyTracks, aForceFullUpdate, false );
     }
@@ -779,6 +1108,14 @@ void TEARDROP_MANAGER::AddTeardropsOnTracks( BOARD_COMMIT& aCommit,
 
                 if( existingPadOrVia )
                     continue;
+
+                if( smoothConnectionsEnabled( track ) || smoothConnectionsEnabled( candidate ) )
+                {
+                    tryCreateSmoothConnection( aCommit, TEARDROP_MANAGER::TD_TYPE_TRACKEND,
+                                                track, track, candidate, pos,
+                                                teardropUuid( track, candidate, 0 ) );
+                    continue;
+                }
 
                 tryCreateTrackTeardrop( aCommit, params, TEARDROP_MANAGER::TD_TYPE_TRACKEND, track,
                                         track, candidate, pos,

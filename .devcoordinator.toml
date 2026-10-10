@@ -2707,11 +2707,11 @@ env={TMPDIR="/tmp"}
 name="managed-build"
 tier="development"
 role="preflight"
+invalidates=["contracts"]
 command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--configuration","Debug"]
 [[test.typed-mcp-contracts.check]]
 name="contracts"
 tier="development"
-requires=["managed-build"]
 command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~DocumentLifecycleInputContractTests|FullyQualifiedName~DocumentLifecycleToolTests|FullyQualifiedName~DocumentStateToolTests|FullyQualifiedName~SchematicExportSvgInputContractTests|FullyQualifiedName~SchematicExportContractTests|FullyQualifiedName~PcbDrcToolTests|FullyQualifiedName~FootprintLibraryContractTests|FullyQualifiedName~SymbolLibraryCheckedContractTests|FullyQualifiedName~CheckedPcbItemContractTests|FullyQualifiedName~PcbManufacturingContractTests|FullyQualifiedName~PcbViaMinimizationTests|FullyQualifiedName~CapabilityCatalogTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/typed-mcp-contracts"]
 retained_artifacts=[{name="typed-mcp-contracts",path="automation/artifacts/typed-mcp-contracts",max_bytes=16777216}]
 

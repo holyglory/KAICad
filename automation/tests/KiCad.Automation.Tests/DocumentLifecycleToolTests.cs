@@ -229,6 +229,40 @@ public sealed class DocumentLifecycleToolTests
         finally { Directory.Delete(directory, true); }
     }
 
+    [TestMethod]
+    public async Task DeliveredRevertCancellationPersistsUnknownAndBlocksReplay()
+    {
+        string directory = Directory.CreateTempSubdirectory("lifecycle-revert-cancel-").FullName;
+        try
+        {
+            var transport = new LifecycleTransport();
+            transport.Session.Epoch = Guid.NewGuid().ToString("D");
+            transport.Session.ProjectPath = Path.Combine(directory, "fixture.kicad_pro");
+            var registry = new InstanceRegistry(transport, directory);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "native.sock")), transport.Session.InstanceId);
+            var tool = new DocumentLifecycleTools(registry);
+            var complete = CompleteState(directory, transport.Session.Epoch, dirty: true);
+            transport.LifecycleState = complete.Clone();
+            string operationId = Guid.NewGuid().ToString("D");
+            transport.RevertFailure = new NngOperationCanceledException(8, "cancelled after send", true, false);
+
+            var cancelled = await tool.Revert(transport.Session.InstanceId, SchematicJson.Formatter.Format(complete), operationId, default);
+            Assert.IsTrue(cancelled.IsError, cancelled.StructuredContent?.GetRawText());
+            Assert.AreEqual("operation_outcome_unknown", cancelled.StructuredContent!.Value.GetProperty("code").GetString());
+            Assert.AreEqual(0, transport.RevertCalls, "The fixture transport failed after delivery evidence before its handler reply.");
+
+            var receipt = await tool.RevertReceipt(transport.Session.InstanceId, transport.Session.Epoch, operationId, default);
+            Assert.IsFalse(receipt.IsError ?? false, receipt.StructuredContent?.GetRawText());
+            Assert.AreEqual("indeterminate", receipt.StructuredContent!.Value.GetProperty("outcome").GetString());
+            transport.RevertFailure = null;
+            var replay = await tool.Revert(transport.Session.InstanceId, SchematicJson.Formatter.Format(complete), operationId, default);
+            Assert.IsTrue(replay.IsError, replay.StructuredContent?.GetRawText());
+            Assert.AreEqual("operation_outcome_unknown", replay.StructuredContent!.Value.GetProperty("code").GetString());
+            Assert.AreEqual(0, transport.RevertCalls, "An indeterminate operation must never be dispatched again automatically.");
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
     private static DocumentLifecycleState State(string directory, string epoch) => new()
     {
         Document = new() { Type = (DocumentType)3, BoardFilename = "fixture.kicad_pcb",
@@ -263,6 +297,7 @@ public sealed class DocumentLifecycleToolTests
         public LifecycleOperationStatus Status { get; set; } = LifecycleOperationStatus.LosSaved;
         public bool WrongTarget { get; set; }
         public NngException? Failure { get; set; }
+        public Exception? RevertFailure { get; set; }
         public string? ReceiptError { get; set; }
         public int RevertCalls { get; private set; }
         public DocumentLifecycleState LifecycleState { get; set; } = new();
@@ -272,6 +307,8 @@ public sealed class DocumentLifecycleToolTests
             var envelope = ApiRequest.Parser.ParseFrom(request);
             if (Failure is not null && (envelope.Message.Is(CheckedSaveDocument.Descriptor) || envelope.Message.Is(CheckedCloseDocument.Descriptor)))
                 return Task.FromException<byte[]>(Failure);
+            if (RevertFailure is not null && envelope.Message.Is(RevertDocument.Descriptor))
+                return Task.FromException<byte[]>(RevertFailure);
             if (ReceiptError is not null && envelope.Message.Is(ReadLifecycleOperation.Descriptor))
                 return Task.FromResult(new ApiResponse { Header = new() { KicadToken = Session.Epoch },
                     Status = new() { Status = (ApiStatusCode)3, ErrorMessage = ReceiptError } }.ToByteArray());

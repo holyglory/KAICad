@@ -69,10 +69,21 @@ public sealed class NngTransport : INativeTransport
             {
                 byte[] result = new byte[checked((int)length)];
                 Marshal.Copy(data, result, 0, result.Length);
-                cancellationToken.ThrowIfCancellationRequested();
+                // A reply was already received.  Preserve that delivery fact when the caller
+                // cancelled during decode; a destructive caller must record an indeterminate
+                // outcome instead of releasing its admission and dispatching again.
+                if (cancellationToken.IsCancellationRequested)
+                    throw new NngOperationCanceledException(0,
+                        "The native reply arrived after cancellation.", requestDelivered: true,
+                        responseReceived: true, cancellationToken);
                 return result;
             }
             finally { Nng.nng_free(data, length); }
+        }
+        catch (NngException error) when (cancellationToken.IsCancellationRequested && delivered)
+        {
+            throw new NngOperationCanceledException(error.ErrorCode, error.Message,
+                requestDelivered: true, responseReceived: false, cancellationToken);
         }
         catch (NngException) when (cancellationToken.IsCancellationRequested)
         {
@@ -104,6 +115,16 @@ public sealed class NngException(int errorCode, string message, bool requestDeli
     /// reply timeout: the peer may still act on it. False means the peer never received it.
     /// </summary>
     public bool RequestDelivered { get; } = requestDelivered;
+}
+
+/// <summary>Cancellation after a native request was delivered retains its dispatch evidence.</summary>
+public sealed class NngOperationCanceledException(int errorCode, string message,
+    bool requestDelivered, bool responseReceived, CancellationToken cancellationToken = default)
+    : OperationCanceledException(message, cancellationToken)
+{
+    public int ErrorCode { get; } = errorCode;
+    public bool RequestDelivered { get; } = requestDelivered;
+    public bool ResponseReceived { get; } = responseReceived;
 }
 
 internal static class Nng

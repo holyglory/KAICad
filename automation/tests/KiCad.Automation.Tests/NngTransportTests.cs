@@ -98,7 +98,9 @@ public sealed class NngTransportTests
             {
                 await received.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 cancellation.Cancel();
-                await Assert.ThrowsExactlyAsync<OperationCanceledException>(() => first);
+                var cancelled = await Assert.ThrowsExactlyAsync<NngOperationCanceledException>(() => first);
+                Assert.IsTrue(cancelled.RequestDelivered);
+                Assert.IsFalse(cancelled.ResponseReceived);
             }
             finally
             {

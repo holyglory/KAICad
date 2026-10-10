@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using Kiapi.Common.Commands;
@@ -15,9 +16,6 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class DocumentLifecycleTools(InstanceRegistry registry)
 {
-    private static readonly object RevertReceiptsGate = new();
-    private static readonly Dictionary<string, RevertReceiptEntry> RevertReceipts = new(StringComparer.Ordinal);
-
     [McpServerTool(Name = "kicad_document_save", ReadOnly = false),
      Description("Save an explicit schematic hierarchy or PCB only if the supplied kicad_document_state observation still matches the native process, document, revision, content and loaded file versions. Supply a new operation UUID, and reuse that exact request after a timeout. Returns a retained operation result; failed or uncertain saves require inspection. A failed save is never reported as saved and the editor keeps the unsaved changes. Its errorMessage names every cause and the next step. Failed-save errorCodes: file_not_writable, the file system would not let KiCad write the files in blockedFiles (a read-only file or folder, a full disk); native_save_refused, KiCad refused for a reason that making the document's files writable does not fix, for example a project KiCad opened read-only or a project lock KiCad could not take (errorMessage says what to change instead, such as making the lock file writable or deleting it, then reopening the project); native_save_failed, writing failed and KiCad found no cause (check the disk and save again); partial_save, saving stopped after replacing the files in writtenFiles, so the disk mixes old and new files until a save succeeds; file_changed_during_save, another program changed a file during the save and KiCad kept that version; file_unreadable_during_save, KiCad could not read a file to confirm nobody changed it; save_outside_document, the save tried to write a design file that is not part of the observed document. If this call is cancelled or times out, call kicad_document_operation with the same operation ID to learn whether KiCad started it. Does not close editors or promise atomic multi-file persistence."),
      KiCadCapability("document-lifecycle", "native-api", "document state observation, operation UUID"),
@@ -85,8 +83,8 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
     }
 
     [McpServerTool(Name = "kicad_document_revert", ReadOnly = false),
-     Description("Revert an explicitly observed schematic hierarchy or PCB to the files currently on disk. The request requires the complete native lifecycle observation, the matching process epoch and a caller-owned operation UUID; KiCad refuses no-op or stale targets before the legacy revert command is dispatched. The MCP verifies that the editor is clean and its file baselines are unchanged after the reload, then stores an atomic state-directory receipt for exact replay after an MCP restart. Revert discards unsaved in-memory edits. The native legacy command has no process-owned receipt, so a delivered transport loss is reported as operation_outcome_unknown and must be resolved by reading kicad_document_state before another action."),
-     KiCadCapability("document-lifecycle", "compiled-mcp plus native-api plus durable receipt", "complete lifecycle observation, process epoch, operation UUID and state-directory receipt"),
+     Description("Revert an explicitly observed schematic hierarchy or PCB to the files currently on disk. This destructive tool is admitted only when the native lifecycle observation proves complete change tracking and unchanged file baselines; current native builds intentionally fail closed because those flags are not yet qualified. A durable per-instance operation admission is written before the final state read, so another MCP process cannot dispatch the same operation twice. The legacy native command has no process-owned receipt: cancellation or transport loss after delivery is retained as operation_outcome_unknown and must be resolved by reading kicad_document_state before another action."),
+     KiCadCapability("document-lifecycle", "compiled-mcp plus fail-closed legacy native-api plus durable receipt", "complete lifecycle observation, process epoch, operation UUID and per-instance operation receipt"),
      KiCadVerification(KiCadVerificationLevel.InProcess, "DocumentLifecycleToolTests.RevertRequiresCompleteObservationAndVerifiesCleanState")]
     public Task<CallToolResult> Revert(string instanceId, string expectedStateJson, string operationId,
         CancellationToken cancellationToken) => InstanceToolBoundary.Run(async () =>
@@ -99,21 +97,42 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
             ValidateRevertObservation(expected, id, client.Epoch);
 
             string fingerprint = RevertFingerprint(instanceId, expected, id);
-            if (TryReadRevertReceipt(id, fingerprint, out RevertReceiptEntry? replay))
+            var store = new DocumentRevertReceiptStore(registry.StateDirectory);
+            var admission = store.Reserve(instanceId, id, client.Epoch, fingerprint);
+            if (!admission.Created)
             {
-                if (replay!.Outcome == RevertOutcome.Unknown)
-                    throw new AutomationException("operation_outcome_unknown", replay.Message);
-                return replay.Result! with { Replayed = true };
+                if (admission.Receipt.Outcome == DocumentRevertReceiptOutcome.Unknown)
+                    throw new AutomationException("operation_outcome_unknown", admission.Receipt.Message
+                        ?? "The revert operation has an indeterminate native outcome; inspect kicad_document_state before another action.");
+                if (admission.Receipt.Outcome == DocumentRevertReceiptOutcome.Completed)
+                    return ReadCompletedReceipt(admission.Receipt, instanceId, id, client.Epoch, fingerprint) with { Replayed = true };
+                throw new AutomationException("operation_in_progress",
+                    $"Revert operation {id} is already admitted by another MCP process. Inspect kicad_document_revert_receipt or kicad_document_state before retrying; no second native dispatch was made.");
             }
 
-            // Read immediately before dispatch.  The native legacy command cannot consume the
-            // lifecycle state atomically, so this read is an explicit admission boundary and the
-            // post-read below refuses to claim success if the editor changed during the reload.
-            var before = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
-                new() { Document = expected.Document.Clone() }, cancellationToken);
-            if (!before.Equals(expected))
-                throw new AutomationException("stale_document_state", "The document changed before revert; obtain a fresh kicad_document_state observation and retry with a new operation UUID.");
-            ValidateRevertObservation(before, id, client.Epoch);
+            // The native legacy command cannot consume lifecycle state atomically. The durable
+            // admission prevents a second MCP process from entering this boundary concurrently;
+            // the read immediately before dispatch still rejects an intervening native change.
+            DocumentLifecycleState before;
+            try
+            {
+                before = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
+                    new() { Document = expected.Document.Clone() }, cancellationToken);
+                if (!before.Equals(expected))
+                {
+                    store.RemoveAdmission(instanceId, id, client.Epoch, fingerprint);
+                    throw new AutomationException("stale_document_state", "The document changed before revert; obtain a fresh kicad_document_state observation and retry with a new operation UUID.");
+                }
+                ValidateRevertObservation(before, id, client.Epoch);
+            }
+            catch
+            {
+                // A failed pre-dispatch observation cannot have discarded in-memory changes.
+                // Leave no stale admission that would unnecessarily block a safe retry.
+                try { store.RemoveAdmission(instanceId, id, client.Epoch, fingerprint); }
+                catch { /* preserve the original observation error; the durable guard remains fail-closed */ }
+                throw;
+            }
 
             try
             {
@@ -122,16 +141,43 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
                     Document = expected.Document.Clone(), OperationId = id
                 }, cancellationToken);
             }
+            catch (NngOperationCanceledException error) when (error.RequestDelivered)
+            {
+                string message = $"KiCad received the revert request for operation {id} but cancellation stopped the reply ({error.Message}). Inspect kicad_document_state before another action; the legacy native revert command has no process-owned receipt.";
+                RememberRevertUnknown(store, id, fingerprint, instanceId, client.Epoch, message);
+                throw new AutomationException("operation_outcome_unknown", message);
+            }
             catch (NngException error) when (error.RequestDelivered)
             {
                 string message = $"KiCad received the revert request for operation {id} but did not answer ({error.Message}). Inspect kicad_document_state before another action; the legacy native revert command has no process-owned receipt.";
-                RememberRevertUnknown(id, fingerprint, instanceId, client.Epoch, message);
+                RememberRevertUnknown(store, id, fingerprint, instanceId, client.Epoch, message);
                 throw new AutomationException("operation_outcome_unknown", message);
             }
             catch (NngException error)
             {
+                store.RemoveAdmission(instanceId, id, client.Epoch, fingerprint);
                 throw new AutomationException("native_not_reached",
                     $"KiCad did not receive the revert request for operation {id} ({error.Message}); no in-memory changes were intentionally discarded. Retry with a fresh observation and operation UUID.");
+            }
+            catch (NativeApiException)
+            {
+                // A typed native refusal is a terminal no-dispatch result; release the
+                // admission so the caller can correct the request and retry safely.
+                store.RemoveAdmission(instanceId, id, client.Epoch, fingerprint);
+                throw;
+            }
+            catch (OperationCanceledException)
+            {
+                // Cancellation before NNG accepted the request has no delivered marker and is
+                // safe to retry. Delivered cancellation is handled above by the typed exception.
+                store.RemoveAdmission(instanceId, id, client.Epoch, fingerprint);
+                throw;
+            }
+            catch (Exception error)
+            {
+                string message = $"The native revert operation {id} returned an unreadable result ({error.Message}). Inspect kicad_document_state before another action; the outcome is indeterminate.";
+                RememberRevertUnknown(store, id, fingerprint, instanceId, client.Epoch, message);
+                throw new AutomationException("operation_outcome_unknown", message);
             }
 
             DocumentLifecycleState after;
@@ -140,24 +186,24 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
                 after = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
                     new() { Document = expected.Document.Clone() }, cancellationToken);
             }
-            catch (Exception error) when (error is NngException or NativeApiException)
+            catch (Exception error)
             {
                 string message = $"KiCad accepted revert operation {id}, but the post-revert lifecycle state could not be read ({error.Message}). Inspect kicad_document_state before another action; the outcome is indeterminate.";
-                RememberRevertUnknown(id, fingerprint, instanceId, client.Epoch, message);
+                RememberRevertUnknown(store, id, fingerprint, instanceId, client.Epoch, message);
                 throw new AutomationException("revert_state_not_confirmed", message);
             }
 
             if (!after.Document.Equals(expected.Document) || after.ProcessEpoch != client.Epoch)
             {
                 string message = $"KiCad returned a post-revert state for a different document or process on operation {id}; inspect kicad_document_state before another action.";
-                RememberRevertUnknown(id, fingerprint, instanceId, client.Epoch, message);
+                RememberRevertUnknown(store, id, fingerprint, instanceId, client.Epoch, message);
                 throw new AutomationException("revert_state_not_confirmed", message);
             }
 
             if (!RevertStateIsClean(after))
             {
                 string message = $"KiCad completed revert operation {id}, but the editor or its file baselines are not clean in the post-revert observation. Inspect kicad_document_state before another action.";
-                RememberRevertUnknown(id, fingerprint, instanceId, client.Epoch, message);
+                RememberRevertUnknown(store, id, fingerprint, instanceId, client.Epoch, message);
                 throw new AutomationException("revert_state_not_confirmed", message);
             }
 
@@ -178,12 +224,12 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
                 Verification = "native lifecycle state is clean and every observed file baseline is unchanged",
                 TransportRetrySafe = false
             };
-            RememberRevertCompleted(id, fingerprint, result);
+            RememberRevertCompleted(store, id, fingerprint, result);
             return result;
         });
 
     [McpServerTool(Name = "kicad_document_revert_receipt", ReadOnly = true),
-     Description("Read the durable MCP receipt for kicad_document_revert by its exact operation UUID and process epoch. The receipt is recovered from the instance state directory after an MCP restart while the native process epoch remains explicit. This never reverts or retries a document. A completed receipt can be replayed safely; an unknown receipt requires a fresh kicad_document_state observation because the legacy native command does not retain a process-owned receipt."),
+     Description("Read the durable per-instance MCP receipt for kicad_document_revert by its exact operation UUID and process epoch. This never reverts or retries a document. An admitted receipt means another MCP process owns the dispatch boundary; a completed receipt can be replayed safely; an unknown receipt requires a fresh kicad_document_state observation because the legacy native command does not retain a process-owned receipt."),
      KiCadCapability("document-lifecycle", "compiled-mcp plus durable state receipt", "operation UUID, process epoch and state-directory receipt"),
      KiCadVerification(KiCadVerificationLevel.InProcess, "DocumentLifecycleToolTests.RevertRequiresCompleteObservationAndVerifiesCleanState")]
     public Task<CallToolResult> RevertReceipt(string instanceId, string expectedProcessEpoch, string operationId,
@@ -192,34 +238,37 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
             cancellationToken.ThrowIfCancellationRequested();
             ValidateEpoch(expectedProcessEpoch);
             string id = OperationId(operationId);
-            lock (RevertReceiptsGate)
-            {
-                // Prefer the atomic state-directory copy so a fresh MCP process and the current
-                // process observe the same receipt. Fall back to memory only when persistence was
-                // unavailable for this operation.
-                RevertReceiptEntry? receipt = ReadPersistedRevertReceipt(id)
-                    ?? (RevertReceipts.TryGetValue(id, out var inMemory) ? inMemory : null);
-                if (receipt is null || receipt.InstanceId != instanceId || receipt.ProcessEpoch != expectedProcessEpoch)
-                    return Task.FromResult<object>(new
-                    {
-                        instanceId, processEpoch = expectedProcessEpoch, operationId = id,
-                        found = false, nativeReceiptAvailable = false, retryDispatched = false
-                    });
-                RevertReceipts[id] = receipt;
-                if (receipt.Outcome == RevertOutcome.Unknown)
-                    return Task.FromResult<object>(new
-                    {
-                        instanceId, processEpoch = expectedProcessEpoch, operationId = id,
-                        found = true, outcome = "indeterminate", nativeReceiptAvailable = false,
-                        retryDispatched = false, errorCode = "operation_outcome_unknown", message = receipt.Message
-                    });
+            var store = new DocumentRevertReceiptStore(registry.StateDirectory);
+            var receipt = store.Read(instanceId, id);
+            if (receipt is null)
                 return Task.FromResult<object>(new
                 {
                     instanceId, processEpoch = expectedProcessEpoch, operationId = id,
-                    found = true, outcome = "completed", nativeReceiptAvailable = false,
-                    retryDispatched = false, receipt = receipt.Result
+                    found = false, nativeReceiptAvailable = false, retryDispatched = false
                 });
-            }
+            if (receipt.ProcessEpoch != expectedProcessEpoch)
+                throw new AutomationException("operation_identity_mismatch", "The durable revert receipt belongs to another native process epoch; inspect the current instance before retrying.");
+            if (receipt.Outcome == DocumentRevertReceiptOutcome.Unknown)
+                return Task.FromResult<object>(new
+                {
+                    instanceId, processEpoch = expectedProcessEpoch, operationId = id,
+                    found = true, outcome = "indeterminate", nativeReceiptAvailable = false,
+                    retryDispatched = false, errorCode = "operation_outcome_unknown", message = receipt.Message
+                });
+            if (receipt.Outcome == DocumentRevertReceiptOutcome.Admitted)
+                return Task.FromResult<object>(new
+                {
+                    instanceId, processEpoch = expectedProcessEpoch, operationId = id,
+                    found = true, outcome = "admitted", nativeReceiptAvailable = false,
+                    retryDispatched = false, message = "The operation is durably admitted and cannot be dispatched a second time."
+                });
+            var result = ReadCompletedReceipt(receipt, instanceId, id, expectedProcessEpoch, receipt.Fingerprint);
+            return Task.FromResult<object>(new
+            {
+                instanceId, processEpoch = expectedProcessEpoch, operationId = id,
+                found = true, outcome = "completed", nativeReceiptAvailable = false,
+                retryDispatched = false, receipt = result
+            });
         });
 
     [McpServerTool(Name = "kicad_document_operation", ReadOnly = true),
@@ -330,163 +379,91 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
             && file.BaselineSha256 == file.CurrentSha256 && file.BaselineBytes == file.CurrentBytes);
 
     private static string RevertFingerprint(string instanceId, DocumentLifecycleState state, string operationId) =>
-        instanceId + "\n" + operationId + "\n" + SchematicJson.Formatter.Format(state);
+        DocumentRevertReceiptStore.Fingerprint(instanceId, operationId, SchematicJson.Formatter.Format(state));
 
-    private bool TryReadRevertReceipt(string operationId, string fingerprint, out RevertReceiptEntry? receipt)
+    private static readonly JsonSerializerOptions RevertResultJson = new(JsonSerializerDefaults.Web)
     {
-        lock (RevertReceiptsGate)
-        {
-            if (!RevertReceipts.TryGetValue(operationId, out receipt))
-            {
-                receipt = ReadPersistedRevertReceipt(operationId);
-                if (receipt is null) return false;
-                RevertReceipts[operationId] = receipt;
-            }
-            if (receipt.Fingerprint != fingerprint)
-                throw new AutomationException("operation_reused", "The revert operation UUID was already used for a different document observation; choose a new operation UUID.");
-            return true;
-        }
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+        WriteIndented = false
+    };
+
+    private static void RememberRevertUnknown(DocumentRevertReceiptStore store, string operationId,
+        string fingerprint, string instanceId, string processEpoch, string message) =>
+        store.WriteTerminal(new DocumentRevertReceiptRecord(DocumentRevertReceiptRecord.CurrentVersion,
+            instanceId, operationId, processEpoch, fingerprint, DocumentRevertReceiptOutcome.Unknown, null, message));
+
+    private static void RememberRevertCompleted(DocumentRevertReceiptStore store, string operationId,
+        string fingerprint, DocumentRevertResult result)
+    {
+        var persisted = new PersistedRevertResult(result.InstanceId, result.ProcessEpoch, result.OperationId,
+            SchematicJson.Formatter.Format(result.Document), result.OperationOutcome, result.Committed,
+            result.NativeReceiptAvailable, result.DiscardedUnsavedChanges,
+            Convert.ToBase64String(result.BeforeState?.ToByteArray() ?? []),
+            Convert.ToBase64String(result.AfterState?.ToByteArray() ?? []), result.PostStateVerified,
+            result.Verification, result.TransportRetrySafe);
+        JsonElement payload = JsonSerializer.SerializeToElement(persisted, RevertResultJson);
+        store.WriteTerminal(new DocumentRevertReceiptRecord(DocumentRevertReceiptRecord.CurrentVersion,
+            result.InstanceId, operationId, result.ProcessEpoch, fingerprint,
+            DocumentRevertReceiptOutcome.Completed, payload, null));
     }
 
-    private void RememberRevertUnknown(string operationId, string fingerprint, string instanceId,
-        string processEpoch, string message)
+    private static DocumentRevertResult ReadCompletedReceipt(DocumentRevertReceiptRecord receipt,
+        string instanceId, string operationId, string processEpoch, string fingerprint)
     {
-        lock (RevertReceiptsGate)
-        {
-            var receipt = new RevertReceiptEntry(instanceId, processEpoch, fingerprint, RevertOutcome.Unknown, null, message);
-            RevertReceipts[operationId] = receipt;
-            PersistRevertReceipt(operationId, receipt);
-        }
-    }
+        if (receipt.Outcome != DocumentRevertReceiptOutcome.Completed || receipt.Result is null
+            || receipt.InstanceId != instanceId || receipt.OperationId != operationId
+            || receipt.ProcessEpoch != processEpoch || receipt.Fingerprint != fingerprint)
+            throw new AutomationException("revert_receipt_corrupt", "The completed document-revert receipt identity does not match its request.");
 
-    private void RememberRevertCompleted(string operationId, string fingerprint, DocumentRevertResult result)
-    {
-        lock (RevertReceiptsGate)
-        {
-            var receipt = new RevertReceiptEntry(result.InstanceId, result.ProcessEpoch, fingerprint,
-                RevertOutcome.Completed, result, "");
-            RevertReceipts[operationId] = receipt;
-            PersistRevertReceipt(operationId, receipt);
-        }
-    }
-
-    // Revert is backed by a legacy native command that has no process-owned receipt. Keep the
-    // MCP receipt in the same state directory as the instance registration so a new MCP process
-    // can replay a completed result or discover an indeterminate outcome without dispatching a
-    // second destructive reload. The native process epoch remains part of every record; this is
-    // recovery evidence, never permission to adopt a replacement KiCad process.
-    private const string RevertReceiptFileName = "document-revert-receipts.json";
-
-    private RevertReceiptEntry? ReadPersistedRevertReceipt(string operationId)
-    {
-        string path = Path.Combine(registry.StateDirectory, RevertReceiptFileName);
-        if (!File.Exists(path)) return null;
         try
         {
-            var all = JsonSerializer.Deserialize<Dictionary<string, PersistedRevertReceipt>>(File.ReadAllText(path));
-            if (all is null || !all.TryGetValue(operationId, out PersistedRevertReceipt? persisted)) return null;
-            if (persisted is null || !string.Equals(persisted.OperationId, operationId, StringComparison.Ordinal))
-                throw new AutomationException("revert_receipt_corrupt", "The persisted revert receipt identity does not match its operation UUID.");
-            return FromPersisted(persisted);
-        }
-        catch (JsonException error)
-        {
-            throw new AutomationException("revert_receipt_corrupt", "The persisted document-revert receipt is not valid JSON: " + error.Message);
-        }
-    }
-
-    private void PersistRevertReceipt(string operationId, RevertReceiptEntry receipt)
-    {
-        try
-        {
-            Directory.CreateDirectory(registry.StateDirectory);
-            string path = Path.Combine(registry.StateDirectory, RevertReceiptFileName);
-            var all = File.Exists(path)
-                ? JsonSerializer.Deserialize<Dictionary<string, PersistedRevertReceipt>>(File.ReadAllText(path))
-                    ?? new(StringComparer.Ordinal)
-                : new(StringComparer.Ordinal);
-            all[operationId] = ToPersisted(operationId, receipt);
-            string temporary = path + ".tmp-" + Guid.NewGuid().ToString("N");
-            File.WriteAllText(temporary, JsonSerializer.Serialize(all));
-            File.Move(temporary, path, true);
-        }
-        catch (JsonException error)
-        {
-            throw new AutomationException("revert_receipt_corrupt", "The persisted document-revert receipt cannot be read: " + error.Message);
-        }
-        catch (IOException error)
-        {
-            // The native reload already completed. Keep the in-memory receipt and report the
-            // persistence failure to the caller instead of claiming durable recovery evidence.
-            throw new AutomationException("revert_receipt_persistence_failed", "The document was reverted, but its MCP receipt could not be persisted: " + error.Message);
-        }
-        catch (UnauthorizedAccessException error)
-        {
-            throw new AutomationException("revert_receipt_persistence_failed", "The document was reverted, but the MCP state directory is not writable: " + error.Message);
-        }
-    }
-
-    private static PersistedRevertReceipt ToPersisted(string operationId, RevertReceiptEntry receipt) =>
-        new(operationId, receipt.InstanceId, receipt.ProcessEpoch, receipt.Fingerprint, receipt.Outcome,
-            receipt.Result is null ? null : new PersistedRevertResult(
-                receipt.Result.InstanceId, receipt.Result.ProcessEpoch, receipt.Result.OperationId,
-                SchematicJson.Formatter.Format(receipt.Result.Document), receipt.Result.OperationOutcome,
-                receipt.Result.Committed, receipt.Result.NativeReceiptAvailable,
-                receipt.Result.DiscardedUnsavedChanges, Convert.ToBase64String(receipt.Result.BeforeState?.ToByteArray() ?? []),
-                Convert.ToBase64String(receipt.Result.AfterState?.ToByteArray() ?? []), receipt.Result.PostStateVerified,
-                receipt.Result.Verification, receipt.Result.TransportRetrySafe), receipt.Message);
-
-    private static RevertReceiptEntry FromPersisted(PersistedRevertReceipt receipt)
-    {
-        DocumentRevertResult? result = null;
-        if (receipt.Result is not null)
-        {
-            try
+            var persisted = receipt.Result.Value.Deserialize<PersistedRevertResult>(RevertResultJson)
+                ?? throw new InvalidDataException("The completed document-revert result is empty.");
+            var result = new DocumentRevertResult
             {
-                result = new DocumentRevertResult
-                {
-                    InstanceId = receipt.Result.InstanceId,
-                    ProcessEpoch = receipt.Result.ProcessEpoch,
-                    OperationId = receipt.Result.OperationId,
-                    Document = SchematicJson.Parser.Parse<DocumentSpecifier>(receipt.Result.DocumentJson),
-                    OperationOutcome = receipt.Result.OperationOutcome,
-                    Committed = receipt.Result.Committed,
-                    Replayed = false,
-                    NativeReceiptAvailable = receipt.Result.NativeReceiptAvailable,
-                    DiscardedUnsavedChanges = receipt.Result.DiscardedUnsavedChanges,
-                    BeforeState = ParseState(receipt.Result.BeforeStateBase64),
-                    AfterState = ParseState(receipt.Result.AfterStateBase64),
-                    PostStateVerified = receipt.Result.PostStateVerified,
-                    Verification = receipt.Result.Verification,
-                    TransportRetrySafe = receipt.Result.TransportRetrySafe
-                };
-            }
-            catch (Exception error) when (error is FormatException or InvalidProtocolBufferException or InvalidJsonException)
-            {
-                throw new AutomationException("revert_receipt_corrupt", "The persisted document-revert result is malformed: " + error.Message);
-            }
+                InstanceId = persisted.InstanceId,
+                ProcessEpoch = persisted.ProcessEpoch,
+                OperationId = persisted.OperationId,
+                Document = SchematicJson.Parser.Parse<DocumentSpecifier>(persisted.DocumentJson),
+                OperationOutcome = persisted.OperationOutcome,
+                Committed = persisted.Committed,
+                Replayed = false,
+                NativeReceiptAvailable = persisted.NativeReceiptAvailable,
+                DiscardedUnsavedChanges = persisted.DiscardedUnsavedChanges,
+                BeforeState = ParseState(persisted.BeforeStateBase64),
+                AfterState = ParseState(persisted.AfterStateBase64),
+                PostStateVerified = persisted.PostStateVerified,
+                Verification = persisted.Verification,
+                TransportRetrySafe = persisted.TransportRetrySafe
+            };
+            if (result.InstanceId != instanceId || result.ProcessEpoch != processEpoch
+                || result.OperationId != operationId || !result.Committed
+                || result.OperationOutcome != "completed" || result.NativeReceiptAvailable
+                || !result.DiscardedUnsavedChanges || !result.PostStateVerified
+                || result.BeforeState is null || result.AfterState is null
+                || !result.BeforeState.Document.Equals(result.Document)
+                || !result.AfterState.Document.Equals(result.Document)
+                || result.BeforeState.ProcessEpoch != processEpoch
+                || result.AfterState.ProcessEpoch != processEpoch
+                || !RevertStateIsClean(result.AfterState)
+                || RevertFingerprint(instanceId, result.BeforeState, operationId) != fingerprint)
+                throw new InvalidDataException("The completed document-revert result does not cross-check against its receipt identity and state.");
+            DocumentStateTools.ValidateTarget(result.Document);
+            return result;
         }
-        if (!System.Enum.IsDefined(receipt.Outcome) || receipt.Outcome == RevertOutcome.Completed && result is null
-            || receipt.Outcome == RevertOutcome.Unknown && string.IsNullOrWhiteSpace(receipt.Message))
-            throw new AutomationException("revert_receipt_corrupt", "The persisted document-revert receipt has an invalid outcome.");
-        return new(receipt.InstanceId, receipt.ProcessEpoch, receipt.Fingerprint, receipt.Outcome, result, receipt.Message ?? "");
+        catch (Exception error)
+        {
+            throw new AutomationException("revert_receipt_corrupt", "The persisted document-revert result is malformed or has inconsistent identity: " + error.Message);
+        }
     }
 
     private static DocumentLifecycleState? ParseState(string value) => string.IsNullOrEmpty(value)
         ? null : DocumentLifecycleState.Parser.ParseFrom(Convert.FromBase64String(value));
 
-    private sealed record PersistedRevertReceipt(string OperationId, string InstanceId, string ProcessEpoch,
-        string Fingerprint, RevertOutcome Outcome, PersistedRevertResult? Result, string? Message);
-
     private sealed record PersistedRevertResult(string InstanceId, string ProcessEpoch, string OperationId,
         string DocumentJson, string OperationOutcome, bool Committed, bool NativeReceiptAvailable,
         bool DiscardedUnsavedChanges, string BeforeStateBase64, string AfterStateBase64, bool PostStateVerified,
         string Verification, bool TransportRetrySafe);
-
-    private enum RevertOutcome { Completed, Unknown }
-
-    private sealed record RevertReceiptEntry(string InstanceId, string ProcessEpoch, string Fingerprint,
-        RevertOutcome Outcome, DocumentRevertResult? Result, string Message);
 
     private sealed record DocumentRevertResult
     {

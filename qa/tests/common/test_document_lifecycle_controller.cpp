@@ -407,6 +407,9 @@ BOOST_AUTO_TEST_CASE( SaveAndReceiptReplayAreProcessOwnedAndNeverRepeatDispatch 
 BOOST_AUTO_TEST_CASE( CheckedRevertRequiresCleanCheckpointAndReplaysItsNativeReceipt )
 {
     LIFECYCLE_FIXTURE fixture;
+    auto checkpoint = fixture.state;
+    checkpoint.set_native_content_dirty( false );
+    fixture.controller.RememberCleanState( checkpoint, false );
     auto request = fixture.RevertRequest();
     auto result = fixture.Result( request );
     BOOST_CHECK( result.status() == LOS_REVERTED );

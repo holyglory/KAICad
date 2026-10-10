@@ -15,6 +15,11 @@ public sealed partial class NativeSessionTests
         var original = await client.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(
             new() { Document = document }, token);
         var clean = await ObserveLifecycleState(client, document, token);
+        if (clean.NativeContentDirty || clean.CleanCheckpointSha256 != clean.StateSha256)
+        {
+            await client.InvokeAsync<SaveDocument, Empty>(new() { Document = document }, token);
+            clean = await ObserveLifecycleState(client, document, token);
+        }
         Assert.IsFalse(clean.NativeContentDirty, "Checked revert starts from a clean checkpoint.");
 
         var edited = original.Clone();

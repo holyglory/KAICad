@@ -234,7 +234,7 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
 
             if (!RevertReceiptStatesMatch(expected, nativeResult, after))
             {
-                string message = $"KiCad completed revert operation {id}, but its retained native state and independent post-revert observation do not match the expected clean checkpoint. Inspect kicad_document_state before another action.";
+                string message = $"KiCad completed revert operation {id}, but its retained native state and independent post-revert observation do not match the expected clean checkpoint ({RevertStateMismatchSummary(expected, nativeResult, after)}). Inspect kicad_document_state before another action.";
                 RememberRevertUnknown(store, id, fingerprint, instanceId, client.Epoch, message);
                 throw new AutomationException("revert_state_not_confirmed", message);
             }
@@ -435,7 +435,10 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
         && first.Scope == second.Scope && first.StateSha256 == second.StateSha256
         && first.CleanCheckpointSha256 == second.CleanCheckpointSha256
         && first.NativeIdentity == second.NativeIdentity
-        && first.Revision?.Epoch == second.Revision?.Epoch
+        && (first.Scope == DocumentLifecycleScope.DlsSchematicHierarchy
+            ? Guid.TryParseExact(first.Revision?.Epoch, "D", out var firstEpoch) && firstEpoch != Guid.Empty
+                && Guid.TryParseExact(second.Revision?.Epoch, "D", out var secondEpoch) && secondEpoch != Guid.Empty
+            : first.Revision?.Epoch == second.Revision?.Epoch)
         && first.NativeContentDirty == second.NativeContentDirty
         && first.ProjectSettingsIncluded == second.ProjectSettingsIncluded
         && first.CompleteChangeTracking == second.CompleteChangeTracking
@@ -443,6 +446,48 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
         && first.NativeFiles.SequenceEqual(second.NativeFiles)
         && first.FileBaselines.Count == second.FileBaselines.Count
         && first.FileBaselines.Zip(second.FileBaselines).All(pair => pair.First.Equals(pair.Second));
+
+    private static string RevertStateMismatchSummary(DocumentLifecycleState expected,
+        LifecycleOperationResult native, DocumentLifecycleState after)
+    {
+        static string Revision(DocumentLifecycleState state) => state.Revision is null
+            ? "<missing>" : $"{state.Revision.Epoch}/{state.Revision.Sequence}";
+        static string Describe(DocumentLifecycleState state) =>
+            $"stateSha={state.StateSha256}, cleanSha={state.CleanCheckpointSha256}, identity={state.NativeIdentity}, "
+            + $"revision={Revision(state)}, scope={state.Scope}, dirty={state.NativeContentDirty}, "
+            + $"project={state.ProjectSettingsIncluded}, complete={state.CompleteChangeTracking}, "
+            + $"diskChecked={state.DiskBaselineChecked}, files={state.NativeFiles.Count}, baselines={state.FileBaselines.Count}";
+
+        if (native.ObservedState is not { } observed)
+            return $"nativeObserved=<missing>; expected=[{Describe(expected)}]; independent=[{Describe(after)}]";
+
+        var differences = new List<string>();
+        void Compare(string name, object? first, object? second)
+        {
+            if (!Equals(first, second)) differences.Add(name);
+        }
+
+        Compare("expected/native stateSha", expected.StateSha256, observed.StateSha256);
+        Compare("expected/native cleanSha", expected.CleanCheckpointSha256, observed.CleanCheckpointSha256);
+        Compare("expected/native identity", expected.NativeIdentity, observed.NativeIdentity);
+        Compare("expected/native revision", Revision(expected), Revision(observed));
+        Compare("expected/native scope", expected.Scope, observed.Scope);
+        Compare("expected/native files", expected.NativeFiles.Count, observed.NativeFiles.Count);
+        Compare("expected/native baselines", expected.FileBaselines.Count, observed.FileBaselines.Count);
+        Compare("native/independent stateSha", observed.StateSha256, after.StateSha256);
+        Compare("native/independent cleanSha", observed.CleanCheckpointSha256, after.CleanCheckpointSha256);
+        Compare("native/independent identity", observed.NativeIdentity, after.NativeIdentity);
+        Compare("native/independent revision", Revision(observed), Revision(after));
+        Compare("native/independent scope", observed.Scope, after.Scope);
+        Compare("native/independent dirty", observed.NativeContentDirty, after.NativeContentDirty);
+        Compare("native/independent project", observed.ProjectSettingsIncluded, after.ProjectSettingsIncluded);
+        Compare("native/independent complete", observed.CompleteChangeTracking, after.CompleteChangeTracking);
+        Compare("native/independent diskChecked", observed.DiskBaselineChecked, after.DiskBaselineChecked);
+        Compare("native/independent files", observed.NativeFiles.Count, after.NativeFiles.Count);
+        Compare("native/independent baselines", observed.FileBaselines.Count, after.FileBaselines.Count);
+        return $"differences={(differences.Count == 0 ? "none" : string.Join(",", differences))}; "
+            + $"expected=[{Describe(expected)}]; native=[{Describe(observed)}]; independent=[{Describe(after)}]";
+    }
 
     private static bool RevertIdentityMatches(DocumentLifecycleState expected, DocumentLifecycleState state)
     {
@@ -455,8 +500,7 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
                 && state.Revision.Epoch == state.NativeIdentity;
 
         return expected.Scope == DocumentLifecycleScope.DlsSchematicHierarchy
-            && state.NativeIdentity == expected.NativeIdentity
-            && expected.Revision is not null && state.Revision.Epoch == expected.Revision.Epoch;
+            && state.NativeIdentity == expected.NativeIdentity;
     }
 
     private static async Task<DocumentRevertResult?> ReconcileNativeReceipt(

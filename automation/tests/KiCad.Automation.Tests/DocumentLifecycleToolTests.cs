@@ -473,6 +473,30 @@ public sealed class DocumentLifecycleToolTests
         finally { Directory.Delete(directory, true); }
     }
 
+    [TestMethod]
+    public async Task RevertAllowsSchematicRevisionEpochRefreshAfterReload()
+    {
+        string directory = Directory.CreateTempSubdirectory("lifecycle-revert-schematic-revision-").FullName;
+        try
+        {
+            var transport = new LifecycleTransport();
+            transport.Session.Epoch = Guid.NewGuid().ToString("D");
+            transport.Session.ProjectPath = Path.Combine(directory, "fixture.kicad_pro");
+            var registry = new InstanceRegistry(transport, directory);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "native.sock")), transport.Session.InstanceId);
+            var tool = new DocumentLifecycleTools(registry);
+            var expected = CompleteSchematicState(directory, transport.Session.Epoch, dirty: true);
+            transport.LifecycleState = expected.Clone();
+            transport.IndependentReadRevisionEpoch = Guid.NewGuid().ToString("D");
+
+            var reverted = await tool.Revert(transport.Session.InstanceId,
+                SchematicJson.Formatter.Format(expected), Guid.NewGuid().ToString("D"), default);
+            Assert.IsFalse(reverted.IsError ?? false, reverted.StructuredContent?.GetRawText());
+            Assert.AreEqual(1, transport.RevertCalls);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
     private static DocumentLifecycleState State(string directory, string epoch) => new()
     {
         Document = new() { Type = (DocumentType)3, BoardFilename = "fixture.kicad_pcb",
@@ -506,6 +530,47 @@ public sealed class DocumentLifecycleToolTests
         };
     }
 
+    private static DocumentLifecycleState CompleteSchematicState(string directory, string epoch, bool dirty)
+    {
+        string identity = Guid.NewGuid().ToString("D");
+        var document = new DocumentSpecifier
+        {
+            Type = DocumentType.DoctypeSchematic,
+            Project = new() { Name = "fixture", Path = directory },
+            SheetPath = new()
+        };
+        document.SheetPath.Path.Add(new() { Value = Guid.NewGuid().ToString("D") });
+        string schematic = Path.Combine(directory, "fixture.kicad_sch");
+        return new()
+        {
+            Document = document,
+            ProcessEpoch = epoch, NativeIdentity = identity,
+            Revision = new() { Epoch = Guid.NewGuid().ToString("D"), Sequence = 5 }, StateSha256 = new string('a', 64),
+            Scope = DocumentLifecycleScope.DlsSchematicHierarchy, NativeContentDirty = dirty,
+            ProjectSettingsIncluded = true, CleanCheckpointSha256 = new string('a', 64),
+            CompleteChangeTracking = false, DiskBaselineChecked = false,
+            NativeFiles = { schematic, Path.Combine(directory, "fixture.kicad_pro") },
+            FileBaselines =
+            {
+                new NativeFileBaselineState
+                {
+                    Path = schematic, BaselinePath = schematic, BaselineKnown = true, BaselineExists = true,
+                    BaselineSha256 = new string('c', 64), BaselineBytes = 10, CurrentKnown = true,
+                    CurrentExists = true, CurrentSha256 = new string('c', 64), CurrentBytes = 10,
+                    Status = NativeFileBaselineStatus.NfbsUnchanged
+                },
+                new NativeFileBaselineState
+                {
+                    Path = Path.Combine(directory, "fixture.kicad_pro"),
+                    BaselinePath = Path.Combine(directory, "fixture.kicad_pro"), BaselineKnown = true,
+                    BaselineExists = true, BaselineSha256 = new string('d', 64), BaselineBytes = 10,
+                    CurrentKnown = true, CurrentExists = true, CurrentSha256 = new string('d', 64),
+                    CurrentBytes = 10, Status = NativeFileBaselineStatus.NfbsUnchanged
+                }
+            }
+        };
+    }
+
     private sealed class LifecycleTransport : INativeTransport
     {
         public NativeClientTests.FixtureTransport Session { get; } = new();
@@ -518,6 +583,7 @@ public sealed class DocumentLifecycleToolTests
         public DocumentLifecycleState? RevertReceiptExpectedState { get; set; }
         public ReadLifecycleOperation? LastReceiptQuery { get; private set; }
         public ulong IndependentReadSequenceDelta { get; set; }
+        public string? IndependentReadRevisionEpoch { get; set; }
         public string? IndependentReadStateSha256 { get; set; }
         public string? IndependentReadBaselineSha256 { get; set; }
         public string? ReceiptError { get; set; }
@@ -576,6 +642,8 @@ public sealed class DocumentLifecycleToolTests
                 if (RevertCalls > 0)
                 {
                     observed.Revision.Sequence += IndependentReadSequenceDelta;
+                    if (IndependentReadRevisionEpoch is not null)
+                        observed.Revision.Epoch = IndependentReadRevisionEpoch;
                     if (IndependentReadStateSha256 is not null)
                         observed.StateSha256 = IndependentReadStateSha256;
                     if (IndependentReadBaselineSha256 is not null && observed.FileBaselines.Count > 0)

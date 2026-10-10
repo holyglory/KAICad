@@ -88,6 +88,15 @@ public sealed class DocumentLifecycleToolTests
             transport.Status = LifecycleOperationStatus.LosSaved;
             Assert.IsTrue((await tool.Close(transport.Session.InstanceId, SchematicJson.Formatter.Format(state),
                 Guid.NewGuid().ToString("D"), default)).IsError, "A save result cannot be reported as a successful close.");
+            transport.Status = LifecycleOperationStatus.LosReverted;
+            foreach (bool close in new[] { false, true })
+            {
+                var wrongKind = close
+                    ? await tool.Close(transport.Session.InstanceId, SchematicJson.Formatter.Format(state), Guid.NewGuid().ToString("D"), default)
+                    : await tool.Save(transport.Session.InstanceId, SchematicJson.Formatter.Format(state), Guid.NewGuid().ToString("D"), default);
+                Assert.IsTrue(wrongKind.IsError, "A revert receipt cannot become save or close success.");
+                Assert.AreEqual("invalid_lifecycle_result", wrongKind.StructuredContent!.Value.GetProperty("code").GetString());
+            }
         }
         finally { Directory.Delete(directory, true); }
     }

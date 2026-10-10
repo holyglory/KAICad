@@ -407,7 +407,7 @@ message LifecycleOperationResult {
   // a full disk, ...). A refusal that writable files would not fix never lists a file here. The
   // error message says why for each one.
   repeated string blocked_files = 401;
-  // True when this retained LOS_SAVED result is the terminal checked-revert receipt.
+  // Retained compatibility flag for a terminal LOS_REVERTED receipt.
   bool revert_completed = 402;
   // -- end lane 2D --
 }

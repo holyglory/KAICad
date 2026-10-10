@@ -152,6 +152,7 @@ public sealed partial class NativeSessionTests
         await File.WriteAllTextAsync(netlistPath, importNetlist, token);
         DocumentSpecifier finalBoard = board;
         await SaveCheckedThroughMcp(client, board, evidence, token, verifyReconnect: false);
+        await VerifyNativeCheckedPcbRevert(client, board, evidence, instanceId, token);
         var before = await ObserveLifecycleState(client, board, token);
         var track = new Track
         {

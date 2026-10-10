@@ -3136,7 +3136,7 @@ command=["dotnet","automation/tools/KiCad.Automation.Validation/bin/Debug/net10.
 
 [test.preview27-linux-public]
 timeout_seconds=1800
-env={TMPDIR="/mnt/build-storage/codex/kicad/t",KICAD_PUBLIC_DOWNLOAD_URL="https://kicad.vr.ae/",KICAD_PACKAGE_CATALOGUE="/mnt/build-storage/codex/kicad/public-candidates/linux-092c-signed-000027",KICAD_UPDATE_PUBLISHER_SPKI_FILE="/home/holyglory/kicad/automation/distribution/preview-publisher.spki",KICAD_PUBLIC_DOWNLOAD_EVIDENCE="automation/artifacts/preview27-public-downloads",KICAD_DELIVERY_ROUTE_ONLY="true",KICAD_DELIVERY_PLATFORM="linux-x64",KICAD_DELIVERY_COMMIT="092cdcecc0df3a879cf8cd2564643071fbc4ecf5",KICAD_DELIVERY_DEPLOYMENT="d30d9eeb63ffeccbc",KICAD_COORDINATOR_EXECUTOR="/home/DevCoordinator2/target/release/devcoordinator2-executor",KICAD_DELIVERY_EVIDENCE="automation/artifacts/preview27-linux-delivery"}
+env={TMPDIR="/mnt/build-storage/codex/kicad/t",KICAD_PUBLIC_DOWNLOAD_URL="https://kicad.vr.ae/",KICAD_PACKAGE_CATALOGUE="/mnt/build-storage/codex/kicad/public-candidates/linux-092c-signed-000027",KICAD_UPDATE_PUBLISHER_SPKI_FILE="/home/holyglory/kicad/automation/distribution/preview-publisher.spki",KICAD_PUBLIC_DOWNLOAD_EVIDENCE="/home/holyglory/.codex/worktrees/0761/kicad/automation/artifacts/preview27-public-downloads",KICAD_DELIVERY_ROUTE_ONLY="true",KICAD_DELIVERY_PLATFORM="linux-x64",KICAD_DELIVERY_COMMIT="092cdcecc0df3a879cf8cd2564643071fbc4ecf5",KICAD_DELIVERY_DEPLOYMENT="d30d9eeb63ffeccbc",KICAD_COORDINATOR_EXECUTOR="/home/DevCoordinator2/target/release/devcoordinator2-executor",KICAD_DELIVERY_EVIDENCE="/home/holyglory/.codex/worktrees/0761/kicad/automation/artifacts/preview27-linux-delivery"}
 [[test.preview27-linux-public.check]]
 name="tls-preflight"
 tier="development"
@@ -3146,17 +3146,17 @@ command=["curl","--fail","--silent","--show-error","--max-time","20","--output",
 name="signed-linux-download"
 tier="development"
 requires=["tls-preflight"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=PublicDownloads","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/preview27-public-download-tests"]
-retained_artifacts=[{name="public-download-tests",path="automation/artifacts/preview27-public-download-tests",max_bytes=16777216},{name="public-download-evidence",path="automation/artifacts/preview27-public-downloads",max_bytes=67108864}]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=PublicDownloads","--logger","trx;LogFileName=results.trx","--results-directory","/home/holyglory/.codex/worktrees/0761/kicad/automation/artifacts/preview27-public-download-tests"]
+retained_artifacts=[{name="public-download-tests",path="/home/holyglory/.codex/worktrees/0761/kicad/automation/artifacts/preview27-public-download-tests",max_bytes=16777216},{name="public-download-evidence",path="/home/holyglory/.codex/worktrees/0761/kicad/automation/artifacts/preview27-public-downloads",max_bytes=67108864}]
 [[test.preview27-linux-public.check]]
 name="delivery-receipts"
 tier="development"
 requires=["signed-linux-download"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=DeliveryReceipts","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/preview27-delivery-receipt-tests"]
-retained_artifacts=[{name="delivery-receipt-tests",path="automation/artifacts/preview27-delivery-receipt-tests",max_bytes=16777216},{name="delivery-evidence",path="automation/artifacts/preview27-linux-delivery",max_bytes=268435456}]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=DeliveryReceipts","--logger","trx;LogFileName=results.trx","--results-directory","/home/holyglory/.codex/worktrees/0761/kicad/automation/artifacts/preview27-delivery-receipt-tests"]
+retained_artifacts=[{name="delivery-receipt-tests",path="/home/holyglory/.codex/worktrees/0761/kicad/automation/artifacts/preview27-delivery-receipt-tests",max_bytes=16777216},{name="delivery-evidence",path="/home/holyglory/.codex/worktrees/0761/kicad/automation/artifacts/preview27-linux-delivery",max_bytes=268435456}]
 [[test.preview27-linux-public.check]]
 name="observe"
 tier="development"
 requires=["delivery-receipts"]
 command=["python3","automation/qualification/observe-preview27-linux.py"]
-retained_artifacts=[{name="completion-and-verification",path="automation/artifacts/preview27-linux-delivery",max_bytes=268435456}]
+retained_artifacts=[{name="completion-and-verification",path="/home/holyglory/.codex/worktrees/0761/kicad/automation/artifacts/preview27-linux-delivery",max_bytes=268435456}]

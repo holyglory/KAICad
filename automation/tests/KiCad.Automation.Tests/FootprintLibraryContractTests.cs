@@ -302,6 +302,7 @@ public sealed class FootprintLibraryContractTests
     public void CheckedFootprintCandidateRequiresCanonicalNonEmptyInstanceIdentity()
     {
         const string epoch = "12121212-1212-1212-1212-121212121212";
+        const string validIdentity = "a1b2c3d4-e5f6-47a8-9b0c-1d2e3f4a5b6c";
         DocumentSpecifier document = Document("Identity");
         FootprintInstance candidate = CompleteDefinition(document, epoch).Footprint;
         candidate.Id = new() { Value = Guid.Empty.ToString("D") };
@@ -310,12 +311,12 @@ public sealed class FootprintLibraryContractTests
             candidate, CancellationToken.None);
         CollectionAssert.Contains(emptyIdentityIssues.ToList(), "missing_instance_id:id");
 
-        candidate.Id.Value = candidate.Id.Value.ToUpperInvariant();
+        candidate.Id.Value = validIdentity.ToUpperInvariant();
         IReadOnlyList<string> casingIssues = FootprintLibraryCheckedContract.ValidateCandidate(
             candidate, CancellationToken.None);
         CollectionAssert.Contains(casingIssues.ToList(), "missing_instance_id:id");
 
-        candidate.Id.Value = "12121212-1212-1212-1212-121212121212";
+        candidate.Id.Value = validIdentity;
         IReadOnlyList<string> validIssues = FootprintLibraryCheckedContract.ValidateCandidate(
             candidate, CancellationToken.None);
         CollectionAssert.DoesNotContain(validIssues.ToList(), "missing_instance_id:id");

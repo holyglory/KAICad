@@ -96,8 +96,10 @@ internal static class SymbolLibraryCheckedContract
                     || !ValidateState(response.ObservedAfter, expectedRequest.ExpectedState)
                     || !response.ObservedBefore.Equals(expectedRequest.ExpectedState)
                     || response.ObservedAfter.StateSha256 != response.AfterSnapshotSha256
-                    || response.ObservedAfter.Revision!.Sequence <= response.ObservedBefore.Revision!.Sequence))
-                throw Invalid("A committed checked symbol receipt requires native write, target, unrelated-entry and advancing revision evidence.");
+                    || response.ObservedAfter.Revision!.Sequence < response.ObservedBefore.Revision!.Sequence
+                    || (response.ObservedAfter.Revision.Sequence == response.ObservedBefore.Revision.Sequence
+                        && !response.ObservedAfter.Equals(response.ObservedBefore)))
+                throw Invalid("A committed checked symbol receipt requires native write, target, unrelated-entry and non-regressing revision evidence.");
             RequireDigest(response.BeforeSnapshotSha256, "before snapshot");
             RequireDigest(response.AfterSnapshotSha256, "after snapshot");
             if (!string.Equals(response.BeforeSnapshotSha256, expectedSnapshotSha256, StringComparison.Ordinal))

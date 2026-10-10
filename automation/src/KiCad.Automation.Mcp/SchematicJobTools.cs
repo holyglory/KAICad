@@ -58,6 +58,40 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
         return legacyJson!;
     }
 
+    private static string ResolveRequestJson<T>(string? legacyJson, T? typed, Func<T, string> convert)
+        where T : class
+    {
+        bool hasLegacy = legacyJson is not null;
+        bool hasTyped = typed is not null;
+        if (hasLegacy == hasTyped)
+            throw new AutomationException("invalid_schematic_export_input",
+                "Provide exactly one export request: requestJson or request.");
+        if (typed is not null)
+            return convert(typed);
+        return legacyJson!;
+    }
+
+    private static Task<CallToolResult> ExportStructured<T>(string instanceId, string? legacyJson, T? typed,
+        string? expectedStateJson, DocumentLifecycleInput? expectedState, string? operationId,
+        Func<T, string> convert,
+        Func<string, string, CancellationToken, string?, Task<CallToolResult>> legacy,
+        CancellationToken cancellationToken)
+        where T : class
+    {
+        try
+        {
+            string requestJson = ResolveRequestJson(legacyJson, typed, convert);
+            string stateJson = ResolveExpectedStateJson(expectedStateJson, expectedState);
+            return legacy(instanceId, requestJson, stateJson, cancellationToken, operationId);
+        }
+        catch (Exception error) when (error is AutomationException or JsonException
+            or InvalidOperationException or ArgumentException)
+        {
+            return Task.FromResult(Error(error is AutomationException known ? known.Code
+                : "invalid_schematic_export_input", error.Message));
+        }
+    }
+
     private static string ResolveExpectedStateJson(string? legacyJson, DocumentLifecycleInput? typed)
     {
         bool hasLegacy = legacyJson is not null;
@@ -71,45 +105,82 @@ public sealed class SchematicJobTools(InstanceRegistry registry)
     }
 
     [McpServerTool(Name = "kicad_schematic_export_dxf", ReadOnly = false),
-     Description("Export an explicitly identified schematic to DXF through KiCad's native schematic job handler. requestJson is RunSchematicJobExportDxf protobuf JSON with an absolute output path and explicit schematic root; expectedStateJson is the matching lifecycle observation used for admission and post-export verification. Returns bounded output paths, byte counts and SHA-256 hashes; the schematic is never mutated."),
+     Description("Export an explicitly identified schematic to DXF. Provide exactly one of requestJson (legacy protobuf JSON) or request (strict structured input), and exactly one of expectedStateJson or expectedState. The native export and receipt path is unchanged."),
      KiCadCapability("schematic-manufacturing", "compiled-mcp plus native-schematic-job", "explicit schematic root, lifecycle state and hashed DXF output manifest"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> ExportDxfStructured(string instanceId, CancellationToken cancellationToken,
+        string? requestJson = null, SchematicExportDxfInput? request = null,
+        string? expectedStateJson = null, DocumentLifecycleInput? expectedState = null,
+        string? operationId = null)
+        => ExportStructured(instanceId, requestJson, request, expectedStateJson, expectedState,
+            operationId, value => SchematicJson.Formatter.Format(value.ToNative()), ExportDxf, cancellationToken);
+
+    // Legacy CLR entry point retained for direct callers; it is intentionally not
+    // registered separately so the structured wrapper owns the MCP tool schema.
     public Task<CallToolResult> ExportDxf(string instanceId, string requestJson, string expectedStateJson,
         CancellationToken cancellationToken, string? operationId = null) =>
         ExportJob<RunSchematicJobExportDxf>(instanceId, requestJson, expectedStateJson, "dxf",
             request => request.JobSettings, outputIsDirectory: true, operationId, cancellationToken);
 
     [McpServerTool(Name = "kicad_schematic_export_pdf", ReadOnly = false),
-     Description("Export an explicitly identified schematic to PDF through KiCad's native schematic job handler. requestJson is RunSchematicJobExportPdf protobuf JSON with an absolute output path and explicit schematic root; expectedStateJson is the matching lifecycle observation used for admission and post-export verification. Returns bounded output paths, byte counts and SHA-256 hashes; the schematic is never mutated."),
+     Description("Export an explicitly identified schematic to PDF. Provide exactly one of requestJson (legacy protobuf JSON) or request (strict structured input), and exactly one of expectedStateJson or expectedState. The native export and receipt path is unchanged."),
      KiCadCapability("schematic-manufacturing", "compiled-mcp plus native-schematic-job", "explicit schematic root, lifecycle state and hashed PDF output manifest"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> ExportPdfStructured(string instanceId, CancellationToken cancellationToken,
+        string? requestJson = null, SchematicExportPdfInput? request = null,
+        string? expectedStateJson = null, DocumentLifecycleInput? expectedState = null,
+        string? operationId = null)
+        => ExportStructured(instanceId, requestJson, request, expectedStateJson, expectedState,
+            operationId, value => SchematicJson.Formatter.Format(value.ToNative()), ExportPdf, cancellationToken);
+
     public Task<CallToolResult> ExportPdf(string instanceId, string requestJson, string expectedStateJson,
         CancellationToken cancellationToken, string? operationId = null) =>
         ExportJob<RunSchematicJobExportPdf>(instanceId, requestJson, expectedStateJson, "pdf",
             request => request.JobSettings, outputIsDirectory: false, operationId, cancellationToken);
 
     [McpServerTool(Name = "kicad_schematic_export_ps", ReadOnly = false),
-     Description("Export an explicitly identified schematic to PostScript through KiCad's native schematic job handler. requestJson is RunSchematicJobExportPs protobuf JSON with an absolute output path and explicit schematic root; expectedStateJson is the matching lifecycle observation used for admission and post-export verification. Returns bounded output paths, byte counts and SHA-256 hashes; the schematic is never mutated."),
+     Description("Export an explicitly identified schematic to PostScript. Provide exactly one of requestJson (legacy protobuf JSON) or request (strict structured input), and exactly one of expectedStateJson or expectedState. The native export and receipt path is unchanged."),
      KiCadCapability("schematic-manufacturing", "compiled-mcp plus native-schematic-job", "explicit schematic root, lifecycle state and hashed PostScript output manifest"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> ExportPsStructured(string instanceId, CancellationToken cancellationToken,
+        string? requestJson = null, SchematicExportPsInput? request = null,
+        string? expectedStateJson = null, DocumentLifecycleInput? expectedState = null,
+        string? operationId = null)
+        => ExportStructured(instanceId, requestJson, request, expectedStateJson, expectedState,
+            operationId, value => SchematicJson.Formatter.Format(value.ToNative()), ExportPs, cancellationToken);
+
     public Task<CallToolResult> ExportPs(string instanceId, string requestJson, string expectedStateJson,
         CancellationToken cancellationToken, string? operationId = null) =>
         ExportJob<RunSchematicJobExportPs>(instanceId, requestJson, expectedStateJson, "ps",
             request => request.JobSettings, outputIsDirectory: true, operationId, cancellationToken);
 
     [McpServerTool(Name = "kicad_schematic_export_netlist", ReadOnly = false),
-     Description("Export an explicitly identified schematic netlist through KiCad's native schematic job handler. requestJson is RunSchematicJobExportNetlist protobuf JSON with a valid SchematicNetlistFormat, absolute output path and explicit schematic root; expectedStateJson is the matching lifecycle observation used for admission and post-export verification. Returns bounded output paths, byte counts and SHA-256 hashes; the schematic is never mutated."),
+     Description("Export an explicitly identified schematic netlist. Provide exactly one of requestJson (legacy protobuf JSON) or request (strict structured input), and exactly one of expectedStateJson or expectedState. The native export and receipt path is unchanged."),
      KiCadCapability("schematic-manufacturing", "compiled-mcp plus native-schematic-job", "explicit schematic root, lifecycle state and hashed netlist output manifest"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> ExportNetlistStructured(string instanceId, CancellationToken cancellationToken,
+        string? requestJson = null, SchematicExportNetlistInput? request = null,
+        string? expectedStateJson = null, DocumentLifecycleInput? expectedState = null,
+        string? operationId = null)
+        => ExportStructured(instanceId, requestJson, request, expectedStateJson, expectedState,
+            operationId, value => SchematicJson.Formatter.Format(value.ToNative()), ExportNetlist, cancellationToken);
+
     public Task<CallToolResult> ExportNetlist(string instanceId, string requestJson, string expectedStateJson,
         CancellationToken cancellationToken, string? operationId = null) =>
         ExportJob<RunSchematicJobExportNetlist>(instanceId, requestJson, expectedStateJson, "netlist",
             request => request.JobSettings, outputIsDirectory: false, operationId, cancellationToken);
 
     [McpServerTool(Name = "kicad_schematic_export_bom", ReadOnly = false),
-     Description("Export an explicitly identified schematic bill of materials through KiCad's native schematic job handler. requestJson is RunSchematicJobExportBOM protobuf JSON with an absolute output path, explicit schematic root and optional format/field, variant, grouping and do-not-populate settings; expectedStateJson is the matching lifecycle observation used for admission and post-export verification. Returns bounded output paths, byte counts and SHA-256 hashes; the schematic is never mutated."),
+     Description("Export an explicitly identified schematic BOM. Provide exactly one of requestJson (legacy protobuf JSON) or request (strict structured input), and exactly one of expectedStateJson or expectedState. Structured input exposes BOM format, fields, grouping, filtering, DNP and variant settings; the native export and receipt path is unchanged."),
      KiCadCapability("schematic-manufacturing", "compiled-mcp plus native-schematic-job", "explicit schematic root, lifecycle state and hashed BOM output manifest"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> ExportBomStructured(string instanceId, CancellationToken cancellationToken,
+        string? requestJson = null, SchematicExportBomInput? request = null,
+        string? expectedStateJson = null, DocumentLifecycleInput? expectedState = null,
+        string? operationId = null)
+        => ExportStructured(instanceId, requestJson, request, expectedStateJson, expectedState,
+            operationId, value => SchematicJson.Formatter.Format(value.ToNative()), ExportBom, cancellationToken);
+
     public Task<CallToolResult> ExportBom(string instanceId, string requestJson, string expectedStateJson,
         CancellationToken cancellationToken, string? operationId = null) =>
         ExportJob<RunSchematicJobExportBOM>(instanceId, requestJson, expectedStateJson, "bom",

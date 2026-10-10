@@ -13,7 +13,21 @@ namespace KiCad.Automation.Mcp;
 /// conversion below is the only boundary that creates the native request.
 /// </summary>
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
-public sealed class SchematicExportSvgInput : NativeDocumentInputObject
+public sealed class SchematicExportSvgInput : SchematicExportPlotInput
+{
+    internal RunSchematicJobExportSvg ToNative()
+    {
+        var result = new RunSchematicJobExportSvg
+        {
+            JobSettings = ToJobSettings(),
+            PlotSettings = PlotSettings?.ToNative() ?? new SchematicPlotSettings()
+        };
+        return result;
+    }
+}
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public abstract class SchematicExportPlotInput : NativeDocumentInputObject
 {
     private NativeDocumentInput? document;
     private string? outputPath;
@@ -22,27 +36,21 @@ public sealed class SchematicExportSvgInput : NativeDocumentInputObject
     [Description("The explicit schematic root document to export.")]
     public NativeDocumentInput? Document { get => document; set => document = BindOnce(value); }
 
-    [Description("Absolute file or directory path selected for the SVG job.")]
+    [Description("Absolute file or directory path selected for the schematic export job.")]
     public string? OutputPath { get => outputPath; set => outputPath = BindOnce(value); }
 
     public SchematicPlotSettingsInput? PlotSettings { get => plotSettings; set => plotSettings = BindOnce(value); }
 
-    internal RunSchematicJobExportSvg ToNative()
+    protected RunJobSettings ToJobSettings()
     {
         if (string.IsNullOrWhiteSpace(OutputPath) || !Path.IsPathFullyQualified(OutputPath))
             throw new AutomationException("invalid_schematic_export_path",
-                "The schematic SVG output path must be absolute.");
-
-        var result = new RunSchematicJobExportSvg
+                "The schematic export output path must be absolute.");
+        return new RunJobSettings
         {
-            JobSettings = new RunJobSettings
-            {
-                Document = NativeDocumentInput.ToNative(Document),
-                OutputPath = OutputPath!
-            },
-            PlotSettings = PlotSettings?.ToNative() ?? new SchematicPlotSettings()
+            Document = NativeDocumentInput.ToNative(Document),
+            OutputPath = OutputPath!
         };
-        return result;
     }
 }
 

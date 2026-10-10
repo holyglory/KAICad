@@ -262,6 +262,7 @@ const std::vector<std::string>& DOCUMENT_LIFECYCLE_CONTROLLER::RequestTypes()
         std::vector<std::string> names = {
             std::string( kiapi::automation::v1::CheckedSaveDocument::descriptor()->full_name() ),
             std::string( kiapi::automation::v1::CheckedCloseDocument::descriptor()->full_name() ),
+            std::string( kiapi::automation::v1::NativeCapabilityCheckedRevertDocument::descriptor()->full_name() ),
             std::string( kiapi::automation::v1::ReadLifecycleOperation::descriptor()->full_name() ),
             std::string( kiapi::automation::v1::NativeCapabilityReadCheckedView::descriptor()->full_name() )
         };
@@ -464,12 +465,149 @@ void DOCUMENT_LIFECYCLE_CONTROLLER::AnnotateCleanState( kiapi::automation::v1::D
         state.set_clean_checkpoint_sha256( checkpoint->second.sha );
 }
 
+API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::HandleRevert( ApiRequest& aEnvelope,
+        const std::string& aProcessEpoch, const DISPATCH& aDispatch )
+{
+    using namespace kiapi::automation::v1;
+    NativeCapabilityCheckedRevertDocument request;
+    if( !aEnvelope.message().UnpackTo( &request ) || !Uuid( request.operation_id() )
+            || !request.has_expected_state() || request.expected_state().process_epoch() != aProcessEpoch
+            || !MessageDifferencer::Equals( request.document(), request.expected_state().document() ) )
+        return Error( "Checked revert requires an operation UUID and an exact observed document/process target" );
+
+    if( const auto previous = m_receipts.find( request.operation_id() ); previous != m_receipts.end() )
+    {
+        if( !previous->second.revert || !MessageDifferencer::Equals( request, previous->second.revert_request ) )
+            return Error( "Lifecycle operation ID was already used for another request" );
+        return Pack( previous->second.result );
+    }
+
+    constexpr size_t budget = 16 * 1024 * 1024;
+    const size_t requestSize = request.ByteSizeLong();
+    if( requestSize > ( budget - 4096 ) / 3 || m_receipts.size() >= 4096 )
+        return Error( "Lifecycle receipt capacity exhausted; no revert was attempted" );
+    const size_t reservation = requestSize * 3 + 4096;
+    if( reservation > budget - m_reservedBytes )
+        return Error( "Lifecycle receipt capacity exhausted; no revert was attempted" );
+
+    RECEIPT receipt;
+    receipt.revert_request = request;
+    receipt.revert = true;
+    receipt.result.mutable_document()->CopyFrom( request.document() );
+    receipt.result.set_operation_id( request.operation_id() );
+    receipt.result.set_process_epoch( aProcessEpoch );
+    receipt.result.set_status( LOS_INDETERMINATE );
+    receipt.result.set_error_code( "operation_in_progress" );
+    auto& result = m_receipts.emplace( request.operation_id(), std::move( receipt ) ).first->second.result;
+    m_reservedBytes += reservation;
+
+    bool attempted = false;
+    auto fail = [&]( LifecycleOperationStatus status, const char* code,
+                     const std::string& message ) -> API_RESULT
+    {
+        result.set_status( status );
+        result.set_error_code( code );
+        result.set_error_message( Truncated( message, 2048 ) );
+        return Pack( result );
+    };
+    auto observe = [&]() -> HANDLER_RESULT<DocumentLifecycleState>
+    {
+        ReadDocumentLifecycleState query;
+        query.mutable_document()->CopyFrom( request.document() );
+        ApiRequest envelope;
+        envelope.mutable_header()->CopyFrom( aEnvelope.header() );
+        envelope.mutable_message()->PackFrom( query );
+        auto reply = aDispatch( envelope );
+        if( !reply ) return tl::unexpected( reply.error() );
+        if( reply->status().status() != ApiStatusCode::AS_OK ) return tl::unexpected( reply->status() );
+        DocumentLifecycleState state;
+        if( !reply->message().UnpackTo( &state ) || state.ByteSizeLong() > requestSize * 2 + 1024 )
+        {
+            ApiResponseStatus error;
+            error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            error.set_error_message( "Native lifecycle observation is invalid or exceeded the reserved receipt size" );
+            return tl::unexpected( error );
+        }
+        AnnotateCleanState( state );
+        return state;
+    };
+    auto matchingBaselines = []( const DocumentLifecycleState& first, const DocumentLifecycleState& second )
+    {
+        if( first.file_baselines_size() != second.file_baselines_size() ) return false;
+        for( int i = 0; i < first.file_baselines_size(); ++i )
+            if( !MessageDifferencer::Equals( first.file_baselines( i ), second.file_baselines( i ) ) ) return false;
+        return true;
+    };
+
+    try
+    {
+        auto before = observe();
+        if( !before ) return fail( LOS_REJECTED, "observation_failed", before.error().error_message() );
+        result.mutable_observed_state()->CopyFrom( *before );
+        if( !MessageDifferencer::Equals( request.expected_state(), *before ) )
+            return fail( LOS_REJECTED, "stale_document_state", "Document or disk state changed; obtain a fresh observation" );
+        if( !Uuid( before->native_identity() ) || !before->has_revision() || !Uuid( before->revision().epoch() )
+                || !Digest( before->state_sha256() ) || !before->project_settings_included()
+                || ( before->scope() != DLS_SCHEMATIC_HIERARCHY && before->scope() != DLS_PCB )
+                || !FileCoverage( *before, false ) )
+            return fail( LOS_REJECTED, "file_baseline_conflict",
+                         "Loaded file coverage is incomplete or differs from disk; no revert was attempted" );
+
+        kiapi::common::commands::RevertDocument native;
+        native.mutable_document()->CopyFrom( request.document() );
+        native.set_operation_id( request.operation_id() );
+        ApiRequest envelope;
+        envelope.mutable_header()->CopyFrom( aEnvelope.header() );
+        envelope.mutable_message()->PackFrom( native );
+        attempted = true;
+        auto reloaded = aDispatch( envelope );
+        if( !reloaded )
+            return fail( LOS_INDETERMINATE, "native_revert_failed",
+                         "KiCad received a checked revert, but the native reload returned no terminal response; inspect the document before retrying" );
+        if( reloaded->status().status() != ApiStatusCode::AS_OK )
+            return fail( LOS_INDETERMINATE, "native_revert_failed",
+                         "KiCad could not confirm the checked reload: " + reloaded->status().error_message() );
+
+        auto after = observe();
+        if( !after )
+            return fail( LOS_INDETERMINATE, "revert_state_not_confirmed",
+                         "KiCad reloaded the document, but its post-revert lifecycle state could not be read; inspect the document before retrying" );
+        result.mutable_observed_state()->CopyFrom( *after );
+        if( !MessageDifferencer::Equals( after->document(), request.document() )
+                || after->process_epoch() != aProcessEpoch
+                || after->native_identity() != before->native_identity()
+                || after->native_content_dirty() || !FileCoverage( *after, false )
+                || !matchingBaselines( *before, *after ) )
+            return fail( LOS_INDETERMINATE, "revert_state_not_confirmed",
+                         "KiCad reloaded the document, but the clean unchanged file baseline could not be confirmed" );
+
+        result.set_status( LOS_SAVED );
+        result.set_revert_completed( true );
+        result.clear_error_code();
+        result.clear_error_message();
+        return Pack( result );
+    }
+    catch( const std::exception& error )
+    {
+        return fail( attempted ? LOS_INDETERMINATE : LOS_REJECTED,
+                     attempted ? "native_revert_failed" : "native_lifecycle_error", error.what() );
+    }
+    catch( ... )
+    {
+        return fail( attempted ? LOS_INDETERMINATE : LOS_REJECTED,
+                     attempted ? "native_revert_failed" : "native_lifecycle_error",
+                     "Native checked revert raised an unexpected error; inspect the document before retrying" );
+    }
+}
+
 API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
         const std::string& aProcessEpoch, const DISPATCH& aDispatch )
 {
     using namespace kiapi::automation::v1;
     if( aEnvelope.message().Is<NativeCapabilityReadCheckedView>() )
         return ReadCheckedView( aEnvelope, aProcessEpoch, aDispatch );
+    if( aEnvelope.message().Is<NativeCapabilityCheckedRevertDocument>() )
+        return HandleRevert( aEnvelope, aProcessEpoch, aDispatch );
     if( aEnvelope.message().Is<ReadLifecycleOperation>() )
     {
         ReadLifecycleOperation query;
@@ -482,7 +620,9 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::Handle( ApiRequest& aEnvelope,
             return Error( std::string( UNKNOWN_OPERATION_MARKER )
                           + ": KiCad has no record of starting a save or close with this operation ID in this "
                             "process, so it saved or closed nothing for it" );
-        if( !MessageDifferencer::Equals( found->second.request.document(), query.document() ) )
+        const auto& document = found->second.revert ? found->second.revert_request.document()
+                                                    : found->second.request.document();
+        if( !MessageDifferencer::Equals( document, query.document() ) )
             return Error( "Lifecycle operation belongs to another document" );
         return Pack( found->second.result );
     }

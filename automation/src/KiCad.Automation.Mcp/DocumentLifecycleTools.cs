@@ -83,8 +83,8 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
     }
 
     [McpServerTool(Name = "kicad_document_revert", ReadOnly = false),
-     Description("Revert an explicitly observed schematic hierarchy or PCB to the files currently on disk. This destructive tool is admitted only when the native lifecycle observation proves complete change tracking and unchanged file baselines; current native builds intentionally fail closed because those flags are not yet qualified. A durable per-instance operation admission is written before the final state read, so another MCP process cannot dispatch the same operation twice. The legacy native command has no process-owned receipt: cancellation or transport loss after delivery is retained as operation_outcome_unknown and must be resolved by reading kicad_document_state before another action."),
-     KiCadCapability("document-lifecycle", "compiled-mcp plus fail-closed legacy native-api plus durable receipt", "complete lifecycle observation, process epoch, operation UUID and per-instance operation receipt"),
+     Description("Revert an explicitly observed schematic hierarchy or PCB to the files currently on disk. The native checked lifecycle controller admits the exact document digest and unchanged file baselines on KiCad's GUI thread, reserves the operation UUID, performs the reload, and retains a process-owned terminal receipt. The MCP also retains a per-instance durable receipt. Reload failure has no automatic rollback; cancellation or transport loss after native admission is operation_outcome_unknown and must be resolved by reading kicad_document_state before another action."),
+     KiCadCapability("document-lifecycle", "compiled-mcp plus native checked lifecycle plus durable receipt", "exact lifecycle observation digest/file baselines, process epoch, operation UUID and per-instance operation receipt"),
      KiCadVerification(KiCadVerificationLevel.InProcess, "DocumentLifecycleToolTests.RevertRequiresCompleteObservationAndVerifiesCleanState")]
     public Task<CallToolResult> Revert(string instanceId, string expectedStateJson, string operationId,
         CancellationToken cancellationToken) => InstanceToolBoundary.Run(async () =>
@@ -136,20 +136,32 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
 
             try
             {
-                await client.InvokeAsync<RevertDocument, Empty>(new()
+                var nativeResult = await client.InvokeAsync<NativeCapabilityCheckedRevertDocument, LifecycleOperationResult>(new()
                 {
-                    Document = expected.Document.Clone(), OperationId = id
+                    Document = expected.Document.Clone(), OperationId = id, ExpectedState = expected.Clone()
                 }, cancellationToken);
+                ValidateResult(nativeResult, expected.Document, id, client.Epoch, LifecycleOperationStatus.LosSaved);
+                if (nativeResult.Status == LifecycleOperationStatus.LosRejected)
+                {
+                    store.RemoveAdmission(instanceId, id, client.Epoch, fingerprint);
+                    throw new AutomationException("native_revert_refused", nativeResult.ErrorMessage);
+                }
+                if (nativeResult.Status != LifecycleOperationStatus.LosSaved || !nativeResult.RevertCompleted)
+                {
+                    string message = $"KiCad admitted revert operation {id}, but its native receipt is {nativeResult.Status}: {nativeResult.ErrorMessage}. Inspect kicad_document_state before another action.";
+                    RememberRevertUnknown(store, id, fingerprint, instanceId, client.Epoch, message);
+                    throw new AutomationException("operation_outcome_unknown", message);
+                }
             }
             catch (NngOperationCanceledException error) when (error.RequestDelivered)
             {
-                string message = $"KiCad received the revert request for operation {id} but cancellation stopped the reply ({error.Message}). Inspect kicad_document_state before another action; the legacy native revert command has no process-owned receipt.";
+                string message = $"KiCad received checked revert operation {id} but cancellation stopped the reply ({error.Message}). Inspect kicad_document_state before another action; the native receipt may be terminal.";
                 RememberRevertUnknown(store, id, fingerprint, instanceId, client.Epoch, message);
                 throw new AutomationException("operation_outcome_unknown", message);
             }
             catch (NngException error) when (error.RequestDelivered)
             {
-                string message = $"KiCad received the revert request for operation {id} but did not answer ({error.Message}). Inspect kicad_document_state before another action; the legacy native revert command has no process-owned receipt.";
+                string message = $"KiCad received checked revert operation {id} but did not answer ({error.Message}). Inspect kicad_document_state before another action; the native receipt may be terminal.";
                 RememberRevertUnknown(store, id, fingerprint, instanceId, client.Epoch, message);
                 throw new AutomationException("operation_outcome_unknown", message);
             }
@@ -175,7 +187,7 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
             }
             catch (Exception error)
             {
-                string message = $"The native revert operation {id} returned an unreadable result ({error.Message}). Inspect kicad_document_state before another action; the outcome is indeterminate.";
+                string message = $"The native checked revert operation {id} returned an unreadable result ({error.Message}). Inspect kicad_document_state before another action; the outcome is indeterminate.";
                 RememberRevertUnknown(store, id, fingerprint, instanceId, client.Epoch, message);
                 throw new AutomationException("operation_outcome_unknown", message);
             }
@@ -216,12 +228,12 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
                 OperationOutcome = "completed",
                 Committed = true,
                 Replayed = false,
-                NativeReceiptAvailable = false,
+                NativeReceiptAvailable = true,
                 DiscardedUnsavedChanges = true,
                 BeforeState = before,
                 AfterState = after,
                 PostStateVerified = true,
-                Verification = "native lifecycle state is clean and every observed file baseline is unchanged",
+                Verification = "native checked lifecycle receipt is terminal, editor state is clean and every observed file baseline is unchanged",
                 TransportRetrySafe = false
             };
             RememberRevertCompleted(store, id, fingerprint, result);
@@ -229,7 +241,7 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
         });
 
     [McpServerTool(Name = "kicad_document_revert_receipt", ReadOnly = true),
-     Description("Read the durable per-instance MCP receipt for kicad_document_revert by its exact operation UUID and process epoch. This never reverts or retries a document. An admitted receipt means another MCP process owns the dispatch boundary; a completed receipt can be replayed safely; an unknown receipt requires a fresh kicad_document_state observation because the legacy native command does not retain a process-owned receipt."),
+     Description("Read the durable per-instance MCP receipt for kicad_document_revert by its exact operation UUID and process epoch. This never reverts or retries a document. An admitted receipt means another MCP process owns the dispatch boundary; a completed receipt is paired with the native process receipt; an unknown receipt requires a fresh kicad_document_state observation because reload failure cannot be rolled back automatically."),
      KiCadCapability("document-lifecycle", "compiled-mcp plus durable state receipt", "operation UUID, process epoch and state-directory receipt"),
      KiCadVerification(KiCadVerificationLevel.InProcess, "DocumentLifecycleToolTests.RevertRequiresCompleteObservationAndVerifiesCleanState")]
     public Task<CallToolResult> RevertReceipt(string instanceId, string expectedProcessEpoch, string operationId,
@@ -363,7 +375,7 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
             || revisionEpoch == Guid.Empty || state.StateSha256.Length != 64
             || !state.StateSha256.All(char.IsAsciiHexDigitLower))
             throw new AutomationException("invalid_revert_observation", "Use a complete lifecycle observation with native identity, revision and state digest; it cannot be replaced by a filename or guessed revision.");
-        if (!state.CompleteChangeTracking || !state.DiskBaselineChecked || state.NativeFiles.Count == 0
+        if (!state.ProjectSettingsIncluded || state.NativeFiles.Count == 0
             || state.FileBaselines.Count != state.NativeFiles.Count
             || state.FileBaselines.Any(file => file is null || file.Status != NativeFileBaselineStatus.NfbsUnchanged
                 || !file.BaselineKnown || !file.CurrentKnown || !file.BaselineExists.Equals(file.CurrentExists)
@@ -372,7 +384,7 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
     }
 
     private static bool RevertStateIsClean(DocumentLifecycleState state) =>
-        state.NativeContentDirty == false && state.DiskBaselineChecked && state.CompleteChangeTracking
+        state.NativeContentDirty == false && state.ProjectSettingsIncluded
         && state.NativeFiles.Count > 0 && state.FileBaselines.Count == state.NativeFiles.Count
         && state.FileBaselines.All(file => file is not null && file.Status == NativeFileBaselineStatus.NfbsUnchanged
             && file.BaselineKnown && file.CurrentKnown && file.BaselineExists.Equals(file.CurrentExists)
@@ -438,7 +450,7 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
             };
             if (result.InstanceId != instanceId || result.ProcessEpoch != processEpoch
                 || result.OperationId != operationId || !result.Committed
-                || result.OperationOutcome != "completed" || result.NativeReceiptAvailable
+                || result.OperationOutcome != "completed" || !result.NativeReceiptAvailable
                 || !result.DiscardedUnsavedChanges || !result.PostStateVerified
                 || result.BeforeState is null || result.AfterState is null
                 || !result.BeforeState.Document.Equals(result.Document)
@@ -488,7 +500,8 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
     {
         if (!document.Equals(result.Document) || result.OperationId != id || result.ProcessEpoch != epoch
             || result.Status is not (LifecycleOperationStatus.LosSaved or LifecycleOperationStatus.LosRejected
-                or LifecycleOperationStatus.LosFailed or LifecycleOperationStatus.LosIndeterminate or LifecycleOperationStatus.LosClosed)
+                or LifecycleOperationStatus.LosFailed or LifecycleOperationStatus.LosIndeterminate
+                or LifecycleOperationStatus.LosClosed)
             || (expectedSuccess is not null && result.Status is (LifecycleOperationStatus.LosSaved or LifecycleOperationStatus.LosClosed)
                 && result.Status != expectedSuccess))
             throw new AutomationException("invalid_lifecycle_result", "Native operation result did not match the requested target and identity.");

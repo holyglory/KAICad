@@ -1926,7 +1926,13 @@ HANDLER_RESULT<Empty> API_HANDLER_PCB::handleRevertDocument(
 
     frame()->GetScreen()->SetContentModified( false );
     frame()->ReleaseFile();
-    frame()->OpenProjectFiles( std::vector<wxString>( 1, fn.GetFullPath() ), KICTL_REVERT );
+    if( !frame()->OpenProjectFiles( std::vector<wxString>( 1, fn.GetFullPath() ), KICTL_REVERT ) )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        error.set_error_message( "PCB reload failed; inspect native diagnostics and reobserve the editor" );
+        return tl::unexpected( error );
+    }
 
     return Empty();
 }

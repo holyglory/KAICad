@@ -189,7 +189,7 @@ public sealed class DocumentLifecycleToolTests
             Assert.IsFalse(reverted.IsError ?? false, reverted.StructuredContent?.GetRawText());
             Assert.IsTrue(reverted.StructuredContent!.Value.GetProperty("committed").GetBoolean());
             Assert.IsTrue(reverted.StructuredContent.Value.GetProperty("postStateVerified").GetBoolean());
-            Assert.IsFalse(reverted.StructuredContent.Value.GetProperty("nativeReceiptAvailable").GetBoolean());
+            Assert.IsTrue(reverted.StructuredContent.Value.GetProperty("nativeReceiptAvailable").GetBoolean());
             Assert.AreEqual(1, transport.RevertCalls);
 
             var replay = await tool.Revert(transport.Session.InstanceId, SchematicJson.Formatter.Format(complete), operationId, default);
@@ -278,6 +278,7 @@ public sealed class DocumentLifecycleToolTests
         ProcessEpoch = epoch, NativeIdentity = Guid.NewGuid().ToString("D"),
         Revision = new() { Epoch = Guid.NewGuid().ToString("D"), Sequence = 5 }, StateSha256 = new string('a', 64),
         Scope = DocumentLifecycleScope.DlsPcb, NativeContentDirty = dirty,
+        ProjectSettingsIncluded = true,
         CompleteChangeTracking = true, DiskBaselineChecked = true,
         NativeFiles = { Path.Combine(directory, "fixture.kicad_pcb") },
         FileBaselines = { new NativeFileBaselineState
@@ -307,7 +308,7 @@ public sealed class DocumentLifecycleToolTests
             var envelope = ApiRequest.Parser.ParseFrom(request);
             if (Failure is not null && (envelope.Message.Is(CheckedSaveDocument.Descriptor) || envelope.Message.Is(CheckedCloseDocument.Descriptor)))
                 return Task.FromException<byte[]>(Failure);
-            if (RevertFailure is not null && envelope.Message.Is(RevertDocument.Descriptor))
+            if (RevertFailure is not null && envelope.Message.Is(NativeCapabilityCheckedRevertDocument.Descriptor))
                 return Task.FromException<byte[]>(RevertFailure);
             if (ReceiptError is not null && envelope.Message.Is(ReadLifecycleOperation.Descriptor))
                 return Task.FromResult(new ApiResponse { Header = new() { KicadToken = Session.Epoch },
@@ -334,12 +335,20 @@ public sealed class DocumentLifecycleToolTests
                 return Task.FromResult(new ApiResponse { Header = new() { KicadToken = Session.Epoch },
                     Status = new() { Status = (ApiStatusCode)1 }, Message = Any.Pack(LifecycleState.Clone()) }.ToByteArray());
             }
-            else if (envelope.Message.TypeUrl == "type.googleapis.com/kiapi.common.commands.RevertDocument")
+            else if (envelope.Message.Is(NativeCapabilityCheckedRevertDocument.Descriptor))
             {
                 ++RevertCalls;
+                var revert = envelope.Message.Unpack<NativeCapabilityCheckedRevertDocument>();
                 LifecycleState.NativeContentDirty = false;
+                var native = new LifecycleOperationResult
+                {
+                    Document = revert.Document.Clone(), OperationId = revert.OperationId,
+                    ProcessEpoch = Session.Epoch, Status = LifecycleOperationStatus.LosSaved,
+                    RevertCompleted = true,
+                    ObservedState = LifecycleState.Clone()
+                };
                 return Task.FromResult(new ApiResponse { Header = new() { KicadToken = Session.Epoch },
-                    Status = new() { Status = (ApiStatusCode)1 }, Message = Any.Pack(new Empty()) }.ToByteArray());
+                    Status = new() { Status = (ApiStatusCode)1 }, Message = Any.Pack(native) }.ToByteArray());
             }
             else return Session.ExchangeAsync(endpoint, request, timeout, cancellationToken);
             return Task.FromResult(new ApiResponse { Header = new() { KicadToken = Session.Epoch },

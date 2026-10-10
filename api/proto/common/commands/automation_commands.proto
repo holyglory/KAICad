@@ -406,6 +406,8 @@ message LifecycleOperationResult {
   // a full disk, ...). A refusal that writable files would not fix never lists a file here. The
   // error message says why for each one.
   repeated string blocked_files = 401;
+  // True when this retained LOS_SAVED result is the terminal checked-revert receipt.
+  bool revert_completed = 402;
   // -- end lane 2D --
 }
 
@@ -1248,6 +1250,17 @@ message SchematicWiringDrawingSheet {
 // == end ==
 
 // == lane 2D messages ==
+// Checked reload of an explicitly observed schematic hierarchy or PCB. The
+// native lifecycle controller reserves operation_id before the final state
+// read, compares the complete observed digest/file baselines on KiCad's GUI
+// thread, and retains a terminal LifecycleOperationResult receipt. Reload
+// rollback is not promised when the native file reopen fails.
+message NativeCapabilityCheckedRevertDocument {
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  DocumentLifecycleState expected_state = 3;
+}
+
 // Read a process-owned simulator operation when the start response was lost.
 // This lookup is read-only: it never dispatches a new simulator job.  The
 // native peer requires the original schematic, operation identity and current

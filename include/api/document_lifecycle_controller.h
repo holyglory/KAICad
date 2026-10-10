@@ -29,6 +29,9 @@ public:
     bool IsCleanCloseActive() const { return m_cleanCloseActive; }
     static bool HasUnchangedFileBaselines( const kiapi::automation::v1::DocumentLifecycleState& aState );
 
+    API_RESULT HandleRevert( ApiRequest& aEnvelope, const std::string& aProcessEpoch,
+                             const DISPATCH& aDispatch );
+
     /**
      * Why KiCad cannot replace @a aPath, or an empty string when it can.  Native saves write a
      * sibling temporary file and rename it over the target, so the folder that holds the file
@@ -82,8 +85,10 @@ private:
     struct RECEIPT
     {
         kiapi::automation::v1::CheckedSaveDocument request;
+        kiapi::automation::v1::NativeCapabilityCheckedRevertDocument revert_request;
         kiapi::automation::v1::LifecycleOperationResult result;
         bool close = false;
+        bool revert = false;
     };
     // Never evict completed IDs: otherwise an old timeout retry could execute twice.
     std::map<std::string, RECEIPT> m_receipts;

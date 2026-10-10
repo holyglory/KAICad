@@ -33,18 +33,67 @@ public sealed partial class NativeSessionTests
         Assert.IsTrue(dirty.NativeContentDirty, "The native title edit must be unsaved before revert.");
 
         string operationId = Guid.NewGuid().ToString("D");
-        var request = new NativeCapabilityCheckedRevertDocument
+        string expectedStateJson = SchematicJson.Formatter.Format(dirty);
+        string statePath = Directory.CreateTempSubdirectory("kicad-checked-revert-mcp-").FullName;
+        try
         {
-            Document = document.Clone(), OperationId = operationId, ExpectedState = dirty.Clone()
-        };
-        var receipt = await client.InvokeAsync<NativeCapabilityCheckedRevertDocument, LifecycleOperationResult>(request, token);
-        Assert.AreEqual(LifecycleOperationStatus.LosSaved, receipt.Status, receipt.ErrorMessage);
-        Assert.IsTrue(receipt.RevertCompleted, "The native terminal result must identify a checked revert.");
-        Assert.IsFalse(receipt.ObservedState.NativeContentDirty);
-        Assert.AreEqual(document, receipt.Document);
+            await using (var mcp = await StdioMcpFixture.StartAsync(statePath,
+                Path.Combine(evidence, instanceId + "-checked-revert-mcp.stderr.log"), token))
+            {
+                RequireToolSuccess(await mcp.Tool("kicad_instance_attach",
+                    new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
+                var reply = await mcp.Tool("kicad_document_revert", new
+                {
+                    instanceId, expectedStateJson, operationId
+                });
+                RequireToolSuccess(reply);
+                var result = reply.GetProperty("structuredContent");
+                Assert.AreEqual("completed", result.GetProperty("operationOutcome").GetString());
+                Assert.IsTrue(result.GetProperty("nativeReceiptAvailable").GetBoolean());
+                Assert.IsTrue(result.GetProperty("postStateVerified").GetBoolean());
 
-        var replay = await client.InvokeAsync<NativeCapabilityCheckedRevertDocument, LifecycleOperationResult>(request, token);
-        Assert.AreEqual(receipt, replay, "The native operation UUID must replay its terminal receipt without reloading twice.");
+                var replay = await mcp.Tool("kicad_document_revert", new
+                {
+                    instanceId, expectedStateJson, operationId
+                });
+                RequireToolSuccess(replay);
+                Assert.IsTrue(replay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean());
+
+                var nativeReceipt = await mcp.Tool("kicad_document_operation", new
+                {
+                    instanceId, documentJson = SchematicJson.Formatter.Format(document), operationId,
+                    processEpoch = client.Epoch
+                });
+                RequireToolSuccess(nativeReceipt);
+                var nativeResult = LifecycleResult(nativeReceipt);
+                Assert.AreEqual(LifecycleOperationStatus.LosSaved, nativeResult.Status);
+                Assert.IsTrue(nativeResult.RevertCompleted);
+
+                var mcpReceipt = await mcp.Tool("kicad_document_revert_receipt", new
+                {
+                    instanceId, expectedProcessEpoch = client.Epoch, operationId
+                });
+                RequireToolSuccess(mcpReceipt);
+                Assert.AreEqual("completed", mcpReceipt.GetProperty("structuredContent").GetProperty("outcome").GetString());
+                Assert.IsTrue(mcpReceipt.GetProperty("structuredContent").GetProperty("nativeReceiptAvailable").GetBoolean());
+            }
+
+            // A new MCP process recovers the durable receipt without dispatching another reload.
+            await using (var reconnect = await StdioMcpFixture.StartAsync(statePath,
+                Path.Combine(evidence, instanceId + "-checked-revert-reconnect.stderr.log"), token))
+            {
+                RequireToolSuccess(await reconnect.Tool("kicad_instance_attach",
+                    new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
+                var recovered = await reconnect.Tool("kicad_document_revert_receipt", new
+                {
+                    instanceId, expectedProcessEpoch = client.Epoch, operationId
+                });
+                RequireToolSuccess(recovered);
+                Assert.AreEqual("completed", recovered.GetProperty("structuredContent").GetProperty("outcome").GetString());
+            }
+        }
+        finally { Directory.Delete(statePath, true); }
+
         Assert.AreEqual(original.Title, (await client.InvokeAsync<GetTitleBlockInfo, TitleBlockInfo>(
             new() { Document = document }, token)).Title, "Reload must discard the unsaved native title edit.");
 
@@ -60,7 +109,7 @@ public sealed partial class NativeSessionTests
             new() { Document = document }, token)).Title, "A stale checked revert must not mutate the document.");
 
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-checked-revert.json"),
-            SchematicJson.Formatter.Format(receipt), token);
+            SchematicJson.Formatter.Format(rejected), token);
     }
 
     private static async Task VerifyNativeCheckedPcbRevert(NativeClient client, DocumentSpecifier board,
@@ -97,15 +146,64 @@ public sealed partial class NativeSessionTests
         Assert.IsTrue(dirty.NativeContentDirty, "The temporary PCB track must make the board dirty.");
 
         string operationId = Guid.NewGuid().ToString("D");
-        var request = new NativeCapabilityCheckedRevertDocument
+        string expectedStateJson = SchematicJson.Formatter.Format(dirty);
+        string statePath = Directory.CreateTempSubdirectory("kicad-checked-pcb-revert-mcp-").FullName;
+        try
         {
-            Document = board.Clone(), OperationId = operationId, ExpectedState = dirty.Clone()
-        };
-        var receipt = await client.InvokeAsync<NativeCapabilityCheckedRevertDocument, LifecycleOperationResult>(request, token);
-        Assert.AreEqual(LifecycleOperationStatus.LosSaved, receipt.Status, receipt.ErrorMessage);
-        Assert.IsTrue(receipt.RevertCompleted);
-        Assert.IsFalse(receipt.ObservedState.NativeContentDirty);
-        Assert.AreEqual(receipt, await client.InvokeAsync<NativeCapabilityCheckedRevertDocument, LifecycleOperationResult>(request, token));
+            await using (var mcp = await StdioMcpFixture.StartAsync(statePath,
+                Path.Combine(evidence, instanceId + "-checked-pcb-revert-mcp.stderr.log"), token))
+            {
+                RequireToolSuccess(await mcp.Tool("kicad_instance_attach",
+                    new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
+                var reply = await mcp.Tool("kicad_document_revert", new
+                {
+                    instanceId, expectedStateJson, operationId
+                });
+                RequireToolSuccess(reply);
+                var result = reply.GetProperty("structuredContent");
+                Assert.AreEqual("completed", result.GetProperty("operationOutcome").GetString());
+                Assert.IsTrue(result.GetProperty("nativeReceiptAvailable").GetBoolean());
+                Assert.IsTrue(result.GetProperty("postStateVerified").GetBoolean());
+
+                var replay = await mcp.Tool("kicad_document_revert", new
+                {
+                    instanceId, expectedStateJson, operationId
+                });
+                RequireToolSuccess(replay);
+                Assert.IsTrue(replay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean());
+
+                var nativeReceipt = await mcp.Tool("kicad_document_operation", new
+                {
+                    instanceId, documentJson = SchematicJson.Formatter.Format(board), operationId,
+                    processEpoch = client.Epoch
+                });
+                RequireToolSuccess(nativeReceipt);
+                var nativeResult = LifecycleResult(nativeReceipt);
+                Assert.AreEqual(LifecycleOperationStatus.LosSaved, nativeResult.Status);
+                Assert.IsTrue(nativeResult.RevertCompleted);
+
+                var mcpReceipt = await mcp.Tool("kicad_document_revert_receipt", new
+                {
+                    instanceId, expectedProcessEpoch = client.Epoch, operationId
+                });
+                RequireToolSuccess(mcpReceipt);
+                Assert.AreEqual("completed", mcpReceipt.GetProperty("structuredContent").GetProperty("outcome").GetString());
+                Assert.IsTrue(mcpReceipt.GetProperty("structuredContent").GetProperty("nativeReceiptAvailable").GetBoolean());
+            }
+            await using (var reconnect = await StdioMcpFixture.StartAsync(statePath,
+                Path.Combine(evidence, instanceId + "-checked-pcb-revert-reconnect.stderr.log"), token))
+            {
+                RequireToolSuccess(await reconnect.Tool("kicad_instance_attach",
+                    new { endpoint = client.Endpoint, expectedInstanceId = instanceId }));
+                var recovered = await reconnect.Tool("kicad_document_revert_receipt", new
+                {
+                    instanceId, expectedProcessEpoch = client.Epoch, operationId
+                });
+                RequireToolSuccess(recovered);
+                Assert.AreEqual("completed", recovered.GetProperty("structuredContent").GetProperty("outcome").GetString());
+            }
+        }
+        finally { Directory.Delete(statePath, true); }
 
         var afterItems = (await Items()).Select(item => Any.Parser.ParseFrom(item.ToByteArray())).ToArray();
         Assert.AreEqual(beforeItems.Length, afterItems.Length, "Checked PCB revert must restore the original route inventory.");
@@ -121,6 +219,6 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(LifecycleOperationStatus.LosRejected, rejected.Status);
         Assert.AreEqual("stale_document_state", rejected.ErrorCode);
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-checked-pcb-revert.json"),
-            SchematicJson.Formatter.Format(receipt), token);
+            SchematicJson.Formatter.Format(rejected), token);
     }
 }

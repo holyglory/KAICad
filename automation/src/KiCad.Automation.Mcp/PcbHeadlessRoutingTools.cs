@@ -40,9 +40,18 @@ public sealed class PcbHeadlessRoutingTools(InstanceRegistry registry)
     ];
 
     [McpServerTool(Name = "kicad_pcb_route_plan", ReadOnly = true),
-     Description("Build a deterministic, read-only single-layer PCB route proposal from a checked board observation. planId is bound to the complete lifecycle checkpoint (including process epoch and revision) and canonical sorted rip-up IDs. requestJson is a JSON object with netName, optional netClassName, start/end {xNm,yNm}, copper layer, widthNm, clearanceNm, gridNm, explicit bounds {minXNm,minYNm,maxXNm,maxYNm}, and optional maxNodes/maxObstacleReport/includeFootprintEnvelopes/includeRipUpCandidate. The planner validates the native net and effective netclass, reads native tracks, arcs, vias, pads, zones, copper graphics and conservative footprint envelopes, expands axis-aligned obstacles, and runs a fixed-order 4-way A* search. When includeRipUpCandidate is true, it also returns an exact DeleteItems candidate for existing same-net copper so the route can be rerouted transactionally after DRC review. It never commits copper and never claims DRC, impedance, differential-pair, length or manufacturing correctness. Multi-layer changes and native push-and-shove remain separate operations.")]
-    [KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "explicit PCB lifecycle state, board obstacle snapshot, deterministic grid proposal"),
+     Description("Build a deterministic, read-only single-layer PCB route proposal from one explicit PCB and lifecycle checkpoint. Use either the legacy documentJson, expectedStateJson and requestJson protobuf/JSON strings or the typed document, expectedState and request objects, but never both forms for one value. The typed request exposes netName, optional netClassName, start/end {xNm,yNm}, copper layer, widthNm, clearanceNm, gridNm, explicit bounds {minXNm,minYNm,maxXNm,maxYNm}, and bounded obstacle/rip-up options. The planner validates the native net and effective netclass, reads native obstacles, and returns exact candidate geometry without committing copper or claiming DRC/manufacturing correctness.")]
+    [KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "typed or legacy explicit PCB lifecycle state, board obstacle snapshot, deterministic grid proposal"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> PlanStructured(string instanceId, CancellationToken cancellationToken,
+        string? documentJson = null, NativeDocumentInput? document = null,
+        string? expectedStateJson = null, DocumentLifecycleInput? expectedState = null,
+        string? requestJson = null, PcbRoutePlanRequestInput? request = null)
+        => RunAdmission(cancellationToken, () => Plan(instanceId,
+            ResolveDocumentJson(documentJson, document),
+            ResolveLifecycleJson(expectedStateJson, expectedState),
+            ResolveRequestJson(requestJson, request), cancellationToken), "invalid_route_plan_input");
+
     public Task<CallToolResult> Plan(string instanceId, string documentJson, string expectedStateJson,
         string requestJson, CancellationToken cancellationToken) => Execute(async () =>
     {
@@ -177,6 +186,82 @@ public sealed class PcbHeadlessRoutingTools(InstanceRegistry registry)
             drcValidated = false, nativeCommit = false, deterministicReplay = true
         });
     });
+
+    private static Task<CallToolResult> RunAdmission(CancellationToken cancellationToken,
+        Func<Task<CallToolResult>> operation, string invalidCode)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return RunAdmission(operation, invalidCode);
+    }
+
+    private static async Task<CallToolResult> RunAdmission(Func<Task<CallToolResult>> operation,
+        string invalidCode)
+    {
+        try { return await operation(); }
+        catch (AutomationException error)
+        {
+            return AdmissionError(error.Code, error.Message);
+        }
+        catch (JsonException error)
+        {
+            return AdmissionError(invalidCode, error.Message);
+        }
+        catch (ArgumentException error)
+        {
+            return AdmissionError(invalidCode, error.Message);
+        }
+    }
+
+    private static string ResolveDocumentJson(string? legacyJson, NativeDocumentInput? typed)
+    {
+        bool legacySupplied = legacyJson is not null;
+        if (legacySupplied && typed is not null)
+            throw new AutomationException("invalid_route_plan_input",
+                "Provide exactly one document descriptor: documentJson or document.");
+        if (typed is null && (!legacySupplied || string.IsNullOrWhiteSpace(legacyJson)))
+            throw new AutomationException("invalid_route_plan_input",
+                "Provide exactly one document descriptor: documentJson or document.");
+        return typed is not null
+            ? SchematicJson.Formatter.Format(NativeDocumentInput.ToNative(typed))
+            : legacyJson!;
+    }
+
+    private static string ResolveLifecycleJson(string? legacyJson, DocumentLifecycleInput? typed)
+    {
+        bool legacySupplied = legacyJson is not null;
+        if (legacySupplied && typed is not null)
+            throw new AutomationException("invalid_route_plan_input",
+                "Provide exactly one lifecycle observation: expectedStateJson or expectedState.");
+        if (typed is null && (!legacySupplied || string.IsNullOrWhiteSpace(legacyJson)))
+            throw new AutomationException("invalid_route_plan_input",
+                "Provide exactly one lifecycle observation: expectedStateJson or expectedState.");
+        return typed is not null
+            ? SchematicJson.Formatter.Format(DocumentLifecycleInput.ToNative(typed))
+            : legacyJson!;
+    }
+
+    private static string ResolveRequestJson(string? legacyJson, PcbRoutePlanRequestInput? typed)
+    {
+        bool legacySupplied = legacyJson is not null;
+        if (legacySupplied && typed is not null)
+            throw new AutomationException("invalid_route_plan_input",
+                "Provide exactly one route request: requestJson or request.");
+        if (typed is null && (!legacySupplied || string.IsNullOrWhiteSpace(legacyJson)))
+            throw new AutomationException("invalid_route_plan_input",
+                "Provide exactly one route request: requestJson or request.");
+        return typed is not null ? typed.ToRequestJson() : legacyJson!;
+    }
+
+    private static CallToolResult AdmissionError(string code, string message)
+    {
+        JsonElement structured = JsonSerializer.SerializeToElement(new { errorCode = code, errorMessage = message }, JsonOptions);
+        return new CallToolResult
+        {
+            IsError = true,
+            StructuredContent = structured,
+            Content = [new TextContentBlock { Text = structured.GetRawText() }]
+        };
+    }
 
     private static RoutePlanRequest ParseRequest(string value)
         => JsonSerializer.Deserialize<RoutePlanRequest>(value, JsonOptions)

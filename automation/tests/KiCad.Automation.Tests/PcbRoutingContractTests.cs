@@ -1,5 +1,6 @@
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
+using System.Text.Json;
 using Kiapi.Board.Types;
 using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
@@ -14,6 +15,102 @@ namespace KiCad.Automation.Tests;
 [TestClass]
 public sealed class PcbRoutingContractTests
 {
+    [TestMethod]
+    public void TypedHeadlessRouteRequestRoundTripsAllPlannerFieldsAndRejectsUnknownMembers()
+    {
+        var request = new PcbRoutePlanRequestInput
+        {
+            NetName = "USB_D+",
+            NetClassName = "HighSpeed",
+            Start = new() { XNm = 1_000, YNm = 2_000 },
+            End = new() { XNm = 9_000, YNm = 2_000 },
+            Layer = "F.Cu",
+            WidthNm = 180,
+            ClearanceNm = 120,
+            GridNm = 1_000,
+            Bounds = new() { MinXNm = 0, MinYNm = 0, MaxXNm = 10_000, MaxYNm = 10_000 },
+            MaxNodes = 40_000,
+            MaxObstacleReport = 37,
+            IncludeFootprintEnvelopes = false,
+            IncludeRipUpCandidate = true
+        };
+
+        string json = request.ToRequestJson();
+        JsonElement parsed = JsonDocument.Parse(json).RootElement;
+        Assert.AreEqual("USB_D+", parsed.GetProperty("netName").GetString());
+        Assert.AreEqual("HighSpeed", parsed.GetProperty("netClassName").GetString());
+        Assert.AreEqual(180, parsed.GetProperty("widthNm").GetInt64());
+        Assert.AreEqual(120, parsed.GetProperty("clearanceNm").GetInt64());
+        Assert.AreEqual(1_000, parsed.GetProperty("gridNm").GetInt64());
+        Assert.AreEqual(40_000, parsed.GetProperty("maxNodes").GetInt32());
+        Assert.AreEqual(37, parsed.GetProperty("maxObstacleReport").GetInt32());
+        Assert.IsFalse(parsed.GetProperty("includeFootprintEnvelopes").GetBoolean());
+        Assert.IsTrue(parsed.GetProperty("includeRipUpCandidate").GetBoolean());
+        Assert.AreEqual(1_000, parsed.GetProperty("start").GetProperty("xNm").GetInt64());
+        Assert.AreEqual(10_000, parsed.GetProperty("bounds").GetProperty("maxXNm").GetInt64());
+
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        Assert.ThrowsExactly<JsonException>(() => JsonSerializer.Deserialize<PcbRoutePlanRequestInput>(
+            "{\"netName\":\"A\",\"unexpected\":true}", options));
+        Assert.ThrowsExactly<JsonException>(() => JsonSerializer.Deserialize<PcbRoutePlanRequestInput>(
+            "{\"netName\":\"A\",\"netName\":\"B\"}", options));
+    }
+
+    [TestMethod]
+    public async Task CompiledStdioExposesTypedHeadlessRoutePlanAndRefusesMixedForms()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-route-plan-input-contract-").FullName;
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        try
+        {
+            await using var mcp = await StdioMcpFixture.StartAsync(
+                SyncHarnessProcessTests.ProductionStartInfo(), Path.Combine(root, "state"),
+                Path.Combine(root, "stderr.log"), deadline.Token);
+            JsonElement listed = await mcp.ListTools(null);
+            JsonElement tool = listed.GetProperty("tools").EnumerateArray()
+                .Single(item => item.GetProperty("name").GetString() == "kicad_pcb_route_plan");
+            JsonElement properties = tool.GetProperty("inputSchema").GetProperty("properties");
+            foreach (string property in new[] { "documentJson", "document", "expectedStateJson", "expectedState", "requestJson", "request" })
+                Assert.IsTrue(properties.TryGetProperty(property, out _), property);
+            Assert.IsTrue(properties.GetProperty("document").GetProperty("type").EnumerateArray()
+                .Any(item => item.GetString() == "object"));
+            Assert.IsTrue(properties.GetProperty("expectedState").GetProperty("type").EnumerateArray()
+                .Any(item => item.GetString() == "object"));
+            Assert.IsTrue(properties.GetProperty("request").GetProperty("type").EnumerateArray()
+                .Any(item => item.GetString() == "object"));
+            JsonElement requestProperties = properties.GetProperty("request").GetProperty("properties");
+            foreach (string property in new[] { "netName", "netClassName", "start", "end", "layer", "widthNm", "clearanceNm", "gridNm", "bounds", "maxNodes", "includeRipUpCandidate" })
+                Assert.IsTrue(requestProperties.TryGetProperty(property, out _), property);
+
+            JsonElement conflict = await mcp.Tool("kicad_pcb_route_plan", new
+            {
+                instanceId = Guid.NewGuid().ToString("D"),
+                documentJson = "{}",
+                document = new { },
+                expectedStateJson = "{}",
+                requestJson = "{}"
+            });
+            Assert.IsTrue(conflict.GetProperty("isError").GetBoolean(), conflict.GetRawText());
+            Assert.AreEqual("invalid_route_plan_input", conflict.GetProperty("structuredContent")
+                .GetProperty("errorCode").GetString(), conflict.GetRawText());
+
+            JsonElement empty = await mcp.Tool("kicad_pcb_route_plan", new
+            {
+                instanceId = Guid.NewGuid().ToString("D"),
+                documentJson = "{}",
+                expectedStateJson = "{}",
+                requestJson = ""
+            });
+            Assert.IsTrue(empty.GetProperty("isError").GetBoolean(), empty.GetRawText());
+            Assert.AreEqual("invalid_route_plan_input", empty.GetProperty("structuredContent")
+                .GetProperty("errorCode").GetString(), empty.GetRawText());
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, true);
+        }
+    }
+
     [TestMethod]
     public void RoutePreviewEndpointIdentityRoundTripsAndStaleCheckpointIsRejected()
     {

@@ -28,7 +28,7 @@ struct LIFECYCLE_FIXTURE
     std::string epoch = KIID().AsStdString();
     DocumentLifecycleState state;
     DOCUMENT_LIFECYCLE_CONTROLLER controller;
-    unsigned reads = 0, saves = 0, closes = 0;
+    unsigned reads = 0, saves = 0, closes = 0, reverts = 0;
     bool failSave = false, throwSave = false, failAfter = false, changeIdentity = false;
     bool closed = false, failClose = false;
     std::function<void()> persist;
@@ -47,6 +47,7 @@ struct LIFECYCLE_FIXTURE
         state.mutable_revision()->set_epoch( KIID().AsStdString() );
         state.mutable_revision()->set_sequence( 3 );
         state.set_state_sha256( std::string( 64, 'a' ) );
+        state.set_clean_checkpoint_sha256( std::string( 64, 'a' ) );
         state.set_scope( DLS_PCB ); state.set_project_settings_included( true );
         state.set_native_content_dirty( true );
         for( const char* name : { "fixture.kicad_pcb", "fixture.kicad_pro" } )
@@ -77,6 +78,15 @@ struct LIFECYCLE_FIXTURE
         CheckedCloseDocument close;
         close.mutable_document()->CopyFrom( save.document() ); close.set_operation_id( save.operation_id() );
         close.mutable_expected_state()->CopyFrom( save.expected_state() ); return close;
+    }
+    NativeCapabilityCheckedRevertDocument RevertRequest()
+    {
+        controller.AnnotateCleanState( state );
+        NativeCapabilityCheckedRevertDocument request;
+        request.mutable_document()->CopyFrom( state.document() );
+        request.set_operation_id( KIID().AsStdString() );
+        request.mutable_expected_state()->CopyFrom( state );
+        return request;
     }
     API_RESULT Dispatch( ApiRequest& request )
     {
@@ -124,6 +134,25 @@ struct LIFECYCLE_FIXTURE
                 error.set_error_message( "Fixture close veto" ); return tl::unexpected( error );
             }
             closed = true;
+            reply.mutable_message()->PackFrom( google::protobuf::Empty{} );
+        }
+        else if( request.message().Is<kiapi::common::commands::RevertDocument>() )
+        {
+            ++reverts;
+            if( failSave )
+            {
+                ApiResponseStatus error;
+                error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+                error.set_error_message( "Fixture reload failure" );
+                return tl::unexpected( error );
+            }
+
+            state.set_native_content_dirty( false );
+            state.set_state_sha256( state.clean_checkpoint_sha256() );
+            // PCB reloads get a fresh board identity; the checked controller accepts that
+            // identity only when its revision epoch is rebound to the new container.
+            state.set_native_identity( KIID().AsStdString() );
+            state.mutable_revision()->set_epoch( state.native_identity() );
             reply.mutable_message()->PackFrom( google::protobuf::Empty{} );
         }
         else throw std::runtime_error( "Unexpected lifecycle dispatch" );
@@ -367,6 +396,28 @@ BOOST_AUTO_TEST_CASE( SaveAndReceiptReplayAreProcessOwnedAndNeverRepeatDispatch 
     query.mutable_document()->CopyFrom( request.document() );
     query.set_process_epoch( KIID().AsStdString() ); BOOST_CHECK( !fixture.Call( query ) );
     BOOST_CHECK_EQUAL( fixture.saves, 1 );
+}
+
+BOOST_AUTO_TEST_CASE( CheckedRevertRequiresCleanCheckpointAndReplaysItsNativeReceipt )
+{
+    LIFECYCLE_FIXTURE fixture;
+    auto request = fixture.RevertRequest();
+    auto result = fixture.Result( request );
+    BOOST_CHECK( result.status() == LOS_REVERTED );
+    BOOST_CHECK( result.revert_completed() );
+    BOOST_CHECK_EQUAL( fixture.reverts, 1 );
+    BOOST_CHECK( result.has_observed_state() );
+    BOOST_CHECK_EQUAL( result.observed_state().state_sha256(), result.observed_state().clean_checkpoint_sha256() );
+
+    auto replay = fixture.Result( request );
+    BOOST_CHECK( google::protobuf::util::MessageDifferencer::Equals( result, replay ) );
+    BOOST_CHECK_EQUAL( fixture.reverts, 1 );
+
+    LIFECYCLE_FIXTURE withoutCheckpoint;
+    withoutCheckpoint.state.clear_clean_checkpoint_sha256();
+    auto refused = withoutCheckpoint.Result( withoutCheckpoint.RevertRequest() );
+    BOOST_CHECK( refused.status() == LOS_REJECTED );
+    BOOST_CHECK_EQUAL( withoutCheckpoint.reverts, 0 );
 }
 
 BOOST_AUTO_TEST_CASE( StaleIdentityRevisionContentAndDiskNeverSave )

@@ -16,10 +16,9 @@ internal enum DocumentRevertReceiptOutcome
 }
 
 /// <summary>
-/// The MCP-side identity and terminal evidence for a document revert.  The native
-/// command used by this compatibility path has no process-owned receipt, so the
-/// admission record is itself durable recovery evidence and an existing admission
-/// is never dispatched a second time.
+/// The MCP-side identity and terminal evidence for a document revert. The durable
+/// record prevents a second dispatch across MCP processes; when the native checked
+/// controller has a process-owned receipt, the MCP admission can be reconciled to it.
 /// </summary>
 internal sealed record DocumentRevertReceiptRecord(
     [property: JsonPropertyName("version")] int Version,
@@ -156,7 +155,12 @@ internal sealed class DocumentRevertReceiptStore
         {
             VerifyRequest(existing, receipt.InstanceId, receipt.OperationId, receipt.ProcessEpoch, receipt.Fingerprint);
             if (existing.Outcome == receipt.Outcome && Equivalent(existing, receipt)) return;
-            if (existing.Outcome != DocumentRevertReceiptOutcome.Admitted)
+            // A delivered transport loss records Unknown before the native process can be
+            // queried. Reconciliation may promote that record only to a fully cross-checked
+            // Completed result; no path may replace Unknown with another uncertain outcome.
+            if (existing.Outcome != DocumentRevertReceiptOutcome.Admitted
+                && !(existing.Outcome == DocumentRevertReceiptOutcome.Unknown
+                     && receipt.Outcome == DocumentRevertReceiptOutcome.Completed))
                 throw new AutomationException("revert_receipt_conflict", "The document-revert operation already has a different terminal receipt.");
         }
 

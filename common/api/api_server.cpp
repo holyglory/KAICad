@@ -52,6 +52,24 @@
 
 using kiapi::common::ApiRequest, kiapi::common::ApiResponse, kiapi::common::ApiStatusCode;
 
+namespace
+{
+class CHECKED_REVERT_ACTIVE_GUARD
+{
+public:
+    explicit CHECKED_REVERT_ACTIVE_GUARD( bool& aActive ) : m_active( aActive ), m_previous( aActive )
+    {
+        m_active = true;
+    }
+
+    ~CHECKED_REVERT_ACTIVE_GUARD() { m_active = m_previous; }
+
+private:
+    bool& m_active;
+    bool  m_previous;
+};
+} // namespace
+
 
 wxString KICAD_API_SERVER::s_logFileName = "api.log";
 
@@ -471,7 +489,20 @@ void KICAD_API_SERVER::handleApiRequestString( std::string& aRequestString )
 
 API_RESULT KICAD_API_SERVER::DispatchToHandlers( ApiRequest& aRequest )
 {
+    return DispatchToHandlers( aRequest, false );
+}
+
+
+API_RESULT KICAD_API_SERVER::DispatchToHandlers( ApiRequest& aRequest, bool aLifecycleInternal )
+{
     wxASSERT( wxIsMainThread() );
+    if( m_checkedRevertActive && !aLifecycleInternal )
+    {
+        ApiResponseStatus error;
+        error.set_status( ApiStatusCode::AS_BUSY );
+        error.set_error_message( "A checked document reload is active; nested external requests are refused" );
+        return tl::unexpected( error );
+    }
     if( CHECKED_SCHEMATIC_CONTROLLER::Handles( aRequest ) )
     {
         if( !IsAutomation() )
@@ -482,7 +513,7 @@ API_RESULT KICAD_API_SERVER::DispatchToHandlers( ApiRequest& aRequest )
             return tl::unexpected( error );
         }
         return m_checkedSchematic->Handle( aRequest, m_token,
-                [this]( ApiRequest& request ) { return DispatchToHandlers( request ); } );
+                [this]( ApiRequest& request ) { return DispatchToHandlers( request, true ); } );
     }
     if( CHECKED_PCB_ROUTE_CONTROLLER::Handles( aRequest ) )
     {
@@ -494,7 +525,7 @@ API_RESULT KICAD_API_SERVER::DispatchToHandlers( ApiRequest& aRequest )
             return tl::unexpected( error );
         }
         return m_checkedPcbRoute->Handle( aRequest, m_token,
-                [this]( ApiRequest& request ) { return DispatchToHandlers( request ); } );
+                [this]( ApiRequest& request ) { return DispatchToHandlers( request, true ); } );
     }
     if( CHECKED_PCB_ITEM_CONTROLLER::Handles( aRequest ) )
     {
@@ -506,7 +537,7 @@ API_RESULT KICAD_API_SERVER::DispatchToHandlers( ApiRequest& aRequest )
             return tl::unexpected( error );
         }
         return m_checkedPcbItem->Handle( aRequest, m_token,
-                [this]( ApiRequest& request ) { return DispatchToHandlers( request ); } );
+                [this]( ApiRequest& request ) { return DispatchToHandlers( request, true ); } );
     }
     if( DOCUMENT_LIFECYCLE_CONTROLLER::Handles( aRequest ) )
     {
@@ -517,8 +548,14 @@ API_RESULT KICAD_API_SERVER::DispatchToHandlers( ApiRequest& aRequest )
             error.set_error_message( "Checked lifecycle operations require an explicit automation instance" );
             return tl::unexpected( error );
         }
-        return m_lifecycle->Handle( aRequest, m_token,
-                [this]( ApiRequest& request ) { return DispatchToHandlers( request ); } );
+        const bool checkedRevert = aRequest.message().Is<kiapi::automation::v1::NativeCapabilityCheckedRevertDocument>();
+        auto dispatch = [this]( ApiRequest& request ) { return DispatchToHandlers( request, true ); };
+        if( checkedRevert )
+        {
+            CHECKED_REVERT_ACTIVE_GUARD guard( m_checkedRevertActive );
+            return m_lifecycle->Handle( aRequest, m_token, dispatch );
+        }
+        return m_lifecycle->Handle( aRequest, m_token, dispatch );
     }
     ApiResponseStatus unhandled;
     unhandled.set_status( ApiStatusCode::AS_UNHANDLED );

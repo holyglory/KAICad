@@ -548,10 +548,11 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::HandleRevert( ApiRequest& aEnvelope,
             return fail( LOS_REJECTED, "stale_document_state", "Document or disk state changed; obtain a fresh observation" );
         if( !Uuid( before->native_identity() ) || !before->has_revision() || !Uuid( before->revision().epoch() )
                 || !Digest( before->state_sha256() ) || !before->project_settings_included()
+                || !Digest( before->clean_checkpoint_sha256() )
                 || ( before->scope() != DLS_SCHEMATIC_HIERARCHY && before->scope() != DLS_PCB )
                 || !FileCoverage( *before, false ) )
             return fail( LOS_REJECTED, "file_baseline_conflict",
-                         "Loaded file coverage is incomplete or differs from disk; no revert was attempted" );
+                         "Loaded file coverage or clean checkpoint is incomplete; no revert was attempted" );
 
         kiapi::common::commands::RevertDocument native;
         native.mutable_document()->CopyFrom( request.document() );

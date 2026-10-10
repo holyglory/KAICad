@@ -101,11 +101,28 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
             var admission = store.Reserve(instanceId, id, client.Epoch, fingerprint);
             if (!admission.Created)
             {
-                if (admission.Receipt.Outcome == DocumentRevertReceiptOutcome.Unknown)
-                    throw new AutomationException("operation_outcome_unknown", admission.Receipt.Message
-                        ?? "The revert operation has an indeterminate native outcome; inspect kicad_document_state before another action.");
                 if (admission.Receipt.Outcome == DocumentRevertReceiptOutcome.Completed)
                     return ReadCompletedReceipt(admission.Receipt, instanceId, id, client.Epoch, fingerprint) with { Replayed = true };
+
+                // A previous MCP process may have lost its reply after native admission. Ask the
+                // process-owned lifecycle controller for the same operation before leaving an
+                // admitted/unknown durable receipt permanently unresolved. This query is
+                // read-only and never dispatches the destructive reload a second time.
+                var reconciled = await ReconcileNativeReceipt(store, admission.Receipt, instanceId, id,
+                    fingerprint, expected, client, cancellationToken);
+                if (reconciled is not null)
+                    return reconciled;
+
+                // Reconciliation can promote an admission to Unknown when native explicitly
+                // confirms that it never started the operation. Re-read the durable record
+                // before choosing the caller-facing state; the immutable reservation snapshot
+                // above cannot reflect that terminal transition.
+                var currentAdmission = store.Read(instanceId, id) ?? admission.Receipt;
+                if (currentAdmission.Outcome == DocumentRevertReceiptOutcome.Unknown)
+                    throw new AutomationException("operation_outcome_unknown", currentAdmission.Message
+                        ?? "The revert operation has an indeterminate native outcome; inspect kicad_document_state before another action.");
+                if (currentAdmission.Outcome == DocumentRevertReceiptOutcome.Completed)
+                    return ReadCompletedReceipt(currentAdmission, instanceId, id, client.Epoch, fingerprint) with { Replayed = true };
                 throw new AutomationException("operation_in_progress",
                     $"Revert operation {id} is already admitted by another MCP process. Inspect kicad_document_revert_receipt or kicad_document_state before retrying; no second native dispatch was made.");
             }
@@ -382,6 +399,7 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
             || !state.StateSha256.All(char.IsAsciiHexDigitLower))
             throw new AutomationException("invalid_revert_observation", "Use a complete lifecycle observation with native identity, revision and state digest; it cannot be replaced by a filename or guessed revision.");
         if (!state.ProjectSettingsIncluded || state.NativeFiles.Count == 0
+            || !DocumentRevertReceiptRecord.Sha256(state.CleanCheckpointSha256)
             || state.FileBaselines.Count != state.NativeFiles.Count
             || state.FileBaselines.Any(file => file is null || file.Status != NativeFileBaselineStatus.NfbsUnchanged
                 || !file.BaselineKnown || !file.CurrentKnown || !file.BaselineExists.Equals(file.CurrentExists)
@@ -395,6 +413,141 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
         && state.FileBaselines.All(file => file is not null && file.Status == NativeFileBaselineStatus.NfbsUnchanged
             && file.BaselineKnown && file.CurrentKnown && file.BaselineExists.Equals(file.CurrentExists)
             && file.BaselineSha256 == file.CurrentSha256 && file.BaselineBytes == file.CurrentBytes);
+
+    private static async Task<DocumentRevertResult?> ReconcileNativeReceipt(
+        DocumentRevertReceiptStore store, DocumentRevertReceiptRecord persisted, string instanceId,
+        string operationId, string fingerprint, DocumentLifecycleState expected, NativeClient client,
+        CancellationToken cancellationToken)
+    {
+        LifecycleOperationResult native;
+        try
+        {
+            native = await client.InvokeAsync<ReadLifecycleOperation, LifecycleOperationResult>(new()
+            {
+                Document = expected.Document.Clone(), OperationId = operationId, ProcessEpoch = client.Epoch
+            }, cancellationToken);
+        }
+        catch (NativeApiException error) when (error.Status == 3
+            && error.Message.StartsWith(NativeUnknownOperation + ":", StringComparison.Ordinal))
+        {
+            // Native explicitly says this operation never entered its receipt table. Promote a
+            // still-admitted MCP reservation to Unknown so it cannot block every future retry;
+            // no destructive native request is dispatched here.
+            if (persisted.Outcome == DocumentRevertReceiptOutcome.Admitted)
+                RememberRevertUnknown(store, operationId, fingerprint, instanceId, client.Epoch,
+                    $"KiCad has no native receipt for admitted revert operation {operationId}; no native reload was started. Obtain a fresh kicad_document_state observation before any new action.");
+            return null;
+        }
+        catch (NativeApiException error) when (error.Status == 3)
+        {
+            throw new AutomationException("revert_receipt_conflict",
+                $"The native receipt for revert operation {operationId} does not belong to this document ({error.Message}).");
+        }
+        catch (OperationCanceledException)
+        {
+            return null;
+        }
+        catch (NngException)
+        {
+            return null;
+        }
+
+        try
+        {
+            ValidateResult(native, expected.Document, operationId, client.Epoch);
+        }
+        catch (AutomationException error)
+        {
+            throw new AutomationException("revert_receipt_conflict",
+                $"The native receipt for revert operation {operationId} is not an exact lifecycle result ({error.Message}).");
+        }
+
+        if (native.Status is LifecycleOperationStatus.LosSaved or LifecycleOperationStatus.LosClosed)
+            throw new AutomationException("revert_receipt_conflict",
+                $"The native receipt for revert operation {operationId} belongs to a different lifecycle operation ({native.Status}).");
+
+        if (native.Status != LifecycleOperationStatus.LosReverted || !native.RevertCompleted)
+        {
+            // LOS_INDETERMINATE/operation_in_progress means another caller is still inside the
+            // controller. A terminal refusal or failure is retained as unknown, but never
+            // converted into a successful MCP receipt.
+            if (persisted.Outcome == DocumentRevertReceiptOutcome.Admitted
+                && !(native.Status == LifecycleOperationStatus.LosIndeterminate
+                     && native.ErrorCode == "operation_in_progress"))
+            {
+                string message = $"KiCad retained revert operation {operationId} with native status {native.Status}: "
+                                 + (string.IsNullOrWhiteSpace(native.ErrorMessage)
+                                     ? "inspect kicad_document_state before another action."
+                                     : native.ErrorMessage);
+                RememberRevertUnknown(store, operationId, fingerprint, instanceId, client.Epoch, message);
+            }
+
+            return null;
+        }
+
+        DocumentLifecycleState after;
+        try
+        {
+            after = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(new()
+            {
+                Document = expected.Document.Clone()
+            }, cancellationToken);
+        }
+        catch (Exception)
+        {
+            if (persisted.Outcome == DocumentRevertReceiptOutcome.Admitted)
+                RememberRevertUnknown(store, operationId, fingerprint, instanceId, client.Epoch,
+                    $"KiCad has a terminal native revert receipt for operation {operationId}, but its post-revert state could not be read; inspect kicad_document_state before another action.");
+            return null;
+        }
+
+        bool cleanCheckpointMatches = DocumentRevertReceiptRecord.Sha256(expected.CleanCheckpointSha256)
+            && after.StateSha256 == expected.CleanCheckpointSha256
+            && after.CleanCheckpointSha256 == expected.CleanCheckpointSha256;
+        if (!after.Document.Equals(expected.Document) || after.ProcessEpoch != client.Epoch
+            || !RevertStateIsClean(after) || !cleanCheckpointMatches)
+        {
+            if (persisted.Outcome == DocumentRevertReceiptOutcome.Admitted)
+                RememberRevertUnknown(store, operationId, fingerprint, instanceId, client.Epoch,
+                    $"KiCad has a terminal native revert receipt for operation {operationId}, but the post-revert lifecycle state is not the expected clean checkpoint; inspect kicad_document_state before another action.");
+            return null;
+        }
+
+        var result = new DocumentRevertResult
+        {
+            InstanceId = instanceId,
+            ProcessEpoch = client.Epoch,
+            OperationId = operationId,
+            Document = expected.Document.Clone(),
+            OperationOutcome = "completed",
+            Committed = true,
+            Replayed = true,
+            NativeReceiptAvailable = true,
+            DiscardedUnsavedChanges = true,
+            BeforeState = expected.Clone(),
+            AfterState = after,
+            PostStateVerified = true,
+            Verification = "native terminal revert receipt reconciled after MCP transport loss; editor state matches the clean checkpoint",
+            TransportRetrySafe = false
+        };
+
+        try
+        {
+            RememberRevertCompleted(store, operationId, fingerprint, result);
+        }
+        catch (AutomationException error) when (error.Code == "revert_receipt_conflict")
+        {
+            // A concurrent original caller may have written the completed receipt between the
+            // read and this promotion. Re-read that terminal record instead of surfacing a
+            // false conflict or dispatching again.
+            var current = store.Read(instanceId, operationId);
+            if (current?.Outcome == DocumentRevertReceiptOutcome.Completed)
+                return ReadCompletedReceipt(current, instanceId, operationId, client.Epoch, fingerprint) with { Replayed = true };
+            throw;
+        }
+
+        return result;
+    }
 
     private static string RevertFingerprint(string instanceId, DocumentLifecycleState state, string operationId) =>
         DocumentRevertReceiptStore.Fingerprint(instanceId, operationId, SchematicJson.Formatter.Format(state));

@@ -159,6 +159,8 @@ private:
 
     void handleApiRequestString( std::string& aRequestString );
 
+    API_RESULT DispatchToHandlers( ApiRequest& aRequest, bool aLifecycleInternal );
+
     void log( const std::string& aOutput );
 
     std::unique_ptr<KINNG_REQUEST_SERVER> m_server;
@@ -169,6 +171,7 @@ private:
 
     std::set<API_HANDLER*> m_handlers;
     std::unique_ptr<DOCUMENT_LIFECYCLE_CONTROLLER> m_lifecycle;
+    bool m_checkedRevertActive = false;
     std::unique_ptr<CHECKED_SCHEMATIC_CONTROLLER> m_checkedSchematic;
     std::unique_ptr<CHECKED_PCB_ROUTE_CONTROLLER> m_checkedPcbRoute;
     std::unique_ptr<CHECKED_PCB_ITEM_CONTROLLER> m_checkedPcbItem;

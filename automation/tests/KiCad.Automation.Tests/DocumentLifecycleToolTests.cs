@@ -274,6 +274,86 @@ public sealed class DocumentLifecycleToolTests
         finally { Directory.Delete(directory, true); }
     }
 
+    [TestMethod]
+    public async Task RevertRetryReconcilesTerminalNativeReceiptWithoutRedispatch()
+    {
+        string directory = Directory.CreateTempSubdirectory("lifecycle-revert-reconcile-").FullName;
+        try
+        {
+            var transport = new LifecycleTransport();
+            transport.Session.Epoch = Guid.NewGuid().ToString("D");
+            transport.Session.ProjectPath = Path.Combine(directory, "fixture.kicad_pro");
+            var registry = new InstanceRegistry(transport, directory);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "native.sock")), transport.Session.InstanceId);
+            var tool = new DocumentLifecycleTools(registry);
+            var complete = CompleteState(directory, transport.Session.Epoch, dirty: true);
+            transport.LifecycleState = complete.Clone();
+            string operationId = Guid.NewGuid().ToString("D");
+            transport.RevertFailure = new NngOperationCanceledException(8, "reply lost", true, false);
+
+            var cancelled = await tool.Revert(transport.Session.InstanceId, SchematicJson.Formatter.Format(complete), operationId, default);
+            Assert.IsTrue(cancelled.IsError, cancelled.StructuredContent?.GetRawText());
+            Assert.AreEqual("operation_outcome_unknown", cancelled.StructuredContent!.Value.GetProperty("code").GetString());
+
+            // Simulate the native process completing the admitted reload after the MCP reply was
+            // lost. Reconciliation must read this receipt and the clean state, never dispatching
+            // NativeCapabilityCheckedRevertDocument again.
+            transport.RevertFailure = null;
+            transport.LifecycleState.NativeContentDirty = false;
+            transport.LifecycleState.StateSha256 = transport.LifecycleState.CleanCheckpointSha256;
+            transport.RevertReceiptResult = new LifecycleOperationResult
+            {
+                Document = complete.Document.Clone(), OperationId = operationId,
+                ProcessEpoch = transport.Session.Epoch, Status = LifecycleOperationStatus.LosReverted,
+                RevertCompleted = true
+            };
+
+            var reconciled = await tool.Revert(transport.Session.InstanceId,
+                SchematicJson.Formatter.Format(complete), operationId, default);
+            Assert.IsFalse(reconciled.IsError ?? false, reconciled.StructuredContent?.GetRawText());
+            Assert.IsTrue(reconciled.StructuredContent!.Value.GetProperty("replayed").GetBoolean());
+            Assert.IsTrue(reconciled.StructuredContent.Value.GetProperty("nativeReceiptAvailable").GetBoolean());
+            Assert.AreEqual(0, transport.RevertCalls, "Receipt reconciliation must never dispatch a second reload.");
+
+            var receipt = await tool.RevertReceipt(transport.Session.InstanceId, transport.Session.Epoch, operationId, default);
+            Assert.IsFalse(receipt.IsError ?? false, receipt.StructuredContent?.GetRawText());
+            Assert.AreEqual("completed", receipt.StructuredContent!.Value.GetProperty("outcome").GetString());
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [TestMethod]
+    public async Task AdmittedRevertWithoutNativeReceiptBecomesUnknownWithoutDispatch()
+    {
+        string directory = Directory.CreateTempSubdirectory("lifecycle-revert-admitted-").FullName;
+        try
+        {
+            var transport = new LifecycleTransport();
+            transport.Session.Epoch = Guid.NewGuid().ToString("D");
+            transport.Session.ProjectPath = Path.Combine(directory, "fixture.kicad_pro");
+            var registry = new InstanceRegistry(transport, directory);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "native.sock")), transport.Session.InstanceId);
+            var tool = new DocumentLifecycleTools(registry);
+            var complete = CompleteState(directory, transport.Session.Epoch, dirty: true);
+            string operationId = Guid.NewGuid().ToString("D");
+            string fingerprint = DocumentRevertReceiptStore.Fingerprint(transport.Session.InstanceId, operationId,
+                SchematicJson.Formatter.Format(complete));
+            new DocumentRevertReceiptStore(directory).Reserve(transport.Session.InstanceId, operationId,
+                transport.Session.Epoch, fingerprint);
+
+            var refused = await tool.Revert(transport.Session.InstanceId,
+                SchematicJson.Formatter.Format(complete), operationId, default);
+            Assert.IsTrue(refused.IsError, refused.StructuredContent?.GetRawText());
+            Assert.AreEqual("operation_outcome_unknown", refused.StructuredContent!.Value.GetProperty("code").GetString());
+            Assert.AreEqual(0, transport.RevertCalls);
+
+            var receipt = await tool.RevertReceipt(transport.Session.InstanceId, transport.Session.Epoch, operationId, default);
+            Assert.IsFalse(receipt.IsError ?? false, receipt.StructuredContent?.GetRawText());
+            Assert.AreEqual("indeterminate", receipt.StructuredContent!.Value.GetProperty("outcome").GetString());
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
     private static DocumentLifecycleState State(string directory, string epoch) => new()
     {
         Document = new() { Type = (DocumentType)3, BoardFilename = "fixture.kicad_pcb",
@@ -311,6 +391,7 @@ public sealed class DocumentLifecycleToolTests
         public bool WrongTarget { get; set; }
         public NngException? Failure { get; set; }
         public Exception? RevertFailure { get; set; }
+        public LifecycleOperationResult? RevertReceiptResult { get; set; }
         public string? ReceiptError { get; set; }
         public int RevertCalls { get; private set; }
         public DocumentLifecycleState LifecycleState { get; set; } = new();
@@ -333,7 +414,21 @@ public sealed class DocumentLifecycleToolTests
                     ProcessEpoch = Session.Epoch, Status = Status, ErrorCode = Status == LifecycleOperationStatus.LosSaved ? "" : "fixture_failure" };
                 if (WrongTarget) result.Document.BoardFilename = "other.kicad_pcb";
             }
-            else if (envelope.Message.Is(ReadLifecycleOperation.Descriptor)) ++LifecycleCalls;
+            else if (envelope.Message.Is(ReadLifecycleOperation.Descriptor))
+            {
+                ++LifecycleCalls;
+                if (RevertReceiptResult is not null)
+                    return Task.FromResult(new ApiResponse { Header = new() { KicadToken = Session.Epoch },
+                        Status = new() { Status = (ApiStatusCode)1 }, Message = Any.Pack(RevertReceiptResult.Clone()) }.ToByteArray());
+
+                if (result is not null)
+                    return Task.FromResult(new ApiResponse { Header = new() { KicadToken = Session.Epoch },
+                        Status = new() { Status = (ApiStatusCode)1 }, Message = Any.Pack(result) }.ToByteArray());
+
+                return Task.FromResult(new ApiResponse { Header = new() { KicadToken = Session.Epoch },
+                    Status = new() { Status = (ApiStatusCode)3,
+                        ErrorMessage = DocumentLifecycleTools.NativeUnknownOperation + ": fixture has no receipt" } }.ToByteArray());
+            }
             else if (envelope.Message.Is(CheckedCloseDocument.Descriptor))
             {
                 ++LifecycleCalls;

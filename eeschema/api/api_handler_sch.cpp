@@ -88,6 +88,7 @@
 #include <sch_tablecell.h>
 #include <sch_symbol.h>
 #include <schematic.h>
+#include <eeschema_helpers.h>
 #include <tool/actions.h>
 #include <tool/tool_manager.h>
 #include <tools/sch_actions.h>
@@ -5096,6 +5097,47 @@ API_HANDLER_SCH::handleRevertDocument( const HANDLER_CONTEXT<RevertDocument>& aC
 
     wxFileName fn = project().AbsolutePath( schematic()->GetFileName() );
 
+    // Parse every declared sheet into a detached SCHEMATIC before releasing
+    // the live editor.  OpenProjectFiles still owns the GUI swap; this guard
+    // prevents malformed/unreadable disk content from destroying the live
+    // in-memory document before the reload starts.
+    try
+    {
+        // Use an analysis-only project copy so the detached parser cannot update the live
+        // project's settings, lock or editor/library registrations while it validates the file.
+        std::unique_ptr<PROJECT> candidateProject = project().CloneForAnalysis();
+        std::unique_ptr<SCHEMATIC> candidate( EESCHEMA_HELPERS::LoadSchematic(
+                fn.GetFullPath(), SCH_IO_MGR::SCH_KICAD, false, false, candidateProject.get(), false ) );
+        const auto& declaredSheets = candidateProject->GetProjectFile().GetTopLevelSheets();
+        const bool allDeclaredFilesExist = std::all_of( declaredSheets.begin(), declaredSheets.end(),
+                [&]( const TOP_LEVEL_SHEET_INFO& sheet )
+                {
+                    wxFileName declared( candidateProject->GetProjectPath(), sheet.filename );
+                    declared.MakeAbsolute();
+                    return declared.FileExists();
+                } );
+        const bool completeTopLevelLoad = declaredSheets.size() <= 1
+                || ( candidate && candidate->GetTopLevelSheets().size() == declaredSheets.size() );
+        const bool completeHierarchy = candidate && candidate->HasHierarchy()
+                && std::all_of( candidate->Hierarchy().begin(), candidate->Hierarchy().end(),
+                        []( const SCH_SHEET_PATH& path ) { return path.LastScreen() != nullptr; } );
+        if( !candidate || !allDeclaredFilesExist || !completeTopLevelLoad || !completeHierarchy )
+        {
+            ApiResponseStatus error;
+            error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            error.set_error_message( "Schematic detached reload preflight failed; the live document was preserved" );
+            return tl::unexpected( error );
+        }
+    }
+    catch( const std::exception& error )
+    {
+        ApiResponseStatus failure;
+        failure.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        failure.set_error_message( "Schematic detached reload preflight failed; the live document was preserved: "
+                                    + std::string( error.what() ) );
+        return tl::unexpected( failure );
+    }
+
     if( m_frame->GetCurrentSheet().Last() != &schematic()->Root() )
     {
         SCH_SHEET_PATH rootSheetPath = schematic()->Hierarchy().at( 0 );
@@ -5112,7 +5154,7 @@ API_HANDLER_SCH::handleRevertDocument( const HANDLER_CONTEXT<RevertDocument>& aC
     {
         ApiResponseStatus e;
         e.set_status( ApiStatusCode::AS_BAD_REQUEST );
-        e.set_error_message( "Schematic reload failed; inspect native diagnostics and reobserve the editor" );
+        e.set_error_message( "Schematic reload failed after detached preflight; rollback_unavailable: inspect native diagnostics and reobserve the editor" );
         return tl::unexpected( e );
     }
 

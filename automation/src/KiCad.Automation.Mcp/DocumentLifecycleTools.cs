@@ -278,7 +278,7 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
             return Task.FromResult<object>(new
             {
                 instanceId, processEpoch = expectedProcessEpoch, operationId = id,
-                found = true, outcome = "completed", nativeReceiptAvailable = false,
+                found = true, outcome = "completed", nativeReceiptAvailable = true,
                 retryDispatched = false, receipt = result
             });
         });

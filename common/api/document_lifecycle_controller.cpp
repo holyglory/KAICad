@@ -573,9 +573,13 @@ API_RESULT DOCUMENT_LIFECYCLE_CONTROLLER::HandleRevert( ApiRequest& aEnvelope,
             return fail( LOS_INDETERMINATE, "revert_state_not_confirmed",
                          "KiCad reloaded the document, but its post-revert lifecycle state could not be read; inspect the document before retrying" );
         result.mutable_observed_state()->CopyFrom( *after );
+        const bool identityOkay = before->scope() == DLS_PCB
+                ? Uuid( after->native_identity() ) && after->has_revision()
+                    && after->revision().epoch() == after->native_identity()
+                : after->native_identity() == before->native_identity();
         if( !MessageDifferencer::Equals( after->document(), request.document() )
                 || after->process_epoch() != aProcessEpoch
-                || after->native_identity() != before->native_identity()
+                || !identityOkay
                 || after->native_content_dirty() || !FileCoverage( *after, false )
                 || !matchingBaselines( *before, *after ) )
             return fail( LOS_INDETERMINATE, "revert_state_not_confirmed",

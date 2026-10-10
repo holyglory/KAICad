@@ -201,6 +201,7 @@ public sealed class DocumentLifecycleToolTests
             Assert.IsFalse(receipt.IsError ?? false, receipt.StructuredContent?.GetRawText());
             Assert.IsTrue(receipt.StructuredContent!.Value.GetProperty("found").GetBoolean());
             Assert.AreEqual("completed", receipt.StructuredContent.Value.GetProperty("outcome").GetString());
+            Assert.IsTrue(receipt.StructuredContent.Value.GetProperty("nativeReceiptAvailable").GetBoolean());
 
             var changed = complete.Clone(); changed.StateSha256 = new string('b', 64);
             var reused = await tool.Revert(transport.Session.InstanceId, SchematicJson.Formatter.Format(changed), operationId, default);
@@ -214,6 +215,7 @@ public sealed class DocumentLifecycleToolTests
             Assert.IsFalse(recovered.IsError ?? false, recovered.StructuredContent?.GetRawText());
             Assert.IsTrue(recovered.StructuredContent!.Value.GetProperty("found").GetBoolean());
             Assert.AreEqual("completed", recovered.StructuredContent.Value.GetProperty("outcome").GetString());
+            Assert.IsTrue(recovered.StructuredContent.Value.GetProperty("nativeReceiptAvailable").GetBoolean());
             Assert.IsTrue(recovered.StructuredContent.Value.GetProperty("receipt").GetProperty("postStateVerified").GetBoolean());
 
             // A file entry whose embedded identity does not match its lookup key is rejected

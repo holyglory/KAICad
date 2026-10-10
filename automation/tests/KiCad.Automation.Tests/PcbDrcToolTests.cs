@@ -128,7 +128,10 @@ public sealed class PcbDrcToolTests
                 transport.Session.Epoch, default, deleteRequestJson: "{");
             Assert.IsTrue(malformedDelete.IsError ?? false,
                 "A malformed delete retry must fail before native dispatch.");
-            Assert.AreEqual(5, transport.Calls);
+            // Candidate starts perform a native replacement-read verification
+            // after the start reply.  Both malformed retries are rejected
+            // before dispatch, so the seven calls already made remain intact.
+            Assert.AreEqual(7, transport.Calls);
             var valid = transport.State.Clone();
             for (int variant = 0; variant < 15; ++variant)
             {

@@ -1923,21 +1923,21 @@ tier="development"
 requires=["native-build"]
 command=["ctest","--test-dir","automation/artifacts/native","--tests-regex","^qa_pcbnew_drc_job_lifecycle$","--output-on-failure","--no-tests=error"]
 
-[test.native-net-settings-rendered-retry]
+[test.netsettings-rendered]
 timeout_seconds=1200
 env={TMPDIR="/mnt/build-storage/codex/kicad/t"}
-[[test.native-net-settings-rendered-retry.check]]
+[[test.netsettings-rendered.check]]
 name="managed-build"
 tier="development"
 role="preflight"
 invalidates=["rendered"]
 command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--configuration","Debug"]
-[[test.native-net-settings-rendered-retry.check]]
+[[test.netsettings-rendered.check]]
 name="rendered"
 tier="development"
 requires=["managed-build"]
-command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeNetSettings","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/native-net-settings-rendered-retry","--","MSTest.MapInconclusiveToFailed=true"]
-retained_artifacts=[{name="native-net-settings-tests",path="automation/artifacts/native-net-settings-rendered-retry",max_bytes=16777216},{name="native-net-settings-evidence",path="automation/artifacts/native-net-settings/native-session-current",max_bytes=33554432}]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","TestCategory=NativeNetSettings","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/netsettings-rendered","--","MSTest.MapInconclusiveToFailed=true"]
+retained_artifacts=[{name="native-net-settings-tests",path="automation/artifacts/netsettings-rendered",max_bytes=16777216},{name="native-net-settings-evidence",path="automation/artifacts/native-net-settings/native-session-current",max_bytes=33554432}]
 [test.native-bom-settings]
 timeout_seconds=3600
 env={TMPDIR="/mnt/build-storage/codex/kicad/t"}

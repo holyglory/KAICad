@@ -80,8 +80,13 @@ internal static class PcbManufacturingContract
             || receipt.ExpectedState.Document is null || receipt.ObservedBefore.Document is null
             || !receipt.ExpectedState.Document.Equals(document)
             || !receipt.ObservedBefore.Document.Equals(document)
+            || receipt.ExpectedState.Scope != DocumentLifecycleScope.DlsPcb
+            || receipt.ObservedBefore.Scope != DocumentLifecycleScope.DlsPcb
+            || !Sha256(receipt.ExpectedState.StateSha256)
+            || !Sha256(receipt.ObservedBefore.StateSha256)
             || receipt.ExpectedState.ProcessEpoch != processEpoch
-            || receipt.ObservedBefore.ProcessEpoch != processEpoch)
+            || receipt.ObservedBefore.ProcessEpoch != processEpoch
+            || !receipt.ExpectedState.Equals(receipt.ObservedBefore))
             throw Invalid("The native manufacturing receipt lacks the requested lifecycle observation.");
         if (expectedState is not null && (!receipt.ExpectedState.Equals(expectedState)
             || !receipt.ObservedBefore.Equals(expectedState)))
@@ -101,6 +106,7 @@ internal static class PcbManufacturingContract
                 || receipt.PublicationState != PcbManufacturingPublicationState.PcbMfgPublicationPublished
                 || !receipt.OutputManifestComplete || !Sha256(receipt.OutputManifestSha256)
                 || receipt.Artifacts.Count == 0 || receipt.ObservedAfter is null
+                || !receipt.ObservedAfter.Equals(receipt.ExpectedState)
                 || (expectedState is not null && !receipt.ObservedAfter.Equals(expectedState)))
                 throw Invalid("A completed manufacturing export must carry a published, complete manifest and unchanged post-export state.");
             if (!string.IsNullOrWhiteSpace(receipt.ErrorCode) || !string.IsNullOrWhiteSpace(receipt.ErrorMessage))

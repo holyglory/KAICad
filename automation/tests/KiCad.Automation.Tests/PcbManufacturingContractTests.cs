@@ -86,6 +86,20 @@ public sealed class PcbManufacturingContractTests
     }
 
     [TestMethod]
+    public void ReplayReceiptRequiresSelfConsistentLifecycleCheckpoints()
+    {
+        var (request, receipt) = Fixture();
+
+        var beforeMismatch = receipt.Clone();
+        beforeMismatch.ObservedBefore.StateSha256 = new string('e', 64);
+        RejectReplay(beforeMismatch, request);
+
+        var afterMismatch = receipt.Clone();
+        afterMismatch.ObservedAfter.StateSha256 = new string('f', 64);
+        RejectReplay(afterMismatch, request);
+    }
+
+    [TestMethod]
     public void RequestRequiresOnePcbJobAndCompleteLifecycleIdentity()
     {
         var (request, _) = Fixture();
@@ -144,6 +158,15 @@ public sealed class PcbManufacturingContractTests
     private static void RejectRequest(RunPcbManufacturingExport request)
     {
         var error = Assert.ThrowsExactly<AutomationException>(() => PcbManufacturingContract.ValidateRequest(request));
+        Assert.AreEqual("invalid_pcb_export_receipt", error.Code);
+    }
+
+    private static void RejectReplay(PcbManufacturingExportReceipt receipt,
+        RunPcbManufacturingExport request)
+    {
+        var error = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbManufacturingContract.ValidateReceipt(receipt, request.Document, null,
+                request.OperationId, request.ProcessEpoch));
         Assert.AreEqual("invalid_pcb_export_receipt", error.Code);
     }
 

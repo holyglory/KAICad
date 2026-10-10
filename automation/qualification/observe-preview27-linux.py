@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import subprocess
 
 COMMIT = "092cdcecc0df3a879cf8cd2564643071fbc4ecf5"
 VERSION = "preview-20261010T094312Z-092cdcecc0df"
@@ -44,6 +45,12 @@ run_id = "run/" + required("DEVCOORDINATOR_RUN_ID")
 required("KICAD_DELIVERY_COMMIT", COMMIT)
 required("KICAD_DELIVERY_PLATFORM", "linux-x64")
 output.mkdir(parents=True, exist_ok=True)
+identity = json.loads(subprocess.run([
+    required("KICAD_COORDINATOR_EXECUTOR"), "source-digest", "--worktree", str(root)
+], check=True, capture_output=True, text=True).stdout)
+source_digest = identity.get("sha256")
+if not isinstance(source_digest, str) or len(source_digest) != 64:
+    fail("The governed source digest is unavailable")
 
 linux = load(output / "linux.verification.json")
 require_fields(linux, {
@@ -54,6 +61,7 @@ require_fields(linux, {
     "observed_sha256": ARCHIVE_SHA256,
     "access": ORIGIN + "artifacts/" + ARCHIVE,
     "observation": "download_matched",
+    "source_sha256": source_digest,
 }, "Linux verification")
 if not isinstance(linux.get("source_sha256"), str) or len(linux["source_sha256"]) != 64:
     fail("Linux verification must bind a 64-character source digest")
@@ -68,6 +76,7 @@ require_fields(route, {
     "file": "index.html",
     "access": ORIGIN,
     "observation": "package_route_passed",
+    "source_sha256": source_digest,
 }, "Package route observation")
 if not isinstance(route.get("observed_sha256"), str) or len(route["observed_sha256"]) != 64:
     fail("Package route observation must bind the returned HTML digest")
@@ -79,13 +88,24 @@ completion = output / "completion.json"
 if verification.exists() or completion.exists():
     fail("Fresh delivery evidence is required; completion.json or Verification already exists")
 verification.write_text(json.dumps(linux, indent=2) + "\n")
+metadata = {
+    "schema_version": 1,
+    "sequence": 27,
+    "version": VERSION,
+    "commit": COMMIT,
+    "archive": ARCHIVE,
+    "archive_sha256": ARCHIVE_SHA256,
+    "source_archive_sha256": SOURCE_ARCHIVE_SHA256,
+    "origin": ORIGIN,
+}
+(output / "release-metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
 capabilities = [
     {
         "id": "KICAD.DELIVERY.SIGNED_LINUX_DOWNLOAD",
         "scope": "product",
         "state": "real_e2e",
         "expected_result": "Download the exact signed Linux sequence 27 archive through the public HTTPS route.",
-        "evidence_refs": [run_id + "/signed-linux-download", run_id + "/delivery-receipts"],
+        "evidence_refs": [run_id + "/delivery-receipts", run_id + "/observe"],
         "enabled_control": False,
     },
     {
@@ -96,51 +116,11 @@ capabilities = [
         "evidence_refs": [run_id + "/delivery-receipts", run_id + "/observe"],
         "enabled_control": False,
     },
-    {
-        "id": "KICAD.DELIVERY.LINUX_UPDATE",
-        "scope": "product",
-        "state": "deferred",
-        "expected_result": "Verify the native Update journey against sequence 27 while preserving open projects.",
-        "evidence_refs": [],
-        "task_id": "p2e4103cde445d5aa",
-        "enabled_control": False,
-    },
-    {
-        "id": "KICAD.RECOVERY.REPEATED_SHEETS",
-        "scope": "product",
-        "state": "deferred",
-        "expected_result": "Rebuild XML-bound repeated and shared physical sheets with complete native proof.",
-        "evidence_refs": [],
-        "task_id": "p195ade3ceaabb5f4",
-        "enabled_control": False,
-    },
-    {
-        "id": "KICAD.RECOVERY.PROJECT_SETTINGS_REMAINDER",
-        "scope": "product",
-        "state": "deferred",
-        "expected_result": "Capture the remaining project settings outside the currently typed schematic groups.",
-        "evidence_refs": [],
-        "task_id": "p7ef37236419d4689",
-        "enabled_control": False,
-    },
-    {
-        "id": "KICAD.DIAGRAM.APPROVED_VISUALS",
-        "scope": "product",
-        "state": "visual_only",
-        "expected_result": "Complete the native diagram editor audit against the selected targets and owner decisions.",
-        "evidence_refs": [],
-        "task_id": "p8c2081361b925bf8",
-        "enabled_control": False,
-    },
 ]
 completion.write_text(json.dumps({
     "schema_version": 1,
     "claim": "preliminary",
-    "source_sha256": linux["source_sha256"],
-    "source_archive_sha256": SOURCE_ARCHIVE_SHA256,
-    "release": {"sequence": 27, "version": VERSION, "commit": COMMIT},
-    "artifacts": {"archive": ARCHIVE, "sha256": ARCHIVE_SHA256},
-    "verification_file": "Verification",
+    "source_sha256": source_digest,
     "capabilities": capabilities,
 }, indent=2) + "\n")
 print(json.dumps({

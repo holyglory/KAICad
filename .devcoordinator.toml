@@ -23,7 +23,7 @@ command=["dotnet","automation/artifacts/download-host/kicad-downloads.dll"]
 port=true
 route=true
 health={path="/healthz",timeout_seconds=300}
-env={ASPNETCORE_ENVIRONMENT="Production",KICAD_DOWNLOAD_ROOT="/mnt/build-storage/codex/kicad/public-candidates/linux-25fb-signed-000025",KICAD_UPDATE_PUBLISHER_SPKI_FILE="/home/holyglory/kicad/automation/distribution/preview-publisher.spki"}
+env={ASPNETCORE_ENVIRONMENT="Production",KICAD_DOWNLOAD_ROOT="/mnt/build-storage/codex/kicad/public-candidates/linux-092c-signed-000027",KICAD_UPDATE_PUBLISHER_SPKI_FILE="/home/holyglory/kicad/automation/distribution/preview-publisher.spki"}
 [test]
 default="automation"
 [test.diagram-requirement-history]
@@ -3160,3 +3160,44 @@ tier="development"
 requires=["delivery-receipts"]
 command=["python3","automation/qualification/observe-preview27-linux.py"]
 retained_artifacts=[{name="completion-and-verification",path="automation/artifacts/preview27-linux-delivery",max_bytes=268435456}]
+
+# Requalify the current package and updater without downloading every historical
+# archive again. Keep the original public graph and its retained evidence intact.
+[test.preview27-linux-receipt-repair]
+timeout_seconds=1200
+env={TMPDIR="/mnt/build-storage/codex/kicad/t",KICAD_PUBLIC_DOWNLOAD_URL="https://kicad.vr.ae/",KICAD_UPDATE_PUBLISHER_SPKI_FILE="/home/holyglory/kicad/automation/distribution/preview-publisher.spki",KICAD_CAPTION_PACKAGE_CATALOGUE="/mnt/build-storage/codex/kicad/public-candidates/20261004T133406Z-a4591f949c9f",KICAD_CAPTION_CANDIDATE_CATALOGUE="/mnt/build-storage/codex/kicad/public-candidates/20261010T094312Z-092cdcecc0df",KICAD_CAPTION_INSTALLED_ENVELOPE="/mnt/build-storage/codex/kicad/public-candidates/linux-a459-signed-000026/updates/preview.json",KICAD_DELIVERY_ROUTE_ONLY="true",KICAD_DELIVERY_PLATFORM="linux-x64",KICAD_DELIVERY_COMMIT="092cdcecc0df3a879cf8cd2564643071fbc4ecf5",KICAD_DELIVERY_DEPLOYMENT="d30d9eeb63ffeccbc",KICAD_COORDINATOR_EXECUTOR="/home/DevCoordinator2/target/release/devcoordinator2-executor",KICAD_DELIVERY_EVIDENCE="/home/holyglory/.codex/worktrees/0761/kicad/automation/artifacts/preview27-linux-receipt-repair"}
+[[test.preview27-linux-receipt-repair.check]]
+name="managed-build"
+tier="development"
+role="preflight"
+invalidates=["updater","delivery-receipts","observe","inventory"]
+command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--configuration","Debug"]
+[[test.preview27-linux-receipt-repair.check]]
+name="tls-preflight"
+tier="development"
+timeout_seconds=30
+command=["curl","--fail","--silent","--show-error","--max-time","20","--output","/dev/null","https://kicad.vr.ae/healthz"]
+[[test.preview27-linux-receipt-repair.check]]
+name="updater"
+tier="development"
+requires=["managed-build","tls-preflight"]
+timeout_seconds=900
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=PublicCaptionMcpUpdate|TestCategory=EmptyCaptionUpdate","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/preview27-updater-tests","--","MSTest.MapInconclusiveToFailed=true","MSTest.Parallelize.Workers=1"]
+retained_artifacts=[{name="updater-tests",path="automation/artifacts/preview27-updater-tests",max_bytes=16777216},{name="updater-evidence",path="automation/artifacts/native-session-current",max_bytes=67108864}]
+[[test.preview27-linux-receipt-repair.check]]
+name="delivery-receipts"
+tier="development"
+requires=["managed-build","tls-preflight"]
+command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--no-restore","--configuration","Debug","--filter","TestCategory=DeliveryReceipts","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/preview27-repaired-delivery-tests"]
+retained_artifacts=[{name="delivery-receipt-tests",path="automation/artifacts/preview27-repaired-delivery-tests",max_bytes=16777216},{name="delivery-evidence",path="automation/artifacts/preview27-linux-receipt-repair",max_bytes=268435456}]
+[[test.preview27-linux-receipt-repair.check]]
+name="observe"
+tier="development"
+requires=["updater","delivery-receipts"]
+command=["python3","automation/qualification/observe-preview27-linux.py"]
+retained_artifacts=[{name="completion-and-verification",path="automation/artifacts/preview27-linux-receipt-repair",max_bytes=268435456}]
+[[test.preview27-linux-receipt-repair.check]]
+name="inventory"
+tier="development"
+requires=["observe"]
+command=["python3","-c","import json, subprocess; receipt=json.loads(subprocess.check_output(['devcoordinator2','completion','check','--file','automation/artifacts/preview27-linux-receipt-repair/completion.json','/home/holyglory/.codex/worktrees/0761/kicad'], text=True)); print(json.dumps(receipt)); assert receipt.get('ok') and receipt.get('data', {}).get('valid'), 'Completion inventory rejected'"]

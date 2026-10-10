@@ -696,7 +696,7 @@ public sealed partial class NativeSessionTests
         await Evidence("pcb-drc-job-router-restored.json", restored);
         AssertPcbDrcJobCurrent(restored, "A new check with the original router mode must be complete and fresh.");
         Assert.AreEqual(check.Findings.Count, restored.Findings.Count, "Router settings do not change what a check without refill finds.");
-        AssertPcbDrcJobStale(await agent.Read(board, check, token), "auxiliary_inputs_changed",
+        AssertPcbDrcJobStale(await agent.Read(board, check, token), "project_inputs_changed",
             "The check before the change never becomes current again, even with the original mode back.");
     }
 

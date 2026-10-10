@@ -79,14 +79,17 @@ struct LIFECYCLE_FIXTURE
         close.mutable_document()->CopyFrom( save.document() ); close.set_operation_id( save.operation_id() );
         close.mutable_expected_state()->CopyFrom( save.expected_state() ); return close;
     }
-    NativeCapabilityCheckedRevertDocument RevertRequest()
+    NativeCapabilityCheckedRevertDocument RevertRequest( bool aSeedCheckpoint = true )
     {
         // Seed the controller with the last persisted clean checkpoint. The live
         // editor is dirty, but revert admission must still retain the clean
         // digest that was observed at the previous save.
-        DocumentLifecycleState checkpoint = state;
-        checkpoint.set_native_content_dirty( false );
-        controller.RememberCleanState( checkpoint, false );
+        if( aSeedCheckpoint )
+        {
+            DocumentLifecycleState checkpoint = state;
+            checkpoint.set_native_content_dirty( false );
+            controller.RememberCleanState( checkpoint, false );
+        }
         controller.AnnotateCleanState( state );
         NativeCapabilityCheckedRevertDocument request;
         request.mutable_document()->CopyFrom( state.document() );
@@ -407,9 +410,6 @@ BOOST_AUTO_TEST_CASE( SaveAndReceiptReplayAreProcessOwnedAndNeverRepeatDispatch 
 BOOST_AUTO_TEST_CASE( CheckedRevertRequiresCleanCheckpointAndReplaysItsNativeReceipt )
 {
     LIFECYCLE_FIXTURE fixture;
-    auto checkpoint = fixture.state;
-    checkpoint.set_native_content_dirty( false );
-    fixture.controller.RememberCleanState( checkpoint, false );
     auto request = fixture.RevertRequest();
     auto result = fixture.Result( request );
     BOOST_CHECK( result.status() == LOS_REVERTED );
@@ -424,7 +424,7 @@ BOOST_AUTO_TEST_CASE( CheckedRevertRequiresCleanCheckpointAndReplaysItsNativeRec
 
     LIFECYCLE_FIXTURE withoutCheckpoint;
     withoutCheckpoint.state.clear_clean_checkpoint_sha256();
-    auto refused = withoutCheckpoint.Result( withoutCheckpoint.RevertRequest() );
+    auto refused = withoutCheckpoint.Result( withoutCheckpoint.RevertRequest( false ) );
     BOOST_CHECK( refused.status() == LOS_REJECTED );
     BOOST_CHECK_EQUAL( withoutCheckpoint.reverts, 0 );
 }

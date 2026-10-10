@@ -3,6 +3,8 @@ using Google.Protobuf;
 using Kiapi.Board.Commands;
 using Kiapi.Common.Types;
 using KiCad.Automation.Mcp;
+using KiCad.Automation.Model;
+using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 

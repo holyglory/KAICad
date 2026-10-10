@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Kiapi.Board.Commands;
 using Kiapi.Common.Types;
+using KiCad.Automation.Model;
 using KiCad.Automation.Protocol;
 
 namespace KiCad.Automation.Mcp;

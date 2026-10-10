@@ -88,7 +88,7 @@ public sealed class SchematicExportSvgInputContractTests
             JsonElement properties = tool.GetProperty("inputSchema").GetProperty("properties");
             foreach (string property in new[] { "instanceId", "requestJson", "request", "expectedStateJson", "expectedState", "operationId" })
                 Assert.IsTrue(properties.TryGetProperty(property, out _), property);
-            Assert.AreEqual("object", properties.GetProperty("request").GetProperty("type").GetString());
+            Assert.IsTrue(properties.GetProperty("request").GetProperty("type").EnumerateArray().Any(item => item.GetString() == "object"));
             string requestSchema = properties.GetProperty("request").GetRawText();
             foreach (string member in new[] { "document", "outputPath", "plotSettings" })
                 StringAssert.Contains(requestSchema, "\"" + member + "\"", requestSchema);

@@ -34,7 +34,7 @@ public sealed class DocumentLifecycleInputContractTests
             JsonElement saveProperties = saveSchema.GetProperty("properties");
             Assert.IsTrue(saveProperties.TryGetProperty("expectedStateJson", out _), save.GetRawText());
             JsonElement expectedState = saveProperties.GetProperty("expectedState");
-            Assert.AreEqual("object", expectedState.GetProperty("type").GetString(), save.GetRawText());
+            Assert.IsTrue(expectedState.GetProperty("type").EnumerateArray().Any(item => item.GetString() == "object"), save.GetRawText());
             JsonElement expectedProperties = expectedState.GetProperty("properties");
             foreach (string property in new[] { "document", "revision", "nativeIdentity", "stateSha256", "scope",
                                                 "nativeFiles", "fileBaselines", "processEpoch" })

@@ -89,7 +89,7 @@ public sealed partial class NativeSessionTests
             End = new() { XNm = 5_000_000, YNm = 4_000_000 },
             Width = new() { ValueNm = 250_000 }, Layer = BoardLayer.BlFCu
         };
-        await client.InvokeAsync<CreateItems, GetItemsResponse>(new()
+        await client.InvokeAsync<CreateItems, CreateItemsResponse>(new()
         {
             Header = new() { Document = board }, Items = { Any.Pack(temporaryTrack) }
         }, token);

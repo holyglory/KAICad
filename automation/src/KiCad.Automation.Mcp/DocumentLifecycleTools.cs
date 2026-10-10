@@ -423,11 +423,26 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
             || !observed.NativeFiles.SequenceEqual(expected.NativeFiles)
             || observed.FileBaselines.Count != expected.FileBaselines.Count
             || !observed.FileBaselines.Zip(expected.FileBaselines).All(pair => pair.First.Equals(pair.Second))
-            || !RevertStateIsClean(observed) || !observed.Equals(after) || !RevertStateIsClean(after))
+            || !RevertStateIsClean(observed) || !RevertStateEquivalent(observed, after)
+            || !RevertStateIsClean(after))
             return false;
 
         return true;
     }
+
+    private static bool RevertStateEquivalent(DocumentLifecycleState first, DocumentLifecycleState second) =>
+        first.Document.Equals(second.Document) && first.ProcessEpoch == second.ProcessEpoch
+        && first.Scope == second.Scope && first.StateSha256 == second.StateSha256
+        && first.CleanCheckpointSha256 == second.CleanCheckpointSha256
+        && first.NativeIdentity == second.NativeIdentity
+        && first.Revision?.Epoch == second.Revision?.Epoch
+        && first.NativeContentDirty == second.NativeContentDirty
+        && first.ProjectSettingsIncluded == second.ProjectSettingsIncluded
+        && first.CompleteChangeTracking == second.CompleteChangeTracking
+        && first.DiskBaselineChecked == second.DiskBaselineChecked
+        && first.NativeFiles.SequenceEqual(second.NativeFiles)
+        && first.FileBaselines.Count == second.FileBaselines.Count
+        && first.FileBaselines.Zip(second.FileBaselines).All(pair => pair.First.Equals(pair.Second));
 
     private static bool RevertIdentityMatches(DocumentLifecycleState expected, DocumentLifecycleState state)
     {

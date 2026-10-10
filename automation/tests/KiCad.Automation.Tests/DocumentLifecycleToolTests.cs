@@ -194,6 +194,7 @@ public sealed class DocumentLifecycleToolTests
 
             var complete = CompleteState(directory, transport.Session.Epoch, dirty: true);
             transport.LifecycleState = complete.Clone();
+            transport.IndependentReadSequenceDelta = 1;
             var reverted = await tool.Revert(transport.Session.InstanceId, SchematicJson.Formatter.Format(complete), operationId, default);
             Assert.IsFalse(reverted.IsError ?? false, reverted.StructuredContent?.GetRawText());
             Assert.IsTrue(reverted.StructuredContent!.Value.GetProperty("committed").GetBoolean());
@@ -444,6 +445,34 @@ public sealed class DocumentLifecycleToolTests
         finally { Directory.Delete(directory, true); }
     }
 
+    [DataTestMethod]
+    [DataRow("digest")]
+    [DataRow("baseline")]
+    public async Task RevertRejectsChangedIndependentState(string mismatch)
+    {
+        string directory = Directory.CreateTempSubdirectory("lifecycle-revert-poststate-").FullName;
+        try
+        {
+            var transport = new LifecycleTransport();
+            transport.Session.Epoch = Guid.NewGuid().ToString("D");
+            transport.Session.ProjectPath = Path.Combine(directory, "fixture.kicad_pro");
+            var registry = new InstanceRegistry(transport, directory);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "native.sock")), transport.Session.InstanceId);
+            var tool = new DocumentLifecycleTools(registry);
+            var expected = CompleteState(directory, transport.Session.Epoch, dirty: true);
+            transport.LifecycleState = expected.Clone();
+            transport.IndependentReadStateSha256 = mismatch == "digest" ? new string('b', 64) : null;
+            transport.IndependentReadBaselineSha256 = mismatch == "baseline" ? new string('d', 64) : null;
+
+            var refused = await tool.Revert(transport.Session.InstanceId,
+                SchematicJson.Formatter.Format(expected), Guid.NewGuid().ToString("D"), default);
+            Assert.IsTrue(refused.IsError, refused.StructuredContent?.GetRawText());
+            Assert.AreEqual("revert_state_not_confirmed", refused.StructuredContent!.Value.GetProperty("code").GetString());
+            Assert.AreEqual(1, transport.RevertCalls);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
     private static DocumentLifecycleState State(string directory, string epoch) => new()
     {
         Document = new() { Type = (DocumentType)3, BoardFilename = "fixture.kicad_pcb",
@@ -488,6 +517,9 @@ public sealed class DocumentLifecycleToolTests
         public LifecycleOperationResult? RevertReceiptResult { get; set; }
         public DocumentLifecycleState? RevertReceiptExpectedState { get; set; }
         public ReadLifecycleOperation? LastReceiptQuery { get; private set; }
+        public ulong IndependentReadSequenceDelta { get; set; }
+        public string? IndependentReadStateSha256 { get; set; }
+        public string? IndependentReadBaselineSha256 { get; set; }
         public string? ReceiptError { get; set; }
         public int RevertCalls { get; private set; }
         public DocumentLifecycleState LifecycleState { get; set; } = new();
@@ -540,8 +572,17 @@ public sealed class DocumentLifecycleToolTests
             }
             else if (envelope.Message.Is(ReadDocumentLifecycleState.Descriptor))
             {
+                var observed = LifecycleState.Clone();
+                if (RevertCalls > 0)
+                {
+                    observed.Revision.Sequence += IndependentReadSequenceDelta;
+                    if (IndependentReadStateSha256 is not null)
+                        observed.StateSha256 = IndependentReadStateSha256;
+                    if (IndependentReadBaselineSha256 is not null && observed.FileBaselines.Count > 0)
+                        observed.FileBaselines[0].CurrentSha256 = IndependentReadBaselineSha256;
+                }
                 return Task.FromResult(new ApiResponse { Header = new() { KicadToken = Session.Epoch },
-                    Status = new() { Status = (ApiStatusCode)1 }, Message = Any.Pack(LifecycleState.Clone()) }.ToByteArray());
+                    Status = new() { Status = (ApiStatusCode)1 }, Message = Any.Pack(observed) }.ToByteArray());
             }
             else if (envelope.Message.Is(NativeCapabilityCheckedRevertDocument.Descriptor))
             {

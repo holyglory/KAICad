@@ -65,6 +65,19 @@ public sealed class DocumentStateToolTests
             var success = await tool.Read(transport.Session.InstanceId, json, default);
             Assert.IsFalse(success.IsError ?? false);
             Assert.AreEqual(state, SchematicJson.Parser.Parse<DocumentLifecycleState>(Text(success)));
+            var typed = await tool.ReadStructured(transport.Session.InstanceId, default, document: new NativeDocumentInput
+            {
+                Type = NativeDocumentType.Pcb,
+                Project = new NativeProjectInput { Name = target.Project.Name, Path = target.Project.Path },
+                BoardFilename = target.BoardFilename
+            });
+            Assert.IsFalse(typed.IsError ?? false, typed.StructuredContent?.GetRawText());
+            Assert.AreEqual(state, SchematicJson.Parser.Parse<DocumentLifecycleState>(Text(typed)));
+            var conflicting = await tool.ReadStructured(transport.Session.InstanceId, default,
+                documentJson: "", document: new NativeDocumentInput());
+            Assert.AreEqual("invalid_document_input", conflicting.StructuredContent!.Value.GetProperty("code").GetString());
+            var missing = await tool.ReadStructured(transport.Session.InstanceId, default);
+            Assert.AreEqual("invalid_document_input", missing.StructuredContent!.Value.GetProperty("code").GetString());
             foreach (int kind in Enumerable.Range(0, 5))
             {
                 transport.State = state.Clone();

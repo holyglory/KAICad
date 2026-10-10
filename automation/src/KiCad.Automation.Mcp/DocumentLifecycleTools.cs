@@ -17,14 +17,14 @@ namespace KiCad.Automation.Mcp;
 public sealed class DocumentLifecycleTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_document_save", ReadOnly = false),
-     Description("Save an explicit schematic hierarchy or PCB only if the supplied kicad_document_state observation still matches the native process, document, revision, content and loaded file versions. Supply operationId and exactly one of expectedStateJson (legacy protobuf JSON) or expectedState (the structured lifecycle observation). Reuse the same complete request after a timeout. Returns a retained operation result; failed or uncertain saves require inspection. A failed save is never reported as saved and the editor keeps the unsaved changes. If this call is cancelled or times out, call kicad_document_operation with the same operation ID to learn whether KiCad started it. Does not close editors or promise atomic multi-file persistence."),
+     Description("Save an explicit schematic hierarchy or PCB only if the supplied kicad_document_state observation still matches the native process, document, revision, content and loaded file versions. Supply operationId and exactly one of expectedStateJson (legacy protobuf JSON) or expectedState (the structured lifecycle observation), and reuse that exact request after a timeout. Returns a retained operation result; failed or uncertain saves require inspection. A failed save is never reported as saved and the editor keeps the unsaved changes. Its errorMessage names every cause and the next step. Failed-save errorCodes: file_not_writable, the file system would not let KiCad write the files in blockedFiles (a read-only file or folder, a full disk); native_save_refused, KiCad refused for a reason that making the document's files writable does not fix, for example a project KiCad opened read-only or a project lock KiCad could not take (errorMessage says what to change instead, such as making the lock file writable or deleting it, then reopening the project); native_save_failed, writing failed and KiCad found no cause (check the disk and save again); partial_save, saving stopped after replacing the files in writtenFiles, so the disk mixes old and new files until a save succeeds; file_changed_during_save, another program changed a file during the save and KiCad kept that version; file_unreadable_during_save, KiCad could not read a file to confirm nobody changed it; save_outside_document, the save tried to write a design file that is not part of the observed document. If this call is cancelled or times out, call kicad_document_operation with the same operation ID to learn whether KiCad started it. Does not close editors or promise atomic multi-file persistence."),
      KiCadCapability("document-lifecycle", "native-api", "typed or legacy document state observation, operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NetClassesRoundTripThroughXmlAndNativeEdits", "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp",
          "NativeSessionTests.CheckedBatchesRejectChangedStateAndPreserveNativeUndo")]
     public Task<CallToolResult> SaveStructured(string instanceId, string operationId,
         CancellationToken cancellationToken, string? expectedStateJson = null,
         DocumentLifecycleInput? expectedState = null) =>
-        Save(instanceId, ResolveLifecycleJson(expectedStateJson, expectedState), operationId, cancellationToken);
+        RunAdmission(cancellationToken, () => Save(instanceId, ResolveLifecycleJson(expectedStateJson, expectedState), operationId, cancellationToken), "invalid_lifecycle_input");
 
     public async Task<CallToolResult> Save(string instanceId, string expectedStateJson, string operationId,
         CancellationToken cancellationToken)
@@ -63,7 +63,7 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
     public Task<CallToolResult> CloseStructured(string instanceId, string operationId,
         CancellationToken cancellationToken, string? expectedStateJson = null,
         DocumentLifecycleInput? expectedState = null) =>
-        Close(instanceId, ResolveLifecycleJson(expectedStateJson, expectedState), operationId, cancellationToken);
+        RunAdmission(cancellationToken, () => Close(instanceId, ResolveLifecycleJson(expectedStateJson, expectedState), operationId, cancellationToken), "invalid_lifecycle_input");
 
     public async Task<CallToolResult> Close(string instanceId, string expectedStateJson, string operationId,
         CancellationToken cancellationToken)
@@ -99,7 +99,7 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
     public Task<CallToolResult> RevertStructured(string instanceId, string operationId,
         CancellationToken cancellationToken, string? expectedStateJson = null,
         DocumentLifecycleInput? expectedState = null) =>
-        Revert(instanceId, ResolveLifecycleJson(expectedStateJson, expectedState), operationId, cancellationToken);
+        RunAdmission(cancellationToken, () => Revert(instanceId, ResolveLifecycleJson(expectedStateJson, expectedState), operationId, cancellationToken), "invalid_lifecycle_input");
 
     public Task<CallToolResult> Revert(string instanceId, string expectedStateJson, string operationId,
         CancellationToken cancellationToken) => InstanceToolBoundary.Run(async () =>
@@ -326,7 +326,7 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
     public Task<CallToolResult> OperationStructured(string instanceId, string operationId,
         string processEpoch, CancellationToken cancellationToken, string? documentJson = null,
         NativeDocumentInput? document = null) =>
-        Operation(instanceId, ResolveDocumentJson(documentJson, document), operationId, processEpoch, cancellationToken);
+        RunAdmission(cancellationToken, () => Operation(instanceId, ResolveDocumentJson(documentJson, document), operationId, processEpoch, cancellationToken), "invalid_document_input");
 
     public Task<CallToolResult> Operation(string instanceId, string documentJson, string operationId,
         string processEpoch, CancellationToken cancellationToken) => InstanceToolBoundary.Run(async () =>
@@ -393,11 +393,39 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
         { throw new AutomationException("invalid_lifecycle_request", "Provide a valid native lifecycle observation or document descriptor: " + error.Message); }
     }
 
+    private static async Task<CallToolResult> RunAdmission(Func<Task<CallToolResult>> operation, string invalidCode)
+    {
+        try { return await operation(); }
+        catch (AutomationException error) { return AdmissionError(error.Code, error.Message); }
+        catch (JsonException error) { return AdmissionError(invalidCode, error.Message); }
+        catch (ArgumentException error) { return AdmissionError(invalidCode, error.Message); }
+    }
+
+    private static Task<CallToolResult> RunAdmission(CancellationToken cancellationToken,
+        Func<Task<CallToolResult>> operation, string invalidCode)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return RunAdmission(operation, invalidCode);
+    }
+
+    private static CallToolResult AdmissionError(string code, string message)
+    {
+        var json = JsonSerializer.SerializeToElement(new { code, message });
+        return new CallToolResult
+        {
+            IsError = true,
+            StructuredContent = json,
+            Content = [new TextContentBlock { Text = json.GetRawText() }]
+        };
+    }
+
     private static string ResolveLifecycleJson(string? legacyJson, DocumentLifecycleInput? typed)
     {
-        bool hasLegacy = !string.IsNullOrWhiteSpace(legacyJson);
-        bool hasTyped = typed is not null;
-        if (hasLegacy == hasTyped)
+        bool legacySupplied = legacyJson is not null;
+        if (legacySupplied && typed is not null)
+            throw new AutomationException("invalid_lifecycle_input",
+                "Provide exactly one lifecycle observation: expectedStateJson or expectedState.");
+        if (typed is null && (!legacySupplied || string.IsNullOrWhiteSpace(legacyJson)))
             throw new AutomationException("invalid_lifecycle_input",
                 "Provide exactly one lifecycle observation: expectedStateJson or expectedState.");
         if (typed is not null)
@@ -407,9 +435,11 @@ public sealed class DocumentLifecycleTools(InstanceRegistry registry)
 
     private static string ResolveDocumentJson(string? legacyJson, NativeDocumentInput? typed)
     {
-        bool hasLegacy = !string.IsNullOrWhiteSpace(legacyJson);
-        bool hasTyped = typed is not null;
-        if (hasLegacy == hasTyped)
+        bool legacySupplied = legacyJson is not null;
+        if (legacySupplied && typed is not null)
+            throw new AutomationException("invalid_document_input",
+                "Provide exactly one document descriptor: documentJson or document.");
+        if (typed is null && (!legacySupplied || string.IsNullOrWhiteSpace(legacyJson)))
             throw new AutomationException("invalid_document_input",
                 "Provide exactly one document descriptor: documentJson or document.");
         if (typed is not null)

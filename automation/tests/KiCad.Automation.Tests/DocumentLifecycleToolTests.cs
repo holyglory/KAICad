@@ -23,6 +23,7 @@ public sealed class DocumentLifecycleToolTests
         try
         {
             var transport = new LifecycleTransport();
+            transport.Session.Epoch = Guid.NewGuid().ToString("D");
             transport.Session.ProjectPath = Path.Combine(directory, "fixture.kicad_pro");
             var registry = new InstanceRegistry(transport, directory);
             var tool = new DocumentLifecycleTools(registry);
@@ -32,6 +33,71 @@ public sealed class DocumentLifecycleToolTests
             await Assert.ThrowsAsync<OperationCanceledException>(() => tool.Save("missing", "{}", "bad", cancelled.Token));
             await Assert.ThrowsAsync<OperationCanceledException>(() => tool.Close("missing", "{}", "bad", cancelled.Token));
             Assert.IsTrue((await tool.Close("missing", "{}", Guid.NewGuid().ToString("D"), default)).IsError);
+            Assert.AreEqual(0, transport.LifecycleCalls);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [TestMethod]
+    public async Task TypedAndLegacySaveUseTheSameNativeDocumentRequest()
+    {
+        string directory = Directory.CreateTempSubdirectory("lifecycle-typed-equivalence-").FullName;
+        try
+        {
+            var transport = new LifecycleTransport();
+            transport.Session.Epoch = Guid.NewGuid().ToString("D");
+            transport.Session.ProjectPath = Path.Combine(directory, "fixture.kicad_pro");
+            var registry = new InstanceRegistry(transport, directory);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "native.sock")), transport.Session.InstanceId);
+            var tool = new DocumentLifecycleTools(registry);
+            var state = CompleteState(directory, transport.Session.Epoch, dirty: false);
+            string legacyId = Guid.NewGuid().ToString("D");
+            string typedId = Guid.NewGuid().ToString("D");
+
+            var legacy = await tool.Save(transport.Session.InstanceId,
+                SchematicJson.Formatter.Format(state), legacyId, default);
+            var typed = await tool.SaveStructured(transport.Session.InstanceId, typedId, default,
+                expectedState: TypedLifecycle(state));
+
+            Assert.IsFalse(legacy.IsError ?? false, legacy.StructuredContent?.GetRawText());
+            Assert.IsFalse(typed.IsError ?? false, typed.StructuredContent?.GetRawText());
+            var legacyResult = SchematicJson.Parser.Parse<LifecycleOperationResult>(Text(legacy));
+            var typedResult = SchematicJson.Parser.Parse<LifecycleOperationResult>(Text(typed));
+            Assert.AreEqual(legacyResult.Document, typedResult.Document);
+            Assert.AreEqual(state.Document, typedResult.Document);
+            Assert.AreEqual(2, transport.LifecycleCalls);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [TestMethod]
+    public async Task StructuredAdmissionRejectsConflictsMalformedInputAndCancellationBeforeNativeContact()
+    {
+        string directory = Directory.CreateTempSubdirectory("lifecycle-typed-admission-").FullName;
+        try
+        {
+            var transport = new LifecycleTransport();
+            transport.Session.ProjectPath = Path.Combine(directory, "fixture.kicad_pro");
+            var registry = new InstanceRegistry(transport, directory);
+            var tool = new DocumentLifecycleTools(registry);
+            string operationId = Guid.NewGuid().ToString("D");
+
+            var conflict = await tool.SaveStructured(transport.Session.InstanceId, operationId, default,
+                expectedStateJson: "", expectedState: new DocumentLifecycleInput());
+            Assert.AreEqual("invalid_lifecycle_input", conflict.StructuredContent!.Value.GetProperty("code").GetString());
+
+            var missing = await tool.SaveStructured(transport.Session.InstanceId, operationId, default);
+            Assert.AreEqual("invalid_lifecycle_input", missing.StructuredContent!.Value.GetProperty("code").GetString());
+
+            var malformed = await tool.OperationStructured(transport.Session.InstanceId, operationId,
+                Guid.NewGuid().ToString("D"), default, document: new NativeDocumentInput());
+            Assert.AreEqual("invalid_document_target", malformed.StructuredContent!.Value.GetProperty("code").GetString());
+            Assert.AreEqual(0, transport.LifecycleCalls);
+
+            using var cancelled = new CancellationTokenSource();
+            cancelled.Cancel();
+            await Assert.ThrowsAsync<OperationCanceledException>(() => tool.SaveStructured(
+                transport.Session.InstanceId, operationId, cancelled.Token, expectedStateJson: ""));
             Assert.AreEqual(0, transport.LifecycleCalls);
         }
         finally { Directory.Delete(directory, true); }
@@ -503,6 +569,42 @@ public sealed class DocumentLifecycleToolTests
             Project = new() { Name = "fixture", Path = directory } },
         ProcessEpoch = epoch, NativeIdentity = Guid.NewGuid().ToString("D"),
         Revision = new() { Epoch = Guid.NewGuid().ToString("D"), Sequence = 5 }, StateSha256 = new string('a', 64)
+    };
+
+    private static DocumentLifecycleInput TypedLifecycle(DocumentLifecycleState state) => new()
+    {
+        Document = new NativeDocumentInput
+        {
+            Type = (NativeDocumentType)state.Document.Type,
+            Project = new NativeProjectInput { Name = state.Document.Project.Name, Path = state.Document.Project.Path },
+            BoardFilename = state.Document.BoardFilename
+        },
+        Revision = new NativeDocumentRevisionInput { Epoch = state.Revision.Epoch, Sequence = state.Revision.Sequence },
+        NativeIdentity = state.NativeIdentity,
+        StateSha256 = state.StateSha256,
+        Scope = (DocumentLifecycleScopeInput)state.Scope,
+        NativeContentDirty = state.NativeContentDirty,
+        ProjectSettingsIncluded = state.ProjectSettingsIncluded,
+        CompleteChangeTracking = state.CompleteChangeTracking,
+        DiskBaselineChecked = state.DiskBaselineChecked,
+        NativeFiles = state.NativeFiles.ToList(),
+        FileBaselines = state.FileBaselines.Select(file => new NativeFileBaselineInput
+        {
+            Path = file.Path,
+            BaselinePath = file.BaselinePath,
+            BaselineKnown = file.BaselineKnown,
+            BaselineExists = file.BaselineExists,
+            BaselineSha256 = file.BaselineSha256,
+            BaselineBytes = file.BaselineBytes,
+            CurrentKnown = file.CurrentKnown,
+            CurrentExists = file.CurrentExists,
+            CurrentSha256 = file.CurrentSha256,
+            CurrentBytes = file.CurrentBytes,
+            Status = (NativeFileBaselineStatusInput)file.Status
+        }).Cast<NativeFileBaselineInput?>().ToList(),
+        ProcessEpoch = state.ProcessEpoch,
+        CleanCheckpointSha256 = state.CleanCheckpointSha256,
+        SaveStableStateSha256 = state.SaveStableStateSha256
     };
 
     private static DocumentLifecycleState CompleteState(string directory, string epoch, bool dirty)

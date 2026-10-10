@@ -911,15 +911,7 @@ endif()
 
 if( NOT Protobuf_PROTOC_EXECUTABLE )
     if( NOT KICAD_USE_CMAKE_FINDPROTOBUF)
-        # Config-mode Protobuf exposes the compiler as an imported target.
-        # GenerateProtobuf.cmake executes a path, so resolve the target before
-        # passing it across the CMake script boundary.
-        if( TARGET protobuf::protoc )
-            get_target_property( Protobuf_PROTOC_EXECUTABLE protobuf::protoc IMPORTED_LOCATION )
-        endif()
-        if( NOT Protobuf_PROTOC_EXECUTABLE )
-            message( FATAL_ERROR "Protobuf compiler target protobuf::protoc has no executable location." )
-        endif()
+        set( Protobuf_PROTOC_EXECUTABLE "protobuf::protoc" )
     else()
         MESSAGE( FATAL_ERROR "Protobuf compiler not found. Please install protobuf-compiler." )
     endif()

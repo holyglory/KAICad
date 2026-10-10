@@ -73,6 +73,7 @@ foreach( PROTO_SRC ${KIAPI_PROTO_SRCS} )
 endforeach ()
 
 if( CMAKE_GENERATOR MATCHES "Ninja" )
+    include( ${KICAD_CMAKE_MODULE_PATH}/ProtobufCompiler.cmake )
     # Keep one protoc invocation so imported schemas cannot race or diverge.
     # The witness is newer than every input after a successful publication;
     # generated files are byproducts so unchanged copies do not retrigger the
@@ -88,7 +89,7 @@ if( CMAKE_GENERATOR MATCHES "Ninja" )
         BYPRODUCTS ${KIAPI_CPP_SRCS} ${KIAPI_CPP_HEADERS}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${KIAPI_CPP_BASEPATH}
         COMMAND ${CMAKE_COMMAND}
-                -DPROTOC=${Protobuf_PROTOC_EXECUTABLE}
+                "-DPROTOC=${KIAPI_PROTOC_COMMAND}"
                 -DPROTO_ROOT=${CMAKE_CURRENT_SOURCE_DIR}/proto
                 "-DPROTO_FILES=${KIAPI_PROTO_SRCS}"
                 -DSTAGING_ROOT=${KIAPI_CPP_STAGING_BASEPATH}

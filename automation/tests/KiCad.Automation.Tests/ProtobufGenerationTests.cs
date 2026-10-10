@@ -9,7 +9,10 @@ namespace KiCad.Automation.Tests;
 public sealed class ProtobufGenerationTests
 {
     [TestMethod, TestCategory("ProtobufGeneration")]
-    public async Task StagedProtobufGenerationPreservesUnchangedOutputsAndRecoversMissingFiles()
+    [DataRow("path")]
+    [DataRow("target")]
+    [DataRow("configured-target")]
+    public async Task StagedProtobufGenerationPreservesUnchangedOutputsAndRecoversMissingFiles(string compilerKind)
     {
         if (!OperatingSystem.IsLinux())
         {
@@ -28,7 +31,7 @@ public sealed class ProtobufGenerationTests
         var phases = new List<object>();
         try
         {
-            await CreateFixture(fixture, helper);
+            await CreateFixture(fixture, helper, compilerKind);
             string wrapper = await CreateProtocWrapper(fixture, protoc);
             string build = Path.Combine(fixture, "build");
             await Run("configure", fixture, "cmake", ["-S", fixture, "-B", build, "-G", "Ninja",
@@ -83,7 +86,7 @@ public sealed class ProtobufGenerationTests
             await MultiConfigIsolation(fixture, helper, wrapper, phases);
             await File.WriteAllTextAsync(Path.Combine(evidence, "receipt.json"), JsonSerializer.Serialize(new
             {
-                status = "passed", cmake, protoc = await ToolVersion(protoc, "--version"), ninja,
+                status = "passed", compilerKind, cmake, protoc = await ToolVersion(protoc, "--version"), ninja,
                 outputs = RelativeOutputs,
                 baseline = new
                 {
@@ -121,10 +124,14 @@ public sealed class ProtobufGenerationTests
         phases.Add(new { name = "multi-config-isolation", debug, release, separate = !string.Equals(debug, release, StringComparison.Ordinal) });
     }
 
-    private static async Task CreateFixture(string fixture, string helper)
+    private static async Task CreateFixture(string fixture, string helper, string compilerKind)
     {
         Directory.CreateDirectory(Path.Combine(fixture, "common"));
         File.Copy(helper, Path.Combine(fixture, "GenerateProtobuf.cmake"));
+        File.Copy(Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(helper)!)!, "ProtobufCompiler.cmake"),
+            Path.Combine(fixture, "ProtobufCompiler.cmake"));
+        await File.WriteAllTextAsync(Path.Combine(fixture, "compiler-kind.cmake"),
+            $"set(COMPILER_KIND \"{compilerKind}\")\n");
         await File.WriteAllTextAsync(Path.Combine(fixture, "common/root.proto"),
             "syntax = \"proto3\";\npackage fixture;\nimport \"common/imported.proto\";\nmessage Root { Imported imported = 1; }\n");
         await File.WriteAllTextAsync(Path.Combine(fixture, "common/imported.proto"),
@@ -134,6 +141,19 @@ public sealed class ProtobufGenerationTests
         await File.WriteAllTextAsync(Path.Combine(fixture, "CMakeLists.txt"), """
             cmake_minimum_required(VERSION 3.22)
             project(ProtobufGenerationFixture NONE)
+            include(${CMAKE_CURRENT_SOURCE_DIR}/compiler-kind.cmake)
+            set(Protobuf_PROTOC_EXECUTABLE "${PROTOC}")
+            if(NOT COMPILER_KIND STREQUAL "path")
+                add_executable(protobuf::protoc IMPORTED GLOBAL)
+                if(COMPILER_KIND STREQUAL "configured-target")
+                    set_target_properties(protobuf::protoc PROPERTIES
+                        IMPORTED_CONFIGURATIONS Release IMPORTED_LOCATION_RELEASE "${PROTOC}")
+                else()
+                    set_target_properties(protobuf::protoc PROPERTIES IMPORTED_LOCATION "${PROTOC}")
+                endif()
+                set(Protobuf_PROTOC_EXECUTABLE protobuf::protoc)
+            endif()
+            include(${CMAKE_CURRENT_SOURCE_DIR}/ProtobufCompiler.cmake)
             set(PROTO_FILES common/root.proto common/imported.proto common/independent.proto)
             get_property(IS_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
             if(IS_MULTI_CONFIG)
@@ -152,7 +172,7 @@ public sealed class ProtobufGenerationTests
             endforeach()
             if(CMAKE_GENERATOR MATCHES "Ninja")
                 add_custom_command(OUTPUT "${STAMP}" BYPRODUCTS ${OUTPUTS}
-                    COMMAND "${CMAKE_COMMAND}" -DPROTOC=${PROTOC} -DPROTO_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+                    COMMAND "${CMAKE_COMMAND}" "-DPROTOC=${KIAPI_PROTOC_COMMAND}" -DPROTO_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
                         "-DPROTO_FILES=${PROTO_FILES}" -DSTAGING_ROOT=${STAGING_ROOT} -DDEST_ROOT=${DEST_ROOT}
                         -P "${CMAKE_CURRENT_SOURCE_DIR}/GenerateProtobuf.cmake"
                     COMMAND "${CMAKE_COMMAND}" -E touch "${STAMP}"

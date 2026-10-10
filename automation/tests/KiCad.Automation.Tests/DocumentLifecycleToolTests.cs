@@ -61,11 +61,41 @@ public sealed class DocumentLifecycleToolTests
 
             Assert.IsFalse(legacy.IsError ?? false, legacy.StructuredContent?.GetRawText());
             Assert.IsFalse(typed.IsError ?? false, typed.StructuredContent?.GetRawText());
+            Assert.AreEqual(2, transport.SaveRequests.Count);
+            var legacyRequest = transport.SaveRequests[0];
+            var typedRequest = transport.SaveRequests[1];
+            Assert.AreNotEqual(legacyRequest.OperationId, typedRequest.OperationId,
+                "The two calls intentionally use distinct operation identities.");
+            Assert.AreEqual(legacyRequest.Document, typedRequest.Document,
+                "Typed and legacy admission must dispatch the same complete document descriptor.");
+            Assert.AreEqual(legacyRequest.ExpectedState, typedRequest.ExpectedState,
+                "Typed and legacy admission must dispatch the same complete lifecycle observation.");
             var legacyResult = SchematicJson.Parser.Parse<LifecycleOperationResult>(Text(legacy));
             var typedResult = SchematicJson.Parser.Parse<LifecycleOperationResult>(Text(typed));
             Assert.AreEqual(legacyResult.Document, typedResult.Document);
             Assert.AreEqual(state.Document, typedResult.Document);
             Assert.AreEqual(2, transport.LifecycleCalls);
+
+            transport.Status = LifecycleOperationStatus.LosClosed;
+            string legacyCloseId = Guid.NewGuid().ToString("D");
+            string typedCloseId = Guid.NewGuid().ToString("D");
+            var legacyClose = await tool.Close(transport.Session.InstanceId,
+                SchematicJson.Formatter.Format(state), legacyCloseId, default);
+            var typedClose = await tool.CloseStructured(transport.Session.InstanceId, typedCloseId, default,
+                expectedState: TypedLifecycle(state));
+            Assert.IsFalse(legacyClose.IsError ?? false, legacyClose.StructuredContent?.GetRawText());
+            Assert.IsFalse(typedClose.IsError ?? false, typedClose.StructuredContent?.GetRawText());
+            Assert.AreEqual(2, transport.CloseRequests.Count);
+            Assert.AreNotEqual(transport.CloseRequests[0].OperationId, transport.CloseRequests[1].OperationId);
+            Assert.AreEqual(transport.CloseRequests[0].Document, transport.CloseRequests[1].Document);
+            Assert.AreEqual(transport.CloseRequests[0].ExpectedState, transport.CloseRequests[1].ExpectedState);
+
+            transport.LifecycleState = state.Clone();
+            string typedRevertId = Guid.NewGuid().ToString("D");
+            var typedRevert = await tool.RevertStructured(transport.Session.InstanceId, typedRevertId, default,
+                expectedState: TypedLifecycle(state));
+            Assert.IsFalse(typedRevert.IsError ?? false, typedRevert.StructuredContent?.GetRawText());
+            Assert.AreEqual(1, transport.RevertCalls);
         }
         finally { Directory.Delete(directory, true); }
     }
@@ -691,6 +721,8 @@ public sealed class DocumentLifecycleToolTests
         public string? ReceiptError { get; set; }
         public int RevertCalls { get; private set; }
         public DocumentLifecycleState LifecycleState { get; set; } = new();
+        public List<CheckedSaveDocument> SaveRequests { get; } = [];
+        public List<CheckedCloseDocument> CloseRequests { get; } = [];
         private LifecycleOperationResult? result;
         public Task<byte[]> ExchangeAsync(string endpoint, byte[] request, TimeSpan timeout, CancellationToken cancellationToken = default)
         {
@@ -706,6 +738,7 @@ public sealed class DocumentLifecycleToolTests
             {
                 ++LifecycleCalls;
                 var save = envelope.Message.Unpack<CheckedSaveDocument>();
+                SaveRequests.Add(save.Clone());
                 result = new() { Document = save.Document.Clone(), OperationId = save.OperationId,
                     ProcessEpoch = Session.Epoch, Status = Status, ErrorCode = Status == LifecycleOperationStatus.LosSaved ? "" : "fixture_failure" };
                 if (WrongTarget) result.Document.BoardFilename = "other.kicad_pcb";
@@ -734,6 +767,7 @@ public sealed class DocumentLifecycleToolTests
             {
                 ++LifecycleCalls;
                 var close = envelope.Message.Unpack<CheckedCloseDocument>();
+                CloseRequests.Add(close.Clone());
                 result = new() { Document = close.Document.Clone(), OperationId = close.OperationId,
                     ProcessEpoch = Session.Epoch, Status = Status };
                 if (WrongTarget) result.Document.BoardFilename = "other.kicad_pcb";

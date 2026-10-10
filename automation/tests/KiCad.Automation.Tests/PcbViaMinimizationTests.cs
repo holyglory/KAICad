@@ -110,7 +110,15 @@ public sealed class PcbViaMinimizationTests
     {
         Id = new() { Value = id }, Position = new() { XNm = 1_000_000, YNm = 2_000_000 }, Net = new() { Name = "N" },
         PadStack = new() { Layers = { start, end }, Drill = new() { StartLayer = start, EndLayer = end, Diameter = new() { XNm = drillDiameter, YNm = drillDiameter } },
-            CopperLayers = { new PadStackLayer { Layer = start }, new PadStackLayer { Layer = end } } }
+            CopperLayers = { CopperLayer(start), CopperLayer(end) } }
+    };
+
+    private static PadStackLayer CopperLayer(BoardLayer layer) => new()
+    {
+        Layer = layer,
+        Shape = PadStackShape.PssCircle,
+        CustomAnchorShape = PadStackShape.PssRectangle,
+        Size = new() { XNm = 1_600_000, YNm = 1_600_000 }
     };
 
     private static DocumentSpecifier Document() => new()

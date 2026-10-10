@@ -1957,7 +1957,13 @@ public sealed class McpProcessTests
             await File.WriteAllBytesAsync(watchedDesign, recoveryFixture.DesiredFileBytes, timeout.Token);
             var startedIntake = await Request(4030, "tools/call", new { name = "kicad_design_intake_start",
                 arguments = new { instanceId = recoveryInstance, recoveryPath, designPath = watchedDesign } });
-            string intakeId = startedIntake.GetProperty("result").GetProperty("structuredContent").GetProperty("intakeId").GetString()!;
+            var startedIntakeResult = startedIntake.GetProperty("result");
+            Assert.IsFalse(startedIntakeResult.TryGetProperty("isError", out var intakeFailed)
+                && intakeFailed.GetBoolean(), startedIntake.GetRawText());
+            Assert.IsTrue(startedIntakeResult.TryGetProperty("structuredContent", out var startedIntakeState),
+                startedIntake.GetRawText());
+            Assert.IsTrue(startedIntakeState.TryGetProperty("intakeId", out _), startedIntake.GetRawText());
+            string intakeId = startedIntakeState.GetProperty("intakeId").GetString()!;
             CollectionAssert.Contains(names, "kicad_design_intake_list");
             var recoveredIntakes = (await Request(4060, "tools/call", new { name = "kicad_design_intake_list",
                 arguments = new { instanceId = recoveryInstance } })).GetProperty("result").GetProperty("structuredContent").GetProperty("sessions");

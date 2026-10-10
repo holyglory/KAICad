@@ -26,12 +26,16 @@
 #include <pcbnew/pcb_track.h>
 #include <pcbnew/pcbexpr_evaluator.h>
 #include <pcbnew/generators/pcb_via_stack.h>
+#include <pcbnew/footprint.h>
+#include <pcbnew/netinfo.h>
+#include <board_design_settings.h>
 
 #include <lset.h>
 #include <padstack.h>
 
 #include <geometry/shape_circle.h>
 #include <geometry/shape_arc.h>
+#include <geometry/direction45.h>
 #include <geometry/eda_angle.h>
 #include <router/pns_component_dragger.h>
 #include <router/pns_dragger.h>
@@ -41,6 +45,7 @@
 #include <router/pns_item.h>
 #include <router/pns_kicad_iface.h>
 #include <router/pns_node.h>
+#include <router/pns_placement_algo.h>
 #include <router/pns_router.h>
 #include <router/pns_segment.h>
 #include <router/pns_shove.h>
@@ -48,6 +53,9 @@
 #include <router/pns_solid.h>
 #include <router/pns_topology.h>
 #include <router/pns_via.h>
+#include <dialogs/dialog_pns_settings.h>
+#include <wx/frame.h>
+#include <wx/app.h>
 
 static bool isCopper( const PNS::ITEM* aItem )
 {
@@ -1637,4 +1645,253 @@ BOOST_FIXTURE_TEST_CASE( PNSMarkViolationsKeepsPadstackViaShape, PNS_TEST_FIXTUR
 
     BOOST_REQUIRE_MESSAGE( iface.m_viasDisplayed > 0, "Via was not highlighted as a violation" );
     BOOST_CHECK_MESSAGE( iface.m_nullShapes == 0, "Highlighted front/inner/back via has no resolvable shape" );
+}
+
+
+BOOST_AUTO_TEST_CASE( TrackConnectionModeRoundTrip )
+{
+    PCB_TRACK track( nullptr );
+
+    BOOST_CHECK( track.GetConnectionMode() == TRACK_CONNECTION_MODE::INHERIT );
+
+    track.SetConnectionMode( TRACK_CONNECTION_MODE::SMOOTH );
+    BOOST_CHECK( track.GetConnectionMode() == TRACK_CONNECTION_MODE::SMOOTH );
+
+    track.SetConnectionMode( TRACK_CONNECTION_MODE::ORDINARY );
+    BOOST_CHECK( track.GetConnectionMode() == TRACK_CONNECTION_MODE::ORDINARY );
+
+    track.SetConnectionMode( TRACK_CONNECTION_MODE::INHERIT );
+    BOOST_CHECK( track.GetConnectionMode() == TRACK_CONNECTION_MODE::INHERIT );
+
+    PCB_TRACK peer( nullptr );
+    peer.SetConnectionMode( TRACK_CONNECTION_MODE::SMOOTH );
+    BOOST_CHECK( !( track == peer ) );
+}
+
+
+BOOST_AUTO_TEST_CASE( RoutingCornerRadiusUnits )
+{
+    PNS::ROUTING_SETTINGS settings( nullptr, "" );
+
+    settings.SetCornerRadius( 120 );
+    settings.SetCornerRadiusPercent( 50.0 );
+    settings.SetCornerRadiusUsesPercent( true );
+    BOOST_CHECK_EQUAL( settings.EffectiveCornerRadius( 1000 ), 500 );
+
+    settings.SetCornerRadiusUsesPercent( false );
+    BOOST_CHECK_EQUAL( settings.EffectiveCornerRadius( 1000 ), 120 );
+}
+
+
+BOOST_AUTO_TEST_CASE( RoundedInitialTraceUsesArc )
+{
+    const VECTOR2I start( 0, 0 );
+    const VECTOR2I end( pcbIUScale.mmToIU( 10.0 ), pcbIUScale.mmToIU( 5.0 ) );
+    const SHAPE_LINE_CHAIN trace = DIRECTION_45().BuildInitialTrace(
+            start, end, false, DIRECTION_45::CORNER_MODE::ROUNDED_90, pcbIUScale.mmToIU( 0.5 ) );
+
+    BOOST_CHECK_EQUAL( trace.ArcCount(), 1 );
+    BOOST_CHECK_EQUAL( trace.CPoint( 0 ), start );
+    BOOST_CHECK_EQUAL( trace.CLastPoint(), end );
+}
+
+
+BOOST_AUTO_TEST_CASE( NativeRouterSettingsDialogControls, * boost::unit_test::disabled() )
+{
+    BOOST_REQUIRE_MESSAGE( std::getenv( "KICAD_UI_TEST" ),
+                           "This UI test requires KICAD_UI_TEST=1 and a display" );
+    wxFrame parent( nullptr, wxID_ANY, wxT( "router-settings-test" ) );
+    BOARD board;
+    PNS::ROUTING_SETTINGS settings( nullptr, "" );
+    DIALOG_PNS_SETTINGS dialog( &parent, settings, &board.GetDesignSettings() );
+
+    parent.Show();
+    dialog.Show( true );
+    wxTheApp->ProcessPendingEvents();
+
+    wxCheckBox* smooth = dynamic_cast<wxCheckBox*>(
+            dialog.FindWindowByLabel( wxT( "Enable smooth connections by default" ) ) );
+    wxCheckBox* flexible = dynamic_cast<wxCheckBox*>(
+            dialog.FindWindowByLabel( wxT( "Enable flexible DRC-safe paths" ) ) );
+    wxCheckBox* rounded = dynamic_cast<wxCheckBox*>(
+            dialog.FindWindowByLabel( wxT( "Round route corners" ) ) );
+
+    BOOST_REQUIRE( smooth );
+    BOOST_REQUIRE( flexible );
+    BOOST_REQUIRE( rounded );
+    BOOST_REQUIRE( dialog.FindWindowByLabel( wxT( "Connection radius:" ) ) );
+    BOOST_REQUIRE( dialog.FindWindowByLabel( wxT( "Rounded route corner radius:" ) ) );
+    BOOST_REQUIRE( dialog.FindWindowByLabel( wxT( "% of track width" ) ) );
+
+    smooth->SetValue( true );
+    flexible->SetValue( true );
+    rounded->SetValue( true );
+    BOOST_REQUIRE( dialog.TransferDataFromWindow() );
+
+    BOOST_CHECK( board.GetDesignSettings().SmoothConnections() );
+    BOOST_CHECK( settings.FlexibleRouting() );
+    BOOST_CHECK( settings.GetCornerMode() == DIRECTION_45::CORNER_MODE::ROUNDED_45
+                 || settings.GetCornerMode() == DIRECTION_45::CORNER_MODE::ROUNDED_90 );
+
+    // Stack windows are destroyed in reverse order, before their models go out of scope.
+    // Do not queue Destroy() on a stack object.
+    dialog.Show( false );
+    parent.Show( false );
+}
+
+
+BOOST_AUTO_TEST_CASE( FlexibleWalkaroundRoundsAConstrainedDetour )
+{
+    auto board = std::make_unique<BOARD>();
+    board->Add( new NETINFO_ITEM( board.get(), wxT( "Route" ), 1 ) );
+    board->Add( new NETINFO_ITEM( board.get(), wxT( "Obstacle" ), 2 ) );
+
+    auto addPad = [&]( int aNet, const VECTOR2I& aPosition, const VECTOR2I& aSize )
+    {
+        FOOTPRINT* footprint = new FOOTPRINT( board.get() );
+        board->Add( footprint );
+        PAD* pad = new PAD( footprint );
+        pad->SetPadstackMode( PADSTACK::MODE::NORMAL );
+        pad->SetNumber( wxT( "1" ) );
+        pad->SetAttribute( PAD_ATTRIB::SMD );
+        pad->SetLayerSet( LSET( { F_Cu } ) );
+        pad->SetShape( F_Cu, PAD_SHAPE::RECTANGLE );
+        pad->SetSize( F_Cu, aSize );
+        pad->SetPosition( aPosition );
+        pad->SetNetCode( aNet );
+        footprint->Add( pad );
+        return pad;
+    };
+
+    PAD* startPad = addPad( 1, VECTOR2I( pcbIUScale.mmToIU( 0.0 ), 0 ),
+                            VECTOR2I( pcbIUScale.mmToIU( 1.0 ), pcbIUScale.mmToIU( 1.0 ) ) );
+    PAD* endPad = addPad( 1, VECTOR2I( pcbIUScale.mmToIU( 10.0 ), 0 ),
+                          VECTOR2I( pcbIUScale.mmToIU( 1.0 ), pcbIUScale.mmToIU( 1.0 ) ) );
+    addPad( 2, VECTOR2I( pcbIUScale.mmToIU( 5.0 ), 0 ),
+            VECTOR2I( pcbIUScale.mmToIU( 2.0 ), pcbIUScale.mmToIU( 2.0 ) ) );
+    board->BuildConnectivity();
+
+    PNS::ROUTER          router;
+    PNS_KICAD_IFACE_BASE iface;
+    PNS::ROUTING_SETTINGS settings( nullptr, "" );
+    iface.SetBoard( board.get() );
+    router.SetInterface( &iface );
+    router.ClearWorld();
+    router.SyncWorld();
+    settings.SetMode( PNS::RM_Walkaround );
+    settings.SetFlexibleRouting( true );
+    settings.SetCornerRadius( pcbIUScale.mmToIU( 0.25 ) );
+    settings.SetCornerRadiusUsesPercent( false );
+    router.LoadSettings( &settings );
+    router.SetMode( PNS::PNS_MODE_ROUTE_SINGLE );
+
+    const int pnsFront = iface.GetPNSLayerFromBoardLayer( F_Cu );
+    PNS::ITEM* startItem = router.GetWorld()->FindItemByParent( startPad );
+    PNS::ITEM* endItem = router.GetWorld()->FindItemByParent( endPad );
+    BOOST_REQUIRE( startItem );
+    BOOST_REQUIRE( endItem );
+
+    PNS::SIZES_SETTINGS sizes( router.Sizes() );
+    BOOST_REQUIRE( iface.ImportSizes( sizes, startItem, nullptr, startPad->GetPosition() ) );
+    sizes.SetTrackWidth( pcbIUScale.mmToIU( 0.3 ) );
+    router.UpdateSizes( sizes );
+
+    BOOST_REQUIRE( router.StartRouting( startPad->GetPosition(), startItem, pnsFront ) );
+    BOOST_REQUIRE( router.Move( endPad->GetPosition(), endItem ) );
+
+    const PNS::ITEM_SET traces = router.Placer()->Traces();
+    bool              foundArc = false;
+    bool              foundDetour = false;
+
+    for( const PNS::ITEM* item : traces.CItems() )
+    {
+        if( item->Kind() != PNS::ITEM::LINE_T )
+            continue;
+
+        const PNS::LINE* line = static_cast<const PNS::LINE*>( item );
+        foundArc |= line->ArcCount() > 0;
+        foundDetour |= line->CLine().Length() > ( endPad->GetPosition() - startPad->GetPosition() ).EuclideanNorm();
+    }
+
+    BOOST_CHECK( foundDetour );
+    BOOST_CHECK( foundArc );
+    router.StopRouting();
+
+    // The ordinary 45/90-degree walkaround path remains mitered.  This comparison pins the
+    // flexible option to the rounded candidate path it promises, rather than merely checking
+    // that some route exists around the obstacle.
+    PNS::ROUTER          ordinaryRouter;
+    PNS_KICAD_IFACE_BASE ordinaryIface;
+    PNS::ROUTING_SETTINGS ordinarySettings( nullptr, "" );
+    ordinarySettings.SetMode( PNS::RM_Walkaround );
+    ordinarySettings.SetFlexibleRouting( false );
+    ordinarySettings.SetCornerMode( DIRECTION_45::CORNER_MODE::MITERED_90 );
+    ordinaryIface.SetBoard( board.get() );
+    ordinaryRouter.SetInterface( &ordinaryIface );
+    ordinaryRouter.ClearWorld();
+    ordinaryRouter.SyncWorld();
+    ordinaryRouter.LoadSettings( &ordinarySettings );
+    ordinaryRouter.SetMode( PNS::PNS_MODE_ROUTE_SINGLE );
+    const int ordinaryLayer = ordinaryIface.GetPNSLayerFromBoardLayer( F_Cu );
+    PNS::ITEM* ordinaryStart = ordinaryRouter.GetWorld()->FindItemByParent( startPad );
+    PNS::ITEM* ordinaryEnd = ordinaryRouter.GetWorld()->FindItemByParent( endPad );
+    BOOST_REQUIRE( ordinaryStart );
+    BOOST_REQUIRE( ordinaryEnd );
+    PNS::SIZES_SETTINGS ordinarySizes( ordinaryRouter.Sizes() );
+    BOOST_REQUIRE( ordinaryIface.ImportSizes( ordinarySizes, ordinaryStart, nullptr,
+                                              startPad->GetPosition() ) );
+    ordinarySizes.SetTrackWidth( pcbIUScale.mmToIU( 0.3 ) );
+    ordinaryRouter.UpdateSizes( ordinarySizes );
+    BOOST_REQUIRE( ordinaryRouter.StartRouting( startPad->GetPosition(), ordinaryStart,
+                                                ordinaryLayer ) );
+    BOOST_REQUIRE( ordinaryRouter.Move( endPad->GetPosition(), ordinaryEnd ) );
+
+    bool ordinaryArc = false;
+    const PNS::ITEM_SET ordinaryTraces = ordinaryRouter.Placer()->Traces();
+
+    for( const PNS::ITEM* item : ordinaryTraces.CItems() )
+    {
+        if( item->Kind() == PNS::ITEM::LINE_T )
+        {
+            const PNS::LINE* line = static_cast<const PNS::LINE*>( item );
+            ordinaryArc |= line->ArcCount() > 0;
+        }
+    }
+
+    BOOST_CHECK( !ordinaryArc );
+    ordinaryRouter.StopRouting();
+
+    PNS::ROUTER          shoveRouter;
+    PNS_KICAD_IFACE_BASE shoveIface;
+    settings.SetMode( PNS::RM_Shove );
+    shoveIface.SetBoard( board.get() );
+    shoveRouter.SetInterface( &shoveIface );
+    shoveRouter.ClearWorld();
+    shoveRouter.SyncWorld();
+    shoveRouter.LoadSettings( &settings );
+    shoveRouter.SetMode( PNS::PNS_MODE_ROUTE_SINGLE );
+
+    const int shoveLayer = shoveIface.GetPNSLayerFromBoardLayer( F_Cu );
+    PNS::ITEM* shoveStart = shoveRouter.GetWorld()->FindItemByParent( startPad );
+    PNS::ITEM* shoveEnd = shoveRouter.GetWorld()->FindItemByParent( endPad );
+    BOOST_REQUIRE( shoveStart );
+    BOOST_REQUIRE( shoveEnd );
+    PNS::SIZES_SETTINGS shoveSizes( shoveRouter.Sizes() );
+    BOOST_REQUIRE( shoveIface.ImportSizes( shoveSizes, shoveStart, nullptr, startPad->GetPosition() ) );
+    shoveSizes.SetTrackWidth( pcbIUScale.mmToIU( 0.3 ) );
+    shoveRouter.UpdateSizes( shoveSizes );
+    BOOST_REQUIRE( shoveRouter.StartRouting( startPad->GetPosition(), shoveStart, shoveLayer ) );
+    BOOST_REQUIRE( shoveRouter.Move( endPad->GetPosition(), shoveEnd ) );
+
+    bool shoveArc = false;
+    const PNS::ITEM_SET shoveTraces = shoveRouter.Placer()->Traces();
+
+    for( const PNS::ITEM* item : shoveTraces.CItems() )
+    {
+        if( item->Kind() == PNS::ITEM::LINE_T )
+            shoveArc |= static_cast<const PNS::LINE*>( item )->ArcCount() > 0;
+    }
+
+    BOOST_CHECK( shoveArc );
+    shoveRouter.StopRouting();
 }

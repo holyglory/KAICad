@@ -60,11 +60,76 @@
 using KIGFX::PCB_PAINTER;
 using KIGFX::PCB_RENDER_SETTINGS;
 
+namespace
+{
+constexpr const char* TRACK_CONNECTION_MODE_PROPERTY = "ki_connection_mode";
+}
+
 PCB_TRACK::PCB_TRACK( BOARD_ITEM* aParent, KICAD_T idtype ) :
     BOARD_CONNECTED_ITEM( aParent, idtype )
 {
     m_width = pcbIUScale.mmToIU( 0.2 );     // Gives a reasonable default width
     m_hasSolderMask = false;
+}
+
+
+TRACK_CONNECTION_MODE PCB_TRACK::GetConnectionMode() const
+{
+    wxString value;
+
+    if( !GetCustomProperty( TRACK_CONNECTION_MODE_PROPERTY, value ) )
+        return TRACK_CONNECTION_MODE::INHERIT;
+
+    if( value.CmpNoCase( "smooth" ) == 0 )
+        return TRACK_CONNECTION_MODE::SMOOTH;
+
+    if( value.CmpNoCase( "ordinary" ) == 0 )
+        return TRACK_CONNECTION_MODE::ORDINARY;
+
+    return TRACK_CONNECTION_MODE::INHERIT;
+}
+
+
+void PCB_TRACK::SetConnectionMode( TRACK_CONNECTION_MODE aMode )
+{
+    switch( aMode )
+    {
+    case TRACK_CONNECTION_MODE::SMOOTH:
+        SetCustomProperty( TRACK_CONNECTION_MODE_PROPERTY, "smooth" );
+        break;
+
+    case TRACK_CONNECTION_MODE::ORDINARY:
+        SetCustomProperty( TRACK_CONNECTION_MODE_PROPERTY, "ordinary" );
+        break;
+
+    case TRACK_CONNECTION_MODE::INHERIT:
+        RemoveCustomProperty( TRACK_CONNECTION_MODE_PROPERTY );
+        break;
+    }
+}
+
+
+wxString PCB_TRACK::GetConnectionModeName() const
+{
+    switch( GetConnectionMode() )
+    {
+    case TRACK_CONNECTION_MODE::SMOOTH:   return _( "Smooth" );
+    case TRACK_CONNECTION_MODE::ORDINARY: return _( "Ordinary" );
+    case TRACK_CONNECTION_MODE::INHERIT:  return _( "Inherit board default" );
+    }
+
+    return _( "Inherit board default" );
+}
+
+
+void PCB_TRACK::SetConnectionModeName( const wxString& aMode )
+{
+    if( aMode.CmpNoCase( _( "Smooth" ) ) == 0 || aMode.CmpNoCase( "smooth" ) == 0 )
+        SetConnectionMode( TRACK_CONNECTION_MODE::SMOOTH );
+    else if( aMode.CmpNoCase( _( "Ordinary" ) ) == 0 || aMode.CmpNoCase( "ordinary" ) == 0 )
+        SetConnectionMode( TRACK_CONNECTION_MODE::ORDINARY );
+    else
+        SetConnectionMode( TRACK_CONNECTION_MODE::INHERIT );
 }
 
 
@@ -206,7 +271,8 @@ bool PCB_TRACK::operator==( const PCB_TRACK& aOther ) const
             && m_layer == aOther.m_layer
             && m_width == aOther.m_width
             && m_hasSolderMask == aOther.m_hasSolderMask
-            && m_solderMaskMargin == aOther.m_solderMaskMargin;
+            && m_solderMaskMargin == aOther.m_solderMaskMargin
+            && GetConnectionMode() == aOther.GetConnectionMode();
 }
 
 
@@ -235,6 +301,9 @@ double PCB_TRACK::Similarity( const BOARD_ITEM& aOther ) const
         similarity *= 0.9;
 
     if( m_solderMaskMargin != other.m_solderMaskMargin )
+        similarity *= 0.9;
+
+    if( GetConnectionMode() != other.GetConnectionMode() )
         similarity *= 0.9;
 
     return similarity;
@@ -3349,6 +3418,8 @@ static struct TRACK_VIA_DESC
 
         propMgr.AddProperty( new PROPERTY<PCB_TRACK, int>( _HKI( "Width" ),
                     &PCB_TRACK::SetWidth, &PCB_TRACK::GetWidth, PROPERTY_DISPLAY::PT_SIZE ) ).SetIsCopyable();
+        propMgr.AddProperty( new PROPERTY<PCB_TRACK, wxString>( _HKI( "Connection Behavior" ),
+                    &PCB_TRACK::SetConnectionModeName, &PCB_TRACK::GetConnectionModeName ) );
         propMgr.ReplaceProperty( TYPE_HASH( BOARD_ITEM ), _HKI( "Position X" ),
                     new PROPERTY<PCB_TRACK, int>( _HKI( "Start X" ),
                                 &PCB_TRACK::SetStartX, &PCB_TRACK::GetStartX, PROPERTY_DISPLAY::PT_COORD,

@@ -48,6 +48,18 @@ class MSG_PANEL_ITEM;
 class SHAPE_POLY_SET;
 class SHAPE_ARC;
 
+/**
+ * Controls how generated track connections are shaped at this track's endpoints.
+ * INHERIT keeps the board default, while SMOOTH and ORDINARY provide explicit
+ * per-track overrides.
+ */
+enum class TRACK_CONNECTION_MODE
+{
+    INHERIT,
+    SMOOTH,
+    ORDINARY
+};
+
 
 // Used for tracks and vias for algorithmic safety, not to enforce constraints
 #define GEOMETRY_MIN_SIZE (int) ( 0.001 * pcbIUScale.IU_PER_MM )
@@ -85,6 +97,11 @@ public:
 
     virtual void SetWidth( int aWidth )             { m_width = aWidth; }
     virtual int GetWidth() const                    { return m_width; }
+
+    TRACK_CONNECTION_MODE GetConnectionMode() const;
+    void SetConnectionMode( TRACK_CONNECTION_MODE aMode );
+    wxString GetConnectionModeName() const;
+    void SetConnectionModeName( const wxString& aMode );
 
     void SetEnd( const VECTOR2I& aEnd )     { m_End = aEnd; }
     const VECTOR2I& GetEnd() const          { return m_End; }

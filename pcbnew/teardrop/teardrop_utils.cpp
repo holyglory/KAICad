@@ -118,6 +118,13 @@ bool TEARDROP_MANAGER::IsUniformlyRound(BOARD_ITEM* aItem)
 
 void TEARDROP_MANAGER::BuildTrackCaches()
 {
+    m_tracksRTree.clear();
+    m_trackLookupList.GetBuffer().clear();
+    m_copperRTree.clear();
+    m_copperIndexed = false;
+    m_pairClearanceCache.clear();
+    m_zoneConnectionCache.clear();
+
     for( PCB_TRACK* track : m_board->Tracks() )
     {
         if( track->Type() == PCB_TRACE_T || track->Type() == PCB_ARC_T )
@@ -168,6 +175,8 @@ void TEARDROP_MANAGER::ensureCopperIndex() const
 
     for( FOOTPRINT* footprint : m_board->Footprints() )
         footprint->RunOnChildren( indexCopper, RECURSE_MODE::RECURSE );
+
+    m_copperRTree.Build();
 }
 
 

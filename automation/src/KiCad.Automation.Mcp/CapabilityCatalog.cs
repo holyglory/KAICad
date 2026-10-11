@@ -245,7 +245,7 @@ public static class CapabilityCatalog
             "Operation through an actual agent client is verified only for the Linux Codex fixture. The Mac-local and Mac-to-VPS modes and other agent clients are not qualified.",
             ["p8bf96f1c4b709a28", "p9bdc0986708bd9b2"]),
         ("platform-qualification", "qualification",
-            "The KiCad design workflow through this MCP server (native editing, synchronization and capability discovery) is verified only on Linux, where this build's native editing journeys run. Installed Mac (Apple Silicon and Intel) and Windows packages are not qualified for it; their separate startup, packaged-MCP, installer and update-helper runs do not qualify this workflow, and new Mac and Windows builds are on hold until the XML editing workflow is complete.",
+            "The complete KiCad design workflow through this MCP server (native editing, synchronization and capability discovery) remains qualified only on Linux. The hosted Mac Apple Silicon and Intel packages and the Windows package now have exact-source native build, install, signature, focused native tests, managed MCP-contract, and packaged-editor journey evidence; public Mac and Windows downloads are available. Those package receipts do not yet qualify the full cross-platform editing workflow, signed update journeys, Codex Desktop operation, or XML editing parity, which remain open.",
             ["kicad-hold-mac-windows-until-xml-editor", "p9bdc0986708bd9b2", "p4d6c4ee22fd8078d", "p67f11d25763f499e"])
     ];
 

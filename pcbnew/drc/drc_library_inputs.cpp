@@ -74,7 +74,7 @@ std::map<wxString, std::string> DRC_LIBRARY_INPUTS::LibraryFingerprints() const
 {
     std::map<wxString, NATIVE_STATE_DIGEST> digests;
     for( const auto& [id, entry] : m_entries )
-        digests[wxString( id.GetLibNickname() )].Append( EntryRecord( id, entry ) );
+        digests[id.GetLibNickname().wx_str()].Append( EntryRecord( id, entry ) );
     std::map<wxString, std::string> result;
     for( auto& [nickname, digest] : digests ) result.emplace( nickname, digest.Hex() );
     return result;
@@ -91,7 +91,7 @@ std::shared_ptr<const DRC_LIBRARY_INPUTS> DRC_LIBRARY_INPUTS::Capture(
         if( aReporter && aReporter->IsCancelled() ) return nullptr;
         const LIB_ID& id = footprint->GetFPID();
         if( id.GetLibNickname().empty() || result->m_entries.contains( id ) ) continue;
-        if( aLibraries && !aLibraries->contains( wxString( id.GetLibNickname() ) ) ) continue;
+        if( aLibraries && !aLibraries->contains( id.GetLibNickname().wx_str() ) ) continue;
         ENTRY entry;
         auto row = aAdapter.GetRow( id.GetLibNickname() );
         if( row )

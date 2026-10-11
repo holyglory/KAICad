@@ -425,6 +425,9 @@ target_link_libraries( qa_symbol_graphic_identity PRIVATE
 )
 target_compile_definitions( qa_symbol_graphic_identity PUBLIC EESCHEMA )
 target_include_directories( qa_symbol_graphic_identity PRIVATE ${NNG_INCLUDE_DIR} )
+if( TARGET api_schema_build_copy )
+    add_dependencies( qa_symbol_graphic_identity api_schema_build_copy )
+endif()
 kicad_add_boost_test( qa_symbol_graphic_identity qa_symbol_graphic_identity )
 setup_qa_env( qa_symbol_graphic_identity )
 

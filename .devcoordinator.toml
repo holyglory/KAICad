@@ -23,7 +23,7 @@ command=["dotnet","automation/artifacts/download-host/kicad-downloads.dll"]
 port=true
 route=true
 health={path="/healthz",timeout_seconds=300}
-env={ASPNETCORE_ENVIRONMENT="Production",KICAD_DOWNLOAD_ROOT="/mnt/build-storage/codex/kicad/public-candidates/linux-092c-signed-000027",KICAD_UPDATE_PUBLISHER_SPKI_FILE="/home/holyglory/kicad/automation/distribution/preview-publisher.spki"}
+env={ASPNETCORE_ENVIRONMENT="Production",KICAD_DOWNLOAD_ROOT="/mnt/build-storage/codex/kicad/public-candidates/mac-both-d611-signed-000001",KICAD_UPDATE_PUBLISHER_SPKI_FILE="/home/holyglory/kicad/automation/distribution/preview-publisher.spki"}
 [test]
 default="automation"
 [test.diagram-requirement-history]

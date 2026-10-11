@@ -280,9 +280,19 @@ BITMAP_TRACE_RESULT TraceBitmap( const BITMAP_TRACE_RASTER& aRaster, const BITMA
         || aSettings.maxContours > HARD_MAX_CONTOURS || aSettings.maxVertices < 3 || aSettings.maxVertices > HARD_MAX_VERTICES )
         return Reject( "invalid_trace_settings", "Trace dimensions, tolerance and limits are outside supported bounds." );
 
-    const __int128 heightNumerator = static_cast<__int128>( aSettings.physicalWidthNm ) * aRaster.height;
-    const __int128 height = ( heightNumerator + aRaster.width / 2 ) / aRaster.width;
-    if( height <= 0 || height > std::numeric_limits<int64_t>::max() )
+    // MSVC does not provide __int128.  Check and perform the bounded positive
+    // multiplication explicitly; the raster dimensions are already capped
+    // above, so uint64_t is sufficient whenever the product is representable.
+    const uint64_t widthNm = static_cast<uint64_t>( aSettings.physicalWidthNm );
+    const uint64_t heightPixels = static_cast<uint64_t>( aRaster.height );
+    const uint64_t widthPixels = static_cast<uint64_t>( aRaster.width );
+    if( heightPixels != 0 && widthNm > std::numeric_limits<uint64_t>::max() / heightPixels )
+        return Reject( "physical_height_overflow", "Physical height does not fit in integer nanometres." );
+    const uint64_t heightNumerator = widthNm * heightPixels;
+    if( heightNumerator > std::numeric_limits<uint64_t>::max() - widthPixels / 2 )
+        return Reject( "physical_height_overflow", "Physical height does not fit in integer nanometres." );
+    const uint64_t height = ( heightNumerator + widthPixels / 2 ) / widthPixels;
+    if( height == 0 || height > static_cast<uint64_t>( std::numeric_limits<int64_t>::max() ) )
         return Reject( "physical_height_overflow", "Physical height does not fit in integer nanometres." );
     if( aSettings.physicalWidthNm > std::numeric_limits<int>::max()
         || height > std::numeric_limits<int>::max() )

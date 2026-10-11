@@ -208,6 +208,13 @@ public static class HostedDelivery
             // installed stock-data path on Windows. Install before ctest so the
             // test process sees the same data root as the packaged application.
             await Run("native-install", "cmake", ["--install", build]);
+            // The CTest environment does not inherit KiCad's installed data
+            // root, so make schema fixtures available under the test's expected
+            // build-relative path as well as through the normal installation.
+            string buildSchemas = Path.Combine(build, "qa", "tests", "schemas");
+            Directory.CreateDirectory(buildSchemas);
+            string sourceSchemas = Path.Combine(repository, "api", "schemas");
+            CopyTree(sourceSchemas, buildSchemas);
             await Run("native-tests", "ctest", ["--test-dir", build, "--no-tests=error", "--output-on-failure",
                 "-R", "^(qa_document_change_journal|qa_symbol_graphic_identity|qa_schematic_symbol_library_identity|qa_schematic_formatting)$", "--output-junit", Path.Combine(evidence, "native-tests.xml")]);
             string dependencies = Path.Combine(build, "vcpkg_installed", "x64-windows");

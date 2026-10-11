@@ -47,6 +47,79 @@ public sealed class PcbConnectivityTools(InstanceRegistry registry)
         ValidateNetName(netName);
         DocumentLifecycleState expected = ParseState(expectedStateJson, document);
 
+        var request = new GetItemsByNet
+        {
+            Header = new ItemHeader { Document = document }
+        };
+        request.Types_.Add(ConnectivityTypes);
+        request.Nets.Add(new Net { Name = netName });
+        return await QueryItems(instanceId, document, expected, "net", netName, request, cancellationToken);
+    });
+
+    [McpServerTool(Name = "kicad_pcb_connectivity_query_net_class", ReadOnly = true),
+     Description("Read typed native PCB connectivity items for one exact netclass at one lifecycle checkpoint. documentJson identifies the open board; expectedStateJson must be the matching kicad_document_state observation. The result is deterministic and read-only; it does not infer DRC validity."),
+     KiCadCapability("pcb-connectivity", "compiled-mcp plus native-board-api", "explicit PCB document, process epoch, lifecycle state, exact netclass"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> QueryNetClass(string instanceId, string documentJson, string netClass,
+        string expectedStateJson, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        DocumentSpecifier document = ParseDocument(documentJson);
+        ValidateFilter(netClass, "netclass");
+        DocumentLifecycleState expected = ParseState(expectedStateJson, document);
+        var request = new GetItemsByNetClass
+        {
+            Header = new ItemHeader { Document = document }
+        };
+        request.Types_.Add(ConnectivityTypes);
+        request.NetClasses.Add(netClass);
+        return await QueryItems(instanceId, document, expected, "net-class", netClass, request, cancellationToken);
+    });
+
+    [McpServerTool(Name = "kicad_pcb_connectivity_query_connected", ReadOnly = true),
+     Description("Read the typed native copper connectivity closure from one or more canonical PCB item IDs at one exact lifecycle checkpoint. documentJson identifies the open board; sourceItemIds must be nonempty lowercase UUIDs; expectedStateJson must be the matching lifecycle observation. This is a read-only native connectivity result, not a DRC conclusion."),
+     KiCadCapability("pcb-connectivity", "compiled-mcp plus native-board-api", "explicit PCB document, process epoch, lifecycle state, canonical source item IDs"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> QueryConnected(string instanceId, string documentJson, string[] sourceItemIds,
+        string expectedStateJson, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        DocumentSpecifier document = ParseDocument(documentJson);
+        KIID[] ids = ParseItemIds(sourceItemIds);
+        DocumentLifecycleState expected = ParseState(expectedStateJson, document);
+        var request = new GetConnectedItems
+        {
+            Header = new ItemHeader { Document = document }
+        };
+        request.Items.Add(ids);
+        request.Types_.Add(ConnectivityTypes);
+        return await QueryItems(instanceId, document, expected, "connected", string.Join(",", sourceItemIds), request, cancellationToken);
+    });
+
+    [McpServerTool(Name = "kicad_pcb_connectivity_query_items", ReadOnly = true),
+     Description("Read typed native PCB items by canonical KIID at one exact lifecycle checkpoint. documentJson identifies the open board; itemIds must be nonempty lowercase UUIDs; expectedStateJson must be the matching lifecycle observation. Footprints, pads, tracks, arcs, vias and zones are normalized into stable summaries."),
+     KiCadCapability("pcb-connectivity", "compiled-mcp plus native-board-api", "explicit PCB document, process epoch, lifecycle state, canonical item IDs"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public Task<CallToolResult> QueryItemsById(string instanceId, string documentJson, string[] itemIds,
+        string expectedStateJson, CancellationToken cancellationToken) => Execute(async () =>
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        DocumentSpecifier document = ParseDocument(documentJson);
+        KIID[] ids = ParseItemIds(itemIds);
+        DocumentLifecycleState expected = ParseState(expectedStateJson, document);
+        var request = new GetItemsById
+        {
+            Header = new ItemHeader { Document = document }
+        };
+        request.Items.Add(ids);
+        return await QueryItems(instanceId, document, expected, "items-by-id", string.Join(",", itemIds), request, cancellationToken);
+    });
+
+    private async Task<CallToolResult> QueryItems<TRequest>(string instanceId, DocumentSpecifier document,
+        DocumentLifecycleState expected, string query, string selector, TRequest request,
+        CancellationToken cancellationToken)
+        where TRequest : class, IMessage<TRequest>, new()
+    {
         NativeClient client = registry.Client(instanceId);
         AutomationSession session = await client.HandshakeAsync(cancellationToken);
         if (!string.Equals(session.Epoch, expected.ProcessEpoch, StringComparison.Ordinal))
@@ -54,16 +127,8 @@ public sealed class PcbConnectivityTools(InstanceRegistry registry)
 
         DocumentLifecycleState before = await ReadState(client, document, cancellationToken);
         RequireState(before, expected, "The PCB changed before the connectivity query; inspect a fresh lifecycle state and retry.");
-
-        var request = new GetItemsByNet
-        {
-            Header = new ItemHeader { Document = document }
-        };
-        request.Types_.Add(ConnectivityTypes);
-        request.Nets.Add(new Net { Name = netName });
-        GetItemsResponse native = await client.InvokeAsync<GetItemsByNet, GetItemsResponse>(request, cancellationToken);
+        GetItemsResponse native = await client.InvokeAsync<TRequest, GetItemsResponse>(request, cancellationToken);
         PcbConnectivityItem[] items = Normalize(native.Items);
-
         DocumentLifecycleState after = await ReadState(client, document, cancellationToken);
         RequireState(after, expected, "The board changed while reading connectivity; discard this snapshot.");
 
@@ -72,8 +137,8 @@ public sealed class PcbConnectivityTools(InstanceRegistry registry)
             instanceId,
             processEpoch = session.Epoch,
             document,
-            query = "net",
-            netName,
+            query,
+            selector,
             beforeState = SchematicJson.Formatter.Format(before),
             afterState = SchematicJson.Formatter.Format(after),
             nativeStatus = native.Status.ToString(),
@@ -83,7 +148,7 @@ public sealed class PcbConnectivityTools(InstanceRegistry registry)
             boardMutation = false,
             drcValidated = false
         });
-    });
+    }
 
     /// <summary>
     /// Converts a native response into the bounded typed surface returned by
@@ -111,6 +176,14 @@ public sealed class PcbConnectivityTools(InstanceRegistry registry)
             return new PcbConnectivityItem(
                 "pad", CanonicalId(item.Id, "pad"), ParentId(item.Parent), NetName(item.Net),
                 null, item.Number, null);
+        }
+
+        if (packed.Is(FootprintInstance.Descriptor))
+        {
+            FootprintInstance item = packed.Unpack<FootprintInstance>();
+            return new PcbConnectivityItem(
+                "footprint", CanonicalId(item.Id, "footprint"), ParentId(item.Parent), null,
+                LayerName(item.Layer), null, null);
         }
 
         if (packed.Is(Track.Descriptor))
@@ -153,11 +226,12 @@ public sealed class PcbConnectivityTools(InstanceRegistry registry)
 
     private static int ItemKindOrder(string kind) => kind switch
     {
-        "pad" => 0,
-        "track" => 1,
-        "arc" => 2,
-        "via" => 3,
-        "zone" => 4,
+        "footprint" => 0,
+        "pad" => 1,
+        "track" => 2,
+        "arc" => 3,
+        "via" => 4,
+        "zone" => 5,
         _ => throw new AutomationException("unsupported_pcb_connectivity_item", $"Unsupported connectivity item kind '{kind}'.")
     };
 
@@ -253,8 +327,26 @@ public sealed class PcbConnectivityTools(InstanceRegistry registry)
 
     private static void ValidateNetName(string value)
     {
+        ValidateFilter(value, "net", "invalid_pcb_connectivity_net");
+    }
+
+    private static void ValidateFilter(string value, string kind, string? errorCode = null)
+    {
         if (string.IsNullOrWhiteSpace(value) || value.Length > 1024)
-            throw new AutomationException("invalid_pcb_connectivity_net", "netName must be a non-empty PCB net name of at most 1024 characters.");
+            throw new AutomationException(errorCode ?? "invalid_pcb_connectivity_filter", $"{kind} must be a non-empty PCB filter of at most 1024 characters.");
+    }
+
+    private static KIID[] ParseItemIds(string[] values)
+    {
+        if (values is null || values.Length is 0 or > 256)
+            throw new AutomationException("invalid_pcb_connectivity_item_ids", "itemIds must contain between 1 and 256 canonical lowercase UUIDs.");
+        return values.Select((value, index) =>
+        {
+            if (!Guid.TryParseExact(value, "D", out Guid parsed) || parsed == Guid.Empty
+                || !string.Equals(value, parsed.ToString("D"), StringComparison.Ordinal))
+                throw new AutomationException("invalid_pcb_connectivity_item_id", $"itemIds[{index}] must be a canonical lowercase UUID.");
+            return new KIID { Value = value };
+        }).ToArray();
     }
 
     private static CallToolResult Data(object value)

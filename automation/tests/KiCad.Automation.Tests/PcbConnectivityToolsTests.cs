@@ -60,4 +60,23 @@ public sealed class PcbConnectivityToolsTests
 
         Assert.AreEqual(0, result.Length);
     }
+
+    [TestMethod]
+    public void NormalizeSupportsFootprintIdentityForItemQueries()
+    {
+        var footprint = new FootprintInstance
+        {
+            Id = new() { Value = "11111111-1111-4111-8111-111111111111" },
+            Layer = BoardLayer.BlFCu,
+            Parent = new() { Value = "22222222-2222-4222-8222-222222222222" }
+        };
+
+        var result = PcbConnectivityTools.Normalize([Any.Pack(footprint)]);
+
+        Assert.AreEqual(1, result.Length);
+        Assert.AreEqual("footprint", result[0].Kind);
+        Assert.AreEqual(footprint.Id.Value, result[0].Id);
+        Assert.AreEqual(footprint.Parent.Value, result[0].ParentId);
+        Assert.AreEqual(nameof(BoardLayer.BlFCu), result[0].Layer);
+    }
 }

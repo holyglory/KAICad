@@ -585,7 +585,9 @@ public sealed class McpProcessTests
             foreach (string boardTool in new[]
             {
                 "kicad_pcb_nets", "kicad_pcb_items_by_net", "kicad_pcb_items_by_net_class",
-                "kicad_pcb_connected_items", "kicad_pcb_connectivity_query", "kicad_pcb_design_rules", "kicad_pcb_net_classes", "kicad_pcb_enabled_layers",
+                "kicad_pcb_connected_items", "kicad_pcb_connectivity_query", "kicad_pcb_connectivity_query_net_class",
+                "kicad_pcb_connectivity_query_connected", "kicad_pcb_connectivity_query_items",
+                "kicad_pcb_design_rules", "kicad_pcb_net_classes", "kicad_pcb_enabled_layers",
                 "kicad_pcb_stackup", "kicad_pcb_plot_settings"
             })
                 CollectionAssert.Contains(names, boardTool);
@@ -618,6 +620,33 @@ public sealed class McpProcessTests
             Assert.IsTrue(emptyConnectivityNet.GetProperty("result").GetProperty("isError").GetBoolean(), emptyConnectivityNet.GetRawText());
             Assert.AreEqual("invalid_pcb_connectivity_net",
                 emptyConnectivityNet.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            var invalidConnectivityNetClass = await Request(9364, "tools/call", new
+            {
+                name = "kicad_pcb_connectivity_query_net_class",
+                arguments = new
+                {
+                    instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", netClass = "SIGNAL",
+                    expectedStateJson = "{}"
+                }
+            });
+            Assert.IsTrue(invalidConnectivityNetClass.GetProperty("result").GetProperty("isError").GetBoolean(),
+                invalidConnectivityNetClass.GetRawText());
+            Assert.AreEqual("invalid_document_target",
+                invalidConnectivityNetClass.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            var invalidConnectivitySource = await Request(9365, "tools/call", new
+            {
+                name = "kicad_pcb_connectivity_query_connected",
+                arguments = new
+                {
+                    instanceId = Guid.NewGuid().ToString("D"),
+                    documentJson = "{\"type\":\"DOCTYPE_PCB\",\"project\":{\"name\":\"connected-contract\",\"path\":\"/tmp\"},\"boardFilename\":\"board.kicad_pcb\"}",
+                    sourceItemIds = new[] { "NOT-A-UUID" }, expectedStateJson = "{}"
+                }
+            });
+            Assert.IsTrue(invalidConnectivitySource.GetProperty("result").GetProperty("isError").GetBoolean(),
+                invalidConnectivitySource.GetRawText());
+            Assert.AreEqual("invalid_pcb_connectivity_item_id",
+                invalidConnectivitySource.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
             var invalidStackup = await Request(9349, "tools/call", new { name = "kicad_pcb_stackup",
                 arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
             Assert.IsTrue(invalidStackup.GetProperty("result").GetProperty("isError").GetBoolean());

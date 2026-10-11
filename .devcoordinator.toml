@@ -23,7 +23,7 @@ command=["dotnet","automation/artifacts/download-host/kicad-downloads.dll"]
 port=true
 route=true
 health={path="/healthz",timeout_seconds=300}
-env={ASPNETCORE_ENVIRONMENT="Production",KICAD_DOWNLOAD_ROOT="/mnt/build-storage/codex/kicad/public-candidates/mac-both-d611-signed-000001",KICAD_UPDATE_PUBLISHER_SPKI_FILE="/home/holyglory/kicad/automation/distribution/preview-publisher.spki"}
+env={ASPNETCORE_ENVIRONMENT="Production",KICAD_DOWNLOAD_ROOT="/mnt/build-storage/codex/kicad/public-candidates/mac-d611-full-signed",KICAD_UPDATE_PUBLISHER_SPKI_FILE="/home/holyglory/kicad/automation/distribution/preview-publisher.spki"}
 [test]
 default="automation"
 [test.diagram-requirement-history]
@@ -3139,3 +3139,44 @@ name="inventory"
 tier="development"
 requires=["observe"]
 command=["python3","-c","import json, subprocess; receipt=json.loads(subprocess.check_output(['devcoordinator2','completion','check','--file','automation/artifacts/preview27-linux-receipt-repair/completion.json','/home/holyglory/.codex/worktrees/0761/kicad'], text=True)); print(json.dumps(receipt)); assert receipt.get('ok') and receipt.get('data', {}).get('valid'), 'Completion inventory rejected'"]
+
+[test.platform-stage-repair]
+timeout_seconds=5400
+env={TMPDIR="/mnt/build-storage/codex/kicad/t"}
+[[test.platform-stage-repair.check]]
+name="managed-build"
+tier="development"
+timeout_seconds=1200
+command=["dotnet", "build", "automation/KiCad.Automation.slnx", "--no-restore", "--configuration", "Release"]
+[[test.platform-stage-repair.check]]
+name="contracts"
+tier="development"
+timeout_seconds=1200
+requires=["managed-build"]
+command=["dotnet", "test", "automation/KiCad.Automation.slnx", "--no-build", "--no-restore", "--configuration", "Release", "--filter", "FullyQualifiedName~HostedPreviewStagingTests|FullyQualifiedName~PlatformUpdateFeedTests|FullyQualifiedName~HostedDeliveryTests|FullyQualifiedName~MacManagedRuntimeTests", "--logger", "trx;LogFileName=results.trx", "--results-directory", "automation/artifacts/platform-stage-repair/contracts"]
+retained_artifacts=[{name="contracts",path="automation/artifacts/platform-stage-repair/contracts",max_bytes=16777216}]
+[[test.platform-stage-repair.check]]
+name="arm64"
+tier="development"
+timeout_seconds=1200
+requires=["contracts"]
+command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Release/net10.0/kicad-validate.dll", "stage-hosted", "--candidate", "/mnt/build-storage/codex/kicad/evidence/release-38108170757-arm64/kicad-delivery", "--commit", "d6119b2b130bc2b141a082f675e5e2c3786420c1", "--platform", "osx-arm64", "--run-id", "38108170757", "--version", "preview-20261011-d6119b2b13", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/linux-092c-signed-000027", "--output", "/mnt/build-storage/codex/kicad/public-candidates/mac-d611-full-arm"]
+[[test.platform-stage-repair.check]]
+name="intel"
+tier="development"
+timeout_seconds=1200
+requires=["arm64"]
+command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Release/net10.0/kicad-validate.dll", "stage-hosted", "--candidate", "/mnt/build-storage/codex/kicad/evidence/release-38108170757-x64/kicad-delivery", "--commit", "d6119b2b130bc2b141a082f675e5e2c3786420c1", "--platform", "osx-x64", "--run-id", "38108170757", "--version", "preview-20261011-d6119b2b13", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/mac-d611-full-arm", "--output", "/mnt/build-storage/codex/kicad/public-candidates/mac-d611-full-both"]
+[[test.platform-stage-repair.check]]
+name="feeds"
+tier="development"
+timeout_seconds=1200
+requires=["intel"]
+command=["dotnet", "automation/tools/KiCad.Automation.Validation/bin/Release/net10.0/kicad-validate.dll", "stage-platform-feeds", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/mac-d611-full-both", "--output", "/mnt/build-storage/codex/kicad/public-candidates/mac-d611-full-signed", "--publisher", "/home/holyglory/kicad/automation/distribution/preview-publisher.spki", "--sources", "/mnt/build-storage/codex/kicad/evidence/release-38108170757-metadata/platform-mac-d611.json"]
+[[test.platform-stage-repair.check]]
+name="preservation"
+tier="development"
+timeout_seconds=1200
+requires=["feeds"]
+command=["python3", "automation/qualification/check-platform-catalogue.py", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/linux-092c-signed-000027", "--candidate", "/mnt/build-storage/codex/kicad/public-candidates/mac-d611-full-signed", "--changed-platform", "osx-arm64", "--changed-platform", "osx-x64", "--output", "automation/artifacts/platform-stage-repair/preservation/receipt.json"]
+retained_artifacts=[{name="preservation",path="automation/artifacts/platform-stage-repair/preservation",max_bytes=16777216}]

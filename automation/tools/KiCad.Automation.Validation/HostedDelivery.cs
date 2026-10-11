@@ -201,7 +201,9 @@ public static class HostedDelivery
                 File.Copy(Path.Combine(build, "CMakeCache.txt"), Path.Combine(evidence, "CMakeCache.txt"));
             }
             if (request.Phase == "prepare") return;
-            await Run("native-build", "cmake", ["--build", build]);
+            // Collect independent compiler/linker failures in this one candidate
+            // instead of paying for a fresh full build after each first error.
+            await Run("native-build", "cmake", ["--build", build, "--", "-k", "0"]);
             await Run("native-tests", "ctest", ["--test-dir", build, "--no-tests=error", "--output-on-failure",
                 "-R", "^(qa_document_change_journal|qa_symbol_graphic_identity|qa_schematic_symbol_library_identity|qa_schematic_formatting)$", "--output-junit", Path.Combine(evidence, "native-tests.xml")]);
             await Run("native-install", "cmake", ["--install", build]);

@@ -90,7 +90,7 @@ public static class MacValidation
                 "-DCMAKE_INSTALL_PREFIX=" + Path.Combine(output, "install"),
                 "-DCMAKE_OSX_ARCHITECTURES=" + MacArchitecture.CmakeName(request.Architecture)]);
             File.Copy(Path.Combine(build, "CMakeCache.txt"), Path.Combine(evidence, "CMakeCache.txt"));
-            await Run("native-build", "cmake", ["--build", build]);
+            await Run("native-build", "cmake", ["--build", build, "--", "-k", "0"]);
             // Use the pinned project's own bundle/dependency installation rules.
             // The wrapper above confines their absolute destinations to this run.
             await Run("native-install", "cmake", ["--install", build]);

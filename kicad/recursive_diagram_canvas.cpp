@@ -820,7 +820,7 @@ std::vector<std::vector<POINT>> RouteLegs( const std::vector<RECT>& blocks, cons
         }
         reachOf.push_back( box );
     }
-    auto near = [&]( const BOX& box, const DRAWN& path )
+    auto isNear = [&]( const BOX& box, const DRAWN& path )
     {
         return !( box.left >= path.right + apart || path.left >= box.right + apart || box.top >= path.bottom + apart || path.top >= box.bottom + apart );
     };
@@ -828,7 +828,7 @@ std::vector<std::vector<POINT>> RouteLegs( const std::vector<RECT>& blocks, cons
     {
         const DRAWN &was = candidates[leg][chosen[leg]].drawn, &now = candidates[leg][index].drawn;
         for( size_t x = 0; x < legs.size(); ++x )
-            if( x != leg && ( near( reachOf[x], was ) || near( reachOf[x], now ) ) )
+            if( x != leg && ( isNear( reachOf[x], was ) || isNear( reachOf[x], now ) ) )
                 for( size_t i = 0; i < candidates[x].size(); ++i )
                     all[x][i] = all[x][i] - against( candidates[x][i].drawn, was ) + against( candidates[x][i].drawn, now );
         chosen[leg] = index;
@@ -2522,15 +2522,15 @@ std::optional<std::pair<wxPoint, wxPoint>> RECURSIVE_DIAGRAM_FRAME::noteLeader( 
     {
         for( const auto& [a, b] : others ) if( segmentToSegment( from, to, a, b ) < wireClear ) return false;
         // Its own connection is met only where the leader ends on it: the last pixels before that end are not checked.
-        wxPoint near = to; const double length = std::hypot( to.x - from.x, to.y - from.y );
+        wxPoint nearPoint = to; const double length = std::hypot( to.x - from.x, to.y - from.y );
         if( onPath )
         {
-            if( length <= touch ) near = from;
-            else near = wxPoint( KiROUND( to.x - ( to.x - from.x ) * touch / length ), KiROUND( to.y - ( to.y - from.y ) * touch / length ) );
+            if( length <= touch ) nearPoint = from;
+            else nearPoint = wxPoint( KiROUND( to.x - ( to.x - from.x ) * touch / length ), KiROUND( to.y - ( to.y - from.y ) * touch / length ) );
         }
-        if( !( onPath && near == from ) )
-            for( const auto& [a, b] : own ) if( segmentToSegment( from, near, a, b ) < wireClear ) return false;
-        for( const wxRect& rect : rects ) if( segmentToRect( from, onPath ? near : to, rect ) < rectClear ) return false;
+        if( !( onPath && nearPoint == from ) )
+            for( const auto& [a, b] : own ) if( segmentToSegment( from, nearPoint, a, b ) < wireClear ) return false;
+        for( const wxRect& rect : rects ) if( segmentToRect( from, onPath ? nearPoint : to, rect ) < rectClear ) return false;
         return true;
     };
     const wxPoint middle( box.x + box.width / 2, box.y + box.height / 2 );

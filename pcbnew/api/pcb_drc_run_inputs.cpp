@@ -73,7 +73,7 @@ std::optional<std::string> CandidateNetName( KICAD_T aType,
     }
     if( aType == PCB_ARC_T )
     {
-        Arc value;
+        kiapi::board::types::Arc value;
         if( !aItem.UnpackTo( &value ) ) return std::nullopt;
         return value.net().name();
     }

@@ -4002,9 +4002,10 @@ BOOST_AUTO_TEST_CASE( FirstSaveOfAnUnsavedProjectKeepsTheSaveStableState )
 
     SETTINGS_MANAGER           settings;
     std::unique_ptr<SCHEMATIC> schematic;
-    KI_TEST::LoadSchematic( settings,
-                            fs::relative( copy / "issue13212", KI_TEST::GetEeschemaTestDataDir() ).generic_string(),
-                            schematic );
+    // The fixture was copied to a private temporary directory; pass its
+    // absolute basename so the loader does not resolve it back under the
+    // source-tree QA data root on Windows.
+    KI_TEST::LoadSchematic( settings, wxString::FromUTF8( ( copy / "issue13212" ).string() ), schematic );
     BOOST_REQUIRE( schematic );
     schematic->RefreshHierarchy();
     PROJECT& project = schematic->Project();

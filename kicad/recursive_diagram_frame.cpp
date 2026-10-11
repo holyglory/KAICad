@@ -308,7 +308,7 @@ RECURSIVE_DIAGRAM_FRAME::RECURSIVE_DIAGRAM_FRAME( wxWindow* parent, const D::Ope
         const char* names[] = { "Power", "Data", "Control", "Analog", "Mechanical" };
         const wxString labels[] = { _( "Power" ), _( "Data" ), _( "Control" ), _( "Analog" ), _( "Mechanical" ) };
         int values[] = { DOMAINS[0], DOMAINS[1], DOMAINS[2], DOMAINS[3], DOMAINS[4] };
-        oneClick( detailRow( DETAIL::DOMAIN, "Domain" ), m_domainChoices.data(), 5, "RecursiveDomain", names, labels, DETAIL::DOMAIN, values );
+        oneClick( detailRow( DETAIL::NET_DOMAIN, "Domain" ), m_domainChoices.data(), 5, "RecursiveDomain", names, labels, DETAIL::NET_DOMAIN, values );
     }
     {
         const char* names[] = { "Interface", "SignalGroup", "DifferentialPair", "Signal" };
@@ -1519,7 +1519,7 @@ bool RECURSIVE_DIAGRAM_FRAME::HasDetail( const LINK_DETAILS& details, DETAIL det
     {
     case DETAIL::SIGNALS: return !details.signals.empty();
     case DETAIL::DIRECTION: return details.direction != D::DCDR_UNSPECIFIED;
-    case DETAIL::DOMAIN: return details.domain != D::DD_UNSPECIFIED;
+    case DETAIL::NET_DOMAIN: return details.domain != D::DD_UNSPECIFIED;
     default: return details.kind != D::DCK_ABSTRACT && details.kind != D::DCK_UNKNOWN;
     }
 }
@@ -1575,7 +1575,7 @@ void RECURSIVE_DIAGRAM_FRAME::setLinkValue( DETAIL detail, int value )
 {
     if( !m_ready || m_process || m_diagramHistoryOpen || m_historyPreview || m_connectionId.empty() ) return;
     LINK_DETAILS details; if( !linkDetails( details ) ) return;
-    int now = detail == DETAIL::DIRECTION ? static_cast<int>( details.direction ) : detail == DETAIL::DOMAIN ? static_cast<int>( details.domain )
+    int now = detail == DETAIL::DIRECTION ? static_cast<int>( details.direction ) : detail == DETAIL::NET_DOMAIN ? static_cast<int>( details.domain )
                                                                                                           : static_cast<int>( details.kind );
     // A choice that is already made stays made; the remove button takes a detail away.
     if( now == value || detail == DETAIL::SIGNALS ) { refresh(); return; }
@@ -1594,7 +1594,7 @@ void RECURSIVE_DIAGRAM_FRAME::setLinkValue( DETAIL detail, int value )
     auto apply = [&]( auto* link )
     {
         if( detail == DETAIL::DIRECTION ) link->set_direction( static_cast<D::DiagramConnectionDirection>( value ) );
-        else if( detail == DETAIL::DOMAIN ) link->set_domain( static_cast<D::DiagramDomain>( value ) );
+        else if( detail == DETAIL::NET_DOMAIN ) link->set_domain( static_cast<D::DiagramDomain>( value ) );
         else link->set_kind( static_cast<D::DiagramConnectionKind>( value ) );
     };
     if( auto* added = newConnection( m_connectionId ) ) apply( added ); else if( auto* draft = editConnection( true ) ) apply( draft );
@@ -1612,7 +1612,7 @@ void RECURSIVE_DIAGRAM_FRAME::revealDetail( DETAIL detail )
                    if( m_closing ) return;
                    if( detail == DETAIL::SIGNALS ) { if( m_signalEntry->IsShown() ) m_signalEntry->SetFocus(); }
                    else if( detail == DETAIL::DIRECTION ) m_directionChoices[0]->SetFocus();
-                   else if( detail == DETAIL::DOMAIN ) m_domainChoices[0]->SetFocus();
+                   else if( detail == DETAIL::NET_DOMAIN ) m_domainChoices[0]->SetFocus();
                    else m_typeChoices[0]->SetFocus();
                } );
 }

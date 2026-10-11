@@ -203,7 +203,9 @@ private:
     // + Add detail, + Add requirement and Comments, and only the details it has. Add detail adds exactly one detail as its
     // own removable row (signals, direction, domain or type, the kinds the format-2 model stores); removing the row returns
     // the connection to its earlier state. Edits change the level draft only, with undo and redo.
-    enum class DETAIL { SIGNALS, DIRECTION, DOMAIN, TYPE };
+    // DOMAIN is defined as a macro by the macOS SDK's math.h.  Keep the
+    // semantic detail name while avoiding a platform header collision.
+    enum class DETAIL { SIGNALS, DIRECTION, NET_DOMAIN, TYPE };
     static constexpr int DETAILS = 4;
     struct SIGNAL { std::string id, name; bool drawn = false; kiapi::automation::diagrams::v1::DiagramConnectionKind kind = {}; };
     struct LINK_DETAILS

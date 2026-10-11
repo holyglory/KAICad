@@ -82,8 +82,17 @@ internal static class EmbeddedFileCodec
         private ZstdApi()
         {
             string[] names = OperatingSystem.IsWindows() ? ["libzstd.dll", "zstd.dll"]
-                : OperatingSystem.IsMacOS() ? ["libzstd.dylib", "libzstd.1.dylib"]
+                : OperatingSystem.IsMacOS() ? ["libzstd.dylib", "libzstd.1.dylib",
+                    "/opt/homebrew/opt/zstd/lib/libzstd.1.dylib", "/usr/local/opt/zstd/lib/libzstd.1.dylib",
+                    "/opt/homebrew/lib/libzstd.1.dylib", "/usr/local/lib/libzstd.1.dylib"]
                 : ["libzstd.so.1", "libzstd.so"];
+            string? configured = Environment.GetEnvironmentVariable("KICAD_AUTOMATION_ZSTD_LIBRARY");
+            if (!string.IsNullOrWhiteSpace(configured))
+            {
+                if (!Path.IsPathFullyQualified(configured) || !File.Exists(configured))
+                    throw new AutomationException("raster_trace_embedded_codec_unavailable", "KICAD_AUTOMATION_ZSTD_LIBRARY must be an existing absolute library path.");
+                names = [configured, .. names];
+            }
             foreach (string name in names)
                 if (NativeLibrary.TryLoad(name, out library)) break;
             if (library == IntPtr.Zero)

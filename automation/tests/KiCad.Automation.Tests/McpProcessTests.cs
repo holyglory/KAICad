@@ -1718,7 +1718,13 @@ public sealed class McpProcessTests
                 var unproven = await Release(4092, held.RevisionToken, heldOperation, "resume");
                 Assert.AreEqual("operation_exit_unproven", Code(unproven), unproven.GetRawText());
                 StringAssert.Contains(unproven.GetProperty("structuredContent").GetProperty("errorMessage").GetString(), heldEpoch);
-                var live = ProcessIdentity.Record(Environment.ProcessId)!;
+                // ProcessIdentity is intentionally Linux-only because it relies on /proc start
+                // ticks. The release-exited proof is covered by the native Linux journey; keep
+                // the portable MCP contract checks above and below on macOS/Windows.
+                if (OperatingSystem.IsLinux())
+                {
+                var live = ProcessIdentity.Record(Environment.ProcessId)
+                    ?? throw new AssertFailedException("Linux process identity must be readable for exit-proof coverage.");
                 async Task Registration(ProcessStartIdentity identity, string? registry = null, string? epoch = null) => await File.WriteAllTextAsync(
                     Path.Combine(registry ?? state, heldInstance + ".json"),
                     JsonSerializer.Serialize(new InstanceRecord(heldInstance, Path.Combine(state, "released-project", "fixture.kicad_pro"),
@@ -1806,6 +1812,7 @@ public sealed class McpProcessTests
                 StringAssert.Contains(refusal.GetProperty("errorMessage").GetString(), "stays released (receipt " + view.GetProperty("receiptPath").GetString());
                 Assert.AreEqual(reattached.RevisionToken, store.Read()!.RevisionToken, "A refused continuation changes nothing.");
                 File.Delete(Path.Combine(state, heldInstance + ".json"));
+                }
             }
             CollectionAssert.Contains(names, "kicad_design_recovery_resolve_pending");
             CollectionAssert.Contains(names, "kicad_design_block_owners_plan");

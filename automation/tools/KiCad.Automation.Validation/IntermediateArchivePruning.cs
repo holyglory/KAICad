@@ -111,8 +111,22 @@ public static class IntermediateArchivePruning
     {
         string root = HostedPreviewStaging.AbsoluteDirectory(path);
         for (var directory = new DirectoryInfo(root); directory is not null; directory = directory.Parent)
-            if (directory.LinkTarget is not null) throw new ArgumentException("Archive roots cannot traverse linked directories.");
+            if (directory.LinkTarget is not null && !IsMacSystemAlias(directory))
+                throw new ArgumentException("Archive roots cannot traverse linked directories.");
         return root;
+    }
+
+    private static bool IsMacSystemAlias(DirectoryInfo directory)
+    {
+        if (!OperatingSystem.IsMacOS() || directory.LinkTarget is null || directory.Parent is null)
+            return false;
+        string resolved = Path.GetFullPath(Path.Combine(directory.Parent.FullName, directory.LinkTarget));
+        return (directory.FullName, resolved) switch
+        {
+            ("/var", "/private/var") => true,
+            ("/tmp", "/private/tmp") => true,
+            _ => false
+        };
     }
 
     private static async Task<Dictionary<string, DownloadArtifact>> Catalogue(string root, string expectedHash, CancellationToken token)

@@ -43,6 +43,12 @@ public sealed class MacManagedRuntimeTests
             await File.WriteAllTextAsync(outside, "Synthetic unbundled library.");
             File.CreateSymbolicLink(conflicting, outside);
             Assert.ThrowsExactly<InvalidDataException>(() => MacManagedRuntime.FindBundledNng(bundle));
+
+            File.Delete(conflicting);
+            string zstdReal = Path.Combine(frameworks, "libzstd.1.5.7.dylib");
+            await File.WriteAllTextAsync(zstdReal, "Synthetic zstd path-selection fixture, not a Mach-O binary.");
+            File.CreateSymbolicLink(Path.Combine(frameworks, "libzstd.1.dylib"), "libzstd.1.5.7.dylib");
+            Assert.AreEqual(zstdReal, MacManagedRuntime.FindBundledZstd(bundle));
         }
         finally { Directory.Delete(root, recursive: true); }
     }

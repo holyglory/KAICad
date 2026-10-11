@@ -41,7 +41,7 @@ public static class MacValidation
         File.Copy(toolchain, Path.Combine(evidence, "builder-toolchain.cmake"));
         string? verified = null, builderCommit = null, builderStatus = null, failure = null;
         string status = "failed";
-        const string dotnetSelection = "TestCategory!=NativeSession&TestCategory!=ExternalIntegration";
+        const string dotnetSelection = "TestCategory!=NativeSession&TestCategory!=ExternalIntegration&TestCategory!=NativeFootprintLibrary";
         var steps = new List<ValidationStep>();
         var binaries = new List<NativeBinaryEvidence>();
         MacManagedRuntimeEvidence? managedRuntime = null;
@@ -111,6 +111,7 @@ public static class MacValidation
             if (nativeCommit != request.Commit)
                 throw new InvalidDataException("Installed native KiCad does not report the requested commit.");
             string nng = MacManagedRuntime.FindBundledNng(nativeBundle);
+            string zstd = MacManagedRuntime.FindBundledZstd(nativeBundle);
             string nngSlices = (await Run("nng-architecture", "xcrun", ["lipo", "-archs", nng], capture: true)).Trim();
             MacArchitecture.RequireBinaryTarget(request.Architecture, nngSlices);
             managedBinaries.Add(new("libnng.dylib", nngSlices, Evidence.Hash(nng)));
@@ -119,6 +120,7 @@ public static class MacValidation
                 throw new InvalidDataException("The managed output unexpectedly already contains an NNG library.");
             File.CreateSymbolicLink(nngLink, Path.GetRelativePath(managed, nng));
             environment["KICAD_AUTOMATION_NNG_LIBRARY"] = nngLink;
+            environment["KICAD_AUTOMATION_ZSTD_LIBRARY"] = zstd;
             string probe = await Run("managed-runtime-probe", Path.Combine(managed, "kicad-mcp"), ["--runtime-info"], capture: true);
             var runtime = MacManagedRuntime.ReadProbe(probe, request.Architecture);
             managedRuntime = new(request.Architecture, managedBinaries,
@@ -134,6 +136,7 @@ public static class MacValidation
             await File.WriteAllTextAsync(launcher, "#!/bin/sh\nset -eu\n"
                 + "kicad_mac_root=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd -P)\n"
                 + "export KICAD_AUTOMATION_NNG_LIBRARY=\"$kicad_mac_root/managed/libnng.dylib\"\n"
+                + "export KICAD_AUTOMATION_ZSTD_LIBRARY=\"$kicad_mac_root/install/KiCad.app/Contents/Frameworks/libzstd.1.dylib\"\n"
                 + "exec \"$kicad_mac_root/managed/kicad-mcp\" \"$@\"\n", cancellationToken);
             File.SetUnixFileMode(launcher, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
                 | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);

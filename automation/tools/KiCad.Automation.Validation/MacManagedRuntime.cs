@@ -35,6 +35,27 @@ public static class MacManagedRuntime
         return candidates.Single();
     }
 
+    public static string FindBundledZstd(string bundle)
+    {
+        if (!Path.IsPathFullyQualified(bundle)) throw new ArgumentException("Use an absolute native app bundle path.");
+        string frameworks = Path.Combine(bundle, "Contents", "Frameworks");
+        if (!Directory.Exists(frameworks)) throw new DirectoryNotFoundException("The native app Frameworks directory is missing.");
+        var candidates = new HashSet<string>(StringComparer.Ordinal);
+        foreach (string path in Directory.EnumerateFiles(frameworks, "libzstd*.dylib", SearchOption.TopDirectoryOnly))
+        {
+            var info = new FileInfo(path);
+            string resolved = info.ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? info.FullName;
+            string relative = Path.GetRelativePath(frameworks, resolved);
+            if (relative.StartsWith("../", StringComparison.Ordinal) || Path.IsPathFullyQualified(relative)
+                || !File.Exists(resolved))
+                throw new InvalidDataException("The bundled zstd library is missing or points outside the native bundle.");
+            candidates.Add(resolved);
+        }
+        if (candidates.Count != 1)
+            throw new InvalidDataException("The native bundle must contain one unambiguous shared zstd library for the MCP runtime.");
+        return candidates.Single();
+    }
+
     public static (string Framework, string NngVersion) ReadProbe(string json, string architecture)
     {
         using var document = JsonDocument.Parse(json);

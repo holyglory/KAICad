@@ -15,6 +15,7 @@ using namespace kiapi::common::commands;
 using namespace kiapi::common::types;
 using namespace kiapi::board::types;
 using google::protobuf::util::MessageDifferencer;
+using BoardArc = kiapi::board::types::Arc;
 
 bool Uuid( const std::string& value )
 {
@@ -96,7 +97,7 @@ bool UniqueProperties( const Route& value )
 bool CandidateType( const google::protobuf::Any& value )
 {
     if( value.Is<Track>() ) { Track item; return value.UnpackTo( &item ) && UniqueProperties( item ); }
-    if( value.Is<Arc>() ) { Arc item; return value.UnpackTo( &item ) && UniqueProperties( item ); }
+    if( value.Is<BoardArc>() ) { BoardArc item; return value.UnpackTo( &item ) && UniqueProperties( item ); }
     if( value.Is<Via>() ) { Via item; return value.UnpackTo( &item ) && UniqueProperties( item ); }
     return false;
 }
@@ -111,9 +112,9 @@ std::string RouteItemId( const google::protobuf::Any& value )
         return item.id().value();
     }
 
-    if( value.Is<Arc>() )
+    if( value.Is<BoardArc>() )
     {
-        Arc item;
+        BoardArc item;
         if( !value.UnpackTo( &item ) || !item.has_id() ) return {};
         return item.id().value();
     }
@@ -146,7 +147,7 @@ void NormalizeBasicRoute( Route& value )
 }
 
 void NormalizeRoute( Track& value ) { NormalizeBasicRoute( value ); }
-void NormalizeRoute( Arc& value ) { NormalizeBasicRoute( value ); }
+void NormalizeRoute( BoardArc& value ) { NormalizeBasicRoute( value ); }
 
 void NormalizeRoute( Via& value )
 {
@@ -248,7 +249,7 @@ bool RouteItemEquivalent( const google::protobuf::Any& expected,
                           const google::protobuf::Any& actual )
 {
     if( expected.Is<Track>() && actual.Is<Track>() ) return TypedRouteEquivalent<Track>( expected, actual );
-    if( expected.Is<Arc>() && actual.Is<Arc>() ) return TypedRouteEquivalent<Arc>( expected, actual );
+    if( expected.Is<BoardArc>() && actual.Is<BoardArc>() ) return TypedRouteEquivalent<BoardArc>( expected, actual );
     if( expected.Is<Via>() && actual.Is<Via>() ) return TypedRouteEquivalent<Via>( expected, actual );
     return false;
 }

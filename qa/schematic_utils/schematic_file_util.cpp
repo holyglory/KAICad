@@ -195,7 +195,9 @@ void LoadSchematic( SETTINGS_MANAGER& aSettingsManager, const wxString& aRelPath
         aSchematic->Reset();
     }
 
-    std::string absPath = GetEeschemaTestDataDir() + aRelPath.ToStdString();
+    wxFileName requested( aRelPath );
+    std::string absPath = requested.IsAbsolute() ? requested.GetFullPath().ToStdString()
+                                                  : GetEeschemaTestDataDir() + aRelPath.ToStdString();
     wxFileName  projectFile( absPath + ".kicad_pro" );
     wxFileName  legacyProject( absPath + ".pro" );
     std::string schematicPath = absPath + ".kicad_sch";

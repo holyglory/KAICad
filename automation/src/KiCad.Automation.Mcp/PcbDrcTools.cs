@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Google.Protobuf;
 using Kiapi.Board.Types;
 using Kiapi.Common;
@@ -143,6 +144,29 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
             return SchematicJson.Formatter.Format(state);
         });
         return WithStructuredState(response, state);
+    }
+
+    [McpServerTool(Name = "kicad_pcb_drc_start_typed"),
+     Description("Typed PCB DRC start boundary. input carries the explicit PCB document, native document revision, process epoch, operation identity and DRC options; legacy JSON remains available through kicad_pcb_drc_start. Exactly one structured input form is admitted and the same native snapshot, candidate validation and receipt rules apply."),
+     KiCadCapability("pcb", "compiled-mcp plus native-api", "typed PCB document, revision, process epoch and operation ID"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public async Task<CallToolResult> StartTyped(string instanceId, PcbDrcStartInput input,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            (string document, string revision) = input.ToPayload();
+            return await Start(instanceId, document, input.OperationId!, input.RefillZones, input.ReportAllTrackErrors,
+                input.TestFootprints, revision, input.ProcessEpoch!, cancellationToken,
+                input.ExpectedSchematicStateJson, input.AllowDuplicateSheetNames, input.CandidateRequestJson,
+                input.DeleteRequestJson, input.GroupChangesJson);
+        }
+        catch (AutomationException error)
+        {
+            JsonElement structured = JsonSerializer.SerializeToElement(new { errorCode = error.Code, errorMessage = error.Message });
+            return new CallToolResult { IsError = true, StructuredContent = structured,
+                Content = [new TextContentBlock { Text = structured.GetRawText() }] };
+        }
     }
 
     [McpServerTool(Name = "kicad_pcb_drc_job", ReadOnly = true),
@@ -510,5 +534,48 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
             response.StructuredContent = json.RootElement.Clone();
         }
         return response;
+    }
+}
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class PcbDrcStartInput : NativeDocumentInputObject
+{
+    private NativeDocumentInput? document;
+    private NativeDocumentRevisionInput? revision;
+    private string? operationId;
+    private string? processEpoch;
+
+    public NativeDocumentInput? Document { get => document; set => document = BindOnce(value); }
+    public NativeDocumentRevisionInput? Revision { get => revision; set => revision = BindOnce(value); }
+    public string? OperationId { get => operationId; set => operationId = BindOnce(value); }
+    public string? ProcessEpoch { get => processEpoch; set => processEpoch = BindOnce(value); }
+    public bool RefillZones { get; set; }
+    public bool ReportAllTrackErrors { get; set; }
+    public bool TestFootprints { get; set; }
+    public bool AllowDuplicateSheetNames { get; set; }
+    public string? ExpectedSchematicStateJson { get; set; }
+    public string? CandidateRequestJson { get; set; }
+    public string? DeleteRequestJson { get; set; }
+    public string? GroupChangesJson { get; set; }
+
+    internal (string Document, string Revision) ToPayload()
+    {
+        if (Document is null || Revision is null || string.IsNullOrWhiteSpace(OperationId)
+            || string.IsNullOrWhiteSpace(ProcessEpoch))
+            throw new AutomationException("invalid_pcb_drc_typed_input", "Document, revision, operationId and processEpoch are required.");
+        DocumentSpecifier target = NativeDocumentInput.ToNative(Document);
+        if (target.Type != DocumentType.DoctypePcb)
+            throw new AutomationException("invalid_pcb_drc_typed_input", "Document must identify a PCB.");
+        if (!Guid.TryParseExact(OperationId, "D", out Guid operation) || operation == Guid.Empty
+            || !string.Equals(OperationId, operation.ToString("D"), StringComparison.Ordinal)
+            || !Guid.TryParseExact(ProcessEpoch, "D", out Guid epoch) || epoch == Guid.Empty
+            || !string.Equals(ProcessEpoch, epoch.ToString("D"), StringComparison.Ordinal))
+            throw new AutomationException("invalid_pcb_drc_typed_input", "operationId and processEpoch must be canonical lowercase UUIDs.");
+        if (string.IsNullOrWhiteSpace(Revision.Epoch)
+            || !Guid.TryParseExact(Revision.Epoch, "D", out Guid revisionEpoch) || revisionEpoch == Guid.Empty
+            || !string.Equals(Revision.Epoch, revisionEpoch.ToString("D"), StringComparison.Ordinal))
+            throw new AutomationException("invalid_pcb_drc_typed_input", "revision.epoch must be a canonical lowercase UUID.");
+        return (SchematicJson.Formatter.Format(target), SchematicJson.Formatter.Format(new KiCad.Automation.Protocol.DocumentRevision
+        { Epoch = Revision.Epoch, Sequence = Revision.Sequence }));
     }
 }

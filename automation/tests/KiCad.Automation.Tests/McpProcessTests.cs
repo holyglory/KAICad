@@ -50,6 +50,15 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_instance_capabilities");
             CollectionAssert.Contains(names, "kicad_service_capabilities");
             CollectionAssert.Contains(names, "kicad_pcb_drc_start");
+            CollectionAssert.Contains(names, "kicad_pcb_drc_start_typed");
+            var invalidTypedDrc = await Request(9367, "tools/call", new
+            {
+                name = "kicad_pcb_drc_start_typed",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), input = new { } }
+            });
+            Assert.IsTrue(invalidTypedDrc.GetProperty("result").GetProperty("isError").GetBoolean(), invalidTypedDrc.GetRawText());
+            Assert.AreEqual("invalid_pcb_drc_typed_input",
+                invalidTypedDrc.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
             CollectionAssert.Contains(names, "kicad_pcb_drc_job");
             CollectionAssert.Contains(names, "kicad_pcb_drc_operation");
             CollectionAssert.Contains(names, "kicad_pcb_drc_cancel");

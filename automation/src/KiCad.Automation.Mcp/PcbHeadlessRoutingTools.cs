@@ -52,6 +52,32 @@ public sealed class PcbHeadlessRoutingTools(InstanceRegistry registry)
             ResolveLifecycleJson(expectedStateJson, expectedState),
             ResolveRequestJson(requestJson, request), cancellationToken), "invalid_route_plan_input");
 
+    [McpServerTool(Name = "kicad_pcb_route_plan_typed", ReadOnly = true),
+     Description("Build a deterministic, read-only PCB route proposal from one structured input. input binds one explicit PCB document, one complete lifecycle observation with process epoch and revision, one canonical caller operationId and one typed route request. The operation ID is a read-only correlation identity; no board mutation or native transaction is submitted. The returned proposal preserves the same obstacle, endpoint, netclass and deterministic replay rules as kicad_pcb_route_plan."),
+     KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "typed PCB document, complete lifecycle checkpoint, operation ID and deterministic route constraints"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public async Task<CallToolResult> PlanTyped(string instanceId, PcbRoutePlanTypedInput input,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (input is null)
+                throw new AutomationException("invalid_route_plan_typed_input", "input is required.");
+            var payload = input.ToPayload();
+            CallToolResult result = await Plan(instanceId, payload.Document, payload.ExpectedState,
+                payload.Request, cancellationToken);
+            return WithOperationIdentity(result, payload.OperationId);
+        }
+        catch (AutomationException error)
+        {
+            return AdmissionError(error.Code, error.Message);
+        }
+        catch (JsonException error)
+        {
+            return AdmissionError("invalid_route_plan_typed_input", error.Message);
+        }
+    }
+
     public Task<CallToolResult> Plan(string instanceId, string documentJson, string expectedStateJson,
         string requestJson, CancellationToken cancellationToken) => Execute(async () =>
     {
@@ -258,6 +284,26 @@ public sealed class PcbHeadlessRoutingTools(InstanceRegistry registry)
         return new CallToolResult
         {
             IsError = true,
+            StructuredContent = structured,
+            Content = [new TextContentBlock { Text = structured.GetRawText() }]
+        };
+    }
+
+    private static CallToolResult WithOperationIdentity(CallToolResult result, string operationId)
+    {
+        JsonElement? structuredContent = result.StructuredContent;
+        if (result.IsError ?? false || structuredContent is null)
+            return result;
+        JsonElement payload = structuredContent!.Value;
+        if (payload.ValueKind != JsonValueKind.Object)
+            return result;
+        var fields = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(payload.GetRawText(), JsonOptions)
+            ?? new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        fields["operationId"] = JsonSerializer.SerializeToElement(operationId, JsonOptions);
+        fields["operationReceipt"] = JsonSerializer.SerializeToElement("read-only-route-plan", JsonOptions);
+        JsonElement structured = JsonSerializer.SerializeToElement(fields, JsonOptions);
+        return new CallToolResult
+        {
             StructuredContent = structured,
             Content = [new TextContentBlock { Text = structured.GetRawText() }]
         };

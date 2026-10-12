@@ -61,6 +61,13 @@ public sealed class PcbRoutingContractTests
     {
         string root = Directory.CreateTempSubdirectory("kicad-route-plan-input-contract-").FullName;
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        static bool IsObjectSchema(JsonElement schema)
+        {
+            JsonElement type = schema.GetProperty("type");
+            return type.ValueKind == JsonValueKind.String
+                ? type.GetString() == "object"
+                : type.ValueKind == JsonValueKind.Array && type.EnumerateArray().Any(item => item.GetString() == "object");
+        }
         try
         {
             await using var mcp = await StdioMcpFixture.StartAsync(
@@ -81,6 +88,25 @@ public sealed class PcbRoutingContractTests
             JsonElement requestProperties = properties.GetProperty("request").GetProperty("properties");
             foreach (string property in new[] { "netName", "netClassName", "start", "end", "layer", "widthNm", "clearanceNm", "gridNm", "bounds", "maxNodes", "includeRipUpCandidate" })
                 Assert.IsTrue(requestProperties.TryGetProperty(property, out _), property);
+
+            JsonElement typedTool = listed.GetProperty("tools").EnumerateArray()
+                .Single(item => item.GetProperty("name").GetString() == "kicad_pcb_route_plan_typed");
+            JsonElement typedProperties = typedTool.GetProperty("inputSchema").GetProperty("properties");
+            Assert.IsTrue(IsObjectSchema(typedProperties.GetProperty("input")), typedTool.GetRawText());
+            JsonElement typedInputProperties = typedProperties.GetProperty("input").GetProperty("properties");
+            foreach (string property in new[] { "document", "expectedState", "operationId", "request" })
+                Assert.IsTrue(typedInputProperties.TryGetProperty(property, out _), property);
+            Assert.IsTrue(IsObjectSchema(typedInputProperties.GetProperty("document")));
+            Assert.IsTrue(IsObjectSchema(typedInputProperties.GetProperty("expectedState")));
+            Assert.IsTrue(IsObjectSchema(typedInputProperties.GetProperty("request")));
+
+            JsonElement invalidTyped = await mcp.Tool("kicad_pcb_route_plan_typed", new
+            {
+                instanceId = Guid.NewGuid().ToString("D"), input = new { }
+            });
+            Assert.IsTrue(invalidTyped.GetProperty("isError").GetBoolean(), invalidTyped.GetRawText());
+            Assert.AreEqual("invalid_route_plan_typed_input", invalidTyped.GetProperty("structuredContent")
+                .GetProperty("errorCode").GetString(), invalidTyped.GetRawText());
 
             JsonElement conflict = await mcp.Tool("kicad_pcb_route_plan", new
             {

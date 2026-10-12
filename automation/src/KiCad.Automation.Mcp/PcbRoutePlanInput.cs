@@ -1,6 +1,10 @@
 using System.ComponentModel;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Kiapi.Common.Types;
+using KiCad.Automation.Model;
+using KiCad.Automation.Native;
+using KiCad.Automation.Protocol;
 
 namespace KiCad.Automation.Mcp;
 
@@ -95,4 +99,63 @@ public sealed class PcbRouteBoundsInput : NativeDocumentInputObject
 
     [JsonNumberHandling(JsonNumberHandling.AllowReadingFromString)]
     public long MaxYNm { get => maxYNm; set => maxYNm = BindOnce(value); }
+}
+
+/// <summary>
+/// Single structured admission boundary for deterministic headless routing.
+/// The legacy planner accepts three independent JSON strings for compatibility;
+/// this input binds one PCB document, one complete lifecycle checkpoint, one
+/// caller-owned operation identity and one typed route request together.
+/// </summary>
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class PcbRoutePlanTypedInput : NativeDocumentInputObject
+{
+    private NativeDocumentInput? document;
+    private DocumentLifecycleInput? expectedState;
+    private string? operationId;
+    private PcbRoutePlanRequestInput? request;
+
+    public NativeDocumentInput? Document { get => document; set => document = BindOnce(value); }
+    public DocumentLifecycleInput? ExpectedState { get => expectedState; set => expectedState = BindOnce(value); }
+    public string? OperationId { get => operationId; set => operationId = BindOnce(value); }
+    public PcbRoutePlanRequestInput? Request { get => request; set => request = BindOnce(value); }
+
+    internal (string Document, string ExpectedState, string Request, string OperationId) ToPayload()
+    {
+        if (Document is null || ExpectedState is null || Request is null)
+            throw Invalid("document, expectedState, operationId and request are required.");
+        if (!Guid.TryParseExact(OperationId, "D", out Guid operation) || operation == Guid.Empty
+            || !string.Equals(OperationId, operation.ToString("D"), StringComparison.Ordinal))
+            throw Invalid("operationId must be a canonical lowercase UUID.");
+
+        DocumentSpecifier target;
+        DocumentLifecycleState state;
+        try
+        {
+            target = NativeDocumentInput.ToNative(Document);
+            state = DocumentLifecycleInput.ToNative(ExpectedState);
+        }
+        catch (AutomationException error)
+        {
+            throw Invalid(error.Message);
+        }
+
+        if (target.Type != DocumentType.DoctypePcb)
+            throw Invalid("document must identify a PCB.");
+        if (state.Scope != DocumentLifecycleScope.DlsPcb || !state.Document.Equals(target))
+            throw Invalid("expectedState must be a complete observation of the same PCB.");
+        if (!Guid.TryParseExact(state.ProcessEpoch, "D", out Guid epoch) || epoch == Guid.Empty
+            || !string.Equals(state.ProcessEpoch, epoch.ToString("D"), StringComparison.Ordinal))
+            throw Invalid("expectedState.processEpoch must be a canonical lowercase UUID.");
+        if (state.Revision is null || !Guid.TryParseExact(state.Revision.Epoch, "D", out Guid revisionEpoch)
+            || revisionEpoch == Guid.Empty
+            || !string.Equals(state.Revision.Epoch, revisionEpoch.ToString("D"), StringComparison.Ordinal))
+            throw Invalid("expectedState.revision.epoch must be a canonical lowercase UUID.");
+
+        return (SchematicJson.Formatter.Format(target), SchematicJson.Formatter.Format(state),
+            Request.ToRequestJson(), OperationId!);
+    }
+
+    private static AutomationException Invalid(string message)
+        => new("invalid_route_plan_typed_input", message);
 }

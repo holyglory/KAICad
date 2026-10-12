@@ -558,6 +558,7 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_pcb_route_candidate_validate");
             CollectionAssert.Contains(names, "kicad_pcb_route_commit");
             CollectionAssert.Contains(names, "kicad_pcb_route_plan");
+            CollectionAssert.Contains(names, "kicad_pcb_route_plan_typed");
             CollectionAssert.Contains(names, "kicad_pcb_route_plan_multilayer");
             CollectionAssert.Contains(names, "kicad_pcb_route_multilayer_apply");
             CollectionAssert.Contains(names, "kicad_pcb_route_multilayer_receipt");
@@ -928,6 +929,7 @@ public sealed class McpProcessTests
             await Request(9318, "tools/call", new { name = "kicad_pcb_export_odb", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
             await Request(9319, "tools/call", new { name = "kicad_pcb_export_stats", arguments = new { instanceId = Guid.NewGuid().ToString("D"), requestJson = "{}", expectedStateJson = "{}" } });
             await Request(9320, "tools/call", new { name = "kicad_pcb_route_plan", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", expectedStateJson = "{}", requestJson = "{}" } });
+            await Request(9322, "tools/call", new { name = "kicad_pcb_route_plan_typed", arguments = new { instanceId = Guid.NewGuid().ToString("D"), input = new { } } });
             await Request(9321, "tools/call", new { name = "kicad_pcb_route_plan_multilayer", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", expectedStateJson = "{}", requestJson = "{}" } });
             await Request(9335, "tools/call", new { name = "kicad_pcb_route_corner_optimize_plan", arguments = new { instanceId = Guid.NewGuid().ToString("D"), documentJson = "{}", expectedStateJson = "{}", candidateRequestJson = "{}", requestJson = "{}" } });
             await Request(9336, "tools/call", new { name = "kicad_pcb_route_corner_optimize_apply", arguments = new { instanceId = Guid.NewGuid().ToString("D"), deleteRequestJson = "{}", createRequestJson = "{}", expectedStateJson = "{}", operationId = Guid.NewGuid().ToString("D") } });

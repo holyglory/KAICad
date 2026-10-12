@@ -411,6 +411,114 @@ public sealed class PcbDrcToolTests
         finally { Directory.Delete(directory, true); }
     }
 
+    [TestMethod]
+    public async Task TypedLifecycleInputsPreserveIdentityAndRejectMalformedDocuments()
+    {
+        string directory = Directory.CreateTempSubdirectory("drc-typed-lifecycle-").FullName;
+        try
+        {
+            var transport = new JobTransport();
+            transport.Session.Epoch = Guid.NewGuid().ToString("D");
+            transport.Session.ProjectPath = Path.Combine(directory, "fixture.kicad_pro");
+            var registry = new InstanceRegistry(transport, directory);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "native.sock")), transport.Session.InstanceId);
+            var tool = new PcbDrcTools(registry);
+            var document = new DocumentSpecifier
+            {
+                Type = DocumentType.DoctypePcb,
+                BoardFilename = "fixture.kicad_pcb",
+                Project = new() { Name = "fixture", Path = directory }
+            };
+            var inputDocument = new NativeDocumentInput
+            {
+                Type = NativeDocumentType.Pcb,
+                BoardFilename = "fixture.kicad_pcb",
+                Project = new NativeProjectInput { Name = "fixture", Path = directory }
+            };
+            string jobId = Guid.NewGuid().ToString("D");
+            transport.State = new PcbDrcJobState
+            {
+                Document = document.Clone(),
+                JobId = jobId,
+                OperationId = Guid.NewGuid().ToString("D"),
+                ProcessEpoch = transport.Session.Epoch,
+                CheckedRevision = new() { Epoch = Guid.NewGuid().ToString("D"), Sequence = 4 },
+                Status = (PcbDrcJobStatus)3,
+                Progress = 1,
+                WorkerFinished = true,
+                SnapshotComplete = true,
+                ResultsFresh = true
+            };
+
+            var accepted = await tool.JobTyped(transport.Session.InstanceId, new PcbDrcJobInput
+            {
+                Document = inputDocument,
+                JobId = jobId,
+                ProcessEpoch = transport.Session.Epoch
+            }, default);
+            Assert.IsFalse(accepted.IsError ?? false, accepted.StructuredContent?.GetRawText() ?? accepted.ToString());
+            Assert.AreEqual(jobId, accepted.StructuredContent!.Value.GetProperty("jobId").GetString());
+            Assert.AreEqual(1, transport.Calls);
+
+            foreach (var invalid in new (PcbDrcJobInput Input, string Code)[]
+            {
+                (new PcbDrcJobInput { JobId = jobId, ProcessEpoch = transport.Session.Epoch }, "invalid_pcb_drc_typed_job"),
+                (new PcbDrcJobInput { Document = inputDocument, JobId = "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA", ProcessEpoch = transport.Session.Epoch }, "invalid_pcb_drc_typed_job"),
+                (new PcbDrcJobInput { Document = inputDocument, JobId = jobId, ProcessEpoch = Guid.NewGuid().ToString("D") }, "stale_process_epoch"),
+                (new PcbDrcJobInput
+                {
+                    Document = new NativeDocumentInput
+                    {
+                        Type = NativeDocumentType.Schematic,
+                        Project = new NativeProjectInput { Name = "fixture", Path = directory },
+                        SheetPath = new NativeSheetPathInput { Path = [new NativeUuidInput { Value = Guid.NewGuid().ToString("D") }] }
+                    },
+                    JobId = jobId,
+                    ProcessEpoch = transport.Session.Epoch
+                }, "invalid_pcb_drc_typed_job")
+            })
+            {
+                var rejected = await tool.JobTyped(transport.Session.InstanceId, invalid.Input, default);
+                Assert.IsTrue(rejected.IsError ?? false, rejected.ToString());
+                JsonElement structured = rejected.StructuredContent!.Value;
+                string code = structured.TryGetProperty("errorCode", out JsonElement typedCode)
+                    ? typedCode.GetString()! : structured.GetProperty("code").GetString()!;
+                Assert.AreEqual(invalid.Code, code);
+            }
+            Assert.AreEqual(1, transport.Calls,
+                "Malformed structured identities and documents must be rejected before native dispatch.");
+
+            transport.OperationResponse = new NativeCapabilityPcbDrcReadOperationResponse
+            {
+                Document = document.Clone(),
+                OperationId = transport.State.OperationId,
+                ProcessEpoch = transport.Session.Epoch,
+                Found = false
+            };
+            var operation = await tool.OperationTyped(transport.Session.InstanceId, new PcbDrcOperationInput
+            {
+                Document = inputDocument,
+                OperationId = transport.State.OperationId,
+                ProcessEpoch = transport.Session.Epoch
+            }, default);
+            Assert.IsFalse(operation.IsError ?? false, operation.ToString());
+            using var operationJson = JsonDocument.Parse(((TextContentBlock)operation.Content.Single()).Text);
+            Assert.IsFalse(operationJson.RootElement.GetProperty("found").GetBoolean());
+            Assert.AreEqual(2, transport.Calls);
+
+            var cancel = await tool.CancelTyped(transport.Session.InstanceId, new PcbDrcCancelInput
+            {
+                Document = inputDocument,
+                JobId = jobId,
+                ProcessEpoch = transport.Session.Epoch
+            }, default);
+            Assert.IsFalse(cancel.IsError ?? false, cancel.ToString());
+            Assert.AreEqual(jobId, cancel.StructuredContent!.Value.GetProperty("jobId").GetString());
+            Assert.AreEqual(3, transport.Calls);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
     private sealed class MarkerTransport : INativeTransport
     {
         public NativeClientTests.FixtureTransport Session { get; } = new();

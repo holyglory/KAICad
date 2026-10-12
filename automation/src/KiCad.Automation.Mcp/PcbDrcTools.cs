@@ -163,9 +163,26 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
         }
         catch (AutomationException error)
         {
-            JsonElement structured = JsonSerializer.SerializeToElement(new { errorCode = error.Code, errorMessage = error.Message });
-            return new CallToolResult { IsError = true, StructuredContent = structured,
-                Content = [new TextContentBlock { Text = structured.GetRawText() }] };
+            return TypedError(error);
+        }
+    }
+
+    [McpServerTool(Name = "kicad_pcb_drc_job_typed", ReadOnly = true),
+     Description("Read one exact native PCB DRC job from a structured input. input carries the explicit PCB document, canonical lowercase job ID and native process epoch; optional detached-candidate fields preserve the exact protobuf payload used by a candidate start. The same stale-epoch, candidate receipt and complete snapshot rules as kicad_pcb_drc_job apply."),
+     KiCadCapability("pcb", "compiled-mcp plus native-api", "typed PCB document, process epoch and job ID"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public async Task<CallToolResult> JobTyped(string instanceId, PcbDrcJobInput input,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var payload = input.ToPayload();
+            return await Job(instanceId, payload.Document, payload.JobId, payload.ProcessEpoch,
+                cancellationToken, input.CandidateRequestJson, input.DeleteRequestJson, input.GroupChangesJson);
+        }
+        catch (AutomationException error)
+        {
+            return TypedError(error);
         }
     }
 
@@ -311,6 +328,25 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
             });
         });
 
+    [McpServerTool(Name = "kicad_pcb_drc_operation_typed", ReadOnly = true),
+     Description("Look up one exact native PCB DRC operation from a structured input. input carries the explicit PCB document, canonical lowercase operation ID and native process epoch; it never starts or replays a job and preserves unknown-native-outcome semantics after a lost reply."),
+     KiCadCapability("pcb", "compiled-mcp plus native-api", "typed PCB document, process epoch and operation ID"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public async Task<CallToolResult> OperationTyped(string instanceId, PcbDrcOperationInput input,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var payload = input.ToPayload();
+            return await Operation(instanceId, payload.Document, payload.OperationId, payload.ProcessEpoch,
+                cancellationToken);
+        }
+        catch (AutomationException error)
+        {
+            return TypedError(error);
+        }
+    }
+
     [McpServerTool(Name = "kicad_pcb_drc_cancel"),
      Description("Cancel one exact native PCB DRC job by process epoch, document and canonical lowercase job ID. Returns at once with cancellationRequested; the job reports cancelled only after its worker has stopped, and a cancelled job never carries findings or becomes completed. Read it with kicad_pcb_drc_job until workerFinished. A job that already finished keeps its terminal state."),
      KiCadCapability("pcb", "compiled-mcp plus native-api", "process epoch, document and job ID"),
@@ -335,6 +371,25 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
             return SchematicJson.Formatter.Format(state);
         });
         return WithStructuredState(response, state);
+    }
+
+    [McpServerTool(Name = "kicad_pcb_drc_cancel_typed"),
+     Description("Cancel one exact native PCB DRC job from a structured input. input carries the explicit PCB document, canonical lowercase job ID and native process epoch; the returned state is the same cancellation acknowledgement used by kicad_pcb_drc_cancel."),
+     KiCadCapability("pcb", "compiled-mcp plus native-api", "typed PCB document, process epoch and job ID"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public async Task<CallToolResult> CancelTyped(string instanceId, PcbDrcCancelInput input,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var payload = input.ToPayload();
+            return await Cancel(instanceId, payload.Document, payload.JobId, payload.ProcessEpoch,
+                cancellationToken);
+        }
+        catch (AutomationException error)
+        {
+            return TypedError(error);
+        }
     }
 
     [McpServerTool(Name = "kicad_pcb_drc_state", ReadOnly = true),
@@ -363,6 +418,23 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                 throw new AutomationException("invalid_drc_state", "Native marker inventory did not match the requested target or snapshot contract.");
             return SchematicJson.Formatter.Format(state);
         });
+
+    [McpServerTool(Name = "kicad_pcb_drc_state_typed", ReadOnly = true),
+     Description("Read the selected PCB's native DRC marker inventory from a structured input. input carries the explicit PCB document; the query is read-only and retains the freshness semantics of kicad_pcb_drc_state."),
+     KiCadCapability("pcb", "compiled-mcp plus native-api", "typed PCB document"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+    public async Task<CallToolResult> ReadTyped(string instanceId, PcbDrcStateInput input,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await Read(instanceId, input.ToPayload(), cancellationToken);
+        }
+        catch (AutomationException error)
+        {
+            return TypedError(error);
+        }
+    }
 
     // The prefix of the input warning that says why a job's snapshot is incomplete.
     internal const string IncompleteSnapshot = "snapshot_incomplete: ";
@@ -421,6 +493,13 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
         && Guid.TryParseExact(value, "D", out var id)
         && id != Guid.Empty
         && string.Equals(value, id.ToString("D"), StringComparison.Ordinal);
+
+    private static CallToolResult TypedError(AutomationException error)
+    {
+        JsonElement structured = JsonSerializer.SerializeToElement(new { errorCode = error.Code, errorMessage = error.Message });
+        return new CallToolResult { IsError = true, StructuredContent = structured,
+            Content = [new TextContentBlock { Text = structured.GetRawText() }] };
+    }
 
     private static void ValidateJobState(PcbDrcJobState state, DocumentSpecifier document,
         string processEpoch)
@@ -577,5 +656,109 @@ public sealed class PcbDrcStartInput : NativeDocumentInputObject
             throw new AutomationException("invalid_pcb_drc_typed_input", "revision.epoch must be a canonical lowercase UUID.");
         return (SchematicJson.Formatter.Format(target), SchematicJson.Formatter.Format(new KiCad.Automation.Protocol.DocumentRevision
         { Epoch = Revision.Epoch, Sequence = Revision.Sequence }));
+    }
+}
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class PcbDrcJobInput : NativeDocumentInputObject
+{
+    private NativeDocumentInput? document;
+    private string? jobId;
+    private string? processEpoch;
+
+    public NativeDocumentInput? Document { get => document; set => document = BindOnce(value); }
+    public string? JobId { get => jobId; set => jobId = BindOnce(value); }
+    public string? ProcessEpoch { get => processEpoch; set => processEpoch = BindOnce(value); }
+
+    // Candidate payloads remain optional compatibility fields for jobs started
+    // through the legacy protobuf-JSON candidate boundary.  The document and
+    // lifecycle identities above are always structured and validated here.
+    public string? CandidateRequestJson { get; set; }
+    public string? DeleteRequestJson { get; set; }
+    public string? GroupChangesJson { get; set; }
+
+    internal (string Document, string JobId, string ProcessEpoch) ToPayload()
+    {
+        DocumentSpecifier target = PcbDrcTypedInputValidation.Document(Document, "invalid_pcb_drc_typed_job");
+        return (SchematicJson.Formatter.Format(target),
+            PcbDrcTypedInputValidation.Identifier(JobId, "job", "invalid_pcb_drc_typed_job"),
+            PcbDrcTypedInputValidation.Identifier(ProcessEpoch, "process epoch", "invalid_pcb_drc_typed_job"));
+    }
+}
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class PcbDrcOperationInput : NativeDocumentInputObject
+{
+    private NativeDocumentInput? document;
+    private string? operationId;
+    private string? processEpoch;
+
+    public NativeDocumentInput? Document { get => document; set => document = BindOnce(value); }
+    public string? OperationId { get => operationId; set => operationId = BindOnce(value); }
+    public string? ProcessEpoch { get => processEpoch; set => processEpoch = BindOnce(value); }
+
+    internal (NativeDocumentInput Document, string OperationId, string ProcessEpoch) ToPayload()
+    {
+        _ = PcbDrcTypedInputValidation.Document(Document, "invalid_pcb_drc_typed_operation");
+        return (Document!,
+            PcbDrcTypedInputValidation.Identifier(OperationId, "operation", "invalid_pcb_drc_typed_operation"),
+            PcbDrcTypedInputValidation.Identifier(ProcessEpoch, "process epoch", "invalid_pcb_drc_typed_operation"));
+    }
+}
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class PcbDrcCancelInput : NativeDocumentInputObject
+{
+    private NativeDocumentInput? document;
+    private string? jobId;
+    private string? processEpoch;
+
+    public NativeDocumentInput? Document { get => document; set => document = BindOnce(value); }
+    public string? JobId { get => jobId; set => jobId = BindOnce(value); }
+    public string? ProcessEpoch { get => processEpoch; set => processEpoch = BindOnce(value); }
+
+    internal (string Document, string JobId, string ProcessEpoch) ToPayload()
+    {
+        DocumentSpecifier target = PcbDrcTypedInputValidation.Document(Document, "invalid_pcb_drc_typed_cancel");
+        return (SchematicJson.Formatter.Format(target),
+            PcbDrcTypedInputValidation.Identifier(JobId, "job", "invalid_pcb_drc_typed_cancel"),
+            PcbDrcTypedInputValidation.Identifier(ProcessEpoch, "process epoch", "invalid_pcb_drc_typed_cancel"));
+    }
+}
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class PcbDrcStateInput : NativeDocumentInputObject
+{
+    private NativeDocumentInput? document;
+
+    public NativeDocumentInput? Document { get => document; set => document = BindOnce(value); }
+
+    internal string ToPayload()
+        => SchematicJson.Formatter.Format(PcbDrcTypedInputValidation.Document(Document, "invalid_pcb_drc_typed_state"));
+}
+
+internal static class PcbDrcTypedInputValidation
+{
+    internal static DocumentSpecifier Document(NativeDocumentInput? input, string code)
+    {
+        if (input is null)
+            throw new AutomationException(code, "Document is required.");
+        DocumentSpecifier target;
+        try { target = NativeDocumentInput.ToNative(input); }
+        catch (AutomationException error)
+        { throw new AutomationException(code, error.Message); }
+        if (target.Type != DocumentType.DoctypePcb)
+            throw new AutomationException(code, "Document must identify a PCB.");
+        return target;
+    }
+
+    internal static string Identifier(string? value, string name, string code)
+    {
+        if (string.IsNullOrWhiteSpace(value)
+            || !Guid.TryParseExact(value, "D", out Guid id)
+            || id == Guid.Empty
+            || !string.Equals(value, id.ToString("D"), StringComparison.Ordinal))
+            throw new AutomationException(code, $"{name} must be a canonical lowercase UUID.");
+        return value;
     }
 }

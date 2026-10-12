@@ -60,8 +60,32 @@ public sealed class McpProcessTests
             Assert.AreEqual("invalid_pcb_drc_typed_input",
                 invalidTypedDrc.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
             CollectionAssert.Contains(names, "kicad_pcb_drc_job");
+            CollectionAssert.Contains(names, "kicad_pcb_drc_job_typed");
             CollectionAssert.Contains(names, "kicad_pcb_drc_operation");
+            CollectionAssert.Contains(names, "kicad_pcb_drc_operation_typed");
             CollectionAssert.Contains(names, "kicad_pcb_drc_cancel");
+            CollectionAssert.Contains(names, "kicad_pcb_drc_cancel_typed");
+            CollectionAssert.Contains(names, "kicad_pcb_drc_state_typed");
+            foreach (string typedDrcTool in new[]
+            {
+                "kicad_pcb_drc_job_typed", "kicad_pcb_drc_operation_typed",
+                "kicad_pcb_drc_cancel_typed", "kicad_pcb_drc_state_typed"
+            })
+            {
+                var invalidTypedDrcLifecycle = await Request(9368 + Array.IndexOf(new[]
+                {
+                    "kicad_pcb_drc_job_typed", "kicad_pcb_drc_operation_typed",
+                    "kicad_pcb_drc_cancel_typed", "kicad_pcb_drc_state_typed"
+                }, typedDrcTool), "tools/call", new
+                {
+                    name = typedDrcTool,
+                    arguments = new { instanceId = Guid.NewGuid().ToString("D"), input = new { } }
+                });
+                Assert.IsTrue(invalidTypedDrcLifecycle.GetProperty("result").GetProperty("isError").GetBoolean(),
+                    invalidTypedDrcLifecycle.GetRawText());
+                Assert.IsTrue(invalidTypedDrcLifecycle.GetProperty("result").GetProperty("structuredContent")
+                    .TryGetProperty("errorCode", out _), invalidTypedDrcLifecycle.GetRawText());
+            }
             CollectionAssert.Contains(names, "kicad_diagram_physical_allocation");
             CollectionAssert.Contains(names, "kicad_diagram_physical_allocation_set");
             CollectionAssert.Contains(names, "kicad_simulation_start");

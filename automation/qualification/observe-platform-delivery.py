@@ -99,11 +99,12 @@ def main() -> int:
         fail("The delivery test did not produce both package and route observations")
     verification = json.loads(verification_path.read_text())
     route = json.loads(route_path.read_text())
-    if verification.get("kind") != "artifact" or verification.get("target") != args.platform:
+    target = VERIFICATION_TARGETS[args.platform]
+    if verification.get("kind") != "artifact" or verification.get("target") != target:
         fail("The package verification is not bound to the requested platform")
     if verification.get("source_sha256") != route.get("source_sha256"):
         fail("Package and route observations have different source identities")
-    if route.get("kind") != "package-route" or route.get("target") != args.platform:
+    if route.get("kind") != "package-route" or route.get("target") != target:
         fail("The route observation is not bound to the requested platform")
 
     # release.deliver_evidence accepts one bounded verification document.  Keep

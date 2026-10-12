@@ -137,6 +137,13 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_pcb_zone_create");
             CollectionAssert.Contains(names, "kicad_pcb_zone_update");
             CollectionAssert.Contains(names, "kicad_pcb_zone_delete");
+            CollectionAssert.Contains(names, "kicad_pcb_zone_mutation_typed");
+            var invalidTypedZone = await Request(9078, "tools/call", new
+            {
+                name = "kicad_pcb_zone_mutation_typed",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), input = new { } }
+            });
+            Assert.IsTrue(invalidTypedZone.GetProperty("result").GetProperty("isError").GetBoolean(), invalidTypedZone.GetRawText());
             foreach (string zoneTool in new[] { "kicad_pcb_zone_create", "kicad_pcb_zone_update" })
             {
                 var zoneSchema = listed.GetProperty("result").GetProperty("tools").EnumerateArray()

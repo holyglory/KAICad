@@ -121,6 +121,7 @@ builder.Services.AddMcpServer(options =>
     .WithTools<PcbItemTransactionTools>()
     .WithTools<PcbConnectivityTools>()
     .WithTools<PcbZoneAuthoringTools>()
+    .WithTools<PcbZoneTypedTools>()
     .WithTools<PcbKeepoutAuthoringTools>()
     .WithTools<PcbFootprintPlacementTools>()
     .WithTools<PcbFootprintValidationTools>()

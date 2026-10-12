@@ -3180,3 +3180,31 @@ timeout_seconds=1200
 requires=["feeds"]
 command=["python3", "automation/qualification/check-platform-catalogue.py", "--previous", "/mnt/build-storage/codex/kicad/public-candidates/linux-092c-signed-000027", "--candidate", "/mnt/build-storage/codex/kicad/public-candidates/mac-d611-full-signed", "--changed-platform", "osx-arm64", "--changed-platform", "osx-x64", "--output", "automation/artifacts/platform-stage-repair/preservation/receipt.json"]
 retained_artifacts=[{name="preservation",path="automation/artifacts/platform-stage-repair/preservation",max_bytes=16777216}]
+
+# Route-only delivery evidence for the already-built Mac d611 and Windows e7
+# packages.  Each check downloads and hashes one signed public archive, checks
+# the owned deployment route, and writes completion.json plus delivery.json.
+# No native build or editor process is part of this graph.
+[test.platform-delivery-evidence]
+timeout_seconds=5400
+env={TMPDIR="/mnt/build-storage/codex/kicad/t",KICAD_PUBLIC_DOWNLOAD_URL="https://kicad.vr.ae/",KICAD_UPDATE_PUBLISHER_SPKI_FILE="/home/holyglory/kicad/automation/distribution/preview-publisher.spki",KICAD_COORDINATOR_EXECUTOR="/home/DevCoordinator2/target/release/devcoordinator2-executor",KICAD_DELIVERY_DEPLOYMENT="d30d9eeb63ffeccbc",KICAD_DELIVERY_ROUTE_ONLY="true"}
+[[test.platform-delivery-evidence.check]]
+name="osx-arm64"
+tier="release"
+timeout_seconds=1200
+command=["python3","automation/qualification/observe-platform-delivery.py","--platform","osx-arm64","--commit","d6119b2b130bc2b141a082f675e5e2c3786420c1","--evidence","automation/artifacts/platform-delivery-evidence/osx-arm64","--check","osx-arm64"]
+retained_artifacts=[{name="delivery-evidence",path="automation/artifacts/platform-delivery-evidence/osx-arm64",max_bytes=536870912}]
+[[test.platform-delivery-evidence.check]]
+name="osx-x64"
+tier="release"
+after=["osx-arm64"]
+timeout_seconds=1200
+command=["python3","automation/qualification/observe-platform-delivery.py","--platform","osx-x64","--commit","d6119b2b130bc2b141a082f675e5e2c3786420c1","--evidence","automation/artifacts/platform-delivery-evidence/osx-x64","--check","osx-x64"]
+retained_artifacts=[{name="delivery-evidence",path="automation/artifacts/platform-delivery-evidence/osx-x64",max_bytes=536870912}]
+[[test.platform-delivery-evidence.check]]
+name="win-x64"
+tier="release"
+after=["osx-x64"]
+timeout_seconds=1200
+command=["python3","automation/qualification/observe-platform-delivery.py","--platform","win-x64","--commit","e7aacb7d19d03b06169bb2eff0bf47f020c4f058","--evidence","automation/artifacts/platform-delivery-evidence/win-x64","--check","win-x64"]
+retained_artifacts=[{name="delivery-evidence",path="automation/artifacts/platform-delivery-evidence/win-x64",max_bytes=536870912}]

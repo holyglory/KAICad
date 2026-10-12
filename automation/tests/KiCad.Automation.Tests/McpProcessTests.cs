@@ -66,26 +66,46 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_pcb_drc_cancel");
             CollectionAssert.Contains(names, "kicad_pcb_drc_cancel_typed");
             CollectionAssert.Contains(names, "kicad_pcb_drc_state_typed");
-            foreach (string typedDrcTool in new[]
+            var invalidTypedDrcJob = await Request(9368, "tools/call", new
             {
-                "kicad_pcb_drc_job_typed", "kicad_pcb_drc_operation_typed",
-                "kicad_pcb_drc_cancel_typed", "kicad_pcb_drc_state_typed"
-            })
+                name = "kicad_pcb_drc_job_typed",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), input = new { } }
+            });
+            Assert.IsTrue(invalidTypedDrcJob.GetProperty("result").GetProperty("isError").GetBoolean(), invalidTypedDrcJob.GetRawText());
+            Assert.IsTrue(invalidTypedDrcJob.GetProperty("result").GetProperty("structuredContent").TryGetProperty("errorCode", out _), invalidTypedDrcJob.GetRawText());
+
+            var invalidTypedDrcOperation = await Request(9369, "tools/call", new
             {
-                var invalidTypedDrcLifecycle = await Request(9368 + Array.IndexOf(new[]
-                {
-                    "kicad_pcb_drc_job_typed", "kicad_pcb_drc_operation_typed",
-                    "kicad_pcb_drc_cancel_typed", "kicad_pcb_drc_state_typed"
-                }, typedDrcTool), "tools/call", new
-                {
-                    name = typedDrcTool,
-                    arguments = new { instanceId = Guid.NewGuid().ToString("D"), input = new { } }
-                });
-                Assert.IsTrue(invalidTypedDrcLifecycle.GetProperty("result").GetProperty("isError").GetBoolean(),
-                    invalidTypedDrcLifecycle.GetRawText());
-                Assert.IsTrue(invalidTypedDrcLifecycle.GetProperty("result").GetProperty("structuredContent")
-                    .TryGetProperty("errorCode", out _), invalidTypedDrcLifecycle.GetRawText());
-            }
+                name = "kicad_pcb_drc_operation_typed",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), input = new { } }
+            });
+            Assert.IsTrue(invalidTypedDrcOperation.GetProperty("result").GetProperty("isError").GetBoolean(), invalidTypedDrcOperation.GetRawText());
+            Assert.IsTrue(invalidTypedDrcOperation.GetProperty("result").GetProperty("structuredContent").TryGetProperty("errorCode", out _), invalidTypedDrcOperation.GetRawText());
+
+            var invalidTypedDrcCancel = await Request(9370, "tools/call", new
+            {
+                name = "kicad_pcb_drc_cancel_typed",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), input = new { } }
+            });
+            Assert.IsTrue(invalidTypedDrcCancel.GetProperty("result").GetProperty("isError").GetBoolean(), invalidTypedDrcCancel.GetRawText());
+            Assert.IsTrue(invalidTypedDrcCancel.GetProperty("result").GetProperty("structuredContent").TryGetProperty("errorCode", out _), invalidTypedDrcCancel.GetRawText());
+
+            var invalidTypedDrcState = await Request(9371, "tools/call", new
+            {
+                name = "kicad_pcb_drc_state_typed",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), input = new { } }
+            });
+            Assert.IsTrue(invalidTypedDrcState.GetProperty("result").GetProperty("isError").GetBoolean(), invalidTypedDrcState.GetRawText());
+            Assert.IsTrue(invalidTypedDrcState.GetProperty("result").GetProperty("structuredContent").TryGetProperty("errorCode", out _), invalidTypedDrcState.GetRawText());
+
+            CollectionAssert.Contains(names, "kicad_pcb_query_typed");
+            var invalidTypedPcbQuery = await Request(9372, "tools/call", new
+            {
+                name = "kicad_pcb_query_typed",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), input = new { } }
+            });
+            Assert.IsTrue(invalidTypedPcbQuery.GetProperty("result").GetProperty("isError").GetBoolean(), invalidTypedPcbQuery.GetRawText());
+            Assert.IsTrue(invalidTypedPcbQuery.GetProperty("result").GetProperty("structuredContent").TryGetProperty("errorCode", out _), invalidTypedPcbQuery.GetRawText());
             CollectionAssert.Contains(names, "kicad_diagram_physical_allocation");
             CollectionAssert.Contains(names, "kicad_diagram_physical_allocation_set");
             CollectionAssert.Contains(names, "kicad_simulation_start");

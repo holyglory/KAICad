@@ -133,6 +133,13 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_schematic_export_netlist");
             CollectionAssert.Contains(names, "kicad_schematic_export_bom");
             CollectionAssert.Contains(names, "kicad_schematic_export_receipt");
+            CollectionAssert.Contains(names, "kicad_schematic_connection_mutation_typed");
+            var invalidSchematicConnectionTyped = await Request(9079, "tools/call", new
+            {
+                name = "kicad_schematic_connection_mutation_typed",
+                arguments = new { instanceId = Guid.NewGuid().ToString("D"), input = new { } }
+            });
+            Assert.IsTrue(invalidSchematicConnectionTyped.GetProperty("result").GetProperty("isError").GetBoolean(), invalidSchematicConnectionTyped.GetRawText());
             CollectionAssert.Contains(names, "kicad_pcb_zone_read");
             CollectionAssert.Contains(names, "kicad_pcb_zone_create");
             CollectionAssert.Contains(names, "kicad_pcb_zone_update");

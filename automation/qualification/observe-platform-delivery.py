@@ -25,6 +25,12 @@ COMMITS = {
     "win-x64": "e7aacb7d19d03b06169bb2eff0bf47f020c4f058",
 }
 
+VERIFICATION_TARGETS = {
+    "osx-arm64": "macos-arm64",
+    "osx-x64": "macos-x64",
+    "win-x64": "windows-x64",
+}
+
 
 def fail(message: str) -> None:
     raise SystemExit(message)
@@ -86,7 +92,7 @@ def main() -> int:
     if result.returncode != 0:
         fail(f"DeliveryReceiptTests failed for {args.platform} with exit code {result.returncode}")
 
-    verification_name = f"{args.platform}.verification.json"
+    verification_name = f"{VERIFICATION_TARGETS[args.platform]}.verification.json"
     verification_path = output / verification_name
     route_path = output / "package-route.observation.json"
     if not verification_path.is_file() or not route_path.is_file():

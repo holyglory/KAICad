@@ -126,6 +126,7 @@ builder.Services.AddMcpServer(options =>
     .WithTools<PcbFootprintValidationTools>()
     .WithTools<PcbFootprintArtworkTools>()
     .WithTools<PcbBoardTools>()
+    .WithTools<PcbBoardTypedTools>()
     .WithTools<PcbOperationsTools>()
     .WithTools<PcbRenderTools>()
     .WithTools<PcbGeometryManifestTools>()

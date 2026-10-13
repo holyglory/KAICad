@@ -33,7 +33,9 @@ public sealed partial class NativeSessionTests
         var templatePad = template.Definition.Items.Where(item => item.Is(Pad.Descriptor))
             .Select(item => item.Unpack<Pad>())
             .Single(pad => pad.PadStack.Layers.Contains(BoardLayer.BlFCu));
-        const long padAX = 20_000_000, padBX = 80_000_000, padY = 70_000_000;
+        // Keep the seeded route at the board's visual centre so the existing
+        // fixture canvas focus point lands on copper after fit-to-board.
+        const long padAX = 35_000_000, padBX = 65_000_000, padY = 50_000_000;
         FootprintInstance padA = CloneInlineDragFootprint(template, templatePad, "GUI_DRAG_A", padAX, padY);
         FootprintInstance padB = CloneInlineDragFootprint(template, templatePad, "GUI_DRAG_B", padBX, padY);
         string trackId = Guid.NewGuid().ToString("D");

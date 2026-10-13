@@ -3847,8 +3847,8 @@ public sealed partial class NativeSessionTests
                             Assert.IsTrue(point.XNm >= boundaryMarginNm && point.YNm >= boundaryMarginNm
                                 && point.XNm <= 100_000_000 - boundaryMarginNm
                                 && point.YNm <= 100_000_000 - boundaryMarginNm);
-                        Assert.IsFalse(BoundarySegmentIntersects(segment, -boundaryMarginNm, 20_000_000 - boundaryMarginNm,
-                            15_000_000 + boundaryMarginNm, 80_000_000 + boundaryMarginNm),
+                        Assert.IsFalse(BoundarySegmentIntersects(segment, 0, 20_000_000,
+                            15_000_000, 80_000_000),
                             "The route must stay out of the concave missing-board region. " + BoardJson.Formatter.Format(segment));
                         Assert.IsFalse(BoundarySegmentIntersects(segment, 78_000_000 - boundaryMarginNm, 78_000_000 - boundaryMarginNm,
                             90_000_000 + boundaryMarginNm, 90_000_000 + boundaryMarginNm),

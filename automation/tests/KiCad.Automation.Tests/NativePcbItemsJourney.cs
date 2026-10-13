@@ -1680,8 +1680,11 @@ public sealed partial class NativeSessionTests
             { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbShape } }, token)).Items
                 .Select(item => item.Unpack<BoardGraphicShape>())
                 .Where(shape => shape.Layer == BoardLayer.BlEdgeCuts).ToArray();
+            Assert.IsTrue(cleanEdgeCuts.Any(shape => shape.Shape.GeometryCase == GraphicShape.GeometryOneofCase.Polygon
+                && shape.Shape.Polygon.Polygons.Any(polygon => polygon.Outline.Nodes.Count == 8)),
+                "The clean route fixture must retain the concave Edge.Cuts outline.");
             Assert.IsTrue(cleanEdgeCuts.Any(shape => shape.Shape.GeometryCase == GraphicShape.GeometryOneofCase.Rectangle),
-                "The clean route fixture must retain a valid Edge.Cuts rectangle for the baseline DRC journey.");
+                "The clean route fixture must retain the separate Edge.Cuts cutout loop.");
 
             var pairPads = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
             { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbPad } }, token);
@@ -2051,7 +2054,8 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(expectedCreates.Overlaps(expectedUpdates) || expectedCreates.Overlaps(expectedRemovals) || expectedUpdates.Overlaps(expectedRemovals));
 
             async Task<PcbDrcJobState> RouteDrc(string candidateJson, string? deleteJson,
-                DocumentLifecycleState checkpoint, string? groupJson = null, string diagnosticJson = "")
+                DocumentLifecycleState checkpoint, string? groupJson = null, string diagnosticJson = "",
+                string? expectedAllowedItemId = null)
             {
                 var reply = await mcp.Tool("kicad_pcb_drc_start", new
                 {
@@ -2071,17 +2075,43 @@ public sealed partial class NativeSessionTests
                     Assert.IsFalse(reply.TryGetProperty("isError", out error) && error.GetBoolean(), reply.GetRawText());
                     job = SchematicJson.Parser.Parse<PcbDrcJobState>(reply.GetProperty("content")[0].GetProperty("text").GetString()!);
                 }
+                // A fast start can already be terminal. Always read with the
+                // exact candidate, independently of whether the worker needed
+                // polling, before accepting payload or finding evidence.
+                reply = await mcp.Tool("kicad_pcb_drc_job", new
+                {
+                    instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard), jobId = job.JobId,
+                    processEpoch = client.Epoch, candidateRequestJson = candidateJson,
+                    deleteRequestJson = deleteJson, groupChangesJson = groupJson ?? ""
+                });
+                Assert.IsFalse(reply.TryGetProperty("isError", out error) && error.GetBoolean(), reply.GetRawText());
+                job = SchematicJson.Parser.Parse<PcbDrcJobState>(reply.GetProperty("content")[0].GetProperty("text").GetString()!);
                 Assert.IsTrue(job.WorkerFinished, "The complete route DRC must finish.");
                 Assert.AreEqual(PcbDrcJobStatus.PdrcjsCompleted, job.Status, job.ErrorMessage);
                 Assert.IsTrue(job.CandidatePayloadVerified && job.CandidateDryRun && job.SnapshotComplete && job.ResultsFresh);
+                Assert.AreEqual(cleanBoard, job.Document);
+                Assert.AreEqual(client.Epoch, job.ProcessEpoch);
+                Assert.AreEqual(checkpoint.Revision, job.CheckedRevision);
                 if (groupJson is not null)
                 {
                     Assert.IsTrue(job.GroupPayloadVerified, SchematicJson.Formatter.Format(job));
                     Assert.IsGreaterThan(0, job.VerifiedGroupChanges.Count, SchematicJson.Formatter.Format(job));
                     Assert.AreEqual(job.VerifiedGroupChanges.Count, job.AfterGroupStates.Count, SchematicJson.Formatter.Format(job));
                 }
-                Assert.IsEmpty(job.Findings, SchematicJson.Formatter.Format(job)
-                    + (diagnosticJson.Length == 0 ? "" : "\nRoute input evidence: " + diagnosticJson));
+                string findingEvidence = SchematicJson.Formatter.Format(job)
+                    + (diagnosticJson.Length == 0 ? "" : "\nRoute input evidence: " + diagnosticJson);
+                if (expectedAllowedItemId is null)
+                    Assert.IsEmpty(job.Findings, findingEvidence);
+                else
+                {
+                    CollectionAssert.Contains(BoardJson.Parser.Parse<CreateItems>(candidateJson).Items
+                        .Select(RouteIdentity).ToArray(), expectedAllowedItemId, findingEvidence);
+                    CollectionAssert.Contains(job.CandidateItemIds.ToArray(), expectedAllowedItemId, findingEvidence);
+                    Assert.IsTrue(job.Findings.Any(finding => finding.Marker is { } marker
+                        && marker.ErrorType == Kiapi.Board.DrcErrorType.DrcetAllowedItems
+                        && marker.Items.Any(item => item.Value == expectedAllowedItemId)),
+                        "The keepout probe requires DRCET_ALLOWED_ITEMS for its exact candidate UUID. " + findingEvidence);
+                }
                 return job;
             }
             var shoveDrc = await RouteDrc(shoveData.GetProperty("drcCandidateRequestJson").GetString()!,
@@ -3700,22 +3730,24 @@ public sealed partial class NativeSessionTests
                 };
                 var blockedTrackCandidate = new CreateItems { Header = new() { Document = cleanBoard } };
                 blockedTrackCandidate.Items.Add(Any.Pack(blockedTrack));
-                var blockedTrackDrc = await RouteDrc(BoardJson.Formatter.Format(blockedTrackCandidate), null, viaKeepoutResult.State);
-                Assert.IsNotEmpty(blockedTrackDrc.Findings,
-                    "Detached DRC must reject a track crossing the track-only rule area.");
+                var blockedTrackDrc = await RouteDrc(BoardJson.Formatter.Format(blockedTrackCandidate), null,
+                    viaKeepoutResult.State, expectedAllowedItemId: blockedTrack.Id.Value);
+                Assert.AreEqual(viaKeepoutResult.State, await ObserveLifecycleState(client, cleanBoard, token),
+                    "The rejected track candidate must leave the live board unchanged.");
 
                 // A via-only rule area is independently checked with a native
                 // via candidate. The same route DRC path proves the rule-area
                 // restriction reaches the candidate evaluator.
-                var blockedVia = multilayerCandidate.Items.First(item => item.Is(Via.Descriptor)).Unpack<Via>().Clone();
+                var blockedVia = multilayerCommitCandidate.Items.First(item => item.Is(Via.Descriptor)).Unpack<Via>().Clone();
                 blockedVia.Id = new() { Value = Guid.NewGuid().ToString("D") };
                 blockedVia.Position = new() { XNm = 55_000_000, YNm = 58_000_000 };
                 blockedVia.Net = new() { Name = "POWER_RAIL" };
                 var blockedViaCandidate = new CreateItems { Header = new() { Document = cleanBoard } };
                 blockedViaCandidate.Items.Add(Any.Pack(blockedVia));
-                var blockedViaDrc = await RouteDrc(BoardJson.Formatter.Format(blockedViaCandidate), null, viaKeepoutResult.State);
-                Assert.IsNotEmpty(blockedViaDrc.Findings,
-                    "Detached DRC must reject a via crossing the via-only rule area.");
+                var blockedViaDrc = await RouteDrc(BoardJson.Formatter.Format(blockedViaCandidate), null,
+                    viaKeepoutResult.State, expectedAllowedItemId: blockedVia.Id.Value);
+                Assert.AreEqual(viaKeepoutResult.State, await ObserveLifecycleState(client, cleanBoard, token),
+                    "The rejected via candidate must leave the live board unchanged.");
                 await SaveCheckedThroughMcp(client, cleanBoard, evidence, token, verifyReconnect: false);
             }
             finally { Directory.Delete(exportDirectory, true); }
@@ -3947,12 +3979,13 @@ public sealed partial class NativeSessionTests
         string obstacle = Guid.NewGuid().ToString("D");
         string viaSupport = Guid.NewGuid().ToString("D");
         string edge = Guid.NewGuid().ToString("D");
+        string cutout = Guid.NewGuid().ToString("D");
         // Keep the candidate deliberately small and deterministic: the native
         // shove preview starts at the USB_D+ pad (40.1,40.1) and runs vertically
-        // through a foreign-net POWER_RAIL barrier at y=42. The native
-        // checker receives the original valid rectangle baseline; concave and
-        // cutout topology remains covered by managed geometry contracts until
-        // a dedicated native fixture can isolate those DRC effects.
+        // through a foreign-net POWER_RAIL barrier at y=42. The concave
+        // Edge.Cuts polygon and separate cutout preserve the same working
+        // corridor. Later pad-to-pad routes must detour around the notch and
+        // cutout before native DRC, checked apply and save/reopen.
         return $"""
 (kicad_pcb (version 20260206) (generator "pcbnew")
   (general (thickness 1.6))
@@ -3965,7 +3998,10 @@ public sealed partial class NativeSessionTests
   (net 3 "USB_D-")
   (net 4 "MULTILAYER_ROUTE")
   (net 5 "MULTILAYER_BARRIER")
-  (gr_rect (start 0 0) (end 100 100) (stroke (width 0.05) (type default)) (fill none) (layer "Edge.Cuts") (uuid "{edge}"))
+  (net 6 "CONCAVE_ROUTE")
+  (net 7 "CUTOUT_ROUTE")
+  (gr_poly (pts (xy 0 0) (xy 100 0) (xy 100 100) (xy 0 100) (xy 0 80) (xy 15 80) (xy 15 20) (xy 0 20)) (stroke (width 0.05) (type default)) (fill none) (layer "Edge.Cuts") (uuid "{edge}"))
+  (gr_rect (start 78 78) (end 90 90) (stroke (width 0.05) (type default)) (fill none) (layer "Edge.Cuts") (uuid "{cutout}"))
   (footprint "PAD1" (layer "F.Cu") (at 30.1 30.1) (uuid "{f1}")
     (attr smd)
     (pad "1" smd circle (at 0 0) (size 0.3 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "POWER_RAIL") (uuid "{p1}")))

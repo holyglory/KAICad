@@ -194,6 +194,8 @@ public sealed class PcbFootprintPlacementTools(InstanceRegistry registry)
     internal static FootprintPlacementPlan BuildPlan(DocumentSpecifier document,
         DocumentLifecycleState expected, FootprintInstance footprint)
     {
+        ValidatePlacementCheckpoint(document, expected);
+
         if (footprint.Id is null || !CanonicalUuid(footprint.Id.Value))
             throw new AutomationException("invalid_pcb_footprint_id", "The footprint instance must have a nonempty canonical UUID.");
 
@@ -231,6 +233,33 @@ public sealed class PcbFootprintPlacementTools(InstanceRegistry registry)
         string planId = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(digestInput)));
         return new FootprintPlacementPlan(planId, candidateJson);
     }
+
+    /// <summary>
+    /// A raw protobuf-JSON caller reaches this planner without the typed input
+    /// adapter.  Keep the same complete-checkpoint admission on that path so a
+    /// plan cannot be produced from a partial observation and later fail only
+    /// when the checked native transaction is built.
+    /// </summary>
+    private static void ValidatePlacementCheckpoint(DocumentSpecifier document,
+        DocumentLifecycleState expected)
+    {
+        if (expected.Scope != DocumentLifecycleScope.DlsPcb
+            || !expected.Document.Equals(document)
+            || string.IsNullOrWhiteSpace(expected.ProcessEpoch)
+            || !expected.ProjectSettingsIncluded
+            || !expected.CompleteChangeTracking
+            || !expected.DiskBaselineChecked
+            || expected.Revision is null
+            || !CanonicalUuid(expected.NativeIdentity)
+            || expected.Revision.Epoch != expected.NativeIdentity
+            || !Digest(expected.StateSha256)
+            || !CheckedSchematicContract.FileCoverage(expected))
+            throw new AutomationException("invalid_pcb_footprint_state",
+                "expectedStateJson must identify one complete, unchanged PCB lifecycle checkpoint including project settings, revision identity and file baselines.");
+    }
+
+    private static bool Digest(string value)
+        => value.Length == 64 && value.All(char.IsAsciiHexDigitLower);
 
     internal sealed record FootprintPlacementPlan(string PlanId, string CandidateRequestJson);
 

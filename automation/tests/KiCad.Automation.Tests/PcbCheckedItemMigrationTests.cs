@@ -206,7 +206,7 @@ public sealed partial class PcbCheckedItemMigrationTests
         {
             Document = document, ProcessEpoch = epoch, NativeIdentity = identity,
             Revision = new() { Epoch = identity, Sequence = (ulong)sequence }, Scope = DocumentLifecycleScope.DlsPcb,
-            ProjectSettingsIncluded = true, DiskBaselineChecked = true,
+            ProjectSettingsIncluded = true, CompleteChangeTracking = true, DiskBaselineChecked = true,
             StateSha256 = new string(digest, 64)
         };
         foreach (string path in new[] { Path.Combine(root, "fixture.kicad_pcb"), Path.Combine(root, "fixture.kicad_pro") })

@@ -82,6 +82,18 @@ public sealed class PcbFootprintPlacementTests
     }
 
     [TestMethod]
+    public void PlacementPlanRejectsPartialLifecycleCheckpointBeforeCandidateCreation()
+    {
+        DocumentSpecifier document = Document();
+        DocumentLifecycleState state = State(document);
+        state.CompleteChangeTracking = false;
+
+        AutomationException error = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbFootprintPlacementTools.BuildPlan(document, state, Footprint(BoardLayer.BlFCu, 0)));
+        Assert.AreEqual("invalid_pcb_footprint_state", error.Code);
+    }
+
+    [TestMethod]
     public void TypedPlacementPreservesCompleteCheckpointAndPermitsRepeatedPadNumbers()
     {
         var json = PcbFootprintTypedFixture.Json();
@@ -210,15 +222,36 @@ public sealed class PcbFootprintPlacementTests
     private static DocumentLifecycleState State(DocumentSpecifier document)
     {
         string identity = Guid.NewGuid().ToString("D");
-        return new()
+        var state = new DocumentLifecycleState
         {
             Document = document,
             Scope = DocumentLifecycleScope.DlsPcb,
             ProcessEpoch = Guid.NewGuid().ToString("D"),
             NativeIdentity = identity,
             ProjectSettingsIncluded = true,
+            CompleteChangeTracking = true,
+            DiskBaselineChecked = true,
             StateSha256 = new string('a', 64),
             Revision = new() { Epoch = identity, Sequence = 7 }
         };
+        foreach (string path in new[]
+        {
+            Path.Combine(document.Project.Path, document.BoardFilename),
+            Path.Combine(document.Project.Path, document.Project.Name + ".kicad_pro")
+        })
+        {
+            state.NativeFiles.Add(path);
+            state.FileBaselines.Add(new NativeFileBaselineState
+            {
+                Path = path,
+                BaselinePath = path,
+                BaselineKnown = true,
+                CurrentKnown = true,
+                Status = NativeFileBaselineStatus.NfbsUnchanged,
+                BaselineExists = false,
+                CurrentExists = false
+            });
+        }
+        return state;
     }
 }

@@ -86,7 +86,10 @@ public sealed class PcbManufacturingRecoveryContractTests
                 Assert.IsTrue(SchemaIncludes(input, "object"),
                     tool.GetRawText());
                 JsonElement properties = input.GetProperty("properties");
-                foreach (string property in new[] { "document", "processEpoch", "operationId" })
+                string[] required = tool.GetProperty("name").GetString() == "kicad_pcb_export_start_typed"
+                    ? ["document", "expectedState", "operationId", "outputDirectory", "job"]
+                    : ["document", "processEpoch", "operationId"];
+                foreach (string property in required)
                     Assert.IsTrue(properties.TryGetProperty(property, out _), tool.GetRawText());
             }
 

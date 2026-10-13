@@ -434,6 +434,14 @@ public sealed class ProjectSettingsTools(InstanceRegistry registry)
                 MergeMode = mergeMode == "MMM_REPLACE" ? MapMergeMode.MmmReplace : MapMergeMode.MmmMerge
             }, cancellationToken);
         }
+        catch (NativeApiException error) when (error.Status == (int)Kiapi.Common.ApiStatusCode.AsBadRequest
+            && error.Message.StartsWith("project_text_variables_stale:", StringComparison.Ordinal))
+        {
+            // The native owner uses a stable prefix to distinguish a stale
+            // project-variable digest from malformed input. Preserve the
+            // native diagnostic while exposing the typed MCP error contract.
+            throw new AutomationException("project_text_variables_stale", error.Message);
+        }
         catch (NativeApiException error) when (error.Status == (int)Kiapi.Common.ApiStatusCode.AsUnhandled
             || error.Status == (int)Kiapi.Common.ApiStatusCode.AsUnimplemented)
         {

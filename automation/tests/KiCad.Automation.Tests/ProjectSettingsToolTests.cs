@@ -153,6 +153,39 @@ public sealed class ProjectSettingsToolTests
     }
 
     [TestMethod]
+    public async Task SetTextVariablesMapsNativeStaleDigestAndPreservesOtherBadRequests()
+    {
+        using var fixture = CreateFixture();
+        fixture.Transport.TextVariables.Variables.Add("BASE", "before");
+        fixture.Transport.TextVariablesNativeErrorMessage =
+            "project_text_variables_stale: expected digest no longer matches the project";
+
+        var stale = await fixture.Tool.SetTextVariables(fixture.Session.InstanceId,
+            new NativeProjectInput { Name = "fixture", Path = fixture.Root },
+            NativeDocument(fixture.Root), SchematicJson.Formatter.Format(fixture.State),
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["BASE"] = "after" },
+            "MMM_REPLACE", Guid.NewGuid(), default);
+
+        Assert.IsTrue(stale.IsError ?? false, Text(stale));
+        Assert.AreEqual("project_text_variables_stale",
+            stale.StructuredContent!.Value.GetProperty("errorCode").GetString(), Text(stale));
+        StringAssert.Contains(stale.StructuredContent.Value.GetProperty("errorMessage").GetString()!,
+            "project_text_variables_stale:");
+        Assert.IsNull(fixture.Transport.LastMutationRequest);
+
+        fixture.Transport.TextVariablesNativeErrorMessage = "a different bad request";
+        var other = await fixture.Tool.SetTextVariables(fixture.Session.InstanceId,
+            new NativeProjectInput { Name = "fixture", Path = fixture.Root },
+            NativeDocument(fixture.Root), SchematicJson.Formatter.Format(fixture.State),
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["BASE"] = "after" },
+            "MMM_REPLACE", Guid.NewGuid(), default);
+
+        Assert.IsTrue(other.IsError ?? false, Text(other));
+        Assert.AreEqual("native_status_3",
+            other.StructuredContent!.Value.GetProperty("errorCode").GetString(), Text(other));
+    }
+
+    [TestMethod]
     public async Task StructuredNetClassesReadMatchesLegacyAndChecksTheCompleteLifecycle()
     {
         using var fixture = CreateFixture();
@@ -364,6 +397,7 @@ public sealed class ProjectSettingsToolTests
         public bool Unsupported { get; set; }
         public bool TamperBeforeMap { get; set; }
         public bool ClaimCommitAndRollback { get; set; }
+        public string? TextVariablesNativeErrorMessage { get; set; }
         public int ExchangeCount { get; private set; }
         private int stateReads;
 
@@ -391,6 +425,8 @@ public sealed class ProjectSettingsToolTests
                 return Task.FromResult(Reply(TextVariables));
             if (envelope.Message.Is(SetTextVariablesChecked.Descriptor))
             {
+                if (TextVariablesNativeErrorMessage is { } nativeError)
+                    return Task.FromResult(Reply(null, ApiStatusCode.AsBadRequest, nativeError));
                 var mutationRequest = envelope.Message.Unpack<SetTextVariablesChecked>();
                 LastMutationRequest = mutationRequest.Clone();
                 var before = TextVariables.Clone();

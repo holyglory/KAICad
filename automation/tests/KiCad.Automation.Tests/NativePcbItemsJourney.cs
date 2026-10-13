@@ -4185,6 +4185,8 @@ public sealed partial class NativeSessionTests
             }
             finally { Directory.Delete(exportDirectory, true); }
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-pcb-items.json"), updatedReply.GetRawText(), token);
+            finalBoard = await VerifyNativePcbInlineDrag(client, finalBoard, mcp, evidence, instanceId,
+                focusProcessId, display, token);
         }
         finally { Directory.Delete(stateDirectory, true); }
         finalBoard = await VerifyNativePcbManufacturing(client, finalBoard, evidence, instanceId, token);

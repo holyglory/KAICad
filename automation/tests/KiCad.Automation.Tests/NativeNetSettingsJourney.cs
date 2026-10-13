@@ -67,7 +67,7 @@ public sealed partial class NativeSessionTests
         }
         async Task<JsonElement> SetProjectTextVariables(DocumentLifecycleState expected,
             IReadOnlyDictionary<string, string> variables, string mergeMode, string operationId, string phase,
-            string? expectedVariablesSha256 = null)
+            string? expectedVariablesSha256 = null, string? projectName = null, string? projectPath = null)
         {
             string stateDirectory = Directory.CreateTempSubdirectory("kicad-project-text-variables-set-mcp-").FullName;
             try
@@ -80,7 +80,7 @@ public sealed partial class NativeSessionTests
                 return await mcp.Tool("kicad_project_text_variables_set", new
                 {
                     instanceId = session.InstanceId,
-                    project = new { name = document.Project.Name, path = document.Project.Path },
+                    project = new { name = projectName ?? document.Project.Name, path = projectPath ?? document.Project.Path },
                     document = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(document)),
                     expectedStateJson = SchematicJson.Formatter.Format(expected),
                     variables, mergeMode, operationId, expectedVariablesSha256
@@ -116,6 +116,16 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(structured.GetProperty("supported").GetBoolean(), $"{phase}: native text-variable support is required.");
             Assert.IsTrue(structured.GetProperty("nativeQuery").GetBoolean(), $"{phase}: the result must come from KiCad.");
             Assert.IsFalse(structured.GetProperty("mutation").GetBoolean(), $"{phase}: reading text variables must not mutate the project.");
+            var reportedDocument = SchematicJson.Parser.Parse<DocumentSpecifier>(
+                structured.GetProperty("document").GetRawText());
+            Assert.AreEqual(expected.Document, reportedDocument,
+                $"{phase}: text-variable read must report the exact lifecycle document it checked.");
+            var reportedProject = SchematicJson.Parser.Parse<DocumentSpecifier>(
+                structured.GetProperty("project").GetRawText());
+            Assert.AreEqual(DocumentType.DoctypeProject, reportedProject.Type,
+                $"{phase}: text-variable read must identify the project owner.");
+            Assert.AreEqual(expected.Document.Project, reportedProject.Project,
+                $"{phase}: text-variable read must report the exact project owner.");
             Assert.AreEqual(SchematicJson.Formatter.Format(expected), structured.GetProperty("beforeState").GetString(),
                 $"{phase}: text-variable read must use the supplied lifecycle checkpoint.");
             Assert.AreEqual(structured.GetProperty("beforeState").GetString(), structured.GetProperty("afterState").GetString(),
@@ -227,6 +237,10 @@ public sealed partial class NativeSessionTests
         Assert.IsFalse(textVariablesSetData.GetProperty("replayed").GetBoolean());
         Assert.IsFalse(textVariablesSetData.GetProperty("revisionTracked").GetBoolean());
         Assert.IsFalse(textVariablesSetData.GetProperty("completeLifecycle").GetBoolean());
+        Assert.AreEqual(projectDocument,
+            SchematicJson.Parser.Parse<DocumentSpecifier>(textVariablesSetData.GetProperty("project").GetRawText()));
+        Assert.AreEqual(document,
+            SchematicJson.Parser.Parse<DocumentSpecifier>(textVariablesSetData.GetProperty("document").GetRawText()));
         Assert.AreEqual(changedTextVariables.Count, textVariablesSetData.GetProperty("afterVariables").EnumerateObject().Count());
         foreach (var pair in changedTextVariables)
             Assert.AreEqual(pair.Value, textVariablesSetData.GetProperty("afterVariables").GetProperty(pair.Key).GetString());
@@ -234,12 +248,55 @@ public sealed partial class NativeSessionTests
             new() { Document = projectDocument }, token)).Variables;
         Assert.AreEqual(changedTextVariables.Count, nativeChangedTextVariables.Count);
         Assert.AreEqual(changedTextVariables["AUTOMATION_TEXT_VARIABLE"], nativeChangedTextVariables["AUTOMATION_TEXT_VARIABLE"]);
+        var publicTextVariables = await ReadProjectTextVariables(originalLifecycle, "after-text-variable-set");
+        await AssertProjectTextVariables(publicTextVariables, originalLifecycle, "after-text-variable-set");
+        Assert.AreEqual("checked-native-value",
+            publicTextVariables.GetProperty("structuredContent").GetProperty("variables")
+                .GetProperty("AUTOMATION_TEXT_VARIABLE").GetString());
+
+        var foreignProject = await SetProjectTextVariables(originalLifecycle, changedTextVariables, "MMM_REPLACE",
+            Guid.NewGuid().ToString("D"), "foreign-project", projectName: document.Project.Name + "-foreign");
+        Assert.IsTrue(foreignProject.GetProperty("isError").GetBoolean(), foreignProject.GetRawText());
+        Assert.AreEqual("invalid_project_text_variables_target",
+            foreignProject.GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+            foreignProject.GetRawText());
+
+        // The project owner admits the complete map by digest. A new operation
+        // carrying the old digest must be refused without changing the native
+        // project, even while the lifecycle checkpoint is still unchanged.
+        var staleTextVariables = await SetProjectTextVariables(originalLifecycle, changedTextVariables, "MMM_REPLACE",
+            Guid.NewGuid().ToString("D"), "stale-map", textVariablesSetData.GetProperty("beforeVariablesSha256").GetString());
+        Assert.IsTrue(staleTextVariables.GetProperty("isError").GetBoolean(), staleTextVariables.GetRawText());
+        Assert.AreEqual("project_text_variables_stale",
+            staleTextVariables.GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+            staleTextVariables.GetRawText());
+        var unchangedAfterStale = await ReadProjectTextVariables(originalLifecycle, "stale-map-preserved");
+        await AssertProjectTextVariables(unchangedAfterStale, originalLifecycle, "stale-map-preserved");
+        Assert.AreEqual("checked-native-value",
+            unchangedAfterStale.GetProperty("structuredContent").GetProperty("variables")
+                .GetProperty("AUTOMATION_TEXT_VARIABLE").GetString());
+
         var textVariablesReplay = await SetProjectTextVariables(originalLifecycle, changedTextVariables, "MMM_REPLACE",
             textVariablesOperation, "replay", textVariablesSetData.GetProperty("beforeVariablesSha256").GetString());
         RequireToolSuccess(textVariablesReplay);
         Assert.IsTrue(textVariablesReplay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean());
         Assert.IsTrue(textVariablesReplay.GetProperty("structuredContent").GetProperty("committed").GetBoolean());
-        await SetProjectTextVariables(originalLifecycle, originalTextVariables, "MMM_REPLACE", Guid.NewGuid().ToString("D"), "restore");
+
+        // Save/reload is performed while the changed map is still installed;
+        // project variables are owned by the project file, so the public read
+        // after reload is the persistence evidence for this mutation.
+        await Reopen(original.Data, "text-variables-reopened", verifyReconnect: false);
+        var textVariablesReloadedLifecycle = await ObserveLifecycleState(client, document, token);
+        var reloadedTextVariables = await ReadProjectTextVariables(textVariablesReloadedLifecycle, "text-variables-reloaded");
+        await AssertProjectTextVariables(reloadedTextVariables, textVariablesReloadedLifecycle, "text-variables-reloaded");
+        Assert.AreEqual("checked-native-value",
+            reloadedTextVariables.GetProperty("structuredContent").GetProperty("variables")
+                .GetProperty("AUTOMATION_TEXT_VARIABLE").GetString());
+
+        await SetProjectTextVariables(textVariablesReloadedLifecycle, originalTextVariables, "MMM_REPLACE",
+            Guid.NewGuid().ToString("D"), "restore");
+        var restoredTextVariables = await ReadProjectTextVariables(textVariablesReloadedLifecycle, "restored");
+        await AssertProjectTextVariables(restoredTextVariables, textVariablesReloadedLifecycle, "restored");
         var desired = original.Data.Clone(); var settings = desired.Metadata.NetSettings;
         settings.DefaultClass.Schematic.WireWidth = new() { ValueNm = 50800 };
         settings.DefaultClass.Board.TrackWidth = new() { ValueNm = 450000 };
@@ -476,6 +533,28 @@ public sealed partial class NativeSessionTests
                 .Select(tool => tool.GetProperty("name").GetString()!)
                 .ToHashSet(StringComparer.Ordinal);
             CollectionAssert.Contains(publicToolNames.ToArray(), "kicad_project_net_classes_set");
+
+            // Keep the public contract honest for board-only callers: project
+            // netclass writes still require the explicit schematic root, even
+            // though project-level reads and text variables are document-bound
+            // and may use either supported lifecycle document type.
+            var pcbOnlyDocument = document.Clone();
+            pcbOnlyDocument.Type = DocumentType.DoctypePcb;
+            pcbOnlyDocument.BoardFilename = document.Project.Name + ".kicad_pcb";
+            var pcbOnlyRefusal = await projectNetClassesMcp.Tool("kicad_project_net_classes_set", new
+            {
+                instanceId = projectNetClassesInstanceId,
+                documentJson = SchematicJson.Formatter.Format(pcbOnlyDocument),
+                expectedStateJson = "{}",
+                netClassesJson = SchematicJson.Formatter.Format(new NetClassesResponse()),
+                mergeMode = "MMM_REPLACE",
+                operationId = Guid.NewGuid().ToString("D"),
+                expectedNetClassesSha256 = new string('0', 64)
+            });
+            Assert.IsTrue(pcbOnlyRefusal.GetProperty("isError").GetBoolean(), pcbOnlyRefusal.GetRawText());
+            Assert.AreEqual("project_net_classes_schematic_required",
+                pcbOnlyRefusal.GetProperty("structuredContent").GetProperty("errorCode").GetString(),
+                pcbOnlyRefusal.GetRawText());
 
             string publicDocumentJson = SchematicJson.Formatter.Format(document);
             async Task<CheckedSchematicState> CapturePublicState()

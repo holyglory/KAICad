@@ -347,7 +347,12 @@ public sealed partial class NativeSessionTests
         var restoredTextVariablesLifecycle = await ObserveLifecycleState(client, document, token);
         var restoredTextVariables = await ReadProjectTextVariables(restoredTextVariablesLifecycle, "restored");
         await AssertProjectTextVariables(restoredTextVariables, restoredTextVariablesLifecycle, "restored");
-        var desired = original.Data.Clone(); var settings = desired.Metadata.NetSettings;
+        // Project-variable writes are persisted through the project owner and
+        // advance the schematic lifecycle revision even after the original map
+        // is restored. Continue the schematic-settings journey from the fresh
+        // native snapshot rather than the pre-project-write checkpoint.
+        var schematicBaseline = await Read();
+        var desired = schematicBaseline.Data.Clone(); var settings = desired.Metadata.NetSettings;
         settings.DefaultClass.Schematic.WireWidth = new() { ValueNm = 50800 };
         settings.DefaultClass.Board.TrackWidth = new() { ValueNm = 450000 };
         var power = settings.DefaultClass.Clone(); power.Name = "AutomationPower"; power.Priority = 2;
@@ -358,7 +363,7 @@ public sealed partial class NativeSessionTests
         settings.NetColors.Add("/POWER", new() { R = 1, A = 1 });
         settings.ChainNetclasses.Add("unassigned-power-chain", power.Name);
         desired = (SchematicScreenData)SchematicDataXml.Read(SchematicDataXml.Write(desired));
-        var batch = Batch(original, desired.Metadata.NetSettings);
+        var batch = Batch(schematicBaseline, desired.Metadata.NetSettings);
         foreach (int kind in Enumerable.Range(0, 6))
         {
             var invalid = batch.Clone(); invalid.OperationId = Guid.NewGuid().ToString("D");
@@ -376,14 +381,14 @@ public sealed partial class NativeSessionTests
                     break;
             }
             await Assert.ThrowsExactlyAsync<NativeApiException>(() => Apply(invalid));
-            Assert.AreEqual(original, await Read(), "Rejected settings must preserve the native revision and all owners.");
+            Assert.AreEqual(schematicBaseline, await Read(), "Rejected settings must preserve the native revision and all owners.");
         }
         var failed = batch.Clone(); failed.OperationId = Guid.NewGuid().ToString("D");
         failed.Operations.Add(new SchematicItemOperation { Remove = new() { Value = Guid.NewGuid().ToString("D") } });
         await Assert.ThrowsExactlyAsync<NativeApiException>(() => Apply(failed));
-        Assert.AreEqual(original, await Read(), "A failed later operation must roll back project settings.");
+        Assert.AreEqual(schematicBaseline, await Read(), "A failed later operation must roll back project settings.");
         var result = await Apply(batch); Assert.IsTrue(result.NetSettingsChanged);
-        var applied = await Read(); Assert.AreEqual(original.Revision.Sequence + 1, applied.Revision.Sequence);
+        var applied = await Read(); Assert.AreEqual(schematicBaseline.Revision.Sequence + 1, applied.Revision.Sequence);
         await Same(desired, applied.Data, "applied");
         var staleProjectNetClasses = await ReadProjectNetClasses(originalLifecycle, "stale");
         Assert.IsTrue(staleProjectNetClasses.GetProperty("isError").GetBoolean(),
@@ -407,18 +412,18 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(applied, await Read());
         Assert.IsFalse((await Apply(Batch(applied, desired.Metadata.NetSettings))).NetSettingsChanged);
         Assert.AreEqual(applied, await Read());
-        await Capture("api-applied"); await UndoRedo(original.Data, desired);
+        await Capture("api-applied"); await UndoRedo(schematicBaseline.Data, desired);
         await Reopen(desired, "reopened");
 
         var twiceExpected = desired.Clone();
         twiceExpected.Metadata.NetSettings.DefaultClass.Schematic.WireWidth = new() { ValueNm = 76200 };
-        var twice = Batch(await Read(), original.Data.Metadata.NetSettings);
+        var twice = Batch(await Read(), schematicBaseline.Data.Metadata.NetSettings);
         twice.Operations.Add(new SchematicItemOperation { SetNetSettings = twiceExpected.Metadata.NetSettings.Clone() });
         twice.Operations[^1].SetNetSettings.LabelAssignments.Clear();
         await Apply(twice); await Same(twiceExpected, (await Read()).Data, "two-operations");
         await UndoRedo(desired, twiceExpected);
-        await Apply(Batch(await Read(), original.Data.Metadata.NetSettings));
-        await Reopen(original.Data, "restored", verifyReconnect: false);
+        await Apply(Batch(await Read(), schematicBaseline.Data.Metadata.NetSettings));
+        await Reopen(schematicBaseline.Data, "restored", verifyReconnect: false);
 
         foreach (bool accept in new[] { false, true })
         {
@@ -450,8 +455,8 @@ public sealed partial class NativeSessionTests
             if (!accept) continue;
             await UndoRedo(before.Data, expected); await Reopen(expected, "manual-reopened", verifyReconnect: false);
         }
-        await Apply(Batch(await Read(), original.Data.Metadata.NetSettings));
-        await Reopen(original.Data, "final-restored");
+        await Apply(Batch(await Read(), schematicBaseline.Data.Metadata.NetSettings));
+        await Reopen(schematicBaseline.Data, "final-restored");
 
         // Exercise the public task-oriented wrapper after the legacy checked-batch
         // coverage has restored its fixture.  The wrapper deliberately receives the
@@ -485,7 +490,7 @@ public sealed partial class NativeSessionTests
                 SchematicJson.Parser.Parse<CheckedSchematicBatchReceipt>(
                     reply.GetProperty("structuredContent").GetProperty("receipt").GetRawText());
 
-            var typedDesired = original.Data.Clone();
+            var typedDesired = schematicBaseline.Data.Clone();
             long typedWireWidth = typedDesired.Metadata.NetSettings.DefaultClass.Schematic.WireWidth.ValueNm == 101600
                 ? 127000 : 101600;
             long typedTrackWidth = typedDesired.Metadata.NetSettings.DefaultClass.Board.TrackWidth.ValueNm == 500000
@@ -532,10 +537,10 @@ public sealed partial class NativeSessionTests
             // stale checkpoint against a later legacy mutation.
             await Reopen(typedDesired, "typed-mcp-reopened", verifyReconnect: false);
             var typedSaved = await ObserveTypedState();
-            var typedRestore = Batch(await Read(), original.Data.Metadata.NetSettings);
+            var typedRestore = Batch(await Read(), schematicBaseline.Data.Metadata.NetSettings);
             var typedRestoreResult = await Apply(typedRestore);
             Assert.IsTrue(typedRestoreResult.NetSettingsChanged, "The legacy restore must advance the native settings after the typed save/reload.");
-            await Same(original.Data, (await Read()).Data, "typed-mcp-legacy-restore");
+            await Same(schematicBaseline.Data, (await Read()).Data, "typed-mcp-legacy-restore");
 
             var typedStale = await typedMcp.Tool("kicad_schematic_set_net_settings", new
             {
@@ -551,13 +556,13 @@ public sealed partial class NativeSessionTests
                 typedStale.GetRawText());
             Assert.IsFalse(typedStale.GetProperty("structuredContent").GetProperty("mutationSubmitted").GetBoolean(),
                 typedStale.GetRawText());
-            await Same(original.Data, (await Read()).Data, "typed-mcp-stale-preserved");
+            await Same(schematicBaseline.Data, (await Read()).Data, "typed-mcp-stale-preserved");
         }
         finally
         {
             if (Directory.Exists(typedStateDirectory)) Directory.Delete(typedStateDirectory, recursive: true);
         }
-        await Reopen(original.Data, "typed-mcp-final-restored", verifyReconnect: false);
+        await Reopen(schematicBaseline.Data, "typed-mcp-final-restored", verifyReconnect: false);
 
         // Qualify the public project-level wrapper itself.  This is deliberately
         // separate from the complete schematic-settings tool above: callers send
@@ -841,7 +846,7 @@ public sealed partial class NativeSessionTests
             if (Directory.Exists(projectNetClassesStateDirectory))
                 Directory.Delete(projectNetClassesStateDirectory, recursive: true);
         }
-        await Apply(Batch(await Read(), original.Data.Metadata.NetSettings));
-        await Reopen(original.Data, "public-netclasses-final-restored", verifyReconnect: false);
+        await Apply(Batch(await Read(), schematicBaseline.Data.Metadata.NetSettings));
+        await Reopen(schematicBaseline.Data, "public-netclasses-final-restored", verifyReconnect: false);
     }
 }

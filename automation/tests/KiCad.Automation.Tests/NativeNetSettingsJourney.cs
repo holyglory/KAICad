@@ -16,6 +16,48 @@ public sealed partial class NativeSessionTests
         int processId, string display, string evidence, CancellationToken token)
     {
         string Prefix(string phase) => Path.Combine(evidence, processId + "-net-settings-" + phase);
+        static bool DocumentTypeMatches(JsonElement value, DocumentType expectedType)
+        {
+            if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out int numericType))
+                return numericType == (int)expectedType;
+            return value.ValueKind == JsonValueKind.String
+                && string.Equals(value.GetString(), expectedType.ToString(), StringComparison.Ordinal);
+        }
+        static void AssertDocumentSpecifierIdentity(JsonElement reported, DocumentSpecifier expected, string phase)
+        {
+            Assert.IsTrue(DocumentTypeMatches(reported.GetProperty("type"), expected.Type),
+                $"{phase}: response changed the document type.");
+            var reportedProject = reported.GetProperty("project");
+            Assert.AreEqual(expected.Project.Name, reportedProject.GetProperty("name").GetString(),
+                $"{phase}: response changed the project name.");
+            Assert.AreEqual(expected.Project.Path, reportedProject.GetProperty("path").GetString(),
+                $"{phase}: response changed the project path.");
+            switch (expected.IdentifierCase)
+            {
+                case DocumentSpecifier.IdentifierOneofCase.BoardFilename:
+                    Assert.AreEqual(expected.BoardFilename, reported.GetProperty("boardFilename").GetString(),
+                        $"{phase}: response changed the board filename.");
+                    break;
+                case DocumentSpecifier.IdentifierOneofCase.LibId:
+                    var reportedLibId = reported.GetProperty("libId");
+                    Assert.AreEqual(expected.LibId.LibraryNickname, reportedLibId.GetProperty("libraryNickname").GetString(),
+                        $"{phase}: response changed the library nickname.");
+                    Assert.AreEqual(expected.LibId.EntryName, reportedLibId.GetProperty("entryName").GetString(),
+                        $"{phase}: response changed the library entry name.");
+                    break;
+                case DocumentSpecifier.IdentifierOneofCase.SheetPath:
+                    var reportedSheetPath = reported.GetProperty("sheetPath");
+                    Assert.AreEqual(expected.SheetPath.PathHumanReadable,
+                        reportedSheetPath.GetProperty("pathHumanReadable").GetString(),
+                        $"{phase}: response changed the sheet path display.");
+                    var expectedPath = expected.SheetPath.Path.Select(id => id.Value).ToArray();
+                    var actualPath = reportedSheetPath.GetProperty("path").EnumerateArray()
+                        .Select(id => id.GetProperty("value").GetString()).ToArray();
+                    CollectionAssert.AreEqual(expectedPath, actualPath,
+                        $"{phase}: response changed the sheet path identity.");
+                    break;
+            }
+        }
         Task<SchematicScreenDataSnapshot> Read() => client.InvokeAsync<ReadSchematicScreenData, SchematicScreenDataSnapshot>(
             new() { Document = document }, token);
         Task<SchematicItemBatchResult> Apply(ApplySchematicItemBatch batch) =>
@@ -111,14 +153,6 @@ public sealed partial class NativeSessionTests
         }
         async Task AssertProjectTextVariables(JsonElement reply, DocumentLifecycleState expected, string phase)
         {
-            static bool DocumentTypeMatches(JsonElement value, DocumentType expectedType)
-            {
-                if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out int numericType))
-                    return numericType == (int)expectedType;
-                if (value.ValueKind == JsonValueKind.String)
-                    return string.Equals(value.GetString(), expectedType.ToString(), StringComparison.Ordinal);
-                return false;
-            }
             RequireToolSuccess(reply);
             var structured = reply.GetProperty("structuredContent");
             Assert.IsTrue(structured.GetProperty("supported").GetBoolean(), $"{phase}: native text-variable support is required.");
@@ -249,10 +283,8 @@ public sealed partial class NativeSessionTests
         Assert.IsFalse(textVariablesSetData.GetProperty("replayed").GetBoolean());
         Assert.IsFalse(textVariablesSetData.GetProperty("revisionTracked").GetBoolean());
         Assert.IsFalse(textVariablesSetData.GetProperty("completeLifecycle").GetBoolean());
-        Assert.AreEqual(projectDocument,
-            SchematicJson.Parser.Parse<DocumentSpecifier>(textVariablesSetData.GetProperty("project").GetRawText()));
-        Assert.AreEqual(document,
-            SchematicJson.Parser.Parse<DocumentSpecifier>(textVariablesSetData.GetProperty("document").GetRawText()));
+        AssertDocumentSpecifierIdentity(textVariablesSetData.GetProperty("project"), projectDocument, "set project");
+        AssertDocumentSpecifierIdentity(textVariablesSetData.GetProperty("document"), document, "set document");
         Assert.AreEqual(changedTextVariables.Count, textVariablesSetData.GetProperty("afterVariables").EnumerateObject().Count());
         foreach (var pair in changedTextVariables)
             Assert.AreEqual(pair.Value, textVariablesSetData.GetProperty("afterVariables").GetProperty(pair.Key).GetString());

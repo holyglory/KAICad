@@ -132,6 +132,7 @@ builder.Services.AddMcpServer(options =>
     .WithTools<PcbOperationsTools>()
     .WithTools<PcbRenderTools>()
     .WithTools<PcbGeometryManifestTools>()
+    .WithTools<PcbGeometryManifestTypedTools>()
     .WithTools<PcbVectorTools>()
     .WithTools<PcbArtworkTools>()
     .WithTools<PcbJobTools>()

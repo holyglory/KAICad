@@ -65,7 +65,7 @@ tl::expected<PCB_MANUFACTURING_JOB_MANAGER::Receipt,std::string> PCB_MANUFACTURI
     JournalRecord j; j.set_format_version(1); j.mutable_request()->CopyFrom(r); j.set_source_board(r.SerializeAsString()); j.set_journal_revision(1); Receipt* q=j.mutable_receipt();
     q->set_operation_id(r.operation_id()); q->set_process_epoch(epoch); q->mutable_document()->CopyFrom(r.document()); q->set_request_fingerprint_sha256(fingerprint(r)); q->set_source_snapshot_sha256(sourceDigest(r)); q->set_job_kind(JobKind(r)); q->set_status(PCB_MFG_EXPORT_ADMITTED); q->set_dispatch_stage(PCB_MFG_DISPATCH_ADMITTED); q->mutable_expected_state()->CopyFrom(r.expected_state()); q->mutable_observed_before()->CopyFrom(r.expected_state()); q->set_output_directory(r.output_directory()); q->set_staging_directory(StagingDirectory(r.output_directory(),r.operation_id())); q->set_publication_state(PCB_MFG_PUBLICATION_STAGED); q->set_recovery_state(PCB_MFG_RECOVERY_ACTIVE); q->set_snapshot_complete(false); q->set_export_adapter_available(false);
     if(auto ok=write(j);!ok) return tl::unexpected(ok.error());
-    if(!TestAdmissionBarrier()){SetUnsupported(*q);++*j.mutable_journal_revision();if(auto ok=write(j);!ok)return tl::unexpected(ok.error());}
+    if(!TestAdmissionBarrier()){SetUnsupported(*q);j.set_journal_revision(j.journal_revision()+1);if(auto ok=write(j);!ok)return tl::unexpected(ok.error());}
     return *q;
 }
 

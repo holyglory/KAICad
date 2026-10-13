@@ -2800,7 +2800,7 @@ public sealed partial class NativeSessionTests
                 .Single(item => item.Is(Track.Descriptor) && item.Unpack<Track>().Id.Value == originalCleanTrack.Id.Value)
                 .Unpack<Track>().End);
 
-            // Length-tuning qualification selects an axis-aligned POWER_RAIL
+            // Length-tuning qualification selects the persisted split route
             // route that is still present after the native shove, undo/redo
             // and save/reopen journey.  The exact source ID and its connected
             // pad/via anchors come from the live native collection, so this
@@ -2836,7 +2836,7 @@ public sealed partial class NativeSessionTests
             string[] tuneAnchorIds = [];
             foreach (var candidate in tuneRoutes.Items.Where(item => item.Is(Track.Descriptor))
                 .Select(item => item.Unpack<Track>().Clone())
-                .Where(track => track.Net.Name == "POWER_RAIL"
+                .Where(track => track.Id.Value == splitSource.Id.Value
                     && (track.Start.XNm == track.End.XNm || track.Start.YNm == track.End.YNm))
                 .OrderBy(track => track.Layer).ThenBy(track => track.Id.Value, StringComparer.Ordinal))
             {
@@ -2856,8 +2856,8 @@ public sealed partial class NativeSessionTests
                 tuneAnchorIds = anchors;
                 break;
             }
-            Assert.IsNotNull(tuneSource, "The persisted POWER_RAIL fixture must retain an axis-aligned route connected to a pad or via.");
-            Assert.AreEqual("POWER_RAIL", tuneSource!.Net.Name);
+            Assert.IsNotNull(tuneSource, "The persisted split route must retain an axis-aligned route connected to a pad or via.");
+            tuneSource = tuneSource ?? throw new AssertFailedException("The persisted split route disappeared before tuning.");
             Assert.IsTrue(tuneSource.Layer is BoardLayer.BlFCu or BoardLayer.BlBCu);
             var tuneCenterline = new[] { tuneSource.Start.Clone(), tuneSource.End.Clone() };
             long tuneBaseLength = IndependentPolylineLength(tuneCenterline);

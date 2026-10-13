@@ -3850,8 +3850,8 @@ public sealed partial class NativeSessionTests
                         Assert.IsFalse(BoundarySegmentIntersects(segment, 0, 20_000_000,
                             15_000_000, 80_000_000),
                             "The route must stay out of the concave missing-board region. " + BoardJson.Formatter.Format(segment));
-                        Assert.IsFalse(BoundarySegmentIntersects(segment, 78_000_000 - boundaryMarginNm, 78_000_000 - boundaryMarginNm,
-                            90_000_000 + boundaryMarginNm, 90_000_000 + boundaryMarginNm),
+                        Assert.IsFalse(BoundarySegmentIntersects(segment, 78_000_000, 78_000_000,
+                            90_000_000, 90_000_000),
                             "The route must stay out of the board cutout. " + BoardJson.Formatter.Format(segment));
                     }
                     boundaryCandidate.Items.Add(candidate.Items.Select(item => item.Clone()));

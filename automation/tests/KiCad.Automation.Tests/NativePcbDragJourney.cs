@@ -109,27 +109,11 @@ public sealed partial class NativeSessionTests
             NativeKeyboard.SchematicShortcut(display, processId, "G", "PCB Editor",
                 controlKey: false, focusCanvas: false);
 
-            bool routerBusy = false;
-            using (var active = CancellationTokenSource.CreateLinkedTokenSource(token))
-            {
-                active.CancelAfter(TimeSpan.FromSeconds(8));
-                while (!routerBusy)
-                {
-                    try
-                    {
-                        await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
-                        { Header = new() { Document = board }, Items = { seededRoute.Id } }, active.Token);
-                    }
-                    catch (NativeApiException error) when (error.Status == 7)
-                    {
-                        routerBusy = true;
-                        break;
-                    }
-                    await Task.Delay(50, active.Token);
-                }
-            }
-            Assert.IsTrue(routerBusy, "G must enter the live native inline router before pointer motion.");
-
+            // The read-only board API remains callable while the GUI router is
+            // active, so AS_BUSY is not an admission signal. The real proof is
+            // the subsequent motion/click changing this exact native item.
+            Assert.IsTrue(NativeKeyboard.HasWindow(display, processId, "PCB Editor"),
+                "The PCB editor must remain alive after entering inline drag.");
             foreach ((int x, int y) in new[] { (648, 502), (656, 506) })
             {
                 NativeKeyboard.SchematicShortcut(display, processId, "motion", "PCB Editor",

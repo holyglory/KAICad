@@ -2,6 +2,7 @@ using System.Text.Json;
 using Kiapi.Common.Types;
 using Kiapi.Schematic.Types;
 using KiCad.Automation.Mcp;
+using KiCad.Automation.Model;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace KiCad.Automation.Tests;
@@ -37,7 +38,7 @@ public sealed class SymbolLibraryTypedMcpProcessTests
         Assert.AreEqual(DocumentType.DoctypeSymbol, payload.Document.Type);
         Assert.AreEqual("Demo", payload.Document.Project.Name);
         Assert.AreEqual("Device", payload.Document.LibId.LibraryNickname);
-        Assert.AreEqual("R_TYPED", payload.Definition.Id.EntryName);
+        Assert.AreEqual("R_TYPED", payload.Definition!.Id!.EntryName);
 
         var mismatch = new SymbolLibraryTypedInput
         {

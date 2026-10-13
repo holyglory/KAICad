@@ -25,7 +25,7 @@ public sealed partial class SchematicSymbolLibraryTools
     [McpServerTool(Name = "kicad_symbol_library_mutation_typed", ReadOnly = false),
      Description("Read or mutate one project symbol-library entry from a structured input. input.document is an explicit project-bound symbol document (library nickname and entry name), input.definition is the SchematicSymbol protobuf object, and input.expectedState is the complete checked direct-file state for writeChecked. write, writeChecked and delete require a canonical operation UUID; native calls retain the legacy receipt/replay and post-readback guarantees. The existing JSON-string symbol-library tools remain available and are not weakened."),
      KiCadCapability("symbol-library", "compiled-mcp plus-native-symbol-library-adapter", "typed project/library document, SchematicSymbol protobuf definition, operation UUID and checked snapshot state"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "SymbolLibraryTypedMcpProcessTests.TypedSymbolLibrarySchemaAndMalformedAdmission")]
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "SymbolLibraryTypedMcpProcessTests.TypedSymbolLibrarySchemaAndMalformedAdmissionAreProvenOverStdio")]
     public async Task<CallToolResult> MutateTyped(string instanceId, SymbolLibraryTypedInput input,
         CancellationToken cancellationToken)
     {

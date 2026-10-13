@@ -21,7 +21,7 @@ public sealed class PcbGeometryManifestTypedTools(InstanceRegistry registry)
     [McpServerTool(Name = "kicad_pcb_render_geometry_typed", ReadOnly = true),
      Description("Read a deterministic PCB geometry manifest from one typed input. input carries an explicit PCB document, complete lifecycle observation, nanometre viewport, output size and optional layer/object-type selectors. Multiple layers form one composite inspection. The legacy kicad_pcb_render_geometry JSON tool remains available; this boundary rejects incomplete identity or lifecycle data before native contact."),
      KiCadCapability("pcb-rendering", "compiled-mcp plus-native-board-api", "typed PCB document, complete lifecycle observation, per-layer or composite selector and native bounding-box projection"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbRenderTypedMcpProcessTests.TypedGeometrySchemaAndIncompleteInputRefusal", "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbRenderTypedMcpProcessTests.TypedGeometrySchemaAndIncompleteInputRefusalAreVisibleOverStdio")]
     public Task<CallToolResult> ReadTyped(string instanceId, PcbRenderGeometryTypedInput input,
         CancellationToken cancellationToken)
     {

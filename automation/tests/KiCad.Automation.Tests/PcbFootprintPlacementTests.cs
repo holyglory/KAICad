@@ -82,6 +82,61 @@ public sealed class PcbFootprintPlacementTests
     }
 
     [TestMethod]
+    public void TypedPlacementPreservesCompleteCheckpointAndPermitsRepeatedPadNumbers()
+    {
+        var json = PcbFootprintTypedFixture.Json();
+        json["footprint"]!["pads"]![1]!["number"] = "1";
+        var source = PcbFootprintTypedFixture.Input(json).ToNative(CancellationToken.None);
+        var plan = PcbFootprintPlacementTools.BuildPlan(source.Document, source.State, source.Footprint);
+        var candidate = BoardJson.Parser.Parse<CreateItems>(plan.CandidateRequestJson);
+        var request = PcbFootprintPlacementTools.BuildCheckedRequest(source.State, candidate,
+            "dddddddd-dddd-dddd-dddd-dddddddddddd");
+        CheckedPcbItemContract.ValidateRequest(request, source.State.ProcessEpoch);
+        Assert.IsTrue(request.ExpectedState.CompleteChangeTracking);
+        Assert.IsTrue(request.ExpectedState.DiskBaselineChecked);
+        Assert.AreEqual(source.State.Revision, request.ExpectedState.Revision);
+        Assert.AreEqual(source.Footprint, candidate.Items.Single().Unpack<FootprintInstance>());
+        Assert.AreEqual("1", source.Footprint.Definition.Items[1].Unpack<Pad>().Number);
+    }
+
+    [TestMethod]
+    public void TypedPlacementRejectsMalformedGeometryAndDuplicateIdentities()
+    {
+        foreach (string defect in new[] { "zero-pad", "duplicate-id", "collinear-arc", "unknown-layer", "null-child", "invalid-circle" })
+        {
+            var json = PcbFootprintTypedFixture.Json();
+            switch (defect)
+            {
+                case "zero-pad": json["footprint"]!["pads"]![0]!["widthNm"] = 0; break;
+                case "duplicate-id": json["footprint"]!["pads"]![0]!["id"] = "11111111-1111-1111-1111-111111111111"; break;
+                case "collinear-arc":
+                    json["footprint"]!["graphics"]![0]!["kind"] = "Arc";
+                    json["footprint"]!["graphics"]![0]!["points"] = System.Text.Json.Nodes.JsonNode.Parse(
+                        "[{\"xNm\":0,\"yNm\":0},{\"xNm\":10,\"yNm\":0},{\"xNm\":20,\"yNm\":0}]");
+                    break;
+                case "unknown-layer": json["footprint"]!["pads"]![0]!["layers"]![0] = "unknown"; break;
+                case "null-child": json["footprint"]!["pads"]![0] = null; break;
+                case "invalid-circle": json["footprint"]!["pads"]![0]!["shape"] = "Circle"; break;
+            }
+            AutomationException error = Assert.ThrowsExactly<AutomationException>(() =>
+                PcbFootprintTypedFixture.Input(json).ToNative(CancellationToken.None), defect);
+            Assert.AreEqual("invalid_pcb_footprint_typed_input", error.Code, defect);
+        }
+    }
+
+    [TestMethod]
+    public void TypedPlacementRejectsUnknownFieldsAndRepeatedJsonMembers()
+    {
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        Assert.ThrowsExactly<JsonException>(() => JsonSerializer.Deserialize<PcbFootprintPlacementInput>(
+            "{\"footprintJson\":\"{}\"}", options));
+        Assert.ThrowsExactly<JsonException>(() => JsonSerializer.Deserialize<PcbFootprintPadInput>(
+            "{\"id\":\"11111111-1111-1111-1111-111111111111\",\"id\":\"22222222-2222-2222-2222-222222222222\"}", options));
+        Assert.ThrowsExactly<JsonException>(() => JsonSerializer.Deserialize<PcbFootprintPadInput>(
+            "{\"shape\":\"Custom\"}", options));
+    }
+
+    [TestMethod]
     public void AssignmentValidationMatchesTypedSymbolFieldToFootprintIdentity()
     {
         var symbol = new SchematicSymbolInstance

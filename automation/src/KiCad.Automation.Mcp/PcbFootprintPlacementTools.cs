@@ -32,6 +32,38 @@ public sealed class PcbFootprintPlacementTools(InstanceRegistry registry)
     private static readonly SemaphoreSlim MutationGate = new(1, 1);
     private static readonly Dictionary<string, StoredReceipt> Receipts = new(StringComparer.Ordinal);
 
+    [McpServerTool(Name = "kicad_pcb_footprint_place_plan_typed", ReadOnly = true),
+     Description("Prepare an exact footprint placement using a structured PCB document, complete lifecycle checkpoint, fields, normal padstacks and segment/rectangle/circle/arc graphics. Coordinates are nanometers. Returns the complete native candidate and deterministic planId without contacting KiCad. It does not check board clearances, net connectivity or manufacturability."),
+     KiCadCapability("pcb-placement", "compiled-mcp", "structured footprint geometry and complete PCB lifecycle observation"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbFootprintTypedMcpProcessTests.TypedPlacementPublishesSchemaAndExactDeterministicCandidate")]
+    public Task<CallToolResult> PlanTyped(PcbFootprintPlacementInput input, CancellationToken cancellationToken) =>
+        Execute(async () =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (input is null) throw PcbFootprintPlacementInput.Invalid("A footprint placement input is required.");
+            var native = input.ToNative(cancellationToken);
+            return await Plan(SchematicJson.Formatter.Format(native.Document),
+                SchematicJson.Formatter.Format(native.State), BoardJson.Formatter.Format(native.Footprint), cancellationToken);
+        });
+
+    [McpServerTool(Name = "kicad_pcb_footprint_place_apply_typed", ReadOnly = false),
+     Description("Apply a structured footprint placement after checking the exact planId, explicit PCB document, complete lifecycle observation and operation UUID. Uses the same checked native create transaction and retained operation receipt as kicad_pcb_footprint_place_apply. Retain the same operation UUID, planId and exact input to reconcile a lost reply. Native board admission and postverification remain mandatory."),
+     KiCadCapability("pcb-placement", "compiled-mcp plus native-board-api", "structured footprint, exact plan identity, complete lifecycle checkpoint, native undo transaction and operation receipt"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbFootprintTypedMcpProcessTests.TypedPlacementRejectsChangedPlanAndMissingOperationBeforeNativeContact")]
+    public Task<CallToolResult> ApplyTyped(string instanceId, PcbFootprintPlacementInput input,
+        CancellationToken cancellationToken) => ExecuteMutation(async () =>
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (input is null) throw PcbFootprintPlacementInput.Invalid("A footprint placement input is required.");
+        ValidateOperation(input.OperationId ?? "");
+        var native = input.ToNative(cancellationToken);
+        FootprintPlacementPlan plan = BuildPlan(native.Document, native.State, native.Footprint);
+        if (!string.Equals(input.ExpectedPlanId, plan.PlanId, StringComparison.Ordinal))
+            throw new AutomationException("stale_pcb_footprint_plan", "The exact footprint and lifecycle checkpoint must match the preview planId before applying.");
+        return await Apply(instanceId, plan.CandidateRequestJson,
+            SchematicJson.Formatter.Format(native.State), input.OperationId!, cancellationToken);
+    });
+
     [McpServerTool(Name = "kicad_pcb_footprint_place_plan", ReadOnly = true),
      Description("Prepare a deterministic, revision-bound PCB footprint placement proposal. documentJson identifies an explicit PCB, expectedStateJson is the lifecycle observation the caller intends to use, and footprintJson is one complete FootprintInstance protobuf-JSON value including its library definition, pads and graphics. The planner validates the document checkpoint, canonical footprint/library identities, front/back copper placement, finite orientation, and bounded packed child size, then returns an exact CreateItems request. It does not validate child geometry or electrical connectivity, never contacts KiCad, commits the footprint, resolves a library entry implicitly, or claims DRC or manufacturability."),
      KiCadCapability("pcb-placement", "compiled-mcp", "explicit PCB document, lifecycle checkpoint, complete FootprintInstance definition"),

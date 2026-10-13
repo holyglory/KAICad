@@ -19,7 +19,7 @@ namespace KiCad.Automation.Mcp;
 public sealed class PcbRouteTuningTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_pcb_route_tune_plan", ReadOnly = true),
-     Description("Create a deterministic proposal-only serpentine Track candidate for length tuning. requestJson requires netName, copper layer, same-axis start/end anchors, widthNm, targetAdditionalLengthNm, pitchNm, maxSegments and an explicit corridor. Returns exact Track CreateItems geometry and achieved additional length; it does not inspect or claim DRC, impedance, differential-pair or manufacturability and never mutates the board."),
+     Description("Create a deterministic proposal-only Track candidate for length tuning. requestJson requires netName, copper layer, widthNm, targetAdditionalLengthNm, pitchNm, maxSegments and an explicit corridor, plus either legacy same-axis start/end anchors or an axis-aligned centerline array whose first and last points are the anchors. Returns exact Track CreateItems geometry and achieved length; it does not inspect or claim DRC, impedance, differential-pair or manufacturability and never mutates the board."),
      KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "explicit PCB lifecycle state, tuning corridor, deterministic meander proposal")]
     public Task<CallToolResult> Plan(string instanceId, string documentJson, string expectedStateJson,
         string requestJson, CancellationToken cancellationToken) => Execute(async () =>

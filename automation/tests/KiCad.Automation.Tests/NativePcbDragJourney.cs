@@ -121,7 +121,18 @@ public sealed partial class NativeSessionTests
             int centerX = (int)Math.Round(window.Width * 671d / 1280d);
             int centerY = (int)Math.Round(window.Height * 383d / 720d);
             string preDragCapture = Path.Combine(evidence, instanceId + "-pcb-inline-drag-pre-g.png");
-            await NativeKeyboard.CaptureAsync(display, preDragCapture, token);
+            string? captureFailure = null;
+            try { await NativeKeyboard.CaptureAsync(display, preDragCapture, token); }
+            catch (InvalidOperationException error)
+            {
+                // This screenshot diagnoses pointer calibration; the actual
+                // acceptance proof below is native geometry, connectivity,
+                // history and persistence. Retain an unavailable capture
+                // without masking that independent functional proof.
+                captureFailure = error.Message;
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-pcb-inline-drag-capture-failure.txt"),
+                    captureFailure, token);
+            }
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-pcb-inline-drag-pre-g.json"),
                 System.Text.Json.JsonSerializer.Serialize(new
                 {
@@ -139,7 +150,8 @@ public sealed partial class NativeSessionTests
                         },
                         layer = seededRoute.Layer.ToString(), widthNm = seededRoute.Width.ValueNm
                     },
-                    capture = Path.GetFileName(preDragCapture)
+                    capture = File.Exists(preDragCapture) ? Path.GetFileName(preDragCapture) : null,
+                    captureFailure
                 }), token);
             // A real click gives the PCB canvas GTK focus. A motion-only
             // command moves XTest's pointer but does not focus the canvas.

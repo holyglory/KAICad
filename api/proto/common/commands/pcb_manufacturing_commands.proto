@@ -88,6 +88,10 @@ message PcbManufacturingManagerCapabilities
   bool publication_supported = 408;
   bool complete_snapshot_supported = 409;
   string unavailable_reason = 410;
+  // The current manager can dispatch SVG synchronously on the owning editor
+  // thread. This does not imply a detached worker, restart publication or a
+  // complete dependency snapshot.
+  bool synchronous_svg_export_supported = 411;
   // -- end lane 2D --
 }
 
@@ -205,10 +209,6 @@ message PcbManufacturingExportReceipt
   // captured. Request/lifecycle journaling alone is not a source snapshot.
   bool snapshot_complete = 406;
   bool export_adapter_available = 407;
-  // The current manager can dispatch SVG synchronously on the owning editor
-  // thread. This does not imply a detached worker, restart publication or a
-  // complete dependency snapshot.
-  bool synchronous_svg_export_supported = 411;
   // -- end lane 2D --
 }
 

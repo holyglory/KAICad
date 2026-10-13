@@ -177,6 +177,9 @@ message PcbManufacturingExportReceipt
   string job_kind = 5;
   PcbManufacturingExportStatus status = 6;
   PcbManufacturingDispatchStage dispatch_stage = 7;
+  // True once native dispatch intent is durably recorded. An indeterminate
+  // terminal receipt may therefore mean the adapter could have run even when
+  // no output was verified.
   bool native_dispatch = 8;
   bool terminal = 9;
   string error_code = 10;
@@ -202,6 +205,10 @@ message PcbManufacturingExportReceipt
   // captured. Request/lifecycle journaling alone is not a source snapshot.
   bool snapshot_complete = 406;
   bool export_adapter_available = 407;
+  // The current manager can dispatch SVG synchronously on the owning editor
+  // thread. This does not imply a detached worker, restart publication or a
+  // complete dependency snapshot.
+  bool synchronous_svg_export_supported = 411;
   // -- end lane 2D --
 }
 

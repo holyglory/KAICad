@@ -40,19 +40,27 @@ public sealed partial class PcbJobTools
             PcbManufacturingExportReceipt>(new() { Request = request }, cancellationToken);
         ValidateManagerReceipt(receipt, request, session.Epoch);
         bool adapterAvailable = receipt.ExportAdapterAvailable;
+        bool completed = receipt.Status == PcbManufacturingExportStatus.PcbMfgExportCompleted;
+        string? errorCode = completed ? null
+            : adapterAvailable && !string.IsNullOrWhiteSpace(receipt.ErrorCode)
+                ? receipt.ErrorCode : "export_adapter_unavailable";
+        string errorMessage = completed ? "" : receipt.ErrorMessage.Length == 0
+            ? adapterAvailable
+                ? "The synchronous SVG adapter did not produce a completed publication receipt."
+                : "The SVG owner-thread adapter is unavailable; no output was generated."
+            : receipt.ErrorMessage;
         return Data(new
         {
             instanceId, processEpoch = session.Epoch, operationId = receipt.OperationId,
             managerAccepted = true, recoverySupported = true,
             exportAdapterAvailable = adapterAvailable,
-            operationOutcome = receipt.Status == PcbManufacturingExportStatus.PcbMfgExportCompleted
+            operationOutcome = completed
                 ? PcbExportRecoveryPolicy.OutcomeCompleted : PcbExportRecoveryPolicy.Unknown,
             status = receipt.Status.ToString(), recoveryState = receipt.RecoveryState.ToString(),
             terminal = receipt.Terminal, workerFinished = receipt.WorkerFinished,
             nativeDispatch = receipt.NativeDispatch, outputGenerated = receipt.Artifacts.Count != 0,
             receipt = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(receipt))
-        }, !adapterAvailable, adapterAvailable ? null : "export_adapter_unavailable",
-            receipt.ErrorMessage.Length == 0 ? "The SVG owner-thread adapter is unavailable; no output was generated." : receipt.ErrorMessage);
+        }, !completed, errorCode, errorMessage);
     }, input?.OperationId, input?.ExpectedState?.ProcessEpoch);
 
     [McpServerTool(Name = "kicad_pcb_export_cancel_typed", ReadOnly = false),
@@ -159,13 +167,13 @@ public sealed partial class PcbJobTools
         if (session.Epoch != epoch) throw new AutomationException("stale_process_epoch", "The capability request belongs to another native process epoch.");
         PcbManufacturingManagerCapabilities result = await client.InvokeAsync<GetPcbManufacturingManagerCapabilities, PcbManufacturingManagerCapabilities>(new() { Document = target, ProcessEpoch = epoch }, cancellationToken);
         if( !result.Document.Equals(target) || result.ProcessEpoch != epoch || string.IsNullOrWhiteSpace(result.UnavailableReason)
-            || !result.UnavailableReason.Contains("synchronous SVG owner-thread dispatch", StringComparison.Ordinal)
+            || !result.SynchronousSvgExportSupported
             || !result.AdmissionSupported || !result.RequestJournalSupported || !result.JournalReadSupported
             || result.DetachedExportSupported || result.PublicationSupported || result.CompleteSnapshotSupported )
             throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
                 "The native manager capability response did not bind the requested PCB and process epoch.");
         return Data(new { instanceId, processEpoch = session.Epoch,
-            synchronousSvgExportSupported = true,
+            synchronousSvgExportSupported = result.SynchronousSvgExportSupported,
             capabilities = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(result)) });
     }, null, input?.ProcessEpoch);
 
@@ -247,6 +255,10 @@ public sealed partial class PcbJobTools
             || receipt.PublicationState != PcbManufacturingPublicationState.PcbMfgPublicationUnspecified) )
             throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
                 "The unavailable exporter receipt claims work or publication that was not performed.");
+        if( receipt.ExportAdapterAvailable && receipt.Status != PcbManufacturingExportStatus.PcbMfgExportCompleted
+            && (!receipt.Terminal || !receipt.NativeDispatch || string.IsNullOrWhiteSpace(receipt.ErrorCode)) )
+            throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
+                "The available exporter receipt does not close a failed or indeterminate dispatch explicitly.");
     }
 
     private static void ValidateManagerReceiptIdentity(PcbManufacturingExportReceipt receipt,

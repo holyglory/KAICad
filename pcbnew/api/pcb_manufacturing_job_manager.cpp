@@ -316,6 +316,53 @@ void PCB_MANUFACTURING_JOB_MANAGER::SetUnsupported( Receipt& aReceipt )
     aReceipt.set_publication_committed( false );
 }
 
+void PCB_MANUFACTURING_JOB_MANAGER::SetDispatchSubmitted( Receipt& aReceipt )
+{
+    // native_dispatch records durable dispatch intent.  It does not claim
+    // that the adapter has already produced an artifact.
+    aReceipt.set_status( PCB_MFG_EXPORT_RUNNING );
+    aReceipt.set_dispatch_stage( PCB_MFG_DISPATCH_SUBMITTED );
+    aReceipt.set_native_dispatch( true );
+    aReceipt.set_export_adapter_available( true );
+    aReceipt.set_terminal( false );
+    aReceipt.set_worker_finished( false );
+    aReceipt.set_recovery_state( PCB_MFG_RECOVERY_ACTIVE );
+    aReceipt.set_publication_state( PCB_MFG_PUBLICATION_STAGED );
+    aReceipt.set_publication_committed( false );
+    aReceipt.set_snapshot_complete( false );
+    aReceipt.clear_error_code();
+    aReceipt.clear_error_message();
+    aReceipt.clear_observed_after();
+    aReceipt.clear_artifacts();
+    aReceipt.clear_output_manifest_sha256();
+    aReceipt.set_output_manifest_complete( false );
+}
+
+void PCB_MANUFACTURING_JOB_MANAGER::SetDispatchIndeterminate(
+        Receipt& aReceipt, const std::string& aErrorCode, const std::string& aErrorMessage )
+{
+    // The callback may have run before reporting an error.  Preserve the
+    // dispatch intent and close the journal without claiming output, cleanup,
+    // publication or a verified post-export lifecycle state.
+    aReceipt.set_status( PCB_MFG_EXPORT_INDETERMINATE );
+    aReceipt.set_dispatch_stage( PCB_MFG_DISPATCH_TERMINAL );
+    aReceipt.set_native_dispatch( true );
+    aReceipt.set_export_adapter_available( true );
+    aReceipt.set_terminal( true );
+    aReceipt.set_worker_finished( true );
+    aReceipt.set_recovery_state( PCB_MFG_RECOVERY_UNKNOWN );
+    aReceipt.set_error_code( aErrorCode );
+    aReceipt.set_error_message( aErrorMessage );
+    aReceipt.set_publication_state( PCB_MFG_PUBLICATION_UNSPECIFIED );
+    aReceipt.set_publication_committed( false );
+    aReceipt.set_snapshot_complete( false );
+    aReceipt.clear_observed_after();
+    aReceipt.clear_staging_directory();
+    aReceipt.clear_artifacts();
+    aReceipt.clear_output_manifest_sha256();
+    aReceipt.set_output_manifest_complete( false );
+}
+
 tl::expected<void, std::string> PCB_MANUFACTURING_JOB_MANAGER::ValidateRecord( const JournalRecord& aRecord )
 {
     if( aRecord.format_version() != JOURNAL_VERSION || aRecord.journal_revision() == 0
@@ -552,10 +599,10 @@ PCB_MANUFACTURING_JOB_MANAGER::Dispatch( const Request& aRequest, const std::str
 {
     if( !aAdapter ) return tl::unexpected( "manufacturing_dispatch_adapter_unavailable" );
 
-    // Keep the operation lock across the external callback.  A cancellation
-    // or second native instance cannot replace the journal while the adapter
-    // is using the immutable context.  The C++ mutex is released while the
-    // callback runs so an adapter may use unrelated manager operations.
+    // The operation lock protects admission and the submitted transition. A
+    // callback must run without the C++ mutex because owner-thread exporters
+    // may observe unrelated manager state, but the operation-file lease stays
+    // held across the callback so another process cannot replace the journal.
     std::unique_lock lock( m_mutex );
     if( auto valid = ValidateRequest( aRequest ); !valid ) return tl::unexpected( valid.error() );
     if( !IsUuid( aEpoch ) || aRequest.process_epoch() != aEpoch )
@@ -582,6 +629,39 @@ PCB_MANUFACTURING_JOB_MANAGER::Dispatch( const Request& aRequest, const std::str
     context.request.CopyFrom( aRequest );
     context.sourceBoard = prior->source_board();
     context.sourceSnapshotSha256 = prior->receipt().source_snapshot_sha256();
+
+    // Record dispatch intent before entering native code.  If the process
+    // exits or the callback loses its reply after this write, the journal is
+    // RUNNING/SUBMITTED and the operation cannot be cancelled or dispatched
+    // again by treating it as a fresh admission.
+    JournalRecord submitted = *prior;
+    SetDispatchSubmitted( *submitted.mutable_receipt() );
+    if( submitted.journal_revision() == std::numeric_limits<uint64_t>::max() )
+        return tl::unexpected( "invalid_manufacturing_journal" );
+    submitted.set_journal_revision( submitted.journal_revision() + 1 );
+    if( auto persisted = write( submitted ); !persisted ) return tl::unexpected( persisted.error() );
+
+    auto persistIndeterminate = [&]( const std::string& aCode,
+                                     const std::string& aMessage )
+            -> tl::expected<Receipt, std::string>
+    {
+        if( !lock.owns_lock() ) lock.lock();
+        auto current = read( aRequest.operation_id() );
+        if( !current ) return tl::unexpected( current.error() );
+        if( current->request().SerializeAsString() != aRequest.SerializeAsString()
+            || current->receipt().status() != PCB_MFG_EXPORT_RUNNING
+            || current->receipt().dispatch_stage() != PCB_MFG_DISPATCH_SUBMITTED )
+            return tl::unexpected( "manufacturing_dispatch_race" );
+
+        JournalRecord candidate = *current;
+        SetDispatchIndeterminate( *candidate.mutable_receipt(), aCode, aMessage );
+        if( candidate.journal_revision() == std::numeric_limits<uint64_t>::max() )
+            return tl::unexpected( "invalid_manufacturing_journal" );
+        candidate.set_journal_revision( candidate.journal_revision() + 1 );
+        if( auto persisted = write( candidate ); !persisted ) return tl::unexpected( persisted.error() );
+        return candidate.receipt();
+    };
+
     lock.unlock();
     tl::expected<Receipt, std::string> dispatched = tl::unexpected( "manufacturing_dispatch_failed" );
     try
@@ -590,30 +670,38 @@ PCB_MANUFACTURING_JOB_MANAGER::Dispatch( const Request& aRequest, const std::str
     }
     catch( const std::exception& error )
     {
-        return tl::unexpected( "manufacturing_dispatch_exception: " + std::string( error.what() ) );
+        return persistIndeterminate( "manufacturing_dispatch_exception",
+                                     "The native adapter raised after dispatch intent: "
+                                     + std::string( error.what() ) );
     }
     catch( ... )
     {
-        return tl::unexpected( "manufacturing_dispatch_exception" );
+        return persistIndeterminate( "manufacturing_dispatch_exception",
+                                     "The native adapter raised an unknown exception after dispatch intent" );
     }
-    lock.lock();
 
-    // An adapter error is deliberately non-terminal.  The durable admission
-    // remains readable as ACTIVE/ADMITTED and can be reconciled or retried
-    // after the adapter itself has recovered; no completion is inferred.
-    if( !dispatched ) return tl::unexpected( "manufacturing_dispatch_failed: " + dispatched.error() );
+    // An adapter error is terminally indeterminate. The callback may have
+    // reached native code before returning its error, so the journal must not
+    // remain ADMITTED and must not permit a second dispatch attempt.
+    if( !dispatched )
+        return persistIndeterminate( "manufacturing_dispatch_indeterminate",
+                                     "The native adapter failed after dispatch intent: " + dispatched.error() );
 
+    if( !lock.owns_lock() ) lock.lock();
     auto current = read( aRequest.operation_id() );
     if( !current ) return tl::unexpected( current.error() );
     if( current->request().SerializeAsString() != aRequest.SerializeAsString()
-        || current->receipt().status() != PCB_MFG_EXPORT_ADMITTED
-        || current->receipt().dispatch_stage() != PCB_MFG_DISPATCH_ADMITTED )
+        || current->receipt().status() != PCB_MFG_EXPORT_RUNNING
+        || current->receipt().dispatch_stage() != PCB_MFG_DISPATCH_SUBMITTED )
         return tl::unexpected( "manufacturing_dispatch_race" );
 
     JournalRecord candidate = *current;
     candidate.mutable_receipt()->CopyFrom( *dispatched );
     if( auto valid = ValidateDispatchedReceipt( candidate, candidate.receipt() ); !valid )
-        return tl::unexpected( valid.error() );
+    {
+        lock.unlock();
+        return persistIndeterminate( "invalid_manufacturing_dispatch_receipt", valid.error() );
+    }
     if( candidate.journal_revision() == std::numeric_limits<uint64_t>::max() )
         return tl::unexpected( "invalid_manufacturing_journal" );
     candidate.set_journal_revision( candidate.journal_revision() + 1 );
@@ -735,6 +823,7 @@ PcbManufacturingManagerCapabilities PCB_MANUFACTURING_JOB_MANAGER::Capabilities(
     response.set_journal_read_supported( true );
     response.set_cancellation_before_dispatch_supported( true );
     response.set_prior_epoch_journal_inspection_supported( true );
+    response.set_synchronous_svg_export_supported( true );
     response.set_unavailable_reason(
             "synchronous SVG owner-thread dispatch is available; detached export, worker cancellation, "
             "restart publication and complete dependency snapshots remain unavailable" );

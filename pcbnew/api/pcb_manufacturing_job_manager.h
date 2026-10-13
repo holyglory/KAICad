@@ -32,9 +32,10 @@ public:
      * The manager owns admission, operation identity and the durable journal.
      * An adapter may dispatch the request to native export code and return a
      * native receipt, but it cannot change the request or lifecycle baseline.
-     * The manager validates the returned receipt before replacing the admitted
-     * journal record. An adapter failure leaves the admitted record untouched,
-     * so a caller cannot mistake a lost handoff for a completed export.
+     * The manager durably records dispatch intent before invoking the adapter,
+     * then validates the returned receipt before replacing that submitted
+     * journal record. An adapter failure closes as indeterminate so a caller
+     * cannot retry after a handoff that may already have reached native code.
      */
     struct DISPATCH_CONTEXT
     {
@@ -88,6 +89,8 @@ private:
     static bool TestAdmissionBarrier();
     static std::string JobKind( const Request& );
     static void SetUnsupported( Receipt& );
+    static void SetDispatchSubmitted( Receipt& );
+    static void SetDispatchIndeterminate( Receipt&, const std::string&, const std::string& );
     const wxString m_journalDirectory;
     mutable std::mutex m_mutex;
 };

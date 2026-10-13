@@ -11,6 +11,23 @@ namespace KiCad.Automation.Tests;
 public sealed class PcbManufacturingRecoveryContractTests
 {
     [TestMethod]
+    public void ManagerCapabilitiesExposeSynchronousSvgSupportSeparatelyFromDetachedRecovery()
+    {
+        var capabilities = new PcbManufacturingManagerCapabilities
+        {
+            SynchronousSvgExportSupported = true,
+            DetachedExportSupported = false,
+            PublicationSupported = false,
+            CompleteSnapshotSupported = false
+        };
+
+        Assert.IsTrue(capabilities.SynchronousSvgExportSupported);
+        Assert.IsFalse(capabilities.DetachedExportSupported);
+        Assert.IsFalse(capabilities.PublicationSupported);
+        Assert.IsFalse(capabilities.CompleteSnapshotSupported);
+    }
+
+    [TestMethod]
     public void TypedRecoveryInputsPreserveIdentityAndRejectContradictoryEpochs()
     {
         string root = Directory.CreateTempSubdirectory("pcb-manufacturing-recovery-contract-").FullName;

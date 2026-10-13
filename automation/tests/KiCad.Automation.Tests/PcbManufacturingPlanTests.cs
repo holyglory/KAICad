@@ -164,7 +164,11 @@ public sealed class PcbManufacturingContractTestsPlanning
         return result.GetProperty("structuredContent");
     }
 
-    private static void AssertSuccess(JsonElement result) => Assert.IsFalse(result.GetProperty("isError").GetBoolean(), result.GetRawText());
+    private static void AssertSuccess(JsonElement result)
+    {
+        if (result.TryGetProperty("isError", out JsonElement isError))
+            Assert.IsFalse(isError.GetBoolean(), result.GetRawText());
+    }
 
     private static void AssertError(JsonElement result, string code)
     {

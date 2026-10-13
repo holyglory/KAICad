@@ -90,16 +90,16 @@ public sealed class PcbManufacturingRecoveryContractTests
                     Assert.IsTrue(properties.TryGetProperty(property, out _), tool.GetRawText());
             }
 
-            foreach (string name in new[] { "kicad_pcb_export_cancel_typed", "kicad_pcb_export_reconcile_typed" })
-            {
-                JsonElement refused = await mcp.Tool(name, new
-                {
-                    instanceId = Guid.NewGuid().ToString("D"), input = new { }
-                });
-                Assert.IsTrue(refused.GetProperty("isError").GetBoolean(), refused.GetRawText());
-                Assert.AreEqual("invalid_pcb_export_" + (name.Contains("cancel", StringComparison.Ordinal) ? "cancel" : "reconcile") + "_input",
-                    refused.GetProperty("structuredContent").GetProperty("errorCode").GetString(), refused.GetRawText());
-            }
+            JsonElement cancelRefused = await mcp.Tool("kicad_pcb_export_cancel_typed", new
+            { instanceId = Guid.NewGuid().ToString("D"), input = new { } });
+            Assert.IsTrue(cancelRefused.GetProperty("isError").GetBoolean(), cancelRefused.GetRawText());
+            Assert.AreEqual("invalid_pcb_export_cancel_input",
+                cancelRefused.GetProperty("structuredContent").GetProperty("errorCode").GetString(), cancelRefused.GetRawText());
+            JsonElement reconcileRefused = await mcp.Tool("kicad_pcb_export_reconcile_typed", new
+            { instanceId = Guid.NewGuid().ToString("D"), input = new { } });
+            Assert.IsTrue(reconcileRefused.GetProperty("isError").GetBoolean(), reconcileRefused.GetRawText());
+            Assert.AreEqual("invalid_pcb_export_reconcile_input",
+                reconcileRefused.GetProperty("structuredContent").GetProperty("errorCode").GetString(), reconcileRefused.GetRawText());
         }
         finally { Directory.Delete(root, true); }
     }

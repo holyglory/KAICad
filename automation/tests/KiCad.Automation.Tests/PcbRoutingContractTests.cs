@@ -70,9 +70,17 @@ public sealed class PcbRoutingContractTests
     [TestMethod]
     public void WiderViaClearanceIsAppliedToGeometryBoundaries()
     {
-        PcbRouteGeometry.Region region = PcbRouteGeometry.FromPolySet(RectanglePolySet(0, 0, 10_000, 10_000), 0)!;
+        PolySet boardWithHole = RectanglePolySet(0, 0, 10_000, 10_000);
+        boardWithHole.Polygons[0].Holes.Add(new PolyLine { Closed = true, Nodes =
+        {
+            new PolyLineNode { Point = new() { XNm = 4_000, YNm = 4_000 } },
+            new PolyLineNode { Point = new() { XNm = 6_000, YNm = 4_000 } },
+            new PolyLineNode { Point = new() { XNm = 6_000, YNm = 6_000 } },
+            new PolyLineNode { Point = new() { XNm = 4_000, YNm = 6_000 } }
+        }});
+        PcbRouteGeometry.Region region = PcbRouteGeometry.FromPolySet(boardWithHole, 0)!;
         Assert.IsFalse(region.Blocks(5_000, 5_000, 0));
-        Assert.IsTrue(region.Blocks(5_000, 5_000, 6_000), "A via radius that reaches the boundary must be refused.");
+        Assert.IsTrue(region.Blocks(5_000, 5_000, 6_000), "A via radius that reaches the hole boundary must be refused.");
     }
 
     private static PolySet RectanglePolySet(long minX, long minY, long maxX, long maxY) => new()

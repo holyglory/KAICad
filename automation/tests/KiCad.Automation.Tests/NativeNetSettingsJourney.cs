@@ -292,8 +292,9 @@ public sealed partial class NativeSessionTests
             new() { Document = projectDocument }, token)).Variables;
         Assert.AreEqual(changedTextVariables.Count, nativeChangedTextVariables.Count);
         Assert.AreEqual(changedTextVariables["AUTOMATION_TEXT_VARIABLE"], nativeChangedTextVariables["AUTOMATION_TEXT_VARIABLE"]);
-        var publicTextVariables = await ReadProjectTextVariables(originalLifecycle, "after-text-variable-set");
-        await AssertProjectTextVariables(publicTextVariables, originalLifecycle, "after-text-variable-set");
+        var textVariablesLifecycle = await ObserveLifecycleState(client, document, token);
+        var publicTextVariables = await ReadProjectTextVariables(textVariablesLifecycle, "after-text-variable-set");
+        await AssertProjectTextVariables(publicTextVariables, textVariablesLifecycle, "after-text-variable-set");
         Assert.AreEqual("checked-native-value",
             publicTextVariables.GetProperty("structuredContent").GetProperty("variables")
                 .GetProperty("AUTOMATION_TEXT_VARIABLE").GetString());
@@ -314,8 +315,8 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual("project_text_variables_stale",
             staleTextVariables.GetProperty("structuredContent").GetProperty("errorCode").GetString(),
             staleTextVariables.GetRawText());
-        var unchangedAfterStale = await ReadProjectTextVariables(originalLifecycle, "stale-map-preserved");
-        await AssertProjectTextVariables(unchangedAfterStale, originalLifecycle, "stale-map-preserved");
+        var unchangedAfterStale = await ReadProjectTextVariables(textVariablesLifecycle, "stale-map-preserved");
+        await AssertProjectTextVariables(unchangedAfterStale, textVariablesLifecycle, "stale-map-preserved");
         Assert.AreEqual("checked-native-value",
             unchangedAfterStale.GetProperty("structuredContent").GetProperty("variables")
                 .GetProperty("AUTOMATION_TEXT_VARIABLE").GetString());
@@ -339,8 +340,9 @@ public sealed partial class NativeSessionTests
 
         await SetProjectTextVariables(textVariablesReloadedLifecycle, originalTextVariables, "MMM_REPLACE",
             Guid.NewGuid().ToString("D"), "restore");
-        var restoredTextVariables = await ReadProjectTextVariables(textVariablesReloadedLifecycle, "restored");
-        await AssertProjectTextVariables(restoredTextVariables, textVariablesReloadedLifecycle, "restored");
+        var restoredTextVariablesLifecycle = await ObserveLifecycleState(client, document, token);
+        var restoredTextVariables = await ReadProjectTextVariables(restoredTextVariablesLifecycle, "restored");
+        await AssertProjectTextVariables(restoredTextVariables, restoredTextVariablesLifecycle, "restored");
         var desired = original.Data.Clone(); var settings = desired.Metadata.NetSettings;
         settings.DefaultClass.Schematic.WireWidth = new() { ValueNm = 50800 };
         settings.DefaultClass.Board.TrackWidth = new() { ValueNm = 450000 };

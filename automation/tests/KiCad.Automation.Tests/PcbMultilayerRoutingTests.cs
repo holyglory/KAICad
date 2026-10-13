@@ -29,7 +29,7 @@ public sealed class PcbMultilayerRoutingTests
         Zone footprintOnly = RuleArea("33333333-3333-3333-3333-333333333333", keepFootprints: true);
         Zone copperOnly = RuleArea("44444444-4444-4444-4444-444444444444", keepCopper: true);
 
-        var first = MultilayerRoutePlanner.Plan(validated: MultilayerRoutePlanner.Validate(request, enabled),
+        var first = MultilayerRoutePlanner.Plan(MultilayerRoutePlanner.Validate(request, enabled),
             [Any.Pack(viaOnly), Any.Pack(copperOnly), Any.Pack(trackOnly), Any.Pack(footprintOnly)], enabled, document, state);
         var replay = MultilayerRoutePlanner.Plan(MultilayerRoutePlanner.Validate(request, enabled),
             [Any.Pack(trackOnly), Any.Pack(footprintOnly), Any.Pack(copperOnly), Any.Pack(viaOnly)], enabled, document, state);

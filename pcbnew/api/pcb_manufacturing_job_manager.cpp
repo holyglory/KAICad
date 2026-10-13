@@ -19,7 +19,7 @@ PCB_MANUFACTURING_JOB_MANAGER::PCB_MANUFACTURING_JOB_MANAGER( const wxString& di
 { wxFileName::Mkdir( m_journalDirectory, wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL ); }
 
 std::string PCB_MANUFACTURING_JOB_MANAGER::pathFor( const std::string& id ) const
-{ return wxFileName( m_journalDirectory, wxString::FromUTF8(id + ".mfg-journal") ).GetFullPath().ToStdString(); }
+{ std::string name = id + ".mfg-journal"; return wxFileName( m_journalDirectory, wxString::FromUTF8(name.c_str()) ).GetFullPath().ToStdString(); }
 std::string PCB_MANUFACTURING_JOB_MANAGER::fingerprint( const Request& r ) const { return Hash(r.SerializeAsString()); }
 std::string PCB_MANUFACTURING_JOB_MANAGER::sourceDigest( const Request& r ) const { return Hash(r.expected_state().SerializeAsString()); }
 bool PCB_MANUFACTURING_JOB_MANAGER::SameDocument( const kiapi::common::types::DocumentSpecifier& a, const kiapi::common::types::DocumentSpecifier& b ) { return google::protobuf::util::MessageDifferencer::Equals(a,b); }
@@ -53,7 +53,8 @@ tl::expected<PCB_MANUFACTURING_JOB_MANAGER::JournalRecord,std::string> PCB_MANUF
 tl::expected<void,std::string> PCB_MANUFACTURING_JOB_MANAGER::write(JournalRecord r) const
 {
     std::filesystem::create_directories(m_journalDirectory.ToStdString()); Receipt* p=r.mutable_receipt(); p->clear_durable_journal_sha256(); std::string u=r.SerializeAsString(); p->set_durable_journal_sha256(Hash(u)); std::string b=r.SerializeAsString(); wxString e;
-    if(!KIPLATFORM::IO::AtomicWriteFile(wxString::FromUTF8(pathFor(r.request().operation_id())),b.data(),b.size(),&e)) return tl::unexpected(e.ToStdString()); return {};
+    std::string path = pathFor(r.request().operation_id());
+    if(!KIPLATFORM::IO::AtomicWriteFile(wxString::FromUTF8(path.c_str()),b.data(),b.size(),&e)) return tl::unexpected(e.ToStdString()); return {};
 }
 
 tl::expected<PCB_MANUFACTURING_JOB_MANAGER::Receipt,std::string> PCB_MANUFACTURING_JOB_MANAGER::Start(const Request& r,const std::string& epoch)

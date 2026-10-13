@@ -2845,8 +2845,10 @@ public sealed partial class NativeSessionTests
                     Header = new() { Document = cleanBoard }, Items = { candidate.Id.Clone() }
                 }, token);
                 string[] anchors = connected.Items
-                    .Where(item => item.Is(Pad.Descriptor) || item.Is(Via.Descriptor))
-                    .Select(item => item.Is(Pad.Descriptor) ? item.Unpack<Pad>().Id.Value : item.Unpack<Via>().Id.Value)
+                    .Where(item => item.Is(Pad.Descriptor) || item.Is(Via.Descriptor)
+                        || item.Is(Track.Descriptor) || item.Is(Arc.Descriptor))
+                    .Select(item => item.Is(Pad.Descriptor) ? item.Unpack<Pad>().Id.Value : RouteIdentity(item))
+                    .Where(id => id != candidate.Id.Value)
                     .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
                 if (anchors.Length == 0)
                     continue;

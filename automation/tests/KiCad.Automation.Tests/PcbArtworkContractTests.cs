@@ -99,6 +99,56 @@ public sealed class PcbArtworkContractTests
     }
 
     [TestMethod]
+    public void SourceArchiveReceiptFailsClosedWhenReadbackChanges()
+    {
+        string root = Directory.CreateTempSubdirectory("pcb-artwork-archive-").FullName;
+        byte[] bytes = Encoding.UTF8.GetBytes("stable-artwork-source");
+        string hash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes));
+        try
+        {
+            ArtworkSourceArchive.Receipt receipt = ArtworkSourceArchive.Persist(root, "artwork/source.svg",
+                bytes, hash, "invalid_archive", "archive_conflict");
+            File.WriteAllText(Path.Combine(root, "artwork/source.svg"), "changed-artwork-source");
+
+            Reject(() => ArtworkSourceArchive.Verify(root, receipt,
+                "invalid_archive", "archive_mismatch"), "archive_mismatch");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [TestMethod]
+    public void SourceArchiveReceiptBindingIsStableAndDistinguishesReplayInputs()
+    {
+        string root = Directory.CreateTempSubdirectory("pcb-artwork-archive-").FullName;
+        byte[] bytes = Encoding.UTF8.GetBytes("replay-stable-artwork");
+        string hash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes));
+        try
+        {
+            ArtworkSourceArchive.Receipt first = ArtworkSourceArchive.Persist(root, "artwork/source.svg",
+                bytes, hash, "invalid_archive", "archive_conflict");
+            ArtworkSourceArchive.Receipt replay = ArtworkSourceArchive.Persist(root, "artwork/source.svg",
+                bytes, hash, "invalid_archive", "archive_conflict");
+            Assert.AreEqual(first.ReceiptId, replay.ReceiptId);
+            Assert.AreEqual(ArtworkSourceArchive.TransactionBinding(first),
+                ArtworkSourceArchive.TransactionBinding(replay));
+
+            ArtworkSourceArchive.Receipt differentPath = first with { RelativePath = "artwork/other.svg" };
+            ArtworkSourceArchive.Receipt differentSize = first with { Bytes = first.Bytes + 1 };
+            Assert.AreNotEqual(first.ReceiptId, differentPath.ReceiptId);
+            Assert.AreNotEqual(first.ReceiptId, differentSize.ReceiptId);
+            Assert.AreNotEqual(ArtworkSourceArchive.TransactionBinding(first),
+                ArtworkSourceArchive.TransactionBinding(differentPath));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [TestMethod]
     public async Task SourceArchivePreflightSharesConcurrentSameContentPublish()
     {
         string root = Directory.CreateTempSubdirectory("pcb-artwork-archive-").FullName;

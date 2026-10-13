@@ -64,5 +64,30 @@ public sealed class PcbArtworkMigrationTests
         Assert.AreEqual("MCP SVG PCB artwork", request.Description);
         Assert.AreEqual(BoardLayer.BlFSilkS,
             request.Operations[0].Create.Items[0].Unpack<BoardGraphicShape>().Layer);
+
+        string archiveRoot = Directory.CreateTempSubdirectory("pcb-artwork-binding-").FullName;
+        try
+        {
+            byte[] source = System.Text.Encoding.UTF8.GetBytes("svg-source");
+            string sourceHash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(source));
+            ArtworkSourceArchive.Receipt archive = ArtworkSourceArchive.Persist(archiveRoot,
+                "artwork/source.svg", source, sourceHash, "invalid_archive", "archive_conflict");
+            CheckedPcbItemTransaction bound = PcbArtworkTools.BuildCheckedRequest(
+                expected, candidate, operationId, archive);
+            string binding = ArtworkSourceArchive.TransactionBinding(archive);
+            Assert.IsTrue(bound.Description.EndsWith(binding, StringComparison.Ordinal));
+            Assert.IsTrue(bound.Description.Contains(archive.ReceiptId, StringComparison.Ordinal));
+            Assert.AreEqual(bound.Description,
+                PcbArtworkTools.BuildCheckedRequest(expected, candidate, operationId, archive).Description,
+                "A retry with the same operation and exact archive receipt must carry the same binding.");
+            ArtworkSourceArchive.Receipt changed = archive with { RelativePath = "artwork/other.svg" };
+            Assert.AreNotEqual(bound.Description,
+                PcbArtworkTools.BuildCheckedRequest(expected, candidate, operationId, changed).Description,
+                "Reusing an operation ID with another archive receipt must not replay the original request.");
+        }
+        finally
+        {
+            Directory.Delete(archiveRoot, recursive: true);
+        }
     }
 }

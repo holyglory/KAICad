@@ -57,6 +57,18 @@ public sealed class PcbItemTools(InstanceRegistry registry)
         CancellationToken cancellationToken, string operationId = "") =>
         Mutate<CreateItems, CreateItemsResponse>(instanceId, requestJson, expectedStateJson, cancellationToken, operationId);
 
+    /// <summary>
+    /// Internal checked-create entry point for typed artwork adapters.  The
+    /// public primitive keeps its existing MCP surface while callers that own
+    /// a provenance receipt can bind that receipt to the native transaction
+    /// description and operation identity.
+    /// </summary>
+    internal Task<CallToolResult> CreateWithDescription(string instanceId, string requestJson,
+        string expectedStateJson, string operationId, string transactionDescription,
+        CancellationToken cancellationToken) =>
+        Mutate<CreateItems, CreateItemsResponse>(instanceId, requestJson, expectedStateJson,
+            cancellationToken, operationId, transactionDescription);
+
     [McpServerTool(Name = "kicad_pcb_items_update"),
      Description("Update typed native PCB items with an exact lifecycle checkpoint. requestJson is UpdateItems protobuf JSON; expectedStateJson must identify the same open board and native content digest. Stale boards are rejected and no unchecked fallback is used. The native result is retained under operationId for exact replay. If operationId is omitted, the generated UUID is returned but cannot be recovered after a lost reply. This is a primitive edit, not automatic routing."),
      KiCadCapability("pcb", "native-board-api", "board lifecycle state, typed Any items"),
@@ -330,13 +342,16 @@ public sealed class PcbItemTools(InstanceRegistry registry)
     }
 
     private Task<CallToolResult> Mutate<TRequest, TResponse>(string instanceId, string requestJson,
-        string expectedStateJson, CancellationToken cancellationToken, string operationId)
+        string expectedStateJson, CancellationToken cancellationToken, string operationId,
+        string transactionDescription = "MCP PCB item transaction")
         where TRequest : class, IMessage<TRequest>
         where TResponse : class, IMessage<TResponse>, new()
-        => Execute(() => MutateCore<TRequest, TResponse>(instanceId, requestJson, expectedStateJson, cancellationToken, operationId));
+        => Execute(() => MutateCore<TRequest, TResponse>(instanceId, requestJson, expectedStateJson,
+            cancellationToken, operationId, transactionDescription));
 
     private async Task<CallToolResult> MutateCore<TRequest, TResponse>(string instanceId, string requestJson,
-        string expectedStateJson, CancellationToken cancellationToken, string operationId)
+        string expectedStateJson, CancellationToken cancellationToken, string operationId,
+        string transactionDescription)
         where TRequest : class, IMessage<TRequest>
         where TResponse : class, IMessage<TResponse>, new()
     {
@@ -381,7 +396,8 @@ public sealed class PcbItemTools(InstanceRegistry registry)
         {
             ExpectedState = expected.Clone(), ProcessEpoch = expected.ProcessEpoch,
             OperationId = effectiveOperationId, MaximumResultBytes = 512 * 1024,
-            Description = "MCP PCB item transaction"
+            Description = string.IsNullOrWhiteSpace(transactionDescription)
+                ? "MCP PCB item transaction" : transactionDescription
         };
         checkedRequest.Operations.Add(request switch
         {

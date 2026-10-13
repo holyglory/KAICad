@@ -59,6 +59,7 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
         PcbSvgGuide parsed = PcbSvgGuideParser.Parse(svg, 20_000);
         ArtworkSourceArchive.Receipt archive = Archive(repositoryRoot, sourceArchivePath,
             Encoding.UTF8.GetBytes(svg), actualSha256);
+        string archiveBinding = ArtworkSourceArchive.TransactionBinding(archive);
         CreateItems create = new() { Header = new() { Document = document } };
         for (int index = 0; index < parsed.Segments.Length; index++)
         {
@@ -73,24 +74,49 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
             shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.artwork.source_sha256", Value = actualSha256 });
             shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.artwork.source_kind", Value = sourceKind });
             shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.artwork.source_archive", Value = archive.RelativePath });
+            shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.artwork.source_archive_receipt", Value = archive.ReceiptId });
+            shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.artwork.source_archive_bytes", Value = archive.Bytes.ToString(System.Globalization.CultureInfo.InvariantCulture) });
             shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.artwork.role", Value = "authoritative-vector" });
             shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.artwork.segment_index", Value = index.ToString() });
             create.Items.Add(Any.Pack(shape));
         }
-        string fingerprint = instanceId + "\n" + BoardJson.Formatter.Format(create) + "\n" + SchematicJson.Formatter.Format(expected) + "\n" + operationId;
+        string fingerprint = instanceId + "\n" + BoardJson.Formatter.Format(create) + "\n" + SchematicJson.Formatter.Format(expected) + "\n" + operationId + "\n" + archiveBinding;
         await Gate.WaitAsync(cancellationToken);
         try
         {
+            // Recheck immediately before receipt lookup or native dispatch.
+            // This closes the gap between archive preflight and a replay and
+            // prevents a stale receipt from being presented as exact source
+            // provenance after the file was changed or removed.
+            ArtworkSourceArchive.Verify(repositoryRoot, archive,
+                "invalid_pcb_artwork_archive", "pcb_artwork_archive_mismatch");
             if (Receipts.TryGetValue(operationId, out StoredReceipt? existing))
             {
                 if (existing.Fingerprint != fingerprint) throw new AutomationException("operation_id_reused", "operationId is already bound to another artwork commit.");
                 return existing.Result;
             }
-            CheckedPcbItemTransaction checkedRequest = BuildCheckedRequest(expected, create, operationId);
+            CheckedPcbItemTransaction checkedRequest = BuildCheckedRequest(expected, create, operationId, archive);
             PcbCheckedItemDispatch.Outcome outcome = await PcbCheckedItemDispatch.ApplyAsync(
                 registry, instanceId, checkedRequest, cancellationToken);
+            bool archiveVerified = true;
+            AutomationException? archiveError = null;
+            try
+            {
+                // Native and filesystem persistence are separate boundaries.
+                // A post-commit archive mismatch is therefore surfaced as an
+                // error with the native receipt retained; it never upgrades
+                // provenanceAtomic or reports a fully accepted asset.
+                ArtworkSourceArchive.Verify(repositoryRoot, archive,
+                    "invalid_pcb_artwork_archive", "pcb_artwork_archive_mismatch");
+            }
+            catch (AutomationException error)
+            {
+                archiveVerified = false;
+                archiveError = error;
+            }
             CallToolResult result = ArtworkMutationData(outcome, document, operationId, assetId,
-                sourceKind, actualSha256, archive, boardLayer, create.Items.Count);
+                sourceKind, actualSha256, archive, boardLayer, create.Items.Count,
+                archiveBinding, archiveVerified, archiveError);
             if (!(result.IsError ?? false)) Receipts[operationId] = new(fingerprint, result);
             return result;
         }
@@ -99,15 +125,19 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
 
     /// <summary>Builds the checked native create transaction without contacting KiCad.</summary>
     internal static CheckedPcbItemTransaction BuildCheckedRequest(
-        DocumentLifecycleState expected, CreateItems candidate, string operationId)
+        DocumentLifecycleState expected, CreateItems candidate, string operationId,
+        ArtworkSourceArchive.Receipt? sourceArchive = null)
     {
+        string description = "MCP SVG PCB artwork";
+        if (sourceArchive is not null)
+            description += "\n" + ArtworkSourceArchive.TransactionBinding(sourceArchive);
         var request = new CheckedPcbItemTransaction
         {
             ExpectedState = expected.Clone(),
             ProcessEpoch = expected.ProcessEpoch,
             OperationId = operationId,
             MaximumResultBytes = 4 * 1024 * 1024,
-            Description = "MCP SVG PCB artwork"
+            Description = description
         };
         request.Operations.Add(new PcbItemOperation { Create = candidate.Clone() });
         return request;
@@ -122,7 +152,10 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
         string sourceSha256,
         ArtworkSourceArchive.Receipt sourceArchive,
         BoardLayer boardLayer,
-        int segmentCount)
+        int segmentCount,
+        string archiveBinding,
+        bool archiveVerified,
+        AutomationException? archiveError)
     {
         CheckedPcbItemTransactionReceipt? receipt = outcome.Receipt;
         bool success = outcome.Completed;
@@ -168,6 +201,8 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
             sourceSha256,
             sourceArchive = sourceArchive.RelativePath,
             archiveSha256 = sourceArchive.Sha256,
+            archiveReceiptId = sourceArchive.ReceiptId,
+            archiveBinding,
             archiveBytes = sourceArchive.Bytes,
             archivePreflight = new
             {
@@ -176,7 +211,9 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
                 bytes = sourceArchive.Bytes,
                 exactBytesVerified = sourceArchive.ExactBytesVerified,
                 atomicWrite = sourceArchive.AtomicWrite,
-                boardTransactionJoined = false
+                boardTransactionJoined = false,
+                readbackVerified = archiveVerified,
+                mismatchCode = archiveError?.Code
             },
             layer = boardLayer.ToString(),
             segmentCount,
@@ -187,7 +224,7 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
             receipt = receiptJson,
             nativeReceipt = receiptJson,
             nativeResult,
-            authoritativeVector = success,
+            authoritativeVector = success && archiveVerified,
             electricalValidation = false,
             manufacturabilityValidation = false,
             mutationConfirmed = success,
@@ -203,12 +240,14 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
             archiveAtomicWrite = sourceArchive.AtomicWrite,
             archiveNativeAtomic = false,
             provenanceAtomic = false,
-            errorCode = success ? null : outcome.ErrorCode,
-            errorMessage = success ? null : outcome.ErrorMessage
+            archiveReadbackVerified = archiveVerified,
+            errorCode = archiveError?.Code ?? (success ? null : outcome.ErrorCode),
+            errorMessage = archiveError?.Message ?? (success ? null : outcome.ErrorMessage),
+            nativeMutationConfirmed = success
         });
         return new CallToolResult
         {
-            IsError = !success,
+            IsError = !success || !archiveVerified,
             StructuredContent = structured,
             Content = [new TextContentBlock { Text = structured.GetRawText() }]
         };

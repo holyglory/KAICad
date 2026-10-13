@@ -193,6 +193,7 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
         ValidateArtworkLayer(layer);
         ArtworkSourceArchive.Receipt archive = ArchiveSource(target.RepositoryRoot!, target.SourceArchivePath!,
             context.SourceBytes, context.SourceSha256);
+        string archiveBinding = ArtworkSourceArchive.TransactionBinding(archive);
         var create = new CreateItems { Header = new() { Document = document } };
         List<string> created = [];
         for (int index = 0; index < context.Proposal.FilledPieces.Count; index++)
@@ -204,46 +205,78 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
         }
         string requestJson = BoardJson.Formatter.Format(create);
         string expectedJson = SchematicJson.Formatter.Format(expected);
-        string fingerprint = instanceId + "\n" + requestJson + "\n" + expectedJson + "\n" + context.OperationId;
+        string fingerprint = instanceId + "\n" + requestJson + "\n" + expectedJson + "\n" + context.OperationId + "\n" + archiveBinding;
         await BoardGate.WaitAsync(token);
         try
         {
+            // The archive is a separate filesystem persistence boundary.  It
+            // must still be readable and byte-identical immediately before a
+            // native replay or first dispatch.
+            ArtworkSourceArchive.Verify(target.RepositoryRoot!, archive,
+                "invalid_raster_projection_archive", "raster_trace_archive_mismatch");
             if (BoardReceipts.TryGetValue(context.OperationId, out StoredReceipt? prior))
             {
                 if (!string.Equals(prior.Fingerprint, fingerprint, StringComparison.Ordinal))
                     throw new AutomationException("operation_id_reused", "The operation ID is already bound to a different raster board projection.");
                 return prior.Result;
             }
-            CallToolResult native = await new PcbItemTools(registry).Create(instanceId, requestJson, expectedJson, token);
-            if (native.IsError ?? false) return Data(new
+            CallToolResult native = await new PcbItemTools(registry).CreateWithDescription(
+                instanceId, requestJson, expectedJson, context.OperationId, archiveBinding, token);
+            bool archiveVerified = true;
+            AutomationException? archiveError = null;
+            try
+            {
+                // A source archive can be changed independently while KiCad
+                // is committing.  Surface that mismatch with the native
+                // receipt intact and keep provenanceAtomic false; do not
+                // report an authoritative projection in that case.
+                ArtworkSourceArchive.Verify(target.RepositoryRoot!, archive,
+                    "invalid_raster_projection_archive", "raster_trace_archive_mismatch");
+            }
+            catch (AutomationException error)
+            {
+                archiveVerified = false;
+                archiveError = error;
+            }
+            if ((native.IsError ?? false) || !archiveVerified) return Data(new
             {
                 operationId = context.OperationId, targetKind = "board", accepted = false,
                 nativeResult = native.StructuredContent, sourceArchive = archive.RelativePath,
                 archiveSha256 = archive.Sha256, archiveBytes = archive.Bytes,
+                archiveReceiptId = archive.ReceiptId, archiveBinding,
                 archivePreflight = new
                 {
                     persisted = archive.Persisted, sha256 = archive.Sha256, bytes = archive.Bytes,
                     exactBytesVerified = archive.ExactBytesVerified,
-                    atomicWrite = archive.AtomicWrite, boardTransactionJoined = false
+                    atomicWrite = archive.AtomicWrite, boardTransactionJoined = false,
+                    readbackVerified = archiveVerified, mismatchCode = archiveError?.Code
                 },
                 archivePersisted = archive.Persisted, archiveAtomicWrite = archive.AtomicWrite,
                 geometrySha256 = context.Proposal.GeometrySha256, sourceSha256 = context.SourceSha256,
-                provenanceAtomic = false, limitation = "Board embedded-file persistence is a separate native command; the durable archive preflight and per-shape SHA remain a separate persistence boundary."
+                provenanceAtomic = false, archiveReadbackVerified = archiveVerified,
+                nativeMutationConfirmed = native.StructuredContent?.TryGetProperty("mutationConfirmed", out var mutation)
+                    == true && mutation.GetBoolean(),
+                errorCode = archiveError?.Code,
+                errorMessage = archiveError?.Message,
+                limitation = "Board embedded-file persistence is a separate native command; the durable archive preflight and per-shape SHA remain a separate persistence boundary."
             }, true);
             CallToolResult result = Data(new
             {
                 operationId = context.OperationId, targetKind = "board", accepted = true, createdIds = created,
                 nativeResult = native.StructuredContent, sourceArchive = archive.RelativePath,
                 archiveSha256 = archive.Sha256, archiveBytes = archive.Bytes,
+                archiveReceiptId = archive.ReceiptId, archiveBinding,
                 archivePreflight = new
                 {
                     persisted = archive.Persisted, sha256 = archive.Sha256, bytes = archive.Bytes,
                     exactBytesVerified = archive.ExactBytesVerified,
-                    atomicWrite = archive.AtomicWrite, boardTransactionJoined = false
+                    atomicWrite = archive.AtomicWrite, boardTransactionJoined = false,
+                    readbackVerified = archiveVerified, mismatchCode = archiveError?.Code
                 },
                 geometrySha256 = context.Proposal.GeometrySha256, sourceSha256 = context.SourceSha256,
                 embeddedSourceVerified = false, archivePersisted = archive.Persisted,
                 archiveAtomicWrite = archive.AtomicWrite, provenanceAtomic = false,
+                archiveReadbackVerified = archiveVerified,
                 limitation = "Board embedded-file persistence is a separate native command; the durable archive preflight and per-shape SHA remain a separate persistence boundary.",
                 electricalValidated = false, manufacturingValidated = false, receiptScope = "mcp-process"
             });
@@ -380,7 +413,11 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
         };
         AddProvenanceProperties(shape.CustomProperties, context, piece.Id);
         if (archive is not null)
+        {
             shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.source_archive", Value = archive.RelativePath });
+            shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.source_archive_receipt", Value = archive.ReceiptId });
+            shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.source_archive_bytes", Value = archive.Bytes.ToString(CultureInfo.InvariantCulture) });
+        }
         return shape;
     }
 

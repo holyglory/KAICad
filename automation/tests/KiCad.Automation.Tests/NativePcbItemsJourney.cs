@@ -2800,45 +2800,82 @@ public sealed partial class NativeSessionTests
                 .Single(item => item.Is(Track.Descriptor) && item.Unpack<Track>().Id.Value == originalCleanTrack.Id.Value)
                 .Unpack<Track>().End);
 
-            // Length-tuning qualification uses the existing disposable
-            // POWER_RAIL barrier.  Its native F.Cu segment is already inside
-            // the clean board and has a through-via at one endpoint, which
-            // gives the replacement a real connectivity target without
-            // expanding the fixture with another footprint.  The plan is
-            // proposal-only until the exact replacement is checked by the
-            // existing detached DRC helper below.
-            var tuneBefore = await ObserveLifecycleState(client, cleanBoard, token);
-            var tuneSource = (await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            // Length-tuning qualification selects an axis-aligned POWER_RAIL
+            // route that is still present after the native shove, undo/redo
+            // and save/reopen journey.  The exact source ID and its connected
+            // pad/via anchors come from the live native collection, so this
+            // does not assume that an earlier shove obstacle retained UUID.
+            static long IndependentPolylineLength(IReadOnlyList<Vector2> points)
             {
-                Header = new() { Document = cleanBoard }, Items = { shoveObstacle.Id.Clone() }
-            }, token)).Items.Single(item => item.Is(Track.Descriptor)).Unpack<Track>();
-            Assert.AreEqual("POWER_RAIL", tuneSource.Net.Name);
-            Assert.AreEqual(BoardLayer.BlFCu, tuneSource.Layer);
-            Assert.AreEqual(tuneSource.Start.YNm, tuneSource.End.YNm,
-                "The disposable tuning source must be an axis-aligned native Track.");
+                long total = 0;
+                for (int index = 1; index < points.Count; ++index)
+                {
+                    double dx = (double)points[index].XNm - points[index - 1].XNm;
+                    double dy = (double)points[index].YNm - points[index - 1].YNm;
+                    total = checked(total + (long)Math.Round(Math.Sqrt(dx * dx + dy * dy), MidpointRounding.AwayFromZero));
+                }
+                return total;
+            }
 
-            long tuneDetourY = tuneSource.Start.YNm + 1_000_000;
-            var tuneCenterline = new[]
+            static long IndependentTrackLength(IEnumerable<Track> tracks)
+                => tracks.Sum(track =>
+                {
+                    double dx = (double)track.End.XNm - track.Start.XNm;
+                    double dy = (double)track.End.YNm - track.Start.YNm;
+                    return checked((long)Math.Round(Math.Sqrt(dx * dx + dy * dy), MidpointRounding.AwayFromZero));
+                });
+
+            static string TunePointKey(Vector2 point) => $"{point.XNm},{point.YNm}";
+
+            var tuneBefore = await ObserveLifecycleState(client, cleanBoard, token);
+            var tuneRoutes = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
             {
-                tuneSource.Start.Clone(),
-                new Vector2 { XNm = tuneSource.Start.XNm, YNm = tuneDetourY },
-                new Vector2 { XNm = tuneSource.End.XNm, YNm = tuneDetourY },
-                tuneSource.End.Clone()
-            };
+                Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbTrace }
+            }, token);
+            Track? tuneSource = null;
+            string[] tuneAnchorIds = [];
+            foreach (var candidate in tuneRoutes.Items.Where(item => item.Is(Track.Descriptor))
+                .Select(item => item.Unpack<Track>().Clone())
+                .Where(track => track.Net.Name == "POWER_RAIL"
+                    && (track.Start.XNm == track.End.XNm || track.Start.YNm == track.End.YNm))
+                .OrderBy(track => track.Layer).ThenBy(track => track.Id.Value, StringComparer.Ordinal))
+            {
+                var connected = await client.InvokeAsync<GetConnectedItems, GetItemsResponse>(new()
+                {
+                    Header = new() { Document = cleanBoard }, Items = { candidate.Id.Clone() }
+                }, token);
+                string[] anchors = connected.Items
+                    .Where(item => item.Is(Pad.Descriptor) || item.Is(Via.Descriptor))
+                    .Select(item => item.Is(Pad.Descriptor) ? item.Unpack<Pad>().Id.Value : item.Unpack<Via>().Id.Value)
+                    .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+                if (anchors.Length == 0)
+                    continue;
+                tuneSource = candidate;
+                tuneAnchorIds = anchors;
+                break;
+            }
+            Assert.IsNotNull(tuneSource, "The persisted POWER_RAIL fixture must retain an axis-aligned route connected to a pad or via.");
+            Assert.AreEqual("POWER_RAIL", tuneSource!.Net.Name);
+            Assert.IsTrue(tuneSource.Layer is BoardLayer.BlFCu or BoardLayer.BlBCu);
+            var tuneCenterline = new[] { tuneSource.Start.Clone(), tuneSource.End.Clone() };
+            long tuneBaseLength = IndependentPolylineLength(tuneCenterline);
+            const long tuneTargetAdditionalLength = 2_000_000L;
+            const long tunePitch = 1_000_000L;
             var tuneRequestObject = new
             {
-                netName = tuneSource.Net.Name, layer = "F.Cu",
+                netName = tuneSource.Net.Name,
+                layer = tuneSource.Layer == BoardLayer.BlFCu ? "F.Cu" : "B.Cu",
                 start = new { xNm = tuneSource.Start.XNm, yNm = tuneSource.Start.YNm },
                 end = new { xNm = tuneSource.End.XNm, yNm = tuneSource.End.YNm },
                 centerline = tuneCenterline.Select(point => new { xNm = point.XNm, yNm = point.YNm }).ToArray(),
                 widthNm = tuneSource.Width.ValueNm, clearanceNm = 100_000L,
-                targetAdditionalLengthNm = 2_000_000L, pitchNm = 1_000_000L, maxSegments = 16,
+                targetAdditionalLengthNm = tuneTargetAdditionalLength, pitchNm = tunePitch, maxSegments = 32,
                 corridor = new
                 {
-                    minXNm = Math.Min(tuneSource.Start.XNm, tuneSource.End.XNm) - 1_000_000,
-                    minYNm = tuneSource.Start.YNm - 2_000_000,
-                    maxXNm = Math.Max(tuneSource.Start.XNm, tuneSource.End.XNm) + 1_000_000,
-                    maxYNm = tuneDetourY + 1_000_000
+                    minXNm = Math.Min(tuneSource.Start.XNm, tuneSource.End.XNm) - 1_500_000,
+                    minYNm = Math.Min(tuneSource.Start.YNm, tuneSource.End.YNm) - 1_500_000,
+                    maxXNm = Math.Max(tuneSource.Start.XNm, tuneSource.End.XNm) + 1_500_000,
+                    maxYNm = Math.Max(tuneSource.Start.YNm, tuneSource.End.YNm) + 1_500_000
                 }
             };
             string tuneRequestJson = JsonSerializer.Serialize(tuneRequestObject);
@@ -2853,32 +2890,36 @@ public sealed partial class NativeSessionTests
             string tunePlanId = tunePlanData.GetProperty("planId").GetString()!;
             Assert.AreEqual(SchematicJson.Formatter.Format(tuneBefore), tunePlanData.GetProperty("beforeState").GetString());
             Assert.AreEqual(tunePlanData.GetProperty("beforeState").GetString(), tunePlanData.GetProperty("afterState").GetString());
-            var tunePoints = tunePlanData.GetProperty("routePoints").EnumerateArray()
-                .Select(point => new Vector2
-                {
-                    XNm = point.GetProperty("xNm").GetInt64(), YNm = point.GetProperty("yNm").GetInt64()
-                }).ToArray();
             var tuneCandidate = BoardJson.Parser.Parse<CreateItems>(tunePlanData.GetProperty("candidateRequestJson").GetString()!);
-            Assert.AreEqual(tunePoints.Length - 1, tuneCandidate.Items.Count);
-            Assert.AreEqual(tunePoints[0], tuneSource.Start);
-            Assert.AreEqual(tunePoints[^1], tuneSource.End);
-            for (int index = 0; index < tuneCandidate.Items.Count; ++index)
+            var tuneTracks = tuneCandidate.Items.Select(item =>
             {
-                var segment = tuneCandidate.Items[index].Unpack<Track>();
-                Assert.AreEqual(tunePoints[index], segment.Start);
-                Assert.AreEqual(tunePoints[index + 1], segment.End);
+                Assert.IsTrue(item.Is(Track.Descriptor), BoardJson.Formatter.Format(item));
+                return item.Unpack<Track>();
+            }).ToArray();
+            Assert.IsGreaterThan(1, tuneTracks.Length);
+            var tuneEndpointDegrees = tuneTracks.SelectMany(track => new[] { track.Start, track.End })
+                .GroupBy(TunePointKey, StringComparer.Ordinal)
+                .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
+            var tuneOpenEndpoints = tuneEndpointDegrees.Where(pair => pair.Value == 1)
+                .Select(pair => pair.Key).ToHashSet(StringComparer.Ordinal);
+            Assert.AreEqual(2, tuneOpenEndpoints.Count, "The tuning candidate must be one connected replacement path.");
+            CollectionAssert.AreEquivalent(new[] { TunePointKey(tuneSource.Start), TunePointKey(tuneSource.End) },
+                tuneOpenEndpoints.ToArray());
+            for (int index = 0; index < tuneTracks.Length; ++index)
+            {
+                var segment = tuneTracks[index];
                 Assert.AreEqual(tuneSource.Net.Name, segment.Net.Name);
-                Assert.AreEqual(BoardLayer.BlFCu, segment.Layer);
+                Assert.AreEqual(tuneSource.Layer, segment.Layer);
                 Assert.AreEqual(tuneSource.Width.ValueNm, segment.Width.ValueNm);
                 Assert.AreEqual(tunePlanId, segment.CustomProperties.Single(property => property.Key == "kicad.ai.tune_plan_id").Value);
-                Assert.AreEqual((index + 1).ToString(CultureInfo.InvariantCulture),
-                    segment.CustomProperties.Single(property => property.Key == "kicad.ai.tune_segment").Value);
+                Assert.IsTrue(int.TryParse(segment.CustomProperties.Single(property => property.Key == "kicad.ai.tune_segment").Value,
+                    NumberStyles.None, CultureInfo.InvariantCulture, out _));
             }
-            long tunePathLength = PcbRouteTuningTools.PathLength(tunePoints);
-            long tuneBaseLength = PcbRouteTuningTools.PathLength(new[] { tunePoints[0], tunePoints[^1] });
+            long tunePathLength = IndependentTrackLength(tuneTracks);
             Assert.AreEqual(tuneBaseLength, tunePlanData.GetProperty("baseLengthNm").GetInt64());
             Assert.AreEqual(tunePathLength - tuneBaseLength, tunePlanData.GetProperty("achievedAdditionalLengthNm").GetInt64());
-            Assert.AreEqual(2_000_000L, tunePlanData.GetProperty("requestedAdditionalLengthNm").GetInt64());
+            Assert.AreEqual(tuneTargetAdditionalLength, tunePathLength - tuneBaseLength);
+            Assert.AreEqual(tuneTargetAdditionalLength, tunePlanData.GetProperty("requestedAdditionalLengthNm").GetInt64());
             Assert.IsTrue(tunePlanData.GetProperty("withinTolerance").GetBoolean());
             Assert.IsFalse(tunePlanData.GetProperty("nativeCommit").GetBoolean());
             Assert.IsFalse(tunePlanData.GetProperty("drcValidated").GetBoolean());
@@ -2930,18 +2971,20 @@ public sealed partial class NativeSessionTests
                 Header = new() { Document = cleanBoard }, Items = { tuneIds.Select(id => new KIID { Value = id }) }
             }, token);
             CollectionAssert.AreEqual(tuneIds, tuneNativeRead.Items.Select(RouteIdentity).Order(StringComparer.Ordinal).ToArray());
-            Assert.AreEqual(0, (await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            var tuneRoutesAfterApply = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
             {
-                Header = new() { Document = cleanBoard }, Items = { tuneSource.Id.Clone() }
-            }, token)).Items.Count);
+                Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbTrace }
+            }, token);
+            Assert.IsFalse(tuneRoutesAfterApply.Items.Select(RouteIdentity).Contains(tuneSource.Id.Value, StringComparer.Ordinal),
+                "The exact persisted source identity must be removed by tuning apply.");
             var tuneNativeById = tuneNativeRead.Items.ToDictionary(RouteIdentity, item => item.Clone(), StringComparer.Ordinal);
             foreach (var created in tuneReceipt.Created.CreatedItems)
                 Assert.AreEqual(created.Item, tuneNativeById[RouteIdentity(created.Item)]);
             var tuneConnected = await client.InvokeAsync<GetConnectedItems, GetItemsResponse>(new()
-            {
-                Header = new() { Document = cleanBoard }, Items = { tuneCandidate.Items[0].Unpack<Track>().Id.Clone() }
-            }, token);
-            CollectionAssert.IsSubsetOf(tuneIds, tuneConnected.Items.Select(RouteIdentity).ToArray());
+            { Header = new() { Document = cleanBoard }, Items = { new KIID { Value = tuneAnchorIds[0] } } }, token);
+            var tuneConnectedIds = tuneConnected.Items.Select(item => item.Is(Pad.Descriptor)
+                ? item.Unpack<Pad>().Id.Value : RouteIdentity(item)).ToArray();
+            CollectionAssert.IsSubsetOf(tuneIds.Concat(tuneAnchorIds).ToArray(), tuneConnectedIds);
             var tuneAfter = SchematicJson.Parser.Parse<DocumentLifecycleState>(tuneApplyData.GetProperty("afterState").GetString()!);
             Assert.IsGreaterThan(tuneBefore.Revision.Sequence, tuneAfter.Revision.Sequence);
 
@@ -2975,10 +3018,16 @@ public sealed partial class NativeSessionTests
             foreach (var persisted in tunePersisted.Items)
                 AssertPersistedRouteState(tuneNativeById[RouteIdentity(persisted)], persisted);
             var persistedTuneConnected = await client.InvokeAsync<GetConnectedItems, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Items = { new KIID { Value = tuneAnchorIds[0] } } }, token);
+            var persistedTuneConnectedIds = persistedTuneConnected.Items.Select(item => item.Is(Pad.Descriptor)
+                ? item.Unpack<Pad>().Id.Value : RouteIdentity(item)).ToArray();
+            CollectionAssert.IsSubsetOf(tuneIds.Concat(tuneAnchorIds).ToArray(), persistedTuneConnectedIds);
+            var persistedTuneRoutes = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
             {
-                Header = new() { Document = cleanBoard }, Items = { tunePersisted.Items[0].Unpack<Track>().Id.Clone() }
+                Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbTrace }
             }, token);
-            CollectionAssert.IsSubsetOf(tuneIds, persistedTuneConnected.Items.Select(RouteIdentity).ToArray());
+            Assert.IsFalse(persistedTuneRoutes.Items.Select(RouteIdentity).Contains(tuneSource.Id.Value, StringComparer.Ordinal),
+                "The removed source identity must stay absent after save/reopen.");
             cleanState = await ObserveLifecycleState(client, cleanBoard, token);
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-route-tune.json"),
                 JsonSerializer.Serialize(new

@@ -1,5 +1,5 @@
 using System.ComponentModel;
-using System.Numerics;
+using BigInteger = System.Numerics.BigInteger;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Serialization;
@@ -41,7 +41,7 @@ public sealed class PcbFootprintPlacementInput : NativeDocumentInputObject
             || !target.Equals(state.Document))
             throw Invalid("The placement document and lifecycle observation must identify the same PCB.");
         if (!state.ProjectSettingsIncluded || !state.CompleteChangeTracking || !state.DiskBaselineChecked
-            || state.Revision.Epoch != state.NativeIdentity
+            || state.Revision is null || state.Revision.Epoch != state.NativeIdentity
             || !CheckedSchematicContract.FileCoverage(state))
             throw Invalid("The complete PCB checkpoint must include project settings, the native revision and unchanged file-baseline coverage.");
         return (target, state, Footprint.ToNative(token));
@@ -93,13 +93,18 @@ public sealed class PcbFootprintAuthoringInput : NativeDocumentInputObject
     internal FootprintInstance ToNative(CancellationToken token)
     {
         FootprintInputValidation.Uuid(Id);
-        if (Library is null || string.IsNullOrWhiteSpace(Library.LibraryNickname)
-            || string.IsNullOrWhiteSpace(Library.EntryName)
-            || Library.LibraryNickname.Contains('\0') || Library.EntryName.Contains('\0'))
+        var library = Library;
+        if (library is null || string.IsNullOrWhiteSpace(library.LibraryNickname)
+            || string.IsNullOrWhiteSpace(library.EntryName)
+            || library.LibraryNickname.Contains('\0') || library.EntryName.Contains('\0'))
             throw PcbFootprintPlacementInput.Invalid("The footprint needs a library nickname and entry name without NUL characters.");
-        if (!Enum.IsDefined(Mounting) || ReferenceField is null || ValueField is null)
+        var referenceInput = ReferenceField;
+        var valueInput = ValueField;
+        var pads = Pads;
+        var graphics = Graphics;
+        if (!System.Enum.IsDefined(Mounting) || referenceInput is null || valueInput is null)
             throw PcbFootprintPlacementInput.Invalid("A defined mounting style, reference field and value field are required.");
-        if (Pads is null || Graphics is null || Pads.Count + (long)Graphics.Count > 16_384)
+        if (pads is null || graphics is null || pads.Count + (long)graphics.Count > 16_384)
             throw PcbFootprintPlacementInput.Invalid("Pads and graphics must be arrays containing at most 16384 total child items.");
         FootprintInputValidation.Angle(RotationDegrees);
         BoardLayer placementLayer = FootprintInputValidation.Layer(Layer);
@@ -107,27 +112,27 @@ public sealed class PcbFootprintAuthoringInput : NativeDocumentInputObject
             throw PcbFootprintPlacementInput.Invalid("A footprint is placed on F.Cu or B.Cu.");
         var definition = new Footprint
         {
-            Id = new() { LibraryNickname = Library.LibraryNickname, EntryName = Library.EntryName },
+            Id = new() { LibraryNickname = library.LibraryNickname, EntryName = library.EntryName },
             Anchor = new(),
             Attributes = new() { MountingStyle = (FootprintMountingStyle)Mounting,
                 Description = Description ?? "", Keywords = Keywords ?? "" },
-            ReferenceField = ReferenceField.ToField(0, "Reference"),
-            ValueField = ValueField.ToField(1, "Value"),
+            ReferenceField = referenceInput.ToField(0, "Reference"),
+            ValueField = valueInput.ToField(1, "Value"),
             DatasheetField = (DatasheetField ?? EmptyField("Datasheet")).ToField(2, "Datasheet"),
             DescriptionField = (DescriptionField ?? EmptyField("Description")).ToField(3, "Description")
         };
         var identities = new HashSet<string>(StringComparer.Ordinal) { Id };
-        foreach (Field field in new[] { definition.ReferenceField, definition.ValueField,
+        foreach (Kiapi.Board.Types.Field field in new[] { definition.ReferenceField, definition.ValueField,
             definition.DatasheetField, definition.DescriptionField })
             Unique(field.Text.Id.Value);
-        foreach (PcbFootprintPadInput? pad in Pads)
+        foreach (PcbFootprintPadInput? pad in pads)
         {
             token.ThrowIfCancellationRequested();
             if (pad is null) throw PcbFootprintPlacementInput.Invalid("A footprint pad cannot be null.");
             Unique(pad.Id);
             definition.Items.Add(Any.Pack(pad.ToNative()));
         }
-        foreach (PcbFootprintGraphicInput? graphic in Graphics)
+        foreach (PcbFootprintGraphicInput? graphic in graphics)
         {
             token.ThrowIfCancellationRequested();
             if (graphic is null) throw PcbFootprintPlacementInput.Invalid("A footprint graphic cannot be null.");
@@ -253,19 +258,22 @@ public sealed class PcbFootprintPadInput : NativeDocumentInputObject
     {
         FootprintInputValidation.Uuid(Id);
         FootprintInputValidation.Angle(RotationDegrees);
-        if (!Enum.IsDefined(Type) || Type == PcbFootprintPadTypeInput.Unknown
-            || !Enum.IsDefined(Shape) || Shape == PcbFootprintPadShapeInput.Unknown
-            || Number is null || Number.Contains('\0') || Number.Length > 128
-            || (Type != PcbFootprintPadTypeInput.NonPlatedHole && string.IsNullOrWhiteSpace(Number))
-            || NetName is null || NetName.Contains('\0') || WidthNm <= 0 || HeightNm <= 0)
+        string number = Number ?? "";
+        string netName = NetName ?? "";
+        if (!System.Enum.IsDefined(Type) || Type == PcbFootprintPadTypeInput.Unknown
+            || !System.Enum.IsDefined(Shape) || Shape == PcbFootprintPadShapeInput.Unknown
+            || number.Contains('\0') || number.Length > 128
+            || (Type != PcbFootprintPadTypeInput.NonPlatedHole && string.IsNullOrWhiteSpace(number))
+            || netName.Contains('\0') || WidthNm <= 0 || HeightNm <= 0)
             throw PcbFootprintPlacementInput.Invalid("A pad needs a defined type/shape, a valid number and net name, and positive dimensions.");
         if (!double.IsFinite(CornerRoundingRatio) || CornerRoundingRatio < 0 || CornerRoundingRatio > 0.5
             || (Shape != PcbFootprintPadShapeInput.RoundRectangle && CornerRoundingRatio != 0)
             || (Shape == PcbFootprintPadShapeInput.Circle && WidthNm != HeightNm))
             throw PcbFootprintPlacementInput.Invalid("Circular pads need equal dimensions; only round rectangles accept a corner ratio between 0 and 0.5.");
-        if (Layers is null || Layers.Count is 0 or > 96)
+        var layers = Layers;
+        if (layers is null || layers.Count is 0 or > 96)
             throw PcbFootprintPlacementInput.Invalid("A pad needs an explicit, bounded layer set.");
-        BoardLayer[] nativeLayers = Layers.Select(FootprintInputValidation.Layer).ToArray();
+        BoardLayer[] nativeLayers = layers.Select(FootprintInputValidation.Layer).ToArray();
         BoardLayer[] copper = nativeLayers.Where(FootprintInputValidation.Copper).ToArray();
         if (copper.Length == 0 || nativeLayers.Distinct().Count() != nativeLayers.Length
             || nativeLayers.Any(layer => !FootprintInputValidation.Copper(layer)
@@ -278,7 +286,7 @@ public sealed class PcbFootprintPadInput : NativeDocumentInputObject
         if ((Type == PcbFootprintPadTypeInput.Smd || Type == PcbFootprintPadTypeInput.EdgeConnector)
             && (copper.Length != 1 || copper[0] is not (BoardLayer.BlFCu or BoardLayer.BlBCu)))
             throw PcbFootprintPlacementInput.Invalid("Surface pads need exactly one outer copper layer.");
-        if (Type == PcbFootprintPadTypeInput.NonPlatedHole && NetName.Length != 0)
+        if (Type == PcbFootprintPadTypeInput.NonPlatedHole && netName.Length != 0)
             throw PcbFootprintPlacementInput.Invalid("A nonplated mounting hole cannot carry a net.");
         var stack = new PadStack
         {
@@ -299,9 +307,9 @@ public sealed class PcbFootprintPadInput : NativeDocumentInputObject
         };
         return new()
         {
-            Id = new() { Value = Id }, Number = Number, Type = (PadType)Type,
+            Id = new() { Value = Id }, Number = number, Type = (PadType)Type,
             Position = new() { XNm = XNm, YNm = YNm }, PadStack = stack,
-            Net = new() { Name = NetName }, Locked = LockedState.LsUnlocked
+            Net = new() { Name = netName }, Locked = LockedState.LsUnlocked
         };
     }
 }
@@ -326,19 +334,20 @@ public sealed class PcbFootprintGraphicInput : NativeDocumentInputObject
     internal BoardGraphicShape ToNative()
     {
         FootprintInputValidation.Uuid(Id);
-        if (!Enum.IsDefined(Kind) || Kind == PcbFootprintGraphicKind.Unknown || Points is null
-            || Points.Count != (Kind == PcbFootprintGraphicKind.Arc ? 3 : 2) || Points.Any(point => point is null)
+        var points = Points;
+        if (!System.Enum.IsDefined(Kind) || Kind == PcbFootprintGraphicKind.Unknown || points is null
+            || points.Count != (Kind == PcbFootprintGraphicKind.Arc ? 3 : 2) || points.Any(point => point is null)
             || StrokeWidthNm < 0 || (StrokeWidthNm == 0 && !Filled)
             || (Filled && Kind is PcbFootprintGraphicKind.Segment or PcbFootprintGraphicKind.Arc))
             throw PcbFootprintPlacementInput.Invalid("A graphic needs exact non-null points, a positive stroke or closed fill, and a defined kind.");
-        Vector2 first = Points[0].ToNative();
-        Vector2 last = Points[^1].ToNative();
+        Kiapi.Common.Types.Vector2 first = points[0]!.ToNative();
+        Kiapi.Common.Types.Vector2 last = points[^1]!.ToNative();
         if (first.Equals(last) || (Kind == PcbFootprintGraphicKind.Rectangle
             && (first.XNm == last.XNm || first.YNm == last.YNm)))
             throw PcbFootprintPlacementInput.Invalid("Footprint graphics cannot have zero length or area.");
         if (Kind == PcbFootprintGraphicKind.Arc)
         {
-            Vector2 middle = Points[1].ToNative();
+            Kiapi.Common.Types.Vector2 middle = points[1]!.ToNative();
             BigInteger cross = ((BigInteger)middle.XNm - first.XNm) * ((BigInteger)last.YNm - first.YNm)
                 - ((BigInteger)middle.YNm - first.YNm) * ((BigInteger)last.XNm - first.XNm);
             if (cross == 0) throw PcbFootprintPlacementInput.Invalid("Arc start, middle and end must not be collinear.");
@@ -356,7 +365,7 @@ public sealed class PcbFootprintGraphicInput : NativeDocumentInputObject
             case PcbFootprintGraphicKind.Segment: shape.Segment = new() { Start = first, End = last }; break;
             case PcbFootprintGraphicKind.Rectangle: shape.Rectangle = new() { TopLeft = first, BottomRight = last }; break;
             case PcbFootprintGraphicKind.Circle: shape.Circle = new() { Center = first, RadiusPoint = last }; break;
-            case PcbFootprintGraphicKind.Arc: shape.Arc = new() { Start = first, Mid = Points[1].ToNative(), End = last }; break;
+            case PcbFootprintGraphicKind.Arc: shape.Arc = new() { Start = first, Mid = points[1]!.ToNative(), End = last }; break;
         }
         return new() { Id = new() { Value = Id }, Layer = FootprintInputValidation.Layer(Layer),
             Shape = shape, Locked = LockedState.LsUnlocked };
@@ -403,9 +412,9 @@ internal static class FootprintInputValidation
     {
         if (string.IsNullOrWhiteSpace(name)) throw PcbFootprintPlacementInput.Invalid("A layer name is required.");
         string compact = string.Concat(name.Where(char.IsLetterOrDigit));
-        string? value = Enum.GetNames<BoardLayer>().FirstOrDefault(candidate =>
+        string? value = System.Enum.GetNames<BoardLayer>().FirstOrDefault(candidate =>
             string.Concat(candidate[2..].Where(char.IsLetterOrDigit)).Equals(compact, StringComparison.OrdinalIgnoreCase));
-        if (value is null || !Enum.TryParse(value, out BoardLayer layer)
+        if (value is null || !System.Enum.TryParse(value, out BoardLayer layer)
             || (int)layer < (int)BoardLayer.BlFCu || layer == BoardLayer.BlRescue)
             throw PcbFootprintPlacementInput.Invalid("Unknown footprint layer: " + name);
         return layer;

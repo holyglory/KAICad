@@ -139,6 +139,7 @@ public sealed class PcbConnectivityTools(InstanceRegistry registry)
             document,
             query,
             selector,
+            netName = query == "net" ? selector : null,
             beforeState = SchematicJson.Formatter.Format(before),
             afterState = SchematicJson.Formatter.Format(after),
             nativeStatus = native.Status.ToString(),

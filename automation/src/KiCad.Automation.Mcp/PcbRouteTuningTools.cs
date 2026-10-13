@@ -136,7 +136,7 @@ public sealed class PcbRouteTuningTools(InstanceRegistry registry)
             throw new AutomationException("invalid_route_tune", "anchors must lie inside the explicit corridor.");
     }
 
-    private static void ValidateCenterline(IReadOnlyList<Vector2> centerline, Vector2? start, Vector2? end,
+    internal static void ValidateCenterline(IReadOnlyList<Vector2> centerline, Vector2? start, Vector2? end,
         long minXNm, long minYNm, long maxXNm, long maxYNm)
     {
         if (centerline.Count < 2)

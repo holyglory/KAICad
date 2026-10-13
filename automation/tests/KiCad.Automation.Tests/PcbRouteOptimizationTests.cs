@@ -4,6 +4,7 @@ using Kiapi.Board.Types;
 using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
 using KiCad.Automation.Mcp;
+using KiCad.Automation.Model;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
@@ -55,6 +56,41 @@ public sealed class PcbRouteOptimizationTests
         };
 
         Assert.AreEqual(5, PcbRouteTuningTools.PathLength(points));
+    }
+
+    [TestMethod]
+    public void RouteTuningAcceptsAxisAlignedCenterlineAndMeasuresItsLength()
+    {
+        var points = new[]
+        {
+            new Vector2 { XNm = 0, YNm = 0 },
+            new Vector2 { XNm = 10, YNm = 0 },
+            new Vector2 { XNm = 10, YNm = 20 },
+            new Vector2 { XNm = 30, YNm = 20 }
+        };
+
+        PcbRouteTuningTools.ValidateCenterline(points, points[0], points[^1], -5, -5, 35, 25);
+        Assert.AreEqual(50, PcbRouteTuningTools.PathLength(points));
+    }
+
+    [TestMethod]
+    public void RouteTuningRejectsDiagonalOrMismatchedCenterline()
+    {
+        var diagonal = new[]
+        {
+            new Vector2 { XNm = 0, YNm = 0 },
+            new Vector2 { XNm = 10, YNm = 10 }
+        };
+        Assert.ThrowsExactly<AutomationException>(() => PcbRouteTuningTools.ValidateCenterline(
+            diagonal, diagonal[0], diagonal[^1], -5, -5, 15, 15));
+
+        var axisAligned = new[]
+        {
+            new Vector2 { XNm = 0, YNm = 0 },
+            new Vector2 { XNm = 10, YNm = 0 }
+        };
+        Assert.ThrowsExactly<AutomationException>(() => PcbRouteTuningTools.ValidateCenterline(
+            axisAligned, new Vector2 { XNm = 1, YNm = 0 }, axisAligned[^1], -5, -5, 15, 15));
     }
 
     [TestMethod]

@@ -124,12 +124,6 @@ public sealed partial class NativeSessionTests
         try
         {
             await client.InvokeAsync<ClearSelection, Empty>(new() { Header = new() { Document = board } }, token);
-            var selection = new AddToSelection { Header = new() { Document = board } };
-            selection.Items.Add(seededRoute.Id.Clone());
-            var selected = await client.InvokeAsync<AddToSelection, SelectionResponse>(selection, token);
-            Assert.IsTrue(selected.Items.Any(item => item.Is(Track.Descriptor)
-                && item.Unpack<Track>().Id.Value == trackId),
-                "The native editor must select the exact seeded track before G.");
 
             // Refit the live PCB canvas before deriving the pointer location.
             // Query the actual window dimensions rather than assuming the
@@ -184,17 +178,13 @@ public sealed partial class NativeSessionTests
                     capture = File.Exists(preDragCapture) ? Path.GetFileName(preDragCapture) : null,
                     captureFailure
                 }), token);
-            // Focus the actual canvas on an empty point first. Reapply the
-            // native selection afterward because GTK background clicks clear
-            // the editor selection; G then sees both a focused canvas and the
-            // exact selected route under the pointer.
+            // Focus the actual canvas on an empty point first. InlineDrag's
+            // native neighboring-segment filter then resolves the route from
+            // the cursor itself, which is the same path used by the GUI.
             NativeKeyboard.SchematicShortcut(display, processId, "click", "PCB Editor",
                 controlKey: false, focusCanvas: true, clickFromLeft: 550, clickFromTop: 300);
-            var refocusedSelection = await client.InvokeAsync<AddToSelection, SelectionResponse>(selection, token);
-            Assert.IsTrue(refocusedSelection.Items.Any(item => item.Is(Track.Descriptor)
-                && item.Unpack<Track>().Id.Value == trackId),
-                "The native editor must retain the exact seeded track after canvas focus.");
-            NativeKeyboard.SchematicShortcut(display, processId, "click", "PCB Editor",
+            await client.InvokeAsync<ClearSelection, Empty>(new() { Header = new() { Document = board } }, token);
+            NativeKeyboard.SchematicShortcut(display, processId, "motion", "PCB Editor",
                 controlKey: false, focusCanvas: false, clickFromLeft: centerX, clickFromTop: centerY);
             await Task.Delay(250, token);
             NativeKeyboard.SchematicShortcut(display, processId, "g", "PCB Editor",

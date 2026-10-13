@@ -5,6 +5,7 @@
 #include <api/api_server.h>
 #include <api/headless_pcb_context.h>
 #include <api/pcb_drc_job_manager.h>
+#include <api/pcb_manufacturing_job_manager.h>
 #include <api/pcb_drc_run_inputs.h>
 #include <api/native_state_digest.h>
 #include <board.h>
@@ -2881,6 +2882,85 @@ BOOST_AUTO_TEST_CASE( RefilledTeardropsNameTheOpenBoardTeardropOrLeaveTheSnapsho
         for( const auto& id : finding.marker().items() )
             BOOST_CHECK_MESSAGE( board.ResolveItem( KIID( id.value() ), true ), "Private identity " << id.value() );
     BOOST_CHECK_EQUAL( board.Zones().size(), 1 );
+}
+
+BOOST_AUTO_TEST_CASE( ManufacturingManagerAdmissionJournalAndReadOnlyReconcile )
+{
+    KI_TEST::TEMPORARY_DIRECTORY scratch( "pcb_manufacturing_manager_" + KIID().AsString(), "" );
+    const wxString journalDirectory = wxString::FromUTF8( ( scratch.GetPath() / "pcb-manufacturing-jobs" ).string() );
+    PCB_MANUFACTURING_JOB_MANAGER manager( journalDirectory );
+    const std::string epoch = KIID().AsString();
+    const std::string operation = KIID().AsString();
+    const auto boardPath = scratch.GetPath() / "fixture.kicad_pcb";
+    kiapi::common::types::DocumentSpecifier document;
+    document.set_type( kiapi::common::types::DOCTYPE_PCB );
+    document.mutable_project()->set_name( "fixture" );
+    document.mutable_project()->set_path( scratch.GetPath().string() );
+    document.set_board_filename( "fixture.kicad_pcb" );
+    DocumentLifecycleState state;
+    state.mutable_document()->CopyFrom( document );
+    state.set_scope( DLS_PCB );
+    state.set_process_epoch( epoch );
+    state.set_native_identity( KIID().AsString() );
+    state.mutable_revision()->set_epoch( state.native_identity() );
+    state.mutable_revision()->set_sequence( 1 );
+    state.set_state_sha256( std::string( 64, 'a' ) );
+    state.set_project_settings_included( true );
+    state.add_native_files( boardPath.string() );
+    state.add_file_baselines()->set_path( boardPath.string() );
+    RunPcbManufacturingExport request;
+    request.set_operation_id( operation );
+    request.set_process_epoch( epoch );
+    request.mutable_document()->CopyFrom( document );
+    request.mutable_expected_state()->CopyFrom( state );
+    request.set_output_directory( ( scratch.GetPath() / "output" ).string() );
+    request.mutable_export_svg()->mutable_job_settings()->mutable_document()->CopyFrom( document );
+    const std::string source = "(kicad_pcb (version 20260101) (generator pcbnew)\n)\n";
+    auto capture = [&]( const DocumentSpecifier& target ) -> tl::expected<PCB_MANUFACTURING_JOB_MANAGER::CAPTURE, std::string>
+    {
+        if( !MessageDifferencer::Equals( target, document ) )
+            return tl::unexpected( "capture target mismatch" );
+        return PCB_MANUFACTURING_JOB_MANAGER::CAPTURE{ state, state, source };
+    };
+
+    wxUnsetEnv( wxT( "KICAD_MANUFACTURING_TEST_BARRIER" ) );
+    auto started = manager.Start( request, epoch, capture );
+    BOOST_REQUIRE_MESSAGE( started.has_value(), ( started ? "" : started.error() ) );
+    BOOST_CHECK( started->terminal() );
+    BOOST_CHECK_EQUAL( started->error_code(), "export_adapter_unavailable" );
+    BOOST_CHECK( !started->native_dispatch() );
+    BOOST_CHECK( !started->publication_committed() );
+    BOOST_CHECK_EQUAL( started->publication_state(), PCB_MFG_PUBLICATION_UNSPECIFIED );
+    BOOST_CHECK( std::filesystem::exists( scratch.GetPath() / "pcb-manufacturing-jobs" / ( operation + ".mfg-journal" ) ) );
+    BOOST_CHECK_EQUAL( started->durable_journal_sha256().size(), 64 );
+
+    NATIVE_STATE_DIGEST requestDigest;
+    requestDigest.Append( request.SerializeAsString() );
+    ReadPcbManufacturingExportJob read;
+    read.mutable_document()->CopyFrom( document );
+    read.set_operation_id( operation );
+    read.set_process_epoch( epoch );
+    read.set_request_fingerprint_sha256( requestDigest.Hex() );
+    auto observed = manager.Read( read, epoch );
+    BOOST_REQUIRE_MESSAGE( observed.has_value(), ( observed ? "" : observed.error() ) );
+    BOOST_CHECK( observed->found() );
+    BOOST_CHECK( observed->journal_verified() );
+    BOOST_CHECK_EQUAL( observed->receipt().durable_journal_sha256(), started->durable_journal_sha256() );
+
+    const std::string nextEpoch = KIID().AsString();
+    ReconcilePcbManufacturingExport reconcile;
+    reconcile.mutable_document()->CopyFrom( document );
+    reconcile.set_operation_id( operation );
+    reconcile.set_process_epoch( nextEpoch );
+    reconcile.set_prior_process_epoch( epoch );
+    reconcile.set_allow_prior_process_epoch( true );
+    reconcile.set_request_fingerprint_sha256( requestDigest.Hex() );
+    auto reconciled = manager.Reconcile( reconcile, nextEpoch );
+    BOOST_REQUIRE_MESSAGE( reconciled.has_value(), ( reconciled ? "" : reconciled.error() ) );
+    BOOST_CHECK( reconciled->found() );
+    BOOST_CHECK( reconciled->journal_verified() );
+    BOOST_CHECK_EQUAL( reconciled->receipt().recovery_state(), PCB_MFG_RECOVERY_UNSUBMITTED );
+    BOOST_CHECK_EQUAL( reconciled->receipt().durable_journal_sha256(), started->durable_journal_sha256() );
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -2800,11 +2800,8 @@ public sealed partial class NativeSessionTests
                 .Single(item => item.Is(Track.Descriptor) && item.Unpack<Track>().Id.Value == originalCleanTrack.Id.Value)
                 .Unpack<Track>().End);
 
-            // Length-tuning qualification selects the persisted split route
-            // route that is still present after the native shove, undo/redo
-            // and save/reopen journey.  The exact source ID and its connected
-            // pad/via anchors come from the live native collection, so this
-            // does not assume that an earlier shove obstacle retained UUID.
+            // Length-tuning qualification uses the persisted clean route that
+            // survived the identity, undo/redo and save/reopen journey.
             static long IndependentPolylineLength(IReadOnlyList<Vector2> points)
             {
                 long total = 0;
@@ -2828,38 +2825,17 @@ public sealed partial class NativeSessionTests
             static string TunePointKey(Vector2 point) => $"{point.XNm},{point.YNm}";
 
             var tuneBefore = await ObserveLifecycleState(client, cleanBoard, token);
-            var tuneRoutes = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
-            {
-                Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbTrace }
-            }, token);
-            Track? tuneSource = null;
-            string[] tuneAnchorIds = [];
-            foreach (var candidate in tuneRoutes.Items.Where(item => item.Is(Track.Descriptor))
-                .Select(item => item.Unpack<Track>().Clone())
-                .Where(track => track.Id.Value == splitSource.Id.Value
-                    && (track.Start.XNm == track.End.XNm || track.Start.YNm == track.End.YNm))
-                .OrderBy(track => track.Layer).ThenBy(track => track.Id.Value, StringComparer.Ordinal))
-            {
-                var connected = await client.InvokeAsync<GetConnectedItems, GetItemsResponse>(new()
-                {
-                    Header = new() { Document = cleanBoard }, Items = { candidate.Id.Clone() }
-                }, token);
-                string[] anchors = connected.Items
-                    .Where(item => item.Is(Pad.Descriptor) || item.Is(Via.Descriptor)
-                        || item.Is(Track.Descriptor) || item.Is(Arc.Descriptor))
-                    .Select(item => item.Is(Pad.Descriptor) ? item.Unpack<Pad>().Id.Value : RouteIdentity(item))
-                    .Where(id => id != candidate.Id.Value)
-                    .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
-                if (anchors.Length == 0)
-                    continue;
-                tuneSource = candidate;
-                tuneAnchorIds = anchors;
-                break;
-            }
-            Assert.IsNotNull(tuneSource, "The persisted split route must retain an axis-aligned route connected to a pad or via.");
-            tuneSource = tuneSource ?? throw new AssertFailedException("The persisted split route disappeared before tuning.");
+            var tuneSource = persistedIdentity.Items
+                .Single(item => item.Is(Track.Descriptor)
+                    && item.Unpack<Track>().Id.Value == originalCleanTrack.Id.Value)
+                .Unpack<Track>().Clone();
             Assert.IsTrue(tuneSource.Layer is BoardLayer.BlFCu or BoardLayer.BlBCu);
-            var tuneCenterline = new[] { tuneSource.Start.Clone(), tuneSource.End.Clone() };
+            var tuneCenterline = new[]
+            {
+                tuneSource.Start.Clone(),
+                new Vector2 { XNm = tuneSource.End.XNm, YNm = tuneSource.Start.YNm },
+                tuneSource.End.Clone()
+            };
             long tuneBaseLength = IndependentPolylineLength(tuneCenterline);
             const long tuneTargetAdditionalLength = 2_000_000L;
             const long tunePitch = 1_000_000L;
@@ -2983,10 +2959,10 @@ public sealed partial class NativeSessionTests
             foreach (var created in tuneReceipt.Created.CreatedItems)
                 Assert.AreEqual(created.Item, tuneNativeById[RouteIdentity(created.Item)]);
             var tuneConnected = await client.InvokeAsync<GetConnectedItems, GetItemsResponse>(new()
-            { Header = new() { Document = cleanBoard }, Items = { new KIID { Value = tuneAnchorIds[0] } } }, token);
+            { Header = new() { Document = cleanBoard }, Items = { new KIID { Value = tuneIds[0] } } }, token);
             var tuneConnectedIds = tuneConnected.Items.Select(item => item.Is(Pad.Descriptor)
                 ? item.Unpack<Pad>().Id.Value : RouteIdentity(item)).ToArray();
-            CollectionAssert.IsSubsetOf(tuneIds.Concat(tuneAnchorIds).ToArray(), tuneConnectedIds);
+            CollectionAssert.IsSubsetOf(tuneIds, tuneConnectedIds);
             var tuneAfter = SchematicJson.Parser.Parse<DocumentLifecycleState>(tuneApplyData.GetProperty("afterState").GetString()!);
             Assert.IsGreaterThan(tuneBefore.Revision.Sequence, tuneAfter.Revision.Sequence);
 
@@ -3020,10 +2996,10 @@ public sealed partial class NativeSessionTests
             foreach (var persisted in tunePersisted.Items)
                 AssertPersistedRouteState(tuneNativeById[RouteIdentity(persisted)], persisted);
             var persistedTuneConnected = await client.InvokeAsync<GetConnectedItems, GetItemsResponse>(new()
-            { Header = new() { Document = cleanBoard }, Items = { new KIID { Value = tuneAnchorIds[0] } } }, token);
+            { Header = new() { Document = cleanBoard }, Items = { new KIID { Value = tuneIds[0] } } }, token);
             var persistedTuneConnectedIds = persistedTuneConnected.Items.Select(item => item.Is(Pad.Descriptor)
                 ? item.Unpack<Pad>().Id.Value : RouteIdentity(item)).ToArray();
-            CollectionAssert.IsSubsetOf(tuneIds.Concat(tuneAnchorIds).ToArray(), persistedTuneConnectedIds);
+            CollectionAssert.IsSubsetOf(tuneIds, persistedTuneConnectedIds);
             var persistedTuneRoutes = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
             {
                 Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbTrace }

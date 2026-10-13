@@ -2961,6 +2961,72 @@ BOOST_AUTO_TEST_CASE( ManufacturingManagerAdmissionJournalAndReadOnlyReconcile )
     BOOST_CHECK( reconciled->journal_verified() );
     BOOST_CHECK_EQUAL( reconciled->receipt().recovery_state(), PCB_MFG_RECOVERY_UNSUBMITTED );
     BOOST_CHECK_EQUAL( reconciled->receipt().durable_journal_sha256(), started->durable_journal_sha256() );
+
+    // A callback adapter is an explicit handoff seam, not a completion claim.
+    // The admission barrier keeps this second operation durable and active so
+    // the test can prove both failure preservation and strict receipt binding.
+    wxSetEnv( wxT( "KICAD_MANUFACTURING_TEST_BARRIER" ), wxT( "after-admission" ) );
+    RunPcbManufacturingExport dispatchRequest = request;
+    dispatchRequest.set_operation_id( KIID().AsString().ToStdString() );
+    auto admitted = manager.Start( dispatchRequest, epoch, capture );
+    BOOST_REQUIRE_MESSAGE( admitted.has_value(), ( admitted ? "" : admitted.error() ) );
+    BOOST_CHECK_EQUAL( admitted->status(), PCB_MFG_EXPORT_ADMITTED );
+    BOOST_CHECK( !admitted->terminal() );
+
+    auto failedDispatch = manager.Dispatch( dispatchRequest, epoch,
+            [&]( const PCB_MANUFACTURING_JOB_MANAGER::DISPATCH_CONTEXT& context )
+                    -> tl::expected<PcbManufacturingExportReceipt, std::string>
+            {
+                BOOST_CHECK_EQUAL( context.request.operation_id(), dispatchRequest.operation_id() );
+                BOOST_CHECK( !context.sourceBoard.empty() );
+                return tl::unexpected( "adapter_not_ready" );
+            } );
+    BOOST_CHECK( !failedDispatch.has_value() );
+    BOOST_CHECK( failedDispatch.error().find( "manufacturing_dispatch_failed" ) != std::string::npos );
+    ReadPcbManufacturingExportJob failedRead = read;
+    failedRead.set_operation_id( dispatchRequest.operation_id() );
+    NATIVE_STATE_DIGEST dispatchDigest;
+    dispatchDigest.Append( dispatchRequest.SerializeAsString() );
+    failedRead.set_request_fingerprint_sha256( dispatchDigest.Hex() );
+    auto afterFailure = manager.Read( failedRead, epoch );
+    BOOST_REQUIRE_MESSAGE( afterFailure.has_value(), ( afterFailure ? "" : afterFailure.error() ) );
+    BOOST_CHECK_EQUAL( afterFailure->receipt().status(), PCB_MFG_EXPORT_ADMITTED );
+    BOOST_CHECK( !afterFailure->receipt().native_dispatch() );
+
+    auto runningDispatch = manager.Dispatch( dispatchRequest, epoch,
+            [&]( const PCB_MANUFACTURING_JOB_MANAGER::DISPATCH_CONTEXT& context )
+                    -> tl::expected<PcbManufacturingExportReceipt, std::string>
+            {
+                PcbManufacturingExportReceipt receipt;
+                receipt.set_operation_id( context.request.operation_id() );
+                receipt.set_process_epoch( context.request.process_epoch() );
+                receipt.mutable_document()->CopyFrom( context.request.document() );
+                receipt.set_request_fingerprint_sha256( dispatchDigest.Hex() );
+                receipt.set_source_snapshot_sha256( context.sourceSnapshotSha256 );
+                receipt.set_job_kind( "svg" );
+                receipt.set_status( PCB_MFG_EXPORT_RUNNING );
+                receipt.set_dispatch_stage( PCB_MFG_DISPATCH_SUBMITTED );
+                receipt.set_native_dispatch( true );
+                receipt.set_terminal( false );
+                receipt.set_worker_finished( false );
+                receipt.set_recovery_state( PCB_MFG_RECOVERY_ACTIVE );
+                receipt.set_export_adapter_available( true );
+                receipt.mutable_expected_state()->CopyFrom( context.request.expected_state() );
+                receipt.mutable_observed_before()->CopyFrom( context.request.expected_state() );
+                receipt.set_output_directory( context.request.output_directory() );
+                receipt.set_publication_state( PCB_MFG_PUBLICATION_STAGED );
+                return receipt;
+            } );
+    BOOST_REQUIRE_MESSAGE( runningDispatch.has_value(), ( runningDispatch ? "" : runningDispatch.error() ) );
+    BOOST_CHECK_EQUAL( runningDispatch->status(), PCB_MFG_EXPORT_RUNNING );
+    BOOST_CHECK( runningDispatch->native_dispatch() );
+    BOOST_CHECK( runningDispatch->export_adapter_available() );
+    auto runningRead = manager.Read( failedRead, epoch );
+    BOOST_REQUIRE_MESSAGE( runningRead.has_value(), ( runningRead ? "" : runningRead.error() ) );
+    BOOST_CHECK_EQUAL( runningRead->receipt().status(), PCB_MFG_EXPORT_RUNNING );
+    BOOST_CHECK( runningRead->receipt().native_dispatch() );
+    BOOST_CHECK( runningRead->journal_verified() );
+    wxUnsetEnv( wxT( "KICAD_MANUFACTURING_TEST_BARRIER" ) );
 }
 
 BOOST_AUTO_TEST_SUITE_END()

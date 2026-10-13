@@ -334,8 +334,14 @@ tl::expected<void, std::string> PCB_MANUFACTURING_JOB_MANAGER::ValidateRecord( c
         || receipt.job_kind() != JobKind( request ) || receipt.output_directory() != request.output_directory()
         || aRecord.source_board().empty() || aRecord.source_board().size() > MAX_SOURCE_BYTES
         || aRecord.source_board().rfind( "(kicad_pcb", 0 ) != 0
-        || receipt.source_snapshot_sha256() != Hash( aRecord.source_board() )
-        || receipt.snapshot_complete() || receipt.export_adapter_available()
+        || receipt.source_snapshot_sha256() != Hash( aRecord.source_board() ) )
+        return tl::unexpected( "invalid_manufacturing_journal" );
+
+    if( receipt.status() == PCB_MFG_EXPORT_RUNNING || receipt.status() == PCB_MFG_EXPORT_COMPLETED
+        || receipt.status() == PCB_MFG_EXPORT_FAILED || receipt.status() == PCB_MFG_EXPORT_INDETERMINATE )
+        return ValidateDispatchedReceipt( aRecord, receipt );
+
+    if( receipt.snapshot_complete() || receipt.export_adapter_available()
         || receipt.native_dispatch() || receipt.publication_committed()
         || receipt.publication_state() != PCB_MFG_PUBLICATION_UNSPECIFIED
         || !receipt.staging_directory().empty() || receipt.artifacts_size() != 0
@@ -365,6 +371,65 @@ tl::expected<void, std::string> PCB_MANUFACTURING_JOB_MANAGER::ValidateRecord( c
         else return tl::unexpected( "invalid_manufacturing_journal" );
     }
     else return tl::unexpected( "manufacturing_journal_phase_unsupported" );
+    return {};
+}
+
+tl::expected<void, std::string> PCB_MANUFACTURING_JOB_MANAGER::ValidateDispatchedReceipt(
+        const JournalRecord& aRecord, const Receipt& aReceipt )
+{
+    const Request& request = aRecord.request();
+    if( !aReceipt.native_dispatch() || !aReceipt.export_adapter_available()
+        || aReceipt.snapshot_complete() || aReceipt.source_snapshot_sha256() != Hash( aRecord.source_board() )
+        || aReceipt.operation_id() != request.operation_id()
+        || aReceipt.process_epoch() != request.process_epoch()
+        || !SameDocument( aReceipt.document(), request.document() )
+        || aReceipt.request_fingerprint_sha256() != Hash( request.SerializeAsString() )
+        || aReceipt.job_kind() != JobKind( request )
+        || aReceipt.output_directory() != request.output_directory()
+        || !google::protobuf::util::MessageDifferencer::Equals(
+                aReceipt.expected_state(), request.expected_state() )
+        || !google::protobuf::util::MessageDifferencer::Equals(
+                aReceipt.observed_before(), request.expected_state() ) )
+        return tl::unexpected( "invalid_manufacturing_dispatch_receipt" );
+
+    if( aReceipt.has_observed_after()
+        && ( !ValidState( aReceipt.observed_after() )
+             || !google::protobuf::util::MessageDifferencer::Equals(
+                     aReceipt.observed_after(), request.expected_state() ) ) )
+        return tl::unexpected( "invalid_manufacturing_dispatch_receipt" );
+
+    switch( aReceipt.status() )
+    {
+    case PCB_MFG_EXPORT_RUNNING:
+        if( aReceipt.terminal() || aReceipt.worker_finished()
+            || aReceipt.dispatch_stage() != PCB_MFG_DISPATCH_SUBMITTED
+            || aReceipt.recovery_state() != PCB_MFG_RECOVERY_ACTIVE
+            || aReceipt.has_observed_after() || aReceipt.publication_committed()
+            || aReceipt.publication_state() == PCB_MFG_PUBLICATION_PUBLISHED
+            || !aReceipt.error_code().empty() || !aReceipt.error_message().empty() )
+            return tl::unexpected( "invalid_manufacturing_dispatch_receipt" );
+        break;
+    case PCB_MFG_EXPORT_COMPLETED:
+        if( !aReceipt.terminal() || !aReceipt.worker_finished()
+            || aReceipt.dispatch_stage() != PCB_MFG_DISPATCH_TERMINAL
+            || !aReceipt.has_observed_after()
+            || aReceipt.publication_state() != PCB_MFG_PUBLICATION_PUBLISHED
+            || !aReceipt.publication_committed() || !aReceipt.output_manifest_complete()
+            || !IsDigest( aReceipt.output_manifest_sha256() ) || aReceipt.artifacts_size() == 0
+            || !aReceipt.error_code().empty() || !aReceipt.error_message().empty() )
+            return tl::unexpected( "invalid_manufacturing_dispatch_receipt" );
+        break;
+    case PCB_MFG_EXPORT_FAILED:
+    case PCB_MFG_EXPORT_INDETERMINATE:
+        if( !aReceipt.terminal() || !aReceipt.worker_finished()
+            || aReceipt.dispatch_stage() != PCB_MFG_DISPATCH_TERMINAL
+            || aReceipt.error_code().empty() || aReceipt.error_message().empty()
+            || aReceipt.publication_committed() )
+            return tl::unexpected( "invalid_manufacturing_dispatch_receipt" );
+        break;
+    default:
+        return tl::unexpected( "invalid_manufacturing_dispatch_receipt" );
+    }
     return {};
 }
 
@@ -478,6 +543,81 @@ PCB_MANUFACTURING_JOB_MANAGER::Start( const Request& aRequest, const std::string
 }
 
 tl::expected<PCB_MANUFACTURING_JOB_MANAGER::Receipt, std::string>
+PCB_MANUFACTURING_JOB_MANAGER::Dispatch( const Request& aRequest, const std::string& aEpoch,
+                                          const DISPATCH_ADAPTER& aAdapter )
+{
+    if( !aAdapter ) return tl::unexpected( "manufacturing_dispatch_adapter_unavailable" );
+
+    // Keep the operation lock across the external callback.  A cancellation
+    // or second native instance cannot replace the journal while the adapter
+    // is using the immutable context.  The C++ mutex is released while the
+    // callback runs so an adapter may use unrelated manager operations.
+    std::unique_lock lock( m_mutex );
+    if( auto valid = ValidateRequest( aRequest ); !valid ) return tl::unexpected( valid.error() );
+    if( !IsUuid( aEpoch ) || aRequest.process_epoch() != aEpoch )
+        return tl::unexpected( "stale_process_epoch" );
+    auto prior = read( aRequest.operation_id() );
+    if( !prior ) return tl::unexpected( prior.error() );
+    if( prior->request().SerializeAsString() != aRequest.SerializeAsString() )
+        return tl::unexpected( "manufacturing_operation_reused" );
+    if( prior->receipt().terminal() || prior->receipt().status() != PCB_MFG_EXPORT_ADMITTED
+        || prior->receipt().dispatch_stage() != PCB_MFG_DISPATCH_ADMITTED )
+        return tl::unexpected( "manufacturing_dispatch_not_admitted" );
+
+    auto lease = AcquireOperationLock( fs::u8path( m_journalDirectory.ToStdString() ), aRequest.operation_id() );
+    if( !lease ) return tl::unexpected( lease.error() );
+    prior = read( aRequest.operation_id() );
+    if( !prior ) return tl::unexpected( prior.error() );
+    if( prior->request().SerializeAsString() != aRequest.SerializeAsString() )
+        return tl::unexpected( "manufacturing_operation_reused" );
+    if( prior->receipt().terminal() || prior->receipt().status() != PCB_MFG_EXPORT_ADMITTED
+        || prior->receipt().dispatch_stage() != PCB_MFG_DISPATCH_ADMITTED )
+        return tl::unexpected( "manufacturing_dispatch_not_admitted" );
+
+    DISPATCH_CONTEXT context;
+    context.request.CopyFrom( aRequest );
+    context.sourceBoard = prior->source_board();
+    context.sourceSnapshotSha256 = prior->receipt().source_snapshot_sha256();
+    lock.unlock();
+    tl::expected<Receipt, std::string> dispatched = tl::unexpected( "manufacturing_dispatch_failed" );
+    try
+    {
+        dispatched = aAdapter( context );
+    }
+    catch( const std::exception& error )
+    {
+        return tl::unexpected( "manufacturing_dispatch_exception: " + std::string( error.what() ) );
+    }
+    catch( ... )
+    {
+        return tl::unexpected( "manufacturing_dispatch_exception" );
+    }
+    lock.lock();
+
+    // An adapter error is deliberately non-terminal.  The durable admission
+    // remains readable as ACTIVE/ADMITTED and can be reconciled or retried
+    // after the adapter itself has recovered; no completion is inferred.
+    if( !dispatched ) return tl::unexpected( "manufacturing_dispatch_failed: " + dispatched.error() );
+
+    auto current = read( aRequest.operation_id() );
+    if( !current ) return tl::unexpected( current.error() );
+    if( current->request().SerializeAsString() != aRequest.SerializeAsString()
+        || current->receipt().status() != PCB_MFG_EXPORT_ADMITTED
+        || current->receipt().dispatch_stage() != PCB_MFG_DISPATCH_ADMITTED )
+        return tl::unexpected( "manufacturing_dispatch_race" );
+
+    JournalRecord candidate = *current;
+    candidate.mutable_receipt()->CopyFrom( *dispatched );
+    if( auto valid = ValidateDispatchedReceipt( candidate, candidate.receipt() ); !valid )
+        return tl::unexpected( valid.error() );
+    if( candidate.journal_revision() == std::numeric_limits<uint64_t>::max() )
+        return tl::unexpected( "invalid_manufacturing_journal" );
+    candidate.set_journal_revision( candidate.journal_revision() + 1 );
+    if( auto persisted = write( candidate ); !persisted ) return tl::unexpected( persisted.error() );
+    return candidate.receipt();
+}
+
+tl::expected<PCB_MANUFACTURING_JOB_MANAGER::Receipt, std::string>
 PCB_MANUFACTURING_JOB_MANAGER::Cancel( const CancelPcbManufacturingExport& aRequest,
                                      const std::string& aEpoch )
 {
@@ -491,6 +631,9 @@ PCB_MANUFACTURING_JOB_MANAGER::Cancel( const CancelPcbManufacturingExport& aRequ
         || !SameDocument( prior->receipt().document(), aRequest.document() ) )
         return tl::unexpected( "manufacturing_cancel_identity_mismatch" );
     if( prior->receipt().terminal() ) return prior->receipt();
+    if( prior->receipt().status() != PCB_MFG_EXPORT_ADMITTED
+        || prior->receipt().dispatch_stage() != PCB_MFG_DISPATCH_ADMITTED )
+        return tl::unexpected( "manufacturing_cancel_requires_pre_dispatch" );
     auto lease = AcquireOperationLock( fs::u8path( m_journalDirectory.ToStdString() ), aRequest.operation_id() );
     if( !lease ) return tl::unexpected( lease.error() );
     auto journal = read( aRequest.operation_id() );

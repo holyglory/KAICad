@@ -63,6 +63,59 @@ public sealed class SchematicTypedMutationTests
     }
 
     [TestMethod]
+    public async Task TypedConnectionBoundaryPreservesCompleteObservationForCreateReadUpdateDelete()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+
+        SchematicConnectionMutationInput Input(string mutation, string itemId, string? operationId = null,
+            long? xNm = null, long? yNm = null, string? text = null) =>
+            JsonSerializer.Deserialize<SchematicConnectionMutationInput>(JsonSerializer.Serialize(new
+            {
+                document = JsonSerializer.Deserialize<JsonElement>(fixture.DocumentJson),
+                // Keep this branch as raw protobuf JSON. The typed adapter must
+                // pass the electrical hierarchy, repeated items and Any payloads
+                // through to the existing checked connection handler.
+                expectedState = JsonSerializer.Deserialize<JsonElement>(fixture.ExpectedJson),
+                mutation,
+                kind = (int)SchematicConnectionItemKind.LocalLabel,
+                itemId,
+                operationId,
+                xNm,
+                yNm,
+                text
+            }, options), options)!;
+
+        string operation = Guid.NewGuid().ToString("D");
+        var created = await fixture.TypedTools.Mutate(fixture.InstanceId,
+            Input("create", Id, operation, 1_000, 2_000, "DATA"), default);
+        Assert.IsFalse(created.IsError ?? false, Data(created).GetRawText());
+        Assert.AreEqual(1, fixture.Items.Count);
+        Assert.AreEqual("DATA", fixture.Items.Single().Unpack<LocalLabel>().Text.Text_);
+
+        var read = await fixture.TypedTools.Mutate(fixture.InstanceId,
+            Input("read", Id), default);
+        Assert.IsFalse(read.IsError ?? false, Data(read).GetRawText());
+        Assert.AreEqual("DATA", SchematicJson.Parser.Parse<Any>(
+            Data(read).GetProperty("item").GetRawText()).Unpack<LocalLabel>().Text.Text_);
+
+        string updateOperation = Guid.NewGuid().ToString("D");
+        var updated = await fixture.TypedTools.Mutate(fixture.InstanceId,
+            Input("update", Id, updateOperation, 3_000, 4_000, "DATA_OUT"), default);
+        Assert.IsFalse(updated.IsError ?? false, Data(updated).GetRawText());
+        var update = fixture.Items.Single().Unpack<LocalLabel>();
+        Assert.AreEqual("DATA_OUT", update.Text.Text_);
+        Assert.AreEqual(new Vector2 { XNm = 3_000, YNm = 4_000 }, update.Position);
+
+        string deleteOperation = Guid.NewGuid().ToString("D");
+        var deleted = await fixture.TypedTools.Mutate(fixture.InstanceId,
+            Input("delete", Id, deleteOperation), default);
+        Assert.IsFalse(deleted.IsError ?? false, Data(deleted).GetRawText());
+        Assert.IsEmpty(fixture.Items);
+        Assert.HasCount(3, fixture.Batches);
+    }
+
+    [TestMethod]
     public async Task CreateRequiresRootCheckedObservationAndRetainsExactOperationReplay()
     {
         using var fixture = await Fixture.CreateAsync();
@@ -631,6 +684,7 @@ public sealed class SchematicTypedMutationTests
         internal DocumentSpecifier TargetDocument => State.Electrical.Hierarchy.Data.Instances[0].Metadata.Document;
         internal Google.Protobuf.Collections.RepeatedField<Any> Items => State.Electrical.Hierarchy.Data.Instances[0].Items;
         internal SchematicTypedMutationTools Tools { get; }
+        internal SchematicConnectionTypedTools TypedTools { get; }
         internal SchematicLibraryCacheTools CacheTools { get; }
         internal SchematicHierarchyMutationTools HierarchyTools { get; }
         internal string InstanceId => Session.InstanceId;
@@ -649,7 +703,7 @@ public sealed class SchematicTypedMutationTests
         private Fixture()
         {
             Session.ProjectPath = Path.Combine(root, "fixture.kicad_pro");
-            Registry = new(this, root); Tools = new(Registry); CacheTools = new(Registry);
+            Registry = new(this, root); Tools = new(Registry); TypedTools = new(Registry); CacheTools = new(Registry);
             HierarchyTools = new(Registry);
             var checkedRequest = CheckedSchematicToolTests.Request(root, Session.Epoch);
             State = new() { State = checkedRequest.ExpectedState.Clone(), Electrical = new()

@@ -15,8 +15,8 @@ namespace KiCad.Automation.Mcp;
 public sealed class SchematicConnectionTypedTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_schematic_connection_mutation_typed"),
-     Description("Read or mutate one checked schematic wire, bus, junction, bus entry, label or text item from one structured input. input binds an explicit root schematic document, complete lifecycle observation, mutation kind, item kind and identity, operation UUID and optional typed coordinates/text. The existing connection-item handlers remain the execution and receipt authority; this boundary rejects incomplete or stale identities before invoking them."),
-     KiCadCapability("schematic-design", "compiled-mcp plus-native-api", "typed root document, complete lifecycle checkpoint, connection kind, item UUID and operation UUID"),
+     Description("Read or mutate one checked schematic wire, bus, junction, bus entry, label or text item from one structured input. input binds an explicit root schematic document, the complete checked schematic observation returned by kicad_schematic_checked_state (lifecycle state plus electrical hierarchy), mutation kind, item kind and identity, operation UUID and optional typed coordinates/text. The existing connection-item handlers remain the execution and receipt authority; this boundary rejects incomplete or stale identities before invoking them."),
+     KiCadCapability("schematic-design", "compiled-mcp plus-native-api", "typed root document, complete checked state with electrical hierarchy, connection kind, item UUID and operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "SchematicConnectionTypedMcpProcessTests.TypedConnectionMutationPublishesStructuredSchemaAndRejectsIncompleteInput", "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public async Task<CallToolResult> Mutate(string instanceId, SchematicConnectionMutationInput input,
         CancellationToken cancellationToken)
@@ -71,7 +71,7 @@ public sealed class SchematicConnectionTypedTools(InstanceRegistry registry)
 public sealed class SchematicConnectionMutationInput : NativeDocumentInputObject
 {
     private NativeDocumentInput? document;
-    private DocumentLifecycleInput? expectedState;
+    private CheckedSchematicObservationInput? expectedState;
     private SchematicConnectionMutationKind mutation;
     private SchematicConnectionItemKind? kind;
     private string? itemId;
@@ -83,7 +83,8 @@ public sealed class SchematicConnectionMutationInput : NativeDocumentInputObject
     private string? text;
 
     public NativeDocumentInput? Document { get => document; set => document = BindOnce(value); }
-    public DocumentLifecycleInput? ExpectedState { get => expectedState; set => expectedState = BindOnce(value); }
+    [Description("The complete checked schematic observation: state and electrical hierarchy from one kicad_schematic_checked_state response. All hierarchy items, repeated fields and Any-packed payloads are retained.")]
+    public CheckedSchematicObservationInput? ExpectedState { get => expectedState; set => expectedState = BindOnce(value); }
     public SchematicConnectionMutationKind Mutation { get => mutation; set => mutation = BindOnce(value); }
     public SchematicConnectionItemKind? Kind { get => kind; set => kind = BindOnce(value); }
     public string? ItemId { get => itemId; set => itemId = BindOnce(value); }
@@ -106,18 +107,19 @@ public sealed class SchematicConnectionMutationInput : NativeDocumentInputObject
             || !string.Equals(ItemId, item.ToString("D"), StringComparison.Ordinal))
             throw Invalid("itemId must be a canonical lowercase UUID.");
         DocumentSpecifier document;
-        DocumentLifecycleState state;
+        CheckedSchematicState state;
         try
         {
             document = NativeDocumentInput.ToNative(Document);
-            state = DocumentLifecycleInput.ToNative(ExpectedState);
+            state = ExpectedState.ToNative();
+            CheckedSchematicContract.ValidateObservation(state, document, state.State.ProcessEpoch);
         }
         catch (AutomationException error)
         {
             throw Invalid(error.Message);
         }
-        if (document.Type != DocumentType.DoctypeSchematic || state.Scope != DocumentLifecycleScope.DlsSchematicHierarchy
-            || !state.Document.Equals(document))
+        if (document.Type != DocumentType.DoctypeSchematic || state.State.Scope != DocumentLifecycleScope.DlsSchematicHierarchy
+            || !state.State.Document.Equals(document) || !state.Electrical.Hierarchy.Data.Document.Equals(document))
             throw Invalid("document and expectedState must identify the same schematic root.");
         if (Mutation is SchematicConnectionMutationKind.Create or SchematicConnectionMutationKind.Update or SchematicConnectionMutationKind.Delete)
         {
@@ -135,7 +137,7 @@ public sealed class SchematicConnectionMutationInput : NativeDocumentInputObject
                 throw Invalid("coordinates must lie on 100 nm boundaries.");
         }
         SchematicConnectionItemKind parsedKind = Kind ?? SchematicConnectionItemKind.Wire;
-        return (SchematicJson.Formatter.Format(document), SchematicJson.Formatter.Format(state), Mutation, parsedKind,
+        return (SchematicJson.Formatter.Format(document), ExpectedState.ToJson(), Mutation, parsedKind,
             Kind, ItemId!,
             Mutation == SchematicConnectionMutationKind.Read ? null : OperationId,
             XNm, YNm, EndXNm, EndYNm, Text);

@@ -1681,7 +1681,7 @@ public sealed partial class NativeSessionTests
                 .Select(item => item.Unpack<BoardGraphicShape>())
                 .Where(shape => shape.Layer == BoardLayer.BlEdgeCuts).ToArray();
             Assert.IsTrue(cleanEdgeCuts.Any(shape => shape.Shape.GeometryCase == GraphicShape.GeometryOneofCase.Polygon
-                && shape.Shape.Polygon.Outline.Nodes.Count >= 8),
+                && shape.Shape.Polygon.Polygons.Any(polygon => polygon.Outline.Nodes.Count >= 8)),
                 "The clean route fixture must retain a legal concave Edge.Cuts polygon.");
             Assert.IsTrue(cleanEdgeCuts.Any(shape => shape.Shape.GeometryCase == GraphicShape.GeometryOneofCase.Rectangle),
                 "The clean route fixture must retain a separate Edge.Cuts cutout loop.");

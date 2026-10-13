@@ -407,7 +407,8 @@ internal static class MultilayerRoutePlanner
     internal readonly record struct MlPathPoint(long XNm, long YNm, BoardLayer Layer);
     internal readonly record struct MlBoundsValue(long MinXNm, long MinYNm, long MaxXNm, long MaxYNm);
     internal readonly record struct MlObstacle(string Kind, string Id, string NetName, BoardLayer Layer,
-        MlBoundsValue Bounds, string Reason, PcbRouteGeometry.Region? Geometry = null);
+        MlBoundsValue Bounds, string Reason, PcbRouteGeometry.Region? Geometry = null,
+        bool BlocksTracks = true, bool BlocksVias = true);
     private readonly record struct GridStep(int X, int Y);
     private readonly record struct GridNode(int X, int Y, int Layer, int ViaCount);
     private readonly record struct GridCell(int X, int Y, int Layer);
@@ -503,7 +504,8 @@ internal static class MultilayerRoutePlanner
             layer = LayerName(obstacle.Layer),
             bounds = new { minXNm = obstacle.Bounds.MinXNm, minYNm = obstacle.Bounds.MinYNm, maxXNm = obstacle.Bounds.MaxXNm, maxYNm = obstacle.Bounds.MaxYNm },
             reason = obstacle.Reason, geometryAware = obstacle.Geometry is not null,
-            geometryMode = obstacle.Geometry?.KeepInside == true ? "keep-inside" : obstacle.Geometry is null ? "bounds" : "filled-region"
+            geometryMode = obstacle.Geometry?.KeepInside == true ? "keep-inside" : obstacle.Geometry is null ? "bounds" : "filled-region",
+            blocksTracks = obstacle.BlocksTracks, blocksVias = obstacle.BlocksVias
         }).ToArray();
         int geometryObstacleCount = obstacles.Count(obstacle => obstacle.Geometry is not null);
         bool boundaryGeometry = obstacles.Any(obstacle => obstacle.Kind == "board-boundary" && obstacle.Geometry is not null);
@@ -569,6 +571,7 @@ internal static class MultilayerRoutePlanner
         var blocked = ImmutableHashSet.CreateBuilder<GridCell>();
         foreach (MlObstacle obstacle in obstacles)
         {
+            if (!obstacle.BlocksTracks) continue;
             int layer = grid.LayerIndex(obstacle.Layer);
             if (layer < 0) continue;
             foreach (GridNode node in grid.CellsIntersecting(obstacle.Bounds, layer))
@@ -603,7 +606,7 @@ internal static class MultilayerRoutePlanner
             {
                 GridNode next = current with { X = current.X + direction.X, Y = current.Y + direction.Y };
                 if (!grid.Contains(next.X, next.Y) || blocked.Contains(new(next.X, next.Y, next.Layer))
-                    || !grid.EdgeClear(current, next, request, blocked)) continue;
+                    || !grid.EdgeClear(current, next, request, blocked, obstacles)) continue;
                 long nextDistance = checked(distance[current] + request.GridNm);
                 if (distance.TryGetValue(next, out long known) && known <= nextDistance) continue;
                 distance[next] = nextDistance; parent[next] = current;
@@ -777,13 +780,17 @@ internal static class MultilayerRoutePlanner
                 if (zone.Outline is null || zone.Outline.Polygons.Count == 0) continue;
                 string net = zone.CopperSettings?.Net?.Name ?? "";
                 bool keepout = zone.Type == ZoneType.ZtRuleArea;
+                bool blocksTracks = !keepout || zone.RuleAreaSettings?.KeepoutTracks == true;
+                bool blocksVias = !keepout || zone.RuleAreaSettings?.KeepoutVias == true;
+                if (!blocksTracks && !blocksVias) continue;
                 if (!keepout && SameNet(new Net { Name = net }, request.NetName)) continue;
                 long margin = checked((zone.CopperSettings?.Clearance?.ValueNm ?? 0) + request.ClearanceNm + request.WidthNm / 2);
                 PcbRouteGeometry.Region? geometry = PcbRouteGeometry.FromPolySet(zone.Outline!, margin);
                 MlBoundsValue bounds = geometry is null ? PolySetBounds(zone.Outline!, margin) : ToBounds(geometry.Bounds);
                 foreach (BoardLayer layer in enabledCopper.Where(layer => LayersContain(zone.Layers, layer)))
                     result.Add(new("zone", zone.Id.Value, net, layer, bounds,
-                        keepout ? "rule-area keepout geometry" : "different-net copper zone geometry", geometry));
+                        keepout ? "rule-area keepout geometry" : "different-net copper zone geometry", geometry,
+                        blocksTracks, blocksVias));
             }
             else if (packed.Is(BoardGraphicShape.Descriptor))
             {
@@ -798,7 +805,8 @@ internal static class MultilayerRoutePlanner
                     result.Add(new("shape", shape.Id.Value, shape.Net.Name, shape.Layer, bounds, "copper graphic"));
             }
         }
-        return result.Where(obstacle => Intersects(obstacle.Bounds, request.Bounds))
+        return result.Where(obstacle => (obstacle.BlocksTracks || obstacle.BlocksVias)
+                && Intersects(obstacle.Bounds, request.Bounds))
             .OrderBy(obstacle => obstacle.Layer).ThenBy(obstacle => obstacle.Kind, StringComparer.Ordinal)
             .ThenBy(obstacle => obstacle.Id, StringComparer.Ordinal).ToImmutableArray();
     }
@@ -828,7 +836,8 @@ internal static class MultilayerRoutePlanner
             int highY = Math.Clamp(checked((int)((maxY - _bounds.MinYNm) / _size)), 0, Height - 1);
             for (int x = lowX; x <= highX; x++) for (int y = lowY; y <= highY; y++) yield return new(x, y, layer, 0);
         }
-        public bool EdgeClear(GridNode from, GridNode to, ValidatedRequest request, ImmutableHashSet<GridCell> blocked)
+        public bool EdgeClear(GridNode from, GridNode to, ValidatedRequest request,
+            ImmutableHashSet<GridCell> blocked, ImmutableArray<MlObstacle> obstacles)
         {
             if (from.Layer != to.Layer) return false;
             int minX = Math.Min(from.X, to.X), maxX = Math.Max(from.X, to.X), minY = Math.Min(from.Y, to.Y), maxY = Math.Max(from.Y, to.Y);
@@ -836,7 +845,22 @@ internal static class MultilayerRoutePlanner
                 for (int y = minY; y <= maxY; y++) if (blocked.Contains(new(from.X, y, from.Layer))) return false;
             else
                 for (int x = minX; x <= maxX; x++) if (blocked.Contains(new(x, from.Y, from.Layer))) return false;
+            Vector2 start = Point(from.X, from.Y), end = Point(to.X, to.Y);
+            foreach (MlObstacle obstacle in obstacles)
+            {
+                if (!obstacle.BlocksTracks || obstacle.Layer != _layers[from.Layer]) continue;
+                if (!BoundsIntersectsSegment(obstacle.Bounds, start, end)) continue;
+                if (obstacle.Geometry is null || obstacle.Geometry.BlocksSegment(start.XNm, start.YNm, end.XNm, end.YNm)) return false;
+            }
             return true;
+        }
+
+        private static bool BoundsIntersectsSegment(MlBoundsValue bounds, Vector2 start, Vector2 end)
+        {
+            long minX = Math.Min(start.XNm, end.XNm), maxX = Math.Max(start.XNm, end.XNm);
+            long minY = Math.Min(start.YNm, end.YNm), maxY = Math.Max(start.YNm, end.YNm);
+            return maxX >= bounds.MinXNm && minX <= bounds.MaxXNm
+                && maxY >= bounds.MinYNm && minY <= bounds.MaxYNm;
         }
         public bool ViaClear(GridNode current, BoardLayer targetLayer, MlViaSpec via, ValidatedRequest request,
             ImmutableArray<MlObstacle> obstacles)
@@ -849,7 +873,7 @@ internal static class MultilayerRoutePlanner
             for (int layer = low; layer <= high; layer++)
             {
                 BoardLayer boardLayer = _physicalLayers[layer];
-                foreach (MlObstacle obstacle in obstacles.Where(obstacle => obstacle.Layer == boardLayer))
+                foreach (MlObstacle obstacle in obstacles.Where(obstacle => obstacle.Layer == boardLayer && obstacle.BlocksVias))
                 {
                     // Track/pad obstacles already include the requested track
                     // width and clearance.  Expand them by the difference when
@@ -862,7 +886,7 @@ internal static class MultilayerRoutePlanner
                     Vector2 point = Point(current.X, current.Y);
                     if (point.XNm >= expanded.MinXNm && point.XNm <= expanded.MaxXNm
                         && point.YNm >= expanded.MinYNm && point.YNm <= expanded.MaxYNm
-                        && (obstacle.Geometry is null || obstacle.Geometry.Blocks(point.XNm, point.YNm)))
+                        && (obstacle.Geometry is null || obstacle.Geometry.Blocks(point.XNm, point.YNm, extra)))
                         return false;
                 }
             }
@@ -946,7 +970,8 @@ internal static class MultilayerRoutePlanner
     private static string PlanIdentity(ValidatedRequest request, DocumentLifecycleState state, ImmutableArray<MlObstacle> obstacles)
     {
         string canonical = JsonSerializer.Serialize(request, JsonOptions) + "\n" + state.StateSha256 + "\n"
-            + string.Join("\n", obstacles.Select(o => $"{o.Kind}|{o.Id}|{o.Layer}|{o.Bounds.MinXNm},{o.Bounds.MinYNm},{o.Bounds.MaxXNm},{o.Bounds.MaxYNm}"));
+            + string.Join("\n", obstacles.Select(o =>
+                $"{o.Kind}|{o.Id}|{o.Layer}|{o.BlocksTracks}|{o.BlocksVias}|{o.Bounds.MinXNm},{o.Bounds.MinYNm},{o.Bounds.MaxXNm},{o.Bounds.MaxYNm}|{o.Geometry?.CanonicalKey ?? ""}"));
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
     }
 

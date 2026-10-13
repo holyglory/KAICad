@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Text.Json;
 using Google.Protobuf.WellKnownTypes;
 using Kiapi.Board.Types;
 using Kiapi.Common;
@@ -16,6 +17,34 @@ namespace KiCad.Automation.Tests;
 [TestClass]
 public sealed class PcbMultilayerRoutingTests
 {
+    [TestMethod]
+    public void RuleAreaTrackAndViaRestrictionsRemainIndependentAndDeterministic()
+    {
+        var enabled = new[] { BoardLayer.BlFCu, BoardLayer.BlIn1Cu, BoardLayer.BlIn2Cu, BoardLayer.BlBCu }.ToImmutableArray();
+        var request = Request(enabled);
+        DocumentSpecifier document = new() { BoardFilename = "fixture.kicad_pcb", Type = DocumentType.DoctypePcb };
+        DocumentLifecycleState state = new() { StateSha256 = new string('a', 64) };
+        Zone trackOnly = RuleArea("11111111-1111-1111-1111-111111111111", keepTracks: true);
+        Zone viaOnly = RuleArea("22222222-2222-2222-2222-222222222222", keepVias: true);
+        Zone footprintOnly = RuleArea("33333333-3333-3333-3333-333333333333", keepFootprints: true);
+        Zone copperOnly = RuleArea("44444444-4444-4444-4444-444444444444", keepCopper: true);
+
+        var first = MultilayerRoutePlanner.Plan(validated: MultilayerRoutePlanner.Validate(request, enabled),
+            [Any.Pack(viaOnly), Any.Pack(copperOnly), Any.Pack(trackOnly), Any.Pack(footprintOnly)], enabled, document, state);
+        var replay = MultilayerRoutePlanner.Plan(MultilayerRoutePlanner.Validate(request, enabled),
+            [Any.Pack(trackOnly), Any.Pack(footprintOnly), Any.Pack(copperOnly), Any.Pack(viaOnly)], enabled, document, state);
+        Assert.AreEqual(first.PlanId, replay.PlanId);
+
+        JsonElement report = JsonSerializer.SerializeToElement(first.ObstacleReport);
+        JsonElement track = report.EnumerateArray().Single(item => item.GetProperty("id").GetString() == trackOnly.Id.Value);
+        JsonElement via = report.EnumerateArray().Single(item => item.GetProperty("id").GetString() == viaOnly.Id.Value);
+        Assert.IsTrue(track.GetProperty("blocksTracks").GetBoolean());
+        Assert.IsFalse(track.GetProperty("blocksVias").GetBoolean());
+        Assert.IsFalse(via.GetProperty("blocksTracks").GetBoolean());
+        Assert.IsTrue(via.GetProperty("blocksVias").GetBoolean());
+        Assert.IsFalse(report.EnumerateArray().Any(item => item.GetProperty("id").GetString() == footprintOnly.Id.Value));
+        Assert.IsFalse(report.EnumerateArray().Any(item => item.GetProperty("id").GetString() == copperOnly.Id.Value));
+    }
     [TestMethod]
     public void ThroughViasCrossAFullForeignWallAndReturnToTheFrontLayer()
     {
@@ -92,4 +121,31 @@ public sealed class PcbMultilayerRoutingTests
                 new() { Type = "through", StartLayer = "F.Cu", EndLayer = "B.Cu", DiameterNm = 400_000, DrillNm = 200_000, CostNm = 500_000 }
             ]
         };
+
+    private static Zone RuleArea(string id, bool keepTracks = false, bool keepVias = false,
+        bool keepFootprints = false, bool keepCopper = false) => new()
+    {
+        Id = new() { Value = id }, Type = ZoneType.ZtRuleArea, Layers = { BoardLayer.BlFCu },
+        Outline = new PolySet
+        {
+            Polygons =
+            {
+                new PolygonWithHoles
+                {
+                    Outline = new PolyLine { Closed = true, Nodes =
+                    {
+                        new PolyLineNode { Point = new() { XNm = 1_500_000, YNm = -500_000 } },
+                        new PolyLineNode { Point = new() { XNm = 2_500_000, YNm = -500_000 } },
+                        new PolyLineNode { Point = new() { XNm = 2_500_000, YNm = 500_000 } },
+                        new PolyLineNode { Point = new() { XNm = 1_500_000, YNm = 500_000 } }
+                    } }
+                }
+            }
+        },
+        RuleAreaSettings = new RuleAreaSettings
+        {
+            KeepoutTracks = keepTracks, KeepoutVias = keepVias,
+            KeepoutFootprints = keepFootprints, KeepoutCopper = keepCopper
+        }
+    };
 }

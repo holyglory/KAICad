@@ -184,7 +184,7 @@ public sealed class PcbHeadlessRoutingTools(InstanceRegistry registry)
                 drcValidated = false, nativeCommit = false
             });
 
-        SearchResult search = Search(grid, blocked, start, goal, request.MaxNodes);
+        SearchResult search = Search(grid, blocked, start, goal, request.MaxNodes, obstacles);
         if (search.Path is null)
             return Result(new
             {
@@ -514,13 +514,17 @@ public sealed class PcbHeadlessRoutingTools(InstanceRegistry registry)
                 if (!LayersContain(zone.Layers, layer) || zone.Outline?.Polygons.Count == 0) continue;
                 string net = zone.CopperSettings?.Net?.Name ?? "";
                 bool keepout = zone.Type == ZoneType.ZtRuleArea;
+                bool blocksTracks = !keepout || zone.RuleAreaSettings?.KeepoutTracks == true;
+                bool blocksVias = !keepout || zone.RuleAreaSettings?.KeepoutVias == true;
+                if (!blocksTracks) continue;
                 if (!keepout && SameNet(new Net { Name = net }, request.NetName)) continue;
                 long extra = zone.CopperSettings?.Clearance?.ValueNm ?? 0;
                 long margin = checked(extra + request.ClearanceNm + request.WidthNm / 2);
                 PcbRouteGeometry.Region? geometry = PcbRouteGeometry.FromPolySet(zone.Outline!, margin);
                 result.Add(new("zone", zone.Id.Value, net, layer,
                     geometry is null ? PolySetBounds(zone.Outline!, margin) : ToBounds(geometry.Bounds),
-                    keepout ? "rule-area keepout geometry" : "different-net copper zone geometry", geometry));
+                    keepout ? "rule-area keepout geometry" : "different-net copper zone geometry", geometry,
+                    blocksTracks, blocksVias));
             }
             else if (packed.Is(BoardGraphicShape.Descriptor))
             {
@@ -535,7 +539,7 @@ public sealed class PcbHeadlessRoutingTools(InstanceRegistry registry)
                     result.Add(new("shape", shape.Id.Value, shape.Net.Name, shape.Layer, bounds, "copper graphic"));
             }
         }
-        return result.Where(o => Intersects(o.Bounds, request.Bounds!)).OrderBy(o => o.Kind, StringComparer.Ordinal)
+        return result.Where(o => o.BlocksTracks && Intersects(o.Bounds, request.Bounds!)).OrderBy(o => o.Kind, StringComparer.Ordinal)
             .ThenBy(o => o.Id, StringComparer.Ordinal).ToImmutableArray();
     }
 
@@ -545,10 +549,12 @@ public sealed class PcbHeadlessRoutingTools(InstanceRegistry registry)
             kind = o.Kind, id = o.Id, netName = o.NetName, layer = o.Layer.ToString(),
             bounds = new { minXNm = o.Bounds.MinXNm, minYNm = o.Bounds.MinYNm, maxXNm = o.Bounds.MaxXNm, maxYNm = o.Bounds.MaxYNm },
             reason = o.Reason, geometryAware = o.Geometry is not null,
-            geometryMode = o.Geometry?.KeepInside == true ? "keep-inside" : o.Geometry is null ? "bounds" : "filled-region"
+            geometryMode = o.Geometry?.KeepInside == true ? "keep-inside" : o.Geometry is null ? "bounds" : "filled-region",
+            blocksTracks = o.BlocksTracks, blocksVias = o.BlocksVias
         }).ToArray();
 
-    private static SearchResult Search(Grid grid, HashSet<GridNode> blocked, GridNode start, GridNode goal, int maxNodes)
+    private static SearchResult Search(Grid grid, HashSet<GridNode> blocked, GridNode start, GridNode goal,
+        int maxNodes, ImmutableArray<Obstacle> obstacles)
     {
         var queue = new PriorityQueue<GridNode, (int Score, int Sequence)>();
         var distance = new Dictionary<GridNode, int> { [start] = 0 };
@@ -568,7 +574,7 @@ public sealed class PcbHeadlessRoutingTools(InstanceRegistry registry)
             foreach (GridNode direction in Directions)
             {
                 GridNode next = new(current.X + direction.X, current.Y + direction.Y);
-                if (!grid.Contains(next) || blocked.Contains(next)) continue;
+                if (!grid.Contains(next) || blocked.Contains(next) || !grid.EdgeClear(current, next, obstacles)) continue;
                 int nextDistance = distance[current] + 1;
                 if (distance.TryGetValue(next, out int known) && known <= nextDistance) continue;
                 distance[next] = nextDistance; parent[next] = current;
@@ -637,7 +643,7 @@ public sealed class PcbHeadlessRoutingTools(InstanceRegistry registry)
             + SchematicJson.Formatter.Format(state) + "\n"
             + BoardJson.Formatter.Format(ripUp) + "\n"
             + string.Join("\n", obstacles.Select(o =>
-                $"{o.Kind}|{o.Id}|{o.NetName}|{o.Layer}|{o.Bounds.MinXNm},{o.Bounds.MinYNm},{o.Bounds.MaxXNm},{o.Bounds.MaxYNm}"));
+                $"{o.Kind}|{o.Id}|{o.NetName}|{o.Layer}|{o.BlocksTracks}|{o.BlocksVias}|{o.Bounds.MinXNm},{o.Bounds.MinYNm},{o.Bounds.MaxXNm},{o.Bounds.MaxYNm}|{o.Geometry?.CanonicalKey ?? ""}"));
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
     }
 
@@ -789,7 +795,8 @@ public sealed class PcbHeadlessRoutingTools(InstanceRegistry registry)
     private readonly record struct GridNode(int X, int Y);
     private readonly record struct BoundsValue(long MinXNm, long MinYNm, long MaxXNm, long MaxYNm);
     private readonly record struct Obstacle(string Kind, string Id, string NetName, BoardLayer Layer,
-        BoundsValue Bounds, string Reason, PcbRouteGeometry.Region? Geometry = null);
+        BoundsValue Bounds, string Reason, PcbRouteGeometry.Region? Geometry = null,
+        bool BlocksTracks = true, bool BlocksVias = true);
     private readonly record struct SearchResult(ImmutableArray<GridNode>? Path, int ExploredNodes);
 
     private sealed class Grid(RouteBounds bounds, long size)
@@ -799,6 +806,25 @@ public sealed class PcbHeadlessRoutingTools(InstanceRegistry registry)
         public GridNode Node(RoutePoint point) => new(checked((int)((point.XNm - bounds.MinXNm) / size)), checked((int)((point.YNm - bounds.MinYNm) / size)));
         public Vector2 Point(GridNode node) => new() { XNm = checked(bounds.MinXNm + (long)node.X * size), YNm = checked(bounds.MinYNm + (long)node.Y * size) };
         public bool Contains(GridNode node) => node.X >= 0 && node.X < Width && node.Y >= 0 && node.Y < Height;
+        public bool EdgeClear(GridNode from, GridNode to, ImmutableArray<Obstacle> obstacles)
+        {
+            Vector2 start = Point(from), end = Point(to);
+            foreach (Obstacle obstacle in obstacles)
+            {
+                if (!obstacle.BlocksTracks || !BoundsIntersectsSegment(obstacle.Bounds, start, end)) continue;
+                if (obstacle.Geometry is null || obstacle.Geometry.BlocksSegment(start.XNm, start.YNm, end.XNm, end.YNm))
+                    return false;
+            }
+            return true;
+        }
+
+        private static bool BoundsIntersectsSegment(BoundsValue bounds, Vector2 start, Vector2 end)
+        {
+            long minX = Math.Min(start.XNm, end.XNm), maxX = Math.Max(start.XNm, end.XNm);
+            long minY = Math.Min(start.YNm, end.YNm), maxY = Math.Max(start.YNm, end.YNm);
+            return maxX >= bounds.MinXNm && minX <= bounds.MaxXNm
+                && maxY >= bounds.MinYNm && minY <= bounds.MaxYNm;
+        }
         public HashSet<GridNode> Blocked(ImmutableArray<Obstacle> obstacles)
         {
             var blocked = new HashSet<GridNode>();
@@ -841,6 +867,9 @@ internal static class PcbRouteGeometry
         private readonly long margin;
         internal bool KeepInside { get; }
         internal Bounds Bounds { get; }
+        internal string CanonicalKey => string.Join(";", Polygons.Select(p =>
+            string.Join(",", p.Outline.Select(point => $"{point.XNm}:{point.YNm}")) + "/"
+            + string.Join("/", p.Holes.Select(hole => string.Join(",", hole.Select(point => $"{point.XNm}:{point.YNm}"))))));
 
         internal Region(ImmutableArray<Polygon> polygons, long margin, bool keepInside, Bounds bounds)
         {
@@ -849,17 +878,26 @@ internal static class PcbRouteGeometry
 
         internal bool Blocks(long xNm, long yNm)
         {
-            Point point = new(xNm, yNm);
+            return Blocks(new Point(xNm, yNm), margin);
+        }
+
+        internal bool Blocks(long xNm, long yNm, long extraMargin)
+            => Blocks(new Point(xNm, yNm), checked(margin + Math.Max(0, extraMargin)));
+
+        internal bool BlocksSegment(long startXNm, long startYNm, long endXNm, long endYNm)
+            => BlocksSegment(new Point(startXNm, startYNm), new Point(endXNm, endYNm), margin);
+
+        internal bool BlocksSegment(long startXNm, long startYNm, long endXNm, long endYNm, long extraMargin)
+            => BlocksSegment(new Point(startXNm, startYNm), new Point(endXNm, endYNm),
+                checked(margin + Math.Max(0, extraMargin)));
+
+        private bool Blocks(Point point, long effectiveMargin)
+        {
             if (KeepInside)
             {
-                foreach (Polygon polygon in Polygons)
-                {
-                    if (!Inside(polygon, point)) continue;
-                    if (DistanceToRing(polygon.Outline, point) <= margin
-                        || polygon.Holes.Any(hole => DistanceToRing(hole, point) <= margin)) return true;
-                    return false;
-                }
-                return true;
+                bool inside = Polygons.Any(polygon => Inside(polygon, point)
+                    && DistanceToPolygonBoundary(polygon, point) > effectiveMargin);
+                return !inside;
             }
 
             foreach (Polygon polygon in Polygons)
@@ -867,13 +905,41 @@ internal static class PcbRouteGeometry
                 bool insideOuter = PointInRing(polygon.Outline, point);
                 if (insideOuter && !polygon.Holes.Any(hole => PointInRing(hole, point))) return true;
                 if (insideOuter && polygon.Holes.Any(hole => PointInRing(hole, point)
-                    && DistanceToRing(hole, point) <= margin)) return true;
-                if (!insideOuter && DistanceToRing(polygon.Outline, point) <= margin) return true;
+                    && DistanceToRing(hole, point) <= effectiveMargin)) return true;
+                if (!insideOuter && DistanceToRing(polygon.Outline, point) <= effectiveMargin) return true;
                 if (insideOuter && polygon.Holes.Any(hole => !PointInRing(hole, point)
-                    && DistanceToRing(hole, point) <= margin)) return true;
+                    && DistanceToRing(hole, point) <= effectiveMargin)) return true;
             }
             return false;
         }
+
+        private bool BlocksSegment(Point start, Point end, long effectiveMargin)
+        {
+            if (start == end) return Blocks(start, effectiveMargin);
+            if (KeepInside)
+            {
+                if (Blocks(start.XNm, start.YNm, effectiveMargin - margin)
+                    || Blocks(end.XNm, end.YNm, effectiveMargin - margin)) return true;
+                return Polygons.SelectMany(polygon => Rings(polygon))
+                    .Any(ring => DistanceToRingSegment(ring, start, end) <= effectiveMargin);
+            }
+
+            if (Polygons.Any(polygon => PointInRing(polygon.Outline, start)
+                    && !polygon.Holes.Any(hole => PointInRing(hole, start)))
+                || Polygons.Any(polygon => PointInRing(polygon.Outline, end)
+                    && !polygon.Holes.Any(hole => PointInRing(hole, end)))) return true;
+            return Polygons.SelectMany(polygon => Rings(polygon))
+                .Any(ring => DistanceToRingSegment(ring, start, end) <= effectiveMargin);
+        }
+
+        private static IEnumerable<ImmutableArray<Point>> Rings(Polygon polygon)
+        {
+            yield return polygon.Outline;
+            foreach (ImmutableArray<Point> hole in polygon.Holes) yield return hole;
+        }
+
+        private static double DistanceToPolygonBoundary(Polygon polygon, Point point)
+            => Rings(polygon).Min(ring => DistanceToRing(ring, point));
 
         private bool Inside(Polygon polygon, Point point)
             => PointInRing(polygon.Outline, point)
@@ -896,8 +962,8 @@ internal static class PcbRouteGeometry
             GraphicShape.GeometryOneofCase.Polygon => FromPolySet(shape.Polygon, margin),
             GraphicShape.GeometryOneofCase.Rectangle => Create(
                 ImmutableArray.Create(new Polygon(Rectangle(shape.Rectangle.TopLeft, shape.Rectangle.BottomRight).ToImmutableArray(), [])), margin, false),
-            GraphicShape.GeometryOneofCase.Circle => Create(
-                [new Polygon(Circle(shape.Circle.Center, shape.Circle.RadiusPoint), [])], margin, false),
+            GraphicShape.GeometryOneofCase.Circle => throw UnsupportedCurve("circle"),
+            GraphicShape.GeometryOneofCase.Arc => throw UnsupportedCurve("arc"),
             _ => null
         };
     }
@@ -905,26 +971,34 @@ internal static class PcbRouteGeometry
     internal static Region? FromEdgeCuts(IEnumerable<BoardGraphicShape> shapes, long margin)
     {
         BoardGraphicShape[] edge = shapes.Where(shape => shape.Layer == BoardLayer.BlEdgeCuts).ToArray();
+        foreach (BoardGraphicShape shape in edge)
+        {
+            GraphicShape.GeometryOneofCase geometry = shape.Shape?.GeometryCase ?? GraphicShape.GeometryOneofCase.None;
+            if (geometry is not (GraphicShape.GeometryOneofCase.Polygon or GraphicShape.GeometryOneofCase.Rectangle
+                or GraphicShape.GeometryOneofCase.Segment or GraphicShape.GeometryOneofCase.Circle
+                or GraphicShape.GeometryOneofCase.Arc))
+                throw new AutomationException("invalid_route_edge_cuts", "Edge.Cuts contains unsupported or missing geometry.");
+        }
         var direct = edge.Select(shape => shape.Shape?.GeometryCase switch
         {
             GraphicShape.GeometryOneofCase.Polygon => FromPolySet(shape.Shape.Polygon, margin, true),
             GraphicShape.GeometryOneofCase.Rectangle => Create(
                 ImmutableArray.Create(new Polygon(Rectangle(shape.Shape.Rectangle.TopLeft, shape.Shape.Rectangle.BottomRight).ToImmutableArray(), [])), margin, true),
-            GraphicShape.GeometryOneofCase.Circle => Create(
-                [new Polygon(Circle(shape.Shape.Circle.Center, shape.Shape.Circle.RadiusPoint), [])], margin, true),
+            GraphicShape.GeometryOneofCase.Circle => throw UnsupportedCurve("edge-cuts circle"),
+            GraphicShape.GeometryOneofCase.Arc => throw UnsupportedCurve("edge-cuts arc"),
             _ => null
         }).Where(region => region is not null).Select(region => region!).ToArray();
-        if (direct.Length != 0)
-            return Merge(direct, margin, true);
-
-        // Segment-only Edge.Cuts are common in native boards. A convex hull is
-        // a safe fallback for disconnected or unordered segments; coverage is
-        // reported as geometry-aware but conservative by the caller.
-        var points = edge.SelectMany(shape => shape.Shape?.GeometryCase == GraphicShape.GeometryOneofCase.Segment
-            ? new[] { ToPoint(shape.Shape.Segment.Start), ToPoint(shape.Shape.Segment.End) }
-            : Array.Empty<Point>()).ToArray();
-        ImmutableArray<Point> hull = ConvexHull(points);
-        return hull.Length >= 3 ? Create([new Polygon(hull, [])], margin, true) : null;
+        var segments = edge.Where(shape => shape.Shape?.GeometryCase == GraphicShape.GeometryOneofCase.Segment)
+            .Select(shape => (ToPoint(shape.Shape!.Segment.Start), ToPoint(shape.Shape.Segment.End))).ToArray();
+        if (segments.Length != 0)
+        {
+            if (direct.Length != 0)
+                throw new AutomationException("invalid_route_edge_cuts", "Edge.Cuts cannot mix closed polygon and segment-loop representations.");
+            ImmutableArray<ImmutableArray<Point>> contours = BuildContours(segments);
+            ImmutableArray<Polygon> polygons = ClassifyContours(contours);
+            return Create(polygons, margin, true);
+        }
+        return direct.Length == 0 ? null : Merge(direct, margin, true);
     }
 
     private static Region? Merge(IEnumerable<Region> regions, long margin, bool keepInside)
@@ -954,11 +1028,7 @@ internal static class PcbRouteGeometry
             if (node.GeometryCase == PolyLineNode.GeometryOneofCase.Point)
                 AddDistinct(points, ToPoint(node.Point));
             else if (node.GeometryCase == PolyLineNode.GeometryOneofCase.Arc)
-            {
-                AddDistinct(points, ToPoint(node.Arc.Start));
-                AddDistinct(points, ToPoint(node.Arc.Mid));
-                AddDistinct(points, ToPoint(node.Arc.End));
-            }
+                throw UnsupportedCurve("polyline arc");
         }
         if (points.Count > 1 && points[0] == points[^1]) points.RemoveAt(points.Count - 1);
         return points.ToImmutableArray();
@@ -969,20 +1039,6 @@ internal static class PcbRouteGeometry
             new(Math.Max(topLeft.XNm, bottomRight.XNm), Math.Min(topLeft.YNm, bottomRight.YNm)),
             new(Math.Max(topLeft.XNm, bottomRight.XNm), Math.Max(topLeft.YNm, bottomRight.YNm)),
             new(Math.Min(topLeft.XNm, bottomRight.XNm), Math.Max(topLeft.YNm, bottomRight.YNm))];
-
-    private static ImmutableArray<Point> Circle(Vector2 center, Vector2 radiusPoint)
-    {
-        double radius = Math.Sqrt(Math.Pow((double)radiusPoint.XNm - center.XNm, 2)
-            + Math.Pow((double)radiusPoint.YNm - center.YNm, 2));
-        var points = ImmutableArray.CreateBuilder<Point>(32);
-        for (int index = 0; index < 32; index++)
-        {
-            double angle = 2 * Math.PI * index / 32;
-            points.Add(new(checked((long)Math.Round(center.XNm + radius * Math.Cos(angle))),
-                checked((long)Math.Round(center.YNm + radius * Math.Sin(angle)))));
-        }
-        return points.ToImmutable();
-    }
 
     private static Point ToPoint(Vector2 point) => new(point.XNm, point.YNm);
     private static void AddDistinct(List<Point> points, Point point)
@@ -1033,28 +1089,141 @@ internal static class PcbRouteGeometry
         return Math.Sqrt(Math.Pow(point.XNm - x, 2) + Math.Pow(point.YNm - y, 2));
     }
 
-    private static ImmutableArray<Point> ConvexHull(IEnumerable<Point> source)
+    private static double DistanceToRingSegment(ImmutableArray<Point> ring, Point start, Point end)
     {
-        Point[] points = source.Distinct().OrderBy(point => point.XNm).ThenBy(point => point.YNm).ToArray();
-        if (points.Length <= 1) return points.ToImmutableArray();
-        var lower = new List<Point>();
-        foreach (Point point in points)
+        if (ring.Length == 0) return double.PositiveInfinity;
+        double best = double.PositiveInfinity;
+        for (int index = 0; index < ring.Length; index++)
         {
-            while (lower.Count >= 2 && Cross(lower[^2], lower[^1], point) <= 0) lower.RemoveAt(lower.Count - 1);
-            lower.Add(point);
+            Point edgeStart = ring[index], edgeEnd = ring[(index + 1) % ring.Length];
+            if (SegmentsIntersect(start, end, edgeStart, edgeEnd)) return 0;
+            best = Math.Min(best, DistanceToSegment(edgeStart, edgeEnd, start));
+            best = Math.Min(best, DistanceToSegment(edgeStart, edgeEnd, end));
+            best = Math.Min(best, DistanceToSegment(start, end, edgeStart));
+            best = Math.Min(best, DistanceToSegment(start, end, edgeEnd));
         }
-        var upper = new List<Point>();
-        foreach (Point point in points.Reverse())
-        {
-            while (upper.Count >= 2 && Cross(upper[^2], upper[^1], point) <= 0) upper.RemoveAt(upper.Count - 1);
-            upper.Add(point);
-        }
-        lower.RemoveAt(lower.Count - 1); upper.RemoveAt(upper.Count - 1);
-        lower.AddRange(upper);
-        return lower.ToImmutableArray();
+        return best;
+    }
+
+    private static bool SegmentsIntersect(Point a, Point b, Point c, Point d)
+    {
+        double abC = Cross(a, b, c), abD = Cross(a, b, d), cdA = Cross(c, d, a), cdB = Cross(c, d, b);
+        bool proper = ((abC > 0 && abD < 0) || (abC < 0 && abD > 0))
+            && ((cdA > 0 && cdB < 0) || (cdA < 0 && cdB > 0));
+        return proper || (Math.Abs(abC) < 0.5 && OnSegment(a, b, c))
+            || (Math.Abs(abD) < 0.5 && OnSegment(a, b, d))
+            || (Math.Abs(cdA) < 0.5 && OnSegment(c, d, a))
+            || (Math.Abs(cdB) < 0.5 && OnSegment(c, d, b));
     }
 
     private static double Cross(Point a, Point b, Point c)
         => ((double)b.XNm - a.XNm) * ((double)c.YNm - a.YNm)
             - ((double)b.YNm - a.YNm) * ((double)c.XNm - a.XNm);
+
+    private static AutomationException UnsupportedCurve(string kind)
+        => new("unsupported_route_curve", $"Deterministic route geometry refuses {kind}; exact curved obstacle coverage is unavailable.");
+
+    private static ImmutableArray<ImmutableArray<Point>> BuildContours(
+        IReadOnlyList<(Point Start, Point End)> segments)
+    {
+        var adjacency = new Dictionary<Point, List<int>>();
+        var edges = new HashSet<(Point, Point)>();
+        for (int index = 0; index < segments.Count; index++)
+        {
+            Point start = segments[index].Start, end = segments[index].End;
+            if (start == end) throw new AutomationException("invalid_route_edge_cuts", "Edge.Cuts contains a zero-length segment.");
+            (Point, Point) key = Lexicographic(start, end);
+            if (!edges.Add(key)) throw new AutomationException("invalid_route_edge_cuts", "Edge.Cuts contains duplicate segments.");
+            adjacency.GetOrAdd(start).Add(index);
+            adjacency.GetOrAdd(end).Add(index);
+        }
+        if (adjacency.Any(pair => pair.Value.Count != 2))
+            throw new AutomationException("invalid_route_edge_cuts", "Edge.Cuts contours must be closed degree-two loops; open or branching topology was refused.");
+
+        for (int first = 0; first < segments.Count; first++)
+            for (int second = first + 1; second < segments.Count; second++)
+            {
+                bool share = segments[first].Start == segments[second].Start || segments[first].Start == segments[second].End
+                    || segments[first].End == segments[second].Start || segments[first].End == segments[second].End;
+                if (!share && SegmentsIntersect(segments[first].Start, segments[first].End, segments[second].Start, segments[second].End))
+                    throw new AutomationException("invalid_route_edge_cuts", "Edge.Cuts contains a self-crossing contour.");
+            }
+
+        var visited = new HashSet<int>();
+        var contours = new List<ImmutableArray<Point>>();
+        while (visited.Count < segments.Count)
+        {
+            int seed = Enumerable.Range(0, segments.Count).Where(index => !visited.Contains(index))
+                .OrderBy(index => Math.Min(segments[index].Start.XNm, segments[index].End.XNm))
+                .ThenBy(index => Math.Min(segments[index].Start.YNm, segments[index].End.YNm))
+                .ThenBy(index => Math.Max(segments[index].Start.XNm, segments[index].End.XNm))
+                .ThenBy(index => Math.Max(segments[index].Start.YNm, segments[index].End.YNm)).First();
+            Point start = Lexicographic(segments[seed].Start, segments[seed].End).Item1;
+            Point previous = start, current = Lexicographic(segments[seed].Start, segments[seed].End).Item2;
+            var contour = new List<Point> { start };
+            int edge = seed;
+            while (true)
+            {
+                visited.Add(edge);
+                contour.Add(current);
+                if (current == start) break;
+                int next = adjacency[current].Single(candidate => candidate != edge && !visited.Contains(candidate));
+                Point nextPoint = segments[next].Start == current ? segments[next].End : segments[next].Start;
+                previous = current; current = nextPoint; edge = next;
+                if (contour.Count > segments.Count + 2)
+                    throw new AutomationException("invalid_route_edge_cuts", "Edge.Cuts contour traversal exceeded its bounded segment count.");
+            }
+            contour.RemoveAt(contour.Count - 1);
+            contours.Add(contour.ToImmutableArray());
+        }
+        return contours.OrderBy(contour => contour.Min(point => point.XNm))
+            .ThenBy(contour => contour.Min(point => point.YNm))
+            .ThenBy(contour => string.Join(";", contour.Select(point => $"{point.XNm}:{point.YNm}")), StringComparer.Ordinal)
+            .ToImmutableArray();
+    }
+
+    private static ImmutableArray<Polygon> ClassifyContours(ImmutableArray<ImmutableArray<Point>> contours)
+    {
+        if (contours.Any(contour => contour.Length < 3))
+            throw new AutomationException("invalid_route_edge_cuts", "Edge.Cuts contours must contain at least three vertices.");
+        for (int left = 0; left < contours.Length; left++)
+            for (int right = left + 1; right < contours.Length; right++)
+                if (RingsIntersect(contours[left], contours[right]))
+                    throw new AutomationException("invalid_route_edge_cuts", "Edge.Cuts contours intersect or touch each other.");
+
+        int[] depth = new int[contours.Length];
+        for (int index = 0; index < contours.Length; index++)
+            depth[index] = Enumerable.Range(0, contours.Length)
+                .Count(otherIndex => otherIndex != index && PointInRing(contours[otherIndex], contours[index][0]));
+
+        var polygons = new List<Polygon>();
+        for (int index = 0; index < contours.Length; index++)
+        {
+            if ((depth[index] & 1) != 0) continue;
+            var holes = contours.Where((_, candidate) => (depth[candidate] & 1) != 0
+                && depth[candidate] == depth[index] + 1
+                && PointInRing(contours[index], contours[candidate][0])).ToImmutableArray();
+            polygons.Add(new(contours[index], holes));
+        }
+        return polygons.ToImmutableArray();
+    }
+
+    private static bool RingsIntersect(ImmutableArray<Point> left, ImmutableArray<Point> right)
+    {
+        for (int leftIndex = 0; leftIndex < left.Length; leftIndex++)
+            for (int rightIndex = 0; rightIndex < right.Length; rightIndex++)
+                if (SegmentsIntersect(left[leftIndex], left[(leftIndex + 1) % left.Length],
+                    right[rightIndex], right[(rightIndex + 1) % right.Length])) return true;
+        return false;
+    }
+
+    private static (Point, Point) Lexicographic(Point left, Point right)
+        => left.XNm < right.XNm || (left.XNm == right.XNm && left.YNm <= right.YNm) ? (left, right) : (right, left);
+
+    private static List<T> GetOrAdd<TKey, T>(this Dictionary<TKey, List<T>> dictionary, TKey key)
+        where TKey : notnull
+    {
+        if (!dictionary.TryGetValue(key, out List<T>? value)) dictionary[key] = value = [];
+        return value;
+    }
 }

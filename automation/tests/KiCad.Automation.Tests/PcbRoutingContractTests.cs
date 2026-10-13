@@ -16,6 +16,83 @@ namespace KiCad.Automation.Tests;
 public sealed class PcbRoutingContractTests
 {
     [TestMethod]
+    public void ConcaveContoursAndNestedHolesArePreservedWithoutInventingAllowedSpace()
+    {
+        BoardGraphicShape[] edges =
+        [
+            Edge(0, 0, 10_000, 0), Edge(10_000, 0, 10_000, 10_000),
+            Edge(10_000, 10_000, 6_000, 10_000), Edge(6_000, 10_000, 6_000, 4_000),
+            Edge(6_000, 4_000, 0, 4_000), Edge(0, 4_000, 0, 0),
+            Edge(2_000, 1_000, 4_000, 1_000), Edge(4_000, 1_000, 4_000, 3_000),
+            Edge(4_000, 3_000, 2_000, 3_000), Edge(2_000, 3_000, 2_000, 1_000)
+        ];
+        PcbRouteGeometry.Region region = PcbRouteGeometry.FromEdgeCuts(edges, 0)!;
+
+        Assert.IsFalse(region.Blocks(1_000, 1_000));
+        Assert.IsFalse(region.Blocks(8_000, 8_000));
+        Assert.IsTrue(region.Blocks(2_000, 8_000), "A concave outside region must remain unavailable.");
+        Assert.IsTrue(region.Blocks(3_000, 2_000), "A nested contour must remain a hole.");
+
+        static BoardGraphicShape Edge(long x1, long y1, long x2, long y2) => new()
+        {
+            Layer = BoardLayer.BlEdgeCuts,
+            Shape = new GraphicShape { Segment = new() { Start = new() { XNm = x1, YNm = y1 }, End = new() { XNm = x2, YNm = y2 } } }
+        };
+    }
+
+    [TestMethod]
+    public void ThinGeometryBetweenGridNodesBlocksTheWholeRouteSegment()
+    {
+        PolySet barrier = RectanglePolySet(4_900, 4_500, 5_100, 5_500);
+        PcbRouteGeometry.Region region = PcbRouteGeometry.FromPolySet(barrier, 0)!;
+        Assert.IsTrue(region.BlocksSegment(0, 5_000, 10_000, 5_000));
+        Assert.IsFalse(region.BlocksSegment(0, 1_000, 10_000, 1_000));
+    }
+
+    [TestMethod]
+    public void MalformedContoursAndUnsupportedCurvesFailClosed()
+    {
+        BoardGraphicShape[] open = [new()
+        {
+            Layer = BoardLayer.BlEdgeCuts,
+            Shape = new GraphicShape { Segment = new() { Start = new() { XNm = 0, YNm = 0 }, End = new() { XNm = 10, YNm = 0 } } }
+        }];
+        AutomationException openError = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbRouteGeometry.FromEdgeCuts(open, 0));
+        Assert.AreEqual("invalid_route_edge_cuts", openError.Code);
+
+        GraphicShape curved = new() { Circle = new() { Center = new(), RadiusPoint = new() { XNm = 10, YNm = 0 } } };
+        AutomationException curveError = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbRouteGeometry.FromGraphic(curved, 0));
+        Assert.AreEqual("unsupported_route_curve", curveError.Code);
+    }
+
+    [TestMethod]
+    public void WiderViaClearanceIsAppliedToGeometryBoundaries()
+    {
+        PcbRouteGeometry.Region region = PcbRouteGeometry.FromPolySet(RectanglePolySet(0, 0, 10_000, 10_000), 0)!;
+        Assert.IsFalse(region.Blocks(5_000, 5_000));
+        Assert.IsTrue(region.Blocks(5_000, 5_000, 6_000), "A via radius that reaches the boundary must be refused.");
+    }
+
+    private static PolySet RectanglePolySet(long minX, long minY, long maxX, long maxY) => new()
+    {
+        Polygons =
+        {
+            new PolygonWithHoles
+            {
+                Outline = new PolyLine { Closed = true, Nodes =
+                {
+                    new PolyLineNode { Point = new() { XNm = minX, YNm = minY } },
+                    new PolyLineNode { Point = new() { XNm = maxX, YNm = minY } },
+                    new PolyLineNode { Point = new() { XNm = maxX, YNm = maxY } },
+                    new PolyLineNode { Point = new() { XNm = minX, YNm = maxY } }
+                } }
+            }
+        }
+    };
+
+    [TestMethod]
     public void GeometryAwareZonesRespectHolesAndClearance()
     {
         var zone = new PolySet

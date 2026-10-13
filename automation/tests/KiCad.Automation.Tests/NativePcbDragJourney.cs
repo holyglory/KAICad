@@ -205,29 +205,7 @@ public sealed partial class NativeSessionTests
                 }
                 catch (OperationCanceledException) when (!token.IsCancellationRequested) { return null; }
             }
-            Track? changedTrack = await WaitForChanged(TimeSpan.FromSeconds(2));
-            string routerShortcut = "G";
-            if (changedTrack is null)
-            {
-                // Some KiCad profiles bind the selected-track drag action to
-                // the constrained 45-degree router (D). Preserve the free
-                // angle G attempt first, then retry through the native drag
-                // action without weakening the exact geometry proof.
-                NativeKeyboard.SchematicShortcut(display, processId, "Escape", "PCB Editor", false, false);
-                var fallbackSelection = await client.InvokeAsync<AddToSelection, SelectionResponse>(selection, token);
-                Assert.IsTrue(fallbackSelection.Items.Any(item => item.Is(Track.Descriptor)
-                    && item.Unpack<Track>().Id.Value == trackId));
-                NativeKeyboard.SchematicShortcut(display, processId, "click", "PCB Editor", false, false,
-                    clickFromLeft: centerX, clickFromTop: centerY);
-                NativeKeyboard.SchematicShortcut(display, processId, "d", "PCB Editor", false, false);
-                foreach ((int x, int y) in new[] { (centerX + 8, centerY + 2), (centerX + 16, centerY + 6) })
-                    NativeKeyboard.SchematicShortcut(display, processId, "motion", "PCB Editor", false, false,
-                        clickFromLeft: x, clickFromTop: y);
-                NativeKeyboard.SchematicShortcut(display, processId, "click", "PCB Editor", false, false,
-                    clickFromLeft: centerX + 16, clickFromTop: centerY + 6);
-                changedTrack = await WaitForChanged(TimeSpan.FromSeconds(10));
-                routerShortcut = "D";
-            }
+            Track? changedTrack = await WaitForChanged(TimeSpan.FromSeconds(10));
             Assert.IsNotNull(changedTrack, "A native PCB drag action must change the selected route geometry.");
             Track committedTrack = changedTrack!;
             Assert.IsTrue(NativeKeyboard.HasWindow(display, processId, "PCB Editor"),
@@ -323,7 +301,6 @@ public sealed partial class NativeSessionTests
                     trackId, padIds = seededPadIds.Select(id => id.Value).ToArray(),
                     before = DescribeRouteItem(Any.Pack(seededRoute)),
                     after = DescribeRouteItem(Any.Pack(committedTrack)),
-                    routerShortcut,
                     beforeConnected, changedConnected, undoConnected, redoConnected, persistedConnectedIds,
                     guiRouter = true, undoRedo = true, saveReopen = true
                 }), token);

@@ -37,8 +37,8 @@ public sealed class PcbFootprintTypedMcpProcessTests
 
             JsonObject inputJson = PcbFootprintTypedFixture.Json();
             JsonElement result = await mcp.Tool("kicad_pcb_footprint_place_plan_typed", new { input = inputJson });
-            Assert.IsFalse(result.GetProperty("isError").GetBoolean(), result.GetRawText());
-            Assert.IsFalse(result.GetProperty("isError").GetBoolean(), result.GetRawText());
+            if (result.TryGetProperty("isError", out JsonElement isError))
+                Assert.IsFalse(isError.GetBoolean(), result.GetRawText());
             JsonElement data = result.GetProperty("structuredContent");
             Assert.IsTrue(data.GetProperty("proposalOnly").GetBoolean());
             Assert.IsFalse(data.GetProperty("nativeCommit").GetBoolean());

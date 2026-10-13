@@ -94,6 +94,93 @@ public sealed class PcbRouteOptimizationTests
     }
 
     [TestMethod]
+    public void RouteTuningBuildsARealDetourFromTheReferenceCenterline()
+    {
+        var reference = new List<Vector2>
+        {
+            new() { XNm = 0, YNm = 0 },
+            new() { XNm = 100, YNm = 0 }
+        };
+        var request = new PcbRouteTuningTools.TuneRequest
+        {
+            NetName = "N", Layer = "F.Cu", Centerline = reference,
+            WidthNm = 10, ClearanceNm = 10, TargetAdditionalLengthNm = 40,
+            PitchNm = 20, MaxSegments = 16,
+            Corridor = new() { MinXNm = -20, MinYNm = -100, MaxXNm = 120, MaxYNm = 100 }
+        };
+
+        PcbRouteTuningTools.Validate(request);
+        var tuned = PcbRouteTuningTools.BuildPath(request);
+
+        Assert.AreEqual(reference[0], tuned[0]);
+        Assert.AreEqual(reference[^1], tuned[^1]);
+        Assert.AreEqual(100, PcbRouteTuningTools.PathLength(reference));
+        Assert.AreEqual(140, PcbRouteTuningTools.PathLength(tuned));
+        Assert.IsTrue(tuned.Count > reference.Count);
+        Assert.IsTrue(tuned.Count - 1 <= request.MaxSegments);
+        for (int index = 1; index < tuned.Count; index++)
+            Assert.IsTrue(tuned[index - 1].XNm == tuned[index].XNm || tuned[index - 1].YNm == tuned[index].YNm,
+                "The generated candidate must remain axis-aligned.");
+    }
+
+    [TestMethod]
+    public void RouteTuningRejectsInfeasibleGeometryAndNonCopperLayers()
+    {
+        var baseRequest = new PcbRouteTuningTools.TuneRequest
+        {
+            NetName = "N", Layer = "F.Cu",
+            Start = new() { XNm = 0, YNm = 0 }, End = new() { XNm = 100, YNm = 0 },
+            WidthNm = 10, ClearanceNm = 10, TargetAdditionalLengthNm = 40,
+            PitchNm = 20, MaxSegments = 3,
+            Corridor = new() { MinXNm = -20, MinYNm = -100, MaxXNm = 120, MaxYNm = 100 }
+        };
+        PcbRouteTuningTools.Validate(baseRequest);
+        Assert.ThrowsExactly<AutomationException>(() => PcbRouteTuningTools.BuildPath(baseRequest));
+
+        baseRequest.MaxSegments = 16;
+        baseRequest.Layer = "F.Mask";
+        Assert.ThrowsExactly<AutomationException>(() => PcbRouteTuningTools.Validate(baseRequest));
+
+        baseRequest.Layer = "F.Cu";
+        baseRequest.Corridor = new() { MinXNm = -5, MinYNm = -5, MaxXNm = 105, MaxYNm = 5 };
+        Assert.ThrowsExactly<AutomationException>(() => PcbRouteTuningTools.Validate(baseRequest));
+    }
+
+    [TestMethod]
+    public void RouteTuningPlanIdentityIncludesIndependentLifecycleIdentities()
+    {
+        DocumentSpecifier document = Document();
+        var reference = new[] { new Vector2 { XNm = 0, YNm = 0 }, new Vector2 { XNm = 100, YNm = 0 } };
+        var request = new PcbRouteTuningTools.TuneRequest
+        {
+            NetName = "N", Layer = "F.Cu", Centerline = reference.ToList(),
+            WidthNm = 10, ClearanceNm = 10, TargetAdditionalLengthNm = 40,
+            PitchNm = 20, MaxSegments = 16,
+            Corridor = new() { MinXNm = -20, MinYNm = -100, MaxXNm = 120, MaxYNm = 100 }
+        };
+        var expected = new DocumentLifecycleState
+        {
+            Document = document, Scope = DocumentLifecycleScope.DlsPcb,
+            ProcessEpoch = "process-a", NativeIdentity = "native-a", StateSha256 = "state-a",
+            Revision = new() { Epoch = "revision-a", Sequence = 1 }
+        };
+
+        string first = PcbRouteTuningTools.BuildPlanId(document, expected, request, BoardLayer.BlFCu, reference);
+        expected.NativeIdentity = "native-b";
+        string nativeChanged = PcbRouteTuningTools.BuildPlanId(document, expected, request, BoardLayer.BlFCu, reference);
+        expected.NativeIdentity = "native-a";
+        expected.ProcessEpoch = "process-b";
+        string processChanged = PcbRouteTuningTools.BuildPlanId(document, expected, request, BoardLayer.BlFCu, reference);
+        expected.ProcessEpoch = "process-a";
+        expected.Revision.Sequence = 2;
+        string revisionChanged = PcbRouteTuningTools.BuildPlanId(document, expected, request, BoardLayer.BlFCu, reference);
+
+        Assert.AreNotEqual(first, nativeChanged);
+        Assert.AreNotEqual(first, processChanged);
+        Assert.AreNotEqual(first, revisionChanged);
+    }
+
+    [TestMethod]
     public void DrcReplacementBuildsExactCheckedRouteRequestForReplay()
     {
         string root = Directory.CreateTempSubdirectory("pcb-route-checked-").FullName;

@@ -14,20 +14,23 @@ internal static class RasterTraceProjectionAssertions
         IReadOnlyList<Point> Points);
 
     internal static void AssertAgainstProposal(JsonElement trace,
-        IReadOnlyCollection<string> expectedNativeIds, IEnumerable<Polygon> polygons,
+        IReadOnlyCollection<string>? expectedNativeIds, IEnumerable<Polygon> polygons,
         long originXNm, long originYNm, string context)
     {
         JsonElement[] expectedPieces = trace.GetProperty("filledPieces").EnumerateArray().ToArray();
         Polygon[] actualPolygons = polygons.ToArray();
         Assert.AreEqual(expectedPieces.Length, actualPolygons.Length, context + ": piece count");
 
-        string[] expectedIds = expectedNativeIds.ToArray();
         string[] actualIds = actualPolygons.Select(polygon => polygon.NativeId).ToArray();
-        Assert.AreEqual(expectedIds.Length, expectedIds.Distinct(StringComparer.Ordinal).Count(),
-            context + ": expected native IDs must be unique");
         Assert.AreEqual(actualIds.Length, actualIds.Distinct(StringComparer.Ordinal).Count(),
             context + ": projected native IDs must be unique");
-        CollectionAssert.AreEquivalent(expectedIds, actualIds, context + ": native IDs");
+        if (expectedNativeIds is not null)
+        {
+            string[] expectedIds = expectedNativeIds.ToArray();
+            Assert.AreEqual(expectedIds.Length, expectedIds.Distinct(StringComparer.Ordinal).Count(),
+                context + ": expected native IDs must be unique");
+            CollectionAssert.AreEquivalent(expectedIds, actualIds, context + ": native IDs");
+        }
 
         string[] expectedPieceIds = expectedPieces
             .Select(piece => piece.GetProperty("id").GetString() ?? string.Empty).ToArray();

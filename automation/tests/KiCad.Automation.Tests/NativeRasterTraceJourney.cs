@@ -568,7 +568,7 @@ public sealed partial class NativeSessionTests
                 CollectionAssert.AreEqual(expected, geometry, context + ": shape " + shape.Id.Value);
             }
         }
-        RasterTraceProjectionAssertions.AssertAgainstProposal(trace, createdIds, projectedPolygons,
+        RasterTraceProjectionAssertions.AssertAgainstProposal(trace, null, projectedPolygons,
             0, 0, context);
         return actualGeometry;
     }

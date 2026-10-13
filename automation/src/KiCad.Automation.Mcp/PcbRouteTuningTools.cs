@@ -90,6 +90,7 @@ public sealed class PcbRouteTuningTools(InstanceRegistry registry)
         public string Layer { get; set; } = "";
         public Vector2? Start { get; set; }
         public Vector2? End { get; set; }
+        public List<Vector2>? Centerline { get; set; }
         public long WidthNm { get; set; }
         public long ClearanceNm { get; set; }
         public long TargetAdditionalLengthNm { get; set; }
@@ -103,24 +104,66 @@ public sealed class PcbRouteTuningTools(InstanceRegistry registry)
 
     private static void Validate(TuneRequest request)
     {
-        if (string.IsNullOrWhiteSpace(request.NetName) || request.NetName.Length > 512 || request.Start is null || request.End is null || request.Corridor is null)
-            throw new AutomationException("invalid_route_tune", "netName, start, end and corridor are required.");
+        if (string.IsNullOrWhiteSpace(request.NetName) || request.NetName.Length > 512
+            || request.Corridor is null
+            || (request.Centerline is null && (request.Start is null || request.End is null)))
+            throw new AutomationException("invalid_route_tune", "netName, corridor and either start/end or centerline are required.");
         if (request.WidthNm <= 0 || request.ClearanceNm < 0 || request.PitchNm <= 0 || request.TargetAdditionalLengthNm < 0
             || request.MaxSegments is < 3 or > 512)
             throw new AutomationException("invalid_route_tune", "width, pitch and maxSegments must be positive and target additional length cannot be negative.");
-        bool horizontal = request.Start.YNm == request.End.YNm, vertical = request.Start.XNm == request.End.XNm;
-        if (!horizontal && !vertical) throw new AutomationException("invalid_route_tune", "start and end must share one axis.");
-        if (request.Corridor.MinXNm >= request.Corridor.MaxXNm || request.Corridor.MinYNm >= request.Corridor.MaxYNm)
+
+        Bounds corridor = request.Corridor;
+        if (corridor.MinXNm >= corridor.MaxXNm || corridor.MinYNm >= corridor.MaxYNm)
             throw new AutomationException("invalid_route_tune", "corridor must have positive dimensions.");
-        if (request.TargetAdditionalLengthNm > 0 && (request.Corridor.MaxYNm - request.Corridor.MinYNm < request.PitchNm * 2
-            || request.Corridor.MaxXNm - request.Corridor.MinXNm < request.PitchNm * 2))
+
+        if (request.Centerline is { } centerline)
+        {
+            ValidateCenterline(centerline, request.Start, request.End,
+                corridor.MinXNm, corridor.MinYNm, corridor.MaxXNm, corridor.MaxYNm);
+            if (centerline.Count > request.MaxSegments)
+                throw new AutomationException("invalid_route_tune", "maxSegments is too small for the supplied centerline.");
+            request.Start ??= centerline[0].Clone();
+            request.End ??= centerline[^1].Clone();
+            return;
+        }
+
+        bool horizontal = request.Start!.YNm == request.End!.YNm, vertical = request.Start.XNm == request.End.XNm;
+        if (!horizontal && !vertical) throw new AutomationException("invalid_route_tune", "start and end must share one axis.");
+        if (request.TargetAdditionalLengthNm > 0 && (corridor.MaxYNm - corridor.MinYNm < request.PitchNm * 2
+            || corridor.MaxXNm - corridor.MinXNm < request.PitchNm * 2))
             throw new AutomationException("invalid_route_tune", "corridor is too narrow for the requested pitch.");
-        if (!Inside(request.Start, request.Corridor) || !Inside(request.End, request.Corridor))
+        if (!Inside(request.Start, corridor) || !Inside(request.End, corridor))
             throw new AutomationException("invalid_route_tune", "anchors must lie inside the explicit corridor.");
+    }
+
+    private static void ValidateCenterline(IReadOnlyList<Vector2> centerline, Vector2? start, Vector2? end,
+        long minXNm, long minYNm, long maxXNm, long maxYNm)
+    {
+        if (centerline.Count < 2)
+            throw new AutomationException("invalid_route_tune", "centerline must contain at least two points.");
+        if (start is not null && !start.Equals(centerline[0])
+            || end is not null && !end.Equals(centerline[^1]))
+            throw new AutomationException("invalid_route_tune", "start/end must match the supplied centerline endpoints.");
+        for (int index = 0; index < centerline.Count; index++)
+        {
+            Vector2 point = centerline[index];
+            if (point.XNm < minXNm || point.XNm > maxXNm || point.YNm < minYNm || point.YNm > maxYNm)
+                throw new AutomationException("invalid_route_tune", "centerline points must lie inside the explicit corridor.");
+            if (index == 0)
+                continue;
+            Vector2 previous = centerline[index - 1];
+            if (previous.XNm == point.XNm && previous.YNm == point.YNm)
+                throw new AutomationException("invalid_route_tune", "centerline segments must be nonzero.");
+            if (previous.XNm != point.XNm && previous.YNm != point.YNm)
+                throw new AutomationException("invalid_route_tune", "centerline segments must be axis-aligned.");
+        }
     }
 
     private static List<Vector2> BuildPath(TuneRequest request)
     {
+        if (request.Centerline is { } centerline)
+            return centerline.Select(point => point.Clone()).ToList();
+
         bool horizontal = request.Start!.YNm == request.End!.YNm;
         int loops = request.TargetAdditionalLengthNm == 0 ? 0
             : Math.Max(1, (int)Math.Ceiling(request.TargetAdditionalLengthNm / (double)(2 * request.PitchNm)));

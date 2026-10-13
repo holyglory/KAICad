@@ -2333,6 +2333,34 @@ public sealed partial class NativeSessionTests
             var multilayerCandidate = BoardJson.Parser.Parse<CreateItems>(multilayerData.GetProperty("candidateRequestJson").GetString()!);
             Assert.IsTrue(multilayerCandidate.Items.Any(item => item.Is(Track.Descriptor)));
 
+            // Exercise the structured PCB inspection boundary against the same
+            // live checkpoint. Each query must preserve the exact lifecycle
+            // state while delegating to KiCad's native board command.
+            JsonElement typedDocument = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(cleanBoard));
+            JsonElement typedState = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(cleanState));
+            async Task AssertTypedBoardQuery(object input, string kind)
+            {
+                var reply = await mcp.Tool("kicad_pcb_query_typed", new { instanceId, input });
+                Assert.IsFalse(reply.TryGetProperty("isError", out var error) && error.GetBoolean(), reply.GetRawText());
+                var data = reply.GetProperty("structuredContent");
+                Assert.AreEqual(kind, data.GetProperty("query").GetString(), reply.GetRawText());
+                Assert.IsTrue(data.GetProperty("typedInput").GetBoolean(), reply.GetRawText());
+                Assert.IsTrue(data.GetProperty("nativeQuery").GetBoolean(), reply.GetRawText());
+                Assert.IsFalse(data.GetProperty("boardMutation").GetBoolean(), reply.GetRawText());
+                Assert.AreEqual(SchematicJson.Formatter.Format(cleanState), data.GetProperty("beforeState").GetString(), reply.GetRawText());
+                Assert.AreEqual(data.GetProperty("beforeState").GetString(), data.GetProperty("afterState").GetString(), reply.GetRawText());
+            }
+            await AssertTypedBoardQuery(new { document = typedDocument, expectedState = typedState,
+                query = "nets", netClasses = new[] { "Default" } }, "nets");
+            await AssertTypedBoardQuery(new { document = typedDocument, expectedState = typedState,
+                query = "designRules" }, "design-rules");
+            await AssertTypedBoardQuery(new { document = typedDocument, expectedState = typedState,
+                query = "enabledLayers" }, "enabled-layers");
+            await AssertTypedBoardQuery(new { document = typedDocument, expectedState = typedState,
+                query = "stackup" }, "stackup");
+            await AssertTypedBoardQuery(new { document = typedDocument, expectedState = typedState,
+                query = "plotSettings" }, "plot-settings");
+
             var cleanCandidate = new CreateItems { Header = new() { Document = cleanBoard } };
             cleanCandidate.Items.Add(Any.Pack(new Track
             {
@@ -2353,6 +2381,37 @@ public sealed partial class NativeSessionTests
             });
             Assert.IsFalse(cleanDrcReply.TryGetProperty("isError", out var cleanDrcError) && cleanDrcError.GetBoolean(), cleanDrcReply.GetRawText());
             var cleanDrc = SchematicJson.Parser.Parse<PcbDrcJobState>(cleanDrcReply.GetProperty("content")[0].GetProperty("text").GetString()!);
+            var typedDrcStart = await mcp.Tool("kicad_pcb_drc_start_typed", new
+            {
+                instanceId,
+                input = new
+                {
+                    document = typedDocument,
+                    revision = new { epoch = cleanState.Revision.Epoch, sequence = cleanState.Revision.Sequence },
+                    operationId = cleanDrcOperationId,
+                    processEpoch = client.Epoch,
+                    reportAllTrackErrors = true,
+                    candidateRequestJson = BoardJson.Formatter.Format(cleanCandidate)
+                }
+            });
+            Assert.IsFalse(typedDrcStart.TryGetProperty("isError", out var typedDrcStartError) && typedDrcStartError.GetBoolean(), typedDrcStart.GetRawText());
+            var typedDrc = SchematicJson.Parser.Parse<PcbDrcJobState>(typedDrcStart.GetProperty("content")[0].GetProperty("text").GetString()!);
+            Assert.AreEqual(cleanDrc.JobId, typedDrc.JobId, typedDrcStart.GetRawText());
+            Assert.AreEqual(cleanDrc.OperationId, typedDrc.OperationId, typedDrcStart.GetRawText());
+            var typedDrcJob = await mcp.Tool("kicad_pcb_drc_job_typed", new
+            {
+                instanceId,
+                input = new { document = typedDocument, jobId = typedDrc.JobId, processEpoch = client.Epoch,
+                    candidateRequestJson = BoardJson.Formatter.Format(cleanCandidate) }
+            });
+            Assert.IsFalse(typedDrcJob.TryGetProperty("isError", out var typedDrcJobError) && typedDrcJobError.GetBoolean(), typedDrcJob.GetRawText());
+            var typedDrcOperation = await mcp.Tool("kicad_pcb_drc_operation_typed", new
+            {
+                instanceId,
+                input = new { document = typedDocument, operationId = cleanDrcOperationId, processEpoch = client.Epoch }
+            });
+            Assert.IsFalse(typedDrcOperation.TryGetProperty("isError", out var typedDrcOperationError) && typedDrcOperationError.GetBoolean(), typedDrcOperation.GetRawText());
+            Assert.IsTrue(typedDrcOperation.GetProperty("structuredContent").GetProperty("found").GetBoolean(), typedDrcOperation.GetRawText());
             var operationLookup = await mcp.Tool("kicad_pcb_drc_operation", new
             {
                 instanceId,

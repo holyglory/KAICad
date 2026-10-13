@@ -33,9 +33,9 @@ public sealed class ProjectSettingsMcpProcessTests
             {
                 JsonElement properties = tool.GetProperty("inputSchema").GetProperty("properties");
                 Assert.IsTrue(properties.TryGetProperty("expectedStateJson", out _), tool.GetRawText());
-                JsonElement state = properties.GetProperty("expectedState").GetProperty("properties");
+                JsonElement stateProperties = properties.GetProperty("expectedState").GetProperty("properties");
                 foreach (string field in new[] { "document", "revision", "processEpoch", "nativeFiles", "fileBaselines" })
-                    Assert.IsTrue(state.TryGetProperty(field, out _), tool.GetRawText());
+                    Assert.IsTrue(stateProperties.TryGetProperty(field, out _), tool.GetRawText());
             }
             JsonElement write = schemas[1].GetProperty("inputSchema");
             string[] required = write.GetProperty("required").EnumerateArray().Select(value => value.GetString()!).ToArray();

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Google.Protobuf;
+using Kiapi.Common.Commands;
 using KiCad.Automation.Mcp;
 using KiCad.Automation.Model;
 using KiCad.Automation.Protocol;
@@ -25,6 +26,32 @@ public sealed class PcbManufacturingRecoveryContractTests
         Assert.IsFalse(capabilities.DetachedExportSupported);
         Assert.IsFalse(capabilities.PublicationSupported);
         Assert.IsFalse(capabilities.CompleteSnapshotSupported);
+    }
+
+    [TestMethod]
+    public void ReconcileRefusesUnverifiedNotFoundAndAcceptsVerifiedAbsence()
+    {
+        var unsupported = new PcbManufacturingExportReceiptResponse { Found = false };
+        AutomationException error = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbJobTools.ValidateReconcileResponseSupport(unsupported, allowPriorProcessEpoch: false));
+        Assert.AreEqual("pcb_export_recovery_unavailable", error.Code);
+
+        var verifiedAbsence = new PcbManufacturingExportReceiptResponse
+        {
+            Found = false,
+            ReconciliationSupported = true
+        };
+        PcbJobTools.ValidateReconcileResponseSupport(verifiedAbsence, allowPriorProcessEpoch: false);
+
+        var incompleteReceipt = new PcbManufacturingExportReceiptResponse
+        {
+            Found = true,
+            ReconciliationSupported = true,
+            RequestFingerprintVerified = true
+        };
+        error = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbJobTools.ValidateReconcileResponseSupport(incompleteReceipt, allowPriorProcessEpoch: false));
+        Assert.AreEqual("pcb_export_recovery_unavailable", error.Code);
     }
 
     [TestMethod]

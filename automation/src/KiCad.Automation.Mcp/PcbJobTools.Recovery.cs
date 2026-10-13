@@ -127,12 +127,9 @@ public sealed partial class PcbJobTools
         {
             PcbManufacturingExportReceiptResponse response = await client.InvokeAsync<ReconcilePcbManufacturingExport,
                 PcbManufacturingExportReceiptResponse>(request, cancellationToken);
+            ValidateReconcileResponseSupport(response, request.AllowPriorProcessEpoch);
             if( response.Found )
             {
-                if( !response.ReconciliationSupported || !response.RequestFingerprintVerified
-                    || !response.JournalVerified || (request.AllowPriorProcessEpoch && !response.PriorProcessEpochVerified) )
-                    throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
-                        "The native reconciliation response did not prove its journal and identity checks.");
                 ValidateManagerReceiptIdentity(response.Receipt, request.Document, request.OperationId,
                     request.AllowPriorProcessEpoch ? request.PriorProcessEpoch! : request.ProcessEpoch);
             }
@@ -151,6 +148,25 @@ public sealed partial class PcbJobTools
                 "The native manufacturing manager does not yet provide cross-process reconciliation; no retry or publication was attempted.");
         }
     }, input?.OperationId, input?.ProcessEpoch);
+
+    /// <summary>
+    /// A not-found response is meaningful only when the native peer proved it
+    /// could inspect its journal. Older peers may answer the request without
+    /// that capability; such a response must remain an explicit recovery
+    /// refusal instead of being exposed as evidence that no operation exists.
+    /// </summary>
+    internal static void ValidateReconcileResponseSupport(
+        PcbManufacturingExportReceiptResponse response, bool allowPriorProcessEpoch)
+    {
+        if( response is null || !response.ReconciliationSupported )
+            throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
+                "The native manufacturing manager does not provide a verified reconciliation journal; no retry or publication was attempted.");
+
+        if( response.Found && (!response.RequestFingerprintVerified || !response.JournalVerified
+            || (allowPriorProcessEpoch && !response.PriorProcessEpochVerified)) )
+            throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
+                "The native reconciliation response did not prove its journal and identity checks.");
+    }
 
     [McpServerTool(Name = "kicad_pcb_export_manager_capabilities_typed", ReadOnly = true),
      Description("Read the native manufacturing manager's supported recovery boundaries for one PCB. The manager reports durable admission and journal recovery plus synchronous SVG owner-thread dispatch; detached workers, restart publication and complete dependency snapshots remain unavailable."),

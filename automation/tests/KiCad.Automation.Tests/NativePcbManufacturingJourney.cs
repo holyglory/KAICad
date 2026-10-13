@@ -278,9 +278,10 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual("PcbMfgPublicationPublished", managerReceipt.GetProperty("publicationState").GetString(),
                 managerReply.GetRawText());
             Assert.IsTrue(managerReceipt.GetProperty("publicationCommitted").GetBoolean(), managerReply.GetRawText());
-            Assert.IsTrue(File.Exists(managerReceipt.GetProperty("artifacts").EnumerateArray()
+            string managerSvgPath = managerReceipt.GetProperty("artifacts").EnumerateArray()
                 .Select(artifact => artifact.GetProperty("path").GetString()!)
-                .Single(path => Path.GetExtension(path).Equals(".svg", StringComparison.OrdinalIgnoreCase)), managerReply.GetRawText());
+                .Single(path => Path.GetExtension(path).Equals(".svg", StringComparison.OrdinalIgnoreCase));
+            Assert.IsTrue(File.Exists(managerSvgPath), managerReply.GetRawText());
 
             var managerCapabilities = await mcp.Tool("kicad_pcb_export_manager_capabilities_typed", new
             {

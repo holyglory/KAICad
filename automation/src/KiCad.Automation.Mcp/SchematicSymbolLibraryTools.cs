@@ -16,7 +16,7 @@ namespace KiCad.Automation.Mcp;
 
 /// <summary>Typed global symbol-library access through KiCad's native adapter.</summary>
 [McpServerToolType]
-public sealed class SchematicSymbolLibraryTools(InstanceRegistry registry)
+public sealed partial class SchematicSymbolLibraryTools(InstanceRegistry registry)
 {
     private const int MaximumDefinitionBytes = 4 * 1024 * 1024;
     private const int MaximumItems = 4096;

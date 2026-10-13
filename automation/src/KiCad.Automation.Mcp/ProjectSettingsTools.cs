@@ -20,9 +20,18 @@ namespace KiCad.Automation.Mcp;
 public sealed class ProjectSettingsTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_project_net_classes", ReadOnly = true),
-     Description("Read the native project netclass definitions at one exact lifecycle checkpoint. documentJson identifies an open schematic or PCB in the project; expectedStateJson must be the matching kicad_document_state observation with project-settings coverage and process epoch. The common native API is project-wide, so the returned definitions are paired with the requested document only as an identity and revision guard. This never changes design data. If the connected native peer cannot expose project netclasses, the result says supported=false instead of fabricating a snapshot."),
-     KiCadCapability("project-settings", "compiled-mcp plus native-common-api", "explicit project document, process epoch, lifecycle revision and project-settings coverage"),
+     Description("Read native project netclass definitions at an exact lifecycle checkpoint. Provide exactly one document form (document or legacy documentJson) and one state form (expectedState or legacy expectedStateJson) from kicad_document_state, including project-settings coverage. The result preserves the requested document identity and reports supported=false when the native peer lacks this command."),
+     KiCadCapability("project-settings", "compiled-mcp plus native-common-api", "structured or legacy document and complete lifecycle state"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NetClassesRoundTripThroughXmlAndNativeEdits")]
+    public Task<CallToolResult> NetClassesStructured(string instanceId, CancellationToken cancellationToken,
+        string? documentJson = null, NativeDocumentInput? document = null,
+        string? expectedStateJson = null, DocumentLifecycleInput? expectedState = null) => Execute(() =>
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return NetClasses(instanceId, ResolveDocument(documentJson, document),
+            ResolveLifecycle(expectedStateJson, expectedState), cancellationToken);
+    });
+
     public Task<CallToolResult> NetClasses(string instanceId, string documentJson,
         string expectedStateJson, CancellationToken cancellationToken) => Execute(async () =>
     {
@@ -110,10 +119,21 @@ public sealed class ProjectSettingsTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_project_net_classes_set", ReadOnly = false),
-     Description("Replace or merge the declared project netclasses through the existing checked schematic net-settings transaction. documentJson must identify the explicit schematic root, and expectedStateJson must be the complete kicad_schematic_checked_state result from that same root. netClassesJson is protobuf JSON for NetClassesResponse; mergeMode is MMM_MERGE or MMM_REPLACE; operationId is a new canonical UUID; expectedNetClassesSha256 must match the declared netclasses in the supplied checked state. The wrapper preserves every other project net-setting, uses the native checked receipt/replay path, and leaves saving explicit through kicad_document_save. PCB-only documents are refused because no equivalent checked project-settings transaction exists.") ,
-     KiCadCapability("project-settings", "checked-native-schematic-net-settings", "explicit schematic root, complete checked state, netclass digest, operation ID"),
-     KiCadVerification(KiCadVerificationLevel.McpNativeJourney,
-         "NativeSessionTests.NetClassesRoundTripThroughXmlAndNativeEdits")]
+     Description("Replace or merge explicit project netclasses through the checked schematic net-settings transaction. Provide exactly one document form (document or legacy documentJson) and one netclass form (netClasses or legacy netClassesJson). Typed board and schematic dimensions are nanometers; omitted settings inherit. expectedStateJson remains the complete kicad_schematic_checked_state observation for the same schematic root, not a lifecycle cursor. expectedNetClassesSha256 must match that observation. Operation receipts, replay and explicit saving through kicad_document_save are preserved. PCB-only mutations remain unavailable."),
+     KiCadCapability("project-settings", "checked-native-schematic-net-settings", "explicit schematic root, complete checked state, typed netclasses, digest and operation ID"),
+     KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NetClassesRoundTripThroughXmlAndNativeEdits")]
+    public Task<CallToolResult> SetNetClassesStructured(string instanceId, string expectedStateJson,
+        string mergeMode, Guid operationId, string expectedNetClassesSha256, CancellationToken cancellationToken,
+        string? documentJson = null, NativeDocumentInput? document = null,
+        string? netClassesJson = null, ProjectNetClassesInput? netClasses = null) => Execute(() =>
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        string request = ResolveInput(netClassesJson, netClasses,
+            value => SchematicJson.Formatter.Format(ProjectNetClassesInput.ToNative(value)), "netClassesJson", "netClasses");
+        return SetNetClasses(instanceId, ResolveDocument(documentJson, document), expectedStateJson,
+            request, mergeMode, operationId, expectedNetClassesSha256, cancellationToken);
+    });
+
     public Task<CallToolResult> SetNetClasses(string instanceId, string documentJson,
         string expectedStateJson, string netClassesJson, string mergeMode, Guid operationId,
         string expectedNetClassesSha256, CancellationToken cancellationToken) => Execute(async () =>
@@ -263,9 +283,18 @@ public sealed class ProjectSettingsTools(InstanceRegistry registry)
     }
 
     [McpServerTool(Name = "kicad_project_text_variables", ReadOnly = true),
-     Description("Read the native project text-variable map at one exact lifecycle checkpoint. project identifies the loaded project; document and expectedStateJson identify an open schematic or PCB in that project and its project-settings revision coverage. The native common API is project-wide, so the result is paired with the requested document only as an identity and revision guard. This never changes design data and reports supported=false when the connected peer lacks the command."),
-     KiCadCapability("project-settings", "compiled-mcp plus native-common-api", "explicit project, lifecycle document, process epoch, revision and project-settings coverage"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+     Description("Read the native project text-variable map at an exact lifecycle checkpoint. project and document identify the same loaded project. Provide exactly one state form: structured expectedState or legacy expectedStateJson, with project-settings revision coverage. Reports supported=false when the connected peer lacks the command."),
+     KiCadCapability("project-settings", "compiled-mcp plus native-common-api", "explicit project, lifecycle document and structured or legacy lifecycle state"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "ProjectSettingsMcpProcessTests.StructuredProjectSettingsAreDiscoveredAndValidatedOverStdio")]
+    public Task<CallToolResult> TextVariablesStructured(string instanceId, NativeProjectInput project,
+        NativeDocumentInput document, CancellationToken cancellationToken,
+        string? expectedStateJson = null, DocumentLifecycleInput? expectedState = null) => Execute(() =>
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return TextVariables(instanceId, project, document,
+            ResolveLifecycle(expectedStateJson, expectedState), cancellationToken);
+    });
+
     public Task<CallToolResult> TextVariables(string instanceId, NativeProjectInput project,
         NativeDocumentInput document, string expectedStateJson, CancellationToken cancellationToken) => Execute(async () =>
     {
@@ -334,9 +363,19 @@ public sealed class ProjectSettingsTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_project_text_variables_set", ReadOnly = false),
-     Description("Set project text variables with a native map-digest admission, process-owned operation receipt and save/readback outcome. The legacy SetTextVariables command remains unchanged; this typed path refuses stale maps, mismatched projects and operation reuse."),
-     KiCadCapability("project-settings", "checked-native-common-api", "explicit project, lifecycle document, expected revision, operation ID and variable map"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+     Description("Set project text variables with native map-digest admission, process-owned operation receipt and save/readback outcome. Provide exactly one lifecycle state form: structured expectedState or legacy expectedStateJson. Preserves the checked transaction, stale-map and project validation, operation replay, rollback evidence and optional expectedVariablesSha256."),
+     KiCadCapability("project-settings", "checked-native-common-api", "explicit project, lifecycle document, structured or legacy expected state, operation ID and variable map"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "ProjectSettingsMcpProcessTests.StructuredProjectSettingsAreDiscoveredAndValidatedOverStdio")]
+    public Task<CallToolResult> SetTextVariablesStructured(string instanceId, NativeProjectInput project,
+        NativeDocumentInput document, Dictionary<string, string> variables, string mergeMode, Guid operationId,
+        CancellationToken cancellationToken, string? expectedVariablesSha256 = null,
+        string? expectedStateJson = null, DocumentLifecycleInput? expectedState = null) => Execute(() =>
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return SetTextVariables(instanceId, project, document, ResolveLifecycle(expectedStateJson, expectedState),
+            variables, mergeMode, operationId, cancellationToken, expectedVariablesSha256);
+    });
+
     public Task<CallToolResult> SetTextVariables(string instanceId, NativeProjectInput project,
         NativeDocumentInput document, string expectedStateJson, Dictionary<string, string> variables,
         string mergeMode, Guid operationId, CancellationToken cancellationToken,
@@ -582,6 +621,23 @@ public sealed class ProjectSettingsTools(InstanceRegistry registry)
         {
             throw new AutomationException(code, "The supplied protobuf JSON is invalid: " + error.Message);
         }
+    }
+
+    private static string ResolveDocument(string? legacy, NativeDocumentInput? typed) =>
+        ResolveInput(legacy, typed, value => SchematicJson.Formatter.Format(NativeDocumentInput.ToNative(value)),
+            "documentJson", "document");
+
+    private static string ResolveLifecycle(string? legacy, DocumentLifecycleInput? typed) =>
+        ResolveInput(legacy, typed, value => SchematicJson.Formatter.Format(DocumentLifecycleInput.ToNative(value)),
+            "expectedStateJson", "expectedState");
+
+    private static string ResolveInput<T>(string? legacy, T? typed, Func<T, string> convert,
+        string legacyName, string typedName) where T : class
+    {
+        if ((legacy is not null && typed is not null) || (typed is null && string.IsNullOrWhiteSpace(legacy)))
+            throw new AutomationException("invalid_project_settings_input",
+                $"Provide exactly one input form: {typedName} or {legacyName}.");
+        return typed is null ? legacy! : convert(typed);
     }
 
     private static async Task<CallToolResult> Execute(Func<Task<CallToolResult>> action)

@@ -12,6 +12,7 @@ using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
+using KiCad.Automation.Mcp;
 
 namespace KiCad.Automation.Tests;
 

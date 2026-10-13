@@ -1,4 +1,5 @@
 using Google.Protobuf;
+using Google.Protobuf.WellKnownTypes;
 using Kiapi.Board.Commands;
 using Kiapi.Board.Types;
 using Kiapi.Common.Commands;
@@ -79,7 +80,7 @@ public sealed partial class NativeSessionTests
             => await client.InvokeAsync<GetConnectedItems, GetItemsResponse>(new()
             { Header = new() { Document = board }, Items = { item } }, token);
 
-        static string ConnectedIdentity(Any item) => item.Is(Pad.Descriptor)
+        string ConnectedIdentity(Any item) => item.Is(Pad.Descriptor)
             ? item.Unpack<Pad>().Id.Value : RouteIdentity(item);
 
         string[] beforeConnected = (await Connected(seededPadIds[0])).Items
@@ -89,6 +90,7 @@ public sealed partial class NativeSessionTests
 
         try
         {
+            await client.InvokeAsync<ClearSelection, Empty>(new() { Header = new() { Document = board } }, token);
             var selection = new AddToSelection { Header = new() { Document = board } };
             selection.Items.Add(seededRoute.Id.Clone());
             var selected = await client.InvokeAsync<AddToSelection, SelectionResponse>(selection, token);

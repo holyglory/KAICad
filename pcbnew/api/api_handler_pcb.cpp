@@ -66,6 +66,7 @@
 #include <project_pcb.h>
 #include <pcb_edit_frame.h>
 #include <pgm_base.h>
+#include <paths.h>
 #include <pcb_group.h>
 #include <pcb_generator.h>
 #include <pcb_reference_image.h>
@@ -472,7 +473,8 @@ API_HANDLER_PCB::API_HANDLER_PCB( PCB_EDIT_FRAME* aFrame ) :
 
 API_HANDLER_PCB::API_HANDLER_PCB( std::shared_ptr<PCB_CONTEXT> aContext, PCB_EDIT_FRAME* aFrame ) :
         API_HANDLER_BOARD( std::move( aContext ), aFrame ),
-        m_drcJobs( [this]( BOARD& source ) { return observeDrcAuxiliary( source ); } )
+        m_drcJobs( [this]( BOARD& source ) { return observeDrcAuxiliary( source ); } ),
+        m_manufacturingJobs( wxFileName( PATHS::GetUserSettingsPath(), wxS( "pcb-manufacturing-jobs" ) ).GetPath() )
 {
     refreshCustomRulesBaseline();
     // Only the editor frame detaches before it replaces or destroys its board.
@@ -544,6 +546,9 @@ API_HANDLER_PCB::API_HANDLER_PCB( std::shared_ptr<PCB_CONTEXT> aContext, PCB_EDI
     registerHandler<kiapi::automation::v1::RunPcbManufacturingExport,
                     kiapi::automation::v1::PcbManufacturingExportReceipt>(
             &API_HANDLER_PCB::handleRunPcbManufacturingExport );
+    registerHandler<kiapi::automation::v1::StartPcbManufacturingExportJob,
+                    kiapi::automation::v1::PcbManufacturingExportReceipt>(
+            &API_HANDLER_PCB::handleStartPcbManufacturingExportJob );
     registerHandler<kiapi::automation::v1::ReadPcbManufacturingExport,
                     kiapi::automation::v1::PcbManufacturingExportReceiptResponse>(
             &API_HANDLER_PCB::handleReadPcbManufacturingExport );
@@ -4181,6 +4186,20 @@ API_HANDLER_PCB::handleReadPcbManufacturingExport(
     response.set_found( true );
     response.mutable_receipt()->CopyFrom( *found->second->manufacturingExport );
     return response;
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::PcbManufacturingExportReceipt>
+API_HANDLER_PCB::handleStartPcbManufacturingExportJob(
+        const HANDLER_CONTEXT<kiapi::automation::v1::StartPcbManufacturingExportJob>& aCtx )
+{
+    if( !aCtx.Request.has_request() )
+    {
+        return tl::unexpected( ManufacturingError(
+                "The manufacturing manager start requires a complete export request" ) );
+    }
+
+    return m_manufacturingJobs.Start( aCtx.Request.request(), apiServer().Token() );
 }
 
 

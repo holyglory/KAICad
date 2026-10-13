@@ -482,6 +482,7 @@ set( PCBNEW_CLASS_SRCS
     api/api_handler_board.cpp
     api/api_handler_footprint.cpp
     api/api_handler_pcb.cpp
+    api/pcb_manufacturing_job_manager.cpp
     api/pcb_drc_job_manager.cpp
     api/pcb_drc_document_snapshot.cpp
     api/pcb_drc_run_inputs.cpp

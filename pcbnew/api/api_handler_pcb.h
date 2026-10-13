@@ -32,6 +32,7 @@
 #include <api/common/commands/cross_probe_commands.pb.h>
 #include <api/common/commands/project_commands.pb.h>
 #include <api/pcb_drc_job_manager.h>
+#include <api/pcb_manufacturing_job_manager.h>
 #include <api/common/commands/automation_commands.pb.h>
 #include <api/common/commands/pcb_render_inspection_commands.pb.h>
 #include <api/common/commands/pcb_manufacturing_commands.pb.h>
@@ -192,6 +193,10 @@ private:
     handleReadPcbManufacturingExport(
             const HANDLER_CONTEXT<kiapi::automation::v1::ReadPcbManufacturingExport>& aCtx );
 
+    HANDLER_RESULT<kiapi::automation::v1::PcbManufacturingExportReceipt>
+    handleStartPcbManufacturingExportJob(
+            const HANDLER_CONTEXT<kiapi::automation::v1::StartPcbManufacturingExportJob>& aCtx );
+
     // Native manager recovery seam.  The manager is not enabled yet; these
     // handlers are registered so clients receive a typed unsupported result
     // instead of an unknown command while the synchronous exporter remains
@@ -311,6 +316,7 @@ private:
     PCB_EDIT_FRAME* frame() const;
 
     PCB_DRC_JOB_MANAGER m_drcJobs;
+    PCB_MANUFACTURING_JOB_MANAGER m_manufacturingJobs;
     std::map<std::string, std::unique_ptr<ROUTE_PREVIEW_SESSION>> m_routePreviewSessions;
 
     struct PCB_OPERATION_RECEIPT

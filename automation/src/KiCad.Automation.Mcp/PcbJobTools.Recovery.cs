@@ -20,6 +20,38 @@ namespace KiCad.Automation.Mcp;
 /// </summary>
 public sealed partial class PcbJobTools
 {
+    [McpServerTool(Name = "kicad_pcb_export_start_typed", ReadOnly = false),
+     Description("Admit one typed PCB manufacturing export to the native recovery manager. The manager durably records the exact request before any worker dispatch. Until a detached exporter is enabled, the returned terminal state is export_adapter_unavailable and no files are generated; the existing synchronous kicad_pcb_export tool remains unchanged."),
+     KiCadCapability("pcb-manufacturing", "typed-recovery-manager-admission", "typed export request, durable journal admission and explicit adapter availability"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbManufacturingRecoveryContractTests.CompiledStdioPublishesTypedRecoveryToolsAndFailsClosedForIncompleteInput")]
+    public Task<CallToolResult> ExportStartTyped(string instanceId,
+        PcbManufacturingExportInput input, CancellationToken cancellationToken) => ExecuteRecovery(async () =>
+    {
+        if (input is null)
+            throw new AutomationException("invalid_pcb_export_input", "A typed PCB manufacturing export input is required.");
+        RunPcbManufacturingExport request = BuildManufacturingRequest(instanceId, input);
+        NativeClient client = registry.Client(instanceId);
+        AutomationSession session = await client.HandshakeAsync(cancellationToken);
+        if (session.Epoch != request.ProcessEpoch)
+            throw new AutomationException("stale_process_epoch", "The lifecycle observation belongs to another native process epoch.");
+        PcbManufacturingExportReceipt receipt = await client.InvokeAsync<StartPcbManufacturingExportJob,
+            PcbManufacturingExportReceipt>(new() { Request = request }, cancellationToken);
+        bool adapterAvailable = receipt.ExportAdapterAvailable;
+        return Data(new
+        {
+            instanceId, processEpoch = session.Epoch, operationId = receipt.OperationId,
+            managerAccepted = true, recoverySupported = true,
+            exportAdapterAvailable = adapterAvailable,
+            operationOutcome = receipt.Status == PcbManufacturingExportStatus.PcbMfgExportCompleted
+                ? PcbExportRecoveryPolicy.OutcomeCompleted : PcbExportRecoveryPolicy.Unknown,
+            status = receipt.Status.ToString(), recoveryState = receipt.RecoveryState.ToString(),
+            terminal = receipt.Terminal, workerFinished = receipt.WorkerFinished,
+            nativeDispatch = receipt.NativeDispatch, outputGenerated = receipt.Artifacts.Count != 0,
+            receipt = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(receipt))
+        }, !adapterAvailable, adapterAvailable ? null : "export_adapter_unavailable",
+            receipt.ErrorMessage.Length == 0 ? "The detached exporter is unavailable; no output was generated." : receipt.ErrorMessage);
+    }, input?.OperationId, input?.ExpectedState?.ProcessEpoch);
+
     [McpServerTool(Name = "kicad_pcb_export_cancel_typed", ReadOnly = false),
      Description("Request cancellation of one typed PCB manufacturing export through the native manager. The current synchronous exporter has no cancellation manager, so the call fails closed with recoverySupported=false and preserves the durable operation outcome. No output is deleted or declared cancelled by this boundary."),
      KiCadCapability("pcb-manufacturing", "typed-recovery-contract", "explicit PCB document, operation ID, current process epoch and fail-closed cancellation result"),

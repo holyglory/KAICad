@@ -47,6 +47,15 @@ message ReadPcbManufacturingExport
   string process_epoch = 3;
 }
 
+// Opt-in manager admission. The existing RunPcbManufacturingExport remains
+// synchronous; this command never borrows its GUI exporter on a worker.
+message StartPcbManufacturingExportJob
+{
+  // -- lane 2D (400-499) --
+  RunPcbManufacturingExport request = 400;
+  // -- end lane 2D --
+}
+
 // Native manager recovery controls. Fields 1-33 above are frozen for the
 // synchronous export contract. New cancellation/recovery fields use the
 // shared lane-2D band so older peers fail closed when they cannot provide the
@@ -154,6 +163,10 @@ message PcbManufacturingExportReceipt
   bool publication_committed = 403;
   string source_snapshot_sha256 = 404;
   string durable_journal_sha256 = 405;
+  // Capture currently covers the detached board and admitted lifecycle, not
+  // every font, model, library or drawing-sheet dependency an exporter reads.
+  bool snapshot_complete = 406;
+  bool export_adapter_available = 407;
   // -- end lane 2D --
 }
 
@@ -161,6 +174,14 @@ message PcbManufacturingExportReceiptResponse
 {
   bool found = 1;
   PcbManufacturingExportReceipt receipt = 2;
+
+  // -- lane 2D (400-499) --
+  bool reconciliation_supported = 400;
+  string observing_process_epoch = 401;
+  bool request_fingerprint_verified = 402;
+  bool journal_verified = 403;
+  bool prior_process_epoch_verified = 404;
+  // -- end lane 2D --
 }
 
 enum PcbManufacturingRecoveryState
@@ -171,4 +192,19 @@ enum PcbManufacturingRecoveryState
   PCB_MFG_RECOVERY_CANCELLED = 3;
   PCB_MFG_RECOVERY_RECOVERABLE_STAGED = 4;
   PCB_MFG_RECOVERY_RECONCILED = 5;
+  PCB_MFG_RECOVERY_UNSUBMITTED = 6;
+}
+
+// Native-owned on-disk journal. A SHA-256 of this message with the receipt's
+// durable_journal_sha256 cleared binds its immutable request and source to its
+// last durable transition. Only the native manager reads/writes these records.
+message PcbManufacturingJournalRecord
+{
+  // -- lane 2D (400-499) --
+  uint32 format_version = 400;
+  RunPcbManufacturingExport request = 401;
+  PcbManufacturingExportReceipt receipt = 402;
+  bytes source_board = 403;
+  uint64 journal_revision = 404;
+  // -- end lane 2D --
 }

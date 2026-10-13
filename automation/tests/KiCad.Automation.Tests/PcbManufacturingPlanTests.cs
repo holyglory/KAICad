@@ -146,7 +146,7 @@ public sealed class PcbManufacturingContractTestsPlanning
             Job = job switch
             {
                 "gerbers" => new() { ExportGerbers = new() { UseProtelFileExtensions = true } },
-                "drill" => new() { ExportDrill = new() { MapFormat = Kiapi.Board.Jobs.DrillMapFormat.DmfNone } },
+                "drill" => new() { ExportDrill = new() { MapFormat = Kiapi.Board.Jobs.DrillMapFormat.DmfSvg } },
                 "position" => new() { ExportPosition = new() { ExcludeDnp = true } },
                 "svg" => new() { ExportSvg = new() { Precision = 5, FitPageToBoard = true } },
                 "pdf" => new() { ExportPdf = new() { PlotSettings = new() { Negative = true } } },

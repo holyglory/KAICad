@@ -4215,7 +4215,10 @@ HANDLER_RESULT<kiapi::automation::v1::PcbManufacturingExportReceiptResponse>
 API_HANDLER_PCB::handleReadPcbManufacturingExportJob(
         const HANDLER_CONTEXT<kiapi::automation::v1::ReadPcbManufacturingExportJob>& aCtx )
 {
-    return m_manufacturingJobs.Read( aCtx.Request, apiServer().Token() );
+    auto result = m_manufacturingJobs.Read( aCtx.Request, apiServer().Token() );
+    if( !result )
+        return tl::unexpected( ManufacturingError( result.error(), ApiStatusCode::AS_BAD_REQUEST ) );
+    return *result;
 }
 
 HANDLER_RESULT<kiapi::automation::v1::PcbManufacturingManagerCapabilities>

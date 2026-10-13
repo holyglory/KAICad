@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using Kiapi.Board.Commands;
@@ -66,6 +67,41 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
         string expectedStateJson, string operationId, CancellationToken cancellationToken) =>
         Execute(() => MutateCore(instanceId, documentJson, null, keepoutId, expectedStateJson, operationId,
             KeepoutMutation.Delete, cancellationToken));
+
+    [McpServerTool(Name = "kicad_pcb_keepout_mutation_typed"),
+     Description("Read or mutate one PCB rule-area keepout from one structured input. input binds an explicit PCB document, complete lifecycle checkpoint, operation kind, canonical operation identity and either a typed keepout or keepoutId. Create, update and delete retain the existing checked native receipt path; legacy keepout tools remain available."),
+     KiCadCapability("pcb-keepouts", "compiled-mcp plus-native-board-api", "typed PCB document, complete lifecycle checkpoint, operation kind, typed keepout or keepoutId and operation UUID"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbKeepoutTypedMcpProcessTests.TypedKeepoutMutationPublishesStructuredSchemaAndRejectsIncompleteInput")]
+    public async Task<CallToolResult> MutateTyped(string instanceId, PcbKeepoutMutationInput input,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (input is null)
+                throw InvalidTyped("input is required.");
+            var payload = input.ToPayload();
+            return payload.Mutation switch
+            {
+                PcbKeepoutMutationKind.Read => await Read(instanceId, payload.Document, payload.KeepoutId!,
+                    payload.ExpectedState, cancellationToken),
+                PcbKeepoutMutationKind.Create => await Create(instanceId, payload.Document, payload.Keepout!,
+                    payload.ExpectedState, payload.OperationId!, cancellationToken),
+                PcbKeepoutMutationKind.Update => await Update(instanceId, payload.Document, payload.Keepout!,
+                    payload.ExpectedState, payload.OperationId!, cancellationToken),
+                PcbKeepoutMutationKind.Delete => await Delete(instanceId, payload.Document, payload.KeepoutId!,
+                    payload.ExpectedState, payload.OperationId!, cancellationToken),
+                _ => throw InvalidTyped("mutation must be read, create, update or delete.")
+            };
+        }
+        catch (AutomationException error)
+        {
+            return Data(new { errorCode = error.Code, errorMessage = error.Message }, true);
+        }
+        catch (JsonException error)
+        {
+            return Data(new { errorCode = "invalid_pcb_keepout_typed_input", errorMessage = error.Message }, true);
+        }
+    }
 
     private async Task<CallToolResult> ReadCore(string instanceId, string documentJson, string keepoutId,
         string expectedStateJson, CancellationToken cancellationToken)
@@ -527,6 +563,9 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
         }
     }
 
+    private static AutomationException InvalidTyped(string message)
+        => new("invalid_pcb_keepout_typed_input", message);
+
     private enum KeepoutMutation
     {
         Create,
@@ -540,4 +579,93 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
         string CallerExpectedFingerprint,
         string RequestedZoneFingerprint,
         CheckedPcbItemTransaction Request);
+}
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class PcbKeepoutMutationInput : NativeDocumentInputObject
+{
+    private NativeDocumentInput? document;
+    private DocumentLifecycleInput? expectedState;
+    private PcbKeepoutMutationKind mutation;
+    private string? operationId;
+    private string? keepoutId;
+    private PcbKeepoutAuthoringInput? keepout;
+
+    [Description("The exact PCB document being inspected or changed.")]
+    public NativeDocumentInput? Document { get => document; set => document = BindOnce(value); }
+
+    [Description("The complete lifecycle observation captured immediately before the operation.")]
+    public DocumentLifecycleInput? ExpectedState { get => expectedState; set => expectedState = BindOnce(value); }
+
+    public PcbKeepoutMutationKind Mutation { get => mutation; set => mutation = BindOnce(value); }
+    public string? OperationId { get => operationId; set => operationId = BindOnce(value); }
+    public string? KeepoutId { get => keepoutId; set => keepoutId = BindOnce(value); }
+    public PcbKeepoutAuthoringInput? Keepout { get => keepout; set => keepout = BindOnce(value); }
+
+    internal (string Document, string ExpectedState, PcbKeepoutMutationKind Mutation,
+        string? OperationId, string? KeepoutId, PcbKeepoutAuthoringInput? Keepout) ToPayload()
+    {
+        if (Document is null || ExpectedState is null)
+            throw InvalidTyped("document and expectedState are required.");
+        if (!System.Enum.IsDefined(Mutation))
+            throw InvalidTyped("mutation must be read, create, update or delete.");
+
+        DocumentSpecifier document;
+        DocumentLifecycleState state;
+        try
+        {
+            document = NativeDocumentInput.ToNative(Document);
+            state = DocumentLifecycleInput.ToNative(ExpectedState);
+        }
+        catch (AutomationException error)
+        {
+            throw InvalidTyped(error.Message);
+        }
+        if (document.Type != DocumentType.DoctypePcb || state.Scope != DocumentLifecycleScope.DlsPcb
+            || !state.Document.Equals(document))
+            throw InvalidTyped("document and expectedState must identify the same PCB.");
+
+        string? operation = null;
+        if (Mutation is PcbKeepoutMutationKind.Create or PcbKeepoutMutationKind.Update or PcbKeepoutMutationKind.Delete)
+            operation = Canonical(OperationId, "operationId");
+
+        string? target = null;
+        if (Mutation is PcbKeepoutMutationKind.Read or PcbKeepoutMutationKind.Delete)
+            target = Canonical(KeepoutId, "keepoutId");
+        if (Mutation is PcbKeepoutMutationKind.Create or PcbKeepoutMutationKind.Update)
+        {
+            if (Keepout is null)
+                throw InvalidTyped("keepout is required for create and update.");
+            if (Mutation == PcbKeepoutMutationKind.Update)
+                _ = Canonical(Keepout.Id, "keepout.id");
+        }
+        if (Mutation is PcbKeepoutMutationKind.Read or PcbKeepoutMutationKind.Delete && Keepout is not null)
+            throw InvalidTyped("keepout is not accepted for read or delete.");
+        if (Mutation is PcbKeepoutMutationKind.Create or PcbKeepoutMutationKind.Update
+            && !string.IsNullOrWhiteSpace(KeepoutId))
+            throw InvalidTyped("keepoutId is not accepted for create or update.");
+
+        return (SchematicJson.Formatter.Format(document), SchematicJson.Formatter.Format(state),
+            Mutation, operation, target, Keepout);
+    }
+
+    private static string Canonical(string? value, string field)
+    {
+        if (!Guid.TryParseExact(value, "D", out Guid id) || id == Guid.Empty
+            || !string.Equals(value, id.ToString("D"), StringComparison.Ordinal))
+            throw InvalidTyped($"{field} must be a canonical lowercase UUID.");
+        return value!;
+    }
+
+    private static AutomationException InvalidTyped(string message)
+        => new("invalid_pcb_keepout_typed_input", message);
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<PcbKeepoutMutationKind>))]
+public enum PcbKeepoutMutationKind
+{
+    [JsonStringEnumMemberName("read")] Read = 1,
+    [JsonStringEnumMemberName("create")] Create = 2,
+    [JsonStringEnumMemberName("update")] Update = 3,
+    [JsonStringEnumMemberName("delete")] Delete = 4
 }

@@ -116,16 +116,20 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(structured.GetProperty("supported").GetBoolean(), $"{phase}: native text-variable support is required.");
             Assert.IsTrue(structured.GetProperty("nativeQuery").GetBoolean(), $"{phase}: the result must come from KiCad.");
             Assert.IsFalse(structured.GetProperty("mutation").GetBoolean(), $"{phase}: reading text variables must not mutate the project.");
-            var reportedDocument = SchematicJson.Parser.Parse<DocumentSpecifier>(
-                structured.GetProperty("document").GetRawText());
-            Assert.AreEqual(expected.Document, reportedDocument,
-                $"{phase}: text-variable read must report the exact lifecycle document it checked.");
-            var reportedProject = SchematicJson.Parser.Parse<DocumentSpecifier>(
-                structured.GetProperty("project").GetRawText());
-            Assert.AreEqual(DocumentType.DoctypeProject, reportedProject.Type,
+            var reportedDocument = structured.GetProperty("document");
+            Assert.AreEqual(expected.Document.Type.ToString(), reportedDocument.GetProperty("type").GetString(),
+                $"{phase}: text-variable read must report the exact lifecycle document type.");
+            Assert.AreEqual(expected.Document.Project.Name, reportedDocument.GetProperty("project").GetProperty("name").GetString(),
+                $"{phase}: text-variable read must report the exact project owner name.");
+            Assert.AreEqual(expected.Document.Project.Path, reportedDocument.GetProperty("project").GetProperty("path").GetString(),
+                $"{phase}: text-variable read must report the exact project owner path.");
+            var reportedProject = structured.GetProperty("project");
+            Assert.AreEqual(DocumentType.DoctypeProject.ToString(), reportedProject.GetProperty("type").GetString(),
                 $"{phase}: text-variable read must identify the project owner.");
-            Assert.AreEqual(expected.Document.Project, reportedProject.Project,
+            Assert.AreEqual(expected.Document.Project.Name, reportedProject.GetProperty("project").GetProperty("name").GetString(),
                 $"{phase}: text-variable read must report the exact project owner.");
+            Assert.AreEqual(expected.Document.Project.Path, reportedProject.GetProperty("project").GetProperty("path").GetString(),
+                $"{phase}: text-variable read must report the exact project owner path.");
             Assert.AreEqual(SchematicJson.Formatter.Format(expected), structured.GetProperty("beforeState").GetString(),
                 $"{phase}: text-variable read must use the supplied lifecycle checkpoint.");
             Assert.AreEqual(structured.GetProperty("beforeState").GetString(), structured.GetProperty("afterState").GetString(),

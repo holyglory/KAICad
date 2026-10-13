@@ -163,7 +163,7 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(refocusedSelection.Items.Any(item => item.Is(Track.Descriptor)
                 && item.Unpack<Track>().Id.Value == trackId),
                 "The native editor must retain the exact seeded track after canvas focus.");
-            NativeKeyboard.SchematicShortcut(display, processId, "motion", "PCB Editor",
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "PCB Editor",
                 controlKey: false, focusCanvas: false, clickFromLeft: centerX, clickFromTop: centerY);
             NativeKeyboard.SchematicShortcut(display, processId, "G", "PCB Editor",
                 controlKey: false, focusCanvas: false);

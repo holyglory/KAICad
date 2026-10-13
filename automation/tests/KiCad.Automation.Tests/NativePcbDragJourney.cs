@@ -131,7 +131,7 @@ public sealed partial class NativeSessionTests
             // measured target with the live window so G is sent over the
             // actual seeded segment rather than an empty canvas pixel.
             int centerX = (int)Math.Round(window.Width * 671d / 1280d);
-            int centerY = (int)Math.Round(window.Height * 373d / 720d);
+            int centerY = (int)Math.Round(window.Height * 392d / 720d);
             string preDragCapture = Path.Combine(evidence, instanceId + "-pcb-inline-drag-pre-g.png");
             string? captureFailure = null;
             try { await NativeKeyboard.CaptureAsync(display, preDragCapture, token); }

@@ -175,14 +175,14 @@ public sealed partial class NativeSessionTests
             // the subsequent motion/click changing this exact native item.
             Assert.IsTrue(NativeKeyboard.HasWindow(display, processId, "PCB Editor"),
                 "The PCB editor must remain alive after entering inline drag.");
-            foreach ((int x, int y) in new[] { (centerX + 8, centerY + 2), (centerX + 16, centerY + 6) })
+            foreach ((int x, int y) in new[] { (centerX + 4, centerY + 2), (centerX + 8, centerY + 4) })
             {
                 NativeKeyboard.SchematicShortcut(display, processId, "motion", "PCB Editor",
                     controlKey: false, focusCanvas: false, clickFromLeft: x, clickFromTop: y);
                 await Task.Delay(100, token);
             }
             NativeKeyboard.SchematicShortcut(display, processId, "click", "PCB Editor",
-                controlKey: false, focusCanvas: false, clickFromLeft: centerX + 16, clickFromTop: centerY + 6);
+                controlKey: false, focusCanvas: false, clickFromLeft: centerX + 8, clickFromTop: centerY + 4);
 
             async Task<Track?> WaitForChanged(TimeSpan timeout)
             {

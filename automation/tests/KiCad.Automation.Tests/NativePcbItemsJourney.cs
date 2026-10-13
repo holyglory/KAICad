@@ -1327,6 +1327,29 @@ public sealed partial class NativeSessionTests
             Assert.IsFalse(renderGeometryData.GetProperty("boardMutation").GetBoolean(), renderGeometryData.GetRawText());
             Assert.AreEqual(svgState, renderGeometryData.GetProperty("beforeState").GetString(), renderGeometryData.GetRawText());
             Assert.AreEqual(svgState, renderGeometryData.GetProperty("afterState").GetString(), renderGeometryData.GetRawText());
+            // Exercise the structured geometry boundary against the same live
+            // board/lifecycle checkpoint.  The legacy reply above and the
+            // typed reply must describe the same native object identities.
+            var typedRenderGeometryReply = await mcp.Tool("kicad_pcb_render_geometry_typed", new
+            {
+                instanceId,
+                input = new
+                {
+                    document = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(board)),
+                    expectedState = JsonSerializer.Deserialize<JsonElement>(svgState),
+                    request = JsonSerializer.Deserialize<JsonElement>(RenderGeometryRequest("F.Cu"))
+                }
+            });
+            Assert.IsFalse(typedRenderGeometryReply.TryGetProperty("isError", out var typedRenderError)
+                && typedRenderError.GetBoolean(), typedRenderGeometryReply.GetRawText());
+            var typedRenderGeometryData = typedRenderGeometryReply.GetProperty("structuredContent");
+            Assert.IsTrue(typedRenderGeometryData.GetProperty("typedInput").GetBoolean(), typedRenderGeometryReply.GetRawText());
+            Assert.AreEqual(renderGeometryData.GetProperty("afterState").GetString(),
+                typedRenderGeometryData.GetProperty("afterState").GetString(), typedRenderGeometryReply.GetRawText());
+            CollectionAssert.AreEquivalent(
+                renderGeometryData.GetProperty("items").EnumerateArray().Select(item => item.GetProperty("id").GetString()).ToArray(),
+                typedRenderGeometryData.GetProperty("items").EnumerateArray().Select(item => item.GetProperty("id").GetString()).ToArray(),
+                typedRenderGeometryReply.GetRawText());
             var geometryTransform = renderGeometryData.GetProperty("coordinateTransform");
             Assert.AreEqual("nm", geometryTransform.GetProperty("units").GetString(), renderGeometryData.GetRawText());
             Assert.AreEqual("down", geometryTransform.GetProperty("yAxis").GetString(), renderGeometryData.GetRawText());

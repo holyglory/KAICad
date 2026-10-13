@@ -106,11 +106,17 @@ public sealed partial class NativeSessionTests
                 holeX0: 20_000_000, holeY0: 20_000_000, holeX1: 30_000_000, holeY1: 30_000_000,
                 copper: true, vias: true, tracks: true, pads: true, footprints: true);
             string createOperationId = Guid.NewGuid().ToString("D");
-            JsonElement createdReply = await mcp.Tool("kicad_pcb_keepout_create", new
+            JsonElement createdReply = await mcp.Tool("kicad_pcb_keepout_mutation_typed", new
             {
-                instanceId, documentJson = boardJson, keepout = initial,
-                expectedStateJson = SchematicJson.Formatter.Format(baseline),
-                operationId = createOperationId
+                instanceId,
+                input = new
+                {
+                    document = JsonSerializer.Deserialize<JsonElement>(boardJson),
+                    expectedState = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(baseline)),
+                    mutation = "create",
+                    operationId = createOperationId,
+                    keepout = initial
+                }
             });
             JsonElement created = KeepoutToolSuccess(createdReply);
             Assert.AreEqual("create", created.GetProperty("operation").GetString(), createdReply.GetRawText());

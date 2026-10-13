@@ -195,7 +195,7 @@ public sealed class PcbRouteTuningTools(InstanceRegistry registry)
                 {
                     continue;
                 }
-                if (candidate.Count - 1 > request.MaxSegments)
+                if (candidate is null || candidate.Count - 1 > request.MaxSegments)
                     continue;
                 try
                 {

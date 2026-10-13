@@ -89,7 +89,7 @@ public sealed class PcbFootprintTypedMcpProcessTests
             AssertFailure(incomplete, "invalid_pcb_footprint_typed_input");
 
             input["operationId"] = "dddddddd-dddd-dddd-dddd-dddddddddddd";
-            input["expectedState"]!["completeChangeTracking"] = false;
+            input["expectedState"]!["diskBaselineChecked"] = false;
             JsonElement partial = await mcp.Tool("kicad_pcb_footprint_place_plan_typed", new { input });
             AssertFailure(partial, "invalid_pcb_footprint_typed_input");
         });

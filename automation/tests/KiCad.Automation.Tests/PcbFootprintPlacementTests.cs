@@ -104,7 +104,7 @@ public sealed class PcbFootprintPlacementTests
         var request = PcbFootprintPlacementTools.BuildCheckedRequest(source.State, candidate,
             "dddddddd-dddd-dddd-dddd-dddddddddddd");
         CheckedPcbItemContract.ValidateRequest(request, source.State.ProcessEpoch);
-        Assert.IsFalse(request.ExpectedState.CompleteChangeTracking);
+        Assert.IsTrue(request.ExpectedState.CompleteChangeTracking);
         Assert.IsTrue(request.ExpectedState.DiskBaselineChecked);
         Assert.AreEqual(source.State.Revision, request.ExpectedState.Revision);
         Assert.AreEqual(source.Footprint, candidate.Items.Single().Unpack<FootprintInstance>());

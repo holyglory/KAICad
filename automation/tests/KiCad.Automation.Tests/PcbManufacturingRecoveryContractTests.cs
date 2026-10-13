@@ -110,6 +110,11 @@ public sealed class PcbManufacturingRecoveryContractTests
             Assert.IsTrue(startRefused.GetProperty("isError").GetBoolean(), startRefused.GetRawText());
             Assert.AreEqual("invalid_operation_id",
                 startRefused.GetProperty("structuredContent").GetProperty("errorCode").GetString(), startRefused.GetRawText());
+            JsonElement capabilitiesRefused = await mcp.Tool("kicad_pcb_export_manager_capabilities_typed", new
+            { instanceId = Guid.NewGuid().ToString("D"), input = new { } });
+            Assert.IsTrue(capabilitiesRefused.GetProperty("isError").GetBoolean(), capabilitiesRefused.GetRawText());
+            Assert.AreEqual("invalid_pcb_export_capabilities_input",
+                capabilitiesRefused.GetProperty("structuredContent").GetProperty("errorCode").GetString(), capabilitiesRefused.GetRawText());
         }
         finally { Directory.Delete(root, true); }
     }

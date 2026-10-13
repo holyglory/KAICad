@@ -861,7 +861,8 @@ internal static class MultilayerRoutePlanner
                         checked(obstacle.Bounds.MaxXNm + extra), checked(obstacle.Bounds.MaxYNm + extra));
                     Vector2 point = Point(current.X, current.Y);
                     if (point.XNm >= expanded.MinXNm && point.XNm <= expanded.MaxXNm
-                        && point.YNm >= expanded.MinYNm && point.YNm <= expanded.MaxYNm)
+                        && point.YNm >= expanded.MinYNm && point.YNm <= expanded.MaxYNm
+                        && (obstacle.Geometry is null || obstacle.Geometry.Blocks(point.XNm, point.YNm)))
                         return false;
                 }
             }

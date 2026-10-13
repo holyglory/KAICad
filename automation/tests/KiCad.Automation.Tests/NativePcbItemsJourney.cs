@@ -1234,6 +1234,86 @@ public sealed partial class NativeSessionTests
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-render-3d-geometry.json"),
                 JsonSerializer.Serialize(new { requestJson = JsonFormatter.Default.Format(renderRequest), response = renderGeometryOnlyReply }), token);
 
+            // Exercise the typed 3D admission boundary against this same live
+            // renderer checkpoint. The typed wrapper owns output-path
+            // normalization; compare its actual native model identity and
+            // camera metadata with the legacy geometry observation above.
+            object TypedLifecycle(DocumentLifecycleState state) => new
+            {
+                document = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(state.Document)),
+                revision = new { epoch = state.Revision.Epoch, sequence = state.Revision.Sequence },
+                nativeIdentity = state.NativeIdentity, stateSha256 = state.StateSha256,
+                scope = "DLS_PCB", nativeContentDirty = state.NativeContentDirty,
+                projectSettingsIncluded = state.ProjectSettingsIncluded,
+                completeChangeTracking = state.CompleteChangeTracking,
+                diskBaselineChecked = state.DiskBaselineChecked,
+                nativeFiles = state.NativeFiles.ToArray(),
+                fileBaselines = state.FileBaselines.Select(file => new
+                {
+                    path = file.Path, baselinePath = file.BaselinePath,
+                    baselineKnown = file.BaselineKnown, baselineExists = file.BaselineExists,
+                    baselineSha256 = file.BaselineSha256, baselineBytes = file.BaselineBytes,
+                    currentKnown = file.CurrentKnown, currentExists = file.CurrentExists,
+                    currentSha256 = file.CurrentSha256, currentBytes = file.CurrentBytes,
+                    status = file.Status switch
+                    {
+                        NativeFileBaselineStatus.NfbsUnchanged => "NFBS_UNCHANGED",
+                        NativeFileBaselineStatus.NfbsChanged => "NFBS_CHANGED",
+                        NativeFileBaselineStatus.NfbsWrongPath => "NFBS_WRONG_PATH",
+                        NativeFileBaselineStatus.NfbsUnreadable => "NFBS_UNREADABLE",
+                        _ => "NFBS_UNKNOWN"
+                    }
+                }).ToArray(),
+                processEpoch = state.ProcessEpoch,
+                cleanCheckpointSha256 = state.CleanCheckpointSha256,
+                saveStableStateSha256 = state.SaveStableStateSha256
+            };
+            var typedRender3d = await mcp.Tool("kicad_pcb_render_3d_geometry_typed", new
+            {
+                instanceId,
+                input = new
+                {
+                    document = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(board)),
+                    expectedState = TypedLifecycle(expectedRenderState),
+                    request = new
+                    {
+                        format = 1, quality = 1, backgroundStyle = 3,
+                        width = (int)renderRequest.Width, height = (int)renderRequest.Height,
+                        appearancePreset = renderRequest.AppearancePreset,
+                        useBoardStackupColors = renderRequest.UseBoardStackupColors,
+                        side = 1, zoom = renderRequest.Zoom,
+                        perspective = renderRequest.Perspective,
+                        proceduralTextures = renderRequest.ProceduralTextures,
+                        floor = renderRequest.Floor, antiAlias = renderRequest.AntiAlias,
+                        postProcess = renderRequest.PostProcess,
+                        lightSideElevation = renderRequest.LightSideElevation
+                    }
+                }
+            });
+            Assert.IsFalse(typedRender3d.TryGetProperty("isError", out var typedRender3dError)
+                && typedRender3dError.GetBoolean(), typedRender3d.GetRawText());
+            var typedRender3dData = typedRender3d.GetProperty("structuredContent");
+            Assert.IsTrue(typedRender3dData.GetProperty("typedInput").GetBoolean(), typedRender3d.GetRawText());
+            Assert.IsTrue(typedRender3dData.GetProperty("typed3dInspection").GetBoolean(), typedRender3d.GetRawText());
+            Assert.AreEqual("incomplete", typedRender3dData.GetProperty("status").GetString(), typedRender3d.GetRawText());
+            Assert.IsFalse(typedRender3dData.GetProperty("complete").GetBoolean(), typedRender3d.GetRawText());
+            Assert.AreEqual(svgState, typedRender3dData.GetProperty("beforeState").GetString(), typedRender3d.GetRawText());
+            Assert.AreEqual(svgState, typedRender3dData.GetProperty("afterState").GetString(), typedRender3d.GetRawText());
+            var typedMetadata = typedRender3dData.GetProperty("metadata");
+            var typedModel = typedMetadata.GetProperty("models").EnumerateArray()
+                .Single(row => row.GetProperty("nativeUuid").GetString() == renderFootprint.Id.Value);
+            Assert.AreEqual(modelRow.GetProperty("nativeUuid").GetString(), typedModel.GetProperty("nativeUuid").GetString());
+            Assert.AreEqual(modelHashBefore, typedModel.GetProperty("contentSha256").GetString());
+            Assert.AreEqual(renderMetadata.GetProperty("viewMatrixColumnMajor").GetRawText(),
+                typedMetadata.GetProperty("viewMatrixColumnMajor").GetRawText());
+            Assert.AreEqual(renderMetadata.GetProperty("projectionMatrixColumnMajor").GetRawText(),
+                typedMetadata.GetProperty("projectionMatrixColumnMajor").GetRawText());
+            Assert.IsTrue(typedRender3dData.GetProperty("metadataCoverage").GetProperty("modelInstancesComplete").GetBoolean());
+            Assert.IsFalse(typedRender3dData.GetProperty("metadataCoverage").GetProperty("boardGeometryComplete").GetBoolean());
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-render-3d-geometry-typed.json"),
+                JsonSerializer.Serialize(new { request = typedRender3d, modelId = renderFootprint.Id.Value,
+                    requestSha256 = typedRender3dData.GetProperty("requestSha256").GetString() }), token);
+
             foreach ((RenderSide side, bool perspective) in new[]
             {
                 (RenderSide.RsBottom, false), (RenderSide.RsTop, true)
@@ -1596,6 +1676,15 @@ public sealed partial class NativeSessionTests
             var cleanBoard = cleanOpen.Document;
             finalBoard = cleanBoard;
             var cleanState = await ObserveLifecycleState(client, cleanBoard, token);
+            var cleanEdgeCuts = (await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+            { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbShape } }, token)).Items
+                .Select(item => item.Unpack<BoardGraphicShape>())
+                .Where(shape => shape.Layer == BoardLayer.BlEdgeCuts).ToArray();
+            Assert.IsTrue(cleanEdgeCuts.Any(shape => shape.Shape.GeometryCase == GraphicShape.GeometryOneofCase.Polygon
+                && shape.Shape.Polygon.Outline.Nodes.Count >= 8),
+                "The clean route fixture must retain a legal concave Edge.Cuts polygon.");
+            Assert.IsTrue(cleanEdgeCuts.Any(shape => shape.Shape.GeometryCase == GraphicShape.GeometryOneofCase.Rectangle),
+                "The clean route fixture must retain a separate Edge.Cuts cutout loop.");
 
             var pairPads = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
             { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbPad } }, token);
@@ -3507,6 +3596,130 @@ public sealed partial class NativeSessionTests
                 Assert.IsFalse(rerouteApply.TryGetProperty("isError", out var rerouteApplyError)
                     && rerouteApplyError.GetBoolean(), rerouteApply.GetRawText());
                 Assert.IsTrue(rerouteApply.GetProperty("structuredContent").GetProperty("mutationConfirmed").GetBoolean());
+
+                // Add two native rule areas to the same clean route board:
+                // one blocks tracks only and one blocks vias only. The typed
+                // route planner must treat their exact polygon geometry and
+                // restriction flags differently, while detached DRC rejects
+                // a candidate that violates the corresponding rule area.
+                object RouteKeepout(string id, long x0, long y0, long x1, long y1,
+                    bool keepoutTracks, bool keepoutVias) => new
+                {
+                    id, layers = new[] { "F.Cu", "B.Cu" }, name = keepoutTracks ? "route-track-only" : "route-via-only",
+                    polygons = new[] { new
+                    {
+                        outline = new[]
+                        {
+                            new { xNm = x0, yNm = y0 }, new { xNm = x1, yNm = y0 },
+                            new { xNm = x1, yNm = y1 }, new { xNm = x0, yNm = y1 }
+                        },
+                        holes = Array.Empty<object>()
+                    } },
+                    keepoutCopper = false, keepoutVias, keepoutTracks,
+                    keepoutPads = false, keepoutFootprints = false,
+                    borderStyle = "ZBS_SOLID", borderPitchNm = 1_000_000L
+                };
+                async Task<(JsonElement Data, DocumentLifecycleState State)> CreateRouteKeepout(
+                    object keepout, DocumentLifecycleState state)
+                {
+                    var reply = await mcp.Tool("kicad_pcb_keepout_mutation_typed", new
+                    {
+                        instanceId,
+                        input = new
+                        {
+                            document = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(cleanBoard)),
+                            expectedState = TypedLifecycle(state), mutation = "create",
+                            operationId = Guid.NewGuid().ToString("D"), keepout
+                        }
+                    });
+                    Assert.IsFalse(reply.TryGetProperty("isError", out var createError) && createError.GetBoolean(), reply.GetRawText());
+                    var data = reply.GetProperty("structuredContent");
+                    Assert.IsTrue(data.GetProperty("mutationConfirmed").GetBoolean(), reply.GetRawText());
+                    var after = SchematicJson.Parser.Parse<DocumentLifecycleState>(data.GetProperty("afterState").GetString()!);
+                    return (data, after);
+                }
+
+                string trackKeepoutId = Guid.NewGuid().ToString("D");
+                string viaKeepoutId = Guid.NewGuid().ToString("D");
+                var trackKeepoutResult = await CreateRouteKeepout(
+                    RouteKeepout(trackKeepoutId, 52_000_000, 43_000_000, 58_000_000, 49_000_000, true, false),
+                    await ObserveLifecycleState(client, cleanBoard, token));
+                var viaKeepoutResult = await CreateRouteKeepout(
+                    RouteKeepout(viaKeepoutId, 52_000_000, 55_000_000, 58_000_000, 61_000_000, false, true),
+                    trackKeepoutResult.State);
+                var ruleAreas = (await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+                { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbZone } }, token)).Items
+                    .Select(item => item.Unpack<Zone>()).Where(zone => zone.Type == ZoneType.ZtRuleArea).ToArray();
+                var trackRule = ruleAreas.Single(zone => zone.Id.Value == trackKeepoutId);
+                var viaRule = ruleAreas.Single(zone => zone.Id.Value == viaKeepoutId);
+                Assert.IsTrue(trackRule.RuleAreaSettings!.KeepoutTracks);
+                Assert.IsFalse(trackRule.RuleAreaSettings.KeepoutVias);
+                Assert.IsFalse(viaRule.RuleAreaSettings!.KeepoutTracks);
+                Assert.IsTrue(viaRule.RuleAreaSettings.KeepoutVias);
+
+                var typedRouteReply = await mcp.Tool("kicad_pcb_route_plan_typed", new
+                {
+                    instanceId,
+                    input = new
+                    {
+                        document = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(cleanBoard)),
+                        expectedState = TypedLifecycle(viaKeepoutResult.State),
+                        operationId = Guid.NewGuid().ToString("D"),
+                        request = new
+                        {
+                            netName = "POWER_RAIL", netClassName = "", layer = "F.Cu",
+                            start = new { xNm = 46_000_000L, yNm = 46_000_000L },
+                            end = new { xNm = 64_000_000L, yNm = 46_000_000L },
+                            widthNm = 250_000L, clearanceNm = 100_000L, gridNm = 500_000L,
+                            bounds = new { minXNm = 45_000_000L, minYNm = 40_000_000L, maxXNm = 70_000_000L, maxYNm = 70_000_000L },
+                            maxNodes = 10000, maxObstacleReport = 512,
+                            includeFootprintEnvelopes = false, includeRipUpCandidate = false
+                        }
+                    }
+                });
+                Assert.IsFalse(typedRouteReply.TryGetProperty("isError", out var typedRouteError)
+                    && typedRouteError.GetBoolean(), typedRouteReply.GetRawText());
+                var typedRouteData = typedRouteReply.GetProperty("structuredContent");
+                Assert.IsTrue(typedRouteData.GetProperty("routeFound").GetBoolean(), typedRouteReply.GetRawText());
+                var typedObstacles = typedRouteData.GetProperty("obstacleReport").EnumerateArray().ToArray();
+                var typedTrackObstacle = typedObstacles.Single(obstacle => obstacle.GetProperty("id").GetString() == trackKeepoutId);
+                Assert.IsTrue(typedTrackObstacle.GetProperty("blocksTracks").GetBoolean(), typedRouteReply.GetRawText());
+                Assert.IsFalse(typedObstacles.Any(obstacle => obstacle.GetProperty("id").GetString() == viaKeepoutId),
+                    "A via-only rule area must not block a single-layer track planner.");
+                foreach (var point in typedRouteData.GetProperty("routePoints").EnumerateArray())
+                {
+                    long x = point.GetProperty("xNm").GetInt64(), y = point.GetProperty("yNm").GetInt64();
+                    Assert.IsFalse(x >= 52_000_000 && x <= 58_000_000 && y >= 43_000_000 && y <= 49_000_000,
+                        typedRouteReply.GetRawText());
+                }
+
+                var blockedTrack = new Track
+                {
+                    Id = new() { Value = Guid.NewGuid().ToString("D") },
+                    Start = new() { XNm = 52_000_000, YNm = 46_000_000 },
+                    End = new() { XNm = 58_000_000, YNm = 46_000_000 },
+                    Width = new() { ValueNm = 250_000 }, Layer = BoardLayer.BlFCu,
+                    Net = new() { Name = "POWER_RAIL" }
+                };
+                var blockedTrackCandidate = new CreateItems { Header = new() { Document = cleanBoard } };
+                blockedTrackCandidate.Items.Add(Any.Pack(blockedTrack));
+                var blockedTrackDrc = await RouteDrc(BoardJson.Formatter.Format(blockedTrackCandidate), null, viaKeepoutResult.State);
+                Assert.IsNotEmpty(blockedTrackDrc.Findings,
+                    "Detached DRC must reject a track crossing the track-only rule area.");
+
+                // A via-only rule area is independently checked with a native
+                // via candidate. The same route DRC path proves the rule-area
+                // restriction reaches the candidate evaluator.
+                var blockedVia = multilayerCandidate.Items.First(item => item.Is(Via.Descriptor)).Unpack<Via>().Clone();
+                blockedVia.Id = new() { Value = Guid.NewGuid().ToString("D") };
+                blockedVia.Position = new() { XNm = 55_000_000, YNm = 58_000_000 };
+                blockedVia.Net = new() { Name = "POWER_RAIL" };
+                var blockedViaCandidate = new CreateItems { Header = new() { Document = cleanBoard } };
+                blockedViaCandidate.Items.Add(Any.Pack(blockedVia));
+                var blockedViaDrc = await RouteDrc(BoardJson.Formatter.Format(blockedViaCandidate), null, viaKeepoutResult.State);
+                Assert.IsNotEmpty(blockedViaDrc.Findings,
+                    "Detached DRC must reject a via crossing the via-only rule area.");
+                await SaveCheckedThroughMcp(client, cleanBoard, evidence, token, verifyReconnect: false);
             }
             finally { Directory.Delete(exportDirectory, true); }
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-pcb-items.json"), updatedReply.GetRawText(), token);
@@ -3737,11 +3950,15 @@ public sealed partial class NativeSessionTests
         string obstacle = Guid.NewGuid().ToString("D");
         string viaSupport = Guid.NewGuid().ToString("D");
         string edge = Guid.NewGuid().ToString("D");
+        string cutout = Guid.NewGuid().ToString("D");
         // Keep the candidate deliberately small and deterministic: the native
         // shove preview starts at the USB_D+ pad (40.1,40.1) and runs vertically
-        // through a foreign-net POWER_RAIL barrier at y=42. The explicit
-        // Edge.Cuts rectangle gives the native checker a finite board for edge
-        // clearance and containment rules.
+        // through a foreign-net POWER_RAIL barrier at y=42. A legal concave
+        // Edge.Cuts polygon gives the native checker a finite
+        // board for edge clearance and containment rules. The separate closed
+        // Edge.Cuts rectangle is a real board cutout, away from the route
+        // corridor, so route candidates must preserve both outer and inner
+        // boundaries.
         return $"""
 (kicad_pcb (version 20260206) (generator "pcbnew")
   (general (thickness 1.6))
@@ -3754,7 +3971,8 @@ public sealed partial class NativeSessionTests
   (net 3 "USB_D-")
   (net 4 "MULTILAYER_ROUTE")
   (net 5 "MULTILAYER_BARRIER")
-  (gr_rect (start 0 0) (end 100 100) (stroke (width 0.05) (type default)) (fill none) (layer "Edge.Cuts") (uuid "{edge}"))
+  (gr_poly (pts (xy 0 0) (xy 100 0) (xy 100 100) (xy 0 100) (xy 0 80) (xy 15 80) (xy 15 20) (xy 0 20)) (stroke (width 0.05) (type default)) (fill none) (layer "Edge.Cuts") (uuid "{edge}"))
+  (gr_rect (start 78 78) (end 90 90) (stroke (width 0.05) (type default)) (fill none) (layer "Edge.Cuts") (uuid "{cutout}"))
   (footprint "PAD1" (layer "F.Cu") (at 30.1 30.1) (uuid "{f1}")
     (attr smd)
     (pad "1" smd circle (at 0 0) (size 0.3 0.3) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "POWER_RAIL") (uuid "{p1}")))

@@ -2886,11 +2886,11 @@ BOOST_AUTO_TEST_CASE( RefilledTeardropsNameTheOpenBoardTeardropOrLeaveTheSnapsho
 
 BOOST_AUTO_TEST_CASE( ManufacturingManagerAdmissionJournalAndReadOnlyReconcile )
 {
-    KI_TEST::TEMPORARY_DIRECTORY scratch( "pcb_manufacturing_manager_" + KIID().AsString(), "" );
+    KI_TEST::TEMPORARY_DIRECTORY scratch( "pcb_manufacturing_manager_" + KIID().AsString().ToStdString(), "" );
     const wxString journalDirectory = wxString::FromUTF8( ( scratch.GetPath() / "pcb-manufacturing-jobs" ).string() );
     PCB_MANUFACTURING_JOB_MANAGER manager( journalDirectory );
-    const std::string epoch = KIID().AsString();
-    const std::string operation = KIID().AsString();
+    const std::string epoch = KIID().AsString().ToStdString();
+    const std::string operation = KIID().AsString().ToStdString();
     const auto boardPath = scratch.GetPath() / "fixture.kicad_pcb";
     kiapi::common::types::DocumentSpecifier document;
     document.set_type( kiapi::common::types::DOCTYPE_PCB );
@@ -2947,7 +2947,7 @@ BOOST_AUTO_TEST_CASE( ManufacturingManagerAdmissionJournalAndReadOnlyReconcile )
     BOOST_CHECK( observed->journal_verified() );
     BOOST_CHECK_EQUAL( observed->receipt().durable_journal_sha256(), started->durable_journal_sha256() );
 
-    const std::string nextEpoch = KIID().AsString();
+    const std::string nextEpoch = KIID().AsString().ToStdString();
     ReconcilePcbManufacturingExport reconcile;
     reconcile.mutable_document()->CopyFrom( document );
     reconcile.set_operation_id( operation );

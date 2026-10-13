@@ -13,7 +13,7 @@ using ModelContextProtocol.Server;
 namespace KiCad.Automation.Mcp;
 
 [McpServerToolType]
-public sealed class SimulationTools(InstanceRegistry instances)
+public sealed partial class SimulationTools(InstanceRegistry instances)
 {
     private readonly SimulationResultReceipts receipts = new(instances.StateDirectory);
     [McpServerTool(Name = "kicad_simulation_start"),

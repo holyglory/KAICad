@@ -86,7 +86,7 @@ public sealed class PcbFootprintPlacementTests
     {
         DocumentSpecifier document = Document();
         DocumentLifecycleState state = State(document);
-        state.CompleteChangeTracking = false;
+        state.DiskBaselineChecked = false;
 
         AutomationException error = Assert.ThrowsExactly<AutomationException>(() =>
             PcbFootprintPlacementTools.BuildPlan(document, state, Footprint(BoardLayer.BlFCu, 0)));
@@ -104,7 +104,7 @@ public sealed class PcbFootprintPlacementTests
         var request = PcbFootprintPlacementTools.BuildCheckedRequest(source.State, candidate,
             "dddddddd-dddd-dddd-dddd-dddddddddddd");
         CheckedPcbItemContract.ValidateRequest(request, source.State.ProcessEpoch);
-        Assert.IsTrue(request.ExpectedState.CompleteChangeTracking);
+        Assert.IsFalse(request.ExpectedState.CompleteChangeTracking);
         Assert.IsTrue(request.ExpectedState.DiskBaselineChecked);
         Assert.AreEqual(source.State.Revision, request.ExpectedState.Revision);
         Assert.AreEqual(source.Footprint, candidate.Items.Single().Unpack<FootprintInstance>());

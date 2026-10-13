@@ -247,7 +247,6 @@ public sealed class PcbFootprintPlacementTools(InstanceRegistry registry)
             || !expected.Document.Equals(document)
             || string.IsNullOrWhiteSpace(expected.ProcessEpoch)
             || !expected.ProjectSettingsIncluded
-            || !expected.CompleteChangeTracking
             || !expected.DiskBaselineChecked
             || expected.Revision is null
             || !CanonicalUuid(expected.NativeIdentity)
@@ -255,7 +254,7 @@ public sealed class PcbFootprintPlacementTools(InstanceRegistry registry)
             || !Digest(expected.StateSha256)
             || !CheckedSchematicContract.FileCoverage(expected))
             throw new AutomationException("invalid_pcb_footprint_state",
-                "expectedStateJson must identify one complete, unchanged PCB lifecycle checkpoint including project settings, revision identity and file baselines.");
+                "expectedStateJson must identify one complete, unchanged PCB lifecycle checkpoint including project settings, revision identity, state digest and file baselines.");
     }
 
     private static bool Digest(string value)

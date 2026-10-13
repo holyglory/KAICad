@@ -40,10 +40,10 @@ public sealed class PcbFootprintPlacementInput : NativeDocumentInputObject
         if (target.Type != DocumentType.DoctypePcb || state.Scope != DocumentLifecycleScope.DlsPcb
             || !target.Equals(state.Document))
             throw Invalid("The placement document and lifecycle observation must identify the same PCB.");
-        if (!state.ProjectSettingsIncluded || !state.CompleteChangeTracking || !state.DiskBaselineChecked
+        if (!state.ProjectSettingsIncluded || !state.DiskBaselineChecked
             || state.Revision is null || state.Revision.Epoch != state.NativeIdentity
             || !CheckedSchematicContract.FileCoverage(state))
-            throw Invalid("The complete PCB checkpoint must include project settings, the native revision and unchanged file-baseline coverage.");
+            throw Invalid("The PCB checkpoint must include project settings, the native revision, a complete state digest and unchanged file-baseline coverage.");
         return (target, state, Footprint.ToNative(token));
     }
 

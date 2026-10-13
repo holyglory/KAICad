@@ -71,7 +71,7 @@ public sealed class PcbRoutingContractTests
     public void WiderViaClearanceIsAppliedToGeometryBoundaries()
     {
         PcbRouteGeometry.Region region = PcbRouteGeometry.FromPolySet(RectanglePolySet(0, 0, 10_000, 10_000), 0)!;
-        Assert.IsFalse(region.Blocks(5_000, 5_000));
+        Assert.IsFalse(region.Blocks(5_000, 5_000, 0));
         Assert.IsTrue(region.Blocks(5_000, 5_000, 6_000), "A via radius that reaches the boundary must be refused.");
     }
 

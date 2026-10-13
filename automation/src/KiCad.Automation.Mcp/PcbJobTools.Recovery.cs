@@ -23,7 +23,7 @@ public sealed partial class PcbJobTools
     [McpServerTool(Name = "kicad_pcb_export_cancel_typed", ReadOnly = false),
      Description("Request cancellation of one typed PCB manufacturing export through the native manager. The current synchronous exporter has no cancellation manager, so the call fails closed with recoverySupported=false and preserves the durable operation outcome. No output is deleted or declared cancelled by this boundary."),
      KiCadCapability("pcb-manufacturing", "typed-recovery-contract", "explicit PCB document, operation ID, current process epoch and fail-closed cancellation result"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbManufacturingRecoveryContractTests.TypedRecoveryInputsPreserveIdentity")]
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbManufacturingRecoveryContractTests.CompiledStdioPublishesTypedRecoveryToolsAndFailsClosedForIncompleteInput")]
     public Task<CallToolResult> ExportCancelTyped(string instanceId,
         PcbManufacturingCancelInput input, CancellationToken cancellationToken) => ExecuteRecovery(async () =>
     {
@@ -59,7 +59,7 @@ public sealed partial class PcbJobTools
     [McpServerTool(Name = "kicad_pcb_export_reconcile_typed", ReadOnly = true),
      Description("Reconcile one typed PCB manufacturing export across an MCP or native reconnect through the native manager. The current peer has only process-owned receipts, so cross-process reconciliation fails closed with recoverySupported=false and does not retry or publish staged files."),
      KiCadCapability("pcb-manufacturing", "typed-recovery-contract", "explicit PCB document, operation ID, fingerprint, current and prior process epochs"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbManufacturingRecoveryContractTests.TypedRecoveryInputsPreserveIdentity")]
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbManufacturingRecoveryContractTests.CompiledStdioPublishesTypedRecoveryToolsAndFailsClosedForIncompleteInput")]
     public Task<CallToolResult> ExportReconcileTyped(string instanceId,
         PcbManufacturingReconcileInput input, CancellationToken cancellationToken) => ExecuteRecovery(async () =>
     {

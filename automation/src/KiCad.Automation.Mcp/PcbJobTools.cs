@@ -19,7 +19,7 @@ namespace KiCad.Automation.Mcp;
 /// returns bounded, hashable output evidence for an agent.
 /// </summary>
 [McpServerToolType]
-public sealed class PcbJobTools(InstanceRegistry registry)
+public sealed partial class PcbJobTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_pcb_export", ReadOnly = false),
      Description("Run exactly one typed native PCB manufacturing export into a new absolute outputDirectory. Supply an explicit operationId, typed document and complete lifecycle observation, plus exactly one concrete job setting (3D, render, SVG, DXF, PDF, PostScript, Gerbers, drill, position, GenCAD, IPC-2581, IPC-D-356, ODB++ or board statistics). KiCad stages and atomically publishes the directory without replacing existing files. Reuse the same operationId after a lost reply; cancellation never claims native cancellation."),
@@ -28,33 +28,9 @@ public sealed class PcbJobTools(InstanceRegistry registry)
     public Task<CallToolResult> ExportTyped(string instanceId, PcbManufacturingExportInput input,
         CancellationToken cancellationToken) => Execute(async () =>
     {
-        if (input is null)
-            throw new AutomationException("invalid_pcb_export_input", "A typed PCB manufacturing export input is required.");
-        ValidateOperationId(input.OperationId);
-        if (string.IsNullOrWhiteSpace(instanceId))
-            throw new AutomationException("invalid_instance_id", "instanceId is required for a PCB manufacturing export.");
-        if (string.IsNullOrWhiteSpace(input.OutputDirectory) || !Path.IsPathFullyQualified(input.OutputDirectory))
-            throw new AutomationException("invalid_pcb_export_path", "outputDirectory must be an absolute path.");
-
-        DocumentSpecifier document = NativeDocumentInput.ToNative(input.Document);
-        DocumentLifecycleState expected = DocumentLifecycleInput.ToNative(input.ExpectedState);
-        DocumentStateTools.ValidateTarget(document);
-        if (document.Type != DocumentType.DoctypePcb || !expected.Document.Equals(document)
-            || expected.Scope != DocumentLifecycleScope.DlsPcb || string.IsNullOrWhiteSpace(expected.ProcessEpoch))
-            throw new AutomationException("invalid_pcb_export_state", "The typed document and lifecycle observation must identify the same PCB.");
-
-        RunPcbManufacturingExport request = new()
-        {
-            OperationId = input.OperationId,
-            ProcessEpoch = expected.ProcessEpoch,
-            Document = document.Clone(),
-            ExpectedState = expected,
-            OutputDirectory = Path.GetFullPath(input.OutputDirectory)
-        };
-        if (input.Job is null)
-            throw new AutomationException("invalid_pcb_export_job", "Exactly one concrete PCB manufacturing job setting is required.");
-        input.Job.ApplyTo(request);
-        PcbManufacturingContract.ValidateRequest(request);
+        RunPcbManufacturingExport request = BuildManufacturingRequest(instanceId, input);
+        DocumentSpecifier document = request.Document;
+        DocumentLifecycleState expected = request.ExpectedState;
 
         NativeClient client = registry.Client(instanceId);
         AutomationSession session = await client.HandshakeAsync(cancellationToken);

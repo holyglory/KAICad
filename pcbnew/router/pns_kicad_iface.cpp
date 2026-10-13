@@ -2762,7 +2762,18 @@ std::unique_ptr<BOARD_CONNECTED_ITEM> PNS_KICAD_IFACE::MaterializeRouteItem(
 
 void PNS_KICAD_IFACE::modifyBoardItem( PNS::ITEM* aItem, BOARD_COMMIT& aCommit )
 {
-    BOARD_ITEM* original = aItem->Parent();
+    if( !aItem )
+        return;
+
+    // A routed preview branch can be detached from its direct parent while
+    // retaining the live board object as its source item.  Resolve the native
+    // target before any type check or commit operation; a branch without either
+    // pointer is auxiliary geometry and cannot be committed safely.
+    BOARD_ITEM* original = aItem->Parent() ? aItem->Parent() : aItem->GetSourceItem();
+
+    if( !original )
+        return;
+
     if( auto materialized = MaterializeRouteItem( aItem, true ) )
     {
         aCommit.Modify( original );

@@ -29,6 +29,9 @@
 #include <pcbnew/footprint.h>
 #include <pcbnew/netinfo.h>
 #include <board_design_settings.h>
+#include <board_commit.h>
+#include <tool/tool_manager.h>
+#include <pcbnew_utils/board_test_utils.h>
 
 #include <lset.h>
 #include <padstack.h>
@@ -357,6 +360,13 @@ public:
 
 private:
     PNS_TEST_FIXTURE* m_testFixture;
+};
+
+
+class ROUTE_UPDATE_TEST_IFACE : public PNS_KICAD_IFACE
+{
+public:
+    using PNS_KICAD_IFACE::modifyBoardItem;
 };
 
 
@@ -693,6 +703,50 @@ BOOST_FIXTURE_TEST_CASE( PNSRoutePartitionRetainsArcSourceIdentity, PNS_TEST_FIX
     BOOST_CHECK_EQUAL( updated.front(), &replacement );
     BOOST_CHECK( deleted.empty() );
     BOOST_CHECK( created.empty() );
+}
+
+
+BOOST_AUTO_TEST_CASE( PNSDetachedRouteUpdateUsesSourceAndRejectsOrphans )
+{
+    BOARD board;
+    board.SetCopperLayerCount( 2 );
+
+    TOOL_MANAGER mgr;
+    mgr.SetEnvironment( &board, nullptr, nullptr, nullptr, nullptr );
+    KI_TEST::DUMMY_TOOL* tool = new KI_TEST::DUMMY_TOOL();
+    mgr.RegisterTool( tool );
+    BOARD_COMMIT commit( tool );
+
+    PCB_TRACK nativeTrack( &board );
+    nativeTrack.SetStart( VECTOR2I( 100000, 100000 ) );
+    nativeTrack.SetEnd( VECTOR2I( 300000, 100000 ) );
+    nativeTrack.SetWidth( 10000 );
+    nativeTrack.SetLayer( F_Cu );
+
+    ROUTE_UPDATE_TEST_IFACE iface;
+    iface.SetBoard( &board );
+
+    // A detached preview branch has no direct parent, but retains the native
+    // route item as its source.  Updating it must stage and copy the source
+    // without dereferencing the null direct-parent slot.
+    PNS::SEGMENT detached( SEG( VECTOR2I( 100000, 100000 ), VECTOR2I( 500000, 100000 ) ), nullptr );
+    detached.SetWidth( 10000 );
+    detached.SetLayer( F_Cu );
+    detached.SetSourceItem( &nativeTrack );
+
+    iface.modifyBoardItem( &detached, commit );
+
+    BOOST_CHECK_EQUAL( commit.GetStatus( &nativeTrack ), CHT_MODIFY );
+    BOOST_CHECK_EQUAL( nativeTrack.GetEnd(), VECTOR2I( 500000, 100000 ) );
+
+    // Auxiliary geometry with neither parent nor source has no native object
+    // to mutate and must be ignored safely.
+    PNS::SEGMENT orphan( SEG( VECTOR2I( 100000, 200000 ), VECTOR2I( 300000, 200000 ) ), nullptr );
+    orphan.SetWidth( 10000 );
+    orphan.SetLayer( F_Cu );
+
+    iface.modifyBoardItem( &orphan, commit );
+    BOOST_CHECK_EQUAL( commit.GetStatus( &nativeTrack ), CHT_MODIFY );
 }
 
 

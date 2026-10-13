@@ -11,9 +11,12 @@
 #include <cerrno>
 #include <cstdlib>
 #include <filesystem>
+#include <iterator>
 #include <limits>
 #include <memory>
+#include <set>
 #include <stdexcept>
+#include <string_view>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -104,7 +107,7 @@ tl::expected<std::string, std::string> ReadBytes( const fs::path& aPath )
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
             FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, nullptr );
     if( handle == INVALID_HANDLE_VALUE ) return tl::unexpected( "manufacturing_journal_unavailable" );
-    auto close = std::unique_ptr<void, decltype( &CloseHandle )>( handle, &CloseHandle );
+    struct HANDLE_CLOSE { HANDLE value; ~HANDLE_CLOSE() { CloseHandle( value ); } } close{ handle };
     BY_HANDLE_FILE_INFORMATION information;
     if( !GetFileInformationByHandle( handle, &information )
         || ( information.dwFileAttributes & ( FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY ) ) )
@@ -305,6 +308,12 @@ void PCB_MANUFACTURING_JOB_MANAGER::SetUnsupported( Receipt& aReceipt )
     aReceipt.set_recovery_state( PCB_MFG_RECOVERY_UNSUBMITTED );
     aReceipt.set_error_code( "export_adapter_unavailable" );
     aReceipt.set_error_message( "The detached exporter is unavailable; the admitted request was not dispatched." );
+    aReceipt.set_publication_state( PCB_MFG_PUBLICATION_UNSPECIFIED );
+    aReceipt.clear_staging_directory();
+    aReceipt.clear_artifacts();
+    aReceipt.clear_output_manifest_sha256();
+    aReceipt.set_output_manifest_complete( false );
+    aReceipt.set_publication_committed( false );
 }
 
 tl::expected<void, std::string> PCB_MANUFACTURING_JOB_MANAGER::ValidateRecord( const JournalRecord& aRecord )

@@ -74,6 +74,9 @@ public sealed partial class PcbJobTools
             PcbManufacturingExportReceipt receipt = await client.InvokeAsync<CancelPcbManufacturingExport,
                 PcbManufacturingExportReceipt>(request, cancellationToken);
             ValidateManagerReceiptIdentity(receipt, request.Document, request.OperationId, request.ProcessEpoch);
+            if( receipt.RecoveryState != PcbManufacturingRecoveryState.PcbMfgRecoveryCancelled )
+                throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
+                    "The native manager did not cancel this operation; its previous outcome remains unchanged.");
             if( receipt.RecoveryState == PcbManufacturingRecoveryState.PcbMfgRecoveryCancelled
                 && (!receipt.CancellationRequested || !receipt.Terminal || receipt.NativeDispatch
                     || receipt.Artifacts.Count != 0 || receipt.PublicationCommitted) )
@@ -154,7 +157,9 @@ public sealed partial class PcbJobTools
         NativeClient client = registry.Client(instanceId); AutomationSession session = await client.HandshakeAsync(cancellationToken);
         if (session.Epoch != epoch) throw new AutomationException("stale_process_epoch", "The capability request belongs to another native process epoch.");
         PcbManufacturingManagerCapabilities result = await client.InvokeAsync<GetPcbManufacturingManagerCapabilities, PcbManufacturingManagerCapabilities>(new() { Document = target, ProcessEpoch = epoch }, cancellationToken);
-        if( !result.Document.Equals(target) || result.ProcessEpoch != epoch || string.IsNullOrWhiteSpace(result.UnavailableReason) )
+        if( !result.Document.Equals(target) || result.ProcessEpoch != epoch || string.IsNullOrWhiteSpace(result.UnavailableReason)
+            || !result.AdmissionSupported || !result.RequestJournalSupported || !result.JournalReadSupported
+            || result.DetachedExportSupported || result.PublicationSupported || result.CompleteSnapshotSupported )
             throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
                 "The native manager capability response did not bind the requested PCB and process epoch.");
         return Data(new { instanceId, processEpoch = session.Epoch, capabilities = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(result)) });
@@ -181,6 +186,8 @@ public sealed partial class PcbJobTools
             if( !response.ReconciliationSupported || !response.RequestFingerprintVerified || !response.JournalVerified )
                 throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable, "The native journal read did not prove its integrity checks.");
             ValidateManagerReceiptIdentity(response.Receipt, target, operation, epoch);
+            if( response.Receipt.RequestFingerprintSha256 != fingerprint )
+                throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable, "The native journal fingerprint does not match the requested operation.");
         }
         return Data(new { instanceId, processEpoch = epoch, operationId = operation, found = response.Found,
             recoverySupported = response.ReconciliationSupported, requestFingerprintVerified = response.RequestFingerprintVerified,

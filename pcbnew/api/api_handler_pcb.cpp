@@ -4245,6 +4245,9 @@ HANDLER_RESULT<kiapi::automation::v1::PcbManufacturingManagerCapabilities>
 API_HANDLER_PCB::handleGetPcbManufacturingManagerCapabilities(
         const HANDLER_CONTEXT<kiapi::automation::v1::GetPcbManufacturingManagerCapabilities>& aCtx )
 {
+    if( aCtx.Request.process_epoch() != apiServer().Token() )
+        return tl::unexpected( ManufacturingError( "The manufacturing manager capability request has a stale process epoch",
+                                                   ApiStatusCode::AS_BUSY ) );
     return m_manufacturingJobs.Capabilities( aCtx.Request.document(), apiServer().Token() );
 }
 

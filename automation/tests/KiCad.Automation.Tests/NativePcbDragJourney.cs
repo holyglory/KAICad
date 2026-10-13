@@ -153,9 +153,17 @@ public sealed partial class NativeSessionTests
                     capture = File.Exists(preDragCapture) ? Path.GetFileName(preDragCapture) : null,
                     captureFailure
                 }), token);
-            // A real click gives the PCB canvas GTK focus. A motion-only
-            // command moves XTest's pointer but does not focus the canvas.
+            // Focus the actual canvas on an empty point first. Reapply the
+            // native selection afterward because GTK background clicks clear
+            // the editor selection; G then sees both a focused canvas and the
+            // exact selected route under the pointer.
             NativeKeyboard.SchematicShortcut(display, processId, "click", "PCB Editor",
+                controlKey: false, focusCanvas: true, clickFromLeft: 550, clickFromTop: 300);
+            var refocusedSelection = await client.InvokeAsync<AddToSelection, SelectionResponse>(selection, token);
+            Assert.IsTrue(refocusedSelection.Items.Any(item => item.Is(Track.Descriptor)
+                && item.Unpack<Track>().Id.Value == trackId),
+                "The native editor must retain the exact seeded track after canvas focus.");
+            NativeKeyboard.SchematicShortcut(display, processId, "motion", "PCB Editor",
                 controlKey: false, focusCanvas: false, clickFromLeft: centerX, clickFromTop: centerY);
             NativeKeyboard.SchematicShortcut(display, processId, "G", "PCB Editor",
                 controlKey: false, focusCanvas: false);

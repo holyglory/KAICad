@@ -330,7 +330,11 @@ public sealed partial class NativeSessionTests
         // Save/reload is performed while the changed map is still installed;
         // project variables are owned by the project file, so the public read
         // after reload is the persistence evidence for this mutation.
-        await Reopen(original.Data, "text-variables-reopened", verifyReconnect: false);
+        var expectedWithTextVariables = original.Data.Clone();
+        expectedWithTextVariables.Metadata.TextVariables.Clear();
+        foreach (var pair in changedTextVariables)
+            expectedWithTextVariables.Metadata.TextVariables[pair.Key] = pair.Value;
+        await Reopen(expectedWithTextVariables, "text-variables-reopened", verifyReconnect: false);
         var textVariablesReloadedLifecycle = await ObserveLifecycleState(client, document, token);
         var reloadedTextVariables = await ReadProjectTextVariables(textVariablesReloadedLifecycle, "text-variables-reloaded");
         await AssertProjectTextVariables(reloadedTextVariables, textVariablesReloadedLifecycle, "text-variables-reloaded");

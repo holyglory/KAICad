@@ -199,7 +199,12 @@ public sealed partial class NativeSessionTests
         RequireToolSuccess(projection);
         JsonElement projectionData = projection.GetProperty("structuredContent");
         Assert.IsTrue(projectionData.GetProperty("accepted").GetBoolean(), projection.GetRawText());
+        // Board archive publication remains separate from the native board
+        // transaction; this qualification must not imply atomic provenance.
         Assert.IsFalse(projectionData.GetProperty("provenanceAtomic").GetBoolean(), projection.GetRawText());
+        Assert.IsFalse(projectionData.GetProperty("embeddedSourceVerified").GetBoolean(), projection.GetRawText());
+        Assert.IsFalse(projectionData.GetProperty("archivePreflight").GetProperty("boardTransactionJoined").GetBoolean(),
+            projection.GetRawText());
         Assert.AreEqual(sourceSha256, projectionData.GetProperty("sourceSha256").GetString(), projection.GetRawText());
         Assert.AreEqual(trace.GetProperty("geometrySha256").GetString(), projectionData.GetProperty("geometrySha256").GetString(),
             projection.GetRawText());
@@ -219,6 +224,7 @@ public sealed partial class NativeSessionTests
         }, token);
         Assert.AreEqual(createdIds.Length, live.Items.Count, projection.GetRawText());
         var expectedGeometry = new Dictionary<string, string[]>(StringComparer.Ordinal);
+        var livePolygons = new List<RasterTraceProjectionAssertions.Polygon>();
         foreach (var item in live.Items)
         {
             Assert.IsTrue(item.Is(BoardGraphicShape.Descriptor), projection.GetRawText());
@@ -226,13 +232,19 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(BoardLayer.BlFSilkS, shape.Layer, projection.GetRawText());
             Assert.AreEqual(GraphicShape.GeometryOneofCase.Polygon, shape.Shape.GeometryCase, projection.GetRawText());
             Assert.IsTrue(shape.Shape.Polygon.Polygons.Single().Outline.Closed, projection.GetRawText());
-            expectedGeometry[shape.Id.Value] = shape.Shape.Polygon.Polygons.Single().Outline.Nodes
+            var outline = shape.Shape.Polygon.Polygons.Single().Outline;
+            expectedGeometry[shape.Id.Value] = outline.Nodes
                 .Select(node => $"{node.Point.XNm}:{node.Point.YNm}").ToArray();
+            livePolygons.Add(new(shape.Id.Value, Property(shape, "kicad.ai.raster_trace.piece_id"),
+                outline.Nodes.Select(node => new RasterTraceProjectionAssertions.Point(
+                    node.Point.XNm, node.Point.YNm)).ToArray()));
             Assert.AreEqual(trace.GetProperty("geometrySha256").GetString(), Property(shape, "kicad.ai.raster_trace.geometry_sha256"), projection.GetRawText());
             Assert.AreEqual(sourceSha256, Property(shape, "kicad.ai.raster_trace.source_sha256"), projection.GetRawText());
             Assert.AreEqual("filled-vector-projection", Property(shape, "kicad.ai.raster_trace.role"), projection.GetRawText());
             Assert.AreEqual(archivePath, Property(shape, "kicad.ai.raster_trace.source_archive"), projection.GetRawText());
         }
+        RasterTraceProjectionAssertions.AssertAgainstProposal(trace, createdIds, livePolygons,
+            30_000_000L, 30_000_000L, "live board raster projection");
 
         DocumentLifecycleState projected = await ObserveLifecycleState(client, board, token);
         var saved = await mcp.Tool("kicad_document_save", new
@@ -265,18 +277,25 @@ public sealed partial class NativeSessionTests
         }, token);
         Assert.AreEqual(createdIds.Length, persisted.Items.Count,
             "Every projected filled piece must survive a native save, close and reopen.");
+        var persistedPolygons = new List<RasterTraceProjectionAssertions.Polygon>();
         foreach (var item in persisted.Items)
         {
             Assert.IsTrue(item.Is(BoardGraphicShape.Descriptor), item.ToString());
             BoardGraphicShape shape = item.Unpack<BoardGraphicShape>();
+            var outline = shape.Shape.Polygon.Polygons.Single().Outline;
             Assert.IsTrue(expectedGeometry.TryGetValue(shape.Id.Value, out string[]? geometry), shape.Id.Value);
-            CollectionAssert.AreEqual(geometry, shape.Shape.Polygon.Polygons.Single().Outline.Nodes
+            CollectionAssert.AreEqual(geometry, outline.Nodes
                 .Select(node => $"{node.Point.XNm}:{node.Point.YNm}").ToArray(), shape.Id.Value);
+            persistedPolygons.Add(new(shape.Id.Value, Property(shape, "kicad.ai.raster_trace.piece_id"),
+                outline.Nodes.Select(node => new RasterTraceProjectionAssertions.Point(
+                    node.Point.XNm, node.Point.YNm)).ToArray()));
             Assert.AreEqual(trace.GetProperty("geometrySha256").GetString(), Property(shape, "kicad.ai.raster_trace.geometry_sha256"), shape.Id.Value);
             Assert.AreEqual(sourceSha256, Property(shape, "kicad.ai.raster_trace.source_sha256"), shape.Id.Value);
             Assert.AreEqual("filled-vector-projection", Property(shape, "kicad.ai.raster_trace.role"), shape.Id.Value);
             Assert.AreEqual(archivePath, Property(shape, "kicad.ai.raster_trace.source_archive"), shape.Id.Value);
         }
+        RasterTraceProjectionAssertions.AssertAgainstProposal(trace, createdIds, persistedPolygons,
+            30_000_000L, 30_000_000L, "reopened board raster projection");
 
         // Reuse the saved board as the source for the footprint target.  This
         // exercises the real clone transaction after the board itself has
@@ -321,6 +340,10 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(sourceSha256, footprintProjectionData.GetProperty("sourceSha256").GetString(), footprintProjection.GetRawText());
         Assert.AreEqual(trace.GetProperty("geometrySha256").GetString(),
             footprintProjectionData.GetProperty("geometrySha256").GetString(), footprintProjection.GetRawText());
+        string[] footprintCreatedIds = footprintProjectionData.GetProperty("createdIds").EnumerateArray()
+            .Select(item => item.GetString()!).ToArray();
+        Assert.AreEqual(trace.GetProperty("filledPieceCount").GetInt32(), footprintCreatedIds.Length,
+            footprintProjection.GetRawText());
 
         FootprintInstance projectedFootprint = (await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
         {
@@ -333,7 +356,7 @@ public sealed partial class NativeSessionTests
             .Single(property => property.Key == "kicad.ai.raster_trace.source_sha256").Value,
             "the live footprint projection must retain the exact source SHA");
         Dictionary<string, string[]> expectedFootprintGeometry = AssertRasterFootprintArtwork(
-            projectedFootprint, trace, sourceSha256, "live footprint projection");
+            projectedFootprint, trace, footprintCreatedIds, sourceSha256, "live footprint projection");
         string embeddedName = "raster_trace_" + sourceSha256 + ".png";
         EmbeddedFile embedded = projectedFootprint.EmbeddedFiles.Files.Single(file => file.Name == embeddedName);
         Assert.IsFalse(string.IsNullOrWhiteSpace(embedded.DataHash), footprintProjection.GetRawText());
@@ -381,7 +404,7 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(sourceSha256, persistedFootprint.CustomProperties
             .Single(property => property.Key == "kicad.ai.raster_trace.source_sha256").Value,
             "the reopened footprint projection must retain the exact source SHA");
-        AssertRasterFootprintArtwork(persistedFootprint, trace, sourceSha256,
+        AssertRasterFootprintArtwork(persistedFootprint, trace, footprintCreatedIds, sourceSha256,
             "reopened footprint projection", expectedFootprintGeometry);
         EmbeddedFile persistedEmbedded = persistedFootprint.EmbeddedFiles.Files.Single(file => file.Name == embeddedName);
         Assert.AreEqual(embeddedDataHash, persistedEmbedded.DataHash, persistedFootprint.ToString());
@@ -511,12 +534,13 @@ public sealed partial class NativeSessionTests
     }
 
     private static Dictionary<string, string[]> AssertRasterFootprintArtwork(FootprintInstance footprint,
-        JsonElement trace, string sourceSha256, string context,
+        JsonElement trace, string[] createdIds, string sourceSha256, string context,
         Dictionary<string, string[]>? expectedGeometry = null)
     {
         string geometrySha256 = trace.GetProperty("geometrySha256").GetString()!;
         string contributorSemantics = trace.GetProperty("contributorSemantics").GetString()!;
         var actualGeometry = new Dictionary<string, string[]>(StringComparer.Ordinal);
+        var projectedPolygons = new List<RasterTraceProjectionAssertions.Polygon>();
         BoardGraphicShape[] artwork = footprint.Definition.Items.Where(item => item.Is(BoardGraphicShape.Descriptor))
             .Select(item => item.Unpack<BoardGraphicShape>()).ToArray();
         Assert.AreEqual(trace.GetProperty("filledPieceCount").GetInt32(), artwork.Length, context);
@@ -525,9 +549,13 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(BoardLayer.BlFSilkS, shape.Layer, context + ": layer");
             Assert.AreEqual(GraphicShape.GeometryOneofCase.Polygon, shape.Shape.GeometryCase, context + ": geometry");
             Assert.IsTrue(shape.Shape.Polygon.Polygons.Single().Outline.Closed, context + ": closed polygon");
-            string[] geometry = shape.Shape.Polygon.Polygons.Single().Outline.Nodes
+            var outline = shape.Shape.Polygon.Polygons.Single().Outline;
+            string[] geometry = outline.Nodes
                 .Select(node => $"{node.Point.XNm}:{node.Point.YNm}").ToArray();
             actualGeometry[shape.Id.Value] = geometry;
+            projectedPolygons.Add(new(shape.Id.Value, Property(shape, "kicad.ai.raster_trace.piece_id"),
+                outline.Nodes.Select(node => new RasterTraceProjectionAssertions.Point(
+                    node.Point.XNm, node.Point.YNm)).ToArray()));
             Assert.AreEqual(geometrySha256, Property(shape, "kicad.ai.raster_trace.geometry_sha256"), context + ": geometry hash");
             Assert.AreEqual(sourceSha256, Property(shape, "kicad.ai.raster_trace.source_sha256"), context + ": source hash");
             Assert.AreEqual("generated", Property(shape, "kicad.ai.raster_trace.source_kind"), context + ": source kind");
@@ -540,6 +568,8 @@ public sealed partial class NativeSessionTests
                 CollectionAssert.AreEqual(expected, geometry, context + ": shape " + shape.Id.Value);
             }
         }
+        RasterTraceProjectionAssertions.AssertAgainstProposal(trace, createdIds, projectedPolygons,
+            0, 0, context);
         return actualGeometry;
     }
 

@@ -200,6 +200,7 @@ public sealed partial class NativeSessionTests
     {
         JsonElement[] pieces = trace.GetProperty("filledPieces").EnumerateArray().ToArray();
         Assert.AreEqual(pieces.Length, createdIds.Length, context);
+        var projectedPolygons = new List<RasterTraceProjectionAssertions.Polygon>();
         foreach ((string id, int index) in createdIds.Select((id, index) => (id, index)))
         {
             SchematicGraphicShape shape = data.Items.Where(item => item.Is(SchematicGraphicShape.Descriptor))
@@ -237,6 +238,9 @@ public sealed partial class NativeSessionTests
             // provenance records.
             if (requireExplicitClosure)
             {
+                projectedPolygons.Add(new(id, SchematicProperty(shape, "kicad.ai.raster_trace.piece_id"),
+                    polygon.Outline.Nodes.Select(node => new RasterTraceProjectionAssertions.Point(
+                        node.Point.XNm, node.Point.YNm)).ToArray()));
                 Assert.AreEqual(pieces[index].GetProperty("id").GetString(), SchematicProperty(shape, "kicad.ai.raster_trace.piece_id"), id);
                 Assert.AreEqual(sourceSha256, SchematicProperty(shape, "kicad.ai.raster_trace.source_sha256"), id);
                 Assert.AreEqual(trace.GetProperty("geometrySha256").GetString(), SchematicProperty(shape, "kicad.ai.raster_trace.geometry_sha256"), id);
@@ -246,6 +250,9 @@ public sealed partial class NativeSessionTests
                 Assert.AreEqual("true", SchematicProperty(shape, "kicad.ai.raster_trace.filled"), id);
             }
         }
+        if (requireExplicitClosure)
+            RasterTraceProjectionAssertions.AssertAgainstProposal(trace, createdIds, projectedPolygons,
+                originXNm, originYNm, context);
     }
 
     private static void AssertSchematicRasterGroup(SchematicScreenData data, string groupId,

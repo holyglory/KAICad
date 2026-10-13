@@ -1041,6 +1041,7 @@ public sealed partial class NativeSessionTests
     {
         JsonElement[] pieces = trace.GetProperty("filledPieces").EnumerateArray().ToArray();
         Assert.AreEqual(pieces.Length, createdIds.Length, "the native symbol contains every projected filled raster piece");
+        var projectedPolygons = new List<RasterTraceProjectionAssertions.Polygon>();
         foreach ((string id, int index) in createdIds.Select((id, index) => (id, index)))
         {
             SchematicGraphicShape shape = symbol.Items
@@ -1050,6 +1051,9 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual(GraphicShape.GeometryOneofCase.Polygon, shape.Shape.GeometryCase, id);
             PolygonWithHoles polygon = shape.Shape.Polygon.Polygons.Single();
             Assert.IsTrue(polygon.Outline.Closed, id);
+            projectedPolygons.Add(new(id, Property(shape, "kicad.ai.raster_trace.piece_id"),
+                polygon.Outline.Nodes.Select(node => new RasterTraceProjectionAssertions.Point(
+                    node.Point.XNm, node.Point.YNm)).ToArray()));
             (long X, long Y)[] expectedPoints = pieces[index].GetProperty("points").EnumerateArray()
                 .Select(point => (Long(point.GetProperty("xNm")), Long(point.GetProperty("yNm"))))
                 .ToArray();
@@ -1073,6 +1077,8 @@ public sealed partial class NativeSessionTests
             Assert.AreEqual("filled-vector-projection", Property(shape, "kicad.ai.raster_trace.role"), id);
             Assert.AreEqual("true", Property(shape, "kicad.ai.raster_trace.filled"), id);
         }
+        RasterTraceProjectionAssertions.AssertAgainstProposal(trace, createdIds, projectedPolygons,
+            0, 0, "raster symbol projection");
 
         SchematicField manifest = symbol.Items
             .Where(child => child.Item?.Is(SchematicField.Descriptor) == true)

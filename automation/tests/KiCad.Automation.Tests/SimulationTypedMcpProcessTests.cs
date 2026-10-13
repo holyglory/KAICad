@@ -199,6 +199,7 @@ public sealed class SimulationTypedMcpProcessTests
             Guid unresolvedId = Guid.NewGuid();
             var dispatched = SimulationOperationReceipt.Prepare(unresolvedInstance, epoch, document, unresolvedId, deckHash, "inline-caller-deck")
                 with { Stage = SimulationOperationStage.Dispatched };
+            store.WriteOperation(dispatched with { Stage = SimulationOperationStage.Prepared });
             store.WriteOperation(dispatched); store.MakeCurrent(dispatched);
             JsonObject unresolved = Input(documentInput, epoch, "operationId", unresolvedId.ToString("D")); unresolved["netlist"] = deck;
             await using var finalMcp = await StdioMcpFixture.StartAsync(SyncHarnessProcessTests.ProductionStartInfo(),

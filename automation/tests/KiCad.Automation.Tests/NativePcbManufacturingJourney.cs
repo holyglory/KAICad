@@ -233,6 +233,65 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(typedSvgText.Length > 256, "The typed native SVG export must contain geometry, not an empty shell.");
             StringAssert.Contains(typedSvgText, "R1", "Nested plot reference settings must reach the native SVG output.");
 
+            // The recovery manager's first production adapter is deliberately
+            // SVG-only.  It must use the same owner-thread plot path, publish
+            // a durable journal receipt, and leave detached/restart recovery
+            // unclaimed.
+            string managerOutputDirectory = Path.Combine(exportDirectory, "manager-svg");
+            string managerOperationId = Guid.NewGuid().ToString("D");
+            object managerInput = new
+            {
+                operationId = managerOperationId,
+                document = typedDocument,
+                expectedState = typedExpectedState,
+                outputDirectory = managerOutputDirectory,
+                job = new
+                {
+                    exportSvg = new
+                    {
+                        plotSettings = new
+                        {
+                            layers = new[] { "BL_F_Cu", "BL_F_SilkS" },
+                            commonLayers = new[] { "BL_Edge_Cuts" },
+                            plotFootprintValues = true,
+                            plotReferenceDesignators = true,
+                            drillMarks = "PDM_FULL",
+                            checkZonesBeforePlot = false
+                        },
+                        fitPageToBoard = true,
+                        precision = 6,
+                        pageMode = "BJPM_ALL_LAYERS_ONE_PAGE"
+                    }
+                }
+            };
+            var managerReply = await mcp.Tool("kicad_pcb_export_start_typed", new
+            { instanceId, input = managerInput });
+            Assert.IsFalse(managerReply.TryGetProperty("isError", out var managerError) && managerError.GetBoolean(),
+                managerReply.GetRawText());
+            var managerData = managerReply.GetProperty("structuredContent");
+            Assert.AreEqual("PcbMfgExportCompleted", managerData.GetProperty("status").GetString(), managerReply.GetRawText());
+            Assert.IsTrue(managerData.GetProperty("exportAdapterAvailable").GetBoolean(), managerReply.GetRawText());
+            Assert.IsTrue(managerData.GetProperty("nativeDispatch").GetBoolean(), managerReply.GetRawText());
+            Assert.IsTrue(managerData.GetProperty("workerFinished").GetBoolean(), managerReply.GetRawText());
+            Assert.IsTrue(managerData.GetProperty("outputGenerated").GetBoolean(), managerReply.GetRawText());
+            JsonElement managerReceipt = managerData.GetProperty("receipt");
+            Assert.AreEqual("PcbMfgPublicationPublished", managerReceipt.GetProperty("publicationState").GetString(),
+                managerReply.GetRawText());
+            Assert.IsTrue(managerReceipt.GetProperty("publicationCommitted").GetBoolean(), managerReply.GetRawText());
+            Assert.IsTrue(File.Exists(managerReceipt.GetProperty("artifacts").EnumerateArray()
+                .Select(artifact => artifact.GetProperty("path").GetString()!)
+                .Single(path => Path.GetExtension(path).Equals(".svg", StringComparison.OrdinalIgnoreCase)), managerReply.GetRawText());
+
+            var managerCapabilities = await mcp.Tool("kicad_pcb_export_manager_capabilities_typed", new
+            {
+                instanceId,
+                input = new { document = typedDocument, processEpoch = before.ProcessEpoch }
+            });
+            Assert.IsFalse(managerCapabilities.TryGetProperty("isError", out var capabilityError)
+                && capabilityError.GetBoolean(), managerCapabilities.GetRawText());
+            Assert.IsTrue(managerCapabilities.GetProperty("structuredContent")
+                .GetProperty("synchronousSvgExportSupported").GetBoolean(), managerCapabilities.GetRawText());
+
             var replayReply = await mcp.Tool("kicad_pcb_export", new { instanceId, input = typedInput });
             Assert.IsFalse(replayReply.TryGetProperty("isError", out var replayError) && replayError.GetBoolean(), replayReply.GetRawText());
             Assert.AreEqual(typedData.GetRawText(), replayReply.GetProperty("structuredContent").GetRawText(),

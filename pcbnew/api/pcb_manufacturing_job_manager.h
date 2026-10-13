@@ -52,7 +52,8 @@ public:
 
     tl::expected<kiapi::automation::v1::PcbManufacturingExportReceipt, std::string> Start(
             const kiapi::automation::v1::RunPcbManufacturingExport&,
-            const std::string& aProcessEpoch, const CAPTURE_SOURCE& aCapture );
+            const std::string& aProcessEpoch, const CAPTURE_SOURCE& aCapture,
+            bool aLeaveAdmitted = false );
     tl::expected<kiapi::automation::v1::PcbManufacturingExportReceipt, std::string> Dispatch(
             const kiapi::automation::v1::RunPcbManufacturingExport&,
             const std::string& aProcessEpoch, const DISPATCH_ADAPTER& aAdapter );

@@ -477,7 +477,7 @@ bool PCB_MANUFACTURING_JOB_MANAGER::TestAdmissionBarrier()
 
 tl::expected<PCB_MANUFACTURING_JOB_MANAGER::Receipt, std::string>
 PCB_MANUFACTURING_JOB_MANAGER::Start( const Request& aRequest, const std::string& aEpoch,
-                                    const CAPTURE_SOURCE& aCapture )
+                                    const CAPTURE_SOURCE& aCapture, bool aLeaveAdmitted )
 {
     std::lock_guard lock( m_mutex );
     if( auto valid = ValidateRequest( aRequest ); !valid ) return tl::unexpected( valid.error() );
@@ -533,7 +533,11 @@ PCB_MANUFACTURING_JOB_MANAGER::Start( const Request& aRequest, const std::string
     // No staging directory, source dependency set or exporter exists yet.
     receipt.set_publication_state( PCB_MFG_PUBLICATION_UNSPECIFIED );
     if( auto persisted = write( journal ); !persisted ) return tl::unexpected( persisted.error() );
-    if( !TestAdmissionBarrier() )
+    // Production callers that have an owner-thread adapter dispatch the
+    // admitted journal immediately after this return.  The default preserves
+    // the fail-closed admission-only contract, and the test barrier remains a
+    // deterministic way to exercise the recovery seam without an adapter.
+    if( !aLeaveAdmitted && !TestAdmissionBarrier() )
     {
         SetUnsupported( *journal.mutable_receipt() );
         journal.set_journal_revision( 2 );
@@ -731,6 +735,8 @@ PcbManufacturingManagerCapabilities PCB_MANUFACTURING_JOB_MANAGER::Capabilities(
     response.set_journal_read_supported( true );
     response.set_cancellation_before_dispatch_supported( true );
     response.set_prior_epoch_journal_inspection_supported( true );
-    response.set_unavailable_reason( "detached export, worker cancellation, publication and complete dependency snapshots remain unavailable" );
+    response.set_unavailable_reason(
+            "synchronous SVG owner-thread dispatch is available; detached export, worker cancellation, "
+            "restart publication and complete dependency snapshots remain unavailable" );
     return response;
 }

@@ -14,15 +14,16 @@ using ModelContextProtocol.Server;
 namespace KiCad.Automation.Mcp;
 
 /// <summary>
-/// Typed admission for the future native manufacturing manager.  The native
-/// handlers are registered now but deliberately return AS_UNIMPLEMENTED until
-/// detached snapshots, worker ownership and durable journals are enabled.
-/// These wrappers therefore never claim cancellation or cross-process recovery.
+/// Typed admission for the native manufacturing manager.  SVG requests may
+/// complete through KiCad's synchronous owner-thread plot adapter; detached
+/// snapshots, worker ownership and cross-process publication remain separate
+/// unsupported boundaries.  These wrappers therefore never claim cancellation
+/// or restart recovery for those boundaries.
 /// </summary>
 public sealed partial class PcbJobTools
 {
     [McpServerTool(Name = "kicad_pcb_export_start_typed", ReadOnly = false),
-     Description("Admit one typed PCB manufacturing export to the native recovery manager. The manager durably records the exact request before any worker dispatch. Until a detached exporter is enabled, the returned terminal state is export_adapter_unavailable and no files are generated; the existing synchronous kicad_pcb_export tool remains unchanged."),
+     Description("Admit one typed PCB manufacturing export to the native recovery manager. SVG requests dispatch synchronously through KiCad's owner-thread plot adapter and return a journaled publication receipt; other job families remain fail-closed as export_adapter_unavailable. Detached workers and restart recovery are not claimed, and the existing synchronous kicad_pcb_export tool remains unchanged."),
      KiCadCapability("pcb-manufacturing", "typed-recovery-manager-admission", "typed export request, durable journal admission and explicit adapter availability"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbManufacturingRecoveryContractTests.CompiledStdioPublishesTypedRecoveryToolsAndFailsClosedForIncompleteInput")]
     public Task<CallToolResult> ExportStartTyped(string instanceId,
@@ -51,7 +52,7 @@ public sealed partial class PcbJobTools
             nativeDispatch = receipt.NativeDispatch, outputGenerated = receipt.Artifacts.Count != 0,
             receipt = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(receipt))
         }, !adapterAvailable, adapterAvailable ? null : "export_adapter_unavailable",
-            receipt.ErrorMessage.Length == 0 ? "The detached exporter is unavailable; no output was generated." : receipt.ErrorMessage);
+            receipt.ErrorMessage.Length == 0 ? "The SVG owner-thread adapter is unavailable; no output was generated." : receipt.ErrorMessage);
     }, input?.OperationId, input?.ExpectedState?.ProcessEpoch);
 
     [McpServerTool(Name = "kicad_pcb_export_cancel_typed", ReadOnly = false),
@@ -144,7 +145,7 @@ public sealed partial class PcbJobTools
     }, input?.OperationId, input?.ProcessEpoch);
 
     [McpServerTool(Name = "kicad_pcb_export_manager_capabilities_typed", ReadOnly = true),
-     Description("Read the native manufacturing manager's supported recovery boundaries for one PCB. The current manager reports durable admission and journal recovery, while detached SVG/Gerber export, worker publication and complete dependency snapshots remain unavailable."),
+     Description("Read the native manufacturing manager's supported recovery boundaries for one PCB. The manager reports durable admission and journal recovery plus synchronous SVG owner-thread dispatch; detached workers, restart publication and complete dependency snapshots remain unavailable."),
      KiCadCapability("pcb-manufacturing", "typed-recovery-capabilities", "explicit PCB document and current process epoch"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbManufacturingRecoveryContractTests.CompiledStdioPublishesTypedRecoveryToolsAndFailsClosedForIncompleteInput")]
     public Task<CallToolResult> ExportManagerCapabilitiesTyped(string instanceId,
@@ -158,11 +159,14 @@ public sealed partial class PcbJobTools
         if (session.Epoch != epoch) throw new AutomationException("stale_process_epoch", "The capability request belongs to another native process epoch.");
         PcbManufacturingManagerCapabilities result = await client.InvokeAsync<GetPcbManufacturingManagerCapabilities, PcbManufacturingManagerCapabilities>(new() { Document = target, ProcessEpoch = epoch }, cancellationToken);
         if( !result.Document.Equals(target) || result.ProcessEpoch != epoch || string.IsNullOrWhiteSpace(result.UnavailableReason)
+            || !result.UnavailableReason.Contains("synchronous SVG owner-thread dispatch", StringComparison.Ordinal)
             || !result.AdmissionSupported || !result.RequestJournalSupported || !result.JournalReadSupported
             || result.DetachedExportSupported || result.PublicationSupported || result.CompleteSnapshotSupported )
             throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
                 "The native manager capability response did not bind the requested PCB and process epoch.");
-        return Data(new { instanceId, processEpoch = session.Epoch, capabilities = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(result)) });
+        return Data(new { instanceId, processEpoch = session.Epoch,
+            synchronousSvgExportSupported = true,
+            capabilities = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(result)) });
     }, null, input?.ProcessEpoch);
 
     [McpServerTool(Name = "kicad_pcb_export_read_typed", ReadOnly = true),

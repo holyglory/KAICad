@@ -4225,10 +4225,55 @@ API_HANDLER_PCB::handleStartPcbManufacturingExportJob(
         PCB_MANUFACTURING_JOB_MANAGER::CAPTURE result{ *before, *after, serialized.GetString() };
         return result;
     };
-    auto result = m_manufacturingJobs.Start( aCtx.Request.request(), apiServer().Token(), capture );
+    const auto& request = aCtx.Request.request();
+    // The manager's first native adapter is intentionally limited to the
+    // existing SVG/plot path.  It runs inline on API_SERVER's wx owner thread,
+    // where the plotter and project state are valid; no worker borrows GUI
+    // objects and no other job family is advertised through this seam.
+    const bool svgAdapter = request.job_case() == RunPcbManufacturingExport::kExportSvg;
+    auto result = m_manufacturingJobs.Start( request, apiServer().Token(), capture, svgAdapter );
     if( !result )
         return tl::unexpected( ManufacturingError( result.error(), ApiStatusCode::AS_BAD_REQUEST ) );
-    return *result;
+
+    if( !svgAdapter || result->status() != PCB_MFG_EXPORT_ADMITTED )
+        return *result;
+
+    auto dispatched = m_manufacturingJobs.Dispatch( request, apiServer().Token(),
+            [this]( const PCB_MANUFACTURING_JOB_MANAGER::DISPATCH_CONTEXT& context )
+                    -> tl::expected<PcbManufacturingExportReceipt, std::string>
+            {
+                if( context.request.job_case() != RunPcbManufacturingExport::kExportSvg )
+                    return tl::unexpected( "synchronous_svg_adapter_only" );
+
+                HANDLER_CONTEXT<RunPcbManufacturingExport> child;
+                child.Request.CopyFrom( context.request );
+                auto exported = handleRunPcbManufacturingExport( child );
+                if( !exported )
+                    return tl::unexpected( exported.error().error_message() );
+
+                PcbManufacturingExportReceipt receipt = *exported;
+                // The callback has completed synchronously on the owner
+                // thread.  These fields describe that handoff while keeping
+                // detached snapshots and restart recovery explicitly false.
+                receipt.set_native_dispatch( true );
+                receipt.set_export_adapter_available( true );
+                receipt.set_worker_finished( true );
+                receipt.set_source_snapshot_sha256( context.sourceSnapshotSha256 );
+                receipt.set_snapshot_complete( false );
+                receipt.set_publication_committed(
+                        receipt.status() == PCB_MFG_EXPORT_COMPLETED
+                        && receipt.publication_state() == PCB_MFG_PUBLICATION_PUBLISHED );
+                receipt.set_recovery_state(
+                        receipt.status() == PCB_MFG_EXPORT_COMPLETED
+                        ? PCB_MFG_RECOVERY_RECONCILED
+                        : receipt.staging_directory().empty()
+                                ? PCB_MFG_RECOVERY_RECONCILED
+                                : PCB_MFG_RECOVERY_RECOVERABLE_STAGED );
+                return receipt;
+            } );
+    if( !dispatched )
+        return tl::unexpected( ManufacturingError( dispatched.error(), ApiStatusCode::AS_UNIMPLEMENTED ) );
+    return *dispatched;
 }
 
 HANDLER_RESULT<kiapi::automation::v1::PcbManufacturingExportReceiptResponse>

@@ -203,10 +203,10 @@ private:
     handleGetPcbManufacturingManagerCapabilities(
             const HANDLER_CONTEXT<kiapi::automation::v1::GetPcbManufacturingManagerCapabilities>& aCtx );
 
-    // Native manager recovery seam.  The manager is not enabled yet; these
-    // handlers are registered so clients receive a typed unsupported result
-    // instead of an unknown command while the synchronous exporter remains
-    // backward compatible.
+    // Native manager recovery seam.  SVG requests may use the KiCad-owned
+    // synchronous plot adapter on this handler's owner thread.  Detached
+    // workers and restart publication remain separate unsupported features;
+    // the legacy synchronous exporter remains backward compatible.
     HANDLER_RESULT<kiapi::automation::v1::PcbManufacturingExportReceipt>
     handleCancelPcbManufacturingExport(
             const HANDLER_CONTEXT<kiapi::automation::v1::CancelPcbManufacturingExport>& aCtx );

@@ -166,7 +166,7 @@ public sealed partial class NativeSessionTests
             NativeKeyboard.SchematicShortcut(display, processId, "click", "PCB Editor",
                 controlKey: false, focusCanvas: false, clickFromLeft: centerX, clickFromTop: centerY);
             await Task.Delay(250, token);
-            NativeKeyboard.SchematicShortcut(display, processId, "G", "PCB Editor",
+            NativeKeyboard.SchematicShortcut(display, processId, "g", "PCB Editor",
                 controlKey: false, focusCanvas: false);
             await Task.Delay(250, token);
 
@@ -219,7 +219,7 @@ public sealed partial class NativeSessionTests
                     && item.Unpack<Track>().Id.Value == trackId));
                 NativeKeyboard.SchematicShortcut(display, processId, "click", "PCB Editor", false, false,
                     clickFromLeft: centerX, clickFromTop: centerY);
-                NativeKeyboard.SchematicShortcut(display, processId, "D", "PCB Editor", false, false);
+                NativeKeyboard.SchematicShortcut(display, processId, "d", "PCB Editor", false, false);
                 foreach ((int x, int y) in new[] { (centerX + 8, centerY + 2), (centerX + 16, centerY + 6) })
                     NativeKeyboard.SchematicShortcut(display, processId, "motion", "PCB Editor", false, false,
                         clickFromLeft: x, clickFromTop: y);

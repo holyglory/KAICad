@@ -62,8 +62,9 @@ public sealed class PcbManufacturingContractTestsPlanning
                 AssertError(failed, "fixture_export_refused");
                 Assert.AreEqual(dispatched + 1, peer.Exports.Count);
                 RunPcbManufacturingExport submitted = peer.Exports.Last();
-                Assert.AreEqual(plan.GetProperty("normalizedRequest").GetRawText(),
-                    JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(submitted)).GetRawText());
+                JsonElement submittedJson = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(submitted));
+                Assert.IsTrue(JsonElement.DeepEquals(plan.GetProperty("normalizedRequest"), submittedJson),
+                    "The execution payload must equal the normalized planning payload.");
                 Assert.AreEqual(plan.GetProperty("requestFingerprintSha256").GetString(),
                     Convert.ToHexStringLower(SHA256.HashData(submitted.ToByteArray())));
 

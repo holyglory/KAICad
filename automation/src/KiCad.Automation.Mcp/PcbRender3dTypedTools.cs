@@ -24,7 +24,7 @@ public sealed class PcbRender3dTypedTools(InstanceRegistry registry)
     [McpServerTool(Name = "kicad_pcb_render_3d_geometry_typed", ReadOnly = true),
      Description("Read lifecycle-bound native 3D geometry metadata from one typed PCB input. input carries an explicit PCB document, complete lifecycle observation and camera/render settings. The service owns the temporary PNG path, invokes the same native renderer as kicad_pcb_render_3d_geometry and returns the existing conservative footprint-model metadata with its explicit incomplete coverage flags. No board mutation or exact raster/occlusion claim is made."),
      KiCadCapability("pcb-observation", "compiled-mcp plus-native-board-renderer", "typed PCB document, complete lifecycle checkpoint and 3D render settings"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbRender3dTypedMcpProcessTests.TypedRender3dSchemaAndIncompleteInputRefusalAreVisibleOverStdio", "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbRender3dTypedMcpProcessTests.TypedRender3dSchemaAndIncompleteInputRefusalAreVisibleOverStdio")]
     public Task<CallToolResult> ReadGeometry(string instanceId, PcbRender3dTypedInput input,
         CancellationToken cancellationToken) => Execute(async () =>
     {

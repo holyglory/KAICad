@@ -3748,7 +3748,223 @@ public sealed partial class NativeSessionTests
                     viaKeepoutResult.State, expectedAllowedItemId: blockedVia.Id.Value);
                 Assert.AreEqual(viaKeepoutResult.State, await ObserveLifecycleState(client, cleanBoard, token),
                     "The rejected via candidate must leave the live board unchanged.");
-                await SaveCheckedThroughMcp(client, cleanBoard, evidence, token, verifyReconnect: false);
+
+                // Add real endpoint pads only after the earlier DRC cases;
+                // otherwise their intentionally disconnected nets would make
+                // those positive checks fail. Both detours are checked and
+                // committed together so neither new net remains unconnected.
+                var boundaryPadsCreate = new CreateItems { Header = new() { Document = cleanBoard } };
+                boundaryPadsCreate.Items.Add(new[]
+                {
+                    Any.Pack(MultilayerFootprint("EDGE1", "CONCAVE_ROUTE", 10_000_000, 15_000_000, 700_000)),
+                    Any.Pack(MultilayerFootprint("EDGE2", "CONCAVE_ROUTE", 10_000_000, 85_000_000, 700_000)),
+                    Any.Pack(MultilayerFootprint("HOLE1", "CUTOUT_ROUTE", 75_000_000, 84_000_000, 700_000)),
+                    Any.Pack(MultilayerFootprint("HOLE2", "CUTOUT_ROUTE", 93_000_000, 84_000_000, 700_000))
+                });
+                var boundaryPadsReply = await mcp.Tool("kicad_pcb_items_create", new
+                {
+                    instanceId, requestJson = BoardJson.Formatter.Format(boundaryPadsCreate),
+                    expectedStateJson = SchematicJson.Formatter.Format(viaKeepoutResult.State)
+                });
+                RequireToolSuccess(boundaryPadsReply);
+                var boundaryBefore = await ObserveLifecycleState(client, cleanBoard, token);
+                var boundaryPadsRead = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+                { Header = new() { Document = cleanBoard }, Types_ = { KiCadObjectType.KotPcbPad } }, token);
+                var boundaryPadPairs = new[]
+                {
+                    new
+                    {
+                        Net = "CONCAVE_ROUTE",
+                        Start = boundaryPadsRead.Items.Select(item => item.Unpack<Pad>())
+                            .Single(pad => pad.Net.Name == "CONCAVE_ROUTE" && pad.Position.YNm == 15_000_000),
+                        End = boundaryPadsRead.Items.Select(item => item.Unpack<Pad>())
+                            .Single(pad => pad.Net.Name == "CONCAVE_ROUTE" && pad.Position.YNm == 85_000_000),
+                        MinX = 5_000_000L, MinY = 10_000_000L, MaxX = 25_000_000L, MaxY = 90_000_000L,
+                        DirectLength = 70_000_000L
+                    },
+                    new
+                    {
+                        Net = "CUTOUT_ROUTE",
+                        Start = boundaryPadsRead.Items.Select(item => item.Unpack<Pad>())
+                            .Single(pad => pad.Net.Name == "CUTOUT_ROUTE" && pad.Position.XNm == 75_000_000),
+                        End = boundaryPadsRead.Items.Select(item => item.Unpack<Pad>())
+                            .Single(pad => pad.Net.Name == "CUTOUT_ROUTE" && pad.Position.XNm == 93_000_000),
+                        MinX = 72_000_000L, MinY = 74_000_000L, MaxX = 96_000_000L, MaxY = 94_000_000L,
+                        DirectLength = 18_000_000L
+                    }
+                };
+                const long boundaryClearanceNm = 1_000_000;
+                const long boundaryWidthNm = 250_000;
+                const long boundaryMarginNm = boundaryClearanceNm + boundaryWidthNm / 2;
+                var boundaryCandidate = new CreateItems { Header = new() { Document = cleanBoard } };
+                var boundaryPlans = new List<JsonElement>();
+                foreach (var pair in boundaryPadPairs)
+                {
+                    Assert.IsTrue(pair.Start.PadStack.Layers.Contains(BoardLayer.BlFCu));
+                    Assert.IsTrue(pair.End.PadStack.Layers.Contains(BoardLayer.BlFCu));
+                    var planReply = await mcp.Tool("kicad_pcb_route_plan_typed", new
+                    {
+                        instanceId,
+                        input = new
+                        {
+                            document = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(cleanBoard)),
+                            expectedState = TypedLifecycle(boundaryBefore), operationId = Guid.NewGuid().ToString("D"),
+                            request = new
+                            {
+                                netName = pair.Net, netClassName = "", layer = "F.Cu",
+                                start = new { xNm = pair.Start.Position.XNm, yNm = pair.Start.Position.YNm },
+                                end = new { xNm = pair.End.Position.XNm, yNm = pair.End.Position.YNm },
+                                widthNm = boundaryWidthNm, clearanceNm = boundaryClearanceNm, gridNm = 500_000L,
+                                bounds = new { minXNm = pair.MinX, minYNm = pair.MinY, maxXNm = pair.MaxX, maxYNm = pair.MaxY },
+                                maxNodes = 10000, maxObstacleReport = 512,
+                                includeFootprintEnvelopes = false, includeRipUpCandidate = false
+                            }
+                        }
+                    });
+                    RequireToolSuccess(planReply);
+                    var planData = planReply.GetProperty("structuredContent");
+                    Assert.IsTrue(planData.GetProperty("routeFound").GetBoolean(), planReply.GetRawText());
+                    Assert.IsFalse(planData.GetProperty("nativeCommit").GetBoolean());
+                    Assert.IsFalse(planData.GetProperty("drcValidated").GetBoolean());
+                    Assert.IsTrue(planData.GetProperty("pathLengthNm").GetInt64() > pair.DirectLength,
+                        "A direct route would cross the notch or cutout; the live proposal must detour. " + planReply.GetRawText());
+                    Assert.IsTrue(planData.GetProperty("obstacleReport").EnumerateArray().Any(obstacle =>
+                        obstacle.GetProperty("kind").GetString() == "board-boundary"
+                        && obstacle.GetProperty("geometryAware").GetBoolean()), planReply.GetRawText());
+                    var candidate = BoardJson.Parser.Parse<CreateItems>(planData.GetProperty("candidateRequestJson").GetString()!);
+                    Assert.IsTrue(candidate.Items.Count > 1);
+                    foreach (var item in candidate.Items)
+                    {
+                        Assert.IsTrue(item.Is(Track.Descriptor));
+                        var segment = item.Unpack<Track>();
+                        Assert.AreEqual(pair.Net, segment.Net.Name);
+                        Assert.AreEqual(BoardLayer.BlFCu, segment.Layer);
+                        // An independent coordinate oracle checks every whole
+                        // segment, rather than reusing the planner's region
+                        // predicates or examining only its sampled grid nodes.
+                        Assert.IsTrue(segment.Start.XNm == segment.End.XNm || segment.Start.YNm == segment.End.YNm);
+                        foreach (var point in new[] { segment.Start, segment.End })
+                            Assert.IsTrue(point.XNm >= boundaryMarginNm && point.YNm >= boundaryMarginNm
+                                && point.XNm <= 100_000_000 - boundaryMarginNm
+                                && point.YNm <= 100_000_000 - boundaryMarginNm);
+                        Assert.IsFalse(BoundarySegmentIntersects(segment, -boundaryMarginNm, 20_000_000 - boundaryMarginNm,
+                            15_000_000 + boundaryMarginNm, 80_000_000 + boundaryMarginNm),
+                            "The route must stay out of the concave missing-board region. " + BoardJson.Formatter.Format(segment));
+                        Assert.IsFalse(BoundarySegmentIntersects(segment, 78_000_000 - boundaryMarginNm, 78_000_000 - boundaryMarginNm,
+                            90_000_000 + boundaryMarginNm, 90_000_000 + boundaryMarginNm),
+                            "The route must stay out of the board cutout. " + BoardJson.Formatter.Format(segment));
+                    }
+                    boundaryCandidate.Items.Add(candidate.Items.Select(item => item.Clone()));
+                    boundaryPlans.Add(planData.Clone());
+                    Assert.AreEqual(boundaryBefore, await ObserveLifecycleState(client, cleanBoard, token));
+                }
+
+                string boundaryCandidateJson = BoardJson.Formatter.Format(boundaryCandidate);
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-boundary-route-input.json"),
+                    JsonSerializer.Serialize(new
+                    {
+                        checkpoint = SchematicJson.Formatter.Format(boundaryBefore),
+                        candidateRequestJson = boundaryCandidateJson, plans = boundaryPlans,
+                        edges = cleanEdgeCuts.Select(edgeShape => BoardJson.Formatter.Format(edgeShape)).ToArray(),
+                        pads = boundaryPadPairs.Select(pair => new
+                        { pair.Net, start = BoardJson.Formatter.Format(pair.Start), end = BoardJson.Formatter.Format(pair.End) }).ToArray(),
+                        keepoutTrackProbe = SchematicJson.Formatter.Format(blockedTrackDrc),
+                        keepoutViaProbe = SchematicJson.Formatter.Format(blockedViaDrc)
+                    }), token);
+                var boundaryDrc = await RouteDrc(boundaryCandidateJson, null, boundaryBefore);
+                CollectionAssert.AreEqual(boundaryCandidate.Items.Select(RouteIdentity).ToArray(), boundaryDrc.CandidateItemIds.ToArray());
+                Assert.AreEqual(boundaryBefore, await ObserveLifecycleState(client, cleanBoard, token),
+                    "Detached DRC must not put either route into the live editor.");
+                string boundaryOperationId = Guid.NewGuid().ToString("D");
+                var boundaryCommit = await mcp.Tool("kicad_pcb_route_commit", new
+                {
+                    instanceId, requestJson = boundaryCandidateJson,
+                    expectedStateJson = SchematicJson.Formatter.Format(boundaryBefore),
+                    drcJobStateJson = SchematicJson.Formatter.Format(boundaryDrc), operationId = boundaryOperationId
+                });
+                RequireToolSuccess(boundaryCommit);
+                var boundaryCommitData = boundaryCommit.GetProperty("structuredContent");
+                Assert.IsTrue(boundaryCommitData.GetProperty("mutationConfirmed").GetBoolean());
+                var boundaryReceipt = SchematicJson.Parser.Parse<CheckedPcbRouteReceipt>(boundaryCommitData.GetProperty("receipt").GetRawText());
+                CheckedPcbRouteContract.ValidateResult(new()
+                {
+                    Candidate = boundaryCandidate, ExpectedState = boundaryBefore, DrcJobId = boundaryDrc.JobId,
+                    OperationId = boundaryOperationId, MaximumResultBytes = 4 * 1024 * 1024
+                }, boundaryReceipt, inspect: false);
+                var boundaryIds = boundaryCandidate.Items.Select(RouteIdentity).Order(StringComparer.Ordinal).ToArray();
+                var boundaryNative = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+                { Header = new() { Document = cleanBoard }, Items = { boundaryIds.Select(id => new KIID { Value = id }) } }, token);
+                CollectionAssert.AreEqual(boundaryIds, boundaryNative.Items.Select(RouteIdentity).Order(StringComparer.Ordinal).ToArray());
+                var boundaryNativeById = boundaryNative.Items.ToDictionary(RouteIdentity, item => item.Clone(), StringComparer.Ordinal);
+                foreach (var created in boundaryReceipt.Created.CreatedItems)
+                    Assert.AreEqual(created.Item, boundaryNativeById[RouteIdentity(created.Item)]);
+
+                async Task AssertBoundaryConnections()
+                {
+                    foreach (var pair in boundaryPadPairs)
+                    {
+                        var connected = await client.InvokeAsync<GetConnectedItems, GetItemsResponse>(new()
+                        { Header = new() { Document = cleanBoard }, Items = { pair.Start.Id.Clone() } }, token);
+                        var expectedConnected = boundaryCandidate.Items.Where(item => item.Unpack<Track>().Net.Name == pair.Net)
+                            .Select(RouteIdentity).Concat(new[] { pair.Start.Id.Value, pair.End.Id.Value }).Order(StringComparer.Ordinal).ToArray();
+                        CollectionAssert.AreEqual(expectedConnected, connected.Items.Select(item => item.Is(Pad.Descriptor)
+                            ? item.Unpack<Pad>().Id.Value : RouteIdentity(item)).Order(StringComparer.Ordinal).ToArray(),
+                            "The native route must physically connect the endpoint pads on " + pair.Net);
+                    }
+                }
+                await AssertBoundaryConnections();
+                var boundarySave = await mcp.Tool("kicad_document_save", new
+                {
+                    instanceId, expectedStateJson = SchematicJson.Formatter.Format(await ObserveLifecycleState(client, cleanBoard, token)),
+                    operationId = Guid.NewGuid().ToString("D")
+                });
+                RequireToolSuccess(boundarySave);
+                var boundaryClose = await mcp.Tool("kicad_document_close", new
+                {
+                    instanceId, expectedStateJson = boundarySave.GetProperty("structuredContent").GetProperty("observedState").GetRawText(),
+                    operationId = Guid.NewGuid().ToString("D")
+                });
+                RequireToolSuccess(boundaryClose);
+                cleanBoard = (await CreateRootThroughMcp(client.Endpoint, instanceId, cleanPath, evidence, token,
+                    toolName: "kicad_pcb_open")).Document;
+                finalBoard = cleanBoard;
+                var boundaryPersisted = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+                { Header = new() { Document = cleanBoard }, Items = { boundaryIds.Select(id => new KIID { Value = id }) } }, token);
+                CollectionAssert.AreEqual(boundaryIds, boundaryPersisted.Items.Select(RouteIdentity).Order(StringComparer.Ordinal).ToArray());
+                foreach (var item in boundaryPersisted.Items)
+                    AssertPersistedRouteState(boundaryNativeById[RouteIdentity(item)], item);
+                await AssertBoundaryConnections();
+                var persistedBoundaryItems = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+                {
+                    Header = new() { Document = cleanBoard },
+                    Items = { cleanEdgeCuts.Select(edgeShape => edgeShape.Id.Clone()), trackRule.Id.Clone(), viaRule.Id.Clone() }
+                }, token);
+                foreach (var edgeShape in cleanEdgeCuts)
+                {
+                    var expectedEdge = edgeShape.Clone();
+                    var actualEdge = persistedBoundaryItems.Items.Single(item => item.Is(BoardGraphicShape.Descriptor)
+                        && item.Unpack<BoardGraphicShape>().Id.Equals(edgeShape.Id)).Unpack<BoardGraphicShape>();
+                    expectedEdge.Parent = null; actualEdge.Parent = null;
+                    if (expectedEdge.Net is not null) expectedEdge.Net.Code = null;
+                    if (actualEdge.Net is not null) actualEdge.Net.Code = null;
+                    Assert.AreEqual(expectedEdge, actualEdge, "Saving the detours must preserve the outer outline and cutout.");
+                }
+                foreach (var rule in new[] { trackRule, viaRule })
+                {
+                    var persistedRule = persistedBoundaryItems.Items.Single(item => item.Is(Zone.Descriptor)
+                        && item.Unpack<Zone>().Id.Equals(rule.Id)).Unpack<Zone>();
+                    CollectionAssert.AreEquivalent(rule.Layers.ToArray(), persistedRule.Layers.ToArray());
+                    Assert.AreEqual(rule.RuleAreaSettings.KeepoutTracks, persistedRule.RuleAreaSettings.KeepoutTracks);
+                    Assert.AreEqual(rule.RuleAreaSettings.KeepoutVias, persistedRule.RuleAreaSettings.KeepoutVias);
+                }
+                await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-boundary-route-result.json"),
+                    JsonSerializer.Serialize(new
+                    {
+                        operationId = boundaryOperationId, drc = SchematicJson.Formatter.Format(boundaryDrc),
+                        receipt = SchematicJson.Formatter.Format(boundaryReceipt),
+                        persisted = BoardJson.Formatter.Format(boundaryPersisted),
+                        finalState = SchematicJson.Formatter.Format(await ObserveLifecycleState(client, cleanBoard, token))
+                    }), token);
             }
             finally { Directory.Delete(exportDirectory, true); }
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-pcb-items.json"), updatedReply.GetRawText(), token);
@@ -3864,6 +4080,16 @@ public sealed partial class NativeSessionTests
 
     private static string RouteIdentity(Any item) => item.Is(Track.Descriptor) ? item.Unpack<Track>().Id.Value
         : item.Is(Arc.Descriptor) ? item.Unpack<Arc>().Id.Value : item.Unpack<Via>().Id.Value;
+
+    private static bool BoundarySegmentIntersects(Track segment, long minX, long minY, long maxX, long maxY)
+    {
+        long segmentMinX = Math.Min(segment.Start.XNm, segment.End.XNm);
+        long segmentMaxX = Math.Max(segment.Start.XNm, segment.End.XNm);
+        long segmentMinY = Math.Min(segment.Start.YNm, segment.End.YNm);
+        long segmentMaxY = Math.Max(segment.Start.YNm, segment.End.YNm);
+        return segmentMinX <= maxX && segmentMaxX >= minX
+            && segmentMinY <= maxY && segmentMaxY >= minY;
+    }
 
     private static object DescribeRouteItem(Any item)
     {

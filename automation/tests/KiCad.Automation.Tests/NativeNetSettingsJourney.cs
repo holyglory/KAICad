@@ -111,20 +111,28 @@ public sealed partial class NativeSessionTests
         }
         async Task AssertProjectTextVariables(JsonElement reply, DocumentLifecycleState expected, string phase)
         {
+            static bool DocumentTypeMatches(JsonElement value, DocumentType expectedType)
+            {
+                if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out int numericType))
+                    return numericType == (int)expectedType;
+                if (value.ValueKind == JsonValueKind.String)
+                    return string.Equals(value.GetString(), expectedType.ToString(), StringComparison.Ordinal);
+                return false;
+            }
             RequireToolSuccess(reply);
             var structured = reply.GetProperty("structuredContent");
             Assert.IsTrue(structured.GetProperty("supported").GetBoolean(), $"{phase}: native text-variable support is required.");
             Assert.IsTrue(structured.GetProperty("nativeQuery").GetBoolean(), $"{phase}: the result must come from KiCad.");
             Assert.IsFalse(structured.GetProperty("mutation").GetBoolean(), $"{phase}: reading text variables must not mutate the project.");
             var reportedDocument = structured.GetProperty("document");
-            Assert.AreEqual(expected.Document.Type.ToString(), reportedDocument.GetProperty("type").GetString(),
+            Assert.IsTrue(DocumentTypeMatches(reportedDocument.GetProperty("type"), expected.Document.Type),
                 $"{phase}: text-variable read must report the exact lifecycle document type.");
             Assert.AreEqual(expected.Document.Project.Name, reportedDocument.GetProperty("project").GetProperty("name").GetString(),
                 $"{phase}: text-variable read must report the exact project owner name.");
             Assert.AreEqual(expected.Document.Project.Path, reportedDocument.GetProperty("project").GetProperty("path").GetString(),
                 $"{phase}: text-variable read must report the exact project owner path.");
             var reportedProject = structured.GetProperty("project");
-            Assert.AreEqual(DocumentType.DoctypeProject.ToString(), reportedProject.GetProperty("type").GetString(),
+            Assert.IsTrue(DocumentTypeMatches(reportedProject.GetProperty("type"), DocumentType.DoctypeProject),
                 $"{phase}: text-variable read must identify the project owner.");
             Assert.AreEqual(expected.Document.Project.Name, reportedProject.GetProperty("project").GetProperty("name").GetString(),
                 $"{phase}: text-variable read must report the exact project owner.");

@@ -158,8 +158,8 @@ public sealed class SchematicErcExecutionContractTests
         foreignRevision.LegacyResult.ObservedRevision = foreignRevision.AfterState.Revision.Clone();
         var revisionError = Assert.ThrowsExactly<AutomationException>(() =>
             SchematicErcExecutionContract.ValidateReceipt(foreignRevision, fixture.Document,
-                expectedState: null, fixture.OperationId, fixture.ProcessEpoch));
-        Assert.AreEqual("invalid_schematic_erc_state", revisionError.Code);
+                fixture.State, fixture.OperationId, fixture.ProcessEpoch));
+        Assert.AreEqual("invalid_schematic_erc_receipt", revisionError.Code);
 
         var missingMarkers = fixture.Receipt.Clone();
         missingMarkers.MarkersCaptured = false;

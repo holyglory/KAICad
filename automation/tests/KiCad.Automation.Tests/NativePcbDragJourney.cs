@@ -165,8 +165,10 @@ public sealed partial class NativeSessionTests
                 "The native editor must retain the exact seeded track after canvas focus.");
             NativeKeyboard.SchematicShortcut(display, processId, "click", "PCB Editor",
                 controlKey: false, focusCanvas: false, clickFromLeft: centerX, clickFromTop: centerY);
+            await Task.Delay(250, token);
             NativeKeyboard.SchematicShortcut(display, processId, "G", "PCB Editor",
                 controlKey: false, focusCanvas: false);
+            await Task.Delay(250, token);
 
             // The read-only board API remains callable while the GUI router is
             // active, so AS_BUSY is not an admission signal. The real proof is

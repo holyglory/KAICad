@@ -100,12 +100,25 @@ public sealed partial class NativeSessionTests
                 && item.Unpack<Track>().Id.Value == trackId),
                 "The native editor must select the exact seeded track before G.");
 
-            // The selected-only PNS path snaps the initial cursor to this
-            // track, so this input does not rely on a fragile board-to-pixel
-            // transform.  The short two-point motion is a real XTest path and
-            // stays well inside the 0..100 mm deterministic board.
-            NativeKeyboard.SchematicShortcut(display, processId, "motion", "PCB Editor",
-                controlKey: false, focusCanvas: true, clickFromLeft: 640, clickFromTop: 500);
+            // Refit the live PCB canvas before deriving the pointer location.
+            // The seeded pads are symmetric around (50 mm, 50 mm), so after
+            // fit-to-board their route midpoint is the editor canvas midpoint.
+            // Query the actual window dimensions rather than assuming the
+            // fixture's current Xvfb size; this keeps the pointer target tied
+            // to the rendered native window.
+            (int Width, int Height) window = default;
+            NativeKeyboard.SchematicShortcut(display, processId, "", "PCB Editor",
+                controlKey: false, focusCanvas: false,
+                observeGeometry: geometry => window = (geometry.Width, geometry.Height));
+            Assert.IsGreaterThan(0, window.Width, "The PCB editor window must expose a positive width.");
+            Assert.IsGreaterThan(0, window.Height, "The PCB editor window must expose a positive height.");
+            NativeKeyboard.SchematicShortcut(display, processId, "Home", "PCB Editor",
+                controlKey: false, focusCanvas: false);
+            int centerX = window.Width / 2, centerY = window.Height / 2;
+            // A real click gives the PCB canvas GTK focus. A motion-only
+            // command moves XTest's pointer but does not focus the canvas.
+            NativeKeyboard.SchematicShortcut(display, processId, "click", "PCB Editor",
+                controlKey: false, focusCanvas: true, clickFromLeft: centerX, clickFromTop: centerY);
             NativeKeyboard.SchematicShortcut(display, processId, "G", "PCB Editor",
                 controlKey: false, focusCanvas: false);
 
@@ -114,14 +127,14 @@ public sealed partial class NativeSessionTests
             // the subsequent motion/click changing this exact native item.
             Assert.IsTrue(NativeKeyboard.HasWindow(display, processId, "PCB Editor"),
                 "The PCB editor must remain alive after entering inline drag.");
-            foreach ((int x, int y) in new[] { (648, 502), (656, 506) })
+            foreach ((int x, int y) in new[] { (centerX + 8, centerY + 2), (centerX + 16, centerY + 6) })
             {
                 NativeKeyboard.SchematicShortcut(display, processId, "motion", "PCB Editor",
                     controlKey: false, focusCanvas: true, clickFromLeft: x, clickFromTop: y);
                 await Task.Delay(100, token);
             }
             NativeKeyboard.SchematicShortcut(display, processId, "click", "PCB Editor",
-                controlKey: false, focusCanvas: true, clickFromLeft: 656, clickFromTop: 506);
+                controlKey: false, focusCanvas: true, clickFromLeft: centerX + 16, clickFromTop: centerY + 6);
 
             Track changedTrack;
             using (var committed = CancellationTokenSource.CreateLinkedTokenSource(token))

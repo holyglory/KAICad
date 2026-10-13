@@ -2973,7 +2973,7 @@ retained_artifacts=[{name="slice-native-library-readback",path="automation/artif
 name="zone"
 tier="development"
 requires=["native-build"]
-command=["ctest","--test-dir","automation/artifacts/native","-R","^qa_pcbnew_zone_fill_outcome$|^qa_pcbnew_drc_job_lifecycle$","--output-on-failure","--no-tests=error"]
+command=["ctest","--test-dir","automation/artifacts/native","-R","^qa_pcbnew_zone_fill_outcome$|^qa_pcbnew_drc_job_lifecycle$|^qa_pcbnew_pns_detached_update$","--output-on-failure","--no-tests=error"]
 [test.simulation-dependency-focus]
 timeout_seconds=900
 env={TMPDIR="/tmp"}

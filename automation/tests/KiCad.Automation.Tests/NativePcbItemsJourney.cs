@@ -2799,6 +2799,195 @@ public sealed partial class NativeSessionTests
                 .Single(item => item.Is(Track.Descriptor) && item.Unpack<Track>().Id.Value == originalCleanTrack.Id.Value)
                 .Unpack<Track>().End);
 
+            // Length-tuning qualification uses the existing disposable
+            // POWER_RAIL barrier.  Its native F.Cu segment is already inside
+            // the clean board and has a through-via at one endpoint, which
+            // gives the replacement a real connectivity target without
+            // expanding the fixture with another footprint.  The plan is
+            // proposal-only until the exact replacement is checked by the
+            // existing detached DRC helper below.
+            var tuneBefore = await ObserveLifecycleState(client, cleanBoard, token);
+            var tuneSource = (await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            {
+                Header = new() { Document = cleanBoard }, Items = { shoveObstacle.Id.Clone() }
+            }, token)).Items.Single(item => item.Is(Track.Descriptor)).Unpack<Track>();
+            Assert.AreEqual("POWER_RAIL", tuneSource.Net.Name);
+            Assert.AreEqual(BoardLayer.BlFCu, tuneSource.Layer);
+            Assert.AreEqual(tuneSource.Start.YNm, tuneSource.End.YNm,
+                "The disposable tuning source must be an axis-aligned native Track.");
+
+            long tuneDetourY = tuneSource.Start.YNm + 1_000_000;
+            var tuneCenterline = new[]
+            {
+                tuneSource.Start.Clone(),
+                new Vector2 { XNm = tuneSource.Start.XNm, YNm = tuneDetourY },
+                new Vector2 { XNm = tuneSource.End.XNm, YNm = tuneDetourY },
+                tuneSource.End.Clone()
+            };
+            var tuneRequestObject = new
+            {
+                netName = tuneSource.Net.Name, layer = "F.Cu",
+                start = new { xNm = tuneSource.Start.XNm, yNm = tuneSource.Start.YNm },
+                end = new { xNm = tuneSource.End.XNm, yNm = tuneSource.End.YNm },
+                centerline = tuneCenterline.Select(point => new { xNm = point.XNm, yNm = point.YNm }).ToArray(),
+                widthNm = tuneSource.Width.ValueNm, clearanceNm = 100_000L,
+                targetAdditionalLengthNm = 2_000_000L, pitchNm = 1_000_000L, maxSegments = 16,
+                corridor = new
+                {
+                    minXNm = Math.Min(tuneSource.Start.XNm, tuneSource.End.XNm) - 1_000_000,
+                    minYNm = tuneSource.Start.YNm - 2_000_000,
+                    maxXNm = Math.Max(tuneSource.Start.XNm, tuneSource.End.XNm) + 1_000_000,
+                    maxYNm = tuneDetourY + 1_000_000
+                }
+            };
+            string tuneRequestJson = JsonSerializer.Serialize(tuneRequestObject);
+            var tunePlanArguments = new
+            {
+                instanceId, documentJson = SchematicJson.Formatter.Format(cleanBoard),
+                expectedStateJson = SchematicJson.Formatter.Format(tuneBefore), requestJson = tuneRequestJson
+            };
+            var tunePlan = await mcp.Tool("kicad_pcb_route_tune_plan", tunePlanArguments);
+            RequireToolSuccess(tunePlan);
+            var tunePlanData = tunePlan.GetProperty("structuredContent");
+            string tunePlanId = tunePlanData.GetProperty("planId").GetString()!;
+            Assert.AreEqual(SchematicJson.Formatter.Format(tuneBefore), tunePlanData.GetProperty("beforeState").GetString());
+            Assert.AreEqual(tunePlanData.GetProperty("beforeState").GetString(), tunePlanData.GetProperty("afterState").GetString());
+            var tunePoints = tunePlanData.GetProperty("routePoints").EnumerateArray()
+                .Select(point => new Vector2
+                {
+                    XNm = point.GetProperty("xNm").GetInt64(), YNm = point.GetProperty("yNm").GetInt64()
+                }).ToArray();
+            var tuneCandidate = BoardJson.Parser.Parse<CreateItems>(tunePlanData.GetProperty("candidateRequestJson").GetString()!);
+            Assert.AreEqual(tunePoints.Length - 1, tuneCandidate.Items.Count);
+            Assert.AreEqual(tunePoints[0], tuneSource.Start);
+            Assert.AreEqual(tunePoints[^1], tuneSource.End);
+            for (int index = 0; index < tuneCandidate.Items.Count; ++index)
+            {
+                var segment = tuneCandidate.Items[index].Unpack<Track>();
+                Assert.AreEqual(tunePoints[index], segment.Start);
+                Assert.AreEqual(tunePoints[index + 1], segment.End);
+                Assert.AreEqual(tuneSource.Net.Name, segment.Net.Name);
+                Assert.AreEqual(BoardLayer.BlFCu, segment.Layer);
+                Assert.AreEqual(tuneSource.Width.ValueNm, segment.Width.ValueNm);
+                Assert.AreEqual(tunePlanId, segment.CustomProperties.Single(property => property.Key == "kicad.ai.tune_plan_id").Value);
+                Assert.AreEqual((index + 1).ToString(CultureInfo.InvariantCulture),
+                    segment.CustomProperties.Single(property => property.Key == "kicad.ai.tune_segment").Value);
+            }
+            long tunePathLength = PcbRouteTuningTools.PathLength(tunePoints);
+            long tuneBaseLength = PcbRouteTuningTools.PathLength(new[] { tunePoints[0], tunePoints[^1] });
+            Assert.AreEqual(tuneBaseLength, tunePlanData.GetProperty("baseLengthNm").GetInt64());
+            Assert.AreEqual(tunePathLength - tuneBaseLength, tunePlanData.GetProperty("achievedAdditionalLengthNm").GetInt64());
+            Assert.AreEqual(2_000_000L, tunePlanData.GetProperty("requestedAdditionalLengthNm").GetInt64());
+            Assert.IsTrue(tunePlanData.GetProperty("withinTolerance").GetBoolean());
+            Assert.IsFalse(tunePlanData.GetProperty("nativeCommit").GetBoolean());
+            Assert.IsFalse(tunePlanData.GetProperty("drcValidated").GetBoolean());
+            Assert.AreEqual(tuneBefore, await ObserveLifecycleState(client, cleanBoard, token));
+
+            var tuneReplay = await mcp.Tool("kicad_pcb_route_tune_plan", tunePlanArguments);
+            RequireToolSuccess(tuneReplay);
+            var tuneReplayData = tuneReplay.GetProperty("structuredContent");
+            Assert.AreEqual(tunePlanId, tuneReplayData.GetProperty("planId").GetString());
+            Assert.AreEqual(tunePlanData.GetProperty("candidateRequestJson").GetString(),
+                tuneReplayData.GetProperty("candidateRequestJson").GetString());
+            Assert.AreEqual(tuneBefore, await ObserveLifecycleState(client, cleanBoard, token));
+
+            var tuneDelete = new DeleteItems { Header = new() { Document = cleanBoard }, ItemIds = { tuneSource.Id.Clone() } };
+            string tuneCandidateJson = BoardJson.Formatter.Format(tuneCandidate);
+            var tuneDrc = await RouteDrc(tuneCandidateJson, BoardJson.Formatter.Format(tuneDelete), tuneBefore);
+            CollectionAssert.AreEqual(tuneCandidate.Items.Select(RouteIdentity).ToArray(), tuneDrc.CandidateItemIds.ToArray());
+            Assert.IsEmpty(tuneDrc.Findings, SchematicJson.Formatter.Format(tuneDrc));
+            Assert.AreEqual(tuneBefore, await ObserveLifecycleState(client, cleanBoard, token));
+
+            string tuneOperationId = Guid.NewGuid().ToString("D");
+            var tuneApplyArguments = new
+            {
+                instanceId, deleteRequestJson = BoardJson.Formatter.Format(tuneDelete),
+                createRequestJson = tuneCandidateJson,
+                expectedStateJson = SchematicJson.Formatter.Format(tuneBefore),
+                operationId = tuneOperationId, drcJobStateJson = SchematicJson.Formatter.Format(tuneDrc)
+            };
+            var tuneApply = await mcp.Tool("kicad_pcb_route_tune_apply", tuneApplyArguments);
+            RequireToolSuccess(tuneApply);
+            var tuneApplyData = tuneApply.GetProperty("structuredContent");
+            Assert.IsTrue(tuneApplyData.GetProperty("mutationConfirmed").GetBoolean());
+            Assert.IsTrue(tuneApplyData.GetProperty("nativeReceiptAvailable").GetBoolean());
+            Assert.IsTrue(tuneApplyData.GetProperty("drcValidated").GetBoolean());
+            Assert.AreEqual("native-process", tuneApplyData.GetProperty("receiptScope").GetString());
+            Assert.IsFalse(tuneApplyData.GetProperty("replayed").GetBoolean());
+            var tuneReceipt = SchematicJson.Parser.Parse<CheckedPcbRouteReceipt>(tuneApplyData.GetProperty("receipt").GetRawText());
+            var tuneCheckedRequest = new CheckedPcbRouteCommit
+            {
+                Candidate = tuneCandidate, Removals = tuneDelete, ExpectedState = tuneBefore,
+                DrcJobId = tuneDrc.JobId, OperationId = tuneOperationId, MaximumResultBytes = 4 * 1024 * 1024
+            };
+            CheckedPcbRouteContract.ValidateResult(tuneCheckedRequest, tuneReceipt, inspect: false);
+            Assert.AreEqual(CheckedPcbRouteReceipt.Types.State.Completed, tuneReceipt.State);
+            Assert.AreEqual(tuneCandidate.Items.Count, tuneReceipt.Created.CreatedItems.Count);
+            var tuneIds = tuneCandidate.Items.Select(RouteIdentity).Order(StringComparer.Ordinal).ToArray();
+            var tuneNativeRead = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            {
+                Header = new() { Document = cleanBoard }, Items = { tuneIds.Select(id => new KIID { Value = id }) }
+            }, token);
+            CollectionAssert.AreEqual(tuneIds, tuneNativeRead.Items.Select(RouteIdentity).Order(StringComparer.Ordinal).ToArray());
+            Assert.AreEqual(0, (await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            {
+                Header = new() { Document = cleanBoard }, Items = { tuneSource.Id.Clone() }
+            }, token)).Items.Count);
+            var tuneNativeById = tuneNativeRead.Items.ToDictionary(RouteIdentity, item => item.Clone(), StringComparer.Ordinal);
+            foreach (var created in tuneReceipt.Created.CreatedItems)
+                Assert.AreEqual(created.Item, tuneNativeById[RouteIdentity(created.Item)]);
+            var tuneConnected = await client.InvokeAsync<GetConnectedItems, GetItemsResponse>(new()
+            {
+                Header = new() { Document = cleanBoard }, Items = { tuneCandidate.Items[0].Unpack<Track>().Id.Clone() }
+            }, token);
+            CollectionAssert.IsSubsetOf(tuneIds, tuneConnected.Items.Select(RouteIdentity).ToArray());
+            var tuneAfter = SchematicJson.Parser.Parse<DocumentLifecycleState>(tuneApplyData.GetProperty("afterState").GetString()!);
+            Assert.IsGreaterThan(tuneBefore.Revision.Sequence, tuneAfter.Revision.Sequence);
+
+            var tuneApplyReplay = await mcp.Tool("kicad_pcb_route_tune_apply", tuneApplyArguments);
+            RequireToolSuccess(tuneApplyReplay);
+            Assert.IsTrue(tuneApplyReplay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean());
+            Assert.AreEqual(tuneAfter, await ObserveLifecycleState(client, cleanBoard, token));
+            var tuneReceiptRead = await mcp.Tool("kicad_pcb_route_tune_receipt", new
+            { instanceId, expectedProcessEpoch = client.Epoch, operationId = tuneOperationId });
+            RequireToolSuccess(tuneReceiptRead);
+            var tuneReceiptData = tuneReceiptRead.GetProperty("structuredContent");
+            Assert.IsTrue(tuneReceiptData.GetProperty("found").GetBoolean());
+            Assert.IsTrue(tuneReceiptData.GetProperty("nativeReceiptAvailable").GetBoolean());
+            Assert.AreEqual(tuneApplyReplay.GetProperty("structuredContent").GetRawText(),
+                tuneReceiptData.GetProperty("receipt").GetRawText());
+
+            var tuneSave = await mcp.Tool("kicad_document_save", new
+            { instanceId, expectedStateJson = SchematicJson.Formatter.Format(tuneAfter), operationId = Guid.NewGuid().ToString("D") });
+            RequireToolSuccess(tuneSave);
+            var tuneClose = await mcp.Tool("kicad_document_close", new
+            { instanceId, expectedStateJson = tuneSave.GetProperty("structuredContent").GetProperty("observedState").GetRawText(), operationId = Guid.NewGuid().ToString("D") });
+            RequireToolSuccess(tuneClose);
+            cleanBoard = (await CreateRootThroughMcp(client.Endpoint, instanceId, cleanPath, evidence, token,
+                toolName: "kicad_pcb_open")).Document;
+            finalBoard = cleanBoard;
+            var tunePersisted = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
+            {
+                Header = new() { Document = cleanBoard }, Items = { tuneIds.Select(id => new KIID { Value = id }) }
+            }, token);
+            CollectionAssert.AreEqual(tuneIds, tunePersisted.Items.Select(RouteIdentity).Order(StringComparer.Ordinal).ToArray());
+            foreach (var persisted in tunePersisted.Items)
+                AssertPersistedRouteState(tuneNativeById[RouteIdentity(persisted)], persisted);
+            var persistedTuneConnected = await client.InvokeAsync<GetConnectedItems, GetItemsResponse>(new()
+            {
+                Header = new() { Document = cleanBoard }, Items = { tunePersisted.Items[0].Unpack<Track>().Id.Clone() }
+            }, token);
+            CollectionAssert.IsSubsetOf(tuneIds, persistedTuneConnected.Items.Select(RouteIdentity).ToArray());
+            cleanState = await ObserveLifecycleState(client, cleanBoard, token);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-route-tune.json"),
+                JsonSerializer.Serialize(new
+                {
+                    requestJson = tuneRequestJson, plan = tunePlanData, replay = tuneReplayData,
+                    drc = SchematicJson.Formatter.Format(tuneDrc), apply = tuneApplyData,
+                    receipt = tuneReceiptData, persisted = tunePersisted.Items.Select(DescribeRouteItem).ToArray(),
+                    finalState = SchematicJson.Formatter.Format(cleanState)
+                }), token);
+
             // Route across a real foreign-net wall between two F.Cu pads.
             // The wall is attached to its own pads, and spans the full search
             // bounds, so the untouched proposal must change layers twice.

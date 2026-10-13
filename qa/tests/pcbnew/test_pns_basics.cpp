@@ -715,38 +715,109 @@ BOOST_AUTO_TEST_CASE( PNSDetachedRouteUpdateUsesSourceAndRejectsOrphans )
     mgr.SetEnvironment( &board, nullptr, nullptr, nullptr, nullptr );
     KI_TEST::DUMMY_TOOL* tool = new KI_TEST::DUMMY_TOOL();
     mgr.RegisterTool( tool );
-    BOARD_COMMIT commit( tool );
 
-    PCB_TRACK nativeTrack( &board );
-    nativeTrack.SetStart( VECTOR2I( 100000, 100000 ) );
-    nativeTrack.SetEnd( VECTOR2I( 300000, 100000 ) );
-    nativeTrack.SetWidth( 10000 );
-    nativeTrack.SetLayer( F_Cu );
+    auto* nativeTrack = new PCB_TRACK( &board );
+    nativeTrack->SetStart( VECTOR2I( 100000, 100000 ) );
+    nativeTrack->SetEnd( VECTOR2I( 300000, 100000 ) );
+    nativeTrack->SetWidth( 10000 );
+    nativeTrack->SetLayer( F_Cu );
+    nativeTrack->SetLocked( true );
+    nativeTrack->SetCustomProperty( wxS( "pns-probe" ), wxS( "retained" ) );
+    board.Add( nativeTrack );
+
+    auto* otherTrack = new PCB_TRACK( &board );
+    otherTrack->SetStart( VECTOR2I( 100000, 300000 ) );
+    otherTrack->SetEnd( VECTOR2I( 300000, 300000 ) );
+    otherTrack->SetWidth( 10000 );
+    otherTrack->SetLayer( F_Cu );
+    board.Add( otherTrack );
+
+    const KIID nativeIdentity = nativeTrack->m_Uuid;
+    const KIID otherIdentity = otherTrack->m_Uuid;
+    const auto nativeProperties = nativeTrack->GetCustomProperties();
+    const auto nativeStart = nativeTrack->GetStart();
+    const auto nativeEnd = nativeTrack->GetEnd();
+    const auto otherStart = otherTrack->GetStart();
+    const auto otherEnd = otherTrack->GetEnd();
 
     ROUTE_UPDATE_TEST_IFACE iface;
     iface.SetBoard( &board );
 
+    // A direct parent remains authoritative even if a stale source pointer is
+    // present.  The native identity and properties must survive the update and
+    // BOARD_COMMIT must restore them when the staged change is reverted.
+    {
+        PNS::SEGMENT direct( SEG( VECTOR2I( 100000, 100000 ), VECTOR2I( 450000, 100000 ) ), nullptr );
+        direct.SetWidth( 10000 );
+        direct.SetLayer( F_Cu );
+        direct.SetParent( nativeTrack );
+        direct.SetSourceItem( otherTrack );
+
+        BOOST_REQUIRE_EQUAL( direct.Parent(), nativeTrack );
+        BOOST_REQUIRE_EQUAL( direct.GetSourceItem(), otherTrack );
+
+        BOARD_COMMIT directCommit( tool );
+        iface.modifyBoardItem( &direct, directCommit );
+
+        BOOST_CHECK_EQUAL( directCommit.GetStatus( nativeTrack ), CHT_MODIFY );
+        BOOST_CHECK_EQUAL( nativeTrack->GetEnd(), VECTOR2I( 450000, 100000 ) );
+        BOOST_CHECK( nativeTrack->m_Uuid == nativeIdentity );
+        BOOST_CHECK( nativeTrack->IsLocked() );
+        BOOST_CHECK( nativeTrack->GetCustomProperties() == nativeProperties );
+        BOOST_CHECK_EQUAL( otherTrack->GetStart(), otherStart );
+        BOOST_CHECK_EQUAL( otherTrack->GetEnd(), otherEnd );
+        BOOST_CHECK( otherTrack->m_Uuid == otherIdentity );
+
+        directCommit.Revert();
+        BOOST_CHECK_EQUAL( nativeTrack->GetStart(), nativeStart );
+        BOOST_CHECK_EQUAL( nativeTrack->GetEnd(), nativeEnd );
+        BOOST_CHECK( nativeTrack->m_Uuid == nativeIdentity );
+        BOOST_CHECK( nativeTrack->IsLocked() );
+        BOOST_CHECK( nativeTrack->GetCustomProperties() == nativeProperties );
+    }
+
     // A detached preview branch has no direct parent, but retains the native
     // route item as its source.  Updating it must stage and copy the source
     // without dereferencing the null direct-parent slot.
-    PNS::SEGMENT detached( SEG( VECTOR2I( 100000, 100000 ), VECTOR2I( 500000, 100000 ) ), nullptr );
-    detached.SetWidth( 10000 );
-    detached.SetLayer( F_Cu );
-    detached.SetSourceItem( &nativeTrack );
+    {
+        PNS::SEGMENT detached( SEG( VECTOR2I( 100000, 100000 ), VECTOR2I( 500000, 100000 ) ), nullptr );
+        detached.SetWidth( 10000 );
+        detached.SetLayer( F_Cu );
+        detached.SetSourceItem( nativeTrack );
 
-    iface.modifyBoardItem( &detached, commit );
+        BOOST_REQUIRE( detached.Parent() == nullptr );
+        BOOST_REQUIRE_EQUAL( detached.GetSourceItem(), nativeTrack );
 
-    BOOST_CHECK_EQUAL( commit.GetStatus( &nativeTrack ), CHT_MODIFY );
-    BOOST_CHECK_EQUAL( nativeTrack.GetEnd(), VECTOR2I( 500000, 100000 ) );
+        BOARD_COMMIT detachedCommit( tool );
+        iface.modifyBoardItem( &detached, detachedCommit );
 
-    // Auxiliary geometry with neither parent nor source has no native object
-    // to mutate and must be ignored safely.
+        BOOST_CHECK_EQUAL( detachedCommit.GetStatus( nativeTrack ), CHT_MODIFY );
+        BOOST_CHECK_EQUAL( nativeTrack->GetEnd(), VECTOR2I( 500000, 100000 ) );
+        BOOST_CHECK( nativeTrack->m_Uuid == nativeIdentity );
+        BOOST_CHECK( nativeTrack->IsLocked() );
+        BOOST_CHECK( nativeTrack->GetCustomProperties() == nativeProperties );
+
+        detachedCommit.Revert();
+        BOOST_CHECK_EQUAL( nativeTrack->GetStart(), nativeStart );
+        BOOST_CHECK_EQUAL( nativeTrack->GetEnd(), nativeEnd );
+        BOOST_CHECK( nativeTrack->m_Uuid == nativeIdentity );
+        BOOST_CHECK( nativeTrack->IsLocked() );
+        BOOST_CHECK( nativeTrack->GetCustomProperties() == nativeProperties );
+    }
+
+    // Null and source-less router items have no native object to mutate and
+    // must be ignored safely without staging a bogus transaction entry.
+    BOARD_COMMIT emptyCommit( tool );
+    iface.modifyBoardItem( nullptr, emptyCommit );
+    BOOST_CHECK( emptyCommit.Empty() );
+
     PNS::SEGMENT orphan( SEG( VECTOR2I( 100000, 200000 ), VECTOR2I( 300000, 200000 ) ), nullptr );
     orphan.SetWidth( 10000 );
     orphan.SetLayer( F_Cu );
-
-    iface.modifyBoardItem( &orphan, commit );
-    BOOST_CHECK_EQUAL( commit.GetStatus( &nativeTrack ), CHT_MODIFY );
+    iface.modifyBoardItem( &orphan, emptyCommit );
+    BOOST_CHECK( emptyCommit.Empty() );
+    BOOST_CHECK_EQUAL( nativeTrack->GetStart(), nativeStart );
+    BOOST_CHECK_EQUAL( nativeTrack->GetEnd(), nativeEnd );
 }
 
 

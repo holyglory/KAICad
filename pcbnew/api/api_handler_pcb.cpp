@@ -547,6 +547,12 @@ API_HANDLER_PCB::API_HANDLER_PCB( std::shared_ptr<PCB_CONTEXT> aContext, PCB_EDI
     registerHandler<kiapi::automation::v1::ReadPcbManufacturingExport,
                     kiapi::automation::v1::PcbManufacturingExportReceiptResponse>(
             &API_HANDLER_PCB::handleReadPcbManufacturingExport );
+    registerHandler<kiapi::automation::v1::CancelPcbManufacturingExport,
+                    kiapi::automation::v1::PcbManufacturingExportReceipt>(
+            &API_HANDLER_PCB::handleCancelPcbManufacturingExport );
+    registerHandler<kiapi::automation::v1::ReconcilePcbManufacturingExport,
+                    kiapi::automation::v1::PcbManufacturingExportReceiptResponse>(
+            &API_HANDLER_PCB::handleReconcilePcbManufacturingExport );
 
     registerHandler<GetBoardEditorAppearanceSettings, BoardEditorAppearanceSettings>(
             &API_HANDLER_PCB::handleGetBoardEditorAppearanceSettings );
@@ -4175,6 +4181,32 @@ API_HANDLER_PCB::handleReadPcbManufacturingExport(
     response.set_found( true );
     response.mutable_receipt()->CopyFrom( *found->second->manufacturingExport );
     return response;
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::PcbManufacturingExportReceipt>
+API_HANDLER_PCB::handleCancelPcbManufacturingExport(
+        const HANDLER_CONTEXT<kiapi::automation::v1::CancelPcbManufacturingExport>& )
+{
+    // Keep the old synchronous exporter unchanged until the native manager
+    // owns a detached snapshot, worker and durable journal.  Returning
+    // AS_UNIMPLEMENTED is deliberate: MCP must fail closed and must never
+    // claim that a live export was cancelled.
+    return tl::unexpected( ManufacturingError(
+            "Native PCB manufacturing cancellation is unavailable until the manager-owned worker is enabled",
+            ApiStatusCode::AS_UNIMPLEMENTED ) );
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::PcbManufacturingExportReceiptResponse>
+API_HANDLER_PCB::handleReconcilePcbManufacturingExport(
+        const HANDLER_CONTEXT<kiapi::automation::v1::ReconcilePcbManufacturingExport>& )
+{
+    // The current process-owned receipt cache cannot prove a prior epoch.
+    // Refuse cross-process recovery until the durable manager journal exists.
+    return tl::unexpected( ManufacturingError(
+            "Native PCB manufacturing reconciliation is unavailable until the durable manager journal is enabled",
+            ApiStatusCode::AS_UNIMPLEMENTED ) );
 }
 
 

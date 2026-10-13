@@ -91,6 +91,7 @@ internal sealed record PcbExportRecoveryDecision(
 
 internal static class PcbExportRecoveryPolicy
 {
+    internal const string RecoveryUnavailable = "pcb_export_recovery_unavailable";
     internal const string Pending = "pending";
     internal const string Completed = "completed";
     internal const string Indeterminate = "indeterminate";

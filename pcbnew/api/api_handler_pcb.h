@@ -192,6 +192,18 @@ private:
     handleReadPcbManufacturingExport(
             const HANDLER_CONTEXT<kiapi::automation::v1::ReadPcbManufacturingExport>& aCtx );
 
+    // Native manager recovery seam.  The manager is not enabled yet; these
+    // handlers are registered so clients receive a typed unsupported result
+    // instead of an unknown command while the synchronous exporter remains
+    // backward compatible.
+    HANDLER_RESULT<kiapi::automation::v1::PcbManufacturingExportReceipt>
+    handleCancelPcbManufacturingExport(
+            const HANDLER_CONTEXT<kiapi::automation::v1::CancelPcbManufacturingExport>& aCtx );
+
+    HANDLER_RESULT<kiapi::automation::v1::PcbManufacturingExportReceiptResponse>
+    handleReconcilePcbManufacturingExport(
+            const HANDLER_CONTEXT<kiapi::automation::v1::ReconcilePcbManufacturingExport>& aCtx );
+
     HANDLER_RESULT<BoardEditorAppearanceSettings> handleGetBoardEditorAppearanceSettings(
             const HANDLER_CONTEXT<GetBoardEditorAppearanceSettings>& aCtx );
 

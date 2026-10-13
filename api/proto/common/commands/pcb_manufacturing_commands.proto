@@ -47,6 +47,37 @@ message ReadPcbManufacturingExport
   string process_epoch = 3;
 }
 
+// Native manager recovery controls. Fields 1-33 above are frozen for the
+// synchronous export contract. New cancellation/recovery fields use the
+// shared lane-2D band so older peers fail closed when they cannot provide the
+// manager contract.
+message CancelPcbManufacturingExport
+{
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  string process_epoch = 3;
+
+  // -- lane 2D (400-499) --
+  // Restrict cancellation to work that has not reached native dispatch.
+  bool before_native_dispatch_only = 400;
+  // -- end lane 2D --
+}
+
+message ReconcilePcbManufacturingExport
+{
+  kiapi.common.types.DocumentSpecifier document = 1;
+  string operation_id = 2;
+  string process_epoch = 3;
+  string request_fingerprint_sha256 = 4;
+
+  // -- lane 2D (400-499) --
+  // The epoch that admitted the operation before a native restart. The
+  // current process_epoch remains the live peer identity above.
+  string prior_process_epoch = 400;
+  bool allow_prior_process_epoch = 401;
+  // -- end lane 2D --
+}
+
 enum PcbManufacturingExportStatus
 {
   PCB_MFG_EXPORT_STATUS_UNSPECIFIED = 0;
@@ -115,10 +146,29 @@ message PcbManufacturingExportReceipt
   bool output_manifest_complete = 18;
   string output_manifest_sha256 = 19;
   PcbManufacturingPublicationState publication_state = 20;
+
+  // -- lane 2D (400-499) --
+  PcbManufacturingRecoveryState recovery_state = 400;
+  bool cancellation_requested = 401;
+  bool worker_finished = 402;
+  bool publication_committed = 403;
+  string source_snapshot_sha256 = 404;
+  string durable_journal_sha256 = 405;
+  // -- end lane 2D --
 }
 
 message PcbManufacturingExportReceiptResponse
 {
   bool found = 1;
   PcbManufacturingExportReceipt receipt = 2;
+}
+
+enum PcbManufacturingRecoveryState
+{
+  PCB_MFG_RECOVERY_UNKNOWN = 0;
+  PCB_MFG_RECOVERY_ACTIVE = 1;
+  PCB_MFG_RECOVERY_CANCEL_REQUESTED = 2;
+  PCB_MFG_RECOVERY_CANCELLED = 3;
+  PCB_MFG_RECOVERY_RECOVERABLE_STAGED = 4;
+  PCB_MFG_RECOVERY_RECONCILED = 5;
 }

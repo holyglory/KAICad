@@ -106,7 +106,7 @@ public sealed class PcbManufacturingRecoveryContractTests
             JsonElement startRefused = await mcp.Tool("kicad_pcb_export_start_typed", new
             { instanceId = Guid.NewGuid().ToString("D"), input = new { } });
             Assert.IsTrue(startRefused.GetProperty("isError").GetBoolean(), startRefused.GetRawText());
-            Assert.AreEqual("invalid_pcb_export_input",
+            Assert.AreEqual("invalid_operation_id",
                 startRefused.GetProperty("structuredContent").GetProperty("errorCode").GetString(), startRefused.GetRawText());
         }
         finally { Directory.Delete(root, true); }

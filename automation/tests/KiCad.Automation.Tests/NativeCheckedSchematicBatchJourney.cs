@@ -470,6 +470,95 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual(deletedState.State.StateSha256, typedCleanupReceipt.ObservedAfter.StateSha256,
             "The typed qualification leaves the schematic at the same saved state.");
 
+        // The structured typed boundary must carry the same complete checked
+        // observation as the legacy connection handlers. In particular, the
+        // electrical hierarchy is required for item lookup; a lifecycle-only
+        // DTO would reach the wrapper but fail before native dispatch.
+        var typedConnectionOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        JsonElement TypedConnectionInput(CheckedSchematicState observed, string mutation, string itemId,
+            string? operationId = null, long? xNm = null, long? yNm = null,
+            long? endXNm = null, long? endYNm = null) => JsonSerializer.SerializeToElement(new
+            {
+                document = JsonSerializer.Deserialize<JsonElement>(documentJson),
+                expectedState = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(observed)),
+                mutation,
+                kind = 1, // SchematicConnectionItemKind.Wire
+                itemId,
+                operationId,
+                xNm,
+                yNm,
+                endXNm,
+                endYNm
+            }, typedConnectionOptions);
+
+        async Task<JsonElement> TypedConnectionCall(CheckedSchematicState observed, string mutation,
+            string itemId, string? operationId = null, long? xNm = null, long? yNm = null,
+            long? endXNm = null, long? endYNm = null)
+            => await mcp.Tool("kicad_schematic_connection_mutation_typed", new
+            {
+                instanceId,
+                input = TypedConnectionInput(observed, mutation, itemId, operationId,
+                    xNm, yNm, endXNm, endYNm)
+            });
+
+        var typedConnectionBefore = await Observe();
+        string typedConnectionId = Guid.NewGuid().ToString("D");
+        string typedConnectionCreateOperation = Guid.NewGuid().ToString("D");
+        long typedStartX = At(40, 140).XNm, typedStartY = At(40, 140).YNm;
+        long typedEndX = At(55, 140).XNm, typedEndY = At(55, 140).YNm;
+        var typedConnectionCreate = await TypedConnectionCall(typedConnectionBefore, "create", typedConnectionId,
+            typedConnectionCreateOperation, typedStartX, typedStartY, typedEndX, typedEndY);
+        RequireToolSuccess(typedConnectionCreate);
+        var typedConnectionCreateReceipt = SchematicJson.Parser.Parse<CheckedSchematicBatchReceipt>(
+            typedConnectionCreate.GetProperty("structuredContent").GetProperty("receipt").GetRawText());
+        Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, typedConnectionCreateReceipt.Status);
+        var typedConnectionCreated = typedConnectionCreateReceipt.Result.Items.Single().Unpack<SchematicLine>();
+        Assert.AreEqual(typedConnectionId, typedConnectionCreated.Id.Value);
+        Assert.AreEqual(new Vector2 { XNm = typedStartX, YNm = typedStartY }, typedConnectionCreated.Start);
+        Assert.AreEqual(new Vector2 { XNm = typedEndX, YNm = typedEndY }, typedConnectionCreated.End);
+
+        var typedConnectionCreateReplay = await TypedConnectionCall(typedConnectionBefore, "create", typedConnectionId,
+            typedConnectionCreateOperation, typedStartX, typedStartY, typedEndX, typedEndY);
+        RequireToolSuccess(typedConnectionCreateReplay);
+        Assert.AreEqual(typedConnectionCreateReceipt, SchematicJson.Parser.Parse<CheckedSchematicBatchReceipt>(
+            typedConnectionCreateReplay.GetProperty("structuredContent").GetProperty("receipt").GetRawText()));
+
+        var typedConnectionAfterCreate = await Observe();
+        var typedConnectionRead = await TypedConnectionCall(typedConnectionAfterCreate, "read", typedConnectionId);
+        RequireToolSuccess(typedConnectionRead);
+        var typedConnectionReadItem = SchematicJson.Parser.Parse<Any>(
+            typedConnectionRead.GetProperty("structuredContent").GetProperty("item").GetRawText()).Unpack<SchematicLine>();
+        Assert.AreEqual(typedConnectionId, typedConnectionReadItem.Id.Value);
+        Assert.AreEqual(typedConnectionCreated, typedConnectionReadItem);
+
+        long typedUpdatedStartX = At(42, 142).XNm, typedUpdatedStartY = At(42, 142).YNm;
+        long typedUpdatedEndX = At(58, 142).XNm, typedUpdatedEndY = At(58, 142).YNm;
+        string typedConnectionUpdateOperation = Guid.NewGuid().ToString("D");
+        var typedConnectionUpdate = await TypedConnectionCall(typedConnectionAfterCreate, "update", typedConnectionId,
+            typedConnectionUpdateOperation, typedUpdatedStartX, typedUpdatedStartY,
+            typedUpdatedEndX, typedUpdatedEndY);
+        RequireToolSuccess(typedConnectionUpdate);
+        var typedConnectionUpdateReceipt = SchematicJson.Parser.Parse<CheckedSchematicBatchReceipt>(
+            typedConnectionUpdate.GetProperty("structuredContent").GetProperty("receipt").GetRawText());
+        Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, typedConnectionUpdateReceipt.Status);
+        var typedConnectionUpdated = typedConnectionUpdateReceipt.Result.Items.Single().Unpack<SchematicLine>();
+        Assert.AreEqual(new Vector2 { XNm = typedUpdatedStartX, YNm = typedUpdatedStartY }, typedConnectionUpdated.Start);
+        Assert.AreEqual(new Vector2 { XNm = typedUpdatedEndX, YNm = typedUpdatedEndY }, typedConnectionUpdated.End);
+
+        var typedConnectionAfterUpdate = await Observe();
+        string typedConnectionDeleteOperation = Guid.NewGuid().ToString("D");
+        var typedConnectionDelete = await TypedConnectionCall(typedConnectionAfterUpdate, "delete", typedConnectionId,
+            typedConnectionDeleteOperation);
+        RequireToolSuccess(typedConnectionDelete);
+        var typedConnectionDeleteReceipt = SchematicJson.Parser.Parse<CheckedSchematicBatchReceipt>(
+            typedConnectionDelete.GetProperty("structuredContent").GetProperty("receipt").GetRawText());
+        Assert.AreEqual(CheckedSchematicBatchStatus.CsbsCompleted, typedConnectionDeleteReceipt.Status);
+        CollectionAssert.Contains(typedConnectionDeleteReceipt.Result.Removed.Select(id => id.Value).ToArray(), typedConnectionId);
+        var typedConnectionAfterDelete = await Observe();
+        Assert.IsFalse(ItemsByUuid(typedConnectionAfterDelete.Electrical.Hierarchy.Data.Instances
+            .Single(screen => Equals(screen.Metadata.Document?.SheetPath, document.SheetPath)).Items)
+            .ContainsKey(typedConnectionId));
+
         await VerifyTypedSymbolMutations(mcp, client, document, evidence, instanceId, token);
 
         await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-crud-requests.json"),

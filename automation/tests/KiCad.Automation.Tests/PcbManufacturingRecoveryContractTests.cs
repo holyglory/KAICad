@@ -77,9 +77,9 @@ public sealed class PcbManufacturingRecoveryContractTests
             JsonElement listed = await mcp.ListTools(null);
             JsonElement[] tools = listed.GetProperty("tools").EnumerateArray()
                 .Where(tool => tool.GetProperty("name").GetString() is
-                    "kicad_pcb_export_start_typed" or "kicad_pcb_export_cancel_typed" or "kicad_pcb_export_reconcile_typed" or "kicad_pcb_export_manager_capabilities_typed")
+                    "kicad_pcb_export_start_typed" or "kicad_pcb_export_cancel_typed" or "kicad_pcb_export_reconcile_typed" or "kicad_pcb_export_read_typed" or "kicad_pcb_export_manager_capabilities_typed")
                 .ToArray();
-            Assert.AreEqual(4, tools.Length);
+            Assert.AreEqual(5, tools.Length);
             foreach (JsonElement tool in tools)
             {
                 JsonElement input = tool.GetProperty("inputSchema").GetProperty("properties").GetProperty("input");
@@ -90,6 +90,8 @@ public sealed class PcbManufacturingRecoveryContractTests
                     ? ["document", "expectedState", "operationId", "outputDirectory", "job"]
                     : tool.GetProperty("name").GetString() == "kicad_pcb_export_manager_capabilities_typed"
                         ? ["document", "processEpoch"]
+                    : tool.GetProperty("name").GetString() == "kicad_pcb_export_read_typed"
+                        ? ["document", "processEpoch", "operationId", "requestFingerprintSha256"]
                     : ["document", "processEpoch", "operationId"];
                 foreach (string property in required)
                     Assert.IsTrue(properties.TryGetProperty(property, out _), tool.GetRawText());

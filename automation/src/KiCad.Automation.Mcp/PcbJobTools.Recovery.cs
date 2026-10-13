@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Google.Protobuf;
@@ -36,6 +37,7 @@ public sealed partial class PcbJobTools
             throw new AutomationException("stale_process_epoch", "The lifecycle observation belongs to another native process epoch.");
         PcbManufacturingExportReceipt receipt = await client.InvokeAsync<StartPcbManufacturingExportJob,
             PcbManufacturingExportReceipt>(new() { Request = request }, cancellationToken);
+        ValidateManagerReceipt(receipt, request, session.Epoch);
         bool adapterAvailable = receipt.ExportAdapterAvailable;
         return Data(new
         {
@@ -71,6 +73,12 @@ public sealed partial class PcbJobTools
         {
             PcbManufacturingExportReceipt receipt = await client.InvokeAsync<CancelPcbManufacturingExport,
                 PcbManufacturingExportReceipt>(request, cancellationToken);
+            ValidateManagerReceiptIdentity(receipt, request.Document, request.OperationId, request.ProcessEpoch);
+            if( receipt.RecoveryState == PcbManufacturingRecoveryState.PcbMfgRecoveryCancelled
+                && (!receipt.CancellationRequested || !receipt.Terminal || receipt.NativeDispatch
+                    || receipt.Artifacts.Count != 0 || receipt.PublicationCommitted) )
+                throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
+                    "The native cancellation receipt does not prove a pre-dispatch cancellation.");
             return Data(new
             {
                 instanceId, processEpoch = session.Epoch, operationId = request.OperationId,
@@ -107,6 +115,15 @@ public sealed partial class PcbJobTools
         {
             PcbManufacturingExportReceiptResponse response = await client.InvokeAsync<ReconcilePcbManufacturingExport,
                 PcbManufacturingExportReceiptResponse>(request, cancellationToken);
+            if( response.Found )
+            {
+                if( !response.ReconciliationSupported || !response.RequestFingerprintVerified
+                    || !response.JournalVerified || (request.AllowPriorProcessEpoch && !response.PriorProcessEpochVerified) )
+                    throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
+                        "The native reconciliation response did not prove its journal and identity checks.");
+                ValidateManagerReceiptIdentity(response.Receipt, request.Document, request.OperationId,
+                    request.AllowPriorProcessEpoch ? request.PriorProcessEpoch! : request.ProcessEpoch);
+            }
             return Data(new
             {
                 instanceId, processEpoch = session.Epoch, operationId = request.OperationId,
@@ -137,8 +154,39 @@ public sealed partial class PcbJobTools
         NativeClient client = registry.Client(instanceId); AutomationSession session = await client.HandshakeAsync(cancellationToken);
         if (session.Epoch != epoch) throw new AutomationException("stale_process_epoch", "The capability request belongs to another native process epoch.");
         PcbManufacturingManagerCapabilities result = await client.InvokeAsync<GetPcbManufacturingManagerCapabilities, PcbManufacturingManagerCapabilities>(new() { Document = target, ProcessEpoch = epoch }, cancellationToken);
+        if( !result.Document.Equals(target) || result.ProcessEpoch != epoch || string.IsNullOrWhiteSpace(result.UnavailableReason) )
+            throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
+                "The native manager capability response did not bind the requested PCB and process epoch.");
         return Data(new { instanceId, processEpoch = session.Epoch, capabilities = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(result)) });
     }, null, input?.ProcessEpoch);
+
+    [McpServerTool(Name = "kicad_pcb_export_read_typed", ReadOnly = true),
+     Description("Read one exact durable manufacturing-manager journal by PCB document, operation ID, current process epoch and request fingerprint. The result is read-only and never resumes or republishes work."),
+     KiCadCapability("pcb-manufacturing", "typed-recovery-journal-read", "explicit PCB document, operation ID, process epoch and request fingerprint"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbManufacturingRecoveryContractTests.CompiledStdioPublishesTypedRecoveryToolsAndFailsClosedForIncompleteInput")]
+    public Task<CallToolResult> ExportReadTyped(string instanceId,
+        PcbManufacturingReadInput input, CancellationToken cancellationToken) => ExecuteRecovery(async () =>
+    {
+        if (input is null) throw new AutomationException("invalid_pcb_export_read_input", "input is required.");
+        DocumentSpecifier target = RecoveryInputValidation.Document(input.Document, "invalid_pcb_export_read_input");
+        string epoch = RecoveryInputValidation.Uuid(input.ProcessEpoch, "processEpoch", "invalid_pcb_export_read_input");
+        string operation = RecoveryInputValidation.Uuid(input.OperationId, "operationId", "invalid_pcb_export_read_input");
+        string fingerprint = RecoveryInputValidation.Digest(input.RequestFingerprintSha256, "requestFingerprintSha256", "invalid_pcb_export_read_input");
+        NativeClient client = registry.Client(instanceId); AutomationSession session = await client.HandshakeAsync(cancellationToken);
+        if( session.Epoch != epoch ) throw new AutomationException("stale_process_epoch", "The journal read belongs to another native process epoch.");
+        PcbManufacturingExportReceiptResponse response = await client.InvokeAsync<ReadPcbManufacturingExportJob, PcbManufacturingExportReceiptResponse>(
+            new() { Document = target, OperationId = operation, ProcessEpoch = epoch, RequestFingerprintSha256 = fingerprint }, cancellationToken);
+        if( response.Found )
+        {
+            if( !response.ReconciliationSupported || !response.RequestFingerprintVerified || !response.JournalVerified )
+                throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable, "The native journal read did not prove its integrity checks.");
+            ValidateManagerReceiptIdentity(response.Receipt, target, operation, epoch);
+        }
+        return Data(new { instanceId, processEpoch = epoch, operationId = operation, found = response.Found,
+            recoverySupported = response.ReconciliationSupported, requestFingerprintVerified = response.RequestFingerprintVerified,
+            journalVerified = response.JournalVerified, receipt = response.Found
+                ? JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(response.Receipt)) : (JsonElement?)null });
+    }, input?.OperationId, input?.ProcessEpoch);
 
     private static async Task<CallToolResult> ExecuteRecovery(Func<Task<CallToolResult>> operation,
         string? operationId, string? processEpoch)
@@ -171,6 +219,33 @@ public sealed partial class PcbJobTools
                 errorMessage = error.Message
             }, true, code, error.Message);
         }
+    }
+
+    private static void ValidateManagerReceipt(PcbManufacturingExportReceipt receipt,
+        RunPcbManufacturingExport request, string processEpoch)
+    {
+        ValidateManagerReceiptIdentity(receipt, request.Document, request.OperationId, processEpoch);
+        if( receipt.RequestFingerprintSha256 != Convert.ToHexStringLower(SHA256.HashData(request.ToByteArray()))
+            || receipt.ExpectedState is null || !receipt.ExpectedState.Equals(request.ExpectedState)
+            || receipt.ObservedBefore is null || !receipt.ObservedBefore.Equals(request.ExpectedState) )
+            throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
+                "The native manager receipt does not bind the exact request and lifecycle checkpoint.");
+        if( !receipt.ExportAdapterAvailable && (receipt.Status != PcbManufacturingExportStatus.PcbMfgExportUnsubmitted
+            || !receipt.Terminal || receipt.NativeDispatch || receipt.Artifacts.Count != 0
+            || receipt.OutputManifestComplete || receipt.PublicationCommitted
+            || receipt.PublicationState != PcbManufacturingPublicationState.PcbMfgPublicationUnspecified) )
+            throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
+                "The unavailable exporter receipt claims work or publication that was not performed.");
+    }
+
+    private static void ValidateManagerReceiptIdentity(PcbManufacturingExportReceipt receipt,
+        DocumentSpecifier document, string operationId, string processEpoch)
+    {
+        if( receipt is null || !receipt.Document.Equals(document) || receipt.OperationId != operationId
+            || receipt.ProcessEpoch != processEpoch || receipt.DurableJournalSha256.Length != 64
+            || !receipt.DurableJournalSha256.All(char.IsAsciiHexDigitLower) )
+            throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
+                "The native manager receipt has an untrusted operation, document, epoch or journal identity.");
     }
 }
 
@@ -248,6 +323,19 @@ public sealed class PcbManufacturingManagerCapabilitiesInput : NativeDocumentInp
     private string? processEpoch;
     public NativeDocumentInput? Document { get => document; set => document = BindOnce(value); }
     public string? ProcessEpoch { get => processEpoch; set => processEpoch = BindOnce(value); }
+}
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class PcbManufacturingReadInput : NativeDocumentInputObject
+{
+    private NativeDocumentInput? document;
+    private string? processEpoch;
+    private string? operationId;
+    private string? requestFingerprintSha256;
+    public NativeDocumentInput? Document { get => document; set => document = BindOnce(value); }
+    public string? ProcessEpoch { get => processEpoch; set => processEpoch = BindOnce(value); }
+    public string? OperationId { get => operationId; set => operationId = BindOnce(value); }
+    public string? RequestFingerprintSha256 { get => requestFingerprintSha256; set => requestFingerprintSha256 = BindOnce(value); }
 }
 
 internal static class RecoveryInputValidation

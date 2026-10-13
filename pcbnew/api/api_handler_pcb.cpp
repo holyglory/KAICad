@@ -166,6 +166,9 @@ namespace
 namespace fs = std::filesystem;
 using namespace kiapi::automation::v1;
 
+HANDLER_RESULT<DocumentLifecycleState> ReadPcbLifecycle(
+        KICAD_API_SERVER& aServer, const DocumentSpecifier& aDocument );
+
 
 ApiResponseStatus ManufacturingError( const std::string& aMessage,
                                        ApiStatusCode aStatus = ApiStatusCode::AS_BAD_REQUEST )
@@ -474,7 +477,7 @@ API_HANDLER_PCB::API_HANDLER_PCB( PCB_EDIT_FRAME* aFrame ) :
 API_HANDLER_PCB::API_HANDLER_PCB( std::shared_ptr<PCB_CONTEXT> aContext, PCB_EDIT_FRAME* aFrame ) :
         API_HANDLER_BOARD( std::move( aContext ), aFrame ),
         m_drcJobs( [this]( BOARD& source ) { return observeDrcAuxiliary( source ); } ),
-        m_manufacturingJobs( wxFileName( PATHS::GetUserSettingsPath(), wxS( "pcb-manufacturing-jobs" ) ).GetPath() )
+        m_manufacturingJobs( PCB_MANUFACTURING_JOB_MANAGER::JournalDirectory( PATHS::GetUserSettingsPath() ) )
 {
     refreshCustomRulesBaseline();
     // Only the editor frame detaches before it replaces or destroys its board.
@@ -4205,7 +4208,24 @@ API_HANDLER_PCB::handleStartPcbManufacturingExportJob(
                 "The manufacturing manager start requires a complete export request" ) );
     }
 
-    auto result = m_manufacturingJobs.Start( aCtx.Request.request(), apiServer().Token() );
+    const auto capture = [this]( const DocumentSpecifier& document )
+            -> tl::expected<PCB_MANUFACTURING_JOB_MANAGER::CAPTURE, std::string>
+    {
+        auto before = ReadPcbLifecycle( apiServer(), document );
+        if( !before ) return tl::unexpected( before.error().error_message() );
+        if( !board() || document.type() != DocumentType::DOCTYPE_PCB )
+            return tl::unexpected( "manufacturing_capture_unavailable" );
+        STRING_FORMATTER serialized;
+        PCB_IO_KICAD_SEXPR writer;
+        writer.FormatBoardToFormatter( &serialized, board(), nullptr, false );
+        auto after = ReadPcbLifecycle( apiServer(), document );
+        if( !after ) return tl::unexpected( after.error().error_message() );
+        if( !google::protobuf::util::MessageDifferencer::Equals( *before, *after ) )
+            return tl::unexpected( "pcb_export_state_changed" );
+        PCB_MANUFACTURING_JOB_MANAGER::CAPTURE result{ *before, *after, serialized.GetString() };
+        return result;
+    };
+    auto result = m_manufacturingJobs.Start( aCtx.Request.request(), apiServer().Token(), capture );
     if( !result )
         return tl::unexpected( ManufacturingError( result.error(), ApiStatusCode::AS_BAD_REQUEST ) );
     return *result;

@@ -156,7 +156,7 @@ public sealed partial class NativeSessionTests
             // A real click gives the PCB canvas GTK focus. A motion-only
             // command moves XTest's pointer but does not focus the canvas.
             NativeKeyboard.SchematicShortcut(display, processId, "click", "PCB Editor",
-                controlKey: false, focusCanvas: true, clickFromLeft: centerX, clickFromTop: centerY);
+                controlKey: false, focusCanvas: false, clickFromLeft: centerX, clickFromTop: centerY);
             NativeKeyboard.SchematicShortcut(display, processId, "G", "PCB Editor",
                 controlKey: false, focusCanvas: false);
 
@@ -168,11 +168,11 @@ public sealed partial class NativeSessionTests
             foreach ((int x, int y) in new[] { (centerX + 8, centerY + 2), (centerX + 16, centerY + 6) })
             {
                 NativeKeyboard.SchematicShortcut(display, processId, "motion", "PCB Editor",
-                    controlKey: false, focusCanvas: true, clickFromLeft: x, clickFromTop: y);
+                    controlKey: false, focusCanvas: false, clickFromLeft: x, clickFromTop: y);
                 await Task.Delay(100, token);
             }
             NativeKeyboard.SchematicShortcut(display, processId, "click", "PCB Editor",
-                controlKey: false, focusCanvas: true, clickFromLeft: centerX + 16, clickFromTop: centerY + 6);
+                controlKey: false, focusCanvas: false, clickFromLeft: centerX + 16, clickFromTop: centerY + 6);
 
             Track changedTrack;
             using (var committed = CancellationTokenSource.CreateLinkedTokenSource(token))

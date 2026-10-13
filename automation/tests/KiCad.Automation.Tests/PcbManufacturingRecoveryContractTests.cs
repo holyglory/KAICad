@@ -77,9 +77,9 @@ public sealed class PcbManufacturingRecoveryContractTests
             JsonElement listed = await mcp.ListTools(null);
             JsonElement[] tools = listed.GetProperty("tools").EnumerateArray()
                 .Where(tool => tool.GetProperty("name").GetString() is
-                    "kicad_pcb_export_cancel_typed" or "kicad_pcb_export_reconcile_typed")
+                    "kicad_pcb_export_start_typed" or "kicad_pcb_export_cancel_typed" or "kicad_pcb_export_reconcile_typed")
                 .ToArray();
-            Assert.AreEqual(2, tools.Length);
+            Assert.AreEqual(3, tools.Length);
             foreach (JsonElement tool in tools)
             {
                 JsonElement input = tool.GetProperty("inputSchema").GetProperty("properties").GetProperty("input");
@@ -95,11 +95,21 @@ public sealed class PcbManufacturingRecoveryContractTests
             Assert.IsTrue(cancelRefused.GetProperty("isError").GetBoolean(), cancelRefused.GetRawText());
             Assert.AreEqual("invalid_pcb_export_cancel_input",
                 cancelRefused.GetProperty("structuredContent").GetProperty("errorCode").GetString(), cancelRefused.GetRawText());
+            JsonElement startRefused = await mcp.Tool("kicad_pcb_export_start_typed", new
+            { instanceId = Guid.NewGuid().ToString("D"), input = new { } });
+            Assert.IsTrue(startRefused.GetProperty("isError").GetBoolean(), startRefused.GetRawText());
+            Assert.AreEqual("invalid_pcb_export_input",
+                startRefused.GetProperty("structuredContent").GetProperty("errorCode").GetString(), startRefused.GetRawText());
             JsonElement reconcileRefused = await mcp.Tool("kicad_pcb_export_reconcile_typed", new
             { instanceId = Guid.NewGuid().ToString("D"), input = new { } });
             Assert.IsTrue(reconcileRefused.GetProperty("isError").GetBoolean(), reconcileRefused.GetRawText());
             Assert.AreEqual("invalid_pcb_export_reconcile_input",
                 reconcileRefused.GetProperty("structuredContent").GetProperty("errorCode").GetString(), reconcileRefused.GetRawText());
+            JsonElement startRefused = await mcp.Tool("kicad_pcb_export_start_typed", new
+            { instanceId = Guid.NewGuid().ToString("D"), input = new { } });
+            Assert.IsTrue(startRefused.GetProperty("isError").GetBoolean(), startRefused.GetRawText());
+            Assert.AreEqual("invalid_pcb_export_input",
+                startRefused.GetProperty("structuredContent").GetProperty("errorCode").GetString(), startRefused.GetRawText());
         }
         finally { Directory.Delete(root, true); }
     }

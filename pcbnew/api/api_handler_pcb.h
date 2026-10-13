@@ -196,6 +196,12 @@ private:
     HANDLER_RESULT<kiapi::automation::v1::PcbManufacturingExportReceipt>
     handleStartPcbManufacturingExportJob(
             const HANDLER_CONTEXT<kiapi::automation::v1::StartPcbManufacturingExportJob>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::PcbManufacturingExportReceiptResponse>
+    handleReadPcbManufacturingExportJob(
+            const HANDLER_CONTEXT<kiapi::automation::v1::ReadPcbManufacturingExportJob>& aCtx );
+    HANDLER_RESULT<kiapi::automation::v1::PcbManufacturingManagerCapabilities>
+    handleGetPcbManufacturingManagerCapabilities(
+            const HANDLER_CONTEXT<kiapi::automation::v1::GetPcbManufacturingManagerCapabilities>& aCtx );
 
     // Native manager recovery seam.  The manager is not enabled yet; these
     // handlers are registered so clients receive a typed unsupported result

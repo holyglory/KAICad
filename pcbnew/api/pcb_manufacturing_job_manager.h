@@ -18,6 +18,11 @@ public:
             const kiapi::automation::v1::CancelPcbManufacturingExport&, const std::string& aProcessEpoch );
     tl::expected<kiapi::automation::v1::PcbManufacturingExportReceiptResponse, std::string> Reconcile(
             const kiapi::automation::v1::ReconcilePcbManufacturingExport&, const std::string& aProcessEpoch );
+    tl::expected<kiapi::automation::v1::PcbManufacturingExportReceiptResponse, std::string> Read(
+            const kiapi::automation::v1::ReadPcbManufacturingExportJob&,
+            const std::string& aProcessEpoch );
+    kiapi::automation::v1::PcbManufacturingManagerCapabilities Capabilities(
+            const kiapi::common::types::DocumentSpecifier&, const std::string& aProcessEpoch ) const;
 
 private:
     using JournalRecord = kiapi::automation::v1::PcbManufacturingJournalRecord;

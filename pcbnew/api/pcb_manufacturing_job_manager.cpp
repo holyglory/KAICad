@@ -47,7 +47,10 @@ void PCB_MANUFACTURING_JOB_MANAGER::SetUnsupported( Receipt& r )
 tl::expected<PCB_MANUFACTURING_JOB_MANAGER::JournalRecord,std::string> PCB_MANUFACTURING_JOB_MANAGER::read(const std::string& id) const
 {
     std::ifstream f(pathFor(id),std::ios::binary); if(!f) return tl::unexpected("journal_not_found");
-    std::string b((std::istreambuf_iterator<char>(f)),{}); JournalRecord r; if(!r.ParseFromString(b)||r.format_version()!=1||r.request().operation_id()!=id||!IsDigest(r.receipt().durable_journal_sha256())) return tl::unexpected("invalid_manufacturing_journal"); return r;
+    std::string b((std::istreambuf_iterator<char>(f)),{}); JournalRecord r; if(!r.ParseFromString(b)||r.format_version()!=1||r.request().operation_id()!=id||!IsDigest(r.receipt().durable_journal_sha256())) return tl::unexpected("invalid_manufacturing_journal");
+    std::string stored = r.receipt().durable_journal_sha256(); r.mutable_receipt()->clear_durable_journal_sha256();
+    if( Hash(r.SerializeAsString()) != stored ) return tl::unexpected("invalid_manufacturing_journal");
+    r.mutable_receipt()->set_durable_journal_sha256(stored); return r;
 }
 
 tl::expected<void,std::string> PCB_MANUFACTURING_JOB_MANAGER::write(JournalRecord r) const
@@ -77,4 +80,23 @@ tl::expected<PCB_MANUFACTURING_JOB_MANAGER::Receipt,std::string> PCB_MANUFACTURI
 tl::expected<PcbManufacturingExportReceiptResponse,std::string> PCB_MANUFACTURING_JOB_MANAGER::Reconcile(const ReconcilePcbManufacturingExport& r,const std::string& epoch)
 {
     std::lock_guard lock(m_mutex); PcbManufacturingExportReceiptResponse out; auto j=read(r.operation_id()); if(!j){if(j.error()=="journal_not_found"){out.set_found(false);out.set_reconciliation_supported(true);out.set_observing_process_epoch(epoch);return out;}return tl::unexpected(j.error());} const Receipt& old=j->receipt(); if(!IsUuid(epoch)||!IsDigest(r.request_fingerprint_sha256())||old.request_fingerprint_sha256()!=r.request_fingerprint_sha256()||!SameDocument(old.document(),r.document())||!r.allow_prior_process_epoch()||r.prior_process_epoch()!=old.process_epoch()) return tl::unexpected("manufacturing_reconcile_identity_mismatch"); Receipt* q=j->mutable_receipt();q->set_recovery_state(PCB_MFG_RECOVERY_RECONCILED);j->set_journal_revision(j->journal_revision()+1);if(auto ok=write(*j);!ok)return tl::unexpected(ok.error());out.set_found(true);out.set_reconciliation_supported(true);out.set_observing_process_epoch(epoch);out.set_request_fingerprint_verified(true);out.set_journal_verified(true);out.set_prior_process_epoch_verified(true);out.mutable_receipt()->CopyFrom(*q);return out;
+}
+
+tl::expected<PcbManufacturingExportReceiptResponse,std::string> PCB_MANUFACTURING_JOB_MANAGER::Read(
+        const ReadPcbManufacturingExportJob& r, const std::string& epoch )
+{
+    std::lock_guard lock(m_mutex); PcbManufacturingExportReceiptResponse out; auto j=read(r.operation_id());
+    if(!j){if(j.error()=="journal_not_found"){out.set_found(false);out.set_reconciliation_supported(true);out.set_observing_process_epoch(epoch);return out;}return tl::unexpected(j.error());}
+    const Receipt& q=j->receipt(); if(!IsUuid(epoch)||!IsDigest(r.request_fingerprint_sha256())||q.process_epoch()!=epoch||q.request_fingerprint_sha256()!=r.request_fingerprint_sha256()||!SameDocument(q.document(),r.document())) return tl::unexpected("manufacturing_read_identity_mismatch");
+    out.set_found(true); out.set_reconciliation_supported(true); out.set_observing_process_epoch(epoch); out.set_request_fingerprint_verified(true); out.set_journal_verified(true); out.mutable_receipt()->CopyFrom(q); return out;
+}
+
+PcbManufacturingManagerCapabilities PCB_MANUFACTURING_JOB_MANAGER::Capabilities(
+        const kiapi::common::types::DocumentSpecifier& document, const std::string& epoch ) const
+{
+    PcbManufacturingManagerCapabilities out; out.mutable_document()->CopyFrom(document); out.set_process_epoch(epoch);
+    out.set_admission_supported(true); out.set_request_journal_supported(true); out.set_journal_read_supported(true);
+    out.set_cancellation_before_dispatch_supported(true); out.set_prior_epoch_journal_inspection_supported(true);
+    out.set_detached_export_supported(false); out.set_publication_supported(false); out.set_complete_snapshot_supported(false);
+    out.set_unavailable_reason("detached SVG/Gerber export requires Kiway/tool-manager/drawing-sheet dependencies; no worker adapter is enabled"); return out;
 }

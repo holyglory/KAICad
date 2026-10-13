@@ -56,6 +56,41 @@ message StartPcbManufacturingExportJob
   // -- end lane 2D --
 }
 
+message ReadPcbManufacturingExportJob
+{
+  // -- lane 2D (400-499) --
+  kiapi.common.types.DocumentSpecifier document = 400;
+  string operation_id = 401;
+  string process_epoch = 402;
+  string request_fingerprint_sha256 = 403;
+  // -- end lane 2D --
+}
+
+message GetPcbManufacturingManagerCapabilities
+{
+  // -- lane 2D (400-499) --
+  kiapi.common.types.DocumentSpecifier document = 400;
+  string process_epoch = 401;
+  // -- end lane 2D --
+}
+
+message PcbManufacturingManagerCapabilities
+{
+  // -- lane 2D (400-499) --
+  kiapi.common.types.DocumentSpecifier document = 400;
+  string process_epoch = 401;
+  bool admission_supported = 402;
+  bool request_journal_supported = 403;
+  bool journal_read_supported = 404;
+  bool cancellation_before_dispatch_supported = 405;
+  bool prior_epoch_journal_inspection_supported = 406;
+  bool detached_export_supported = 407;
+  bool publication_supported = 408;
+  bool complete_snapshot_supported = 409;
+  string unavailable_reason = 410;
+  // -- end lane 2D --
+}
+
 // Native manager recovery controls. Fields 1-33 above are frozen for the
 // synchronous export contract. New cancellation/recovery fields use the
 // shared lane-2D band so older peers fail closed when they cannot provide the
@@ -163,8 +198,8 @@ message PcbManufacturingExportReceipt
   bool publication_committed = 403;
   string source_snapshot_sha256 = 404;
   string durable_journal_sha256 = 405;
-  // Capture currently covers the detached board and admitted lifecycle, not
-  // every font, model, library or drawing-sheet dependency an exporter reads.
+  // False until the board and all dependencies the exporter reads are
+  // captured. Request/lifecycle journaling alone is not a source snapshot.
   bool snapshot_complete = 406;
   bool export_adapter_available = 407;
   // -- end lane 2D --

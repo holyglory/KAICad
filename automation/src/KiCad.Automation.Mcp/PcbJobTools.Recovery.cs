@@ -123,6 +123,23 @@ public sealed partial class PcbJobTools
         }
     }, input?.OperationId, input?.ProcessEpoch);
 
+    [McpServerTool(Name = "kicad_pcb_export_manager_capabilities_typed", ReadOnly = true),
+     Description("Read the native manufacturing manager's supported recovery boundaries for one PCB. The current manager reports durable admission and journal recovery, while detached SVG/Gerber export, worker publication and complete dependency snapshots remain unavailable."),
+     KiCadCapability("pcb-manufacturing", "typed-recovery-capabilities", "explicit PCB document and current process epoch"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbManufacturingRecoveryContractTests.CompiledStdioPublishesTypedRecoveryToolsAndFailsClosedForIncompleteInput")]
+    public Task<CallToolResult> ExportManagerCapabilitiesTyped(string instanceId,
+        PcbManufacturingManagerCapabilitiesInput input, CancellationToken cancellationToken) => ExecuteRecovery(async () =>
+    {
+        if (input is null) throw new AutomationException("invalid_pcb_export_capabilities_input", "input is required.");
+        NativeDocumentInput document = input.Document ?? throw new AutomationException("invalid_pcb_export_capabilities_input", "document is required.");
+        DocumentSpecifier target = RecoveryInputValidation.Document(document, "invalid_pcb_export_capabilities_input");
+        string epoch = RecoveryInputValidation.Uuid(input.ProcessEpoch, "processEpoch", "invalid_pcb_export_capabilities_input");
+        NativeClient client = registry.Client(instanceId); AutomationSession session = await client.HandshakeAsync(cancellationToken);
+        if (session.Epoch != epoch) throw new AutomationException("stale_process_epoch", "The capability request belongs to another native process epoch.");
+        PcbManufacturingManagerCapabilities result = await client.InvokeAsync<GetPcbManufacturingManagerCapabilities, PcbManufacturingManagerCapabilities>(new() { Document = target, ProcessEpoch = epoch }, cancellationToken);
+        return Data(new { instanceId, processEpoch = session.Epoch, capabilities = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(result)) });
+    }, null, input?.ProcessEpoch);
+
     private static async Task<CallToolResult> ExecuteRecovery(Func<Task<CallToolResult>> operation,
         string? operationId, string? processEpoch)
     {
@@ -222,6 +239,15 @@ public sealed class PcbManufacturingReconcileInput : NativeDocumentInputObject
             AllowPriorProcessEpoch = AllowPriorProcessEpoch
         };
     }
+}
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class PcbManufacturingManagerCapabilitiesInput : NativeDocumentInputObject
+{
+    private NativeDocumentInput? document;
+    private string? processEpoch;
+    public NativeDocumentInput? Document { get => document; set => document = BindOnce(value); }
+    public string? ProcessEpoch { get => processEpoch; set => processEpoch = BindOnce(value); }
 }
 
 internal static class RecoveryInputValidation

@@ -549,6 +549,12 @@ API_HANDLER_PCB::API_HANDLER_PCB( std::shared_ptr<PCB_CONTEXT> aContext, PCB_EDI
     registerHandler<kiapi::automation::v1::StartPcbManufacturingExportJob,
                     kiapi::automation::v1::PcbManufacturingExportReceipt>(
             &API_HANDLER_PCB::handleStartPcbManufacturingExportJob );
+    registerHandler<kiapi::automation::v1::ReadPcbManufacturingExportJob,
+                    kiapi::automation::v1::PcbManufacturingExportReceiptResponse>(
+            &API_HANDLER_PCB::handleReadPcbManufacturingExportJob );
+    registerHandler<kiapi::automation::v1::GetPcbManufacturingManagerCapabilities,
+                    kiapi::automation::v1::PcbManufacturingManagerCapabilities>(
+            &API_HANDLER_PCB::handleGetPcbManufacturingManagerCapabilities );
     registerHandler<kiapi::automation::v1::ReadPcbManufacturingExport,
                     kiapi::automation::v1::PcbManufacturingExportReceiptResponse>(
             &API_HANDLER_PCB::handleReadPcbManufacturingExport );
@@ -4203,6 +4209,20 @@ API_HANDLER_PCB::handleStartPcbManufacturingExportJob(
     if( !result )
         return tl::unexpected( ManufacturingError( result.error(), ApiStatusCode::AS_BAD_REQUEST ) );
     return *result;
+}
+
+HANDLER_RESULT<kiapi::automation::v1::PcbManufacturingExportReceiptResponse>
+API_HANDLER_PCB::handleReadPcbManufacturingExportJob(
+        const HANDLER_CONTEXT<kiapi::automation::v1::ReadPcbManufacturingExportJob>& aCtx )
+{
+    return m_manufacturingJobs.Read( aCtx.Request, apiServer().Token() );
+}
+
+HANDLER_RESULT<kiapi::automation::v1::PcbManufacturingManagerCapabilities>
+API_HANDLER_PCB::handleGetPcbManufacturingManagerCapabilities(
+        const HANDLER_CONTEXT<kiapi::automation::v1::GetPcbManufacturingManagerCapabilities>& aCtx )
+{
+    return m_manufacturingJobs.Capabilities( aCtx.Request.document(), apiServer().Token() );
 }
 
 

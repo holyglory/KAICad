@@ -35,14 +35,25 @@ public sealed partial class NativeSessionTests
             .Single(pad => pad.PadStack.Layers.Contains(BoardLayer.BlFCu));
         // Keep the seeded route at the board's visual centre so the existing
         // fixture canvas focus point lands on copper after fit-to-board.
-        const long padAX = 35_000_000, padBX = 65_000_000, padY = 50_000_000;
+        const long padAX = 35_000_000, padBX = 65_000_000, padY = 50_000_000,
+            cornerX = 50_000_000, cornerY = 52_000_000;
         FootprintInstance padA = CloneInlineDragFootprint(template, templatePad, "GUI_DRAG_A", padAX, padY);
         FootprintInstance padB = CloneInlineDragFootprint(template, templatePad, "GUI_DRAG_B", padBX, padY);
         string trackId = Guid.NewGuid().ToString("D");
+        string tailTrackId = Guid.NewGuid().ToString("D");
         var seededTrack = new Track
         {
             Id = new() { Value = trackId },
             Start = new() { XNm = padAX, YNm = padY },
+            End = new() { XNm = cornerX, YNm = cornerY },
+            Width = new() { ValueNm = 250_000 },
+            Layer = BoardLayer.BlFCu,
+            Net = new() { Name = "POWER_RAIL" }
+        };
+        var seededTail = new Track
+        {
+            Id = new() { Value = tailTrackId },
+            Start = new() { XNm = cornerX, YNm = cornerY },
             End = new() { XNm = padBX, YNm = padY },
             Width = new() { ValueNm = 250_000 },
             Layer = BoardLayer.BlFCu,
@@ -52,6 +63,7 @@ public sealed partial class NativeSessionTests
         seed.Items.Add(Any.Pack(padA));
         seed.Items.Add(Any.Pack(padB));
         seed.Items.Add(Any.Pack(seededTrack));
+        seed.Items.Add(Any.Pack(seededTail));
         var seedReply = await mcp.Tool("kicad_pcb_items_create", new
         {
             instanceId,
@@ -87,7 +99,7 @@ public sealed partial class NativeSessionTests
 
         string[] beforeConnected = (await Connected(seededPadIds[0])).Items
             .Select(ConnectedIdentity).Order(StringComparer.Ordinal).ToArray();
-        CollectionAssert.IsSubsetOf(new[] { seededPadIds[0].Value, seededPadIds[1].Value, trackId }, beforeConnected,
+        CollectionAssert.IsSubsetOf(new[] { seededPadIds[0].Value, seededPadIds[1].Value, trackId, tailTrackId }, beforeConnected,
             "The seeded route must connect both pads before the GUI drag.");
 
         try
@@ -119,7 +131,7 @@ public sealed partial class NativeSessionTests
             // measured target with the live window so G is sent over the
             // actual seeded segment rather than an empty canvas pixel.
             int centerX = (int)Math.Round(window.Width * 671d / 1280d);
-            int centerY = (int)Math.Round(window.Height * 383d / 720d);
+            int centerY = (int)Math.Round(window.Height * 373d / 720d);
             string preDragCapture = Path.Combine(evidence, instanceId + "-pcb-inline-drag-pre-g.png");
             string? captureFailure = null;
             try { await NativeKeyboard.CaptureAsync(display, preDragCapture, token); }
@@ -212,7 +224,7 @@ public sealed partial class NativeSessionTests
                 "The PCB editor must remain alive after committing the GUI drag.");
             string[] changedConnected = (await Connected(seededPadIds[0])).Items
                 .Select(ConnectedIdentity).Order(StringComparer.Ordinal).ToArray();
-            CollectionAssert.IsSubsetOf(new[] { seededPadIds[0].Value, seededPadIds[1].Value, trackId }, changedConnected,
+            CollectionAssert.IsSubsetOf(new[] { seededPadIds[0].Value, seededPadIds[1].Value, trackId, tailTrackId }, changedConnected,
                 "The committed inline drag must preserve both pad connections.");
 
             async Task<Track> ReadRoute(CancellationToken local)
@@ -242,7 +254,7 @@ public sealed partial class NativeSessionTests
             }
             string[] undoConnected = (await Connected(seededPadIds[0])).Items
                 .Select(ConnectedIdentity).Order(StringComparer.Ordinal).ToArray();
-            CollectionAssert.IsSubsetOf(new[] { seededPadIds[0].Value, seededPadIds[1].Value, trackId }, undoConnected,
+            CollectionAssert.IsSubsetOf(new[] { seededPadIds[0].Value, seededPadIds[1].Value, trackId, tailTrackId }, undoConnected,
                 "Undo must restore both pad connections.");
 
             NativeKeyboard.SchematicShortcut(display, processId, "y", "PCB Editor",
@@ -263,7 +275,7 @@ public sealed partial class NativeSessionTests
             }
             string[] redoConnected = (await Connected(seededPadIds[0])).Items
                 .Select(ConnectedIdentity).Order(StringComparer.Ordinal).ToArray();
-            CollectionAssert.IsSubsetOf(new[] { seededPadIds[0].Value, seededPadIds[1].Value, trackId }, redoConnected,
+            CollectionAssert.IsSubsetOf(new[] { seededPadIds[0].Value, seededPadIds[1].Value, trackId, tailTrackId }, redoConnected,
                 "Redo must restore both pad connections.");
 
             var redoneState = await ObserveLifecycleState(client, board, token);
@@ -293,12 +305,12 @@ public sealed partial class NativeSessionTests
             { Header = new() { Document = board }, Items = { seededPadIds[0] } }, token);
             string[] persistedConnectedIds = persistedConnected.Items.Select(ConnectedIdentity)
                 .Order(StringComparer.Ordinal).ToArray();
-            CollectionAssert.IsSubsetOf(new[] { seededPadIds[0].Value, seededPadIds[1].Value, trackId }, persistedConnectedIds,
+            CollectionAssert.IsSubsetOf(new[] { seededPadIds[0].Value, seededPadIds[1].Value, trackId, tailTrackId }, persistedConnectedIds,
                 "Save/reopen must preserve both pad connections after the GUI drag.");
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-pcb-inline-drag.json"),
                 System.Text.Json.JsonSerializer.Serialize(new
                 {
-                    trackId, padIds = seededPadIds.Select(id => id.Value).ToArray(),
+                    trackId, tailTrackId, padIds = seededPadIds.Select(id => id.Value).ToArray(),
                     before = DescribeRouteItem(Any.Pack(seededRoute)),
                     after = DescribeRouteItem(Any.Pack(committedTrack)),
                     beforeConnected, changedConnected, undoConnected, redoConnected, persistedConnectedIds,

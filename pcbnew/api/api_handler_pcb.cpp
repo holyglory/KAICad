@@ -4199,7 +4199,10 @@ API_HANDLER_PCB::handleStartPcbManufacturingExportJob(
                 "The manufacturing manager start requires a complete export request" ) );
     }
 
-    return m_manufacturingJobs.Start( aCtx.Request.request(), apiServer().Token() );
+    auto result = m_manufacturingJobs.Start( aCtx.Request.request(), apiServer().Token() );
+    if( !result )
+        return tl::unexpected( ManufacturingError( result.error(), ApiStatusCode::AS_BAD_REQUEST ) );
+    return *result;
 }
 
 

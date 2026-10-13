@@ -188,7 +188,7 @@ public sealed class PcbFootprintTextInput : NativeDocumentInputObject
     public string Layer { get => layer; set => layer = BindOnce(value); }
     public bool Visible { get => visible; set => visible = BindOnce(value); }
 
-    internal Field ToField(int fieldId, string name)
+    internal Kiapi.Board.Types.Field ToField(int fieldId, string name)
     {
         FootprintInputValidation.Uuid(Id);
         FootprintInputValidation.Angle(RotationDegrees);
@@ -370,7 +370,7 @@ public sealed class PcbFootprintPointInput : NativeDocumentInputObject
     private long yNm;
     public long XNm { get => xNm; set => xNm = BindOnce(value); }
     public long YNm { get => yNm; set => yNm = BindOnce(value); }
-    internal Vector2 ToNative() => new() { XNm = XNm, YNm = YNm };
+    internal Kiapi.Common.Types.Vector2 ToNative() => new() { XNm = XNm, YNm = YNm };
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<PcbFootprintMountingInput>))]

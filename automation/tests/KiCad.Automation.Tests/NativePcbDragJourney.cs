@@ -101,11 +101,9 @@ public sealed partial class NativeSessionTests
                 "The native editor must select the exact seeded track before G.");
 
             // Refit the live PCB canvas before deriving the pointer location.
-            // The seeded pads are symmetric around (50 mm, 50 mm), so after
-            // fit-to-board their route midpoint is the editor canvas midpoint.
             // Query the actual window dimensions rather than assuming the
-            // fixture's current Xvfb size; this keeps the pointer target tied
-            // to the rendered native window.
+            // fixture's current Xvfb size; the calibrated target below keeps
+            // the pointer tied to the rendered native window.
             (int Width, int Height) window = default;
             NativeKeyboard.SchematicShortcut(display, processId, "", "PCB Editor",
                 controlKey: false, focusCanvas: false,
@@ -114,7 +112,14 @@ public sealed partial class NativeSessionTests
             Assert.IsGreaterThan(0, window.Height, "The PCB editor window must expose a positive height.");
             NativeKeyboard.SchematicShortcut(display, processId, "Home", "PCB Editor",
                 controlKey: false, focusCanvas: false);
-            int centerX = window.Width / 2, centerY = window.Height / 2;
+            // The fitted PCB view keeps the selected route inside the board
+            // canvas, but the side panels and toolbar shift its board-space
+            // midpoint away from the top-level window center.  The fixture's
+            // rendered calibration is (671,383) at 1280x720; scale that
+            // measured target with the live window so G is sent over the
+            // actual seeded segment rather than an empty canvas pixel.
+            int centerX = (int)Math.Round(window.Width * 671d / 1280d);
+            int centerY = (int)Math.Round(window.Height * 383d / 720d);
             string preDragCapture = Path.Combine(evidence, instanceId + "-pcb-inline-drag-pre-g.png");
             await NativeKeyboard.CaptureAsync(display, preDragCapture, token);
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-pcb-inline-drag-pre-g.json"),

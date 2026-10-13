@@ -169,7 +169,7 @@ internal static class SchematicErcExecutionContract
             || state.Document is null || !state.Document.Equals(document)
             || state.ProcessEpoch != processEpoch
             || !IsCanonicalUuid(state.NativeIdentity) || state.Revision is null
-            || !IsCanonicalUuid(state.Revision.Epoch) || state.Revision.Epoch != state.NativeIdentity
+            || !IsCanonicalUuid(state.Revision.Epoch)
             || state.StateSha256.Length != 64
             || !state.StateSha256.All(char.IsAsciiHexDigitLower))
             throw InvalidState("The native schematic ERC lifecycle state is incomplete or targets another revision.");

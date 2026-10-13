@@ -98,6 +98,9 @@ public sealed class NativeErcDialogTests
                     new() { Document = opened.Document }, deadline.Token);
                 string ercState = SchematicJson.Formatter.Format(await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
                     new() { Document = opened.Document }, deadline.Token));
+                var parsedErcState = SchematicJson.Parser.Parse<DocumentLifecycleState>(ercState);
+                Assert.AreNotEqual(parsedErcState.NativeIdentity, parsedErcState.Revision.Epoch,
+                    "KiCad's native document identity and change-journal epoch must remain independent.");
                 string ercMcpState = Directory.CreateTempSubdirectory("kicad-erc-mcp-").FullName;
                 try
                 {

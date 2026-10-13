@@ -13,6 +13,8 @@ public sealed class SchematicErcExecutionContractTests
     public void CompletedReceiptCanBeReplayedOnlyForItsExactOperationAndRevision()
     {
         var fixture = Fixture();
+        Assert.AreNotEqual(fixture.State.NativeIdentity, fixture.State.Revision.Epoch,
+            "Native document identity and revision epoch are independent native identities.");
         SchematicErcExecutionContract.ValidateRequest(fixture.Request);
         SchematicErcExecutionContract.ValidateReceipt(fixture.Request, fixture.Receipt);
 
@@ -150,7 +152,7 @@ public sealed class SchematicErcExecutionContractTests
         RejectReceipt(staleEpoch, fixture, "epoch");
 
         var foreignRevision = fixture.Receipt.Clone();
-        foreignRevision.BeforeState.Revision.Epoch = "55555555-5555-5555-5555-555555555555";
+        foreignRevision.BeforeState.Revision.Epoch = "66666666-6666-6666-6666-666666666666";
         foreignRevision.AfterState.Revision.Epoch = foreignRevision.BeforeState.Revision.Epoch;
         foreignRevision.LegacyResult.CheckedRevision = foreignRevision.BeforeState.Revision.Clone();
         foreignRevision.LegacyResult.ObservedRevision = foreignRevision.AfterState.Revision.Clone();
@@ -202,7 +204,7 @@ public sealed class SchematicErcExecutionContractTests
             Scope = DocumentLifecycleScope.DlsSchematicHierarchy,
             ProcessEpoch = processEpoch,
             NativeIdentity = "44444444-4444-4444-4444-444444444444",
-            Revision = new() { Epoch = "44444444-4444-4444-4444-444444444444", Sequence = 7 },
+            Revision = new() { Epoch = "55555555-5555-5555-5555-555555555555", Sequence = 7 },
             StateSha256 = new string('a', 64)
         };
         var request = new NativeCapabilitySchematicExecuteErc

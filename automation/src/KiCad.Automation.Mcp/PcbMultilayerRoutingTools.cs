@@ -122,8 +122,10 @@ public sealed class PcbMultilayerRoutingTools(InstanceRegistry registry)
             ["enabledCopperLayers"] = enabledCopper.Select(layer => MultilayerRoutePlanner.LayerName(layer)).ToArray(),
             ["netValidated"] = true,
             ["effectiveNetClass"] = effectiveNetClass.Name,
-            ["obstacleModel"] = "conservative-axis-aligned",
+            ["obstacleModel"] = plan.ObstacleModel,
             ["completeObstacleModel"] = false,
+            ["geometryObstacleCount"] = plan.GeometryObstacleCount,
+            ["obstacleCoverage"] = plan.ObstacleCoverage,
             ["drcValidated"] = false,
             ["nativeCommit"] = false,
             ["deterministicReplay"] = true,
@@ -344,6 +346,9 @@ internal static class MultilayerRoutePlanner
         public int ExploredNodes { get; init; }
         public int ObstacleCount { get; init; }
         public object[] ObstacleReport { get; init; } = [];
+        public string ObstacleModel { get; init; } = "conservative-axis-aligned";
+        public int GeometryObstacleCount { get; init; }
+        public object[] ObstacleCoverage { get; init; } = [];
         public CreateItems? Candidate { get; init; }
         public ImmutableArray<MlPathPoint>? Path { get; init; }
         public ImmutableArray<BoardLayer> LayersUsed { get; init; } = [];
@@ -402,7 +407,7 @@ internal static class MultilayerRoutePlanner
     internal readonly record struct MlPathPoint(long XNm, long YNm, BoardLayer Layer);
     internal readonly record struct MlBoundsValue(long MinXNm, long MinYNm, long MaxXNm, long MaxYNm);
     internal readonly record struct MlObstacle(string Kind, string Id, string NetName, BoardLayer Layer,
-        MlBoundsValue Bounds, string Reason);
+        MlBoundsValue Bounds, string Reason, PcbRouteGeometry.Region? Geometry = null);
     private readonly record struct GridStep(int X, int Y);
     private readonly record struct GridNode(int X, int Y, int Layer, int ViaCount);
     private readonly record struct GridCell(int X, int Y, int Layer);
@@ -497,8 +502,17 @@ internal static class MultilayerRoutePlanner
             netName = obstacle.NetName,
             layer = LayerName(obstacle.Layer),
             bounds = new { minXNm = obstacle.Bounds.MinXNm, minYNm = obstacle.Bounds.MinYNm, maxXNm = obstacle.Bounds.MaxXNm, maxYNm = obstacle.Bounds.MaxYNm },
-            reason = obstacle.Reason
+            reason = obstacle.Reason, geometryAware = obstacle.Geometry is not null,
+            geometryMode = obstacle.Geometry?.KeepInside == true ? "keep-inside" : obstacle.Geometry is null ? "bounds" : "filled-region"
         }).ToArray();
+        int geometryObstacleCount = obstacles.Count(obstacle => obstacle.Geometry is not null);
+        bool boundaryGeometry = obstacles.Any(obstacle => obstacle.Kind == "board-boundary" && obstacle.Geometry is not null);
+        object[] obstacleCoverage =
+        [
+            new { kind = "filled-zones-and-rule-areas", geometry = true, holes = true },
+            new { kind = "edge-cuts-boundary", geometry = boundaryGeometry, holes = true },
+            new { kind = "tracks-arcs-pads-vias", geometry = false, holes = false }
+        ];
 
         var grid = new MlGrid(request.Bounds, request.GridNm, request.Layers, enabledCopper);
         var blocked = BuildBlocked(grid, obstacles, request);
@@ -506,11 +520,11 @@ internal static class MultilayerRoutePlanner
         GridNode start = new(startBase.X, startBase.Y, grid.LayerIndex(request.StartLayer), 0);
         GridNode goal = new(goalBase.X, goalBase.Y, grid.LayerIndex(request.EndLayer), 0);
         if (blocked.Contains(new(start.X, start.Y, start.Layer)) || blocked.Contains(new(goal.X, goal.Y, goal.Layer)))
-            return Failure(planId, "endpoint_blocked", 0, obstacles.Length, report);
+            return Failure(planId, "endpoint_blocked", 0, obstacles.Length, report, geometryObstacleCount, obstacleCoverage);
 
         SearchResult search = Search(grid, blocked, start, goal, request, obstacles);
         if (search.Path is null)
-            return Failure(planId, "no_route", search.ExploredNodes, obstacles.Length, report);
+            return Failure(planId, "no_route", search.ExploredNodes, obstacles.Length, report, geometryObstacleCount, obstacleCoverage);
 
         ImmutableArray<MlPathPoint> path = search.Path.Value.Select(node => new MlPathPoint(
             grid.Point(node.X, node.Y).XNm, grid.Point(node.X, node.Y).YNm, request.Layers[node.Layer])).ToImmutableArray();
@@ -535,15 +549,20 @@ internal static class MultilayerRoutePlanner
         return new PlanResult
         {
             RouteFound = true, PlanId = planId, ExploredNodes = search.ExploredNodes,
-            ObstacleCount = obstacles.Length, ObstacleReport = report, Candidate = candidate,
+            ObstacleCount = obstacles.Length, ObstacleReport = report,
+            ObstacleModel = geometryObstacleCount == 0 ? "conservative-axis-aligned" : "geometry-aware-regions-with-conservative-fallback",
+            GeometryObstacleCount = geometryObstacleCount, ObstacleCoverage = obstacleCoverage, Candidate = candidate,
             Path = path, LayersUsed = usedLayers.ToImmutable(), TrackCount = candidate.Items.Count(item => item.Is(Track.Descriptor)),
             ViaCount = vias, PathLengthNm = pathLength, ViaCostNm = viaCost, TotalCostNm = checked(pathLength + viaCost), BendCount = bends
         };
     }
 
-    private static PlanResult Failure(string planId, string failure, int explored, int obstacleCount, object[] report)
+    private static PlanResult Failure(string planId, string failure, int explored, int obstacleCount, object[] report,
+        int geometryObstacleCount = 0, object[]? obstacleCoverage = null)
         => new() { RouteFound = false, FailureCode = failure, PlanId = planId, ExploredNodes = explored,
-            ObstacleCount = obstacleCount, ObstacleReport = report };
+            ObstacleCount = obstacleCount, ObstacleReport = report,
+            ObstacleModel = geometryObstacleCount == 0 ? "conservative-axis-aligned" : "geometry-aware-regions-with-conservative-fallback",
+            GeometryObstacleCount = geometryObstacleCount, ObstacleCoverage = obstacleCoverage ?? [] };
 
     private static ImmutableHashSet<GridCell> BuildBlocked(MlGrid grid, ImmutableArray<MlObstacle> obstacles, ValidatedRequest request)
     {
@@ -553,7 +572,11 @@ internal static class MultilayerRoutePlanner
             int layer = grid.LayerIndex(obstacle.Layer);
             if (layer < 0) continue;
             foreach (GridNode node in grid.CellsIntersecting(obstacle.Bounds, layer))
-                blocked.Add(new(node.X, node.Y, node.Layer));
+            {
+                Vector2 point = grid.Point(node.X, node.Y);
+                if (obstacle.Geometry is null || obstacle.Geometry.Blocks(point.XNm, point.YNm))
+                    blocked.Add(new(node.X, node.Y, node.Layer));
+            }
         }
         return blocked.ToImmutable();
     }
@@ -699,8 +722,22 @@ internal static class MultilayerRoutePlanner
     private static ImmutableArray<MlObstacle> BuildObstacles(IEnumerable<ProtoAny> packedItems,
         ValidatedRequest request, ImmutableArray<BoardLayer> enabledCopper)
     {
+        ProtoAny[] items = packedItems.ToArray();
         var result = ImmutableArray.CreateBuilder<MlObstacle>();
-        foreach (ProtoAny packed in packedItems)
+        long boundaryMargin = checked(request.ClearanceNm + request.WidthNm / 2);
+        PcbRouteGeometry.Region? boardBoundary = PcbRouteGeometry.FromEdgeCuts(
+            items.Where(item => item.Is(BoardGraphicShape.Descriptor))
+                .Select(item => item.Unpack<BoardGraphicShape>()), boundaryMargin);
+        if (boardBoundary is not null)
+        {
+            MlBoundsValue requestBounds = new(request.Bounds.MinXNm, request.Bounds.MinYNm,
+                request.Bounds.MaxXNm, request.Bounds.MaxYNm);
+            foreach (BoardLayer layer in request.Layers)
+                result.Add(new("board-boundary", "edge-cuts", "", layer, requestBounds,
+                    "board outline keep-inside geometry", boardBoundary));
+        }
+
+        foreach (ProtoAny packed in items)
         {
             if (packed.Is(Track.Descriptor))
             {
@@ -742,15 +779,22 @@ internal static class MultilayerRoutePlanner
                 bool keepout = zone.Type == ZoneType.ZtRuleArea;
                 if (!keepout && SameNet(new Net { Name = net }, request.NetName)) continue;
                 long margin = checked((zone.CopperSettings?.Clearance?.ValueNm ?? 0) + request.ClearanceNm + request.WidthNm / 2);
-                MlBoundsValue bounds = PolySetBounds(zone.Outline!, margin);
+                PcbRouteGeometry.Region? geometry = PcbRouteGeometry.FromPolySet(zone.Outline!, margin);
+                MlBoundsValue bounds = geometry is null ? PolySetBounds(zone.Outline!, margin) : ToBounds(geometry.Bounds);
                 foreach (BoardLayer layer in enabledCopper.Where(layer => LayersContain(zone.Layers, layer)))
-                    result.Add(new("zone", zone.Id.Value, net, layer, bounds, keepout ? "rule-area keepout" : "different-net copper zone"));
+                    result.Add(new("zone", zone.Id.Value, net, layer, bounds,
+                        keepout ? "rule-area keepout geometry" : "different-net copper zone geometry", geometry));
             }
             else if (packed.Is(BoardGraphicShape.Descriptor))
             {
                 BoardGraphicShape shape = packed.Unpack<BoardGraphicShape>();
+                if (shape.Layer == BoardLayer.BlEdgeCuts) continue;
                 if (!enabledCopper.Contains(shape.Layer) || SameNet(shape.Net, request.NetName)) continue;
-                if (TryGraphicBounds(shape.Shape, Margin(request, shape.Shape.Attributes?.Stroke?.Width?.ValueNm ?? 0), out MlBoundsValue bounds))
+                long margin = Margin(request, shape.Shape?.Attributes?.Stroke?.Width?.ValueNm ?? 0);
+                PcbRouteGeometry.Region? geometry = PcbRouteGeometry.FromGraphic(shape.Shape, margin);
+                if (geometry is not null && geometry.Bounds.MinXNm != geometry.Bounds.MaxXNm)
+                    result.Add(new("shape", shape.Id.Value, shape.Net.Name, shape.Layer, ToBounds(geometry.Bounds), "copper graphic geometry", geometry));
+                else if (TryGraphicBounds(shape.Shape!, margin, out MlBoundsValue bounds))
                     result.Add(new("shape", shape.Id.Value, shape.Net.Name, shape.Layer, bounds, "copper graphic"));
             }
         }
@@ -921,6 +965,8 @@ internal static class MultilayerRoutePlanner
         var points = poly.Polygons.SelectMany(p => p.Outline.Nodes).Where(n => n.GeometryCase == PolyLineNode.GeometryOneofCase.Point).Select(n => n.Point).ToArray();
         return points.Length == 0 ? new(0, 0, 0, 0) : PointBounds(points, margin);
     }
+    private static MlBoundsValue ToBounds(PcbRouteGeometry.Bounds bounds)
+        => new(bounds.MinXNm, bounds.MinYNm, bounds.MaxXNm, bounds.MaxYNm);
     private static long PadRadius(PadStack? stack)
     {
         if (stack is null) return 0;

@@ -16,6 +16,75 @@ namespace KiCad.Automation.Tests;
 public sealed class PcbRoutingContractTests
 {
     [TestMethod]
+    public void GeometryAwareZonesRespectHolesAndClearance()
+    {
+        var zone = new PolySet
+        {
+            Polygons =
+            {
+                new PolygonWithHoles
+                {
+                    Outline = new PolyLine { Closed = true, Nodes =
+                    {
+                        new PolyLineNode { Point = new() { XNm = 0, YNm = 0 } },
+                        new PolyLineNode { Point = new() { XNm = 10_000, YNm = 0 } },
+                        new PolyLineNode { Point = new() { XNm = 10_000, YNm = 10_000 } },
+                        new PolyLineNode { Point = new() { XNm = 0, YNm = 10_000 } }
+                    } },
+                    Holes =
+                    {
+                        new PolyLine { Closed = true, Nodes =
+                        {
+                            new PolyLineNode { Point = new() { XNm = 4_000, YNm = 4_000 } },
+                            new PolyLineNode { Point = new() { XNm = 6_000, YNm = 4_000 } },
+                            new PolyLineNode { Point = new() { XNm = 6_000, YNm = 6_000 } },
+                            new PolyLineNode { Point = new() { XNm = 4_000, YNm = 6_000 } }
+                        } }
+                    }
+                }
+            }
+        };
+
+        PolySet outlineOnly = zone.Clone();
+        outlineOnly.Polygons[0].Holes.Clear();
+        PcbRouteGeometry.Region region = PcbRouteGeometry.FromPolySet(zone, 500)!,
+            boundary = PcbRouteGeometry.FromEdgeCuts(
+                [new BoardGraphicShape
+                {
+                    Layer = BoardLayer.BlEdgeCuts,
+                    Shape = new GraphicShape { Polygon = outlineOnly }
+                }], 500)!;
+
+        Assert.IsTrue(region.Blocks(2_000, 2_000));
+        Assert.IsFalse(region.Blocks(5_000, 5_000), "A route through a true zone hole must remain available.");
+        Assert.IsTrue(region.Blocks(4_200, 5_000), "Clearance must shrink the usable hole boundary.");
+        Assert.IsFalse(boundary.Blocks(5_000, 5_000));
+        Assert.IsTrue(boundary.Blocks(-500, 5_000), "The edge-cut allow-region must block cells outside the board.");
+    }
+
+    [TestMethod]
+    public void GeometryAwareEdgeCutFallbackIsDeterministicForSegmentLoops()
+    {
+        BoardGraphicShape[] edges =
+        [
+            Edge(0, 0, 10_000, 0), Edge(10_000, 0, 10_000, 10_000),
+            Edge(10_000, 10_000, 0, 10_000), Edge(0, 10_000, 0, 0)
+        ];
+        PcbRouteGeometry.Region first = PcbRouteGeometry.FromEdgeCuts(edges, 0)!,
+            second = PcbRouteGeometry.FromEdgeCuts(edges.Reverse(), 0)!;
+        Assert.AreEqual(first.Bounds, second.Bounds);
+        Assert.IsFalse(first.Blocks(5_000, 5_000));
+        Assert.IsTrue(first.Blocks(11_000, 5_000));
+        Assert.IsTrue(first.KeepInside);
+
+        static BoardGraphicShape Edge(long x1, long y1, long x2, long y2) => new()
+        {
+            Layer = BoardLayer.BlEdgeCuts,
+            Shape = new GraphicShape { Segment = new() { Start = new() { XNm = x1, YNm = y1 }, End = new() { XNm = x2, YNm = y2 } } }
+        };
+    }
+
+    [TestMethod]
     public void TypedHeadlessRouteRequestRoundTripsAllPlannerFieldsAndRejectsUnknownMembers()
     {
         var request = new PcbRoutePlanRequestInput

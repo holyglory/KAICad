@@ -146,6 +146,7 @@ public sealed class SimulationTypedMcpProcessTests
             dependencies.Warnings.Add("External dependency enumeration is incomplete.");
             var store = new SimulationResultReceipts(state);
             store.WriteOperation(operation with { Stage = SimulationOperationStage.Prepared, JobId = null });
+            store.WriteOperation(operation with { Stage = SimulationOperationStage.Dispatched, JobId = null });
             store.WriteOperation(operation); store.MakeCurrent(operation);
             SimulationTerminalReceipt terminal = SimulationTerminalReceipt.Capture(operation, job, dependencies);
             store.WriteTerminal(terminal);

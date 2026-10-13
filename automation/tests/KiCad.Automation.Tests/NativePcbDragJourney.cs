@@ -115,6 +115,27 @@ public sealed partial class NativeSessionTests
             NativeKeyboard.SchematicShortcut(display, processId, "Home", "PCB Editor",
                 controlKey: false, focusCanvas: false);
             int centerX = window.Width / 2, centerY = window.Height / 2;
+            string preDragCapture = Path.Combine(evidence, instanceId + "-pcb-inline-drag-pre-g.png");
+            await NativeKeyboard.CaptureAsync(display, preDragCapture, token);
+            await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-pcb-inline-drag-pre-g.json"),
+                System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    fitShortcut = "Home",
+                    window = new { width = window.Width, height = window.Height },
+                    pointer = new { x = centerX, y = centerY },
+                    route = new
+                    {
+                        start = new { xNm = seededRoute.Start.XNm, yNm = seededRoute.Start.YNm },
+                        end = new { xNm = seededRoute.End.XNm, yNm = seededRoute.End.YNm },
+                        midpoint = new
+                        {
+                            xNm = (seededRoute.Start.XNm + seededRoute.End.XNm) / 2,
+                            yNm = (seededRoute.Start.YNm + seededRoute.End.YNm) / 2
+                        },
+                        layer = seededRoute.Layer.ToString(), widthNm = seededRoute.Width.ValueNm
+                    },
+                    capture = Path.GetFileName(preDragCapture)
+                }), token);
             // A real click gives the PCB canvas GTK focus. A motion-only
             // command moves XTest's pointer but does not focus the canvas.
             NativeKeyboard.SchematicShortcut(display, processId, "click", "PCB Editor",

@@ -17,7 +17,7 @@ public sealed partial class SimulationTools(InstanceRegistry instances)
 {
     private readonly SimulationResultReceipts receipts = new(instances.StateDirectory);
     [McpServerTool(Name = "kicad_simulation_start"),
-     Description("Start one explicit ngspice simulation through KiCad's existing native simulator for a verified schematic document. Pass an empty netlist to simulate the deck KiCad generates from the schematic. A supplied netlist must be a plain self-contained circuit: interpreter blocks (.control/.exec, *ng_script) and file includes (.include, .lib file) are rejected. The MCP result records the inline deck SHA-256. An identical operation with a durable terminal receipt replays its archive without running again. A dispatched operation is recovered by its native operation identity when possible; if no authoritative native record exists it remains explicitly unresolved and is never automatically dispatched again. A different operation cannot replace an unarchived native job."),
+     Description("Start one explicit ngspice simulation through KiCad's existing native simulator for a verified schematic document. Pass an empty netlist to simulate the deck KiCad generates from the schematic. A supplied netlist must be a plain self-contained circuit: interpreter blocks (.control/.exec, *ng_script) and file includes (.include, .lib file) are rejected. The MCP result records the inline deck SHA-256. An identical operation with a durable terminal receipt replays its archive without running again. A dispatched or accepted operation is recovered by its native operation identity when possible; if the native instance is unavailable or no authoritative native record exists it remains explicitly unresolved and is never automatically dispatched again. A different operation cannot replace an unarchived native job."),
      KiCadCapability("simulation", "native-ngspice", "instance epoch, document, operation ID"),
      KiCadVerification(KiCadVerificationLevel.NativeJourney, "NativeSessionTests.NativeSimulationUsesKiCadNgspiceAndReturnsVectors", "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Start(string instanceId, string expectedInstanceEpoch, SimulationDocumentInput document,
@@ -40,7 +40,7 @@ public sealed partial class SimulationTools(InstanceRegistry instances)
         }
         NativeClient client;
         try { client = instances.Client(instanceId); }
-        catch (AutomationException error) when (previous?.Stage == SimulationOperationStage.Dispatched
+        catch (AutomationException error) when (previous?.Stage is SimulationOperationStage.Dispatched or SimulationOperationStage.Accepted
             && error.Code == "unknown_instance")
         { throw SimulationResultReceipts.Unresolved(previous.OperationId); }
         var session = await client.HandshakeAsync(cancellationToken);

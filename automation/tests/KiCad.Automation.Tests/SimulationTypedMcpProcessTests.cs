@@ -207,6 +207,25 @@ public sealed class SimulationTypedMcpProcessTests
             AssertError(await finalMcp.Tool("kicad_simulation_start_typed", new { instanceId = unresolvedInstance, input = unresolved }),
                 "simulation_operation_unresolved");
             Assert.AreEqual(dispatched, store.ReadOperation(unresolvedInstance, unresolvedId), "A lost reply must not authorize a replacement simulation.");
+
+            // An accepted native job can lose its terminal archive if the MCP
+            // host disappears after KiCad accepted the request.  Preserve the
+            // same no-duplicate-dispatch guarantee when the native instance is
+            // no longer attached; an accepted receipt is already evidence that
+            // the operation may have executed.
+            string acceptedInstance = Guid.NewGuid().ToString("D");
+            Guid acceptedId = Guid.NewGuid();
+            string acceptedJobId = Guid.NewGuid().ToString("D");
+            var accepted = SimulationOperationReceipt.Prepare(acceptedInstance, epoch, document, acceptedId, deckHash, "inline-caller-deck")
+                with { Stage = SimulationOperationStage.Accepted, JobId = acceptedJobId };
+            store.WriteOperation(accepted with { Stage = SimulationOperationStage.Prepared, JobId = null });
+            store.WriteOperation(accepted with { Stage = SimulationOperationStage.Dispatched, JobId = null });
+            store.WriteOperation(accepted); store.MakeCurrent(accepted);
+            JsonObject acceptedInput = Input(documentInput, epoch, "operationId", acceptedId.ToString("D")); acceptedInput["netlist"] = deck;
+            AssertError(await finalMcp.Tool("kicad_simulation_start_typed", new { instanceId = acceptedInstance, input = acceptedInput }),
+                "simulation_operation_unresolved");
+            Assert.AreEqual(accepted, store.ReadOperation(acceptedInstance, acceptedId),
+                "An accepted job without a terminal archive must remain unresolved after instance loss.");
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
     }

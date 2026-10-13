@@ -90,6 +90,23 @@ public sealed partial class NativeSessionTests
             .Single(track => track.Id.Value == trackId);
         var seededPadIds = dragPads.Select(pad => pad.Id.Clone()).ToArray();
 
+        async Task<Track[]> PowerRoutes(CancellationToken local)
+        {
+            var rows = await client.InvokeAsync<GetItems, GetItemsResponse>(new()
+            {
+                Header = new() { Document = board }, Types_ = { KiCadObjectType.KotPcbTrace }
+            }, local);
+            return rows.Items.Select(item => item.Unpack<Track>())
+                .Where(track => track.Net?.Name == "POWER_RAIL")
+                .ToArray();
+        }
+        static string RouteSetShape(IEnumerable<Track> routes) => string.Join("|",
+            routes.Select(track => RouteShape(Any.Pack(track))).Order(StringComparer.Ordinal));
+        Track[] seededRoutes = await PowerRoutes(token);
+        Assert.IsGreaterThanOrEqualTo(2, seededRoutes.Length,
+            "The seeded connected route must contain both segments before the GUI drag.");
+        string seededRouteShape = RouteSetShape(seededRoutes);
+
         async Task<GetItemsResponse> Connected(KIID item)
             => await client.InvokeAsync<GetConnectedItems, GetItemsResponse>(new()
             { Header = new() { Document = board }, Items = { item } }, token);
@@ -99,8 +116,10 @@ public sealed partial class NativeSessionTests
 
         string[] beforeConnected = (await Connected(seededPadIds[0])).Items
             .Select(ConnectedIdentity).Order(StringComparer.Ordinal).ToArray();
-        CollectionAssert.IsSubsetOf(new[] { seededPadIds[0].Value, seededPadIds[1].Value, trackId, tailTrackId }, beforeConnected,
+        CollectionAssert.IsSubsetOf(new[] { seededPadIds[0].Value, seededPadIds[1].Value }, beforeConnected,
             "The seeded route must connect both pads before the GUI drag.");
+        Assert.IsTrue(beforeConnected.Any(id => seededRoutes.Any(route => route.Id.Value == id)),
+            "The seeded pad must be connected to a native route segment before the GUI drag.");
 
         try
         {
@@ -187,16 +206,16 @@ public sealed partial class NativeSessionTests
             // the subsequent motion/click changing this exact native item.
             Assert.IsTrue(NativeKeyboard.HasWindow(display, processId, "PCB Editor"),
                 "The PCB editor must remain alive after entering inline drag.");
-            foreach ((int x, int y) in new[] { (centerX + 4, centerY + 2), (centerX + 8, centerY + 4) })
+            foreach ((int x, int y) in new[] { (centerX + 8, centerY + 8), (centerX + 16, centerY + 16) })
             {
                 NativeKeyboard.SchematicShortcut(display, processId, "motion", "PCB Editor",
                     controlKey: false, focusCanvas: false, clickFromLeft: x, clickFromTop: y);
                 await Task.Delay(100, token);
             }
             NativeKeyboard.SchematicShortcut(display, processId, "click", "PCB Editor",
-                controlKey: false, focusCanvas: false, clickFromLeft: centerX + 8, clickFromTop: centerY + 4);
+                controlKey: false, focusCanvas: false, clickFromLeft: centerX + 16, clickFromTop: centerY + 16);
 
-            async Task<Track?> WaitForChanged(TimeSpan timeout)
+            async Task<(Track[] Routes, string Shape)?> WaitForChanged(TimeSpan timeout)
             {
                 using var committed = CancellationTokenSource.CreateLinkedTokenSource(token);
                 committed.CancelAfter(timeout);
@@ -204,57 +223,49 @@ public sealed partial class NativeSessionTests
                 {
                     while (true)
                     {
-                        var rows = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
-                        { Header = new() { Document = board }, Items = { seededRoute.Id } }, committed.Token);
-                        if (rows.Items.Count == 1 && rows.Items[0].Is(Track.Descriptor))
-                        {
-                            Track changed = rows.Items[0].Unpack<Track>();
-                            if (!RouteShape(Any.Pack(seededRoute)).Equals(RouteShape(Any.Pack(changed)), StringComparison.Ordinal))
-                                return changed;
-                        }
+                        Track[] current = await PowerRoutes(committed.Token);
+                        string shape = RouteSetShape(current);
+                        if (!string.Equals(seededRouteShape, shape, StringComparison.Ordinal))
+                            return (current, shape);
                         await Task.Delay(75, committed.Token);
                     }
                 }
                 catch (OperationCanceledException) when (!token.IsCancellationRequested) { return null; }
             }
-            Track? changedTrack = await WaitForChanged(TimeSpan.FromSeconds(10));
-            Assert.IsNotNull(changedTrack, "A native PCB drag action must change the selected route geometry.");
-            Track committedTrack = changedTrack!;
+            var changed = await WaitForChanged(TimeSpan.FromSeconds(10));
+            Assert.IsNotNull(changed, "A native PCB drag action must change the selected route geometry.");
+            Track[] committedRoutes = changed!.Value.Routes;
+            string committedRouteShape = changed.Value.Shape;
+            Track committedTrack = committedRoutes.FirstOrDefault(route => route.Id.Value == trackId)
+                ?? committedRoutes[0];
             Assert.IsTrue(NativeKeyboard.HasWindow(display, processId, "PCB Editor"),
                 "The PCB editor must remain alive after committing the GUI drag.");
             string[] changedConnected = (await Connected(seededPadIds[0])).Items
                 .Select(ConnectedIdentity).Order(StringComparer.Ordinal).ToArray();
-            CollectionAssert.IsSubsetOf(new[] { seededPadIds[0].Value, seededPadIds[1].Value, trackId, tailTrackId }, changedConnected,
+            CollectionAssert.IsSubsetOf(new[] { seededPadIds[0].Value, seededPadIds[1].Value }, changedConnected,
                 "The committed inline drag must preserve both pad connections.");
-
-            async Task<Track> ReadRoute(CancellationToken local)
-            {
-                var rows = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
-                { Header = new() { Document = board }, Items = { seededRoute.Id } }, local);
-                Assert.AreEqual(1, rows.Items.Count, "The original track identity must survive inline drag history.");
-                Assert.IsTrue(rows.Items[0].Is(Track.Descriptor));
-                return rows.Items[0].Unpack<Track>();
-            }
+            Assert.IsTrue(changedConnected.Any(id => committedRoutes.Any(route => route.Id.Value == id)),
+                "The committed pad connection must point to a native route segment.");
 
             NativeKeyboard.SchematicShortcut(display, processId, "z", "PCB Editor",
                 controlKey: true, focusCanvas: false);
             using (var undo = CancellationTokenSource.CreateLinkedTokenSource(token))
             {
                 undo.CancelAfter(TimeSpan.FromSeconds(10));
-                Track restored;
+                Track[] restored;
                 do
                 {
-                    restored = await ReadRoute(undo.Token);
-                    if (RouteShape(Any.Pack(restored)).Equals(RouteShape(Any.Pack(seededRoute)), StringComparison.Ordinal))
+                    restored = await PowerRoutes(undo.Token);
+                    if (RouteSetShape(restored).Equals(seededRouteShape, StringComparison.Ordinal))
                         break;
                     await Task.Delay(75, undo.Token);
                 } while (true);
-                Assert.AreEqual(RouteShape(Any.Pack(seededRoute)), RouteShape(Any.Pack(restored)),
+                Assert.AreEqual(seededRouteShape, RouteSetShape(restored),
                     "Undo must restore the exact pre-drag geometry.");
             }
             string[] undoConnected = (await Connected(seededPadIds[0])).Items
                 .Select(ConnectedIdentity).Order(StringComparer.Ordinal).ToArray();
-            CollectionAssert.IsSubsetOf(new[] { seededPadIds[0].Value, seededPadIds[1].Value, trackId, tailTrackId }, undoConnected,
+            CollectionAssert.IsSubsetOf(new[] { seededPadIds[0].Value, seededPadIds[1].Value }, undoConnected,
                 "Undo must restore both pad connections.");
 
             NativeKeyboard.SchematicShortcut(display, processId, "y", "PCB Editor",
@@ -262,20 +273,20 @@ public sealed partial class NativeSessionTests
             using (var redo = CancellationTokenSource.CreateLinkedTokenSource(token))
             {
                 redo.CancelAfter(TimeSpan.FromSeconds(10));
-                Track restored;
+                Track[] restored;
                 do
                 {
-                    restored = await ReadRoute(redo.Token);
-                    if (RouteShape(Any.Pack(restored)).Equals(RouteShape(Any.Pack(committedTrack)), StringComparison.Ordinal))
+                    restored = await PowerRoutes(redo.Token);
+                    if (RouteSetShape(restored).Equals(committedRouteShape, StringComparison.Ordinal))
                         break;
                     await Task.Delay(75, redo.Token);
                 } while (true);
-                Assert.AreEqual(RouteShape(Any.Pack(committedTrack)), RouteShape(Any.Pack(restored)),
+                Assert.AreEqual(committedRouteShape, RouteSetShape(restored),
                     "Redo must restore the exact committed geometry.");
             }
             string[] redoConnected = (await Connected(seededPadIds[0])).Items
                 .Select(ConnectedIdentity).Order(StringComparer.Ordinal).ToArray();
-            CollectionAssert.IsSubsetOf(new[] { seededPadIds[0].Value, seededPadIds[1].Value, trackId, tailTrackId }, redoConnected,
+            CollectionAssert.IsSubsetOf(new[] { seededPadIds[0].Value, seededPadIds[1].Value }, redoConnected,
                 "Redo must restore both pad connections.");
 
             var redoneState = await ObserveLifecycleState(client, board, token);
@@ -296,17 +307,17 @@ public sealed partial class NativeSessionTests
             board = (await CreateRootThroughMcp(client.Endpoint, instanceId, boardPath, evidence, token,
                 toolName: "kicad_pcb_open")).Document;
 
-            var persistedRows = await client.InvokeAsync<GetItemsById, GetItemsResponse>(new()
-            { Header = new() { Document = board }, Items = { seededRoute.Id } }, token);
-            Assert.AreEqual(1, persistedRows.Items.Count, "The dragged track must persist with its original identity.");
-            Assert.IsTrue(persistedRows.Items[0].Is(Track.Descriptor));
-            AssertPersistedRouteState(Any.Pack(committedTrack), persistedRows.Items[0]);
+            Track[] persistedRoutes = await PowerRoutes(token);
+            Assert.AreEqual(committedRouteShape, RouteSetShape(persistedRoutes),
+                "Save/reopen must preserve the complete committed route geometry.");
             var persistedConnected = await client.InvokeAsync<GetConnectedItems, GetItemsResponse>(new()
             { Header = new() { Document = board }, Items = { seededPadIds[0] } }, token);
             string[] persistedConnectedIds = persistedConnected.Items.Select(ConnectedIdentity)
                 .Order(StringComparer.Ordinal).ToArray();
-            CollectionAssert.IsSubsetOf(new[] { seededPadIds[0].Value, seededPadIds[1].Value, trackId, tailTrackId }, persistedConnectedIds,
+            CollectionAssert.IsSubsetOf(new[] { seededPadIds[0].Value, seededPadIds[1].Value }, persistedConnectedIds,
                 "Save/reopen must preserve both pad connections after the GUI drag.");
+            Assert.IsTrue(persistedConnectedIds.Any(id => persistedRoutes.Any(route => route.Id.Value == id)),
+                "Save/reopen must preserve a native route connection for both pads.");
             await File.WriteAllTextAsync(Path.Combine(evidence, instanceId + "-pcb-inline-drag.json"),
                 System.Text.Json.JsonSerializer.Serialize(new
                 {

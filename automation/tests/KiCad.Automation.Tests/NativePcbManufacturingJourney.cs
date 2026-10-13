@@ -275,7 +275,7 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(managerData.GetProperty("workerFinished").GetBoolean(), managerReply.GetRawText());
             Assert.IsTrue(managerData.GetProperty("outputGenerated").GetBoolean(), managerReply.GetRawText());
             JsonElement managerReceipt = managerData.GetProperty("receipt");
-            Assert.AreEqual("PcbMfgPublicationPublished", managerReceipt.GetProperty("publicationState").GetString(),
+            Assert.AreEqual("PCB_MFG_PUBLICATION_PUBLISHED", managerReceipt.GetProperty("publicationState").GetString(),
                 managerReply.GetRawText());
             Assert.IsTrue(managerReceipt.GetProperty("publicationCommitted").GetBoolean(), managerReply.GetRawText());
             string managerSvgPath = managerReceipt.GetProperty("artifacts").EnumerateArray()

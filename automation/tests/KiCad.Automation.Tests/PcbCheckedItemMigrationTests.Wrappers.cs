@@ -95,7 +95,10 @@ public sealed partial class PcbCheckedItemMigrationTests
             transport.LiveBoardChanged = true;
             JsonElement replay = Success(await tools.Apply(transport.InstanceId, BoardJson.Formatter.Format(delete),
                 BoardJson.Formatter.Format(create), stateJson, operationId, default));
-            Assert.IsTrue(replay.GetProperty("replayed").GetBoolean());
+            // The durable MCP receipt returns the original successful result
+            // without contacting the native controller a second time.
+            Assert.AreEqual(applied.GetRawText(), replay.GetRawText());
+            Assert.IsFalse(replay.GetProperty("replayed").GetBoolean());
             Assert.AreEqual(1, transport.CheckedMutations);
             Assert.AreEqual(1, transport.AppliedItemTransactions);
             Assert.AreEqual(2, transport.ReceiptReads);

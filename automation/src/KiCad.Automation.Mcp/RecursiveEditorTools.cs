@@ -519,6 +519,49 @@ public sealed class RecursiveEditorTools(InstanceRegistry registry)
         return new() { Content = [new TextContentBlock { Text = result.GetRawText() }], StructuredContent = result };
     });
 
+    [McpServerTool(Name = "kicad_diagram_requirements_set"),
+     KiCadCapability("structural-diagram", "compiled-mcp", "instance epoch, source token, exact root and level path, complete three-field requirements, operation ID"),
+     Description("Save the complete General, Schematic and Routing requirements for one exact block revision in the recursive design. The request is bound to the observed native instance epoch, file token, selected root and root-to-block path; all three fields are replaced together, including explicit empty values. It creates one guarded conceptual revision with immutable requirement history and operation-derived identities, preserves children, connections, interfaces, definitions, physical allocation and unrelated implementations, and returns the resulting selection and source token. A stale token or exact revision refuses without writing; this edits the structural XML model and does not activate schematic or PCB objects. Reload or reconcile an already-open native draft after this external save.")]
+    public Task<CallToolResult> SetRequirements(string instanceId, string expectedInstanceEpoch, string repositoryRoot,
+        string sourcePath, string documentId, string expectedSourceToken, BlockSelection expectedRoot, BlockSelection[] blockPath,
+        DiagramRequirements requirements, Guid operationId, string actor, CancellationToken cancellationToken,
+        Guid? refinementInputId = null) => Execute(async () =>
+    {
+        var requestedPath = blockPath?.ToArray() ?? [];
+        var session = await registry.Client(instanceId).HandshakeAsync(cancellationToken);
+        if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
+            throw new AutomationException("recursive_instance_changed", "The native instance identity or epoch changed; reattach and inspect it again.");
+        if (requestedPath.Length == 0 || requestedPath.Any(p => p is null) || expectedRoot is null
+            || requirements is null || operationId == Guid.Empty || string.IsNullOrWhiteSpace(actor)
+            || string.IsNullOrEmpty(expectedSourceToken))
+            throw new AutomationException("invalid_requirements_operation", "Provide the exact root/path, complete requirements, observed source, operation identity and actor.");
+        requirements.Validate();
+        Guid id = Identity(documentId);
+        var loaded = await RecursiveBlockFiles.ReadAsync(repositoryRoot, sourcePath, id, cancellationToken);
+        if (loaded.ContentSha256 != expectedSourceToken)
+            throw new AutomationException("recursive_block_file_changed", "The saved design changed; retain the requirements and compare them with the latest revision.");
+        var draft = loaded.Graph.StartDraft(requestedPath[^1]);
+        var fields = draft.Requirements;
+        foreach (var field in Enum.GetValues<DiagramRequirementField>())
+            fields = fields.Edit(field, requirements.Get(field));
+        draft = draft with { Requirements = fields };
+        var origin = new RequirementRevisionOrigin(RequirementRevisionActor.Agent, actor, DateTimeOffset.UtcNow,
+            "Edit diagram requirements", [], [operationId]);
+        origin = RefinementInputFiles.AttachOrigin(loaded.Graph, [.. requestedPath], refinementInputId, origin);
+        var saved = await RecursiveBlockFiles.SaveDraftAsync(repositoryRoot, sourcePath, id, expectedSourceToken, expectedRoot,
+            [.. requestedPath], draft, DiagramIdentity.Derive(operationId, "block-revision"),
+            DiagramIdentity.Derive(operationId, "requirements-revision"),
+            [.. requestedPath.Skip(1).Select((_, i) => DiagramIdentity.Derive(operationId,
+                "block-ancestor:" + i.ToString(System.Globalization.CultureInfo.InvariantCulture)))], origin,
+            token: cancellationToken);
+        var selection = saved.Graph.Walk(saved.Graph.SelectedRoot).Single(s => s.BlockId == draft.Baseline.BlockId);
+        var result = JsonSerializer.SerializeToElement(new { instanceId, instanceEpoch = session.Epoch, documentId, operationId,
+            sourceToken = saved.ContentSha256, selectedRoot = saved.Graph.SelectedRoot, selection,
+            requirements = saved.Graph.Requirements(selection), changed = saved.ContentSha256 != loaded.ContentSha256 });
+        result = Upgraded(result, saved.UpgradedFromSchemaVersion);
+        return new CallToolResult { Content = [new TextContentBlock { Text = result.GetRawText() }], StructuredContent = result };
+    });
+
     [McpServerTool(Name = "kicad_diagram_connection_endpoint_set"),
      KiCadCapability("structural-diagram", "compiled-mcp", "instance epoch, source token, exact root and level path, exact connection path, operation ID"),
      Description("Bind one end of one exact connection or member to a port, or leave it explicitly unresolved, in a saved system diagram. endpointIndex counts the connection's ends from 0. action \"bind\" needs blockId and interfaceId: one of the level's blocks and one of its ports, or the level's own block and a port on the level's boundary, which carries the end through that port to the parent level's connections using it. An end that states pins, candidates or a compatibility selector keeps them while it stays on its block; moving such an end to another block is refused. action \"unbind\" leaves the end Unresolved on its block (or on blockId, one of the level's blocks) with no port, pins or selector. intent, when given, replaces what the end says. The edit is checked against the current file (expectedSourceToken), the selected root (expectedRoot), the root-to-level blockPath and the root-to-member connectionPath, each by exact revision: a changed or no longer current target is refused (recursive_block_file_changed, stale_root_revision, stale_block_revision, stale_parent_revision, stale_connection_revision, and stale_connection_parent for a group containing the member that has a newer saved revision), a block, port, connection or end the level does not have is refused (connection_edit_target_missing), and an edit that does not say exactly one thing is refused (ambiguous_connection_edit); a refusal writes nothing. Otherwise one guarded write saves a new revision of the connection (and of the groups containing it), of the level and of each level above it; the earlier binding and every requirement field stay in history. The connection's new revision takes operationId as its identity (the other new revisions are derived from it), so after an uncertain or cancelled call a read of the connection shows whether the operation landed, and repeating a landed operation never saves it twice. An end that would not change writes nothing (changed=false). Returns the new source token, the block and connection paths now selected, the end before and after, and, for an end on a port of the level's boundary, how that port maps through the levels. An open editor shows the change after it reloads. Never touches schematic or PCB files.")]

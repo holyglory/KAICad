@@ -108,6 +108,7 @@ public sealed class McpProcessTests
             Assert.IsTrue(invalidTypedPcbQuery.GetProperty("result").GetProperty("structuredContent").TryGetProperty("errorCode", out _), invalidTypedPcbQuery.GetRawText());
             CollectionAssert.Contains(names, "kicad_diagram_physical_allocation");
             CollectionAssert.Contains(names, "kicad_diagram_physical_allocation_set");
+            CollectionAssert.Contains(names, "kicad_diagram_requirements_set");
             CollectionAssert.Contains(names, "kicad_simulation_start");
             CollectionAssert.Contains(names, "kicad_simulation_result");
             CollectionAssert.Contains(names, "kicad_simulation_job");
@@ -1491,6 +1492,13 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(names, "kicad_diagram_open");
             CollectionAssert.Contains(names, "kicad_diagram_connection_endpoint_set");
             CollectionAssert.Contains(names, "kicad_diagram_connection_members_refine");
+            var requirementsInput = listed.GetProperty("result").GetProperty("tools").EnumerateArray()
+                .Single(tool => tool.GetProperty("name").GetString() == "kicad_diagram_requirements_set")
+                .GetProperty("inputSchema").GetProperty("properties");
+            Assert.IsTrue(SimulationSchemaType(requirementsInput.GetProperty("requirements"), "object"));
+            var requirementFields = requirementsInput.GetProperty("requirements").GetProperty("properties");
+            CollectionAssert.AreEquivalent(new[] { "general", "schematic", "routing" },
+                requirementFields.EnumerateObject().Select(p => p.Name).ToArray());
             CollectionAssert.Contains(names, "kicad_diagram_agent_context");
             CollectionAssert.Contains(names, "kicad_diagram_proposal_compare");
             var invalidGeometry = await Request(9088, "tools/call", new { name = "kicad_schematic_measure_placement",

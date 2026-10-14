@@ -550,7 +550,10 @@ public sealed class SchematicRebuildTests
         // provenance transition before the post-save delta check.
         var savedNative = candidate.Schematic.Clone();
         foreach (var screen in savedNative.Instances)
+        {
             screen.Metadata.LoadedNativeFormatVersion = SchematicItemDelta.SupportedWriterFormatVersion;
+            screen.Metadata.WriterNativeFormatVersion = SchematicItemDelta.SupportedWriterFormatVersion;
+        }
         var savedElectrical = new SchematicElectricalState { Hierarchy = new() { Data = savedNative } };
         var adopted = SchematicRebuild.AdoptSavedNativeProvenance(candidate, savedElectrical, batch);
         Assert.IsTrue(adopted.Schematic.Instances.All(screen =>

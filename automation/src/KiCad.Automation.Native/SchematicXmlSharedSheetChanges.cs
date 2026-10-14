@@ -141,22 +141,30 @@ internal static class SchematicXmlSharedSheetChanges
                 Func<T, string> path, Func<T, string> project, Action<T, string> repath, string screenId) where T : IMessage<T>
             {
                 string Key(T record) => project(record) + "#" + path(record);
-                var next = newRecords.ToDictionary(Key, StringComparer.Ordinal);
+                // A placement identity is the project/path pair.  Do not let a
+                // malformed XML/native snapshot escape through ToDictionary's
+                // ArgumentException: duplicate identities are an ordinary
+                // mapping refusal and must leave the native edit untouched.
+                var previous = oldRecords.ToArray();
+                var candidate = newRecords.ToArray();
+                if (!PlacementRecordsHaveUniqueKeys(previous.Select(Key))
+                    || !PlacementRecordsHaveUniqueKeys(candidate.Select(Key))) return false;
+                var next = candidate.ToDictionary(Key, StringComparer.Ordinal);
                 var used = new HashSet<string>(StringComparer.Ordinal);
-                foreach (var previous in oldRecords)
+                foreach (var prior in previous)
                 {
-                    string oldPath = path(previous);
-                    bool ownProject = project(previous).Length == 0 || project(previous) == state.Observed.Document.Project.Name;
+                    string oldPath = path(prior);
+                    bool ownProject = project(prior).Length == 0 || project(prior) == state.Observed.Document.Project.Name;
                     string? destination = ownProject ? topology.Now(oldPath) : oldPath;
                     if (destination is null)
                     {
                         // A detached historical record may remain verbatim, but
                         // cannot be silently edited or reused as a live owner.
-                        if (next.TryGetValue(Key(previous), out var detached))
-                        { if (!previous.Equals(detached)) return false; used.Add(Key(previous)); }
+                        if (next.TryGetValue(Key(prior), out var detached))
+                        { if (!prior.Equals(detached)) return false; used.Add(Key(prior)); }
                         continue;
                     }
-                    var expectedRecord = previous.Clone(); repath(expectedRecord, destination);
+                    var expectedRecord = prior.Clone(); repath(expectedRecord, destination);
                     if (!next.TryGetValue(Key(expectedRecord), out var actual) || !expectedRecord.Equals(actual)) return false;
                     used.Add(Key(expectedRecord));
                 }
@@ -241,6 +249,12 @@ internal static class SchematicXmlSharedSheetChanges
                 null, [], [], null, report.CoverageGaps, true);
         }
         catch (AutomationException error) { return Failure(error.Code, error.Message); }
+    }
+
+    internal static bool PlacementRecordsHaveUniqueKeys(IEnumerable<string> keys)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        return keys.All(seen.Add);
     }
 
     private static SchematicDesign CanonicalPlacements(SchematicDesign design)

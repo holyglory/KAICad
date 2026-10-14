@@ -381,4 +381,14 @@ public sealed class SchematicHierarchyDeltaTests
         using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
         Assert.ThrowsExactly<OperationCanceledException>(() => SchematicHierarchyDelta.Plan(before, before, cancelled.Token));
     }
+
+    [TestMethod]
+    public void SharedPlacementMappingRejectsDuplicateProjectPathsBeforeDictionaryProjection()
+    {
+        Assert.IsTrue(KiCad.Automation.Native.SchematicXmlSharedSheetChanges.PlacementRecordsHaveUniqueKeys([
+            "fixture#root", "fixture#root/child"]));
+        Assert.IsFalse(KiCad.Automation.Native.SchematicXmlSharedSheetChanges.PlacementRecordsHaveUniqueKeys([
+            "fixture#root/child", "fixture#root/child"]),
+            "A duplicate project/path identity must be reported as a typed mapping refusal before ToDictionary.");
+    }
 }

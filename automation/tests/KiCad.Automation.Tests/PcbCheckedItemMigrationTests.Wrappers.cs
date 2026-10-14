@@ -302,7 +302,7 @@ public sealed partial class PcbCheckedItemMigrationTests
                 System.Text.Encoding.UTF8.GetBytes(svg), sourceHash, "invalid_archive", "archive_conflict");
             CreateItems candidate = new() { Header = new() { Document = expected.Document.Clone() } };
             CreateItemsResponse response = BoardJson.Parser.Parse<CreateItemsResponse>(
-                firstData.GetProperty("response").GetRawText());
+                firstData.GetProperty("nativeResult").GetProperty("response").GetRawText());
             candidate.Items.Add(response.CreatedItems.Single().Item.Clone());
             string archiveBinding = ArtworkSourceArchive.TransactionBinding(archive);
             string requestFingerprint = PcbArtworkReceiptStore.Fingerprint(

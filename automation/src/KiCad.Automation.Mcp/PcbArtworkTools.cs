@@ -130,8 +130,8 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
                     }
 
                     inspected.Receipt.Replayed = true;
-                    bool archiveVerified = true;
-                    AutomationException? archiveError = null;
+                    bool reconciledArchiveVerified = true;
+                    AutomationException? reconciledArchiveError = null;
                     try
                     {
                         ArtworkSourceArchive.Verify(repositoryRoot, archive,
@@ -139,12 +139,12 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
                     }
                     catch (AutomationException error)
                     {
-                        archiveVerified = false;
-                        archiveError = error;
+                        reconciledArchiveVerified = false;
+                        reconciledArchiveError = error;
                     }
                     CallToolResult reconciled = ArtworkMutationData(inspected, document, operationId,
                         assetId, sourceKind, actualSha256, archive, boardLayer, create.Items.Count,
-                        archiveBinding, archiveVerified, archiveError, durableReconciled: true);
+                        archiveBinding, reconciledArchiveVerified, reconciledArchiveError, durableReconciled: true);
                     if (inspected.UntrustedReceipt)
                     {
                         receiptStore.WriteUnknown(instanceId, expected.ProcessEpoch, operationId,
@@ -154,7 +154,7 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
                     else if (inspected.NativeReceiptAvailable)
                     {
                         receiptStore.WriteTerminal(instanceId, expected.ProcessEpoch, operationId, fingerprint,
-                            archive, inspected.Receipt.State.ToString(), archiveVerified, reconciled);
+                            archive, inspected.Receipt.State.ToString(), reconciledArchiveVerified, reconciled);
                     }
                     return reconciled;
                 }

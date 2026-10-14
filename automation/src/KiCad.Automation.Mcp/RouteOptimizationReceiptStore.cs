@@ -51,11 +51,14 @@ internal sealed class RouteOptimizationReceiptStore
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     { UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow };
 
-    internal RouteOptimizationReceiptStore(string stateDirectory)
+    internal RouteOptimizationReceiptStore(string stateDirectory, string subdirectory = "pcb-route-receipts")
     {
         if (!Path.IsPathFullyQualified(stateDirectory))
             throw new AutomationException("invalid_route_receipt", "Route receipt state directory must be absolute.");
-        directory = Path.Combine(Path.GetFullPath(stateDirectory), "pcb-route-receipts");
+        if (string.IsNullOrWhiteSpace(subdirectory) || subdirectory.Contains(Path.DirectorySeparatorChar)
+            || subdirectory.Contains(Path.AltDirectorySeparatorChar))
+            throw new AutomationException("invalid_route_receipt", "Receipt state subdirectory is invalid.");
+        directory = Path.Combine(Path.GetFullPath(stateDirectory), subdirectory);
     }
 
     /// <summary>

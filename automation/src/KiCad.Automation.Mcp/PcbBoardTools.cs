@@ -6,6 +6,7 @@ using System.Text.Json.Serialization;
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using Kiapi.Board.Commands;
+using Kiapi.Board.Types;
 using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
 using KiCad.Automation.Model;
@@ -21,6 +22,8 @@ namespace KiCad.Automation.Mcp;
 public sealed class PcbBoardTools(InstanceRegistry registry)
 {
     private readonly RouteOptimizationReceiptStore plotReceipts = new(registry.StateDirectory);
+    private readonly RouteOptimizationReceiptStore enabledLayerReceipts =
+        new(registry.StateDirectory, "pcb-enabled-layer-receipts");
     [McpServerTool(Name = "kicad_pcb_nets", ReadOnly = true),
      Description("Read the native PCB net inventory at one exact lifecycle checkpoint. requestJson is GetNets protobuf JSON with an explicit PCB board and optional netclass filters; expectedStateJson must be the matching kicad_document_state observation. The response is a typed native net list paired with unchanged before/after board state."),
      KiCadCapability("pcb-connectivity", "compiled-mcp plus native-board-api", "explicit PCB document, process epoch, lifecycle state"),
@@ -90,6 +93,88 @@ public sealed class PcbBoardTools(InstanceRegistry registry)
      KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbBoardTypedMcpProcessTests.TypedPcbPlotSettingsMutationPublishesSchemaAndRejectsIncompleteInput")]
     public Task<CallToolResult> SetPlotSettingsTyped(string instanceId,
         PcbPlotSettingsMutationInput input, CancellationToken cancellationToken) => ExecutePlotSettingsMutation(instanceId, input, cancellationToken);
+
+    [McpServerTool(Name = "kicad_pcb_enabled_layers_set_typed", ReadOnly = false),
+     Description("Apply typed PCB enabled-layer settings at one exact lifecycle checkpoint and verify normalized native readback. Dispatch intent and terminal results are durable in MCP state; an interrupted native setter remains unknown and is never resubmitted."),
+     KiCadCapability("pcb-rules", "typed-native-enabled-layers-mutation", "explicit PCB document, complete lifecycle state, copper-layer count, layer set, operation ID and normalized native readback"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbBoardTypedMcpProcessTests.TypedPcbEnabledLayersMutationPublishesSchemaAndRejectsIncompleteInput")]
+    public Task<CallToolResult> SetEnabledLayersTyped(string instanceId,
+        PcbEnabledLayersMutationInput input, CancellationToken cancellationToken) => ExecuteEnabledLayersMutation(instanceId, input, cancellationToken);
+
+    private async Task<CallToolResult> ExecuteEnabledLayersMutation(string instanceId,
+        PcbEnabledLayersMutationInput input, CancellationToken cancellationToken)
+    {
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (input is null || !Guid.TryParseExact(input.OperationId, "D", out Guid operation) || operation == Guid.Empty)
+                throw new AutomationException("invalid_operation_id", "operationId must be a canonical nonempty UUID.");
+            DocumentSpecifier document = NativeDocumentInput.ToNative(input.Document);
+            ValidateBoard(document);
+            DocumentLifecycleState expected = DocumentLifecycleInput.ToNative(input.ExpectedState);
+            if (!expected.Document.Equals(document) || expected.Scope != DocumentLifecycleScope.DlsPcb
+                || string.IsNullOrWhiteSpace(expected.ProcessEpoch))
+                throw new AutomationException("invalid_pcb_enabled_layers_state", "ExpectedState must be a complete observation of the same PCB document.");
+            if (input.CopperLayerCount == 0 || input.CopperLayerCount % 2 != 0)
+                throw new AutomationException("invalid_pcb_enabled_layers", "copperLayerCount must be a positive even number.");
+            NativeClient client = registry.Client(instanceId);
+            AutomationSession session = await client.HandshakeAsync(cancellationToken);
+            if (session.Epoch != expected.ProcessEpoch)
+                throw new AutomationException("pcb_instance_changed", "The expected PCB state belongs to another native process epoch.");
+            string operationId = operation.ToString("D");
+            string fingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+                SchematicJson.Formatter.Format(document) + "\n" + SchematicJson.Formatter.Format(expected)
+                + "\n" + input.CopperLayerCount + "\n" + string.Join(",", input.Layers))));
+            using FileStream lease = enabledLayerReceipts.Acquire(instanceId, operationId);
+            RouteOptimizationReceiptRecord? previous = enabledLayerReceipts.Read(instanceId, operationId);
+            if (previous is not null)
+            {
+                if (!string.Equals(previous.Fingerprint, fingerprint, StringComparison.Ordinal))
+                    throw new AutomationException("pcb_enabled_layers_operation_reused", "operationId is already bound to different enabled-layer settings.");
+                using JsonDocument priorJson = JsonDocument.Parse(previous.ResultJson);
+                if (priorJson.RootElement.TryGetProperty("status", out JsonElement status)
+                    && status.GetString() == "unknown")
+                    throw new AutomationException("pcb_enabled_layers_outcome_unknown", "The native setter may have run before the previous reply was lost; inspect the board before retrying.");
+                return RouteOptimizationReceiptStore.ReplayResult(previous);
+            }
+            DocumentLifecycleState before = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
+                new() { Document = document }, cancellationToken);
+            if (!before.Equals(expected))
+                throw new AutomationException("pcb_state_changed", "The PCB changed before enabled-layer mutation; inspect a fresh lifecycle state.");
+            var request = new SetBoardEnabledLayers { Board = document, CopperLayerCount = input.CopperLayerCount };
+            request.Layers.Add(input.Layers);
+            enabledLayerReceipts.Write(instanceId, session.Epoch, operationId, fingerprint, JsonSerializer.SerializeToElement(new
+            {
+                instanceId, processEpoch = session.Epoch, operationId, status = "unknown", nativeMutation = true
+            }));
+            BoardEnabledLayersResponse normalized = await client.InvokeAsync<SetBoardEnabledLayers, BoardEnabledLayersResponse>(request, cancellationToken);
+            DocumentLifecycleState after = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
+                new() { Document = document }, cancellationToken);
+            JsonElement result = JsonSerializer.SerializeToElement(new
+            {
+                instanceId, processEpoch = session.Epoch, operationId, document,
+                beforeState = SchematicJson.Formatter.Format(before), afterState = SchematicJson.Formatter.Format(after),
+                requestedCopperLayerCount = input.CopperLayerCount, requestedLayers = input.Layers,
+                readback = JsonDocument.Parse(BoardJson.Formatter.Format(normalized)).RootElement.Clone(),
+                readbackVerified = normalized.CopperLayerCount == input.CopperLayerCount,
+                nativeMutation = true, replaySupported = true, status = "completed"
+            });
+            enabledLayerReceipts.Write(instanceId, session.Epoch, operationId, fingerprint, result);
+            return new CallToolResult { StructuredContent = result,
+                Content = [new TextContentBlock { Text = result.GetRawText() }] };
+        }
+        catch (Exception error) when (error is AutomationException or NativeApiException or NngException
+            or InvalidProtocolBufferException or InvalidJsonException or InvalidOperationException or ArgumentException)
+        {
+            var structured = JsonSerializer.SerializeToElement(new
+            {
+                errorCode = error is AutomationException known ? known.Code : "pcb_enabled_layers_failed",
+                errorMessage = error.Message, nativeMutation = false, replaySupported = false
+            });
+            return new CallToolResult { IsError = true, StructuredContent = structured,
+                Content = [new TextContentBlock { Text = structured.GetRawText() }] };
+        }
+    }
 
     private async Task<CallToolResult> ExecutePlotSettingsMutation(string instanceId,
         PcbPlotSettingsMutationInput input, CancellationToken cancellationToken)
@@ -289,5 +374,16 @@ public sealed class PcbPlotSettingsMutationInput
     public NativeDocumentInput Document { get; set; } = new();
     public DocumentLifecycleInput ExpectedState { get; set; } = new();
     public BoardPlotSettingsInput Settings { get; set; } = new();
+    public string OperationId { get; set; } = "";
+}
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class PcbEnabledLayersMutationInput
+{
+    public NativeDocumentInput Document { get; set; } = new();
+    public DocumentLifecycleInput ExpectedState { get; set; } = new();
+    [JsonConverter(typeof(BoardLayerListJsonConverter))]
+    public List<BoardLayer> Layers { get; set; } = [];
+    public uint CopperLayerCount { get; set; }
     public string OperationId { get; set; } = "";
 }

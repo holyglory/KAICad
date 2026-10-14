@@ -193,6 +193,12 @@ internal static class ArtworkSourceArchive
     private static void EnsureNoSymbolicLinks(string root, string path, string invalidCode)
     {
         string? current = path;
+        string boundary = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (boundary.Length == 0)
+            boundary = Path.GetPathRoot(root)!;
+        string boundaryWithSeparator = boundary.EndsWith(Path.DirectorySeparatorChar)
+            || boundary.EndsWith(Path.AltDirectorySeparatorChar)
+            ? boundary : boundary + Path.DirectorySeparatorChar;
         StringComparison comparison = OperatingSystem.IsWindows()
             ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
 
@@ -207,12 +213,13 @@ internal static class ArtworkSourceArchive
                     throw new AutomationException(invalidCode,
                         "The source archive path cannot traverse a symbolic link.");
 
-                if (string.Equals(candidate, root, comparison))
+                if (string.Equals(candidate, boundary, comparison))
                     return;
 
                 string? parent = Directory.GetParent(candidate)?.FullName;
                 if (parent is null || string.Equals(parent, candidate, comparison)
-                    || !parent.StartsWith(root, comparison))
+                    || (!string.Equals(parent, boundary, comparison)
+                        && !parent.StartsWith(boundaryWithSeparator, comparison)))
                     return;
                 current = parent;
             }

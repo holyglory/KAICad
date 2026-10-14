@@ -14,16 +14,16 @@ using ModelContextProtocol.Server;
 namespace KiCad.Automation.Mcp;
 
 /// <summary>
-/// Typed admission for the native manufacturing manager.  SVG requests may
-/// complete through KiCad's synchronous owner-thread plot adapter; detached
-/// snapshots, worker ownership and cross-process publication remain separate
-/// unsupported boundaries.  These wrappers therefore never claim cancellation
-/// or restart recovery for those boundaries.
+/// Typed admission for the native manufacturing manager.  SVG and Gerber
+/// requests may complete through KiCad's synchronous owner-thread plot
+/// adapters; detached snapshots, worker ownership and cross-process
+/// publication remain separate unsupported boundaries.  These wrappers
+/// therefore never claim cancellation or restart recovery for those boundaries.
 /// </summary>
 public sealed partial class PcbJobTools
 {
     [McpServerTool(Name = "kicad_pcb_export_start_typed", ReadOnly = false),
-     Description("Admit one typed PCB manufacturing export to the native recovery manager. SVG requests dispatch synchronously through KiCad's owner-thread plot adapter and return a journaled publication receipt; other job families remain fail-closed as export_adapter_unavailable. Detached workers and restart recovery are not claimed, and the existing synchronous kicad_pcb_export tool remains unchanged."),
+     Description("Admit one typed PCB manufacturing export to the native recovery manager. SVG and Gerber requests dispatch synchronously through KiCad's owner-thread plot adapters and return a journaled publication receipt; other job families remain fail-closed as export_adapter_unavailable. Detached workers and restart recovery are not claimed, and the existing synchronous kicad_pcb_export tool remains unchanged."),
      KiCadCapability("pcb-manufacturing", "typed-recovery-manager-admission", "typed export request, durable journal admission and explicit adapter availability"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbManufacturingRecoveryContractTests.CompiledStdioPublishesTypedRecoveryToolsAndFailsClosedForIncompleteInput")]
     public Task<CallToolResult> ExportStartTyped(string instanceId,
@@ -41,13 +41,19 @@ public sealed partial class PcbJobTools
         ValidateManagerReceipt(receipt, request, session.Epoch);
         bool adapterAvailable = receipt.ExportAdapterAvailable;
         bool completed = receipt.Status == PcbManufacturingExportStatus.PcbMfgExportCompleted;
+        string adapterName = request.JobCase switch
+        {
+            RunPcbManufacturingExport.JobOneofCase.ExportSvg => "SVG",
+            RunPcbManufacturingExport.JobOneofCase.ExportGerbers => "Gerber",
+            _ => "requested"
+        };
         string? errorCode = completed ? null
             : adapterAvailable && !string.IsNullOrWhiteSpace(receipt.ErrorCode)
                 ? receipt.ErrorCode : "export_adapter_unavailable";
         string errorMessage = completed ? "" : receipt.ErrorMessage.Length == 0
             ? adapterAvailable
-                ? "The synchronous SVG adapter did not produce a completed publication receipt."
-                : "The SVG owner-thread adapter is unavailable; no output was generated."
+                ? $"The synchronous {adapterName} adapter did not produce a completed publication receipt."
+                : $"The {adapterName} owner-thread adapter is unavailable; no output was generated."
             : receipt.ErrorMessage;
         return Data(new
         {
@@ -188,7 +194,7 @@ public sealed partial class PcbJobTools
     }
 
     [McpServerTool(Name = "kicad_pcb_export_manager_capabilities_typed", ReadOnly = true),
-     Description("Read the native manufacturing manager's supported recovery boundaries for one PCB. The manager reports durable admission and journal recovery plus synchronous SVG owner-thread dispatch; detached workers, restart publication and complete dependency snapshots remain unavailable."),
+     Description("Read the native manufacturing manager's supported recovery boundaries for one PCB. The manager reports durable admission and journal recovery plus synchronous SVG and Gerber owner-thread dispatch; detached workers, restart publication and complete dependency snapshots remain unavailable."),
      KiCadCapability("pcb-manufacturing", "typed-recovery-capabilities", "explicit PCB document and current process epoch"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbManufacturingRecoveryContractTests.CompiledStdioPublishesTypedRecoveryToolsAndFailsClosedForIncompleteInput")]
     public Task<CallToolResult> ExportManagerCapabilitiesTyped(string instanceId,
@@ -203,6 +209,7 @@ public sealed partial class PcbJobTools
         PcbManufacturingManagerCapabilities result = await client.InvokeAsync<GetPcbManufacturingManagerCapabilities, PcbManufacturingManagerCapabilities>(new() { Document = target, ProcessEpoch = epoch }, cancellationToken);
         if( !result.Document.Equals(target) || result.ProcessEpoch != epoch || string.IsNullOrWhiteSpace(result.UnavailableReason)
             || !result.SynchronousSvgExportSupported
+            || !result.SynchronousGerberExportSupported
             || !result.AdmissionSupported || !result.RequestJournalSupported || !result.JournalReadSupported
             || !result.PublishedOutputsVerificationSupported
             || result.DetachedExportSupported || result.PublicationSupported || result.CompleteSnapshotSupported )
@@ -210,6 +217,7 @@ public sealed partial class PcbJobTools
                 "The native manager capability response did not bind the requested PCB and process epoch.");
         return Data(new { instanceId, processEpoch = session.Epoch,
             synchronousSvgExportSupported = result.SynchronousSvgExportSupported,
+            synchronousGerberExportSupported = result.SynchronousGerberExportSupported,
             publishedOutputsVerificationSupported = result.PublishedOutputsVerificationSupported,
             capabilities = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(result)) });
     }, null, input?.ProcessEpoch);

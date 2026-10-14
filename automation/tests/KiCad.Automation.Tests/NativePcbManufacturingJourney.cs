@@ -283,6 +283,96 @@ public sealed partial class NativeSessionTests
                 .Single(path => Path.GetExtension(path).Equals(".svg", StringComparison.OrdinalIgnoreCase));
             Assert.IsTrue(File.Exists(managerSvgPath), managerReply.GetRawText());
 
+            // Gerber plotting now uses the same synchronous owner-thread
+            // adapter.  Verify real plot files, durable journal readback and
+            // exact-operation replay rather than only checking admission.
+            string managerGerberOutputDirectory = Path.Combine(exportDirectory, "manager-gerbers");
+            string managerGerberOperationId = Guid.NewGuid().ToString("D");
+            object managerGerberInput = new
+            {
+                operationId = managerGerberOperationId,
+                document = typedDocument,
+                expectedState = typedExpectedState,
+                outputDirectory = managerGerberOutputDirectory,
+                job = new
+                {
+                    exportGerbers = new
+                    {
+                        plotSettings = new
+                        {
+                            layers = new[] { "BL_F_Cu", "BL_B_Cu", "BL_F_SilkS", "BL_B_SilkS" },
+                            commonLayers = new[] { "BL_Edge_Cuts" },
+                            plotFootprintValues = true,
+                            plotReferenceDesignators = true,
+                            drillMarks = "PDM_FULL",
+                            checkZonesBeforePlot = false
+                        },
+                        useBoardPlotParams = false,
+                        createGerberJobFile = true,
+                        includeNetlistAttributes = true,
+                        useX2Format = true,
+                        disableApertureMacros = false,
+                        useProtelFileExtensions = false,
+                        precision = 2
+                    }
+                }
+            };
+            var managerGerberReply = await mcp.Tool("kicad_pcb_export_start_typed", new
+            { instanceId, input = managerGerberInput });
+            Assert.IsFalse(managerGerberReply.TryGetProperty("isError", out var managerGerberError)
+                && managerGerberError.GetBoolean(), managerGerberReply.GetRawText());
+            var managerGerberData = managerGerberReply.GetProperty("structuredContent");
+            Assert.AreEqual("PcbMfgExportCompleted", managerGerberData.GetProperty("status").GetString(),
+                managerGerberReply.GetRawText());
+            Assert.IsTrue(managerGerberData.GetProperty("exportAdapterAvailable").GetBoolean(),
+                managerGerberReply.GetRawText());
+            Assert.IsTrue(managerGerberData.GetProperty("outputGenerated").GetBoolean(),
+                managerGerberReply.GetRawText());
+            JsonElement managerGerberReceipt = managerGerberData.GetProperty("receipt");
+            Assert.AreEqual("PCB_MFG_PUBLICATION_PUBLISHED",
+                managerGerberReceipt.GetProperty("publicationState").GetString(), managerGerberReply.GetRawText());
+            string[] managerGerberPaths = managerGerberReceipt.GetProperty("artifacts").EnumerateArray()
+                .Select(artifact => artifact.GetProperty("path").GetString()!)
+                .ToArray();
+            Assert.IsTrue(managerGerberPaths.Any(path => Path.GetExtension(path)
+                .Equals(".gbr", StringComparison.OrdinalIgnoreCase)), managerGerberReply.GetRawText());
+            string managerGerberPath = managerGerberPaths.Single(path => Path.GetExtension(path)
+                .Equals(".gbr", StringComparison.OrdinalIgnoreCase));
+            Assert.IsTrue(File.Exists(managerGerberPath), managerGerberReply.GetRawText());
+            StringAssert.Contains(await File.ReadAllTextAsync(managerGerberPath, token), "G04",
+                "The manager Gerber adapter must publish a real Gerber document.");
+            Assert.IsTrue(managerGerberPaths.Any(path => Path.GetExtension(path)
+                .Equals(".gbrjob", StringComparison.OrdinalIgnoreCase)), managerGerberReply.GetRawText());
+
+            string managerGerberFingerprint = managerGerberReceipt.GetProperty("requestFingerprintSha256").GetString()!;
+            var managerGerberRead = await mcp.Tool("kicad_pcb_export_read_typed", new
+            {
+                instanceId,
+                input = new
+                {
+                    document = typedDocument,
+                    processEpoch = before.ProcessEpoch,
+                    operationId = managerGerberOperationId,
+                    requestFingerprintSha256 = managerGerberFingerprint
+                }
+            });
+            Assert.IsFalse(managerGerberRead.TryGetProperty("isError", out var managerGerberReadError)
+                && managerGerberReadError.GetBoolean(), managerGerberRead.GetRawText());
+            var managerGerberReadData = managerGerberRead.GetProperty("structuredContent");
+            Assert.IsTrue(managerGerberReadData.GetProperty("found").GetBoolean(), managerGerberRead.GetRawText());
+            Assert.IsTrue(managerGerberReadData.GetProperty("publishedOutputsVerified").GetBoolean(),
+                managerGerberRead.GetRawText());
+            Assert.AreEqual(managerGerberReceipt.GetRawText(),
+                managerGerberReadData.GetProperty("receipt").GetRawText(), managerGerberRead.GetRawText());
+
+            var managerGerberReplay = await mcp.Tool("kicad_pcb_export_start_typed", new
+            { instanceId, input = managerGerberInput });
+            Assert.IsFalse(managerGerberReplay.TryGetProperty("isError", out var managerGerberReplayError)
+                && managerGerberReplayError.GetBoolean(), managerGerberReplay.GetRawText());
+            Assert.AreEqual(managerGerberReceipt.GetRawText(),
+                managerGerberReplay.GetProperty("structuredContent").GetProperty("receipt").GetRawText(),
+                "Replaying an exact Gerber manager request must return its retained native receipt.");
+
             var managerCapabilities = await mcp.Tool("kicad_pcb_export_manager_capabilities_typed", new
             {
                 instanceId,
@@ -292,6 +382,8 @@ public sealed partial class NativeSessionTests
                 && capabilityError.GetBoolean(), managerCapabilities.GetRawText());
             Assert.IsTrue(managerCapabilities.GetProperty("structuredContent")
                 .GetProperty("synchronousSvgExportSupported").GetBoolean(), managerCapabilities.GetRawText());
+            Assert.IsTrue(managerCapabilities.GetProperty("structuredContent")
+                .GetProperty("synchronousGerberExportSupported").GetBoolean(), managerCapabilities.GetRawText());
 
             var replayReply = await mcp.Tool("kicad_pcb_export", new { instanceId, input = typedInput });
             Assert.IsFalse(replayReply.TryGetProperty("isError", out var replayError) && replayError.GetBoolean(), replayReply.GetRawText());

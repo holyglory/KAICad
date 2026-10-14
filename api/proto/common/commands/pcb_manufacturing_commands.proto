@@ -98,6 +98,10 @@ message PcbManufacturingManagerCapabilities
   // True when completed receipts are rechecked against their owned published
   // output directory before a read or restart reconciliation is returned.
   bool published_outputs_verification_supported = 415;
+  // The current manager can also dispatch Gerber plotting synchronously on the
+  // owning editor thread. This has the same detached-worker and restart
+  // recovery limits as the SVG adapter.
+  bool synchronous_gerber_export_supported = 416;
   // -- end lane 2D --
 }
 

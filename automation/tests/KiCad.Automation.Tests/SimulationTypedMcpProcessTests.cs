@@ -170,6 +170,18 @@ public sealed class SimulationTypedMcpProcessTests
                 Assert.IsFalse(archived.GetProperty("dependencies").GetProperty("dependencyCaptureComplete").GetBoolean());
                 Assert.AreEqual(dependencies.Warnings[0], archived.GetProperty("dependencies").GetProperty("warnings")[0].GetString());
 
+                JsonElement archivedDependencies = Data(await mcp.Tool("kicad_simulation_dependencies_typed",
+                    new { instanceId, input = jobInput }));
+                Assert.AreEqual("archive", archivedDependencies.GetProperty("source").GetString());
+                Assert.AreEqual(terminal.Sha256, archivedDependencies.GetProperty("receiptSha256").GetString());
+                Assert.AreEqual(epoch, archivedDependencies.GetProperty("instanceEpoch").GetString());
+                Assert.AreEqual(jobId, archivedDependencies.GetProperty("jobId").GetString());
+                Assert.AreEqual(operationId.ToString("D"), archivedDependencies.GetProperty("operationId").GetString());
+                Assert.AreEqual(deckHash, archivedDependencies.GetProperty("generatedDeckSha256").GetString());
+                Assert.IsFalse(archivedDependencies.GetProperty("dependencyCaptureComplete").GetBoolean());
+                CollectionAssert.AreEqual(dependencies.Warnings.ToArray(), archivedDependencies.GetProperty("warnings")
+                    .EnumerateArray().Select(value => value.GetString()).ToArray());
+
                 JsonElement vector = Data(await mcp.Tool("kicad_simulation_vector_typed", new { instanceId, input = vectorInput }))
                     .GetProperty("vector");
                 Assert.IsTrue(vector.GetProperty("complex").GetBoolean());

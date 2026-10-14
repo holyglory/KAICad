@@ -198,7 +198,7 @@ public sealed partial class SimulationTools(InstanceRegistry instances)
     });
 
     [McpServerTool(Name = "kicad_simulation_dependencies", ReadOnly = true),
-     Description("Read the dependency evidence for one exact native KiCad simulation job. Pass the complete native document descriptor as protobuf JSON in documentJson, including its exact sheet-instance path. The response is bound to the process epoch, document, job, and original operation. A false dependencyCaptureComplete value is returned when KiCad or the retained deck has not enumerated external dependency paths; warnings remain explicit and are never converted into an empty successful dependency set."),
+     Description("Read the dependency evidence for one exact native KiCad simulation job. Pass the complete native document descriptor as protobuf JSON in documentJson, including its exact sheet-instance path. The response is bound to the process epoch, document, job, and original operation. A completed archive is read after native or MCP restart without contacting a replacement editor. A false dependencyCaptureComplete value is returned when KiCad or the retained deck has not enumerated external dependency paths; warnings remain explicit and are never converted into an empty successful dependency set."),
      KiCadCapability("simulation", "dependency-evidence", "instance epoch, document, job ID"),
      KiCadVerification(KiCadVerificationLevel.NativeJourney, "NativeSessionTests.NativeSimulationUsesKiCadNgspiceAndReturnsVectors")]
     public Task<CallToolResult> Dependencies(string instanceId, string expectedInstanceEpoch, string documentJson,
@@ -215,6 +215,14 @@ public sealed partial class SimulationTools(InstanceRegistry instances)
         DocumentStateTools.ValidateTarget(document);
         if ((int)document.Type != 1)
             throw new AutomationException("unsupported_simulation_document", "Simulation requires a schematic document.");
+        using var ownership = receipts.AcquireSession(instanceId);
+        if (receipts.ReadTerminal(instanceId, expectedInstanceEpoch, jobId) is { } archive)
+        {
+            if (!archive.Operation.Document.Equals(document))
+                throw new AutomationException("simulation_result_not_found",
+                    "No native or archived simulation result matches the original schematic document.");
+            return ArchivedDependenciesData(archive, document);
+        }
         var client = instances.Client(instanceId); var session = await client.HandshakeAsync(cancellationToken);
         if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
             throw new AutomationException("simulation_instance_changed", "The native instance identity or epoch changed; inspect it again.");
@@ -441,6 +449,28 @@ public sealed partial class SimulationTools(InstanceRegistry instances)
             instanceId = operation.InstanceId, instanceEpoch = operation.ProcessEpoch, document,
             source = "archive", receiptSha256 = receipt.Sha256, operationId = operation.OperationId,
             jobId = receipt.Job.JobId, deck = DescribeDeck(operation), vector = DescribeVector(slice)
+        });
+    }
+
+    private static CallToolResult ArchivedDependenciesData(SimulationTerminalReceipt receipt,
+        DocumentSpecifier document)
+    {
+        var operation = receipt.Operation;
+        var dependencies = receipt.Dependencies;
+        SimulationJobContract.ValidateArchive(receipt, document, operation.ProcessEpoch, receipt.Job.JobId);
+        return Data(new
+        {
+            instanceId = operation.InstanceId,
+            instanceEpoch = operation.ProcessEpoch,
+            document,
+            source = "archive",
+            receiptSha256 = receipt.Sha256,
+            jobId = dependencies.JobId,
+            operationId = dependencies.OperationId,
+            generatedDeckSha256 = dependencies.GeneratedDeckSha256,
+            dependencyCaptureComplete = dependencies.DependencyCaptureComplete,
+            dependencyPaths = dependencies.DependencyPaths.ToArray(),
+            warnings = dependencies.Warnings.ToArray()
         });
     }
 

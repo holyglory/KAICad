@@ -68,17 +68,36 @@ public sealed class ProjectSettingsToolTests
     }
 
     [TestMethod]
-    public async Task SetNetClassesRequiresSchematicCheckedState()
+    public async Task SetNetClassesRefusesPcbOnlyWithoutCheckedProjectTransaction()
     {
         using var fixture = CreateFixture();
-        var result = await fixture.Tool.SetNetClasses(fixture.Session.InstanceId,
+
+        // The common SetNetClasses command is a legacy project-global setter.  A PCB
+        // lifecycle observation cannot be used as its revision/receipt precondition,
+        // so both wrappers must refuse before contacting the native peer until a
+        // checked project-settings transaction exists.
+        int exchanges = fixture.Transport.ExchangeCount;
+        var legacy = await fixture.Tool.SetNetClasses(fixture.Session.InstanceId,
             SchematicJson.Formatter.Format(fixture.Document), "{}",
             SchematicJson.Formatter.Format(fixture.Transport.NetClasses), "MMM_MERGE",
             Guid.NewGuid(), new string('a', 64), default);
 
-        Assert.IsTrue(result.IsError ?? false, Text(result));
-        Assert.AreEqual("project_net_classes_schematic_required",
-            result.StructuredContent!.Value.GetProperty("errorCode").GetString(), Text(result));
+        var typed = await fixture.Tool.SetNetClassesStructured(fixture.Session.InstanceId, "{}",
+            "MMM_MERGE", Guid.NewGuid(), new string('a', 64), default,
+            document: NativeDocument(fixture.Root), netClasses: new() { NetClasses = [] });
+
+        foreach (CallToolResult result in new[] { legacy, typed })
+        {
+            Assert.IsTrue(result.IsError ?? false, Text(result));
+            JsonElement data = result.StructuredContent!.Value;
+            Assert.AreEqual("project_net_classes_schematic_required",
+                data.GetProperty("errorCode").GetString(), Text(result));
+            StringAssert.Contains(data.GetProperty("errorMessage").GetString()!,
+                "PCB-only project settings have no checked mutation path", Text(result));
+        }
+
+        Assert.AreEqual(exchanges, fixture.Transport.ExchangeCount,
+            "PCB-only refusal must happen before handshake, lifecycle reads, or a legacy native setter.");
     }
 
     [TestMethod]

@@ -16,6 +16,10 @@ public sealed class PcbRenderContractTests
         CollectionAssert.Contains(PcbRenderObservationContract.Limitations.ToArray(),
             "3D geometry covers shown footprint-model instances only; mesh vertices and PCB layer geometry are unavailable");
         CollectionAssert.Contains(PcbRenderObservationContract.Limitations.ToArray(),
+            "complete PCB layer overlays are unavailable; the native inspection does not enumerate board-layer raster/vector overlays");
+        CollectionAssert.Contains(PcbRenderObservationContract.Limitations.ToArray(),
+            "DRC overlays are unavailable; the native inspection does not capture DRC marker geometry or visibility");
+        CollectionAssert.Contains(PcbRenderObservationContract.Limitations.ToArray(),
             "projected bounds are conservative and do not prove exact visible pixels or occlusion depth");
     }
 
@@ -49,6 +53,10 @@ public sealed class PcbRenderContractTests
         Assert.IsTrue(coverage.SecondaryAssetIdentitiesComplete);
         Assert.IsFalse(coverage.BoardGeometryComplete,
             "A prose coverage note must not claim typed board-layer geometry that the native hook does not enumerate.");
+        Assert.IsFalse(coverage.CompletePcbLayerOverlays,
+            "The native hook has no complete PCB-layer overlay rows.");
+        Assert.IsFalse(coverage.DrcOverlays,
+            "The native hook has no DRC overlay rows.");
         Assert.IsFalse(coverage.ExactVisiblePixels);
         Assert.IsFalse(coverage.OcclusionDepth);
     }

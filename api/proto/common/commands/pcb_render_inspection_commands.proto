@@ -25,8 +25,9 @@ message PcbRenderInspectionResponse
   // True means the captured renderer metadata is complete for the covered
   // footprint 3D model instances and their declared assets. It does not
   // claim complete mapping of PCB copper, pads, tracks, vias, zones, board
-  // outlines, or other board geometry; metadata.coverage_notes states those
-  // coverage limits explicitly.
+  // outlines, complete PCB-layer overlays or DRC overlays; metadata.coverage_notes
+  // states those coverage limits explicitly. Exact pixels and occlusion are
+  // also outside this response.
   bool metadata_complete = 5;
   repeated string limitations = 6;
 }
@@ -57,7 +58,9 @@ message PcbRenderMetadata
   bool matrices_finite = 18;
   bool matrices_invertible = 19;
   // Describes the precision boundary of this renderer hook. These notes do
-  // not by themselves make metadata incomplete.
+  // not by themselves make metadata complete: the native hook has no rows for
+  // complete PCB-layer overlays or DRC overlays, and no exact pixel/depth
+  // visibility test.
   repeated string coverage_notes = 20;
 }
 

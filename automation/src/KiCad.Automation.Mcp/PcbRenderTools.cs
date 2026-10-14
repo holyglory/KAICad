@@ -17,7 +17,7 @@ namespace KiCad.Automation.Mcp;
 public sealed class PcbRenderTools(InstanceRegistry registry)
 {
     [McpServerTool(Name = "kicad_pcb_render_3d", ReadOnly = true),
-     Description("Render one exact native PCB view through KiCad's existing 3D renderer and return the PNG alongside the matching lifecycle state. requestJson is RunBoardJobExportRender protobuf JSON with an explicit PCB document; the MCP service owns the temporary output path. The operation is read-only, rejects unsupported dimensions/formats and discards the image if the board changes during rendering. Renderer metadata is complete only for the covered, shown footprint-model rows; board copper/pads/tracks/zones, texture identities, exact pixels and occlusion remain explicit limitations. Invoke it repeatedly for top/bottom/side or zoomed views; this is observation, not routing or RF correctness."),
+     Description("Render one exact native PCB view through KiCad's existing 3D renderer and return the PNG alongside the matching lifecycle state. requestJson is RunBoardJobExportRender protobuf JSON with an explicit PCB document; the MCP service owns the temporary output path. The operation is read-only, rejects unsupported dimensions/formats and discards the image if the board changes during rendering. Renderer metadata is complete only for the covered, shown footprint-model rows; board copper/pads/tracks/zones, complete PCB-layer overlays, DRC overlays, texture identities, exact pixels and occlusion remain explicit limitations. Invoke it repeatedly for top/bottom/side or zoomed views; this is observation, not routing or RF correctness."),
      KiCadCapability("pcb-observation", "compiled-mcp plus native-board-job-renderer", "board lifecycle state, native image snapshot"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp")]
     public Task<CallToolResult> Render3D(string instanceId, string requestJson, string expectedStateJson,
@@ -25,7 +25,7 @@ public sealed class PcbRenderTools(InstanceRegistry registry)
             cancellationToken);
 
     [McpServerTool(Name = "kicad_pcb_render_3d_geometry", ReadOnly = true),
-     Description("Read lifecycle-bound native 3D geometry metadata for one typed RunBoardJobExportRender request and expected PCB state. This invokes the same native renderer as kicad_pcb_render_3d, including its temporary PNG rendering cost, but returns text only. It exposes the camera matrices, shown footprint-model identities and content hashes, native model/object transforms and conservative scene/projected bounds. The current handler does not expose mesh vertices, board copper/pads/tracks/zones or layer overlays, secondary texture identities, exact visible pixels or occlusion depth; the whole-scene result is explicitly incomplete. An older peer without the inspection handler is refused rather than substituting image-only output."),
+     Description("Read lifecycle-bound native 3D geometry metadata for one typed RunBoardJobExportRender request and expected PCB state. This invokes the same native renderer as kicad_pcb_render_3d, including its temporary PNG rendering cost, but returns text only. It exposes the camera matrices, shown footprint-model identities and content hashes, native model/object transforms and conservative scene/projected bounds. The current handler does not expose mesh vertices, board copper/pads/tracks/zones, complete PCB-layer overlays or DRC overlays, secondary texture identities, exact visible pixels or occlusion depth; the whole-scene result is explicitly incomplete. An older peer without the inspection handler is refused rather than substituting image-only output."),
      KiCadCapability("pcb-observation", "compiled-mcp plus native-board-job-renderer", "exact PCB lifecycle state, native camera/model transforms, conservative model bounds and asset coverage"),
      KiCadVerification(KiCadVerificationLevel.InProcess, "PcbRenderContractTests.GeometryObservationStatusIsExplicitlyIncompleteAndNeverClaimsRasterCoverage")]
     public Task<CallToolResult> Read3DGeometry(string instanceId, string requestJson, string expectedStateJson,
@@ -151,6 +151,8 @@ public sealed class PcbRenderTools(InstanceRegistry registry)
                 {
                     modelInstancesComplete = coverage.ModelInstancesComplete,
                     boardGeometryComplete = coverage.BoardGeometryComplete,
+                    completePcbLayerOverlays = coverage.CompletePcbLayerOverlays,
+                    drcOverlays = coverage.DrcOverlays,
                     secondaryAssetIdentitiesComplete = coverage.SecondaryAssetIdentitiesComplete,
                     exactVisiblePixels = coverage.ExactVisiblePixels,
                     occlusionDepth = coverage.OcclusionDepth
@@ -228,6 +230,8 @@ internal static class PcbRenderObservationContract
     internal static IReadOnlyList<string> Limitations { get; } =
     [
         "3D geometry covers shown footprint-model instances only; mesh vertices and PCB layer geometry are unavailable",
+        "complete PCB layer overlays are unavailable; the native inspection does not enumerate board-layer raster/vector overlays",
+        "DRC overlays are unavailable; the native inspection does not capture DRC marker geometry or visibility",
         "projected bounds are conservative and do not prove exact visible pixels or occlusion depth"
     ];
 
@@ -237,11 +241,13 @@ internal static class PcbRenderObservationContract
 internal readonly record struct PcbRenderCoverage(
     bool ModelInstancesComplete,
     bool BoardGeometryComplete,
+    bool CompletePcbLayerOverlays,
+    bool DrcOverlays,
     bool SecondaryAssetIdentitiesComplete,
     bool ExactVisiblePixels,
     bool OcclusionDepth)
 {
-    internal static PcbRenderCoverage Unavailable => new(false, false, false, false, false);
+    internal static PcbRenderCoverage Unavailable => new(false, false, false, false, false, false, false);
 }
 
 internal static class PcbRenderCoverageContract
@@ -260,7 +266,7 @@ internal static class PcbRenderCoverageContract
         // it does not inspect raster visibility, depth, or board copper geometry.
         // Coverage notes are descriptive evidence, not a typed claim that can
         // extend the current protocol's footprint-model-only boundary.
-        return new(modelInstancesComplete, false, secondaryAssetsComplete, false, false);
+        return new(modelInstancesComplete, false, false, false, secondaryAssetsComplete, false, false);
     }
 
     private static bool HasCompleteModelIdentityAndGeometry(PcbRenderModelMetadata model) =>

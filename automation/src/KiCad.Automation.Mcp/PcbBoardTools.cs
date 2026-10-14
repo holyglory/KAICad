@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -19,6 +20,7 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class PcbBoardTools(InstanceRegistry registry)
 {
+    private readonly RouteOptimizationReceiptStore plotReceipts = new(registry.StateDirectory);
     [McpServerTool(Name = "kicad_pcb_nets", ReadOnly = true),
      Description("Read the native PCB net inventory at one exact lifecycle checkpoint. requestJson is GetNets protobuf JSON with an explicit PCB board and optional netclass filters; expectedStateJson must be the matching kicad_document_state observation. The response is a typed native net list paired with unchanged before/after board state."),
      KiCadCapability("pcb-connectivity", "compiled-mcp plus native-board-api", "explicit PCB document, process epoch, lifecycle state"),
@@ -83,7 +85,7 @@ public sealed class PcbBoardTools(InstanceRegistry registry)
         Read<GetBoardPlotSettings, BoardPlotSettingsResponse>(instanceId, requestJson, expectedStateJson, "plot-settings", request => request.Board, cancellationToken);
 
     [McpServerTool(Name = "kicad_pcb_plot_settings_set_typed", ReadOnly = false),
-     Description("Apply typed PCB plot settings at one exact lifecycle checkpoint and verify normalized native readback. The native setter has no operation receipt, so replay and restart recovery remain explicitly unsupported; retry only after inspecting the returned readback."),
+     Description("Apply typed PCB plot settings at one exact lifecycle checkpoint and verify normalized native readback. MCP state records dispatch intent and exact terminal results; a lost reply remains explicitly unknown and is never resubmitted."),
      KiCadCapability("pcb-rules", "typed-native-plot-settings-mutation", "explicit PCB document, complete lifecycle state, typed plot settings, operation ID and normalized native readback"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbBoardTypedMcpProcessTests.TypedPcbPlotSettingsMutationPublishesSchemaAndRejectsIncompleteInput")]
     public Task<CallToolResult> SetPlotSettingsTyped(string instanceId,
@@ -110,10 +112,32 @@ public sealed class PcbBoardTools(InstanceRegistry registry)
             AutomationSession session = await client.HandshakeAsync(cancellationToken);
             if (session.Epoch != expected.ProcessEpoch)
                 throw new AutomationException("pcb_instance_changed", "The expected PCB state belongs to another native process epoch.");
+            string operationId = operation.ToString("D");
+            string fingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+                SchematicJson.Formatter.Format(document) + "\n" + SchematicJson.Formatter.Format(expected)
+                + "\n" + BoardJson.Formatter.Format(settings))));
+            using FileStream lease = plotReceipts.Acquire(instanceId, operationId);
+            RouteOptimizationReceiptRecord? previous = plotReceipts.Read(instanceId, operationId);
+            if (previous is not null)
+            {
+                if (!string.Equals(previous.Fingerprint, fingerprint, StringComparison.Ordinal))
+                    throw new AutomationException("pcb_plot_settings_operation_reused", "operationId is already bound to different plot settings.");
+                using JsonDocument priorJson = JsonDocument.Parse(previous.ResultJson);
+                if (priorJson.RootElement.TryGetProperty("status", out JsonElement status)
+                    && status.GetString() == "unknown")
+                    throw new AutomationException("pcb_plot_settings_outcome_unknown", "The native setter may have run before the previous reply was lost; inspect the board before retrying.");
+                return RouteOptimizationReceiptStore.ReplayResult(previous);
+            }
             DocumentLifecycleState before = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
                 new() { Document = document }, cancellationToken);
             if (!before.Equals(expected))
                 throw new AutomationException("pcb_state_changed", "The PCB changed before plot-settings mutation; inspect a fresh lifecycle state.");
+            plotReceipts.Write(instanceId, session.Epoch, operationId, fingerprint, JsonSerializer.SerializeToElement(new
+            {
+                instanceId, processEpoch = session.Epoch, operationId, status = "unknown",
+                nativeMutation = true, replaySupported = false,
+                errorCode = "pcb_plot_settings_dispatch_unknown"
+            }));
             await client.InvokeAsync<SetBoardPlotSettings, Empty>(
                 new() { Board = document, PlotSettings = settings }, cancellationToken);
             DocumentLifecycleState after = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
@@ -122,20 +146,19 @@ public sealed class PcbBoardTools(InstanceRegistry registry)
                 new() { Board = document }, cancellationToken);
             string requestedJson = BoardJson.Formatter.Format(settings);
             string normalizedJson = BoardJson.Formatter.Format(normalized.PlotSettings);
-            return new CallToolResult
+            JsonElement result = JsonSerializer.SerializeToElement(new
             {
-                StructuredContent = JsonSerializer.SerializeToElement(new
-                {
-                    instanceId, processEpoch = session.Epoch, operationId = operation.ToString("D"), document,
-                    beforeState = SchematicJson.Formatter.Format(before), afterState = SchematicJson.Formatter.Format(after),
-                    requested = JsonDocument.Parse(requestedJson).RootElement.Clone(),
-                    readback = JsonDocument.Parse(normalizedJson).RootElement.Clone(),
-                    readbackVerified = normalized.PlotSettings is not null,
-                    nativeMutation = true, replaySupported = false,
-                    limitation = "The native SetBoardPlotSettings command has no operation receipt; retry is not replay-safe after a lost reply."
-                }),
-                Content = [new TextContentBlock { Text = "PCB plot settings applied and read back; native replay receipt is unavailable." }]
-            };
+                instanceId, processEpoch = session.Epoch, operationId, document,
+                beforeState = SchematicJson.Formatter.Format(before), afterState = SchematicJson.Formatter.Format(after),
+                requested = JsonDocument.Parse(requestedJson).RootElement.Clone(),
+                readback = JsonDocument.Parse(normalizedJson).RootElement.Clone(),
+                readbackVerified = normalized.PlotSettings is not null,
+                nativeMutation = true, replaySupported = false, status = "completed",
+                limitation = "The native setter has no native operation receipt; exact retries are served from MCP state, while an interrupted dispatch remains explicitly unknown."
+            });
+            plotReceipts.Write(instanceId, session.Epoch, operationId, fingerprint, result);
+            return new CallToolResult { StructuredContent = result,
+                Content = [new TextContentBlock { Text = result.GetRawText() }] };
         }
         catch (Exception error) when (error is AutomationException or NativeApiException or NngException
             or InvalidProtocolBufferException or InvalidJsonException or InvalidOperationException or ArgumentException)

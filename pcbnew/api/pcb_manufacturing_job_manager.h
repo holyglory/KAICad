@@ -6,13 +6,36 @@
 #include <tl/expected.hpp>
 #include <wx/string.h>
 #include <functional>
+#include <atomic>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 
 /** Request journaling is not an exporter or a complete dependency snapshot. */
 class PCB_MANUFACTURING_JOB_MANAGER
 {
 public:
+    /**
+     * Cooperative cancellation shared by the manager and one worker.
+     *
+     * The token never owns native editor objects.  Adapters may poll it while
+     * producing output and must return without touching the live board once it
+     * is set.  The manager still journals dispatch intent before invoking an
+     * adapter and therefore fails closed if cancellation races native code.
+     */
+    struct CANCELLATION_TOKEN
+    {
+        void Request() { requested.store( true, std::memory_order_release ); }
+        bool IsRequested() const { return requested.load( std::memory_order_acquire ); }
+
+    private:
+        std::atomic<bool> requested{ false };
+    };
+
+    using CANCELLATION = std::shared_ptr<CANCELLATION_TOKEN>;
+
     struct CAPTURE
     {
         kiapi::automation::v1::DocumentLifecycleState before;
@@ -42,6 +65,12 @@ public:
         kiapi::automation::v1::RunPcbManufacturingExport request;
         std::string sourceBoard;
         std::string sourceSnapshotSha256;
+        // Copied before worker creation.  This is the immutable lifecycle and
+        // dependency baseline associated with sourceBoard; a worker never
+        // re-reads the live editor to fill in missing inputs.
+        kiapi::automation::v1::DocumentLifecycleState sourceState;
+        CANCELLATION cancellation;
+        bool detachedWorker = false;
     };
 
     using DISPATCH_ADAPTER = std::function<tl::expected<
@@ -49,6 +78,7 @@ public:
             const DISPATCH_CONTEXT& )>;
 
     explicit PCB_MANUFACTURING_JOB_MANAGER( const wxString& aJournalDirectory );
+    ~PCB_MANUFACTURING_JOB_MANAGER();
     static wxString JournalDirectory( const wxString& aSettingsDirectory );
 
     tl::expected<kiapi::automation::v1::PcbManufacturingExportReceipt, std::string> Start(
@@ -57,7 +87,20 @@ public:
             bool aLeaveAdmitted = false );
     tl::expected<kiapi::automation::v1::PcbManufacturingExportReceipt, std::string> Dispatch(
             const kiapi::automation::v1::RunPcbManufacturingExport&,
+            const std::string& aProcessEpoch, const DISPATCH_ADAPTER& aAdapter,
+            const CANCELLATION& aCancellation = {}, bool aDetachedWorker = false );
+    /**
+     * Dispatch through a manager-owned joinable worker.  The adapter receives
+     * only the copied request/source/dependency snapshot and cancellation
+     * token.  The returned receipt is the admission/dispatch observation;
+     * callers use Join or Read to observe terminal worker output.
+     */
+    tl::expected<kiapi::automation::v1::PcbManufacturingExportReceipt, std::string> DispatchAsync(
+            const kiapi::automation::v1::RunPcbManufacturingExport&,
             const std::string& aProcessEpoch, const DISPATCH_ADAPTER& aAdapter );
+    /** Join one worker and durably record that the worker has been joined. */
+    tl::expected<kiapi::automation::v1::PcbManufacturingExportReceipt, std::string> Join(
+            const std::string& aOperationId, const std::string& aProcessEpoch );
     tl::expected<kiapi::automation::v1::PcbManufacturingExportReceipt, std::string> Cancel(
             const kiapi::automation::v1::CancelPcbManufacturingExport&, const std::string& aProcessEpoch );
     tl::expected<kiapi::automation::v1::PcbManufacturingExportReceiptResponse, std::string> Reconcile(
@@ -86,13 +129,26 @@ private:
     static bool ValidState( const kiapi::automation::v1::DocumentLifecycleState& );
     static bool IsUuid( const std::string& );
     static bool IsDigest( const std::string& );
+    static bool HasCompleteSourceSnapshot(
+            const kiapi::automation::v1::DocumentLifecycleState& );
     static bool TestAdmissionBarrier();
     static std::string JobKind( const Request& );
     static void SetUnsupported( Receipt& );
     static void SetDispatchSubmitted( Receipt& );
     static void SetDispatchIndeterminate( Receipt&, const std::string&, const std::string& );
+    struct WORKER
+    {
+        CANCELLATION cancellation;
+        std::thread thread;
+    };
+    tl::expected<Receipt, std::string> MarkWorkerJoined( const std::string& aOperationId,
+                                                         const std::string& aProcessEpoch );
+    tl::expected<Receipt, std::string> FinalizeWorkerIndeterminate(
+            const std::string& aOperationId, const std::string& aProcessEpoch,
+            const std::string& aErrorCode, const std::string& aErrorMessage );
     const wxString m_journalDirectory;
     mutable std::mutex m_mutex;
+    std::map<std::string, std::shared_ptr<WORKER>> m_workers;
 };
 
 #endif

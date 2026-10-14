@@ -45,6 +45,7 @@
 #include <zone.h>
 #include <filesystem>
 #include <fstream>
+#include <atomic>
 #include <functional>
 #include <optional>
 #include <git2.h>
@@ -2906,8 +2907,15 @@ BOOST_AUTO_TEST_CASE( ManufacturingManagerAdmissionJournalAndReadOnlyReconcile )
     state.mutable_revision()->set_sequence( 1 );
     state.set_state_sha256( std::string( 64, 'a' ) );
     state.set_project_settings_included( true );
+    state.set_disk_baseline_checked( true );
     state.add_native_files( boardPath.string() );
-    state.add_file_baselines()->set_path( boardPath.string() );
+    auto* sourceBaseline = state.add_file_baselines();
+    sourceBaseline->set_path( boardPath.string() );
+    sourceBaseline->set_baseline_known( true );
+    sourceBaseline->set_current_known( true );
+    sourceBaseline->set_baseline_exists( false );
+    sourceBaseline->set_current_exists( false );
+    sourceBaseline->set_status( NFBS_UNCHANGED );
     RunPcbManufacturingExport request;
     request.set_operation_id( operation );
     request.set_process_epoch( epoch );
@@ -3055,6 +3063,78 @@ BOOST_AUTO_TEST_CASE( ManufacturingManagerAdmissionJournalAndReadOnlyReconcile )
     BOOST_CHECK_EQUAL( runningRead->receipt().status(), PCB_MFG_EXPORT_RUNNING );
     BOOST_CHECK( runningRead->receipt().native_dispatch() );
     BOOST_CHECK( runningRead->journal_verified() );
+
+    // A manager-owned worker receives only the captured source/dependency
+    // snapshot and a cooperative cancellation token.  Cancellation after the
+    // submitted transition is terminally indeterminate, then Join records
+    // that the worker has actually exited.
+    RunPcbManufacturingExport asyncRequest = request;
+    asyncRequest.set_operation_id( KIID().AsString().ToStdString() );
+    auto asyncAdmitted = manager.Start( asyncRequest, epoch, capture, true );
+    BOOST_REQUIRE_MESSAGE( asyncAdmitted.has_value(), ( asyncAdmitted ? "" : asyncAdmitted.error() ) );
+    BOOST_CHECK( asyncAdmitted->worker_started() );
+    std::atomic<bool> adapterEntered{ false };
+    std::atomic<bool> adapterObservedCancellation{ false };
+    std::atomic<bool> adapterContextValid{ false };
+    auto asyncAccepted = manager.DispatchAsync( asyncRequest, epoch,
+            [&]( const PCB_MANUFACTURING_JOB_MANAGER::DISPATCH_CONTEXT& context )
+                    -> tl::expected<PcbManufacturingExportReceipt, std::string>
+            {
+                adapterContextValid.store(
+                        context.detachedWorker && bool( context.cancellation )
+                        && context.sourceBoard == source
+                        && MessageDifferencer::Equals( context.sourceState, state ),
+                        std::memory_order_release );
+                adapterEntered.store( true, std::memory_order_release );
+                while( !context.cancellation->IsRequested() )
+                    std::this_thread::sleep_for( std::chrono::milliseconds( 1 ) );
+                adapterObservedCancellation.store( true, std::memory_order_release );
+                return tl::unexpected( "cooperative_cancel" );
+            } );
+    BOOST_REQUIRE_MESSAGE( asyncAccepted.has_value(), ( asyncAccepted ? "" : asyncAccepted.error() ) );
+    for( int attempt = 0; attempt < 500 && !adapterEntered.load( std::memory_order_acquire ); ++attempt )
+        std::this_thread::sleep_for( std::chrono::milliseconds( 1 ) );
+    BOOST_REQUIRE( adapterEntered.load( std::memory_order_acquire ) );
+
+    CancelPcbManufacturingExport cancelWorker;
+    cancelWorker.mutable_document()->CopyFrom( document );
+    cancelWorker.set_operation_id( asyncRequest.operation_id() );
+    cancelWorker.set_process_epoch( epoch );
+    cancelWorker.set_before_native_dispatch_only( false );
+    auto cancellation = manager.Cancel( cancelWorker, epoch );
+    BOOST_REQUIRE_MESSAGE( cancellation.has_value(), ( cancellation ? "" : cancellation.error() ) );
+    BOOST_CHECK( cancellation->cancellation_requested() );
+    BOOST_CHECK_EQUAL( cancellation->recovery_state(), PCB_MFG_RECOVERY_CANCEL_REQUESTED );
+    auto joined = manager.Join( asyncRequest.operation_id(), epoch );
+    BOOST_REQUIRE_MESSAGE( joined.has_value(), ( joined ? "" : joined.error() ) );
+    BOOST_CHECK( adapterObservedCancellation.load( std::memory_order_acquire ) );
+    BOOST_CHECK( adapterContextValid.load( std::memory_order_acquire ) );
+    BOOST_CHECK( joined->terminal() );
+    BOOST_CHECK( joined->worker_finished() );
+    BOOST_CHECK( joined->worker_joined() );
+    BOOST_CHECK( joined->cancellation_requested() );
+    BOOST_CHECK_EQUAL( joined->status(), PCB_MFG_EXPORT_INDETERMINATE );
+    BOOST_CHECK_EQUAL( joined->recovery_state(), PCB_MFG_RECOVERY_CANCELLED );
+    BOOST_CHECK_EQUAL( joined->error_code(), "export_cancelled_after_dispatch" );
+
+    // A different process epoch never resumes a live worker.  Reconcile binds
+    // the prior operation identity and closes an orphaned RUNNING receipt as
+    // an explicit, machine-readable indeterminate result.
+    const std::string restartEpoch = KIID().AsString().ToStdString();
+    ReconcilePcbManufacturingExport restart;
+    restart.mutable_document()->CopyFrom( document );
+    restart.set_operation_id( runningRequest.operation_id() );
+    restart.set_process_epoch( restartEpoch );
+    restart.set_prior_process_epoch( epoch );
+    restart.set_allow_prior_process_epoch( true );
+    restart.set_request_fingerprint_sha256( runningDigest.Hex() );
+    auto restartResult = manager.Reconcile( restart, restartEpoch );
+    BOOST_REQUIRE_MESSAGE( restartResult.has_value(), ( restartResult ? "" : restartResult.error() ) );
+    BOOST_CHECK( restartResult->restart_reconciled() );
+    BOOST_CHECK_EQUAL( restartResult->receipt().status(), PCB_MFG_EXPORT_INDETERMINATE );
+    BOOST_CHECK_EQUAL( restartResult->receipt().recovery_state(), PCB_MFG_RECOVERY_RECONCILED );
+    BOOST_CHECK( restartResult->receipt().terminal() );
+    BOOST_CHECK( restartResult->receipt().worker_finished() );
     wxUnsetEnv( wxT( "KICAD_MANUFACTURING_TEST_BARRIER" ) );
 }
 

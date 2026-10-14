@@ -17,6 +17,7 @@
 #include <set>
 #include <stdexcept>
 #include <string_view>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -178,6 +179,32 @@ PCB_MANUFACTURING_JOB_MANAGER::PCB_MANUFACTURING_JOB_MANAGER( const wxString& aD
     // only after target identity and live lifecycle validation have succeeded.
 }
 
+PCB_MANUFACTURING_JOB_MANAGER::~PCB_MANUFACTURING_JOB_MANAGER()
+{
+    // A manager owns every worker it starts.  Move the handles out while the
+    // registry is locked, then join without holding m_mutex: a worker may be
+    // finishing a durable receipt and therefore needs the same mutex.
+    std::vector<std::pair<std::string, std::shared_ptr<WORKER>>> workers;
+    {
+        std::lock_guard lock( m_mutex );
+        for( auto& entry : m_workers )
+            workers.emplace_back( entry.first, std::move( entry.second ) );
+        m_workers.clear();
+    }
+    for( auto& entry : workers )
+    {
+        if( entry.second && entry.second->thread.joinable() )
+            entry.second->thread.join();
+        // The object is being destroyed, so failure to rewrite a receipt is
+        // intentionally ignored.  A normal caller uses Join and receives the
+        // durable worker_joined evidence before releasing the manager.
+        auto journal = read( entry.first );
+        if( journal && journal->receipt().worker_started()
+            && journal->receipt().worker_finished() && !journal->receipt().worker_joined() )
+            (void) MarkWorkerJoined( entry.first, journal->receipt().process_epoch() );
+    }
+}
+
 wxString PCB_MANUFACTURING_JOB_MANAGER::JournalDirectory( const wxString& aSettingsDirectory )
 {
     wxFileName root;
@@ -229,6 +256,27 @@ bool PCB_MANUFACTURING_JOB_MANAGER::IsDigest( const std::string& aValue )
 {
     return aValue.size() == 64 && std::all_of( aValue.begin(), aValue.end(), []( char c )
              { return ( c >= '0' && c <= '9' ) || ( c >= 'a' && c <= 'f' ); } );
+}
+
+bool PCB_MANUFACTURING_JOB_MANAGER::HasCompleteSourceSnapshot(
+        const kiapi::automation::v1::DocumentLifecycleState& aState )
+{
+    if( !aState.disk_baseline_checked() || aState.native_files_size() == 0
+        || aState.native_files_size() != aState.file_baselines_size() )
+        return false;
+
+    for( int index = 0; index < aState.native_files_size(); ++index )
+    {
+        const auto& baseline = aState.file_baselines( index );
+        if( baseline.path() != aState.native_files( index ) || !baseline.baseline_known()
+            || !baseline.current_known() || baseline.status() != NFBS_UNCHANGED )
+            return false;
+        if( baseline.baseline_exists() && !IsDigest( baseline.baseline_sha256() ) )
+            return false;
+        if( baseline.current_exists() && !IsDigest( baseline.current_sha256() ) )
+            return false;
+    }
+    return true;
 }
 
 bool PCB_MANUFACTURING_JOB_MANAGER::SameDocument(
@@ -372,6 +420,9 @@ tl::expected<void, std::string> PCB_MANUFACTURING_JOB_MANAGER::ValidateRecord( c
         return tl::unexpected( "invalid_manufacturing_journal" );
     const Request& request = aRecord.request();
     const Receipt& receipt = aRecord.receipt();
+    if( receipt.worker_joined()
+        && ( !receipt.worker_started() || !receipt.worker_finished() ) )
+        return tl::unexpected( "invalid_manufacturing_journal" );
     const bool sameState = google::protobuf::util::MessageDifferencer::Equals(
             request.expected_state(), receipt.observed_before() )
         && google::protobuf::util::MessageDifferencer::Equals( request.expected_state(), receipt.expected_state() );
@@ -407,7 +458,10 @@ tl::expected<void, std::string> PCB_MANUFACTURING_JOB_MANAGER::ValidateRecord( c
             return tl::unexpected( "invalid_manufacturing_journal" );
         if( receipt.recovery_state() == PCB_MFG_RECOVERY_UNSUBMITTED )
         {
-            if( receipt.cancellation_requested() || receipt.error_code() != "export_adapter_unavailable" )
+            if( receipt.cancellation_requested()
+                || ( receipt.error_code() != "export_adapter_unavailable"
+                     && receipt.error_code() != "manufacturing_worker_lost_before_dispatch"
+                     && receipt.error_code() != "manufacturing_worker_exception_before_dispatch" ) )
                 return tl::unexpected( "invalid_manufacturing_journal" );
         }
         else if( receipt.recovery_state() == PCB_MFG_RECOVERY_CANCELLED )
@@ -426,7 +480,9 @@ tl::expected<void, std::string> PCB_MANUFACTURING_JOB_MANAGER::ValidateDispatche
 {
     const Request& request = aRecord.request();
     if( !aReceipt.native_dispatch() || !aReceipt.export_adapter_available()
-        || aReceipt.snapshot_complete() || aReceipt.source_snapshot_sha256() != Hash( aRecord.source_board() )
+        || ( aReceipt.snapshot_complete()
+             && !HasCompleteSourceSnapshot( aRecord.receipt().observed_before() ) )
+        || aReceipt.source_snapshot_sha256() != Hash( aRecord.source_board() )
         || aReceipt.operation_id() != request.operation_id()
         || aReceipt.process_epoch() != request.process_epoch()
         || !SameDocument( aReceipt.document(), request.document() )
@@ -450,7 +506,10 @@ tl::expected<void, std::string> PCB_MANUFACTURING_JOB_MANAGER::ValidateDispatche
     case PCB_MFG_EXPORT_RUNNING:
         if( aReceipt.terminal() || aReceipt.worker_finished()
             || aReceipt.dispatch_stage() != PCB_MFG_DISPATCH_SUBMITTED
-            || aReceipt.recovery_state() != PCB_MFG_RECOVERY_ACTIVE
+            || ( aReceipt.cancellation_requested()
+                 ? aReceipt.recovery_state() != PCB_MFG_RECOVERY_CANCEL_REQUESTED
+                 : aReceipt.recovery_state() != PCB_MFG_RECOVERY_ACTIVE )
+            || aReceipt.worker_joined()
             || aReceipt.has_observed_after() || aReceipt.publication_committed()
             || aReceipt.publication_state() == PCB_MFG_PUBLICATION_PUBLISHED
             || !aReceipt.error_code().empty() || !aReceipt.error_message().empty() )
@@ -595,7 +654,8 @@ PCB_MANUFACTURING_JOB_MANAGER::Start( const Request& aRequest, const std::string
 
 tl::expected<PCB_MANUFACTURING_JOB_MANAGER::Receipt, std::string>
 PCB_MANUFACTURING_JOB_MANAGER::Dispatch( const Request& aRequest, const std::string& aEpoch,
-                                          const DISPATCH_ADAPTER& aAdapter )
+                                          const DISPATCH_ADAPTER& aAdapter,
+                                          const CANCELLATION& aCancellation, bool aDetachedWorker )
 {
     if( !aAdapter ) return tl::unexpected( "manufacturing_dispatch_adapter_unavailable" );
 
@@ -625,10 +685,34 @@ PCB_MANUFACTURING_JOB_MANAGER::Dispatch( const Request& aRequest, const std::str
         || prior->receipt().dispatch_stage() != PCB_MFG_DISPATCH_ADMITTED )
         return tl::unexpected( "manufacturing_dispatch_not_admitted" );
 
+    // Cancellation that wins before dispatch intent is persisted remains a
+    // safe pre-dispatch cancellation.  The worker may have been created, but
+    // no adapter has been called and the operation can be terminally closed.
+    if( aCancellation && aCancellation->IsRequested() )
+    {
+        JournalRecord cancelled = *prior;
+        Receipt& receipt = *cancelled.mutable_receipt();
+        receipt.set_cancellation_requested( true );
+        receipt.set_recovery_state( PCB_MFG_RECOVERY_CANCELLED );
+        receipt.set_status( PCB_MFG_EXPORT_UNSUBMITTED );
+        receipt.set_terminal( true );
+        receipt.set_worker_finished( true );
+        receipt.set_error_code( "export_cancelled_before_dispatch" );
+        receipt.set_error_message( "The worker observed cancellation before native dispatch; no exporter ran." );
+        if( cancelled.journal_revision() == std::numeric_limits<uint64_t>::max() )
+            return tl::unexpected( "invalid_manufacturing_journal" );
+        cancelled.set_journal_revision( cancelled.journal_revision() + 1 );
+        if( auto persisted = write( cancelled ); !persisted ) return tl::unexpected( persisted.error() );
+        return cancelled.receipt();
+    }
+
     DISPATCH_CONTEXT context;
     context.request.CopyFrom( aRequest );
     context.sourceBoard = prior->source_board();
     context.sourceSnapshotSha256 = prior->receipt().source_snapshot_sha256();
+    context.sourceState.CopyFrom( prior->receipt().observed_before() );
+    context.cancellation = aCancellation;
+    context.detachedWorker = aDetachedWorker;
 
     // Record dispatch intent before entering native code.  If the process
     // exits or the callback loses its reply after this write, the journal is
@@ -636,6 +720,8 @@ PCB_MANUFACTURING_JOB_MANAGER::Dispatch( const Request& aRequest, const std::str
     // again by treating it as a fresh admission.
     JournalRecord submitted = *prior;
     SetDispatchSubmitted( *submitted.mutable_receipt() );
+    submitted.mutable_receipt()->set_worker_started(
+            aDetachedWorker || submitted.receipt().worker_started() );
     if( submitted.journal_revision() == std::numeric_limits<uint64_t>::max() )
         return tl::unexpected( "invalid_manufacturing_journal" );
     submitted.set_journal_revision( submitted.journal_revision() + 1 );
@@ -655,6 +741,15 @@ PCB_MANUFACTURING_JOB_MANAGER::Dispatch( const Request& aRequest, const std::str
 
         JournalRecord candidate = *current;
         SetDispatchIndeterminate( *candidate.mutable_receipt(), aCode, aMessage );
+        if( aCode.rfind( "export_cancelled", 0 ) == 0 )
+        {
+            candidate.mutable_receipt()->set_cancellation_requested( true );
+            candidate.mutable_receipt()->set_recovery_state( PCB_MFG_RECOVERY_CANCELLED );
+        }
+        candidate.mutable_receipt()->set_snapshot_complete(
+                aDetachedWorker && HasCompleteSourceSnapshot( current->receipt().observed_before() ) );
+        candidate.mutable_receipt()->set_worker_started(
+                aDetachedWorker || current->receipt().worker_started() );
         if( candidate.journal_revision() == std::numeric_limits<uint64_t>::max() )
             return tl::unexpected( "invalid_manufacturing_journal" );
         candidate.set_journal_revision( candidate.journal_revision() + 1 );
@@ -664,6 +759,9 @@ PCB_MANUFACTURING_JOB_MANAGER::Dispatch( const Request& aRequest, const std::str
 
     lock.unlock();
     tl::expected<Receipt, std::string> dispatched = tl::unexpected( "manufacturing_dispatch_failed" );
+    if( aCancellation && aCancellation->IsRequested() )
+        return persistIndeterminate( "export_cancelled_before_native_dispatch",
+                                     "The worker was cancelled after dispatch intent but before native code ran." );
     try
     {
         dispatched = aAdapter( context );
@@ -683,6 +781,10 @@ PCB_MANUFACTURING_JOB_MANAGER::Dispatch( const Request& aRequest, const std::str
     // An adapter error is terminally indeterminate. The callback may have
     // reached native code before returning its error, so the journal must not
     // remain ADMITTED and must not permit a second dispatch attempt.
+    if( aCancellation && aCancellation->IsRequested() )
+        return persistIndeterminate( "export_cancelled_after_dispatch",
+                                     "The worker was cancelled after native dispatch; output cannot be assumed safe." );
+
     if( !dispatched )
         return persistIndeterminate( "manufacturing_dispatch_indeterminate",
                                      "The native adapter failed after dispatch intent: " + dispatched.error() );
@@ -697,6 +799,19 @@ PCB_MANUFACTURING_JOB_MANAGER::Dispatch( const Request& aRequest, const std::str
 
     JournalRecord candidate = *current;
     candidate.mutable_receipt()->CopyFrom( *dispatched );
+    if( aDetachedWorker )
+    {
+        candidate.mutable_receipt()->set_worker_started( true );
+        candidate.mutable_receipt()->set_worker_finished( true );
+        candidate.mutable_receipt()->set_snapshot_complete(
+                HasCompleteSourceSnapshot( current->receipt().observed_before() ) );
+    }
+    if( aDetachedWorker && candidate.receipt().status() == PCB_MFG_EXPORT_RUNNING )
+    {
+        lock.unlock();
+        return persistIndeterminate( "manufacturing_worker_exited_running",
+                                     "The manager worker exited while the adapter still reported RUNNING." );
+    }
     if( auto valid = ValidateDispatchedReceipt( candidate, candidate.receipt() ); !valid )
     {
         lock.unlock();
@@ -707,6 +822,203 @@ PCB_MANUFACTURING_JOB_MANAGER::Dispatch( const Request& aRequest, const std::str
     candidate.set_journal_revision( candidate.journal_revision() + 1 );
     if( auto persisted = write( candidate ); !persisted ) return tl::unexpected( persisted.error() );
     return candidate.receipt();
+}
+
+tl::expected<PCB_MANUFACTURING_JOB_MANAGER::Receipt, std::string>
+PCB_MANUFACTURING_JOB_MANAGER::DispatchAsync( const Request& aRequest,
+                                               const std::string& aEpoch,
+                                               const DISPATCH_ADAPTER& aAdapter )
+{
+    if( !aAdapter ) return tl::unexpected( "manufacturing_dispatch_adapter_unavailable" );
+
+    auto worker = std::make_shared<WORKER>();
+    worker->cancellation = std::make_shared<CANCELLATION_TOKEN>();
+    Receipt admitted;
+
+    // Admission of the worker is itself journaled before the thread is made
+    // visible.  This gives cancellation and Join a stable operation identity,
+    // while the copied context below prevents a worker from observing a live
+    // board or mutable request after this critical section.
+    std::unique_lock lock( m_mutex );
+    if( auto valid = ValidateRequest( aRequest ); !valid ) return tl::unexpected( valid.error() );
+    if( !IsUuid( aEpoch ) || aRequest.process_epoch() != aEpoch )
+        return tl::unexpected( "stale_process_epoch" );
+    auto prior = read( aRequest.operation_id() );
+    if( !prior ) return tl::unexpected( prior.error() );
+    if( prior->request().SerializeAsString() != aRequest.SerializeAsString() )
+        return tl::unexpected( "manufacturing_operation_reused" );
+    if( prior->receipt().terminal() || prior->receipt().status() != PCB_MFG_EXPORT_ADMITTED
+        || prior->receipt().dispatch_stage() != PCB_MFG_DISPATCH_ADMITTED )
+        return tl::unexpected( "manufacturing_dispatch_not_admitted" );
+    if( !HasCompleteSourceSnapshot( prior->receipt().observed_before() ) )
+        return tl::unexpected( "manufacturing_dependency_snapshot_incomplete" );
+    if( m_workers.find( aRequest.operation_id() ) != m_workers.end() )
+        return tl::unexpected( "manufacturing_worker_already_started" );
+
+    auto lease = AcquireOperationLock( fs::u8path( m_journalDirectory.ToStdString() ),
+                                       aRequest.operation_id() );
+    if( !lease ) return tl::unexpected( lease.error() );
+    prior = read( aRequest.operation_id() );
+    if( !prior ) return tl::unexpected( prior.error() );
+    if( prior->request().SerializeAsString() != aRequest.SerializeAsString() )
+        return tl::unexpected( "manufacturing_operation_reused" );
+    if( prior->receipt().terminal() || prior->receipt().status() != PCB_MFG_EXPORT_ADMITTED
+        || prior->receipt().dispatch_stage() != PCB_MFG_DISPATCH_ADMITTED )
+        return tl::unexpected( "manufacturing_dispatch_not_admitted" );
+
+    JournalRecord workerAdmission = *prior;
+    workerAdmission.mutable_receipt()->set_worker_started( true );
+    if( workerAdmission.journal_revision() == std::numeric_limits<uint64_t>::max() )
+        return tl::unexpected( "invalid_manufacturing_journal" );
+    workerAdmission.set_journal_revision( workerAdmission.journal_revision() + 1 );
+    if( auto persisted = write( workerAdmission ); !persisted )
+        return tl::unexpected( persisted.error() );
+    admitted = workerAdmission.receipt();
+
+    try
+    {
+        Request request = aRequest;
+        const std::string epoch = aEpoch;
+        worker->thread = std::thread(
+                [this, worker, request = std::move( request ), epoch,
+                 adapter = aAdapter]() mutable
+                {
+                    // Dispatch catches adapter exceptions and durably turns
+                    // them into an indeterminate terminal receipt.  No
+                    // exception is allowed to escape the thread entrypoint.
+                    try
+                    {
+                        auto result = Dispatch( request, epoch, adapter, worker->cancellation, true );
+                        if( !result )
+                            (void) FinalizeWorkerIndeterminate(
+                                    request.operation_id(), epoch, "manufacturing_worker_dispatch_failed",
+                                    "The manager worker could not complete its dispatch boundary: "
+                                    + result.error() );
+                    }
+                    catch( const std::exception& error )
+                    {
+                        (void) FinalizeWorkerIndeterminate(
+                                request.operation_id(), epoch, "manufacturing_worker_exception",
+                                "The manager worker raised after admission: " + std::string( error.what() ) );
+                    }
+                    catch( ... )
+                    {
+                        (void) FinalizeWorkerIndeterminate(
+                                request.operation_id(), epoch, "manufacturing_worker_exception",
+                                "The manager worker raised an unknown exception after admission" );
+                    }
+                } );
+    }
+    catch( const std::exception& )
+    {
+        // The worker was never started.  Restore the admitted record so a
+        // caller can retry with a new worker without violating dispatch
+        // uncertainty semantics.
+        JournalRecord restored = workerAdmission;
+        restored.mutable_receipt()->set_worker_started( false );
+        restored.set_journal_revision( workerAdmission.journal_revision() + 1 );
+        if( auto persisted = write( restored ); !persisted )
+            return tl::unexpected( persisted.error() );
+        return tl::unexpected( "manufacturing_worker_start_failed" );
+    }
+    m_workers.emplace( aRequest.operation_id(), worker );
+    lock.unlock();
+    return admitted;
+}
+
+tl::expected<PCB_MANUFACTURING_JOB_MANAGER::Receipt, std::string>
+PCB_MANUFACTURING_JOB_MANAGER::MarkWorkerJoined( const std::string& aOperationId,
+                                                  const std::string& aProcessEpoch )
+{
+    std::lock_guard lock( m_mutex );
+    auto journal = read( aOperationId );
+    if( !journal ) return tl::unexpected( journal.error() );
+    if( journal->receipt().process_epoch() != aProcessEpoch )
+        return tl::unexpected( "stale_process_epoch" );
+    if( !journal->receipt().worker_started() )
+        return tl::unexpected( "manufacturing_worker_not_started" );
+    if( !journal->receipt().worker_finished() )
+        return tl::unexpected( "manufacturing_worker_not_finished" );
+    if( journal->receipt().worker_joined() ) return journal->receipt();
+    auto lease = AcquireOperationLock( fs::u8path( m_journalDirectory.ToStdString() ), aOperationId );
+    if( !lease ) return tl::unexpected( lease.error() );
+    journal = read( aOperationId );
+    if( !journal ) return tl::unexpected( journal.error() );
+    if( !journal->receipt().worker_finished() )
+        return tl::unexpected( "manufacturing_worker_not_finished" );
+    journal->mutable_receipt()->set_worker_joined( true );
+    if( journal->journal_revision() == std::numeric_limits<uint64_t>::max() )
+        return tl::unexpected( "invalid_manufacturing_journal" );
+    journal->set_journal_revision( journal->journal_revision() + 1 );
+    if( auto persisted = write( *journal ); !persisted ) return tl::unexpected( persisted.error() );
+    return journal->receipt();
+}
+
+tl::expected<PCB_MANUFACTURING_JOB_MANAGER::Receipt, std::string>
+PCB_MANUFACTURING_JOB_MANAGER::FinalizeWorkerIndeterminate(
+        const std::string& aOperationId, const std::string& aProcessEpoch,
+        const std::string& aErrorCode, const std::string& aErrorMessage )
+{
+    std::lock_guard lock( m_mutex );
+    auto journal = read( aOperationId );
+    if( !journal ) return tl::unexpected( journal.error() );
+    if( journal->receipt().process_epoch() != aProcessEpoch )
+        return tl::unexpected( "stale_process_epoch" );
+    if( journal->receipt().terminal() ) return journal->receipt();
+    Receipt& receipt = *journal->mutable_receipt();
+    if( receipt.status() == PCB_MFG_EXPORT_RUNNING
+        && receipt.dispatch_stage() == PCB_MFG_DISPATCH_SUBMITTED )
+    {
+        SetDispatchIndeterminate( receipt, aErrorCode, aErrorMessage );
+        receipt.set_worker_started( true );
+        receipt.set_snapshot_complete( HasCompleteSourceSnapshot( receipt.observed_before() ) );
+    }
+    else if( receipt.status() == PCB_MFG_EXPORT_ADMITTED
+             && receipt.dispatch_stage() == PCB_MFG_DISPATCH_ADMITTED )
+    {
+        receipt.set_status( PCB_MFG_EXPORT_UNSUBMITTED );
+        receipt.set_dispatch_stage( PCB_MFG_DISPATCH_ADMITTED );
+        receipt.set_terminal( true );
+        receipt.set_worker_finished( true );
+        receipt.set_recovery_state( PCB_MFG_RECOVERY_UNSUBMITTED );
+        receipt.set_error_code( "manufacturing_worker_exception_before_dispatch" );
+        receipt.set_error_message( aErrorMessage );
+    }
+    else return tl::unexpected( "manufacturing_worker_state_unsupported" );
+    if( journal->journal_revision() == std::numeric_limits<uint64_t>::max() )
+        return tl::unexpected( "invalid_manufacturing_journal" );
+    journal->set_journal_revision( journal->journal_revision() + 1 );
+    if( auto persisted = write( *journal ); !persisted ) return tl::unexpected( persisted.error() );
+    return journal->receipt();
+}
+
+tl::expected<PCB_MANUFACTURING_JOB_MANAGER::Receipt, std::string>
+PCB_MANUFACTURING_JOB_MANAGER::Join( const std::string& aOperationId,
+                                     const std::string& aProcessEpoch )
+{
+    if( !IsUuid( aOperationId ) || !IsUuid( aProcessEpoch ) )
+        return tl::unexpected( "invalid_manufacturing_join_request" );
+    std::shared_ptr<WORKER> worker;
+    {
+        std::lock_guard lock( m_mutex );
+        auto found = m_workers.find( aOperationId );
+        if( found == m_workers.end() )
+        {
+            auto journal = read( aOperationId );
+            if( journal && journal->receipt().terminal() ) return journal->receipt();
+            return tl::unexpected( "manufacturing_worker_not_found" );
+        }
+        worker = found->second;
+        if( worker->thread.joinable()
+            && worker->thread.get_id() == std::this_thread::get_id() )
+            return tl::unexpected( "manufacturing_worker_self_join" );
+    }
+    if( worker && worker->thread.joinable() ) worker->thread.join();
+    auto joined = MarkWorkerJoined( aOperationId, aProcessEpoch );
+    if( !joined ) return joined;
+    std::lock_guard lock( m_mutex );
+    m_workers.erase( aOperationId );
+    return joined;
 }
 
 tl::expected<PCB_MANUFACTURING_JOB_MANAGER::Receipt, std::string>
@@ -723,15 +1035,42 @@ PCB_MANUFACTURING_JOB_MANAGER::Cancel( const CancelPcbManufacturingExport& aRequ
         || !SameDocument( prior->receipt().document(), aRequest.document() ) )
         return tl::unexpected( "manufacturing_cancel_identity_mismatch" );
     if( prior->receipt().terminal() ) return prior->receipt();
-    if( prior->receipt().status() != PCB_MFG_EXPORT_ADMITTED
-        || prior->receipt().dispatch_stage() != PCB_MFG_DISPATCH_ADMITTED )
+    const bool admitted = prior->receipt().status() == PCB_MFG_EXPORT_ADMITTED
+        && prior->receipt().dispatch_stage() == PCB_MFG_DISPATCH_ADMITTED;
+    const bool running = prior->receipt().status() == PCB_MFG_EXPORT_RUNNING
+        && prior->receipt().dispatch_stage() == PCB_MFG_DISPATCH_SUBMITTED;
+    if( !admitted && !running ) return tl::unexpected( "manufacturing_cancel_requires_pre_dispatch" );
+    if( running && aRequest.before_native_dispatch_only() )
         return tl::unexpected( "manufacturing_cancel_requires_pre_dispatch" );
+    if( running )
+    {
+        auto worker = m_workers.find( aRequest.operation_id() );
+        if( worker == m_workers.end() || !worker->second || !worker->second->cancellation )
+            return tl::unexpected( "manufacturing_worker_unavailable" );
+        worker->second->cancellation->Request();
+    }
     auto lease = AcquireOperationLock( fs::u8path( m_journalDirectory.ToStdString() ), aRequest.operation_id() );
     if( !lease ) return tl::unexpected( lease.error() );
     auto journal = read( aRequest.operation_id() );
     if( !journal ) return tl::unexpected( journal.error() );
     if( journal->receipt().terminal() ) return journal->receipt();
+    if( running && ( journal->receipt().status() != PCB_MFG_EXPORT_RUNNING
+                     || journal->receipt().dispatch_stage() != PCB_MFG_DISPATCH_SUBMITTED ) )
+        return journal->receipt();
     Receipt& receipt = *journal->mutable_receipt();
+    if( running )
+    {
+        // The worker owns the terminal transition.  Persisting the request
+        // here makes cancellation observable immediately and gives the
+        // adapter a release/acquire token to poll before it returns.
+        receipt.set_cancellation_requested( true );
+        receipt.set_recovery_state( PCB_MFG_RECOVERY_CANCEL_REQUESTED );
+        if( journal->journal_revision() == std::numeric_limits<uint64_t>::max() )
+            return tl::unexpected( "invalid_manufacturing_journal" );
+        journal->set_journal_revision( journal->journal_revision() + 1 );
+        if( auto persisted = write( *journal ); !persisted ) return tl::unexpected( persisted.error() );
+        return journal->receipt();
+    }
     receipt.set_cancellation_requested( true );
     receipt.set_recovery_state( PCB_MFG_RECOVERY_CANCELLED );
     receipt.set_status( PCB_MFG_EXPORT_UNSUBMITTED );
@@ -801,14 +1140,65 @@ PCB_MANUFACTURING_JOB_MANAGER::Reconcile( const ReconcilePcbManufacturingExport&
     if( receipt.process_epoch() != expectedEpoch || !SameDocument( receipt.document(), aRequest.document() )
         || receipt.request_fingerprint_sha256() != aRequest.request_fingerprint_sha256() )
         return tl::unexpected( "manufacturing_reconcile_identity_mismatch" );
-    // This inspects historical admission only. Never rewrite a cancelled,
-    // unavailable or abandoned ACTIVE receipt as "recovered", and never
-    // resume, publish, delete or rerun it in a different native process.
+
+    // A prior process cannot safely resume a worker or infer whether native
+    // code reached the exporter.  Reconcile therefore performs one explicit,
+    // identity-bound terminal transition for a prior RUNNING worker.  An
+    // admitted worker that never reached dispatch is safely classified as
+    // unsubmitted and may be re-admitted by a fresh operation.  Existing
+    // terminal receipts remain immutable and are only inspected.
+    if( aRequest.allow_prior_process_epoch() && expectedEpoch != aEpoch && !receipt.terminal() )
+    {
+        auto lease = AcquireOperationLock( fs::u8path( m_journalDirectory.ToStdString() ),
+                                           aRequest.operation_id() );
+        if( !lease ) return tl::unexpected( lease.error() );
+        auto current = read( aRequest.operation_id() );
+        if( !current ) return tl::unexpected( current.error() );
+        if( current->receipt().process_epoch() != expectedEpoch
+            || current->receipt().request_fingerprint_sha256() != aRequest.request_fingerprint_sha256()
+            || !SameDocument( current->receipt().document(), aRequest.document() ) )
+            return tl::unexpected( "manufacturing_reconcile_identity_mismatch" );
+
+        Receipt& recovered = *current->mutable_receipt();
+        if( recovered.status() == PCB_MFG_EXPORT_RUNNING
+            && recovered.dispatch_stage() == PCB_MFG_DISPATCH_SUBMITTED )
+        {
+            recovered.set_status( PCB_MFG_EXPORT_INDETERMINATE );
+            recovered.set_dispatch_stage( PCB_MFG_DISPATCH_TERMINAL );
+            recovered.set_terminal( true );
+            recovered.set_worker_finished( true );
+            recovered.set_recovery_state( PCB_MFG_RECOVERY_RECONCILED );
+            recovered.set_error_code( "manufacturing_worker_lost_after_restart" );
+            recovered.set_error_message(
+                    "The admitting process ended while export was dispatched; output must be reconciled manually." );
+        }
+        else if( recovered.status() == PCB_MFG_EXPORT_ADMITTED
+                 && recovered.dispatch_stage() == PCB_MFG_DISPATCH_ADMITTED )
+        {
+            recovered.set_status( PCB_MFG_EXPORT_UNSUBMITTED );
+            recovered.set_dispatch_stage( PCB_MFG_DISPATCH_ADMITTED );
+            recovered.set_terminal( true );
+            recovered.set_worker_finished( true );
+            recovered.set_recovery_state( PCB_MFG_RECOVERY_UNSUBMITTED );
+            recovered.set_error_code( "manufacturing_worker_lost_before_dispatch" );
+            recovered.set_error_message(
+                    "The admitting process ended before native dispatch; no exporter output was assumed." );
+        }
+        else return tl::unexpected( "manufacturing_reconcile_state_unsupported" );
+        recovered.set_worker_joined( false );
+        if( current->journal_revision() == std::numeric_limits<uint64_t>::max() )
+            return tl::unexpected( "invalid_manufacturing_journal" );
+        current->set_journal_revision( current->journal_revision() + 1 );
+        if( auto persisted = write( *current ); !persisted ) return tl::unexpected( persisted.error() );
+        journal = std::move( current );
+        response.set_restart_reconciled( true );
+    }
+
     response.set_found( true );
     response.set_request_fingerprint_verified( true );
     response.set_journal_verified( true );
     response.set_prior_process_epoch_verified( aRequest.allow_prior_process_epoch() );
-    response.mutable_receipt()->CopyFrom( receipt );
+    response.mutable_receipt()->CopyFrom( journal->receipt() );
     return response;
 }
 
@@ -824,8 +1214,12 @@ PcbManufacturingManagerCapabilities PCB_MANUFACTURING_JOB_MANAGER::Capabilities(
     response.set_cancellation_before_dispatch_supported( true );
     response.set_prior_epoch_journal_inspection_supported( true );
     response.set_synchronous_svg_export_supported( true );
+    response.set_manager_worker_boundary_supported( true );
+    response.set_cooperative_worker_cancellation_supported( true );
+    response.set_worker_join_supported( true );
     response.set_unavailable_reason(
-            "synchronous SVG owner-thread dispatch is available; detached export, worker cancellation, "
-            "restart publication and complete dependency snapshots remain unavailable" );
+            "synchronous SVG owner-thread dispatch is available; the manager worker boundary is available "
+            "for adapters with complete immutable dependency snapshots, while detached production export and "
+            "restart publication remain unavailable" );
     return response;
 }

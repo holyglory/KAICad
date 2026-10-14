@@ -92,6 +92,9 @@ message PcbManufacturingManagerCapabilities
   // thread. This does not imply a detached worker, restart publication or a
   // complete dependency snapshot.
   bool synchronous_svg_export_supported = 411;
+  bool manager_worker_boundary_supported = 412;
+  bool cooperative_worker_cancellation_supported = 413;
+  bool worker_join_supported = 414;
   // -- end lane 2D --
 }
 
@@ -209,6 +212,11 @@ message PcbManufacturingExportReceipt
   // captured. Request/lifecycle journaling alone is not a source snapshot.
   bool snapshot_complete = 406;
   bool export_adapter_available = 407;
+  // Set when the manager has started a detached worker for this operation.
+  // The worker remains joinable until Join (or manager destruction) records
+  // worker_joined.  Older synchronous receipts leave both fields false.
+  bool worker_started = 408;
+  bool worker_joined = 409;
   // -- end lane 2D --
 }
 
@@ -223,6 +231,9 @@ message PcbManufacturingExportReceiptResponse
   bool request_fingerprint_verified = 402;
   bool journal_verified = 403;
   bool prior_process_epoch_verified = 404;
+  // True when restart reconciliation converted a prior RUNNING worker into a
+  // terminal indeterminate receipt because no worker can be resumed safely.
+  bool restart_reconciled = 405;
   // -- end lane 2D --
 }
 

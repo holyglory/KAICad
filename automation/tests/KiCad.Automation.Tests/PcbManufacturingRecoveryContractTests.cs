@@ -12,13 +12,14 @@ namespace KiCad.Automation.Tests;
 public sealed class PcbManufacturingRecoveryContractTests
 {
     [TestMethod]
-    public void ManagerCapabilitiesExposeSynchronousPlotSupportSeparatelyFromDetachedRecovery()
+    public void ManagerCapabilitiesExposeSynchronousOwnerThreadSupportSeparatelyFromDetachedRecovery()
     {
         var capabilities = new PcbManufacturingManagerCapabilities
         {
             SynchronousSvgExportSupported = true,
             SynchronousGerberExportSupported = true,
             SynchronousOdbExportSupported = true,
+            SynchronousIpc2581ExportSupported = true,
             PublishedOutputsVerificationSupported = true,
             DetachedExportSupported = false,
             PublicationSupported = false,
@@ -28,6 +29,7 @@ public sealed class PcbManufacturingRecoveryContractTests
         Assert.IsTrue(capabilities.SynchronousSvgExportSupported);
         Assert.IsTrue(capabilities.SynchronousGerberExportSupported);
         Assert.IsTrue(capabilities.SynchronousOdbExportSupported);
+        Assert.IsTrue(capabilities.SynchronousIpc2581ExportSupported);
         Assert.IsTrue(capabilities.PublishedOutputsVerificationSupported);
         Assert.IsFalse(capabilities.DetachedExportSupported);
         Assert.IsFalse(capabilities.PublicationSupported);

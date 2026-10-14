@@ -4227,13 +4227,14 @@ API_HANDLER_PCB::handleStartPcbManufacturingExportJob(
     };
     const auto& request = aCtx.Request.request();
     // The manager's native adapters are intentionally limited to the existing
-    // SVG, Gerber and ODB++ board-job paths. They run inline on API_SERVER's wx owner
+    // SVG, Gerber, ODB++ and IPC-2581 board-job paths. They run inline on API_SERVER's wx owner
     // thread, where the plotter and project state are valid; no worker borrows
     // GUI objects and no other job family is advertised through this seam.
     const bool ownerThreadAdapter =
             request.job_case() == RunPcbManufacturingExport::kExportSvg
             || request.job_case() == RunPcbManufacturingExport::kExportGerbers
-            || request.job_case() == RunPcbManufacturingExport::kExportOdb;
+            || request.job_case() == RunPcbManufacturingExport::kExportOdb
+            || request.job_case() == RunPcbManufacturingExport::kExportIpc2581;
     auto result = m_manufacturingJobs.Start( request, apiServer().Token(), capture, ownerThreadAdapter );
     if( !result )
         return tl::unexpected( ManufacturingError( result.error(), ApiStatusCode::AS_BAD_REQUEST ) );
@@ -4251,8 +4252,9 @@ API_HANDLER_PCB::handleStartPcbManufacturingExportJob(
                         context.request.job_case() == RunPcbManufacturingExport::kExportSvg
                         || context.request.job_case() == RunPcbManufacturingExport::kExportGerbers
                         || context.request.job_case() == RunPcbManufacturingExport::kExportOdb
+                        || context.request.job_case() == RunPcbManufacturingExport::kExportIpc2581
                         ? handleRunPcbManufacturingExport( child )
-                        : tl::unexpected( ManufacturingError( "synchronous_svg_gerber_or_odb_adapter_only" ) );
+                        : tl::unexpected( ManufacturingError( "synchronous_svg_gerber_odb_or_ipc2581_adapter_only" ) );
                 if( !exported )
                     return tl::unexpected( exported.error().error_message() );
 

@@ -451,6 +451,87 @@ public sealed partial class NativeSessionTests
                 managerOdbReplay.GetProperty("structuredContent").GetProperty("receipt").GetRawText(),
                 "Replaying an exact ODB++ manager request must return its retained native receipt.");
 
+            // IPC-2581 uses the same synchronous owner-thread manager adapter.
+            // Verify a real XML document, its verified published readback and
+            // exact-operation replay; detached workers, cross-process recovery
+            // and atomic production publication remain deliberately unavailable.
+            string managerIpc2581OutputDirectory = Path.Combine(exportDirectory, "manager-ipc2581");
+            string managerIpc2581OperationId = Guid.NewGuid().ToString("D");
+            object managerIpc2581Input = new
+            {
+                operationId = managerIpc2581OperationId,
+                document = typedDocument,
+                expectedState = typedExpectedState,
+                outputDirectory = managerIpc2581OutputDirectory,
+                job = new
+                {
+                    exportIpc2581 = new
+                    {
+                        units = "UMm",
+                        version = 1,
+                        precision = 6
+                    }
+                }
+            };
+            var managerIpc2581Reply = await mcp.Tool("kicad_pcb_export_start_typed", new
+            { instanceId, input = managerIpc2581Input });
+            Assert.IsFalse(managerIpc2581Reply.TryGetProperty("isError", out var managerIpc2581Error)
+                && managerIpc2581Error.GetBoolean(), managerIpc2581Reply.GetRawText());
+            var managerIpc2581Data = managerIpc2581Reply.GetProperty("structuredContent");
+            Assert.AreEqual("PcbMfgExportCompleted", managerIpc2581Data.GetProperty("status").GetString(),
+                managerIpc2581Reply.GetRawText());
+            Assert.IsTrue(managerIpc2581Data.GetProperty("exportAdapterAvailable").GetBoolean(),
+                managerIpc2581Reply.GetRawText());
+            Assert.IsTrue(managerIpc2581Data.GetProperty("nativeDispatch").GetBoolean(),
+                managerIpc2581Reply.GetRawText());
+            Assert.IsTrue(managerIpc2581Data.GetProperty("workerFinished").GetBoolean(),
+                managerIpc2581Reply.GetRawText());
+            Assert.IsTrue(managerIpc2581Data.GetProperty("outputGenerated").GetBoolean(),
+                managerIpc2581Reply.GetRawText());
+            JsonElement managerIpc2581Receipt = managerIpc2581Data.GetProperty("receipt");
+            Assert.AreEqual("PCB_MFG_PUBLICATION_PUBLISHED",
+                managerIpc2581Receipt.GetProperty("publicationState").GetString(), managerIpc2581Reply.GetRawText());
+            Assert.IsTrue(managerIpc2581Receipt.GetProperty("publicationCommitted").GetBoolean(),
+                managerIpc2581Reply.GetRawText());
+            string managerIpc2581Path = managerIpc2581Receipt.GetProperty("artifacts").EnumerateArray()
+                .Select(artifact => artifact.GetProperty("path").GetString()!)
+                .Single(path => Path.GetExtension(path).Equals(".xml", StringComparison.OrdinalIgnoreCase));
+            Assert.IsTrue(File.Exists(managerIpc2581Path), managerIpc2581Reply.GetRawText());
+            string managerIpc2581Text = await File.ReadAllTextAsync(managerIpc2581Path, token);
+            StringAssert.Contains(managerIpc2581Text, "<IPC-2581",
+                "The manager IPC-2581 adapter must publish a real IPC-2581 XML document.");
+            Assert.IsTrue(managerIpc2581Text.Length > 256,
+                "The manager IPC-2581 adapter must publish board content, not an empty XML shell.");
+
+            string managerIpc2581Fingerprint = managerIpc2581Receipt.GetProperty("requestFingerprintSha256").GetString()!;
+            var managerIpc2581Read = await mcp.Tool("kicad_pcb_export_read_typed", new
+            {
+                instanceId,
+                input = new
+                {
+                    document = typedDocument,
+                    processEpoch = before.ProcessEpoch,
+                    operationId = managerIpc2581OperationId,
+                    requestFingerprintSha256 = managerIpc2581Fingerprint
+                }
+            });
+            Assert.IsFalse(managerIpc2581Read.TryGetProperty("isError", out var managerIpc2581ReadError)
+                && managerIpc2581ReadError.GetBoolean(), managerIpc2581Read.GetRawText());
+            var managerIpc2581ReadData = managerIpc2581Read.GetProperty("structuredContent");
+            Assert.IsTrue(managerIpc2581ReadData.GetProperty("found").GetBoolean(), managerIpc2581Read.GetRawText());
+            Assert.IsTrue(managerIpc2581ReadData.GetProperty("publishedOutputsVerified").GetBoolean(),
+                managerIpc2581Read.GetRawText());
+            Assert.AreEqual(managerIpc2581Receipt.GetRawText(),
+                managerIpc2581ReadData.GetProperty("receipt").GetRawText(), managerIpc2581Read.GetRawText());
+
+            var managerIpc2581Replay = await mcp.Tool("kicad_pcb_export_start_typed", new
+            { instanceId, input = managerIpc2581Input });
+            Assert.IsFalse(managerIpc2581Replay.TryGetProperty("isError", out var managerIpc2581ReplayError)
+                && managerIpc2581ReplayError.GetBoolean(), managerIpc2581Replay.GetRawText());
+            Assert.AreEqual(managerIpc2581Receipt.GetRawText(),
+                managerIpc2581Replay.GetProperty("structuredContent").GetProperty("receipt").GetRawText(),
+                "Replaying an exact IPC-2581 manager request must return its retained native receipt.");
+
             var managerCapabilities = await mcp.Tool("kicad_pcb_export_manager_capabilities_typed", new
             {
                 instanceId,
@@ -464,6 +545,8 @@ public sealed partial class NativeSessionTests
                 .GetProperty("synchronousGerberExportSupported").GetBoolean(), managerCapabilities.GetRawText());
             Assert.IsTrue(managerCapabilities.GetProperty("structuredContent")
                 .GetProperty("synchronousOdbExportSupported").GetBoolean(), managerCapabilities.GetRawText());
+            Assert.IsTrue(managerCapabilities.GetProperty("structuredContent")
+                .GetProperty("synchronousIpc2581ExportSupported").GetBoolean(), managerCapabilities.GetRawText());
 
             var replayReply = await mcp.Tool("kicad_pcb_export", new { instanceId, input = typedInput });
             Assert.IsFalse(replayReply.TryGetProperty("isError", out var replayError) && replayError.GetBoolean(), replayReply.GetRawText());

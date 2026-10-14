@@ -106,6 +106,10 @@ message PcbManufacturingManagerCapabilities
   // owning editor thread. This has the same detached-worker and restart
   // recovery limits as the SVG and Gerber adapters.
   bool synchronous_odb_export_supported = 417;
+  // The existing IPC-2581 board-job exporter can also run synchronously on
+  // the owning editor thread. This has the same detached-worker and restart
+  // recovery limits as the SVG, Gerber and ODB++ adapters.
+  bool synchronous_ipc2581_export_supported = 418;
   // -- end lane 2D --
 }
 

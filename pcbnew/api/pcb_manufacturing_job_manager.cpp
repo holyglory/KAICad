@@ -1365,12 +1365,13 @@ PcbManufacturingManagerCapabilities PCB_MANUFACTURING_JOB_MANAGER::Capabilities(
     response.set_synchronous_svg_export_supported( true );
     response.set_synchronous_gerber_export_supported( true );
     response.set_synchronous_odb_export_supported( true );
+    response.set_synchronous_ipc2581_export_supported( true );
     response.set_manager_worker_boundary_supported( true );
     response.set_cooperative_worker_cancellation_supported( true );
     response.set_worker_join_supported( true );
     response.set_published_outputs_verification_supported( true );
     response.set_unavailable_reason(
-            "synchronous SVG, Gerber and ODB++ owner-thread dispatch are available; the manager worker boundary is available "
+            "synchronous SVG, Gerber, ODB++ and IPC-2581 owner-thread dispatch are available; the manager worker boundary is available "
             "for adapters with complete immutable dependency snapshots, while detached production export and "
             "restart publication remain unavailable" );
     return response;

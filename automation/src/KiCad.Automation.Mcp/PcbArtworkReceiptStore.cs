@@ -125,7 +125,7 @@ internal sealed class PcbArtworkReceiptStore
         }
 
         var admitted = NewRecord(instanceId, processEpoch, operationId,
-            requestFingerprintSha256, archive, Admitted, Admitted, true, false,
+            requestFingerprintSha256, archive, PcbArtworkReceiptRecord.Admitted, PcbArtworkReceiptRecord.Admitted, true, false,
             string.Empty, string.Empty, string.Empty);
         WriteAtomic(path, admitted, overwrite: false);
         return new(admitted, true);
@@ -157,7 +157,7 @@ internal sealed class PcbArtworkReceiptStore
             throw PcbArtworkReceiptRecord.Invalid("A terminal PCB artwork result must identify its native outcome.");
         string resultJson = result.StructuredContent.Value.GetRawText();
         var terminal = NewRecord(instanceId, processEpoch, operationId, requestFingerprintSha256,
-            archive, Terminal, nativeOutcome, archiveReadbackVerified, result.IsError ?? false,
+            archive, PcbArtworkReceiptRecord.Terminal, nativeOutcome, archiveReadbackVerified, result.IsError ?? false,
             resultJson, string.Empty, string.Empty);
         terminal.Validate();
         WriteTerminalRecord(terminal);
@@ -171,7 +171,7 @@ internal sealed class PcbArtworkReceiptStore
         if (string.IsNullOrWhiteSpace(errorCode) || string.IsNullOrWhiteSpace(errorMessage))
             throw PcbArtworkReceiptRecord.Invalid("An indeterminate PCB artwork receipt requires an error code and message.");
         var unknown = NewRecord(instanceId, processEpoch, operationId, requestFingerprintSha256,
-            archive, Unknown, "indeterminate", false, true, string.Empty, errorCode, errorMessage);
+            archive, PcbArtworkReceiptRecord.Unknown, "indeterminate", false, true, string.Empty, errorCode, errorMessage);
         unknown.Validate();
         WriteTerminalRecord(unknown);
     }

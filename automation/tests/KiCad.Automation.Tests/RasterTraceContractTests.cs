@@ -25,7 +25,36 @@ public sealed class RasterTraceContractTests
     public void RasterProjectionRejectsDegenerateTriangleGeometry()
     {
         RasterTraceResult proposal = ValidProjectionProposal();
+        proposal.FilledPieces[0].Points[2].XNm = 5;
         proposal.FilledPieces[0].Points[2].YNm = 0;
+
+        AssertInvalidProjection(proposal);
+    }
+
+    [TestMethod]
+    public void RasterProjectionRejectsFilledPieceWithFewerThanThreePoints()
+    {
+        RasterTraceResult proposal = ValidProjectionProposal();
+        proposal.FilledPieces[0].Points.RemoveAt(2);
+
+        AssertInvalidProjection(proposal);
+    }
+
+    [TestMethod]
+    public void RasterProjectionRejectsDuplicateConsecutiveVertices()
+    {
+        RasterTraceResult proposal = ValidProjectionProposal();
+        proposal.FilledPieces[0].Points[1].XNm = 0;
+        proposal.FilledPieces[0].Points[1].YNm = 0;
+
+        AssertInvalidProjection(proposal);
+    }
+
+    [TestMethod]
+    public void RasterProjectionRejectsCollapsedBounds()
+    {
+        RasterTraceResult proposal = ValidProjectionProposal();
+        proposal.FilledPieces[0].Bounds.MaxXNm = proposal.FilledPieces[0].Bounds.MinXNm;
 
         AssertInvalidProjection(proposal);
     }

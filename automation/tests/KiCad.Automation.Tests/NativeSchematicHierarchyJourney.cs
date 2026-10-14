@@ -232,6 +232,114 @@ public sealed partial class NativeSessionTests
         Assert.IsTrue(pinDeleteReplay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean(),
             pinDeleteReplay.GetRawText());
 
+        // Exercise the two original repeated parent instances as separate
+        // SheetPin owners. Their shared child screen must not make a parent
+        // replacement bleed into the sibling instance. Keep one pass through
+        // save/reload so the repeated-parent path also proves persistence.
+        async Task<CheckedSchematicState> ExerciseRepeatedParentPin(
+            string parentSheetId, string text, CheckedSchematicState baseline, bool saveReload)
+        {
+            var parent = Sheet(baseline, parentSheetId);
+            string pinId = Guid.NewGuid().ToString("D");
+            var repeatedPin = new SheetPin
+            {
+                Id = new() { Value = pinId },
+                Position = new() { XNm = parent.Position.XNm + parent.Size.XNm, YNm = parent.Position.YNm + 5_000_000 },
+                Text = new() { Text_ = text },
+                SpinStyle = SchematicLabelSpinStyle.SlssLeft, Shape = SchematicLabelShape.SlshPassive,
+                Side = SheetSide.ShsRight, Locked = LockedState.LsUnlocked
+            };
+            string createOperation = Guid.NewGuid().ToString("D");
+            JsonElement created = await mcp.Tool("kicad_schematic_create_sheet_pin", new
+            {
+                instanceId, documentJson, parentSheetId,
+                targetDocumentJson = documentJson,
+                expectedStateJson = SchematicJson.Formatter.Format(baseline),
+                pinJson = SchematicJson.Formatter.Format(repeatedPin), operationId = createOperation
+            });
+            RequireToolSuccess(created);
+            CheckedSchematicState afterCreate = await Capture();
+            Assert.AreEqual(text, Sheet(afterCreate, parentSheetId).Pins.Single().Text.Text_);
+            Assert.IsEmpty(Sheet(afterCreate, parentSheetId == fixture.First ? fixture.Second : fixture.First).Pins);
+            JsonElement createReplay = await mcp.Tool("kicad_schematic_create_sheet_pin", new
+            {
+                instanceId, documentJson, parentSheetId,
+                targetDocumentJson = documentJson,
+                expectedStateJson = SchematicJson.Formatter.Format(baseline),
+                pinJson = SchematicJson.Formatter.Format(repeatedPin), operationId = createOperation
+            });
+            RequireToolSuccess(createReplay);
+            Assert.IsTrue(createReplay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean(),
+                createReplay.GetRawText());
+
+            JsonElement read = await mcp.Tool("kicad_schematic_read_sheet_pin", new
+            {
+                instanceId, documentJson, parentSheetId, pinId,
+                targetDocumentJson = documentJson,
+                expectedStateJson = SchematicJson.Formatter.Format(afterCreate)
+            });
+            RequireToolSuccess(read);
+            Assert.AreEqual(pinId, Unpack<SheetPin>(read, "item").Id.Value);
+
+            var updated = repeatedPin.Clone(); updated.Text.Text_ = text + "_UPDATED";
+            string updateOperation = Guid.NewGuid().ToString("D");
+            JsonElement changed = await mcp.Tool("kicad_schematic_update_sheet_pin", new
+            {
+                instanceId, documentJson, parentSheetId, pinId,
+                targetDocumentJson = documentJson,
+                expectedStateJson = SchematicJson.Formatter.Format(afterCreate),
+                pinJson = SchematicJson.Formatter.Format(updated), operationId = updateOperation
+            });
+            RequireToolSuccess(changed);
+            CheckedSchematicState afterUpdate = await Capture();
+            Assert.AreEqual(text + "_UPDATED", Sheet(afterUpdate, parentSheetId).Pins.Single().Text.Text_);
+            JsonElement updateReplay = await mcp.Tool("kicad_schematic_update_sheet_pin", new
+            {
+                instanceId, documentJson, parentSheetId, pinId,
+                targetDocumentJson = documentJson,
+                expectedStateJson = SchematicJson.Formatter.Format(afterCreate),
+                pinJson = SchematicJson.Formatter.Format(updated), operationId = updateOperation
+            });
+            RequireToolSuccess(updateReplay);
+            Assert.IsTrue(updateReplay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean(),
+                updateReplay.GetRawText());
+
+            if (saveReload)
+            {
+                await client.InvokeAsync<SaveDocument, Empty>(new() { Document = document.Clone() }, token);
+                await client.InvokeAsync<RevertDocument, Empty>(new() { Document = document.Clone() }, token);
+                afterUpdate = await Capture();
+                Assert.AreEqual(text + "_UPDATED", Sheet(afterUpdate, parentSheetId).Pins.Single().Text.Text_);
+            }
+
+            string deleteOperation = Guid.NewGuid().ToString("D");
+            JsonElement deleted = await mcp.Tool("kicad_schematic_delete_sheet_pin", new
+            {
+                instanceId, documentJson, parentSheetId, pinId,
+                targetDocumentJson = documentJson,
+                expectedStateJson = SchematicJson.Formatter.Format(afterUpdate), operationId = deleteOperation
+            });
+            RequireToolSuccess(deleted);
+            CheckedSchematicState afterDelete = await Capture();
+            Assert.IsEmpty(Sheet(afterDelete, parentSheetId).Pins);
+            JsonElement deleteReplay = await mcp.Tool("kicad_schematic_delete_sheet_pin", new
+            {
+                instanceId, documentJson, parentSheetId, pinId,
+                targetDocumentJson = documentJson,
+                expectedStateJson = SchematicJson.Formatter.Format(afterUpdate), operationId = deleteOperation
+            });
+            RequireToolSuccess(deleteReplay);
+            Assert.IsTrue(deleteReplay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean(),
+                deleteReplay.GetRawText());
+            return afterDelete;
+        }
+
+        CheckedSchematicState afterRepeatedFirst = await ExerciseRepeatedParentPin(
+            fixture.First, "MCP_SHARED_A", afterPinDelete, saveReload: true);
+        CheckedSchematicState afterRepeatedSecond = await ExerciseRepeatedParentPin(
+            fixture.Second, "MCP_SHARED_B", afterRepeatedFirst, saveReload: false);
+        Assert.IsEmpty(Sheet(afterRepeatedSecond, fixture.First).Pins);
+
         // Create and update a hierarchical endpoint on a child document while
         // the root remains the checked mutation document. The response target
         // must carry the child path explicitly.

@@ -664,6 +664,66 @@ public sealed class SchematicTypedMutationTests
             .Unpack<HierarchicalLabel>().Text.Text_);
     }
 
+    [TestMethod]
+    public async Task HierarchyToolsTargetDisambiguatesRepeatedSheetAndPinIdentity()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var first = fixture.State.Electrical.Hierarchy.Data.Instances[0];
+        string sheetId = Guid.NewGuid().ToString("D");
+        string pinId = Guid.NewGuid().ToString("D");
+        var pin = new SheetPin
+        {
+            Id = new() { Value = pinId }, Position = new() { XNm = 60_000, YNm = 40_000 },
+            Text = new() { Text_ = "SHARED_DATA" }, Side = SheetSide.ShsRight,
+            Shape = SchematicLabelShape.SlshPassive, SpinStyle = SchematicLabelSpinStyle.SlssLeft,
+            Locked = LockedState.LsUnlocked
+        };
+        var sheet = new SheetSymbol
+        {
+            Id = new() { Value = sheetId }, Position = new() { XNm = 20_000, YNm = 30_000 },
+            Size = new() { XNm = 40_000, YNm = 30_000 }, Path = first.Metadata.Document.SheetPath.Clone(),
+            ChildScreenId = new() { Value = fixture.ScreenId },
+            NameField = new() { Name = "Sheetname", Text = new() { Text_ = "Shared child" } },
+            FilenameField = new() { Name = "Sheetfile", Text = new() { Text_ = "child.kicad_sch" } },
+            Locked = LockedState.LsUnlocked
+        };
+        sheet.Pins.Add(pin);
+        first.Items.Add(Any.Pack(sheet));
+
+        var second = first.Clone();
+        second.Metadata.Document.SheetPath.Path[^1].Value = Guid.NewGuid().ToString("D");
+        second.Metadata.ScreenId.Value = fixture.ScreenId;
+        second.Items.Clear();
+        var repeated = sheet.Clone(); repeated.Path = second.Metadata.Document.SheetPath.Clone();
+        second.Items.Add(Any.Pack(repeated));
+        fixture.State.Electrical.Hierarchy.Data.Instances.Add(second);
+        string expected = fixture.ExpectedJson;
+
+        var ambiguousSheet = await fixture.HierarchyTools.ReadSheetSymbol(fixture.InstanceId,
+            fixture.DocumentJson, sheetId, expected, default);
+        AssertError(ambiguousSheet, "ambiguous_schematic_hierarchy_item");
+        var ambiguousPin = await fixture.HierarchyTools.ReadSheetPin(fixture.InstanceId,
+            fixture.DocumentJson, sheetId, pinId, expected, default);
+        AssertError(ambiguousPin, "ambiguous_schematic_hierarchy_item");
+
+        string targetJson = SchematicJson.Formatter.Format(second.Metadata.Document);
+        var selectedSheet = await fixture.HierarchyTools.ReadSheetSymbol(fixture.InstanceId,
+            fixture.DocumentJson, sheetId, expected, default, targetJson);
+        Assert.IsFalse(selectedSheet.IsError ?? false, Data(selectedSheet).GetRawText());
+        Assert.AreEqual(second.Metadata.Document,
+            SchematicJson.Parser.Parse<DocumentSpecifier>(Data(selectedSheet).GetProperty("targetDocument").GetRawText()));
+        Assert.AreEqual(sheetId, SchematicJson.Parser.Parse<Any>(Data(selectedSheet).GetProperty("item").GetRawText())
+            .Unpack<SheetSymbol>().Id.Value);
+
+        var selectedPin = await fixture.HierarchyTools.ReadSheetPin(fixture.InstanceId,
+            fixture.DocumentJson, sheetId, pinId, expected, default, targetJson);
+        Assert.IsFalse(selectedPin.IsError ?? false, Data(selectedPin).GetRawText());
+        Assert.AreEqual(second.Metadata.Document,
+            SchematicJson.Parser.Parse<DocumentSpecifier>(Data(selectedPin).GetProperty("targetDocument").GetRawText()));
+        Assert.AreEqual("SHARED_DATA", SchematicJson.Parser.Parse<Any>(Data(selectedPin).GetProperty("item").GetRawText())
+            .Unpack<SheetPin>().Text.Text_);
+    }
+
     private static JsonElement Data(CallToolResult result) => JsonSerializer.SerializeToElement(result.StructuredContent);
     private static CheckedSchematicBatchReceipt Receipt(CallToolResult result) =>
         SchematicJson.Parser.Parse<CheckedSchematicBatchReceipt>(Data(result).GetProperty("receipt").GetRawText());

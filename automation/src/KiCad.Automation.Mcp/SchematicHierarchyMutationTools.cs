@@ -34,77 +34,78 @@ public sealed class SchematicHierarchyMutationTools(InstanceRegistry registry)
 
     [McpServerTool(Name = "kicad_schematic_read_sheet_symbol", ReadOnly = true,
         UseStructuredContent = true),
-     Description("Read one exact SheetSymbol from the checked native hierarchy by UUID. The complete checked state, process epoch, native identity, revision and file baselines must still describe the same root; a changed hierarchy is rejected and no native edit occurs. The response includes the owning parent sheet and complete sheet-pin list."),
+     Description("Read one exact SheetSymbol from the checked native hierarchy by UUID. The complete checked state, process epoch, native identity, revision and file baselines must still describe the same root; a changed hierarchy is rejected and no native edit occurs. The response includes the owning parent sheet and complete sheet-pin list. When a shared child repeats the UUID on more than one sheet instance, supply targetDocumentJson to select the exact instance."),
      KiCadCapability("schematic-design", "compiled-mcp plus native-api", "explicit root and sheet UUID, complete checked hierarchy and process epoch"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TypedSchematicHierarchyAuthoringPersistsThroughMcp")]
     public Task<CallToolResult> ReadSheetSymbol(string instanceId, string documentJson,
-        string sheetId, string expectedStateJson, CancellationToken cancellationToken) =>
+        string sheetId, string expectedStateJson, CancellationToken cancellationToken,
+        string? targetDocumentJson = null) =>
         ExecuteRead(instanceId, documentJson, expectedStateJson, sheetId, null, ReadKind.Sheet,
-            cancellationToken);
+            cancellationToken, targetDocumentJson);
 
     [McpServerTool(Name = "kicad_schematic_update_sheet_symbol", ReadOnly = false,
         UseStructuredContent = true),
-     Description("Replace one complete SheetSymbol while retaining the explicit sheetId, parent sheet, child-screen identity and filename binding. Supply the exact checked state and a new operationId. Rebinding a sheet to another child or moving it to another parent requires an explicit hierarchy transaction and is refused. The edit is one native undo step and is unsaved until kicad_document_save."),
+     Description("Replace one complete SheetSymbol while retaining the explicit sheetId, parent sheet, child-screen identity and filename binding. Supply the exact checked state and a new operationId. Rebinding a sheet to another child or moving it to another parent requires an explicit hierarchy transaction and is refused. The edit is one native undo step and is unsaved until kicad_document_save. When a shared child repeats the UUID on more than one sheet instance, supply targetDocumentJson to select the exact instance."),
      KiCadCapability("schematic-design", "compiled-mcp plus native-api", "explicit root and sheet UUID, complete replacement, checked hierarchy, process epoch, revision and operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TypedSchematicHierarchyAuthoringPersistsThroughMcp")]
     public Task<CallToolResult> UpdateSheetSymbol(string instanceId, string documentJson,
         string sheetId, string expectedStateJson, string sheetJson, string operationId,
-        CancellationToken cancellationToken) => Execute(instanceId, documentJson, null,
-            expectedStateJson, sheetJson, sheetId, null, operationId, Mutation.UpdateSheet,
+        CancellationToken cancellationToken, string? targetDocumentJson = null) => Execute(instanceId, documentJson,
+            targetDocumentJson, expectedStateJson, sheetJson, sheetId, null, operationId, Mutation.UpdateSheet,
             cancellationToken);
 
     [McpServerTool(Name = "kicad_schematic_delete_sheet_symbol", ReadOnly = false,
         UseStructuredContent = true),
-     Description("Delete one explicitly identified SheetSymbol from its checked parent sheet. The complete hierarchy checkpoint and child-screen identity are checked before dispatch; native rejection leaves the hierarchy unchanged. Reuse the same operationId only with the same request after a lost reply. The edit is unsaved until kicad_document_save."),
+     Description("Delete one explicitly identified SheetSymbol from its checked parent sheet. The complete hierarchy checkpoint and child-screen identity are checked before dispatch; native rejection leaves the hierarchy unchanged. Reuse the same operationId only with the same request after a lost reply. The edit is unsaved until kicad_document_save. When a shared child repeats the UUID on more than one sheet instance, supply targetDocumentJson to select the exact instance."),
      KiCadCapability("schematic-design", "compiled-mcp plus native-api", "explicit root and sheet UUID, checked hierarchy, process epoch, revision and operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TypedSchematicHierarchyAuthoringPersistsThroughMcp")]
     public Task<CallToolResult> DeleteSheetSymbol(string instanceId, string documentJson,
         string sheetId, string expectedStateJson, string operationId,
-        CancellationToken cancellationToken) => Execute(instanceId, documentJson, null,
-            expectedStateJson, null, sheetId, null, operationId, Mutation.DeleteSheet,
+        CancellationToken cancellationToken, string? targetDocumentJson = null) => Execute(instanceId, documentJson,
+            targetDocumentJson, expectedStateJson, null, sheetId, null, operationId, Mutation.DeleteSheet,
             cancellationToken);
 
     [McpServerTool(Name = "kicad_schematic_create_sheet_pin", ReadOnly = false,
         UseStructuredContent = true),
-     Description("Add one typed SheetPin to an existing SheetSymbol. parentSheetId identifies the exact parent object in the checked hierarchy; pinJson is a complete SheetPin with a new UUID, text, position, side and electrical shape. The parent SheetSymbol is replaced atomically, preserving every other pin and field. The operation is checked, replayable and unsaved until kicad_document_save."),
+     Description("Add one typed SheetPin to an existing SheetSymbol. parentSheetId identifies the exact parent object in the checked hierarchy; pinJson is a complete SheetPin with a new UUID, text, position, side and electrical shape. The parent SheetSymbol is replaced atomically, preserving every other pin and field. The operation is checked, replayable and unsaved until kicad_document_save. When a shared child repeats the parent UUID on more than one sheet instance, supply targetDocumentJson to select the exact instance."),
      KiCadCapability("schematic-design", "compiled-mcp plus native-api", "explicit root and parent sheet UUID, complete checked hierarchy, process epoch, revision and operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TypedSchematicHierarchyAuthoringPersistsThroughMcp")]
     public Task<CallToolResult> CreateSheetPin(string instanceId, string documentJson,
         string parentSheetId, string expectedStateJson, string pinJson, string operationId,
-        CancellationToken cancellationToken) => Execute(instanceId, documentJson, null,
-            expectedStateJson, pinJson, null, parentSheetId, operationId, Mutation.CreatePin,
+        CancellationToken cancellationToken, string? targetDocumentJson = null) => Execute(instanceId, documentJson,
+            targetDocumentJson, expectedStateJson, pinJson, null, parentSheetId, operationId, Mutation.CreatePin,
             cancellationToken);
 
     [McpServerTool(Name = "kicad_schematic_read_sheet_pin", ReadOnly = true,
         UseStructuredContent = true),
-     Description("Read one exact SheetPin nested in a SheetSymbol from the checked hierarchy. Supply the parent sheet UUID and pin UUID. The response includes the complete pin, owning SheetSymbol and parent sheet document; it refuses stale state before returning data."),
+     Description("Read one exact SheetPin nested in a SheetSymbol from the checked hierarchy. Supply the parent sheet UUID and pin UUID. The response includes the complete pin, owning SheetSymbol and parent sheet document; it refuses stale state before returning data. When a shared child repeats the parent UUID on more than one sheet instance, supply targetDocumentJson to select the exact instance."),
      KiCadCapability("schematic-design", "compiled-mcp plus native-api", "explicit root, parent sheet UUID and pin UUID, complete checked hierarchy and process epoch"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TypedSchematicHierarchyAuthoringPersistsThroughMcp")]
     public Task<CallToolResult> ReadSheetPin(string instanceId, string documentJson,
         string parentSheetId, string pinId, string expectedStateJson,
-        CancellationToken cancellationToken) => ExecuteRead(instanceId, documentJson,
-            expectedStateJson, pinId, parentSheetId, ReadKind.Pin, cancellationToken);
+        CancellationToken cancellationToken, string? targetDocumentJson = null) => ExecuteRead(instanceId, documentJson,
+        expectedStateJson, pinId, parentSheetId, ReadKind.Pin, cancellationToken, targetDocumentJson);
 
     [McpServerTool(Name = "kicad_schematic_update_sheet_pin", ReadOnly = false,
         UseStructuredContent = true),
-     Description("Replace one complete SheetPin identified by pinId inside its explicitly identified parent SheetSymbol. Its UUID and parent remain fixed; the checked batch preserves all sibling pins and sheet properties, and exact operation replay is supported. The edit is unsaved until kicad_document_save."),
+     Description("Replace one complete SheetPin identified by pinId inside its explicitly identified parent SheetSymbol. Its UUID and parent remain fixed; the checked batch preserves all sibling pins and sheet properties, and exact operation replay is supported. The edit is unsaved until kicad_document_save. When a shared child repeats the parent UUID on more than one sheet instance, supply targetDocumentJson to select the exact instance."),
      KiCadCapability("schematic-design", "compiled-mcp plus native-api", "explicit root, parent sheet UUID and pin UUID, complete replacement, checked hierarchy, process epoch, revision and operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TypedSchematicHierarchyAuthoringPersistsThroughMcp")]
     public Task<CallToolResult> UpdateSheetPin(string instanceId, string documentJson,
         string parentSheetId, string pinId, string expectedStateJson, string pinJson, string operationId,
-        CancellationToken cancellationToken) => Execute(instanceId, documentJson, null,
-            expectedStateJson, pinJson, pinId, parentSheetId, operationId, Mutation.UpdatePin,
+        CancellationToken cancellationToken, string? targetDocumentJson = null) => Execute(instanceId, documentJson,
+            targetDocumentJson, expectedStateJson, pinJson, pinId, parentSheetId, operationId, Mutation.UpdatePin,
             cancellationToken);
 
     [McpServerTool(Name = "kicad_schematic_delete_sheet_pin", ReadOnly = false,
         UseStructuredContent = true),
-     Description("Delete one SheetPin from the explicitly identified parent SheetSymbol. The complete checked hierarchy and parent UUID are admitted before one atomic parent replacement; stale, rejected and indeterminate receipts remain errors and do not claim a deletion. The edit is unsaved until kicad_document_save."),
+     Description("Delete one SheetPin from the explicitly identified parent SheetSymbol. The complete checked hierarchy and parent UUID are admitted before one atomic parent replacement; stale, rejected and indeterminate receipts remain errors and do not claim a deletion. The edit is unsaved until kicad_document_save. When a shared child repeats the parent UUID on more than one sheet instance, supply targetDocumentJson to select the exact instance."),
      KiCadCapability("schematic-design", "compiled-mcp plus native-api", "explicit root, parent sheet UUID and pin UUID, checked hierarchy, process epoch, revision and operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.TypedSchematicHierarchyAuthoringPersistsThroughMcp")]
     public Task<CallToolResult> DeleteSheetPin(string instanceId, string documentJson,
         string parentSheetId, string pinId, string expectedStateJson, string operationId,
-        CancellationToken cancellationToken) => Execute(instanceId, documentJson, null,
-            expectedStateJson, null, pinId, parentSheetId, operationId, Mutation.DeletePin,
+        CancellationToken cancellationToken, string? targetDocumentJson = null) => Execute(instanceId, documentJson,
+            targetDocumentJson, expectedStateJson, null, pinId, parentSheetId, operationId, Mutation.DeletePin,
             cancellationToken);
 
     [McpServerTool(Name = "kicad_schematic_create_hierarchical_label", ReadOnly = false,
@@ -323,20 +324,20 @@ public sealed class SchematicHierarchyMutationTools(InstanceRegistry registry)
                 return NewPlan(expected.State, target, null, id, null, "delete");
             case Mutation.CreatePin:
                 ValidateIdentity(parentSheetId ?? string.Empty, "parentSheetId");
-                source = Find(hierarchy, parentSheetId!, null, ReadKind.Sheet);
+                source = Find(hierarchy, parentSheetId!, null, ReadKind.Sheet, requestedTarget);
                 target = source.Document; var newPin = Parse<SheetPin>(payloadJson, "invalid_sheet_pin");
                 ValidatePin(newPin); id = newPin.Id.Value;
                 EnsurePinAbsent((SheetSymbol)source.Item, id);
                 return NewParentPlan(expected.State, target, (SheetSymbol)source.Item, newPin, id, create: true);
             case Mutation.UpdatePin:
-                source = Find(hierarchy, itemId ?? string.Empty, parentSheetId, ReadKind.Pin);
+                source = Find(hierarchy, itemId ?? string.Empty, parentSheetId, ReadKind.Pin, requestedTarget);
                 target = source.Document; var updatedPin = Parse<SheetPin>(payloadJson, "invalid_sheet_pin");
                 ValidatePin(updatedPin); id = RequireSameId(updatedPin.Id.Value, source.Item, "sheet pin");
-                return NewParentPlan(expected.State, target, FindParent(hierarchy, parentSheetId!, itemId!), updatedPin, id, create: false);
+                return NewParentPlan(expected.State, target, FindParent(hierarchy, parentSheetId!, itemId!, requestedTarget), updatedPin, id, create: false);
             case Mutation.DeletePin:
-                source = Find(hierarchy, itemId ?? string.Empty, parentSheetId, ReadKind.Pin);
+                source = Find(hierarchy, itemId ?? string.Empty, parentSheetId, ReadKind.Pin, requestedTarget);
                 target = source.Document; id = itemId!;
-                var parent = FindParent(hierarchy, parentSheetId!, itemId!);
+                var parent = FindParent(hierarchy, parentSheetId!, itemId!, requestedTarget);
                 var removed = parent.Clone(); removed.Pins.Remove(removed.Pins.Single(p => p.Id.Value == id));
                 var deletePin = NewPlan(expected.State, target, Any.Pack(removed), id, parentSheetId, "update");
                 return deletePin with { ReplyItem = null };
@@ -434,15 +435,19 @@ public sealed class SchematicHierarchyMutationTools(InstanceRegistry registry)
             throw new AutomationException("target_sheet_not_loaded", "targetDocumentJson is not a loaded sheet in the checked hierarchy.");
     }
 
-    private static SheetSymbol FindParent(SchematicHierarchyData hierarchy, string parentId, string pinId)
+    private static SheetSymbol FindParent(SchematicHierarchyData hierarchy, string parentId, string pinId,
+        DocumentSpecifier? targetDocument = null)
     {
         foreach (var screen in hierarchy.Instances)
+        {
+            if (targetDocument is not null && !Equals(screen.Metadata?.Document, targetDocument)) continue;
             foreach (var packed in screen.Items)
                 if (packed.Is(SheetSymbol.Descriptor) && packed.Unpack<SheetSymbol>().Id.Value == parentId)
                 {
                     var sheet = packed.Unpack<SheetSymbol>();
                     if (sheet.Pins.Any(pin => pin.Id?.Value == pinId)) return sheet;
                 }
+        }
         throw new AutomationException("sheet_symbol_not_found", "The parent SheetSymbol was not found.");
     }
 

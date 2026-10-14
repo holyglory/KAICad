@@ -1062,6 +1062,9 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
         bool submitted = code is "operation_outcome_unknown" or "footprint_persistence_unverified";
         JsonElement structured = JsonSerializer.SerializeToElement(new { errorCode = code, errorMessage = message,
             mutationSubmitted = submitted,
+            committed = false,
+            nativeWriteStarted = false,
+            rollbackAttempted = false,
             outcome = code == "operation_outcome_unknown" ? "indeterminate"
                 : code == "footprint_persistence_unverified" ? "unverified" : "not_submitted" });
         return new() { IsError = true, StructuredContent = structured,

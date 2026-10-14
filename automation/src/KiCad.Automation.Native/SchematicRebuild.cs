@@ -199,7 +199,7 @@ public static class SchematicRebuild
         foreach (var screen in adopted.Schematic.Instances)
         {
             if (screen.Metadata?.ScreenId is null || screen.Metadata.LoadedNativeFormatVersion != 0
-                || screen.Metadata.WriterNativeFormatVersion != SchematicItemDelta.SupportedWriterFormatVersion)
+                || screen.Metadata.WriterNativeFormatVersion is not (0 or SchematicItemDelta.SupportedWriterFormatVersion))
                 continue;
             var actual = observed.Instances.SingleOrDefault(nativeScreen =>
                 Equals(nativeScreen.Metadata.Document, screen.Metadata.Document)
@@ -209,6 +209,7 @@ public static class SchematicRebuild
                 || actual.Metadata.LoadedNativeFormatVersion != SchematicItemDelta.SupportedWriterFormatVersion)
                 continue;
             screen.Metadata.LoadedNativeFormatVersion = actual.Metadata.LoadedNativeFormatVersion;
+            screen.Metadata.WriterNativeFormatVersion = actual.Metadata.WriterNativeFormatVersion;
         }
         return adopted;
     }

@@ -1,5 +1,6 @@
 using Kiapi.Board.Types;
 using Kiapi.Common.Types;
+using KiCad.Automation.Model;
 using KiCad.Automation.Mcp;
 using KiCad.Automation.Protocol;
 

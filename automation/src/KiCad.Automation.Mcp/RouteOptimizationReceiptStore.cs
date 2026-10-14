@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Nodes;
 using KiCad.Automation.Model;
 using ModelContextProtocol.Protocol;
 
@@ -12,7 +13,8 @@ internal sealed record RouteOptimizationReceiptRecord(
     [property: JsonPropertyName("processEpoch")] string ProcessEpoch,
     [property: JsonPropertyName("operationId")] string OperationId,
     [property: JsonPropertyName("fingerprint")] string Fingerprint,
-    [property: JsonPropertyName("resultJson")] string ResultJson)
+    [property: JsonPropertyName("resultJson")] string ResultJson,
+    [property: JsonPropertyName("replayObserved")] bool ReplayObserved = false)
 {
     internal void Validate()
     {
@@ -103,15 +105,36 @@ internal sealed class RouteOptimizationReceiptStore
         string fingerprint, JsonElement result)
     {
         var record = new RouteOptimizationReceiptRecord(instanceId, processEpoch, operationId,
-            fingerprint, result.GetRawText());
+            fingerprint, result.GetRawText(), ReplayObserved: false);
         record.Validate();
         Directory.CreateDirectory(directory);
-        string path = PathFor(instanceId, operationId);
+        WriteRecord(record, overwrite: true);
+    }
+
+    /// <summary>
+    /// Retains the immutable terminal result while recording that an exact
+    /// retry has been served from MCP state.  The caller holds the operation
+    /// lease for the read/mark/response sequence.
+    /// </summary>
+    internal RouteOptimizationReceiptRecord MarkReplayed(RouteOptimizationReceiptRecord record)
+    {
+        record.Validate();
+        if (record.ReplayObserved) return record;
+        var replayed = record with { ReplayObserved = true };
+        replayed.Validate();
+        WriteRecord(replayed, overwrite: true);
+        return replayed;
+    }
+
+    private void WriteRecord(RouteOptimizationReceiptRecord record, bool overwrite)
+    {
+        Directory.CreateDirectory(directory);
+        string path = PathFor(record.InstanceId, record.OperationId);
         string temp = path + ".tmp-" + Guid.NewGuid().ToString("N");
         try
         {
             File.WriteAllBytes(temp, JsonSerializer.SerializeToUtf8Bytes(record, Json));
-            File.Move(temp, path, true);
+            File.Move(temp, path, overwrite);
         }
         finally { if (File.Exists(temp)) try { File.Delete(temp); } catch { } }
     }
@@ -122,6 +145,34 @@ internal sealed class RouteOptimizationReceiptStore
         JsonElement payload = JsonDocument.Parse(record.ResultJson).RootElement.Clone();
         return new CallToolResult { StructuredContent = payload,
             Content = [new TextContentBlock { Text = payload.GetRawText() }] };
+    }
+
+    /// <summary>
+    /// Projects an exact retry from the immutable terminal result.  Only the
+    /// replay markers change; all state, geometry and receipt evidence remain
+    /// the original native outcome.
+    /// </summary>
+    internal static CallToolResult ReplayResult(RouteOptimizationReceiptRecord record)
+    {
+        record.Validate();
+        JsonObject payload = JsonNode.Parse(record.ResultJson)?.AsObject()
+            ?? throw new AutomationException("invalid_route_receipt", "The route receipt result must be a JSON object.");
+        payload["replayed"] = true;
+        MarkReceipt(payload["receipt"]);
+        MarkReceipt(payload["nativeReceipt"]);
+        if (payload["checkedRoute"] is JsonObject checkedRoute)
+        {
+            MarkReceipt(checkedRoute["receipt"]);
+            MarkReceipt(checkedRoute["nativeReceipt"]);
+        }
+        JsonElement projected = JsonSerializer.SerializeToElement(payload, Json);
+        return new CallToolResult { StructuredContent = projected,
+            Content = [new TextContentBlock { Text = projected.GetRawText() }] };
+    }
+
+    private static void MarkReceipt(JsonNode? value)
+    {
+        if (value is JsonObject receipt) receipt["replayed"] = true;
     }
 
     private string PathFor(string instanceId, string operationId) => Path.Combine(directory,

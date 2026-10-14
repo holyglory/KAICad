@@ -203,7 +203,9 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
             if (stored is null)
                 return ReceiptData(new { instanceId, processEpoch = expectedProcessEpoch, operationId, found = false,
                     receiptScope = "mcp-state", nativeReceiptAvailable = false });
-            JsonElement payload = JsonDocument.Parse(stored.ResultJson).RootElement.Clone();
+            JsonElement payload = (stored.ReplayObserved
+                ? RouteOptimizationReceiptStore.ReplayResult(stored)
+                : RouteOptimizationReceiptStore.Result(stored)).StructuredContent!.Value;
             string? processEpoch = payload.TryGetProperty("processEpoch", out JsonElement epoch) ? epoch.GetString() : null;
             if (!string.Equals(processEpoch, expectedProcessEpoch, StringComparison.Ordinal)) throw new AutomationException("stale_process_epoch", "The route-optimization receipt belongs to another native process epoch.");
             string? receiptInstance = payload.TryGetProperty("instanceId", out JsonElement instance) ? instance.GetString() : null;
@@ -597,7 +599,8 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
             {
                 if (existing.Fingerprint != digest)
                     throw new AutomationException("operation_id_reused", "The operation ID is already bound to a different route replacement request.");
-                return RouteOptimizationReceiptStore.Result(existing);
+                existing = store.MarkReplayed(existing);
+                return RouteOptimizationReceiptStore.ReplayResult(existing);
             }
             CallToolResult result = await action();
             if (!(result.IsError ?? false) && result.StructuredContent is JsonElement payload)

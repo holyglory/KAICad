@@ -25,7 +25,7 @@ public sealed partial class PcbCheckedItemMigrationTests
             string epoch = Guid.NewGuid().ToString("D");
             string operation = Guid.NewGuid().ToString("D");
             string fingerprint = new string('a', 64);
-            using JsonDocument payload = JsonDocument.Parse($"{{\"instanceId\":\"{instance}\",\"processEpoch\":\"{epoch}\",\"operationId\":\"{operation}\",\"outcome\":\"completed\",\"replayed\":false}}");
+            using JsonDocument payload = JsonDocument.Parse($"{{\"instanceId\":\"{instance}\",\"processEpoch\":\"{epoch}\",\"operationId\":\"{operation}\",\"outcome\":\"completed\",\"replayed\":false,\"receipt\":{{\"replayed\":false}}}}");
 
             new RouteOptimizationReceiptStore(root).Write(instance, epoch, operation, fingerprint,
                 payload.RootElement);
@@ -38,9 +38,23 @@ public sealed partial class PcbCheckedItemMigrationTests
             Assert.AreEqual(operation, reopened.OperationId);
             Assert.AreEqual(fingerprint, reopened.Fingerprint);
             Assert.AreEqual(payload.RootElement.GetRawText(), reopened.ResultJson);
+            Assert.IsFalse(reopened.ReplayObserved);
 
             CallToolResult restored = RouteOptimizationReceiptStore.Result(reopened);
             Assert.AreEqual(reopened.ResultJson, restored.StructuredContent!.Value.GetRawText());
+
+            RouteOptimizationReceiptRecord replayedRecord = new RouteOptimizationReceiptStore(root)
+                .MarkReplayed(reopened);
+            Assert.IsTrue(replayedRecord.ReplayObserved);
+            Assert.AreEqual(reopened.ResultJson, replayedRecord.ResultJson,
+                "The immutable terminal result must remain unchanged when replay is observed.");
+            JsonElement replay = RouteOptimizationReceiptStore.ReplayResult(replayedRecord)
+                .StructuredContent!.Value;
+            Assert.IsTrue(replay.GetProperty("replayed").GetBoolean());
+            Assert.IsTrue(replay.GetProperty("receipt").GetProperty("replayed").GetBoolean());
+            Assert.AreEqual(reopened.ResultJson,
+                RouteOptimizationReceiptStore.Result(replayedRecord).StructuredContent!.Value.GetRawText(),
+                "A durable read still exposes the original terminal payload.");
             Assert.AreEqual(1, Directory.EnumerateFiles(
                 Path.Combine(root, "pcb-route-receipts"), "*.json").Count());
         }
@@ -119,7 +133,9 @@ public sealed partial class PcbCheckedItemMigrationTests
             var replayTools = new PcbRouteOptimizationTools(restarted);
             JsonElement replay = Success(await replayTools.Apply(
                 transport.InstanceId, deleteJson, createJson, stateJson, operationId, default));
-            Assert.AreEqual(first.GetRawText(), replay.GetRawText());
+            Assert.IsTrue(replay.GetProperty("replayed").GetBoolean());
+            Assert.IsTrue(replay.GetProperty("receipt").GetProperty("replayed").GetBoolean());
+            Assert.IsFalse(first.GetProperty("replayed").GetBoolean());
             Assert.AreEqual(routeMutations, transport.RouteMutations);
             Assert.AreEqual(exchanges, transport.Exchanges);
 
@@ -127,7 +143,7 @@ public sealed partial class PcbCheckedItemMigrationTests
                 transport.InstanceId, transport.Epoch, operationId, default));
             Assert.IsTrue(receipt.GetProperty("found").GetBoolean());
             Assert.AreEqual("mcp-state", receipt.GetProperty("receiptScope").GetString());
-            Assert.AreEqual(first.GetRawText(), receipt.GetProperty("receipt").GetRawText());
+            Assert.AreEqual(replay.GetRawText(), receipt.GetProperty("receipt").GetRawText());
         }
         finally { Directory.Delete(root, true); }
     }

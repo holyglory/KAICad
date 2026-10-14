@@ -316,7 +316,7 @@ public sealed partial class PcbCheckedItemMigrationTests
         JsonElement data = Success(await inspect(transport.InstanceId, transport.Epoch));
         Assert.IsTrue(data.GetProperty("found").GetBoolean());
         Assert.IsTrue(data.GetProperty("nativeReceiptAvailable").GetBoolean());
-        Assert.AreEqual("mcp-process", data.GetProperty("receiptScope").GetString());
+        Assert.AreEqual("mcp-state", data.GetProperty("receiptScope").GetString());
         Assert.AreEqual(transport.InstanceId, data.GetProperty("receipt").GetProperty("instanceId").GetString());
         Assert.AreEqual(operationId, data.GetProperty("receipt").GetProperty("operationId").GetString());
         Assert.IsFalse(data.GetProperty("receipt").GetProperty("replayed").GetBoolean());

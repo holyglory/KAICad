@@ -606,7 +606,7 @@ public sealed class McpProcessTests
             Assert.IsTrue(emptyDiffPairStructured.TryGetProperty("found", out var emptyDiffPairFoundValue),
                 emptyDiffPairReceipt.GetRawText());
             Assert.IsFalse(emptyDiffPairFoundValue.GetBoolean(), emptyDiffPairReceipt.GetRawText());
-            Assert.AreEqual("mcp-process", emptyDiffPairStructured.GetProperty("receiptScope").GetString(),
+            Assert.AreEqual("mcp-state", emptyDiffPairStructured.GetProperty("receiptScope").GetString(),
                 emptyDiffPairReceipt.GetRawText());
             CollectionAssert.Contains(names, "kicad_pcb_footprint_place_plan");
             CollectionAssert.Contains(names, "kicad_pcb_route_receipt");

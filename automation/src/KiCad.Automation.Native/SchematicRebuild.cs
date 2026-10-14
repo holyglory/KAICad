@@ -196,20 +196,9 @@ public static class SchematicRebuild
             return candidate;
 
         var adopted = candidate with { Schematic = candidate.Schematic.Clone() };
-        var materialized = batch!.Operations
-            .Where(operation => operation.RebuildScreenIdentity is not null)
-            .Select(operation => operation.RebuildScreenIdentity!.Value)
-            .Concat(batch.Operations
-                .Where(operation => operation.Create?.Is(SheetSymbol.Descriptor) == true)
-                .Select(operation => operation.Create.Unpack<SheetSymbol>().ChildScreenId?.Value)
-                .Where(value => value is not null)
-                .Select(value => value!))
-            .ToHashSet(StringComparer.Ordinal);
-
         foreach (var screen in adopted.Schematic.Instances)
         {
-            if (screen.Metadata?.ScreenId?.Value is not { } screenId || !materialized.Contains(screenId)
-                || screen.Metadata.LoadedNativeFormatVersion != 0
+            if (screen.Metadata?.ScreenId is null || screen.Metadata.LoadedNativeFormatVersion != 0
                 || screen.Metadata.WriterNativeFormatVersion != SchematicItemDelta.SupportedWriterFormatVersion)
                 continue;
             var actual = observed.Instances.SingleOrDefault(nativeScreen =>

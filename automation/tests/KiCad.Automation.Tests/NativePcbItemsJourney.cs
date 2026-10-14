@@ -2548,7 +2548,7 @@ public sealed partial class NativeSessionTests
                 operationId = Guid.NewGuid().ToString("D")
             });
             Assert.IsFalse(plotSave.TryGetProperty("isError", out var plotSaveError) && plotSaveError.GetBoolean(), plotSave.GetRawText());
-            var plotSavedState = plotSave.GetProperty("structuredContent").GetProperty("observedState").GetString();
+            var plotSavedState = plotSave.GetProperty("structuredContent").GetProperty("observedState").GetRawText();
             Assert.IsFalse(string.IsNullOrWhiteSpace(plotSavedState), plotSave.GetRawText());
             var plotClose = await mcp.Tool("kicad_document_close", new
             {

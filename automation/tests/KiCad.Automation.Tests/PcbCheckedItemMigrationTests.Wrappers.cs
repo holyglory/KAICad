@@ -37,12 +37,22 @@ public sealed partial class PcbCheckedItemMigrationTests
             Assert.AreEqual(footprint.Id, BoardJson.Parser.Parse<CreateItemsResponse>(
                 applied.GetProperty("response").GetRawText()).CreatedItems.Single().Item.Unpack<FootprintInstance>().Id);
             await AssertReceiptIdentity((instance, epoch) => tools.Receipt(instance, epoch, operationId, default),
-                transport, operationId);
+                transport, operationId, "mcp-durable");
+            int nativeMutations = transport.CheckedMutations;
+            int nativeExchanges = transport.Exchanges;
 
-            transport.LiveBoardChanged = true;
-            JsonElement replay = Success(await tools.Apply(transport.InstanceId, candidate, stateJson, operationId, default));
+            // A new MCP registry has no native attachment. Durable terminal
+            // state must serve the exact retry without contacting the native
+            // transport or submitting a second checked transaction.
+            var restarted = new InstanceRegistry(new PlacementOfflineTransport(), root);
+            var replayTools = new PcbFootprintPlacementTools(restarted);
+            JsonElement replay = Success(await replayTools.Apply(transport.InstanceId, candidate, stateJson, operationId, default));
             Assert.IsTrue(replay.GetProperty("replayed").GetBoolean());
-            Assert.AreEqual(2, transport.CheckedMutations);
+            Assert.IsTrue(replay.GetProperty("receipt").GetProperty("replayed").GetBoolean());
+            Assert.AreEqual(nativeMutations, transport.CheckedMutations);
+            Assert.AreEqual(nativeExchanges, transport.Exchanges);
+            await AssertReceiptIdentity((instance, epoch) => replayTools.Receipt(instance, epoch, operationId, default),
+                transport, operationId, "mcp-durable");
             Assert.AreEqual(1, transport.AppliedItemTransactions);
             Assert.AreEqual(0, transport.LifecycleReads);
             Assert.AreEqual(0, transport.LegacyMutations);
@@ -50,12 +60,20 @@ public sealed partial class PcbCheckedItemMigrationTests
             var changed = BoardJson.Parser.Parse<CreateItems>(candidate);
             var moved = changed.Items[0].Unpack<FootprintInstance>(); moved.Position.XNm++;
             changed.Items[0] = Any.Pack(moved);
-            AssertError(await tools.Apply(transport.InstanceId, BoardJson.Formatter.Format(changed),
+            AssertError(await replayTools.Apply(transport.InstanceId, BoardJson.Formatter.Format(changed),
                 stateJson, operationId, default), "operation_id_reused");
-            Assert.AreEqual(2, transport.CheckedMutations);
+            Assert.AreEqual(nativeMutations, transport.CheckedMutations);
             var foreignState = expected.Clone(); foreignState.ProcessEpoch = Guid.NewGuid().ToString("D");
-            AssertError(await tools.Apply(transport.InstanceId, candidate, SchematicJson.Formatter.Format(foreignState),
-                Guid.NewGuid().ToString("D"), default), "pcb_instance_changed");
+            AssertError(await replayTools.Apply(transport.InstanceId, candidate,
+                SchematicJson.Formatter.Format(foreignState), operationId, default), "stale_process_epoch");
+
+            // The operation key is scoped by state directory and instance. A
+            // different instance cannot replay the original result through the
+            // process-global in-memory cache.
+            string foreignInstance = Guid.NewGuid().ToString("D");
+            JsonElement foreignReceipt = Success(await replayTools.Receipt(foreignInstance, transport.Epoch, operationId, default));
+            Assert.IsFalse(foreignReceipt.GetProperty("found").GetBoolean());
+            AssertError(await replayTools.Apply(foreignInstance, candidate, stateJson, operationId, default), "unknown_instance");
             transport.LiveBoardChanged = false;
             var nativeItems = await ReadNativeItems(registry, transport.InstanceId, expected.Document, [footprint.Id]);
             Assert.AreEqual(footprint, nativeItems.Single().Unpack<FootprintInstance>());
@@ -430,7 +448,7 @@ public sealed partial class PcbCheckedItemMigrationTests
         Assert.AreEqual(transport.InstanceId, data.GetProperty("receipt").GetProperty("instanceId").GetString());
         Assert.AreEqual(operationId, data.GetProperty("receipt").GetProperty("operationId").GetString());
         Assert.IsFalse(data.GetProperty("receipt").GetProperty("replayed").GetBoolean());
-        if (expectedScope == "mcp-state")
+        if (expectedScope is "mcp-state" or "mcp-durable")
         {
             JsonElement foreign = Success(await inspect(Guid.NewGuid().ToString("D"), transport.Epoch));
             Assert.IsFalse(foreign.GetProperty("found").GetBoolean(),
@@ -469,4 +487,11 @@ public sealed partial class PcbCheckedItemMigrationTests
         Orientation = new() { ValueDegrees = 0 }, Layer = BoardLayer.BlFCu,
         Definition = new() { Id = new() { LibraryNickname = "Generated", EntryName = "Fixture" } }
     };
+
+    private sealed class PlacementOfflineTransport : INativeTransport
+    {
+        public Task<byte[]> ExchangeAsync(string endpoint, byte[] request, TimeSpan timeout,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("A durable placement replay must not contact native.");
+    }
 }

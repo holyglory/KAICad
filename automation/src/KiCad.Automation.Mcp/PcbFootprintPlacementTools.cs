@@ -187,7 +187,7 @@ public sealed class PcbFootprintPlacementTools(InstanceRegistry registry)
                     found = true, receiptScope = "mcp-durable", nativeReceiptAvailable = durableNativeReceipt,
                     receipt = durablePayload });
             }
-            if (!Receipts.TryGetValue(operationId, out StoredReceipt? stored))
+            if (!Receipts.TryGetValue(ReceiptKey(instanceId, operationId), out StoredReceipt? stored))
                 return ReceiptData(new { instanceId, processEpoch = expectedProcessEpoch, operationId, found = false,
                     receiptScope = "mcp-process", nativeReceiptAvailable = false });
             JsonElement payload = stored.Result.StructuredContent ?? JsonSerializer.SerializeToElement(new { });
@@ -387,13 +387,14 @@ public sealed class PcbFootprintPlacementTools(InstanceRegistry registry)
             PcbFootprintPlacementReceiptRecord? durable = durableReceipts.Read(instanceId, operationId);
             if (durable is not null)
             {
-                if (durable.RequestFingerprintSha256 != requestFingerprintSha256)
-                    throw new AutomationException("operation_id_reused", "The PCB footprint-placement operation UUID is already bound to a different request.");
                 if (durable.ProcessEpoch != expectedProcessEpoch)
                     throw new AutomationException("stale_process_epoch", "The PCB footprint-placement receipt belongs to a different native process epoch.");
+                if (durable.RequestFingerprintSha256 != requestFingerprintSha256)
+                    throw new AutomationException("operation_id_reused", "The PCB footprint-placement operation UUID is already bound to a different request.");
                 return PcbFootprintPlacementReceiptStore.ReplayResult(durable);
             }
-            if (Receipts.TryGetValue(operationId, out StoredReceipt? existing))
+            string receiptKey = ReceiptKey(instanceId, operationId);
+            if (Receipts.TryGetValue(receiptKey, out StoredReceipt? existing))
             {
                 if (existing.Fingerprint != fingerprint)
                     throw new AutomationException("operation_id_reused", "The operation ID is already bound to a different footprint placement.");
@@ -404,7 +405,7 @@ public sealed class PcbFootprintPlacementTools(InstanceRegistry registry)
             {
                 durableReceipts.WriteHeld(instanceId, expectedProcessEpoch, operationId,
                     requestFingerprintSha256, result);
-                Receipts[operationId] = new(fingerprint, result);
+                Receipts[receiptKey] = new(fingerprint, result);
             }
             return result;
         }
@@ -413,6 +414,9 @@ public sealed class PcbFootprintPlacementTools(InstanceRegistry registry)
 
     private static Task<CallToolResult> ExecuteMutation(Func<Task<CallToolResult>> action)
         => Execute(action);
+
+    private string ReceiptKey(string instanceId, string operationId) =>
+        Path.GetFullPath(registry.StateDirectory) + "\n" + instanceId + "\n" + operationId;
 
     private static async Task<CallToolResult> Execute(Func<Task<CallToolResult>> action)
     {

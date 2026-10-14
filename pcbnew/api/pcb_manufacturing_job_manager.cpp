@@ -1025,7 +1025,7 @@ tl::expected<PCB_MANUFACTURING_JOB_MANAGER::Receipt, std::string>
 PCB_MANUFACTURING_JOB_MANAGER::Cancel( const CancelPcbManufacturingExport& aRequest,
                                      const std::string& aEpoch )
 {
-    std::lock_guard lock( m_mutex );
+    std::unique_lock lock( m_mutex );
     if( !IsUuid( aRequest.operation_id() ) || !ValidDocument( aRequest.document() ) )
         return tl::unexpected( "invalid_manufacturing_cancel_request" );
     if( !IsUuid( aEpoch ) || aRequest.process_epoch() != aEpoch ) return tl::unexpected( "stale_process_epoch" );
@@ -1049,6 +1049,10 @@ PCB_MANUFACTURING_JOB_MANAGER::Cancel( const CancelPcbManufacturingExport& aRequ
             return tl::unexpected( "manufacturing_worker_unavailable" );
         worker->second->cancellation->Request();
     }
+    // Never hold the in-memory manager mutex while waiting for the operation
+    // file lease.  A worker keeps that lease across its adapter callback and
+    // needs m_mutex to publish its terminal receipt after observing this token.
+    lock.unlock();
     auto lease = AcquireOperationLock( fs::u8path( m_journalDirectory.ToStdString() ), aRequest.operation_id() );
     if( !lease ) return tl::unexpected( lease.error() );
     auto journal = read( aRequest.operation_id() );
@@ -1056,6 +1060,9 @@ PCB_MANUFACTURING_JOB_MANAGER::Cancel( const CancelPcbManufacturingExport& aRequ
     if( journal->receipt().terminal() ) return journal->receipt();
     if( running && ( journal->receipt().status() != PCB_MFG_EXPORT_RUNNING
                      || journal->receipt().dispatch_stage() != PCB_MFG_DISPATCH_SUBMITTED ) )
+        return journal->receipt();
+    if( !running && ( journal->receipt().status() != PCB_MFG_EXPORT_ADMITTED
+                      || journal->receipt().dispatch_stage() != PCB_MFG_DISPATCH_ADMITTED ) )
         return journal->receipt();
     Receipt& receipt = *journal->mutable_receipt();
     if( running )

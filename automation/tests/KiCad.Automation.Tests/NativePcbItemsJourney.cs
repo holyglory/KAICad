@@ -2588,7 +2588,7 @@ public sealed partial class NativeSessionTests
                 {
                     document = reopenedPlotDocument,
                     expectedState = reopenedPlotState,
-                    layers = new[] { "BL_F_Cu", "BL_B_Cu", "BL_Edge_Cuts", "BL_F_CrtYd", "BL_B_CrtYd" },
+                    layers = new[] { "BL_F_Cu", "BL_B_Cu", "BL_Edge_Cuts", "BL_F_SilkS", "BL_B_SilkS", "BL_F_CrtYd", "BL_B_CrtYd" },
                     copperLayerCount = 2u,
                     operationId = Guid.NewGuid().ToString("D")
                 }

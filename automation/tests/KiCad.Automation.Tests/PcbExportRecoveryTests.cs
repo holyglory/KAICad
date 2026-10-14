@@ -358,8 +358,27 @@ public sealed class PcbExportRecoveryTests
                 Document = document.Clone(),
                 Scope = DocumentLifecycleScope.DlsPcb,
                 ProcessEpoch = processEpoch,
-                StateSha256 = new string('a', 64)
+                StateSha256 = new string('a', 64),
+                DiskBaselineChecked = true
             };
+            foreach (string path in new[]
+            {
+                Path.Combine(root, "fixture.kicad_pcb"),
+                Path.Combine(root, "fixture.kicad_pro")
+            })
+            {
+                state.NativeFiles.Add(path);
+                state.FileBaselines.Add(new NativeFileBaselineState
+                {
+                    Path = path,
+                    BaselinePath = path,
+                    BaselineKnown = true,
+                    CurrentKnown = true,
+                    Status = NativeFileBaselineStatus.NfbsUnchanged,
+                    BaselineExists = false,
+                    CurrentExists = false
+                });
+            }
             string output = Path.Combine(root, "out");
             string fingerprint = new string('b', 64);
             var receipt = new PcbManufacturingExportReceipt

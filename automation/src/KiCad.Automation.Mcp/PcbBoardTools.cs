@@ -1,7 +1,9 @@
 using System.ComponentModel;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Google.Protobuf;
+using Google.Protobuf.WellKnownTypes;
 using Kiapi.Board.Commands;
 using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
@@ -79,6 +81,74 @@ public sealed class PcbBoardTools(InstanceRegistry registry)
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> PlotSettings(string instanceId, string requestJson, string expectedStateJson, CancellationToken cancellationToken) =>
         Read<GetBoardPlotSettings, BoardPlotSettingsResponse>(instanceId, requestJson, expectedStateJson, "plot-settings", request => request.Board, cancellationToken);
+
+    [McpServerTool(Name = "kicad_pcb_plot_settings_set_typed", ReadOnly = false),
+     Description("Apply typed PCB plot settings at one exact lifecycle checkpoint and verify normalized native readback. The native setter has no operation receipt, so replay and restart recovery remain explicitly unsupported; retry only after inspecting the returned readback."),
+     KiCadCapability("pcb-rules", "typed-native-plot-settings-mutation", "explicit PCB document, complete lifecycle state, typed plot settings, operation ID and normalized native readback"),
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbPlotSettingsTypedContractTests")]
+    public Task<CallToolResult> SetPlotSettingsTyped(string instanceId,
+        PcbPlotSettingsMutationInput input, CancellationToken cancellationToken) => ExecutePlotSettingsMutation(instanceId, input, cancellationToken);
+
+    private async Task<CallToolResult> ExecutePlotSettingsMutation(string instanceId,
+        PcbPlotSettingsMutationInput input, CancellationToken cancellationToken)
+    {
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (input is null || string.IsNullOrWhiteSpace(input.OperationId)
+                || !Guid.TryParseExact(input.OperationId, "D", out Guid operation) || operation == Guid.Empty)
+                throw new AutomationException("invalid_operation_id", "operationId must be a canonical nonempty UUID.");
+            DocumentSpecifier document = NativeDocumentInput.ToNative(input.Document);
+            ValidateBoard(document);
+            DocumentLifecycleState expected = DocumentLifecycleInput.ToNative(input.ExpectedState);
+            if (!expected.Document.Equals(document) || expected.Scope != DocumentLifecycleScope.DlsPcb
+                || string.IsNullOrWhiteSpace(expected.ProcessEpoch))
+                throw new AutomationException("invalid_pcb_plot_settings_state", "ExpectedState must be a complete observation of the same PCB document.");
+            Kiapi.Board.Jobs.BoardPlotSettings settings = input.Settings?.ToNative()
+                ?? throw new AutomationException("invalid_pcb_plot_settings", "settings is required.");
+            NativeClient client = registry.Client(instanceId);
+            AutomationSession session = await client.HandshakeAsync(cancellationToken);
+            if (session.Epoch != expected.ProcessEpoch)
+                throw new AutomationException("pcb_instance_changed", "The expected PCB state belongs to another native process epoch.");
+            DocumentLifecycleState before = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
+                new() { Document = document }, cancellationToken);
+            if (!before.Equals(expected))
+                throw new AutomationException("pcb_state_changed", "The PCB changed before plot-settings mutation; inspect a fresh lifecycle state.");
+            await client.InvokeAsync<SetBoardPlotSettings, Empty>(
+                new() { Board = document, PlotSettings = settings }, cancellationToken);
+            DocumentLifecycleState after = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(
+                new() { Document = document }, cancellationToken);
+            BoardPlotSettingsResponse normalized = await client.InvokeAsync<GetBoardPlotSettings, BoardPlotSettingsResponse>(
+                new() { Board = document }, cancellationToken);
+            string requestedJson = BoardJson.Formatter.Format(settings);
+            string normalizedJson = BoardJson.Formatter.Format(normalized.PlotSettings);
+            return new CallToolResult
+            {
+                StructuredContent = JsonSerializer.SerializeToElement(new
+                {
+                    instanceId, processEpoch = session.Epoch, operationId = operation.ToString("D"), document,
+                    beforeState = SchematicJson.Formatter.Format(before), afterState = SchematicJson.Formatter.Format(after),
+                    requested = JsonDocument.Parse(requestedJson).RootElement.Clone(),
+                    readback = JsonDocument.Parse(normalizedJson).RootElement.Clone(),
+                    readbackVerified = normalized.PlotSettings is not null,
+                    nativeMutation = true, replaySupported = false,
+                    limitation = "The native SetBoardPlotSettings command has no operation receipt; retry is not replay-safe after a lost reply."
+                }),
+                Content = [new TextContentBlock { Text = "PCB plot settings applied and read back; native replay receipt is unavailable." }]
+            };
+        }
+        catch (Exception error) when (error is AutomationException or NativeApiException or NngException
+            or InvalidProtocolBufferException or InvalidJsonException or InvalidOperationException or ArgumentException)
+        {
+            var structured = JsonSerializer.SerializeToElement(new
+            {
+                errorCode = error is AutomationException known ? known.Code : "pcb_plot_settings_failed",
+                errorMessage = error.Message, nativeMutation = false, replaySupported = false
+            });
+            return new CallToolResult { IsError = true, StructuredContent = structured,
+                Content = [new TextContentBlock { Text = structured.GetRawText() }] };
+        }
+    }
 
     private async Task<CallToolResult> Read<TRequest, TResponse>(string instanceId, string requestJson,
         string expectedStateJson, string queryKind, Func<TRequest, DocumentSpecifier?> target,
@@ -188,4 +258,13 @@ public sealed class PcbBoardTools(InstanceRegistry registry)
         if (document!.Type != DocumentType.DoctypePcb)
             throw new AutomationException("invalid_pcb_query_target", "The query target must be an explicit PCB document.");
     }
+}
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed class PcbPlotSettingsMutationInput
+{
+    public NativeDocumentInput Document { get; set; } = new();
+    public DocumentLifecycleInput ExpectedState { get; set; } = new();
+    public BoardPlotSettingsInput Settings { get; set; } = new();
+    public string OperationId { get; set; } = "";
 }

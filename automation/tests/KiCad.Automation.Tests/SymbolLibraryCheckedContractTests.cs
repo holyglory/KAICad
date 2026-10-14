@@ -92,6 +92,9 @@ public sealed class SymbolLibraryCheckedContractTests
         var before = State(document, epoch, sequence: 7, expected);
         string expectedSnapshot = before.StateSha256;
         var after = State(document, epoch, sequence: 8, new string('b', 64));
+        after.EntryExists = true;
+        after.DetachedDefinitionSha256 = new string('d', 64);
+        after.StateSha256 = SymbolLibraryCheckedContract.ComputeStateDigest(after);
         NativeCapabilitySymbolLibraryCheckedWriteResponse response = Response(document, epoch, operation,
             status: "committed_postverified", committed: true, revisionTracked: true,
             completeLifecycle: false, before: expectedSnapshot, after: after.StateSha256);
@@ -113,6 +116,75 @@ public sealed class SymbolLibraryCheckedContractTests
         response.RequestFingerprintSha256 = SymbolLibraryCheckedContract.ComputeFingerprint(response.Request);
 
         SymbolLibraryCheckedContract.ValidateResponse(response, response.Request);
+    }
+
+    [TestMethod]
+    public void DirectFileReceiptAcceptsTargetCreationWithChangedEntryCheckpoint()
+    {
+        (DocumentSpecifier document, string epoch, string operation, string expected) = Fixture();
+        var before = State(document, epoch, sequence: 7, expected);
+        var after = State(document, epoch, sequence: 8, new string('b', 64));
+        after.EntryExists = true;
+        after.DetachedDefinitionSha256 = new string('d', 64);
+        after.DependencyBaselines[1].Sha256 = new string('e', 64);
+        after.DependencyBaselines[1].Bytes = 19;
+        after.StateSha256 = SymbolLibraryCheckedContract.ComputeStateDigest(after);
+        var request = new NativeCapabilitySymbolLibraryCheckedWrite
+        {
+            Document = document.Clone(), ProcessEpoch = epoch, OperationId = operation,
+            ExpectedSnapshotSha256 = before.StateSha256, ExpectedState = before
+        };
+        var response = Response(document, epoch, operation,
+            status: "committed_postverified", committed: true, revisionTracked: true,
+            completeLifecycle: false, before: before.StateSha256, after: after.StateSha256);
+        response.ReceiptStatus = NativeCapabilitySymbolLibraryCheckedReceiptStatus.NcpSlcwsCommittedPostverified;
+        response.Scope = "mcp_direct_symbol_file";
+        response.ExpectedRequestVerified = true;
+        response.NativeWriteStarted = true;
+        response.Postverified = true;
+        response.TargetVerified = true;
+        response.UnrelatedEntriesVerified = true;
+        response.ObservedBefore = before;
+        response.ObservedAfter = after;
+        response.Request = request;
+        response.RequestFingerprintSha256 = SymbolLibraryCheckedContract.ComputeFingerprint(request);
+
+        SymbolLibraryCheckedContract.ValidateResponse(response, request);
+    }
+
+    [TestMethod]
+    public void DirectFileReceiptRejectsAfterCheckpointWithInvalidEntryDigest()
+    {
+        (DocumentSpecifier document, string epoch, string operation, string expected) = Fixture();
+        var before = State(document, epoch, sequence: 7, expected);
+        var after = State(document, epoch, sequence: 8, new string('b', 64));
+        after.EntryExists = true;
+        after.DetachedDefinitionSha256 = "invalid-entry-digest";
+        after.StateSha256 = SymbolLibraryCheckedContract.ComputeStateDigest(after);
+        var request = new NativeCapabilitySymbolLibraryCheckedWrite
+        {
+            Document = document.Clone(), ProcessEpoch = epoch, OperationId = operation,
+            ExpectedSnapshotSha256 = before.StateSha256, ExpectedState = before
+        };
+        var response = Response(document, epoch, operation,
+            status: "committed_postverified", committed: true, revisionTracked: true,
+            completeLifecycle: false, before: before.StateSha256, after: after.StateSha256);
+        response.ReceiptStatus = NativeCapabilitySymbolLibraryCheckedReceiptStatus.NcpSlcwsCommittedPostverified;
+        response.Scope = "mcp_direct_symbol_file";
+        response.ExpectedRequestVerified = true;
+        response.NativeWriteStarted = true;
+        response.Postverified = true;
+        response.TargetVerified = true;
+        response.UnrelatedEntriesVerified = true;
+        response.ObservedBefore = before;
+        response.ObservedAfter = after;
+        response.Request = request;
+        response.RequestFingerprintSha256 = SymbolLibraryCheckedContract.ComputeFingerprint(request);
+
+        AutomationException error = Assert.ThrowsExactly<AutomationException>(() =>
+            SymbolLibraryCheckedContract.ValidateResponse(response, request));
+
+        Assert.AreEqual("invalid_symbol_library_response", error.Code);
     }
 
     [TestMethod]
@@ -152,6 +224,9 @@ public sealed class SymbolLibraryCheckedContractTests
     {
         (DocumentSpecifier document, string epoch, string operation, string expected) = Fixture();
         var before = State(document, epoch, sequence: 7, expected);
+        before.EntryExists = true;
+        before.DetachedDefinitionSha256 = new string('d', 64);
+        before.StateSha256 = SymbolLibraryCheckedContract.ComputeStateDigest(before);
         var request = new NativeCapabilitySymbolLibraryCheckedWrite
         {
             Document = document.Clone(), ProcessEpoch = epoch, OperationId = operation,

@@ -93,7 +93,13 @@ internal static class SymbolLibraryCheckedContract
                     || !response.TargetVerified || !response.UnrelatedEntriesVerified || response.RollbackAttempted
                     || response.ObservedBefore is null || response.ObservedAfter is null
                     || !ValidateState(response.ObservedBefore, expectedRequest.ExpectedState)
-                    || !ValidateState(response.ObservedAfter, expectedRequest.ExpectedState)
+                    // The post-write checkpoint must retain the same direct-file owner and
+                    // dependency set, but the requested entry is the mutation itself.  A create
+                    // changes EntryExists and DetachedDefinitionSha256; an update may change
+                    // only the latter.  Keep those fields validated for shape/digest while
+                    // allowing their admitted value to differ from the before-state.
+                    || !ValidateState(response.ObservedAfter, expectedRequest.ExpectedState, allowEntryMutation: true)
+                    || !response.ObservedAfter.EntryExists
                     || !response.ObservedBefore.Equals(expectedRequest.ExpectedState)
                     || response.ObservedAfter.StateSha256 != response.AfterSnapshotSha256
                     || response.ObservedAfter.Revision!.Sequence < response.ObservedBefore.Revision!.Sequence
@@ -175,7 +181,8 @@ internal static class SymbolLibraryCheckedContract
 
     private static bool ValidateState(
         NativeCapabilitySymbolLibraryCheckedState state,
-        NativeCapabilitySymbolLibraryCheckedState expected)
+        NativeCapabilitySymbolLibraryCheckedState expected,
+        bool allowEntryMutation = false)
     {
         if (state is null || expected is null || state.Document is null || expected.Document is null
             || !state.Document.Equals(expected.Document)
@@ -228,8 +235,9 @@ internal static class SymbolLibraryCheckedContract
             && state.ExpandedUri == expected.ExpandedUri
             && state.Provider == expected.Provider
             && state.ProviderOptions == expected.ProviderOptions
-            && state.EntryExists == expected.EntryExists
-            && state.DetachedDefinitionSha256 == expected.DetachedDefinitionSha256;
+            && (allowEntryMutation
+                || (state.EntryExists == expected.EntryExists
+                    && state.DetachedDefinitionSha256 == expected.DetachedDefinitionSha256));
     }
 
     private static bool IsValidDirectSymbolMetadata(NativeCapabilitySymbolLibraryCheckedState state) =>

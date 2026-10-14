@@ -554,7 +554,9 @@ public sealed class SchematicRebuildTests
         var savedElectrical = new SchematicElectricalState { Hierarchy = new() { Data = savedNative } };
         var adopted = SchematicRebuild.AdoptSavedNativeProvenance(candidate, savedElectrical, batch);
         Assert.IsTrue(adopted.Schematic.Instances.All(screen =>
-            screen.Metadata.LoadedNativeFormatVersion == SchematicItemDelta.SupportedWriterFormatVersion));
+            screen.Metadata.LoadedNativeFormatVersion == SchematicItemDelta.SupportedWriterFormatVersion),
+            string.Join(";", adopted.Schematic.Instances.Select(screen =>
+                $"{screen.Metadata.Document.SheetPath.Path[^1].Value}:{screen.Metadata.LoadedNativeFormatVersion}:{screen.Metadata.WriterNativeFormatVersion}")));
         string beforeProvenance = SchematicDesignXml.Write(candidate, []);
         string afterProvenance = SchematicDesignXml.Write(adopted, []);
         Assert.IsTrue(SchematicRebuild.SavedProvenanceOnlyChange(Encoding.UTF8.GetBytes(beforeProvenance),

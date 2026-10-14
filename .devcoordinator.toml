@@ -2728,7 +2728,7 @@ command=["dotnet","build","automation/KiCad.Automation.slnx","--no-restore","--c
 name="contracts"
 tier="development"
 command=["dotnet","test","automation/KiCad.Automation.slnx","--no-build","--configuration","Debug","--filter","FullyQualifiedName~DocumentLifecycleInput|FullyQualifiedName~DocumentLifecycleTool|FullyQualifiedName~DocumentStateTool|FullyQualifiedName~PcbDrcTool|FullyQualifiedName~FootprintLibrary|FullyQualifiedName~SymbolLibraryCheckedContractTests|FullyQualifiedName~CheckedPcbItemContractTests|FullyQualifiedName~PcbManufacturing|FullyQualifiedName~PcbViaMinimizationTests|FullyQualifiedName~PcbBoardTypedMcpProcessTests|FullyQualifiedName~PcbRoutingContract|FullyQualifiedName~PcbZoneTypedMcpProcessTests|FullyQualifiedName~PcbKeepoutTypedMcpProcessTests|FullyQualifiedName~SchematicConnectionTypedMcpProcess|FullyQualifiedName~SchematicErcExecutionContract|FullyQualifiedName~ProjectSettingsToolTests|FullyQualifiedName~ProjectSettingsMcpProcessTests|FullyQualifiedName~SimulationTypedMcpProcessTests|FullyQualifiedName~SimulationDeckAdmissionTests|FullyQualifiedName~PcbFootprintPlacementTests|FullyQualifiedName~PcbFootprintTypedMcpProcess|FullyQualifiedName~PcbRender|FullyQualifiedName~PcbArtworkReceiptStoreTests|FullyQualifiedName~SymbolLibraryTypedMcpProcessTests|FullyQualifiedName~CapabilityCatalogTests","--logger","trx;LogFileName=results.trx","--results-directory","automation/artifacts/typed-mcp-contracts"]
-retained_artifacts=[{name="typed-mcp-contracts",path="automation/artifacts/typed-mcp-contracts",max_bytes=16777216}]
+retained_artifacts=[{name="typed-mcp-contracts",path="automation/artifacts/typed-mcp-contracts",max_bytes=67108864}]
 
 [test.native-xml-rebuild-focus]
 timeout_seconds=3600

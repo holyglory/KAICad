@@ -31,6 +31,8 @@ public sealed class PcbFootprintPlacementTools(InstanceRegistry registry)
 {
     private static readonly SemaphoreSlim MutationGate = new(1, 1);
     private static readonly Dictionary<string, StoredReceipt> Receipts = new(StringComparer.Ordinal);
+    private readonly PcbFootprintPlacementReceiptStore durableReceipts =
+        new(registry.StateDirectory);
 
     [McpServerTool(Name = "kicad_pcb_footprint_place_plan_typed", ReadOnly = true),
      Description("Prepare an exact footprint placement using a structured PCB document, complete lifecycle checkpoint, fields, normal padstacks and segment/rectangle/circle/arc graphics. Coordinates are nanometers. Returns the complete native candidate and deterministic planId without contacting KiCad. It does not check board clearances, net connectivity or manufacturability."),
@@ -133,6 +135,7 @@ public sealed class PcbFootprintPlacementTools(InstanceRegistry registry)
         string operationId, CancellationToken cancellationToken) => ExecuteMutation(async () =>
     {
         ValidateOperation(operationId);
+        ValidateInstance(instanceId);
         CreateItems request = ParseCandidate(candidateRequestJson);
         DocumentLifecycleState expected = ParseState(expectedStateJson);
         if (request.Header?.Document is null || request.Header.Document.Type != DocumentType.DoctypePcb)
@@ -149,7 +152,7 @@ public sealed class PcbFootprintPlacementTools(InstanceRegistry registry)
         if (!string.Equals(canonicalCandidate, plan.CandidateRequestJson, StringComparison.Ordinal))
             throw new AutomationException("invalid_pcb_footprint_candidate", "The candidate does not match the deterministic placement plan for this footprint and checkpoint.");
         string fingerprint = instanceId + "\n" + canonicalCandidate + "\n" + SchematicJson.Formatter.Format(expected);
-        return await WithReceipt(operationId, fingerprint, async () =>
+        return await WithReceipt(instanceId, expected.ProcessEpoch, operationId, fingerprint, async () =>
         {
             CheckedPcbItemTransaction checkedRequest = BuildCheckedRequest(expected, request, operationId);
             PcbCheckedItemDispatch.Outcome outcome = await PcbCheckedItemDispatch.ApplyAsync(
@@ -159,7 +162,7 @@ public sealed class PcbFootprintPlacementTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_pcb_footprint_place_receipt", ReadOnly = true),
-     Description("Read the MCP process-owned receipt for a footprint placement operation after a lost reply. The tool never resubmits the placement; receipts are discarded when this MCP process restarts and are not native cross-process receipts."),
+     Description("Read the MCP process-owned receipt for a footprint placement operation after a lost reply. The tool never resubmits the placement; successful terminal receipts survive an MCP restart in the configured state directory. Native editor receipts and native cross-process recovery remain separate."),
      KiCadCapability("pcb-placement", "compiled-mcp plus native-board-api", "operation UUID and process-owned placement receipt"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp", "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Receipt(string instanceId, string expectedProcessEpoch, string operationId,
@@ -172,6 +175,18 @@ public sealed class PcbFootprintPlacementTools(InstanceRegistry registry)
         await MutationGate.WaitAsync(cancellationToken);
         try
         {
+            PcbFootprintPlacementReceiptRecord? durable = durableReceipts.Read(instanceId, operationId);
+            if (durable is not null)
+            {
+                if (!string.Equals(durable.ProcessEpoch, expectedProcessEpoch, StringComparison.Ordinal))
+                    throw new AutomationException("stale_process_epoch", "The placement receipt belongs to a different native process epoch.");
+                JsonElement durablePayload = JsonDocument.Parse(durable.ResultJson).RootElement.Clone();
+                bool durableNativeReceipt = durablePayload.TryGetProperty("nativeReceiptAvailable", out JsonElement durableNative)
+                    && durableNative.ValueKind == JsonValueKind.True;
+                return ReceiptData(new { instanceId, processEpoch = durable.ProcessEpoch, operationId,
+                    found = true, receiptScope = "mcp-durable", nativeReceiptAvailable = durableNativeReceipt,
+                    receipt = durablePayload });
+            }
             if (!Receipts.TryGetValue(operationId, out StoredReceipt? stored))
                 return ReceiptData(new { instanceId, processEpoch = expectedProcessEpoch, operationId, found = false,
                     receiptScope = "mcp-process", nativeReceiptAvailable = false });
@@ -345,25 +360,52 @@ public sealed class PcbFootprintPlacementTools(InstanceRegistry registry)
             throw new AutomationException("invalid_operation_id", "operationId must be a canonical nonempty UUID.");
     }
 
+    private static void ValidateInstance(string value)
+    {
+        if (!PcbFootprintPlacementReceiptRecord.CanonicalGuid(value))
+            throw new AutomationException("invalid_instance_id", "instanceId must be a canonical UUID.");
+    }
+
     private static void ValidateEpoch(string value)
     {
         if (!Guid.TryParseExact(value, "D", out Guid epoch) || epoch == Guid.Empty)
             throw new AutomationException("invalid_process_epoch", "Provide the canonical process epoch from the attached KiCad session.");
     }
 
-    private static async Task<CallToolResult> WithReceipt(string operationId, string fingerprint,
+    private async Task<CallToolResult> WithReceipt(string instanceId, string expectedProcessEpoch,
+        string operationId, string fingerprint,
         Func<Task<CallToolResult>> action)
     {
+        ValidateInstance(instanceId);
+        if (!PcbFootprintPlacementReceiptRecord.CanonicalGuid(expectedProcessEpoch))
+            throw new AutomationException("invalid_process_epoch", "processEpoch must be a canonical UUID.");
+        string requestFingerprintSha256 = PcbFootprintPlacementReceiptStore.Fingerprint(fingerprint);
         await MutationGate.WaitAsync();
         try
         {
+            using FileStream lease = durableReceipts.Acquire(instanceId, operationId);
+            PcbFootprintPlacementReceiptRecord? durable = durableReceipts.Read(instanceId, operationId);
+            if (durable is not null)
+            {
+                if (durable.RequestFingerprintSha256 != requestFingerprintSha256)
+                    throw new AutomationException("operation_id_reused", "The PCB footprint-placement operation UUID is already bound to a different request.");
+                if (durable.ProcessEpoch != expectedProcessEpoch)
+                    throw new AutomationException("stale_process_epoch", "The PCB footprint-placement receipt belongs to a different native process epoch.");
+                return PcbFootprintPlacementReceiptStore.ReplayResult(durable);
+            }
             if (Receipts.TryGetValue(operationId, out StoredReceipt? existing))
             {
                 if (existing.Fingerprint != fingerprint)
                     throw new AutomationException("operation_id_reused", "The operation ID is already bound to a different footprint placement.");
+                return existing.Result;
             }
             CallToolResult result = await action();
-            if (!(result.IsError ?? false)) Receipts[operationId] = new(fingerprint, result);
+            if (!(result.IsError ?? false))
+            {
+                durableReceipts.WriteHeld(instanceId, expectedProcessEpoch, operationId,
+                    requestFingerprintSha256, result);
+                Receipts[operationId] = new(fingerprint, result);
+            }
             return result;
         }
         finally { MutationGate.Release(); }

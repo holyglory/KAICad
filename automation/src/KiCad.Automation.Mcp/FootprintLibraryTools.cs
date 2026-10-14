@@ -592,6 +592,7 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
                 || expectedRequest.OperationId != operationId)
                 throw new AutomationException("invalid_library_request", "expectedRequestJson must retain the same document, process epoch and operation UUID.");
             var receiptStore = new FootprintLibraryCheckedReceiptStore(registry.StateDirectory);
+            FootprintLibraryCheckedReceiptRecord? durableBeforeNative = receiptStore.Read(instanceId, operationId);
             NativeCapabilityFootprintLibraryCheckedReadOperationResponse? nativeResponse = null;
             try
             {
@@ -608,7 +609,12 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
                 if (nativeResponse.Found)
                 {
                     FootprintLibraryCheckedContract.ValidateResponse(nativeResponse.Receipt, expectedRequest);
-                    receiptStore.WriteTerminal(instanceId, expectedRequest, nativeResponse.Receipt);
+                    // A live native read is authoritative for this response,
+                    // but an existing durable terminal record is immutable.
+                    // Native replay/read responses may differ in observation
+                    // metadata, so do not overwrite the durable evidence.
+                    if (durableBeforeNative?.Outcome != FootprintLibraryCheckedReceiptRecord.Terminal)
+                        receiptStore.WriteTerminal(instanceId, expectedRequest, nativeResponse.Receipt);
                     return Data(new
                     {
                         instanceId, processEpoch = session.Epoch, operationId, found = true,

@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Google.Protobuf;
 using KiCad.Automation.Model;
+using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
 
 namespace KiCad.Automation.Mcp;

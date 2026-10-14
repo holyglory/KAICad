@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 using System.Text;
 using System.Security.Cryptography;
 using KiCad.Automation.Mcp;
+using KiCad.Automation.Model;
 using KiCad.Automation.Protocol;
 using Kiapi.Common.Types;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
@@ -14,6 +15,39 @@ namespace KiCad.Automation.Tests;
 [TestClass]
 public sealed class RasterTraceContractTests
 {
+    [TestMethod]
+    public void RasterProjectionAcceptsValidTriangleGeometry()
+    {
+        RasterTraceProjectionTools.ValidateProposal(ValidProjectionProposal());
+    }
+
+    [TestMethod]
+    public void RasterProjectionRejectsDegenerateTriangleGeometry()
+    {
+        RasterTraceResult proposal = ValidProjectionProposal();
+        proposal.FilledPieces[0].Points[2].YNm = 0;
+
+        AssertInvalidProjection(proposal);
+    }
+
+    [TestMethod]
+    public void RasterProjectionRejectsOutOfBoundsGeometry()
+    {
+        RasterTraceResult proposal = ValidProjectionProposal();
+        proposal.FilledPieces[0].Bounds.MaxXNm = 2;
+
+        AssertInvalidProjection(proposal);
+    }
+
+    [TestMethod]
+    public void RasterProjectionRejectsUnknownSourceContour()
+    {
+        RasterTraceResult proposal = ValidProjectionProposal();
+        proposal.FilledPieces[0].SourceContourIds[0] = "retained-but-missing";
+
+        AssertInvalidProjection(proposal);
+    }
+
     [TestMethod]
     public void TraceJsonRetainsAcceptanceDecisionAndRejectionCode()
     {
@@ -69,12 +103,14 @@ public sealed class RasterTraceContractTests
             proposal.Contours.Add(new RasterTraceContour
             {
                 Id = "c0", Orientation = 1,
+                Bounds = Bounds(0, 0, 1_000, 1_000),
                 Points = { new RasterTracePoint { XNm = 0, YNm = 0 }, new RasterTracePoint { XNm = 1_000, YNm = 0 },
                     new RasterTracePoint { XNm = 0, YNm = 1_000 } }
             });
             proposal.FilledPieces.Add(new RasterTraceFilledPiece
             {
                 Id = "p0", SourceContoursAreWholeTrace = true, SourceContourIds = { "c0" },
+                Bounds = Bounds(0, 0, 1_000, 1_000),
                 Points = { new RasterTracePoint { XNm = 0, YNm = 0 }, new RasterTracePoint { XNm = 1_000, YNm = 0 },
                     new RasterTracePoint { XNm = 0, YNm = 1_000 } }
             });
@@ -126,5 +162,40 @@ public sealed class RasterTraceContractTests
         for (DirectoryInfo? directory = new(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
             if (File.Exists(Path.Combine(directory.FullName, "KiCad.Automation.slnx"))) return directory.FullName;
         throw new InvalidOperationException("Run this source test from the automation checkout.");
+    }
+
+    private static RasterTraceResult ValidProjectionProposal()
+    {
+        var proposal = new RasterTraceResult
+        {
+            Accepted = true, SourceSha256 = new string('b', 64), GeometrySha256 = new string('a', 64),
+            CoordinateOrientation = "image_x_right_y_down", Rounding = "nearest_integer",
+            ContourCount = 1, FilledPieceCount = 1
+        };
+        proposal.Contours.Add(new RasterTraceContour
+        {
+            Id = "c0", Bounds = Bounds(0, 0, 10, 10),
+            Points = { Point(0, 0), Point(10, 0), Point(0, 10) }
+        });
+        proposal.FilledPieces.Add(new RasterTraceFilledPiece
+        {
+            Id = "p0", SourceContoursAreWholeTrace = true, SourceContourIds = { "c0" },
+            Bounds = Bounds(0, 0, 10, 10), Points = { Point(0, 0), Point(10, 0), Point(0, 10) }
+        });
+        return proposal;
+    }
+
+    private static RasterTraceBounds Bounds(long minX, long minY, long maxX, long maxY) => new()
+    {
+        MinXNm = minX, MinYNm = minY, MaxXNm = maxX, MaxYNm = maxY
+    };
+
+    private static RasterTracePoint Point(long x, long y) => new() { XNm = x, YNm = y };
+
+    private static void AssertInvalidProjection(RasterTraceResult proposal)
+    {
+        AutomationException error = Assert.ThrowsExactly<AutomationException>(
+            () => RasterTraceProjectionTools.ValidateProposal(proposal));
+        Assert.AreEqual("invalid_raster_trace_proposal", error.Code);
     }
 }

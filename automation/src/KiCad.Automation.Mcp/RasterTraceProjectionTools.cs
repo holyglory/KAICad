@@ -519,7 +519,7 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
         properties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.filled", Value = "true" });
     }
 
-    private static void ValidateProposal(ProtocolRasterTraceResult proposal)
+    internal static void ValidateProposal(ProtocolRasterTraceResult proposal)
     {
         if (!proposal.Accepted || proposal.FilledPieces.Count == 0 || proposal.Contours.Count == 0
             || proposal.GeometrySha256.Length != 64 || proposal.GeometrySha256.Any(c => !Uri.IsHexDigit(c))
@@ -527,10 +527,44 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
             throw new AutomationException("invalid_raster_trace_proposal", "Only an accepted, complete raster trace proposal can be projected.");
         if (proposal.CoordinateOrientation != "image_x_right_y_down" || proposal.Rounding != "nearest_integer")
             throw new AutomationException("invalid_raster_trace_proposal", "The proposal coordinate convention is unsupported.");
-        if (proposal.FilledPieces.Any(piece => piece.Points.Count < 3 || !piece.SourceContoursAreWholeTrace))
-            throw new AutomationException("invalid_raster_trace_proposal", "Every filled piece must be a bounded closed whole-trace proposal.");
         if (proposal.FilledPieceCount != proposal.FilledPieces.Count || proposal.ContourCount != proposal.Contours.Count)
             throw new AutomationException("invalid_raster_trace_proposal", "Proposal counts do not match its retained geometry.");
+
+        HashSet<string> retainedContourIds = proposal.Contours.Select(contour => contour.Id)
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (KiCad.Automation.Protocol.RasterTraceFilledPiece piece in proposal.FilledPieces)
+        {
+            if (!piece.SourceContoursAreWholeTrace || piece.Points.Count < 3
+                || piece.Points.Any(point => !double.IsFinite(point.XNm) || !double.IsFinite(point.YNm)))
+                throw new AutomationException("invalid_raster_trace_proposal", "Every filled piece must be a bounded closed whole-trace proposal with finite points.");
+
+            for (int index = 0; index < piece.Points.Count; index++)
+            {
+                KiCad.Automation.Protocol.RasterTracePoint current = piece.Points[index];
+                KiCad.Automation.Protocol.RasterTracePoint next = piece.Points[(index + 1) % piece.Points.Count];
+                if (current.XNm == next.XNm && current.YNm == next.YNm)
+                    throw new AutomationException("invalid_raster_trace_proposal", "Filled piece vertices must not repeat consecutively.");
+            }
+
+            if (piece.Bounds is null || piece.Bounds.MinXNm >= piece.Bounds.MaxXNm
+                || piece.Bounds.MinYNm >= piece.Bounds.MaxYNm
+                || piece.Points.Any(point => point.XNm < piece.Bounds.MinXNm || point.XNm > piece.Bounds.MaxXNm
+                    || point.YNm < piece.Bounds.MinYNm || point.YNm > piece.Bounds.MaxYNm))
+                throw new AutomationException("invalid_raster_trace_proposal", "Filled piece bounds must be ordered and contain every point.");
+
+            Int128 signedAreaTwice = 0;
+            for (int index = 0; index < piece.Points.Count; index++)
+            {
+                KiCad.Automation.Protocol.RasterTracePoint current = piece.Points[index];
+                KiCad.Automation.Protocol.RasterTracePoint next = piece.Points[(index + 1) % piece.Points.Count];
+                signedAreaTwice += (Int128) current.XNm * next.YNm - (Int128) next.XNm * current.YNm;
+            }
+            if (signedAreaTwice == 0)
+                throw new AutomationException("invalid_raster_trace_proposal", "Filled piece geometry must have nonzero signed area.");
+
+            if (piece.SourceContourIds.Any(id => !retainedContourIds.Contains(id)))
+                throw new AutomationException("invalid_raster_trace_proposal", "Filled pieces must reference retained source contours.");
+        }
     }
 
     private static void ValidateSymbolTarget(RasterTraceSymbolTargetInput target)
@@ -843,7 +877,8 @@ public sealed class RasterTraceProposalInput
             Invert = Invert, TurdSize = TurdSize, CurveToleranceNm = CurveToleranceNm,
             MaxContours = MaxContours, MaxVertices = MaxVertices, GeometrySha256 = GeometrySha256 ?? "",
             ContourCount = ContourCount, VertexCount = VertexCount, FilledPieceCount = FilledPieceCount,
-            PotraceOptTolerancePx = PotraceOptTolerancePx, ContributorSemantics = ContributorSemantics ?? ""
+            PotraceOptTolerancePx = PotraceOptTolerancePx, ContributorSemantics = ContributorSemantics ?? "",
+            Bounds = ToNative(Bounds)
         };
         foreach (RasterTraceContourInput? contour in Contours ?? [])
         {
@@ -851,6 +886,7 @@ public sealed class RasterTraceProposalInput
             result.Contours.Add(new KiCad.Automation.Protocol.RasterTraceContour
             {
                 Id = contour.Id ?? "", ParentId = contour.ParentId ?? "", Hole = contour.Hole, Orientation = contour.Orientation,
+                Bounds = ToNative(contour.Bounds),
                 Points = { (contour.Points ?? []).Where(point => point is not null).Select(point => new KiCad.Automation.Protocol.RasterTracePoint
                     { XNm = point!.XNm, YNm = point.YNm }) }
             });
@@ -862,12 +898,19 @@ public sealed class RasterTraceProposalInput
             {
                 Id = piece.Id ?? "", SourceContoursAreWholeTrace = piece.SourceContoursAreWholeTrace,
                 SourceContourIds = { piece.SourceContourIds ?? [] },
+                Bounds = ToNative(piece.Bounds),
                 Points = { (piece.Points ?? []).Where(point => point is not null).Select(point => new KiCad.Automation.Protocol.RasterTracePoint
                     { XNm = point!.XNm, YNm = point.YNm }) }
             });
         }
         return result;
     }
+
+    private static KiCad.Automation.Protocol.RasterTraceBounds? ToNative(RasterTraceBoundsInput? bounds) =>
+        bounds is null ? null : new KiCad.Automation.Protocol.RasterTraceBounds
+        {
+            MinXNm = bounds.MinXNm, MinYNm = bounds.MinYNm, MaxXNm = bounds.MaxXNm, MaxYNm = bounds.MaxYNm
+        };
 }
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]

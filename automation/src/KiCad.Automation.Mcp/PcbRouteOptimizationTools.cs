@@ -524,7 +524,31 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
     private static CallToolResult CheckedRouteResult(CallToolResult result, PcbDrcJobState drc)
     {
         if (result.IsError ?? false || result.StructuredContent is null)
+        {
+            if (result.IsError == true && result.StructuredContent is JsonElement failure
+                && failure.TryGetProperty("errorCode", out JsonElement errorCode)
+                && string.Equals(errorCode.GetString(), "route_commit_not_confirmed", StringComparison.Ordinal)
+                && failure.TryGetProperty("requestDelivered", out JsonElement delivered)
+                && delivered.ValueKind == JsonValueKind.True)
+            {
+                string message = failure.TryGetProperty("errorMessage", out JsonElement errorMessage)
+                    && errorMessage.ValueKind == JsonValueKind.String
+                    ? errorMessage.GetString() ?? "The native route outcome is unknown."
+                    : "The native route outcome is unknown.";
+                JsonElement unknown = JsonSerializer.SerializeToElement(new
+                {
+                    errorCode = "operation_outcome_unknown",
+                    errorMessage = message
+                }, JsonOptions);
+                return new CallToolResult
+                {
+                    IsError = true,
+                    StructuredContent = unknown,
+                    Content = [new TextContentBlock { Text = unknown.GetRawText() }]
+                };
+            }
             return result;
+        }
         JsonElement payload = result.StructuredContent!.Value;
         var receipt = SchematicJson.Parser.Parse<CheckedPcbRouteReceipt>(payload.GetProperty("receipt").GetRawText());
 

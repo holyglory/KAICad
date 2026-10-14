@@ -377,7 +377,8 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
         }
         catch (NngException error)
         {
-            return Failure("route_commit_not_confirmed", $"The native reply was lost after operation {operationId}; inspect the exact route receipt before retrying: {error.Message}");
+            return Failure("route_commit_not_confirmed", $"The native reply was lost after operation {operationId}; inspect the exact route receipt before retrying: {error.Message}",
+                error.RequestDelivered);
         }
         catch (Exception error) when (error is AutomationException or NativeApiException or InvalidProtocolBufferException or InvalidJsonException)
         {
@@ -586,9 +587,11 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
         }
     }
 
-    private static CallToolResult Failure(string code, string message)
+    private static CallToolResult Failure(string code, string message, bool? requestDelivered = null)
     {
-        var structured = JsonSerializer.SerializeToElement(new { errorCode = code, errorMessage = message });
+        JsonElement structured = requestDelivered is { } delivered
+            ? JsonSerializer.SerializeToElement(new { errorCode = code, errorMessage = message, requestDelivered = delivered })
+            : JsonSerializer.SerializeToElement(new { errorCode = code, errorMessage = message });
         return new CallToolResult { IsError = true, StructuredContent = structured,
             Content = [new TextContentBlock { Text = structured.GetRawText() }] };
     }

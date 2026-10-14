@@ -201,6 +201,92 @@ public sealed partial class PcbCheckedItemMigrationTests
     }
 
     [TestMethod]
+    [DataRow(true)]
+    [DataRow(false)]
+    public async Task DrcReplacementTransportOutcomeUsesDeliveryEvidence(bool requestDelivered)
+    {
+        string root = Directory.CreateTempSubdirectory("pcb-drc-replacement-transport-").FullName;
+        try
+        {
+            var transport = new MigrationTransport
+            {
+                RouteFailure = new NngException(5, requestDelivered ? "lost reply" : "not delivered",
+                    requestDelivered)
+            };
+            var registry = new InstanceRegistry(transport, root);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(root, "native.sock")),
+                transport.InstanceId);
+            var expected = State(root, transport.Epoch, 5, 'a');
+            var replacement = Track(Guid.NewGuid().ToString("D"), 1_000, 2_000);
+            replacement.Net = new() { Name = "N1" };
+            var create = new CreateItems { Header = new() { Document = expected.Document }, Items = { Any.Pack(replacement) } };
+            var delete = new DeleteItems { Header = new() { Document = expected.Document },
+                ItemIds = { new KIID { Value = Guid.NewGuid().ToString("D") } } };
+            transport.ExistingItems.Items.Add(Any.Pack(Track(delete.ItemIds[0].Value, 1_000, 2_000)));
+            var start = new StartPcbDrcJob
+            {
+                Document = expected.Document.Clone(), ProcessEpoch = transport.Epoch,
+                OperationId = Guid.NewGuid().ToString("D"), ExpectedRevision = expected.Revision.Clone(),
+                CandidateItems = { create.Items }, DeleteItemIds = { delete.ItemIds }
+            };
+            var drc = await registry.Client(transport.InstanceId).InvokeAsync<StartPcbDrcJob, PcbDrcJobState>(start);
+            string createJson = BoardJson.Formatter.Format(create);
+            string deleteJson = BoardJson.Formatter.Format(delete);
+            string stateJson = SchematicJson.Formatter.Format(expected);
+            string drcJson = SchematicJson.Formatter.Format(drc);
+            string operationId = Guid.NewGuid().ToString("D");
+            var tools = new PcbRouteOptimizationTools(registry);
+
+            CallToolResult first = await tools.RerouteApply(transport.InstanceId, deleteJson, createJson,
+                stateJson, operationId, default, drcJson);
+            Assert.IsTrue(first.IsError ?? false);
+            if (requestDelivered)
+            {
+                Assert.AreEqual("operation_outcome_unknown",
+                    first.StructuredContent!.Value.GetProperty("errorCode").GetString());
+                int exchangesAfterLoss = transport.Exchanges;
+
+                // A fresh MCP registry can still inspect the durable route receipt
+                // without a native attachment, and it must refuse redispatch.
+                var restarted = new InstanceRegistry(new OfflineTransport(), root);
+                var replayTools = new PcbRouteOptimizationTools(restarted);
+                JsonElement receipt = (await replayTools.RerouteReceipt(
+                    transport.InstanceId, transport.Epoch, operationId, default)).StructuredContent!.Value;
+                Assert.IsTrue(receipt.GetProperty("found").GetBoolean());
+                Assert.AreEqual("unknown", receipt.GetProperty("outcome").GetString());
+                Assert.AreEqual("unknown-native-outcome", receipt.GetProperty("retrySafety").GetString());
+
+                CallToolResult retry = await replayTools.RerouteApply(transport.InstanceId, deleteJson, createJson,
+                    stateJson, operationId, default, drcJson);
+                Assert.IsTrue(retry.IsError ?? false);
+                Assert.AreEqual("operation_outcome_unknown",
+                    retry.StructuredContent!.Value.GetProperty("errorCode").GetString());
+                Assert.AreEqual(exchangesAfterLoss, transport.Exchanges,
+                    "A delivered route outcome must be reconciled before another native dispatch.");
+            }
+            else
+            {
+                Assert.AreEqual("route_commit_not_confirmed",
+                    first.StructuredContent!.Value.GetProperty("errorCode").GetString());
+                Assert.IsFalse(first.StructuredContent.Value.GetProperty("requestDelivered").GetBoolean());
+
+                // A transport failure before native delivery has no durable
+                // unknown outcome, so the exact operation remains retryable.
+                transport.RouteFailure = null;
+                JsonElement applied = Success(await tools.RerouteApply(transport.InstanceId, deleteJson,
+                    createJson, stateJson, operationId, default, drcJson));
+                Assert.IsTrue(applied.GetProperty("mutationConfirmed").GetBoolean());
+                Assert.AreEqual(1, transport.AppliedRouteTransactions);
+                JsonElement receipt = (await tools.RerouteReceipt(
+                    transport.InstanceId, transport.Epoch, operationId, default)).StructuredContent!.Value;
+                Assert.IsTrue(receipt.GetProperty("found").GetBoolean());
+                Assert.AreEqual("completed", receipt.GetProperty("outcome").GetString());
+            }
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
     [DataRow("placement")]
     [DataRow("cleanup")]
     [DataRow("corner")]

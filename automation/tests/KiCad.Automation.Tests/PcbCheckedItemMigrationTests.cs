@@ -323,6 +323,8 @@ public sealed partial class PcbCheckedItemMigrationTests
             if (request.Message.Is(CheckedPcbRouteCommit.Descriptor))
             {
                 RouteMutations++;
+                if (RouteFailure is { } routeFailure)
+                    throw routeFailure;
                 var commit = request.Message.Unpack<CheckedPcbRouteCommit>();
                 if (routeReceipts.TryGetValue(commit.OperationId, out var retained))
                 {
@@ -371,8 +373,8 @@ public sealed partial class PcbCheckedItemMigrationTests
             if (!request.Message.Is(CheckedPcbItemTransaction.Descriptor))
                 return Error("unexpected test request");
 
-            if (RouteFailure is { } routeFailure)
-                throw routeFailure;
+            if (RouteFailure is { } itemRouteFailure)
+                throw itemRouteFailure;
 
             CheckedMutations++;
             var checkedRequest = request.Message.Unpack<CheckedPcbItemTransaction>();

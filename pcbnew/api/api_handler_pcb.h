@@ -203,7 +203,7 @@ private:
     handleGetPcbManufacturingManagerCapabilities(
             const HANDLER_CONTEXT<kiapi::automation::v1::GetPcbManufacturingManagerCapabilities>& aCtx );
 
-    // Native manager recovery seam.  SVG and Gerber requests may use the
+    // Native manager recovery seam. SVG, Gerber and ODB++ requests may use the
     // KiCad-owned synchronous plot adapters on this handler's owner thread.
     // Detached workers and restart publication remain separate unsupported
     // features; the legacy synchronous exporter remains backward compatible.

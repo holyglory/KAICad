@@ -102,6 +102,10 @@ message PcbManufacturingManagerCapabilities
   // owning editor thread. This has the same detached-worker and restart
   // recovery limits as the SVG adapter.
   bool synchronous_gerber_export_supported = 416;
+  // The existing ODB++ board-job exporter can also run synchronously on the
+  // owning editor thread. This has the same detached-worker and restart
+  // recovery limits as the SVG and Gerber adapters.
+  bool synchronous_odb_export_supported = 417;
   // -- end lane 2D --
 }
 

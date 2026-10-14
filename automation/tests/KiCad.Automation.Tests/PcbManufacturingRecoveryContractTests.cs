@@ -18,6 +18,7 @@ public sealed class PcbManufacturingRecoveryContractTests
         {
             SynchronousSvgExportSupported = true,
             SynchronousGerberExportSupported = true,
+            SynchronousOdbExportSupported = true,
             PublishedOutputsVerificationSupported = true,
             DetachedExportSupported = false,
             PublicationSupported = false,
@@ -26,6 +27,7 @@ public sealed class PcbManufacturingRecoveryContractTests
 
         Assert.IsTrue(capabilities.SynchronousSvgExportSupported);
         Assert.IsTrue(capabilities.SynchronousGerberExportSupported);
+        Assert.IsTrue(capabilities.SynchronousOdbExportSupported);
         Assert.IsTrue(capabilities.PublishedOutputsVerificationSupported);
         Assert.IsFalse(capabilities.DetachedExportSupported);
         Assert.IsFalse(capabilities.PublicationSupported);

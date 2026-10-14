@@ -374,6 +374,83 @@ public sealed partial class NativeSessionTests
                 managerGerberReplay.GetProperty("structuredContent").GetProperty("receipt").GetRawText(),
                 "Replaying an exact Gerber manager request must return its retained native receipt.");
 
+            // ODB++ uses the same synchronous owner-thread manager adapter.
+            // Keep the assertion on the real archive, its verified readback,
+            // and exact-operation replay; detached workers and restart
+            // publication remain deliberately outside this capability.
+            string managerOdbOutputDirectory = Path.Combine(exportDirectory, "manager-odb");
+            string managerOdbOperationId = Guid.NewGuid().ToString("D");
+            object managerOdbInput = new
+            {
+                operationId = managerOdbOperationId,
+                document = typedDocument,
+                expectedState = typedExpectedState,
+                outputDirectory = managerOdbOutputDirectory,
+                job = new
+                {
+                    exportOdb = new
+                    {
+                        units = "UMm",
+                        compression = 2
+                    }
+                }
+            };
+            var managerOdbReply = await mcp.Tool("kicad_pcb_export_start_typed", new
+            { instanceId, input = managerOdbInput });
+            Assert.IsFalse(managerOdbReply.TryGetProperty("isError", out var managerOdbError)
+                && managerOdbError.GetBoolean(), managerOdbReply.GetRawText());
+            var managerOdbData = managerOdbReply.GetProperty("structuredContent");
+            Assert.AreEqual("PcbMfgExportCompleted", managerOdbData.GetProperty("status").GetString(),
+                managerOdbReply.GetRawText());
+            Assert.IsTrue(managerOdbData.GetProperty("exportAdapterAvailable").GetBoolean(),
+                managerOdbReply.GetRawText());
+            Assert.IsTrue(managerOdbData.GetProperty("nativeDispatch").GetBoolean(),
+                managerOdbReply.GetRawText());
+            Assert.IsTrue(managerOdbData.GetProperty("workerFinished").GetBoolean(),
+                managerOdbReply.GetRawText());
+            Assert.IsTrue(managerOdbData.GetProperty("outputGenerated").GetBoolean(),
+                managerOdbReply.GetRawText());
+            JsonElement managerOdbReceipt = managerOdbData.GetProperty("receipt");
+            Assert.AreEqual("PCB_MFG_PUBLICATION_PUBLISHED",
+                managerOdbReceipt.GetProperty("publicationState").GetString(), managerOdbReply.GetRawText());
+            Assert.IsTrue(managerOdbReceipt.GetProperty("publicationCommitted").GetBoolean(),
+                managerOdbReply.GetRawText());
+            string managerOdbPath = managerOdbReceipt.GetProperty("artifacts").EnumerateArray()
+                .Select(artifact => artifact.GetProperty("path").GetString()!)
+                .Single(path => Path.GetExtension(path).Equals(".zip", StringComparison.OrdinalIgnoreCase));
+            Assert.IsTrue(File.Exists(managerOdbPath), managerOdbReply.GetRawText());
+            Assert.IsTrue(new FileInfo(managerOdbPath).Length > 0,
+                "The manager ODB++ adapter must publish a non-empty archive.");
+
+            string managerOdbFingerprint = managerOdbReceipt.GetProperty("requestFingerprintSha256").GetString()!;
+            var managerOdbRead = await mcp.Tool("kicad_pcb_export_read_typed", new
+            {
+                instanceId,
+                input = new
+                {
+                    document = typedDocument,
+                    processEpoch = before.ProcessEpoch,
+                    operationId = managerOdbOperationId,
+                    requestFingerprintSha256 = managerOdbFingerprint
+                }
+            });
+            Assert.IsFalse(managerOdbRead.TryGetProperty("isError", out var managerOdbReadError)
+                && managerOdbReadError.GetBoolean(), managerOdbRead.GetRawText());
+            var managerOdbReadData = managerOdbRead.GetProperty("structuredContent");
+            Assert.IsTrue(managerOdbReadData.GetProperty("found").GetBoolean(), managerOdbRead.GetRawText());
+            Assert.IsTrue(managerOdbReadData.GetProperty("publishedOutputsVerified").GetBoolean(),
+                managerOdbRead.GetRawText());
+            Assert.AreEqual(managerOdbReceipt.GetRawText(),
+                managerOdbReadData.GetProperty("receipt").GetRawText(), managerOdbRead.GetRawText());
+
+            var managerOdbReplay = await mcp.Tool("kicad_pcb_export_start_typed", new
+            { instanceId, input = managerOdbInput });
+            Assert.IsFalse(managerOdbReplay.TryGetProperty("isError", out var managerOdbReplayError)
+                && managerOdbReplayError.GetBoolean(), managerOdbReplay.GetRawText());
+            Assert.AreEqual(managerOdbReceipt.GetRawText(),
+                managerOdbReplay.GetProperty("structuredContent").GetProperty("receipt").GetRawText(),
+                "Replaying an exact ODB++ manager request must return its retained native receipt.");
+
             var managerCapabilities = await mcp.Tool("kicad_pcb_export_manager_capabilities_typed", new
             {
                 instanceId,
@@ -385,6 +462,8 @@ public sealed partial class NativeSessionTests
                 .GetProperty("synchronousSvgExportSupported").GetBoolean(), managerCapabilities.GetRawText());
             Assert.IsTrue(managerCapabilities.GetProperty("structuredContent")
                 .GetProperty("synchronousGerberExportSupported").GetBoolean(), managerCapabilities.GetRawText());
+            Assert.IsTrue(managerCapabilities.GetProperty("structuredContent")
+                .GetProperty("synchronousOdbExportSupported").GetBoolean(), managerCapabilities.GetRawText());
 
             var replayReply = await mcp.Tool("kicad_pcb_export", new { instanceId, input = typedInput });
             Assert.IsFalse(replayReply.TryGetProperty("isError", out var replayError) && replayError.GetBoolean(), replayReply.GetRawText());

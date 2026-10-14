@@ -14,7 +14,7 @@ using ModelContextProtocol.Server;
 namespace KiCad.Automation.Mcp;
 
 /// <summary>
-/// Typed admission for the native manufacturing manager.  SVG and Gerber
+/// Typed admission for the native manufacturing manager. SVG, Gerber and ODB++
 /// requests may complete through KiCad's synchronous owner-thread plot
 /// adapters; detached snapshots, worker ownership and cross-process
 /// publication remain separate unsupported boundaries.  These wrappers
@@ -23,8 +23,8 @@ namespace KiCad.Automation.Mcp;
 public sealed partial class PcbJobTools
 {
     [McpServerTool(Name = "kicad_pcb_export_start_typed", ReadOnly = false),
-     Description("Admit one typed PCB manufacturing export to the native recovery manager. SVG and Gerber requests dispatch synchronously through KiCad's owner-thread plot adapters and return a journaled publication receipt; other job families remain fail-closed as export_adapter_unavailable. Detached workers and restart recovery are not claimed, and the existing synchronous kicad_pcb_export tool remains unchanged."),
-     KiCadCapability("pcb-manufacturing", "typed-recovery-manager-admission", "typed export request, durable journal admission and SVG/Gerber owner-thread adapter availability"),
+     Description("Admit one typed PCB manufacturing export to the native recovery manager. SVG, Gerber and ODB++ requests dispatch synchronously through KiCad's owner-thread adapters and return a journaled publication receipt; other job families remain fail-closed as export_adapter_unavailable. Detached workers and restart recovery are not claimed, and the existing synchronous kicad_pcb_export tool remains unchanged."),
+     KiCadCapability("pcb-manufacturing", "typed-recovery-manager-admission", "typed export request, durable journal admission and SVG/Gerber/ODB++ owner-thread adapter availability"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbManufacturingRecoveryContractTests.CompiledStdioPublishesTypedRecoveryToolsAndFailsClosedForIncompleteInput")]
     public Task<CallToolResult> ExportStartTyped(string instanceId,
         PcbManufacturingExportInput input, CancellationToken cancellationToken) => ExecuteRecovery(async () =>
@@ -45,6 +45,7 @@ public sealed partial class PcbJobTools
         {
             RunPcbManufacturingExport.JobOneofCase.ExportSvg => "SVG",
             RunPcbManufacturingExport.JobOneofCase.ExportGerbers => "Gerber",
+            RunPcbManufacturingExport.JobOneofCase.ExportOdb => "ODB++",
             _ => "requested"
         };
         string? errorCode = completed ? null
@@ -194,7 +195,7 @@ public sealed partial class PcbJobTools
     }
 
     [McpServerTool(Name = "kicad_pcb_export_manager_capabilities_typed", ReadOnly = true),
-     Description("Read the native manufacturing manager's supported recovery boundaries for one PCB. The manager reports durable admission and journal recovery plus synchronous SVG and Gerber owner-thread dispatch; detached workers, restart publication and complete dependency snapshots remain unavailable."),
+     Description("Read the native manufacturing manager's supported recovery boundaries for one PCB. The manager reports durable admission and journal recovery plus synchronous SVG, Gerber and ODB++ owner-thread dispatch; detached workers, restart publication and complete dependency snapshots remain unavailable."),
      KiCadCapability("pcb-manufacturing", "typed-recovery-capabilities", "explicit PCB document and current process epoch"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbManufacturingRecoveryContractTests.CompiledStdioPublishesTypedRecoveryToolsAndFailsClosedForIncompleteInput")]
     public Task<CallToolResult> ExportManagerCapabilitiesTyped(string instanceId,
@@ -210,6 +211,7 @@ public sealed partial class PcbJobTools
         if( !result.Document.Equals(target) || result.ProcessEpoch != epoch || string.IsNullOrWhiteSpace(result.UnavailableReason)
             || !result.SynchronousSvgExportSupported
             || !result.SynchronousGerberExportSupported
+            || !result.SynchronousOdbExportSupported
             || !result.AdmissionSupported || !result.RequestJournalSupported || !result.JournalReadSupported
             || !result.PublishedOutputsVerificationSupported
             || result.DetachedExportSupported || result.PublicationSupported || result.CompleteSnapshotSupported )
@@ -218,6 +220,7 @@ public sealed partial class PcbJobTools
         return Data(new { instanceId, processEpoch = session.Epoch,
             synchronousSvgExportSupported = result.SynchronousSvgExportSupported,
             synchronousGerberExportSupported = result.SynchronousGerberExportSupported,
+            synchronousOdbExportSupported = result.SynchronousOdbExportSupported,
             publishedOutputsVerificationSupported = result.PublishedOutputsVerificationSupported,
             capabilities = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(result)) });
     }, null, input?.ProcessEpoch);

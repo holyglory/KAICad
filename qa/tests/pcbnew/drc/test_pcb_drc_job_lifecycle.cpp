@@ -3072,7 +3072,7 @@ BOOST_AUTO_TEST_CASE( ManufacturingManagerAdmissionJournalAndReadOnlyReconcile )
     asyncRequest.set_operation_id( KIID().AsString().ToStdString() );
     auto asyncAdmitted = manager.Start( asyncRequest, epoch, capture, true );
     BOOST_REQUIRE_MESSAGE( asyncAdmitted.has_value(), ( asyncAdmitted ? "" : asyncAdmitted.error() ) );
-    BOOST_CHECK( asyncAdmitted->worker_started() );
+    BOOST_CHECK( !asyncAdmitted->worker_started() );
     std::atomic<bool> adapterEntered{ false };
     std::atomic<bool> adapterObservedCancellation{ false };
     std::atomic<bool> adapterContextValid{ false };
@@ -3092,6 +3092,7 @@ BOOST_AUTO_TEST_CASE( ManufacturingManagerAdmissionJournalAndReadOnlyReconcile )
                 return tl::unexpected( "cooperative_cancel" );
             } );
     BOOST_REQUIRE_MESSAGE( asyncAccepted.has_value(), ( asyncAccepted ? "" : asyncAccepted.error() ) );
+    BOOST_CHECK( asyncAccepted->worker_started() );
     for( int attempt = 0; attempt < 500 && !adapterEntered.load( std::memory_order_acquire ); ++attempt )
         std::this_thread::sleep_for( std::chrono::milliseconds( 1 ) );
     BOOST_REQUIRE( adapterEntered.load( std::memory_order_acquire ) );

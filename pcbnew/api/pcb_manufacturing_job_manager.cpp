@@ -1056,12 +1056,27 @@ PCB_MANUFACTURING_JOB_MANAGER::Cancel( const CancelPcbManufacturingExport& aRequ
             return tl::unexpected( "manufacturing_worker_unavailable" );
         worker->second->cancellation->Request();
     }
+    Receipt cancellationAck;
+    if( running )
+    {
+        cancellationAck = prior->receipt();
+        cancellationAck.set_cancellation_requested( true );
+        cancellationAck.set_recovery_state( PCB_MFG_RECOVERY_CANCEL_REQUESTED );
+    }
     // Never hold the in-memory manager mutex while waiting for the operation
     // file lease.  A worker keeps that lease across its adapter callback and
     // needs m_mutex to publish its terminal receipt after observing this token.
     lock.unlock();
     auto lease = AcquireOperationLock( fs::u8path( m_journalDirectory.ToStdString() ), aRequest.operation_id() );
-    if( !lease ) return tl::unexpected( lease.error() );
+    if( !lease )
+    {
+        // The worker may still own the journal lease while it observes the
+        // token. Return an explicit transient acknowledgement instead of
+        // turning a valid cancellation request into a transport-style error;
+        // Join or a later receipt read provides the terminal result.
+        if( running && lease.error() == "manufacturing_journal_busy" ) return cancellationAck;
+        return tl::unexpected( lease.error() );
+    }
     auto journal = read( aRequest.operation_id() );
     if( !journal ) return tl::unexpected( journal.error() );
     if( journal->receipt().terminal() ) return journal->receipt();

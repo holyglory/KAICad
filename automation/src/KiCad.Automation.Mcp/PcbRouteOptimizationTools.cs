@@ -170,24 +170,24 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
             : Apply(instanceId, deleteRequestJson, createRequestJson, expectedStateJson, operationId, cancellationToken, drcJobStateJson);
 
     [McpServerTool(Name = "kicad_pcb_route_reroute_receipt", ReadOnly = true),
-     Description("Read the process-owned receipt for a headless reroute apply after a lost reply. It never resubmits route geometry and does not replace a native cross-process receipt."),
-     KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "operation UUID and process-owned reroute receipt"),
+     Description("Read the durable MCP-state receipt for a headless reroute apply after a lost reply. It never resubmits route geometry and does not replace a native cross-process receipt."),
+     KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "operation UUID and durable MCP-state route receipt"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> RerouteReceipt(string instanceId, string expectedProcessEpoch, string operationId,
         CancellationToken cancellationToken)
         => Receipt(instanceId, expectedProcessEpoch, operationId, cancellationToken);
 
     [McpServerTool(Name = "kicad_pcb_route_tune_receipt", ReadOnly = true),
-     Description("Read the process-owned receipt for a DRC-gated PCB length/skew-tuning apply after a lost reply. It never resubmits geometry and does not replace a native cross-process receipt."),
-     KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "operation UUID and process-owned tuning receipt"),
+     Description("Read the durable MCP-state receipt for a DRC-gated PCB length/skew-tuning apply after a lost reply. It never resubmits geometry and does not replace a native cross-process receipt."),
+     KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "operation UUID and durable MCP-state route receipt"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> TuneReceipt(string instanceId, string expectedProcessEpoch, string operationId,
         CancellationToken cancellationToken)
         => Receipt(instanceId, expectedProcessEpoch, operationId, cancellationToken);
 
     [McpServerTool(Name = "kicad_pcb_route_corner_optimize_receipt", ReadOnly = true),
-     Description("Read the MCP process-owned receipt for a corner-optimization mutation after a lost reply. It never resubmits geometry and does not replace a native cross-process receipt."),
-     KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "operation UUID and process-owned corner-optimization receipt"),
+     Description("Read the durable MCP-state receipt for a corner-optimization mutation after a lost reply. It never resubmits geometry and does not replace a native cross-process receipt."),
+     KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "operation UUID and durable MCP-state route receipt"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Receipt(string instanceId, string expectedProcessEpoch, string operationId,
         CancellationToken cancellationToken) => ExecuteMutation(async () =>

@@ -256,7 +256,7 @@ public sealed class PcbDrcToolTests
             Assert.IsFalse(result.IsError ?? false);
             Assert.AreEqual(state, SchematicJson.Parser.Parse<PcbDrcState>(((TextContentBlock)result.Content.Single()).Text));
             Assert.IsFalse(state.ResultsFreshnessKnown);
-            foreach (int variant in Enumerable.Range(0, 6))
+            foreach (int variant in Enumerable.Range(0, 7))
             {
                 transport.State = state.Clone();
                 switch (variant)
@@ -267,8 +267,15 @@ public sealed class PcbDrcToolTests
                     case 3: transport.State.Findings[0].NativeId = "bad"; break;
                     case 4: transport.State.Findings.Add(transport.State.Findings[0].Clone()); break;
                     case 5: transport.State.Revision.Epoch = "DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD"; break;
+                    // A marker inventory observed by another native process is
+                    // not a recovery receipt for this attached instance.  The
+                    // managed boundary must reject it before exposing markers.
+                    case 6: transport.State.ProcessEpoch = Guid.NewGuid().ToString("D"); break;
                 }
-                Assert.IsTrue((await tool.Read(transport.Session.InstanceId, json, default)).IsError);
+                var rejected = await tool.Read(transport.Session.InstanceId, json, default);
+                Assert.IsTrue(rejected.IsError);
+                if (variant == 6)
+                    Assert.AreEqual("invalid_drc_state", rejected.StructuredContent!.Value.GetProperty("code").GetString());
             }
             transport.State = state.Clone(); transport.State.Running = true;
             transport.State.MarkerSnapshotComplete = false; transport.State.Findings.Clear();

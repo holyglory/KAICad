@@ -23,7 +23,7 @@ namespace KiCad.Automation.Mcp;
 public sealed partial class PcbJobTools
 {
     [McpServerTool(Name = "kicad_pcb_export_start_typed", ReadOnly = false),
-     Description("Admit one typed PCB manufacturing export to the native recovery manager. SVG, Gerber, ODB++ and IPC-2581 requests dispatch synchronously through KiCad's owner-thread adapters and return a journaled publication receipt; other job families remain fail-closed as export_adapter_unavailable. Detached workers and restart recovery are not claimed, and the existing synchronous kicad_pcb_export tool remains unchanged."),
+     Description("Admit one typed PCB manufacturing export to the native recovery manager. SVG, Gerber, ODB++ and IPC-2581 requests dispatch synchronously through KiCad's owner-thread adapters and return a journaled publication receipt; board statistics and other job families are refused before native admission because no serialized-snapshot adapter exists. Use the existing synchronous kicad_pcb_export tool for board statistics. Detached workers and restart recovery are not claimed."),
      KiCadCapability("pcb-manufacturing", "typed-recovery-manager-admission", "typed export request, durable journal admission and SVG/Gerber/ODB++/IPC-2581 owner-thread adapter availability"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbManufacturingRecoveryContractTests.CompiledStdioPublishesTypedRecoveryToolsAndFailsClosedForIncompleteInput")]
     public Task<CallToolResult> ExportStartTyped(string instanceId,
@@ -32,6 +32,7 @@ public sealed partial class PcbJobTools
         if (input is null)
             throw new AutomationException("invalid_pcb_export_input", "A typed PCB manufacturing export input is required.");
         RunPcbManufacturingExport request = BuildManufacturingRequest(instanceId, input);
+        PcbManufacturingContract.ValidateTypedRecoveryJob(request);
         NativeClient client = registry.Client(instanceId);
         AutomationSession session = await client.HandshakeAsync(cancellationToken);
         if (session.Epoch != request.ProcessEpoch)

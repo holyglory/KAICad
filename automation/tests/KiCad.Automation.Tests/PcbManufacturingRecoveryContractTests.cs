@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Google.Protobuf;
+using Kiapi.Board.Jobs;
 using Kiapi.Common.Commands;
 using KiCad.Automation.Mcp;
 using KiCad.Automation.Model;
@@ -34,6 +35,54 @@ public sealed class PcbManufacturingRecoveryContractTests
         Assert.IsFalse(capabilities.DetachedExportSupported);
         Assert.IsFalse(capabilities.PublicationSupported);
         Assert.IsFalse(capabilities.CompleteSnapshotSupported);
+    }
+
+    [TestMethod]
+    public void TypedRecoveryRefusesStatsWithoutDetachedSnapshotAdapter()
+    {
+        var request = new RunPcbManufacturingExport
+        {
+            ExportStats = new RunBoardJobExportStats()
+        };
+
+        AutomationException error = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbManufacturingContract.ValidateTypedRecoveryJob(request));
+
+        Assert.AreEqual("pcb_export_detached_unsupported", error.Code);
+        StringAssert.Contains(error.Message, "PCBNEW_JOBS_HANDLER");
+        StringAssert.Contains(error.Message, "serialized-snapshot");
+    }
+
+    [TestMethod]
+    public void TypedRecoveryAllowsOnlyTheExistingOwnerThreadAdapters()
+    {
+        foreach (RunPcbManufacturingExport.JobOneofCase job in new[]
+        {
+            RunPcbManufacturingExport.JobOneofCase.ExportSvg,
+            RunPcbManufacturingExport.JobOneofCase.ExportGerbers,
+            RunPcbManufacturingExport.JobOneofCase.ExportOdb,
+            RunPcbManufacturingExport.JobOneofCase.ExportIpc2581
+        })
+        {
+            var request = new RunPcbManufacturingExport();
+            switch (job)
+            {
+                case RunPcbManufacturingExport.JobOneofCase.ExportSvg:
+                    request.ExportSvg = new();
+                    break;
+                case RunPcbManufacturingExport.JobOneofCase.ExportGerbers:
+                    request.ExportGerbers = new();
+                    break;
+                case RunPcbManufacturingExport.JobOneofCase.ExportOdb:
+                    request.ExportOdb = new();
+                    break;
+                case RunPcbManufacturingExport.JobOneofCase.ExportIpc2581:
+                    request.ExportIpc2581 = new();
+                    break;
+            }
+
+            PcbManufacturingContract.ValidateTypedRecoveryJob(request);
+        }
     }
 
     [TestMethod]

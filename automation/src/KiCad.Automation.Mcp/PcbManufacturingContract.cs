@@ -14,6 +14,47 @@ namespace KiCad.Automation.Mcp;
 /// </summary>
 internal static class PcbManufacturingContract
 {
+    /// <summary>
+    /// The typed recovery manager currently owns only the four synchronous
+    /// owner-thread adapters exposed by its native contract. Keep the other
+    /// board jobs out of this path until each one can consume the manager's
+    /// immutable serialized snapshot without resolving editor/KIWAY state.
+    /// </summary>
+    public static void ValidateTypedRecoveryJob(RunPcbManufacturingExport request)
+    {
+        if (request is null)
+            throw Invalid("A manufacturing export request is required.");
+
+        if (request.JobCase is RunPcbManufacturingExport.JobOneofCase.ExportSvg
+            or RunPcbManufacturingExport.JobOneofCase.ExportGerbers
+            or RunPcbManufacturingExport.JobOneofCase.ExportOdb
+            or RunPcbManufacturingExport.JobOneofCase.ExportIpc2581)
+            return;
+
+        string job = request.JobCase switch
+        {
+            RunPcbManufacturingExport.JobOneofCase.ExportStats => "board statistics",
+            RunPcbManufacturingExport.JobOneofCase.Export3D => "3D",
+            RunPcbManufacturingExport.JobOneofCase.ExportRender => "render",
+            RunPcbManufacturingExport.JobOneofCase.ExportDxf => "DXF",
+            RunPcbManufacturingExport.JobOneofCase.ExportPdf => "PDF",
+            RunPcbManufacturingExport.JobOneofCase.ExportPs => "PostScript",
+            RunPcbManufacturingExport.JobOneofCase.ExportDrill => "drill",
+            RunPcbManufacturingExport.JobOneofCase.ExportPosition => "position",
+            RunPcbManufacturingExport.JobOneofCase.ExportGencad => "GenCAD",
+            RunPcbManufacturingExport.JobOneofCase.ExportIpcD356 => "IPC-D-356",
+            _ => "the requested job"
+        };
+
+        string detail = request.JobCase == RunPcbManufacturingExport.JobOneofCase.ExportStats
+            ? "The native stats job resolves its board through PCBNEW_JOBS_HANDLER and KIWAY::ProcessJob, and has no serialized-snapshot input."
+            : "The native job has no serialized-snapshot adapter.";
+
+        throw new AutomationException("pcb_export_detached_unsupported",
+            $"Typed recovery cannot dispatch {job} from the manager worker boundary. {detail} "
+            + "Use the existing synchronous kicad_pcb_export tool or wait for a native detached adapter.");
+    }
+
     public static void ValidateRequest(RunPcbManufacturingExport request)
     {
         if (request is null)

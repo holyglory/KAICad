@@ -53,7 +53,7 @@ public sealed class PcbConnectivityTools(InstanceRegistry registry)
         };
         request.Types_.Add(ConnectivityTypes);
         request.Nets.Add(new Net { Name = netName });
-        return await QueryItems(instanceId, document, expected, "net", netName, request, cancellationToken);
+        return await QueryItems(instanceId, document, expected, "net", netName, request, null, cancellationToken);
     });
 
     [McpServerTool(Name = "kicad_pcb_connectivity_query_net_class", ReadOnly = true),
@@ -73,7 +73,7 @@ public sealed class PcbConnectivityTools(InstanceRegistry registry)
         };
         request.Types_.Add(ConnectivityTypes);
         request.NetClasses.Add(netClass);
-        return await QueryItems(instanceId, document, expected, "net-class", netClass, request, cancellationToken);
+        return await QueryItems(instanceId, document, expected, "net-class", netClass, request, null, cancellationToken);
     });
 
     [McpServerTool(Name = "kicad_pcb_connectivity_query_connected", ReadOnly = true),
@@ -93,7 +93,8 @@ public sealed class PcbConnectivityTools(InstanceRegistry registry)
         };
         request.Items.Add(ids);
         request.Types_.Add(ConnectivityTypes);
-        return await QueryItems(instanceId, document, expected, "connected", string.Join(",", sourceItemIds), request, cancellationToken);
+        return await QueryItems(instanceId, document, expected, "connected", string.Join(",", sourceItemIds), request,
+            ids.Select(id => id.Value).ToArray(), cancellationToken);
     });
 
     [McpServerTool(Name = "kicad_pcb_connectivity_query_items", ReadOnly = true),
@@ -112,12 +113,13 @@ public sealed class PcbConnectivityTools(InstanceRegistry registry)
             Header = new ItemHeader { Document = document }
         };
         request.Items.Add(ids);
-        return await QueryItems(instanceId, document, expected, "items-by-id", string.Join(",", itemIds), request, cancellationToken);
+        return await QueryItems(instanceId, document, expected, "items-by-id", string.Join(",", itemIds), request,
+            ids.Select(id => id.Value).ToArray(), cancellationToken);
     });
 
     private async Task<CallToolResult> QueryItems<TRequest>(string instanceId, DocumentSpecifier document,
         DocumentLifecycleState expected, string query, string selector, TRequest request,
-        CancellationToken cancellationToken)
+        IReadOnlyList<string>? selectorIds, CancellationToken cancellationToken)
         where TRequest : class, IMessage<TRequest>, new()
     {
         NativeClient client = registry.Client(instanceId);
@@ -132,6 +134,7 @@ public sealed class PcbConnectivityTools(InstanceRegistry registry)
         DocumentLifecycleState after = await ReadState(client, document, cancellationToken);
         RequireState(after, expected, "The board changed while reading connectivity; discard this snapshot.");
 
+        PcbConnectivitySelector selectorMetadata = DescribeSelector(query, selector, selectorIds);
         return Data(new
         {
             instanceId,
@@ -139,7 +142,11 @@ public sealed class PcbConnectivityTools(InstanceRegistry registry)
             document,
             query,
             selector,
-            netName = query == "net" ? selector : null,
+            selectorKind = selectorMetadata.Kind,
+            netName = selectorMetadata.NetName,
+            netClass = selectorMetadata.NetClass,
+            sourceItemIds = selectorMetadata.SourceItemIds,
+            itemIds = selectorMetadata.ItemIds,
             beforeState = SchematicJson.Formatter.Format(before),
             afterState = SchematicJson.Formatter.Format(after),
             nativeStatus = native.Status.ToString(),
@@ -149,6 +156,28 @@ public sealed class PcbConnectivityTools(InstanceRegistry registry)
             boardMutation = false,
             drcValidated = false
         });
+    }
+
+    /// <summary>
+    /// Gives callers a typed description of the selector that produced a
+    /// connectivity snapshot.  The legacy <c>selector</c> string remains for
+    /// compatibility, while these fields let an agent replay or explain a
+    /// query without parsing a comma-delimited value.
+    /// </summary>
+    internal static PcbConnectivitySelector DescribeSelector(string query, string selector,
+        IReadOnlyList<string>? selectorIds)
+    {
+        return query switch
+        {
+            "net" => new("net", selector, null, null, null),
+            "net-class" => new("net-class", null, selector, null, null),
+            "connected" when selectorIds is { Count: > 0 } =>
+                new("connected", null, null, selectorIds.ToArray(), null),
+            "items-by-id" when selectorIds is { Count: > 0 } =>
+                new("items-by-id", null, null, null, selectorIds.ToArray()),
+            _ => throw new AutomationException("invalid_pcb_connectivity_selector",
+                $"The connectivity query '{query}' does not have a valid typed selector.")
+        };
     }
 
     /// <summary>
@@ -341,13 +370,16 @@ public sealed class PcbConnectivityTools(InstanceRegistry registry)
     {
         if (values is null || values.Length is 0 or > 256)
             throw new AutomationException("invalid_pcb_connectivity_item_ids", "itemIds must contain between 1 and 256 canonical lowercase UUIDs.");
-        return values.Select((value, index) =>
+        KIID[] ids = values.Select((value, index) =>
         {
             if (!Guid.TryParseExact(value, "D", out Guid parsed) || parsed == Guid.Empty
                 || !string.Equals(value, parsed.ToString("D"), StringComparison.Ordinal))
                 throw new AutomationException("invalid_pcb_connectivity_item_id", $"itemIds[{index}] must be a canonical lowercase UUID.");
             return new KIID { Value = value };
         }).ToArray();
+        if (ids.Select(id => id.Value).Distinct(StringComparer.Ordinal).Count() != ids.Length)
+            throw new AutomationException("duplicate_pcb_connectivity_selector", "itemIds must not contain duplicate canonical UUIDs.");
+        return ids;
     }
 
     private static CallToolResult Data(object value)
@@ -394,3 +426,11 @@ internal sealed record PcbConnectivityItem(
     string? Layer,
     string? PadNumber,
     string[]? Layers);
+
+/// <summary>Machine-readable selector metadata paired with one connectivity snapshot.</summary>
+internal sealed record PcbConnectivitySelector(
+    string Kind,
+    string? NetName,
+    string? NetClass,
+    string[]? SourceItemIds,
+    string[]? ItemIds);

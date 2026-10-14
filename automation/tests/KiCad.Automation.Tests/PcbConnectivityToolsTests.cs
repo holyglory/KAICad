@@ -79,4 +79,33 @@ public sealed class PcbConnectivityToolsTests
         Assert.AreEqual(footprint.Parent.Value, result[0].ParentId);
         Assert.AreEqual(nameof(BoardLayer.BlFCu), result[0].Layer);
     }
+
+    [TestMethod]
+    public void DescribeSelectorReturnsReplayableTypedFields()
+    {
+        var net = PcbConnectivityTools.DescribeSelector("net", "POWER", null);
+        Assert.AreEqual("net", net.Kind);
+        Assert.AreEqual("POWER", net.NetName);
+        Assert.IsNull(net.NetClass);
+        Assert.IsNull(net.SourceItemIds);
+        Assert.IsNull(net.ItemIds);
+
+        var netClass = PcbConnectivityTools.DescribeSelector("net-class", "HighSpeed", null);
+        Assert.AreEqual("net-class", netClass.Kind);
+        Assert.AreEqual("HighSpeed", netClass.NetClass);
+
+        string first = "11111111-1111-4111-8111-111111111111";
+        string second = "22222222-2222-4222-8222-222222222222";
+        var connected = PcbConnectivityTools.DescribeSelector("connected", $"{first},{second}", [first, second]);
+        CollectionAssert.AreEqual(new[] { first, second }, connected.SourceItemIds);
+        Assert.IsNull(connected.ItemIds);
+
+        var byId = PcbConnectivityTools.DescribeSelector("items-by-id", $"{first},{second}", [first, second]);
+        CollectionAssert.AreEqual(new[] { first, second }, byId.ItemIds);
+        Assert.IsNull(byId.SourceItemIds);
+
+        var invalid = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbConnectivityTools.DescribeSelector("connected", first, null));
+        Assert.AreEqual("invalid_pcb_connectivity_selector", invalid.Code);
+    }
 }

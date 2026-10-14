@@ -144,6 +144,13 @@ public sealed partial class PcbCheckedItemMigrationTests
             Assert.IsTrue(receipt.GetProperty("found").GetBoolean());
             Assert.AreEqual("mcp-state", receipt.GetProperty("receiptScope").GetString());
             Assert.AreEqual(replay.GetRawText(), receipt.GetProperty("receipt").GetRawText());
+
+            // A native process restart changes the epoch.  The durable MCP
+            // receipt remains readable, but must fail closed rather than
+            // presenting an old process-owned outcome as current.
+            AssertError(await replayTools.Receipt(
+                transport.InstanceId, Guid.NewGuid().ToString("D"), operationId, default),
+                "stale_process_epoch");
         }
         finally { Directory.Delete(root, true); }
     }

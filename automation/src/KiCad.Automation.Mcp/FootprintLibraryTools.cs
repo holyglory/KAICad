@@ -592,7 +592,7 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
                 || expectedRequest.OperationId != operationId)
                 throw new AutomationException("invalid_library_request", "expectedRequestJson must retain the same document, process epoch and operation UUID.");
             var receiptStore = new FootprintLibraryCheckedReceiptStore(registry.StateDirectory);
-            FootprintLibraryCheckedReceiptRecord? durableBeforeNative = receiptStore.Read(instanceId, operationId);
+            FootprintLibraryCheckedReceiptRecord? durableBeforeNative = receiptStore.ReadBound(instanceId, expectedRequest);
             NativeCapabilityFootprintLibraryCheckedReadOperationResponse? nativeResponse = null;
             try
             {

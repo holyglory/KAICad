@@ -3104,7 +3104,12 @@ BOOST_AUTO_TEST_CASE( ManufacturingManagerAdmissionJournalAndReadOnlyReconcile )
     auto cancellation = manager.Cancel( cancelWorker, epoch );
     BOOST_REQUIRE_MESSAGE( cancellation.has_value(), ( cancellation ? "" : cancellation.error() ) );
     BOOST_CHECK( cancellation->cancellation_requested() );
-    BOOST_CHECK_EQUAL( cancellation->recovery_state(), PCB_MFG_RECOVERY_CANCEL_REQUESTED );
+    // The worker may observe the token and publish its terminal receipt before
+    // the cancelling caller reacquires the operation lease.  Both the
+    // immediate acknowledgement and that already-completed terminal response
+    // are valid cooperative cancellation observations.
+    BOOST_CHECK( cancellation->recovery_state() == PCB_MFG_RECOVERY_CANCEL_REQUESTED
+                 || cancellation->recovery_state() == PCB_MFG_RECOVERY_CANCELLED );
     auto joined = manager.Join( asyncRequest.operation_id(), epoch );
     BOOST_REQUIRE_MESSAGE( joined.has_value(), ( joined ? "" : joined.error() ) );
     BOOST_CHECK( adapterObservedCancellation.load( std::memory_order_acquire ) );

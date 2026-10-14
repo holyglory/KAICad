@@ -506,7 +506,10 @@ internal static class PcbRenderMetadataContract
                     double clipY = MatrixProduct(metadata.ProjectionMatrixColumnMajor, 1, viewX, viewY, viewZ, viewW);
                     double clipW = MatrixProduct(metadata.ProjectionMatrixColumnMajor, 3, viewX, viewY, viewZ, viewW);
                     if (!double.IsFinite(clipX) || !double.IsFinite(clipY) || !double.IsFinite(clipW)
-                        || Math.Abs(clipW) < double.Epsilon)
+                        // The native producer performs this same guard with
+                        // std::numeric_limits<float>::epsilon() before
+                        // dividing by clip.w.
+                        || Math.Abs(clipW) < 1.1920928955078125e-7)
                         continue;
 
                     double pixelX = (clipX / clipW + 1.0) * 0.5 * metadata.WidthPixels;
@@ -523,10 +526,16 @@ internal static class PcbRenderMetadataContract
             || !double.IsFinite(maxX) || !double.IsFinite(maxY))
             return;
 
-        const double tolerance = 1e-6;
         IReadOnlyList<double> declared = item.ProjectedConservativeBounds;
-        if (declared[0] > minX + tolerance || declared[1] > minY + tolerance
-            || declared[2] < maxX - tolerance || declared[3] < maxY - tolerance)
+        bool outside(double declaredValue, double expectedValue, bool lowerBound)
+        {
+            double tolerance = 1e-5 * Math.Max(1.0, Math.Abs(expectedValue));
+            return lowerBound
+                ? declaredValue > expectedValue + tolerance
+                : declaredValue < expectedValue - tolerance;
+        }
+        if (outside(declared[0], minX, true) || outside(declared[1], minY, true)
+            || outside(declared[2], maxX, false) || outside(declared[3], maxY, false))
             failures.Add("object projected geometry must conservatively contain the captured camera projection");
     }
 

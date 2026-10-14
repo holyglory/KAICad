@@ -32,8 +32,9 @@ public sealed partial class InstanceRegistry
         {
             var saved = JsonSerializer.Deserialize<InstanceRecord>(
                 await File.ReadAllTextAsync(Path.Combine(directory, id + ".json"), token));
-            if (saved is null || saved.InstanceId != id || string.IsNullOrWhiteSpace(saved.ProjectPath)
-                || !Path.IsPathFullyQualified(saved.ProjectPath) || string.IsNullOrWhiteSpace(saved.Epoch)
+            if (saved is null || saved.InstanceId != id
+                || saved.ProjectPath.Length != 0 && !Path.IsPathFullyQualified(saved.ProjectPath)
+                || string.IsNullOrWhiteSpace(saved.Epoch)
                 || saved.VerifiedAt == default || saved.ProcessId is <= 0 || string.IsNullOrWhiteSpace(saved.Endpoint)
                 || (saved.ProcessStart is { } identity && (saved.ProcessId is null || string.IsNullOrWhiteSpace(identity.MachineId)
                     || string.IsNullOrWhiteSpace(identity.BootId) || identity.PidNamespace == 0)))
@@ -79,8 +80,9 @@ public sealed partial class InstanceRegistry
         try
         {
             var launch = JsonSerializer.Deserialize<UnverifiedInstanceLaunch>(await File.ReadAllTextAsync(LaunchPath(id), token));
-            if (launch is null || launch.InstanceId != id || string.IsNullOrWhiteSpace(launch.ProjectPath)
-                || !Path.IsPathFullyQualified(launch.ProjectPath) || launch.RequestedAt == default
+            if (launch is null || launch.InstanceId != id
+                || launch.ProjectPath.Length != 0 && !Path.IsPathFullyQualified(launch.ProjectPath)
+                || launch.RequestedAt == default
                 || launch.ProcessId is <= 0 || launch.ReplacesEpoch is { Length: 0 }
                 || (launch.ProcessStart is { } identity && (launch.ProcessId is null || string.IsNullOrWhiteSpace(identity.MachineId)
                     || string.IsNullOrWhiteSpace(identity.BootId) || identity.PidNamespace == 0))

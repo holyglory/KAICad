@@ -193,8 +193,11 @@ PCB_MANUFACTURING_JOB_MANAGER::~PCB_MANUFACTURING_JOB_MANAGER()
     }
     for( auto& entry : workers )
     {
-        if( entry.second && entry.second->thread.joinable() )
-            entry.second->thread.join();
+        if( entry.second )
+        {
+            std::lock_guard joinLock( entry.second->joinMutex );
+            if( entry.second->thread.joinable() ) entry.second->thread.join();
+        }
         // The object is being destroyed, so failure to rewrite a receipt is
         // intentionally ignored.  A normal caller uses Join and receives the
         // durable worker_joined evidence before releasing the manager.
@@ -1013,7 +1016,11 @@ PCB_MANUFACTURING_JOB_MANAGER::Join( const std::string& aOperationId,
             && worker->thread.get_id() == std::this_thread::get_id() )
             return tl::unexpected( "manufacturing_worker_self_join" );
     }
-    if( worker && worker->thread.joinable() ) worker->thread.join();
+    if( worker )
+    {
+        std::lock_guard joinLock( worker->joinMutex );
+        if( worker->thread.joinable() ) worker->thread.join();
+    }
     auto joined = MarkWorkerJoined( aOperationId, aProcessEpoch );
     if( !joined ) return joined;
     std::lock_guard lock( m_mutex );

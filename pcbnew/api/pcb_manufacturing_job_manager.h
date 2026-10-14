@@ -139,6 +139,7 @@ private:
     struct WORKER
     {
         CANCELLATION cancellation;
+        std::mutex joinMutex;
         std::thread thread;
     };
     tl::expected<Receipt, std::string> MarkWorkerJoined( const std::string& aOperationId,

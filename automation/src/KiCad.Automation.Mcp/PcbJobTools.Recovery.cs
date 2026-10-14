@@ -109,7 +109,7 @@ public sealed partial class PcbJobTools
     }, input?.OperationId, input?.ProcessEpoch);
 
     [McpServerTool(Name = "kicad_pcb_export_reconcile_typed", ReadOnly = true),
-     Description("Reconcile one typed PCB manufacturing export across an MCP or native reconnect through the native manager. The current peer has only process-owned receipts, so cross-process reconciliation fails closed with recoverySupported=false and does not retry or publish staged files."),
+     Description("Reconcile one typed PCB manufacturing export across an MCP or native reconnect through the native manager. Prior-epoch journals are inspected and terminalized without resubmitting native work; completed receipts require a fresh proof of their owned published outputs, and no detached export or restart publication is claimed."),
      KiCadCapability("pcb-manufacturing", "typed-recovery-contract", "explicit PCB document, operation ID, fingerprint, current and prior process epochs"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbManufacturingRecoveryContractTests.CompiledStdioPublishesTypedRecoveryToolsAndFailsClosedForIncompleteInput")]
     public Task<CallToolResult> ExportReconcileTyped(string instanceId,

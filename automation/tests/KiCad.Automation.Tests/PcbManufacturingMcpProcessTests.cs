@@ -246,13 +246,18 @@ public sealed class PcbManufacturingMcpProcessTests
                         nativeIdentity = Guid.NewGuid().ToString("D"),
                         stateSha256 = new string('0', 64),
                         scope = "DLS_PCB",
+                        diskBaselineChecked = true,
                         nativeFiles = new[] { boardPath },
                         fileBaselines = new[]
                         {
                             new
                             {
-                                path = boardPath, baselinePath = boardPath, baselineSha256 = "",
-                                currentSha256 = "", status = "NFBS_UNCHANGED"
+                                path = boardPath, baselinePath = boardPath,
+                                baselineKnown = true, baselineExists = false,
+                                currentKnown = true, currentExists = false,
+                                baselineSha256 = "", currentSha256 = "",
+                                baselineBytes = 0UL, currentBytes = 0UL,
+                                status = "NFBS_UNCHANGED"
                             }
                         },
                         processEpoch

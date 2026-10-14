@@ -74,6 +74,7 @@ internal static class PcbManufacturingContract
             || request.ExpectedState.ProcessEpoch != request.ProcessEpoch
             || !Sha256(request.ExpectedState.StateSha256))
             throw Invalid("The manufacturing export must carry a complete PCB lifecycle observation for the same process epoch.");
+        ValidateDependencySnapshot(request.ExpectedState);
         if (string.IsNullOrWhiteSpace(request.OutputDirectory)
             || !Path.IsPathFullyQualified(request.OutputDirectory))
             throw Invalid("The manufacturing output directory must be absolute.");
@@ -129,6 +130,8 @@ internal static class PcbManufacturingContract
             || receipt.ObservedBefore.ProcessEpoch != processEpoch
             || !receipt.ExpectedState.Equals(receipt.ObservedBefore))
             throw Invalid("The native manufacturing receipt lacks the requested lifecycle observation.");
+        ValidateDependencySnapshot(receipt.ExpectedState);
+        ValidateDependencySnapshot(receipt.ObservedBefore);
         if (expectedState is not null && (!receipt.ExpectedState.Equals(expectedState)
             || !receipt.ObservedBefore.Equals(expectedState)))
             throw Invalid("The native manufacturing receipt changed the lifecycle observation before export.");
@@ -205,6 +208,74 @@ internal static class PcbManufacturingContract
                 || !paths.Add(reported) || !relativePaths.Add(artifact.RelativePath))
                 throw Invalid("Manufacturing artifacts must have distinct paths contained by the published output directory.");
         }
+    }
+
+    /// <summary>
+    /// A detached export can only be admitted from a lifecycle checkpoint that
+    /// names every persisted native file and proves its bytes were unchanged.
+    /// The native PCB owner currently returns the board, project and optional
+    /// custom-rules sidecar through this existing state envelope. Keep this
+    /// boundary independent from the future serialized-byte snapshot: a path
+    /// list or a hash alone is never treated as a detached source snapshot.
+    /// </summary>
+    private static void ValidateDependencySnapshot(DocumentLifecycleState state)
+    {
+        if (!state.DiskBaselineChecked || state.NativeFiles.Count == 0
+            || state.NativeFiles.Count != state.FileBaselines.Count)
+            throw Invalid("The manufacturing export requires complete unchanged dependency baselines.");
+
+        StringComparer pathComparer = OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        var paths = new HashSet<string>(pathComparer);
+        foreach (string nativePath in state.NativeFiles)
+        {
+            string canonical = CanonicalPath(nativePath);
+            if (!paths.Add(canonical))
+                throw Invalid("The manufacturing lifecycle observation contains duplicate dependency paths.");
+        }
+
+        var baselines = new Dictionary<string, NativeFileBaselineState>(pathComparer);
+        foreach (NativeFileBaselineState baseline in state.FileBaselines)
+        {
+            if (baseline is null)
+                throw Invalid("The manufacturing lifecycle observation contains an empty dependency baseline.");
+
+            string canonical = CanonicalPath(baseline.Path);
+            if (!PathEquals(canonical, CanonicalPath(baseline.BaselinePath))
+                || !baseline.BaselineKnown || !baseline.CurrentKnown
+                || baseline.Status != NativeFileBaselineStatus.NfbsUnchanged
+                || !baselines.TryAdd(canonical, baseline))
+                throw Invalid("The manufacturing dependency baseline is incomplete or changed.");
+
+            if (baseline.BaselineExists != baseline.CurrentExists
+                || baseline.BaselineBytes != baseline.CurrentBytes
+                || !string.Equals(baseline.BaselineSha256, baseline.CurrentSha256,
+                    StringComparison.Ordinal))
+                throw Invalid("The manufacturing dependency baseline changed during observation.");
+
+            if (baseline.BaselineExists)
+            {
+                if (!Sha256(baseline.BaselineSha256))
+                    throw Invalid("Every existing manufacturing dependency needs a complete SHA-256 baseline.");
+            }
+            else if (!string.IsNullOrEmpty(baseline.BaselineSha256)
+                || !string.IsNullOrEmpty(baseline.CurrentSha256)
+                || baseline.BaselineBytes != 0 || baseline.CurrentBytes != 0)
+                throw Invalid("An absent manufacturing dependency cannot carry a partial baseline.");
+        }
+
+        if (baselines.Count != paths.Count || paths.Any(path => !baselines.ContainsKey(path)))
+            throw Invalid("The manufacturing dependency baselines do not cover every native file.");
+    }
+
+    private static string CanonicalPath(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.IndexOf('\0') >= 0
+            || !Path.IsPathFullyQualified(value))
+            throw Invalid("Manufacturing dependency paths must be absolute and NUL-free.");
+        try { return Path.GetFullPath(value); }
+        catch (Exception error) when (error is ArgumentException or NotSupportedException)
+        { throw Invalid("Manufacturing dependency paths must be valid absolute paths."); }
     }
 
     private static void CanonicalUuid(string value, string name)

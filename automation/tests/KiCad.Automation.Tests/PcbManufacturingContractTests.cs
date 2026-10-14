@@ -118,6 +118,24 @@ public sealed class PcbManufacturingContractTests
     }
 
     [TestMethod]
+    public void RequestRejectsIncompleteOrChangedDependencyBaselines()
+    {
+        var (request, receipt) = Fixture();
+
+        var missingBaselines = request.Clone();
+        missingBaselines.ExpectedState.FileBaselines.RemoveAt(1);
+        RejectRequest(missingBaselines);
+
+        var changedBaseline = request.Clone();
+        changedBaseline.ExpectedState.FileBaselines[0].CurrentSha256 = new string('f', 64);
+        RejectRequest(changedBaseline);
+
+        var receiptWithChangedDependency = receipt.Clone();
+        receiptWithChangedDependency.ObservedBefore.FileBaselines[0].CurrentBytes++;
+        Reject(receiptWithChangedDependency, request, "invalid_pcb_export_receipt");
+    }
+
+    [TestMethod]
     public void RequestIdentityRequiresCanonicalLowercaseOperationAndProcessIds()
     {
         var (request, _) = Fixture();
@@ -180,13 +198,46 @@ public sealed class PcbManufacturingContractTests
             BoardFilename = "fixture.kicad_pcb",
             Project = new() { Name = "fixture", Path = "/tmp/kicad-manufacturing-contract" }
         };
+        string boardPath = "/tmp/kicad-manufacturing-contract/fixture.kicad_pcb";
+        string projectPath = "/tmp/kicad-manufacturing-contract/fixture.kicad_pro";
         var state = new DocumentLifecycleState
         {
             Document = document.Clone(),
             Scope = DocumentLifecycleScope.DlsPcb,
             ProcessEpoch = processEpoch,
-            StateSha256 = new string('a', 64)
+            StateSha256 = new string('a', 64),
+            DiskBaselineChecked = true
         };
+        state.NativeFiles.Add(boardPath);
+        state.NativeFiles.Add(projectPath);
+        state.FileBaselines.Add(new NativeFileBaselineState
+        {
+            Path = boardPath,
+            BaselinePath = boardPath,
+            BaselineKnown = true,
+            BaselineExists = true,
+            BaselineSha256 = new string('d', 64),
+            BaselineBytes = 1024,
+            CurrentKnown = true,
+            CurrentExists = true,
+            CurrentSha256 = new string('d', 64),
+            CurrentBytes = 1024,
+            Status = NativeFileBaselineStatus.NfbsUnchanged
+        });
+        state.FileBaselines.Add(new NativeFileBaselineState
+        {
+            Path = projectPath,
+            BaselinePath = projectPath,
+            BaselineKnown = true,
+            BaselineExists = true,
+            BaselineSha256 = new string('e', 64),
+            BaselineBytes = 256,
+            CurrentKnown = true,
+            CurrentExists = true,
+            CurrentSha256 = new string('e', 64),
+            CurrentBytes = 256,
+            Status = NativeFileBaselineStatus.NfbsUnchanged
+        });
         var request = new RunPcbManufacturingExport
         {
             OperationId = operationId,

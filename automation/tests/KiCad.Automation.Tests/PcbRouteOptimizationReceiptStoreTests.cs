@@ -5,6 +5,7 @@ using Kiapi.Board.Types;
 using Kiapi.Common.Commands;
 using Kiapi.Common.Types;
 using KiCad.Automation.Mcp;
+using KiCad.Automation.Model;
 using KiCad.Automation.Native;
 using KiCad.Automation.Protocol;
 using ModelContextProtocol.Protocol;
@@ -24,7 +25,7 @@ public sealed partial class PcbCheckedItemMigrationTests
             string epoch = Guid.NewGuid().ToString("D");
             string operation = Guid.NewGuid().ToString("D");
             string fingerprint = new string('a', 64);
-            using JsonDocument payload = JsonDocument.Parse("{\"outcome\":\"completed\",\"replayed\":false}");
+            using JsonDocument payload = JsonDocument.Parse($"{{\"instanceId\":\"{instance}\",\"processEpoch\":\"{epoch}\",\"operationId\":\"{operation}\",\"outcome\":\"completed\",\"replayed\":false}}");
 
             new RouteOptimizationReceiptStore(root).Write(instance, epoch, operation, fingerprint,
                 payload.RootElement);
@@ -42,6 +43,42 @@ public sealed partial class PcbCheckedItemMigrationTests
             Assert.AreEqual(reopened.ResultJson, restored.StructuredContent!.Value.GetRawText());
             Assert.AreEqual(1, Directory.EnumerateFiles(
                 Path.Combine(root, "pcb-route-receipts"), "*.json").Count());
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public void RouteOptimizationReceiptRejectsPayloadIdentityConflict()
+    {
+        string instance = Guid.NewGuid().ToString("D");
+        string epoch = Guid.NewGuid().ToString("D");
+        string operation = Guid.NewGuid().ToString("D");
+        string fingerprint = new string('b', 64);
+        using JsonDocument payload = JsonDocument.Parse($"{{\"instanceId\":\"{instance}\",\"processEpoch\":\"{epoch}\",\"operationId\":\"{Guid.NewGuid():D}\"}}");
+
+        AutomationException error = Assert.ThrowsExactly<AutomationException>(() =>
+            new RouteOptimizationReceiptRecord(instance, epoch, operation, fingerprint,
+                payload.RootElement.GetRawText()).Validate());
+
+        Assert.AreEqual("invalid_route_receipt", error.Code);
+    }
+
+    [TestMethod]
+    public void RouteOptimizationReceiptLeaseIsExclusiveAcrossStoreInstances()
+    {
+        string root = Directory.CreateTempSubdirectory("pcb-route-receipt-lock-").FullName;
+        try
+        {
+            string instance = Guid.NewGuid().ToString("D");
+            string operation = Guid.NewGuid().ToString("D");
+            using FileStream held = new RouteOptimizationReceiptStore(root).Acquire(instance, operation);
+
+            AutomationException error = Assert.ThrowsExactly<AutomationException>(() =>
+            {
+                using FileStream _ = new RouteOptimizationReceiptStore(root).Acquire(instance, operation);
+            });
+
+            Assert.AreEqual("route_receipt_busy", error.Code);
         }
         finally { Directory.Delete(root, true); }
     }

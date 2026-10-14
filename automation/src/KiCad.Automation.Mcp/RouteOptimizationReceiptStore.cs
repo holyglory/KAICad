@@ -19,9 +19,24 @@ internal sealed record RouteOptimizationReceiptRecord(
         if (!Canonical(InstanceId) || !Canonical(ProcessEpoch) || !Canonical(OperationId)
             || !Digest(Fingerprint) || string.IsNullOrWhiteSpace(ResultJson))
             throw new AutomationException("invalid_route_receipt", "The route receipt identity is invalid.");
-        try { using var _ = JsonDocument.Parse(ResultJson); }
+        try
+        {
+            using JsonDocument parsed = JsonDocument.Parse(ResultJson);
+            JsonElement payload = parsed.RootElement;
+            if (payload.ValueKind != JsonValueKind.Object
+                || !Matches(payload, "instanceId", InstanceId)
+                || !Matches(payload, "processEpoch", ProcessEpoch)
+                || !Matches(payload, "operationId", OperationId))
+                throw new AutomationException("invalid_route_receipt",
+                    "The route receipt result identity does not match its envelope.");
+        }
         catch (JsonException error) { throw new AutomationException("invalid_route_receipt", error.Message); }
     }
+
+    private static bool Matches(JsonElement payload, string property, string expected) =>
+        payload.TryGetProperty(property, out JsonElement value)
+        && value.ValueKind == JsonValueKind.String
+        && string.Equals(value.GetString(), expected, StringComparison.Ordinal);
 
     private static bool Canonical(string value) => Guid.TryParseExact(value, "D", out var id)
         && id != Guid.Empty && value == id.ToString("D");
@@ -39,6 +54,31 @@ internal sealed class RouteOptimizationReceiptStore
         if (!Path.IsPathFullyQualified(stateDirectory))
             throw new AutomationException("invalid_route_receipt", "Route receipt state directory must be absolute.");
         directory = Path.Combine(Path.GetFullPath(stateDirectory), "pcb-route-receipts");
+    }
+
+    /// <summary>
+    /// Acquires the durable per-operation admission lease. The lease must span
+    /// the receipt read, native dispatch and terminal write so independent MCP
+    /// processes cannot both admit the same operation before either writes a
+    /// receipt. Lock files are retained as stable inodes; only the lease is
+    /// released when the returned stream is disposed.
+    /// </summary>
+    internal FileStream Acquire(string instanceId, string operationId)
+    {
+        Directory.CreateDirectory(directory);
+        try
+        {
+            return new FileStream(LockFor(instanceId, operationId), FileMode.OpenOrCreate,
+                FileAccess.ReadWrite, FileShare.None);
+        }
+        catch (IOException error)
+        {
+            throw new AutomationException("route_receipt_busy", error.Message);
+        }
+        catch (UnauthorizedAccessException error)
+        {
+            throw new AutomationException("route_receipt_busy", error.Message);
+        }
     }
 
     internal RouteOptimizationReceiptRecord? Read(string instanceId, string operationId)
@@ -86,4 +126,7 @@ internal sealed class RouteOptimizationReceiptStore
 
     private string PathFor(string instanceId, string operationId) => Path.Combine(directory,
         Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(instanceId + "\n" + operationId))) + ".json");
+
+    private string LockFor(string instanceId, string operationId) => Path.Combine(directory,
+        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(instanceId + "\n" + operationId))) + ".lock");
 }

@@ -591,6 +591,7 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
         try
         {
             var store = new RouteOptimizationReceiptStore(registry.StateDirectory);
+            using var lease = store.Acquire(instanceId, operationId);
             string digest = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(fingerprint)));
             if (store.Read(instanceId, operationId) is { } existing)
             {

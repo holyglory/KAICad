@@ -131,6 +131,8 @@ private:
     static bool IsDigest( const std::string& );
     static bool HasCompleteSourceSnapshot(
             const kiapi::automation::v1::DocumentLifecycleState& );
+    static tl::expected<void, std::string> VerifyPublishedOutputs(
+            const kiapi::automation::v1::PcbManufacturingExportReceipt& );
     static bool TestAdmissionBarrier();
     static std::string JobKind( const Request& );
     static void SetUnsupported( Receipt& );

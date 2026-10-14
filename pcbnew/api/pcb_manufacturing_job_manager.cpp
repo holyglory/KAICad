@@ -2,6 +2,7 @@
 #include "pcb_manufacturing_job_manager.h"
 
 #include <api/native_state_digest.h>
+#include <file_content_baseline.h>
 #include <google/protobuf/util/message_differencer.h>
 #include <kiplatform/io.h>
 #include <wx/filename.h>
@@ -280,6 +281,113 @@ bool PCB_MANUFACTURING_JOB_MANAGER::HasCompleteSourceSnapshot(
             return false;
     }
     return true;
+}
+
+tl::expected<void, std::string> PCB_MANUFACTURING_JOB_MANAGER::VerifyPublishedOutputs(
+        const Receipt& aReceipt )
+{
+    // A completed journal is immutable.  This check only observes its owned
+    // publication and never rewrites the receipt or starts another export.
+    const auto unverified = []() -> tl::expected<void, std::string>
+    {
+        return tl::unexpected( "manufacturing_published_outputs_unverified" );
+    };
+
+    if( aReceipt.status() != PCB_MFG_EXPORT_COMPLETED || !aReceipt.terminal()
+        || aReceipt.publication_state() != PCB_MFG_PUBLICATION_PUBLISHED
+        || !aReceipt.publication_committed() || !aReceipt.output_manifest_complete()
+        || !IsDigest( aReceipt.output_manifest_sha256() ) || aReceipt.artifacts_size() == 0
+        || aReceipt.artifacts_size() > 4096 || aReceipt.output_directory().empty() )
+        return unverified();
+
+    const fs::path root = fs::u8path( aReceipt.output_directory() );
+    if( !root.is_absolute() || root != root.lexically_normal() ) return unverified();
+    if( auto links = NoLinks( root ); !links ) return unverified();
+
+    std::error_code rootError;
+    const fs::file_status rootStatus = fs::symlink_status( root, rootError );
+    if( rootError || rootStatus.type() == fs::file_type::not_found
+        || !fs::is_directory( rootStatus ) )
+        return unverified();
+
+    std::set<std::string> expectedPaths;
+    std::vector<std::pair<std::string, std::string>> manifestEntries;
+    manifestEntries.reserve( aReceipt.artifacts_size() );
+    uint64_t totalBytes = 0;
+
+    for( const PcbManufacturingArtifact& artifact : aReceipt.artifacts() )
+    {
+        if( artifact.relative_path().empty() || artifact.relative_path() == "."
+            || artifact.path().empty() || !IsDigest( artifact.sha256() )
+            || artifact.ownership() == PCB_MFG_ARTIFACT_OWNERSHIP_UNSPECIFIED )
+            return unverified();
+
+        const fs::path relative = fs::u8path( artifact.relative_path() );
+        const std::string relativeText = relative.generic_string();
+        if( relative.is_absolute() || relative != relative.lexically_normal()
+            || relativeText.empty() || relativeText == "."
+            || relativeText == ".."
+            || ( relativeText.size() >= 3 && relativeText.compare( 0, 3, "../" ) == 0 ) )
+            return unverified();
+
+        const fs::path expectedPath = ( root / relative ).lexically_normal();
+        const fs::path reportedPath = fs::u8path( artifact.path() );
+        if( !reportedPath.is_absolute() || reportedPath != reportedPath.lexically_normal()
+            || expectedPath != reportedPath || !expectedPaths.insert( relativeText ).second )
+            return unverified();
+        if( auto links = NoLinks( expectedPath ); !links ) return unverified();
+
+        std::error_code statusError;
+        const fs::file_status status = fs::symlink_status( expectedPath, statusError );
+        if( statusError || status.type() != fs::file_type::regular ) return unverified();
+
+        const FILE_CONTENT_BASELINE baseline = FILE_CONTENT_BASELINE::Read( WxPath( expectedPath ) );
+        if( !baseline.Known() || !baseline.Exists() || baseline.Bytes() != artifact.bytes()
+            || baseline.Sha256() != artifact.sha256() )
+            return unverified();
+
+        totalBytes += baseline.Bytes();
+        if( baseline.Bytes() > 512ULL * 1024 * 1024
+            || totalBytes > 2ULL * 1024 * 1024 * 1024 )
+            return unverified();
+        manifestEntries.emplace_back( relativeText, baseline.Sha256() );
+    }
+
+    std::set<std::string> actualPaths;
+    std::error_code iteratorError;
+    fs::recursive_directory_iterator it( root, iteratorError );
+    if( iteratorError ) return unverified();
+    for( fs::recursive_directory_iterator end; it != end; it.increment( iteratorError ) )
+    {
+        if( iteratorError ) return unverified();
+        const fs::path path = it->path();
+        const fs::file_status status = it->symlink_status( iteratorError );
+        if( iteratorError || status.type() == fs::file_type::symlink
+            || ReparsePath( path ) )
+            return unverified();
+        if( status.type() == fs::file_type::directory ) continue;
+        if( status.type() != fs::file_type::regular ) return unverified();
+
+        const fs::path relative = path.lexically_relative( root );
+        const std::string relativeText = relative.generic_string();
+        if( relative.empty() || relative.is_absolute() || relative != relative.lexically_normal()
+            || relativeText.empty() || relativeText == "." || relativeText == ".."
+            || ( relativeText.size() >= 3 && relativeText.compare( 0, 3, "../" ) == 0 )
+            || !actualPaths.insert( relativeText ).second )
+            return unverified();
+    }
+    if( iteratorError || actualPaths != expectedPaths ) return unverified();
+
+    std::sort( manifestEntries.begin(), manifestEntries.end(),
+               []( const auto& aLeft, const auto& aRight ) { return aLeft.first < aRight.first; } );
+    NATIVE_STATE_DIGEST manifest;
+    for( const auto& entry : manifestEntries )
+    {
+        manifest.Append( entry.first );
+        manifest.Append( entry.second );
+    }
+    if( manifest.Hex() != aReceipt.output_manifest_sha256() ) return unverified();
+    return {};
 }
 
 bool PCB_MANUFACTURING_JOB_MANAGER::SameDocument(
@@ -1139,6 +1247,12 @@ PCB_MANUFACTURING_JOB_MANAGER::Read( const ReadPcbManufacturingExportJob& aReque
     response.set_found( true );
     response.set_request_fingerprint_verified( true );
     response.set_journal_verified( true );
+    if( receipt.status() == PCB_MFG_EXPORT_COMPLETED )
+    {
+        if( auto verified = VerifyPublishedOutputs( receipt ); !verified )
+            return tl::unexpected( verified.error() );
+        response.set_published_outputs_verified( true );
+    }
     response.mutable_receipt()->CopyFrom( receipt );
     return response;
 }
@@ -1227,6 +1341,12 @@ PCB_MANUFACTURING_JOB_MANAGER::Reconcile( const ReconcilePcbManufacturingExport&
     response.set_request_fingerprint_verified( true );
     response.set_journal_verified( true );
     response.set_prior_process_epoch_verified( aRequest.allow_prior_process_epoch() );
+    if( journal->receipt().status() == PCB_MFG_EXPORT_COMPLETED )
+    {
+        if( auto verified = VerifyPublishedOutputs( journal->receipt() ); !verified )
+            return tl::unexpected( verified.error() );
+        response.set_published_outputs_verified( true );
+    }
     response.mutable_receipt()->CopyFrom( journal->receipt() );
     return response;
 }
@@ -1246,6 +1366,7 @@ PcbManufacturingManagerCapabilities PCB_MANUFACTURING_JOB_MANAGER::Capabilities(
     response.set_manager_worker_boundary_supported( true );
     response.set_cooperative_worker_cancellation_supported( true );
     response.set_worker_join_supported( true );
+    response.set_published_outputs_verification_supported( true );
     response.set_unavailable_reason(
             "synchronous SVG owner-thread dispatch is available; the manager worker boundary is available "
             "for adapters with complete immutable dependency snapshots, while detached production export and "

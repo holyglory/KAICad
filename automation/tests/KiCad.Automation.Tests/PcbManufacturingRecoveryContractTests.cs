@@ -17,12 +17,14 @@ public sealed class PcbManufacturingRecoveryContractTests
         var capabilities = new PcbManufacturingManagerCapabilities
         {
             SynchronousSvgExportSupported = true,
+            PublishedOutputsVerificationSupported = true,
             DetachedExportSupported = false,
             PublicationSupported = false,
             CompleteSnapshotSupported = false
         };
 
         Assert.IsTrue(capabilities.SynchronousSvgExportSupported);
+        Assert.IsTrue(capabilities.PublishedOutputsVerificationSupported);
         Assert.IsFalse(capabilities.DetachedExportSupported);
         Assert.IsFalse(capabilities.PublicationSupported);
         Assert.IsFalse(capabilities.CompleteSnapshotSupported);
@@ -84,6 +86,22 @@ public sealed class PcbManufacturingRecoveryContractTests
             PcbJobTools.ValidateReconcileResponseSupport(incompleteReceipt, allowPriorProcessEpoch: false,
                 "11111111-1111-4111-8111-111111111111"));
         Assert.AreEqual("pcb_export_recovery_unavailable", error.Code);
+
+        var completedUnverified = verifiedAbsence.Clone();
+        completedUnverified.Found = true;
+        completedUnverified.Receipt = new PcbManufacturingExportReceipt
+        {
+            Status = PcbManufacturingExportStatus.PcbMfgExportCompleted
+        };
+        error = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbJobTools.ValidateReconcileResponseSupport(completedUnverified, allowPriorProcessEpoch: false,
+                "11111111-1111-4111-8111-111111111111"));
+        Assert.AreEqual("pcb_export_recovery_unavailable", error.Code);
+
+        var completedVerified = completedUnverified.Clone();
+        completedVerified.PublishedOutputsVerified = true;
+        PcbJobTools.ValidateReconcileResponseSupport(completedVerified, allowPriorProcessEpoch: false,
+            "11111111-1111-4111-8111-111111111111");
     }
 
     [TestMethod]

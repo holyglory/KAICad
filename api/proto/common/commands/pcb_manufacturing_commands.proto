@@ -95,6 +95,9 @@ message PcbManufacturingManagerCapabilities
   bool manager_worker_boundary_supported = 412;
   bool cooperative_worker_cancellation_supported = 413;
   bool worker_join_supported = 414;
+  // True when completed receipts are rechecked against their owned published
+  // output directory before a read or restart reconciliation is returned.
+  bool published_outputs_verification_supported = 415;
   // -- end lane 2D --
 }
 
@@ -234,6 +237,10 @@ message PcbManufacturingExportReceiptResponse
   // True when restart reconciliation converted a prior RUNNING worker into a
   // terminal indeterminate receipt because no worker can be resumed safely.
   bool restart_reconciled = 405;
+  // True only when a found completed receipt's published output directory,
+  // exact file set, byte sizes, SHA256 values and manifest digest were
+  // rechecked successfully by the native manager.
+  bool published_outputs_verified = 406;
   // -- end lane 2D --
 }
 

@@ -137,6 +137,7 @@ public sealed partial class PcbJobTools
             {
                 instanceId, processEpoch = session.Epoch, operationId = request.OperationId,
                 recoverySupported = true, found = response.Found,
+                publishedOutputsVerified = response.PublishedOutputsVerified,
                 receipt = response.Found
                     ? JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(response.Receipt))
                     : (JsonElement?)null
@@ -176,6 +177,14 @@ public sealed partial class PcbJobTools
             || (allowPriorProcessEpoch && !response.PriorProcessEpochVerified) )
             throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
                 "The native reconciliation response did not prove its journal and identity checks.");
+
+        if( response.Found && response.Receipt is null )
+            throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
+                "The native reconciliation response reported a receipt without returning it.");
+        if( response.Found && response.Receipt.Status == PcbManufacturingExportStatus.PcbMfgExportCompleted
+            && !response.PublishedOutputsVerified )
+            throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
+                "The native manager did not recheck the completed export's published outputs; no retry or publication was attempted.");
     }
 
     [McpServerTool(Name = "kicad_pcb_export_manager_capabilities_typed", ReadOnly = true),
@@ -195,11 +204,13 @@ public sealed partial class PcbJobTools
         if( !result.Document.Equals(target) || result.ProcessEpoch != epoch || string.IsNullOrWhiteSpace(result.UnavailableReason)
             || !result.SynchronousSvgExportSupported
             || !result.AdmissionSupported || !result.RequestJournalSupported || !result.JournalReadSupported
+            || !result.PublishedOutputsVerificationSupported
             || result.DetachedExportSupported || result.PublicationSupported || result.CompleteSnapshotSupported )
             throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
                 "The native manager capability response did not bind the requested PCB and process epoch.");
         return Data(new { instanceId, processEpoch = session.Epoch,
             synchronousSvgExportSupported = result.SynchronousSvgExportSupported,
+            publishedOutputsVerificationSupported = result.PublishedOutputsVerificationSupported,
             capabilities = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(result)) });
     }, null, input?.ProcessEpoch);
 
@@ -229,7 +240,8 @@ public sealed partial class PcbJobTools
         }
         return Data(new { instanceId, processEpoch = epoch, operationId = operation, found = response.Found,
             recoverySupported = response.ReconciliationSupported, requestFingerprintVerified = response.RequestFingerprintVerified,
-            journalVerified = response.JournalVerified, receipt = response.Found
+            journalVerified = response.JournalVerified,
+            publishedOutputsVerified = response.PublishedOutputsVerified, receipt = response.Found
                 ? JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(response.Receipt)) : (JsonElement?)null });
     }, input?.OperationId, input?.ProcessEpoch);
 

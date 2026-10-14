@@ -2975,6 +2975,112 @@ BOOST_AUTO_TEST_CASE( ManufacturingManagerAdmissionJournalAndReadOnlyReconcile )
     // callback may have run, so the operation cannot be retried or cancelled
     // as if it were still pre-dispatch.
     wxSetEnv( wxT( "KICAD_MANUFACTURING_TEST_BARRIER" ), wxT( "after-admission" ) );
+    // A completed journal is accepted only while its immutable manifest still
+    // describes the owned publication.  Reads and reconciliations are
+    // read-only: a changed file is refused and the adapter is never replayed.
+    RunPcbManufacturingExport completedRequest = request;
+    completedRequest.set_operation_id( KIID().AsString().ToStdString() );
+    completedRequest.set_output_directory( ( scratch.GetPath() / "completed-output" ).string() );
+    NATIVE_STATE_DIGEST completedDigest;
+    completedDigest.Append( completedRequest.SerializeAsString() );
+    auto completedAdmitted = manager.Start( completedRequest, epoch, capture, true );
+    BOOST_REQUIRE_MESSAGE( completedAdmitted.has_value(),
+                           ( completedAdmitted ? "" : completedAdmitted.error() ) );
+    BOOST_CHECK_EQUAL( completedAdmitted->status(), PCB_MFG_EXPORT_ADMITTED );
+    int completedAdapterCalls = 0;
+    const std::string publishedBytes = "verified manufacturing output\n";
+    auto completedDispatch = manager.Dispatch( completedRequest, epoch,
+            [&]( const PCB_MANUFACTURING_JOB_MANAGER::DISPATCH_CONTEXT& context )
+                    -> tl::expected<PcbManufacturingExportReceipt, std::string>
+            {
+                ++completedAdapterCalls;
+                const std::filesystem::path output = context.request.output_directory();
+                std::error_code error;
+                std::filesystem::create_directories( output, error );
+                if( error ) return tl::unexpected( "completed_output_directory_failed" );
+                const std::filesystem::path file = output / "export.svg";
+                std::ofstream stream( file, std::ios::binary );
+                stream << publishedBytes;
+                stream.close();
+                if( !stream ) return tl::unexpected( "completed_output_write_failed" );
+
+                NATIVE_STATE_DIGEST outputDigest;
+                outputDigest.Append( publishedBytes );
+                NATIVE_STATE_DIGEST manifestDigest;
+                manifestDigest.Append( "export.svg" );
+                manifestDigest.Append( outputDigest.Hex() );
+                PcbManufacturingExportReceipt receipt;
+                receipt.set_operation_id( context.request.operation_id() );
+                receipt.set_process_epoch( context.request.process_epoch() );
+                receipt.mutable_document()->CopyFrom( context.request.document() );
+                receipt.set_request_fingerprint_sha256( completedDigest.Hex() );
+                receipt.set_source_snapshot_sha256( context.sourceSnapshotSha256 );
+                receipt.set_job_kind( "svg" );
+                receipt.set_status( PCB_MFG_EXPORT_COMPLETED );
+                receipt.set_dispatch_stage( PCB_MFG_DISPATCH_TERMINAL );
+                receipt.set_native_dispatch( true );
+                receipt.set_export_adapter_available( true );
+                receipt.set_terminal( true );
+                receipt.set_worker_finished( true );
+                receipt.set_recovery_state( PCB_MFG_RECOVERY_RECONCILED );
+                receipt.mutable_expected_state()->CopyFrom( context.request.expected_state() );
+                receipt.mutable_observed_before()->CopyFrom( context.request.expected_state() );
+                receipt.mutable_observed_after()->CopyFrom( context.request.expected_state() );
+                receipt.set_output_directory( context.request.output_directory() );
+                receipt.set_output_manifest_complete( true );
+                receipt.set_output_manifest_sha256( manifestDigest.Hex() );
+                receipt.set_publication_state( PCB_MFG_PUBLICATION_PUBLISHED );
+                receipt.set_publication_committed( true );
+                auto* artifact = receipt.add_artifacts();
+                artifact->set_path( file.generic_string() );
+                artifact->set_relative_path( "export.svg" );
+                artifact->set_bytes( publishedBytes.size() );
+                artifact->set_sha256( outputDigest.Hex() );
+                artifact->set_ownership( PCB_MFG_ARTIFACT_CREATED );
+                return receipt;
+            } );
+    BOOST_REQUIRE_MESSAGE( completedDispatch.has_value(),
+                           ( completedDispatch ? "" : completedDispatch.error() ) );
+    BOOST_CHECK_EQUAL( completedAdapterCalls, 1 );
+    ReadPcbManufacturingExportJob completedRead = read;
+    completedRead.set_operation_id( completedRequest.operation_id() );
+    completedRead.set_request_fingerprint_sha256( completedDigest.Hex() );
+    auto completedObserved = manager.Read( completedRead, epoch );
+    BOOST_REQUIRE_MESSAGE( completedObserved.has_value(),
+                           ( completedObserved ? "" : completedObserved.error() ) );
+    BOOST_CHECK( completedObserved->published_outputs_verified() );
+
+    ReconcilePcbManufacturingExport completedReconcile;
+    completedReconcile.mutable_document()->CopyFrom( document );
+    completedReconcile.set_operation_id( completedRequest.operation_id() );
+    completedReconcile.set_process_epoch( epoch );
+    completedReconcile.set_request_fingerprint_sha256( completedDigest.Hex() );
+    auto completedReconciled = manager.Reconcile( completedReconcile, epoch );
+    BOOST_REQUIRE_MESSAGE( completedReconciled.has_value(),
+                           ( completedReconciled ? "" : completedReconciled.error() ) );
+    BOOST_CHECK( completedReconciled->published_outputs_verified() );
+
+    std::ofstream tampered( scratch.GetPath() / "completed-output" / "export.svg", std::ios::binary );
+    tampered << "tampered manufacturing output\n";
+    tampered.close();
+    auto refusedRead = manager.Read( completedRead, epoch );
+    BOOST_CHECK( !refusedRead.has_value() );
+    BOOST_CHECK_EQUAL( refusedRead.error(), "manufacturing_published_outputs_unverified" );
+    auto refusedReconcile = manager.Reconcile( completedReconcile, epoch );
+    BOOST_CHECK( !refusedReconcile.has_value() );
+    BOOST_CHECK_EQUAL( refusedReconcile.error(), "manufacturing_published_outputs_unverified" );
+    bool replayed = false;
+    auto replay = manager.Dispatch( completedRequest, epoch,
+            [&]( const PCB_MANUFACTURING_JOB_MANAGER::DISPATCH_CONTEXT& )
+                    -> tl::expected<PcbManufacturingExportReceipt, std::string>
+            {
+                replayed = true;
+                return tl::unexpected( "completed_output_must_not_rerun" );
+            } );
+    BOOST_CHECK( !replay.has_value() );
+    BOOST_CHECK_EQUAL( replay.error(), "manufacturing_dispatch_not_admitted" );
+    BOOST_CHECK( !replayed );
+
     RunPcbManufacturingExport dispatchRequest = request;
     dispatchRequest.set_operation_id( KIID().AsString().ToStdString() );
     auto admitted = manager.Start( dispatchRequest, epoch, capture );

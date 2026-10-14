@@ -22,6 +22,84 @@ public sealed class RasterTraceContractTests
     }
 
     [TestMethod]
+    public void ImageGenProvenanceBindsAssetHashBytesAndManifestSchema()
+    {
+        const string hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        RasterTraceProvenanceInput provenance = new()
+        {
+            AssetId = "00000000-0000-0000-0000-000000000001",
+            SourceSha256 = hash,
+            SourceBytes = 17,
+            Generator = "imagegen",
+            SourceKind = "imagegen",
+            ManifestSchema = RasterTraceProvenanceInput.ExpectedManifestSchema
+        };
+
+        Assert.AreSame(provenance, RasterTraceProvenanceInput.Validate(provenance, "imagegen", hash, 17));
+        Assert.ThrowsExactly<AutomationException>(() =>
+            RasterTraceProvenanceInput.Validate(null, "imagegen", hash, 17));
+        RasterTraceProvenanceInput mismatchedHash = new()
+        {
+            AssetId = provenance.AssetId, SourceSha256 = hash, SourceBytes = 17,
+            Generator = provenance.Generator, SourceKind = provenance.SourceKind,
+            ManifestSchema = provenance.ManifestSchema
+        };
+        Assert.ThrowsExactly<AutomationException>(() =>
+            RasterTraceProvenanceInput.Validate(mismatchedHash, "imagegen", new string('a', 64), 17));
+
+        provenance.SourceBytes = 18;
+        Assert.ThrowsExactly<AutomationException>(() =>
+            RasterTraceProvenanceInput.Validate(provenance, "imagegen", hash, 17));
+        provenance.SourceBytes = 17;
+        provenance.ManifestSchema = "kicad.ai.raster_trace.v0";
+        Assert.ThrowsExactly<AutomationException>(() =>
+            RasterTraceProvenanceInput.Validate(provenance, "imagegen", hash, 17));
+    }
+
+    [TestMethod]
+    public void HumanAndGeneratedRasterSourcesKeepOptionalProvenance()
+    {
+        const string hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        Assert.IsNull(RasterTraceProvenanceInput.Validate(null, "human", hash, 17));
+        Assert.IsNull(RasterTraceProvenanceInput.Validate(null, "generated", hash, 17));
+    }
+
+    [TestMethod]
+    public void RasterInputsRejectImageGenWithoutProvenanceBeforeNativeContact()
+    {
+        RasterTraceInput trace = new()
+        {
+            SourcePath = Path.Combine(Path.GetTempPath(), "imagegen.png"),
+            ExpectedSourceSha256 = new string('b', 64), PhysicalWidthNm = 1_000_000
+        };
+        trace.SourceKind = "imagegen";
+        AutomationException traceError = Assert.ThrowsExactly<AutomationException>(() => RasterTraceInput.Validate(trace));
+        Assert.AreEqual("invalid_raster_provenance", traceError.Code);
+
+        RasterTraceProjectionInput projection = new()
+        {
+            OperationId = "00000000-0000-0000-0000-000000000001",
+            TargetKind = RasterTraceProjectionTargetKind.Board,
+            SourcePath = trace.SourcePath,
+            SourceKind = "imagegen",
+            Proposal = new RasterTraceProposalInput(),
+            Board = new RasterTraceBoardTargetInput { RepositoryRoot = "/tmp", SourceArchivePath = "source.png" }
+        };
+        AutomationException projectionError = Assert.ThrowsExactly<AutomationException>(() => projection.Validate());
+        Assert.AreEqual("invalid_raster_provenance", projectionError.Code);
+    }
+
+    [TestMethod]
+    public void ProvenanceEnvelopeRejectsUnknownJsonFields()
+    {
+        string json = "{\"assetId\":\"00000000-0000-0000-0000-000000000001\",\"sourceSha256\":\""
+            + new string('b', 64) + "\",\"sourceBytes\":17,\"generator\":\"imagegen\","
+            + "\"sourceKind\":\"imagegen\",\"manifestSchema\":\"kicad.ai.raster_trace.v1\","
+            + "\"unexpected\":true}";
+        Assert.ThrowsExactly<JsonException>(() => JsonSerializer.Deserialize<RasterTraceProvenanceInput>(json));
+    }
+
+    [TestMethod]
     public void RasterProjectionRejectsDegenerateTriangleGeometry()
     {
         RasterTraceResult proposal = ValidProjectionProposal();

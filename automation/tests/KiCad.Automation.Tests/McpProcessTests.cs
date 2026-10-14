@@ -350,6 +350,12 @@ public sealed class McpProcessTests
             Assert.IsTrue(SimulationSchemaType(rasterTraceSchema, "object"));
             CollectionAssert.Contains(rasterTraceSchema.GetProperty("properties").EnumerateObject().Select(p => p.Name).ToArray(), "sourcePath");
             CollectionAssert.Contains(rasterTraceSchema.GetProperty("properties").EnumerateObject().Select(p => p.Name).ToArray(), "expectedSourceSha256");
+            CollectionAssert.Contains(rasterTraceSchema.GetProperty("properties").EnumerateObject().Select(p => p.Name).ToArray(), "sourceKind");
+            CollectionAssert.Contains(rasterTraceSchema.GetProperty("properties").EnumerateObject().Select(p => p.Name).ToArray(), "provenance");
+            var rasterTraceProvenanceSchema = rasterTraceSchema.GetProperty("properties").GetProperty("provenance");
+            Assert.IsTrue(SimulationSchemaType(rasterTraceProvenanceSchema, "object"));
+            foreach (string property in new[] { "assetId", "sourceSha256", "sourceBytes", "generator", "sourceKind", "manifestSchema" })
+                CollectionAssert.Contains(rasterTraceProvenanceSchema.GetProperty("properties").EnumerateObject().Select(p => p.Name).ToArray(), property);
             var rasterProjectionSchema = listed.GetProperty("result").GetProperty("tools").EnumerateArray()
                 .Single(tool => tool.GetProperty("name").GetString() == "kicad_artwork_raster_project")
                 .GetProperty("inputSchema").GetProperty("properties").GetProperty("input");
@@ -357,6 +363,7 @@ public sealed class McpProcessTests
             CollectionAssert.Contains(rasterProjectionSchema.GetProperty("properties").EnumerateObject().Select(p => p.Name).ToArray(), "proposal");
             CollectionAssert.Contains(rasterProjectionSchema.GetProperty("properties").EnumerateObject().Select(p => p.Name).ToArray(), "targetKind");
              CollectionAssert.Contains(rasterProjectionSchema.GetProperty("properties").EnumerateObject().Select(p => p.Name).ToArray(), "operationId");
+            CollectionAssert.Contains(rasterProjectionSchema.GetProperty("properties").EnumerateObject().Select(p => p.Name).ToArray(), "provenance");
             // Deck admission runs before any instance lookup, so a script deck is refused
             // even when no native editor could ever receive it.
             var scriptDeck = await Request(9089, "tools/call", new { name = "kicad_simulation_start", arguments = new
@@ -399,6 +406,18 @@ public sealed class McpProcessTests
             } });
             Assert.IsTrue(malformedProjection.GetProperty("result").GetProperty("isError").GetBoolean(), malformedProjection.GetRawText());
             Assert.AreEqual("invalid_raster_trace_proposal", malformedProjection.GetProperty("result").GetProperty("structuredContent").GetProperty("errorCode").GetString());
+            var malformedImageGenProvenance = await Request(9083, "tools/call", new { name = "kicad_artwork_raster_project", arguments = new
+            {
+                instanceId = Guid.NewGuid().ToString("D"), input = new
+                {
+                    operationId = Guid.NewGuid().ToString("D"), targetKind = "BOARD", sourcePath = projectionFixture,
+                    sourceKind = "imagegen", proposal = new { accepted = true, sourceSha256 = projectionHash, sourceBytes = 123L },
+                    provenance = new { assetId = Guid.NewGuid().ToString("D"), sourceSha256 = projectionHash, sourceBytes = 123L,
+                        generator = "imagegen", sourceKind = "imagegen", manifestSchema = "kicad.ai.raster_trace.v1", unexpected = true },
+                    board = new { repositoryRoot = state, sourceArchivePath = "raster-trace/source.png" }
+                }
+            } });
+            Assert.IsTrue(malformedImageGenProvenance.GetProperty("result").GetProperty("isError").GetBoolean(), malformedImageGenProvenance.GetRawText());
             string[] simulationTools = ["kicad_simulation_start", "kicad_simulation_job", "kicad_simulation_vector", "kicad_simulation_operation", "kicad_simulation_wait", "kicad_simulation_cancel", "kicad_simulation_result"];
             foreach (string simulationTool in simulationTools)
             {

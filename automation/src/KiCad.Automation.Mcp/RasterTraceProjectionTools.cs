@@ -26,7 +26,7 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
     private static readonly SemaphoreSlim BoardGate = new(1, 1);
 
     [McpServerTool(Name = "kicad_artwork_raster_project", ReadOnly = false),
-     Description("Project one accepted KiCad raster trace proposal into an existing symbol library, a cloned PCB footprint, a non-copper PCB board graphic, or a checked schematic drawing. Filled pieces remain filled polygons; signed contour topology stays in a bounded manifest. Existing pins, pads, fields and metadata are retained. Source kind/origin are caller declarations only. Board source archives are preflighted with an atomic publish and readback hash before the item transaction, while board geometry and archival remain separate persistence boundaries and provenanceAtomic stays false."),
+     Description("Project one accepted KiCad raster trace proposal into an existing symbol library, a cloned PCB footprint, a non-copper PCB board graphic, or a checked schematic drawing. Filled pieces remain filled polygons; signed contour topology stays in a bounded manifest. Existing pins, pads, fields and metadata are retained. Human/generated source attribution remains compatible; imagegen requires a typed provenance envelope bound to the exact local bytes. Board source archives are preflighted with an atomic publish and readback hash before the item transaction, while board geometry and archival remain separate persistence boundaries and provenanceAtomic stays false. Manifest validation does not authenticate an external ImageGen service."),
      KiCadCapability("generated-artwork-cad", "typed-projection-adapters", "accepted raster proposal, exact source SHA, deterministic filled polygons, target lifecycle admission and provenance"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp", "NativeSessionTests.NativeSymbolLibraryReadbackUsesMcp")]
     public Task<CallToolResult> Project(string instanceId, RasterTraceProjectionInput input,
@@ -57,10 +57,10 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
         if (!string.Equals(actual, proposal.SourceSha256, StringComparison.Ordinal)
             || !string.Equals(actual, input.Proposal.SourceSha256, StringComparison.Ordinal))
             throw new AutomationException("raster_trace_source_changed", "Source bytes do not match the accepted proposal SHA-256.");
-        if (input.SourceKind is not ("imagegen" or "human" or "generated"))
-            throw new AutomationException("invalid_raster_projection_source", "SourceKind must be imagegen, human or generated.");
-        return new(proposal, source, actual, EmbeddedFileCodec.Name(actual), input.SourceKind,
-            input.SourceOrigin ?? "", input.OperationId!);
+        RasterTraceProvenanceInput? provenance = RasterTraceProvenanceInput.Validate(input.Provenance,
+            input.SourceKind, actual, (ulong)source.Length);
+        return new(proposal, source, actual, EmbeddedFileCodec.Name(actual), input.SourceKind!,
+            input.SourceOrigin ?? "", input.OperationId!, provenance);
     }
 
     private async Task<CallToolResult> ProjectSymbol(string instanceId, RasterTraceProjectionInput input,
@@ -90,6 +90,7 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
         {
             operationId, targetKind = "symbol", accepted = false, nativeResult = write.StructuredContent,
             geometrySha256 = context.Proposal.GeometrySha256, sourceSha256 = context.SourceSha256,
+            provenance = context.Provenance, provenanceVerified = context.Provenance is not null,
             provenanceAtomic = true, electricalValidated = false, manufacturingValidated = false
         }, true);
         return Data(new
@@ -97,6 +98,7 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
             operationId, targetKind = "symbol", accepted = true, createdIds = created,
             nativeResult = write.StructuredContent, geometrySha256 = context.Proposal.GeometrySha256,
             sourceSha256 = context.SourceSha256, embeddedSourceVerified = true, provenanceAtomic = true,
+            provenance = context.Provenance, provenanceVerified = context.Provenance is not null,
             electricalValidated = false, manufacturingValidated = false, receiptScope = "native-symbol-library"
         });
     }
@@ -165,6 +167,7 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
             operationId = context.OperationId, targetKind = "footprint", accepted = false,
             nativeResult = applied.StructuredContent, geometrySha256 = context.Proposal.GeometrySha256,
             sourceSha256 = context.SourceSha256, provenanceAtomic = true,
+            provenance = context.Provenance, provenanceVerified = context.Provenance is not null,
             electricalValidated = false, manufacturingValidated = false
         }, true);
         return Data(new
@@ -173,6 +176,7 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
             targetFootprintId = target.TargetFootprintId, nativeResult = applied.StructuredContent,
             geometrySha256 = context.Proposal.GeometrySha256, sourceSha256 = context.SourceSha256,
             embeddedSourceVerified = true, provenanceAtomic = true, electricalValidated = false,
+            provenance = context.Provenance, provenanceVerified = context.Provenance is not null,
             manufacturingValidated = false, receiptScope = "mcp-process"
         });
     }
@@ -378,6 +382,7 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
             operationId = context.OperationId, targetKind = "schematic", accepted = completed, createdIds = created,
             receipt = receiptJson, geometrySha256 = context.Proposal.GeometrySha256, sourceSha256 = context.SourceSha256,
             embeddedSourceVerified = completed, provenanceAtomic = completed,
+            provenance = context.Provenance, provenanceVerified = context.Provenance is not null,
             electricalValidated = false, manufacturingValidated = false, designFilesSaved = false,
             limitation = "Save/reload remains a separate required step; this receipt proves one checked native batch only."
         }, !completed);
@@ -485,6 +490,7 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
             schema = "kicad.ai.raster_trace.v1", sourceSha256 = context.SourceSha256,
             sourceBytes = context.Proposal.SourceBytes, sourceKind = context.SourceKind,
             sourceOrigin = context.SourceOrigin, embeddedFile = context.EmbeddedFileName,
+            provenance = context.Provenance,
             geometrySha256 = context.Proposal.GeometrySha256, contourCount = context.Proposal.ContourCount,
             filledPieceCount = context.Proposal.FilledPieceCount, contributorSemantics = context.Proposal.ContributorSemantics,
             coordinateOrientation = context.Proposal.CoordinateOrientation, rounding = context.Proposal.Rounding,
@@ -503,6 +509,13 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
         properties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.source_sha256", Value = context.SourceSha256 });
         properties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.geometry_sha256", Value = context.Proposal.GeometrySha256 });
         properties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.source_kind", Value = context.SourceKind });
+        if (context.Provenance is not null)
+        {
+            properties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.asset_id", Value = context.Provenance.AssetId });
+            properties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.source_bytes", Value = context.Provenance.SourceBytes.ToString(CultureInfo.InvariantCulture) });
+            properties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.generator", Value = context.Provenance.Generator });
+            properties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.manifest_schema", Value = context.Provenance.ManifestSchema });
+        }
         if (!string.IsNullOrWhiteSpace(context.SourceOrigin))
             properties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.source_origin", Value = context.SourceOrigin });
         properties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.role", Value = "filled-vector-projection" });
@@ -724,6 +737,8 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
             },
             geometrySha256 = context.Proposal.GeometrySha256,
             sourceSha256 = context.SourceSha256,
+            provenance = context.Provenance,
+            provenanceVerified = context.Provenance is not null,
             embeddedSourceVerified = false,
             archivePersisted = archive.Persisted,
             archiveAtomicWrite = archive.AtomicWrite,
@@ -774,7 +789,8 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
     }
 
     private sealed record ProjectionContext(ProtocolRasterTraceResult Proposal, byte[] SourceBytes,
-        string SourceSha256, string EmbeddedFileName, string SourceKind, string SourceOrigin, string OperationId);
+        string SourceSha256, string EmbeddedFileName, string SourceKind, string SourceOrigin, string OperationId,
+        RasterTraceProvenanceInput? Provenance);
 }
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
@@ -786,6 +802,7 @@ public sealed class RasterTraceProjectionInput
     public string? SourcePath { get; set; }
     public string? SourceKind { get; set; }
     public string? SourceOrigin { get; set; }
+    public RasterTraceProvenanceInput? Provenance { get; set; }
     public string? ExpectedProcessEpoch { get; set; }
     public RasterTraceSymbolTargetInput? Symbol { get; set; }
     public RasterTraceFootprintTargetInput? Footprint { get; set; }
@@ -799,6 +816,10 @@ public sealed class RasterTraceProjectionInput
         if (Proposal is null || string.IsNullOrWhiteSpace(SourcePath) || !Path.IsPathFullyQualified(SourcePath)
             || SourcePath.IndexOf('\0') >= 0 || !Path.GetExtension(SourcePath).Equals(".png", StringComparison.OrdinalIgnoreCase))
             throw new AutomationException("invalid_raster_projection_source", "SourcePath must be an absolute PNG path.");
+        if (SourceKind is not ("imagegen" or "human" or "generated"))
+            throw new AutomationException("invalid_raster_projection_source", "SourceKind must be imagegen, human or generated.");
+        if (SourceKind == "imagegen" && Provenance is null)
+            throw new AutomationException("invalid_raster_provenance", "ImageGen raster projections require a typed provenance envelope.");
         if (TargetKind is RasterTraceProjectionTargetKind.Unknown)
             throw new AutomationException("invalid_raster_projection_target", "TargetKind is required.");
         int targets = (Symbol is null ? 0 : 1) + (Footprint is null ? 0 : 1) + (Board is null ? 0 : 1) + (Schematic is null ? 0 : 1);

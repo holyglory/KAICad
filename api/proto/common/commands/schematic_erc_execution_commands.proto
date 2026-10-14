@@ -44,7 +44,25 @@ message NativeCapabilitySchematicReadErcOperation {
   string process_epoch = 3;
 }
 
+// Recovery classification for a read-only operation lookup. A missing native
+// receipt is never evidence that a second check is safe to submit; callers
+// must treat its retry safety as unknown. A retained terminal receipt can be
+// replayed by operation ID without running ERC again.
+enum NativeErcRecoveryState {
+  NATIVE_ERC_RECOVERY_UNKNOWN = 0;
+  NATIVE_ERC_RECOVERY_MISSING = 1;
+  NATIVE_ERC_RECOVERY_PENDING = 2;
+  NATIVE_ERC_RECOVERY_TERMINAL = 3;
+}
+
+enum NativeErcRetrySafety {
+  NATIVE_ERC_RETRY_UNKNOWN = 0;
+  NATIVE_ERC_RETRY_REPLAY_ONLY = 1;
+}
+
 message NativeCapabilitySchematicReadErcOperationResponse {
   bool found = 1;
   NativeErcOperationReceipt receipt = 2;
+  NativeErcRecoveryState recovery_state = 3;
+  NativeErcRetrySafety retry_safety = 4;
 }

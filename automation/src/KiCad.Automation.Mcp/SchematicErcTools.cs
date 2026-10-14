@@ -170,7 +170,7 @@ public sealed class SchematicErcTools(InstanceRegistry registry)
     });
 
     [McpServerTool(Name = "kicad_schematic_erc_operation", ReadOnly = true),
-     Description("Read one exact retained native ERC operation after a lost reply or MCP reconnect. The lookup is native-process owned and returns found=false when KiCad has no receipt; it never falls back to an MCP cache or submits a new ERC run."),
+     Description("Read one exact retained native ERC operation after a lost reply or MCP reconnect. The lookup is native-process owned and classifies missing, pending and terminal receipts with explicit retry safety: a retained completed or failed receipt is replay-only, while missing, pending and indeterminate outcomes remain unknown and never authorize an implicit rerun. It never falls back to an MCP cache or submits a new ERC run."),
      KiCadCapability("schematic-design", "compiled-mcp plus native-schematic-api", "typed document, process epoch and retained ERC operation ID"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Operation(string instanceId, NativeDocumentInput document,
@@ -186,17 +186,20 @@ public sealed class SchematicErcTools(InstanceRegistry registry)
         AutomationSession session = await client.HandshakeAsync(cancellationToken);
         if (session.Epoch != expectedProcessEpoch)
             throw new AutomationException("stale_process_epoch", "The ERC operation belongs to another native process epoch.");
-        NativeErcOperationReceipt? receipt = await TryReadNativeReceipt(
+        NativeCapabilitySchematicReadErcOperationResponse? recovery = await ReadNativeRecovery(
             client, target, expectedProcessEpoch, operationId, cancellationToken, tolerateUnsupported: false);
-        if (receipt is null)
+        if (recovery is null)
+            throw new AutomationException("native_erc_receipt_unavailable", "The connected KiCad peer did not return an ERC recovery response.");
+        SchematicErcExecutionContract.ValidateRecoveryResponse(recovery, target, operationId, expectedProcessEpoch);
+        if (!recovery.Found)
             return Data(new { instanceId, processEpoch = session.Epoch, document = target, operationId, found = false,
+                recoveryState = recovery.RecoveryState.ToString(), retrySafety = recovery.RetrySafety.ToString(),
                 receiptScope = "native-process", nativeReceiptAvailable = true });
-        SchematicErcExecutionContract.ValidateReceipt(receipt, target, expectedState: null,
-            operationId: operationId, processEpoch: expectedProcessEpoch);
-        return DescribeRun(instanceId, session.Epoch, target, receipt);
+        return DescribeRun(instanceId, session.Epoch, target, recovery.Receipt!,
+            recoveryState: recovery.RecoveryState, retrySafety: recovery.RetrySafety);
     });
 
-    private static async Task<NativeErcOperationReceipt?> TryReadNativeReceipt(
+    private static async Task<NativeCapabilitySchematicReadErcOperationResponse?> ReadNativeRecovery(
         NativeClient client, DocumentSpecifier document, string processEpoch, string operationId,
         CancellationToken cancellationToken, bool tolerateUnsupported)
     {
@@ -205,13 +208,7 @@ public sealed class SchematicErcTools(InstanceRegistry registry)
             NativeCapabilitySchematicReadErcOperationResponse native = await client.InvokeAsync<
                 NativeCapabilitySchematicReadErcOperation, NativeCapabilitySchematicReadErcOperationResponse>(
                     new() { Document = document, OperationId = operationId, ProcessEpoch = processEpoch }, cancellationToken);
-            if (!native.Found) return null;
-            if (native.Receipt is null || native.Receipt.LegacyResult is null
-                || !native.Receipt.LegacyResult.Document.Equals(document)
-                || native.Receipt.LegacyResult.OperationId != operationId
-                || native.Receipt.LegacyResult.ProcessEpoch != processEpoch)
-                throw new AutomationException("wrong_erc_operation_receipt", "KiCad returned an ERC receipt for a different operation target.");
-            return native.Receipt;
+            return native;
         }
         catch (NativeApiException error) when (tolerateUnsupported
             && (error.Status == (int)Kiapi.Common.ApiStatusCode.AsUnhandled
@@ -229,31 +226,38 @@ public sealed class SchematicErcTools(InstanceRegistry registry)
     }
 
     private static CallToolResult DescribeRun(string instanceId, string processEpoch,
-        DocumentSpecifier document, NativeErcOperationReceipt result, bool nativeReceiptAvailable = true)
+        DocumentSpecifier document, NativeErcOperationReceipt result, bool nativeReceiptAvailable = true,
+        NativeErcRecoveryState? recoveryState = null, NativeErcRetrySafety? retrySafety = null)
     {
         SchematicTrackingErcMarkers markers = result.CapturedMarkers ?? new SchematicTrackingErcMarkers();
         NativeCapabilitySchematicRunErcResponse legacy = result.LegacyResult ?? new NativeCapabilitySchematicRunErcResponse();
-        JsonElement structured = JsonSerializer.SerializeToElement(new
+        var payload = new Dictionary<string, object?>
         {
-            instanceId,
-            processEpoch,
-            document,
-            operationId = legacy.OperationId,
-            found = true,
-            beforeState = result.BeforeState is null ? null : SchematicJson.Formatter.Format(result.BeforeState),
-            afterState = result.AfterState is null ? null : SchematicJson.Formatter.Format(result.AfterState),
-            result = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(legacy)),
-            markers = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(markers)),
-            markerCount = legacy.MarkerCount,
-            nativeExecution = true,
-            operationReceipt = legacy.Completed,
-            operationState = result.State.ToString(),
-            admissionVerified = result.AdmissionVerified,
-            executionStarted = result.ExecutionStarted,
-            markersCaptured = result.MarkersCaptured,
-            nativeReceiptAvailable,
-            zeroMarkersIsNotProofOfElectricalCompleteness = true
-        });
+            ["instanceId"] = instanceId,
+            ["processEpoch"] = processEpoch,
+            ["document"] = document,
+            ["operationId"] = legacy.OperationId,
+            ["found"] = true,
+            ["beforeState"] = result.BeforeState is null ? null : SchematicJson.Formatter.Format(result.BeforeState),
+            ["afterState"] = result.AfterState is null ? null : SchematicJson.Formatter.Format(result.AfterState),
+            ["result"] = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(legacy)),
+            ["markers"] = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(markers)),
+            ["markerCount"] = legacy.MarkerCount,
+            ["nativeExecution"] = true,
+            ["operationReceipt"] = legacy.Completed,
+            ["operationState"] = result.State.ToString(),
+            ["admissionVerified"] = result.AdmissionVerified,
+            ["executionStarted"] = result.ExecutionStarted,
+            ["markersCaptured"] = result.MarkersCaptured,
+            ["nativeReceiptAvailable"] = nativeReceiptAvailable,
+            ["zeroMarkersIsNotProofOfElectricalCompleteness"] = true
+        };
+        if (recoveryState is not null)
+        {
+            payload["recoveryState"] = recoveryState.Value.ToString();
+            payload["retrySafety"] = retrySafety?.ToString();
+        }
+        JsonElement structured = JsonSerializer.SerializeToElement(payload);
         return new CallToolResult { StructuredContent = structured,
             Content = [new TextContentBlock { Text = structured.GetRawText() }] };
     }

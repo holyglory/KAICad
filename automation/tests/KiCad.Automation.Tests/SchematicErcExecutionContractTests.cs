@@ -166,6 +166,100 @@ public sealed class SchematicErcExecutionContractTests
         RejectReceipt(missingMarkers, fixture, "marker");
     }
 
+    [TestMethod]
+    public void RecoveryLookupClassifiesMissingAndRetainedStatesWithoutGuessingRetry()
+    {
+        var fixture = Fixture();
+
+        var missing = new NativeCapabilitySchematicReadErcOperationResponse
+        {
+            Found = false,
+            RecoveryState = NativeErcRecoveryState.NativeErcRecoveryMissing,
+            RetrySafety = NativeErcRetrySafety.NativeErcRetryUnknown
+        };
+        SchematicErcExecutionContract.ValidateRecoveryResponse(missing, fixture.Document,
+            fixture.OperationId, fixture.ProcessEpoch);
+
+        var legacyPeer = new NativeCapabilitySchematicReadErcOperationResponse { Found = false };
+        var legacyError = Assert.ThrowsExactly<AutomationException>(() =>
+            SchematicErcExecutionContract.ValidateRecoveryResponse(legacyPeer, fixture.Document,
+                fixture.OperationId, fixture.ProcessEpoch));
+        Assert.AreEqual("invalid_schematic_erc_recovery", legacyError.Code);
+
+        var pendingReceipt = fixture.Receipt.Clone();
+        pendingReceipt.State = NativeErcOperationState.NeosAdmitted;
+        pendingReceipt.ExecutionStarted = false;
+        pendingReceipt.MarkersCaptured = false;
+        pendingReceipt.CapturedMarkers = null;
+        pendingReceipt.AfterState = null;
+        pendingReceipt.LegacyResult.ObservedRevision = null;
+        pendingReceipt.LegacyResult.Completed = false;
+        pendingReceipt.LegacyResult.ErrorCode = "";
+        pendingReceipt.LegacyResult.ErrorMessage = "";
+        var pending = new NativeCapabilitySchematicReadErcOperationResponse
+        {
+            Found = true,
+            Receipt = pendingReceipt,
+            RecoveryState = NativeErcRecoveryState.NativeErcRecoveryPending,
+            RetrySafety = NativeErcRetrySafety.NativeErcRetryUnknown
+        };
+        SchematicErcExecutionContract.ValidateRecoveryResponse(pending, fixture.Document,
+            fixture.OperationId, fixture.ProcessEpoch);
+
+        var completed = new NativeCapabilitySchematicReadErcOperationResponse
+        {
+            Found = true,
+            Receipt = fixture.Receipt.Clone(),
+            RecoveryState = NativeErcRecoveryState.NativeErcRecoveryTerminal,
+            RetrySafety = NativeErcRetrySafety.NativeErcRetryReplayOnly
+        };
+        SchematicErcExecutionContract.ValidateRecoveryResponse(completed, fixture.Document,
+            fixture.OperationId, fixture.ProcessEpoch);
+
+        var failedReceipt = pendingReceipt.Clone();
+        failedReceipt.State = NativeErcOperationState.NeosFailed;
+        failedReceipt.LegacyResult.ErrorCode = "erc_library_unavailable";
+        failedReceipt.LegacyResult.ErrorMessage = "fixture failure";
+        var failed = new NativeCapabilitySchematicReadErcOperationResponse
+        {
+            Found = true,
+            Receipt = failedReceipt,
+            RecoveryState = NativeErcRecoveryState.NativeErcRecoveryTerminal,
+            RetrySafety = NativeErcRetrySafety.NativeErcRetryReplayOnly
+        };
+        SchematicErcExecutionContract.ValidateRecoveryResponse(failed, fixture.Document,
+            fixture.OperationId, fixture.ProcessEpoch);
+
+        var indeterminateReceipt = fixture.Receipt.Clone();
+        indeterminateReceipt.State = NativeErcOperationState.NeosIndeterminate;
+        indeterminateReceipt.LegacyResult.Completed = false;
+        indeterminateReceipt.LegacyResult.ErrorCode = "erc_execution_indeterminate";
+        indeterminateReceipt.LegacyResult.ErrorMessage = "the editor stopped responding";
+        var indeterminate = new NativeCapabilitySchematicReadErcOperationResponse
+        {
+            Found = true,
+            Receipt = indeterminateReceipt,
+            RecoveryState = NativeErcRecoveryState.NativeErcRecoveryTerminal,
+            RetrySafety = NativeErcRetrySafety.NativeErcRetryUnknown
+        };
+        SchematicErcExecutionContract.ValidateRecoveryResponse(indeterminate, fixture.Document,
+            fixture.OperationId, fixture.ProcessEpoch);
+
+        var foreign = completed.Clone();
+        foreign.Receipt.LegacyResult.ProcessEpoch = "66666666-6666-6666-6666-666666666666";
+        var foreignError = Assert.ThrowsExactly<AutomationException>(() =>
+            SchematicErcExecutionContract.ValidateRecoveryResponse(foreign, fixture.Document,
+                fixture.OperationId, fixture.ProcessEpoch));
+        Assert.AreEqual("invalid_schematic_erc_receipt", foreignError.Code);
+
+        var mismatched = completed.Clone();
+        mismatched.RetrySafety = NativeErcRetrySafety.NativeErcRetryUnknown;
+        var mismatchError = Assert.ThrowsExactly<AutomationException>(() =>
+            SchematicErcExecutionContract.ValidateRecoveryResponse(mismatched, fixture.Document,
+                fixture.OperationId, fixture.ProcessEpoch));
+        Assert.AreEqual("invalid_schematic_erc_recovery", mismatchError.Code);
+    }
+
     private static void RejectReceipt(NativeErcOperationReceipt receipt,
         (DocumentSpecifier Document, DocumentLifecycleState State, string ProcessEpoch,
             string OperationId, NativeCapabilitySchematicExecuteErc Request,

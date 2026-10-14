@@ -141,6 +141,68 @@ internal static class SchematicErcExecutionContract
         }
     }
 
+    /// <summary>
+    /// Validates the explicit recovery classification returned by a native
+    /// operation lookup. A missing receipt is an evidence gap, and a retained
+    /// terminal receipt is replay-only; neither result authorizes an implicit
+    /// second ERC execution.
+    /// </summary>
+    public static void ValidateRecoveryResponse(
+        NativeCapabilitySchematicReadErcOperationResponse response,
+        DocumentSpecifier document, string operationId, string processEpoch)
+    {
+        if (response is null)
+            throw InvalidRecovery("The native schematic ERC recovery response is missing.");
+
+        CanonicalUuid(operationId, "operation ID");
+        CanonicalUuid(processEpoch, "process epoch");
+        if (document is null || document.Type != DocumentType.DoctypeSchematic)
+            throw InvalidRecovery("A schematic document is required for ERC recovery.");
+        DocumentStateTools.ValidateTarget(document);
+
+        if (!Enum.IsDefined(response.RecoveryState)
+            || response.RecoveryState == NativeErcRecoveryState.NativeErcRecoveryUnknown
+            || !Enum.IsDefined(response.RetrySafety))
+            throw InvalidRecovery("The native schematic ERC recovery classification is unknown.");
+
+        if (!response.Found)
+        {
+            if (response.Receipt is not null
+                || response.RecoveryState != NativeErcRecoveryState.NativeErcRecoveryMissing
+                || response.RetrySafety != NativeErcRetrySafety.NativeErcRetryUnknown)
+                throw InvalidRecovery("A missing ERC receipt must report missing recovery state and unknown retry safety.");
+            return;
+        }
+
+        if (response.Receipt is null)
+            throw InvalidRecovery("A found ERC operation must include its retained receipt.");
+        ValidateReceipt(response.Receipt, document, expectedState: null, operationId, processEpoch);
+
+        NativeErcRecoveryState expectedState;
+        NativeErcRetrySafety expectedRetry;
+        switch (response.Receipt.State)
+        {
+            case NativeErcOperationState.NeosAdmitted:
+                expectedState = NativeErcRecoveryState.NativeErcRecoveryPending;
+                expectedRetry = NativeErcRetrySafety.NativeErcRetryUnknown;
+                break;
+            case NativeErcOperationState.NeosCompleted:
+            case NativeErcOperationState.NeosFailed:
+                expectedState = NativeErcRecoveryState.NativeErcRecoveryTerminal;
+                expectedRetry = NativeErcRetrySafety.NativeErcRetryReplayOnly;
+                break;
+            case NativeErcOperationState.NeosIndeterminate:
+                expectedState = NativeErcRecoveryState.NativeErcRecoveryTerminal;
+                expectedRetry = NativeErcRetrySafety.NativeErcRetryUnknown;
+                break;
+            default:
+                throw InvalidRecovery("The native schematic ERC receipt has no recoverable operation state.");
+        }
+
+        if (response.RecoveryState != expectedState || response.RetrySafety != expectedRetry)
+            throw InvalidRecovery("The native schematic ERC recovery classification does not match its receipt state.");
+    }
+
     /// <summary>Rejects an admitted, failed or indeterminate result at the execution boundary.</summary>
     public static void RequireSuccessful(NativeErcOperationReceipt receipt)
     {
@@ -198,4 +260,7 @@ internal static class SchematicErcExecutionContract
 
     private static AutomationException InvalidState(string message) =>
         new("invalid_schematic_erc_state", message);
+
+    private static AutomationException InvalidRecovery(string message) =>
+        new("invalid_schematic_erc_recovery", message);
 }

@@ -4469,6 +4469,11 @@ API_HANDLER_SCH::handleReadErcOperation(
     if( found == m_ercReceipts.end() )
     {
         response.set_found( false );
+        // A missing native receipt is an evidence gap, not permission to run
+        // ERC again. The caller must inspect the design and choose a new
+        // operation explicitly when retry safety is unknown.
+        response.set_recovery_state( NATIVE_ERC_RECOVERY_MISSING );
+        response.set_retry_safety( NATIVE_ERC_RETRY_UNKNOWN );
         return response;
     }
     const auto& legacy = found->second.result.legacy_result();
@@ -4477,6 +4482,29 @@ API_HANDLER_SCH::handleReadErcOperation(
         return reject( "The ERC receipt belongs to another document or native process epoch" );
     response.set_found( true );
     response.mutable_receipt()->CopyFrom( found->second.result );
+    switch( found->second.result.state() )
+    {
+    case NEOS_ADMITTED:
+        response.set_recovery_state( NATIVE_ERC_RECOVERY_PENDING );
+        response.set_retry_safety( NATIVE_ERC_RETRY_UNKNOWN );
+        break;
+    case NEOS_COMPLETED:
+    case NEOS_FAILED:
+        response.set_recovery_state( NATIVE_ERC_RECOVERY_TERMINAL );
+        response.set_retry_safety( NATIVE_ERC_RETRY_REPLAY_ONLY );
+        break;
+    case NEOS_INDETERMINATE:
+        response.set_recovery_state( NATIVE_ERC_RECOVERY_TERMINAL );
+        response.set_retry_safety( NATIVE_ERC_RETRY_UNKNOWN );
+        break;
+    default:
+        // Preserve the explicit unknown classification so the managed
+        // boundary rejects the malformed receipt without guessing whether a
+        // second ERC run is safe.
+        response.set_recovery_state( NATIVE_ERC_RECOVERY_UNKNOWN );
+        response.set_retry_safety( NATIVE_ERC_RETRY_UNKNOWN );
+        break;
+    }
     return response;
 }
 

@@ -115,6 +115,36 @@ internal sealed class RouteOptimizationReceiptStore
     }
 
     /// <summary>
+    /// Retain the fact that native may have accepted the operation even though
+    /// the transport did not return a receipt.  This is deliberately a
+    /// terminal, non-replayable MCP record: a later retry must inspect or
+    /// reconcile it instead of dispatching the same geometry a second time.
+    /// </summary>
+    internal void WriteUnknown(string instanceId, string processEpoch, string operationId,
+        string fingerprint, string errorCode, string errorMessage)
+    {
+        if (string.IsNullOrWhiteSpace(errorCode) || string.IsNullOrWhiteSpace(errorMessage))
+            throw new AutomationException("invalid_route_receipt", "An unknown route outcome requires an error code and message.");
+        JsonElement payload = JsonSerializer.SerializeToElement(new
+        {
+            instanceId,
+            processEpoch,
+            operationId,
+            outcome = "unknown",
+            nativeReceiptAvailable = false,
+            retrySafety = "unknown-native-outcome",
+            errorCode,
+            errorMessage,
+            replayed = false
+        }, Json);
+        var record = new RouteOptimizationReceiptRecord(instanceId, processEpoch, operationId,
+            fingerprint, payload.GetRawText(), ReplayObserved: false);
+        record.Validate();
+        Directory.CreateDirectory(directory);
+        WriteRecord(record, overwrite: true);
+    }
+
+    /// <summary>
     /// Retains the immutable terminal result while recording that an exact
     /// retry has been served from MCP state.  The caller holds the operation
     /// lease for the read/mark/response sequence.

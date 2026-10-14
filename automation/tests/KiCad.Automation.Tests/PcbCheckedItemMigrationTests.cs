@@ -243,6 +243,7 @@ public sealed partial class PcbCheckedItemMigrationTests
         internal bool LiveBoardChanged { get; set; }
         internal bool RejectUpdates { get; init; }
         internal bool ForeignReceipt { get; init; }
+        internal NngException? RouteFailure { get; set; }
         internal DocumentLifecycleState? LiveState { get; set; }
         internal GetItemsResponse ExistingItems { get; } = new();
         internal int CheckedMutations { get; private set; }
@@ -369,6 +370,9 @@ public sealed partial class PcbCheckedItemMigrationTests
             }
             if (!request.Message.Is(CheckedPcbItemTransaction.Descriptor))
                 return Error("unexpected test request");
+
+            if (RouteFailure is { } routeFailure)
+                throw routeFailure;
 
             CheckedMutations++;
             var checkedRequest = request.Message.Unpack<CheckedPcbItemTransaction>();

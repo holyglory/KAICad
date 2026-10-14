@@ -131,7 +131,7 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
         string fingerprint = instanceId + "\n" + canonicalDelete + "\n" + canonicalCreate + "\n"
             + canonicalExpected + "\n" + canonicalDrc;
         if (drc is not null)
-            return await WithNativeReceipt(instanceId, operationId, fingerprint, async () =>
+            return await WithNativeReceipt(instanceId, expected.ProcessEpoch, operationId, fingerprint, async () =>
             {
                 CheckedPcbRouteCommit checkedRequest = BuildCheckedRequest(
                     create, delete, expected, drc.JobId, operationId);
@@ -145,7 +145,7 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
                     cancellationToken: cancellationToken);
                 return CheckedRouteResult(checkedResult, drc);
             });
-        return await WithNativeReceipt(instanceId, operationId, fingerprint, () =>
+        return await WithNativeReceipt(instanceId, expected.ProcessEpoch, operationId, fingerprint, () =>
             ApplyCornerChecked(instanceId, delete, create, expected, operationId, cancellationToken));
     });
 
@@ -210,12 +210,17 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
             if (!string.Equals(processEpoch, expectedProcessEpoch, StringComparison.Ordinal)) throw new AutomationException("stale_process_epoch", "The route-optimization receipt belongs to another native process epoch.");
             string? receiptInstance = payload.TryGetProperty("instanceId", out JsonElement instance) ? instance.GetString() : null;
             if (!string.Equals(receiptInstance, instanceId, StringComparison.Ordinal)) throw new AutomationException("wrong_instance_receipt", "The route-optimization receipt belongs to another MCP instance.");
+            string outcome = payload.TryGetProperty("outcome", out JsonElement outcomeValue)
+                && outcomeValue.ValueKind == JsonValueKind.String
+                ? outcomeValue.GetString()! : "completed";
             bool nativeReceiptAvailable = payload.TryGetProperty("nativeReceiptAvailable", out JsonElement native)
                 ? native.ValueKind == JsonValueKind.True
                 : payload.TryGetProperty("nativeReceipt", out JsonElement nativeReceipt)
                     && nativeReceipt.ValueKind == JsonValueKind.True;
             return ReceiptData(new { instanceId, processEpoch, operationId, found = true,
                 receiptScope = "mcp-state",
+                outcome,
+                retrySafety = outcome == "unknown" ? "unknown-native-outcome" : "terminal",
                 nativeReceiptAvailable, receipt = payload });
         }
         finally { MutationGate.Release(); }
@@ -586,7 +591,8 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
         }
     }
 
-    private async Task<CallToolResult> WithNativeReceipt(string instanceId, string operationId, string fingerprint,
+    private async Task<CallToolResult> WithNativeReceipt(string instanceId, string processEpoch,
+        string operationId, string fingerprint,
         Func<Task<CallToolResult>> action)
     {
         await MutationGate.WaitAsync();
@@ -599,11 +605,31 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
             {
                 if (existing.Fingerprint != digest)
                     throw new AutomationException("operation_id_reused", "The operation ID is already bound to a different route replacement request.");
+                JsonElement stored = JsonDocument.Parse(existing.ResultJson).RootElement;
+                if (stored.TryGetProperty("outcome", out JsonElement outcome)
+                    && string.Equals(outcome.GetString(), "unknown", StringComparison.Ordinal))
+                {
+                    return new CallToolResult
+                    {
+                        IsError = true,
+                        StructuredContent = stored,
+                        Content = [new TextContentBlock { Text = stored.GetRawText() }]
+                    };
+                }
                 existing = store.MarkReplayed(existing);
                 return RouteOptimizationReceiptStore.ReplayResult(existing);
             }
             CallToolResult result = await action();
-            if (!(result.IsError ?? false) && result.StructuredContent is JsonElement payload)
+            if (result.IsError == true && result.StructuredContent is JsonElement errorPayload
+                && errorPayload.TryGetProperty("errorCode", out JsonElement errorCode)
+                && string.Equals(errorCode.GetString(), "operation_outcome_unknown", StringComparison.Ordinal))
+            {
+                store.WriteUnknown(instanceId, processEpoch, operationId, digest,
+                    errorCode.GetString()!, errorPayload.TryGetProperty("errorMessage", out JsonElement message)
+                        ? message.GetString() ?? "Native route outcome is unknown."
+                        : "Native route outcome is unknown.");
+            }
+            else if (!(result.IsError ?? false) && result.StructuredContent is JsonElement payload)
                 store.Write(instanceId, payload.TryGetProperty("processEpoch", out var epoch) ? epoch.GetString()! : "",
                     operationId, digest, payload);
             return result;

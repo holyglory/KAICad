@@ -78,6 +78,33 @@ public sealed partial class PcbCheckedItemMigrationTests
     }
 
     [TestMethod]
+    public void RouteOptimizationUnknownOutcomeSurvivesStoreReopenWithoutRetryPermission()
+    {
+        string root = Directory.CreateTempSubdirectory("pcb-route-receipt-unknown-").FullName;
+        try
+        {
+            string instance = Guid.NewGuid().ToString("D");
+            string epoch = Guid.NewGuid().ToString("D");
+            string operation = Guid.NewGuid().ToString("D");
+            string fingerprint = new string('c', 64);
+            var store = new RouteOptimizationReceiptStore(root);
+            store.WriteUnknown(instance, epoch, operation, fingerprint,
+                "operation_outcome_unknown", "KiCad may have committed the route before transport loss.");
+
+            RouteOptimizationReceiptRecord? reopened = new RouteOptimizationReceiptStore(root)
+                .Read(instance, operation);
+            Assert.IsNotNull(reopened);
+            JsonElement payload = JsonDocument.Parse(reopened!.ResultJson).RootElement;
+            Assert.AreEqual("unknown", payload.GetProperty("outcome").GetString());
+            Assert.AreEqual("unknown-native-outcome", payload.GetProperty("retrySafety").GetString());
+            Assert.AreEqual("operation_outcome_unknown", payload.GetProperty("errorCode").GetString());
+            Assert.IsFalse(payload.GetProperty("nativeReceiptAvailable").GetBoolean());
+            Assert.IsFalse(payload.GetProperty("replayed").GetBoolean());
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
     public void RouteOptimizationReceiptLeaseIsExclusiveAcrossStoreInstances()
     {
         string root = Directory.CreateTempSubdirectory("pcb-route-receipt-lock-").FullName;
@@ -151,6 +178,52 @@ public sealed partial class PcbCheckedItemMigrationTests
             AssertError(await replayTools.Receipt(
                 transport.InstanceId, Guid.NewGuid().ToString("D"), operationId, default),
                 "stale_process_epoch");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public async Task CornerApplyPersistsUnknownTransportOutcomeAndBlocksRedispatch()
+    {
+        string root = Directory.CreateTempSubdirectory("pcb-route-receipt-unknown-apply-").FullName;
+        try
+        {
+            var transport = new MigrationTransport { RouteFailure = new NngException(5, "lost reply", requestDelivered: true) };
+            var registry = new InstanceRegistry(transport, root);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(root, "native.sock")),
+                transport.InstanceId);
+            var expected = State(root, transport.Epoch, 7, 'a');
+            transport.LiveState = expected.Clone();
+            var source = Track(Guid.NewGuid().ToString("D"), 1_000, 2_000);
+            source.Net = new() { Name = "N1" };
+            transport.ExistingItems.Items.Add(Any.Pack(source));
+            var replacement = source.Clone();
+            replacement.Id.Value = Guid.NewGuid().ToString("D");
+            replacement.End.XNm++;
+            var delete = new DeleteItems { Header = new() { Document = expected.Document }, ItemIds = { source.Id } };
+            var create = new CreateItems { Header = new() { Document = expected.Document }, Items = { Any.Pack(replacement) } };
+            string operationId = Guid.NewGuid().ToString("D");
+
+            CallToolResult first = await new PcbRouteOptimizationTools(registry).Apply(
+                transport.InstanceId, BoardJson.Formatter.Format(delete), BoardJson.Formatter.Format(create),
+                SchematicJson.Formatter.Format(expected), operationId, default);
+            Assert.IsTrue(first.IsError ?? false);
+            Assert.AreEqual("operation_outcome_unknown", first.StructuredContent!.Value.GetProperty("errorCode").GetString());
+            int exchangesAfterLoss = transport.Exchanges;
+
+            JsonElement receipt = (await new PcbRouteOptimizationTools(registry).Receipt(
+                transport.InstanceId, transport.Epoch, operationId, default)).StructuredContent!.Value;
+            Assert.IsTrue(receipt.GetProperty("found").GetBoolean());
+            Assert.AreEqual("unknown", receipt.GetProperty("outcome").GetString());
+            Assert.AreEqual("unknown-native-outcome", receipt.GetProperty("retrySafety").GetString());
+
+            CallToolResult retry = await new PcbRouteOptimizationTools(registry).Apply(
+                transport.InstanceId, BoardJson.Formatter.Format(delete), BoardJson.Formatter.Format(create),
+                SchematicJson.Formatter.Format(expected), operationId, default);
+            Assert.IsTrue(retry.IsError ?? false);
+            Assert.AreEqual("operation_outcome_unknown", retry.StructuredContent!.Value.GetProperty("errorCode").GetString());
+            Assert.AreEqual(exchangesAfterLoss, transport.Exchanges,
+                "An unknown native outcome must be reconciled before another native dispatch.");
         }
         finally { Directory.Delete(root, true); }
     }

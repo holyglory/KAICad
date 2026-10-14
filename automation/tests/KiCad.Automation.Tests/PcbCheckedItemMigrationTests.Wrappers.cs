@@ -90,7 +90,7 @@ public sealed partial class PcbCheckedItemMigrationTests
             Assert.IsFalse(applied.GetProperty("drcValidated").GetBoolean());
             Assert.AreEqual(source.Id, BoardJson.Parser.Parse<DeleteItemsResponse>(applied.GetProperty("deleted").GetRawText()).DeletedItems.Single().Id);
             await AssertReceiptIdentity((instance, epoch) => tools.Receipt(instance, epoch, operationId, default),
-                transport, operationId);
+                transport, operationId, "mcp-state");
 
             transport.LiveBoardChanged = true;
             JsonElement replay = Success(await tools.Apply(transport.InstanceId, BoardJson.Formatter.Format(delete),
@@ -156,7 +156,7 @@ public sealed partial class PcbCheckedItemMigrationTests
             Assert.IsTrue(applied.GetProperty("drcValidated").GetBoolean());
             await AssertReceiptIdentity((instance, epoch) => tuning
                 ? tools.TuneReceipt(instance, epoch, operationId, default)
-                : tools.RerouteReceipt(instance, epoch, operationId, default), transport, operationId);
+                : tools.RerouteReceipt(instance, epoch, operationId, default), transport, operationId, "mcp-state");
 
             transport.LiveBoardChanged = true;
             registry = new InstanceRegistry(transport, Path.Combine(root, "reconnected"));
@@ -310,17 +310,24 @@ public sealed partial class PcbCheckedItemMigrationTests
     }
 
     private static async Task AssertReceiptIdentity(Func<string, string, Task<CallToolResult>> inspect,
-        MigrationTransport transport, string operationId)
+        MigrationTransport transport, string operationId, string expectedScope = "mcp-process")
     {
         int exchanges = transport.Exchanges;
         JsonElement data = Success(await inspect(transport.InstanceId, transport.Epoch));
         Assert.IsTrue(data.GetProperty("found").GetBoolean());
         Assert.IsTrue(data.GetProperty("nativeReceiptAvailable").GetBoolean());
-        Assert.AreEqual("mcp-state", data.GetProperty("receiptScope").GetString());
+        Assert.AreEqual(expectedScope, data.GetProperty("receiptScope").GetString());
         Assert.AreEqual(transport.InstanceId, data.GetProperty("receipt").GetProperty("instanceId").GetString());
         Assert.AreEqual(operationId, data.GetProperty("receipt").GetProperty("operationId").GetString());
         Assert.IsFalse(data.GetProperty("receipt").GetProperty("replayed").GetBoolean());
-        AssertError(await inspect(Guid.NewGuid().ToString("D"), transport.Epoch), "wrong_instance_receipt");
+        if (expectedScope == "mcp-state")
+        {
+            JsonElement foreign = Success(await inspect(Guid.NewGuid().ToString("D"), transport.Epoch));
+            Assert.IsFalse(foreign.GetProperty("found").GetBoolean(),
+                "Durable route receipts are keyed by both instance and operation.");
+        }
+        else
+            AssertError(await inspect(Guid.NewGuid().ToString("D"), transport.Epoch), "wrong_instance_receipt");
         AssertError(await inspect(transport.InstanceId, Guid.NewGuid().ToString("D")), "stale_process_epoch");
         Assert.AreEqual(exchanges, transport.Exchanges, "A historical MCP receipt lookup does not claim a new native read.");
     }

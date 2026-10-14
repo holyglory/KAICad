@@ -8,46 +8,60 @@ namespace KiCad.Automation.Tests;
 public sealed partial class NativeSessionTests
 {
     private static async Task<DocumentLifecycleState> ObserveLifecycleState(NativeClient client,
-        DocumentSpecifier document, CancellationToken token)
+        DocumentSpecifier document, CancellationToken token, bool retryOnTransition = false)
     {
         var query = new ReadDocumentLifecycleState { Document = document.Clone() };
-        var state = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(query, token);
-        Assert.AreEqual(document, state.Document);
-        Assert.IsTrue(Guid.TryParse(state.NativeIdentity, out _));
-        Assert.IsTrue(Guid.TryParse(state.Revision.Epoch, out _));
-        Assert.HasCount(64, state.StateSha256);
-        Assert.IsTrue(state.StateSha256.All(character => char.IsAsciiHexDigitLower(character)));
-        Assert.IsTrue(state.ProjectSettingsIncluded);
-        if (document.Type == DocumentType.DoctypePcb)
+        async Task<DocumentLifecycleState> ReadAndValidate()
         {
-            Assert.IsFalse(state.CompleteChangeTracking, "The numeric PCB revision remains a partial cache cursor; checked route admission uses the full state digest separately.");
-            Assert.AreEqual(CheckedSchematicContract.FileCoverage(state), state.DiskBaselineChecked,
-                "The disk flag describes only the listed native file comparisons.");
-        }
-        else
-        {
-            Assert.IsFalse(state.CompleteChangeTracking);
-            Assert.IsFalse(state.DiskBaselineChecked, "Schematic per-file comparisons do not imply qualified lifecycle mutation guards.");
-        }
-        Assert.IsNotEmpty(state.NativeFiles);
-        Assert.IsTrue(state.NativeFiles.All(Path.IsPathFullyQualified));
-        CollectionAssert.AreEquivalent(state.NativeFiles.ToArray(), state.FileBaselines.Select(file => file.Path).ToArray());
-        foreach (var file in state.FileBaselines)
-        {
-            if (file.BaselineKnown && file.BaselineExists)
+            var state = await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(query, token);
+            Assert.AreEqual(document, state.Document);
+            Assert.IsTrue(Guid.TryParse(state.NativeIdentity, out _));
+            Assert.IsTrue(Guid.TryParse(state.Revision.Epoch, out _));
+            Assert.HasCount(64, state.StateSha256);
+            Assert.IsTrue(state.StateSha256.All(character => char.IsAsciiHexDigitLower(character)));
+            Assert.IsTrue(state.ProjectSettingsIncluded);
+            if (document.Type == DocumentType.DoctypePcb)
             {
-                Assert.HasCount(64, file.BaselineSha256);
-                Assert.IsTrue(file.BaselineSha256.All(char.IsAsciiHexDigitLower));
+                Assert.IsFalse(state.CompleteChangeTracking, "The numeric PCB revision remains a partial cache cursor; checked route admission uses the full state digest separately.");
+                Assert.AreEqual(CheckedSchematicContract.FileCoverage(state), state.DiskBaselineChecked,
+                    "The disk flag describes only the listed native file comparisons.");
             }
-            if (file.CurrentKnown && file.CurrentExists)
+            else
             {
-                Assert.HasCount(64, file.CurrentSha256);
-                Assert.IsTrue(file.CurrentSha256.All(char.IsAsciiHexDigitLower));
+                Assert.IsFalse(state.CompleteChangeTracking);
+                Assert.IsFalse(state.DiskBaselineChecked, "Schematic per-file comparisons do not imply qualified lifecycle mutation guards.");
             }
+            Assert.IsNotEmpty(state.NativeFiles);
+            Assert.IsTrue(state.NativeFiles.All(Path.IsPathFullyQualified));
+            CollectionAssert.AreEquivalent(state.NativeFiles.ToArray(), state.FileBaselines.Select(file => file.Path).ToArray());
+            foreach (var file in state.FileBaselines)
+            {
+                if (file.BaselineKnown && file.BaselineExists)
+                {
+                    Assert.HasCount(64, file.BaselineSha256);
+                    Assert.IsTrue(file.BaselineSha256.All(char.IsAsciiHexDigitLower));
+                }
+                if (file.CurrentKnown && file.CurrentExists)
+                {
+                    Assert.HasCount(64, file.CurrentSha256);
+                    Assert.IsTrue(file.CurrentSha256.All(char.IsAsciiHexDigitLower));
+                }
+            }
+            return state;
         }
-        Assert.AreEqual(state, await client.InvokeAsync<ReadDocumentLifecycleState, DocumentLifecycleState>(query, token),
-            "Reading the same native state must be deterministic and non-mutating.");
-        return state;
+
+        while (true)
+        {
+            DocumentLifecycleState state = await ReadAndValidate();
+            DocumentLifecycleState repeated = await ReadAndValidate();
+            if (state.Equals(repeated)) return state;
+            if (!retryOnTransition)
+            {
+                Assert.AreEqual(state, repeated,
+                    "Reading the same native state must be deterministic and non-mutating.");
+            }
+            await Task.Delay(50, token);
+        }
     }
 
     private static async Task VerifyLifecycleStateThroughMcp(NativeClient client, DocumentSpecifier document,

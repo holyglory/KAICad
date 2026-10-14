@@ -349,7 +349,11 @@ public sealed partial class NativeSessionTests
                 wait.CancelAfter(TimeSpan.FromSeconds(12));
                 while (true)
                 {
-                    DocumentLifecycleState observed = await ObserveLifecycleState(client, board, wait.Token);
+                    // Undo/redo is delivered through the native UI thread. The first
+                    // lifecycle read can therefore straddle the history event; retry
+                    // only this transition wait until the state itself is stable.
+                    DocumentLifecycleState observed = await ObserveLifecycleState(client, board, wait.Token,
+                        retryOnTransition: true);
                     var routes = await ReadRoutes(observed);
                     bool found = routes.Items.Items.Any(item => RouteIdentity(item) == merged.Id.Value);
                     if (found == present)

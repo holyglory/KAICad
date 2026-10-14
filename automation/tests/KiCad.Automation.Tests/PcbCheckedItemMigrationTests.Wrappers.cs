@@ -292,6 +292,24 @@ public sealed partial class PcbCheckedItemMigrationTests
             // than dispatch the board graphic a second time.
             string receiptPath = Directory.GetFiles(Path.Combine(root, "pcb-artwork-receipts"), "*.json").Single();
             File.Delete(receiptPath);
+            // Recreate the durable admitted boundary left by a caller that
+            // crashed after reservation and native dispatch but before it
+            // published its terminal MCP receipt.  Bind it to the exact
+            // checked request so a different artwork payload cannot reuse the
+            // operation UUID.
+            ArtworkSourceArchive.Receipt archive = ArtworkSourceArchive.Persist(root, "artwork/source.svg",
+                System.Text.Encoding.UTF8.GetBytes(svg), sourceHash, "invalid_archive", "archive_conflict");
+            CreateItems candidate = new() { Header = new() { Document = expected.Document.Clone() } };
+            CreateItemsResponse response = BoardJson.Parser.Parse<CreateItemsResponse>(
+                firstData.GetProperty("response").GetRawText());
+            candidate.Items.Add(response.CreatedItems.Single().Item.Clone());
+            string archiveBinding = ArtworkSourceArchive.TransactionBinding(archive);
+            string requestFingerprint = PcbArtworkReceiptStore.Fingerprint(
+                "pcb-svg-artwork\n" + transport.InstanceId + "\n" + BoardJson.Formatter.Format(candidate)
+                + "\n" + stateJson + "\n" + operationId + "\n" + archiveBinding);
+            PcbArtworkReceiptReservation admission = new PcbArtworkReceiptStore(root).Reserve(
+                transport.InstanceId, transport.Epoch, operationId, requestFingerprint, archive);
+            Assert.IsTrue(admission.Created, "The fixture must leave an admitted durable boundary before retry.");
             CallToolResult reconciled = await tools.Commit(transport.InstanceId,
                 SchematicJson.Formatter.Format(expected.Document), stateJson, svg, sourceHash,
                 "imagegen", firstData.GetProperty("assetId").GetString()!, root, "artwork/source.svg", "Dwgs.User",

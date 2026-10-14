@@ -4,8 +4,8 @@ using KiCad.Automation.Model;
 namespace KiCad.Automation.Mcp;
 
 /// <summary>
-/// Managed identity checks for the process-local PCB artwork receipt cache.
-/// A cache hit is evidence only for the instance and native process epoch that
+/// Managed identity checks for the durable PCB artwork receipt store.
+/// A receipt is evidence only for the instance and native process epoch that
 /// produced it; the caller's supplied epoch cannot replace the stored one.
 /// </summary>
 internal static class PcbArtworkContract

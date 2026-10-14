@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using KiCad.Automation.Model;
 using KiCad.Automation.Mcp;
+using KiCad.Automation.Protocol;
 using ModelContextProtocol.Protocol;
 
 namespace KiCad.Automation.Tests;
@@ -39,6 +40,7 @@ public sealed class PcbArtworkReceiptStoreTests
             Assert.AreEqual(PcbArtworkReceiptRecord.Unknown, unknown!.Outcome);
             Assert.AreEqual("indeterminate", unknown.NativeOutcome);
             Assert.AreEqual("operation_outcome_unknown", unknown.ErrorCode);
+            Assert.ThrowsExactly<AutomationException>(() => PcbArtworkReceiptStore.ToResult(unknown));
 
             PcbArtworkReceiptReservation blocked = new PcbArtworkReceiptStore(root).Reserve(
                 instance, epoch, operation, fingerprint, archive);
@@ -53,6 +55,36 @@ public sealed class PcbArtworkReceiptStoreTests
         {
             Directory.Delete(root, recursive: true);
         }
+    }
+
+    [TestMethod]
+    public void OnlyProvenPreNativeRejectionsCanReleaseAdmission()
+    {
+        string instance = Guid.NewGuid().ToString("D");
+        string epoch = Guid.NewGuid().ToString("D");
+        string operation = Guid.NewGuid().ToString("D");
+        var request = new CheckedPcbItemTransaction
+        {
+            ProcessEpoch = epoch,
+            OperationId = operation
+        };
+
+        Assert.IsTrue(PcbArtworkTools.ProvenPreNativeRejection(
+            new PcbCheckedItemDispatch.Outcome(instance, request, null,
+                "native_not_reached", "handshake failed")));
+        Assert.IsTrue(PcbArtworkTools.ProvenPreNativeRejection(
+            new PcbCheckedItemDispatch.Outcome(instance, request, null,
+                "invalid_pcb_item_request", "invalid request")));
+        Assert.IsFalse(PcbArtworkTools.ProvenPreNativeRejection(
+            new PcbCheckedItemDispatch.Outcome(instance, request, null,
+                "operation_outcome_unknown", "reply lost")));
+        Assert.IsFalse(PcbArtworkTools.ProvenPreNativeRejection(
+            new PcbCheckedItemDispatch.Outcome(instance, request, null,
+                "native_status_3", "native rejected after dispatch")));
+        Assert.IsFalse(PcbArtworkTools.ProvenPreNativeRejection(
+            new PcbCheckedItemDispatch.Outcome(instance, request, null,
+                "invalid_checked_pcb_receipt", "receipt is malformed",
+                NativeReceiptAvailable: true, UntrustedReceipt: true)));
     }
 
     [TestMethod]

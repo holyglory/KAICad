@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -19,7 +18,6 @@ namespace KiCad.Automation.Mcp;
 [McpServerToolType]
 public sealed class PcbArtworkTools(InstanceRegistry registry)
 {
-    private static readonly ConcurrentDictionary<string, StoredReceipt> Receipts = new(StringComparer.Ordinal);
     private static readonly SemaphoreSlim Gate = new(1, 1);
 
     [McpServerTool(Name = "kicad_pcb_svg_artwork_commit"),
@@ -80,7 +78,10 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
             shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.artwork.segment_index", Value = index.ToString() });
             create.Items.Add(Any.Pack(shape));
         }
-        string fingerprint = instanceId + "\n" + BoardJson.Formatter.Format(create) + "\n" + SchematicJson.Formatter.Format(expected) + "\n" + operationId + "\n" + archiveBinding;
+        string fingerprint = PcbArtworkReceiptStore.Fingerprint(
+            "pcb-svg-artwork\n" + instanceId + "\n" + BoardJson.Formatter.Format(create)
+            + "\n" + SchematicJson.Formatter.Format(expected) + "\n" + operationId + "\n" + archiveBinding);
+        PcbArtworkReceiptStore receiptStore = new(registry.StateDirectory);
         await Gate.WaitAsync(cancellationToken);
         try
         {
@@ -90,14 +91,53 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
             // provenance after the file was changed or removed.
             ArtworkSourceArchive.Verify(repositoryRoot, archive,
                 "invalid_pcb_artwork_archive", "pcb_artwork_archive_mismatch");
-            if (Receipts.TryGetValue(operationId, out StoredReceipt? existing))
+            PcbArtworkReceiptReservation reservation = receiptStore.Reserve(
+                instanceId, expected.ProcessEpoch, operationId, fingerprint, archive);
+            if (!reservation.Created)
             {
-                if (existing.Fingerprint != fingerprint) throw new AutomationException("operation_id_reused", "operationId is already bound to another artwork commit.");
-                return existing.Result;
+                if (reservation.Receipt.Outcome == PcbArtworkReceiptRecord.Terminal)
+                {
+                    CallToolResult replay = PcbArtworkReceiptStore.ToResult(reservation.Receipt);
+                    if (replay.StructuredContent is JsonElement payload)
+                        PcbArtworkContract.ValidateReceiptIdentity(payload, instanceId, expected.ProcessEpoch);
+                    return replay;
+                }
+
+                throw new AutomationException("operation_outcome_unknown",
+                    reservation.Receipt.Outcome == PcbArtworkReceiptRecord.Unknown
+                        ? "The PCB artwork operation reached the native boundary but has no terminal receipt; inspect the board before retrying."
+                        : "Another MCP process has admitted this PCB artwork operation; reconcile its native outcome before retrying.");
+            }
+            try
+            {
+                // Reserve first, then verify once more immediately before the
+                // checked request is built and dispatched. A changed archive
+                // is a proven pre-native rejection and may release only this
+                // still-admitted reservation.
+                ArtworkSourceArchive.Verify(repositoryRoot, archive,
+                    "invalid_pcb_artwork_archive", "pcb_artwork_archive_mismatch");
+            }
+            catch
+            {
+                try { receiptStore.RemoveAdmission(instanceId, expected.ProcessEpoch, operationId, fingerprint, archive); }
+                catch (AutomationException) { }
+                throw;
             }
             CheckedPcbItemTransaction checkedRequest = BuildCheckedRequest(expected, create, operationId, archive);
-            PcbCheckedItemDispatch.Outcome outcome = await PcbCheckedItemDispatch.ApplyAsync(
-                registry, instanceId, checkedRequest, cancellationToken);
+            PcbCheckedItemDispatch.Outcome outcome;
+            try
+            {
+                outcome = await PcbCheckedItemDispatch.ApplyAsync(
+                    registry, instanceId, checkedRequest, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                receiptStore.WriteUnknown(instanceId, expected.ProcessEpoch, operationId, fingerprint,
+                    archive, "operation_outcome_unknown",
+                    $"PCB artwork operation {operationId} was cancelled after admission; inspect the board before retrying.");
+                throw new AutomationException("operation_outcome_unknown",
+                    $"PCB artwork operation {operationId} was cancelled after admission; inspect the board before retrying.");
+            }
             bool archiveVerified = true;
             AutomationException? archiveError = null;
             try
@@ -117,7 +157,31 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
             CallToolResult result = ArtworkMutationData(outcome, document, operationId, assetId,
                 sourceKind, actualSha256, archive, boardLayer, create.Items.Count,
                 archiveBinding, archiveVerified, archiveError);
-            if (!(result.IsError ?? false)) Receipts[operationId] = new(fingerprint, result);
+            if (outcome.UntrustedReceipt)
+            {
+                receiptStore.WriteUnknown(instanceId, expected.ProcessEpoch, operationId, fingerprint,
+                    archive, outcome.ErrorCode ?? "invalid_checked_pcb_receipt",
+                    outcome.ErrorMessage ?? "The native PCB artwork receipt was invalid and cannot be trusted.");
+            }
+            else if (outcome.NativeReceiptAvailable)
+            {
+                receiptStore.WriteTerminal(instanceId, expected.ProcessEpoch, operationId, fingerprint,
+                    archive, outcome.Receipt?.State.ToString() ?? "native-result",
+                    archiveVerified, result);
+            }
+            else if (ProvenPreNativeRejection(outcome))
+            {
+                // Only a checked dispatch that proves no native request was
+                // admitted may release the durable reservation for retry.
+                receiptStore.RemoveAdmission(instanceId, expected.ProcessEpoch, operationId,
+                    fingerprint, archive);
+            }
+            else
+            {
+                receiptStore.WriteUnknown(instanceId, expected.ProcessEpoch, operationId, fingerprint,
+                    archive, outcome.ErrorCode ?? "operation_outcome_unknown",
+                    outcome.ErrorMessage ?? "The native PCB artwork outcome is unresolved; inspect the board before retrying.");
+            }
             return result;
         }
         finally { Gate.Release(); }
@@ -126,18 +190,19 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
     /// <summary>Builds the checked native create transaction without contacting KiCad.</summary>
     internal static CheckedPcbItemTransaction BuildCheckedRequest(
         DocumentLifecycleState expected, CreateItems candidate, string operationId,
-        ArtworkSourceArchive.Receipt? sourceArchive = null)
+        ArtworkSourceArchive.Receipt? sourceArchive = null, string? description = null)
     {
-        string description = "MCP SVG PCB artwork";
+        string transactionDescription = string.IsNullOrWhiteSpace(description)
+            ? "MCP SVG PCB artwork" : description;
         if (sourceArchive is not null)
-            description += "\n" + ArtworkSourceArchive.TransactionBinding(sourceArchive);
+            transactionDescription += "\n" + ArtworkSourceArchive.TransactionBinding(sourceArchive);
         var request = new CheckedPcbItemTransaction
         {
             ExpectedState = expected.Clone(),
             ProcessEpoch = expected.ProcessEpoch,
             OperationId = operationId,
             MaximumResultBytes = 4 * 1024 * 1024,
-            Description = description
+            Description = transactionDescription
         };
         request.Operations.Add(new PcbItemOperation { Create = candidate.Clone() });
         return request;
@@ -264,10 +329,23 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
         await Gate.WaitAsync(cancellationToken);
         try
         {
-            if (!Receipts.TryGetValue(operationId, out StoredReceipt? stored)) return Data(new { instanceId, processEpoch = expectedProcessEpoch, operationId, found = false });
-            JsonElement payload = stored.Result.StructuredContent ?? JsonSerializer.SerializeToElement(new { });
+            PcbArtworkReceiptRecord? stored = new PcbArtworkReceiptStore(registry.StateDirectory)
+                .Read(instanceId, operationId);
+            if (stored is null)
+                return Data(new { instanceId, processEpoch = expectedProcessEpoch, operationId,
+                    found = false, receiptScope = "mcp-state", retrySafety = "unknown-native-outcome" });
+            if (stored.ProcessEpoch != expectedProcessEpoch)
+                throw new AutomationException("stale_process_epoch", "The receipt belongs to another native process epoch.");
+            if (stored.Outcome != PcbArtworkReceiptRecord.Terminal)
+                throw new AutomationException("operation_outcome_unknown",
+                    stored.ErrorMessage.Length == 0
+                        ? "The PCB artwork operation has no terminal receipt; inspect the board before retrying."
+                        : stored.ErrorMessage);
+            CallToolResult restored = PcbArtworkReceiptStore.ToResult(stored);
+            JsonElement payload = restored.StructuredContent ?? JsonSerializer.SerializeToElement(new { });
             PcbArtworkContract.ValidateReceiptIdentity(payload, instanceId, expectedProcessEpoch);
-            return Data(new { instanceId, processEpoch = expectedProcessEpoch, operationId, found = true, receipt = payload, receiptScope = "mcp-process" });
+            return Data(new { instanceId, processEpoch = expectedProcessEpoch, operationId,
+                found = true, receipt = payload, receiptScope = "mcp-state", durableRecovery = true });
         }
         finally { Gate.Release(); }
     });
@@ -292,6 +370,8 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
     private static void ValidateEpoch(string value) { if (!Guid.TryParseExact(value, "D", out var id) || id == Guid.Empty) throw new AutomationException("invalid_process_epoch", "Provide the canonical native process epoch."); }
     private static T Parse<T>(string json, string code) where T : class, Google.Protobuf.IMessage<T>, new() { try { return SchematicJson.Parser.Parse<T>(json); } catch (Exception error) when (error is Google.Protobuf.InvalidProtocolBufferException or InvalidJsonException) { throw new AutomationException(code, error.Message); } }
     private static CallToolResult Data(object value) { JsonElement data = JsonSerializer.SerializeToElement(value); return new() { StructuredContent = data, Content = [new TextContentBlock { Text = data.GetRawText() }] }; }
+    internal static bool ProvenPreNativeRejection(PcbCheckedItemDispatch.Outcome outcome) =>
+        !outcome.NativeReceiptAvailable && outcome.ErrorCode is
+            "native_not_reached" or "pcb_instance_changed" or "invalid_pcb_item_request";
     private static async Task<CallToolResult> Execute(Func<Task<CallToolResult>> action) { try { return await action(); } catch (Exception error) when (error is AutomationException or NativeApiException or NngException or IOException or InvalidJsonException or Google.Protobuf.InvalidProtocolBufferException) { JsonElement data = JsonSerializer.SerializeToElement(new { errorCode = error is AutomationException known ? known.Code : "pcb_artwork_failed", errorMessage = error.Message }); return new() { IsError = true, StructuredContent = data, Content = [new TextContentBlock { Text = data.GetRawText() }] }; } }
-    private sealed record StoredReceipt(string Fingerprint, CallToolResult Result);
 }

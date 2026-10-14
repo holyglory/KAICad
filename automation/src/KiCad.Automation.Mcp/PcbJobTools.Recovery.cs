@@ -168,8 +168,12 @@ public sealed partial class PcbJobTools
             throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
                 "The native reconciliation response was observed by a different process epoch; no retry or publication was attempted.");
 
-        if( response.Found && (!response.RequestFingerprintVerified || !response.JournalVerified
-            || (allowPriorProcessEpoch && !response.PriorProcessEpochVerified)) )
+        // A not-found result is still a journal lookup.  Without the same
+        // request and journal proofs required for a found receipt, an older
+        // or partially implemented peer could turn an unknown operation into
+        // false evidence that it is safe to submit again.
+        if( !response.RequestFingerprintVerified || !response.JournalVerified
+            || (allowPriorProcessEpoch && !response.PriorProcessEpochVerified) )
             throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
                 "The native reconciliation response did not prove its journal and identity checks.");
     }

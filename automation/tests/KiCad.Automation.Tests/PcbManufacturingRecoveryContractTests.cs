@@ -41,9 +41,29 @@ public sealed class PcbManufacturingRecoveryContractTests
         {
             Found = false,
             ReconciliationSupported = true,
-            ObservingProcessEpoch = "11111111-1111-4111-8111-111111111111"
+            ObservingProcessEpoch = "11111111-1111-4111-8111-111111111111",
+            RequestFingerprintVerified = true,
+            JournalVerified = true
         };
         PcbJobTools.ValidateReconcileResponseSupport(verifiedAbsence, allowPriorProcessEpoch: false,
+            "11111111-1111-4111-8111-111111111111");
+
+        var unverifiedAbsence = verifiedAbsence.Clone();
+        unverifiedAbsence.JournalVerified = false;
+        error = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbJobTools.ValidateReconcileResponseSupport(unverifiedAbsence, allowPriorProcessEpoch: false,
+                "11111111-1111-4111-8111-111111111111"));
+        Assert.AreEqual("pcb_export_recovery_unavailable", error.Code);
+
+        var unverifiedPriorAbsence = verifiedAbsence.Clone();
+        error = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbJobTools.ValidateReconcileResponseSupport(unverifiedPriorAbsence, allowPriorProcessEpoch: true,
+                "11111111-1111-4111-8111-111111111111"));
+        Assert.AreEqual("pcb_export_recovery_unavailable", error.Code);
+
+        var verifiedPriorAbsence = verifiedAbsence.Clone();
+        verifiedPriorAbsence.PriorProcessEpochVerified = true;
+        PcbJobTools.ValidateReconcileResponseSupport(verifiedPriorAbsence, allowPriorProcessEpoch: true,
             "11111111-1111-4111-8111-111111111111");
 
         var foreignObserver = verifiedAbsence.Clone();

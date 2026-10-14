@@ -235,7 +235,9 @@ public static class SchematicRebuild
             var before = SchematicDesignXml.Read(new System.Text.UTF8Encoding(false, true).GetString(beforeBytes), libraries);
             var after = SchematicDesignXml.Read(new System.Text.UTF8Encoding(false, true).GetString(afterBytes), libraries);
             var native = new SchematicElectricalState { Hierarchy = new() { Data = after.Schematic.Clone() } };
-            return AdoptSavedNativeProvenance(before, native, batch).Equals(after);
+            var adopted = AdoptSavedNativeProvenance(before, native, batch);
+            return SchematicDesignXml.Write(adopted, libraries)
+                == SchematicDesignXml.Write(after, libraries);
         }
         catch (Exception error) when (error is AutomationException or System.Text.DecoderFallbackException or ArgumentException)
         { return false; }

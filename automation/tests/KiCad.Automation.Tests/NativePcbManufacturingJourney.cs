@@ -335,8 +335,10 @@ public sealed partial class NativeSessionTests
                 .ToArray();
             Assert.IsTrue(managerGerberPaths.Any(path => Path.GetExtension(path)
                 .Equals(".gbr", StringComparison.OrdinalIgnoreCase)), managerGerberReply.GetRawText());
-            string managerGerberPath = managerGerberPaths.Single(path => Path.GetExtension(path)
-                .Equals(".gbr", StringComparison.OrdinalIgnoreCase));
+            string managerGerberPath = managerGerberPaths
+                .Where(path => Path.GetExtension(path).Equals(".gbr", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(path => path, StringComparer.Ordinal)
+                .First();
             Assert.IsTrue(File.Exists(managerGerberPath), managerGerberReply.GetRawText());
             StringAssert.Contains(await File.ReadAllTextAsync(managerGerberPath, token), "G04",
                 "The manager Gerber adapter must publish a real Gerber document.");

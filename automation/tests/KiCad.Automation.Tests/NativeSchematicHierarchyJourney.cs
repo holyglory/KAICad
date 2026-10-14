@@ -355,7 +355,7 @@ public sealed partial class NativeSessionTests
         JsonElement labelCreated = await mcp.Tool("kicad_schematic_create_hierarchical_label", new
         {
             instanceId, documentJson, targetDocumentJson = childJson,
-            expectedStateJson = SchematicJson.Formatter.Format(afterPinDelete),
+            expectedStateJson = SchematicJson.Formatter.Format(afterRepeatedSecond),
             labelJson = SchematicJson.Formatter.Format(label), operationId = labelCreateOperation
         });
         RequireToolSuccess(labelCreated);
@@ -365,7 +365,7 @@ public sealed partial class NativeSessionTests
         JsonElement labelCreateReplay = await mcp.Tool("kicad_schematic_create_hierarchical_label", new
         {
             instanceId, documentJson, targetDocumentJson = childJson,
-            expectedStateJson = SchematicJson.Formatter.Format(afterPinDelete),
+            expectedStateJson = SchematicJson.Formatter.Format(afterRepeatedSecond),
             labelJson = SchematicJson.Formatter.Format(label), operationId = labelCreateOperation
         });
         RequireToolSuccess(labelCreateReplay);

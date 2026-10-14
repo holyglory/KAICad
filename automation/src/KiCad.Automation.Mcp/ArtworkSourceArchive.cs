@@ -57,6 +57,7 @@ internal static class ArtworkSourceArchive
             ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         if (!full.StartsWith(root, pathComparison))
             throw new AutomationException(invalidCode, "The archive receipt escapes repositoryRoot.");
+        EnsureNoSymbolicLinks(root, full, invalidCode);
 
         try
         {
@@ -101,6 +102,7 @@ internal static class ArtworkSourceArchive
             ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         if (!full.StartsWith(root, pathComparison))
             throw new AutomationException(invalidCode, "The source archive escapes repositoryRoot.");
+        EnsureNoSymbolicLinks(root, full, invalidCode);
 
         try
         {
@@ -186,6 +188,45 @@ internal static class ArtworkSourceArchive
             + receipt.Sha256.ToLowerInvariant() + "\n"
             + receipt.Bytes.ToString(System.Globalization.CultureInfo.InvariantCulture);
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
+    }
+
+    private static void EnsureNoSymbolicLinks(string root, string path, string invalidCode)
+    {
+        string? current = path;
+        StringComparison comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
+        try
+        {
+            while (!string.IsNullOrEmpty(current))
+            {
+                string candidate = Path.GetFullPath(current);
+                string? fileLink = new FileInfo(candidate).LinkTarget;
+                string? directoryLink = new DirectoryInfo(candidate).LinkTarget;
+                if (fileLink is not null || directoryLink is not null)
+                    throw new AutomationException(invalidCode,
+                        "The source archive path cannot traverse a symbolic link.");
+
+                if (string.Equals(candidate, root, comparison))
+                    return;
+
+                string? parent = Directory.GetParent(candidate)?.FullName;
+                if (parent is null || string.Equals(parent, candidate, comparison)
+                    || !parent.StartsWith(root, comparison))
+                    return;
+                current = parent;
+            }
+        }
+        catch (AutomationException)
+        {
+            throw;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException
+            or ArgumentException or NotSupportedException or SecurityException)
+        {
+            throw new AutomationException(invalidCode,
+                "The source archive path could not be checked for symbolic links: " + error.Message);
+        }
     }
 
     private static void TryDelete(string path)

@@ -99,6 +99,32 @@ public sealed class PcbArtworkContractTests
     }
 
     [TestMethod]
+    public void SourceArchivePreflightRejectsLinkedAncestorBeforeMutation()
+    {
+        if (OperatingSystem.IsWindows())
+            Assert.Inconclusive("This filesystem-link fixture runs on Unix without changing Windows symlink privileges.");
+
+        string root = Directory.CreateTempSubdirectory("pcb-artwork-archive-").FullName;
+        string outside = Directory.CreateTempSubdirectory("pcb-artwork-outside-").FullName;
+        byte[] bytes = Encoding.UTF8.GetBytes("linked-artwork-source");
+        string hash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes));
+        try
+        {
+            Directory.CreateSymbolicLink(Path.Combine(root, "artwork"), outside);
+
+            Reject(() => ArtworkSourceArchive.Persist(root, "artwork/source.svg", bytes, hash,
+                "invalid_archive", "archive_conflict"), "invalid_archive");
+            Assert.IsFalse(File.Exists(Path.Combine(outside, "source.svg")),
+                "A linked archive directory must never receive source bytes.");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+            Directory.Delete(outside, recursive: true);
+        }
+    }
+
+    [TestMethod]
     public void SourceArchiveReceiptFailsClosedWhenReadbackChanges()
     {
         string root = Directory.CreateTempSubdirectory("pcb-artwork-archive-").FullName;

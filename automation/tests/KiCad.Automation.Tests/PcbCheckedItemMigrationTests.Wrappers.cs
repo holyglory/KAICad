@@ -101,7 +101,8 @@ public sealed partial class PcbCheckedItemMigrationTests
             Assert.IsFalse(replay.GetProperty("replayed").GetBoolean());
             Assert.AreEqual(1, transport.CheckedMutations);
             Assert.AreEqual(1, transport.AppliedItemTransactions);
-            Assert.AreEqual(2, transport.ReceiptReads);
+            Assert.AreEqual(1, transport.ReceiptReads,
+                "The durable MCP replay must not perform a second native receipt inspection.");
             Assert.AreEqual(1, transport.LifecycleReads);
             Assert.AreEqual(1, transport.ItemReads);
             Assert.AreEqual(0, transport.LegacyMutations);

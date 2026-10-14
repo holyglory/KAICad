@@ -376,8 +376,8 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
     }
 
     [McpServerTool(Name = "kicad_pcb_svg_artwork_receipt", ReadOnly = true),
-     Description("Read the process-owned receipt for an authoritative SVG artwork commit. It never resubmits board geometry and does not replace a native cross-process receipt."),
-     KiCadCapability("pcb-artwork", "compiled-mcp plus native-board-api", "operation UUID and process-owned vector artwork receipt"),
+     Description("Read the durable MCP-state receipt for an authoritative SVG artwork commit. It never resubmits board geometry and does not replace a native cross-process receipt."),
+     KiCadCapability("pcb-artwork", "compiled-mcp plus native-board-api", "operation UUID and durable MCP-state vector artwork receipt"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Receipt(string instanceId, string expectedProcessEpoch, string operationId,
         CancellationToken cancellationToken) => Execute(async () =>

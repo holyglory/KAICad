@@ -2478,6 +2478,109 @@ public sealed partial class NativeSessionTests
             await AssertTypedBoardQuery(new { document = typedDocument, expectedState = typedState,
                 query = "plotSettings" }, "plot-settings");
 
+            // Qualify the typed plot-settings mutation against the same live
+            // board checkpoint.  The request is deliberately complete so the
+            // native setter must exercise lifecycle admission and normalized
+            // readback rather than relying on DTO defaults.
+            var plotSettings = new
+            {
+                layers = new[] { "BL_F_Cu", "BL_B_Cu", "BL_Edge_Cuts" },
+                commonLayers = new[] { "BL_Edge_Cuts" },
+                colorTheme = "",
+                drawingSheet = "",
+                variant = "",
+                mirror = false,
+                blackAndWhite = true,
+                negative = false,
+                scale = 1.0,
+                sketchPadsOnFabLayers = false,
+                hideDnpFootprintsOnFabLayers = false,
+                sketchDnpFootprintsOnFabLayers = false,
+                crossoutDnpFootprintsOnFabLayers = false,
+                plotFootprintValues = false,
+                plotReferenceDesignators = true,
+                plotDrawingSheet = false,
+                subtractSolderMaskFromSilk = false,
+                plotPadNumbers = true,
+                drillMarks = "PDM_SMALL",
+                useDrillOrigin = false,
+                checkZonesBeforePlot = true
+            };
+            string plotOperationId = Guid.NewGuid().ToString("D");
+            var plotMutationArguments = new
+            {
+                instanceId,
+                input = new
+                {
+                    document = typedDocument,
+                    expectedState = typedState,
+                    settings = plotSettings,
+                    operationId = plotOperationId
+                }
+            };
+            var plotMutation = await mcp.Tool("kicad_pcb_plot_settings_set_typed", plotMutationArguments);
+            Assert.IsFalse(plotMutation.TryGetProperty("isError", out var plotMutationError)
+                && plotMutationError.GetBoolean(), plotMutation.GetRawText());
+            var plotData = plotMutation.GetProperty("structuredContent");
+            Assert.AreEqual("completed", plotData.GetProperty("status").GetString(), plotMutation.GetRawText());
+            Assert.IsTrue(plotData.GetProperty("nativeMutation").GetBoolean(), plotMutation.GetRawText());
+            Assert.IsTrue(plotData.GetProperty("readbackVerified").GetBoolean(), plotMutation.GetRawText());
+            Assert.AreEqual(SchematicJson.Formatter.Format(cleanState), plotData.GetProperty("beforeState").GetString(), plotMutation.GetRawText());
+            var plotAfterState = SchematicJson.Parser.Parse<DocumentLifecycleState>(plotData.GetProperty("afterState").GetString()!);
+            Assert.IsTrue(plotAfterState.NativeContentDirty, plotMutation.GetRawText());
+            Assert.IsTrue(plotData.GetProperty("readback").GetProperty("blackAndWhite").GetBoolean(), plotMutation.GetRawText());
+            Assert.IsTrue(plotData.GetProperty("readback").GetProperty("plotReferenceDesignators").GetBoolean(), plotMutation.GetRawText());
+            Assert.AreEqual("PDM_SMALL", plotData.GetProperty("readback").GetProperty("drillMarks").GetString(), plotMutation.GetRawText());
+
+            // A completed retry must be served from the exact MCP receipt and
+            // must not dispatch a second native mutation.
+            var plotReplay = await mcp.Tool("kicad_pcb_plot_settings_set_typed", plotMutationArguments);
+            Assert.IsFalse(plotReplay.TryGetProperty("isError", out var plotReplayError)
+                && plotReplayError.GetBoolean(), plotReplay.GetRawText());
+            Assert.IsTrue(plotReplay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean(), plotReplay.GetRawText());
+            Assert.AreEqual(plotData.GetProperty("afterState").GetString(),
+                plotReplay.GetProperty("structuredContent").GetProperty("afterState").GetString(), plotReplay.GetRawText());
+
+            var plotSave = await mcp.Tool("kicad_document_save", new
+            {
+                instanceId,
+                expectedStateJson = plotData.GetProperty("afterState").GetString(),
+                operationId = Guid.NewGuid().ToString("D")
+            });
+            Assert.IsFalse(plotSave.TryGetProperty("isError", out var plotSaveError) && plotSaveError.GetBoolean(), plotSave.GetRawText());
+            var plotSavedState = plotSave.GetProperty("structuredContent").GetProperty("observedState").GetString();
+            Assert.IsFalse(string.IsNullOrWhiteSpace(plotSavedState), plotSave.GetRawText());
+            var plotClose = await mcp.Tool("kicad_document_close", new
+            {
+                instanceId,
+                expectedStateJson = plotSavedState,
+                operationId = Guid.NewGuid().ToString("D")
+            });
+            Assert.IsFalse(plotClose.TryGetProperty("isError", out var plotCloseError) && plotCloseError.GetBoolean(), plotClose.GetRawText());
+            var plotReopen = await CreateRootThroughMcp(client.Endpoint, instanceId, cleanPath, evidence, token,
+                toolName: "kicad_pcb_open");
+            cleanBoard = plotReopen.Document;
+            finalBoard = cleanBoard;
+            cleanState = await ObserveLifecycleState(client, cleanBoard, token);
+            Assert.IsFalse(cleanState.NativeContentDirty, "A saved and reopened board must be clean.");
+
+            JsonElement reopenedPlotDocument = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(cleanBoard));
+            JsonElement reopenedPlotState = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(cleanState));
+            var persistedPlot = await mcp.Tool("kicad_pcb_query_typed", new
+            {
+                instanceId,
+                input = new { document = reopenedPlotDocument, expectedState = reopenedPlotState, query = "plotSettings" }
+            });
+            Assert.IsFalse(persistedPlot.TryGetProperty("isError", out var persistedPlotError)
+                && persistedPlotError.GetBoolean(), persistedPlot.GetRawText());
+            var persistedPlotData = persistedPlot.GetProperty("structuredContent");
+            Assert.IsTrue(persistedPlotData.GetProperty("nativeQuery").GetBoolean(), persistedPlot.GetRawText());
+            Assert.IsFalse(persistedPlotData.GetProperty("boardMutation").GetBoolean(), persistedPlot.GetRawText());
+            Assert.IsTrue(persistedPlotData.GetProperty("response").GetProperty("plotSettings")
+                .GetProperty("blackAndWhite").GetBoolean(), persistedPlot.GetRawText());
+            Assert.IsTrue(persistedPlotData.GetProperty("response").GetProperty("plotSettings")
+                .GetProperty("plotReferenceDesignators").GetBoolean(), persistedPlot.GetRawText());
+
             var cleanCandidate = new CreateItems { Header = new() { Document = cleanBoard } };
             cleanCandidate.Items.Add(Any.Pack(new Track
             {

@@ -592,6 +592,33 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
                 || expectedRequest.OperationId != operationId)
                 throw new AutomationException("invalid_library_request", "expectedRequestJson must retain the same document, process epoch and operation UUID.");
             var receiptStore = new FootprintLibraryCheckedReceiptStore(registry.StateDirectory);
+            NativeCapabilityFootprintLibraryCheckedReadOperationResponse? nativeResponse = null;
+            try
+            {
+                NativeClient client = registry.Client(instanceId);
+                AutomationSession session = await client.HandshakeAsync(cancellationToken);
+                if (session.Epoch != expectedProcessEpoch)
+                    throw new AutomationException("stale_process_epoch", "The expected process epoch is stale; inspect the instance again.");
+                nativeResponse = await client.InvokeAsync<NativeCapabilityFootprintLibraryCheckedReadOperation,
+                    NativeCapabilityFootprintLibraryCheckedReadOperationResponse>(new()
+                    {
+                        Document = document, ProcessEpoch = session.Epoch, OperationId = operationId,
+                        ExpectedRequest = expectedRequest
+                    }, cancellationToken);
+                if (nativeResponse.Found)
+                {
+                    FootprintLibraryCheckedContract.ValidateResponse(nativeResponse.Receipt, expectedRequest);
+                    receiptStore.WriteTerminal(instanceId, expectedRequest, nativeResponse.Receipt);
+                    return Data(new
+                    {
+                        instanceId, processEpoch = session.Epoch, operationId, found = true,
+                        receipt = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(nativeResponse.Receipt)),
+                        nativeReceiptAvailable = true, durableRecovery = false, retryDispatched = false
+                    });
+                }
+            }
+            catch (NngException) { }
+
             FootprintLibraryCheckedReceiptRecord? durable = receiptStore.Read(instanceId, operationId);
             if (durable is not null)
             {
@@ -617,25 +644,14 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
                         : durable.ErrorMessage);
             }
 
-            NativeClient client = registry.Client(instanceId);
-            AutomationSession session = await client.HandshakeAsync(cancellationToken);
-            if (session.Epoch != expectedProcessEpoch)
-                throw new AutomationException("stale_process_epoch", "The expected process epoch is stale; inspect the instance again.");
-            NativeCapabilityFootprintLibraryCheckedReadOperationResponse response = await client.InvokeAsync<
-                NativeCapabilityFootprintLibraryCheckedReadOperation, NativeCapabilityFootprintLibraryCheckedReadOperationResponse>(new()
-                {
-                    Document = document, ProcessEpoch = session.Epoch, OperationId = operationId,
-                    ExpectedRequest = expectedRequest
-                }, cancellationToken);
-            if (response.Found)
-                FootprintLibraryCheckedContract.ValidateResponse(response.Receipt, expectedRequest);
-            if (response.Found)
-                receiptStore.WriteTerminal(instanceId, expectedRequest, response.Receipt);
             return Data(new
             {
-                instanceId, processEpoch = session.Epoch, operationId, found = response.Found,
-                receipt = response.Found ? JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(response.Receipt)) : (JsonElement?)null,
-                nativeReceiptAvailable = response.Found, retryDispatched = false
+                instanceId, processEpoch = expectedProcessEpoch, operationId,
+                found = nativeResponse?.Found == true,
+                receipt = nativeResponse?.Found == true
+                    ? JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(nativeResponse.Receipt))
+                    : (JsonElement?)null,
+                nativeReceiptAvailable = false, durableRecovery = false, retryDispatched = false
             });
         });
 

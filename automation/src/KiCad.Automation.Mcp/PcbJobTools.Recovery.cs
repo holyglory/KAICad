@@ -127,7 +127,7 @@ public sealed partial class PcbJobTools
         {
             PcbManufacturingExportReceiptResponse response = await client.InvokeAsync<ReconcilePcbManufacturingExport,
                 PcbManufacturingExportReceiptResponse>(request, cancellationToken);
-            ValidateReconcileResponseSupport(response, request.AllowPriorProcessEpoch);
+            ValidateReconcileResponseSupport(response, request.AllowPriorProcessEpoch, request.ProcessEpoch);
             if( response.Found )
             {
                 ValidateManagerReceiptIdentity(response.Receipt, request.Document, request.OperationId,
@@ -156,11 +156,17 @@ public sealed partial class PcbJobTools
     /// refusal instead of being exposed as evidence that no operation exists.
     /// </summary>
     internal static void ValidateReconcileResponseSupport(
-        PcbManufacturingExportReceiptResponse response, bool allowPriorProcessEpoch)
+        PcbManufacturingExportReceiptResponse response, bool allowPriorProcessEpoch,
+        string expectedObservingProcessEpoch)
     {
         if( response is null || !response.ReconciliationSupported )
             throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
                 "The native manufacturing manager does not provide a verified reconciliation journal; no retry or publication was attempted.");
+
+        if( string.IsNullOrWhiteSpace(expectedObservingProcessEpoch)
+            || response.ObservingProcessEpoch != expectedObservingProcessEpoch )
+            throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
+                "The native reconciliation response was observed by a different process epoch; no retry or publication was attempted.");
 
         if( response.Found && (!response.RequestFingerprintVerified || !response.JournalVerified
             || (allowPriorProcessEpoch && !response.PriorProcessEpochVerified)) )
@@ -209,10 +215,10 @@ public sealed partial class PcbJobTools
         if( session.Epoch != epoch ) throw new AutomationException("stale_process_epoch", "The journal read belongs to another native process epoch.");
         PcbManufacturingExportReceiptResponse response = await client.InvokeAsync<ReadPcbManufacturingExportJob, PcbManufacturingExportReceiptResponse>(
             new() { Document = target, OperationId = operation, ProcessEpoch = epoch, RequestFingerprintSha256 = fingerprint }, cancellationToken);
+        ValidateReconcileResponseSupport(response, allowPriorProcessEpoch: false,
+            expectedObservingProcessEpoch: epoch);
         if( response.Found )
         {
-            if( !response.ReconciliationSupported || !response.RequestFingerprintVerified || !response.JournalVerified )
-                throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable, "The native journal read did not prove its integrity checks.");
             ValidateManagerReceiptIdentity(response.Receipt, target, operation, epoch);
             if( response.Receipt.RequestFingerprintSha256 != fingerprint )
                 throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable, "The native journal fingerprint does not match the requested operation.");

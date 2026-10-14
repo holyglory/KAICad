@@ -33,24 +33,36 @@ public sealed class PcbManufacturingRecoveryContractTests
     {
         var unsupported = new PcbManufacturingExportReceiptResponse { Found = false };
         AutomationException error = Assert.ThrowsExactly<AutomationException>(() =>
-            PcbJobTools.ValidateReconcileResponseSupport(unsupported, allowPriorProcessEpoch: false));
+            PcbJobTools.ValidateReconcileResponseSupport(unsupported, allowPriorProcessEpoch: false,
+                "11111111-1111-4111-8111-111111111111"));
         Assert.AreEqual("pcb_export_recovery_unavailable", error.Code);
 
         var verifiedAbsence = new PcbManufacturingExportReceiptResponse
         {
             Found = false,
-            ReconciliationSupported = true
+            ReconciliationSupported = true,
+            ObservingProcessEpoch = "11111111-1111-4111-8111-111111111111"
         };
-        PcbJobTools.ValidateReconcileResponseSupport(verifiedAbsence, allowPriorProcessEpoch: false);
+        PcbJobTools.ValidateReconcileResponseSupport(verifiedAbsence, allowPriorProcessEpoch: false,
+            "11111111-1111-4111-8111-111111111111");
+
+        var foreignObserver = verifiedAbsence.Clone();
+        foreignObserver.ObservingProcessEpoch = "22222222-2222-4222-8222-222222222222";
+        error = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbJobTools.ValidateReconcileResponseSupport(foreignObserver, allowPriorProcessEpoch: false,
+                "11111111-1111-4111-8111-111111111111"));
+        Assert.AreEqual("pcb_export_recovery_unavailable", error.Code);
 
         var incompleteReceipt = new PcbManufacturingExportReceiptResponse
         {
             Found = true,
             ReconciliationSupported = true,
+            ObservingProcessEpoch = "11111111-1111-4111-8111-111111111111",
             RequestFingerprintVerified = true
         };
         error = Assert.ThrowsExactly<AutomationException>(() =>
-            PcbJobTools.ValidateReconcileResponseSupport(incompleteReceipt, allowPriorProcessEpoch: false));
+            PcbJobTools.ValidateReconcileResponseSupport(incompleteReceipt, allowPriorProcessEpoch: false,
+                "11111111-1111-4111-8111-111111111111"));
         Assert.AreEqual("pcb_export_recovery_unavailable", error.Code);
     }
 

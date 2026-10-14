@@ -542,11 +542,15 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
             }
             catch (NngException error)
             {
-                receiptStore.WriteUnknown(instanceId, expectedRequest,
-                    error.RequestDelivered ? "operation_outcome_unknown" : "native_not_reached",
-                    error.RequestDelivered
-                        ? $"KiCad received checked footprint write {operationId} but did not answer; inspect the library before retrying."
-                        : $"KiCad did not receive checked footprint write {operationId}; inspect the instance before retrying.");
+                if (error.RequestDelivered)
+                {
+                    receiptStore.WriteUnknown(instanceId, expectedRequest, "operation_outcome_unknown",
+                        $"KiCad received checked footprint write {operationId} but did not answer; inspect the library before retrying.");
+                }
+                else
+                {
+                    receiptStore.RemoveAdmission(instanceId, expectedRequest);
+                }
                 throw new AutomationException(error.RequestDelivered ? "operation_outcome_unknown" : "native_not_reached",
                     error.RequestDelivered
                         ? $"KiCad received checked footprint write {operationId} but did not answer; inspect the library before retrying."

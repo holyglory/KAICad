@@ -22,7 +22,6 @@ namespace KiCad.Automation.Mcp;
 public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
 {
     private static readonly SemaphoreSlim MutationGate = new(1, 1);
-    private static readonly Dictionary<string, StoredReceipt> Receipts = new(StringComparer.Ordinal);
 
     [McpServerTool(Name = "kicad_pcb_route_corner_optimize_plan", ReadOnly = true),
      Description("Plan deterministic PCB corner optimization from one exact board observation. candidateRequestJson must be CreateItems containing Track, Arc or Via route objects; requestJson contains optional nets[] and maxMerges. Only same-net, same-layer, same-width Track segments meeting at a degree-two collinear junction are merged. Branches, arcs and vias are preserved. The result is exact DeleteItems and CreateItems protobuf JSON, proposal-only, and does not claim DRC, impedance, length, via minimization or native push-and-shove."),
@@ -132,7 +131,7 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
         string fingerprint = instanceId + "\n" + canonicalDelete + "\n" + canonicalCreate + "\n"
             + canonicalExpected + "\n" + canonicalDrc;
         if (drc is not null)
-            return await WithNativeReceipt(operationId, fingerprint, async () =>
+            return await WithNativeReceipt(instanceId, operationId, fingerprint, async () =>
             {
                 CheckedPcbRouteCommit checkedRequest = BuildCheckedRequest(
                     create, delete, expected, drc.JobId, operationId);
@@ -146,7 +145,7 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
                     cancellationToken: cancellationToken);
                 return CheckedRouteResult(checkedResult, drc);
             });
-        return await WithNativeReceipt(operationId, fingerprint, () =>
+        return await WithNativeReceipt(instanceId, operationId, fingerprint, () =>
             ApplyCornerChecked(instanceId, delete, create, expected, operationId, cancellationToken));
     });
 
@@ -199,10 +198,12 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
         await MutationGate.WaitAsync(cancellationToken);
         try
         {
-            if (!Receipts.TryGetValue(operationId, out StoredReceipt? stored))
+            var store = new RouteOptimizationReceiptStore(registry.StateDirectory);
+            RouteOptimizationReceiptRecord? stored = store.Read(instanceId, operationId);
+            if (stored is null)
                 return ReceiptData(new { instanceId, processEpoch = expectedProcessEpoch, operationId, found = false,
-                    receiptScope = "mcp-process", nativeReceiptAvailable = false });
-            JsonElement payload = stored.Result.StructuredContent ?? JsonSerializer.SerializeToElement(new { });
+                    receiptScope = "mcp-state", nativeReceiptAvailable = false });
+            JsonElement payload = JsonDocument.Parse(stored.ResultJson).RootElement.Clone();
             string? processEpoch = payload.TryGetProperty("processEpoch", out JsonElement epoch) ? epoch.GetString() : null;
             if (!string.Equals(processEpoch, expectedProcessEpoch, StringComparison.Ordinal)) throw new AutomationException("stale_process_epoch", "The route-optimization receipt belongs to another native process epoch.");
             string? receiptInstance = payload.TryGetProperty("instanceId", out JsonElement instance) ? instance.GetString() : null;
@@ -212,7 +213,7 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
                 : payload.TryGetProperty("nativeReceipt", out JsonElement nativeReceipt)
                     && nativeReceipt.ValueKind == JsonValueKind.True;
             return ReceiptData(new { instanceId, processEpoch, operationId, found = true,
-                receiptScope = "mcp-process",
+                receiptScope = "mcp-state",
                 nativeReceiptAvailable, receipt = payload });
         }
         finally { MutationGate.Release(); }
@@ -583,17 +584,24 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
         }
     }
 
-    private static async Task<CallToolResult> WithNativeReceipt(string operationId, string fingerprint,
+    private async Task<CallToolResult> WithNativeReceipt(string instanceId, string operationId, string fingerprint,
         Func<Task<CallToolResult>> action)
     {
         await MutationGate.WaitAsync();
         try
         {
-            if (Receipts.TryGetValue(operationId, out StoredReceipt? existing)
-                && existing.Fingerprint != fingerprint)
-                throw new AutomationException("operation_id_reused", "The operation ID is already bound to a different route replacement request.");
+            var store = new RouteOptimizationReceiptStore(registry.StateDirectory);
+            string digest = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(fingerprint)));
+            if (store.Read(instanceId, operationId) is { } existing)
+            {
+                if (existing.Fingerprint != digest)
+                    throw new AutomationException("operation_id_reused", "The operation ID is already bound to a different route replacement request.");
+                return RouteOptimizationReceiptStore.Result(existing);
+            }
             CallToolResult result = await action();
-            if (!(result.IsError ?? false)) Receipts[operationId] = new(fingerprint, result);
+            if (!(result.IsError ?? false) && result.StructuredContent is JsonElement payload)
+                store.Write(instanceId, payload.TryGetProperty("processEpoch", out var epoch) ? epoch.GetString()! : "",
+                    operationId, digest, payload);
             return result;
         }
         finally { MutationGate.Release(); }
@@ -607,6 +615,5 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
 
     internal sealed record OptimizationPlan(string PlanId, CreateItems Create, DeleteItems Delete,
         int MergedCount, IReadOnlyList<string> RemovedItemIds, IReadOnlyList<string> CreatedTrackIds, int PreservedItemCount);
-    private sealed record StoredReceipt(string Fingerprint, CallToolResult Result);
     private sealed record Segment(Track Item, bool Existing);
 }

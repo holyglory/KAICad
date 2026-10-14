@@ -154,7 +154,7 @@ public static class HostedDelivery
             string macOutput = Path.Combine(output, "mac");
             ValidationResult result = await MacValidation.RunAsync(new(repository, request.Commit, builder,
                 Path.Combine(builder, "toolchain", "kicad-mac-builder.cmake"), macOutput,
-                "^(qa_document_change_journal|qa_symbol_graphic_identity|qa_schematic_symbol_library_identity|qa_schematic_formatting)$", request.Architecture), token);
+                "^(qa_document_change_journal|qa_symbol_graphic_identity|qa_schematic_symbol_library_identity|qa_schematic_formatting|qa_pcbnew_pns_detached_update)$", request.Architecture), token);
             if (result.Status != "checks_passed")
             {
                 // Keep a failed installed tree separate from distributable
@@ -216,7 +216,7 @@ public static class HostedDelivery
             string sourceSchemas = Path.Combine(repository, "api", "schemas");
             CopyTree(sourceSchemas, buildSchemas);
             await Run("native-tests", "ctest", ["--test-dir", build, "--no-tests=error", "--output-on-failure",
-                "-R", "^(qa_document_change_journal|qa_symbol_graphic_identity|qa_schematic_symbol_library_identity|qa_schematic_formatting)$", "--output-junit", Path.Combine(evidence, "native-tests.xml")]);
+                "-R", "^(qa_document_change_journal|qa_symbol_graphic_identity|qa_schematic_symbol_library_identity|qa_schematic_formatting|qa_pcbnew_pns_detached_update)$", "--output-junit", Path.Combine(evidence, "native-tests.xml")]);
             string dependencies = Path.Combine(build, "vcpkg_installed", "x64-windows");
             Directory.CreateDirectory(bin);
             CopyDlls(Path.Combine(dependencies, "bin"), bin);

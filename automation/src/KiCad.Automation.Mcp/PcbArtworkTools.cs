@@ -91,6 +91,11 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
             // provenance after the file was changed or removed.
             ArtworkSourceArchive.Verify(repositoryRoot, archive,
                 "invalid_pcb_artwork_archive", "pcb_artwork_archive_mismatch");
+            // Build the exact checked request before consulting the durable
+            // admission.  If MCP died after reserving the operation but after
+            // native dispatch, a retry can use this deterministic envelope to
+            // inspect KiCad's receipt and settle without a second mutation.
+            CheckedPcbItemTransaction checkedRequest = BuildCheckedRequest(expected, create, operationId, archive);
             PcbArtworkReceiptReservation reservation = receiptStore.Reserve(
                 instanceId, expected.ProcessEpoch, operationId, fingerprint, archive);
             if (!reservation.Created)
@@ -101,6 +106,57 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
                     if (replay.StructuredContent is JsonElement payload)
                         PcbArtworkContract.ValidateReceiptIdentity(payload, instanceId, expected.ProcessEpoch);
                     return replay;
+                }
+
+                if (reservation.Receipt.Outcome == PcbArtworkReceiptRecord.Admitted)
+                {
+                    // The durable admission is intentionally fail-closed: a
+                    // second caller must first reconcile the exact native
+                    // request.  A terminal native receipt is safe to settle;
+                    // a missing or unavailable receipt remains indeterminate.
+                    PcbCheckedItemDispatch.Outcome inspected = await PcbCheckedItemDispatch.InspectAsync(
+                        registry, instanceId, checkedRequest, cancellationToken);
+                    if (inspected.Receipt is null
+                        || inspected.Receipt.State == CheckedPcbItemTransactionState.CpbtsNotFound)
+                    {
+                        string message = inspected.ErrorMessage
+                            ?? $"PCB artwork operation {operationId} has an admitted durable boundary but no terminal native receipt; inspect the board before retrying.";
+                        if (inspected.ErrorCode is null)
+                        {
+                            receiptStore.WriteUnknown(instanceId, expected.ProcessEpoch, operationId,
+                                fingerprint, archive, "operation_outcome_unknown", message);
+                        }
+                        throw new AutomationException("operation_outcome_unknown", message);
+                    }
+
+                    inspected.Receipt.Replayed = true;
+                    bool archiveVerified = true;
+                    AutomationException? archiveError = null;
+                    try
+                    {
+                        ArtworkSourceArchive.Verify(repositoryRoot, archive,
+                            "invalid_pcb_artwork_archive", "pcb_artwork_archive_mismatch");
+                    }
+                    catch (AutomationException error)
+                    {
+                        archiveVerified = false;
+                        archiveError = error;
+                    }
+                    CallToolResult reconciled = ArtworkMutationData(inspected, document, operationId,
+                        assetId, sourceKind, actualSha256, archive, boardLayer, create.Items.Count,
+                        archiveBinding, archiveVerified, archiveError, durableReconciled: true);
+                    if (inspected.UntrustedReceipt)
+                    {
+                        receiptStore.WriteUnknown(instanceId, expected.ProcessEpoch, operationId,
+                            fingerprint, archive, inspected.ErrorCode ?? "invalid_checked_pcb_receipt",
+                            inspected.ErrorMessage ?? "The native PCB artwork receipt was invalid and cannot be trusted.");
+                    }
+                    else if (inspected.NativeReceiptAvailable)
+                    {
+                        receiptStore.WriteTerminal(instanceId, expected.ProcessEpoch, operationId, fingerprint,
+                            archive, inspected.Receipt.State.ToString(), archiveVerified, reconciled);
+                    }
+                    return reconciled;
                 }
 
                 throw new AutomationException("operation_outcome_unknown",
@@ -123,7 +179,6 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
                 catch (AutomationException) { }
                 throw;
             }
-            CheckedPcbItemTransaction checkedRequest = BuildCheckedRequest(expected, create, operationId, archive);
             PcbCheckedItemDispatch.Outcome outcome;
             try
             {
@@ -156,7 +211,7 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
             }
             CallToolResult result = ArtworkMutationData(outcome, document, operationId, assetId,
                 sourceKind, actualSha256, archive, boardLayer, create.Items.Count,
-                archiveBinding, archiveVerified, archiveError);
+                archiveBinding, archiveVerified, archiveError, durableReconciled: false);
             if (outcome.UntrustedReceipt)
             {
                 receiptStore.WriteUnknown(instanceId, expected.ProcessEpoch, operationId, fingerprint,
@@ -220,7 +275,8 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
         int segmentCount,
         string archiveBinding,
         bool archiveVerified,
-        AutomationException? archiveError)
+        AutomationException? archiveError,
+        bool durableReconciled)
     {
         CheckedPcbItemTransactionReceipt? receipt = outcome.Receipt;
         bool success = outcome.Completed;
@@ -299,6 +355,7 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
             replayableWithinProcess = outcome.NativeReceiptAvailable,
             transportRetrySafe = outcome.NativeReceiptAvailable,
             receiptScope = outcome.NativeReceiptAvailable ? "native-process" : "none",
+            durableReconciled,
             // The archive is published and readback-verified before the native
             // item transaction. It remains a separate persistence boundary.
             archivePersisted = sourceArchive.Persisted,

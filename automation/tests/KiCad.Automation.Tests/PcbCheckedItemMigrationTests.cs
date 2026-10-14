@@ -428,7 +428,10 @@ public sealed partial class PcbCheckedItemMigrationTests
         }
 
         private static string ItemId(Any item) => item.Is(Kiapi.Board.Types.Track.Descriptor)
-            ? item.Unpack<Track>().Id.Value : item.Unpack<FootprintInstance>().Id.Value;
+            ? item.Unpack<Track>().Id.Value
+            : item.Is(BoardGraphicShape.Descriptor)
+                ? item.Unpack<BoardGraphicShape>().Id.Value
+                : item.Unpack<FootprintInstance>().Id.Value;
 
         internal void InvalidateDrc(string jobId)
         {

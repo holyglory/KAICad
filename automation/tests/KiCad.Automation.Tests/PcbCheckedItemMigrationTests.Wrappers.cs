@@ -256,6 +256,59 @@ public sealed partial class PcbCheckedItemMigrationTests
         finally { Directory.Delete(root, true); }
     }
 
+    [TestMethod]
+    public async Task SvgArtworkReconcilesAdmittedReceiptWithoutSecondNativeDispatch()
+    {
+        string root = Directory.CreateTempSubdirectory("pcb-artwork-reconcile-").FullName;
+        try
+        {
+            var transport = new MigrationTransport();
+            var registry = new InstanceRegistry(transport, root);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(root, "native.sock")), transport.InstanceId);
+            DocumentLifecycleState expected = State(root, transport.Epoch, 5, 'a');
+            string stateJson = SchematicJson.Formatter.Format(expected);
+            const string svg = "<svg viewBox=\"0 0 10 10\"><line x1=\"1\" y1=\"2\" x2=\"8\" y2=\"2\"/></svg>";
+            string sourceHash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(svg)));
+            string operationId = Guid.NewGuid().ToString("D");
+            var tools = new PcbArtworkTools(registry);
+
+            CallToolResult first = await tools.Commit(transport.InstanceId,
+                SchematicJson.Formatter.Format(expected.Document), stateJson, svg, sourceHash,
+                "imagegen", Guid.NewGuid().ToString("D"), root, "artwork/source.svg", "Dwgs.User",
+                "0", "0", "1", operationId, default);
+            JsonElement firstData = Success(first);
+            Assert.IsTrue(firstData.GetProperty("authoritativeVector").GetBoolean(), Text(first));
+            Assert.IsFalse(firstData.GetProperty("durableReconciled").GetBoolean(), Text(first));
+            int nativeDispatches = transport.CheckedMutations;
+            Assert.AreEqual(1, nativeDispatches);
+
+            // Simulate MCP loss after native completion but before terminal
+            // receipt publication. The native process still retains the exact
+            // checked receipt; the next MCP instance must inspect it rather
+            // than dispatch the board graphic a second time.
+            string receiptPath = Directory.GetFiles(Path.Combine(root, "pcb-artwork-receipts"), "*.json").Single();
+            File.Delete(receiptPath);
+            CallToolResult reconciled = await tools.Commit(transport.InstanceId,
+                SchematicJson.Formatter.Format(expected.Document), stateJson, svg, sourceHash,
+                "imagegen", firstData.GetProperty("assetId").GetString()!, root, "artwork/source.svg", "Dwgs.User",
+                "0", "0", "1", operationId, default);
+            JsonElement reconciledData = Success(reconciled);
+            Assert.IsTrue(reconciledData.GetProperty("durableReconciled").GetBoolean(), Text(reconciled));
+            Assert.IsTrue(reconciledData.GetProperty("replayed").GetBoolean(), Text(reconciled));
+            Assert.AreEqual(nativeDispatches, transport.CheckedMutations,
+                "Durable admission reconciliation must never submit a second native mutation.");
+            Assert.IsTrue(transport.ReceiptReads > 0, "Reconciliation must inspect the native receipt.");
+
+            JsonElement receipt = Success(await tools.Receipt(transport.InstanceId, transport.Epoch,
+                operationId, default));
+            Assert.IsTrue(receipt.GetProperty("found").GetBoolean(), receipt.GetRawText());
+            Assert.IsTrue(receipt.GetProperty("durableRecovery").GetBoolean(), receipt.GetRawText());
+            Assert.IsTrue(receipt.GetProperty("receipt").GetProperty("durableReconciled").GetBoolean(), receipt.GetRawText());
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
     private static async Task AssertReceiptIdentity(Func<string, string, Task<CallToolResult>> inspect,
         MigrationTransport transport, string operationId)
     {

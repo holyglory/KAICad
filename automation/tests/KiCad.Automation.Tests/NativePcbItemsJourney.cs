@@ -2581,6 +2581,61 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(persistedPlotData.GetProperty("response").GetProperty("plotSettings")
                 .GetProperty("plotReferenceDesignators").GetBoolean(), persistedPlot.GetRawText());
 
+            var enabledLayerArguments = new
+            {
+                instanceId,
+                input = new
+                {
+                    document = reopenedPlotDocument,
+                    expectedState = reopenedPlotState,
+                    layers = new[] { "BL_F_Cu", "BL_B_Cu", "BL_Edge_Cuts", "BL_F_CrtYd", "BL_B_CrtYd" },
+                    copperLayerCount = 2u,
+                    operationId = Guid.NewGuid().ToString("D")
+                }
+            };
+            var enabledLayerMutation = await mcp.Tool("kicad_pcb_enabled_layers_set_typed", enabledLayerArguments);
+            Assert.IsFalse(enabledLayerMutation.TryGetProperty("isError", out var enabledLayerError)
+                && enabledLayerError.GetBoolean(), enabledLayerMutation.GetRawText());
+            var enabledLayerData = enabledLayerMutation.GetProperty("structuredContent");
+            Assert.AreEqual("completed", enabledLayerData.GetProperty("status").GetString(), enabledLayerMutation.GetRawText());
+            Assert.IsTrue(enabledLayerData.GetProperty("readbackVerified").GetBoolean(), enabledLayerMutation.GetRawText());
+            Assert.AreEqual(2, enabledLayerData.GetProperty("readback").GetProperty("copperLayerCount").GetInt32(), enabledLayerMutation.GetRawText());
+            var enabledLayerReplay = await mcp.Tool("kicad_pcb_enabled_layers_set_typed", enabledLayerArguments);
+            Assert.IsFalse(enabledLayerReplay.TryGetProperty("isError", out var enabledLayerReplayError)
+                && enabledLayerReplayError.GetBoolean(), enabledLayerReplay.GetRawText());
+            Assert.IsTrue(enabledLayerReplay.GetProperty("structuredContent").GetProperty("replayed").GetBoolean(), enabledLayerReplay.GetRawText());
+
+            var enabledLayerSave = await mcp.Tool("kicad_document_save", new
+            {
+                instanceId,
+                expectedStateJson = enabledLayerData.GetProperty("afterState").GetString(),
+                operationId = Guid.NewGuid().ToString("D")
+            });
+            Assert.IsFalse(enabledLayerSave.TryGetProperty("isError", out var enabledLayerSaveError)
+                && enabledLayerSaveError.GetBoolean(), enabledLayerSave.GetRawText());
+            string enabledLayerSavedState = enabledLayerSave.GetProperty("structuredContent").GetProperty("observedState").GetRawText();
+            var enabledLayerClose = await mcp.Tool("kicad_document_close", new
+            {
+                instanceId, expectedStateJson = enabledLayerSavedState, operationId = Guid.NewGuid().ToString("D")
+            });
+            Assert.IsFalse(enabledLayerClose.TryGetProperty("isError", out var enabledLayerCloseError)
+                && enabledLayerCloseError.GetBoolean(), enabledLayerClose.GetRawText());
+            var enabledLayerReopen = await CreateRootThroughMcp(client.Endpoint, instanceId, cleanPath, evidence, token,
+                toolName: "kicad_pcb_open");
+            cleanBoard = enabledLayerReopen.Document;
+            finalBoard = cleanBoard;
+            cleanState = await ObserveLifecycleState(client, cleanBoard, token);
+            JsonElement enabledLayerDocument = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(cleanBoard));
+            JsonElement enabledLayerState = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(cleanState));
+            var persistedEnabledLayers = await mcp.Tool("kicad_pcb_query_typed", new
+            {
+                instanceId, input = new { document = enabledLayerDocument, expectedState = enabledLayerState, query = "enabledLayers" }
+            });
+            Assert.IsFalse(persistedEnabledLayers.TryGetProperty("isError", out var persistedEnabledLayersError)
+                && persistedEnabledLayersError.GetBoolean(), persistedEnabledLayers.GetRawText());
+            Assert.AreEqual(2, persistedEnabledLayers.GetProperty("structuredContent").GetProperty("response")
+                .GetProperty("copperLayerCount").GetInt32(), persistedEnabledLayers.GetRawText());
+
             var cleanCandidate = new CreateItems { Header = new() { Document = cleanBoard } };
             cleanCandidate.Items.Add(Any.Pack(new Track
             {

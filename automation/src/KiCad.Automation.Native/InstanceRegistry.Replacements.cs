@@ -34,7 +34,8 @@ public sealed partial class InstanceRegistry
         string endpoint, string epoch, int processId, Guid operationId, CancellationToken token, Action? beforePublish)
     {
         if (!Guid.TryParseExact(previous.InstanceId, "D", out var id) || id == Guid.Empty
-            || string.IsNullOrWhiteSpace(previous.Epoch) || !Path.IsPathFullyQualified(previous.ProjectPath)
+            || string.IsNullOrWhiteSpace(previous.Epoch)
+            || previous.ProjectPath.Length != 0 && !Path.IsPathFullyQualified(previous.ProjectPath)
             || string.IsNullOrWhiteSpace(epoch) || epoch == previous.Epoch || processId <= 0 || operationId == Guid.Empty)
             throw new AutomationException("invalid_replacement", "Use the exact previous registration and a verified replacement with a new process epoch.");
         NngTransport.ValidateEndpoint(endpoint); NngTransport.ValidateEndpoint(previous.Endpoint);

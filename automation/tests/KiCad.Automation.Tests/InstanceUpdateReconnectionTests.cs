@@ -22,6 +22,37 @@ public sealed class InstanceUpdateReconnectionTests
         foreach (string status in new[] { "exited", "identity_changed" })
             Assert.IsNotNull(UpdateReplacementProof.FromInspection(origin, status, Guid.NewGuid(), Guid.NewGuid(),
                 Path.GetFullPath("project.kicad_pro"), 1, 2, Endpoint("new"), "new"));
+
+        // The explicit update manager has no engineering project path. Its
+        // native origin is still exact and must produce the same replacement
+        // proof as a project-backed editor.
+        Assert.IsNotNull(UpdateReplacementProof.FromInspection(origin, "exited", Guid.NewGuid(), Guid.NewGuid(),
+            "", 1, 2, Endpoint("manager-new"), "new"));
+    }
+
+    [TestMethod]
+    public async Task EmptyManagerReplacementCanBeAdoptedThroughTheSameIdentityReceipt()
+    {
+        string state = Directory.CreateTempSubdirectory("kicad-manager-reconnect-").FullName;
+        try
+        {
+            var peer = new NativeClientTests.FixtureTransport { ProjectPath = "" };
+            var registry = new InstanceRegistry(peer, state);
+            var previous = await registry.AttachAsync(Endpoint("manager-old"), peer.InstanceId);
+            Guid operation = Guid.NewGuid();
+            peer.Epoch = "manager-new-epoch";
+            var proof = new UpdateReplacementProof(operation, Guid.Parse(peer.InstanceId), "",
+                new(previous.Endpoint, previous.Epoch), 11, 22, Endpoint("manager-new"), peer.Epoch);
+
+            var adopted = await InstanceUpdateReconnection.AdoptInspectedAsync(registry, peer.InstanceId,
+                operation, previous.Epoch, proof, default);
+            Assert.IsFalse(adopted.Reused);
+            Assert.AreEqual("", adopted.Instance.ProjectPath);
+            Assert.AreEqual(peer.Epoch, adopted.Instance.Epoch);
+            Assert.IsTrue((await InstanceUpdateReconnection.AdoptInspectedAsync(registry, peer.InstanceId,
+                operation, previous.Epoch, proof, default)).Reused);
+        }
+        finally { Directory.Delete(state, true); }
     }
 
     [TestMethod]

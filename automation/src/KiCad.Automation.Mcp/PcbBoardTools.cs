@@ -85,7 +85,7 @@ public sealed class PcbBoardTools(InstanceRegistry registry)
     [McpServerTool(Name = "kicad_pcb_plot_settings_set_typed", ReadOnly = false),
      Description("Apply typed PCB plot settings at one exact lifecycle checkpoint and verify normalized native readback. The native setter has no operation receipt, so replay and restart recovery remain explicitly unsupported; retry only after inspecting the returned readback."),
      KiCadCapability("pcb-rules", "typed-native-plot-settings-mutation", "explicit PCB document, complete lifecycle state, typed plot settings, operation ID and normalized native readback"),
-     KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbPlotSettingsTypedContractTests")]
+     KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbBoardTypedMcpProcessTests.TypedPcbPlotSettingsMutationPublishesSchemaAndRejectsIncompleteInput")]
     public Task<CallToolResult> SetPlotSettingsTyped(string instanceId,
         PcbPlotSettingsMutationInput input, CancellationToken cancellationToken) => ExecutePlotSettingsMutation(instanceId, input, cancellationToken);
 

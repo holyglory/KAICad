@@ -78,4 +78,37 @@ public sealed class PcbBoardTypedMcpProcessTests
             if (Directory.Exists(root)) Directory.Delete(root, true);
         }
     }
+
+    [TestMethod]
+    public async Task TypedPcbPlotSettingsMutationPublishesSchemaAndRejectsIncompleteInput()
+    {
+        string root = Directory.CreateTempSubdirectory("kicad-pcb-plot-settings-typed-").FullName;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        try
+        {
+            await using var mcp = await StdioMcpFixture.StartAsync(
+                SyncHarnessProcessTests.ProductionStartInfo(),
+                Path.Combine(root, "state"), Path.Combine(root, "stderr.log"), timeout.Token);
+            JsonElement listed = await mcp.ListTools(null);
+            JsonElement tool = listed.GetProperty("tools").EnumerateArray()
+                .Single(candidate => candidate.GetProperty("name").GetString() == "kicad_pcb_plot_settings_set_typed");
+            JsonElement input = tool.GetProperty("inputSchema").GetProperty("properties").GetProperty("input");
+            Assert.IsTrue(input.GetProperty("properties").TryGetProperty("document", out _), input.GetRawText());
+            Assert.IsTrue(input.GetProperty("properties").TryGetProperty("expectedState", out _), input.GetRawText());
+            Assert.IsTrue(input.GetProperty("properties").TryGetProperty("settings", out _), input.GetRawText());
+            Assert.IsTrue(input.GetProperty("properties").TryGetProperty("operationId", out _), input.GetRawText());
+
+            JsonElement refusal = await mcp.Tool("kicad_pcb_plot_settings_set_typed", new
+            {
+                instanceId = Guid.NewGuid().ToString("D"), input = new { }
+            });
+            Assert.IsTrue(refusal.GetProperty("isError").GetBoolean(), refusal.GetRawText());
+            Assert.AreEqual("invalid_operation_id",
+                refusal.GetProperty("structuredContent").GetProperty("errorCode").GetString(), refusal.GetRawText());
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, true);
+        }
+    }
 }

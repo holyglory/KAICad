@@ -165,6 +165,29 @@ internal sealed class FootprintLibraryCheckedReceiptStore
         { throw new AutomationException("footprint_receipt_unavailable", error.Message); }
     }
 
+    /// <summary>
+    /// Read a receipt and bind it to the exact request before a caller contacts
+    /// the native process.  This is deliberately separate from the key-only
+    /// lookup used by diagnostics so an operation ID cannot be used to probe a
+    /// different request at the native boundary.
+    /// </summary>
+    internal FootprintLibraryCheckedReceiptRecord? ReadBound(
+        string instanceId, NativeCapabilityFootprintLibraryCheckedWrite request)
+    {
+        string fingerprint = FootprintLibraryCheckedContract.ComputeFingerprint(request);
+        ValidateKey(instanceId, request, fingerprint);
+        if (request.Document is null || request.ExpectedState is null
+            || request.ExpectedSnapshotSha256 != request.ExpectedState.StateSha256
+            || FootprintLibraryCheckedContract.ComputeStateDigest(request.ExpectedState)
+                != request.ExpectedSnapshotSha256)
+            throw FootprintLibraryCheckedReceiptRecord.Invalid(
+                "The checked footprint request does not retain its exact expected state digest.");
+
+        FootprintLibraryCheckedReceiptRecord? record = Read(instanceId, request.OperationId);
+        if (record is not null) VerifyBinding(record, instanceId, request, fingerprint);
+        return record;
+    }
+
     internal void WriteTerminal(string instanceId,
         NativeCapabilityFootprintLibraryCheckedWrite request,
         NativeCapabilityFootprintLibraryCheckedWriteResponse response)
@@ -182,7 +205,7 @@ internal sealed class FootprintLibraryCheckedReceiptStore
             if (existing.Outcome == FootprintLibraryCheckedReceiptRecord.Terminal)
             {
                 var prior = ParseResponse(existing.ResponseJson);
-                if (!prior.Equals(response))
+                if (!SemanticallyEqual(prior, response))
                     throw new AutomationException("footprint_receipt_conflict", "The checked footprint operation already has a different terminal response.");
                 return;
             }
@@ -257,6 +280,23 @@ internal sealed class FootprintLibraryCheckedReceiptStore
 
     internal static NativeCapabilityFootprintLibraryCheckedWriteResponse ParseResponse(
         string json) => SchematicJson.Parser.Parse<NativeCapabilityFootprintLibraryCheckedWriteResponse>(json);
+
+    /// <summary>
+    /// Native read/replay responses mark the observation as replayed.  That bit
+    /// is produced by the observation path and is not part of the immutable
+    /// terminal result.  Every other response field remains part of the
+    /// semantic comparison.
+    /// </summary>
+    private static bool SemanticallyEqual(
+        NativeCapabilityFootprintLibraryCheckedWriteResponse left,
+        NativeCapabilityFootprintLibraryCheckedWriteResponse right)
+    {
+        var canonicalLeft = left.Clone();
+        canonicalLeft.Replayed = false;
+        var canonicalRight = right.Clone();
+        canonicalRight.Replayed = false;
+        return canonicalLeft.Equals(canonicalRight);
+    }
 
     private FootprintLibraryCheckedReceiptRecord? ReadCurrent(string path,
         string instanceId, string operationId) =>

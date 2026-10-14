@@ -226,9 +226,14 @@ internal sealed class PcbArtworkReceiptStore
                 throw new AutomationException("pcb_artwork_receipt_conflict",
                     "The PCB artwork operation already has a different terminal receipt.");
             }
-            if (existing.Outcome == PcbArtworkReceiptRecord.Unknown
-                && next.Outcome != PcbArtworkReceiptRecord.Terminal)
+            if (existing.Outcome == PcbArtworkReceiptRecord.Unknown)
+            {
+                // Unknown is a durable recovery boundary. A later caller
+                // cannot replace it with a terminal result without an
+                // explicit reconciliation path; otherwise a post-commit
+                // archive mismatch could silently become replayable success.
                 return;
+            }
         }
         WriteAtomic(path, next, overwrite: existing is not null);
     }

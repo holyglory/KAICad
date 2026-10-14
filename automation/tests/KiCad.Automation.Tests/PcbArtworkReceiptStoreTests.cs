@@ -160,6 +160,48 @@ public sealed class PcbArtworkReceiptStoreTests
     }
 
     [TestMethod]
+    public void PostCommitArchiveMismatchLeavesStickyRecoveryReceipt()
+    {
+        string root = Directory.CreateTempSubdirectory("pcb-artwork-recovery-").FullName;
+        try
+        {
+            string instance = Guid.NewGuid().ToString("D");
+            string epoch = Guid.NewGuid().ToString("D");
+            string operation = Guid.NewGuid().ToString("D");
+            ArtworkSourceArchive.Receipt archive = Archive(root, "recovery.svg", "recovery-artwork");
+            string fingerprint = PcbArtworkReceiptStore.Fingerprint("recovery-request");
+            var store = new PcbArtworkReceiptStore(root);
+            _ = store.Reserve(instance, epoch, operation, fingerprint, archive);
+
+            store.WriteUnknown(instance, epoch, operation, fingerprint, archive,
+                "raster_trace_archive_mismatch",
+                "Native board geometry committed, but source archive verification failed; inspect before retrying.");
+
+            PcbArtworkReceiptRecord recovery = new PcbArtworkReceiptStore(root)
+                .Read(instance, operation)!;
+            Assert.AreEqual(PcbArtworkReceiptRecord.Unknown, recovery.Outcome);
+            Assert.AreEqual("raster_trace_archive_mismatch", recovery.ErrorCode);
+            Assert.IsFalse(recovery.ArchiveReadbackVerified);
+            Assert.ThrowsExactly<AutomationException>(() => PcbArtworkReceiptStore.ToResult(recovery));
+
+            // A late terminal publication cannot erase the recovery boundary.
+            store.WriteTerminal(instance, epoch, operation, fingerprint, archive,
+                "completed", archiveReadbackVerified: true,
+                Result(new { operationId = operation, accepted = true }));
+            PcbArtworkReceiptRecord retained = new PcbArtworkReceiptStore(root)
+                .Read(instance, operation)!;
+            Assert.AreEqual(PcbArtworkReceiptRecord.Unknown, retained.Outcome);
+            Assert.AreEqual("raster_trace_archive_mismatch", retained.ErrorCode);
+            Assert.IsFalse(new PcbArtworkReceiptStore(root)
+                .Reserve(instance, epoch, operation, fingerprint, archive).Created);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [TestMethod]
     public void TamperedReceiptFailsClosedOnRead()
     {
         string root = Directory.CreateTempSubdirectory("pcb-artwork-tamper-").FullName;

@@ -291,6 +291,17 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
                     fingerprint, archive, outcome.ErrorCode ?? "invalid_checked_pcb_receipt",
                     outcome.ErrorMessage ?? "The native raster PCB projection receipt was invalid and cannot be trusted.");
             }
+            else if (!archiveVerified && outcome.Completed)
+            {
+                // The board transaction is known to have committed, but the
+                // source archive is no longer byte-identical. Do not publish
+                // a terminal receipt that could be replayed as success: the
+                // durable recovery state blocks another dispatch and tells
+                // the caller that native geometry may require inspection.
+                receiptStore.WriteUnknown(instanceId, expected.ProcessEpoch, context.OperationId,
+                    fingerprint, archive, archiveError?.Code ?? "raster_trace_archive_mismatch",
+                    $"Raster PCB projection {context.OperationId} committed native board geometry, but source archive verification failed; inspect the board and archive before retrying. {archiveError?.Message}");
+            }
             else if (outcome.NativeReceiptAvailable)
             {
                 receiptStore.WriteTerminal(instanceId, expected.ProcessEpoch, context.OperationId,

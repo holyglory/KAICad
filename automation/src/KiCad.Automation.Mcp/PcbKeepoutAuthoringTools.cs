@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Security.Cryptography;
 using System.Text;
@@ -31,8 +30,6 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
     // inspection can replay it without rereading a target that may no longer
     // be available after a lost reply. The native receipt remains authoritative
     // for settlement; this cache only reconstructs its exact request envelope.
-    private static readonly ConcurrentDictionary<string, CachedCheckedRequest> checkedRequests = new(StringComparer.Ordinal);
-
     [McpServerTool(Name = "kicad_pcb_keepout_read", ReadOnly = true),
      Description("Read one typed native keepout by canonical KIID at an exact PCB lifecycle checkpoint. documentJson identifies the board, keepoutId identifies one rule area, and expectedStateJson must carry the matching process epoch, revision and digest. Derived fill polygons and parent links are returned as native state but are never treated as authoring input."),
      KiCadCapability("pcb-keepouts", "compiled-mcp plus-native-board-api", "outcome:p079fb6adb164b14c; explicit PCB document, keepout KIID, process epoch, lifecycle revision and digest"),
@@ -251,8 +248,8 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
         var checkedRequest = CheckedRequest(expected, session.Epoch, operation, operationId);
         if (mutation == KeepoutMutation.Update)
         {
-            checkedRequests[CacheKey(instanceId, operationId)] = new CachedCheckedRequest(
-                mutation, targetId, Fingerprint(callerExpected), Fingerprint(requestedZone!), checkedRequest.Clone());
+            new KeepoutCheckedRequestStore(registry.StateDirectory).Write(instanceId, operationId, new KeepoutCachedCheckedRequest(
+                mutation, targetId, Fingerprint(callerExpected), Fingerprint(requestedZone!), checkedRequest.Clone()));
         }
         var outcome = await PcbCheckedItemDispatch.ApplyAsync(registry, instanceId, checkedRequest, cancellationToken);
         return KeepoutMutationData(outcome, mutation, targetId,
@@ -265,14 +262,14 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
     {
         request = null!;
         if (requestedZone is null
-            || !checkedRequests.TryGetValue(CacheKey(instanceId, operationId), out var cached)
+            || new KeepoutCheckedRequestStore(registry.StateDirectory).Read(instanceId, operationId) is not { } cached
             || cached.Mutation != KeepoutMutation.Update
             || cached.TargetId != targetId
             || cached.CallerExpectedFingerprint != Fingerprint(callerExpected)
             || cached.RequestedZoneFingerprint != Fingerprint(requestedZone)
             || cached.Request.ProcessEpoch != callerExpected.ProcessEpoch)
         {
-            if (checkedRequests.ContainsKey(CacheKey(instanceId, operationId)))
+            if (new KeepoutCheckedRequestStore(registry.StateDirectory).Read(instanceId, operationId) is not null)
                 throw new AutomationException("invalid_operation_replay",
                     "operationId is already bound to a different PCB keepout request or lifecycle checkpoint.");
             return false;
@@ -281,8 +278,6 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
         request = cached.Request.Clone();
         return true;
     }
-
-    private static string CacheKey(string instanceId, string operationId) => instanceId + "\0" + operationId;
 
     private static string Fingerprint(DocumentLifecycleState state) =>
         Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
@@ -566,20 +561,21 @@ public sealed class PcbKeepoutAuthoringTools(InstanceRegistry registry)
     private static AutomationException InvalidTyped(string message)
         => new("invalid_pcb_keepout_typed_input", message);
 
-    private enum KeepoutMutation
+    internal enum KeepoutMutation
     {
         Create,
         Update,
         Delete
     }
 
-    private sealed record CachedCheckedRequest(
-        KeepoutMutation Mutation,
-        string TargetId,
-        string CallerExpectedFingerprint,
-        string RequestedZoneFingerprint,
-        CheckedPcbItemTransaction Request);
 }
+
+internal sealed record KeepoutCachedCheckedRequest(
+    PcbKeepoutAuthoringTools.KeepoutMutation Mutation,
+    string TargetId,
+    string CallerExpectedFingerprint,
+    string RequestedZoneFingerprint,
+    CheckedPcbItemTransaction Request);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed class PcbKeepoutMutationInput : NativeDocumentInputObject

@@ -475,42 +475,99 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
                     "The complete footprint definition is structurally invalid: "
                     + string.Join(", ", structuralIssues.Take(16)));
 
-            NativeClient client = registry.Client(instanceId);
-            AutomationSession session = await client.HandshakeAsync(cancellationToken);
-            if (session.Epoch != expectedProcessEpoch)
-                throw new AutomationException("stale_process_epoch", "The expected process epoch is stale; inspect the instance again.");
-            NativeCapabilityFootprintLibraryCheckedWriteResponse response = await client.InvokeAsync<
-                NativeCapabilityFootprintLibraryCheckedWrite, NativeCapabilityFootprintLibraryCheckedWriteResponse>(new()
-                {
-                    Document = document, ProcessEpoch = session.Epoch, OperationId = operationId,
-                    ExpectedSnapshotSha256 = expectedSnapshotSha256, Footprint = footprint,
-                    Overwrite = overwrite, ExpectedState = expectedState
-                }, cancellationToken);
             NativeCapabilityFootprintLibraryCheckedWrite expectedRequest = new()
             {
-                Document = document.Clone(), ProcessEpoch = session.Epoch, OperationId = operationId,
+                Document = document.Clone(), ProcessEpoch = expectedProcessEpoch, OperationId = operationId,
                 ExpectedSnapshotSha256 = expectedSnapshotSha256, Footprint = footprint.Clone(),
                 Overwrite = overwrite, ExpectedState = expectedState.Clone()
             };
-            FootprintLibraryCheckedContract.ValidateResponse(response, expectedRequest);
-            return Data(new
+
+            // Reserve the exact request before touching the native writer. The
+            // reservation is durable, so a second MCP process cannot dispatch
+            // an operation whose first outcome is still unknown.
+            var receiptStore = new FootprintLibraryCheckedReceiptStore(registry.StateDirectory);
+            var reservation = receiptStore.Reserve(instanceId, expectedRequest);
+            if (!reservation.Created)
             {
-                instanceId, processEpoch = session.Epoch, document, operationId,
-                status = response.Status, committed = response.Committed, replayed = response.Replayed,
-                rollbackCompleted = response.RollbackCompleted, revisionTracked = response.RevisionTracked,
-                completeLifecycle = response.CompleteLifecycle, beforeSnapshotSha256 = response.BeforeSnapshotSha256,
-                afterSnapshotSha256 = response.AfterSnapshotSha256, errorCode = response.ErrorCode,
-                errorMessage = response.ErrorMessage, nativeReceiptAvailable = true, receiptVerified = true,
-                persistenceVerified = response.Committed, requestFingerprintSha256 = response.RequestFingerprintSha256,
-                expectedRequestVerified = response.ExpectedRequestVerified, nativeWriteStarted = response.NativeWriteStarted,
-                postverified = response.Postverified, targetVerified = response.TargetVerified,
-                unrelatedEntriesVerified = response.UnrelatedEntriesVerified, rollbackAttempted = response.RollbackAttempted,
-                receiptStatus = response.ReceiptStatus.ToString(), scope = response.Scope,
-                beforeRevision = response.ObservedBefore?.Revision, afterRevision = response.ObservedAfter?.Revision,
-                rollbackRevision = response.ObservedRollback?.Revision,
-                persistenceSource = response.Committed ? "native-footprint-lifecycle-receipt" : null,
-                transportRetrySafe = !response.Committed || response.Replayed
-            }, !response.Committed || !string.IsNullOrEmpty(response.ErrorCode));
+                if (reservation.Receipt.Outcome == FootprintLibraryCheckedReceiptRecord.Terminal)
+                {
+                    NativeCapabilityFootprintLibraryCheckedWriteResponse replay =
+                        FootprintLibraryCheckedReceiptStore.ParseResponse(reservation.Receipt.ResponseJson);
+                    replay.Replayed = true;
+                    FootprintLibraryCheckedContract.ValidateResponse(replay, expectedRequest);
+                    return PublishCheckedResponse(instanceId, expectedProcessEpoch, document, operationId,
+                        replay, nativeReceiptAvailable: false, durableRecovery: true);
+                }
+
+                throw new AutomationException("operation_outcome_unknown",
+                    reservation.Receipt.Outcome == FootprintLibraryCheckedReceiptRecord.Unknown
+                        ? "The checked footprint write was delivered previously but its native result is unresolved; inspect the native library before starting a new operation."
+                        : "Another MCP process has admitted this checked footprint write; reconcile its outcome before retrying.");
+            }
+
+            NativeClient client;
+            AutomationSession session;
+            try
+            {
+                client = registry.Client(instanceId);
+                session = await client.HandshakeAsync(cancellationToken);
+                if (session.Epoch != expectedProcessEpoch)
+                {
+                    receiptStore.RemoveAdmission(instanceId, expectedRequest);
+                    throw new AutomationException("stale_process_epoch", "The expected process epoch is stale; inspect the instance again.");
+                }
+            }
+            catch
+            {
+                // No native mutation has been submitted before the handshake;
+                // release only this still-admitted reservation so a fresh
+                // epoch can make a new admission.
+                try { receiptStore.RemoveAdmission(instanceId, expectedRequest); }
+                catch (AutomationException) { }
+                throw;
+            }
+
+            NativeCapabilityFootprintLibraryCheckedWriteResponse response;
+            try
+            {
+                response = await client.InvokeAsync<
+                    NativeCapabilityFootprintLibraryCheckedWrite, NativeCapabilityFootprintLibraryCheckedWriteResponse>(new()
+                    {
+                        Document = document, ProcessEpoch = session.Epoch, OperationId = operationId,
+                        ExpectedSnapshotSha256 = expectedSnapshotSha256, Footprint = footprint,
+                        Overwrite = overwrite, ExpectedState = expectedState
+                    }, cancellationToken);
+                FootprintLibraryCheckedContract.ValidateResponse(response, expectedRequest);
+                receiptStore.WriteTerminal(instanceId, expectedRequest, response);
+            }
+            catch (NngException error)
+            {
+                receiptStore.WriteUnknown(instanceId, expectedRequest,
+                    error.RequestDelivered ? "operation_outcome_unknown" : "native_not_reached",
+                    error.RequestDelivered
+                        ? $"KiCad received checked footprint write {operationId} but did not answer; inspect the library before retrying."
+                        : $"KiCad did not receive checked footprint write {operationId}; inspect the instance before retrying.");
+                throw new AutomationException(error.RequestDelivered ? "operation_outcome_unknown" : "native_not_reached",
+                    error.RequestDelivered
+                        ? $"KiCad received checked footprint write {operationId} but did not answer; inspect the library before retrying."
+                        : $"KiCad did not receive checked footprint write {operationId}; inspect the instance before retrying.");
+            }
+            catch (OperationCanceledException)
+            {
+                receiptStore.WriteUnknown(instanceId, expectedRequest, "operation_outcome_unknown",
+                    $"Checked footprint write {operationId} was cancelled after admission; inspect the library before retrying.");
+                throw new AutomationException("operation_outcome_unknown",
+                    $"Checked footprint write {operationId} was cancelled after admission; inspect the library before retrying.");
+            }
+            catch (AutomationException error)
+            {
+                receiptStore.WriteUnknown(instanceId, expectedRequest, "invalid_native_receipt",
+                    $"The checked footprint write returned an untrusted native result: {error.Message}");
+                throw;
+            }
+
+            return PublishCheckedResponse(instanceId, session.Epoch, document, operationId,
+                response, nativeReceiptAvailable: true, durableRecovery: false);
         });
 
     [McpServerTool(Name = "kicad_footprint_library_checked_receipt", ReadOnly = true),
@@ -530,6 +587,32 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
             if (!expectedRequest.Document.Equals(document) || expectedRequest.ProcessEpoch != expectedProcessEpoch
                 || expectedRequest.OperationId != operationId)
                 throw new AutomationException("invalid_library_request", "expectedRequestJson must retain the same document, process epoch and operation UUID.");
+            var receiptStore = new FootprintLibraryCheckedReceiptStore(registry.StateDirectory);
+            FootprintLibraryCheckedReceiptRecord? durable = receiptStore.Read(instanceId, operationId);
+            if (durable is not null)
+            {
+                NativeCapabilityFootprintLibraryCheckedWrite storedRequest =
+                    FootprintLibraryCheckedReceiptStore.ParseRequest(durable);
+                if (!storedRequest.Equals(expectedRequest))
+                    throw new AutomationException("operation_id_conflict", "The operation ID is already bound to another checked footprint request.");
+                if (durable.Outcome == FootprintLibraryCheckedReceiptRecord.Terminal)
+                {
+                    NativeCapabilityFootprintLibraryCheckedWriteResponse storedResponse =
+                        FootprintLibraryCheckedReceiptStore.ParseResponse(durable.ResponseJson);
+                    FootprintLibraryCheckedContract.ValidateResponse(storedResponse, expectedRequest);
+                    return Data(new
+                    {
+                        instanceId, processEpoch = expectedProcessEpoch, operationId, found = true,
+                        receipt = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(storedResponse)),
+                        nativeReceiptAvailable = false, durableRecovery = true, retryDispatched = false
+                    });
+                }
+                throw new AutomationException("operation_outcome_unknown",
+                    durable.ErrorMessage.Length == 0
+                        ? "The checked footprint write has no terminal receipt; inspect the native library before retrying."
+                        : durable.ErrorMessage);
+            }
+
             NativeClient client = registry.Client(instanceId);
             AutomationSession session = await client.HandshakeAsync(cancellationToken);
             if (session.Epoch != expectedProcessEpoch)
@@ -542,6 +625,8 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
                 }, cancellationToken);
             if (response.Found)
                 FootprintLibraryCheckedContract.ValidateResponse(response.Receipt, expectedRequest);
+            if (response.Found)
+                receiptStore.WriteTerminal(instanceId, expectedRequest, response.Receipt);
             return Data(new
             {
                 instanceId, processEpoch = session.Epoch, operationId, found = response.Found,
@@ -918,6 +1003,32 @@ public sealed class FootprintLibraryTools(InstanceRegistry registry)
         CallToolResult result = Data(value);
         result.IsError = isError;
         return result;
+    }
+
+    private static CallToolResult PublishCheckedResponse(string instanceId,
+        string processEpoch, DocumentSpecifier document, string operationId,
+        NativeCapabilityFootprintLibraryCheckedWriteResponse response,
+        bool nativeReceiptAvailable, bool durableRecovery)
+    {
+        return Data(new
+        {
+            instanceId, processEpoch, document, operationId,
+            status = response.Status, committed = response.Committed, replayed = response.Replayed,
+            rollbackCompleted = response.RollbackCompleted, revisionTracked = response.RevisionTracked,
+            completeLifecycle = response.CompleteLifecycle, beforeSnapshotSha256 = response.BeforeSnapshotSha256,
+            afterSnapshotSha256 = response.AfterSnapshotSha256, errorCode = response.ErrorCode,
+            errorMessage = response.ErrorMessage, nativeReceiptAvailable, receiptVerified = true,
+            durableRecovery, persistenceVerified = response.Committed,
+            requestFingerprintSha256 = response.RequestFingerprintSha256,
+            expectedRequestVerified = response.ExpectedRequestVerified, nativeWriteStarted = response.NativeWriteStarted,
+            postverified = response.Postverified, targetVerified = response.TargetVerified,
+            unrelatedEntriesVerified = response.UnrelatedEntriesVerified, rollbackAttempted = response.RollbackAttempted,
+            receiptStatus = response.ReceiptStatus.ToString(), scope = response.Scope,
+            beforeRevision = response.ObservedBefore?.Revision, afterRevision = response.ObservedAfter?.Revision,
+            rollbackRevision = response.ObservedRollback?.Revision,
+            persistenceSource = response.Committed ? "native-footprint-lifecycle-receipt" : null,
+            transportRetrySafe = !response.Committed || response.Replayed
+        }, !response.Committed || !string.IsNullOrEmpty(response.ErrorCode));
     }
 
     private static CallToolResult Failure(string code, string message)

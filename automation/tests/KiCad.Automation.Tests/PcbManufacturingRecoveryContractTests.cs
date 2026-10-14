@@ -51,6 +51,15 @@ public sealed class PcbManufacturingRecoveryContractTests
         Assert.AreEqual("pcb_export_detached_unsupported", error.Code);
         StringAssert.Contains(error.Message, "PCBNEW_JOBS_HANDLER");
         StringAssert.Contains(error.Message, "serialized-snapshot");
+
+        var unsupported = new RunPcbManufacturingExport
+        {
+            Export3D = new RunBoardJobExport3D()
+        };
+        error = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbManufacturingContract.ValidateTypedRecoveryJob(unsupported));
+        Assert.AreEqual("pcb_export_detached_unsupported", error.Code);
+        StringAssert.Contains(error.Message, "serialized-snapshot");
     }
 
     [TestMethod]

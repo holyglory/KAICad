@@ -233,10 +233,9 @@ public sealed partial class NativeSessionTests
             Assert.IsTrue(typedSvgText.Length > 256, "The typed native SVG export must contain geometry, not an empty shell.");
             StringAssert.Contains(typedSvgText, "R1", "Nested plot reference settings must reach the native SVG output.");
 
-            // The recovery manager's first production adapter is deliberately
-            // SVG-only.  It must use the same owner-thread plot path, publish
-            // a durable journal receipt, and leave detached/restart recovery
-            // unclaimed.
+            // The recovery manager's synchronous plot adapter uses the
+            // owner-thread SVG path, publishes a durable journal receipt, and
+            // leaves detached/restart recovery unclaimed.
             string managerOutputDirectory = Path.Combine(exportDirectory, "manager-svg");
             string managerOperationId = Guid.NewGuid().ToString("D");
             object managerInput = new

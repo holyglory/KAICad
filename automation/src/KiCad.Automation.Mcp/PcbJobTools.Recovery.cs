@@ -24,7 +24,7 @@ public sealed partial class PcbJobTools
 {
     [McpServerTool(Name = "kicad_pcb_export_start_typed", ReadOnly = false),
      Description("Admit one typed PCB manufacturing export to the native recovery manager. SVG and Gerber requests dispatch synchronously through KiCad's owner-thread plot adapters and return a journaled publication receipt; other job families remain fail-closed as export_adapter_unavailable. Detached workers and restart recovery are not claimed, and the existing synchronous kicad_pcb_export tool remains unchanged."),
-     KiCadCapability("pcb-manufacturing", "typed-recovery-manager-admission", "typed export request, durable journal admission and explicit adapter availability"),
+     KiCadCapability("pcb-manufacturing", "typed-recovery-manager-admission", "typed export request, durable journal admission and SVG/Gerber owner-thread adapter availability"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "PcbManufacturingRecoveryContractTests.CompiledStdioPublishesTypedRecoveryToolsAndFailsClosedForIncompleteInput")]
     public Task<CallToolResult> ExportStartTyped(string instanceId,
         PcbManufacturingExportInput input, CancellationToken cancellationToken) => ExecuteRecovery(async () =>

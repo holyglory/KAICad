@@ -356,7 +356,12 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
         }
         Kiapi.Schematic.Types.Group group = new() { Id = new() { Value = target.ManifestGroupId }, Name = "Raster trace artwork", Locked = LockedState.LsUnlocked };
         group.Items.Add(created.Select(id => new KIID { Value = id }));
-        AddManifestProperties(group.CustomProperties, context);
+        // Graphic custom properties are currently dropped by the native
+        // schematic serializer.  Keep the bounded trace manifest on the
+        // group, whose custom properties survive save/reload, so the group is
+        // the authoritative durable provenance owner for the projected CAD
+        // geometry.
+        AddManifestProperties(group.CustomProperties, context, includeManifest: true);
         batch.Operations.Add(new SchematicItemOperation { Create = Any.Pack(group) });
         batch.Operations.Add(new SchematicItemOperation
         {
@@ -492,7 +497,8 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
         return json;
     }
 
-    private static void AddManifestProperties(ICollection<CustomProperty> properties, ProjectionContext context)
+    private static void AddManifestProperties(ICollection<CustomProperty> properties,
+        ProjectionContext context, bool includeManifest = false)
     {
         properties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.source_sha256", Value = context.SourceSha256 });
         properties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.geometry_sha256", Value = context.Proposal.GeometrySha256 });
@@ -501,6 +507,8 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
             properties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.source_origin", Value = context.SourceOrigin });
         properties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.role", Value = "filled-vector-projection" });
         properties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.contributor_semantics", Value = context.Proposal.ContributorSemantics });
+        if (includeManifest)
+            properties.Add(new CustomProperty { Key = "kicad.ai.raster_trace.manifest", Value = Manifest(context) });
     }
 
     private static void AddProvenanceProperties(ICollection<CustomProperty> properties,

@@ -268,6 +268,53 @@ public sealed partial class NativeSessionTests
         Assert.AreEqual("generated", SchematicProperty(group.CustomProperties, "kicad.ai.raster_trace.source_kind"), context);
         Assert.AreEqual("deterministic-fixture", SchematicProperty(group.CustomProperties, "kicad.ai.raster_trace.source_origin"), context);
         Assert.AreEqual("filled-vector-projection", SchematicProperty(group.CustomProperties, "kicad.ai.raster_trace.role"), context);
+
+        // Schematic serializers currently drop custom properties attached to
+        // each graphic shape.  The group is the durable provenance owner, so
+        // its bounded manifest must survive save/reload and retain the exact
+        // trace topology identity used by the projected vectors.
+        JsonElement manifest = JsonDocument.Parse(
+            SchematicProperty(group.CustomProperties, "kicad.ai.raster_trace.manifest")).RootElement;
+        Assert.AreEqual("kicad.ai.raster_trace.v1", manifest.GetProperty("schema").GetString(), context);
+        Assert.AreEqual(sourceSha256, manifest.GetProperty("sourceSha256").GetString(), context);
+        Assert.AreEqual(trace.GetProperty("geometrySha256").GetString(),
+            manifest.GetProperty("geometrySha256").GetString(), context);
+        Assert.AreEqual("generated", manifest.GetProperty("sourceKind").GetString(), context);
+        Assert.AreEqual("deterministic-fixture", manifest.GetProperty("sourceOrigin").GetString(), context);
+        Assert.AreEqual(trace.GetProperty("contributorSemantics").GetString(),
+            manifest.GetProperty("contributorSemantics").GetString(), context);
+        Assert.AreEqual(trace.GetProperty("coordinateOrientation").GetString(),
+            manifest.GetProperty("coordinateOrientation").GetString(), context);
+        Assert.AreEqual(trace.GetProperty("rounding").GetString(),
+            manifest.GetProperty("rounding").GetString(), context);
+
+        JsonElement[] traceContours = trace.GetProperty("contours").EnumerateArray().ToArray();
+        JsonElement[] manifestContours = manifest.GetProperty("contours").EnumerateArray().ToArray();
+        Assert.AreEqual(traceContours.Length, manifestContours.Length, context + ": manifest contours");
+        CollectionAssert.AreEquivalent(
+            traceContours.Select(contour => contour.GetProperty("id").GetString()).ToArray(),
+            manifestContours.Select(contour => contour.GetProperty("id").GetString()).ToArray(),
+            context + ": manifest contour IDs");
+
+        JsonElement[] tracePieces = trace.GetProperty("filledPieces").EnumerateArray().ToArray();
+        JsonElement[] manifestPieces = manifest.GetProperty("pieces").EnumerateArray().ToArray();
+        Assert.AreEqual(tracePieces.Length, manifestPieces.Length, context + ": manifest pieces");
+        CollectionAssert.AreEquivalent(
+            tracePieces.Select(piece => piece.GetProperty("id").GetString()).ToArray(),
+            manifestPieces.Select(piece => piece.GetProperty("id").GetString()).ToArray(),
+            context + ": manifest piece IDs");
+        foreach (JsonElement tracePiece in tracePieces)
+        {
+            string pieceId = tracePiece.GetProperty("id").GetString()!;
+            JsonElement manifestPiece = manifestPieces.Single(piece => piece.GetProperty("id").GetString() == pieceId);
+            CollectionAssert.AreEqual(
+                tracePiece.GetProperty("sourceContourIds").EnumerateArray().Select(id => id.GetString()).ToArray(),
+                manifestPiece.GetProperty("sourceContourIds").EnumerateArray().Select(id => id.GetString()).ToArray(),
+                context + ": manifest contour links for " + pieceId);
+            Assert.AreEqual(tracePiece.GetProperty("sourceContoursAreWholeTrace").GetBoolean(),
+                manifestPiece.GetProperty("sourceContoursAreWholeTrace").GetBoolean(),
+                context + ": manifest trace completeness for " + pieceId);
+        }
     }
 
     private static async Task<string> AssertSchematicRasterEmbeddedSource(NativeClient client,

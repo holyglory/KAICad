@@ -278,8 +278,15 @@ public sealed class SymbolLibraryCheckedContractTests
         {
             Document = document.Clone(), ProcessEpoch = epoch,
             Revision = new() { Epoch = epoch, Sequence = sequence }, Scope = "mcp_direct_symbol_file",
+            TablePath = "/tmp/sym-lib-table", TableScope = "PROJECT",
+            RawUri = "${KIPRJMOD}/fixture.kicad_sym", ExpandedUri = "/tmp/fixture.kicad_sym",
+            Provider = "KiCad",
             StateComplete = true, DiskBaselineChecked = true, CompleteChangeTracking = false,
             DependencyBaselines = { new NativeCapabilityLibrarySnapshotDependencyBaseline
+            {
+                Path = "/tmp/sym-lib-table", Exists = true, Known = true,
+                Sha256 = stateSha, Bytes = 11
+            }, new NativeCapabilityLibrarySnapshotDependencyBaseline
             {
                 Path = "/tmp/fixture.kicad_sym", Exists = true, Known = true,
                 Sha256 = stateSha, Bytes = 7

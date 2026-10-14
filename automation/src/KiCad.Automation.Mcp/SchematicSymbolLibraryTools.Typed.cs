@@ -224,15 +224,25 @@ public sealed class SymbolLibraryTypedInput : NativeDocumentInputObject
             throw Invalid("expectedState.document must match document.");
         if (state.ProcessEpoch != processEpoch || state.Revision is null || state.Revision.Epoch != processEpoch)
             throw Invalid("expectedState must carry the same process epoch in processEpoch and revision.epoch.");
-        if (state.Scope != "mcp_direct_symbol_file" || !state.StateComplete || !state.DiskBaselineChecked
-            || state.CompleteChangeTracking || state.DependencyBaselines.Count == 0)
-            throw Invalid("expectedState must be a complete direct symbol-file checkpoint with dependency baselines.");
         ValidateDigest(state.StateSha256, "expectedState.stateSha256");
         if (!string.Equals(state.StateSha256, expectedSnapshotSha256, StringComparison.Ordinal))
             throw Invalid("expectedSnapshotSha256 must equal expectedState.stateSha256.");
         if (!string.Equals(SymbolLibraryCheckedContract.ComputeStateDigest(state), state.StateSha256,
                 StringComparison.Ordinal))
             throw Invalid("expectedState.stateSha256 does not match the canonical checked-state digest.");
+
+        // Reuse the receipt validator's complete identity checks before a
+        // typed request reaches the native writer. A digest over an aliased
+        // or incomplete dependency set cannot stand in for the table and
+        // expanded-file baselines required by the direct-file owner.
+        try
+        {
+            SymbolLibraryCheckedContract.ValidateExpectedState(state, document, processEpoch);
+        }
+        catch (AutomationException error)
+        {
+            throw Invalid(error.Message);
+        }
     }
 
     private static void ValidateOptionalDigest(string? value, string name)

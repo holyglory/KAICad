@@ -154,6 +154,16 @@ internal static class SymbolLibraryCheckedContract
         return Convert.ToHexStringLower(SHA256.HashData(stream.ToArray()));
     }
 
+    internal static void ValidateExpectedState(
+        NativeCapabilitySymbolLibraryCheckedState state,
+        DocumentSpecifier expectedDocument,
+        string expectedProcessEpoch)
+    {
+        if (state is null || expectedDocument is null || state.Document is null || !state.Document.Equals(expectedDocument)
+            || state.ProcessEpoch != expectedProcessEpoch || !ValidateState(state, state))
+            throw Invalid("The checked native symbol state is not a complete direct-file checkpoint.");
+    }
+
     private static void RequireDigest(string value, string name)
     {
         if (value.Length != 64 || !value.All(char.IsAsciiHexDigitLower))
@@ -167,10 +177,13 @@ internal static class SymbolLibraryCheckedContract
         NativeCapabilitySymbolLibraryCheckedState state,
         NativeCapabilitySymbolLibraryCheckedState expected)
     {
-        if (state is null || expected is null || !state.Document.Equals(expected.Document)
+        if (state is null || expected is null || state.Document is null || expected.Document is null
+            || !state.Document.Equals(expected.Document)
             || state.ProcessEpoch != expected.ProcessEpoch || state.Scope != "mcp_direct_symbol_file"
             || !state.StateComplete || !state.DiskBaselineChecked || state.CompleteChangeTracking
             || state.Revision is null || state.Revision.Epoch != expected.ProcessEpoch
+            || state.Revision.Sequence == 0
+            || !IsValidDirectSymbolMetadata(state)
             || state.StateSha256.Length != 64 || !state.StateSha256.All(char.IsAsciiHexDigitLower))
             return false;
 
@@ -180,13 +193,68 @@ internal static class SymbolLibraryCheckedContract
         var paths = new HashSet<string>(StringComparer.Ordinal);
         foreach (var baseline in state.DependencyBaselines)
         {
-            if (!baseline.Known || string.IsNullOrWhiteSpace(baseline.Path) || !paths.Add(baseline.Path)
+            string? canonicalPath = baseline is null ? null : CanonicalPath(baseline.Path);
+            if (baseline is null || !baseline.Known || canonicalPath is null || !paths.Add(canonicalPath)
                 || (baseline.Exists && (baseline.Sha256.Length != 64 || !baseline.Sha256.All(char.IsAsciiHexDigitLower)))
                 || (!baseline.Exists && (baseline.Sha256.Length != 0 || baseline.Bytes != 0)))
                 return false;
         }
 
-        return paths.Count != 0;
+        if (paths.Count == 0)
+            return false;
+
+        string?[] expectedPaths = expected.DependencyBaselines.Select(item => CanonicalPath(item.Path)).ToArray();
+        if (expectedPaths.Any(path => path is null) || paths.Count != expectedPaths.Length
+            || !paths.SetEquals(expectedPaths.Where(path => path is not null).Select(path => path!)))
+            return false;
+
+        bool hasTable = false;
+        bool hasExpanded = false;
+        foreach (var baseline in state.DependencyBaselines)
+        {
+            string? canonicalPath = CanonicalPath(baseline.Path);
+            if (canonicalPath is null)
+                return false;
+            hasTable |= string.Equals(canonicalPath, CanonicalPath(state.TablePath), StringComparison.Ordinal)
+                && baseline.Exists;
+            hasExpanded |= string.Equals(canonicalPath, CanonicalPath(state.ExpandedUri), StringComparison.Ordinal)
+                && baseline.Exists;
+        }
+
+        return hasTable && hasExpanded
+            && state.TablePath == expected.TablePath
+            && state.TableScope == expected.TableScope
+            && state.RawUri == expected.RawUri
+            && state.ExpandedUri == expected.ExpandedUri
+            && state.Provider == expected.Provider
+            && state.ProviderOptions == expected.ProviderOptions
+            && state.EntryExists == expected.EntryExists
+            && state.DetachedDefinitionSha256 == expected.DetachedDefinitionSha256;
+    }
+
+    private static bool IsValidDirectSymbolMetadata(NativeCapabilitySymbolLibraryCheckedState state) =>
+        IsAbsolutePath(state.TablePath)
+        && state.TableScope is "PROJECT" or "GLOBAL"
+        && !string.IsNullOrWhiteSpace(state.RawUri)
+        && state.RawUri.IndexOf('\0') < 0
+        && IsAbsolutePath(state.ExpandedUri)
+        && state.Provider == "KiCad"
+        && state.ProviderOptions.IndexOf('\0') < 0
+        && (!state.EntryExists
+            ? string.IsNullOrEmpty(state.DetachedDefinitionSha256)
+            : state.DetachedDefinitionSha256.Length == 64
+                && state.DetachedDefinitionSha256.All(char.IsAsciiHexDigitLower));
+
+    private static bool IsAbsolutePath(string value) =>
+        CanonicalPath(value) is not null;
+
+    private static string? CanonicalPath(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.IndexOf('\0') >= 0 || !Path.IsPathFullyQualified(value))
+            return null;
+        try { return Path.TrimEndingDirectorySeparator(Path.GetFullPath(value)); }
+        catch (Exception error) when (error is ArgumentException or NotSupportedException)
+        { return null; }
     }
 
 }

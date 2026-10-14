@@ -196,14 +196,19 @@ public static class SchematicRebuild
             return candidate;
 
         var adopted = candidate with { Schematic = candidate.Schematic.Clone() };
+        static bool SameDocument(DocumentSpecifier? left, DocumentSpecifier? right) =>
+            left is not null && right is not null && left.Type == right.Type
+            && left.Project?.Name == right.Project?.Name && left.Project?.Path == right.Project?.Path
+            && (left.SheetPath?.Path.Select(id => id.Value) ?? []).SequenceEqual(right.SheetPath?.Path.Select(id => id.Value) ?? []);
+
         foreach (var screen in adopted.Schematic.Instances)
         {
             if (screen.Metadata?.ScreenId is null || screen.Metadata.LoadedNativeFormatVersion != 0
                 || screen.Metadata.WriterNativeFormatVersion is not (0 or SchematicItemDelta.SupportedWriterFormatVersion))
                 continue;
             var actual = observed.Instances.SingleOrDefault(nativeScreen =>
-                Equals(nativeScreen.Metadata.Document, screen.Metadata.Document)
-                && Equals(nativeScreen.Metadata.ScreenId, screen.Metadata.ScreenId));
+                SameDocument(nativeScreen.Metadata.Document, screen.Metadata.Document)
+                && nativeScreen.Metadata.ScreenId?.Value == screen.Metadata.ScreenId.Value);
             if (actual?.Metadata is null
                 || actual.Metadata.WriterNativeFormatVersion != SchematicItemDelta.SupportedWriterFormatVersion
                 || actual.Metadata.LoadedNativeFormatVersion != SchematicItemDelta.SupportedWriterFormatVersion)

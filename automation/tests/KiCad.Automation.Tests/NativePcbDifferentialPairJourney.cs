@@ -244,8 +244,8 @@ public sealed partial class NativeSessionTests
             RequireToolSuccess(receiptReply);
             var receiptData = receiptReply.GetProperty("structuredContent");
             Assert.IsTrue(receiptData.GetProperty("found").GetBoolean());
-            Assert.AreEqual("mcp-process", receiptData.GetProperty("receiptScope").GetString(),
-                "Lookup reports the MCP receipt cache containing the authoritative native receipt.");
+            Assert.AreEqual("mcp-state", receiptData.GetProperty("receiptScope").GetString(),
+                "Lookup reports the durable MCP receipt state containing the authoritative native receipt.");
             Assert.IsTrue(receiptData.GetProperty("nativeReceiptAvailable").GetBoolean());
             Assert.AreEqual(replayData.GetRawText(), receiptData.GetProperty("receipt").GetRawText());
             await File.WriteAllTextAsync(Path.Combine(retained, "replay.json"), replayReply.GetRawText(), token);

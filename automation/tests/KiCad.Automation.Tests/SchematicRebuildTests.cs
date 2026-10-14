@@ -543,6 +543,27 @@ public sealed class SchematicRebuildTests
         var native = new SchematicElectricalState { Hierarchy = new() { Data = candidate.Schematic.Clone() } };
         var resolved = SchematicRebuild.Resolve(candidate, state, native, batch, receipt);
         Assert.AreEqual(SchematicDesignXml.Write(candidate, []), SchematicDesignXml.Write(resolved, []));
+
+        // KiCad marks every materialized sheet with the supported loaded-file
+        // format when the rebuild save completes. The candidate intentionally
+        // uses zero for those screens until that save; adopt only this exact
+        // provenance transition before the post-save delta check.
+        var savedNative = candidate.Schematic.Clone();
+        foreach (var screen in savedNative.Instances)
+            screen.Metadata.LoadedNativeFormatVersion = SchematicItemDelta.SupportedWriterFormatVersion;
+        var savedElectrical = new SchematicElectricalState { Hierarchy = new() { Data = savedNative } };
+        var adopted = SchematicRebuild.AdoptSavedNativeProvenance(candidate, savedElectrical, batch);
+        Assert.IsTrue(adopted.Schematic.Instances.All(screen =>
+            screen.Metadata.LoadedNativeFormatVersion == SchematicItemDelta.SupportedWriterFormatVersion));
+        string beforeProvenance = SchematicDesignXml.Write(candidate, []);
+        string afterProvenance = SchematicDesignXml.Write(adopted, []);
+        Assert.IsTrue(SchematicRebuild.SavedProvenanceOnlyChange(Encoding.UTF8.GetBytes(beforeProvenance),
+            Encoding.UTF8.GetBytes(afterProvenance), [], batch));
+        var ordinary = new ApplySchematicItemBatch { Description = "Apply XML synchronization candidate" };
+        ordinary.Operations.Add(batch.Operations.Select(operation => operation.Clone()));
+        Assert.IsFalse(SchematicRebuild.SavedProvenanceOnlyChange(Encoding.UTF8.GetBytes(beforeProvenance),
+            Encoding.UTF8.GetBytes(afterProvenance), [], ordinary));
+
         var drifted = candidate.Schematic.Clone();
         drifted.Instances.Last().Items.RemoveAt(0);
         Assert.AreEqual("rebuild_native_mismatch", Assert.ThrowsExactly<AutomationException>(() => SchematicRebuild.Resolve(candidate, state,

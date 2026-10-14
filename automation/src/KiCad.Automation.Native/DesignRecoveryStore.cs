@@ -680,11 +680,13 @@ public sealed class DesignRecoveryStore(string statePath)
         {
             byte[] a = JsonSerializer.SerializeToUtf8Bytes(before with { Phase = DesignPublicationPhase.Prepared }, Json);
             byte[] b = JsonSerializer.SerializeToUtf8Bytes(after with { Phase = DesignPublicationPhase.Prepared }, Json);
-            bool computedNetChainUpdate = current.PendingNativeSave is not null
+            bool computedCandidateUpdate = current.PendingNativeSave is not null
                 && before.Phase == DesignPublicationPhase.Prepared && after.Phase == DesignPublicationPhase.Prepared
                 && a.AsSpan().SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(after with { CandidateFileBytes = before.CandidateFileBytes }, Json))
-                && ComputedNetChainOnlyChange(before.CandidateFileBytes, after.CandidateFileBytes, current.KnowledgeLibraries);
-            if ((!a.AsSpan().SequenceEqual(b) && !computedNetChainUpdate) || !Equals(current.PendingMutation, next.PendingMutation)
+                && (ComputedNetChainOnlyChange(before.CandidateFileBytes, after.CandidateFileBytes, current.KnowledgeLibraries)
+                    || SchematicRebuild.SavedProvenanceOnlyChange(before.CandidateFileBytes, after.CandidateFileBytes,
+                        current.KnowledgeLibraries, current.PendingMutation));
+            if ((!a.AsSpan().SequenceEqual(b) && !computedCandidateUpdate) || !Equals(current.PendingMutation, next.PendingMutation)
                 || !Equals(current.PendingNativeState, next.PendingNativeState)
                 || (current.PendingNativeSave is not null && !Equals(current.PendingNativeSave, next.PendingNativeSave)))
                 throw Failure("sync_intent_changed", "The exact request and pending native identities cannot change during synchronization.");

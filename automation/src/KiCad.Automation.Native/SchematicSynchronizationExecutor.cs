@@ -223,7 +223,11 @@ internal static class SchematicSynchronizationExecutor
         if (!afterSave.State.Equals(save.ObservedState))
             throw Error("native_changed_during_sync", "The native document changed after saving; preserve the pending candidate for reconciliation.");
         if (intent.Phase == DesignPublicationPhase.Prepared)
+        {
             candidate = AdoptComputedNetChainMembership(candidate, afterSave.Electrical);
+            candidate = SchematicRebuild.AdoptSavedNativeProvenance(candidate, afterSave.Electrical,
+                saved.State.PendingMutation);
+        }
         RequireCandidate(candidate, afterSave.Electrical, saved.State, token);
         if (!candidate.Schematic.Equals(SchematicDesignXml.Read(new UTF8Encoding(false, true).GetString(intent.CandidateFileBytes),
                 saved.State.KnowledgeLibraries).Schematic))

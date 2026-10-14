@@ -171,9 +171,79 @@ public static class SchematicRebuild
     internal static bool IsRebuild(DesignRecoveryState state)
     {
         ArgumentNullException.ThrowIfNull(state);
-        return state.PendingLayout?.Lane == DesignLayoutIntent.RebuildLane && state.PendingMutation is { } batch
-            && batch.Description == BatchDescription && batch.Operations.Count != 0
-            && batch.Operations.Select((o, index) => (o, index)).All(p => Journaled(p.o, p.index));
+        return state.PendingLayout?.Lane == DesignLayoutIntent.RebuildLane && IsRebuildBatch(state.PendingMutation);
+    }
+
+    /// <summary>Whether a pending batch is the exact, journaled rebuild batch.
+    /// This remains true after the layout intent is resolved into a publication,
+    /// while the batch is still retained for save/replay recovery.</summary>
+    internal static bool IsRebuildBatch(ApplySchematicItemBatch? batch) => batch is not null
+        && batch.Description == BatchDescription && batch.Operations.Count != 0
+        && batch.Operations.Select((o, index) => (o, index)).All(p => Journaled(p.o, p.index));
+
+    /// <summary>Adopt only the native file provenance that a successful rebuild
+    /// save is expected to add to newly materialized screens. The rebuild plans
+    /// those screens with loaded format zero; KiCad records the supported writer
+    /// format after saving them. Document and screen identities must still match
+    /// exactly, and every other metadata difference remains subject to the normal
+    /// delta guard.</summary>
+    internal static SchematicDesign AdoptSavedNativeProvenance(SchematicDesign candidate,
+        SchematicElectricalState native, ApplySchematicItemBatch? batch)
+    {
+        ArgumentNullException.ThrowIfNull(candidate);
+        ArgumentNullException.ThrowIfNull(native);
+        if (!IsRebuildBatch(batch) || native.Hierarchy?.Data is not { } observed)
+            return candidate;
+
+        var adopted = candidate with { Schematic = candidate.Schematic.Clone() };
+        var materialized = batch!.Operations
+            .Where(operation => operation.RebuildScreenIdentity is not null)
+            .Select(operation => operation.RebuildScreenIdentity!.Value)
+            .Concat(batch.Operations
+                .Where(operation => operation.Create?.Is(SheetSymbol.Descriptor) == true)
+                .Select(operation => operation.Create.Unpack<SheetSymbol>().ChildScreenId?.Value)
+                .Where(value => value is not null)
+                .Select(value => value!))
+            .ToHashSet(StringComparer.Ordinal);
+
+        foreach (var screen in adopted.Schematic.Instances)
+        {
+            if (screen.Metadata?.ScreenId?.Value is not { } screenId || !materialized.Contains(screenId)
+                || screen.Metadata.LoadedNativeFormatVersion != 0
+                || screen.Metadata.WriterNativeFormatVersion != SchematicItemDelta.SupportedWriterFormatVersion)
+                continue;
+            var actual = observed.Instances.SingleOrDefault(nativeScreen =>
+                Equals(nativeScreen.Metadata.Document, screen.Metadata.Document)
+                && Equals(nativeScreen.Metadata.ScreenId, screen.Metadata.ScreenId));
+            if (actual?.Metadata is null
+                || actual.Metadata.WriterNativeFormatVersion != SchematicItemDelta.SupportedWriterFormatVersion
+                || actual.Metadata.LoadedNativeFormatVersion != SchematicItemDelta.SupportedWriterFormatVersion)
+                continue;
+            screen.Metadata.LoadedNativeFormatVersion = actual.Metadata.LoadedNativeFormatVersion;
+        }
+        return adopted;
+    }
+
+    /// <summary>Validate the one candidate-file rewrite allowed after a rebuild
+    /// save: exact XML equality after adopting only the supported loaded-format
+    /// provenance above. Ordinary synchronization and other candidate changes
+    /// remain rejected by the recovery transition guard.</summary>
+    internal static bool SavedProvenanceOnlyChange(byte[] beforeBytes, byte[] afterBytes,
+        IReadOnlyCollection<ComponentKnowledgeLibrary> libraries, ApplySchematicItemBatch? batch)
+    {
+        ArgumentNullException.ThrowIfNull(beforeBytes);
+        ArgumentNullException.ThrowIfNull(afterBytes);
+        ArgumentNullException.ThrowIfNull(libraries);
+        if (!IsRebuildBatch(batch)) return false;
+        try
+        {
+            var before = SchematicDesignXml.Read(new System.Text.UTF8Encoding(false, true).GetString(beforeBytes), libraries);
+            var after = SchematicDesignXml.Read(new System.Text.UTF8Encoding(false, true).GetString(afterBytes), libraries);
+            var native = new SchematicElectricalState { Hierarchy = new() { Data = after.Schematic.Clone() } };
+            return AdoptSavedNativeProvenance(before, native, batch).Equals(after);
+        }
+        catch (Exception error) when (error is AutomationException or System.Text.DecoderFallbackException or ArgumentException)
+        { return false; }
     }
 
     private static bool Journaled(SchematicItemOperation operation, int index) =>

@@ -325,6 +325,43 @@ public sealed class PcbRenderContractTests
         }
     }
 
+    [TestMethod]
+    public void ProjectedBoundsMustContainTheCapturedCameraProjection()
+    {
+        const string stateHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const string inputHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        PcbRenderMetadata metadata = CameraMetadata(stateHash, inputHash);
+        metadata.Models.Add(new PcbRenderModelMetadata
+        {
+            NativeUuid = "66666666-6666-6666-6666-666666666666", ModelIndex = 0,
+            RequestedIdentity = "${KICAD6_3DMODEL_DIR}/resistor.wrl",
+            ResolvedIdentity = "/models/resistor.wrl", ContentSha256 = new string('f', 64),
+            Loaded = true, SecondaryAssetsComplete = true, NativeGeometryBoundsAvailable = true,
+            SceneTransformColumnMajor = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 },
+            NativeGeometryBounds = { 0, 0, 0, 1, 1, 1 }
+        });
+        metadata.Objects.Add(new PcbRenderObjectMetadata
+        {
+            NativeUuid = "66666666-6666-6666-6666-666666666666", ModelIndex = 0,
+            NativeGeometryBoundsAvailable = true, ProjectedBoundsAvailable = true,
+            SceneTransformColumnMajor = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 },
+            NativeGeometryBounds = { 0, 0, 0, 1, 1, 1 },
+            // Identity view/projection maps the scene bounds to x=160..320
+            // and y=0..120 in the 320x240 top-left-origin image.
+            ProjectedConservativeBounds = { 160, 0, 320, 120 }
+        });
+
+        PcbRenderMetadataValidation valid = PcbRenderMetadataContract.Validate(
+            metadata, RenderRequest(), stateHash, inputHash);
+        Assert.IsTrue(valid.IsValid, string.Join("; ", valid.Failures));
+
+        metadata.Objects[0].ProjectedConservativeBounds[0] = 161;
+        PcbRenderMetadataValidation underCovered = PcbRenderMetadataContract.Validate(
+            metadata, RenderRequest(), stateHash, inputHash);
+        Assert.IsFalse(underCovered.IsValid);
+        StringAssert.Contains(string.Join("; ", underCovered.Failures), "captured camera projection");
+    }
+
     private static RunBoardJobExportRender RenderRequest() => new()
     {
         Width = 320,

@@ -421,7 +421,10 @@ internal static class PcbRenderMetadataContract
                     || !item.NativeGeometryBounds.SequenceEqual(model.NativeGeometryBounds)))
                 failures.Add("object metadata must preserve its declared model geometry");
             if (item.ProjectedBoundsAvailable)
+            {
                 ValidateBounds(item.ProjectedConservativeBounds, true, 4, "object projected geometry", failures);
+                ValidateProjectedBounds(item, metadata, failures);
+            }
             if (item.ExactVisiblePixels || item.OcclusionTested)
                 failures.Add("object metadata cannot claim exact pixels or occlusion testing");
         }
@@ -462,6 +465,79 @@ internal static class PcbRenderMetadataContract
                 break;
             }
         }
+    }
+
+    private static void ValidateProjectedBounds(PcbRenderObjectMetadata item,
+        PcbRenderMetadata metadata, List<string> failures)
+    {
+        // Object bounds are emitted in scene space by the native producer, so
+        // the declared pixel bounds must conservatively contain the projection
+        // of those same bounds under the captured camera matrices. Without
+        // this check a producer could pair valid camera/model rows with pixel
+        // coordinates from a different view and still pass the metadata
+        // boundary.
+        if (metadata.WidthPixels == 0 || metadata.HeightPixels == 0
+            || metadata.ViewMatrixColumnMajor.Count != 16
+            || metadata.ProjectionMatrixColumnMajor.Count != 16
+            || !metadata.ViewMatrixColumnMajor.All(double.IsFinite)
+            || !metadata.ProjectionMatrixColumnMajor.All(double.IsFinite)
+            || item.NativeGeometryBounds.Count != 6
+            || !item.NativeGeometryBounds.All(double.IsFinite))
+            return;
+
+        double minX = double.PositiveInfinity;
+        double minY = double.PositiveInfinity;
+        double maxX = double.NegativeInfinity;
+        double maxY = double.NegativeInfinity;
+        for (int x = 0; x < 2; x++)
+        {
+            for (int y = 0; y < 2; y++)
+            {
+                for (int z = 0; z < 2; z++)
+                {
+                    double sceneX = item.NativeGeometryBounds[x == 0 ? 0 : 3];
+                    double sceneY = item.NativeGeometryBounds[y == 0 ? 1 : 4];
+                    double sceneZ = item.NativeGeometryBounds[z == 0 ? 2 : 5];
+                    double viewX = MatrixProduct(metadata.ViewMatrixColumnMajor, 0, sceneX, sceneY, sceneZ);
+                    double viewY = MatrixProduct(metadata.ViewMatrixColumnMajor, 1, sceneX, sceneY, sceneZ);
+                    double viewZ = MatrixProduct(metadata.ViewMatrixColumnMajor, 2, sceneX, sceneY, sceneZ);
+                    double viewW = MatrixProduct(metadata.ViewMatrixColumnMajor, 3, sceneX, sceneY, sceneZ);
+                    double clipX = MatrixProduct(metadata.ProjectionMatrixColumnMajor, 0, viewX, viewY, viewZ, viewW);
+                    double clipY = MatrixProduct(metadata.ProjectionMatrixColumnMajor, 1, viewX, viewY, viewZ, viewW);
+                    double clipW = MatrixProduct(metadata.ProjectionMatrixColumnMajor, 3, viewX, viewY, viewZ, viewW);
+                    if (!double.IsFinite(clipX) || !double.IsFinite(clipY) || !double.IsFinite(clipW)
+                        || Math.Abs(clipW) < double.Epsilon)
+                        continue;
+
+                    double pixelX = (clipX / clipW + 1.0) * 0.5 * metadata.WidthPixels;
+                    double pixelY = (1.0 - clipY / clipW) * 0.5 * metadata.HeightPixels;
+                    minX = Math.Min(minX, pixelX);
+                    minY = Math.Min(minY, pixelY);
+                    maxX = Math.Max(maxX, pixelX);
+                    maxY = Math.Max(maxY, pixelY);
+                }
+            }
+        }
+
+        if (!double.IsFinite(minX) || !double.IsFinite(minY)
+            || !double.IsFinite(maxX) || !double.IsFinite(maxY))
+            return;
+
+        const double tolerance = 1e-6;
+        IReadOnlyList<double> declared = item.ProjectedConservativeBounds;
+        if (declared[0] > minX + tolerance || declared[1] > minY + tolerance
+            || declared[2] < maxX - tolerance || declared[3] < maxY - tolerance)
+            failures.Add("object projected geometry must conservatively contain the captured camera projection");
+    }
+
+    private static double MatrixProduct(IReadOnlyList<double> matrix, int row,
+        double x, double y, double z, double w = 1.0)
+    {
+        double[] vector = [x, y, z, w];
+        double result = 0;
+        for (int column = 0; column < 4; column++)
+            result += matrix[column * 4 + row] * vector[column];
+        return result;
     }
 
     private static bool ValidSha256(string value)

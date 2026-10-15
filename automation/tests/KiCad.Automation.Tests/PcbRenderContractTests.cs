@@ -401,6 +401,42 @@ public sealed class PcbRenderContractTests
         StringAssert.Contains(string.Join("; ", underCovered.Failures), "captured camera projection");
     }
 
+    [TestMethod]
+    public void UnavailableProjectedBoundsCannotCarryPixelCoordinatesOrVisibilityClaims()
+    {
+        const string stateHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const string inputHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        PcbRenderMetadata metadata = CameraMetadata(stateHash, inputHash);
+        metadata.Models.Add(new PcbRenderModelMetadata
+        {
+            NativeUuid = "77777777-7777-7777-7777-777777777777", ModelIndex = 0,
+            RequestedIdentity = "${KICAD6_3DMODEL_DIR}/resistor.wrl",
+            ResolvedIdentity = "/models/resistor.wrl", ContentSha256 = new string('a', 64),
+            Loaded = true, SecondaryAssetsComplete = true, NativeGeometryBoundsAvailable = true,
+            SceneTransformColumnMajor = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 },
+            NativeGeometryBounds = { 0, 0, 0, 1, 1, 1 }
+        });
+        metadata.Objects.Add(new PcbRenderObjectMetadata
+        {
+            NativeUuid = "77777777-7777-7777-7777-777777777777", ModelIndex = 0,
+            NativeGeometryBoundsAvailable = true,
+            SceneTransformColumnMajor = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 },
+            NativeGeometryBounds = { 0, 0, 0, 1, 1, 1 },
+            ProjectedConservativeBounds = { 0, 0, 320, 240 },
+            ProjectedBoundsAvailable = false,
+            ExactVisiblePixels = true,
+            OcclusionTested = true
+        });
+
+        PcbRenderMetadataValidation validation = PcbRenderMetadataContract.Validate(
+            metadata, RenderRequest(), stateHash, inputHash);
+
+        Assert.IsFalse(validation.IsValid);
+        string failures = string.Join("; ", validation.Failures);
+        StringAssert.Contains(failures, "projected geometry must be empty");
+        StringAssert.Contains(failures, "cannot claim exact pixels or occlusion testing");
+    }
+
     private static RunBoardJobExportRender RenderRequest() => new()
     {
         Width = 320,

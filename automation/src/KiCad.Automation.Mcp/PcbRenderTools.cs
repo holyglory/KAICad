@@ -483,6 +483,10 @@ internal static class PcbRenderMetadataContract
                 ValidateBounds(item.ProjectedConservativeBounds, true, 4, "object projected geometry", failures);
                 ValidateProjectedBounds(item, metadata, failures);
             }
+            else if (item.ProjectedConservativeBounds.Count != 0)
+            {
+                failures.Add("object projected geometry must be empty when projected bounds are unavailable");
+            }
             if (item.ExactVisiblePixels || item.OcclusionTested)
                 failures.Add("object metadata cannot claim exact pixels or occlusion testing");
         }

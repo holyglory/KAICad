@@ -162,6 +162,9 @@ public sealed class SimulationTypedMcpProcessTests
                 JsonElement replay = Data(await mcp.Tool("kicad_simulation_start_typed", new { instanceId, input = startInput }));
                 JsonElement archived = Data(await mcp.Tool("kicad_simulation_result_typed", new { instanceId, input = jobInput }));
                 Assert.AreEqual(replay.GetRawText(), archived.GetRawText(), "Identical starts must replay the original archive without a native instance.");
+                JsonElement cancelled = Data(await mcp.Tool("kicad_simulation_cancel_typed", new { instanceId, input = jobInput }));
+                Assert.AreEqual(archived.GetRawText(), cancelled.GetRawText(),
+                    "A late cancellation retry must replay the exact terminal archive without contacting a native instance.");
                 Assert.AreEqual("archive", archived.GetProperty("source").GetString());
                 Assert.AreEqual(terminal.Sha256, archived.GetProperty("receiptSha256").GetString());
                 Assert.AreEqual(epoch, archived.GetProperty("instanceEpoch").GetString());

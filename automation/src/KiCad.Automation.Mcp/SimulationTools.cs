@@ -293,7 +293,7 @@ public sealed partial class SimulationTools(InstanceRegistry instances)
     }
 
     [McpServerTool(Name = "kicad_simulation_cancel"),
-     Description("Cancel one exact native KiCad simulation job. The native simulator is stopped before the terminal Cancelled state is returned; result vectors from a cancelled run are never reported as successful output."),
+     Description("Cancel one exact native KiCad simulation job. A matching immutable terminal archive is returned before contacting a current or replacement editor, so a late completion or retry cannot cancel another job. Otherwise the native simulator is stopped before the terminal Cancelled state is returned; result vectors from a cancelled run are never reported as successful output."),
      KiCadCapability("simulation", "native-ngspice", "instance epoch, document, job ID"),
      KiCadVerification(KiCadVerificationLevel.NativeJourney, "NativeSessionTests.NativeSimulationUsesKiCadNgspiceAndReturnsVectors")]
     public Task<CallToolResult> Cancel(string instanceId, string expectedInstanceEpoch, SimulationDocumentInput document,
@@ -301,12 +301,22 @@ public sealed partial class SimulationTools(InstanceRegistry instances)
     {
         ValidateId(jobId, "job");
         var target = SimulationDocumentInput.ToNative(document);
+        // A terminal archive is authoritative for this original job. Check it
+        // before resolving the live instance so a late cancellation retry after
+        // a native/MCP restart cannot contact (or cancel) a replacement editor.
+        using var ownership = receipts.AcquireSession(instanceId);
+        if (receipts.ReadTerminal(instanceId, expectedInstanceEpoch, jobId) is { } archive)
+        {
+            if (!archive.Operation.Document.Equals(target))
+                throw new AutomationException("simulation_result_not_found",
+                    "No terminal simulation archive matches that original schematic document.");
+            return ArchivedData(archive, target);
+        }
         var client = instances.Client(instanceId); var session = await client.HandshakeAsync(cancellationToken);
         if (session.InstanceId != instanceId || session.Epoch != expectedInstanceEpoch)
             throw new AutomationException("simulation_instance_changed", "The native instance identity or epoch changed; inspect it again.");
         var request = new CancelSimulationJob
         { Document = target, JobId = jobId.ToString("D"), ProcessEpoch = session.Epoch };
-        using var ownership = receipts.AcquireSession(instanceId);
         SimulationJobState result;
         try { result = await client.InvokeAsync<CancelSimulationJob, SimulationJobState>(request, cancellationToken); }
         catch (NativeApiException error) when (IsMissingJob(error) && receipts.HasEarlierEpoch(instanceId, session.Epoch, jobId))

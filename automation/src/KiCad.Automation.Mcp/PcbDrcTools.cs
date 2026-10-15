@@ -475,7 +475,7 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
     }
 
     [McpServerTool(Name = "kicad_pcb_drc_operation_receipt", ReadOnly = true),
-     Description("Read the durable MCP-side admission receipt for one PCB DRC operation after an MCP reconnect. The receipt preserves the exact document, revision, candidate and process-epoch binding, but never substitutes for KiCad's native job result. A changed native epoch is rejected; an unknown or prepared record remains unknown and is never replayed automatically."),
+     Description("Read the durable MCP-side admission receipt for one PCB DRC operation after an MCP reconnect. The receipt preserves the exact document, revision, candidate and original process-epoch binding, but never substitutes for KiCad's native job result. After a native restart, supply the current epoch to read the old receipt with durableProcessEpoch; an unknown or prepared record remains unknown and is never replayed automatically."),
      KiCadCapability("pcb", "durable-mcp-receipt", "typed PCB document, process epoch and operation ID"),
      KiCadVerification(KiCadVerificationLevel.InProcess, "PcbDrcReceiptStoreTests.DurableReceiptSurvivesStoreRecreation")]
     public async Task<CallToolResult> OperationReceiptTyped(string instanceId,
@@ -513,10 +513,49 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                     instanceId, processEpoch = epoch, document = target, operationId = id,
                     found = false, receiptScope = "mcp-state", nativeReceiptAvailable = false
                 });
-            if (durable.ProcessEpoch != epoch)
-                throw new AutomationException("stale_process_epoch", "The durable DRC receipt belongs to another native process epoch.");
             if (durable.DocumentJson != SchematicJson.Formatter.Format(target))
                 throw new AutomationException("drc_receipt_identity_mismatch", "The durable DRC receipt belongs to another PCB document.");
+            // A replacement native process has a new epoch, but the MCP-side
+            // journal remains authoritative for the old admission. Return it
+            // as receipt-only evidence and never dispatch a native lookup or
+            // retry. The process-owned kicad_pcb_drc_operation boundary above
+            // remains fail-closed on a stale epoch.
+            if (durable.ProcessEpoch != epoch)
+            {
+                JsonElement? retainedAfterRestart = null;
+                if (durable.ResultJson is not null)
+                {
+                    try
+                    {
+                        var retained = SchematicJson.Parser.Parse<PcbDrcJobState>(durable.ResultJson);
+                        ValidateJobState(retained, target, durable.ProcessEpoch);
+                        retainedAfterRestart = JsonSerializer.SerializeToElement(retained);
+                    }
+                    catch (Exception error) when (error is InvalidProtocolBufferException or InvalidJsonException
+                        or AutomationException)
+                    { throw new AutomationException("drc_receipt_corrupt", "The retained PCB DRC result is invalid: " + error.Message); }
+                }
+                return JsonSerializer.SerializeToElement(new
+                {
+                    instanceId,
+                    processEpoch = epoch,
+                    durableProcessEpoch = durable.ProcessEpoch,
+                    document = target,
+                    operationId = id,
+                    jobId = durable.JobId,
+                    found = true,
+                    receiptScope = "mcp-state",
+                    nativeReceiptAvailable = false,
+                    outcome = durable.Outcome.ToString(),
+                    retrySafety = durable.Outcome == PcbDrcReceiptOutcome.Retryable
+                        ? "safe-native-not-reached" : "unknown-native-outcome",
+                    requestFingerprintSha256 = durable.RequestFingerprintSha256,
+                    candidateHash = durable.CandidateHash,
+                    result = retainedAfterRestart,
+                    errorCode = durable.ErrorCode,
+                    errorMessage = durable.ErrorMessage
+                });
+            }
             JsonElement? result = durable.ResultJson is null
                 ? null : JsonDocument.Parse(durable.ResultJson).RootElement.Clone();
             if (durable.ResultJson is not null)

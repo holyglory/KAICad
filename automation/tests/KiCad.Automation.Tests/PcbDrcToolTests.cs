@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text.Json;
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
@@ -634,7 +635,8 @@ public sealed class PcbDrcToolTests
                 ProcessEpoch = transport.Session.Epoch
             };
             var receipt = await reopenedTool.OperationReceiptTyped(transport.Session.InstanceId, input, default);
-            Assert.IsFalse(receipt.IsError ?? false, receipt.ToString());
+            Assert.IsFalse(receipt.IsError ?? false,
+                receipt.StructuredContent?.GetRawText() ?? string.Join(" | ", receipt.Content.Select(content => content.ToString())));
             Assert.IsTrue(receipt.StructuredContent!.Value.GetProperty("found").GetBoolean());
             Assert.AreEqual("mcp-state", receipt.StructuredContent.Value.GetProperty("receiptScope").GetString());
             Assert.AreEqual("Completed", receipt.StructuredContent.Value.GetProperty("outcome").GetString());
@@ -648,6 +650,98 @@ public sealed class PcbDrcToolTests
             var stale = await reopenedTool.OperationReceiptTyped(transport.Session.InstanceId, staleInput, default);
             Assert.IsTrue(stale.IsError ?? false, stale.ToString());
             Assert.AreEqual("stale_process_epoch", stale.StructuredContent!.Value.GetProperty("code").GetString());
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [TestMethod]
+    public async Task DurableOperationReceiptRemainsReadableAfterNativeRestartWithoutLookup()
+    {
+        string directory = Directory.CreateTempSubdirectory("drc-operation-restart-receipt-").FullName;
+        try
+        {
+            string oldEpoch = Guid.NewGuid().ToString("D");
+            string currentEpoch = Guid.NewGuid().ToString("D");
+            string operationId = Guid.NewGuid().ToString("D");
+            string revision = "{\"epoch\":\"" + Guid.NewGuid().ToString("D") + "\",\"sequence\":1}";
+            var document = new DocumentSpecifier { Type = DocumentType.DoctypePcb, BoardFilename = "fixture.kicad_pcb",
+                Project = new() { Name = "fixture", Path = directory } };
+            string documentJson = SchematicJson.Formatter.Format(document);
+            string fingerprint = Convert.ToHexStringLower(SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes("restart-receipt" + operationId)));
+            var replacement = new JobTransport();
+            replacement.Session.Epoch = currentEpoch;
+            replacement.Session.ProjectPath = Path.Combine(directory, "fixture.kicad_pro");
+            var durable = new PcbDrcReceiptStore(directory);
+            durable.Reserve(replacement.Session.InstanceId, operationId, oldEpoch, documentJson, revision,
+                "", "", "", fingerprint, "");
+            durable.MarkUnknown(replacement.Session.InstanceId, operationId, true,
+                "operation_outcome_unknown", "the native peer exited after dispatch");
+
+            // This second transport represents the replacement KiCad process.
+            // The old receipt remains on disk while the replacement handshake
+            // carries a new epoch for the same instance identity.
+            var registry = new InstanceRegistry(replacement, directory);
+            await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "native.sock")),
+                replacement.Session.InstanceId);
+            var tool = new PcbDrcTools(registry);
+            var input = new PcbDrcOperationReceiptInput
+            {
+                Document = new NativeDocumentInput
+                {
+                    Type = NativeDocumentType.Pcb,
+                    BoardFilename = "fixture.kicad_pcb",
+                    Project = new NativeProjectInput { Name = "fixture", Path = directory }
+                },
+                OperationId = operationId,
+                ProcessEpoch = currentEpoch
+            };
+            int nativeCallsBefore = replacement.Calls;
+            var receipt = await tool.OperationReceiptTyped(replacement.Session.InstanceId, input, default);
+            Assert.IsFalse(receipt.IsError ?? false,
+                receipt.StructuredContent?.GetRawText() ?? string.Join(" | ", receipt.Content.Select(content => content.ToString())));
+            JsonElement value = receipt.StructuredContent!.Value;
+            Assert.IsTrue(value.GetProperty("found").GetBoolean());
+            Assert.AreEqual(currentEpoch, value.GetProperty("processEpoch").GetString());
+            Assert.AreEqual(oldEpoch, value.GetProperty("durableProcessEpoch").GetString());
+            Assert.AreEqual("Unknown", value.GetProperty("outcome").GetString());
+            Assert.AreEqual("mcp-state", value.GetProperty("receiptScope").GetString());
+            Assert.IsFalse(value.GetProperty("nativeReceiptAvailable").GetBoolean());
+            Assert.AreEqual("unknown-native-outcome", value.GetProperty("retrySafety").GetString());
+            Assert.AreEqual(nativeCallsBefore, replacement.Calls,
+                "A receipt read after restart must never issue a native DRC lookup or retry.");
+
+            // A terminal stale result is also durable evidence from the old
+            // peer. It is returned with its original epoch and remains
+            // permanently non-retryable after the replacement attaches.
+            string staleOperation = Guid.NewGuid().ToString("D");
+            string staleJobId = Guid.NewGuid().ToString("D");
+            durable.Reserve(replacement.Session.InstanceId, staleOperation, oldEpoch, documentJson, revision,
+                "", "", "", Convert.ToHexStringLower(SHA256.HashData(
+                    System.Text.Encoding.UTF8.GetBytes("restart-stale" + staleOperation))), "");
+            var staleJob = new PcbDrcJobState
+            {
+                Document = document.Clone(), JobId = staleJobId, OperationId = staleOperation,
+                ProcessEpoch = oldEpoch, CheckedRevision = new() { Epoch = Guid.NewGuid().ToString("D"), Sequence = 1 },
+                Status = PcbDrcJobStatus.PdrcjsStale, Progress = 0.5, WorkerFinished = true,
+                SnapshotComplete = true, ResultsFresh = false, CancellationRequested = true,
+                ErrorCode = "document_changed", ErrorMessage = "The old native board changed."
+            };
+            durable.MarkStale(replacement.Session.InstanceId, staleOperation, oldEpoch, staleJobId,
+                SchematicJson.Formatter.Format(staleJob), staleJob.ErrorCode, staleJob.ErrorMessage);
+            var staleInput = new PcbDrcOperationReceiptInput
+            {
+                Document = input.Document, OperationId = staleOperation, ProcessEpoch = currentEpoch
+            };
+            var staleReceipt = await tool.OperationReceiptTyped(replacement.Session.InstanceId, staleInput, default);
+            Assert.IsFalse(staleReceipt.IsError ?? false,
+                staleReceipt.StructuredContent?.GetRawText() ?? string.Join(" | ", staleReceipt.Content.Select(content => content.ToString())));
+            JsonElement staleValue = staleReceipt.StructuredContent!.Value;
+            Assert.AreEqual("Stale", staleValue.GetProperty("outcome").GetString());
+            Assert.AreEqual(oldEpoch, staleValue.GetProperty("durableProcessEpoch").GetString());
+            Assert.AreEqual("unknown-native-outcome", staleValue.GetProperty("retrySafety").GetString());
+            Assert.AreEqual(nativeCallsBefore, replacement.Calls,
+                "Reading stale evidence after restart must not dispatch a replacement DRC job.");
         }
         finally { Directory.Delete(directory, true); }
     }

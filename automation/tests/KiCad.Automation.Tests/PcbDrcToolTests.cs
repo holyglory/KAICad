@@ -23,6 +23,7 @@ public sealed class PcbDrcToolTests
         try
         {
             var transport = new JobTransport();
+            transport.Session.Epoch = Guid.NewGuid().ToString("D");
             transport.Session.ProjectPath = Path.Combine(directory, "fixture.kicad_pro");
             var registry = new InstanceRegistry(transport, directory);
             await registry.AttachAsync(NativeIpcEndpoint.FromSocketPath(Path.Combine(directory, "native.sock")), transport.Session.InstanceId);
@@ -69,7 +70,7 @@ public sealed class PcbDrcToolTests
             Assert.IsTrue(SchematicJson.Parser.Parse<PcbDrcJobState>(
                 ((TextContentBlock)candidateStarted.Content.Single()).Text).CandidatePayloadVerified,
                 "A candidate start must return the exact native payload receipt.");
-            Assert.IsTrue(PcbDrcTools.TryGetCandidateReceipt(transport.State.JobId,
+            Assert.IsTrue(PcbDrcTools.TryGetCandidateReceipt(transport.State.JobId, transport.Session.Epoch,
                 out string candidateEpoch, out DocumentSpecifier candidateDocument,
                 out DocumentRevision candidateRevision, out string candidateHash,
                 out IReadOnlyList<string> candidateDeleteIds));
@@ -264,6 +265,34 @@ public sealed class PcbDrcToolTests
             Assert.IsTrue((await tool.Start(transport.Session.InstanceId, json, transport.State.OperationId,
                 false, false, true, revisionJson, transport.Session.Epoch, default, schematicJson)).IsError ?? false,
                 "A different checked schematic cannot be accepted as this operation's result.");
+
+            // Candidate metadata is bound to the native epoch and is removed
+            // when the native receipt is observed as permanently stale.  A
+            // reconnect must never make a prior candidate look replayable.
+            transport.State = valid.Clone();
+            transport.State.OperationId = Guid.NewGuid().ToString("D");
+            transport.State.CandidateDryRun = true;
+            transport.State.CandidateItemIds.Add(candidateRequest.Items[0].Unpack<Track>().Id.Value);
+            var candidateRefresh = await tool.Start(transport.Session.InstanceId, json, transport.State.OperationId,
+                false, false, false, revisionJson, transport.Session.Epoch, default,
+                candidateRequestJson: BoardJson.Formatter.Format(candidateRequest));
+            Assert.IsFalse(candidateRefresh.IsError ?? false, candidateRefresh.ToString());
+            Assert.IsTrue(PcbDrcTools.TryGetCandidateReceipt(valid.JobId, transport.Session.Epoch,
+                out _, out _, out _, out _, out _));
+            Assert.IsFalse(PcbDrcTools.TryGetCandidateReceipt(valid.JobId, Guid.NewGuid().ToString("D"),
+                out _, out _, out _, out _, out _));
+            transport.State = valid.Clone();
+            transport.State.Status = PcbDrcJobStatus.PdrcjsStale;
+            transport.State.CancellationRequested = true;
+            transport.State.ResultsFresh = false;
+            transport.State.WorkerFinished = true;
+            transport.State.SnapshotComplete = true;
+            transport.State.ErrorCode = "document_changed";
+            transport.State.ErrorMessage = "The live PCB changed while DRC was running.";
+            Assert.IsFalse((await tool.Job(transport.Session.InstanceId, json, valid.JobId,
+                transport.Session.Epoch, default)).IsError ?? false);
+            Assert.IsFalse(PcbDrcTools.TryGetCandidateReceipt(valid.JobId, transport.Session.Epoch,
+                out _, out _, out _, out _, out _));
         }
         finally { Directory.Delete(directory, true); }
     }

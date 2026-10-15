@@ -166,7 +166,7 @@ public sealed partial class PcbCheckedItemMigrationTests
                 CandidateItems = { create.Items }, DeleteItemIds = { delete.ItemIds }
             };
             var drc = await registry.Client(transport.InstanceId).InvokeAsync<StartPcbDrcJob, PcbDrcJobState>(start);
-            Assert.IsFalse(PcbDrcTools.TryGetCandidateReceipt(drc.JobId, out _, out _, out _, out _, out _));
+            Assert.IsFalse(PcbDrcTools.TryGetCandidateReceipt(drc.JobId, transport.Epoch, out _, out _, out _, out _, out _));
             string drcJson = SchematicJson.Formatter.Format(drc);
             var tools = new PcbRouteOptimizationTools(registry);
             string operationId = Guid.NewGuid().ToString("D"), stateJson = SchematicJson.Formatter.Format(expected);
@@ -189,7 +189,7 @@ public sealed partial class PcbCheckedItemMigrationTests
             // Caller status is not operation identity or admission proof.
             // Retry with only the same job locator and exact checked payload.
             drcJson = SchematicJson.Formatter.Format(new PcbDrcJobState { JobId = drc.JobId });
-            Assert.IsFalse(PcbDrcTools.TryGetCandidateReceipt(drc.JobId, out _, out _, out _, out _, out _));
+            Assert.IsFalse(PcbDrcTools.TryGetCandidateReceipt(drc.JobId, transport.Epoch, out _, out _, out _, out _, out _));
             JsonElement replay = Success(await Apply());
             Assert.IsTrue(replay.GetProperty("replayed").GetBoolean());
             Assert.IsTrue(SchematicJson.Parser.Parse<CheckedPcbRouteReceipt>(

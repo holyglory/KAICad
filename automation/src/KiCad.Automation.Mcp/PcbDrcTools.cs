@@ -250,6 +250,7 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
             }
             ValidateJobState(state, document, processEpoch);
             if (state.JobId != id) throw new AutomationException("invalid_drc_job_state", "Native DRC job identity mismatch.");
+            ForgetCandidateReceiptOnStale(state);
             return SchematicJson.Formatter.Format(state);
         });
         return WithStructuredState(response, state);
@@ -315,6 +316,7 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
             if (native.Job.OperationId != id)
                 throw new AutomationException("invalid_drc_operation_result",
                     "Native DRC operation lookup returned a job for a different operation.");
+            ForgetCandidateReceiptOnStale(native.Job);
             using var jobJson = JsonDocument.Parse(SchematicJson.Formatter.Format(native.Job));
             return JsonSerializer.SerializeToElement(new
             {
@@ -368,6 +370,7 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                 { Document = document, JobId = id, ProcessEpoch = processEpoch }, cancellationToken);
             ValidateJobState(state, document, processEpoch);
             if (state.JobId != id) throw new AutomationException("invalid_drc_job_state", "Native DRC job identity mismatch.");
+            ForgetCandidateReceiptOnStale(state);
             return SchematicJson.Formatter.Format(state);
         });
         return WithStructuredState(response, state);
@@ -591,16 +594,28 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
         }
     }
 
-    internal static bool TryGetCandidateReceipt(string jobId, out string processEpoch,
-        out DocumentSpecifier document, out KiCad.Automation.Protocol.DocumentRevision revision,
+    // Candidate payloads are an MCP-process cache, not a durable native receipt.
+    // Require the caller to bind a lookup to the currently attached native epoch
+    // so a native restart cannot make an old candidate appear replayable.
+    internal static bool TryGetCandidateReceipt(string jobId, string expectedProcessEpoch,
+        out string processEpoch, out DocumentSpecifier document,
+        out KiCad.Automation.Protocol.DocumentRevision revision,
         out string candidateHash, out IReadOnlyList<string> deleteItemIds)
     {
-        if (CandidateReceipts.TryGetValue(jobId, out CandidateReceipt? receipt))
+        if (CanonicalUuid(jobId) && CanonicalUuid(expectedProcessEpoch)
+            && CandidateReceipts.TryGetValue(jobId, out CandidateReceipt? receipt)
+            && string.Equals(receipt.ProcessEpoch, expectedProcessEpoch, StringComparison.Ordinal))
         {
-            processEpoch = receipt.ProcessEpoch; document = receipt.Document; revision = receipt.Revision.Clone();
-            candidateHash = receipt.CandidateHash; deleteItemIds = receipt.DeleteItemIds; return true;
+            processEpoch = receipt.ProcessEpoch; document = receipt.Document.Clone(); revision = receipt.Revision.Clone();
+            candidateHash = receipt.CandidateHash; deleteItemIds = receipt.DeleteItemIds.ToArray(); return true;
         }
         processEpoch = ""; document = new(); revision = new(); candidateHash = ""; deleteItemIds = []; return false;
+    }
+
+    private static void ForgetCandidateReceiptOnStale(PcbDrcJobState state)
+    {
+        if (state.Status == PcbDrcJobStatus.PdrcjsStale)
+            CandidateReceipts.TryRemove(state.JobId, out _);
     }
 
     internal static string CanonicalCandidate(CreateItems candidate)

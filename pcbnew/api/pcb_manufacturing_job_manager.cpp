@@ -212,6 +212,45 @@ std::string JournalHash( PcbManufacturingJournalRecord aRecord )
     aRecord.mutable_receipt()->clear_durable_journal_sha256();
     return Hash( aRecord.SerializeAsString() );
 }
+
+// Detached workers never receive the caller's output path as a writable
+// destination.  They receive this unique sibling directory instead; the
+// owner thread can later validate and publish it with its existing atomic
+// no-replace path.  Creation is deliberately fail-closed when the parent,
+// output, or staging path is not a regular local filesystem path.
+tl::expected<fs::path, std::string> PrepareDetachedStaging(
+        const kiapi::automation::v1::RunPcbManufacturingExport& aRequest )
+{
+    const fs::path output = fs::u8path( aRequest.output_directory() );
+    if( aRequest.output_directory().empty() || !output.is_absolute()
+        || output != output.lexically_normal() || output.filename().empty() )
+        return tl::unexpected( "manufacturing_detached_output_path_invalid" );
+
+    const fs::path parent = output.parent_path();
+    if( parent.empty() ) return tl::unexpected( "manufacturing_detached_output_parent_invalid" );
+    if( auto links = NoLinks( parent ); !links ) return tl::unexpected( links.error() );
+
+    std::error_code error;
+    const auto parentStatus = fs::symlink_status( parent, error );
+    if( error || parentStatus.type() != fs::file_type::directory )
+        return tl::unexpected( "manufacturing_detached_output_parent_unavailable" );
+
+    auto outputState = RegularOrMissing( output );
+    if( !outputState ) return tl::unexpected( outputState.error() );
+    if( *outputState ) return tl::unexpected( "manufacturing_detached_output_exists" );
+
+    const fs::path staging = parent
+            / ( output.filename().string() + ".kicad-staging-" + aRequest.operation_id() );
+    auto stagingState = RegularOrMissing( staging );
+    if( !stagingState ) return tl::unexpected( stagingState.error() );
+    if( *stagingState ) return tl::unexpected( "manufacturing_detached_staging_exists" );
+
+    error.clear();
+    if( !fs::create_directory( staging, error ) || error )
+        return tl::unexpected( "manufacturing_detached_staging_failed" );
+    if( auto links = NoLinks( staging ); !links ) return tl::unexpected( links.error() );
+    return staging;
+}
 }
 
 PCB_MANUFACTURING_JOB_MANAGER::PCB_MANUFACTURING_JOB_MANAGER( const wxString& aDirectory ) :
@@ -965,12 +1004,29 @@ PCB_MANUFACTURING_JOB_MANAGER::Dispatch( const Request& aRequest, const std::str
     context.cancellation = aCancellation;
     context.detachedWorker = aDetachedWorker;
 
+    if( aDetachedWorker )
+    {
+        // This first worker seam is intentionally limited to SVG.  Other
+        // families still use their existing synchronous owner-thread path.
+        if( aRequest.job_case() != Request::kExportSvg )
+            return tl::unexpected( "manufacturing_svg_detached_adapter_only" );
+
+        auto staging = PrepareDetachedStaging( aRequest );
+        if( !staging ) return tl::unexpected( staging.error() );
+        context.stagingDirectory = staging->generic_string();
+    }
+
     // Record dispatch intent before entering native code.  If the process
     // exits or the callback loses its reply after this write, the journal is
     // RUNNING/SUBMITTED and the operation cannot be cancelled or dispatched
     // again by treating it as a fresh admission.
     JournalRecord submitted = *prior;
     SetDispatchSubmitted( *submitted.mutable_receipt() );
+    if( aDetachedWorker )
+    {
+        submitted.mutable_receipt()->set_staging_directory( context.stagingDirectory );
+        submitted.mutable_receipt()->set_publication_state( PCB_MFG_PUBLICATION_STAGED );
+    }
     submitted.mutable_receipt()->set_worker_started(
             aDetachedWorker || submitted.receipt().worker_started() );
     if( submitted.journal_revision() == std::numeric_limits<uint64_t>::max() )
@@ -990,8 +1046,11 @@ PCB_MANUFACTURING_JOB_MANAGER::Dispatch( const Request& aRequest, const std::str
             || current->receipt().dispatch_stage() != PCB_MFG_DISPATCH_SUBMITTED )
             return tl::unexpected( "manufacturing_dispatch_race" );
 
+        const std::string stagingDirectory = current->receipt().staging_directory();
         JournalRecord candidate = *current;
         SetDispatchIndeterminate( *candidate.mutable_receipt(), aCode, aMessage );
+        if( aDetachedWorker && !stagingDirectory.empty() )
+            candidate.mutable_receipt()->set_staging_directory( stagingDirectory );
         if( aCode.rfind( "export_cancelled", 0 ) == 0 )
         {
             candidate.mutable_receipt()->set_cancellation_requested( true );
@@ -1048,6 +1107,13 @@ PCB_MANUFACTURING_JOB_MANAGER::Dispatch( const Request& aRequest, const std::str
         || current->receipt().dispatch_stage() != PCB_MFG_DISPATCH_SUBMITTED )
         return tl::unexpected( "manufacturing_dispatch_race" );
 
+    if( aDetachedWorker && dispatched->status() == PCB_MFG_EXPORT_COMPLETED )
+    {
+        lock.unlock();
+        return persistIndeterminate( "manufacturing_detached_publication_unavailable",
+                                     "The detached SVG worker has no manager-owned publication boundary; output was not claimed as published." );
+    }
+
     JournalRecord candidate = *current;
     candidate.mutable_receipt()->CopyFrom( *dispatched );
     // Existing owner-thread adapters return their historical receipt fields and
@@ -1059,6 +1125,8 @@ PCB_MANUFACTURING_JOB_MANAGER::Dispatch( const Request& aRequest, const std::str
     if( candidate.receipt().source_snapshot_sha256().empty() )
         candidate.mutable_receipt()->set_source_snapshot_sha256(
                 current->receipt().source_snapshot_sha256() );
+    if( aDetachedWorker && candidate.receipt().staging_directory().empty() )
+        candidate.mutable_receipt()->set_staging_directory( current->receipt().staging_directory() );
     if( aDetachedWorker )
     {
         candidate.mutable_receipt()->set_worker_started( true );

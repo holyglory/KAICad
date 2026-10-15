@@ -67,6 +67,10 @@ public:
         std::string sourceBoard;
         std::string sourceSnapshotSha256;
         kiapi::automation::v1::PcbManufacturingDetachedSnapshot sourceSnapshot;
+        // Detached adapters may write only below this operation-owned path.
+        // The manager creates it before dispatch intent is published; the
+        // owner thread remains responsible for any later publication.
+        std::string stagingDirectory;
         // Copied before worker creation.  This is the immutable lifecycle and
         // dependency baseline associated with sourceBoard; a worker never
         // re-reads the live editor to fill in missing inputs.

@@ -4211,7 +4211,7 @@ public sealed partial class NativeSessionTests
                 var boundaryPadsReply = await mcp.Tool("kicad_pcb_items_create", new
                 {
                     instanceId, requestJson = BoardJson.Formatter.Format(boundaryPadsCreate),
-                    expectedStateJson = SchematicJson.Formatter.Format(viaKeepoutResult.State)
+                    expectedStateJson = boundaryGeometryReply.GetProperty("structuredContent").GetProperty("afterState").GetString()
                 });
                 RequireToolSuccess(boundaryPadsReply);
                 var boundaryBefore = await ObserveLifecycleState(client, cleanBoard, token);

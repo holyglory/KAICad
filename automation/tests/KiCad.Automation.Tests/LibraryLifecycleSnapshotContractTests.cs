@@ -43,6 +43,55 @@ public sealed class LibraryLifecycleSnapshotContractTests
     }
 
     [TestMethod]
+    public void ProviderMetadataRetainsOptionsAndRejectsMalformedRows()
+    {
+        (LibraryLifecycleSnapshot snapshot, DocumentSpecifier document, string projectPath) = Fixture();
+
+        LibraryLifecycleSnapshotContract.ValidateReadOnly(
+            snapshot with { ProviderOptions = "cache=fixture" }, document, "fixture", projectPath);
+        LibraryLifecycleSnapshotContract.ValidateProviderMetadata(
+            document, snapshot.TablePath, snapshot.TableScope, snapshot.Nickname,
+            snapshot.RawUri, snapshot.ExpandedUri, snapshot.Provider, "cache=fixture");
+
+        Reject(() => LibraryLifecycleSnapshotContract.ValidateProviderMetadata(
+            document, snapshot.TablePath, snapshot.TableScope, snapshot.Nickname,
+            snapshot.RawUri, snapshot.ExpandedUri, snapshot.Provider, "bad\0options"),
+            "library_provider_metadata_incomplete");
+
+        Reject(() => LibraryLifecycleSnapshotContract.ValidateProviderMetadata(
+            document, snapshot.TablePath, snapshot.TableScope, snapshot.Nickname,
+            snapshot.RawUri, snapshot.ExpandedUri, snapshot.Provider, null),
+            "library_provider_metadata_incomplete");
+
+        Reject(() => LibraryLifecycleSnapshotContract.ValidateProviderMetadata(
+            document, snapshot.TablePath, snapshot.TableScope, snapshot.Nickname,
+            snapshot.RawUri, snapshot.ExpandedUri, snapshot.Provider, new string('x', 64 * 1024 + 1)),
+            "library_provider_metadata_incomplete");
+
+        Assert.AreEqual(projectPath, document.Project.Path);
+    }
+
+    [TestMethod]
+    public void SnapshotResponseIdentityRejectsForeignDocumentAndProcessEpoch()
+    {
+        (_, DocumentSpecifier document, _) = Fixture();
+        string epoch = Guid.NewGuid().ToString("D");
+
+        LibraryLifecycleSnapshotContract.ValidateResponseIdentity(document, epoch, document.Clone(), epoch);
+
+        var foreign = document.Clone();
+        foreign.LibId.EntryName = "Other";
+        Reject(() => LibraryLifecycleSnapshotContract.ValidateResponseIdentity(
+            document, epoch, foreign, epoch), "library_document_mismatch");
+
+        Reject(() => LibraryLifecycleSnapshotContract.ValidateResponseIdentity(
+            document, epoch, document.Clone(), Guid.NewGuid().ToString("D")), "stale_process_epoch");
+
+        Reject(() => LibraryLifecycleSnapshotContract.ValidateResponseIdentity(
+            document, "invalid", document.Clone(), "invalid"), "invalid_process_epoch");
+    }
+
+    [TestMethod]
     public void RelativeProjectPathsAreRejectedEvenWhenExpectedPathMatches()
     {
         (LibraryLifecycleSnapshot snapshot, DocumentSpecifier document, _) = Fixture();

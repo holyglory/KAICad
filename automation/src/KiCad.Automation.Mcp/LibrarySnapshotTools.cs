@@ -62,6 +62,16 @@ public sealed class LibrarySnapshotTools(InstanceRegistry registry)
                     string.IsNullOrWhiteSpace(response.ErrorCode) ? "library_snapshot_failed" : response.ErrorCode,
                     string.IsNullOrWhiteSpace(response.ErrorMessage) ? "The native owner did not complete the library snapshot." : response.ErrorMessage);
 
+            // Do not expose a complete status until the response is still bound
+            // to the exact request and the provider row carries all configured
+            // metadata.  Native status alone does not protect a reconnect from
+            // returning a different document or provider-options row.
+            LibraryLifecycleSnapshotContract.ValidateResponseIdentity(
+                document, expectedProcessEpoch, response.Document, response.ProcessEpoch);
+            LibraryLifecycleSnapshotContract.ValidateProviderMetadata(
+                document, response.TablePath, response.TableScope, response.Nickname,
+                response.RawUri, response.ExpandedUri, response.Provider, response.ProviderOptions);
+
             JsonElement checkedState = document.Type == DocumentType.DoctypeFootprint
                 ? JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(response.FootprintCheckedState))
                 : JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(response.CheckedState));

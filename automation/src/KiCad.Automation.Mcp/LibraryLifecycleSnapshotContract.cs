@@ -34,7 +34,12 @@ internal sealed record LibraryLifecycleSnapshot(
     bool ContentSnapshotComplete,
     bool DiskBaselineChecked,
     bool CompleteChangeTracking,
-    bool Postverify);
+    bool Postverify,
+    // Provider options are part of the configured table-row identity.  Keep
+    // them in the managed snapshot even when the direct providers currently
+    // use an empty option string; dropping the field would allow a row to be
+    // rebound without changing the apparent provider name or URI.
+    string ProviderOptions = "");
 
 internal static class LibraryLifecycleSnapshotContract
 {
@@ -68,25 +73,8 @@ internal static class LibraryLifecycleSnapshotContract
             throw new AutomationException("library_project_mismatch",
                 "The requested library project is not the project served by this native owner.");
 
-        if (string.IsNullOrWhiteSpace(snapshot.Nickname)
-            || !string.Equals(snapshot.Nickname, document.LibId.LibraryNickname, StringComparison.Ordinal)
-            || snapshot.TableScope is not ("PROJECT" or "GLOBAL")
-            || !IsAbsolute(snapshot.TablePath) || string.IsNullOrWhiteSpace(snapshot.RawUri)
-            || snapshot.RawUri.IndexOf('\0') >= 0
-            || (isSymbol && !IsSymbolFile(snapshot.ExpandedUri))
-            || (isFootprint && (!IsFootprintDirectoryUri(snapshot.RawUri)
-                                || !IsFootprintFile(snapshot.ExpandedUri))))
-            throw new AutomationException("library_table_row_mismatch",
-                "The library table row must include the exact scope, table path and raw/expanded URI.");
-
-        if (string.IsNullOrWhiteSpace(snapshot.Provider))
-            throw new AutomationException("library_provider_unknown", "The symbol-library provider was not identified.");
-        bool providerSupported = string.Equals(snapshot.Provider, "KiCad", StringComparison.Ordinal)
-            || (isSymbol && string.Equals(snapshot.Provider, "kicad-symbol-file", StringComparison.Ordinal))
-            || (isFootprint && string.Equals(snapshot.Provider, "kicad-footprint-file", StringComparison.Ordinal));
-        if (!providerSupported)
-            throw new AutomationException("library_provider_unsupported",
-                "The library provider is outside the read-only lifecycle slice.");
+        ValidateProviderMetadata(document, snapshot.TablePath, snapshot.TableScope, snapshot.Nickname,
+            snapshot.RawUri, snapshot.ExpandedUri, snapshot.Provider, snapshot.ProviderOptions);
 
         if (!snapshot.ForcedRefresh || !snapshot.ProviderObservable || !snapshot.ContentSnapshotComplete
             || !snapshot.DiskBaselineChecked || string.IsNullOrWhiteSpace(snapshot.DetachedDefinitionJson)
@@ -128,6 +116,82 @@ internal static class LibraryLifecycleSnapshotContract
         if (snapshot.CompleteChangeTracking || snapshot.Postverify)
             throw new AutomationException("library_snapshot_incomplete",
                 "The read-only foundation cannot claim complete mutation tracking or postverify.");
+    }
+
+    /// <summary>
+    /// Validates the provider row metadata independently of detached content.
+    /// The native snapshot transport carries provider options alongside the
+    /// provider name; callers must retain and validate both before exposing a
+    /// lifecycle checkpoint.  Empty options are valid for the direct KiCad
+    /// providers, but NUL/oversized values are incomplete metadata.
+    /// </summary>
+    internal static void ValidateProviderMetadata(
+        DocumentSpecifier expectedDocument,
+        string tablePath,
+        string tableScope,
+        string nickname,
+        string rawUri,
+        string expandedUri,
+        string provider,
+        string? providerOptions)
+    {
+        if (expectedDocument is null || expectedDocument.Project is null || expectedDocument.LibId is null)
+            throw new AutomationException("invalid_library_document",
+                "A provider row requires a project-bound symbol or footprint document.");
+
+        bool isSymbol = expectedDocument.Type == DocumentType.DoctypeSymbol;
+        bool isFootprint = expectedDocument.Type == DocumentType.DoctypeFootprint;
+        if (!isSymbol && !isFootprint)
+            throw new AutomationException("invalid_library_document",
+                "A provider row requires a symbol or footprint document.");
+
+        if (string.IsNullOrWhiteSpace(nickname)
+            || !string.Equals(nickname, expectedDocument.LibId.LibraryNickname, StringComparison.Ordinal)
+            || tableScope is not ("PROJECT" or "GLOBAL")
+            || !IsAbsolute(tablePath) || string.IsNullOrWhiteSpace(rawUri)
+            || rawUri.IndexOf('\0') >= 0
+            || (isSymbol && !IsSymbolFile(expandedUri))
+            || (isFootprint && (!IsFootprintDirectoryUri(rawUri) || !IsFootprintFile(expandedUri))))
+            throw new AutomationException("library_table_row_mismatch",
+                "The library table row must include the exact scope, table path and raw/expanded URI.");
+
+        if (string.IsNullOrWhiteSpace(provider) || provider.IndexOf('\0') >= 0)
+            throw new AutomationException("library_provider_unknown", "The library provider was not identified.");
+
+        bool providerSupported = string.Equals(provider, "KiCad", StringComparison.Ordinal)
+            || (isSymbol && string.Equals(provider, "kicad-symbol-file", StringComparison.Ordinal))
+            || (isFootprint && string.Equals(provider, "kicad-footprint-file", StringComparison.Ordinal));
+        if (!providerSupported)
+            throw new AutomationException("library_provider_unsupported",
+                "The library provider is outside the read-only lifecycle slice.");
+
+        if (providerOptions is null || providerOptions.IndexOf('\0') >= 0 || providerOptions.Length > 64 * 1024)
+            throw new AutomationException("library_provider_metadata_incomplete",
+                "The provider row options are missing, contain NUL data or exceed the bounded metadata size.");
+    }
+
+    /// <summary>
+    /// Binds a native response to the exact managed request before its row
+    /// metadata is returned.  A complete status alone is insufficient when a
+    /// reconnect or stale native peer can return another document/epoch.
+    /// </summary>
+    internal static void ValidateResponseIdentity(
+        DocumentSpecifier expectedDocument,
+        string expectedProcessEpoch,
+        DocumentSpecifier observedDocument,
+        string observedProcessEpoch)
+    {
+        if (expectedDocument is null || observedDocument is null)
+            throw new AutomationException("invalid_library_document",
+                "The library snapshot response is missing its document identity.");
+        if (!observedDocument.Equals(expectedDocument))
+            throw new AutomationException("library_document_mismatch",
+                "The library snapshot response changed the requested project or library document.");
+        if (!Guid.TryParseExact(expectedProcessEpoch, "D", out Guid epoch) || epoch == Guid.Empty)
+            throw new AutomationException("invalid_process_epoch", "Provide a canonical native process epoch.");
+        if (!string.Equals(observedProcessEpoch, expectedProcessEpoch, StringComparison.Ordinal))
+            throw new AutomationException("stale_process_epoch",
+                "The library snapshot response belongs to another native process epoch.");
     }
 
     internal static void AdmitCheckedMutation(

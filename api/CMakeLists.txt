@@ -35,6 +35,7 @@ set( KIAPI_PROTO_SRCS
     common/commands/cross_probe_commands.proto
     common/commands/editor_commands.proto
     common/commands/project_commands.proto
+    common/commands/project_settings_checked_commands.proto
     common/commands/recursive_diagram_commands.proto
     common/commands/schematic_realization_commands.proto
     common/commands/diagram_canvas_commands.proto

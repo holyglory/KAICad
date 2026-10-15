@@ -1,0 +1,114 @@
+/* Checked project-settings transactions and retained native receipts. */
+syntax = "proto3";
+
+package kiapi.automation.v1;
+option csharp_namespace = "KiCad.Automation.Protocol";
+
+import "common/commands/project_commands.proto";
+import "common/types/base_types.proto";
+import "common/types/project_settings.proto";
+import "common/commands/automation_commands.proto";
+
+// A revision-paired project netclass mutation.  The existing SetNetClasses
+// command remains available for legacy SDKs; it does not satisfy this checked
+// contract because it has no lifecycle admission or operation receipt.
+message CheckedProjectNetClassesTransaction
+{
+  kiapi.common.types.DocumentSpecifier project = 1;
+  kiapi.common.types.DocumentSpecifier document = 2;
+  DocumentLifecycleState expected_state = 3;
+  string process_epoch = 4;
+  string operation_id = 5;
+  // Digest of the complete project netclass list in the canonical managed
+  // ordering.  The native owner refuses a stale project-settings map.
+  string expected_net_classes_sha256 = 6;
+  repeated kiapi.common.project.NetClass net_classes = 7;
+  kiapi.common.types.MapMergeMode merge_mode = 8;
+  uint32 maximum_result_bytes = 9;
+  string description = 10;
+}
+
+message ReadCheckedProjectNetClassesReceipt
+{
+  kiapi.common.types.DocumentSpecifier project = 1;
+  kiapi.common.types.DocumentSpecifier document = 2;
+  string process_epoch = 3;
+  string operation_id = 4;
+  CheckedProjectNetClassesTransaction expected_request = 5;
+}
+
+enum CheckedProjectNetClassesState
+{
+  CPCS_UNKNOWN = 0;
+  CPCS_NOT_FOUND = 1;
+  CPCS_REJECTED = 2;
+  CPCS_ROLLED_BACK = 3;
+  CPCS_COMPLETED = 4;
+  // Native execution or rollback may have occurred.  The caller must inspect
+  // the retained observations before deciding whether a retry is safe.
+  CPCS_INDETERMINATE = 5;
+  // This peer has no checked project-settings owner.  It must not fall back to
+  // the legacy unchecked SetNetClasses command.
+  CPCS_UNAVAILABLE = 6;
+}
+
+enum CheckedProjectNetClassesPhase
+{
+  CPCP_UNKNOWN = 0;
+  CPCP_ADMISSION_VERIFIED = 1;
+  CPCP_STAGED = 2;
+  CPCP_COMMIT_REQUESTED = 3;
+  CPCP_COMMITTED = 4;
+  CPCP_ROLLBACK_REQUESTED = 5;
+  CPCP_ROLLBACK_CONFIRMED = 6;
+  CPCP_POSTCOMMIT_OBSERVED = 7;
+  CPCP_COMPLETE = 8;
+}
+
+enum CheckedProjectNetClassesRollbackState
+{
+  CPCRS_UNKNOWN = 0;
+  CPCRS_NOT_ATTEMPTED = 1;
+  CPCRS_REQUESTED = 2;
+  CPCRS_CONFIRMED = 3;
+  CPCRS_UNCONFIRMED = 4;
+}
+
+enum CheckedProjectNetClassesPostCommitState
+{
+  CPCPS_UNKNOWN = 0;
+  CPCPS_NOT_ATTEMPTED = 1;
+  CPCPS_REQUESTED = 2;
+  CPCPS_CONFIRMED = 3;
+  CPCPS_UNCONFIRMED = 4;
+}
+
+message CheckedProjectNetClassesReceipt
+{
+  kiapi.common.types.DocumentSpecifier project = 1;
+  kiapi.common.types.DocumentSpecifier document = 2;
+  string process_epoch = 3;
+  string operation_id = 4;
+  CheckedProjectNetClassesState state = 5;
+  bool request_verified = 6;
+  bool replayed = 7;
+  kiapi.common.commands.NetClassesResponse before_net_classes = 8;
+  kiapi.common.commands.NetClassesResponse after_net_classes = 9;
+  string before_net_classes_sha256 = 10;
+  string after_net_classes_sha256 = 11;
+  DocumentLifecycleState observed_before = 12;
+  DocumentLifecycleState observed_rollback = 13;
+  DocumentLifecycleState observed_after = 14;
+  CheckedProjectNetClassesPhase phase = 15;
+  CheckedProjectNetClassesRollbackState rollback_state = 16;
+  CheckedProjectNetClassesPostCommitState post_commit_state = 17;
+  // Project settings remain unsaved until the explicit document-save journey
+  // completes.  These flags never imply that save or reload was performed.
+  bool design_files_saved = 18;
+  bool reload_verified = 19;
+  // Native project-settings ownership has not yet been implemented for peers
+  // that return CPCS_UNAVAILABLE.  Such a receipt is not a mutation result.
+  bool undo_redo_supported = 20;
+  string error_code = 21;
+  string error_message = 22;
+}

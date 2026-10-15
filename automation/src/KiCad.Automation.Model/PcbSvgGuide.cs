@@ -48,7 +48,7 @@ public static class PcbSvgGuideParser
             { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null, MaxCharactersInDocument = 2_000_000 });
             var root = XDocument.Load(reader, LoadOptions.PreserveWhitespace).Root;
             if (root is null || root.Name.LocalName != "svg") throw Invalid("The source must contain an SVG root element.");
-            if (root.Descendants().Any(e => e.Attribute("transform") is not null
+            if (root.DescendantsAndSelf().Any(e => e.Attribute("transform") is not null
                 || e.Name.LocalName is "script" or "image" or "text" or "use" or "foreignObject"))
                 throw Invalid("SVG transforms, scripts, images, text and external references are not allowed in a PCB guide.");
             var viewBox = Numbers((string?)root.Attribute("viewBox"), 4, "viewBox");

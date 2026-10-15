@@ -48,6 +48,8 @@ public sealed class PcbVectorContractTests
     {
         var invalidSources = new[]
         {
+            (Name: "root transform", Svg: "<svg viewBox=\"0 0 2 2\" transform=\"translate(1)\"><line x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"/></svg>",
+                Message: "SVG transforms, scripts, images, text and external references are not allowed in a PCB guide."),
             (Name: "transform", Svg: "<svg viewBox=\"0 0 2 2\"><g transform=\"translate(1)\"><line x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"/></g></svg>",
                 Message: "SVG transforms, scripts, images, text and external references are not allowed in a PCB guide."),
             (Name: "image", Svg: "<svg viewBox=\"0 0 2 2\"><image href=\"asset.png\" x=\"0\" y=\"0\" width=\"1\" height=\"1\"/></svg>",

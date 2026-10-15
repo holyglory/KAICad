@@ -232,6 +232,10 @@ message PcbManufacturingExportReceipt
   // worker_joined.  Older synchronous receipts leave both fields false.
   bool worker_started = 408;
   bool worker_joined = 409;
+  // Complete immutable source evidence captured by the owner thread.  This
+  // is present even for the synchronous adapters so a future detached worker
+  // cannot mistake a lifecycle path/hash for serialized input.
+  PcbManufacturingDetachedSnapshot source_snapshot = 420;
   // -- end lane 2D --
 }
 
@@ -278,5 +282,37 @@ message PcbManufacturingJournalRecord
   PcbManufacturingExportReceipt receipt = 402;
   bytes source_board = 403;
   uint64 journal_revision = 404;
+  // The immutable board/project bytes and dependency baselines used by a
+  // future detached exporter.  source_board remains for journal compatibility
+  // and must match source_snapshot.serialized_board.
+  PcbManufacturingDetachedSnapshot source_snapshot = 405;
   // -- end lane 2D --
+}
+
+// One owner-thread captured dependency baseline.  This intentionally carries
+// only persisted input identity and bytes; project editor settings are not
+// duplicated into the manufacturing journal.
+message PcbManufacturingDependencyBaseline
+{
+  string path = 1;
+  string sha256 = 2;
+  uint64 bytes = 3;
+  bool exists = 4;
+  bool known = 5;
+}
+
+// Immutable source handoff for a detached manufacturing worker.  The native
+// manager validates every field before admission and keeps synchronous
+// adapters on their existing owner-thread path until a worker consumes this
+// complete record.
+message PcbManufacturingDetachedSnapshot
+{
+  string serialized_board = 1;
+  string serialized_project = 2;
+  string snapshot_sha256 = 3;
+  repeated PcbManufacturingDependencyBaseline dependency_baselines = 4;
+  bool board_serialization_complete = 5;
+  bool project_serialization_complete = 6;
+  bool dependency_capture_complete = 7;
+  bool disk_baseline_checked = 8;
 }

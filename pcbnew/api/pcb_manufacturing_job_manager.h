@@ -41,6 +41,7 @@ public:
         kiapi::automation::v1::DocumentLifecycleState before;
         kiapi::automation::v1::DocumentLifecycleState after;
         std::string sourceBoard;
+        kiapi::automation::v1::PcbManufacturingDetachedSnapshot sourceSnapshot;
     };
 
     // Invoked only on first admission, on the registering editor thread. The
@@ -65,6 +66,7 @@ public:
         kiapi::automation::v1::RunPcbManufacturingExport request;
         std::string sourceBoard;
         std::string sourceSnapshotSha256;
+        kiapi::automation::v1::PcbManufacturingDetachedSnapshot sourceSnapshot;
         // Copied before worker creation.  This is the immutable lifecycle and
         // dependency baseline associated with sourceBoard; a worker never
         // re-reads the live editor to fill in missing inputs.
@@ -130,6 +132,12 @@ private:
     static bool IsUuid( const std::string& );
     static bool IsDigest( const std::string& );
     static bool HasCompleteSourceSnapshot(
+            const kiapi::automation::v1::DocumentLifecycleState& );
+    static bool HasCompleteDetachedSnapshot(
+            const kiapi::automation::v1::PcbManufacturingDetachedSnapshot&,
+            const kiapi::common::types::DocumentSpecifier& );
+    static bool SnapshotMatchesState(
+            const kiapi::automation::v1::PcbManufacturingDetachedSnapshot&,
             const kiapi::automation::v1::DocumentLifecycleState& );
     static tl::expected<void, std::string> VerifyPublishedOutputs(
             const kiapi::automation::v1::PcbManufacturingExportReceipt& );

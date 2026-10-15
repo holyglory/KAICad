@@ -45,6 +45,47 @@ std::string Hash( std::string_view aBytes )
     return digest.Hex();
 }
 
+std::string SnapshotPath( const std::string& aPath )
+{
+    const fs::path path = fs::u8path( aPath );
+    if( aPath.empty() || !path.is_absolute() || path != path.lexically_normal() )
+        return {};
+    return path.generic_string();
+}
+
+void SnapshotAppend( std::string& aTarget, const std::string& aValue )
+{
+    aTarget += std::to_string( aValue.size() );
+    aTarget += ':';
+    aTarget += aValue;
+    aTarget += '\n';
+}
+
+std::string SnapshotHash( const PcbManufacturingDetachedSnapshot& aSnapshot )
+{
+    std::vector<const PcbManufacturingDependencyBaseline*> dependencies;
+    dependencies.reserve( aSnapshot.dependency_baselines_size() );
+    for( const auto& dependency : aSnapshot.dependency_baselines() )
+        dependencies.push_back( &dependency );
+    std::sort( dependencies.begin(), dependencies.end(), []( const auto* aLeft, const auto* aRight )
+    {
+        return SnapshotPath( aLeft->path() ) < SnapshotPath( aRight->path() );
+    } );
+
+    std::string canonical;
+    SnapshotAppend( canonical, aSnapshot.serialized_board() );
+    SnapshotAppend( canonical, aSnapshot.serialized_project() );
+    for( const auto* dependency : dependencies )
+    {
+        SnapshotAppend( canonical, SnapshotPath( dependency->path() ) );
+        SnapshotAppend( canonical, dependency->sha256() );
+        SnapshotAppend( canonical, std::to_string( dependency->bytes() ) );
+        SnapshotAppend( canonical, dependency->exists() ? "1" : "0" );
+        SnapshotAppend( canonical, dependency->known() ? "1" : "0" );
+    }
+    return Hash( canonical );
+}
+
 wxString WxPath( const fs::path& aPath )
 {
     const auto utf8 = aPath.u8string();
@@ -278,6 +319,86 @@ bool PCB_MANUFACTURING_JOB_MANAGER::HasCompleteSourceSnapshot(
         if( baseline.baseline_exists() && !IsDigest( baseline.baseline_sha256() ) )
             return false;
         if( baseline.current_exists() && !IsDigest( baseline.current_sha256() ) )
+            return false;
+    }
+    return true;
+}
+
+bool PCB_MANUFACTURING_JOB_MANAGER::HasCompleteDetachedSnapshot(
+        const PcbManufacturingDetachedSnapshot& aSnapshot,
+        const kiapi::common::types::DocumentSpecifier& aDocument )
+{
+    const auto startsWith = []( const std::string& aValue, const std::string& aPrefix )
+    {
+        const size_t first = aValue.find_first_not_of( " \t\r\n" );
+        return first != std::string::npos && aValue.compare( first, aPrefix.size(), aPrefix ) == 0;
+    };
+
+    if( !aSnapshot.board_serialization_complete() || !aSnapshot.project_serialization_complete()
+        || !aSnapshot.dependency_capture_complete() || !aSnapshot.disk_baseline_checked()
+        || aSnapshot.serialized_board().empty() || aSnapshot.serialized_board().size() > MAX_SOURCE_BYTES
+        || aSnapshot.serialized_project().empty() || aSnapshot.serialized_project().size() > MAX_SOURCE_BYTES
+        || !startsWith( aSnapshot.serialized_board(), "(kicad_pcb" )
+        || !startsWith( aSnapshot.serialized_project(), "{" )
+        || !IsDigest( aSnapshot.snapshot_sha256() ) || aSnapshot.dependency_baselines_size() == 0
+        || aSnapshot.dependency_baselines_size() > 4096 || !ValidDocument( aDocument ) )
+        return false;
+
+    std::set<std::string> paths;
+    for( const auto& dependency : aSnapshot.dependency_baselines() )
+    {
+        const std::string canonical = SnapshotPath( dependency.path() );
+        if( canonical.empty() || !paths.insert( canonical ).second || !dependency.known() )
+            return false;
+        if( dependency.exists() )
+        {
+            if( !IsDigest( dependency.sha256() ) || dependency.bytes() == 0 ) return false;
+        }
+        else if( !dependency.sha256().empty() || dependency.bytes() != 0 )
+            return false;
+    }
+
+    const std::string boardPath = SnapshotPath(
+            ( fs::u8path( aDocument.project().path() ) / fs::u8path( aDocument.board_filename() ) ).generic_string() );
+    const std::string projectPath = SnapshotPath(
+            ( fs::u8path( aDocument.project().path() )
+              / fs::u8path( aDocument.project().name() + ".kicad_pro" ) ).generic_string() );
+    bool boardFound = false;
+    bool projectFound = false;
+    for( const auto& dependency : aSnapshot.dependency_baselines() )
+    {
+        const std::string canonical = SnapshotPath( dependency.path() );
+        boardFound = boardFound || ( canonical == boardPath && dependency.exists() );
+        projectFound = projectFound || ( canonical == projectPath && dependency.exists() );
+    }
+    return boardFound && projectFound && SnapshotHash( aSnapshot ) == aSnapshot.snapshot_sha256();
+}
+
+bool PCB_MANUFACTURING_JOB_MANAGER::SnapshotMatchesState(
+        const PcbManufacturingDetachedSnapshot& aSnapshot,
+        const DocumentLifecycleState& aState )
+{
+    if( !HasCompleteSourceSnapshot( aState )
+        || aSnapshot.dependency_baselines_size() != aState.file_baselines_size() )
+        return false;
+
+    std::map<std::string, const PcbManufacturingDependencyBaseline*> snapshot;
+    for( const auto& dependency : aSnapshot.dependency_baselines() )
+    {
+        const std::string path = SnapshotPath( dependency.path() );
+        if( path.empty() || !snapshot.emplace( path, &dependency ).second ) return false;
+    }
+
+    for( const auto& baseline : aState.file_baselines() )
+    {
+        const std::string path = SnapshotPath( baseline.path() );
+        auto found = snapshot.find( path );
+        if( found == snapshot.end() ) return false;
+        const auto* dependency = found->second;
+        if( dependency->known() != baseline.baseline_known()
+            || dependency->exists() != baseline.baseline_exists()
+            || dependency->bytes() != baseline.baseline_bytes()
+            || dependency->sha256() != baseline.baseline_sha256() )
             return false;
     }
     return true;
@@ -543,7 +664,11 @@ tl::expected<void, std::string> PCB_MANUFACTURING_JOB_MANAGER::ValidateRecord( c
         || receipt.job_kind() != JobKind( request ) || receipt.output_directory() != request.output_directory()
         || aRecord.source_board().empty() || aRecord.source_board().size() > MAX_SOURCE_BYTES
         || aRecord.source_board().rfind( "(kicad_pcb", 0 ) != 0
-        || receipt.source_snapshot_sha256() != Hash( aRecord.source_board() ) )
+        || receipt.source_snapshot_sha256() != Hash( aRecord.source_board() )
+        || !HasCompleteDetachedSnapshot( aRecord.source_snapshot(), request.document() )
+        || !SnapshotMatchesState( aRecord.source_snapshot(), receipt.observed_before() )
+        || aRecord.source_snapshot().serialized_board() != aRecord.source_board()
+        || receipt.source_snapshot().SerializeAsString() != aRecord.source_snapshot().SerializeAsString() )
         return tl::unexpected( "invalid_manufacturing_journal" );
 
     if( receipt.status() == PCB_MFG_EXPORT_RUNNING || receipt.status() == PCB_MFG_EXPORT_COMPLETED
@@ -593,6 +718,8 @@ tl::expected<void, std::string> PCB_MANUFACTURING_JOB_MANAGER::ValidateDispatche
     if( !aReceipt.native_dispatch() || !aReceipt.export_adapter_available()
         || ( aReceipt.snapshot_complete()
              && !HasCompleteSourceSnapshot( aRecord.receipt().observed_before() ) )
+        || !HasCompleteDetachedSnapshot( aReceipt.source_snapshot(), request.document() )
+        || aReceipt.source_snapshot().SerializeAsString() != aRecord.source_snapshot().SerializeAsString()
         || aReceipt.source_snapshot_sha256() != Hash( aRecord.source_board() )
         || aReceipt.operation_id() != request.operation_id()
         || aReceipt.process_epoch() != request.process_epoch()
@@ -710,12 +837,17 @@ PCB_MANUFACTURING_JOB_MANAGER::Start( const Request& aRequest, const std::string
     if( !aCapture ) return tl::unexpected( "manufacturing_capture_unavailable" );
     auto captured = aCapture( aRequest.document() );
     if( !captured ) return tl::unexpected( captured.error() );
+    if( captured->sourceSnapshot.snapshot_sha256().empty() )
+        captured->sourceSnapshot.set_snapshot_sha256( SnapshotHash( captured->sourceSnapshot ) );
     if( !ValidState( captured->before ) || !ValidState( captured->after )
         || !google::protobuf::util::MessageDifferencer::Equals( captured->before, aRequest.expected_state() )
         || !google::protobuf::util::MessageDifferencer::Equals( captured->before, captured->after ) )
         return tl::unexpected( "pcb_export_state_changed" );
     if( captured->sourceBoard.empty() || captured->sourceBoard.size() > MAX_SOURCE_BYTES
-        || captured->sourceBoard.rfind( "(kicad_pcb", 0 ) != 0 )
+        || captured->sourceBoard.rfind( "(kicad_pcb", 0 ) != 0
+        || !HasCompleteDetachedSnapshot( captured->sourceSnapshot, aRequest.document() )
+        || !SnapshotMatchesState( captured->sourceSnapshot, captured->before )
+        || captured->sourceSnapshot.serialized_board() != captured->sourceBoard )
         return tl::unexpected( "manufacturing_capture_incomplete" );
     if( auto root = requireDirectory( true ); !root ) return tl::unexpected( root.error() );
     auto lease = AcquireOperationLock( fs::u8path( m_journalDirectory.ToStdString() ), aRequest.operation_id() );
@@ -733,6 +865,7 @@ PCB_MANUFACTURING_JOB_MANAGER::Start( const Request& aRequest, const std::string
     journal.set_format_version( JOURNAL_VERSION );
     journal.mutable_request()->CopyFrom( aRequest );
     journal.set_source_board( captured->sourceBoard );
+    journal.mutable_source_snapshot()->CopyFrom( captured->sourceSnapshot );
     journal.set_journal_revision( 1 );
     Receipt& receipt = *journal.mutable_receipt();
     receipt.set_operation_id( aRequest.operation_id() );
@@ -740,6 +873,7 @@ PCB_MANUFACTURING_JOB_MANAGER::Start( const Request& aRequest, const std::string
     receipt.mutable_document()->CopyFrom( aRequest.document() );
     receipt.set_request_fingerprint_sha256( Hash( aRequest.SerializeAsString() ) );
     receipt.set_source_snapshot_sha256( Hash( captured->sourceBoard ) );
+    receipt.mutable_source_snapshot()->CopyFrom( captured->sourceSnapshot );
     receipt.set_job_kind( JobKind( aRequest ) );
     receipt.set_status( PCB_MFG_EXPORT_ADMITTED );
     receipt.set_dispatch_stage( PCB_MFG_DISPATCH_ADMITTED );
@@ -821,6 +955,7 @@ PCB_MANUFACTURING_JOB_MANAGER::Dispatch( const Request& aRequest, const std::str
     context.request.CopyFrom( aRequest );
     context.sourceBoard = prior->source_board();
     context.sourceSnapshotSha256 = prior->receipt().source_snapshot_sha256();
+    context.sourceSnapshot.CopyFrom( prior->source_snapshot() );
     context.sourceState.CopyFrom( prior->receipt().observed_before() );
     context.cancellation = aCancellation;
     context.detachedWorker = aDetachedWorker;
@@ -1362,6 +1497,7 @@ PcbManufacturingManagerCapabilities PCB_MANUFACTURING_JOB_MANAGER::Capabilities(
     response.set_journal_read_supported( true );
     response.set_cancellation_before_dispatch_supported( true );
     response.set_prior_epoch_journal_inspection_supported( true );
+    response.set_complete_snapshot_supported( true );
     response.set_synchronous_svg_export_supported( true );
     response.set_synchronous_gerber_export_supported( true );
     response.set_synchronous_odb_export_supported( true );
@@ -1371,8 +1507,8 @@ PcbManufacturingManagerCapabilities PCB_MANUFACTURING_JOB_MANAGER::Capabilities(
     response.set_worker_join_supported( true );
     response.set_published_outputs_verification_supported( true );
     response.set_unavailable_reason(
-            "synchronous SVG, Gerber, ODB++ and IPC-2581 owner-thread dispatch are available; the manager worker boundary is available "
-            "for adapters with complete immutable dependency snapshots, while detached production export and "
-            "restart publication remain unavailable" );
+            "complete serialized board/project snapshots and dependency baselines are captured; synchronous SVG, Gerber, ODB++ "
+            "and IPC-2581 owner-thread dispatch remain available, while detached production export and restart publication "
+            "remain unavailable" );
     return response;
 }

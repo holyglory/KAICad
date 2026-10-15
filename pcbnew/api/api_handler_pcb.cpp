@@ -4218,11 +4218,34 @@ API_HANDLER_PCB::handleStartPcbManufacturingExportJob(
         STRING_FORMATTER serialized;
         PCB_IO_KICAD_SEXPR writer;
         writer.FormatBoardToFormatter( &serialized, board(), nullptr, false );
+        std::string serializedProject;
+        const wxString projectPath = project().GetProjectFullName();
+        const FILE_CONTENT_BASELINE projectBaseline = FILE_CONTENT_BASELINE::Read(
+                projectPath, &serializedProject );
+        if( projectPath.empty() || !projectBaseline.Known() || !projectBaseline.Exists()
+            || serializedProject.empty() )
+            return tl::unexpected( "manufacturing_project_snapshot_unavailable" );
         auto after = ReadPcbLifecycle( apiServer(), document );
         if( !after ) return tl::unexpected( after.error().error_message() );
         if( !google::protobuf::util::MessageDifferencer::Equals( *before, *after ) )
             return tl::unexpected( "pcb_export_state_changed" );
-        PCB_MANUFACTURING_JOB_MANAGER::CAPTURE result{ *before, *after, serialized.GetString() };
+        PCB_MANUFACTURING_JOB_MANAGER::CAPTURE result{ *before, *after, serialized.GetString(), {} };
+        auto* snapshot = &result.sourceSnapshot;
+        snapshot->set_serialized_board( result.sourceBoard );
+        snapshot->set_serialized_project( serializedProject );
+        snapshot->set_board_serialization_complete( true );
+        snapshot->set_project_serialization_complete( true );
+        snapshot->set_dependency_capture_complete( true );
+        snapshot->set_disk_baseline_checked( before->disk_baseline_checked() );
+        for( const auto& baseline : before->file_baselines() )
+        {
+            auto* dependency = snapshot->add_dependency_baselines();
+            dependency->set_path( baseline.path() );
+            dependency->set_sha256( baseline.baseline_sha256() );
+            dependency->set_bytes( baseline.baseline_bytes() );
+            dependency->set_exists( baseline.baseline_exists() );
+            dependency->set_known( baseline.baseline_known() );
+        }
         return result;
     };
     const auto& request = aCtx.Request.request();
@@ -4266,6 +4289,7 @@ API_HANDLER_PCB::handleStartPcbManufacturingExportJob(
                 receipt.set_export_adapter_available( true );
                 receipt.set_worker_finished( true );
                 receipt.set_source_snapshot_sha256( context.sourceSnapshotSha256 );
+                receipt.mutable_source_snapshot()->CopyFrom( context.sourceSnapshot );
                 receipt.set_snapshot_complete( false );
                 receipt.set_publication_committed(
                         receipt.status() == PCB_MFG_EXPORT_COMPLETED

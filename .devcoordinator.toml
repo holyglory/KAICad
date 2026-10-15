@@ -3204,4 +3204,4 @@ env={TMPDIR="/mnt/build-storage/codex/kicad/t"}
 name="public-and-updater"
 tier="development"
 command=["python3","automation/qualification/run-linux-preview-public.py"]
-retained_artifacts=[{name="public-and-updater-tests",path="automation/artifacts/preview28-linux-delivery",max_bytes=536870912}]
+retained_artifacts=[{name="pub-evidence",path="automation/artifacts/preview28-linux-delivery",max_bytes=536870912}]

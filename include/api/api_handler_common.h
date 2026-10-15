@@ -29,6 +29,7 @@
 #include <api/api_handler.h>
 #include <api/common/commands/base_commands.pb.h>
 #include <api/common/commands/project_commands.pb.h>
+#include <api/common/commands/project_settings_checked_commands.pb.h>
 #include <api/common/commands/raster_trace_commands.pb.h>
 
 using namespace kiapi::common;
@@ -73,6 +74,14 @@ private:
 
     HANDLER_RESULT<Empty> handleSetNetClasses(
         const HANDLER_CONTEXT<commands::SetNetClasses>& aCtx );
+
+    HANDLER_RESULT<kiapi::automation::v1::CheckedProjectNetClassesReceipt>
+    handleCheckedProjectNetClasses(
+        const HANDLER_CONTEXT<kiapi::automation::v1::CheckedProjectNetClassesTransaction>& aCtx );
+
+    HANDLER_RESULT<kiapi::automation::v1::CheckedProjectNetClassesReceipt>
+    handleReadCheckedProjectNetClassesReceipt(
+        const HANDLER_CONTEXT<kiapi::automation::v1::ReadCheckedProjectNetClassesReceipt>& aCtx );
 
     HANDLER_RESULT<Empty> handlePing( const HANDLER_CONTEXT<commands::Ping>& aCtx );
 
@@ -121,6 +130,16 @@ private:
     };
 
     std::map<std::string, TEXT_VARIABLES_RECEIPT> m_textVariablesReceipts;
+
+    struct CHECKED_PROJECT_NET_CLASSES_RECEIPT
+    {
+        kiapi::automation::v1::CheckedProjectNetClassesTransaction request;
+        kiapi::automation::v1::CheckedProjectNetClassesReceipt response;
+    };
+
+    // Process-owned checked project-settings receipts are retained for the life of this handler.
+    // Reusing an operation UUID with another request is always rejected.
+    std::map<std::string, CHECKED_PROJECT_NET_CLASSES_RECEIPT> m_checkedProjectNetClassesReceipts;
 };
 
 #endif //KICAD_API_HANDLER_COMMON_H

@@ -24,6 +24,7 @@
 
 #include <api/api_handler_common.h>
 #include <api/api_server.h>
+#include <api/document_lifecycle_controller.h>
 #include <bitmap_trace.h>
 #include <build_version.h>
 #include <eda_shape.h>
@@ -31,10 +32,12 @@
 #include <gestfich.h>
 #include <geometry/shape_compound.h>
 #include <google/protobuf/empty.pb.h>
+#include <google/protobuf/util/message_differencer.h>
 #include <paths.h>
 #include <pgm_base.h>
 #include <api/api_plugin.h>
 #include <api/api_utils.h>
+#include <netclass.h>
 #include <project/net_settings.h>
 #include <project/project_file.h>
 #include <settings/settings_manager.h>
@@ -47,8 +50,11 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <optional>
 #include <project.h>
+#include <set>
+#include <vector>
 
 using namespace kiapi::common::commands;
 using namespace kiapi::common::types;
@@ -89,6 +95,260 @@ bool IsOperationId( const std::string& aValue )
         else if( !std::isxdigit( static_cast<unsigned char>( aValue[index] ) ) )
             return false;
     }
+    return true;
+}
+
+
+bool IsCanonicalUuid( const std::string& aValue )
+{
+    if( aValue.size() != 36 ) return false;
+    bool nonzero = false;
+
+    for( size_t index = 0; index < aValue.size(); ++index )
+    {
+        const char c = aValue[index];
+
+        if( index == 8 || index == 13 || index == 18 || index == 23 )
+        {
+            if( c != '-' ) return false;
+        }
+        else
+        {
+            if( !( ( c >= '0' && c <= '9' ) || ( c >= 'a' && c <= 'f' ) ) ) return false;
+            nonzero |= c != '0';
+        }
+    }
+
+    return nonzero;
+}
+
+
+size_t Utf16Length( const std::string& aValue )
+{
+    size_t result = 0;
+
+    for( size_t index = 0; index < aValue.size(); )
+    {
+        const unsigned char first = static_cast<unsigned char>( aValue[index] );
+        uint32_t codepoint = 0;
+        size_t width = 0;
+
+        if( first < 0x80 )
+        {
+            codepoint = first;
+            width = 1;
+        }
+        else if( ( first & 0xe0 ) == 0xc0 )
+        {
+            codepoint = first & 0x1f;
+            width = 2;
+        }
+        else if( ( first & 0xf0 ) == 0xe0 )
+        {
+            codepoint = first & 0x0f;
+            width = 3;
+        }
+        else if( ( first & 0xf8 ) == 0xf0 )
+        {
+            codepoint = first & 0x07;
+            width = 4;
+        }
+        else
+        {
+            return aValue.size();
+        }
+
+        if( index + width > aValue.size() ) return aValue.size();
+
+        for( size_t offset = 1; offset < width; ++offset )
+        {
+            const unsigned char continuation = static_cast<unsigned char>( aValue[index + offset] );
+
+            if( ( continuation & 0xc0 ) != 0x80 ) return aValue.size();
+            codepoint = ( codepoint << 6 ) | ( continuation & 0x3f );
+        }
+
+        if( ( width == 2 && codepoint < 0x80 ) || ( width == 3 && codepoint < 0x800 )
+            || ( width == 4 && codepoint < 0x10000 ) || codepoint > 0x10ffff
+            || ( codepoint >= 0xd800 && codepoint <= 0xdfff ) )
+            return aValue.size();
+
+        result += codepoint > 0xffff ? 2 : 1;
+        index += width;
+    }
+
+    return result;
+}
+
+
+std::string NetClassesDigest( const NetClassesResponse& aResponse )
+{
+    std::vector<const kiapi::common::project::NetClass*> classes;
+    classes.reserve( aResponse.net_classes_size() );
+
+    for( const auto& netClass : aResponse.net_classes() )
+        classes.push_back( &netClass );
+
+    std::sort( classes.begin(), classes.end(), []( const auto* left, const auto* right )
+    {
+        return left->name() < right->name();
+    } );
+
+    NATIVE_STATE_DIGEST digest;
+
+    for( const auto* netClass : classes )
+    {
+        const std::string serialized = netClass->SerializeAsString();
+        digest.Append( std::to_string( Utf16Length( netClass->name() ) ) );
+        digest.Append( "\n" );
+        digest.Append( netClass->name() );
+        digest.Append( std::to_string( serialized.size() ) );
+        digest.Append( "\n" );
+        digest.Append( serialized );
+    }
+
+    return digest.Hex();
+}
+
+
+NetClassesResponse ReadProjectNetClasses( const PROJECT& aProject )
+{
+    NetClassesResponse result;
+    const std::shared_ptr<NET_SETTINGS>& settings = aProject.GetProjectFile().m_NetSettings;
+
+    if( settings && settings->GetDefaultNetclass() )
+        settings->GetDefaultNetclass()->Serialize( *result.add_net_classes() );
+
+    if( settings )
+    {
+        for( const auto& [unused, netClass] : settings->GetNetclasses() )
+        {
+            if( netClass ) netClass->Serialize( *result.add_net_classes() );
+        }
+    }
+
+    return result;
+}
+
+
+bool ValidExplicitNetClasses( const NetClassesResponse& aResponse, std::string& aReason )
+{
+    if( aResponse.net_classes_size() > 4096 )
+    {
+        aReason = "a checked project netclass request is limited to 4096 classes";
+        return false;
+    }
+
+    std::set<std::string> names;
+
+    for( const auto& netClass : aResponse.net_classes() )
+    {
+        if( netClass.name().empty() || netClass.name().find( '\0' ) != std::string::npos
+            || netClass.type() != kiapi::common::project::NCT_EXPLICIT || netClass.constituents_size() != 0
+            || !names.insert( netClass.name() ).second )
+        {
+            aReason = "checked project netclasses must be unique named explicit classes";
+            return false;
+        }
+
+        NETCLASS candidate( wxString::FromUTF8( netClass.name() ), false );
+        if( !candidate.Deserialize( netClass ) )
+        {
+            aReason = "a checked project netclass contains unsupported values";
+            return false;
+        }
+    }
+
+    return true;
+}
+
+
+bool ValidCheckedProjectNetClassesRequest(
+        const kiapi::automation::v1::CheckedProjectNetClassesTransaction& aRequest,
+        const std::string& aProcessEpoch, bool aInspect, std::string& aReason )
+{
+    using namespace kiapi::automation::v1;
+
+    if( !aRequest.has_project() || aRequest.project().type() != DOCTYPE_PROJECT
+        || !aRequest.project().has_project() || aRequest.project().project().name().empty()
+        || aRequest.project().project().path().empty() || !aRequest.has_document()
+        || aRequest.document().type() != DOCTYPE_PCB || !aRequest.document().has_board_filename()
+        || aRequest.document().board_filename().empty() || !aRequest.document().has_project()
+        || !google::protobuf::util::MessageDifferencer::Equals( aRequest.project().project(),
+                                                                 aRequest.document().project() ) )
+    {
+        aReason = "checked project netclasses require one named project and a PCB in that project";
+        return false;
+    }
+
+    const wxFileName projectPath = wxFileName::DirName( wxString::FromUTF8( aRequest.project().project().path() ) );
+    if( !projectPath.IsAbsolute() || aRequest.project().project().path().find( '\0' ) != std::string::npos
+        || aRequest.document().board_filename().find( '\0' ) != std::string::npos )
+    {
+        aReason = "the checked project netclass project path must be absolute and NUL-free";
+        return false;
+    }
+
+    if( !IsCanonicalUuid( aProcessEpoch ) || aRequest.process_epoch() != aProcessEpoch
+        || !IsCanonicalUuid( aRequest.operation_id() ) )
+    {
+        aReason = "checked project netclasses require one canonical operation and process UUID";
+        return false;
+    }
+
+    if( !aRequest.has_expected_state() || aRequest.expected_state().scope() != DLS_PCB
+        || !aRequest.expected_state().has_document()
+        || !google::protobuf::util::MessageDifferencer::Equals( aRequest.expected_state().document(),
+                                                                 aRequest.document() )
+        || aRequest.expected_state().process_epoch() != aProcessEpoch
+        || !aRequest.expected_state().has_revision()
+        || !IsCanonicalUuid( aRequest.expected_state().native_identity() )
+        || aRequest.expected_state().revision().epoch() != aRequest.expected_state().native_identity()
+        || !IsSha256( aRequest.expected_state().state_sha256() )
+        || !aRequest.expected_state().project_settings_included()
+        || !aRequest.expected_state().disk_baseline_checked() )
+    {
+        aReason = "checked project netclasses require an exact PCB lifecycle observation";
+        return false;
+    }
+
+    if( !aInspect && !DOCUMENT_LIFECYCLE_CONTROLLER::HasUnchangedFileBaselines( aRequest.expected_state() ) )
+    {
+        aReason = "the checked PCB lifecycle observation lacks complete unchanged file coverage";
+        return false;
+    }
+
+    if( !IsSha256( aRequest.expected_net_classes_sha256() ) )
+    {
+        aReason = "expected_net_classes_sha256 must be a lowercase SHA-256 digest";
+        return false;
+    }
+
+    NetClassesResponse requested;
+    for( const auto& netClass : aRequest.net_classes() )
+        *requested.add_net_classes() = netClass;
+    if( !ValidExplicitNetClasses( requested, aReason ) ) return false;
+
+    if( aRequest.merge_mode() != MapMergeMode::MMM_MERGE
+        && aRequest.merge_mode() != MapMergeMode::MMM_REPLACE )
+    {
+        aReason = "merge_mode must be MMM_MERGE or MMM_REPLACE";
+        return false;
+    }
+
+    if( aRequest.maximum_result_bytes() != 0
+        && ( aRequest.maximum_result_bytes() < 64 * 1024 || aRequest.maximum_result_bytes() > 4 * 1024 * 1024 ) )
+    {
+        aReason = "maximum_result_bytes must be zero or between 64 KiB and 4 MiB";
+        return false;
+    }
+
+    if( aRequest.ByteSizeLong() > 4 * 1024 * 1024 )
+    {
+        aReason = "the checked project netclass request exceeds its 4 MiB limit";
+        return false;
+    }
+
     return true;
 }
 
@@ -250,6 +510,12 @@ API_HANDLER_COMMON::API_HANDLER_COMMON() :
             &API_HANDLER_COMMON::handleGetKiCadBinaryPath );
     registerHandler<GetNetClasses, NetClassesResponse>( &API_HANDLER_COMMON::handleGetNetClasses );
     registerHandler<SetNetClasses, Empty>( &API_HANDLER_COMMON::handleSetNetClasses );
+    registerHandler<kiapi::automation::v1::CheckedProjectNetClassesTransaction,
+                    kiapi::automation::v1::CheckedProjectNetClassesReceipt>(
+            &API_HANDLER_COMMON::handleCheckedProjectNetClasses );
+    registerHandler<kiapi::automation::v1::ReadCheckedProjectNetClassesReceipt,
+                    kiapi::automation::v1::CheckedProjectNetClassesReceipt>(
+            &API_HANDLER_COMMON::handleReadCheckedProjectNetClassesReceipt );
     registerHandler<Ping, Empty>( &API_HANDLER_COMMON::handlePing );
     registerHandler<GetTextExtents, types::Box2>( &API_HANDLER_COMMON::handleGetTextExtents );
     registerHandler<GetTextAsShapes, GetTextAsShapesResponse>(
@@ -472,6 +738,176 @@ HANDLER_RESULT<Empty> API_HANDLER_COMMON::handleSetNetClasses(
     netSettings->SetNetclasses( netClasses );
 
     return Empty();
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::CheckedProjectNetClassesReceipt>
+API_HANDLER_COMMON::handleCheckedProjectNetClasses(
+        const HANDLER_CONTEXT<kiapi::automation::v1::CheckedProjectNetClassesTransaction>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    using google::protobuf::util::MessageDifferencer;
+
+    const auto& request = aCtx.Request;
+    const std::string processEpoch = apiServerOrNull() ? apiServer().Token() : std::string();
+
+    auto reject = []( const char* code, const std::string& message )
+            -> HANDLER_RESULT<CheckedProjectNetClassesReceipt>
+    {
+        ApiResponseStatus error;
+        Fail( error, code, message );
+        return tl::unexpected( error );
+    };
+
+    std::string reason;
+    if( !apiServerOrNull() || !ValidCheckedProjectNetClassesRequest( request, processEpoch, false, reason ) )
+        return reject( "project_net_classes_admission_invalid", reason.empty()
+                ? "the checked project netclass owner is not attached to a native API server" : reason );
+
+    PROJECT& project = Pgm().GetSettingsManager().Prj();
+    if( project.IsNullProject() )
+        return reject( "project_net_classes_project_unavailable", "no valid project is loaded" );
+
+    if( auto target = ValidateProjectVariableTarget( request.project(), project, apiServerOrNull() ) )
+        return tl::unexpected( *target );
+    if( auto target = ValidateProjectVariableTarget( request.document(), project, apiServerOrNull() ) )
+        return tl::unexpected( *target );
+
+    auto existing = m_checkedProjectNetClassesReceipts.find( request.operation_id() );
+    if( existing != m_checkedProjectNetClassesReceipts.end() )
+    {
+        if( !MessageDifferencer::Equals( existing->second.request, request ) )
+            return reject( "operation_id_reused",
+                           "the operation ID is already bound to another checked project netclass request" );
+
+        CheckedProjectNetClassesReceipt replay = existing->second.response;
+        replay.set_replayed( true );
+        return replay;
+    }
+
+    auto observe = [&]() -> HANDLER_RESULT<DocumentLifecycleState>
+    {
+        ReadDocumentLifecycleState query;
+        query.mutable_document()->CopyFrom( request.document() );
+        ApiRequest envelope;
+        envelope.mutable_message()->PackFrom( query );
+        API_RESULT reply = apiServer().DispatchToHandlers( envelope );
+
+        if( !reply ) return tl::unexpected( reply.error() );
+        if( reply->status().status() != ApiStatusCode::AS_OK )
+            return tl::unexpected( reply->status() );
+
+        DocumentLifecycleState state;
+        if( !reply->message().UnpackTo( &state ) )
+        {
+            ApiResponseStatus error;
+            error.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            error.set_error_message( "the native PCB lifecycle observation was not parseable" );
+            return tl::unexpected( error );
+        }
+
+        return state;
+    };
+
+    auto beforeState = observe();
+    if( !beforeState )
+        return reject( "project_net_classes_observation_failed", beforeState.error().error_message() );
+
+    if( !MessageDifferencer::Equals( *beforeState, request.expected_state() ) )
+        return reject( "project_net_classes_stale",
+                       "the PCB lifecycle state changed; inspect a fresh state before writing" );
+
+    const PROJECT& checkedProject = project;
+    const std::string currentDigest = NetClassesDigest( ReadProjectNetClasses( checkedProject ) );
+    if( currentDigest != request.expected_net_classes_sha256() )
+        return reject( "project_net_classes_stale",
+                       "the project netclass map changed; inspect a fresh map before writing" );
+
+    // Project NET_SETTINGS has no native PCB editor undo/redo owner. Keep the checked
+    // mutation unavailable until an editor-backed owner can provide a real undo entry
+    // and post-undo/redo evidence; never mutate project settings behind a false receipt.
+    if( m_checkedProjectNetClassesReceipts.size() >= 4096 )
+        return reject( "project_net_classes_receipt_capacity_exhausted",
+                       "checked project netclass receipt capacity is exhausted; no mutation was attempted" );
+
+    CHECKED_PROJECT_NET_CLASSES_RECEIPT retained;
+    retained.request = request;
+    auto& response = retained.response;
+    response.mutable_project()->CopyFrom( request.project() );
+    response.mutable_document()->CopyFrom( request.document() );
+    response.set_process_epoch( processEpoch );
+    response.set_operation_id( request.operation_id() );
+    response.set_state( CPCS_UNAVAILABLE );
+    response.set_phase( CPCP_UNKNOWN );
+    response.set_rollback_state( CPCRS_NOT_ATTEMPTED );
+    response.set_post_commit_state( CPCPS_NOT_ATTEMPTED );
+    response.set_error_code( "project_settings_checked_unavailable" );
+    response.set_error_message(
+            "The native PCB project-settings owner has no editor-backed undo/redo path yet; no mutation was attempted" );
+    response.set_undo_redo_supported( false );
+
+    auto inserted = m_checkedProjectNetClassesReceipts.emplace( request.operation_id(), std::move( retained ) );
+    if( !inserted.second )
+        return reject( "operation_id_reused",
+                       "the operation ID is already bound to another checked project netclass request" );
+
+    return inserted.first->second.response;
+}
+
+
+HANDLER_RESULT<kiapi::automation::v1::CheckedProjectNetClassesReceipt>
+API_HANDLER_COMMON::handleReadCheckedProjectNetClassesReceipt(
+        const HANDLER_CONTEXT<kiapi::automation::v1::ReadCheckedProjectNetClassesReceipt>& aCtx )
+{
+    using namespace kiapi::automation::v1;
+    using google::protobuf::util::MessageDifferencer;
+
+    const auto& query = aCtx.Request;
+    const std::string processEpoch = apiServerOrNull() ? apiServer().Token() : std::string();
+    std::string reason;
+
+    if( !apiServerOrNull() || !query.has_expected_request()
+        || !ValidCheckedProjectNetClassesRequest( query.expected_request(), processEpoch, true, reason )
+        || query.process_epoch() != processEpoch || query.operation_id() != query.expected_request().operation_id()
+        || !MessageDifferencer::Equals( query.project(), query.expected_request().project() )
+        || !MessageDifferencer::Equals( query.document(), query.expected_request().document() ) )
+    {
+        ApiResponseStatus error;
+        Fail( error, "project_net_classes_receipt_query_invalid",
+              reason.empty() ? "the checked project netclass receipt query must identify its exact request" : reason );
+        return tl::unexpected( error );
+    }
+
+    PROJECT& project = Pgm().GetSettingsManager().Prj();
+    if( project.IsNullProject() )
+        return tl::unexpected( [&]() { ApiResponseStatus e; Fail( e, "project_net_classes_project_unavailable", "no valid project is loaded" ); return e; }() );
+
+    if( auto target = ValidateProjectVariableTarget( query.project(), project, apiServerOrNull() ) )
+        return tl::unexpected( *target );
+
+    auto found = m_checkedProjectNetClassesReceipts.find( query.operation_id() );
+    if( found == m_checkedProjectNetClassesReceipts.end() )
+    {
+        CheckedProjectNetClassesReceipt result;
+        result.mutable_project()->CopyFrom( query.project() );
+        result.mutable_document()->CopyFrom( query.document() );
+        result.set_process_epoch( processEpoch );
+        result.set_operation_id( query.operation_id() );
+        result.set_state( CPCS_NOT_FOUND );
+        result.set_phase( CPCP_UNKNOWN );
+        result.set_rollback_state( CPCRS_NOT_ATTEMPTED );
+        result.set_post_commit_state( CPCPS_NOT_ATTEMPTED );
+        return result;
+    }
+
+    if( !MessageDifferencer::Equals( found->second.request, query.expected_request() ) )
+    {
+        ApiResponseStatus error;
+        Fail( error, "operation_id_reused", "the operation ID belongs to a different checked project netclass request" );
+        return tl::unexpected( error );
+    }
+
+    return found->second.response;
 }
 
 

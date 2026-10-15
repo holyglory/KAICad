@@ -286,19 +286,99 @@ public sealed class PcbRoutingReceiptRecoveryTests
         finally { Directory.Delete(root, true); }
     }
 
+    [TestMethod]
+    public async Task CommitReplaysDurableReceiptAfterMcpReconnectWithoutNativeContact()
+    {
+        string root = Directory.CreateTempSubdirectory("pcb-route-commit-reconnect-").FullName;
+        try
+        {
+            var fixture = RouteReceiptFixture.Create(root);
+            fixture.Transport.Receipt = fixture.CompletedReceipt(replayed: false);
+            var registry = await fixture.Registry(root);
+            var tools = new PcbRoutingTools(registry);
+            string candidateJson = BoardJson.Formatter.Format(fixture.Request.Candidate);
+            string stateJson = SchematicJson.Formatter.Format(fixture.State);
+            string drcJson = SchematicJson.Formatter.Format(new PcbDrcJobState { JobId = fixture.Request.DrcJobId });
+
+            JsonElement first = Success(await tools.Commit(fixture.Transport.InstanceId, candidateJson,
+                stateJson, drcJson, fixture.Request.OperationId, cancellationToken: default));
+            Assert.IsTrue(first.GetProperty("mutationConfirmed").GetBoolean());
+            var firstReceipt = SchematicJson.Parser.Parse<CheckedPcbRouteReceipt>(
+                first.GetProperty("receipt").GetRawText());
+            Assert.IsFalse(firstReceipt.Replayed);
+            int nativeMutations = fixture.Transport.RouteMutations;
+            int nativeExchanges = fixture.Transport.Exchanges;
+
+            var restarted = new InstanceRegistry(new OfflineTransport(), Path.Combine(root, "mcp"));
+            var replayTools = new PcbRoutingTools(restarted);
+            JsonElement replay = Success(await replayTools.Commit(fixture.Transport.InstanceId, candidateJson,
+                stateJson, drcJson, fixture.Request.OperationId, cancellationToken: default));
+            Assert.IsTrue(replay.GetProperty("replayed").GetBoolean());
+            Assert.IsTrue(replay.GetProperty("receipt").GetProperty("replayed").GetBoolean());
+            Assert.AreEqual(nativeMutations, fixture.Transport.RouteMutations);
+            Assert.AreEqual(nativeExchanges, fixture.Transport.Exchanges);
+
+            JsonElement stored = Success(await replayTools.Receipt(fixture.Transport.InstanceId,
+                fixture.RequestJson, fixture.State.ProcessEpoch, fixture.Request.OperationId, default));
+            Assert.AreEqual("mcp-state", stored.GetProperty("receiptScope").GetString());
+            Assert.IsTrue(stored.GetProperty("nativeReceiptAvailable").GetBoolean());
+            Assert.IsTrue(stored.GetProperty("replayed").GetBoolean());
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public async Task CommitPersistsDeliveredTransportAsUnknownAndBlocksRedispatch()
+    {
+        string root = Directory.CreateTempSubdirectory("pcb-route-commit-unknown-").FullName;
+        try
+        {
+            var fixture = RouteReceiptFixture.Create(root);
+            fixture.Transport.Receipt = fixture.CompletedReceipt(replayed: false);
+            fixture.Transport.RouteFailure = new NngException(5, "reply timeout", requestDelivered: true);
+            var registry = await fixture.Registry(root);
+            var tools = new PcbRoutingTools(registry);
+            string candidateJson = BoardJson.Formatter.Format(fixture.Request.Candidate);
+            string stateJson = SchematicJson.Formatter.Format(fixture.State);
+            string drcJson = SchematicJson.Formatter.Format(new PcbDrcJobState { JobId = fixture.Request.DrcJobId });
+
+            CallToolResult first = await tools.Commit(fixture.Transport.InstanceId, candidateJson,
+                stateJson, drcJson, fixture.Request.OperationId, cancellationToken: default);
+            AssertError(first, "operation_outcome_unknown");
+            int nativeExchanges = fixture.Transport.Exchanges;
+
+            var restarted = new InstanceRegistry(new OfflineTransport(), Path.Combine(root, "mcp"));
+            var replayTools = new PcbRoutingTools(restarted);
+            CallToolResult receipt = await replayTools.Receipt(fixture.Transport.InstanceId,
+                fixture.RequestJson, fixture.State.ProcessEpoch, fixture.Request.OperationId, default);
+            AssertError(receipt, "operation_outcome_unknown");
+            Assert.AreEqual("unknown", receipt.StructuredContent!.Value.GetProperty("outcome").GetString());
+
+            CallToolResult retry = await replayTools.Commit(fixture.Transport.InstanceId, candidateJson,
+                stateJson, drcJson, fixture.Request.OperationId, cancellationToken: default);
+            AssertError(retry, "operation_outcome_unknown");
+            Assert.AreEqual(nativeExchanges, fixture.Transport.Exchanges,
+                "A delivered route outcome must be reconciled before another native dispatch.");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
     private sealed class RouteReceiptTransport : INativeTransport
     {
         internal readonly string Epoch = Guid.NewGuid().ToString("D");
         internal readonly string InstanceId = Guid.NewGuid().ToString("D");
         internal CheckedPcbRouteReceipt Receipt { get; set; } = new();
         internal Exception? ReceiptFailure { get; set; }
+        internal Exception? RouteFailure { get; set; }
         internal int RouteReceiptReads { get; private set; }
         internal int RouteMutations { get; private set; }
+        internal int Exchanges { get; private set; }
         internal bool HandshakeSeen { get; private set; }
 
         public Task<byte[]> ExchangeAsync(string endpoint, byte[] bytes, TimeSpan timeout,
             CancellationToken cancellationToken = default)
         {
+            Exchanges++;
             var request = ApiRequest.Parser.ParseFrom(bytes);
             if (request.Message.Is(GetAutomationSession.Descriptor))
             {
@@ -318,6 +398,7 @@ public sealed class PcbRoutingReceiptRecoveryTests
             if (request.Message.Is(CheckedPcbRouteCommit.Descriptor))
             {
                 RouteMutations++;
+                if (RouteFailure is { } failure) throw failure;
                 return Reply(Receipt.Clone());
             }
             return Error("unexpected route receipt request");
@@ -332,5 +413,12 @@ public sealed class PcbRoutingReceiptRecoveryTests
         {
             Header = new() { KicadToken = Epoch }, Status = new() { Status = (ApiStatusCode)3, ErrorMessage = message }
         }.ToByteArray());
+    }
+
+    private sealed class OfflineTransport : INativeTransport
+    {
+        public Task<byte[]> ExchangeAsync(string endpoint, byte[] bytes, TimeSpan timeout,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("A durable route receipt replay must not contact native.");
     }
 }

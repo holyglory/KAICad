@@ -1,5 +1,7 @@
 using System.ComponentModel;
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
@@ -294,15 +296,39 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
      Description("Request a native undoable commit of explicit Track/Arc/Via candidates. drcJobStateJson supplies only a job locator: KiCad rereads that job and compares the complete ordered candidate payload before accepting its result. Optional replacementUpdatesJson updates existing copper with its original UUID; removalsJson removes other existing copper inside the same transaction. Use preview drcCandidateRequestJson and drcDeleteRequestJson for the exact ordered candidate and deletion payloads checked by DRC. Creates, updates and removals require distinct UUIDs. Requires fresh, finding-free candidate DRC, an exact serialized PCB state and unchanged native file baselines; the generic numeric revision cursor is not used alone. Older peers without payload verification are rejected."),
      KiCadCapability("pcb-routing", "compiled-mcp plus native-board-api", "validated candidate, exact lifecycle checkpoint, atomic native commit"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
-    public async Task<CallToolResult> Commit(string instanceId, string requestJson, string expectedStateJson,
+    public Task<CallToolResult> Commit(string instanceId, string requestJson, string expectedStateJson,
      string drcJobStateJson, string operationId, string replacementUpdatesJson = "", string removalsJson = "",
      string groupChangesJson = "", string candidateFingerprintSha256 = "", CancellationToken cancellationToken = default)
+        => CommitCore(instanceId, requestJson, expectedStateJson, drcJobStateJson, operationId,
+            replacementUpdatesJson, removalsJson, groupChangesJson, candidateFingerprintSha256,
+            cancellationToken, durableReceipt: true);
+
+    // Route optimization wrappers already hold the shared replacement receipt
+    // lease.  They use this internal path to avoid recursively acquiring the
+    // direct-route lease while retaining the exact checked native boundary.
+    internal Task<CallToolResult> CommitWithoutMcpReceipt(string instanceId, string requestJson,
+        string expectedStateJson, string drcJobStateJson, string operationId,
+        string replacementUpdatesJson = "", string removalsJson = "", string groupChangesJson = "",
+        string candidateFingerprintSha256 = "", CancellationToken cancellationToken = default)
+        => CommitCore(instanceId, requestJson, expectedStateJson, drcJobStateJson, operationId,
+            replacementUpdatesJson, removalsJson, groupChangesJson, candidateFingerprintSha256,
+            cancellationToken, durableReceipt: false);
+
+    private async Task<CallToolResult> CommitCore(string instanceId, string requestJson, string expectedStateJson,
+     string drcJobStateJson, string operationId, string replacementUpdatesJson, string removalsJson,
+     string groupChangesJson, string candidateFingerprintSha256, CancellationToken cancellationToken,
+     bool durableReceipt)
     {
+        RouteOptimizationReceiptStore? receiptStore = null;
+        FileStream? receiptLease = null;
+        string? receiptFingerprint = null;
+        string? expectedProcessEpoch = null;
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
             var request = BoardJson.Parser.Parse<CreateItems>(requestJson);
             var expected = SchematicJson.Parser.Parse<DocumentLifecycleState>(expectedStateJson);
+            expectedProcessEpoch = expected.ProcessEpoch;
             var locator = SchematicJson.Parser.Parse<PcbDrcJobState>(drcJobStateJson);
             UpdateItems? replacementUpdates = string.IsNullOrWhiteSpace(replacementUpdatesJson)
                 ? null : BoardJson.Parser.Parse<UpdateItems>(replacementUpdatesJson);
@@ -328,9 +354,6 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
                     throw new AutomationException("invalid_route_commit", "Route removals must identify existing copper on the same board.");
                 removals = null;
             }
-            var client = registry.Client(instanceId);
-            if (client.Epoch != expected.ProcessEpoch)
-                throw new AutomationException("pcb_instance_changed", "The candidate belongs to another native process epoch.");
             var checkedRequest = new CheckedPcbRouteCommit
             {
                 Candidate = request,
@@ -351,7 +374,43 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
             // native checked controller repeats this admission check, but doing it
             // here gives callers a deterministic typed error and avoids spending a
             // native round trip on a candidate that cannot ever be committed.
-            CheckedPcbRouteContract.ValidateRequest(checkedRequest, client.Epoch);
+            CheckedPcbRouteContract.ValidateRequest(checkedRequest, expected.ProcessEpoch);
+
+            if (durableReceipt)
+            {
+                receiptStore = new RouteOptimizationReceiptStore(registry.StateDirectory,
+                    "pcb-route-commit-receipts");
+                receiptFingerprint = RouteCommitReceiptFingerprint(instanceId, checkedRequest);
+                receiptLease = receiptStore.Acquire(instanceId, operationId);
+                if (receiptStore.Read(instanceId, operationId) is { } existing)
+                {
+                    if (existing.ProcessEpoch != expected.ProcessEpoch)
+                        throw new AutomationException("stale_process_epoch",
+                            "The durable route receipt belongs to another native process epoch.");
+                    if (existing.Fingerprint != receiptFingerprint)
+                        throw new AutomationException("operation_id_reused",
+                            "The operation ID is already bound to a different checked route request.");
+
+                    JsonElement stored = JsonDocument.Parse(existing.ResultJson).RootElement;
+                    if (stored.TryGetProperty("outcome", out JsonElement outcome)
+                        && string.Equals(outcome.GetString(), "unknown", StringComparison.Ordinal))
+                    {
+                        return new CallToolResult
+                        {
+                            IsError = true,
+                            StructuredContent = stored,
+                            Content = [new TextContentBlock { Text = stored.GetRawText() }]
+                        };
+                    }
+
+                    existing = receiptStore.MarkReplayed(existing);
+                    return RouteOptimizationReceiptStore.ReplayResult(existing);
+                }
+            }
+
+            var client = registry.Client(instanceId);
+            if (client.Epoch != expected.ProcessEpoch)
+                throw new AutomationException("pcb_instance_changed", "The candidate belongs to another native process epoch.");
             var receipt = await client.InvokeAsync<CheckedPcbRouteCommit, CheckedPcbRouteReceipt>(checkedRequest, cancellationToken);
             CheckedPcbRouteContract.ValidateResult(checkedRequest, receipt, inspect: false);
             if (receipt.State is not CheckedPcbRouteReceipt.Types.State.Completed
@@ -373,24 +432,35 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
                 candidateFingerprintSha256 = computedFingerprint,
                 mutationConfirmed = true, atomicTransaction = true, nativeReceipt = true
             });
+            if (receiptStore is not null && receiptFingerprint is not null)
+                receiptStore.Write(instanceId, receipt.ProcessEpoch, operationId, receiptFingerprint, structured);
             return new CallToolResult { StructuredContent = structured, Content = [new TextContentBlock { Text = structured.GetRawText() }] };
         }
         catch (NngException error)
         {
-            return Failure("route_commit_not_confirmed", $"The native reply was lost after operation {operationId}; inspect the exact route receipt before retrying: {error.Message}",
-                error.RequestDelivered);
+            string message = $"The native reply was lost after operation {operationId}; inspect the exact route receipt before retrying: {error.Message}";
+            if (receiptStore is not null && receiptFingerprint is not null && error.RequestDelivered
+                && !string.IsNullOrWhiteSpace(expectedProcessEpoch))
+            {
+                receiptStore.WriteUnknown(instanceId, expectedProcessEpoch, operationId, receiptFingerprint,
+                    "operation_outcome_unknown", message);
+                return Failure("operation_outcome_unknown", message, requestDelivered: true);
+            }
+            return Failure("route_commit_not_confirmed", message, error.RequestDelivered);
         }
-        catch (Exception error) when (error is AutomationException or NativeApiException or InvalidProtocolBufferException or InvalidJsonException)
+        catch (Exception error) when (error is AutomationException or NativeApiException or InvalidProtocolBufferException
+            or InvalidJsonException or IOException or UnauthorizedAccessException)
         {
             string code = error is AutomationException known ? known.Code
                 : error is NativeApiException && error.Message.Contains("tracking", StringComparison.OrdinalIgnoreCase)
                     ? "pcb_tracking_incomplete" : "route_commit_failed";
             return Failure(code, error.Message);
         }
+        finally { receiptLease?.Dispose(); }
     }
 
     [McpServerTool(Name = "kicad_pcb_route_receipt", ReadOnly = true),
-     Description("Read the native process-owned checked route receipt for an exact operation request. Use after route_commit_not_confirmed; it never submits a mutation and rejects a mismatched operation payload."),
+     Description("Read the native process-owned or durable MCP-state checked route receipt for an exact operation request. Use after route_commit_not_confirmed or a reconnect; it never submits a mutation and rejects a mismatched operation payload."),
      KiCadCapability("pcb-routing", "compiled-mcp plus native-checked-controller", "exact process epoch, operation ID and request payload"),
      KiCadVerification(KiCadVerificationLevel.McpProcess, "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public async Task<CallToolResult> Receipt(string instanceId, string requestJson, string processEpoch,
@@ -408,6 +478,56 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
                 || !string.Equals(request.ExpectedState.ProcessEpoch, processEpoch, StringComparison.Ordinal))
                 throw new AutomationException("invalid_route_receipt", "Supply the exact checked route request, operation ID and process epoch.");
             CheckedPcbRouteContract.ValidateRequest(request, processEpoch, inspect: true);
+            string candidateFingerprint = CheckedPcbRouteContract.CandidateFingerprint(request);
+            var durableStore = new RouteOptimizationReceiptStore(registry.StateDirectory,
+                "pcb-route-commit-receipts");
+            using (var durableLease = durableStore.Acquire(instanceId, operationId))
+            {
+                if (durableStore.Read(instanceId, operationId) is { } stored)
+                {
+                    if (stored.ProcessEpoch != processEpoch)
+                        throw new AutomationException("stale_process_epoch",
+                            "The durable route receipt belongs to another native process epoch.");
+                    if (stored.Fingerprint != RouteCommitReceiptFingerprint(instanceId, request))
+                        throw new AutomationException("operation_id_reused",
+                            "The operation ID is already bound to a different checked route request.");
+
+                    JsonElement payload = JsonDocument.Parse(stored.ResultJson).RootElement;
+                    if (payload.TryGetProperty("outcome", out JsonElement outcome)
+                        && string.Equals(outcome.GetString(), "unknown", StringComparison.Ordinal))
+                    {
+                        JsonElement unknown = JsonSerializer.SerializeToElement(new
+                        {
+                            instanceId, processEpoch, operationId, found = true,
+                            receiptScope = "mcp-state", outcome = "unknown",
+                            retrySafety = "unknown-native-outcome", nativeReceiptAvailable = false,
+                            errorCode = payload.TryGetProperty("errorCode", out JsonElement errorCode)
+                                ? errorCode.GetString() : "operation_outcome_unknown",
+                            errorMessage = payload.TryGetProperty("errorMessage", out JsonElement errorMessage)
+                                ? errorMessage.GetString() : "The native route outcome is unknown.",
+                            readOnly = true
+                        });
+                        return new CallToolResult { IsError = true, StructuredContent = unknown,
+                            Content = [new TextContentBlock { Text = unknown.GetRawText() }] };
+                    }
+
+                    payload = stored.ReplayObserved
+                        ? RouteOptimizationReceiptStore.ReplayResult(stored).StructuredContent!.Value
+                        : payload;
+                    var durableReceipt = SchematicJson.Parser.Parse<CheckedPcbRouteReceipt>(
+                        payload.GetProperty("receipt").GetRawText());
+                    JsonElement durable = JsonSerializer.SerializeToElement(new
+                    {
+                        instanceId, receipt = payload.GetProperty("receipt"), operationId, processEpoch,
+                        state = durableReceipt.State.ToString(), replayed = payload.TryGetProperty("replayed", out JsonElement replayed)
+                            && replayed.ValueKind == JsonValueKind.True,
+                        candidateFingerprintSha256 = candidateFingerprint, readOnly = true,
+                        receiptScope = "mcp-state", nativeReceiptAvailable = true
+                    });
+                    return new CallToolResult { StructuredContent = durable,
+                        Content = [new TextContentBlock { Text = durable.GetRawText() }] };
+                }
+            }
             var document = request.Candidate.Header.Document;
             NativeClient client = registry.Client(instanceId);
             AutomationSession session = await client.HandshakeAsync(cancellationToken);
@@ -417,7 +537,6 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
                 OperationId = operationId, ExpectedRequest = request };
             var result = await client.InvokeAsync<ReadCheckedPcbRouteReceipt, CheckedPcbRouteReceipt>(read, cancellationToken);
             CheckedPcbRouteContract.ValidateResult(request, result, inspect: true);
-            string candidateFingerprint = CheckedPcbRouteContract.CandidateFingerprint(request);
             var structured = JsonSerializer.SerializeToElement(new { instanceId,
                 receipt = JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(result)),
                 operationId, processEpoch = session.Epoch, state = result.State.ToString(),
@@ -531,6 +650,17 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
     {
         return string.IsNullOrWhiteSpace(result.ReplacementUpdatesError)
             ? null : result.ReplacementUpdatesError;
+    }
+
+    private static string RouteCommitReceiptFingerprint(string instanceId, CheckedPcbRouteCommit request)
+    {
+        string canonical = "kicad-pcb-route-commit-v1\n"
+            + instanceId + "\n"
+            + request.OperationId + "\n"
+            + request.ExpectedState.ProcessEpoch + "\n"
+            + request.DrcJobId + "\n"
+            + CheckedPcbRouteContract.CandidateFingerprint(request);
+        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
     }
 
     private static string RouteItemId(Any item)

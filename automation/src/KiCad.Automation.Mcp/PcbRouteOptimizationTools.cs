@@ -136,7 +136,7 @@ public sealed class PcbRouteOptimizationTools(InstanceRegistry registry)
                 CheckedPcbRouteCommit checkedRequest = BuildCheckedRequest(
                     create, delete, expected, drc.JobId, operationId);
                 CheckedPcbRouteContract.ValidateRequest(checkedRequest, expected.ProcessEpoch);
-                CallToolResult checkedResult = await new PcbRoutingTools(registry).Commit(
+                CallToolResult checkedResult = await new PcbRoutingTools(registry).CommitWithoutMcpReceipt(
                     instanceId, BoardJson.Formatter.Format(checkedRequest.Candidate),
                     SchematicJson.Formatter.Format(checkedRequest.ExpectedState),
                     canonicalDrc,

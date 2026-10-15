@@ -15,7 +15,7 @@ public sealed class MacRetainedPackageInputTests
         Assert.AreEqual("1", input.Attempt);
         Assert.AreEqual(commit, input.Commit);
         Assert.AreEqual(hash, input.Sha256);
-        Assert.AreEqual($"unqualified-macos-{commit}.tar.gz", input.ArchiveName);
+        Assert.AreEqual("unqualified-macos-arm64.tar.gz", input.ArchiveName);
     }
 
     [TestMethod]

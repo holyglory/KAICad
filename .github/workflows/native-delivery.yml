@@ -181,7 +181,7 @@ jobs:
           retained_root="$RUNNER_TEMP/kicad-retained-mac"
           gh run download "$retained_run" --repo "${{ github.repository }}" \
             --name "native-macos-arm64-${retained_commit}-${retained_attempt}" --dir "$retained_root"
-          archive_path="$(find "$retained_root" -type f -name "unqualified-macos-${retained_commit}.tar.gz" -print -quit)"
+          archive_path="$(find "$retained_root" -type f -path '*/kicad-delivery/diagnostics/unqualified-macos-arm64.tar.gz' -print -quit)"
           receipt_path="$(find "$retained_root" -type f -path '*/kicad-delivery/receipt.json' -print -quit)"
           test -n "$archive_path" && test -n "$receipt_path"
           export KICAD_RETAINED_MAC_ARCHIVE="$archive_path"

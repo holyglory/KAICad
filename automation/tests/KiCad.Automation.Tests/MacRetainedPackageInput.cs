@@ -5,7 +5,11 @@ namespace KiCad.Automation.Tests;
 internal sealed record MacRetainedPackageInput(string RunId, string Attempt, string Commit, string Sha256)
 {
     public string ArtifactName => $"native-macos-arm64-{Commit}-{Attempt}";
-    public string ArchiveName => $"unqualified-macos-{Commit}.tar.gz";
+    // HostedDelivery retains a failed ARM package under the fixed diagnostic
+    // filename emitted by the architecture-specific build, rather than
+    // embedding the source commit in the archive name. The commit remains
+    // bound by the receipt and SHA-256 input fields.
+    public string ArchiveName => "unqualified-macos-arm64.tar.gz";
 
     public static MacRetainedPackageInput Parse(string value)
     {

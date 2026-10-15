@@ -28,20 +28,21 @@ public static class MacRequalifiedPreview
             throw new ArgumentException("Use an explicit qualification run and a valid preview version.");
         if (Directory.Exists(request.Output) || File.Exists(request.Output)) throw new IOException("Preserve the existing output.");
 
-        byte[] originalBytes = await HostedPreviewStaging.Metadata(Path.Combine(request.NativeCandidate, "receipt.json"), token);
+        string candidateDelivery = ResolveRetainedDeliveryRoot(request.NativeCandidate);
+        byte[] originalBytes = await HostedPreviewStaging.Metadata(Path.Combine(candidateDelivery, "receipt.json"), token);
         using JsonDocument original = JsonDocument.Parse(originalBytes);
-        string archiveName = "unqualified-macos-" + request.Commit + ".tar.gz";
+        const string archiveName = "unqualified-macos-arm64.tar.gz";
         JsonElement originalRoot = original.RootElement;
         ValidateOriginal(originalRoot, request.Commit, archiveName);
-        string archive = Path.Combine(request.NativeCandidate, "diagnostics", archiveName);
+        string archive = Path.Combine(candidateDelivery, "diagnostics", archiveName);
         var diagnostic = originalRoot.GetProperty("DiagnosticArtifacts").EnumerateArray()
             .Single(item => item.GetProperty("Path").GetString() == archiveName);
         long archiveBytes = diagnostic.GetProperty("Bytes").GetInt64();
         string archiveSha = diagnostic.GetProperty("Sha256").GetString()!;
         await HostedPreviewStaging.VerifyFile(archive, archiveBytes, archiveSha, token);
 
-        string macEvidence = Path.Combine(request.NativeCandidate, "mac", "evidence");
-        RequirePassingTests(await HostedPreviewStaging.Metadata(Path.Combine(macEvidence, "native-tests.xml"), token),
+        string macEvidence = Path.Combine(candidateDelivery, "mac", "evidence");
+        RequirePassingNativeTests(await HostedPreviewStaging.Metadata(Path.Combine(macEvidence, "native-tests.xml"), token),
             "qa_pcbnew_pns_detached_update");
 
         string qualificationEvidence = Path.Combine(request.Qualification, "mac-retained-package");
@@ -156,6 +157,67 @@ public static class MacRequalifiedPreview
             throw new InvalidDataException("The retained Mac test receipt is incomplete or failed.");
         if (requiredName is not null && !tests.Any(test => ((string?)test.Attribute("testName"))?.EndsWith(requiredName, StringComparison.Ordinal) == true))
             throw new InvalidDataException("The retained Mac test receipt omitted " + requiredName + ".");
+    }
+
+    /// <summary>
+    /// CTest's --output-junit receipt is JUnit XML, not a Visual Studio TRX.
+    /// Keep this parser separate from RequirePassingTests so a native receipt
+    /// cannot be accepted merely because it contains similarly named XML.
+    /// </summary>
+    internal static void RequirePassingNativeTests(byte[] bytes, string? requiredName = null)
+    {
+        using var stream = new MemoryStream(bytes);
+        using var reader = XmlReader.Create(stream, new()
+        {
+            DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null,
+            MaxCharactersInDocument = 32 * 1024 * 1024
+        });
+        XDocument document = XDocument.Load(reader);
+        XNamespace ns = document.Root?.Name.Namespace
+            ?? throw new InvalidDataException("A native CTest receipt has no root.");
+        XElement[] suites = document.Descendants(ns + "testsuite").ToArray();
+        XElement[] tests = document.Descendants(ns + "testcase").ToArray();
+        if (suites.Length == 0 || tests.Length == 0)
+            throw new InvalidDataException("A native CTest receipt has no test cases.");
+        foreach (XElement suite in suites)
+        {
+            int suiteTests = ParseCount(suite, "tests");
+            int failures = ParseCount(suite, "failures");
+            int errors = ParseCount(suite, "errors");
+            int skipped = ParseCount(suite, "disabled", optional: true);
+            int skippedCases = ParseCount(suite, "skipped", optional: true);
+            if (suiteTests <= 0 || failures != 0 || errors != 0 || skipped != 0 || skippedCases != 0
+                || suite.Descendants(ns + "testcase").Count() != suiteTests)
+                throw new InvalidDataException("The native CTest receipt is incomplete or failed.");
+        }
+        if (tests.Any(test => test.Element(ns + "failure") is not null
+            || test.Element(ns + "error") is not null
+            || test.Element(ns + "skipped") is not null
+            || ((string?)test.Attribute("status")) is { } status && status is not ("run" or "passed")
+            || ((string?)test.Attribute("result")) is { } result && result is not ("completed" or "passed")))
+            throw new InvalidDataException("The native CTest receipt is incomplete or failed.");
+        if (requiredName is not null && !tests.Any(test =>
+                ((string?)test.Attribute("name"))?.EndsWith(requiredName, StringComparison.Ordinal) == true))
+            throw new InvalidDataException("The native CTest receipt omitted " + requiredName + ".");
+
+        static int ParseCount(XElement suite, string name, bool optional = false)
+        {
+            string? value = (string?)suite.Attribute(name);
+            if (value is null && optional) return 0;
+            return value is not null && int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out int count)
+                ? count : throw new InvalidDataException("The native CTest receipt has an invalid " + name + " count.");
+        }
+    }
+
+    internal static string ResolveRetainedDeliveryRoot(string candidate)
+    {
+        if (!Path.IsPathFullyQualified(candidate))
+            throw new ArgumentException("The retained candidate root must be absolute.");
+        string direct = Path.Combine(candidate, "receipt.json");
+        if (File.Exists(direct)) return Path.GetFullPath(candidate);
+        string nestedRoot = Path.Combine(candidate, "kicad-delivery");
+        if (File.Exists(Path.Combine(nestedRoot, "receipt.json"))) return Path.GetFullPath(nestedRoot);
+        throw new FileNotFoundException("The retained Mac candidate lacks kicad-delivery/receipt.json.", direct);
     }
 
     private static async Task RunGitArchive(string repository, string commit, string destination, CancellationToken token)

@@ -60,4 +60,52 @@ public sealed class MacRequalifiedPreviewTests
         Assert.ThrowsExactly<InvalidDataException>(() => MacRequalifiedPreview.RequirePassingTests(
             Encoding.UTF8.GetBytes(passing.Replace("passed=\"1\"", "passed=\"0\"", StringComparison.Ordinal))));
     }
+
+    [TestMethod]
+    public void NativeCtestReceiptUsesJunitLayoutAndRejectsTrxOrFailures()
+    {
+        string junit = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <testsuites>
+              <testsuite name="native" tests="2" failures="0" errors="0" disabled="0" skipped="0">
+                <testcase name="qa_pcbnew_pns_detached_update" status="run" result="completed" />
+                <testcase name="qa_symbol_graphic_identity" status="run" result="completed" />
+              </testsuite>
+            </testsuites>
+            """;
+        MacRequalifiedPreview.RequirePassingNativeTests(
+            Encoding.UTF8.GetBytes(junit), "qa_pcbnew_pns_detached_update");
+
+        string failed = junit.Replace("failures=\"0\"", "failures=\"1\"")
+            .Replace("<testcase name=\"qa_symbol_graphic_identity\" status=\"run\" result=\"completed\" />",
+                "<testcase name=\"qa_symbol_graphic_identity\" status=\"run\" result=\"completed\"><failure /></testcase>",
+                StringComparison.Ordinal);
+        Assert.ThrowsExactly<InvalidDataException>(() =>
+            MacRequalifiedPreview.RequirePassingNativeTests(Encoding.UTF8.GetBytes(failed)));
+
+        string skipped = junit.Replace("skipped=\"0\"", "skipped=\"1\"");
+        Assert.ThrowsExactly<InvalidDataException>(() =>
+            MacRequalifiedPreview.RequirePassingNativeTests(Encoding.UTF8.GetBytes(skipped)));
+
+        const string trx = "<TestRun><Results><UnitTestResult testName=\"qa_pcbnew_pns_detached_update\" outcome=\"Passed\" /></Results></TestRun>";
+        Assert.ThrowsExactly<InvalidDataException>(() =>
+            MacRequalifiedPreview.RequirePassingNativeTests(Encoding.UTF8.GetBytes(trx)));
+    }
+
+    [TestMethod]
+    public void RetainedCandidateRootResolvesDownloadedKicadDeliveryLayout()
+    {
+        string root = Directory.CreateTempSubdirectory("mac-retained-layout-").FullName;
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root, "kicad-delivery"));
+            File.WriteAllText(Path.Combine(root, "kicad-delivery", "receipt.json"), "{}");
+            Assert.AreEqual(Path.Combine(root, "kicad-delivery"),
+                MacRequalifiedPreview.ResolveRetainedDeliveryRoot(root));
+
+            File.WriteAllText(Path.Combine(root, "receipt.json"), "{}");
+            Assert.AreEqual(Path.GetFullPath(root), MacRequalifiedPreview.ResolveRetainedDeliveryRoot(root));
+        }
+        finally { Directory.Delete(root, true); }
+    }
 }

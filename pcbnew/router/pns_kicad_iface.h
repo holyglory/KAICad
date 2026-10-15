@@ -124,6 +124,10 @@ public:
     std::vector<LENGTH_DELAY_CALCULATION_ITEM> GetLengthDelayCalculationItems( const PNS::ITEM_SET& aLine,
                                                                                const NETCLASS*      aNetClass ) const;
 
+    // Router branches can retain raw pointers after the corresponding native item has been
+    // removed from the board. Probe the board's pointer index before touching such a pointer.
+    bool IsLiveBoardItem( const BOARD_ITEM* aItem ) const;
+
 protected:
     PNS_PCBNEW_RULE_RESOLVER* m_ruleResolver;
     PNS::DEBUG_DECORATOR* m_debugDecorator;

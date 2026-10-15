@@ -1590,6 +1590,14 @@ PNS_KICAD_IFACE_BASE::PNS_KICAD_IFACE_BASE()
 }
 
 
+bool PNS_KICAD_IFACE_BASE::IsLiveBoardItem( const BOARD_ITEM* aItem ) const
+{
+    // BOARD::IsItemIndexedById() only hashes the pointer key. It remains safe when a router
+    // branch carries an address after the native item has been removed and freed.
+    return m_board && aItem && m_board->IsItemIndexedById( aItem );
+}
+
+
 PNS_KICAD_IFACE::PNS_KICAD_IFACE()
 {
     m_tool = nullptr;
@@ -2593,9 +2601,15 @@ void PNS_KICAD_IFACE::DisplayRatline( const SHAPE_LINE_CHAIN& aRatline, PNS::NET
 
 void PNS_KICAD_IFACE::HideItem( PNS::ITEM* aItem )
 {
+    if( !aItem )
+        return;
+
     BOARD_ITEM* parent = aItem->Parent();
 
-    if( parent )
+    if( !IsLiveBoardItem( parent ) )
+        parent = aItem->GetSourceItem();
+
+    if( IsLiveBoardItem( parent ) )
     {
         if( m_view->IsVisible( parent ) )
             m_hiddenItems.insert( parent );
@@ -2606,7 +2620,7 @@ void PNS_KICAD_IFACE::HideItem( PNS::ITEM* aItem )
         for( ZONE* td : m_board->Zones() )
         {
             if( td->IsTeardropArea()
-                && td->GetBoundingBox().Intersects( aItem->Parent()->GetBoundingBox() )
+                && td->GetBoundingBox().Intersects( parent->GetBoundingBox() )
                 && td->Outline()->Collide( aItem->Shape( td->GetLayer() ) ) )
             {
                 m_view->SetVisible( td, false );
@@ -2624,7 +2638,18 @@ void PNS_KICAD_IFACE_BASE::RemoveItem( PNS::ITEM* aItem )
 
 void PNS_KICAD_IFACE::RemoveItem( PNS::ITEM* aItem )
 {
+    if( !aItem )
+        return;
+
     BOARD_ITEM* parent = aItem->Parent();
+
+    // Prefer a direct parent while it is attached. If a preview branch retained a removed
+    // parent, use the live source item without dereferencing the stale pointer.
+    if( !IsLiveBoardItem( parent ) )
+        parent = aItem->GetSourceItem();
+
+    if( !IsLiveBoardItem( parent ) )
+        return;
 
     if( aItem->OfKind( PNS::ITEM::SOLID_T ) && parent->Type() == PCB_PAD_T )
     {
@@ -2724,7 +2749,14 @@ std::unique_ptr<BOARD_CONNECTED_ITEM> PNS_KICAD_IFACE::MaterializeRouteItem(
     // Preview branch clones can detach the direct parent while retaining the
     // original board object as their source item. Preserve that native UUID
     // for replacement updates instead of rejecting an otherwise valid via.
-    BOARD_ITEM* source = aItem->Parent() ? aItem->Parent() : aItem->GetSourceItem();
+    BOARD_ITEM* source = aItem->Parent();
+
+    if( !IsLiveBoardItem( source ) )
+        source = aItem->GetSourceItem();
+
+    if( source && !IsLiveBoardItem( source ) )
+        return nullptr;
+
     if( aPreserveIdentity && ( !source || source->Type() != type ) )
         return nullptr;
 
@@ -2769,9 +2801,12 @@ void PNS_KICAD_IFACE::modifyBoardItem( PNS::ITEM* aItem, BOARD_COMMIT& aCommit )
     // retaining the live board object as its source item.  Resolve the native
     // target before any type check or commit operation; a branch without either
     // pointer is auxiliary geometry and cannot be committed safely.
-    BOARD_ITEM* original = aItem->Parent() ? aItem->Parent() : aItem->GetSourceItem();
+    BOARD_ITEM* original = aItem->Parent();
 
-    if( !original )
+    if( !IsLiveBoardItem( original ) )
+        original = aItem->GetSourceItem();
+
+    if( !IsLiveBoardItem( original ) )
         return;
 
     if( auto materialized = MaterializeRouteItem( aItem, true ) )
@@ -2802,12 +2837,28 @@ void PNS_KICAD_IFACE_BASE::AddItem( PNS::ITEM* aItem )
 
 BOARD_CONNECTED_ITEM* PNS_KICAD_IFACE::createBoardItem( PNS::ITEM* aItem )
 {
+    if( !aItem )
+        return nullptr;
+
     if( aItem->Kind() == PNS::ITEM::SOLID_T )
     {
-        PAD* pad = static_cast<PAD*>( aItem->Parent() );
+        BOARD_ITEM* parent = aItem->Parent();
+
+        if( !IsLiveBoardItem( parent ) || parent->Type() != PCB_PAD_T )
+            return nullptr;
+
+        PAD* pad = static_cast<PAD*>( parent );
         m_fpOffsets[pad].p_new = static_cast<PNS::SOLID*>( aItem )->Pos();
         return nullptr;
     }
+    BOARD_ITEM* source = aItem->GetSourceItem();
+
+    // A stale source is only grouping metadata for a newly-created item. Drop it rather than
+    // dereferencing it; a live direct parent, when present, remains authoritative in the
+    // materializer below.
+    if( source && !IsLiveBoardItem( source ) )
+        source = nullptr;
+
     auto materialized = MaterializeRouteItem( aItem, false );
     if( !materialized )
         return nullptr;
@@ -2818,7 +2869,7 @@ BOARD_CONNECTED_ITEM* PNS_KICAD_IFACE::createBoardItem( PNS::ITEM* aItem )
         net->SetParent( m_board );
         net->SetNetClass( m_board->GetDesignSettings().m_NetSettings->GetDefaultNetclass() );
     }
-    if( BOARD_ITEM* source = aItem->GetSourceItem() )
+    if( source )
     {
         if( !m_itemGroups.contains( source ) )
             if( EDA_GROUP* group = source->GetParentGroup() )
@@ -2851,8 +2902,15 @@ void PNS_KICAD_IFACE::applyFootprintOffsets( BOARD_COMMIT& aCommit )
 
     for( const auto& [ pad, fpOffset ] : m_fpOffsets )
     {
+        if( !IsLiveBoardItem( pad ) )
+            continue;
+
         VECTOR2I   offset = fpOffset.p_new - fpOffset.p_old;
         FOOTPRINT* footprint = pad->GetParentFootprint();
+
+        if( !IsLiveBoardItem( footprint ) )
+            continue;
+
         VECTOR2I   p_orig = footprint->GetPosition();
         VECTOR2I   p_new = p_orig + offset;
 

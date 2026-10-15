@@ -805,6 +805,35 @@ BOOST_AUTO_TEST_CASE( PNSDetachedRouteUpdateUsesSourceAndRejectsOrphans )
         BOOST_CHECK( nativeTrack->GetCustomProperties() == nativeProperties );
     }
 
+    // A branch can keep a direct-parent address after that native item has been removed and
+    // destroyed. The source item remains the only valid identity and must be selected without
+    // dereferencing the stale parent pointer.
+    {
+        auto* removedTrack = new PCB_TRACK( &board );
+        removedTrack->SetStart( VECTOR2I( 100000, 500000 ) );
+        removedTrack->SetEnd( VECTOR2I( 300000, 500000 ) );
+        removedTrack->SetWidth( 10000 );
+        removedTrack->SetLayer( F_Cu );
+        board.Add( removedTrack );
+
+        PNS::SEGMENT detachedAfterRemoval( SEG( VECTOR2I( 100000, 100000 ), VECTOR2I( 550000, 100000 ) ), nullptr );
+        detachedAfterRemoval.SetWidth( 10000 );
+        detachedAfterRemoval.SetLayer( F_Cu );
+        detachedAfterRemoval.SetParent( removedTrack );
+        detachedAfterRemoval.SetSourceItem( nativeTrack );
+
+        board.Remove( removedTrack );
+        delete removedTrack;
+
+        BOARD_COMMIT staleParentCommit( tool );
+        iface.modifyBoardItem( &detachedAfterRemoval, staleParentCommit );
+
+        BOOST_CHECK_EQUAL( staleParentCommit.GetStatus( nativeTrack ), CHT_MODIFY );
+        BOOST_CHECK_EQUAL( nativeTrack->GetEnd(), VECTOR2I( 550000, 100000 ) );
+        staleParentCommit.Revert();
+        BOOST_CHECK_EQUAL( nativeTrack->GetEnd(), nativeEnd );
+    }
+
     // Null and source-less router items have no native object to mutate and
     // must be ignored safely without staging a bogus transaction entry.
     BOARD_COMMIT emptyCommit( tool );

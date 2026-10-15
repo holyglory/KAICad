@@ -15,7 +15,7 @@ public static class WindowsUpdateRecoveryCommand
                 throw new ArgumentException("Use --recover-update --installation ABSOLUTE_ROOT --operation UUID --attempt UUID.");
             var result = await WindowsUpdateRecovery.RecoverAsync(args[2], operation, attempt, token);
             await output.WriteLineAsync(JsonSerializer.Serialize(new { schemaVersion = 1, result }, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
-            return result.NativeEditorRestarted || result.Reused || result.Status == "original_running" ? 0 : 1;
+            return ExitCode(result);
         }
         catch (Exception error) when (error is IOException or InvalidDataException or ArgumentException or JsonException
             or UnauthorizedAccessException or PlatformNotSupportedException or OperationCanceledException)
@@ -27,4 +27,7 @@ public static class WindowsUpdateRecoveryCommand
         }
         finally { await output.FlushAsync(CancellationToken.None); }
     }
+
+    internal static int ExitCode(WindowsUpdateRecoveryResult result) =>
+        result.NativeEditorRestarted || result.Status is "restored" or "original_running" or "attempt_already_recorded" ? 0 : 1;
 }

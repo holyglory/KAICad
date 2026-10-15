@@ -70,4 +70,20 @@ public sealed class UpdateRecoveryTests
         }
         finally { Directory.Delete(root, recursive: true); }
     }
+
+    [TestMethod]
+    [DataRow("restored", false, false, 0)]
+    [DataRow("original_running", false, false, 0)]
+    [DataRow("attempt_already_recorded", false, true, 0)]
+    [DataRow("attempt_not_current", false, true, 1)]
+    [DataRow("operation_unavailable", false, true, 1)]
+    [DataRow("launch_failed", false, false, 1)]
+    [DataRow("unexpected", true, false, 0)]
+    public void RecoveryCommandExitCodeDoesNotTreatStaleAttemptsAsSuccess(
+        string status, bool nativeEditorRestarted, bool reused, int expected)
+    {
+        var result = new WindowsUpdateRecoveryResult(status, Guid.NewGuid(), Guid.NewGuid(),
+            NativeEditorRestarted: nativeEditorRestarted, Reused: reused);
+        Assert.AreEqual(expected, WindowsUpdateRecoveryCommand.ExitCode(result));
+    }
 }

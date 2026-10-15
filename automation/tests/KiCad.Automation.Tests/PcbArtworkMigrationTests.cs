@@ -90,4 +90,112 @@ public sealed class PcbArtworkMigrationTests
             Directory.Delete(archiveRoot, recursive: true);
         }
     }
+
+    [TestMethod]
+    public void CompensatingRollbackBindsDeleteToCommittedAfterStateAndStableOperation()
+    {
+        DocumentSpecifier document = new()
+        {
+            Type = DocumentType.DoctypePcb,
+            BoardFilename = "board.kicad_pcb",
+            Project = new ProjectSpecifier { Name = "artwork", Path = "/tmp/artwork" }
+        };
+        string epoch = Guid.NewGuid().ToString("D");
+        string operation = Guid.NewGuid().ToString("D");
+        string firstId = Guid.NewGuid().ToString("D");
+        string secondId = Guid.NewGuid().ToString("D");
+        var after = new DocumentLifecycleState
+        {
+            Document = document.Clone(),
+            Scope = DocumentLifecycleScope.DlsPcb,
+            ProcessEpoch = epoch,
+            NativeIdentity = Guid.NewGuid().ToString("D"),
+            Revision = new() { Epoch = Guid.NewGuid().ToString("D"), Sequence = 8 },
+            ProjectSettingsIncluded = true,
+            DiskBaselineChecked = true,
+            StateSha256 = new string('b', 64)
+        };
+
+        string rollbackId = PcbArtworkTools.CompensatingRollbackOperationId(
+            operation, [secondId, firstId]);
+        CheckedPcbItemTransaction request = PcbArtworkTools.BuildCompensatingDeleteRequest(
+            after, [secondId, firstId], rollbackId);
+
+        Assert.AreEqual(rollbackId, PcbArtworkTools.CompensatingRollbackOperationId(
+            operation, [firstId, secondId]));
+        Assert.AreEqual(rollbackId, request.OperationId);
+        Assert.AreEqual(request.ExpectedState, after);
+        Assert.AreEqual(epoch, request.ProcessEpoch);
+        Assert.AreEqual(PcbItemOperation.ActionOneofCase.Delete, request.Operations[0].ActionCase);
+        CollectionAssert.AreEquivalent(new[] { firstId, secondId },
+            request.Operations[0].Delete.ItemIds.Select(id => id.Value).ToArray());
+        Assert.AreEqual(document, request.Operations[0].Delete.Header.Document);
+    }
+
+    [TestMethod]
+    public void CompensatingRollbackRequiresExactDeletedIdsAndRestoredCheckpoint()
+    {
+        DocumentSpecifier document = new()
+        {
+            Type = DocumentType.DoctypePcb,
+            BoardFilename = "board.kicad_pcb",
+            Project = new ProjectSpecifier { Name = "artwork", Path = "/tmp/artwork" }
+        };
+        string epoch = Guid.NewGuid().ToString("D");
+        string identity = Guid.NewGuid().ToString("D");
+        string revisionEpoch = Guid.NewGuid().ToString("D");
+        string firstId = Guid.NewGuid().ToString("D");
+        string secondId = Guid.NewGuid().ToString("D");
+        var before = new DocumentLifecycleState
+        {
+            Document = document.Clone(),
+            Scope = DocumentLifecycleScope.DlsPcb,
+            ProcessEpoch = epoch,
+            NativeIdentity = identity,
+            Revision = new() { Epoch = revisionEpoch, Sequence = 4 },
+            ProjectSettingsIncluded = true,
+            DiskBaselineChecked = true,
+            StateSha256 = new string('a', 64)
+        };
+        var committedAfter = before.Clone();
+        committedAfter.Revision.Sequence = 5;
+        committedAfter.StateSha256 = new string('b', 64);
+        string rollbackId = PcbArtworkTools.CompensatingRollbackOperationId(
+            Guid.NewGuid().ToString("D"), [firstId, secondId]);
+        CheckedPcbItemTransaction request = PcbArtworkTools.BuildCompensatingDeleteRequest(
+            committedAfter, [firstId, secondId], rollbackId);
+        var receipt = new CheckedPcbItemTransactionReceipt
+        {
+            Document = document.Clone(),
+            ProcessEpoch = epoch,
+            OperationId = rollbackId,
+            State = CheckedPcbItemTransactionState.CpbtsCompleted,
+            RequestVerified = true,
+            ObservedBefore = committedAfter.Clone(),
+            ObservedAfter = before.Clone()
+        };
+        receipt.Results.Add(new PcbItemOperationResult
+        {
+            Delete = new DeleteItemsResponse
+            {
+                Status = ItemRequestStatus.IrsOk,
+                DeletedItems =
+                {
+                    new ItemDeletionResult { Id = new() { Value = secondId }, Status = ItemDeletionStatus.IdsOk },
+                    new ItemDeletionResult { Id = new() { Value = firstId }, Status = ItemDeletionStatus.IdsOk }
+                }
+            }
+        });
+        var outcome = new PcbCheckedItemDispatch.Outcome("instance", request, receipt,
+            NativeReceiptAvailable: true);
+
+        Assert.IsTrue(PcbArtworkTools.CompensatingRollbackConfirmed(before, outcome,
+            [firstId, secondId]));
+        Assert.IsFalse(PcbArtworkTools.CompensatingRollbackConfirmed(before, outcome,
+            [firstId]));
+
+        receipt.ObservedAfter.StateSha256 = new string('c', 64);
+        Assert.IsFalse(PcbArtworkTools.CompensatingRollbackConfirmed(before, outcome,
+            [firstId, secondId]));
+    }
 }

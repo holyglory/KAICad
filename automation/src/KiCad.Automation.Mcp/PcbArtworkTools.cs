@@ -20,8 +20,20 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
 {
     private static readonly SemaphoreSlim Gate = new(1, 1);
 
+    internal sealed record CompensatingRollback(
+        string OperationId,
+        bool Attempted,
+        bool Confirmed,
+        PcbCheckedItemDispatch.Outcome? Outcome,
+        string? ErrorCode,
+        string? ErrorMessage)
+    {
+        internal static CompensatingRollback NotAttempted =>
+            new(string.Empty, false, false, null, null, null);
+    }
+
     [McpServerTool(Name = "kicad_pcb_svg_artwork_commit"),
-     Description("Commit a validated strict SVG asset as authoritative non-copper PCB BoardGraphicShape geometry. The source bytes are preflighted with an atomic publish and readback hash under the explicit repository root, exact SHA-256 and sourceKind are recorded on every object, and the native mutation is lifecycle-checked and undoable. Board geometry and source archival remain separate persistence boundaries, so provenanceAtomic stays false. sourceKind may be imagegen, human or generated; this tool never creates Track, Arc or Via copper and does not claim electrical or manufacturing validity."),
+     Description("Commit a validated strict SVG asset as authoritative non-copper PCB BoardGraphicShape geometry. The source bytes are preflighted with an atomic publish and readback hash under the explicit repository root, exact SHA-256 and sourceKind are recorded on every object, and the native mutation is lifecycle-checked and undoable. Board geometry and source archival remain separate persistence boundaries; a verified compensating delete reports atomic recovery when a post-commit archive mismatch is detected. sourceKind may be imagegen, human or generated; this tool never creates Track, Arc or Via copper and does not claim electrical or manufacturing validity."),
      KiCadCapability("pcb-artwork", "compiled-mcp plus native-board-api", "strict SVG, source archive and SHA-256 provenance, non-copper vector geometry, lifecycle checkpoint, operation UUID"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp", "McpProcessTests.InitializeDiscoverAndCallOverStdio")]
     public Task<CallToolResult> Commit(string instanceId, string documentJson, string expectedStateJson,
@@ -59,13 +71,15 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
             Encoding.UTF8.GetBytes(svg), actualSha256);
         string archiveBinding = ArtworkSourceArchive.TransactionBinding(archive);
         CreateItems create = new() { Header = new() { Document = document } };
+        List<string> createdIds = [];
         for (int index = 0; index < parsed.Segments.Length; index++)
         {
             var segment = parsed.Segments[index];
             Vector2 start = Point(segment.StartX, segment.StartY, x, y, scale), end = Point(segment.EndX, segment.EndY, x, y, scale);
+            string itemId = DeterministicId(assetId, actualSha256, index);
             var shape = new BoardGraphicShape
             {
-                Id = new() { Value = DeterministicId(assetId, actualSha256, index) }, Layer = boardLayer,
+                Id = new() { Value = itemId }, Layer = boardLayer,
                 Shape = new GraphicShape { Attributes = new() { Stroke = new() { Width = new() { ValueNm = strokeWidthNm } } }, Segment = new() { Start = start, End = end } }
             };
             shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.artwork.id", Value = assetId });
@@ -77,6 +91,7 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
             shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.artwork.role", Value = "authoritative-vector" });
             shape.CustomProperties.Add(new CustomProperty { Key = "kicad.ai.artwork.segment_index", Value = index.ToString() });
             create.Items.Add(Any.Pack(shape));
+            createdIds.Add(itemId);
         }
         string fingerprint = PcbArtworkReceiptStore.Fingerprint(
             "pcb-svg-artwork\n" + instanceId + "\n" + BoardJson.Formatter.Format(create)
@@ -142,19 +157,33 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
                         reconciledArchiveVerified = false;
                         reconciledArchiveError = error;
                     }
+                    CompensatingRollback reconciledCompensation = !reconciledArchiveVerified && inspected.Completed
+                        ? await TryCompensatingRollbackAsync(registry, instanceId, expected, inspected.Receipt!,
+                            createdIds, operationId, CancellationToken.None)
+                        : CompensatingRollback.NotAttempted;
                     CallToolResult reconciled = ArtworkMutationData(inspected, document, operationId,
                         assetId, sourceKind, actualSha256, archive, boardLayer, create.Items.Count,
-                        archiveBinding, reconciledArchiveVerified, reconciledArchiveError, durableReconciled: true);
+                        archiveBinding, reconciledArchiveVerified, reconciledArchiveError,
+                        reconciledCompensation, durableReconciled: true);
                     if (inspected.UntrustedReceipt)
                     {
                         receiptStore.WriteUnknown(instanceId, expected.ProcessEpoch, operationId,
                             fingerprint, archive, inspected.ErrorCode ?? "invalid_checked_pcb_receipt",
                             inspected.ErrorMessage ?? "The native PCB artwork receipt was invalid and cannot be trusted.");
                     }
+                    else if (!reconciledArchiveVerified && inspected.Completed && !reconciledCompensation.Confirmed)
+                    {
+                        receiptStore.WriteUnknown(instanceId, expected.ProcessEpoch, operationId,
+                            fingerprint, archive, reconciledCompensation.ErrorCode ?? reconciledArchiveError?.Code
+                                ?? "pcb_artwork_archive_mismatch",
+                            reconciledCompensation.ErrorMessage ?? reconciledArchiveError?.Message
+                                ?? "The native PCB artwork committed but compensating rollback was not confirmed; inspect the board before retrying.");
+                    }
                     else if (inspected.NativeReceiptAvailable)
                     {
                         receiptStore.WriteTerminal(instanceId, expected.ProcessEpoch, operationId, fingerprint,
-                            archive, inspected.Receipt.State.ToString(), reconciledArchiveVerified, reconciled);
+                            archive, reconciledCompensation.Confirmed ? "compensated" : inspected.Receipt.State.ToString(),
+                            reconciledArchiveVerified, reconciled);
                     }
                     return reconciled;
                 }
@@ -209,19 +238,30 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
                 archiveVerified = false;
                 archiveError = error;
             }
+            CompensatingRollback compensation = !archiveVerified && outcome.Completed
+                ? await TryCompensatingRollbackAsync(registry, instanceId, expected, outcome.Receipt!,
+                    createdIds, operationId, CancellationToken.None)
+                : CompensatingRollback.NotAttempted;
             CallToolResult result = ArtworkMutationData(outcome, document, operationId, assetId,
                 sourceKind, actualSha256, archive, boardLayer, create.Items.Count,
-                archiveBinding, archiveVerified, archiveError, durableReconciled: false);
+                archiveBinding, archiveVerified, archiveError, compensation, durableReconciled: false);
             if (outcome.UntrustedReceipt)
             {
                 receiptStore.WriteUnknown(instanceId, expected.ProcessEpoch, operationId, fingerprint,
                     archive, outcome.ErrorCode ?? "invalid_checked_pcb_receipt",
                     outcome.ErrorMessage ?? "The native PCB artwork receipt was invalid and cannot be trusted.");
             }
+            else if (!archiveVerified && outcome.Completed && !compensation.Confirmed)
+            {
+                receiptStore.WriteUnknown(instanceId, expected.ProcessEpoch, operationId,
+                    fingerprint, archive, compensation.ErrorCode ?? archiveError?.Code ?? "pcb_artwork_archive_mismatch",
+                    compensation.ErrorMessage ?? archiveError?.Message
+                        ?? "The native PCB artwork committed but compensating rollback was not confirmed; inspect the board before retrying.");
+            }
             else if (outcome.NativeReceiptAvailable)
             {
                 receiptStore.WriteTerminal(instanceId, expected.ProcessEpoch, operationId, fingerprint,
-                    archive, outcome.Receipt?.State.ToString() ?? "native-result",
+                    archive, compensation.Confirmed ? "compensated" : outcome.Receipt?.State.ToString() ?? "native-result",
                     archiveVerified, result);
             }
             else if (ProvenPreNativeRejection(outcome))
@@ -276,6 +316,7 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
         string archiveBinding,
         bool archiveVerified,
         AutomationException? archiveError,
+        CompensatingRollback compensation,
         bool durableReconciled)
     {
         CheckedPcbItemTransactionReceipt? receipt = outcome.Receipt;
@@ -293,7 +334,8 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
             && receipt.Results[0].ResultCase == PcbItemOperationResult.ResultOneofCase.Create)
             response = JsonDocument.Parse(BoardJson.Formatter.Format(receipt.Results[0].Create)).RootElement.Clone();
 
-        string operationOutcome = success ? "completed"
+        bool compensated = compensation.Confirmed;
+        string operationOutcome = compensated ? "compensated" : success ? "completed"
             : receipt is null ? "not_submitted" : receipt.State.ToString();
         JsonElement nativeResult = JsonSerializer.SerializeToElement(new
         {
@@ -334,7 +376,12 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
                 atomicWrite = sourceArchive.AtomicWrite,
                 boardTransactionJoined = false,
                 readbackVerified = archiveVerified,
-                mismatchCode = archiveError?.Code
+                mismatchCode = archiveError?.Code,
+                compensatingRollbackAttempted = compensation.Attempted,
+                compensatingRollbackConfirmed = compensation.Confirmed,
+                compensatingRollbackOperationId = compensation.OperationId.Length == 0 ? null : compensation.OperationId,
+                compensatingRollbackErrorCode = compensation.ErrorCode,
+                compensatingRollbackErrorMessage = compensation.ErrorMessage
             },
             layer = boardLayer.ToString(),
             segmentCount,
@@ -345,7 +392,7 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
             receipt = receiptJson,
             nativeReceipt = receiptJson,
             nativeResult,
-            authoritativeVector = success && archiveVerified,
+            authoritativeVector = success && archiveVerified && !compensated,
             electricalValidation = false,
             manufacturabilityValidation = false,
             mutationConfirmed = success,
@@ -360,12 +407,17 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
             // item transaction. It remains a separate persistence boundary.
             archivePersisted = sourceArchive.Persisted,
             archiveAtomicWrite = sourceArchive.AtomicWrite,
-            archiveNativeAtomic = false,
-            provenanceAtomic = false,
+            archiveNativeAtomic = compensated,
+            provenanceAtomic = compensated,
             archiveReadbackVerified = archiveVerified,
-            errorCode = archiveError?.Code ?? (success ? null : outcome.ErrorCode),
-            errorMessage = archiveError?.Message ?? (success ? null : outcome.ErrorMessage),
-            nativeMutationConfirmed = success
+            errorCode = compensation.ErrorCode ?? archiveError?.Code ?? (success ? null : outcome.ErrorCode),
+            errorMessage = compensation.ErrorMessage ?? archiveError?.Message ?? (success ? null : outcome.ErrorMessage),
+            nativeMutationConfirmed = success && !compensated,
+            compensatingRollbackAttempted = compensation.Attempted,
+            compensatingRollbackConfirmed = compensation.Confirmed,
+            compensatingRollbackOperationId = compensation.OperationId.Length == 0 ? null : compensation.OperationId,
+            compensatingRollbackReceipt = compensation.Outcome?.Receipt is { } rollbackReceipt
+                ? JsonDocument.Parse(SchematicJson.Formatter.Format(rollbackReceipt)).RootElement.Clone() : (JsonElement?)null
         });
         return new CallToolResult
         {
@@ -373,6 +425,115 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
             StructuredContent = structured,
             Content = [new TextContentBlock { Text = structured.GetRawText() }]
         };
+    }
+
+    /// <summary>
+    /// Builds the exact checked delete used to compensate a committed artwork
+    /// create when the independent source archive no longer verifies. The
+    /// native after-state is the admission checkpoint; no live reread is used.
+    /// </summary>
+    internal static CheckedPcbItemTransaction BuildCompensatingDeleteRequest(
+        DocumentLifecycleState expectedAfter, IReadOnlyCollection<string> itemIds, string operationId)
+    {
+        if (expectedAfter is null || expectedAfter.Document is null
+            || expectedAfter.Scope != DocumentLifecycleScope.DlsPcb
+            || string.IsNullOrWhiteSpace(expectedAfter.ProcessEpoch))
+            throw new AutomationException("invalid_pcb_artwork_rollback", "A compensating rollback requires the committed PCB after-state.");
+        ValidateOperation(operationId);
+        string[] ids = itemIds?.Distinct(StringComparer.Ordinal).ToArray()
+            ?? throw new AutomationException("invalid_pcb_artwork_rollback", "A compensating rollback requires created item identities.");
+        if (ids.Length == 0 || ids.Any(id => !Guid.TryParseExact(id, "D", out var value) || value == Guid.Empty || value.ToString("D") != id))
+            throw new AutomationException("invalid_pcb_artwork_rollback", "A compensating rollback requires distinct canonical item UUIDs.");
+        var delete = new DeleteItems { Header = new() { Document = expectedAfter.Document.Clone() } };
+        delete.ItemIds.Add(ids.Select(id => new KIID { Value = id }));
+        var request = new CheckedPcbItemTransaction
+        {
+            ExpectedState = expectedAfter.Clone(),
+            ProcessEpoch = expectedAfter.ProcessEpoch,
+            OperationId = operationId,
+            MaximumResultBytes = 4 * 1024 * 1024,
+            Description = "Compensating rollback for PCB artwork archive mismatch"
+        };
+        request.Operations.Add(new PcbItemOperation { Delete = delete });
+        return request;
+    }
+
+    internal static string CompensatingRollbackOperationId(string operationId,
+        IReadOnlyCollection<string> itemIds)
+    {
+        ValidateOperation(operationId);
+        string[] ids = itemIds?.Distinct(StringComparer.Ordinal).OrderBy(id => id, StringComparer.Ordinal).ToArray()
+            ?? throw new AutomationException("invalid_pcb_artwork_rollback", "A compensating rollback requires created item identities.");
+        if (ids.Length == 0)
+            throw new AutomationException("invalid_pcb_artwork_rollback", "A compensating rollback requires created item identities.");
+        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(
+            "kicad.ai.pcb-artwork.compensating-rollback.v1\n" + operationId + "\n" + string.Join("\n", ids)));
+        Guid value = new(hash.AsSpan(0, 16));
+        if (value == Guid.Empty) value = new(hash.AsSpan(16, 16));
+        return value.ToString("D");
+    }
+
+    internal static bool CompensatingRollbackConfirmed(
+        DocumentLifecycleState expectedBefore,
+        PcbCheckedItemDispatch.Outcome outcome,
+        IReadOnlyCollection<string> itemIds)
+    {
+        CheckedPcbItemTransactionReceipt? receipt = outcome.Receipt;
+        if (!outcome.Completed || receipt?.ObservedAfter is null || expectedBefore is null
+            || expectedBefore.Revision is null || receipt.Results.Count != 1
+            || receipt.Results[0].ResultCase != PcbItemOperationResult.ResultOneofCase.Delete)
+            return false;
+        string[] expectedIds = itemIds.Distinct(StringComparer.Ordinal).OrderBy(id => id, StringComparer.Ordinal).ToArray();
+        DeleteItemsResponse deleted = receipt.Results[0].Delete;
+        string[] actualIds = deleted.DeletedItems
+            .Where(item => item.Id is not null)
+            .Select(item => item.Id.Value)
+            .OrderBy(id => id, StringComparer.Ordinal).ToArray();
+        if (!expectedIds.SequenceEqual(actualIds, StringComparer.Ordinal)) return false;
+        DocumentLifecycleState restored = receipt.ObservedAfter;
+        if (restored.ProcessEpoch != expectedBefore.ProcessEpoch
+            || restored.StateSha256 != expectedBefore.StateSha256
+            || restored.NativeIdentity != expectedBefore.NativeIdentity
+            || restored.Revision is null
+            || restored.Revision.Epoch != expectedBefore.Revision.Epoch)
+            return false;
+        DocumentLifecycleState normalizedRestored = restored.Clone();
+        DocumentLifecycleState normalizedBefore = expectedBefore.Clone();
+        normalizedRestored.Revision.Sequence = 0;
+        normalizedBefore.Revision.Sequence = 0;
+        return normalizedRestored.Equals(normalizedBefore);
+    }
+
+    internal static async Task<CompensatingRollback> TryCompensatingRollbackAsync(
+        InstanceRegistry registry,
+        string instanceId,
+        DocumentLifecycleState expectedBefore,
+        CheckedPcbItemTransactionReceipt committedReceipt,
+        IReadOnlyCollection<string> itemIds,
+        string originalOperationId,
+        CancellationToken cancellationToken)
+    {
+        if (committedReceipt is null || committedReceipt.State != CheckedPcbItemTransactionState.CpbtsCompleted
+            || committedReceipt.ObservedAfter is null)
+            return CompensatingRollback.NotAttempted;
+        string rollbackOperationId = CompensatingRollbackOperationId(originalOperationId, itemIds);
+        try
+        {
+            CheckedPcbItemTransaction request = BuildCompensatingDeleteRequest(
+                committedReceipt.ObservedAfter, itemIds, rollbackOperationId);
+            PcbCheckedItemDispatch.Outcome outcome = await PcbCheckedItemDispatch.ApplyAsync(
+                registry, instanceId, request, cancellationToken);
+            bool confirmed = CompensatingRollbackConfirmed(expectedBefore, outcome, itemIds);
+            return new(rollbackOperationId, true, confirmed, outcome,
+                confirmed ? null : outcome.ErrorCode ?? "compensating_rollback_unconfirmed",
+                confirmed ? null : outcome.ErrorMessage
+                    ?? "The compensating PCB artwork delete did not prove restoration of the original checkpoint.");
+        }
+        catch (Exception error) when (error is AutomationException or NativeApiException or NngException
+            or IOException or InvalidProtocolBufferException or InvalidJsonException)
+        {
+            return new(rollbackOperationId, true, false, null, "compensating_rollback_failed", error.Message);
+        }
     }
 
     [McpServerTool(Name = "kicad_pcb_svg_artwork_receipt", ReadOnly = true),

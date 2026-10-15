@@ -26,7 +26,7 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
     private static readonly SemaphoreSlim BoardGate = new(1, 1);
 
     [McpServerTool(Name = "kicad_artwork_raster_project", ReadOnly = false),
-     Description("Project one accepted KiCad raster trace proposal into an existing symbol library, a cloned PCB footprint, a non-copper PCB board graphic, or a checked schematic drawing. Filled pieces remain filled polygons; signed contour topology stays in a bounded manifest. Existing pins, pads, fields and metadata are retained. Human/generated source attribution remains compatible; imagegen requires a typed provenance envelope bound to the exact local bytes. Board source archives are preflighted with an atomic publish and readback hash before the item transaction, while board geometry and archival remain separate persistence boundaries and provenanceAtomic stays false. Manifest validation does not authenticate an external ImageGen service."),
+     Description("Project one accepted KiCad raster trace proposal into an existing symbol library, a cloned PCB footprint, a non-copper PCB board graphic, or a checked schematic drawing. Filled pieces remain filled polygons; signed contour topology stays in a bounded manifest. Existing pins, pads, fields and metadata are retained. Human/generated source attribution remains compatible; imagegen requires a typed provenance envelope bound to the exact local bytes. Board source archives are preflighted with an atomic publish and readback hash before the item transaction, while board geometry and archival remain separate persistence boundaries; a verified compensating delete reports atomic recovery after a post-commit archive mismatch. Manifest validation does not authenticate an external ImageGen service."),
      KiCadCapability("generated-artwork-cad", "typed-projection-adapters", "accepted raster proposal, exact source SHA, deterministic filled polygons, target lifecycle admission and provenance"),
      KiCadVerification(KiCadVerificationLevel.McpNativeJourney, "NativeSessionTests.NativePcbItemsAreCreatedAndUpdatedThroughMcp", "NativeSessionTests.NativeSymbolLibraryReadbackUsesMcp")]
     public Task<CallToolResult> Project(string instanceId, RasterTraceProjectionInput input,
@@ -211,6 +211,8 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
             "pcb-raster-artwork\n" + instanceId + "\n" + requestJson + "\n" + expectedJson
             + "\n" + context.OperationId + "\n" + archiveBinding);
         PcbArtworkReceiptStore receiptStore = new(registry.StateDirectory);
+        CheckedPcbItemTransaction checkedRequest = PcbArtworkTools.BuildCheckedRequest(
+            expected, create, context.OperationId, archive, "MCP raster trace PCB artwork");
         await BoardGate.WaitAsync(token);
         try
         {
@@ -229,6 +231,68 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
                     if (replay.StructuredContent is JsonElement payload)
                         PcbArtworkContract.ValidateReceiptIdentity(payload, instanceId, expected.ProcessEpoch);
                     return replay;
+                }
+
+                if (reservation.Receipt.Outcome == PcbArtworkReceiptRecord.Admitted)
+                {
+                    PcbCheckedItemDispatch.Outcome inspected = await PcbCheckedItemDispatch.InspectAsync(
+                        registry, instanceId, checkedRequest, token);
+                    if (inspected.Receipt is null
+                        || inspected.Receipt.State == CheckedPcbItemTransactionState.CpbtsNotFound)
+                    {
+                        string message = inspected.ErrorMessage
+                            ?? $"Raster PCB projection {context.OperationId} has an admitted durable boundary but no terminal native receipt; inspect the board before retrying.";
+                        if (inspected.ErrorCode is null)
+                        {
+                            receiptStore.WriteUnknown(instanceId, expected.ProcessEpoch, context.OperationId,
+                                fingerprint, archive, "operation_outcome_unknown", message);
+                        }
+                        throw new AutomationException("operation_outcome_unknown", message);
+                    }
+
+                    inspected.Receipt.Replayed = true;
+                    bool reconciledArchiveVerified = true;
+                    AutomationException? reconciledArchiveError = null;
+                    try
+                    {
+                        ArtworkSourceArchive.Verify(target.RepositoryRoot!, archive,
+                            "invalid_raster_projection_archive", "raster_trace_archive_mismatch");
+                    }
+                    catch (AutomationException error)
+                    {
+                        reconciledArchiveVerified = false;
+                        reconciledArchiveError = error;
+                    }
+                    PcbArtworkTools.CompensatingRollback reconciledCompensation = !reconciledArchiveVerified
+                        && inspected.Completed
+                        ? await PcbArtworkTools.TryCompensatingRollbackAsync(registry, instanceId, expected,
+                            inspected.Receipt!, created, context.OperationId, CancellationToken.None)
+                        : PcbArtworkTools.CompensatingRollback.NotAttempted;
+                    CallToolResult reconciled = BoardProjectionData(inspected, instanceId, document,
+                        expected, context, archive, archiveBinding, layer, created,
+                        reconciledArchiveVerified, reconciledArchiveError, reconciledCompensation,
+                        durableReconciled: true);
+                    if (inspected.UntrustedReceipt)
+                    {
+                        receiptStore.WriteUnknown(instanceId, expected.ProcessEpoch, context.OperationId,
+                            fingerprint, archive, inspected.ErrorCode ?? "invalid_checked_pcb_receipt",
+                            inspected.ErrorMessage ?? "The native raster PCB projection receipt was invalid and cannot be trusted.");
+                    }
+                    else if (!reconciledArchiveVerified && inspected.Completed && !reconciledCompensation.Confirmed)
+                    {
+                        receiptStore.WriteUnknown(instanceId, expected.ProcessEpoch, context.OperationId,
+                            fingerprint, archive, reconciledCompensation.ErrorCode ?? reconciledArchiveError?.Code
+                                ?? "raster_trace_archive_mismatch",
+                            reconciledCompensation.ErrorMessage ?? reconciledArchiveError?.Message
+                                ?? "The native raster PCB projection committed but compensating rollback was not confirmed; inspect the board before retrying.");
+                    }
+                    else if (inspected.NativeReceiptAvailable)
+                    {
+                        receiptStore.WriteTerminal(instanceId, expected.ProcessEpoch, context.OperationId,
+                            fingerprint, archive, reconciledCompensation.Confirmed ? "compensated" : inspected.Receipt.State.ToString(),
+                            reconciledArchiveVerified, reconciled);
+                    }
+                    return reconciled;
                 }
 
                 throw new AutomationException("operation_outcome_unknown",
@@ -250,8 +314,6 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
                 catch (AutomationException) { }
                 throw;
             }
-            CheckedPcbItemTransaction checkedRequest = PcbArtworkTools.BuildCheckedRequest(
-                expected, create, context.OperationId, archive, "MCP raster trace PCB artwork");
             PcbCheckedItemDispatch.Outcome outcome;
             try
             {
@@ -282,16 +344,20 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
                 archiveVerified = false;
                 archiveError = error;
             }
+            PcbArtworkTools.CompensatingRollback compensation = !archiveVerified && outcome.Completed
+                ? await PcbArtworkTools.TryCompensatingRollbackAsync(registry, instanceId, expected,
+                    outcome.Receipt!, created, context.OperationId, CancellationToken.None)
+                : PcbArtworkTools.CompensatingRollback.NotAttempted;
             CallToolResult result = BoardProjectionData(outcome, instanceId, document,
                 expected, context, archive, archiveBinding, layer, created,
-                archiveVerified, archiveError);
+                archiveVerified, archiveError, compensation);
             if (outcome.UntrustedReceipt)
             {
                 receiptStore.WriteUnknown(instanceId, expected.ProcessEpoch, context.OperationId,
                     fingerprint, archive, outcome.ErrorCode ?? "invalid_checked_pcb_receipt",
                     outcome.ErrorMessage ?? "The native raster PCB projection receipt was invalid and cannot be trusted.");
             }
-            else if (!archiveVerified && outcome.Completed)
+            else if (!archiveVerified && outcome.Completed && !compensation.Confirmed)
             {
                 // The board transaction is known to have committed, but the
                 // source archive is no longer byte-identical. Do not publish
@@ -299,13 +365,13 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
                 // durable recovery state blocks another dispatch and tells
                 // the caller that native geometry may require inspection.
                 receiptStore.WriteUnknown(instanceId, expected.ProcessEpoch, context.OperationId,
-                    fingerprint, archive, archiveError?.Code ?? "raster_trace_archive_mismatch",
-                    $"Raster PCB projection {context.OperationId} committed native board geometry, but source archive verification failed; inspect the board and archive before retrying. {archiveError?.Message}");
+                    fingerprint, archive, compensation.ErrorCode ?? archiveError?.Code ?? "raster_trace_archive_mismatch",
+                    compensation.ErrorMessage ?? $"Raster PCB projection {context.OperationId} committed native board geometry, but source archive verification failed and compensating rollback was not confirmed; inspect the board and archive before retrying. {archiveError?.Message}");
             }
             else if (outcome.NativeReceiptAvailable)
             {
                 receiptStore.WriteTerminal(instanceId, expected.ProcessEpoch, context.OperationId,
-                    fingerprint, archive, outcome.Receipt?.State.ToString() ?? "native-result",
+                    fingerprint, archive, compensation.Confirmed ? "compensated" : outcome.Receipt?.State.ToString() ?? "native-result",
                     archiveVerified, result);
             }
             else if (PcbArtworkTools.ProvenPreNativeRejection(outcome))
@@ -684,7 +750,9 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
         BoardLayer layer,
         IReadOnlyList<string> created,
         bool archiveVerified,
-        AutomationException? archiveError)
+        AutomationException? archiveError,
+        PcbArtworkTools.CompensatingRollback compensation,
+        bool durableReconciled = false)
     {
         CheckedPcbItemTransactionReceipt? receipt = outcome.Receipt;
         bool mutationConfirmed = outcome.Completed;
@@ -700,7 +768,8 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
         if (!outcome.UntrustedReceipt && receipt is not null && receipt.Results.Count > 0
             && receipt.Results[0].ResultCase == PcbItemOperationResult.ResultOneofCase.Create)
             response = JsonDocument.Parse(BoardJson.Formatter.Format(receipt.Results[0].Create)).RootElement.Clone();
-        string operationOutcome = mutationConfirmed ? "completed"
+        bool compensated = compensation.Confirmed;
+        string operationOutcome = compensated ? "compensated" : mutationConfirmed ? "completed"
             : outcome.UntrustedReceipt ? "indeterminate" : outcome.ErrorCode ?? receipt?.State.ToString() ?? "not_submitted";
         JsonElement nativeResult = JsonSerializer.SerializeToElement(new
         {
@@ -715,7 +784,7 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
             afterState = after,
             nativeReceiptAvailable = outcome.NativeReceiptAvailable,
             receipt = receiptJson,
-            mutationConfirmed,
+            mutationConfirmed = mutationConfirmed && !compensated,
             response
         });
         bool accepted = mutationConfirmed && archiveVerified;
@@ -744,7 +813,12 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
                 atomicWrite = archive.AtomicWrite,
                 boardTransactionJoined = false,
                 readbackVerified = archiveVerified,
-                mismatchCode = archiveError?.Code
+                mismatchCode = archiveError?.Code,
+                compensatingRollbackAttempted = compensation.Attempted,
+                compensatingRollbackConfirmed = compensation.Confirmed,
+                compensatingRollbackOperationId = compensation.OperationId.Length == 0 ? null : compensation.OperationId,
+                compensatingRollbackErrorCode = compensation.ErrorCode,
+                compensatingRollbackErrorMessage = compensation.ErrorMessage
             },
             geometrySha256 = context.Proposal.GeometrySha256,
             sourceSha256 = context.SourceSha256,
@@ -753,7 +827,7 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
             embeddedSourceVerified = false,
             archivePersisted = archive.Persisted,
             archiveAtomicWrite = archive.AtomicWrite,
-            provenanceAtomic = false,
+            provenanceAtomic = compensated,
             archiveReadbackVerified = archiveVerified,
             electricalValidated = false,
             manufacturingValidated = false,
@@ -762,15 +836,23 @@ public sealed class RasterTraceProjectionTools(InstanceRegistry registry)
             operationOutcome,
             replayed = receipt?.Replayed ?? false,
             nativeReceiptAvailable = outcome.NativeReceiptAvailable,
-            nativeMutationConfirmed = mutationConfirmed,
-            mutationConfirmed,
+            nativeMutationConfirmed = mutationConfirmed && !compensated,
+            mutationConfirmed = mutationConfirmed && !compensated,
             operationReceipt = outcome.NativeReceiptAvailable,
             replayableWithinProcess = outcome.NativeReceiptAvailable,
             transportRetrySafe = outcome.NativeReceiptAvailable,
             receiptScope = outcome.NativeReceiptAvailable ? "native-process" : "none",
-            errorCode = archiveError?.Code ?? (accepted ? null : outcome.ErrorCode),
-            errorMessage = archiveError?.Message ?? (accepted ? null : outcome.ErrorMessage),
-            limitation = "Board embedded-file persistence is a separate native command; the durable archive preflight and per-shape SHA remain a separate persistence boundary."
+            errorCode = compensation.ErrorCode ?? archiveError?.Code ?? (accepted ? null : outcome.ErrorCode),
+            errorMessage = compensation.ErrorMessage ?? archiveError?.Message ?? (accepted ? null : outcome.ErrorMessage),
+            compensatingRollbackAttempted = compensation.Attempted,
+            compensatingRollbackConfirmed = compensation.Confirmed,
+            compensatingRollbackOperationId = compensation.OperationId.Length == 0 ? null : compensation.OperationId,
+            compensatingRollbackReceipt = compensation.Outcome?.Receipt is { } rollbackReceipt
+                ? JsonDocument.Parse(SchematicJson.Formatter.Format(rollbackReceipt)).RootElement.Clone() : (JsonElement?)null,
+            durableReconciled,
+            limitation = compensated
+                ? "The source archive mismatch was contained by a checked compensating delete that restored the original PCB checkpoint; the source archive remains a separate persistence boundary."
+                : "Board embedded-file persistence is a separate native command; the durable archive preflight and per-shape SHA remain a separate persistence boundary."
         }, !accepted);
     }
 

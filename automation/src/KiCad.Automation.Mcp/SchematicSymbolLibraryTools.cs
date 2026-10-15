@@ -138,6 +138,7 @@ public sealed partial class SchematicSymbolLibraryTools(InstanceRegistry registr
         var receiptStore = new SymbolLibraryCheckedReceiptStore(registry.StateDirectory);
         SymbolLibraryCheckedReceiptRecord? durableBeforeNative = receiptStore.ReadBound(instanceId, expectedRequest);
         NativeCapabilitySymbolLibraryCheckedReadOperationResponse? nativeResponse = null;
+        AutomationException? nativeUnavailable = null;
         try
         {
             NativeClient client = registry.Client(instanceId);
@@ -164,6 +165,14 @@ public sealed partial class SchematicSymbolLibraryTools(InstanceRegistry registr
             }
         }
         catch (NngException) { }
+        catch (AutomationException error) when (error.Code is "stale_process_epoch" or "instance_exited"
+            or "instance_changed" or "unknown_instance")
+        {
+            // A native replacement discards its process-owned receipt table.  The
+            // exact request-bound MCP record remains authoritative for recovery;
+            // preserve this failure only when no durable record exists.
+            nativeUnavailable = error;
+        }
 
         SymbolLibraryCheckedReceiptRecord? durable = receiptStore.Read(instanceId, operationId);
         if (durable is not null)
@@ -190,6 +199,9 @@ public sealed partial class SchematicSymbolLibraryTools(InstanceRegistry registr
                     ? "The checked symbol write has no terminal receipt; inspect the native library before retrying."
                     : durable.ErrorMessage);
         }
+
+        if (nativeUnavailable is not null)
+            throw nativeUnavailable;
 
         return Data(new
         {
@@ -319,6 +331,11 @@ public sealed partial class SchematicSymbolLibraryTools(InstanceRegistry registr
             throw new AutomationException("invalid_library_snapshot", "expectedStateJson is required for checked direct-file mutation.");
         if (!string.Equals(expectedState.StateSha256, expectedSnapshotSha256, StringComparison.Ordinal))
             throw new AutomationException("stale_library_state", "expectedSnapshotSha256 must match the complete checked state digest.");
+        if (expectedState.Document is null || !expectedState.Document.Equals(document)
+            || expectedState.ProcessEpoch != expectedProcessEpoch
+            || expectedState.Revision is null || expectedState.Revision.Epoch != expectedProcessEpoch)
+            throw new AutomationException("invalid_library_snapshot",
+                "expectedStateJson must retain the exact symbol document and native process epoch.");
         var expectedRequest = new NativeCapabilitySymbolLibraryCheckedWrite
         {
             Document = document.Clone(), ProcessEpoch = expectedProcessEpoch, OperationId = operationId,

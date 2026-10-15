@@ -389,6 +389,72 @@ public sealed class SymbolLibraryCheckedContractTests
     }
 
     [TestMethod]
+    public void DurableReceiptRecoveryBindsTheOriginalProcessEpoch()
+    {
+        string root = Directory.CreateTempSubdirectory("symbol-checked-epoch-").FullName;
+        try
+        {
+            string instance = Guid.NewGuid().ToString("D");
+            var request = ReceiptRequest();
+            var first = new SymbolLibraryCheckedReceiptStore(root);
+            _ = first.Reserve(instance, request);
+            first.WriteUnknown(instance, request, "operation_outcome_unknown", "native process ended after dispatch");
+
+            // Reopening the MCP store after a native replacement must recover the
+            // exact old-epoch request without authorizing another dispatch.
+            var reopened = new SymbolLibraryCheckedReceiptStore(root);
+            var recovered = reopened.ReadBound(instance, request);
+            Assert.IsNotNull(recovered);
+            Assert.AreEqual(SymbolLibraryCheckedReceiptRecord.Unknown, recovered!.Outcome);
+            Assert.AreEqual(request.ProcessEpoch, recovered.ProcessEpoch);
+
+            var changedEpoch = request.Clone();
+            changedEpoch.ProcessEpoch = Guid.NewGuid().ToString("D");
+            AutomationException conflict = Assert.ThrowsExactly<AutomationException>(() =>
+                reopened.ReadBound(instance, changedEpoch));
+            Assert.AreEqual("operation_id_conflict", conflict.Code);
+            Assert.AreEqual(SymbolLibraryCheckedReceiptRecord.Unknown,
+                reopened.Reserve(instance, request).Receipt.Outcome);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
+    public void DurableTerminalReplayKeepsTheImmutableOriginalReceipt()
+    {
+        string root = Directory.CreateTempSubdirectory("symbol-checked-replay-").FullName;
+        try
+        {
+            string instance = Guid.NewGuid().ToString("D");
+            var request = ReceiptRequest();
+            var response = new NativeCapabilitySymbolLibraryCheckedWriteResponse
+            {
+                Document = request.Document.Clone(), ProcessEpoch = request.ProcessEpoch,
+                OperationId = request.OperationId, Status = "unavailable",
+                ErrorCode = "library_mutation_unavailable", ErrorMessage = "provider unavailable",
+                ReceiptStatus = NativeCapabilitySymbolLibraryCheckedReceiptStatus.NcpSlcwsUnavailable,
+                Scope = "mcp_direct_symbol_file", ExpectedRequestVerified = true,
+                Request = request.Clone(),
+                RequestFingerprintSha256 = SymbolLibraryCheckedContract.ComputeFingerprint(request)
+            };
+            var first = new SymbolLibraryCheckedReceiptStore(root);
+            _ = first.Reserve(instance, request);
+            first.WriteTerminal(instance, request, response);
+
+            var reopened = new SymbolLibraryCheckedReceiptStore(root);
+            var replay = response.Clone();
+            replay.Replayed = true;
+            reopened.WriteTerminal(instance, request, replay);
+
+            var stored = reopened.Read(instance, request.OperationId);
+            Assert.IsNotNull(stored);
+            Assert.IsFalse(SymbolLibraryCheckedReceiptStore.ParseResponse(stored!.ResponseJson).Replayed);
+            Assert.AreEqual(SymbolLibraryCheckedReceiptRecord.Terminal, stored.Outcome);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [TestMethod]
     public void PreDispatchAdmissionCanBeRemovedOnlyForTheExactRequest()
     {
         string root = Directory.CreateTempSubdirectory("symbol-checked-remove-").FullName;

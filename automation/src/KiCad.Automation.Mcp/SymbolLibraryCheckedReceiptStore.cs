@@ -50,6 +50,11 @@ internal sealed record SymbolLibraryCheckedReceiptRecord(
             if (!CanonicalGuid(request.OperationId) || request.OperationId != OperationId
                 || !CanonicalGuid(request.ProcessEpoch) || request.ProcessEpoch != ProcessEpoch
                 || request.Document is null || request.ExpectedState is null
+                || request.ExpectedState.Document is null
+                || !request.ExpectedState.Document.Equals(request.Document)
+                || request.ExpectedState.ProcessEpoch != request.ProcessEpoch
+                || request.ExpectedState.Revision is null
+                || request.ExpectedState.Revision.Epoch != request.ProcessEpoch
                 || request.ExpectedSnapshotSha256 != RequestFingerprintStateDigest(request))
                 throw Invalid("The durable symbol request does not retain its exact operation identity or state digest.");
 
@@ -176,15 +181,21 @@ internal sealed class SymbolLibraryCheckedReceiptStore
     {
         string fingerprint = SymbolLibraryCheckedContract.ComputeFingerprint(request);
         ValidateKey(instanceId, request, fingerprint);
+        SymbolLibraryCheckedReceiptRecord? record = Read(instanceId, request.OperationId);
+        if (record is not null) VerifyBinding(record, instanceId, request, fingerprint);
+
         if (request.Document is null || request.ExpectedState is null
+            || request.ExpectedState.Document is null
+            || !request.ExpectedState.Document.Equals(request.Document)
+            || request.ExpectedState.ProcessEpoch != request.ProcessEpoch
+            || request.ExpectedState.Revision is null
+            || request.ExpectedState.Revision.Epoch != request.ProcessEpoch
             || request.ExpectedSnapshotSha256 != request.ExpectedState.StateSha256
             || SymbolLibraryCheckedContract.ComputeStateDigest(request.ExpectedState)
                 != request.ExpectedSnapshotSha256)
             throw SymbolLibraryCheckedReceiptRecord.Invalid(
                 "The checked symbol request does not retain its exact expected state digest.");
 
-        SymbolLibraryCheckedReceiptRecord? record = Read(instanceId, request.OperationId);
-        if (record is not null) VerifyBinding(record, instanceId, request, fingerprint);
         return record;
     }
 

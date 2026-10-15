@@ -25,6 +25,7 @@
 #include <list>
 #include <memory>
 #include <optional>
+#include <functional>
 #include <math/box2.h>
 
 #include "pns_routing_settings.h"
@@ -35,6 +36,7 @@
 
 
 class NETCLASS;
+class BOARD_ITEM;
 
 namespace KIGFX
 {
@@ -117,6 +119,11 @@ enum DRAG_MODE
     virtual void UpdateNet( NET_HANDLE aNet ) = 0;
     virtual NET_HANDLE GetOrphanedNetHandle() = 0;
     virtual PNS::NODE* GetWorld() const = 0;
+
+    // Native adapters may retain router branches after their board owner was removed. The
+    // default keeps lightweight test interfaces source-compatible; attached editors override
+    // it with their board pointer index.
+    virtual bool IsLiveBoardItem( const BOARD_ITEM* aItem ) const { return true; }
 
     virtual RULE_RESOLVER* GetRuleResolver() = 0;
     virtual DEBUG_DECORATOR* GetDebugDecorator() = 0;
@@ -215,7 +222,8 @@ public:
                                          std::vector<ITEM*> aAdded,
                                          std::vector<ITEM*>& aDeleted,
                                          std::vector<ITEM*>& aCreated,
-                                         std::vector<ITEM*>& aUpdated );
+                                         std::vector<ITEM*>& aUpdated,
+                                         const std::function<bool( const BOARD_ITEM* )>& aIsLive = {} );
 
     void StopRouting();
     void ClearViewDecorations();

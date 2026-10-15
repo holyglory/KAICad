@@ -126,7 +126,7 @@ public:
 
     // Router branches can retain raw pointers after the corresponding native item has been
     // removed from the board. Probe the board's pointer index before touching such a pointer.
-    bool IsLiveBoardItem( const BOARD_ITEM* aItem ) const;
+    bool IsLiveBoardItem( const BOARD_ITEM* aItem ) const override;
 
 protected:
     PNS_PCBNEW_RULE_RESOLVER* m_ruleResolver;

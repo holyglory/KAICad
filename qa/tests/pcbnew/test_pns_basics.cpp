@@ -706,6 +706,40 @@ BOOST_FIXTURE_TEST_CASE( PNSRoutePartitionRetainsArcSourceIdentity, PNS_TEST_FIX
 }
 
 
+BOOST_AUTO_TEST_CASE( PNSRoutePartitionFallsBackFromStaleParentWithLivenessProbe )
+{
+    BOARD board;
+    auto* nativeTrack = new PCB_TRACK( &board );
+    board.Add( nativeTrack );
+    PCB_TRACK detachedParent( &board );
+
+    PNS::SEGMENT removed( SEG( VECTOR2I( 100000, 100000 ), VECTOR2I( 300000, 100000 ) ), nullptr );
+    removed.SetParent( &detachedParent );
+    removed.SetSourceItem( nativeTrack );
+
+    PNS::SEGMENT replacement( SEG( VECTOR2I( 100000, 100000 ), VECTOR2I( 500000, 100000 ) ), nullptr );
+    replacement.SetSourceItem( nativeTrack );
+
+    std::vector<PNS::ITEM*> removedItems{ &removed };
+    std::vector<PNS::ITEM*> addedItems{ &replacement };
+    std::vector<PNS::ITEM*> deleted;
+    std::vector<PNS::ITEM*> created;
+    std::vector<PNS::ITEM*> updated;
+
+    PNS::ROUTER::PartitionRoutingChanges( std::move( removedItems ), std::move( addedItems ),
+            deleted, created, updated,
+            [&board]( const BOARD_ITEM* item )
+            {
+                return item && board.IsItemIndexedById( item );
+            } );
+
+    BOOST_REQUIRE_EQUAL( updated.size(), 1 );
+    BOOST_CHECK_EQUAL( updated.front(), &replacement );
+    BOOST_CHECK( deleted.empty() );
+    BOOST_CHECK( created.empty() );
+}
+
+
 BOOST_AUTO_TEST_CASE( PNSDetachedRouteUpdateUsesSourceAndRejectsOrphans )
 {
     BOARD board;

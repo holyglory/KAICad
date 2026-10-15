@@ -1572,7 +1572,11 @@ PCB_MANUFACTURING_JOB_MANAGER::PublishDetached( const std::string& aOperationId,
 
     auto current = read( aOperationId );
     if( !current ) return tl::unexpected( current.error() );
-    if( current->receipt().process_epoch() != aProcessEpoch
+    const bool stagedPriorProcessAfterRecheck =
+            current->receipt().process_epoch() != aProcessEpoch
+            && current->receipt().recovery_state() == PCB_MFG_RECOVERY_RECOVERABLE_STAGED
+            && current->receipt().publication_state() == PCB_MFG_PUBLICATION_STAGED;
+    if( ( current->receipt().process_epoch() != aProcessEpoch && !stagedPriorProcessAfterRecheck )
         || current->receipt().status() != PCB_MFG_EXPORT_INDETERMINATE
         || current->receipt().publication_state() != PCB_MFG_PUBLICATION_STAGED
         || current->receipt().recovery_state() != PCB_MFG_RECOVERY_RECOVERABLE_STAGED )

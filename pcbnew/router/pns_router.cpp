@@ -1147,17 +1147,28 @@ void ROUTER::PartitionRoutingChanges( std::vector<ITEM*> aRemoved,
                                       std::vector<ITEM*> aAdded,
                                       std::vector<ITEM*>& aDeleted,
                                       std::vector<ITEM*>& aCreated,
-                                      std::vector<ITEM*>& aUpdated )
+                                      std::vector<ITEM*>& aUpdated,
+                                      const std::function<bool( const BOARD_ITEM* )>& aIsLive )
 {
     // A PNS clone can lose its direct Parent() while retaining the native
     // board object through GetSourceItem().  Route replacement identity must
     // follow that stable source owner, otherwise a moved via is split into a
     // delete/create pair and the MCP cannot preserve its UUID and properties.
-    auto owner = []( ITEM* item ) -> BOARD_ITEM*
+    const auto isLive = [&aIsLive]( const BOARD_ITEM* item )
     {
-        return item ? ( item->Parent() ? item->Parent() : item->GetSourceItem() ) : nullptr;
+        return !item || !aIsLive || aIsLive( item );
     };
-    auto key = []( ITEM* item )
+    auto owner = [&isLive]( ITEM* item ) -> BOARD_ITEM*
+    {
+        if( !item )
+            return nullptr;
+
+        BOARD_ITEM* parent = item->Parent();
+        if( !isLive( parent ) )
+            parent = item->GetSourceItem();
+        return isLive( parent ) ? parent : nullptr;
+    };
+    auto key = [&owner]( ITEM* item )
     {
         std::vector<int64_t> geometry;
         for( int index = 0; index < item->AnchorCount(); ++index )
@@ -1182,7 +1193,7 @@ void ROUTER::PartitionRoutingChanges( std::vector<ITEM*> aRemoved,
         else if( ARC::ClassOf( item ) )
             geometry.push_back( static_cast<ARC*>( item )->Width() );
         auto* net = static_cast<NETINFO_ITEM*>( item->Net() );
-        BOARD_ITEM* source = item ? ( item->Parent() ? item->Parent() : item->GetSourceItem() ) : nullptr;
+        BOARD_ITEM* source = owner( item );
         return std::make_tuple( source ? source->m_Uuid.AsStdString() : std::string(),
                                 item->Kind(), item->Layers().Start(), item->Layers().End(),
                                 net ? net->GetNetname().ToStdString() : std::string(), geometry );
@@ -1248,7 +1259,11 @@ void ROUTER::CommitRouting( NODE* aNode )
         return;
     }
 
-    PartitionRoutingChanges( removed, added, deleted, created, changed );
+    PartitionRoutingChanges( removed, added, deleted, created, changed,
+            [this]( const BOARD_ITEM* item )
+            {
+                return m_iface->IsLiveBoardItem( item );
+            } );
     for( ITEM* item : deleted )
         m_iface->RemoveItem( item );
     for( ITEM* item : created )

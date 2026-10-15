@@ -65,6 +65,7 @@ def main() -> None:
     origin = req["public_url"].rstrip("/") + "/"
     env = os.environ.copy()
     env.update({"KICAD_PUBLIC_DOWNLOAD_URL": origin, "KICAD_PACKAGE_CATALOGUE": req["signed_root"],
+        "TMPDIR": os.environ.get("KICAD_PREVIEW_TMPDIR", "/mnt/build-storage/codex/kicad/t"),
         "KICAD_UPDATE_PUBLISHER_SPKI_FILE": req["publisher_public"], "KICAD_PUBLIC_DOWNLOAD_EVIDENCE": str(evidence / "public-downloads"),
         "KICAD_DELIVERY_ROUTE_ONLY": "true", "KICAD_DELIVERY_PLATFORM": "linux-x64", "KICAD_DELIVERY_COMMIT": package_commit,
         "KICAD_DELIVERY_DEPLOYMENT": req["deployment_id"], "KICAD_COORDINATOR_EXECUTOR": executor,

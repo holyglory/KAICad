@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using KiCad.Automation.Distribution;
 using KiCad.Automation.Native;
 
@@ -19,7 +20,13 @@ public sealed record WindowsUpdateHandoffIntent(int SchemaVersion, WindowsUpdate
 /// Persisted launch uncertainty requires reconciliation, not another launch.</summary>
 public static class WindowsUpdateHandoff
 {
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { WriteIndented = true };
+    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = true,
+        PropertyNameCaseInsensitive = false,
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+        MaxDepth = 16
+    };
     public static Task<WindowsUpdateHandoffState> ExecuteAsync(WindowsUpdateHandoffRequest request,
         Func<WindowsUpdateHandoffState, Task> report, CancellationToken token = default,
         IReadOnlyDictionary<string, string?>? launchEnvironment = null) => ExecuteAsync(request, report, launchEnvironment, null, token);
@@ -135,9 +142,40 @@ public static class WindowsUpdateHandoff
 
     private static async Task<WindowsUpdateHandoffRequest?> ReadRequest(string path, CancellationToken token)
     {
-        await using var file = File.OpenRead(path);
+        await using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
         if (file.Length is < 1 or > 65536) throw new InvalidDataException("Invalid Windows handoff record size.");
-        return await JsonSerializer.DeserializeAsync<WindowsUpdateHandoffRequest>(file, Json, token);
+        byte[] bytes = new byte[(int)file.Length];
+        await file.ReadExactlyAsync(bytes, token);
+        return ParseRequest(bytes);
+    }
+
+    // Persisted requests are part of the recovery identity. Reject unknown or
+    // repeated fields instead of allowing a stale local journal to masquerade
+    // as the current request during a retry.
+    internal static WindowsUpdateHandoffRequest ParseRequest(byte[] bytes)
+    {
+        if (bytes.Length is < 1 or > 65536) throw new InvalidDataException("Invalid Windows handoff record size.");
+        using var document = JsonDocument.Parse(bytes, new JsonDocumentOptions { MaxDepth = 16 });
+        CheckProperties(document.RootElement);
+        return JsonSerializer.Deserialize<WindowsUpdateHandoffRequest>(bytes, Json)
+            ?? throw new InvalidDataException("Missing Windows handoff request.");
+    }
+
+    private static void CheckProperties(JsonElement value)
+    {
+        if (value.ValueKind == JsonValueKind.Object)
+        {
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var property in value.EnumerateObject())
+            {
+                if (!names.Add(property.Name)) throw new InvalidDataException("Repeated Windows handoff property.");
+                CheckProperties(property.Value);
+            }
+        }
+        else if (value.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var element in value.EnumerateArray()) CheckProperties(element);
+        }
     }
     internal static async Task SaveAsync<T>(string path, T value, CancellationToken token, bool overwrite = true)
     {

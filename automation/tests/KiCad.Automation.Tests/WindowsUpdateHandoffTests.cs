@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using KiCad.Automation.Distribution;
 using KiCad.Automation.Mcp;
@@ -11,6 +12,28 @@ namespace KiCad.Automation.Tests;
 public sealed class WindowsUpdateHandoffTests
 {
     public TestContext TestContext { get; set; } = null!;
+
+    [TestMethod]
+    public void PersistedRequestParserRejectsUnknownAndRepeatedIdentityFields()
+    {
+        var request = new WindowsUpdateHandoffRequest(
+            Path.GetFullPath(Path.Combine(Path.GetTempPath(), "kicad-install")),
+            Guid.NewGuid().ToString("D"), new string('a', 64), Guid.NewGuid(),
+            new WindowsProcessIdentity(42, "123", Path.GetFullPath("kicad.exe")), "",
+            Guid.NewGuid(), Path.GetFullPath(Path.Combine(Path.GetTempPath(), "kicad-update.sock")), false,
+            new UpdateOrigin("ipc:///tmp/kicad-original.sock", "old-epoch"));
+        byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(request, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        Assert.AreEqual(request, WindowsUpdateHandoff.ParseRequest(bytes));
+
+        string json = Encoding.UTF8.GetString(bytes);
+        byte[] unknown = Encoding.UTF8.GetBytes(json[..^1] + ",\"unexpected\":true}");
+        Assert.ThrowsExactly<JsonException>(() => WindowsUpdateHandoff.ParseRequest(unknown));
+
+        string operation = request.OperationId.ToString("D");
+        byte[] repeated = Encoding.UTF8.GetBytes(json[..^1] + $",\"operationId\":\"{operation}\"}}");
+        Assert.ThrowsExactly<InvalidDataException>(() => WindowsUpdateHandoff.ParseRequest(repeated));
+    }
+
     [TestMethod]
     public async Task NonWindowsCannotPerformAWindowsHandoff()
     {

@@ -121,6 +121,8 @@ public:
     PNS::RULE_RESOLVER* GetRuleResolver() override;
     PNS::DEBUG_DECORATOR* GetDebugDecorator() override;
 
+    bool IsLiveBoardItem( const BOARD_ITEM* aItem ) const;
+
     std::vector<LENGTH_DELAY_CALCULATION_ITEM> GetLengthDelayCalculationItems( const PNS::ITEM_SET& aLine,
                                                                                const NETCLASS*      aNetClass ) const;
 
@@ -143,6 +145,8 @@ protected:
     PNS::NODE* m_world;
     BOARD*     m_board;
     int        m_startLayer; // The starting layer, in PNS layer coordinates
+    std::unordered_set<BOARD_ITEM*> m_liveBoardItems;
+    bool       m_hasLiveBoardSnapshot;
 };
 
 class PNS_KICAD_IFACE : public PNS_KICAD_IFACE_BASE

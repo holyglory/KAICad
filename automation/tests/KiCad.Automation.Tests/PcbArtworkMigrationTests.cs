@@ -203,5 +203,36 @@ public sealed class PcbArtworkMigrationTests
         receipt.ObservedAfter.StateSha256 = new string('c', 64);
         Assert.IsFalse(PcbArtworkTools.CompensatingRollbackConfirmed(before, outcome,
             [firstId, secondId]));
+
+        receipt.ObservedAfter.StateSha256 = before.StateSha256;
+        receipt.RequestVerified = false;
+        Assert.IsFalse(PcbArtworkTools.CompensatingRollbackConfirmed(before, outcome,
+            [firstId, secondId]),
+            "A rollback receipt without native request verification must not prove compensation.");
+        receipt.RequestVerified = true;
+
+        receipt.OperationId = Guid.NewGuid().ToString("D");
+        Assert.IsFalse(PcbArtworkTools.CompensatingRollbackConfirmed(before, outcome,
+            [firstId, secondId]),
+            "A receipt for another operation must not prove compensation.");
+        receipt.OperationId = rollbackId;
+
+        receipt.ProcessEpoch = Guid.NewGuid().ToString("D");
+        Assert.IsFalse(PcbArtworkTools.CompensatingRollbackConfirmed(before, outcome,
+            [firstId, secondId]),
+            "A receipt from another native process epoch must not prove compensation.");
+        receipt.ProcessEpoch = epoch;
+
+        receipt.Document = document.Clone();
+        receipt.Document.BoardFilename = "other-board.kicad_pcb";
+        Assert.IsFalse(PcbArtworkTools.CompensatingRollbackConfirmed(before, outcome,
+            [firstId, secondId]),
+            "A receipt for another PCB document must not prove compensation.");
+        receipt.Document = document.Clone();
+
+        receipt.ObservedBefore = before.Clone();
+        Assert.IsFalse(PcbArtworkTools.CompensatingRollbackConfirmed(before, outcome,
+            [firstId, secondId]),
+            "A receipt whose before-state is not the committed after-state must not prove compensation.");
     }
 }

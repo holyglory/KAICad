@@ -482,8 +482,16 @@ public sealed class PcbArtworkTools(InstanceRegistry registry)
         IReadOnlyCollection<string> itemIds)
     {
         CheckedPcbItemTransactionReceipt? receipt = outcome.Receipt;
-        if (!outcome.Completed || receipt?.ObservedAfter is null || expectedBefore is null
-            || expectedBefore.Revision is null || receipt.Results.Count != 1
+        if (!outcome.Completed || receipt?.ObservedBefore is null || receipt.ObservedAfter is null
+            || expectedBefore is null || expectedBefore.Document is null
+            || expectedBefore.Revision is null || outcome.Request is null
+            || outcome.Request.ExpectedState is null || !receipt.RequestVerified
+            || receipt.Document is null || !receipt.Document.Equals(expectedBefore.Document)
+            || receipt.ProcessEpoch != expectedBefore.ProcessEpoch
+            || receipt.ProcessEpoch != outcome.Request.ProcessEpoch
+            || receipt.OperationId != outcome.Request.OperationId
+            || !receipt.ObservedBefore.Equals(outcome.Request.ExpectedState)
+            || receipt.Results.Count != 1
             || receipt.Results[0].ResultCase != PcbItemOperationResult.ResultOneofCase.Delete)
             return false;
         string[] expectedIds = itemIds.Distinct(StringComparer.Ordinal).OrderBy(id => id, StringComparer.Ordinal).ToArray();

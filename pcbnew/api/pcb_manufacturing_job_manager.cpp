@@ -36,7 +36,7 @@ namespace
 {
 constexpr uint64_t MAX_SOURCE_BYTES = 32ULL * 1024 * 1024;
 constexpr uint64_t MAX_JOURNAL_BYTES = 64ULL * 1024 * 1024;
-constexpr uint32_t JOURNAL_VERSION = 2;
+constexpr uint32_t JOURNAL_VERSION = 3;
 
 std::string Hash( std::string_view aBytes )
 {
@@ -645,7 +645,8 @@ void PCB_MANUFACTURING_JOB_MANAGER::SetDispatchIndeterminate(
 
 tl::expected<void, std::string> PCB_MANUFACTURING_JOB_MANAGER::ValidateRecord( const JournalRecord& aRecord )
 {
-    if( aRecord.format_version() != JOURNAL_VERSION || aRecord.journal_revision() == 0
+    if( ( aRecord.format_version() != 2 && aRecord.format_version() != JOURNAL_VERSION )
+        || aRecord.journal_revision() == 0
         || !aRecord.has_request() || !aRecord.has_receipt() )
         return tl::unexpected( "invalid_manufacturing_journal" );
     if( auto valid = ValidateRequest( aRecord.request() ); !valid )
@@ -658,6 +659,7 @@ tl::expected<void, std::string> PCB_MANUFACTURING_JOB_MANAGER::ValidateRecord( c
     const bool sameState = google::protobuf::util::MessageDifferencer::Equals(
             request.expected_state(), receipt.observed_before() )
         && google::protobuf::util::MessageDifferencer::Equals( request.expected_state(), receipt.expected_state() );
+    const bool detachedSnapshot = aRecord.format_version() >= JOURNAL_VERSION;
     if( receipt.operation_id() != request.operation_id() || receipt.process_epoch() != request.process_epoch()
         || !SameDocument( receipt.document(), request.document() ) || !sameState
         || receipt.request_fingerprint_sha256() != Hash( request.SerializeAsString() )
@@ -665,10 +667,11 @@ tl::expected<void, std::string> PCB_MANUFACTURING_JOB_MANAGER::ValidateRecord( c
         || aRecord.source_board().empty() || aRecord.source_board().size() > MAX_SOURCE_BYTES
         || aRecord.source_board().rfind( "(kicad_pcb", 0 ) != 0
         || receipt.source_snapshot_sha256() != Hash( aRecord.source_board() )
-        || !HasCompleteDetachedSnapshot( aRecord.source_snapshot(), request.document() )
-        || !SnapshotMatchesState( aRecord.source_snapshot(), receipt.observed_before() )
-        || aRecord.source_snapshot().serialized_board() != aRecord.source_board()
-        || receipt.source_snapshot().SerializeAsString() != aRecord.source_snapshot().SerializeAsString() )
+        || ( detachedSnapshot && ( !HasCompleteDetachedSnapshot( aRecord.source_snapshot(), request.document() )
+                                  || !SnapshotMatchesState( aRecord.source_snapshot(), receipt.observed_before() )
+                                  || aRecord.source_snapshot().serialized_board() != aRecord.source_board()
+                                  || receipt.source_snapshot().SerializeAsString()
+                                          != aRecord.source_snapshot().SerializeAsString() ) ) )
         return tl::unexpected( "invalid_manufacturing_journal" );
 
     if( receipt.status() == PCB_MFG_EXPORT_RUNNING || receipt.status() == PCB_MFG_EXPORT_COMPLETED
@@ -718,8 +721,10 @@ tl::expected<void, std::string> PCB_MANUFACTURING_JOB_MANAGER::ValidateDispatche
     if( !aReceipt.native_dispatch() || !aReceipt.export_adapter_available()
         || ( aReceipt.snapshot_complete()
              && !HasCompleteSourceSnapshot( aRecord.receipt().observed_before() ) )
-        || !HasCompleteDetachedSnapshot( aReceipt.source_snapshot(), request.document() )
-        || aReceipt.source_snapshot().SerializeAsString() != aRecord.source_snapshot().SerializeAsString()
+        || ( aRecord.format_version() >= JOURNAL_VERSION
+             && ( !HasCompleteDetachedSnapshot( aReceipt.source_snapshot(), request.document() )
+                  || aReceipt.source_snapshot().SerializeAsString()
+                             != aRecord.source_snapshot().SerializeAsString() ) )
         || aReceipt.source_snapshot_sha256() != Hash( aRecord.source_board() )
         || aReceipt.operation_id() != request.operation_id()
         || aReceipt.process_epoch() != request.process_epoch()

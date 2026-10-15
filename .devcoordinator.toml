@@ -23,7 +23,7 @@ command=["dotnet","automation/artifacts/download-host/kicad-downloads.dll"]
 port=true
 route=true
 health={path="/healthz",timeout_seconds=300}
-env={ASPNETCORE_ENVIRONMENT="Production",KICAD_DOWNLOAD_ROOT="/mnt/build-storage/codex/kicad/public-candidates/win-e7-full-signed-000001",KICAD_UPDATE_PUBLISHER_SPKI_FILE="/home/holyglory/kicad/automation/distribution/preview-publisher.spki"}
+env={ASPNETCORE_ENVIRONMENT="Production",KICAD_DOWNLOAD_ROOT="/mnt/build-storage/codex/kicad/public-candidates/linux-preview28-signed",KICAD_UPDATE_PUBLISHER_SPKI_FILE="/home/holyglory/kicad/automation/distribution/preview-publisher.spki"}
 [test]
 default="automation"
 [test.diagram-requirement-history]
@@ -3193,6 +3193,7 @@ timeout_seconds=1200
 command=["python3","automation/qualification/observe-platform-delivery.py","--platform","win-x64","--commit","e7aacb7d19d03b06169bb2eff0bf47f020c4f058","--evidence","automation/artifacts/platform-delivery-evidence/win-x64","--check","win-x64"]
 retained_artifacts=[{name="delivery-evidence",path="automation/artifacts/platform-delivery-evidence/win-x64",max_bytes=536870912}]
 [test.preview28-linux-publish]
+env={KICAD_PREVIEW_WORK_ROOT="/mnt/build-storage/codex/kicad/delivery/preview28",KICAD_PREVIEW_SIGNED_ROOT="/mnt/build-storage/codex/kicad/public-candidates/linux-preview28-signed"}
 [[test.preview28-linux-publish.check]]
 name="pub"
 tier="development"

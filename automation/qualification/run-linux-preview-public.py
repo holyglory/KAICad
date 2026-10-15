@@ -33,7 +33,9 @@ def run(command: list[str], environment: dict[str, str]) -> None:
 def main() -> None:
     request = json.loads(Path(os.environ.get("KICAD_PREVIEW_REQUEST", "/mnt/build-storage/codex/kicad/delivery/preview28/request.json")).read_text())
     signed_root = Path(request["signed_root"])
+    candidate_root = Path(request["candidate_root"])
     previous_root = Path(request["previous_root"])
+    previous_package_root = Path(request["previous_package_root"])
     evidence = Path(os.environ.get("KICAD_DELIVERY_EVIDENCE",
                                   ROOT / "automation/artifacts/preview28-linux-delivery"))
     evidence.mkdir(parents=True, exist_ok=True)
@@ -59,8 +61,8 @@ def main() -> None:
         "KICAD_COORDINATOR_EXECUTOR": os.environ.get(
             "KICAD_COORDINATOR_EXECUTOR", "/home/DevCoordinator2/target/release/devcoordinator2-executor"),
         "KICAD_DELIVERY_EVIDENCE": str(evidence),
-        "KICAD_CAPTION_PACKAGE_CATALOGUE": str(previous_root),
-        "KICAD_CAPTION_CANDIDATE_CATALOGUE": str(signed_root),
+        "KICAD_CAPTION_PACKAGE_CATALOGUE": str(previous_package_root),
+        "KICAD_CAPTION_CANDIDATE_CATALOGUE": str(candidate_root),
         "KICAD_CAPTION_INSTALLED_ENVELOPE": str(previous_root / "updates/preview.json"),
     })
     solution = "automation/KiCad.Automation.slnx"

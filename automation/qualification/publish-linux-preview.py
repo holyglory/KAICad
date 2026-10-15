@@ -8,6 +8,7 @@ checkout remains untouched.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -38,6 +39,34 @@ def read_json(path: Path) -> dict:
         raise RuntimeError(f"Cannot read delivery JSON {path}: {error}") from error
 
 
+def release_from_envelope(path: Path) -> dict:
+    envelope = read_json(path)
+    try:
+        return json.loads(base64.b64decode(envelope["payload"], validate=True))
+    except (KeyError, ValueError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"Cannot decode signed release envelope {path}: {error}") from error
+
+
+def package_root_for_commit(root: Path, commit: str) -> Path:
+    matches: list[Path] = []
+    for manifest_path in root.glob("*/downloads.json"):
+        manifest = read_json(manifest_path)
+        artifacts = manifest.get("artifacts")
+        if not isinstance(artifacts, list) or len(artifacts) != 2 or any(not isinstance(item, dict) for item in artifacts):
+            continue
+        if any(item.get("commit") != commit for item in artifacts):
+            continue
+        linux = [item for item in artifacts if item.get("platform") == "linux-x64"]
+        source = [item for item in artifacts if item.get("platform") == "source"]
+        if len(linux) != 1 or len(source) != 1 or linux[0].get("sourceSha256") != source[0].get("sha256"):
+            continue
+        if all((manifest_path.parent / item["fileName"]).is_file() for item in artifacts):
+            matches.append(manifest_path.parent)
+    if len(matches) != 1:
+        raise RuntimeError(f"Expected one two-artifact package root for commit {commit}; found {len(matches)}.")
+    return matches[0]
+
+
 def digest(path: Path) -> str:
     sha = hashlib.sha256()
     with path.open("rb") as stream:
@@ -60,12 +89,15 @@ def main() -> None:
     sequence = int(configured("KICAD_PREVIEW_SEQUENCE", "28"))
     publisher_private = Path(configured("KICAD_PUBLISHER_PRIVATE", "/mnt/build-storage/codex/kicad/signing/preview-publisher.pkcs8"))
     publisher_public = Path(configured("KICAD_PUBLISHER_PUBLIC", "/home/holyglory/kicad/automation/distribution/preview-publisher.spki"))
+    signed_root = Path(configured("KICAD_PREVIEW_SIGNED_ROOT", "/mnt/build-storage/codex/kicad/public-candidates/linux-preview28-signed"))
     if request_path.exists():
         raise RuntimeError(f"Refusing to overwrite an existing delivery request: {request_path}")
     if not candidate_root.is_dir() or not previous_root.is_dir():
         raise RuntimeError("Candidate and previous public roots must already exist.")
     if not (previous_root / "updates/preview.json").is_file():
         raise RuntimeError("The previous public root has no signed preview feed.")
+    if signed_root.exists():
+        raise RuntimeError(f"Refusing to replace an existing signed catalogue root: {signed_root}")
     if not VALIDATOR.is_file():
         raise RuntimeError(f"The built validation tool is missing: {VALIDATOR}")
 
@@ -91,6 +123,11 @@ def main() -> None:
     if len(candidates) != 1:
         raise RuntimeError(f"Expected exactly one package candidate for commit {commit}; found {len(candidates)}.")
     _, candidate_root, catalogue = candidates[0]
+    previous_release = release_from_envelope(previous_root / "updates/preview.json")
+    previous_commit = previous_release.get("commit")
+    if not isinstance(previous_commit, str) or len(previous_commit) != 40:
+        raise RuntimeError("The previous signed feed has no full source commit.")
+    previous_package_root = package_root_for_commit(candidate_root.parent, previous_commit)
     artifacts = catalogue["artifacts"]
     linux = [item for item in artifacts if item.get("platform") == "linux-x64"]
     source = [item for item in artifacts if item.get("platform") == "source"]
@@ -110,7 +147,6 @@ def main() -> None:
     work_root.mkdir(parents=True, exist_ok=False)
     release_path = work_root / "release.json"
     feed_path = work_root / "preview.json"
-    signed_root = work_root / "signed"
     release = {
         "schemaVersion": 1,
         "product": "kicad-codex",
@@ -138,6 +174,7 @@ def main() -> None:
         "sequence": sequence,
         "candidate_root": str(candidate_root),
         "previous_root": str(previous_root),
+        "previous_package_root": str(previous_package_root),
         "signed_root": str(signed_root),
         "release_manifest": str(release_path),
         "feed": str(feed_path),

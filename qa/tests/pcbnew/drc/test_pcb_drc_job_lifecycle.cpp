@@ -3251,6 +3251,110 @@ BOOST_AUTO_TEST_CASE( ManufacturingManagerAdmissionJournalAndReadOnlyReconcile )
     BOOST_CHECK_EQUAL( detachedRetry.error(), "manufacturing_dispatch_not_admitted" );
     BOOST_CHECK( !detachedRetried );
 
+    // A completed detached worker remains staged until the registering owner
+    // thread rechecks the exact lifecycle/dependency snapshot and asks the
+    // manager to publish its operation-owned directory atomically.
+    RunPcbManufacturingExport detachedPublishRequest = request;
+    detachedPublishRequest.set_operation_id( KIID().AsString().ToStdString() );
+    detachedPublishRequest.set_output_directory(
+            ( scratch.GetPath() / "detached-published-output" ).string() );
+    auto detachedPublishAdmitted = manager.Start( detachedPublishRequest, epoch, capture, true );
+    BOOST_REQUIRE_MESSAGE( detachedPublishAdmitted.has_value(),
+                           ( detachedPublishAdmitted ? "" : detachedPublishAdmitted.error() ) );
+    std::string detachedPublishStaging;
+    auto detachedWorkerCompleted = manager.Dispatch( detachedPublishRequest, epoch,
+            [&]( const PCB_MANUFACTURING_JOB_MANAGER::DISPATCH_CONTEXT& context )
+                    -> tl::expected<PcbManufacturingExportReceipt, std::string>
+            {
+                detachedPublishStaging = context.stagingDirectory;
+                std::ofstream staged( std::filesystem::path( context.stagingDirectory ) / "export.svg",
+                                      std::ios::binary );
+                staged << "detached output ready for owner publication\n";
+                if( !staged ) return tl::unexpected( "detached_staging_write_failed" );
+                PcbManufacturingExportReceipt completed;
+                completed.set_status( PCB_MFG_EXPORT_COMPLETED );
+                return completed;
+            }, {}, true );
+    BOOST_REQUIRE_MESSAGE( detachedWorkerCompleted.has_value(),
+                           ( detachedWorkerCompleted ? "" : detachedWorkerCompleted.error() ) );
+    BOOST_CHECK_EQUAL( detachedWorkerCompleted->status(), PCB_MFG_EXPORT_INDETERMINATE );
+    BOOST_CHECK_EQUAL( detachedWorkerCompleted->recovery_state(), PCB_MFG_RECOVERY_RECOVERABLE_STAGED );
+    BOOST_CHECK_EQUAL( detachedWorkerCompleted->publication_state(), PCB_MFG_PUBLICATION_STAGED );
+
+    auto detachedPublished = manager.PublishDetached( detachedPublishRequest.operation_id(), epoch, capture );
+    BOOST_REQUIRE_MESSAGE( detachedPublished.has_value(),
+                           ( detachedPublished ? "" : detachedPublished.error() ) );
+#if defined( __linux__ )
+    BOOST_CHECK_EQUAL( detachedPublished->status(), PCB_MFG_EXPORT_COMPLETED );
+    BOOST_CHECK_EQUAL( detachedPublished->publication_state(), PCB_MFG_PUBLICATION_PUBLISHED );
+    BOOST_CHECK( detachedPublished->publication_committed() );
+    BOOST_CHECK( detachedPublished->output_manifest_complete() );
+    BOOST_CHECK( std::filesystem::exists( detachedPublishRequest.output_directory() ) );
+    BOOST_CHECK( !std::filesystem::exists( detachedPublishStaging ) );
+#else
+    BOOST_CHECK_EQUAL( detachedPublished->status(), PCB_MFG_EXPORT_INDETERMINATE );
+    BOOST_CHECK_EQUAL( detachedPublished->publication_state(), PCB_MFG_PUBLICATION_FAILED );
+    BOOST_CHECK( !detachedPublished->publication_committed() );
+    BOOST_CHECK( !std::filesystem::exists( detachedPublishRequest.output_directory() ) );
+    BOOST_CHECK( std::filesystem::exists( detachedPublishStaging ) );
+#endif
+
+    NATIVE_STATE_DIGEST detachedPublishDigest;
+    detachedPublishDigest.Append( detachedPublishRequest.SerializeAsString() );
+    ReadPcbManufacturingExportJob detachedPublishReadRequest = read;
+    detachedPublishReadRequest.set_operation_id( detachedPublishRequest.operation_id() );
+    detachedPublishReadRequest.set_request_fingerprint_sha256( detachedPublishDigest.Hex() );
+    auto detachedPublishRead = manager.Read( detachedPublishReadRequest, epoch );
+    BOOST_REQUIRE_MESSAGE( detachedPublishRead.has_value(),
+                           ( detachedPublishRead ? "" : detachedPublishRead.error() ) );
+#if defined( __linux__ )
+    BOOST_CHECK( detachedPublishRead->published_outputs_verified() );
+#else
+    BOOST_CHECK( !detachedPublishRead->published_outputs_verified() );
+#endif
+
+    // A changed owner-thread checkpoint is terminally refused and never
+    // publishes the retained stage.
+    RunPcbManufacturingExport detachedChangedRequest = request;
+    detachedChangedRequest.set_operation_id( KIID().AsString().ToStdString() );
+    detachedChangedRequest.set_output_directory(
+            ( scratch.GetPath() / "detached-changed-output" ).string() );
+    auto detachedChangedAdmitted = manager.Start( detachedChangedRequest, epoch, capture, true );
+    BOOST_REQUIRE_MESSAGE( detachedChangedAdmitted.has_value(),
+                           ( detachedChangedAdmitted ? "" : detachedChangedAdmitted.error() ) );
+    std::string detachedChangedStaging;
+    auto detachedChangedWorker = manager.Dispatch( detachedChangedRequest, epoch,
+            [&]( const PCB_MANUFACTURING_JOB_MANAGER::DISPATCH_CONTEXT& context )
+                    -> tl::expected<PcbManufacturingExportReceipt, std::string>
+            {
+                detachedChangedStaging = context.stagingDirectory;
+                std::ofstream staged( std::filesystem::path( context.stagingDirectory ) / "export.svg",
+                                      std::ios::binary );
+                staged << "detached output must remain staged\n";
+                if( !staged ) return tl::unexpected( "detached_staging_write_failed" );
+                PcbManufacturingExportReceipt completed;
+                completed.set_status( PCB_MFG_EXPORT_COMPLETED );
+                return completed;
+            }, {}, true );
+    BOOST_REQUIRE_MESSAGE( detachedChangedWorker.has_value(),
+                           ( detachedChangedWorker ? "" : detachedChangedWorker.error() ) );
+    auto changedRecheck = [&]( const DocumentSpecifier& target )
+            -> tl::expected<PCB_MANUFACTURING_JOB_MANAGER::CAPTURE, std::string>
+    {
+        auto fresh = capture( target );
+        if( fresh ) fresh->before.set_state_sha256( std::string( 64, 'f' ) );
+        return fresh;
+    };
+    auto detachedChanged = manager.PublishDetached( detachedChangedRequest.operation_id(), epoch, changedRecheck );
+    BOOST_REQUIRE_MESSAGE( detachedChanged.has_value(),
+                           ( detachedChanged ? "" : detachedChanged.error() ) );
+    BOOST_CHECK_EQUAL( detachedChanged->status(), PCB_MFG_EXPORT_INDETERMINATE );
+    BOOST_CHECK_EQUAL( detachedChanged->publication_state(), PCB_MFG_PUBLICATION_FAILED );
+    BOOST_CHECK_EQUAL( detachedChanged->error_code(), "manufacturing_publication_source_changed" );
+    BOOST_CHECK( !detachedChanged->publication_committed() );
+    BOOST_CHECK( !std::filesystem::exists( detachedChangedRequest.output_directory() ) );
+    BOOST_CHECK( std::filesystem::exists( detachedChangedStaging ) );
+
     // Unsupported detached families fail before worker/journal admission.
     RunPcbManufacturingExport unsupportedDetached = request;
     unsupportedDetached.set_operation_id( KIID().AsString().ToStdString() );

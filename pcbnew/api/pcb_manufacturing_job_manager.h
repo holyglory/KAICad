@@ -109,6 +109,16 @@ public:
     /** Join one worker and durably record that the worker has been joined. */
     tl::expected<kiapi::automation::v1::PcbManufacturingExportReceipt, std::string> Join(
             const std::string& aOperationId, const std::string& aProcessEpoch );
+    /**
+     * Recheck the live owner-thread lifecycle/source baseline and publish one
+     * completed detached stage atomically.  The callback must run on the
+     * registering editor thread and return the same complete board/project
+     * snapshot captured at admission.  A worker result remains staged until
+     * this boundary verifies the fresh capture and the moved output manifest.
+     */
+    tl::expected<kiapi::automation::v1::PcbManufacturingExportReceipt, std::string> PublishDetached(
+            const std::string& aOperationId, const std::string& aProcessEpoch,
+            const CAPTURE_SOURCE& aOwnerRecheck );
     tl::expected<kiapi::automation::v1::PcbManufacturingExportReceipt, std::string> Cancel(
             const kiapi::automation::v1::CancelPcbManufacturingExport&, const std::string& aProcessEpoch );
     tl::expected<kiapi::automation::v1::PcbManufacturingExportReceiptResponse, std::string> Reconcile(

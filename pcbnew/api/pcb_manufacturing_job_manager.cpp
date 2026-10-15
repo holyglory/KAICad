@@ -28,6 +28,11 @@
 #include <unistd.h>
 #endif
 
+#if defined( __linux__ )
+#include <linux/fs.h>
+#include <sys/syscall.h>
+#endif
+
 using namespace kiapi::automation::v1;
 using kiapi::common::types::DocumentType;
 namespace fs = std::filesystem;
@@ -273,6 +278,101 @@ bool OwnedDetachedStagingExists(
     std::error_code error;
     const fs::file_status status = fs::symlink_status( staging, error );
     return !error && status.type() == fs::file_type::directory;
+}
+
+// Inventory the manager-owned stage before it can be moved.  The worker's
+// receipt is not trusted as a publication manifest: the owner re-reads every
+// regular file, rejects links/special files and computes the exact manifest
+// that the post-move verification will check.
+tl::expected<void, std::string> InventoryDetachedStaging(
+        const fs::path& aRoot, PcbManufacturingExportReceipt& aReceipt )
+{
+    if( !aRoot.is_absolute() || aRoot != aRoot.lexically_normal() )
+        return tl::unexpected( "manufacturing_staging_path_invalid" );
+    if( auto links = NoLinks( aRoot ); !links ) return tl::unexpected( links.error() );
+
+    std::error_code rootError;
+    const fs::file_status rootStatus = fs::symlink_status( aRoot, rootError );
+    if( rootError || rootStatus.type() != fs::file_type::directory )
+        return tl::unexpected( "manufacturing_staging_unavailable" );
+
+    std::vector<fs::path> files;
+    std::error_code iteratorError;
+    fs::recursive_directory_iterator it( aRoot, iteratorError );
+    if( iteratorError ) return tl::unexpected( "manufacturing_staging_unavailable" );
+    for( fs::recursive_directory_iterator end; it != end; it.increment( iteratorError ) )
+    {
+        if( iteratorError ) return tl::unexpected( "manufacturing_staging_unavailable" );
+        const fs::path path = it->path();
+        const fs::file_status status = it->symlink_status( iteratorError );
+        if( iteratorError || status.type() == fs::file_type::symlink || ReparsePath( path ) )
+            return tl::unexpected( "manufacturing_staging_link_rejected" );
+        if( status.type() == fs::file_type::directory ) continue;
+        if( status.type() != fs::file_type::regular )
+            return tl::unexpected( "manufacturing_staging_not_regular" );
+        files.push_back( path );
+    }
+    if( files.empty() || files.size() > 4096 )
+        return tl::unexpected( "manufacturing_staging_manifest_invalid" );
+
+    std::sort( files.begin(), files.end(), []( const fs::path& aLeft, const fs::path& aRight )
+    {
+        return aLeft.generic_string() < aRight.generic_string();
+    } );
+
+    aReceipt.clear_artifacts();
+    aReceipt.clear_output_manifest_sha256();
+    aReceipt.set_output_manifest_complete( false );
+    NATIVE_STATE_DIGEST manifest;
+    uint64_t totalBytes = 0;
+    for( const fs::path& file : files )
+    {
+        if( auto links = NoLinks( file ); !links ) return tl::unexpected( links.error() );
+        const fs::path relative = file.lexically_relative( aRoot );
+        const std::string relativeText = relative.generic_string();
+        if( relative.empty() || relative.is_absolute() || relative != relative.lexically_normal()
+            || relativeText.empty() || relativeText == "." || relativeText == ".."
+            || ( relativeText.size() >= 3 && relativeText.compare( 0, 3, "../" ) == 0 ) )
+            return tl::unexpected( "manufacturing_staging_path_invalid" );
+
+        const FILE_CONTENT_BASELINE baseline = FILE_CONTENT_BASELINE::Read( WxPath( file ) );
+        if( !baseline.Known() || !baseline.Exists() )
+            return tl::unexpected( "manufacturing_staging_unreadable" );
+        totalBytes += baseline.Bytes();
+        if( baseline.Bytes() > 512ULL * 1024 * 1024
+            || totalBytes > 2ULL * 1024 * 1024 * 1024 )
+            return tl::unexpected( "manufacturing_staging_oversized" );
+
+        manifest.Append( relativeText );
+        manifest.Append( baseline.Sha256() );
+        auto* artifact = aReceipt.add_artifacts();
+        artifact->set_path( WxPath( file ).ToStdString() );
+        artifact->set_relative_path( relativeText );
+        artifact->set_bytes( baseline.Bytes() );
+        artifact->set_sha256( baseline.Sha256() );
+        artifact->set_ownership( PCB_MFG_ARTIFACT_CREATED );
+    }
+    aReceipt.set_output_manifest_complete( true );
+    aReceipt.set_output_manifest_sha256( manifest.Hex() );
+    return {};
+}
+
+bool AtomicPublishNoReplaceDirectory( const fs::path& aStaging, const fs::path& aOutput,
+                                      std::string& aReason )
+{
+#if defined( __linux__ ) && defined( SYS_renameat2 ) && defined( RENAME_NOREPLACE )
+    if( ::syscall( SYS_renameat2, AT_FDCWD, aStaging.c_str(), AT_FDCWD, aOutput.c_str(),
+                   RENAME_NOREPLACE ) == 0 )
+        return true;
+
+    aReason = std::error_code( errno, std::generic_category() ).message();
+    return false;
+#else
+    (void) aStaging;
+    (void) aOutput;
+    aReason = "atomic no-replace directory publication is unavailable on this platform";
+    return false;
+#endif
 }
 }
 
@@ -1398,6 +1498,162 @@ PCB_MANUFACTURING_JOB_MANAGER::Join( const std::string& aOperationId,
     std::lock_guard lock( m_mutex );
     m_workers.erase( aOperationId );
     return joined;
+}
+
+tl::expected<PCB_MANUFACTURING_JOB_MANAGER::Receipt, std::string>
+PCB_MANUFACTURING_JOB_MANAGER::PublishDetached( const std::string& aOperationId,
+                                                 const std::string& aProcessEpoch,
+                                                 const CAPTURE_SOURCE& aOwnerRecheck )
+{
+    if( !IsUuid( aOperationId ) || !IsUuid( aProcessEpoch ) )
+        return tl::unexpected( "invalid_manufacturing_publication_request" );
+    if( !aOwnerRecheck ) return tl::unexpected( "manufacturing_owner_recheck_unavailable" );
+
+    std::unique_lock lock( m_mutex );
+    auto journal = read( aOperationId );
+    if( !journal ) return tl::unexpected( journal.error() );
+    if( journal->receipt().process_epoch() != aProcessEpoch )
+        return tl::unexpected( "stale_process_epoch" );
+    const Receipt& admitted = journal->receipt();
+    if( admitted.status() != PCB_MFG_EXPORT_INDETERMINATE || !admitted.terminal()
+        || !admitted.worker_finished() || admitted.publication_state() != PCB_MFG_PUBLICATION_STAGED
+        || admitted.recovery_state() != PCB_MFG_RECOVERY_RECOVERABLE_STAGED
+        || admitted.publication_committed() || admitted.staging_directory().empty() )
+        return tl::unexpected( "manufacturing_publication_not_pending" );
+    if( m_workers.find( aOperationId ) != m_workers.end() )
+        return tl::unexpected( "manufacturing_worker_not_joined" );
+
+    auto lease = AcquireOperationLock( fs::u8path( m_journalDirectory.ToStdString() ), aOperationId );
+    if( !lease ) return tl::unexpected( lease.error() );
+    journal = read( aOperationId );
+    if( !journal ) return tl::unexpected( journal.error() );
+    if( journal->receipt().process_epoch() != aProcessEpoch
+        || journal->receipt().status() != PCB_MFG_EXPORT_INDETERMINATE
+        || journal->receipt().publication_state() != PCB_MFG_PUBLICATION_STAGED
+        || journal->receipt().recovery_state() != PCB_MFG_RECOVERY_RECOVERABLE_STAGED )
+        return tl::unexpected( "manufacturing_publication_race" );
+
+    // The callback is the owner-thread handoff.  It must observe the live
+    // board/project without yielding to editor input while the operation lease
+    // prevents another process from changing this journal.
+    const Request request = journal->request();
+    lock.unlock();
+    auto recaptured = aOwnerRecheck( request.document() );
+    if( !recaptured ) return tl::unexpected( "manufacturing_owner_recheck_failed" );
+    if( recaptured->sourceSnapshot.snapshot_sha256().empty() )
+        recaptured->sourceSnapshot.set_snapshot_sha256( SnapshotHash( recaptured->sourceSnapshot ) );
+    lock.lock();
+
+    auto current = read( aOperationId );
+    if( !current ) return tl::unexpected( current.error() );
+    if( current->receipt().process_epoch() != aProcessEpoch
+        || current->receipt().status() != PCB_MFG_EXPORT_INDETERMINATE
+        || current->receipt().publication_state() != PCB_MFG_PUBLICATION_STAGED
+        || current->receipt().recovery_state() != PCB_MFG_RECOVERY_RECOVERABLE_STAGED )
+        return tl::unexpected( "manufacturing_publication_race" );
+
+    auto persistFailure = [&]( JournalRecord aFailed, const std::string& aCode,
+                               const std::string& aMessage )
+            -> tl::expected<Receipt, std::string>
+    {
+        Receipt& receipt = *aFailed.mutable_receipt();
+        receipt.set_status( PCB_MFG_EXPORT_INDETERMINATE );
+        receipt.set_dispatch_stage( PCB_MFG_DISPATCH_TERMINAL );
+        receipt.set_terminal( true );
+        receipt.set_worker_finished( true );
+        receipt.set_recovery_state( PCB_MFG_RECOVERY_RECOVERABLE_STAGED );
+        receipt.set_publication_state( PCB_MFG_PUBLICATION_FAILED );
+        receipt.set_publication_committed( false );
+        receipt.set_error_code( aCode );
+        receipt.set_error_message( aMessage );
+        receipt.clear_observed_after();
+        if( aFailed.journal_revision() == std::numeric_limits<uint64_t>::max() )
+            return tl::unexpected( "invalid_manufacturing_journal" );
+        aFailed.set_journal_revision( aFailed.journal_revision() + 1 );
+        if( auto persisted = write( aFailed ); !persisted ) return tl::unexpected( persisted.error() );
+        return aFailed.receipt();
+    };
+
+    const Receipt& staged = current->receipt();
+    const bool sourceUnchanged =
+            ValidState( recaptured->before ) && ValidState( recaptured->after )
+            && google::protobuf::util::MessageDifferencer::Equals(
+                    recaptured->before, staged.observed_before() )
+            && google::protobuf::util::MessageDifferencer::Equals(
+                    recaptured->after, staged.observed_before() )
+            && recaptured->sourceBoard == current->source_board()
+            && HasCompleteDetachedSnapshot( recaptured->sourceSnapshot, request.document() )
+            && SnapshotMatchesState( recaptured->sourceSnapshot, recaptured->before )
+            && recaptured->sourceSnapshot.SerializeAsString() == current->source_snapshot().SerializeAsString();
+    if( !sourceUnchanged )
+    {
+        return persistFailure( *current, "manufacturing_publication_source_changed",
+                               "The owner-thread lifecycle or dependency snapshot changed before detached publication." );
+    }
+
+    const fs::path staging = fs::u8path( staged.staging_directory() );
+    const fs::path output = fs::u8path( request.output_directory() );
+    if( !OwnedDetachedStagingExists( request, staged.staging_directory() ) )
+        return persistFailure( *current, "manufacturing_staging_unavailable",
+                               "The manager-owned detached staging directory is missing or unsafe." );
+    if( output.empty() || !output.is_absolute() || output != output.lexically_normal()
+        || output.parent_path().empty() )
+        return persistFailure( *current, "manufacturing_publication_target_invalid",
+                               "The detached publication target is not a canonical absolute path." );
+    if( auto links = NoLinks( output ); !links )
+        return persistFailure( *current, "manufacturing_publication_target_unavailable",
+                               "The detached publication target has an unsafe parent path." );
+
+    std::error_code outputError;
+    const fs::file_status outputStatus = fs::symlink_status( output, outputError );
+    if( outputError && !Missing( outputError ) )
+        return persistFailure( *current, "manufacturing_publication_target_unavailable",
+                               "The detached publication target could not be inspected." );
+    if( !outputError && outputStatus.type() != fs::file_type::not_found )
+        return persistFailure( *current, "manufacturing_publication_target_exists",
+                               "The detached publication target already exists." );
+
+    JournalRecord candidate = *current;
+    Receipt& published = *candidate.mutable_receipt();
+    if( auto inventory = InventoryDetachedStaging( staging, published ); !inventory )
+        return persistFailure( std::move( candidate ), "manufacturing_staging_manifest_invalid",
+                               inventory.error() );
+
+    std::string publicationReason;
+    if( !AtomicPublishNoReplaceDirectory( staging, output, publicationReason ) )
+        return persistFailure( std::move( candidate ), "manufacturing_publication_failed",
+                               publicationReason );
+
+    // The rename is atomic and non-interruptible.  Do not journal PUBLISHED
+    // until the output directory, exact file set, byte sizes, hashes and
+    // manifest digest have all been re-read from the published path.
+    for( int index = 0; index < published.artifacts_size(); ++index )
+    {
+        PcbManufacturingArtifact* artifact = published.mutable_artifacts( index );
+        artifact->set_path( ( output / fs::u8path( artifact->relative_path() ) ).generic_string() );
+    }
+    published.set_status( PCB_MFG_EXPORT_COMPLETED );
+    published.set_dispatch_stage( PCB_MFG_DISPATCH_TERMINAL );
+    published.set_terminal( true );
+    published.set_worker_finished( true );
+    published.set_publication_state( PCB_MFG_PUBLICATION_PUBLISHED );
+    published.set_publication_committed( true );
+    published.set_recovery_state( PCB_MFG_RECOVERY_RECONCILED );
+    published.clear_error_code();
+    published.clear_error_message();
+    published.mutable_observed_after()->CopyFrom( recaptured->after );
+
+    if( auto verified = VerifyPublishedOutputs( published ); !verified )
+    {
+        return persistFailure( std::move( candidate ), "manufacturing_published_outputs_unverified",
+                               verified.error() );
+    }
+    if( candidate.journal_revision() == std::numeric_limits<uint64_t>::max() )
+        return tl::unexpected( "invalid_manufacturing_journal" );
+    candidate.set_journal_revision( candidate.journal_revision() + 1 );
+    if( auto persisted = write( candidate ); !persisted )
+        return tl::unexpected( persisted.error() );
+    return candidate.receipt();
 }
 
 tl::expected<PCB_MANUFACTURING_JOB_MANAGER::Receipt, std::string>

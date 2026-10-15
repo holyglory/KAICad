@@ -102,7 +102,6 @@ def main() -> None:
         "checked_at_ms": linux_observation["checked_at_ms"],
         "access": linux_observation["access"],
         "observation": "download_matched",
-        "web_route": web_observation,
     }
     (evidence / "Verification").write_text(json.dumps(verification, indent=2) + "\n")
     completion = {

@@ -227,13 +227,22 @@ internal sealed class PcbDrcReceiptStore(string stateDirectory)
         {
             if (existing.ProcessEpoch != processEpoch)
                 throw new AutomationException("stale_process_epoch", "The PCB DRC operation belongs to another native process epoch.");
-            if (!SameRequest(existing, instanceId, operationId, processEpoch, documentJson, revisionJson,
-                    candidateJson, deleteJson, groupChangesJson, requestFingerprintSha256, candidateHash))
-                throw new AutomationException("drc_operation_reused", "The PCB DRC operation ID is already bound to different request bytes.");
             if (existing.Outcome == PcbDrcReceiptOutcome.Retryable)
             {
+                // A retryable receipt proves native dispatch did not occur,
+                // so the caller may correct a stale revision or other request
+                // bytes while retaining the same idempotency identity. The
+                // replacement admission becomes the new exact request that
+                // future retries must match.
                 var prepared = existing with
                 {
+                    DocumentJson = documentJson,
+                    RevisionJson = revisionJson,
+                    CandidateJson = candidateJson,
+                    DeleteJson = deleteJson,
+                    GroupChangesJson = groupChangesJson,
+                    RequestFingerprintSha256 = requestFingerprintSha256,
+                    CandidateHash = candidateHash,
                     Outcome = PcbDrcReceiptOutcome.Prepared,
                     NativeDispatchKnown = false,
                     NativeDispatch = false,
@@ -245,6 +254,9 @@ internal sealed class PcbDrcReceiptStore(string stateDirectory)
                 Write(prepared, existing);
                 return new(prepared, true);
             }
+            if (!SameRequest(existing, instanceId, operationId, processEpoch, documentJson, revisionJson,
+                    candidateJson, deleteJson, groupChangesJson, requestFingerprintSha256, candidateHash))
+                throw new AutomationException("drc_operation_reused", "The PCB DRC operation ID is already bound to different request bytes.");
             if (existing.Outcome == PcbDrcReceiptOutcome.Completed)
                 return new(existing, false);
             if (existing.Outcome == PcbDrcReceiptOutcome.Stale)

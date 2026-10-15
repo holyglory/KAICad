@@ -141,6 +141,15 @@ public sealed class PcbDrcTools(InstanceRegistry registry)
                 receipts.MarkUnknownHeld(instanceId, id, null, "operation_outcome_unknown", error.Message);
                 throw;
             }
+            catch (NativeApiException error) when (error.Status == (int)ApiStatusCode.AsBadRequest)
+            {
+                // KiCad rejected the admission before creating a native job
+                // (for example, the requested document revision was stale),
+                // so the operation can safely be retried with the same
+                // identity once the caller supplies a fresh revision.
+                receipts.MarkUnknownHeld(instanceId, id, false, "native_not_reached", error.Message);
+                throw;
+            }
             catch (Exception error) when (error is NativeApiException or AutomationException
                 or InvalidProtocolBufferException or InvalidJsonException)
             {

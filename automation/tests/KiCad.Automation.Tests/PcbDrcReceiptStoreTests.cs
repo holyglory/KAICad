@@ -89,6 +89,32 @@ public sealed class PcbDrcReceiptStoreTests
         finally { Directory.Delete(root, true); }
     }
 
+    [TestMethod]
+    public void ProvenNativeNonDispatchCanRetryWithFreshRequestBytes()
+    {
+        string root = Directory.CreateTempSubdirectory("pcb-drc-receipt-fresh-retry-").FullName;
+        try
+        {
+            string instance = Guid.NewGuid().ToString("D");
+            string operation = Guid.NewGuid().ToString("D");
+            string epoch = Guid.NewGuid().ToString("D");
+            string firstRevision = "{\"epoch\":\"" + Guid.NewGuid().ToString("D") + "\",\"sequence\":1}";
+            string secondRevision = "{\"epoch\":\"" + Guid.NewGuid().ToString("D") + "\",\"sequence\":2}";
+            string firstFingerprint = Digest(operation + firstRevision);
+            string secondFingerprint = Digest(operation + secondRevision);
+            var store = new PcbDrcReceiptStore(root);
+            store.Reserve(instance, operation, epoch, "{}", firstRevision, "", "", "", firstFingerprint, "");
+            store.MarkUnknown(instance, operation, false, "native_not_reached", "the stale revision was rejected before dispatch");
+
+            var retry = store.Reserve(instance, operation, epoch, "{}", secondRevision, "", "", "", secondFingerprint, "");
+            Assert.IsTrue(retry.Created);
+            Assert.AreEqual(PcbDrcReceiptOutcome.Prepared, retry.Receipt.Outcome);
+            Assert.AreEqual(secondRevision, retry.Receipt.RevisionJson);
+            Assert.AreEqual(secondFingerprint, retry.Receipt.RequestFingerprintSha256);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
     private static string Digest(string value) => Convert.ToHexStringLower(
         SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(value)));
 }

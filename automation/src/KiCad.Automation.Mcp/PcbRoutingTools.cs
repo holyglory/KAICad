@@ -424,7 +424,15 @@ public sealed class PcbRoutingTools(InstanceRegistry registry)
                 replayed = result.Replayed, candidateFingerprintSha256 = candidateFingerprint, readOnly = true });
             return new CallToolResult { StructuredContent = structured, Content = [new TextContentBlock { Text = structured.GetRawText() }] };
         }
-        catch (Exception error) when (error is AutomationException or NativeApiException or NngException or InvalidProtocolBufferException or InvalidJsonException)
+        catch (NngException error)
+        {
+            string code = error.RequestDelivered ? "read_outcome_unknown" : "native_not_reached";
+            string message = error.RequestDelivered
+                ? "KiCad received the route receipt read but did not answer; the native receipt is unknown. Retry the read-only receipt request."
+                : "KiCad did not receive the route receipt read; no native receipt result was observed. Retry the read-only receipt request.";
+            return Failure(code, message, error.RequestDelivered);
+        }
+        catch (Exception error) when (error is AutomationException or NativeApiException or InvalidProtocolBufferException or InvalidJsonException)
         { return Failure("route_receipt_failed", error.Message); }
     }
 

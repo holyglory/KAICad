@@ -263,11 +263,35 @@ public sealed class PcbRoutingReceiptRecoveryTests
         }
     }
 
+    [TestMethod]
+    public async Task ReceiptPreservesDeliveredTransportAsUnknownReadOutcome()
+    {
+        string root = Directory.CreateTempSubdirectory("pcb-route-receipt-read-unknown-").FullName;
+        try
+        {
+            var fixture = RouteReceiptFixture.Create(root);
+            fixture.Transport.ReceiptFailure = new NngException(5, "reply timeout", requestDelivered: true);
+            var registry = await fixture.Registry(root);
+
+            CallToolResult result = await new PcbRoutingTools(registry).Receipt(
+                fixture.Transport.InstanceId, fixture.RequestJson, fixture.State.ProcessEpoch,
+                fixture.Request.OperationId, default);
+
+            AssertError(result, "read_outcome_unknown");
+            JsonElement error = result.StructuredContent!.Value;
+            Assert.IsTrue(error.GetProperty("requestDelivered").GetBoolean());
+            Assert.AreEqual(1, fixture.Transport.RouteReceiptReads);
+            Assert.AreEqual(0, fixture.Transport.RouteMutations);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
     private sealed class RouteReceiptTransport : INativeTransport
     {
         internal readonly string Epoch = Guid.NewGuid().ToString("D");
         internal readonly string InstanceId = Guid.NewGuid().ToString("D");
         internal CheckedPcbRouteReceipt Receipt { get; set; } = new();
+        internal Exception? ReceiptFailure { get; set; }
         internal int RouteReceiptReads { get; private set; }
         internal int RouteMutations { get; private set; }
         internal bool HandshakeSeen { get; private set; }
@@ -285,6 +309,7 @@ public sealed class PcbRoutingReceiptRecoveryTests
             if (request.Message.Is(ReadCheckedPcbRouteReceipt.Descriptor))
             {
                 RouteReceiptReads++;
+                if (ReceiptFailure is { } failure) throw failure;
                 var query = request.Message.Unpack<ReadCheckedPcbRouteReceipt>();
                 if (query.ProcessEpoch != Epoch || query.OperationId != Receipt.OperationId)
                     return Error("receipt query identity mismatch");

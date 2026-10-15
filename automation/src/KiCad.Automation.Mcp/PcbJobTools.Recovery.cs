@@ -147,6 +147,8 @@ public sealed partial class PcbJobTools
                 instanceId, processEpoch = session.Epoch, operationId = request.OperationId,
                 recoverySupported = true, found = response.Found,
                 publishedOutputsVerified = response.PublishedOutputsVerified,
+                publicationPending = response.Found
+                    && response.Receipt.RecoveryState == PcbManufacturingRecoveryState.PcbMfgRecoveryRecoverableStaged,
                 receipt = response.Found
                     ? JsonSerializer.Deserialize<JsonElement>(SchematicJson.Formatter.Format(response.Receipt))
                     : (JsonElement?)null
@@ -194,6 +196,27 @@ public sealed partial class PcbJobTools
             && !response.PublishedOutputsVerified )
             throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
                 "The native manager did not recheck the completed export's published outputs; no retry or publication was attempted.");
+        if( response.Found
+            && response.Receipt.RecoveryState == PcbManufacturingRecoveryState.PcbMfgRecoveryRecoverableStaged )
+            ValidateRecoverableStagedReceipt(response.Receipt, response.PublishedOutputsVerified);
+    }
+
+    /// <summary>
+    /// A retained detached stage is an explicit publication opportunity, not
+    /// a completed export. Require the terminal indeterminate receipt and the
+    /// manager-owned staging identity before exposing it after reconnect.
+    /// </summary>
+    private static void ValidateRecoverableStagedReceipt(
+        PcbManufacturingExportReceipt receipt, bool publishedOutputsVerified)
+    {
+        if( receipt.Status != PcbManufacturingExportStatus.PcbMfgExportIndeterminate
+            || !receipt.Terminal || !receipt.WorkerFinished
+            || receipt.PublicationState != PcbManufacturingPublicationState.PcbMfgPublicationStaged
+            || string.IsNullOrWhiteSpace(receipt.StagingDirectory)
+            || !Path.IsPathFullyQualified(receipt.StagingDirectory)
+            || receipt.PublicationCommitted || publishedOutputsVerified )
+            throw new AutomationException(PcbExportRecoveryPolicy.RecoveryUnavailable,
+                "The native manager reported staged recovery without a terminal, owned staging receipt; no publication or retry was claimed.");
     }
 
     [McpServerTool(Name = "kicad_pcb_export_manager_capabilities_typed", ReadOnly = true),

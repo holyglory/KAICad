@@ -187,6 +187,51 @@ public sealed class PcbManufacturingRecoveryContractTests
     }
 
     [TestMethod]
+    public void ReconcileRequiresAnExplicitOwnedStagingReceiptBeforeExposingRestartPublication()
+    {
+        const string epoch = "11111111-1111-4111-8111-111111111111";
+        var staged = new PcbManufacturingExportReceiptResponse
+        {
+            Found = true,
+            ReconciliationSupported = true,
+            ObservingProcessEpoch = epoch,
+            RequestFingerprintVerified = true,
+            JournalVerified = true,
+            PriorProcessEpochVerified = true,
+            Receipt = new PcbManufacturingExportReceipt
+            {
+                Status = PcbManufacturingExportStatus.PcbMfgExportIndeterminate,
+                Terminal = true,
+                WorkerFinished = true,
+                RecoveryState = PcbManufacturingRecoveryState.PcbMfgRecoveryRecoverableStaged,
+                PublicationState = PcbManufacturingPublicationState.PcbMfgPublicationStaged,
+                StagingDirectory = Path.Combine(Path.GetTempPath(), "pcb-mfg-staging-operation"),
+                PublicationCommitted = false
+            }
+        };
+
+        PcbJobTools.ValidateReconcileResponseSupport(staged, allowPriorProcessEpoch: true, epoch);
+
+        var missingStage = staged.Clone();
+        missingStage.Receipt.StagingDirectory = "";
+        AutomationException error = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbJobTools.ValidateReconcileResponseSupport(missingStage, allowPriorProcessEpoch: true, epoch));
+        Assert.AreEqual(PcbExportRecoveryPolicy.RecoveryUnavailable, error.Code);
+
+        var published = staged.Clone();
+        published.PublishedOutputsVerified = true;
+        error = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbJobTools.ValidateReconcileResponseSupport(published, allowPriorProcessEpoch: true, epoch));
+        Assert.AreEqual(PcbExportRecoveryPolicy.RecoveryUnavailable, error.Code);
+
+        var completed = staged.Clone();
+        completed.Receipt.Status = PcbManufacturingExportStatus.PcbMfgExportCompleted;
+        error = Assert.ThrowsExactly<AutomationException>(() =>
+            PcbJobTools.ValidateReconcileResponseSupport(completed, allowPriorProcessEpoch: true, epoch));
+        Assert.AreEqual(PcbExportRecoveryPolicy.RecoveryUnavailable, error.Code);
+    }
+
+    [TestMethod]
     public void TypedRecoveryInputsPreserveIdentityAndRejectContradictoryEpochs()
     {
         string root = Directory.CreateTempSubdirectory("pcb-manufacturing-recovery-contract-").FullName;

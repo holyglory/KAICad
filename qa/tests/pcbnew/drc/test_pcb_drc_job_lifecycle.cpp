@@ -3239,6 +3239,56 @@ BOOST_AUTO_TEST_CASE( ManufacturingManagerAdmissionJournalAndReadOnlyReconcile )
     BOOST_CHECK_EQUAL( detachedRead->receipt().staging_directory(), detachedStagingPath );
     BOOST_CHECK( !detachedRead->published_outputs_verified() );
 
+    // Reconstruct the manager after a process restart.  The old operation
+    // epoch remains part of the receipt identity, while the new owner epoch
+    // is used for the fresh lifecycle/dependency recheck.  Retained staging
+    // may be published only through that explicit owner boundary; it is never
+    // treated as a completed export by reconciliation alone.
+    const std::string stagedRestartEpoch = KIID().AsString().ToStdString();
+    PCB_MANUFACTURING_JOB_MANAGER restarted( journalDirectory );
+    ReconcilePcbManufacturingExport stagedRestart;
+    stagedRestart.mutable_document()->CopyFrom( document );
+    stagedRestart.set_operation_id( detachedFailureRequest.operation_id() );
+    stagedRestart.set_process_epoch( stagedRestartEpoch );
+    stagedRestart.set_prior_process_epoch( epoch );
+    stagedRestart.set_allow_prior_process_epoch( true );
+    stagedRestart.set_request_fingerprint_sha256( detachedDigest.Hex() );
+    auto stagedRecovered = restarted.Reconcile( stagedRestart, stagedRestartEpoch );
+    BOOST_REQUIRE_MESSAGE( stagedRecovered.has_value(),
+                           ( stagedRecovered ? "" : stagedRecovered.error() ) );
+    BOOST_CHECK( stagedRecovered->restart_reconciled() == false );
+    BOOST_CHECK_EQUAL( stagedRecovered->receipt().recovery_state(),
+                       PCB_MFG_RECOVERY_RECOVERABLE_STAGED );
+    BOOST_CHECK_EQUAL( stagedRecovered->receipt().publication_state(), PCB_MFG_PUBLICATION_STAGED );
+    BOOST_CHECK( !stagedRecovered->published_outputs_verified() );
+
+    auto restartedCapture = [&]( const DocumentSpecifier& target )
+            -> tl::expected<PCB_MANUFACTURING_JOB_MANAGER::CAPTURE, std::string>
+    {
+        auto fresh = capture( target );
+        if( fresh )
+        {
+            fresh->before.set_process_epoch( stagedRestartEpoch );
+            fresh->after.set_process_epoch( stagedRestartEpoch );
+        }
+        return fresh;
+    };
+    auto restartedPublished = restarted.PublishDetached(
+            detachedFailureRequest.operation_id(), stagedRestartEpoch, restartedCapture );
+    BOOST_REQUIRE_MESSAGE( restartedPublished.has_value(),
+                           ( restartedPublished ? "" : restartedPublished.error() ) );
+#if defined( __linux__ )
+    BOOST_CHECK_EQUAL( restartedPublished->status(), PCB_MFG_EXPORT_COMPLETED );
+    BOOST_CHECK_EQUAL( restartedPublished->publication_state(), PCB_MFG_PUBLICATION_PUBLISHED );
+    BOOST_CHECK( restartedPublished->publication_committed() );
+    BOOST_CHECK( std::filesystem::exists( detachedFailureRequest.output_directory() ) );
+    BOOST_CHECK( !std::filesystem::exists( detachedStagingPath ) );
+#else
+    BOOST_CHECK_EQUAL( restartedPublished->status(), PCB_MFG_EXPORT_INDETERMINATE );
+    BOOST_CHECK_EQUAL( restartedPublished->publication_state(), PCB_MFG_PUBLICATION_FAILED );
+    BOOST_CHECK( !restartedPublished->publication_committed() );
+#endif
+
     bool detachedRetried = false;
     auto detachedRetry = manager.Dispatch( detachedFailureRequest, epoch,
             [&]( const PCB_MANUFACTURING_JOB_MANAGER::DISPATCH_CONTEXT& )

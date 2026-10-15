@@ -280,6 +280,21 @@ bool OwnedDetachedStagingExists(
     return !error && status.type() == fs::file_type::directory;
 }
 
+// A restarted editor has a new process epoch, but the captured board,
+// document revision and dependency baselines remain the same.  Keep the
+// epoch itself as operation identity in the journal while comparing the
+// source checkpoint independently of that runtime identity.
+bool SameSourceCheckpointAcrossProcessEpoch(
+        const kiapi::automation::v1::DocumentLifecycleState& aLeft,
+        const kiapi::automation::v1::DocumentLifecycleState& aRight )
+{
+    auto left = aLeft;
+    auto right = aRight;
+    left.clear_process_epoch();
+    right.clear_process_epoch();
+    return google::protobuf::util::MessageDifferencer::Equals( left, right );
+}
+
 // Inventory the manager-owned stage before it can be moved.  The worker's
 // receipt is not trusted as a publication manifest: the owner re-reads every
 // regular file, rejects links/special files and computes the exact manifest
@@ -1512,7 +1527,11 @@ PCB_MANUFACTURING_JOB_MANAGER::PublishDetached( const std::string& aOperationId,
     std::unique_lock lock( m_mutex );
     auto journal = read( aOperationId );
     if( !journal ) return tl::unexpected( journal.error() );
-    if( journal->receipt().process_epoch() != aProcessEpoch )
+    const bool stagedPriorProcess =
+            journal->receipt().process_epoch() != aProcessEpoch
+            && journal->receipt().recovery_state() == PCB_MFG_RECOVERY_RECOVERABLE_STAGED
+            && journal->receipt().publication_state() == PCB_MFG_PUBLICATION_STAGED;
+    if( journal->receipt().process_epoch() != aProcessEpoch && !stagedPriorProcess )
         return tl::unexpected( "stale_process_epoch" );
     const Receipt& admitted = journal->receipt();
     if( admitted.status() != PCB_MFG_EXPORT_INDETERMINATE || !admitted.terminal()
@@ -1527,7 +1546,11 @@ PCB_MANUFACTURING_JOB_MANAGER::PublishDetached( const std::string& aOperationId,
     if( !lease ) return tl::unexpected( lease.error() );
     journal = read( aOperationId );
     if( !journal ) return tl::unexpected( journal.error() );
-    if( journal->receipt().process_epoch() != aProcessEpoch
+    const bool stagedPriorProcessAfterLease =
+            journal->receipt().process_epoch() != aProcessEpoch
+            && journal->receipt().recovery_state() == PCB_MFG_RECOVERY_RECOVERABLE_STAGED
+            && journal->receipt().publication_state() == PCB_MFG_PUBLICATION_STAGED;
+    if( ( journal->receipt().process_epoch() != aProcessEpoch && !stagedPriorProcessAfterLease )
         || journal->receipt().status() != PCB_MFG_EXPORT_INDETERMINATE
         || journal->receipt().publication_state() != PCB_MFG_PUBLICATION_STAGED
         || journal->receipt().recovery_state() != PCB_MFG_RECOVERY_RECOVERABLE_STAGED )
@@ -1540,6 +1563,9 @@ PCB_MANUFACTURING_JOB_MANAGER::PublishDetached( const std::string& aOperationId,
     lock.unlock();
     auto recaptured = aOwnerRecheck( request.document() );
     if( !recaptured ) return tl::unexpected( "manufacturing_owner_recheck_failed" );
+    if( recaptured->before.process_epoch() != aProcessEpoch
+        || recaptured->after.process_epoch() != aProcessEpoch )
+        return tl::unexpected( "manufacturing_owner_recheck_epoch_mismatch" );
     if( recaptured->sourceSnapshot.snapshot_sha256().empty() )
         recaptured->sourceSnapshot.set_snapshot_sha256( SnapshotHash( recaptured->sourceSnapshot ) );
     lock.lock();
@@ -1577,9 +1603,9 @@ PCB_MANUFACTURING_JOB_MANAGER::PublishDetached( const std::string& aOperationId,
     const Receipt& staged = current->receipt();
     const bool sourceUnchanged =
             ValidState( recaptured->before ) && ValidState( recaptured->after )
-            && google::protobuf::util::MessageDifferencer::Equals(
+            && SameSourceCheckpointAcrossProcessEpoch(
                     recaptured->before, staged.observed_before() )
-            && google::protobuf::util::MessageDifferencer::Equals(
+            && SameSourceCheckpointAcrossProcessEpoch(
                     recaptured->after, staged.observed_before() )
             && recaptured->sourceBoard == current->source_board()
             && HasCompleteDetachedSnapshot( recaptured->sourceSnapshot, request.document() )
@@ -1641,7 +1667,12 @@ PCB_MANUFACTURING_JOB_MANAGER::PublishDetached( const std::string& aOperationId,
     published.set_recovery_state( PCB_MFG_RECOVERY_RECONCILED );
     published.clear_error_code();
     published.clear_error_message();
-    published.mutable_observed_after()->CopyFrom( recaptured->after );
+    // Keep the journal's immutable admission epoch in observed_after so the
+    // existing receipt contract remains self-consistent.  The owner recheck
+    // above still proves the current epoch and compares every source field
+    // other than that process identity.
+    published.mutable_observed_after()->CopyFrom(
+            staged.process_epoch() == aProcessEpoch ? recaptured->after : staged.observed_before() );
 
     if( auto verified = VerifyPublishedOutputs( published ); !verified )
     {
@@ -1826,14 +1857,21 @@ PCB_MANUFACTURING_JOB_MANAGER::Reconcile( const ReconcilePcbManufacturingExport&
         if( recovered.status() == PCB_MFG_EXPORT_RUNNING
             && recovered.dispatch_stage() == PCB_MFG_DISPATCH_SUBMITTED )
         {
+            const bool stagedOutputRetained =
+                    OwnedDetachedStagingExists( current->request(), recovered.staging_directory() );
             recovered.set_status( PCB_MFG_EXPORT_INDETERMINATE );
             recovered.set_dispatch_stage( PCB_MFG_DISPATCH_TERMINAL );
             recovered.set_terminal( true );
             recovered.set_worker_finished( true );
-            recovered.set_recovery_state( PCB_MFG_RECOVERY_RECONCILED );
             recovered.set_error_code( "manufacturing_worker_lost_after_restart" );
-            recovered.set_error_message(
-                    "The admitting process ended while export was dispatched; output must be reconciled manually." );
+            recovered.set_error_message( stagedOutputRetained
+                    ? "The admitting process ended while export was dispatched; retained staging requires an explicit owner recheck before publication."
+                    : "The admitting process ended while export was dispatched; no output was assumed safe." );
+            recovered.set_recovery_state( stagedOutputRetained
+                    ? PCB_MFG_RECOVERY_RECOVERABLE_STAGED : PCB_MFG_RECOVERY_RECONCILED );
+            recovered.set_publication_state( stagedOutputRetained
+                    ? PCB_MFG_PUBLICATION_STAGED : PCB_MFG_PUBLICATION_FAILED );
+            recovered.set_snapshot_complete( HasCompleteSourceSnapshot( recovered.observed_before() ) );
         }
         else if( recovered.status() == PCB_MFG_EXPORT_ADMITTED
                  && recovered.dispatch_stage() == PCB_MFG_DISPATCH_ADMITTED )
@@ -1861,6 +1899,14 @@ PCB_MANUFACTURING_JOB_MANAGER::Reconcile( const ReconcilePcbManufacturingExport&
     response.set_request_fingerprint_verified( true );
     response.set_journal_verified( true );
     response.set_prior_process_epoch_verified( aRequest.allow_prior_process_epoch() );
+    if( journal->receipt().recovery_state() == PCB_MFG_RECOVERY_RECOVERABLE_STAGED )
+    {
+        // A staged receipt is only a recovery opportunity while the exact
+        // manager-owned directory still exists.  Do not expose stale stage
+        // metadata as evidence that publication can continue after restart.
+        if( !OwnedDetachedStagingExists( journal->request(), journal->receipt().staging_directory() ) )
+            return tl::unexpected( "manufacturing_staging_unavailable" );
+    }
     if( journal->receipt().status() == PCB_MFG_EXPORT_COMPLETED )
     {
         if( auto verified = VerifyPublishedOutputs( journal->receipt() ); !verified )
